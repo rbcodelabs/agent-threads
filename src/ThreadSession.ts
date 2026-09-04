@@ -321,6 +321,9 @@ export class ThreadSession {
     sdkOptions.toolAliases = {
       EnterWorktree: 'mcp__claude_threads__enter_worktree',
       ExitWorktree: 'mcp__claude_threads__exit_worktree',
+      EnterVm: 'mcp__claude_threads__enter_vm',
+      VmExec: 'mcp__claude_threads__vm_exec',
+      ExitVm: 'mcp__claude_threads__exit_vm',
     };
 
     debugLog('[ClaudeThreads] opening thread session', {

@@ -21,6 +21,32 @@
 | `src/statusLine.ts` | Pure parser for `statusLineCommand` output (JSON tags or legacy plaintext → `StatusTag[]`) + `derivePrUrl`/`resolveTagIcon`/`planFooter`. No Obsidian/Node deps |
 | `src/gitDiffUtils.ts` | Pure helpers for the git diff bar: `parseShortStat`, `parseRemoteToOwnerRepo`, `buildComparePrUrl`, plus `gitDiffBarVisible`/`parsePrNumber`/`prButtonLabel`. No Obsidian/Node deps |
 | `src/StatusLineService.ts` | Desktop-only service that polls `statusLineCommand` per thread cwd (coalesced, capped, cached, idle-paused) and writes `statusTags` + derived `prUrl`. See `docs/adr/0001-structured-status-line-tags.md` |
+| `src/sandboxVm.ts` | Sandbox VM command construction + lifecycle (`SandboxVmManager`) behind Apple's `container` CLI. Pure helpers plus an injectable command seam; no top-level Node requires |
+| `sandbox/Dockerfile` | Image for the sandbox VM — `node:22-bookworm-slim` + git, ripgrep, jq, curl, wget, build-essential, python3, openssh-client. Non-root `node` (uid 1000), `WORKDIR /work`, no secrets baked in |
+
+---
+
+## Sandbox VM Tools (`enter_vm` / `vm_exec` / `exit_vm`)
+
+Runs a thread's **commands** inside a lightweight Linux VM while file editing stays on the host.
+
+The agent's `Read`/`Write`/`Edit`/`Bash` tools run on the host, so the sandbox cannot own the filesystem. Instead `enter_vm` bind-mounts the thread's effective cwd into the guest at `/work` and `vm_exec` runs commands there. Host edits are visible inside the VM immediately — no sync step, no divergence.
+
+Backed by Apple's `container` CLI (macOS 26+, Apple silicon), where each container is its own VM with a separate kernel and no view of the host filesystem beyond that mount.
+
+**Setup:** `brew install container` → `container system start` → build the image:
+
+```sh
+container build --tag claude-threads-coding:1 sandbox/
+```
+
+**Networking.** `default` is **full egress** by explicit product decision — `npm install`, git remotes and web access have to work out of the box. `internal` attaches a shared `--internal` network (host reachable, no internet), created on demand; `none` passes `--network none`.
+
+**Settings.** `vmImage` and `vmDefaultNetwork`, read lazily through `getVmImage` / `getVmDefaultNetwork` so a change applies on the next call rather than needing a session restart.
+
+**No `Thread` field.** The container name is derived deterministically from the thread ID (`claude-threads-vm-<sanitized-id>`), so a container started before a plugin reload is still findable, adoptable by `vm_exec`, and removable by `exit_vm` afterwards. That gets persistence across reloads without persisting ephemeral OS state on the thread.
+
+**Mobile.** `sandboxVm.ts` requires `child_process` inside the runner closure only, so importing it is inert. Every tool returns a clean `{ success: false, error }` with a `brew install container` hint when the CLI is unavailable — it never throws and never affects plugin load.
 
 ---
 
