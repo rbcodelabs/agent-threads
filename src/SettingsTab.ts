@@ -1169,6 +1169,12 @@ export class McpServerModal extends Modal {
     const clientIdInput = advanced.createEl('input', { type: 'text', cls: 'ct-modal-input' });
     advanced.createEl('label', { text: 'Authorization server URL (skips discovery)', cls: 'ct-modal-label' });
     const asUrlInput = advanced.createEl('input', { type: 'text', cls: 'ct-modal-input' });
+    advanced.createEl('label', { text: 'Redirect URI (optional — e.g. http://localhost:3118/callback for Slack)', cls: 'ct-modal-label' });
+    const redirectUriInput = advanced.createEl('input', {
+      type: 'text',
+      placeholder: 'http://localhost:3118/callback',
+      cls: 'ct-modal-input',
+    });
 
     const errorEl = el.createEl('p', { cls: 'ct-modal-error' });
     errorEl.style.display = 'none';
@@ -1203,6 +1209,7 @@ export class McpServerModal extends Modal {
         ...(mode !== 'none' && toolNames.length > 0 ? { tools: { [mode]: toolNames } } : {}),
         ...(clientIdInput.value.trim() ? { clientId: clientIdInput.value.trim() } : {}),
         ...(asUrlInput.value.trim() ? { authorizationServerUrl: asUrlInput.value.trim() } : {}),
+        ...(redirectUriInput.value.trim() ? { redirectUri: redirectUriInput.value.trim() } : {}),
       };
 
       if (!entry.name) { showError('Name is required.'); return; }
@@ -1232,6 +1239,7 @@ export class McpServerModal extends Modal {
           tools: entry.tools,
           clientId: entry.clientId,
           authorizationServerUrl: entry.authorizationServerUrl,
+          redirectUri: entry.redirectUri,
         });
       } catch (err) {
         result = { success: false, message: err instanceof Error ? err.message : String(err) };

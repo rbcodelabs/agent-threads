@@ -29,6 +29,54 @@ import { z } from 'zod';
 const isReservedMcpName = (name: string): boolean =>
   ['claude_threads', 'obsidian', '__proto__', 'constructor', 'prototype'].includes(name.toLowerCase());
 
+/**
+ * The only hosts an OAuth callback URI may name. `URL.hostname` returns IPv6
+ * literals bracketed (`[::1]`), so both spellings are listed.
+ *
+ * This is a security boundary, not a convenience check: whatever this URI names
+ * is where the authorization server delivers the authorization code, and is the
+ * interface we bind a local listener to. Anything outside loopback would either
+ * expose the listener beyond this machine (`0.0.0.0`) or hand the code to a
+ * remote host.
+ */
+const LOOPBACK_REDIRECT_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+export interface ParsedRedirectUri {
+  /** Host to bind the local callback server to, IPv6 brackets stripped for `server.listen`. */
+  hostname: string;
+  port: number;
+  /** Path the callback must arrive on, e.g. `/callback`. */
+  pathname: string;
+}
+
+/**
+ * Validate and parse an `oauth` entry's `redirectUri` override.
+ *
+ * Returns a human-readable reason string when the URI is unusable, so the schema
+ * can surface exactly which rule failed instead of a generic "invalid config".
+ */
+export function parseRedirectUri(value: string): { ok: true; parsed: ParsedRedirectUri } | { ok: false; error: string } {
+  let url: URL;
+  try { url = new URL(value); } catch { return { ok: false, error: 'redirectUri must be a valid absolute URL, e.g. http://localhost:3118/callback.' }; }
+  // https is rejected rather than merely discouraged: the local callback server
+  // serves plain HTTP and cannot terminate TLS, so an https URI could never be
+  // reached at all.
+  if (url.protocol !== 'http:') return { ok: false, error: 'redirectUri must use http:// — the local callback server cannot terminate TLS.' };
+  if (!LOOPBACK_REDIRECT_HOSTS.has(url.hostname)) {
+    return { ok: false, error: 'redirectUri host must be a loopback address (127.0.0.1, localhost or [::1]). Any other host, including 0.0.0.0, would expose the OAuth callback beyond this machine.' };
+  }
+  if (url.username || url.password) return { ok: false, error: 'redirectUri must not embed credentials.' };
+  // The AS appends `code` and `state` to this URI; a query of our own would collide.
+  if (url.search) return { ok: false, error: 'redirectUri must not contain a query string — the authorization server appends code and state itself.' };
+  if (url.hash) return { ok: false, error: 'redirectUri must not contain a fragment.' };
+  // An explicit port is mandatory: we have to know which port to bind, and a
+  // portless URI would silently mean :80.
+  if (!url.port) return { ok: false, error: 'redirectUri must include an explicit port, e.g. http://localhost:3118/callback.' };
+  const port = Number(url.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, error: 'redirectUri port must be between 1 and 65535.' };
+  return { ok: true, parsed: { hostname: url.hostname.replace(/^\[|\]$/g, ''), port, pathname: url.pathname } };
+}
+
 /** Shared schema, including direct harness calls which do not parse SDK schemas. */
 export const mcpRegistrationSchema = z.object({
   name: z.string().trim().regex(/^[A-Za-z0-9_-]+$/).refine(name =>
@@ -64,14 +112,22 @@ export const mcpRegistrationSchema = z.object({
   authorizationServerUrl: z.string().trim().url().startsWith('https://').optional().describe(
     'oauth only. Skip protected-resource discovery by naming the authorization server directly. Usually omitted.',
   ),
+  /** `oauth` only: use this exact loopback URI as the OAuth callback instead of an ephemeral 127.0.0.1 port. */
+  redirectUri: z.string().trim().optional().describe(
+    'oauth only. Full loopback redirect URI to use for the OAuth callback, e.g. http://localhost:3118/callback — ' +
+    'required by providers (Slack) that register one exact redirect URI. Must be http on a loopback host with an ' +
+    'explicit port. Omit to use an ephemeral 127.0.0.1 port.',
+  ),
 }).strict().superRefine((entry, ctx) => {
   const invalid = () => ctx.addIssue({ code: 'custom', message: 'Invalid MCP configuration. Credentials must use ${NAME} placeholders; use request_secret to store them.' });
   const credentialKey = /authorization|cookie|token|secret|password|credential|api[-_]?key/i;
   const placeholder = /^(?:Bearer\s+|Basic\s+)?\$\{[A-Z_][A-Z0-9_]*\}$/i;
-  // scopes/tools/clientId/authorizationServerUrl only make sense for an oauth entry;
-  // a non-oauth entry carrying any of them is malformed input, not a silently-ignored extra.
+  // scopes/tools/clientId/authorizationServerUrl/redirectUri only make sense for an
+  // oauth entry; a non-oauth entry carrying any of them is malformed input, not a
+  // silently-ignored extra.
   const oauthOnlyFieldsSet = entry.scopes !== undefined || entry.tools !== undefined
-    || entry.clientId !== undefined || entry.authorizationServerUrl !== undefined;
+    || entry.clientId !== undefined || entry.authorizationServerUrl !== undefined
+    || entry.redirectUri !== undefined;
   if (entry.type === 'stdio') {
     if (!entry.command || entry.url !== undefined || entry.headers !== undefined || oauthOnlyFieldsSet) invalid();
     for (let i = 0; i < (entry.args?.length ?? 0); i++) {
@@ -89,6 +145,10 @@ export const mcpRegistrationSchema = z.object({
     } catch { invalid(); }
     if (entry.tools?.allow !== undefined && entry.tools?.deny !== undefined) {
       ctx.addIssue({ code: 'custom', message: 'tools.allow and tools.deny are mutually exclusive.', path: ['tools'] });
+    }
+    if (entry.redirectUri !== undefined) {
+      const result = parseRedirectUri(entry.redirectUri);
+      if (!result.ok) ctx.addIssue({ code: 'custom', message: result.error, path: ['redirectUri'] });
     }
   } else {
     if (!entry.url || entry.command !== undefined || entry.args !== undefined || entry.env !== undefined || oauthOnlyFieldsSet) invalid();

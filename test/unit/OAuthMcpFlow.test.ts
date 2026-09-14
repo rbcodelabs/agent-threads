@@ -48,6 +48,22 @@ async function httpGet(url: string): Promise<{ status: number; body: string }> {
   return { status: res.status, body: await res.text() };
 }
 
+/**
+ * Bind :0, read the port the OS handed out, release it. Tests that need a
+ * *fixed* port need one that is actually free — hardcoding a number risks
+ * colliding with whatever else is running on the machine (3118 itself is
+ * routinely held by Claude Code/Claude Desktop).
+ */
+async function freePort(): Promise<number> {
+  const { createServer } = await import('http');
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', () => resolve()));
+  const address = probe.address();
+  const port = address && typeof address !== 'string' ? address.port : 0;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
 beforeEach(() => {
   sdkAuth.discoverOAuthServerInfo.mockReset();
   sdkAuth.exchangeAuthorization.mockReset();
@@ -222,6 +238,144 @@ describe('OAuthMcpFlow.authorize', () => {
     const flow = new OAuthMcpFlow(fixtureTokenStore(), failingOpenUrl);
     await expect(flow.authorize({ serverName: 'vercel', clientId: 'c', asMetadata: fixtureAsMetadata() }))
       .rejects.toThrow('Web Viewer unavailable');
+  });
+
+  it('defaults to an ephemeral 127.0.0.1 port and a /callback path when redirectUri is omitted', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({ serverName: 'vercel', clientId: 'client-123', asMetadata: fixtureAsMetadata() });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    expect(redirectUri).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+
+    const state = capturedUrl.searchParams.get('state');
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${state}`);
+    await promise;
+    expect(sdkAuth.exchangeAuthorization).toHaveBeenCalledWith('https://vercel.com', expect.objectContaining({ redirectUri }));
+  });
+
+  /**
+   * The actual Slack regression this option exists for.
+   *
+   * Slack registers `http://localhost:3118/callback` and validates redirect_uri
+   * by exact string match, so a supplied `localhost` URI must stay `localhost`
+   * in BOTH the authorization request and the token exchange. Rebuilding the URI
+   * from the bound socket's address would rewrite it to `127.0.0.1` and get the
+   * whole flow rejected — hence the explicit assertions on the literal string.
+   */
+  it('uses a supplied localhost redirectUri verbatim in the authorization URL and the token exchange', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const port = await freePort();
+    const pinned = `http://localhost:${port}/callback`;
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({ serverName: 'slack', clientId: 'client-123', asMetadata: fixtureAsMetadata(), redirectUri: pinned });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    expect(redirectUri).toBe(pinned);
+    expect(redirectUri).toContain('localhost');
+    expect(redirectUri).not.toContain('127.0.0.1');
+
+    const state = capturedUrl.searchParams.get('state');
+    const callbackRes = await httpGet(`${pinned}?code=auth-code-1&state=${state}`);
+    expect(callbackRes.status).toBe(200);
+
+    await promise;
+    expect(sdkAuth.exchangeAuthorization).toHaveBeenCalledWith('https://vercel.com', expect.objectContaining({
+      redirectUri: pinned,
+    }));
+  });
+
+  /**
+   * Binding must use the hostname parsed from the URI, not a hardcoded
+   * 127.0.0.1. On macOS `localhost` commonly resolves to ::1 first, so a
+   * 127.0.0.1 bind for a `localhost` URI leaves the browser connecting over
+   * IPv6 to a dead port — after the user has already consented.
+   *
+   * Asserting this by fetching `http://localhost:<port>` does NOT work as a
+   * regression guard: Node's fetch (like most clients) falls back to the other
+   * address family when the first refuses, so it passes either way. Instead,
+   * occupy 127.0.0.1:<port> and pin an explicit `[::1]` URI on the same port
+   * number. The two address families can hold the same port independently, so
+   * a correct ::1 bind succeeds while a hardcoded 127.0.0.1 bind collides with
+   * the blocker and fails — a deterministic discriminator with no dependence
+   * on client resolution order.
+   */
+  it('binds the address family named in redirectUri rather than a hardcoded 127.0.0.1', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const port = await freePort();
+    const pinned = `http://[::1]:${port}/callback`;
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const { createServer } = await import('http');
+    const ipv4Blocker = createServer();
+    await new Promise<void>((resolve) => ipv4Blocker.listen(port, '127.0.0.1', () => resolve()));
+    try {
+      const promise = flow.authorize({ serverName: 'slack', clientId: 'c', asMetadata: fixtureAsMetadata(), redirectUri: pinned });
+      // A hardcoded 127.0.0.1 bind would have rejected with EADDRINUSE instead.
+      await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+      expect(capturedUrl.searchParams.get('redirect_uri')).toBe(pinned);
+      const state = capturedUrl.searchParams.get('state');
+
+      const res = await httpGet(`${pinned}?code=auth-code-1&state=${state}`);
+      expect(res.status).toBe(200);
+      await expect(promise).resolves.toMatchObject({ accessToken: 'at-1' });
+    } finally {
+      await new Promise<void>((resolve) => ipv4Blocker.close(() => resolve()));
+    }
+  });
+
+  it('matches the callback on the path named in redirectUri, not a hardcoded /callback', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const port = await freePort();
+    const pinned = `http://127.0.0.1:${port}/oauth/cb`;
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({ serverName: 'slack', clientId: 'c', asMetadata: fixtureAsMetadata(), redirectUri: pinned });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+    expect(capturedUrl.searchParams.get('redirect_uri')).toBe(pinned);
+    const state = capturedUrl.searchParams.get('state');
+
+    // The old hardcoded path must no longer be the one that counts.
+    const wrongPath = await httpGet(`http://127.0.0.1:${port}/callback?code=auth-code-1&state=${state}`);
+    expect(wrongPath.status).toBe(404);
+
+    const res = await httpGet(`${pinned}?code=auth-code-1&state=${state}`);
+    expect(res.status).toBe(200);
+    await expect(promise).resolves.toMatchObject({ accessToken: 'at-1' });
+  });
+
+  it('surfaces a clear error naming host and port when a pinned redirectUri cannot be bound', async () => {
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+    const port = await freePort();
+
+    // Hold the port open so the flow's own listen() call fails with EADDRINUSE.
+    const { createServer } = await import('http');
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(port, '127.0.0.1', () => resolve()));
+    try {
+      await expect(
+        flow.authorize({ serverName: 'slack', clientId: 'c', asMetadata: fixtureAsMetadata(), redirectUri: `http://127.0.0.1:${port}/callback` }),
+      ).rejects.toThrow(new RegExp(`127\\.0\\.0\\.1:${port}.*already be in use`, 'i'));
+      expect(openUrl).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  });
+
+  it('rejects an invalid redirectUri before opening any listener or consent screen', async () => {
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+    await expect(
+      flow.authorize({ serverName: 'slack', clientId: 'c', asMetadata: fixtureAsMetadata(), redirectUri: 'http://evil.example.com:3118/callback' }),
+    ).rejects.toThrow(/loopback/i);
+    expect(openUrl).not.toHaveBeenCalled();
   });
 
   it('times out after 5 minutes of no callback and closes the listening socket', async () => {

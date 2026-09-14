@@ -698,6 +698,7 @@ export interface StoredOAuthMcpServer {
   tools?: { allow?: string[]; deny?: string[] };
   clientId?: string;
   authorizationServerUrl?: string;
+  redirectUri?: string;
 }
 
 export interface OAuthMcpState {

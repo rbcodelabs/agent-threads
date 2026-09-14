@@ -518,6 +518,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
                 tools: data.tools,
                 clientId: data.clientId,
                 authorizationServerUrl: data.authorizationServerUrl,
+                redirectUri: data.redirectUri,
               });
             }
             return registerMcpServer(input, interactive);

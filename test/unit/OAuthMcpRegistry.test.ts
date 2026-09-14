@@ -188,6 +188,47 @@ describe('OAuthMcpRegistry.registerServer', () => {
     expect(settings.oauthMcpState.vercel).toBeUndefined();
   });
 
+  /**
+   * Slack's registered redirect URI is `http://localhost:3118/callback` — a
+   * `localhost` host, not `127.0.0.1`. Since redirect_uri validation is exact
+   * string matching, the DCR registration and the later authorize() call must
+   * both carry that literal string.
+   */
+  it('registers DCR with the exact supplied redirectUri and threads it through to authorize/persistence', async () => {
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+    const redirectUri = 'http://localhost:3118/callback';
+
+    const result = await registry.registerServer({ name: 'slack', url: 'https://mcp.slack.com/', redirectUri });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(registerClientMock).toHaveBeenCalledWith(
+      'https://as.example.com/register',
+      redirectUri,
+      undefined,
+    );
+    // Never rewritten to 127.0.0.1 anywhere along the path.
+    expect(registerClientMock.mock.calls[0][1]).toContain('localhost');
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ redirectUri }));
+    expect(settings.oauthMcpServers.slack).toMatchObject({ redirectUri });
+  });
+
+  it('reproduces today\'s exact portless-URI/ephemeral-port behavior when redirectUri is omitted (regression guard)', async () => {
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/' });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(registerClientMock).toHaveBeenCalledWith(
+      'https://as.example.com/register',
+      'http://127.0.0.1/callback',
+      undefined,
+    );
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ redirectUri: undefined }));
+    expect(settings.oauthMcpServers.vercel.redirectUri).toBeUndefined();
+  });
+
   it('fails cleanly when DCR is required but unsupported by the authorization server', async () => {
     discoverASMock.mockResolvedValue(fakeAsMetadata({ withoutRegistrationEndpoint: true }));
     const { host, settings } = makeHost();

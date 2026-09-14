@@ -545,7 +545,7 @@ A remote MCP server that requires OAuth 2.1 + PKCE (Vercel's, for example) regis
 
 Connect one either way:
 
-- **Settings → MCP → Add MCP server → OAuth.** Fill in a name and the server's URL; scopes, a tool allow/deny filter, and `clientId`/`authorizationServerUrl` overrides are optional.
+- **Settings → MCP → Add MCP server → OAuth.** Fill in a name and the server's URL; scopes, a tool allow/deny filter, and `clientId`/`authorizationServerUrl`/`redirectUri` overrides are optional. Set `redirectUri` for providers that register one exact callback URI instead of accepting any loopback port — Slack's MCP server requires `http://localhost:3118/callback` (note `localhost`, not `127.0.0.1`: exact string matching makes those different URIs).
 - **Ask an agent** to call `mcp_register_server` with `type: "oauth"`.
 
 Both run the same flow and the same validation. Unlike the other transports it is asynchronous and interactive: discovery runs, the provider's consent screen opens in the host's Web Viewer, and the flow waits up to 5 minutes for you to finish signing in before exchanging the code for tokens and starting the proxy. Denying consent or letting the window lapse leaves no partial state behind. Because it needs a real consent screen, scheduled threads can't drive it — they get an `unavailable` result rather than a stalled dialog.

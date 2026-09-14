@@ -143,6 +143,42 @@ describe('connecting', () => {
     );
   });
 
+  it('passes an Advanced redirect URI through to the registry', async () => {
+    const h = openModal();
+    fillValidOAuth(h);
+    h.field('http://localhost:3118/callback').value = 'http://localhost:3118/callback';
+
+    h.button('Connect')!.click();
+    await flush();
+
+    expect(h.registerServer).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ redirectUri: 'http://localhost:3118/callback' }),
+    );
+  });
+
+  it('omits redirectUri entirely when the Advanced field is left blank', async () => {
+    const h = openModal();
+    fillValidOAuth(h);
+
+    h.button('Connect')!.click();
+    await flush();
+
+    expect(h.registerServer.mock.calls[0][0].redirectUri).toBeUndefined();
+  });
+
+  it('rejects a non-loopback redirect URI through the shared schema', async () => {
+    const h = openModal();
+    fillValidOAuth(h);
+    h.field('http://localhost:3118/callback').value = 'http://evil.example.com:3118/callback';
+
+    h.button('Connect')!.click();
+    await flush();
+
+    expect(h.registerServer).not.toHaveBeenCalled();
+    expect(h.modal.contentEl.textContent).toContain('loopback');
+    expect(h.isClosed()).toBe(false);
+  });
+
   it('omits the tool filter entirely when the mode is "No filter"', async () => {
     const h = openModal();
     fillValidOAuth(h);

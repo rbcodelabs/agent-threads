@@ -32,6 +32,7 @@ import {
 } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { AuthorizationServerMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { TokenSet } from './OAuthTokenStore';
+import { parseRedirectUri, type ParsedRedirectUri } from './mcpServerStore';
 
 /** Result of AS discovery (RFC 9728 protected-resource metadata + RFC 8414/OIDC AS metadata). */
 export type OAuthASMetadata = OAuthServerInfo;
@@ -213,14 +214,40 @@ export class OAuthMcpFlow {
     clientId: string;
     asMetadata: OAuthASMetadata;
     scopes?: string;
+    /**
+     * Use this exact loopback URI as the OAuth callback instead of an ephemeral
+     * `127.0.0.1` port. Required by providers whose registered OAuth app expects
+     * one exact redirect_uri rather than relying on RFC 8252 §7.3's "any port"
+     * loopback allowance — Slack's MCP server registers
+     * `http://localhost:3118/callback`.
+     *
+     * Host, port AND path all come from this URI. In particular the URI is used
+     * verbatim in both the authorization request and the token exchange: OAuth
+     * redirect_uri validation is exact string matching, so rebuilding it from
+     * the bound socket's address would turn a `localhost` URI back into
+     * `127.0.0.1` and get it rejected.
+     */
+    redirectUri?: string;
   }): Promise<TokenSet> {
     const { verifier, challenge } = generatePkcePair();
     const state = randomBytes(16).toString('hex');
+
+    // Parsed once up front so a malformed URI fails before a listener is opened.
+    // The schema (mcpRegistrationSchema) is the real validation boundary; this
+    // parse exists to extract bind host/port/path and to fail loudly rather than
+    // bind something unintended if a caller bypassed that schema.
+    let pinned: ParsedRedirectUri | undefined;
+    if (params.redirectUri !== undefined) {
+      const result = parseRedirectUri(params.redirectUri);
+      if (!result.ok) throw new Error(`Invalid OAuth redirectUri "${params.redirectUri}": ${result.error}`);
+      pinned = result.parsed;
+    }
 
     return new Promise<TokenSet>((resolve, reject) => {
       let settled = false;
       let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
       let redirectUri = '';
+      const callbackPath = pinned?.pathname ?? '/callback';
 
       const finish = (result: FinishResult): void => {
         if (settled) return;
@@ -231,18 +258,35 @@ export class OAuthMcpFlow {
       };
 
       const server: Server = createServer((req, res) => {
-        void this.handleCallback(req, res, { ...params, redirectUri, verifier, expectedState: state }, finish);
+        void this.handleCallback(req, res, { ...params, redirectUri, callbackPath, verifier, expectedState: state }, finish);
       });
 
-      server.on('error', (err) => finish({ ok: false, error: asError(err) }));
+      server.on('error', (err) => {
+        const cause = asError(err);
+        // A pinned host/port can fail to bind (e.g. EADDRINUSE because something
+        // else already holds it — realistic for 3118, which Claude Code/Claude
+        // Desktop also bind for their own Slack integration); surface the address
+        // and that it may be in use rather than a bare "EADDRINUSE" with no
+        // actionable context.
+        const error = pinned
+          ? new Error(`OAuth callback server could not bind ${pinned.hostname}:${pinned.port} (the port may already be in use): ${cause.message}`)
+          : cause;
+        finish({ ok: false, error });
+      });
 
-      server.listen(0, '127.0.0.1', () => {
+      // Bind the hostname parsed from the URI, never a hardcoded 127.0.0.1: on
+      // macOS `localhost` commonly resolves to ::1 first, so binding 127.0.0.1
+      // for a `localhost` URI would leave the browser connecting over IPv6 to a
+      // port nothing is listening on — the callback then fails with
+      // connection-refused *after* the user has already consented.
+      server.listen(pinned?.port ?? 0, pinned?.hostname ?? '127.0.0.1', () => {
         const address = server.address();
         if (!address || typeof address === 'string') {
           finish({ ok: false, error: new Error('OAuth callback server failed to bind a port.') });
           return;
         }
-        redirectUri = `http://127.0.0.1:${address.port}/callback`;
+        // Verbatim when pinned — see the redirectUri doc comment above.
+        redirectUri = params.redirectUri ?? `http://127.0.0.1:${address.port}/callback`;
 
         const authorizationEndpoint = params.asMetadata.authorizationServerMetadata?.authorization_endpoint
           ?? `${params.asMetadata.authorizationServerUrl.replace(/\/+$/, '')}/authorize`;
@@ -269,11 +313,11 @@ export class OAuthMcpFlow {
   private async handleCallback(
     req: IncomingMessage,
     res: ServerResponse,
-    ctx: { serverName: string; clientId: string; asMetadata: OAuthASMetadata; redirectUri: string; verifier: string; expectedState: string },
+    ctx: { serverName: string; clientId: string; asMetadata: OAuthASMetadata; redirectUri: string; callbackPath: string; verifier: string; expectedState: string },
     finish: (result: FinishResult) => void,
   ): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    if (url.pathname !== '/callback') {
+    if (url.pathname !== ctx.callbackPath) {
       res.writeHead(404).end();
       return;
     }
