@@ -47,7 +47,7 @@ Fields specific to `oauth` (mutually exclusive with the stdio/http/sse fields ab
 | `tools.deny` | no | Tool names hidden from `tools/list` and blocked (with an MCP `-32601` error) on `tools/call`. Mutually exclusive with `tools.allow`. |
 | `clientId` | no | Skip Dynamic Client Registration by supplying a known public client_id. |
 | `authorizationServerUrl` | no | Skip protected-resource discovery by pointing directly at the authorization server. |
-| `redirectPort` | no | Pin the local OAuth callback server to a fixed port instead of an ephemeral one. Required by providers (e.g. Slack, port 3118) that register a fixed redirect URI rather than relying on RFC 8252 §7.3's "any port" loopback allowance. |
+| `redirectUri` | no | Exact loopback URI to use for the OAuth callback, e.g. `http://localhost:3118/callback`. Required by providers (Slack) that register one exact redirect URI rather than relying on RFC 8252 §7.3's "any port" loopback allowance. Must be `http://` on a loopback host (`127.0.0.1`, `localhost` or `[::1]`) with an explicit port, and carry no credentials, query string or fragment. |
 
 Registering an `oauth` server is asynchronous and interactive — it is not a one-shot confirm-and-save like the other transports. On success the flow:
 
@@ -58,7 +58,25 @@ Registering an `oauth` server is asynchronous and interactive — it is not a on
 
 Denying consent, closing the tab, or letting the 5-minute window lapse leaves no partial state behind — nothing is saved, and no proxy is left running. The same interactive-host requirement as other registrations applies: scheduled threads cannot drive this flow and get an `unavailable` result instead of a stalled dialog.
 
-By default, the local callback server binds an ephemeral port and, when DCR is required, registers a portless loopback redirect URI (`http://127.0.0.1/callback`) — most authorization servers accept this per RFC 8252 §7.3. A provider that instead requires an exact redirect_uri match (Slack's MCP server, for example, which expects port 3118 — the same port Claude Code/Claude Desktop use for their own Slack integration) needs `redirectPort` set explicitly; the plugin then registers and authorizes against that exact fixed port. If the port is already in use by something else, registration fails with an error naming the port.
+### Providers that require an exact redirect URI
+
+By default, the local callback server binds an ephemeral port on `127.0.0.1` and, when DCR is required, registers a portless loopback redirect URI (`http://127.0.0.1/callback`) — most authorization servers accept this per RFC 8252 §7.3 ("the authorization server MUST allow any port to be specified at the time of the request" for loopback redirect URIs).
+
+Some providers don't follow that allowance and validate `redirect_uri` by exact string match. Slack's MCP server is one: its [published configuration](https://raw.githubusercontent.com/slackapi/slack-mcp-plugin/main/.mcp.json) registers `http://localhost:3118/callback`, and anything else is rejected with `redirect_uri did not match any configured URIs`. Note the host is **`localhost`, not `127.0.0.1`** — under exact string matching those are different URIs, so pinning the port alone is not enough.
+
+Set `redirectUri` to the provider's exact registered value:
+
+```json
+{
+  "name": "slack",
+  "type": "oauth",
+  "url": "https://mcp.slack.com/mcp",
+  "clientId": "1601185624273.8899143856786",
+  "redirectUri": "http://localhost:3118/callback"
+}
+```
+
+The plugin then uses that string verbatim as the `redirect_uri` in both the DCR registration and the authorization request, and binds the local callback server to the host, port and path it names — including the address family, which matters because `localhost` commonly resolves to `::1` before `127.0.0.1` on macOS. If the port is already in use (3118 in particular is also used by Claude Code and Claude Desktop for their own Slack integration), registration fails with an error naming the host and port.
 
 Access and refresh tokens live only in the OS keychain — never in `data.json`, never returned to the calling thread. The token is refreshed proactively ahead of expiry and, as a fallback, transparently on the next request if the upstream rejects it. If the authorization server revokes or fails to renew the refresh token, the server's status becomes "Needs re-authorization" and the calling thread's request fails as if the server were a normal, unreachable endpoint.
 
