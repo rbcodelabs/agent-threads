@@ -213,6 +213,13 @@ export class OAuthMcpFlow {
     clientId: string;
     asMetadata: OAuthASMetadata;
     scopes?: string;
+    /**
+     * Pin the local callback server to this exact port instead of an
+     * ephemeral one. Required by providers (e.g. Slack, port 3118) whose
+     * registered OAuth app expects an exact redirect_uri match rather than
+     * relying on RFC 8252 §7.3's "any port" loopback allowance.
+     */
+    redirectPort?: number;
   }): Promise<TokenSet> {
     const { verifier, challenge } = generatePkcePair();
     const state = randomBytes(16).toString('hex');
@@ -234,9 +241,19 @@ export class OAuthMcpFlow {
         void this.handleCallback(req, res, { ...params, redirectUri, verifier, expectedState: state }, finish);
       });
 
-      server.on('error', (err) => finish({ ok: false, error: asError(err) }));
+      server.on('error', (err) => {
+        const cause = asError(err);
+        // A fixed redirectPort can fail to bind (e.g. EADDRINUSE because something
+        // else already holds it, such as Claude Code/Claude Desktop's own Slack
+        // integration on 3118); surface the port and that it may be in use rather
+        // than a bare "EADDRINUSE" with no actionable context.
+        const error = params.redirectPort
+          ? new Error(`OAuth callback server could not bind port ${params.redirectPort} (it may already be in use): ${cause.message}`)
+          : cause;
+        finish({ ok: false, error });
+      });
 
-      server.listen(0, '127.0.0.1', () => {
+      server.listen(params.redirectPort ?? 0, '127.0.0.1', () => {
         const address = server.address();
         if (!address || typeof address === 'string') {
           finish({ ok: false, error: new Error('OAuth callback server failed to bind a port.') });

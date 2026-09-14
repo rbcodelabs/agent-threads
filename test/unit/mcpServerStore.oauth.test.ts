@@ -20,6 +20,27 @@ describe('mcpRegistrationSchema — oauth type', () => {
     expect(result.success).toBe(true);
   });
 
+  it('accepts a valid redirectPort on an oauth entry', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, redirectPort: 3118 }).success).toBe(true);
+  });
+
+  it('rejects an out-of-range redirectPort', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, redirectPort: 0 }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ ...base, redirectPort: 65536 }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ ...base, redirectPort: -1 }).success).toBe(false);
+  });
+
+  it('rejects a non-integer redirectPort', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, redirectPort: 3118.5 }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ ...base, redirectPort: '3118' }).success).toBe(false);
+  });
+
+  it('rejects redirectPort on a non-oauth entry', () => {
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'stdio', command: 'npx', redirectPort: 3118 }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'http', url: 'https://x.test', redirectPort: 3118 }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'sse', url: 'https://x.test', redirectPort: 3118 }).success).toBe(false);
+  });
+
   it('accepts a deny list', () => {
     const result = mcpRegistrationSchema.safeParse({ ...base, tools: { deny: ['buy_pro', 'buy_credits'] } });
     expect(result.success).toBe(true);

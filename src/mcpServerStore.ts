@@ -64,14 +64,21 @@ export const mcpRegistrationSchema = z.object({
   authorizationServerUrl: z.string().trim().url().startsWith('https://').optional().describe(
     'oauth only. Skip protected-resource discovery by naming the authorization server directly. Usually omitted.',
   ),
+  /** `oauth` only: pin the local OAuth callback server to a fixed port instead of an ephemeral one. */
+  redirectPort: z.number().int().min(1).max(65535).optional().describe(
+    'oauth only. Pin the local OAuth callback server to a fixed port instead of an ephemeral one — ' +
+    'required by providers (e.g. Slack, port 3118) that register a fixed redirect URI. Usually omitted.',
+  ),
 }).strict().superRefine((entry, ctx) => {
   const invalid = () => ctx.addIssue({ code: 'custom', message: 'Invalid MCP configuration. Credentials must use ${NAME} placeholders; use request_secret to store them.' });
   const credentialKey = /authorization|cookie|token|secret|password|credential|api[-_]?key/i;
   const placeholder = /^(?:Bearer\s+|Basic\s+)?\$\{[A-Z_][A-Z0-9_]*\}$/i;
-  // scopes/tools/clientId/authorizationServerUrl only make sense for an oauth entry;
-  // a non-oauth entry carrying any of them is malformed input, not a silently-ignored extra.
+  // scopes/tools/clientId/authorizationServerUrl/redirectPort only make sense for an
+  // oauth entry; a non-oauth entry carrying any of them is malformed input, not a
+  // silently-ignored extra.
   const oauthOnlyFieldsSet = entry.scopes !== undefined || entry.tools !== undefined
-    || entry.clientId !== undefined || entry.authorizationServerUrl !== undefined;
+    || entry.clientId !== undefined || entry.authorizationServerUrl !== undefined
+    || entry.redirectPort !== undefined;
   if (entry.type === 'stdio') {
     if (!entry.command || entry.url !== undefined || entry.headers !== undefined || oauthOnlyFieldsSet) invalid();
     for (let i = 0; i < (entry.args?.length ?? 0); i++) {

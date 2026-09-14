@@ -188,6 +188,38 @@ describe('OAuthMcpRegistry.registerServer', () => {
     expect(settings.oauthMcpState.vercel).toBeUndefined();
   });
 
+  it('registers DCR with the exact fixed redirect URI and threads redirectPort through to authorize/persistence when supplied', async () => {
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({ name: 'slack', url: 'https://mcp.slack.com/', redirectPort: 3118 });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(registerClientMock).toHaveBeenCalledWith(
+      'https://as.example.com/register',
+      'http://127.0.0.1:3118/callback',
+      undefined,
+    );
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ redirectPort: 3118 }));
+    expect(settings.oauthMcpServers.slack).toMatchObject({ redirectPort: 3118 });
+  });
+
+  it('reproduces today\'s exact portless-URI/ephemeral-port behavior when redirectPort is omitted (regression guard)', async () => {
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/' });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(registerClientMock).toHaveBeenCalledWith(
+      'https://as.example.com/register',
+      'http://127.0.0.1/callback',
+      undefined,
+    );
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ redirectPort: undefined }));
+    expect(settings.oauthMcpServers.vercel.redirectPort).toBeUndefined();
+  });
+
   it('fails cleanly when DCR is required but unsupported by the authorization server', async () => {
     discoverASMock.mockResolvedValue(fakeAsMetadata({ withoutRegistrationEndpoint: true }));
     const { host, settings } = makeHost();

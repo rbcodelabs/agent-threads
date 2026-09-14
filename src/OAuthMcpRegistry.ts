@@ -31,6 +31,7 @@ export interface OAuthRegistrationEntry {
   tools?: ToolFilter;
   clientId?: string;
   authorizationServerUrl?: string;
+  redirectPort?: number;
 }
 
 export interface OAuthMcpRegistryHost {
@@ -233,17 +234,25 @@ export class OAuthMcpRegistry {
         return { success: false, status: 'failed', message: `"${entry.name}"'s authorization server does not support Dynamic Client Registration and no clientId was supplied.` };
       }
       try {
-        // Known gap: OAuthMcpFlow.authorize() always binds a fresh ephemeral port for
-        // its local callback server rather than a fixed one this registry could
-        // reserve ahead of time and pass through to registerClient(). We register a
-        // portless loopback redirect URI, relying on RFC 8252 §7.3 ("the authorization
-        // server MUST allow any port to be specified at the time of the request" for
-        // loopback IP redirect URIs) so the AS accepts whatever ephemeral port
-        // authorize() ends up binding. An AS that instead enforces exact redirect_uri
-        // port matching will reject the later authorize() callback; fixing that
-        // properly needs OAuthMcpFlow.authorize() to accept an externally-reserved
-        // port, which is out of scope for this stage (see "What NOT to do").
-        clientId = await flow.registerClient(registrationEndpoint, 'http://127.0.0.1/callback', entry.scopes);
+        // Resolved gap (previously: "OAuthMcpFlow.authorize() always binds a fresh
+        // ephemeral port..."). When the caller supplies `entry.redirectPort` (e.g.
+        // Slack, which requires an exact redirect_uri match at port 3118 — the same
+        // port Claude Code/Claude Desktop use for their own Slack integration), we
+        // register the exact fixed redirect URI here and pass the same port through
+        // to `flow.authorize()` below, so the AS sees a matching redirect_uri on
+        // both the DCR registration and the actual authorization request.
+        //
+        // When `redirectPort` is omitted, we still register a portless loopback
+        // redirect URI, relying on RFC 8252 §7.3 ("the authorization server MUST
+        // allow any port to be specified at the time of the request" for loopback
+        // IP redirect URIs) so the AS accepts whatever ephemeral port `authorize()`
+        // ends up binding. An AS that instead enforces exact redirect_uri port
+        // matching without a caller-supplied `redirectPort` will reject the later
+        // `authorize()` callback — that's the case this option exists to fix.
+        const redirectUri = entry.redirectPort
+          ? `http://127.0.0.1:${entry.redirectPort}/callback`
+          : 'http://127.0.0.1/callback';
+        clientId = await flow.registerClient(registrationEndpoint, redirectUri, entry.scopes);
       } catch (err) {
         return { success: false, status: 'failed', message: `Dynamic Client Registration failed for "${entry.name}": ${errorMessage(err)}` };
       }
@@ -252,7 +261,7 @@ export class OAuthMcpRegistry {
 
     let tokens: TokenSet;
     try {
-      tokens = await flow.authorize({ serverName: entry.name, clientId, asMetadata, scopes: entry.scopes });
+      tokens = await flow.authorize({ serverName: entry.name, clientId, asMetadata, scopes: entry.scopes, redirectPort: entry.redirectPort });
     } catch (err) {
       tokenStore.clear(entry.name);
       const message = errorMessage(err);
@@ -277,6 +286,7 @@ export class OAuthMcpRegistry {
       tools: entry.tools,
       clientId,
       authorizationServerUrl: entry.authorizationServerUrl,
+      redirectPort: entry.redirectPort,
     };
     settings.oauthMcpServers[entry.name] = storedEntry;
     settings.oauthMcpState[entry.name] = this.buildState(entry.name, clientId, asMetadata, proxy, tokens, 'connected');

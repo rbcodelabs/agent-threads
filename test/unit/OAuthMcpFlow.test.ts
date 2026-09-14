@@ -224,6 +224,64 @@ describe('OAuthMcpFlow.authorize', () => {
       .rejects.toThrow('Web Viewer unavailable');
   });
 
+  it('defaults to an ephemeral port when redirectPort is omitted', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({ serverName: 'vercel', clientId: 'client-123', asMetadata: fixtureAsMetadata() });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    expect(redirectUri).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+
+    const state = capturedUrl.searchParams.get('state');
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${state}`);
+    await promise;
+  });
+
+  it('binds the local callback server to an explicitly-passed redirectPort, and that port carries through to the exchanged redirect_uri', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const tokenStore = fixtureTokenStore();
+    const flow = new OAuthMcpFlow(tokenStore, openUrl);
+    const fixedPort = 41823;
+
+    const promise = flow.authorize({ serverName: 'vercel', clientId: 'client-123', asMetadata: fixtureAsMetadata(), redirectPort: fixedPort });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    expect(redirectUri).toBe(`http://127.0.0.1:${fixedPort}/callback`);
+
+    const state = capturedUrl.searchParams.get('state');
+    const callbackRes = await httpGet(`${redirectUri}?code=auth-code-1&state=${state}`);
+    expect(callbackRes.status).toBe(200);
+
+    await promise;
+    expect(sdkAuth.exchangeAuthorization).toHaveBeenCalledWith('https://vercel.com', expect.objectContaining({
+      redirectUri: `http://127.0.0.1:${fixedPort}/callback`,
+    }));
+  });
+
+  it('surfaces a clear error mentioning the port when a fixed redirectPort cannot be bound', async () => {
+    const tokenStore = fixtureTokenStore();
+    const flow = new OAuthMcpFlow(tokenStore, openUrl);
+    const fixedPort = 41824;
+
+    // Hold the port open so the flow's own listen() call fails with EADDRINUSE.
+    const { createServer } = await import('http');
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(fixedPort, '127.0.0.1', () => resolve()));
+    try {
+      await expect(
+        flow.authorize({ serverName: 'vercel', clientId: 'client-123', asMetadata: fixtureAsMetadata(), redirectPort: fixedPort }),
+      ).rejects.toThrow(new RegExp(`port ${fixedPort}.*already be in use`, 'i'));
+      expect(openUrl).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  });
+
   it('times out after 5 minutes of no callback and closes the listening socket', async () => {
     vi.useFakeTimers();
     try {
