@@ -1402,6 +1402,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.addRibbonIcon('list', 'Agents List', () => {
       this.activateAgentView();
     });
+    this.addRibbonIcon('kanban', 'Agent Board', () => {
+      this.activateKanbanView();
+    });
     this.addRibbonIcon('puzzle', 'Skills Manager', () => {
       this.activateSkillsView();
     });
