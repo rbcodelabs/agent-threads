@@ -2441,9 +2441,70 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         groups.threadSpecific,
         renderDashboard,
       );
+      this.renderWatchedDocumentsSection(dashboard, renderDashboard);
     };
 
     renderDashboard();
+  }
+
+  private renderWatchedDocumentsSection(containerEl: HTMLElement, refresh: () => void): void {
+    const section = containerEl.createEl('section', { cls: 'ct-scheduled-section' });
+    section.createEl('h2', { text: 'Watched documents' });
+    section.createEl('p', {
+      text: 'Documents a thread is watching for content changes. Any edit alerts the owning thread — only that thread.',
+      cls: 'ct-scheduled-section-desc',
+    });
+
+    const watches = this.plugin.settings.watchedDocuments ?? [];
+    if (watches.length === 0) {
+      section.createEl('p', { text: 'None yet.', cls: 'ct-settings-empty' });
+      return;
+    }
+
+    for (const watch of watches) {
+      const thread = this.plugin.manager.getThread(watch.threadId);
+      const ownerLabel = thread ? thread.title : 'Thread no longer exists';
+
+      const card = section.createEl('details', { cls: 'ct-scheduled-card' });
+      const summary = card.createEl('summary', { cls: 'ct-scheduled-summary' });
+      const titleRow = summary.createSpan({ cls: 'ct-scheduled-card-title-row' });
+      titleRow.createEl('span', { text: watch.path, cls: 'ct-scheduled-name' });
+      titleRow.createEl('span', {
+        text: watch.enabled ? 'Watching' : 'Paused',
+        cls: `ct-scheduled-status ${watch.enabled ? 'is-enabled' : 'is-paused'}`,
+      });
+      const summaryMeta = summary.createSpan({ cls: 'ct-scheduled-summary-meta' });
+      summaryMeta.createEl('span', { text: `Owner: ${ownerLabel}` });
+      summaryMeta.createEl('span', {
+        text: watch.lastAlertedAt ? `Last alerted ${new Date(watch.lastAlertedAt).toLocaleString()}` : 'Never alerted',
+      });
+
+      const content = card.createDiv({ cls: 'ct-scheduled-content' });
+      const metadata = content.createDiv({ cls: 'ct-scheduled-metadata' });
+      this.renderScheduledMetadata(metadata, 'Path', watch.path, true);
+      this.renderScheduledMetadata(metadata, 'Owning thread', ownerLabel);
+      this.renderScheduledMetadata(metadata, 'Created', new Date(watch.createdAt).toLocaleString());
+      this.renderScheduledMetadata(
+        metadata,
+        'Last alerted',
+        watch.lastAlertedAt ? new Date(watch.lastAlertedAt).toLocaleString() : 'Never',
+      );
+
+      const actions = new Setting(content).setClass('ct-scheduled-actions');
+      if (thread) {
+        actions.addButton((btn) =>
+          btn.setButtonText('Open owning thread').onClick(() => {
+            void this.plugin.openThreadInChatView(watch.threadId);
+          }),
+        );
+      }
+      actions.addButton((btn) =>
+        btn.setButtonText('Unwatch').setWarning().setTooltip('Stop watching this document').onClick(async () => {
+          await this.plugin.unwatchDocument(watch.threadId, { id: watch.id });
+          refresh();
+        }),
+      );
+    }
   }
 
   private renderScheduledGroup(

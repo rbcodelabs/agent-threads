@@ -55,6 +55,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 - **Permission dialogs** — Claude asks before writing files or running commands; you approve or deny inline
 - **@ file mentions** — type `@` in the input to search vault files by name; selecting one injects its full content into the prompt as context; type `@this` to reference the currently open file without searching
 - **Chat about this document** — right-click a note in the file explorer or inside the editor (or run the command from the palette) to start a new thread pre-seeded with an `@` mention of that note
+- **Watch a document** — right-click a note (or run the command) to have the active thread watch it for changes; any edit sends that thread an alert, whether the edit came from you, another thread, or an external sync — also callable by agents via the `watch_document` MCP tool
 - **Push-to-talk voice input** — hold a configurable hotkey to dictate a message via speech-to-text (uses the Claude Code STT pipeline); transcript populates the input box ready to send or edit
 - **Projects** — group threads, choose their initial working directory, and inject shared context into every message (a context aid, not a tool or filesystem security boundary)
 - **Draft persistence** — input text and attachments auto-save when switching threads and survive plugin reloads
@@ -277,6 +278,18 @@ To start from a note rather than from the composer, use **Chat about this docume
 All three open the **Agents List** and seed its dispatch box with `@[[<note name>]] `, with the cursor after the mention — type your question and send. Because it seeds the dispatch box, submitting always starts a **new thread** rather than adding to an open one, and the mention resolves to the note's full content exactly like a manually typed `@` mention.
 
 The draft is appended to, never overwritten: if you had already typed something, the mention is added to the end, and triggering the action twice on the same note won't inline it twice. The action only appears on Markdown notes, since that's what the mention resolver can read back.
+
+### Watch a document
+
+To have a thread notice when a note changes without polling it yourself, use **Watch this document**. It is available from the same three places as *Chat about this document*:
+
+- **Right-click a note in the file explorer**
+- **Right-click inside an open note** (editor context menu)
+- **Command palette** → *Watch this document* / *Stop watching this document* (label flips depending on whether the active thread is already watching the active file)
+
+The watch is owned by whichever thread is currently active when you trigger it — only that thread is alerted, and it stays alerted even if you switch away. If no thread is open, a notice asks you to open or start one first. When the note's content changes — from you, from another thread's edit, from a sync, from anyone — the owning thread receives an injected message referencing the file with the same `@[[filename]]` mention the composer uses, so the full content is right there in the alert. Saving a note with no actual content change (e.g. a no-op resave) does not trigger an alert, and a burst of edits to multiple watched files collapses into one batched message instead of one per file. Renaming a watched file keeps the watch attached; deleting it sends one final alert and removes the watch.
+
+Agents can do all of this without the menu via three MCP tools — see [`watch_document`](#session-tools) below. Manage active watches, see who owns each one, and unwatch from outside the file itself under **Settings → Scheduled → Watched documents**.
 
 ### Model switching
 
@@ -811,6 +824,9 @@ Control the current thread's session state.
 | `ExitWorktree` | `worktreePath?`, `force?` | Removes the worktree and restores the session cwd to the original repo root. Defaults to the current effective cwd. Pass `force: true` to remove even if there are uncommitted changes. |
 | `threads_create` | `prompt`, `title?`, `cwd?`, `projectId?` | Creates a persistent thread and immediately queues its initial prompt. Working directory and project inherit from the caller when omitted; pass `projectId: null` to clear the project. |
 | `request_secret` | `secretName`, `reason`, `force?` | Prompts the user (via a modal) to provide a secret value such as an API key. The value is stored in the OS keychain under the plugin's namespace and injected into future sessions as an environment variable — it never appears in the conversation. Returns `{success: true, secretName, alreadyExisted: boolean}` if the user saves, or `{success: false, reason}` if cancelled. If a secret with the same name already exists, returns `alreadyExisted: true` immediately without prompting. Pass `force: true` to always re-prompt (e.g. when rotating a stale token) — the modal will indicate that the existing value will be replaced. |
+| `watch_document` | `path` | Watches a vault note for content changes, owned by the calling thread. Any subsequent edit — from you, another thread, or a sync — sends this thread an injected alert message referencing the file via an `@[[filename]]` mention. Re-watching an already-watched path is a no-op that keeps the existing watch. See [Watch a document](#watch-a-document). |
+| `unwatch_document` | `path?`, `id?` | Removes a watch owned by the calling thread, by path or watch id (at least one required). Never affects another thread's watch on the same path. |
+| `list_watched_documents` | — | Returns the calling thread's own active watches: path, watch id, creation time, and last-alerted time. |
 
 ### Thread coordination tools
 
@@ -940,6 +956,7 @@ Everything the [Skills Manager](#skills-manager) panel can do — browse the [sk
 | Auto-collapse side panel | Collapse the left, right, or both sidebars when the Agent Board opens, restoring them when it closes (default: `None`). See [Agent Board](#kanban-board). |
 | Stack scheduled job threads | Collapse repeat runs of the same scheduled/cron job into an expandable rollup in the Agent Board's quiet columns and the Agents List's Scheduled Jobs section (default: on). See [Agent Board](#kanban-board) and [Agents List](#agents-list). |
 | Scheduled work | The dedicated **Scheduled** tab groups recurring jobs, thread loops, and wakeups into collapsed rows showing status, cadence, next occurrence, Project, and execution target. Expand one for prompt, working directory, active hours, gate, history, and pause/resume/delete/open controls. |
+| Watched documents | A **Watched documents** section on the **Scheduled** tab lists every active watch (see [Watch a document](#watch-a-document)) with its path, owning thread, and last-alerted time, plus an unwatch control — the same view whether the watch was created from the file menu or the `watch_document` MCP tool. |
 | Diagnostics | Enable the always-on, local-only telemetry layer (counters + renderer CPU/memory samples) that powers the [Diagnostics report](#diagnostics-report). Nothing leaves your machine; on by default. Desktop only. |
 | Remote access | Enable/disable mobile remote access via WebSocket relay |
 | Room ID | Shared secret used to pair mobile (rotate to revoke all access) |

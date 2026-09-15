@@ -18,6 +18,7 @@ import type { createClaudeThreadsMcpServers, ProjectSnapshot, ProjectUpdatePatch
 import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
+import { isWatchableDocument, watchMenuLabel } from './documentWatch';
 import { mergeMcpServers } from './mcpServerMerge';
 import { createMcpRegistration, mcpRegistrationSchema } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
@@ -32,6 +33,7 @@ import {
   type Project,
   type ImageAttachment,
   type ScheduledItem,
+  type WatchedDocument,
 } from './types';
 import { serializeThreadForSave } from './imageExternalization';
 import { selectIdleThreadsForArchive } from './autoArchive';
@@ -245,6 +247,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   statusLine: import('./StatusLineService').StatusLineService | null = null;
   gitDiff: import('./GitDiffService').GitDiffService | null = null;
   orchestratorWakeup: import('./OrchestratorWakeup').OrchestratorWakeup | null = null;
+  documentWatch: import('./DocumentWatchService').DocumentWatchService | null = null;
   contextPanel!: ContextPanelController;
   googleWorkspaceMcp?: import('./GoogleWorkspaceMcp').GoogleWorkspaceMcp;
   oauthMcpRegistry?: import('./OAuthMcpRegistry').OAuthMcpRegistry;
@@ -496,6 +499,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
       try {
         const mcpServers = createClaudeThreadsMcpServers(this.app, {
           onEnterDesignMode: brief => this.enterDesignMode(threadId, brief),
+          onWatchDocument: path => this.watchDocument(threadId, path),
+          onUnwatchDocument: opts => this.unwatchDocument(threadId, opts),
+          onListWatchedDocuments: () => this.listWatchedDocuments(threadId),
           onRegisterMcpServer: input => {
             const caller = this.manager.getThread(threadId);
             const interactive = mcpRegistrationAvailable && !!caller && !caller.scheduledItemId;
@@ -1212,6 +1218,26 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.register(() => this.orchestratorWakeup?.stop());
     }
 
+    // Document watch service: alerts the owning thread whenever a watched vault
+    // document's content changes. Works on both desktop and mobile — vault.on()
+    // events don't require child_process, unlike the desktop-only services above.
+    {
+      const { DocumentWatchService } = require('./DocumentWatchService') as typeof import('./DocumentWatchService');
+      this.documentWatch = new DocumentWatchService({
+        app: this.app,
+        getWatches: () => this.settings.watchedDocuments ?? [],
+        saveWatches: async (next) => {
+          this.settings.watchedDocuments = next;
+          await this.saveSettings();
+        },
+        sendMessage: (id, text) => this.manager.sendMessage(id, text),
+        getThread: (id) => this.manager.getThread(id),
+        onError: (err) => console.error('[ClaudeThreads] Document watch alert failed:', err),
+      });
+      this.documentWatch.start();
+      this.register(() => this.documentWatch?.stop());
+    }
+
     // Repair any threads whose cwd points to a deleted worktree — removed by
     // exit_worktree, the worktree-cleanup skill, the Agent tool's auto-cleanup, or
     // (for legacy os.tmpdir()/claude-worktrees/ paths) wiped by an OS reboot.
@@ -1514,6 +1540,38 @@ export default class ClaudeThreadsPlugin extends Plugin {
         const file = info.file;
         if (!file || !isChattableDocument(file)) return;
         this.addDocumentChatMenuItem(menu, file);
+      }),
+    );
+
+    // ── "Watch with active thread" ──────────────────────────────────────────
+    // Same three-entry-point pattern as "Chat about this document", funneled
+    // through one shared handler (toggleDocumentWatch). Unlike document chat,
+    // watching needs an already-open thread to own the alert — there is
+    // nothing to create the watch's target from, so a missing active thread
+    // is a Notice rather than a new-thread dispatch.
+    this.addCommand({
+      id: 'watch-active-document',
+      name: 'Watch or stop watching this document with the active thread',
+      checkCallback: (checking: boolean) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!isWatchableDocument(file)) return false;
+        if (!checking) void this.toggleDocumentWatch(file as TFile);
+        return true;
+      },
+    });
+
+    this.registerEvent(
+      this.app.workspace.on('file-menu', (menu, file) => {
+        if (!(file instanceof TFile) || !isWatchableDocument(file)) return;
+        this.addDocumentWatchMenuItem(menu, file);
+      }),
+    );
+
+    this.registerEvent(
+      this.app.workspace.on('editor-menu', (menu, _editor, info) => {
+        const file = info.file;
+        if (!file || !isWatchableDocument(file)) return;
+        this.addDocumentWatchMenuItem(menu, file);
       }),
     );
 
@@ -2037,6 +2095,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.wakeLock?.destroy();
     this.statusLine?.stop();
     this.gitDiff?.stop();
+    this.documentWatch?.stop();
     telemetry.dispose();
     this.manager?.destroy();
 
@@ -2617,6 +2676,67 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
   }
 
+  /**
+   * Creates (or re-enables) a watch on `path`, owned by `threadId`. Resolves
+   * the path the same way `obsidian_navigate_to_file` does. Primes the
+   * watch's change-detection stamp immediately so watching itself never
+   * counts as a change. Single source of truth for the watch_document MCP
+   * tool and the "Watch with active thread" menu item.
+   */
+  async watchDocument(threadId: string, path: string): Promise<{ id: string; path: string }> {
+    const abstract = this.app.vault.getAbstractFileByPath(normalizePath(path));
+    if (!(abstract instanceof TFile)) throw new Error(`File not found: ${path}`);
+
+    const existing = this.settings.watchedDocuments.find(
+      (w) => w.threadId === threadId && w.path === abstract.path,
+    );
+    if (existing) {
+      existing.enabled = true;
+      this.documentWatch?.primeWatch(existing);
+      await this.saveSettings();
+      return { id: existing.id, path: existing.path };
+    }
+
+    const watch: WatchedDocument = {
+      id: crypto.randomUUID(),
+      path: abstract.path,
+      threadId,
+      enabled: true,
+      createdAt: Date.now(),
+    };
+    this.documentWatch?.primeWatch(watch);
+    this.settings.watchedDocuments.push(watch);
+    await this.saveSettings();
+    return { id: watch.id, path: watch.path };
+  }
+
+  /**
+   * Removes `threadId`'s own watch(es) matching `path` and/or `id`. Never
+   * removes a watch owned by another thread on the same path. Single source
+   * of truth for the unwatch_document MCP tool, the settings tab's unwatch
+   * button, and the "Stop watching this document" menu item.
+   */
+  async unwatchDocument(threadId: string, opts: { path?: string; id?: string }): Promise<{ removed: number }> {
+    const normalizedPath = opts.path ? normalizePath(opts.path) : undefined;
+    const before = this.settings.watchedDocuments.length;
+    this.settings.watchedDocuments = this.settings.watchedDocuments.filter((w) => {
+      if (w.threadId !== threadId) return true;
+      if (opts.id && w.id === opts.id) return false;
+      if (normalizedPath && w.path === normalizedPath) return false;
+      return true;
+    });
+    const removed = before - this.settings.watchedDocuments.length;
+    if (removed > 0) await this.saveSettings();
+    return { removed };
+  }
+
+  /** Returns `threadId`'s own watched documents. */
+  listWatchedDocuments(threadId: string): Array<{ id: string; path: string; createdAt: number; lastAlertedAt?: number }> {
+    return this.settings.watchedDocuments
+      .filter((w) => w.threadId === threadId)
+      .map(({ id, path, createdAt, lastAlertedAt }) => ({ id, path, createdAt, lastAlertedAt }));
+  }
+
   /** Creates a new thread whose first turn uses the native static-artifact workflow. */
   async dispatchNewDesignThread(brief: string, agentHarness?: 'claude' | 'codex'): Promise<string> {
     const adapter = this.app.vault.adapter;
@@ -2696,6 +2816,43 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const view = leaf?.view;
     if (!view || typeof (view as any).focusDispatchInput !== 'function') return null;
     return view as AgentDashboard;
+  }
+
+  /** Add the shared "Watch with active thread" / "Stop watching this document" item to a context menu. */
+  private addDocumentWatchMenuItem(menu: Menu, file: TFile): void {
+    const activeThreadId = this.getActiveThreadId();
+    const isCurrentlyWatched = !!activeThreadId && this.settings.watchedDocuments.some(
+      (w) => w.threadId === activeThreadId && w.path === file.path && w.enabled,
+    );
+    menu.addItem(item => item
+      .setTitle(watchMenuLabel(isCurrentlyWatched))
+      .setIcon(isCurrentlyWatched ? 'eye-off' : 'eye')
+      .onClick(() => { void this.toggleDocumentWatch(file); }));
+  }
+
+  /**
+   * Single handler behind all three "Watch with active thread" entry points.
+   * Unlike "Chat about this document" (which always starts a new thread),
+   * a watch needs an existing thread to own its alerts — there's no draft to
+   * seed and submit later, so a missing active thread is a Notice, not a
+   * new-thread dispatch.
+   */
+  async toggleDocumentWatch(file: TFile): Promise<void> {
+    const threadId = this.getActiveThreadId();
+    if (!threadId) {
+      new Notice('Open or start a thread first to watch this document.');
+      return;
+    }
+    const existing = this.settings.watchedDocuments.find(
+      (w) => w.threadId === threadId && w.path === file.path && w.enabled,
+    );
+    if (existing) {
+      await this.unwatchDocument(threadId, { id: existing.id });
+      new Notice(`Stopped watching "${file.basename}".`);
+    } else {
+      await this.watchDocument(threadId, file.path);
+      new Notice(`Watching "${file.basename}" — this thread will be alerted on changes.`);
+    }
   }
 
   /**
@@ -2816,6 +2973,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.settings.oauthMcpState = this.settings.oauthMcpState ?? {};
     // Ensure scheduledItems array exists for installs predating this feature
     this.settings.scheduledItems = this.settings.scheduledItems ?? [];
+    // Ensure watchedDocuments array exists for installs predating this feature
+    this.settings.watchedDocuments = this.settings.watchedDocuments ?? [];
     // Ensure remoteAccess block exists for installs predating this feature
     this.settings.remoteAccess = Object.assign({}, DEFAULT_SETTINGS.remoteAccess, this.settings.remoteAccess ?? {});
     // Default local telemetry ON for installs predating this feature (local-only).

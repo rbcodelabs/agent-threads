@@ -1723,7 +1723,9 @@ test.describe('Agent Threads UI', () => {
     await page.waitForSelector('.ct-settings-tabs');
     await page.click('.ct-settings-tab-btn:has-text("Scheduled")');
     await expect(page.getByRole('heading', { name: 'Next up' })).toHaveCount(0);
-    await expect(page.locator('.ct-scheduled-card')).toHaveCount(5);
+    // 5 scheduled-work cards + 2 watched-document cards share the same
+    // .ct-scheduled-card markup (see "Watched documents" checks below).
+    await expect(page.locator('.ct-scheduled-card')).toHaveCount(7);
     const expectedNames = [
       'Morning inbox triage',
       'Project pulse',
@@ -1748,6 +1750,30 @@ test.describe('Agent Threads UI', () => {
     await expect(page.getByText('Thread Orchestrator heartbeat')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Create with Claude' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Open last run' })).toHaveCount(0);
+
+    // ── Watched documents ────────────────────────────────────────────────
+    await expect(page.getByText('Watched documents')).toBeVisible();
+    const watchedSection = page.locator('.ct-scheduled-section').filter({ hasText: 'Watched documents' });
+    const liveWatch = watchedSection.locator('.ct-scheduled-card').filter({ hasText: 'Reports/Weekly Report.md' });
+    const orphanWatch = watchedSection.locator('.ct-scheduled-card').filter({ hasText: 'Specs/Orphaned Watch.md' });
+    await expect(liveWatch).toContainText('Watching');
+    await expect(liveWatch).toContainText('Owner: Weekly report review');
+    await expect(orphanWatch).toContainText('Owner: Thread no longer exists');
+    await expect(orphanWatch).toContainText('Never alerted');
+    await expect(watchedSection.locator('.ct-scheduled-card')).toHaveCount(2);
+
+    // The unwatch button's tooltip ("Stop watching this document") becomes its
+    // accessible name (aria-label wins over visible text), even though its
+    // visible label reads "Unwatch" — mirrors the Delete button's tooltip below.
+    await liveWatch.locator(':scope > summary').click();
+    await expect(liveWatch.getByRole('button', { name: 'Open owning thread' })).toBeVisible();
+    await expect(liveWatch.getByRole('button', { name: 'Stop watching this document' })).toBeVisible();
+    await liveWatch.locator(':scope > summary').click(); // collapse again for the baseline screenshot
+
+    await orphanWatch.locator(':scope > summary').click();
+    await expect(orphanWatch.getByRole('button', { name: 'Open owning thread' })).toHaveCount(0);
+    await expect(orphanWatch.getByRole('button', { name: 'Stop watching this document' })).toBeVisible();
+    await orphanWatch.locator(':scope > summary').click(); // collapse again for the baseline screenshot
     await page.evaluate(() => {
       const app = document.getElementById('app');
       const content = app?.querySelector<HTMLElement>('.vertical-tab-content');
@@ -1800,6 +1826,12 @@ test.describe('Agent Threads UI', () => {
     await expect(page.locator('.ct-scheduled-card').filter({ hasText: 'Weekly PR sweep' })).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => (window as any).__scheduledCreateCalls.updatedItemIds)).toEqual(['sched-1']);
     await expect.poll(() => page.evaluate(() => (window as any).__scheduledCreateCalls.deletedItemIds)).toEqual(['sched-2']);
+
+    const liveWatchCard = page.locator('.ct-scheduled-card').filter({ hasText: 'Reports/Weekly Report.md' });
+    await liveWatchCard.locator(':scope > summary').click();
+    await liveWatchCard.getByRole('button', { name: 'Stop watching this document' }).click();
+    await expect(page.locator('.ct-scheduled-card').filter({ hasText: 'Reports/Weekly Report.md' })).toHaveCount(0);
+    await expect(page.locator('.ct-scheduled-card').filter({ hasText: 'Specs/Orphaned Watch.md' })).toHaveCount(1);
   });
 
   test('settings — mcp tab', async ({ page }) => {
