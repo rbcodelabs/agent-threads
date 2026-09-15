@@ -590,6 +590,32 @@ export interface RunEvent {
 }
 
 /**
+ * A single vault document watch: alerts the owning thread whenever the
+ * document's content changes. Ownership is per-thread — two threads can
+ * independently watch the same path with no dedup/merge, and only the
+ * owning thread is alerted.
+ */
+export interface WatchedDocument {
+  id: string;
+  /** Vault-relative path; kept in sync on rename. */
+  path: string;
+  /** Thread ID that created this watch and receives its alerts. */
+  threadId: string;
+  enabled: boolean;
+  createdAt: number;
+  /**
+   * `${mtimeMs}:${size}` stamp captured when the watch is (re)primed, e.g. at
+   * creation time — the same cheap "did content change" pattern used by
+   * `loadFragment` in `src/visualizeRenderer.ts`. Comparing against this on
+   * every `modify` event is what keeps watching itself from counting as a
+   * change, and keeps a resave-with-no-actual-diff from re-alerting.
+   */
+  lastStamp?: string;
+  /** Epoch ms of the most recent alert sent for this watch. */
+  lastAlertedAt?: number;
+}
+
+/**
  * A configured skill source.
  *
  * Two ways one comes into existence, and the difference matters for `id` and
@@ -897,6 +923,8 @@ export interface PluginSettings {
   autoArchiveIdleDays?: number;
   /** Recurring scheduled tasks that fire prompts into new threads. */
   scheduledItems: ScheduledItem[];
+  /** Vault documents being watched for content changes, each owned by a thread. */
+  watchedDocuments: WatchedDocument[];
   /**
    * ID of the persistent thread running the bundled thread-orchestrator skill,
    * created by the "Agent Threads: Open Thread Orchestrator" command. Used
@@ -1010,6 +1038,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     pairingExpiresAt: null,
   },
   scheduledItems: [],
+  watchedDocuments: [],
   enableWebViewerTool: true,
   enableInlineVisualizations: true,
   kanbanGroupBy: 'status',

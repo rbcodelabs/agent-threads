@@ -1,6 +1,6 @@
 import './obsidian-mock'; // must be first — sets up HTMLElement.prototype
 import { ClaudeThreadsSettingTab, RequestSecretModal } from '../../src/SettingsTab';
-import { DEFAULT_SETTINGS, type PluginSettings, type Project, type ScheduledItem } from '../../src/types';
+import { DEFAULT_SETTINGS, type PluginSettings, type Project, type ScheduledItem, type WatchedDocument } from '../../src/types';
 import { mockApp } from './obsidian-mock';
 import { McpRegistrationModal } from '../../src/confirmModal';
 
@@ -97,6 +97,29 @@ const fixtureScheduled: ScheduledItem[] = [
   },
 ];
 
+// Two watches for the Settings → Scheduled tab's "Watched documents" card:
+// one with a live owning thread and a recorded alert, one whose owning
+// thread no longer exists (covers the "Thread no longer exists" label and
+// the missing "Open owning thread" button).
+const fixtureWatchedDocuments: WatchedDocument[] = [
+  {
+    id: 'watch-1',
+    path: 'Reports/Weekly Report.md',
+    threadId: 'thread-doc-watch',
+    enabled: true,
+    createdAt: FIXTURE_NOW - 3 * 24 * 60 * 60_000,
+    lastStamp: '1700000000000:2048',
+    lastAlertedAt: FIXTURE_NOW - 90 * 60_000,
+  },
+  {
+    id: 'watch-2',
+    path: 'Specs/Orphaned Watch.md',
+    threadId: 'thread-gone',
+    enabled: true,
+    createdAt: FIXTURE_NOW - 10 * 24 * 60 * 60_000,
+  },
+];
+
 // One server per transport for the Settings → MCP tab screenshot. `compass`
 // references ${COMPASS_API_KEY}, which is deliberately NOT in secretEnvKeys
 // below, so the baseline also captures the "will be skipped" warning that
@@ -174,6 +197,7 @@ const settings: PluginSettings = {
   summarizationEnabled: true,
   projects: fixtureProjects,
   scheduledItems: fixtureScheduled,
+  watchedDocuments: fixtureWatchedDocuments,
 };
 
 const scheduledCreateCalls: {
@@ -209,6 +233,7 @@ const mockPlugin = {
     getThread: (id: string) => {
       if (id === 'thread-morning') return { id, title: 'Morning inbox triage run' };
       if (id === 'thread-ci') return { id, title: 'CI watcher', agentHarness: 'codex', model: 'gpt-5.6-codex' };
+      if (id === 'thread-doc-watch') return { id, title: 'Weekly report review' };
       return undefined;
     },
   },
@@ -246,6 +271,16 @@ const mockPlugin = {
   },
   openThreadInChatView: async (threadId: string) => {
     scheduledCreateCalls.openedThreadIds.push(threadId);
+  },
+  unwatchDocument: async (threadId: string, opts: { id?: string; path?: string }) => {
+    const before = settings.watchedDocuments.length;
+    settings.watchedDocuments = settings.watchedDocuments.filter((w) => {
+      if (w.threadId !== threadId) return true;
+      if (opts.id && w.id === opts.id) return false;
+      if (opts.path && w.path === opts.path) return false;
+      return true;
+    });
+    return { removed: before - settings.watchedDocuments.length };
   },
 };
 

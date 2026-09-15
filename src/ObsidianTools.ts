@@ -352,6 +352,19 @@ export interface ObsidianMcpServerOptions {
   onSkillsUpdate?: (sourceId: string) => Promise<{ behindCount: number; lastFetched: number }>;
   onSkillsCreateLocal?: (params: { skillId: string; skillMd: string; files?: Array<{ path: string; encoding: 'utf8' | 'base64'; content: string }> }) => Promise<unknown>;
   onSkillsUpdateLocal?: (params: { skillId: string; files?: Array<{ path: string; encoding: 'utf8' | 'base64'; content: string }>; deleteFiles?: string[] }) => Promise<unknown>;
+  /**
+   * Creates (or re-enables) a watch on a vault document, owned by the calling
+   * thread, and primes its change-detection stamp so watching itself never
+   * counts as a change.
+   */
+  onWatchDocument?: (path: string) => Promise<{ id: string; path: string }>;
+  /**
+   * Removes the calling thread's own watch(es) matching `path` and/or `id`.
+   * Never removes a watch owned by another thread on the same path.
+   */
+  onUnwatchDocument?: (opts: { path?: string; id?: string }) => Promise<{ removed: number }>;
+  /** Returns the calling thread's own watched documents. */
+  onListWatchedDocuments?: () => Array<{ id: string; path: string; createdAt: number; lastAlertedAt?: number }>;
 }
 
 export interface CronCreateParams {
@@ -742,6 +755,61 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
             },
           ],
         };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
+      }
+    },
+  );
+
+  const boundWatchDocument = tool(
+    'watch_document',
+    [
+      'Watches a vault document and alerts this thread whenever its content changes — any edit triggers the alert, not just comments.',
+      'The watch is owned by this thread only; another thread watching the same path is entirely independent (no dedup/merge).',
+      'Re-watching a path this thread already watches (including a previously disabled watch) re-enables it instead of creating a duplicate.',
+    ].join(' '),
+    { path: z.string().describe('Vault-relative path of the document to watch') },
+    async (args, _extra) => {
+      try {
+        if (!options.onWatchDocument) throw new Error('Document watching is unavailable in this host.');
+        const result = await options.onWatchDocument(args.path);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: msg }) }], isError: true };
+      }
+    },
+  );
+
+  const boundUnwatchDocument = tool(
+    'unwatch_document',
+    'Removes this thread\'s own watch(es) matching the given path and/or id. Never removes a watch owned by another thread on the same path. Provide at least one of path or id.',
+    {
+      path: z.string().optional().describe('Vault-relative path of a document this thread is watching'),
+      id: z.string().optional().describe('ID of a specific watch, as returned by watch_document or list_watched_documents'),
+    },
+    async (args, _extra) => {
+      try {
+        if (!args.path && !args.id) throw new Error('Provide at least one of path or id.');
+        if (!options.onUnwatchDocument) throw new Error('Document watching is unavailable in this host.');
+        const result = await options.onUnwatchDocument({ path: args.path, id: args.id });
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: msg }) }], isError: true };
+      }
+    },
+  );
+
+  const boundListWatchedDocuments = tool(
+    'list_watched_documents',
+    'Returns this thread\'s own watched documents: id, path, createdAt, lastAlertedAt.',
+    {},
+    async (_args, _extra) => {
+      try {
+        const result = options.onListWatchedDocuments?.() ?? [];
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
@@ -2592,6 +2660,9 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundSetWorkingDirectory,
       boundScheduleWakeup,
       boundEnterDesignMode,
+      boundWatchDocument,
+      boundUnwatchDocument,
+      boundListWatchedDocuments,
       boundEnterWorktree,
       boundExitWorktree,
       boundListCommands,

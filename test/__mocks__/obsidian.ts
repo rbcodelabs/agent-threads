@@ -182,11 +182,14 @@ export class TFile {
   name: string;
   basename: string;
   extension: string;
+  /** Defaults to zeros; tests that exercise stamp/mtime logic set this directly. */
+  stat: { ctime: number; mtime: number; size: number };
   constructor(path: string) {
     this.path = path;
     this.name = path.split('/').pop() ?? path;
     this.basename = this.name.replace(/\.[^.]+$/, '');
     this.extension = this.name.includes('.') ? this.name.split('.').pop() ?? '' : '';
+    this.stat = { ctime: 0, mtime: 0, size: 0 };
   }
 }
 
