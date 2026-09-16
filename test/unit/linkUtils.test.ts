@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openUrlPreferringWebViewer, resolveAbsoluteVaultHref } from '../../src/linkUtils';
+import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openOAuthConsentUrl, openUrlPreferringWebViewer, resolveAbsoluteVaultHref } from '../../src/linkUtils';
 import type { App } from 'obsidian';
 
 function fakeApp(opts: { existingWebviewer?: boolean } = {}) {
@@ -190,4 +190,77 @@ describe('isOsAbsoluteHref', () => {
     'treats %s as not OS-absolute',
     (href) => { expect(isOsAbsoluteHref(href)).toBe(false); },
   );
+});
+
+describe('openOAuthConsentUrl', () => {
+  const CONSENT = 'https://as.example.com/authorize?client_id=abc&state=xyz';
+
+  it('opens the consent URL in the system browser via electron shell', async () => {
+    const openExternal = vi.fn(() => Promise.resolve());
+    const fallbackOpen = vi.fn();
+
+    const target = await openOAuthConsentUrl(CONSENT, {
+      resolveShell: () => ({ openExternal }),
+      fallbackOpen,
+    });
+
+    expect(target).toBe('system-browser');
+    expect(openExternal).toHaveBeenCalledWith(CONSENT);
+    expect(fallbackOpen).not.toHaveBeenCalled();
+  });
+
+  // The regression this whole helper exists for: interactive registration runs
+  // behind a modal confirmation dialog, so a Web Viewer tab would render behind
+  // it and be unreachable. Nothing here may touch the workspace.
+  it('never opens a Web Viewer leaf or otherwise touches the workspace', async () => {
+    const { setViewState, existingSetViewState, reveal, ws } = fakeApp({ existingWebviewer: true });
+
+    await openOAuthConsentUrl(CONSENT, {
+      resolveShell: () => ({ openExternal: vi.fn(() => Promise.resolve()) }),
+      fallbackOpen: vi.fn(),
+    });
+
+    expect(setViewState).not.toHaveBeenCalled();
+    expect(existingSetViewState).not.toHaveBeenCalled();
+    expect(reveal).not.toHaveBeenCalled();
+    expect(ws.getLeavesOfType).not.toHaveBeenCalled();
+    expect(ws.getLeaf).not.toHaveBeenCalled();
+  });
+
+  it('awaits a promise-returning openExternal so a rejected open surfaces', async () => {
+    const openExternal = vi.fn(() => Promise.reject(new Error('no handler for https')));
+
+    await expect(openOAuthConsentUrl(CONSENT, {
+      resolveShell: () => ({ openExternal }),
+      fallbackOpen: vi.fn(),
+    })).rejects.toThrow('no handler for https');
+  });
+
+  it('tolerates a void-returning openExternal (older electron typings)', async () => {
+    const openExternal = vi.fn((): void => undefined);
+
+    const target = await openOAuthConsentUrl(CONSENT, {
+      resolveShell: () => ({ openExternal }),
+      fallbackOpen: vi.fn(),
+    });
+
+    expect(target).toBe('system-browser');
+    expect(openExternal).toHaveBeenCalledWith(CONSENT);
+  });
+
+  // Mobile / no-node-integration renderer: `require('electron')` is absent or
+  // throws. The flow must still hand the URL somewhere rather than dead-ending.
+  it.each([
+    ['shell is null', () => null],
+    ['shell is undefined', () => undefined],
+    ['shell lacks openExternal', () => ({}) as { openExternal?: never }],
+    ['resolveShell throws', () => { throw new Error("Cannot find module 'electron'"); }],
+  ])('falls back to the injected opener when %s', async (_label, resolveShell) => {
+    const fallbackOpen = vi.fn();
+
+    const target = await openOAuthConsentUrl(CONSENT, { resolveShell, fallbackOpen });
+
+    expect(target).toBe('fallback');
+    expect(fallbackOpen).toHaveBeenCalledWith(CONSENT);
+  });
 });
