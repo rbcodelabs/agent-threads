@@ -22,6 +22,7 @@ import { isWatchableDocument, watchMenuLabel } from './documentWatch';
 import { mergeMcpServers } from './mcpServerMerge';
 import { createMcpRegistration, mcpRegistrationSchema } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
+import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 // Shared / mobile-safe modules (no Node.js built-in calls at module level)
@@ -406,20 +407,19 @@ export default class ClaudeThreadsPlugin extends Plugin {
       getSettings: () => this.settings,
       save: () => this.saveSettings(),
       secretStorage: this.app.secretStorage,
-      // Mirrors openContextualUrl's/obsidian_open_url's fallback leaf-finding logic
-      // (see ObsidianTools.ts's boundOpenUrl and this file's openContextualUrl) so an
-      // OAuth consent tab opens the same way any other in-app URL does. Only invoked
-      // lazily at authorize() time, well after this.contextPanel exists.
+      // Consent goes to the SYSTEM browser, deliberately NOT the in-app Web
+      // Viewer: registration runs behind a modal confirmation dialog, so an
+      // in-app tab would render behind it and be unclickable, and consent
+      // usually needs the SSO session / passkey / password manager that only
+      // exists in the real browser. See openOAuthConsentUrl for the full
+      // rationale and why the 127.0.0.1 callback still works.
       openUrl: async (url: string) => {
-        if (this.isConversationFirst()) {
-          const reusedTab = await this.contextPanel.setViewState({ type: 'webviewer', active: true, state: { url } });
-          return { reusedTab };
-        }
-        const existing = this.app.workspace.getLeavesOfType('webviewer');
-        const leaf = existing.length > 0 ? existing[0] : this.app.workspace.getLeaf('tab');
-        this.app.workspace.revealLeaf(leaf);
-        await leaf.setViewState({ type: 'webviewer', active: true, state: { url } });
-        return { reusedTab: existing.length > 0 };
+        const target = await openOAuthConsentUrl(url, {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          resolveShell: () => (require('electron') as { shell?: ExternalShellLike }).shell,
+          fallbackOpen: (u) => { window.open(u, '_blank'); },
+        });
+        return { target };
       },
     });
     await this.oauthMcpRegistry.configure();

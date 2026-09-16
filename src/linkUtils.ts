@@ -130,3 +130,59 @@ export function openUrlPreferringWebViewer(app: App, url: string, deps: OpenUrlD
     return 'external';
   }
 }
+
+/** Minimal shape of electron's `shell` that {@link openOAuthConsentUrl} needs. */
+export interface ExternalShellLike {
+  openExternal?: (url: string) => void | Promise<void>;
+}
+
+export interface OpenConsentUrlDeps {
+  /**
+   * Resolve electron's `shell`, or null/undefined when unavailable (mobile, or a
+   * renderer without node integration). Injected rather than `require`d here so
+   * the branch is testable without electron present.
+   */
+  resolveShell: () => ExternalShellLike | null | undefined;
+  /** Last-resort opener when no electron shell exists — typically `window.open`. */
+  fallbackOpen: (url: string) => void;
+}
+
+/** Which surface actually received the consent URL. */
+export type ConsentUrlTarget = 'system-browser' | 'fallback';
+
+/**
+ * Open an OAuth consent URL in the **system browser**, never an in-app Web
+ * Viewer tab.
+ *
+ * This is deliberately *not* `openUrlPreferringWebViewer`. Two reasons:
+ *
+ * 1. **Reachability.** Interactive registration runs behind a modal host
+ *    confirmation dialog. A Web Viewer tab opens *inside* the workspace, so the
+ *    consent page renders behind that modal where it cannot be clicked — the
+ *    flow deadlocks with the page loaded but unreachable.
+ * 2. **Auth state lives in the real browser.** Consent normally depends on an
+ *    existing SSO session, a passkey, or a password manager. A fresh in-app
+ *    Web Viewer partition has none of them, forcing a from-scratch login that
+ *    may not even be completable (hardware keys, IdP device checks).
+ *
+ * The loopback callback is unaffected: `OAuthMcpFlow` serves it from a local
+ * HTTP server on 127.0.0.1, which any external browser can reach, and it
+ * already renders a self-closing success page written for exactly that case.
+ */
+export async function openOAuthConsentUrl(url: string, deps: OpenConsentUrlDeps): Promise<ConsentUrlTarget> {
+  let shell: ExternalShellLike | null | undefined;
+  try {
+    shell = deps.resolveShell();
+  } catch {
+    shell = null;
+  }
+  if (shell?.openExternal) {
+    // `shell.openExternal` returns a promise on modern electron but is typed
+    // loosely across versions; awaiting a plain `undefined` is harmless and
+    // means a rejected open surfaces to the caller instead of going unhandled.
+    await shell.openExternal(url);
+    return 'system-browser';
+  }
+  deps.fallbackOpen(url);
+  return 'fallback';
+}
