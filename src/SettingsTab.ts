@@ -459,6 +459,7 @@ class ConnectClaudeModal extends Modal {
   }
 
   onOpen(): void {
+    console.log('[ConnectClaude] modal opened');
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl('h2', { text: 'Connect Claude' });
@@ -481,6 +482,7 @@ class ConnectClaudeModal extends Modal {
   }
 
   private async start(): Promise<void> {
+    console.log('[ConnectClaude] Connect clicked');
     if (!this.connectBtn || !this.statusEl) return;
     this.connectBtn.disabled = true;
     this.closeBtn?.setText('Cancel');
@@ -492,7 +494,12 @@ class ConnectClaudeModal extends Modal {
     const childProcess = require('child_process') as typeof import('child_process');
     const { runClaudeSetupToken } = await import('./ClaudeTokenSetup');
     this.controller = new AbortController();
-    const result = await runClaudeSetupToken(this.claudeBinaryPath || 'claude', childProcess.spawn, this.controller.signal);
+    const result = await runClaudeSetupToken(
+      this.claudeBinaryPath || 'claude',
+      childProcess.spawn,
+      this.controller.signal,
+      (message) => console.log(`[ConnectClaude] ${message}`),
+    );
     this.controller = null;
     if (this.closed) return;
 

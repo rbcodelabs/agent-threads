@@ -70,17 +70,24 @@ export function runClaudeSetupToken(
   claudeBinaryPath: string,
   spawnFn: SpawnFn,
   signal?: AbortSignal,
+  // Diagnostic hook, called with safe-to-log summaries only — never the raw
+  // chunk text or the token itself. Defaults to a no-op so tests and callers
+  // that don't care can omit it.
+  log: (message: string) => void = () => {},
 ): Promise<ClaudeSetupTokenResult> {
   return new Promise((resolve) => {
     if (signal?.aborted) {
+      log('aborted before spawn');
       resolve({ ok: false, error: 'Cancelled.', rawOutput: '' });
       return;
     }
 
+    log(`spawning "${claudeBinaryPath} setup-token"`);
     let child: SpawnedProcess;
     try {
       child = spawnFn(claudeBinaryPath, ['setup-token']);
     } catch (err) {
+      log(`spawn threw synchronously: ${(err as Error).message}`);
       resolve({ ok: false, error: `Could not start "${claudeBinaryPath} setup-token": ${(err as Error).message}`, rawOutput: '' });
       return;
     }
@@ -91,6 +98,7 @@ export function runClaudeSetupToken(
       if (settled) return;
       settled = true;
       signal?.removeEventListener('abort', onAbort);
+      log(result.ok ? 'resolved: token found' : `resolved: failed — ${result.error}`);
       resolve(result);
       // The token (or failure) is already captured — nothing further from
       // this process matters, and it may otherwise sit waiting on stdin
@@ -101,15 +109,20 @@ export function runClaudeSetupToken(
     signal?.addEventListener('abort', onAbort);
 
     const checkForToken = (): void => {
+      const clean = output.replace(ANSI_PATTERN, '');
+      const candidates = new Set(clean.match(TOKEN_PATTERN) ?? []).size;
+      if (candidates > 0) log(`${candidates} token-shaped candidate(s) seen so far`);
       const token = extractSetupToken(output);
       if (token) finish({ ok: true, token });
     };
-    child.stdout.on('data', (chunk) => { output += chunk.toString(); checkForToken(); });
-    child.stderr.on('data', (chunk) => { output += chunk.toString(); checkForToken(); });
+    child.stdout.on('data', (chunk) => { const s = chunk.toString(); output += s; log(`stdout: +${s.length} chars`); checkForToken(); });
+    child.stderr.on('data', (chunk) => { const s = chunk.toString(); output += s; log(`stderr: +${s.length} chars`); checkForToken(); });
     child.on('error', (err) => {
+      log(`process 'error' event: ${err.message}`);
       finish({ ok: false, error: `"${claudeBinaryPath} setup-token" failed to run: ${err.message}`, rawOutput: output });
     });
     child.on('close', (code) => {
+      log(`process 'close' event: code=${code}`);
       if (settled) return; // token already found, or cancelled/errored
       finish({
         ok: false,
