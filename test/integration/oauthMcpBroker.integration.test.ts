@@ -554,6 +554,32 @@ describe('OAuth MCP broker integration — full registration flow', () => {
     expect(payload.result.tools.map((t: { name: string }) => t.name)).toEqual(['allowed_tool', 'denied_tool', 'stream_tool']);
   });
 
+  // End-to-end shape of the reported bug: OAuth completes, the first tool call
+  // works, then every later one dies with "Invalid or missing capability
+  // token." A resumed session keeps posting the config it was spawned with, so
+  // the turn-1 config has to survive later serversForThread() calls.
+  it('keeps a running session authorized across later turns', async () => {
+    const { upstream } = await setupServers();
+    const { registry: reg } = registry();
+
+    const result = await reg.registerServer({ name: 'vercel', url: upstream.baseUrl });
+    if (result.success) activeRegistrations.push({ registry: reg, name: 'vercel' });
+    expect(result.success).toBe(true);
+
+    // Turn 1: the session is spawned with this config and holds onto it.
+    const sessionConfig = reg.serversForThread('thread-1').vercel as { url: string; headers: Record<string, string> };
+    expect((await callProxy(sessionConfig, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status).toBe(200);
+
+    // Turns 2 and 3 rebuild options for the same thread; the live session is
+    // never handed the new config, so it goes on using sessionConfig.
+    reg.serversForThread('thread-1');
+    reg.serversForThread('thread-1');
+
+    const later = await callProxy(sessionConfig, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
+    expect(later.status).toBe(200);
+    expect((await later.json()).result).toBeDefined();
+  });
+
   it('streams an SSE tools/call response through the proxy without buffering', async () => {
     const { upstream } = await setupServers();
     const { registry: reg } = registry();

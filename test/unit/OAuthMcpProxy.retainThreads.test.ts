@@ -37,7 +37,7 @@ describe('OAuthMcpProxy — retainThreads', () => {
   it('revokes capability tokens for threads outside the active set', async () => {
     const proxy = setup();
     await proxy.start();
-    const staleToken = proxy.mintCapabilityToken('thread-stale');
+    const staleToken = proxy.capabilityTokenFor('thread-stale');
 
     proxy.retainThreads(new Set(['thread-other']));
 
@@ -47,8 +47,8 @@ describe('OAuthMcpProxy — retainThreads', () => {
   it('leaves capability tokens for threads inside the active set untouched', async () => {
     const proxy = setup();
     await proxy.start();
-    const keptToken = proxy.mintCapabilityToken('thread-kept');
-    const staleToken = proxy.mintCapabilityToken('thread-stale');
+    const keptToken = proxy.capabilityTokenFor('thread-kept');
+    const staleToken = proxy.capabilityTokenFor('thread-stale');
 
     proxy.retainThreads(new Set(['thread-kept']));
 
@@ -59,7 +59,7 @@ describe('OAuthMcpProxy — retainThreads', () => {
   it('is a no-op when every current thread is retained', async () => {
     const proxy = setup();
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
 
     proxy.retainThreads(new Set(['thread-1', 'thread-2']));
 

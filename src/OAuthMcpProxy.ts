@@ -137,7 +137,30 @@ export class OAuthMcpProxy {
     return `http://127.0.0.1:${this.port}/`;
   }
 
-  mintCapabilityToken(threadId: string): string {
+  /**
+   * The thread's capability token, minted on first request and **stable
+   * thereafter** for as long as the thread stays active.
+   *
+   * Stability is load-bearing, not a convenience. The token is handed to the
+   * SDK inside the `X-Capability-Token` header of a `mcpServers` entry, and
+   * that config is only applied when a harness session is *created*: on a
+   * resumed session `ThreadManager.sendMessage` rebuilds the options (calling
+   * through to this method) but then discards everything except model and
+   * permission mode, because the live Query keeps the headers it was spawned
+   * with. So the running MCP client goes on presenting the token from turn 1
+   * forever.
+   *
+   * Re-minting here would therefore overwrite the map entry with a token that
+   * nothing in flight is using, and the very next tool call would fail the
+   * `threadIdForToken` lookup with "Invalid or missing capability token." —
+   * every turn after the first. Mirrors `GoogleWorkspaceMcp.serversForThread`,
+   * which likewise mints its capability once per thread binding and reuses it.
+   *
+   * Revocation stays explicit, via `revokeCapabilityToken`/`retainThreads`.
+   */
+  capabilityTokenFor(threadId: string): string {
+    const existing = this.capabilityTokens.get(threadId);
+    if (existing) return existing;
     const token = randomBytes(32).toString('hex');
     this.capabilityTokens.set(threadId, token);
     return token;
