@@ -227,6 +227,30 @@ export class OAuthMcpRegistry {
     }
     setAsMetadata(asMetadata);
 
+    // When the caller names no scopes, fall back to the ones the *resource*
+    // advertises in its RFC 9728 metadata. Without this the authorization
+    // request carries no `scope` parameter at all and the AS falls back to its
+    // own default grant — which for Atlassian is identity-only, producing a
+    // token that authenticates fine (`atlassianUserInfo` works) but 401s every
+    // real API call with "scope does not match". A silent, very confusing
+    // failure that lands *after* a successful-looking consent.
+    //
+    // `scopes_supported` is the only machine-readable statement of what the
+    // resource needs: Atlassian's AS metadata omits it entirely (null), so the
+    // resource half of discovery is the sole source. The SDK already returns it
+    // on `OAuthServerInfo.resourceMetadata`, so nothing new is fetched here.
+    //
+    // Caveat worth knowing: this requests everything the resource advertises,
+    // which can exceed what a given user actually wants granted (Atlassian
+    // lists 22, spanning Jira, Confluence and Compass). Pass `scopes`
+    // explicitly to request least privilege — an explicit value always wins.
+    const advertisedScopes = asMetadata.resourceMetadata?.scopes_supported;
+    const effectiveScopes = entry.scopes
+      ?? (Array.isArray(advertisedScopes) && advertisedScopes.length > 0 ? advertisedScopes.join(' ') : undefined);
+    if (!entry.scopes && effectiveScopes) {
+      console.log(`[OAuthMcpRegistry] No scopes given for "${entry.name}"; requesting the ${advertisedScopes?.length} advertised by the resource: ${effectiveScopes}`);
+    }
+
     let clientId = entry.clientId;
     if (!clientId) {
       const registrationEndpoint = asMetadata.authorizationServerMetadata?.registration_endpoint;
@@ -251,7 +275,7 @@ export class OAuthMcpRegistry {
         // without a caller-supplied `redirectUri` will reject the later
         // `authorize()` callback — that's the case this option exists to fix.
         const redirectUri = entry.redirectUri ?? 'http://127.0.0.1/callback';
-        clientId = await flow.registerClient(registrationEndpoint, redirectUri, entry.scopes);
+        clientId = await flow.registerClient(registrationEndpoint, redirectUri, effectiveScopes);
       } catch (err) {
         return { success: false, status: 'failed', message: `Dynamic Client Registration failed for "${entry.name}": ${errorMessage(err)}` };
       }
@@ -260,7 +284,7 @@ export class OAuthMcpRegistry {
 
     let tokens: TokenSet;
     try {
-      tokens = await flow.authorize({ serverName: entry.name, clientId, asMetadata, scopes: entry.scopes, redirectUri: entry.redirectUri });
+      tokens = await flow.authorize({ serverName: entry.name, clientId, asMetadata, scopes: effectiveScopes, redirectUri: entry.redirectUri });
     } catch (err) {
       tokenStore.clear(entry.name);
       const message = errorMessage(err);
@@ -281,7 +305,10 @@ export class OAuthMcpRegistry {
 
     const storedEntry: StoredOAuthMcpServer = {
       url: entry.url,
-      scopes: entry.scopes,
+      // Persist what was actually requested, not what was passed in, so a later
+      // reconnect/re-register reproduces this grant instead of silently
+      // re-deriving a different one if the resource changes its advertisement.
+      scopes: effectiveScopes,
       tools: entry.tools,
       clientId,
       authorizationServerUrl: entry.authorizationServerUrl,
