@@ -474,6 +474,7 @@ class ConnectClaudeModal extends Modal {
     const buttonRow = contentEl.createDiv('ct-modal-button-row');
     this.closeBtn = buttonRow.createEl('button', { text: 'Cancel' });
     this.closeBtn.addEventListener('click', () => {
+      console.log('[ConnectClaude] Cancel/Close button clicked');
       if (this.controller) this.controller.abort();
       else this.close();
     });
@@ -527,6 +528,7 @@ class ConnectClaudeModal extends Modal {
   }
 
   onClose(): void {
+    console.log('[ConnectClaude] modal onClose fired', new Error('stack').stack);
     this.closed = true;
     if (this.controller) this.controller.abort();
     this.contentEl.empty();
