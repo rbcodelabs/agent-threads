@@ -52,16 +52,27 @@ function fakeSecretStorage() {
   };
 }
 
-function fakeAsMetadata(opts: { withoutRegistrationEndpoint?: boolean } = {}) {
+/**
+ * `scopesSupported` models the RFC 9728 *resource* metadata half of discovery:
+ * omit the option for a resource that publishes none, pass an array for one
+ * that advertises scopes, pass `null`/`[]` for the degenerate cases. The AS half
+ * deliberately carries `scopes_supported: null`, matching Atlassian — which is
+ * why the resource half is the only usable source of scope names.
+ */
+function fakeAsMetadata(opts: { withoutRegistrationEndpoint?: boolean; scopesSupported?: string[] | null } = {}) {
   const authorizationServerMetadata: Record<string, unknown> = {
     issuer: 'https://as.example.com',
     authorization_endpoint: 'https://as.example.com/authorize',
     token_endpoint: 'https://as.example.com/token',
     response_types_supported: ['code'],
+    scopes_supported: null,
     revocation_endpoint: 'https://as.example.com/revoke',
   };
   if (!opts.withoutRegistrationEndpoint) authorizationServerMetadata.registration_endpoint = 'https://as.example.com/register';
-  return { authorizationServerUrl: 'https://as.example.com', authorizationServerMetadata };
+  const resourceMetadata = 'scopesSupported' in opts
+    ? { resource: 'https://mcp.example.com/', scopes_supported: opts.scopesSupported ?? undefined }
+    : undefined;
+  return { authorizationServerUrl: 'https://as.example.com', authorizationServerMetadata, resourceMetadata };
 }
 
 function makeHost() {
@@ -227,6 +238,65 @@ describe('OAuthMcpRegistry.registerServer', () => {
     );
     expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ redirectUri: undefined }));
     expect(settings.oauthMcpServers.vercel.redirectUri).toBeUndefined();
+  });
+
+  /**
+   * Regression guard for the failure Atlassian's MCP server produces: registered
+   * with no `scopes`, no `scope` parameter reaches the authorization request, the
+   * AS issues its own default (identity-only) grant, and every real API call
+   * then 401s with "scope does not match" — while `atlassianUserInfo` keeps
+   * working, so the connection looks healthy.
+   */
+  it('falls back to the resource metadata\'s advertised scopes when none are supplied', async () => {
+    discoverASMock.mockResolvedValue(fakeAsMetadata({ scopesSupported: ['offline_access', 'read:me', 'read:jira-work', 'write:jira-work'] }));
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({ name: 'atlassian', url: 'https://mcp.atlassian.com/v1/mcp/authv2' });
+
+    expect(result.success).toBe(true);
+    const expected = 'offline_access read:me read:jira-work write:jira-work';
+    expect(registerClientMock).toHaveBeenCalledWith('https://as.example.com/register', 'http://127.0.0.1/callback', expected);
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ scopes: expected }));
+    // Persisted so a reconnect reproduces this exact grant.
+    expect(settings.oauthMcpServers.atlassian.scopes).toBe(expected);
+  });
+
+  it('prefers explicitly supplied scopes over the advertised list', async () => {
+    discoverASMock.mockResolvedValue(fakeAsMetadata({ scopesSupported: ['read:jira-work', 'write:jira-work', 'read:confluence-content.all', 'write:confluence-content'] }));
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const scopes = 'offline_access read:me read:jira-work write:jira-work';
+    const result = await registry.registerServer({ name: 'atlassian', url: 'https://mcp.atlassian.com/v1/mcp/authv2', scopes });
+
+    expect(result.success).toBe(true);
+    expect(registerClientMock).toHaveBeenCalledWith(expect.any(String), expect.any(String), scopes);
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ scopes }));
+    expect(settings.oauthMcpServers.atlassian.scopes).toBe(scopes);
+    // Never widened to include the Confluence scopes the resource also advertises.
+    expect(authorizeMock.mock.calls[0][0].scopes).not.toContain('confluence');
+  });
+
+  it('sends no scopes at all when neither the caller nor the resource names any', async () => {
+    // A resource that publishes metadata but leaves scopes_supported out, and
+    // one that publishes an empty array, must both behave like today: omit the
+    // scope parameter entirely rather than sending an empty string.
+    for (const scopesSupported of [null, []] as Array<string[] | null>) {
+      vi.clearAllMocks();
+      registerClientMock.mockResolvedValue('dcr-client-id');
+      authorizeMock.mockResolvedValue({ accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3600_000 });
+      proxyStartMock.mockResolvedValue(undefined);
+      discoverASMock.mockResolvedValue(fakeAsMetadata({ scopesSupported }));
+      const { host, settings } = makeHost();
+
+      const result = await new OAuthMcpRegistry(host).registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/' });
+
+      expect(result.success).toBe(true);
+      expect(registerClientMock).toHaveBeenCalledWith(expect.any(String), expect.any(String), undefined);
+      expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ scopes: undefined }));
+      expect(settings.oauthMcpServers.vercel.scopes).toBeUndefined();
+    }
   });
 
   it('fails cleanly when DCR is required but unsupported by the authorization server', async () => {
