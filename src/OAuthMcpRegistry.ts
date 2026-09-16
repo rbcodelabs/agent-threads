@@ -180,14 +180,21 @@ export class OAuthMcpRegistry {
     }
   }
 
-  /** Every running proxy, keyed by server name, ready to merge into a thread's MCP servers. */
+  /**
+   * Every running proxy, keyed by server name, ready to merge into a thread's
+   * MCP servers.
+   *
+   * Called once per turn (via `ThreadManager.buildThreadSessionOptions`), so it
+   * must be idempotent for a given thread — see `capabilityTokenFor` for why
+   * handing back a fresh token here would 403 every already-running session.
+   */
   serversForThread(threadId: string): Record<string, McpServerConfig> {
     const result: Record<string, McpServerConfig> = {};
     for (const [name, conn] of this.connections) {
       result[name] = {
         type: 'http',
         url: conn.proxy.url,
-        headers: { 'X-Capability-Token': conn.proxy.mintCapabilityToken(threadId) },
+        headers: { 'X-Capability-Token': conn.proxy.capabilityTokenFor(threadId) },
       } as McpServerConfig;
     }
     return result;

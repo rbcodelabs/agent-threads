@@ -48,7 +48,7 @@ describe('OAuthMcpProxy — capability tokens', () => {
   it('accepts a request with a minted capability token, and rejects it again after revocation', async () => {
     const { proxy } = setup();
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const ok = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': token }, body: '{}' });
     expect(ok.status).toBe(200);
 
@@ -57,10 +57,61 @@ describe('OAuthMcpProxy — capability tokens', () => {
     expect(after.status).toBe(403);
   });
 
+  // The second-turn 403. ThreadManager rebuilds a thread's session options on
+  // every turn, which calls back in here, but a resumed session keeps the
+  // headers its Query was spawned with. If this handed back a fresh token the
+  // already-running MCP client's token would be evicted and every tool call
+  // from turn 2 onward would fail with "Invalid or missing capability token."
+  it('keeps a live token valid when the same thread asks for its token again', async () => {
+    const { proxy } = setup();
+    await proxy.start();
+    const turn1 = proxy.capabilityTokenFor('thread-1');
+
+    const turn2 = proxy.capabilityTokenFor('thread-1');
+    expect(turn2).toBe(turn1);
+
+    // The token the running session is still presenting must keep working.
+    const res = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': turn1 }, body: '{}' });
+    expect(res.status).toBe(200);
+  });
+
+  it('stays stable across many turns without accumulating tokens', async () => {
+    const { proxy } = setup();
+    await proxy.start();
+    const tokens = new Set(Array.from({ length: 10 }, () => proxy.capabilityTokenFor('thread-1')));
+    expect(tokens.size).toBe(1);
+
+    // One entry, so a single revoke still fully de-authorizes the thread —
+    // rotation would have orphaned nine unreachable-but-live map entries.
+    proxy.revokeCapabilityToken('thread-1');
+    const res = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': [...tokens][0] }, body: '{}' });
+    expect(res.status).toBe(403);
+  });
+
+  it('issues distinct tokens to different threads', async () => {
+    const { proxy } = setup();
+    await proxy.start();
+    expect(proxy.capabilityTokenFor('thread-1')).not.toBe(proxy.capabilityTokenFor('thread-2'));
+  });
+
+  it('mints a fresh token after revocation rather than resurrecting the old one', async () => {
+    const { proxy } = setup();
+    await proxy.start();
+    const first = proxy.capabilityTokenFor('thread-1');
+    proxy.revokeCapabilityToken('thread-1');
+    const second = proxy.capabilityTokenFor('thread-1');
+
+    expect(second).not.toBe(first);
+    const stale = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': first }, body: '{}' });
+    expect(stale.status).toBe(403);
+    const fresh = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': second }, body: '{}' });
+    expect(fresh.status).toBe(200);
+  });
+
   it('returns 401 with a structured MCP error when no access token is available', async () => {
     const { proxy } = setup({ accessToken: null });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': token }, body: '{}' });
     expect(res.status).toBe(401);
     expect(await res.json()).toMatchObject({ jsonrpc: '2.0', error: { code: -32001 } });
@@ -71,7 +122,7 @@ describe('OAuthMcpProxy — tool filtering', () => {
   it('filters a tools/list response by an allow list', async () => {
     const { proxy } = setup({ toolFilter: { allow: ['a'] } });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, {
       method: 'POST', headers: { 'x-capability-token': token, 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
@@ -83,7 +134,7 @@ describe('OAuthMcpProxy — tool filtering', () => {
   it('filters a tools/list response by a deny list', async () => {
     const { proxy } = setup({ toolFilter: { deny: ['a'] } });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, {
       method: 'POST', headers: { 'x-capability-token': token, 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
@@ -95,7 +146,7 @@ describe('OAuthMcpProxy — tool filtering', () => {
   it('passes tools/list through unfiltered with no toolFilter configured', async () => {
     const { proxy } = setup();
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, {
       method: 'POST', headers: { 'x-capability-token': token, 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
@@ -107,7 +158,7 @@ describe('OAuthMcpProxy — tool filtering', () => {
   it('blocks a denied tools/call with a -32601 MCP error, matching the request id, without contacting upstream', async () => {
     const { proxy, upstream } = setup({ toolFilter: { deny: ['buy_pro'] } });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, {
       method: 'POST', headers: { 'x-capability-token': token, 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'buy_pro' } }),
@@ -121,7 +172,7 @@ describe('OAuthMcpProxy — tool filtering', () => {
     const upstream = jsonUpstream({ jsonrpc: '2.0', id: 9, result: { ok: true } });
     const { proxy } = setup({ toolFilter: { deny: ['buy_pro'] }, upstream });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, {
       method: 'POST', headers: { 'x-capability-token': token, 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'list_projects' } }),
@@ -134,7 +185,7 @@ describe('OAuthMcpProxy — tool filtering', () => {
     const upstream = jsonUpstream({ jsonrpc: '2.0', id: 1, result: { ok: true } });
     const { proxy } = setup({ toolFilter: { allow: ['list_projects'] }, upstream });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const call = (name: string) => fetch(proxy.url, {
       method: 'POST', headers: { 'x-capability-token': token, 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name } }),
@@ -156,7 +207,7 @@ describe('OAuthMcpProxy — 401 refresh-and-retry', () => {
     });
     const { proxy, refresh } = setup({ upstream });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': token }, body: '{}' });
     expect(res.status).toBe(200);
     expect(refresh).toHaveBeenCalledTimes(1);
@@ -167,7 +218,7 @@ describe('OAuthMcpProxy — 401 refresh-and-retry', () => {
     const upstream: Upstream = vi.fn(async () => ({ status: 401, headers: new Headers(), body: null }));
     const { proxy, refresh } = setup({ upstream });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': token }, body: '{}' });
     expect(res.status).toBe(401);
     expect(refresh).toHaveBeenCalledTimes(1);
@@ -183,7 +234,7 @@ describe('OAuthMcpProxy — 401 refresh-and-retry', () => {
     });
     const { proxy } = setup({ upstream, accessToken: 'stale-token' });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': token }, body: '{}' });
     expect(seenTokens).toEqual(['Bearer stale-token', 'Bearer token-2']);
   });
@@ -204,7 +255,7 @@ describe('OAuthMcpProxy — SSE pass-through', () => {
     }));
     const { proxy } = setup({ upstream });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
 
     const res = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': token }, body: '{}' });
     expect(res.headers.get('content-type')).toBe('text/event-stream');
@@ -235,7 +286,7 @@ describe('OAuthMcpProxy — SSE pass-through', () => {
     }));
     const { proxy } = setup({ toolFilter: { deny: ['a'] }, upstream });
     await proxy.start();
-    const token = proxy.mintCapabilityToken('thread-1');
+    const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, {
       method: 'POST', headers: { 'x-capability-token': token, 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),

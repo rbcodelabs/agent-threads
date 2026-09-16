@@ -23,7 +23,7 @@ vi.mock('../../src/OAuthMcpFlow', () => ({
 
 const proxyStartMock = vi.fn();
 const proxyStopMock = vi.fn();
-const mintCapabilityTokenMock = vi.fn();
+const capabilityTokenForMock = vi.fn();
 const proxyRetainThreadsMock = vi.fn();
 let proxyUrl = 'http://127.0.0.1:5555/';
 
@@ -32,7 +32,7 @@ vi.mock('../../src/OAuthMcpProxy', () => ({
     return {
       start: proxyStartMock,
       stop: proxyStopMock,
-      mintCapabilityToken: mintCapabilityTokenMock,
+      capabilityTokenFor: capabilityTokenForMock,
       retainThreads: proxyRetainThreadsMock,
       get url() { return proxyUrl; },
     };
@@ -92,7 +92,7 @@ beforeEach(() => {
   revokeMock.mockResolvedValue(undefined);
   proxyStartMock.mockResolvedValue(undefined);
   proxyStopMock.mockResolvedValue(undefined);
-  mintCapabilityTokenMock.mockImplementation((threadId: string) => `cap-${threadId}`);
+  capabilityTokenForMock.mockImplementation((threadId: string) => `cap-${threadId}`);
 });
 
 describe('OAuthMcpRegistry.registerServer', () => {
@@ -259,6 +259,21 @@ describe('OAuthMcpRegistry.serversForThread', () => {
     const registry = new OAuthMcpRegistry(host);
 
     expect(registry.serversForThread('thread-1')).toEqual({});
+  });
+
+  // ThreadManager calls this on every turn but only applies the result when it
+  // creates a session, so the config a live session is running on must not
+  // drift underneath it. Same guarantee GoogleWorkspaceMcp's "preserves thread
+  // capabilities across calls" test pins down for its side.
+  it('returns an identical config when called again for the same thread', async () => {
+    const { host } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+    await registry.registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/' });
+
+    const first = registry.serversForThread('thread-1');
+    const second = registry.serversForThread('thread-1');
+
+    expect(second).toEqual(first);
   });
 });
 
