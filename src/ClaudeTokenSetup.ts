@@ -54,9 +54,17 @@ export function extractSetupToken(rawOutput: string): string | null {
 }
 
 /**
- * Runs `<claudeBinaryPath> setup-token` and resolves once it exits (or is
- * aborted via `signal`). Never rejects — every outcome, including a spawn
- * failure, resolves to a tagged result so callers don't need a try/catch.
+ * Runs `<claudeBinaryPath> setup-token` and resolves as soon as a token
+ * appears in its output (or it exits without one, or is aborted via
+ * `signal`). Never rejects — every outcome resolves to a tagged result so
+ * callers don't need a try/catch.
+ *
+ * Deliberately does not wait for the process to exit before resolving: after
+ * printing the token, some CLI flows sit on a "press Enter to continue"-style
+ * prompt for a real terminal session. This process's stdin is an unconnected
+ * pipe (nothing will ever write to it), so waiting for `close` would hang
+ * forever even though the OAuth flow itself already succeeded. The token is
+ * everything the caller needs, so grab it and kill the process immediately.
  */
 export function runClaudeSetupToken(
   claudeBinaryPath: string,
@@ -84,30 +92,32 @@ export function runClaudeSetupToken(
       settled = true;
       signal?.removeEventListener('abort', onAbort);
       resolve(result);
-    };
-    const onAbort = (): void => {
+      // The token (or failure) is already captured — nothing further from
+      // this process matters, and it may otherwise sit waiting on stdin
+      // indefinitely (see doc comment above).
       child.kill();
-      finish({ ok: false, error: 'Cancelled.', rawOutput: output });
     };
+    const onAbort = (): void => finish({ ok: false, error: 'Cancelled.', rawOutput: output });
     signal?.addEventListener('abort', onAbort);
 
-    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
-    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+    const checkForToken = (): void => {
+      const token = extractSetupToken(output);
+      if (token) finish({ ok: true, token });
+    };
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); checkForToken(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); checkForToken(); });
     child.on('error', (err) => {
       finish({ ok: false, error: `"${claudeBinaryPath} setup-token" failed to run: ${err.message}`, rawOutput: output });
     });
     child.on('close', (code) => {
-      if (settled) return; // already resolved via onAbort
-      if (code !== 0) {
-        finish({ ok: false, error: `"claude setup-token" exited with code ${code ?? 'unknown'}.`, rawOutput: output });
-        return;
-      }
-      const token = extractSetupToken(output);
-      if (!token) {
-        finish({ ok: false, error: 'Finished, but no token was found in the output.', rawOutput: output });
-        return;
-      }
-      finish({ ok: true, token });
+      if (settled) return; // token already found, or cancelled/errored
+      finish({
+        ok: false,
+        error: code === 0
+          ? 'Finished, but no token was found in the output.'
+          : `"claude setup-token" exited with code ${code ?? 'unknown'}.`,
+        rawOutput: output,
+      });
     });
   });
 }
