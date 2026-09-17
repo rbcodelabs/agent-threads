@@ -19,7 +19,7 @@ import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
 import { mergeMcpServers } from './mcpServerMerge';
-import { createMcpRegistration, mcpRegistrationSchema } from './mcpServerStore';
+import { createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
 import type { SkillsManagerView } from './SkillsManagerView';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
@@ -248,6 +248,15 @@ export default class ClaudeThreadsPlugin extends Plugin {
   contextPanel!: ContextPanelController;
   googleWorkspaceMcp?: import('./GoogleWorkspaceMcp').GoogleWorkspaceMcp;
   oauthMcpRegistry?: import('./OAuthMcpRegistry').OAuthMcpRegistry;
+  /**
+   * Shared MCP-registration state, promoted from `onloadDesktop()` locals so
+   * both the agent-tool factory (per-thread) and the peer-plugin public API
+   * (`initializePublicApi()`, no calling thread) can drive the exact same
+   * confirm-then-save transaction and host-availability guard.
+   */
+  private mcpRegistrationModals = new Set<McpRegistrationModal>();
+  private mcpRegistrationAvailable = true;
+  private registerMcpServerFn?: ReturnType<typeof createMcpRegistration>;
 
   /**
    * MCP-server warnings already shown as a Notice this plugin load, so a
@@ -472,24 +481,22 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
     // Use a per-thread factory so the set_working_directory tool can close over the
     // correct threadId without shared mutable state across concurrent sessions.
-    const mcpRegistrationModals = new Set<McpRegistrationModal>();
-    let mcpRegistrationAvailable = true;
     this.register(() => {
-      mcpRegistrationAvailable = false;
-      for (const modal of mcpRegistrationModals) modal.close();
+      this.mcpRegistrationAvailable = false;
+      for (const modal of this.mcpRegistrationModals) modal.close();
     });
-    const registerMcpServer = createMcpRegistration({
+    this.registerMcpServerFn = createMcpRegistration({
       getSettings: () => this.settings,
       save: () => this.saveSettings(),
       confirm: entry => new Promise<boolean>((resolve, reject) => {
-        if (!mcpRegistrationAvailable) { reject(new Error('Host unavailable')); return; }
+        if (!this.mcpRegistrationAvailable) { reject(new Error('Host unavailable')); return; }
         const modal = new McpRegistrationModal(this.app, entry, accepted => {
-          mcpRegistrationModals.delete(modal);
+          this.mcpRegistrationModals.delete(modal);
           resolve(accepted);
         });
-        mcpRegistrationModals.add(modal);
+        this.mcpRegistrationModals.add(modal);
         try { modal.open(); }
-        catch (error) { mcpRegistrationModals.delete(modal); reject(error); }
+        catch (error) { this.mcpRegistrationModals.delete(modal); reject(error); }
       }),
     });
     this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
@@ -498,30 +505,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
           onEnterDesignMode: brief => this.enterDesignMode(threadId, brief),
           onRegisterMcpServer: input => {
             const caller = this.manager.getThread(threadId);
-            const interactive = mcpRegistrationAvailable && !!caller && !caller.scheduledItemId;
-            // The OAuth consent round-trip needs an interactive human even more than a
-            // static server registration does, so it shares the exact same guard.
-            const parsed = mcpRegistrationSchema.safeParse(input);
-            if (parsed.success && parsed.data.type === 'oauth') {
-              if (!interactive) {
-                return Promise.resolve({ success: false, status: 'unavailable', message: 'Interactive host confirmation is unavailable. Register this server from an interactive thread.' });
-              }
-              if (!this.oauthMcpRegistry) {
-                return Promise.resolve({ success: false, status: 'unavailable', message: 'OAuth MCP registration is unavailable in this context.' });
-              }
-              const data = parsed.data;
-              // Guaranteed non-empty for an oauth entry by mcpRegistrationSchema's superRefine.
-              return this.oauthMcpRegistry.registerServer({
-                name: data.name,
-                url: data.url ?? '',
-                scopes: data.scopes,
-                tools: data.tools,
-                clientId: data.clientId,
-                authorizationServerUrl: data.authorizationServerUrl,
-                redirectUri: data.redirectUri,
-              });
-            }
-            return registerMcpServer(input, interactive);
+            const interactive = this.mcpRegistrationAvailable && !!caller && !caller.scheduledItemId;
+            return this.registerExternalMcpServer(input, interactive);
           },
           enableOpenUrl: (this.settings.enableWebViewerTool ?? true) && isWebViewerEnabled(this.app),
           openContextualFile: async (file) => {
@@ -787,19 +772,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
             await this.saveSettings();
             return result;
           },
-          onRequestSecret: (secretName: string, reason: string, force?: boolean) => {
-            return new Promise<boolean>((resolve) => {
-              new RequestSecretModal(this.app, secretName, reason, async (saved) => {
-                if (saved) {
-                  if (!this.settings.secretEnvKeys.includes(secretName)) {
-                    this.settings.secretEnvKeys.push(secretName);
-                    await this.saveSettings();
-                  }
-                }
-                resolve(saved);
-              }, force).open();
-            });
-          },
+          onRequestSecret: (secretName: string, reason: string, force?: boolean) =>
+            this.requestSecretFromUser(secretName, reason, force),
         });
         const mcpDebug = Object.fromEntries(Object.entries(mcpServers).map(([key, server]) => [key, {
           type: (server as unknown as Record<string, unknown>).type,
@@ -1902,6 +1876,61 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
   }
 
+  /**
+   * The single MCP-server registration dispatcher, shared by the agent-facing
+   * `mcp_register_server` tool (via `onRegisterMcpServer` in the per-thread MCP
+   * factory) and the peer-plugin `api.v1.mcp.register` method. Both callers pass
+   * through the exact same interactive-confirmation guard and, for `oauth`,
+   * the same `OAuthMcpRegistry` consent flow — there is no separate silent path.
+   */
+  private async registerExternalMcpServer(input: unknown, interactive: boolean): Promise<McpRegistrationResult> {
+    const parsed = mcpRegistrationSchema.safeParse(input);
+    // The OAuth consent round-trip needs an interactive human even more than a
+    // static server registration does, so it shares the exact same guard.
+    if (parsed.success && parsed.data.type === 'oauth') {
+      if (!interactive) {
+        return { success: false, status: 'unavailable', message: 'Interactive host confirmation is unavailable. Register this server from an interactive thread.' };
+      }
+      if (!this.oauthMcpRegistry) {
+        return { success: false, status: 'unavailable', message: 'OAuth MCP registration is unavailable in this context.' };
+      }
+      const data = parsed.data;
+      // Guaranteed non-empty for an oauth entry by mcpRegistrationSchema's superRefine.
+      return this.oauthMcpRegistry.registerServer({
+        name: data.name,
+        url: data.url ?? '',
+        scopes: data.scopes,
+        tools: data.tools,
+        clientId: data.clientId,
+        authorizationServerUrl: data.authorizationServerUrl,
+        redirectUri: data.redirectUri,
+      });
+    }
+    if (!this.registerMcpServerFn) {
+      return { success: false, status: 'unavailable', message: 'MCP registration is unavailable in this context.' };
+    }
+    return this.registerMcpServerFn(input, interactive);
+  }
+
+  /**
+   * Shared secret-request dispatcher, used by both the agent-facing
+   * `request_secret` tool (`onRequestSecret`) and the peer-plugin
+   * `api.v1.mcp.requestSecret` method. Always shows the same host modal.
+   */
+  private requestSecretFromUser(secretName: string, reason: string, force?: boolean): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      new RequestSecretModal(this.app, secretName, reason, async (saved) => {
+        if (saved) {
+          if (!this.settings.secretEnvKeys.includes(secretName)) {
+            this.settings.secretEnvKeys.push(secretName);
+            await this.saveSettings();
+          }
+        }
+        resolve(saved);
+      }, force).open();
+    });
+  }
+
   getPluginSkillsRoot(): string {
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) return '';
@@ -2107,6 +2136,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
         const workspace = this.app.workspace as unknown as { trigger(event: string, payload: unknown): void };
         workspace.trigger(name, payload);
       },
+      // Peer-plugin calls have no calling thread or scheduled-item concept, so
+      // "interactive" here is just "is the plugin still loaded" — never gated on
+      // thread state the way the agent-tool path is. The confirmation modal (or,
+      // for oauth, the OAuthMcpRegistry consent flow) is still always shown;
+      // see registerExternalMcpServer.
+      registerMcpServer: (input) => this.registerExternalMcpServer(input, this.mcpRegistrationAvailable),
+      requestSecret: (secretName, reason, force) => this.requestSecretFromUser(secretName, reason, force),
+      hasSecret: (name) => !!this.app.secretStorage.getSecret(secretStorageKey(name)),
     });
     this.publicApiService = service;
     this.api = Object.freeze({ v1: service.api });

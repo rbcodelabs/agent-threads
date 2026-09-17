@@ -1,6 +1,7 @@
 import type { ChatMessage, Thread, ThreadStatus } from './types';
 import type { ThreadEvent } from './ThreadManager';
 import type { RawLogTraceChunk, RawLogTraceMetadata } from './RawLogWriter';
+import type { McpRegistrationResult } from './mcpServerStore';
 
 export type PublicErrorCode = 'PLUGIN_UNAVAILABLE' | 'THREAD_NOT_FOUND' | 'RUN_NOT_FOUND' | 'RUN_FAILED' | 'RUN_INTERRUPTED' | 'THREAD_BUSY' | 'IDEMPOTENCY_CONFLICT' | 'TRACE_NOT_FOUND' | 'CURSOR_INVALID' | 'CONSTRAINT_UNSUPPORTED' | 'ORCHESTRATOR_NOT_FOUND' | 'INVALID_ARGUMENT';
 export interface PublicError { readonly code: PublicErrorCode; readonly message: string }
@@ -47,6 +48,24 @@ export interface OrchestratorSnapshot { readonly id: string; readonly kind: 'por
 export interface OrchestratorTarget { readonly id: string }
 export interface AgentToolDefinition { readonly type: 'function'; readonly name: string; readonly description: string; readonly parameters: Readonly<Record<string, unknown>> }
 export interface AgentToolBundle { readonly tools: readonly AgentToolDefinition[]; execute(name: string, args: Record<string, unknown>): Promise<string> }
+export interface McpRegisterInput {
+  readonly name: string;
+  readonly type: 'stdio' | 'http' | 'sse' | 'oauth';
+  readonly command?: string;
+  readonly args?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+  readonly url?: string;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly scopes?: string;
+  readonly tools?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] };
+  readonly clientId?: string;
+  readonly authorizationServerUrl?: string;
+  readonly redirectUri?: string;
+}
+export interface RequestSecretInput { readonly secretName: string; readonly reason: string; readonly force?: boolean }
+export type RequestSecretResult =
+  | { readonly success: true; readonly secretName: string; readonly alreadyExisted: boolean }
+  | { readonly success: false; readonly reason: string };
 export interface ClaudeThreadsApiV1 {
   readonly apiVersion: 1; readonly generation: string; readonly capabilities: readonly string[];
   readonly threads: {
@@ -58,6 +77,10 @@ export interface ClaudeThreadsApiV1 {
   readonly constrainedRuns: { create(input: ConstrainedRunInput): Promise<{ readonly runId: string }>; get(runId: string): Promise<ConstrainedRunResult>; wait(runId: string, options?: WaitOptions): Promise<ConstrainedRunResult>; cancel(runId: string): Promise<ConstrainedRunResult> };
   readonly orchestrators: { list(): Promise<readonly OrchestratorSnapshot[]>; dispatch(target: OrchestratorTarget, input: SendInput): Promise<{ readonly runId: string }> };
   readonly agentTools: { createBundle(profile: 'voice-orchestration'): AgentToolBundle };
+  readonly mcp: {
+    register(input: McpRegisterInput): Promise<McpRegistrationResult>;
+    requestSecret(input: RequestSecretInput): Promise<RequestSecretResult>;
+  };
 }
 export interface PublicApiDependencies {
   getThreads(): Thread[]; getThread(id: string): Thread | undefined; isRunning(id: string): boolean; createThread(input: CreateThreadInput): Thread | Promise<Thread>;
@@ -71,11 +94,14 @@ export interface PublicApiDependencies {
   runConstrainedQuery?(input: ConstrainedQueryInput): Promise<ConstrainedQueryOutput>;
   listOrchestrators(): OrchestratorSnapshot[]; resolveOrchestrator(target: OrchestratorTarget): Promise<string | null>;
   triggerHostEvent(name: 'claude-threads:api-ready' | 'claude-threads:api-stopping', payload: { apiVersion: 1; generation: string }): void;
+  registerMcpServer?(input: unknown): Promise<McpRegistrationResult>;
+  requestSecret?(secretName: string, reason: string, force?: boolean): Promise<boolean>;
+  hasSecret?(secretName: string): boolean;
 }
 interface RunRecord { readonly runId: string; readonly threadId: string; result?: Exclude<RunResult, { status: 'timed_out' }>; waiters: Set<(result: Exclude<RunResult, { status: 'timed_out' }>) => void> }
 export interface ClaudeThreadsApiService { readonly api: ClaudeThreadsApiV1; start(): void; stop(): void }
 
-const CAPABILITIES = Object.freeze(['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe', 'traces.listSources', 'traces.readChunk', 'traces.subscribe', 'constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel', 'orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration']);
+const CAPABILITIES = Object.freeze(['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe', 'traces.listSources', 'traces.readChunk', 'traces.subscribe', 'constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel', 'orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration', 'mcp.register', 'mcp.requestSecret']);
 function freeze<T extends object>(value: T): Readonly<T> { for (const nested of Object.values(value)) if (nested && typeof nested === 'object' && !Object.isFrozen(nested)) freeze(nested as object); return Object.freeze(value); }
 function snapshotMessage(message: ChatMessage): MessageSnapshot { return freeze({ id: message.id, role: message.role, content: String(message.content).slice(0, 100_000), timestamp: message.timestamp }); }
 function snapshotSummary(thread: Thread, running: boolean): ThreadSummary { return freeze({ id: thread.id, title: thread.title, status: thread.status ?? 'waiting', reviewed: thread.reviewed ?? false, cwd: thread.cwd, projectId: thread.projectId, agentHarness: thread.agentHarness ?? 'claude', origin: thread.origin, externalJobId: thread.externalJobId, ephemeral: thread.ephemeral, background: thread.background, createdAt: thread.createdAt, updatedAt: thread.updatedAt, isRunning: running, messageCount: thread.messages.length }); }
@@ -90,6 +116,8 @@ const MAX_SYSTEM_LENGTH = 20_000;
 const MAX_MODEL_LENGTH = 128;
 const MAX_BUDGET_USD = 100;
 const MAX_TIMEOUT_MS = 600_000;
+const MAX_SECRET_NAME_LENGTH = 128;
+const MAX_SECRET_REASON_LENGTH = 500;
 function boundedString(value: unknown, name: string, max: number, required = false): string | undefined {
   if (value === undefined && !required) return undefined;
   if (typeof value !== 'string') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `${name} must be a string.`);
@@ -422,6 +450,28 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       return `Error: Agent Threads tool "${name}" is not available in public API v1.`;
     } catch (error) { return `Error: ${error instanceof Error ? error.message : String(error)}`; }
   };
+  const registerMcp = async (input: McpRegisterInput): Promise<McpRegistrationResult> => {
+    guard();
+    if (!deps.registerMcpServer) {
+      return freeze({ success: false, status: 'unavailable', message: 'MCP registration is not available in this host context.' });
+    }
+    return freeze(await deps.registerMcpServer(input));
+  };
+  const requestSecretMcp = async (input: RequestSecretInput): Promise<RequestSecretResult> => {
+    guard();
+    const secretName = boundedString(input.secretName, 'secretName', MAX_SECRET_NAME_LENGTH, true)!;
+    const reason = boundedString(input.reason, 'reason', MAX_SECRET_REASON_LENGTH, true)!;
+    const varName = secretName.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+    if (!deps.requestSecret) {
+      return freeze({ success: false, reason: 'Secret request UI is not available in this context.' });
+    }
+    if (!input.force && deps.hasSecret?.(varName)) {
+      return freeze({ success: true, secretName: varName, alreadyExisted: true });
+    }
+    const saved = await deps.requestSecret(varName, reason, !!input.force);
+    if (saved) return freeze({ success: true, secretName: varName, alreadyExisted: false });
+    return freeze({ success: false, reason: 'The user did not save the secret.' });
+  };
   const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: CAPABILITIES,
     threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const owner = boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH); const explicitOrigin = boundedString(input.origin, 'origin', MAX_OWNER_LENGTH); if (owner && explicitOrigin && owner !== explicitOrigin) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match ownerPluginId.'); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: explicitOrigin ?? owner, externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, send, wait, cancel,
       open: async (threadId: string) => { guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.'); await deps.openThread(threadId); },
@@ -430,6 +480,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     constrainedRuns: { create: createConstrained, get: getConstrained, wait: waitConstrained, cancel: cancelConstrained },
     orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input); } },
     agentTools: { createBundle: (profile) => { guard(); if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`); return freeze({ tools: VOICE_TOOLS, execute: executeTool }); } },
+    mcp: { register: registerMcp, requestSecret: requestSecretMcp },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
     stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
