@@ -435,6 +435,107 @@ class SecretEnvModal extends Modal {
 }
 
 /**
+ * One-click "Connect Claude" flow: runs `claude setup-token` as a child
+ * process instead of sending the user to a terminal. On a normal desktop
+ * session that command opens the browser and completes via a local OAuth
+ * callback on its own — this modal just surfaces progress, lets the user
+ * cancel a stuck attempt, and falls back to showing the raw CLI output if the
+ * token couldn't be parsed out of it automatically (see ClaudeTokenSetup.ts).
+ */
+class ConnectClaudeModal extends Modal {
+  private statusEl: HTMLElement | null = null;
+  private rawOutputEl: HTMLTextAreaElement | null = null;
+  private connectBtn: HTMLButtonElement | null = null;
+  private closeBtn: HTMLButtonElement | null = null;
+  private controller: AbortController | null = null;
+  private closed = false;
+
+  constructor(
+    app: App,
+    private claudeBinaryPath: string,
+    private onConnected: (token: string) => void,
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    console.log('[ConnectClaude] modal opened');
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl('h2', { text: 'Connect Claude' });
+    contentEl.createEl('p', {
+      text: `Runs "${this.claudeBinaryPath || 'claude'} setup-token" and stores the resulting token as a secret — `
+        + 'no terminal needed. Your browser will open to sign in.',
+      cls: 'setting-item-description',
+    });
+
+    this.statusEl = contentEl.createEl('p', { cls: 'setting-item-description' });
+
+    const buttonRow = contentEl.createDiv('ct-modal-button-row');
+    this.closeBtn = buttonRow.createEl('button', { text: 'Cancel' });
+    this.closeBtn.addEventListener('click', () => {
+      console.log('[ConnectClaude] Cancel/Close button clicked');
+      if (this.controller) this.controller.abort();
+      else this.close();
+    });
+    this.connectBtn = buttonRow.createEl('button', { text: 'Connect', cls: 'mod-cta' });
+    this.connectBtn.addEventListener('click', () => void this.start());
+  }
+
+  private async start(): Promise<void> {
+    console.log('[ConnectClaude] Connect clicked');
+    if (!this.connectBtn || !this.statusEl) return;
+    this.connectBtn.disabled = true;
+    this.closeBtn?.setText('Cancel');
+    this.rawOutputEl?.remove();
+    this.rawOutputEl = null;
+    this.statusEl.setText('Opening your browser to sign in… complete sign-in there, then come back.');
+
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const childProcess = require('child_process') as typeof import('child_process');
+    const { runClaudeSetupToken } = await import('./ClaudeTokenSetup');
+    this.controller = new AbortController();
+    const result = await runClaudeSetupToken(
+      this.claudeBinaryPath || 'claude',
+      childProcess.spawn,
+      this.controller.signal,
+      (message) => console.log(`[ConnectClaude] ${message}`),
+    );
+    this.controller = null;
+    if (this.closed) return;
+
+    if (result.ok) {
+      this.statusEl.setText('✓ Connected.');
+      this.onConnected(result.token);
+      setTimeout(() => this.close(), 600);
+      return;
+    }
+
+    if (this.connectBtn) this.connectBtn.disabled = false;
+    this.closeBtn?.setText('Close');
+    this.statusEl.setText(result.error);
+    if (result.rawOutput.trim()) {
+      this.contentEl.createEl('p', {
+        text: 'Could not find the token automatically. Copy it from the output below and add it as a secret named CLAUDE_CODE_OAUTH_TOKEN instead.',
+        cls: 'setting-item-description',
+      });
+      this.rawOutputEl = this.contentEl.createEl('textarea', {
+        cls: 'ct-modal-input ct-modal-input-mono',
+        attr: { readonly: 'true', rows: '6' },
+      });
+      this.rawOutputEl.value = result.rawOutput;
+    }
+  }
+
+  onClose(): void {
+    console.log('[ConnectClaude] modal onClose fired', new Error('stack').stack);
+    this.closed = true;
+    if (this.controller) this.controller.abort();
+    this.contentEl.empty();
+  }
+}
+
+/**
  * Modal opened when an agent calls the `request_secret` MCP tool.
  * Shows the secret name and the agent's reason for requesting it, collects
  * a password-type value, writes it to `app.secretStorage` (the OS keychain on a
@@ -1618,6 +1719,33 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
+
+    // Desktop-only: spawns a real child process and expects a browser it can
+    // open — neither exists on Obsidian Mobile.
+    if (!Platform.isMobile) {
+      const hasClaudeToken = (this.plugin.settings.secretEnvKeys ?? []).includes('CLAUDE_CODE_OAUTH_TOKEN');
+      new Setting(containerEl)
+        .setName('Connect Claude account')
+        .setDesc(
+          hasClaudeToken
+            ? 'Connected via a long-lived token (CLAUDE_CODE_OAUTH_TOKEN secret). Reconnect if it stops working.'
+            : 'Skip the terminal: runs "claude setup-token" for you and stores the result as a secret, '
+              + 'so threads authenticate without depending on the CLI\'s own interactive login session.',
+        )
+        .addButton((btn) =>
+          btn.setButtonText(hasClaudeToken ? 'Reconnect' : 'Connect').onClick(() => {
+            new ConnectClaudeModal(this.app, this.plugin.settings.claudeBinaryPath, async (token) => {
+              this.app.secretStorage.setSecret(secretStorageKey('CLAUDE_CODE_OAUTH_TOKEN'), token);
+              if (!this.plugin.settings.secretEnvKeys.includes('CLAUDE_CODE_OAUTH_TOKEN')) {
+                this.plugin.settings.secretEnvKeys.push('CLAUDE_CODE_OAUTH_TOKEN');
+                await this.plugin.saveSettings();
+              }
+              new Notice('✓ Claude connected');
+              this.display();
+            }).open();
+          }),
+        );
+    }
 
     new Setting(containerEl)
       .setName('Default model')
