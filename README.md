@@ -885,6 +885,11 @@ Peer plugins should verify `apiVersion` and the advertised `capabilities`, liste
 
 The TypeScript contract and structured error codes are defined in [`src/PublicApi.ts`](src/PublicApi.ts). API v1 intentionally excludes archive/delete operations, cross-Project elevation, generic extension registration, and direct access to private views or runtime sessions.
 
+`api.v1.mcp` lets a peer plugin reuse Agent Threads' own MCP-registration and secret-storage machinery instead of reinventing OS-keychain storage or its own MCP config UI:
+
+- **`mcp.register(input)`** registers a global external MCP server (`stdio`, `http`, `sse`, or `oauth` — same shape as the `mcp_register_server` agent tool). Registration **always** shows the same interactive `McpRegistrationModal` confirmation to the human that the agent tool shows — there is no silent or bypassed path for a peer-plugin caller, including for `stdio` servers that can execute an arbitrary local command. An `oauth` entry goes through the identical OAuth 2.1 + PKCE consent flow (`OAuthMcpRegistry`) as agent-initiated oauth registration. If the host has no interactive context available (e.g. the plugin is unloading), it returns `{success: false, status: 'unavailable', ...}` rather than throwing. Returns the same `McpRegistrationResult` shape (`status`: `registered` | `unchanged` | `conflict` | `invalid` | `cancelled` | `unavailable` | `failed`) documented for `mcp_register_server` above.
+- **`mcp.requestSecret(input)`** prompts the user, via the same `RequestSecretModal` the `request_secret` agent tool uses, to provide a credential. The value is stored directly in the OS keychain under the plugin's namespace and is **never returned to the caller** — only `{success: true, secretName, alreadyExisted}` or `{success: false, reason}`. If a secret with that name already exists, it short-circuits with `alreadyExisted: true` without prompting again, unless `force: true` is passed.
+
 ### Vault Bridges integration
 
 If you have the [Vault Bridges](https://github.com/rbcodelabs/obsidian-vault-bridges) plugin installed, Claude agents can inspect and configure bridges directly via MCP — no config-file editing or host restart required.
