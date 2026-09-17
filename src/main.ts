@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, addIcon, Notice, Platform, normalizePath, TFile, Modal, type Menu } from 'obsidian';
+import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, addIcon, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createConstrainedQueryRunner } from './ConstrainedRun';
 export { createClaudeThreadsApiV1 } from './PublicApi';
@@ -18,6 +18,12 @@ import type { createClaudeThreadsMcpServers, ProjectSnapshot, ProjectUpdatePatch
 import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
+import {
+  HandoffDebouncer,
+  WEB_VIEWER_EVENT_NAME,
+  handleWebViewerEvent,
+  type HandoffHost,
+} from './compassHandoff';
 import { isWatchableDocument, watchMenuLabel } from './documentWatch';
 import { mergeMcpServers } from './mcpServerMerge';
 import { createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
@@ -252,6 +258,13 @@ export default class ClaudeThreadsPlugin extends Plugin {
   contextPanel!: ContextPanelController;
   googleWorkspaceMcp?: import('./GoogleWorkspaceMcp').GoogleWorkspaceMcp;
   oauthMcpRegistry?: import('./OAuthMcpRegistry').OAuthMcpRegistry;
+  /**
+   * Collapses a double-clicked Compass "Send to Agent" into one thread. Owned
+   * by the plugin instance so it is discarded with the plugin on unload — a
+   * module-level singleton would survive a disable/enable cycle and keep
+   * suppressing handoffs the freshly-enabled plugin has never seen.
+   */
+  private readonly compassHandoffDebouncer = new HandoffDebouncer();
   /**
    * Shared MCP-registration state, promoted from `onloadDesktop()` locals so
    * both the agent-tool factory (per-thread) and the peer-plugin public API
@@ -1552,6 +1565,22 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }),
     );
 
+    // ── Compass "Send to Agent" receiver ───────────────────────────────────
+    // Desktop-only by construction: the Web Viewer bridge exists only in
+    // desktop Geode, so this lives in onloadDesktop() rather than the shared
+    // onload(). Obsidian's Workspace typings don't know `web-viewer:event`
+    // (it's Geode-specific), hence the cast — kept to the `on()` call itself so
+    // the handler body stays typed. Subscribing to an event the host never
+    // fires is harmless, which is exactly what happens under plain Obsidian.
+    this.registerEvent(
+      (this.app.workspace.on as unknown as (
+        name: string,
+        callback: (ev: unknown) => void,
+      ) => EventRef)(WEB_VIEWER_EVENT_NAME, (ev: unknown) => {
+        void handleWebViewerEvent(ev, this.compassHandoffHost(), this.compassHandoffDebouncer);
+      }),
+    );
+
     this.addCommand({
       id: 'open-thread-orchestrator',
       name: 'Open Portfolio Orchestrator',
@@ -2849,6 +2878,28 @@ export default class ClaudeThreadsPlugin extends Plugin {
       return;
     }
     dashboard.seedDocumentChat(file.basename);
+  }
+
+  /**
+   * Host adapter for the Compass "Send to Agent" receiver.
+   *
+   * Built per event rather than cached so it always reads current plugin state
+   * (`this.manager` is assigned partway through `onloadDesktop`).
+   *
+   * Surfacing goes through `openThreadInChatView` — the same path the
+   * orchestrator threads, the design flow and the dashboard's triage jump all
+   * use — rather than `contextPanel`. `contextPanel` owns a *companion* leaf
+   * that renders a file or a webviewer URL beside an already-open chat leaf; it
+   * has no way to display a thread, and it throws outright when chat isn't
+   * open. Handing it a thread id would be a new code path, not the existing one.
+   */
+  private compassHandoffHost(): HandoffHost {
+    return {
+      isReady: () => !!this.manager,
+      dispatchThread: (prompt, titleHint) => this.dispatchNewThread(prompt, undefined, titleHint),
+      surfaceThread: (threadId) => this.openThreadInChatView(threadId),
+      notify: (message) => { new Notice(message); },
+    };
   }
 
   getAgentDashboard(): AgentDashboard | null {
