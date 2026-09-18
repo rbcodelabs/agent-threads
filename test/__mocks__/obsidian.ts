@@ -52,6 +52,8 @@ export class ItemView {
 
   registerEvent(_event: unknown) {}
   registerDomEvent(_el: unknown, _type: string, _handler: unknown) {}
+  /** Real Obsidian ties the timer to the view's lifetime and returns the id. */
+  registerInterval(id: number): number { return id; }
   addAction(_icon: string, title: string, callback: (evt: MouseEvent) => unknown): HTMLElement {
     const action = document.createElement('button');
     action.className = 'clickable-icon view-action';

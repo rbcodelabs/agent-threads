@@ -20,6 +20,7 @@ import { tool } from '@anthropic-ai/claude-agent-sdk/browser';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 
 import { AgentBrowserError } from './agentBrowserErrors';
+import { base64FromBytes } from './agentBrowserImage';
 import type { ThreadBrowser } from './ThreadBrowser';
 
 /** Names registered by this module. Kept in one place for the wiring maps. */
@@ -238,21 +239,4 @@ export function createAgentBrowserTools(browser: ThreadBrowser): SdkMcpToolDefin
     boundStatus,
     boundClose,
   ];
-}
-
-/**
- * Base64 without Node's Buffer.
- *
- * This module is reachable from the renderer bundle, which `bundle-safety.test`
- * guards against Node built-ins, so the conversion is done with `btoa` over a
- * chunked binary string. Chunking avoids blowing the argument limit on
- * `String.fromCharCode` for large screenshots.
- */
-function base64FromBytes(bytes: Uint8Array): string {
-  let binary = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return btoa(binary);
 }

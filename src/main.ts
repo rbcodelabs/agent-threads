@@ -71,6 +71,10 @@ const VIEW_TYPE = 'claude-threads:chat';
 const AGENT_VIEW_TYPE = 'claude-threads:agents';
 const KANBAN_VIEW_TYPE = 'claude-threads:kanban';
 const SKILLS_VIEW_TYPE = 'claude-threads:skills';
+// Literal rather than an import: main.ts is bundle-init on every platform, and
+// value-importing the view would drag its module into eager scope.
+// Kept in sync with AGENT_BROWSER_VIEW_TYPE in agentBrowser/AgentBrowserPreviewView.ts.
+const AGENT_BROWSER_VIEW_TYPE = 'claude-threads:browser-preview';
 
 interface AgentThreadCreateParams {
   prompt: string;
@@ -1268,6 +1272,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
       // Last-ditch: a page teardown that skips plugin unload entirely.
       this.registerDomEvent(window, 'pagehide', () => {
         this.agentBrowser?.destroyAll('unload');
+      });
+
+      // Preview pane. Registered with the pool rather than unconditionally, so
+      // the view type simply does not exist when the feature is off.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { AgentBrowserPreviewView } = require('./agentBrowser/AgentBrowserPreviewView') as typeof import('./agentBrowser/AgentBrowserPreviewView');
+      this.registerView(
+        AGENT_BROWSER_VIEW_TYPE,
+        (leaf) => new AgentBrowserPreviewView(leaf, () => this.agentBrowser),
+      );
+      this.addCommand({
+        id: 'open-agent-browser-preview',
+        name: 'Open Agent Browser',
+        callback: () => { void this.activateAgentBrowserView(); },
       });
     }
 
@@ -2644,6 +2662,23 @@ export default class ClaudeThreadsPlugin extends Plugin {
       // the main area is free for editing, so a tab still makes sense.
       leaf = (this.isConversationFirst() ? workspace.getRightLeaf(false) : workspace.getLeaf('tab')) as WorkspaceLeaf;
       await leaf.setViewState({ type: SKILLS_VIEW_TYPE, active: true });
+    }
+    workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * Show the agent browser preview, in the right sidebar.
+   *
+   * Always a sidebar leaf rather than a main-area tab: this is something you
+   * glance at while the agent works, and putting it in the main area would mean
+   * it competes with the conversation for the space you are actually reading.
+   */
+  async activateAgentBrowserView(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(AGENT_BROWSER_VIEW_TYPE)[0];
+    if (!leaf) {
+      leaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+      await leaf.setViewState({ type: AGENT_BROWSER_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
   }

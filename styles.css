@@ -8493,3 +8493,64 @@ button.ct-agent-crumb:focus-visible {
   overflow-wrap: anywhere;
 }
 .ct-skills-root .ct-skills-author-btn { min-height: 44px; min-width: 44px; }
+
+/* ── Agent browser preview ─────────────────────────────────────────────────
+   Shows frames captured from the agent's browser guest. The guest itself is
+   never parented here: workspace tab groups clear their pane host on switch,
+   which would destroy it. See AgentBrowserPreviewView.ts. */
+.ct-browser-preview {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 8px;
+  padding: 8px;
+}
+.ct-browser-preview-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ct-browser-preview-text {
+  flex: 1;
+  min-width: 0;
+}
+.ct-browser-preview-summary {
+  font-weight: var(--font-semibold);
+}
+.ct-browser-preview-detail {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
+}
+.ct-browser-preview-stop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  min-width: 32px;
+  flex-shrink: 0;
+}
+.ct-browser-preview-stop.is-hidden { display: none; }
+.ct-browser-preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+}
+.ct-browser-preview-frame {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+.ct-browser-preview-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  padding: 16px;
+  text-align: center;
+  align-self: center;
+}

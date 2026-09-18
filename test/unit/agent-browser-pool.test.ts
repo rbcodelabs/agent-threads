@@ -695,6 +695,57 @@ describe('AgentBrowserPool', () => {
     pool.destroy();
   });
 
+  it('nominates the most recently used guest for preview', async () => {
+    // The preview shows one session; "the one that just did something" tracks
+    // the active agent without the user having to choose a thread.
+    const clock = movingClock();
+    const { pool } = makePool({ now: clock.now });
+    const first = await pool.acquire('a');
+    clock.step();
+    const second = await pool.acquire('b');
+
+    // `b` was acquired later, so it is the least idle.
+    expect(pool.mostRecentlyUsed()).toBe(second);
+
+    clock.advance(60_000);
+    await first.runScript('1');
+    expect(pool.mostRecentlyUsed()).toBe(first);
+    pool.destroy();
+  });
+
+  it('has no preview candidate when nothing is running', () => {
+    const { pool } = makePool();
+    expect(pool.mostRecentlyUsed()).toBeNull();
+    pool.destroy();
+  });
+
+  it('records create and destroy so a leak audit can balance them', async () => {
+    const clock = movingClock();
+    const { pool } = makePool({ now: clock.now });
+    await pool.acquire('a');
+    pool.destroyForThread('a', 'thread-delete');
+
+    const kinds = pool.recentEvents().map((e) => `${e.kind}:${e.threadId}`);
+    expect(kinds).toContain('create:a');
+    expect(kinds).toContain('destroy:a');
+    expect(pool.recentEvents().at(-1)?.reason).toBe('thread-delete');
+    pool.destroy();
+  });
+
+  it('bounds the event ring so the leak aid cannot become a leak', async () => {
+    const clock = movingClock();
+    const { pool } = makePool({ now: clock.now });
+    for (let i = 0; i < 40; i += 1) {
+      await pool.acquire(`t${i}`);
+      pool.destroyForThread(`t${i}`, 'tool');
+      // 5s apart, so 40 sessions stay under the 20-per-minute creation limit —
+      // otherwise this test trips the rate limiter instead of the ring bound.
+      clock.advance(5_000);
+    }
+    expect(pool.recentEvents().length).toBeLessThanOrEqual(50);
+    pool.destroy();
+  });
+
   it('reports itself incapable when the host exposes no diagnostics', async () => {
     const pool = new AgentBrowserPool({
       doc: document,

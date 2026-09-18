@@ -63,6 +63,23 @@ export interface PoolStatus {
   guests: GuestFacts[];
 }
 
+/** One lifecycle transition, for the status UI and leak audits. */
+export interface PoolEvent {
+  at: number;
+  kind: 'create' | 'destroy' | 'died';
+  threadId: string;
+  reason?: GuestEndReason;
+  code?: string;
+}
+
+/**
+ * Lifecycle history is bounded, matching how Geode bounds its own guest
+ * diagnostics. The point of the ring is to make "creates and destroys balance"
+ * checkable at a glance; keeping it unbounded would make a leak-detection aid
+ * into its own slow leak.
+ */
+const MAX_EVENTS = 50;
+
 interface CrashRecord {
   /** Timestamps of recent deaths, pruned to the breaker window. */
   at: number[];
@@ -82,6 +99,7 @@ export class AgentBrowserPool {
 
   private readonly guests = new Map<string, AgentBrowserGuest>();
   private readonly crashes = new Map<string, CrashRecord>();
+  private readonly events: PoolEvent[] = [];
   /** Creation timestamps, pruned to one minute, for the rate limiter. */
   private createTimes: number[] = [];
   private lastCreateAt = 0;
@@ -131,6 +149,33 @@ export class AgentBrowserPool {
   /** The live guest for a thread, or null. Never creates. */
   peek(threadId: string): AgentBrowserGuest | null {
     return this.guests.get(threadId) ?? null;
+  }
+
+  /**
+   * The guest that was used most recently.
+   *
+   * The preview pane shows one guest at a time, and "the one that just did
+   * something" is almost always the one worth watching — an agent working a page
+   * produces a steady stream of operations, so this follows the active session
+   * without the user having to pick a thread.
+   */
+  mostRecentlyUsed(): AgentBrowserGuest | null {
+    let best: AgentBrowserGuest | null = null;
+    for (const guest of this.guests.values()) {
+      if (!guest.isAlive()) continue;
+      if (!best || guest.idleMs < best.idleMs) best = guest;
+    }
+    return best;
+  }
+
+  /** Most recent lifecycle transitions, oldest first. */
+  recentEvents(): readonly PoolEvent[] {
+    return this.events;
+  }
+
+  private record(event: PoolEvent): void {
+    this.events.push(event);
+    if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS);
   }
 
   // ── Acquisition ────────────────────────────────────────────────────────────
@@ -192,6 +237,7 @@ export class AgentBrowserPool {
     this.lastCreateAt = at;
     this.guests.set(threadId, guest);
     this.log('agent-browser: create', { threadId, inUse: this.guests.size });
+    this.record({ at, kind: 'create', threadId });
 
     try {
       await guest.start();
@@ -299,6 +345,7 @@ export class AgentBrowserPool {
     this.guests.delete(threadId);
     guest.destroy(reason);
     this.log('agent-browser: destroy', { threadId, reason, inUse: this.guests.size });
+    this.record({ at: this.now(), kind: 'destroy', threadId, reason });
   }
 
   /** Public reclaim for one thread — delete, archive, or an explicit close. */
@@ -377,6 +424,7 @@ export class AgentBrowserPool {
   private handleGuestDied(threadId: string, reason: GuestEndReason, error: AgentBrowserError): void {
     this.guests.delete(threadId);
     this.log('agent-browser: died', { threadId, reason, code: error.code });
+    this.record({ at: this.now(), kind: 'died', threadId, reason, code: error.code });
 
     if (reason !== 'crash' && reason !== 'hang') return;
 
