@@ -71,6 +71,10 @@ const VIEW_TYPE = 'claude-threads:chat';
 const AGENT_VIEW_TYPE = 'claude-threads:agents';
 const KANBAN_VIEW_TYPE = 'claude-threads:kanban';
 const SKILLS_VIEW_TYPE = 'claude-threads:skills';
+// Literal rather than an import: main.ts is bundle-init on every platform, and
+// value-importing the view would drag its module into eager scope.
+// Kept in sync with AGENT_BROWSER_VIEW_TYPE in agentBrowser/AgentBrowserPreviewView.ts.
+const AGENT_BROWSER_VIEW_TYPE = 'claude-threads:browser-preview';
 
 interface AgentThreadCreateParams {
   prompt: string;
@@ -255,6 +259,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   gitDiff: import('./GitDiffService').GitDiffService | null = null;
   orchestratorWakeup: import('./OrchestratorWakeup').OrchestratorWakeup | null = null;
   documentWatch: import('./DocumentWatchService').DocumentWatchService | null = null;
+  agentBrowser: import('./agentBrowser/AgentBrowserPool').AgentBrowserPool | null = null;
   contextPanel!: ContextPanelController;
   googleWorkspaceMcp?: import('./GoogleWorkspaceMcp').GoogleWorkspaceMcp;
   oauthMcpRegistry?: import('./OAuthMcpRegistry').OAuthMcpRegistry;
@@ -528,6 +533,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
             return this.registerExternalMcpServer(input, interactive);
           },
           enableOpenUrl: (this.settings.enableWebViewerTool ?? true) && isWebViewerEnabled(this.app),
+          // Undefined when the pool is off or the host cannot support guests, in
+          // which case the browser_* tools are not registered at all. `capable`
+          // is checked here rather than inside the tools so an unsupported host
+          // costs nothing per turn instead of advertising tools that only refuse.
+          browser: this.agentBrowser?.capable ? this.createThreadBrowser(threadId) : undefined,
           openContextualFile: async (file) => {
             if (!this.isConversationFirst()) return false;
             await this.contextPanel.openFile(file);
@@ -1223,6 +1233,60 @@ export default class ClaudeThreadsPlugin extends Plugin {
       });
       this.documentWatch.start();
       this.register(() => this.documentWatch?.stop());
+    }
+
+    // Agent browser pool: owns every in-app browser guest and, more importantly,
+    // reclaims them. Each guest is a sandboxed renderer process, so the failure
+    // mode of getting this wrong is not a stale record but an app that slowly
+    // runs the machine out of file descriptors — which is exactly what the
+    // external browser CLI this replaces used to do.
+    //
+    // Desktop-only by construction: the pool refuses to create anything unless
+    // the host exposes FD diagnostics, which only Geode desktop does.
+    if (this.settings.enableAgentBrowser) {
+      const { AgentBrowserPool } = require('./agentBrowser/AgentBrowserPool') as typeof import('./agentBrowser/AgentBrowserPool');
+      this.agentBrowser = new AgentBrowserPool({
+        doc: document,
+        hostWindow: window,
+        getMaxGuests: () => this.settings.agentBrowserMaxGuests ?? 2,
+        getUrlPolicy: () => ({ allowPrivateNetwork: this.settings.agentBrowserAllowPrivateNetwork ?? false }),
+        notify: (message) => { new Notice(message); },
+        log: (message, meta) => { debugLog(message, meta); },
+      });
+      this.agentBrowser.start();
+
+      // Teardown goes through register() rather than onunload(): register
+      // callbacks run synchronously inside Component.unload(), whereas
+      // onunload() is not awaited and already sits behind an up-to-10s
+      // gracefulShutdown wait. A guest must not survive that long past unload.
+      this.register(() => this.agentBrowser?.destroy());
+
+      // A deleted thread's guest goes with it. emit() dispatches to listeners
+      // synchronously, so this reclaims inside deleteThread's own call stack.
+      this.register(this.manager.subscribe((threadId, event) => {
+        if (event.type === 'thread_deleted') {
+          this.agentBrowser?.destroyForThread(threadId, 'thread-delete');
+        }
+      }));
+
+      // Last-ditch: a page teardown that skips plugin unload entirely.
+      this.registerDomEvent(window, 'pagehide', () => {
+        this.agentBrowser?.destroyAll('unload');
+      });
+
+      // Preview pane. Registered with the pool rather than unconditionally, so
+      // the view type simply does not exist when the feature is off.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { AgentBrowserPreviewView } = require('./agentBrowser/AgentBrowserPreviewView') as typeof import('./agentBrowser/AgentBrowserPreviewView');
+      this.registerView(
+        AGENT_BROWSER_VIEW_TYPE,
+        (leaf) => new AgentBrowserPreviewView(leaf, () => this.agentBrowser),
+      );
+      this.addCommand({
+        id: 'open-agent-browser-preview',
+        name: 'Open Agent Browser',
+        callback: () => { void this.activateAgentBrowserView(); },
+      });
     }
 
     // Repair any threads whose cwd points to a deleted worktree — removed by
@@ -2124,6 +2188,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // independently fire the same due item. Destroying synchronously here closes
     // that race window immediately, regardless of how long thread shutdown takes.
     this.scheduler?.destroy();
+    // Same reasoning as the scheduler: every agent browser guest is a live
+    // renderer process, and this must not wait for the gracefulShutdown poll
+    // below. register() already covers the normal unload path; this is the
+    // belt-and-braces call for teardown orders that reach onunload() first.
+    // destroy() is idempotent, so running twice is free.
+    this.agentBrowser?.destroy();
     this.googleWorkspaceMcp?.close();
     this.oauthMcpRegistry?.close();
 
@@ -2212,10 +2282,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         const { listInstalledSkills } = require('./skillManager') as typeof import('./skillManager');
         return (await listInstalledSkills(this.settings.skillSources ?? [])).map(skill => skill.name);
       },
-      getRedactionSecrets: () => [
-        ...(this.settings.secretEnvKeys ?? []).map((name) => this.app.secretStorage.getSecret(secretStorageKey(name))),
-        ...Object.entries(parseExtraEnv(effectiveExtraEnv(this.settings))).filter(([name]) => /(?:token|secret|key|password)/i.test(name)).map(([, value]) => value),
-      ].filter((value): value is string => Boolean(value)),
+      getRedactionSecrets: () => this.collectSecretValues(),
       getPublicState: () => this.settings.publicApiState,
       savePublicState: async (state) => { this.settings.publicApiState = state; await this.saveSettings(); },
       runConstrainedQuery: createConstrainedQueryRunner(() => this.settings, undefined, () => this.manager.secretEnvResolver?.() ?? {}),
@@ -2533,6 +2600,38 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return isConversationFirstPlacement(this.settings.threadViewPlacement, Platform.isMobile);
   }
 
+  /**
+   * Stored secret values, for redaction and for refusing to type a credential
+   * into a web page. Synchronous because `secretStorage.getSecret` is.
+   */
+  collectSecretValues(): string[] {
+    return [
+      ...(this.settings.secretEnvKeys ?? []).map((name) => this.app.secretStorage.getSecret(secretStorageKey(name))),
+      ...Object.entries(parseExtraEnv(effectiveExtraEnv(this.settings)))
+        .filter(([name]) => /(?:token|secret|key|password)/i.test(name))
+        .map(([, value]) => value),
+    ].filter((value): value is string => Boolean(value));
+  }
+
+  /**
+   * Per-thread handle on the agent browser.
+   *
+   * Built fresh for each MCP session rather than cached on the plugin: element
+   * refs belong to a page and a snapshot generation, so a restarted session
+   * starting without them is correct — it forces a fresh snapshot instead of
+   * letting the agent act on refs whose page may have changed underneath it.
+   */
+  private createThreadBrowser(threadId: string): import('./agentBrowser/ThreadBrowser').ThreadBrowser | undefined {
+    if (!this.agentBrowser) return undefined;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { ThreadBrowser } = require('./agentBrowser/ThreadBrowser') as typeof import('./agentBrowser/ThreadBrowser');
+    return new ThreadBrowser({
+      threadId,
+      pool: this.agentBrowser,
+      getSecrets: () => this.collectSecretValues(),
+    });
+  }
+
   async activateAgentView(): Promise<void> {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
@@ -2563,6 +2662,23 @@ export default class ClaudeThreadsPlugin extends Plugin {
       // the main area is free for editing, so a tab still makes sense.
       leaf = (this.isConversationFirst() ? workspace.getRightLeaf(false) : workspace.getLeaf('tab')) as WorkspaceLeaf;
       await leaf.setViewState({ type: SKILLS_VIEW_TYPE, active: true });
+    }
+    workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * Show the agent browser preview, in the right sidebar.
+   *
+   * Always a sidebar leaf rather than a main-area tab: this is something you
+   * glance at while the agent works, and putting it in the main area would mean
+   * it competes with the conversation for the space you are actually reading.
+   */
+  async activateAgentBrowserView(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(AGENT_BROWSER_VIEW_TYPE)[0];
+    if (!leaf) {
+      leaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+      await leaf.setViewState({ type: AGENT_BROWSER_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
   }

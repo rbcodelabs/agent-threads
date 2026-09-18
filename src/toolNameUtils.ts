@@ -103,6 +103,14 @@ export function getToolIcon(raw: string): string {
     case 'exit_worktree':        return 'git-branch';
     case 'get_open_tabs':        return 'layout-panel-top';
     case 'ScheduleWakeup':       return 'alarm-clock';
+    case 'browser_navigate':     return 'globe';
+    case 'browser_snapshot':     return 'scan-eye';
+    case 'browser_read_text':    return 'file-text';
+    case 'browser_click':        return 'mouse-pointer-click';
+    case 'browser_type':         return 'keyboard';
+    case 'browser_screenshot':   return 'camera';
+    case 'browser_status':       return 'activity';
+    case 'browser_close':        return 'circle-x';
     default:               return 'wrench';
   }
 }
@@ -130,6 +138,10 @@ const CANONICAL_BUILT_IN_TOOLS = new Set([
   'threads_open',
   'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_proposed_reply',
   'threads_clear_proposed_reply',
+  // Agent browser. Canonical-only: these are new tools, so they were never
+  // exposed under the legacy obsidian_ names and need no compatibility alias.
+  'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
+  'browser_type', 'browser_screenshot', 'browser_status', 'browser_close',
 ]);
 
 /** True only for a known first-party tool on the canonical or compatibility server. */
@@ -183,6 +195,14 @@ export function getActivityKind(raw: string): ActivityKind {
       return 'planning';
     case 'WebFetch':
     case 'WebSearch':
+    case 'browser_navigate':
+    case 'browser_snapshot':
+    case 'browser_read_text':
+    case 'browser_click':
+    case 'browser_type':
+    case 'browser_screenshot':
+    case 'browser_status':
+    case 'browser_close':
       return 'researching';
     case 'ToolSearch':
     case 'Agent':

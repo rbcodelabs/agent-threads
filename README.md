@@ -48,6 +48,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 - **Native document header** — when the conversation is in a main document pane, its title and thread controls use the host's native header instead of adding a second title bar. The compact custom title bar remains available in sidebars, and the view adapts automatically when you drag it between the two
 - **Slash commands** — built-in context commands plus every skill the session can see (`~/.claude/skills/`, vault-installed, and plugin sources), browseable with `/`
 - **Model switching** — set a persistent model per thread with `/model fable|opus|sonnet|haiku`, or a global default in settings
+- **Agent browser** — Claude drives a browser inside Geode using the embedded web view, reading pages as accessibility snapshots and acting on element refs, with no second Chrome process. Sessions are capped, reclaimed when idle, and closed with their thread; a sidebar pane lets you watch one work and stop it. Geode desktop only, off by default
 - **Claude or Bedrock** — authenticate with your Claude account or route every session through Amazon Bedrock (one dropdown in settings)
 - **Goals and loops** — pin a persistent goal on a thread with `/goal`, or re-run a prompt on an interval with `/loop 10m <prompt>`
 - **Task list card** — Claude Code's task checklist (TodoWrite / TaskCreate) and Codex's `update_plan` checklist render live above the input box: completed tasks struck through, the in-progress one highlighted, with done/in-progress/open counts
@@ -290,6 +291,40 @@ To have a thread notice when a note changes without polling it yourself, use **W
 The watch is owned by whichever thread is currently active when you trigger it — only that thread is alerted, and it stays alerted even if you switch away. If no thread is open, a notice asks you to open or start one first. When the note's content changes — from you, from another thread's edit, from a sync, from anyone — the owning thread receives an injected message referencing the file with the same `@[[filename]]` mention the composer uses, so the full content is right there in the alert. Saving a note with no actual content change (e.g. a no-op resave) does not trigger an alert, and a burst of edits to multiple watched files collapses into one batched message instead of one per file. Renaming a watched file keeps the watch attached; deleting it sends one final alert and removes the watch.
 
 Agents can do all of this without the menu via three MCP tools — see [`watch_document`](#session-tools) below. Manage active watches, see who owns each one, and unwatch from outside the file itself under **Settings → Scheduled → Watched documents**.
+
+### Agent browser
+
+Claude can drive a browser **inside Geode**, using the same embedded web view that powers Web Viewer tabs, instead of launching a separate Chrome. That removes the second browser process entirely — and with it the pile of orphaned Chrome instances that an external automation CLI leaves behind.
+
+Turn it on under **Settings → Tools → Agent browser**, then reload. The toggle is disabled on hosts that can't support it (see *Limits* below).
+
+Pages are read as an **accessibility snapshot** rather than screenshots or raw HTML — a compact list of the things a person could actually interact with:
+
+```
+- textbox "What needs doing?" [ref=e1]
+- button "Submit the form" [ref=e2]
+- link "Documentation" [ref=e3]
+```
+
+Claude reads that, hands back a ref, and acts on it. No coordinate guessing, no brittle CSS selectors. Hidden and disabled elements are left out, so every ref is something you could have clicked yourself.
+
+| Tool | What it does |
+|---|---|
+| `browser_navigate` | Open a URL and return a snapshot |
+| `browser_snapshot` | Re-read the current page |
+| `browser_read_text` | Visible page prose, for when the snapshot isn't enough |
+| `browser_click` / `browser_type` | Act on a ref |
+| `browser_screenshot` | PNG of the current page |
+| `browser_status` | How many sessions are open, and the cap |
+| `browser_close` | End this thread's session |
+
+**Watching it work.** Run **Open Agent Browser** from the command palette for a sidebar pane showing live frames, the page, session age, and a stop button. It streams only while visible, and closing it never closes Claude's session.
+
+**Resource limits.** Each session is a real browser process, so they're capped (2 by default, 4 maximum), reclaimed after 5 minutes idle, recycled after 30 minutes, and closed automatically when their thread is deleted or the plugin unloads. Geode measures file-descriptor pressure, and the browser refuses to start a session when the app is running low — the specific condition under which a sandboxed page process dies on arrival.
+
+**Safety.** Sessions use their own cookie jar, separate from your Web Viewer tabs, so you'll be logged out of most sites. Page text is handed to Claude wrapped as untrusted data rather than as instructions. Typing a stored secret into a page is refused outright. `file:`, `javascript:` and cloud metadata addresses are blocked; private network addresses are behind an opt-in.
+
+**Limits.** Geode desktop only — it needs the process diagnostics Obsidian doesn't expose, and mobile has no embedded web view at all. Top frame only, no iframes, file uploads, or multiple tabs. It also can't drive Electron desktop apps, evade bot detection, or use cloud browsers; the `agent-browser` CLI skill still covers those.
 
 ### Model switching
 
