@@ -87,7 +87,33 @@ Multiple test vaults can be open in separate Obsidian windows simultaneously.
 
 ## Dev Builds in the Live Vault
 
-Sometimes a feature needs to be tested in the user's real vault (`~/Documents/Personal/.obsidian/plugins/claude-threads/`) rather than a test vault.
+Sometimes a feature needs to be tested in the real vault rather than a test vault.
+
+**Get the target directory right — it is host-specific, and the wrong one fails silently.** The plugin appears to deploy, the app is restarted, and the feature simply is not there:
+
+| Host | Plugin directory |
+|---|---|
+| **Geode** | `<vault>/.geode/plugins/claude-threads/` |
+| Obsidian | `<vault>/.obsidian/plugins/claude-threads/` |
+
+Both directories usually exist in the same vault, and both can contain a `claude-threads` install, so the presence of one proves nothing about which the running app loads. Confirm before copying:
+
+```bash
+# Which vault is Geode actually in?
+cat ~/Library/Application\ Support/geode/geode.json   # → lastVault
+# Which install is live? Compare mtimes; the running host writes data.json constantly.
+ls -la "<vault>/.geode/plugins/claude-threads" "<vault>/.obsidian/plugins/claude-threads"
+```
+
+Also resolve `<vault>` against the real vault root. On the primary machine that is the iCloud path (`~/Library/Mobile Documents/com~apple~CloudDocs/Documents/Personal`); `~/Documents/Personal` is a *different* directory that shadows it, so writes there land somewhere nothing reads.
+
+After copying, verify by grepping the installed bundle for a string unique to the change rather than trusting the copy:
+
+```bash
+grep -c "someNewSymbol" "<vault>/.geode/plugins/claude-threads/main.js"
+```
+
+Copy only `main.js`, `manifest.json`, and `styles.css`. **Never copy `data.json`** — it is live settings and conversation state, written continuously by the running app.
 
 **Rule: commit the work and push a branch (draft PR is fine) BEFORE copying a dev build into the live vault.** The installed plugin is overwritten by the next BRAT release update — an uncommitted dev build is the only copy of the work, and it silently evaporates.
 
