@@ -965,6 +965,30 @@ export interface PluginSettings {
    * Defaults to true so the tool is available out of the box.
    */
   enableWebViewerTool?: boolean;
+
+  /**
+   * When true, Claude can drive an in-app browser built on the host's embedded
+   * `<webview>`, instead of an external browser CLI that spawns its own Chrome.
+   *
+   * Defaults to false: each session is a real sandboxed renderer process, so
+   * this stays opt-in until it has been dogfooded. Requires a host that reports
+   * process diagnostics (Geode desktop) — the pool refuses to create anything
+   * without the file-descriptor probe it uses to avoid launching a guest that
+   * would immediately die.
+   */
+  enableAgentBrowser?: boolean;
+
+  /**
+   * Maximum concurrent agent browser sessions across all threads.
+   * Clamped to 1..4 at read time; see `clampMaxGuests` in agentBrowserPolicy.
+   */
+  agentBrowserMaxGuests?: number;
+
+  /**
+   * Permit the agent browser to reach RFC1918 / `.local` addresses.
+   * Cloud metadata endpoints (169.254.0.0/16) stay blocked regardless.
+   */
+  agentBrowserAllowPrivateNetwork?: boolean;
   /**
    * When true, a canonical wrapped `visualize` content reference in an
    * assistant message renders as a live sandboxed visualization inline instead
@@ -1040,6 +1064,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   scheduledItems: [],
   watchedDocuments: [],
   enableWebViewerTool: true,
+  enableAgentBrowser: false,
+  agentBrowserMaxGuests: 2,
+  agentBrowserAllowPrivateNetwork: false,
   enableInlineVisualizations: true,
   kanbanGroupBy: 'status',
   kanbanCollapseSide: 'none',

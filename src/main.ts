@@ -255,6 +255,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   gitDiff: import('./GitDiffService').GitDiffService | null = null;
   orchestratorWakeup: import('./OrchestratorWakeup').OrchestratorWakeup | null = null;
   documentWatch: import('./DocumentWatchService').DocumentWatchService | null = null;
+  agentBrowser: import('./agentBrowser/AgentBrowserPool').AgentBrowserPool | null = null;
   contextPanel!: ContextPanelController;
   googleWorkspaceMcp?: import('./GoogleWorkspaceMcp').GoogleWorkspaceMcp;
   oauthMcpRegistry?: import('./OAuthMcpRegistry').OAuthMcpRegistry;
@@ -1225,6 +1226,46 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.register(() => this.documentWatch?.stop());
     }
 
+    // Agent browser pool: owns every in-app browser guest and, more importantly,
+    // reclaims them. Each guest is a sandboxed renderer process, so the failure
+    // mode of getting this wrong is not a stale record but an app that slowly
+    // runs the machine out of file descriptors — which is exactly what the
+    // external browser CLI this replaces used to do.
+    //
+    // Desktop-only by construction: the pool refuses to create anything unless
+    // the host exposes FD diagnostics, which only Geode desktop does.
+    if (this.settings.enableAgentBrowser) {
+      const { AgentBrowserPool } = require('./agentBrowser/AgentBrowserPool') as typeof import('./agentBrowser/AgentBrowserPool');
+      this.agentBrowser = new AgentBrowserPool({
+        doc: document,
+        hostWindow: window,
+        getMaxGuests: () => this.settings.agentBrowserMaxGuests ?? 2,
+        getUrlPolicy: () => ({ allowPrivateNetwork: this.settings.agentBrowserAllowPrivateNetwork ?? false }),
+        notify: (message) => { new Notice(message); },
+        log: (message, meta) => { debugLog(message, meta); },
+      });
+      this.agentBrowser.start();
+
+      // Teardown goes through register() rather than onunload(): register
+      // callbacks run synchronously inside Component.unload(), whereas
+      // onunload() is not awaited and already sits behind an up-to-10s
+      // gracefulShutdown wait. A guest must not survive that long past unload.
+      this.register(() => this.agentBrowser?.destroy());
+
+      // A deleted thread's guest goes with it. emit() dispatches to listeners
+      // synchronously, so this reclaims inside deleteThread's own call stack.
+      this.register(this.manager.subscribe((threadId, event) => {
+        if (event.type === 'thread_deleted') {
+          this.agentBrowser?.destroyForThread(threadId, 'thread-delete');
+        }
+      }));
+
+      // Last-ditch: a page teardown that skips plugin unload entirely.
+      this.registerDomEvent(window, 'pagehide', () => {
+        this.agentBrowser?.destroyAll('unload');
+      });
+    }
+
     // Repair any threads whose cwd points to a deleted worktree — removed by
     // exit_worktree, the worktree-cleanup skill, the Agent tool's auto-cleanup, or
     // (for legacy os.tmpdir()/claude-worktrees/ paths) wiped by an OS reboot.
@@ -2124,6 +2165,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // independently fire the same due item. Destroying synchronously here closes
     // that race window immediately, regardless of how long thread shutdown takes.
     this.scheduler?.destroy();
+    // Same reasoning as the scheduler: every agent browser guest is a live
+    // renderer process, and this must not wait for the gracefulShutdown poll
+    // below. register() already covers the normal unload path; this is the
+    // belt-and-braces call for teardown orders that reach onunload() first.
+    // destroy() is idempotent, so running twice is free.
+    this.agentBrowser?.destroy();
     this.googleWorkspaceMcp?.close();
     this.oauthMcpRegistry?.close();
 

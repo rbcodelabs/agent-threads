@@ -1904,6 +1904,63 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         });
     }
 
+    // Agent browser. Gated on the host reporting process diagnostics: without
+    // the file-descriptor probe there is no way to avoid launching a guest that
+    // dies on arrival, so the feature refuses to run rather than run blind.
+    {
+      const agentBrowserAvailable =
+        typeof (window as { geode?: { getFdPressure?: unknown } }).geode?.getFdPressure === 'function';
+      new Setting(containerEl)
+        .setName('Agent browser')
+        .setDesc(
+          agentBrowserAvailable
+            ? 'Let Claude drive an in-app browser built on the host\'s embedded web view, instead of launching an external browser. Sessions are capped and reclaimed automatically.'
+            : 'Requires a host that reports process diagnostics (Geode desktop). Claude will continue to use the external agent-browser CLI here.',
+        )
+        .addToggle((toggle) => {
+          toggle
+            .setValue(agentBrowserAvailable && (this.plugin.settings.enableAgentBrowser ?? false))
+            .setDisabled(!agentBrowserAvailable)
+            .onChange(async (value) => {
+              this.plugin.settings.enableAgentBrowser = value;
+              await this.plugin.saveSettings();
+              new Notice('Reload Obsidian to apply the agent browser change.');
+            });
+        });
+
+      if (agentBrowserAvailable && (this.plugin.settings.enableAgentBrowser ?? false)) {
+        new Setting(containerEl)
+          .setName('Maximum browser sessions')
+          .setDesc(
+            'Concurrent in-app browser sessions across all threads. Each one is a separate sandboxed process, so this is a real resource ceiling rather than a preference.',
+          )
+          .addSlider((slider) => {
+            slider
+              .setLimits(1, 4, 1)
+              .setValue(this.plugin.settings.agentBrowserMaxGuests ?? 2)
+              .setDynamicTooltip()
+              .onChange(async (value) => {
+                this.plugin.settings.agentBrowserMaxGuests = value;
+                await this.plugin.saveSettings();
+              });
+          });
+
+        new Setting(containerEl)
+          .setName('Allow private network access')
+          .setDesc(
+            'Let the agent browser reach private addresses such as 192.168.x.x and .local hosts. Cloud metadata endpoints stay blocked either way.',
+          )
+          .addToggle((toggle) => {
+            toggle
+              .setValue(this.plugin.settings.agentBrowserAllowPrivateNetwork ?? false)
+              .onChange(async (value) => {
+                this.plugin.settings.agentBrowserAllowPrivateNetwork = value;
+                await this.plugin.saveSettings();
+              });
+          });
+      }
+    }
+
     new Setting(containerEl)
       .setName('Inline visualizations')
       .setDesc(
