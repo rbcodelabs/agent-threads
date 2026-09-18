@@ -302,6 +302,43 @@ describe('AgentBrowserHost', () => {
     expect(host.isHealthy()).toBe(false);
   });
 
+  it('moves the container on-screen only while a capture is running', () => {
+    // A parked, transparent, off-screen layer is culled by the compositor, so
+    // capturePage has no frame to return — observed live as UnknownVizError.
+    const host = new AgentBrowserHost(document, { onDetached: () => {} });
+    const el = host.ensure();
+    expect(parseInt(el.style.left, 10)).toBeLessThan(-1000);
+
+    host.beginCapture();
+    expect(parseInt(el.style.left, 10)).toBe(0);
+    expect(el.style.opacity).not.toBe('0');
+    // On screen but behind everything and inert, so revealing it cannot let the
+    // guest intercept input or paint over the app.
+    expect(el.style.zIndex).toBe('-1');
+    expect(el.style.pointerEvents).toBe('none');
+
+    host.endCapture();
+    expect(parseInt(el.style.left, 10)).toBeLessThan(-1000);
+    expect(el.style.opacity).toBe('0');
+  });
+
+  it('holds the container on-screen until the last overlapping capture ends', () => {
+    // Two guests can capture at once; the first to finish must not park the
+    // container while the second is still waiting for its frame.
+    const host = new AgentBrowserHost(document, { onDetached: () => {} });
+    const el = host.ensure();
+
+    host.beginCapture();
+    host.beginCapture();
+    host.endCapture();
+    expect(host.capturing).toBe(true);
+    expect(parseInt(el.style.left, 10)).toBe(0);
+
+    host.endCapture();
+    expect(host.capturing).toBe(false);
+    expect(parseInt(el.style.left, 10)).toBeLessThan(-1000);
+  });
+
   it('does not report detachment for its own destroy, and is idempotent', async () => {
     const onDetached = vi.fn();
     const host = new AgentBrowserHost(document, { onDetached });
@@ -316,7 +353,9 @@ describe('AgentBrowserHost', () => {
 
 // ── Guest ────────────────────────────────────────────────────────────────────
 
-async function makeGuest(overrides: { onDied?: ReturnType<typeof vi.fn> } = {}) {
+async function makeGuest(
+  overrides: { onDied?: ReturnType<typeof vi.fn>; captureSurface?: { begin: () => void; end: () => void } } = {},
+) {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const onDied = overrides.onDied ?? vi.fn();
@@ -327,6 +366,7 @@ async function makeGuest(overrides: { onDied?: ReturnType<typeof vi.fn> } = {}) 
     partition: AGENT_BROWSER_PARTITION,
     urlPolicy: {},
     onDied,
+    captureSurface: overrides.captureSurface,
   });
   await guest.start();
   return { guest, container, onDied };
@@ -451,6 +491,62 @@ describe('AgentBrowserGuest', () => {
     expect(guest.isAlive()).toBe(true);
     (guest.element as unknown as { __killContents: () => void }).__killContents();
     expect(guest.isAlive()).toBe(false);
+  });
+
+  it('reveals the guest for a capture and parks it again afterwards', async () => {
+    const begin = vi.fn();
+    const end = vi.fn();
+    const { guest } = await makeGuest({ captureSurface: { begin, end } });
+
+    await guest.capture();
+
+    expect(begin).toHaveBeenCalledTimes(1);
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('parks the guest again even when the capture fails', async () => {
+    // Without the finally, one UnknownVizError would strand the guest on screen
+    // in front of the user's workspace.
+    const begin = vi.fn();
+    const end = vi.fn();
+    const { guest } = await makeGuest({ captureSurface: { begin, end } });
+    (guest.element as unknown as { capturePage: ReturnType<typeof vi.fn> }).capturePage.mockRejectedValue(
+      new Error('UnknownVizError'),
+    );
+
+    await expect(guest.capture()).rejects.toBeInstanceOf(AgentBrowserError);
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls a failed operation a failure, not a crash, while the page is alive', async () => {
+    // The live bug: capturePage rejected with UnknownVizError and was reported
+    // as guest_crashed, telling the agent every ref was dead while the guest
+    // was still sitting there ready.
+    const { guest } = await makeGuest();
+    (guest.element as unknown as { executeJavaScript: ReturnType<typeof vi.fn> }).executeJavaScript.mockRejectedValue(
+      new Error('UnknownVizError'),
+    );
+
+    await expect(guest.runScript('x')).rejects.toMatchObject({ code: 'operation_failed' });
+    expect(guest.currentState).toBe('ready');
+    expect(guest.isAlive()).toBe(true);
+  });
+
+  it('still reports a crash when the guest really did die mid-operation', async () => {
+    const { guest } = await makeGuest();
+    const el = guest.element as unknown as {
+      executeJavaScript: ReturnType<typeof vi.fn>;
+      __killContents: () => void;
+    };
+    el.executeJavaScript.mockImplementation(async () => {
+      el.__killContents();
+      throw new Error('render process gone');
+    });
+
+    await expect(guest.runScript('x')).rejects.toMatchObject({
+      code: 'guest_crashed',
+      hint: expect.stringContaining('refs'),
+    });
   });
 
   it('fails a start that never reaches dom-ready', async () => {

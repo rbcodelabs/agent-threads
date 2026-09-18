@@ -118,6 +118,16 @@ function helpers(): string {
         return label ? (label.textContent || '') : '';
       } catch (e) { return ''; }
     }
+    /**
+     * A link or button whose entire content is an image has no text of its own.
+     * Observed live: IANA's logo link came back as \`link ""\`, which tells the
+     * agent nothing and makes the ref unusable for reasoning.
+     */
+    function ctImageName(el) {
+      var img = el.querySelector('img[alt], img[aria-label], svg[aria-label], [role="img"][aria-label]');
+      if (!img) return '';
+      return img.getAttribute('alt') || img.getAttribute('aria-label') || '';
+    }
     function ctName(el) {
       var labelledBy = el.getAttribute('aria-labelledby');
       var fromLabelledBy = '';
@@ -137,6 +147,7 @@ function helpers(): string {
         // fall back to textContent. Hidden elements are already filtered out
         // before naming, so this cannot surface invisible text on its own.
         || (el.innerText || el.textContent || '')
+        || ctImageName(el)
         || el.getAttribute('title')
         || el.getAttribute('name')
         || '';

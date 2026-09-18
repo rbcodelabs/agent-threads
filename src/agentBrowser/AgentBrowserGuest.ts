@@ -16,6 +16,7 @@ import {
   BOOTSTRAP_URL,
   CAPTURE_BUDGET,
   CAPTURE_TIMEOUT_MS,
+  COMPOSITE_SETTLE_MS,
   DOM_READY_TIMEOUT_MS,
   GUEST_HEIGHT,
   GUEST_WIDTH,
@@ -95,6 +96,11 @@ export interface AgentBrowserGuestOptions {
   /** Invoked when the guest dies on its own (crash, hang, policy abort). */
   onDied: (reason: GuestEndReason, error: AgentBrowserError) => void;
   now?: () => number;
+  /**
+   * Brings the guest somewhere the compositor will draw it, for the duration of
+   * a screenshot. Optional so a guest can be built without a host in tests.
+   */
+  captureSurface?: { begin(): void; end(): void };
 }
 
 /**
@@ -146,6 +152,7 @@ export class AgentBrowserGuest {
   private readonly urlPolicy: UrlPolicyOptions;
   private readonly onDied: (reason: GuestEndReason, error: AgentBrowserError) => void;
   private readonly now: () => number;
+  private readonly captureSurface?: { begin(): void; end(): void };
 
   private el: WebviewLike | null = null;
   private state: GuestState = 'creating';
@@ -176,6 +183,7 @@ export class AgentBrowserGuest {
     this.urlPolicy = options.urlPolicy;
     this.onDied = options.onDied;
     this.now = options.now ?? Date.now;
+    this.captureSurface = options.captureSurface;
     this.createdAt = this.now();
     this.lastUsedAt = this.createdAt;
   }
@@ -537,7 +545,7 @@ export class AgentBrowserGuest {
         } catch (error) {
           if (settled) return;
           settled = true;
-          reject(normalizeError(error));
+          reject(this.classifyError(error));
         } finally {
           this.pendingAborts.delete(abort);
           this.queueDepth -= 1;
@@ -604,23 +612,63 @@ export class AgentBrowserGuest {
     });
   }
 
-  /** Capture the guest viewport as PNG bytes. */
+  /**
+   * Capture the guest viewport as PNG bytes.
+   *
+   * The guest must be composited for this to work at all — a parked, culled
+   * layer has no frame, and `capturePage()` then rejects with `UnknownVizError`
+   * or, in a hidden window, never settles. So the container is moved on-screen
+   * (behind the app, inert) for the duration, given a moment to actually draw,
+   * and parked again in a `finally` so a failure cannot strand it in view.
+   */
   capture(maxWidth = GUEST_WIDTH): Promise<Uint8Array> {
     return this.enqueue(async () => {
       const el = this.requireElement();
       this.captureCount += 1;
-      const image = await withTimeout(
-        el.capturePage(),
-        CAPTURE_TIMEOUT_MS,
-        () =>
-          new AgentBrowserError({
-            code: 'capture_timeout',
-            message: `The page screenshot did not complete within ${CAPTURE_TIMEOUT_MS}ms.`,
-            retryable: true,
-          }),
-      );
-      const sized = maxWidth < GUEST_WIDTH ? image.resize({ width: maxWidth }) : image;
-      return sized.toPNG();
+      this.captureSurface?.begin();
+      try {
+        // A fixed delay rather than requestAnimationFrame: rAF does not fire in
+        // a window that is not being drawn, which is one of the states this
+        // needs to survive.
+        await new Promise((resolve) => setTimeout(resolve, COMPOSITE_SETTLE_MS));
+        const image = await withTimeout(
+          el.capturePage(),
+          CAPTURE_TIMEOUT_MS,
+          () =>
+            new AgentBrowserError({
+              code: 'capture_timeout',
+              message: `The page screenshot did not complete within ${CAPTURE_TIMEOUT_MS}ms.`,
+              retryable: true,
+            }),
+        );
+        const sized = maxWidth < GUEST_WIDTH ? image.resize({ width: maxWidth }) : image;
+        return sized.toPNG();
+      } finally {
+        this.captureSurface?.end();
+      }
+    });
+  }
+
+  /**
+   * Turn an unexpected rejection into an honest error.
+   *
+   * The distinction is worth the extra check: an operation can fail while the
+   * page is perfectly healthy. `capturePage()` on an uncomposited guest rejects
+   * with `UnknownVizError` even though the guest is sitting there `ready` —
+   * calling that a crash tells the agent every element ref it holds is dead and
+   * throws away a working session for nothing.
+   */
+  private classifyError(error: unknown): AgentBrowserError {
+    if (error instanceof AgentBrowserError) return error;
+    const message = error instanceof Error ? error.message : String(error);
+    if (this.isAlive()) {
+      return new AgentBrowserError({ code: 'operation_failed', message, retryable: true });
+    }
+    return new AgentBrowserError({
+      code: 'guest_crashed',
+      message,
+      retryable: true,
+      hint: REFS_INVALIDATED_HINT,
     });
   }
 
@@ -652,15 +700,6 @@ function safeTitle(el: WebviewLike): string {
   } catch {
     return '';
   }
-}
-
-function normalizeError(error: unknown): AgentBrowserError {
-  if (error instanceof AgentBrowserError) return error;
-  return new AgentBrowserError({
-    code: 'guest_crashed',
-    message: error instanceof Error ? error.message : String(error),
-    retryable: true,
-  });
 }
 
 /**

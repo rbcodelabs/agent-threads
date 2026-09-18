@@ -47,7 +47,17 @@ export type AgentBrowserErrorCode =
   /** An operation waited too long behind others. */
   | 'queue_timeout'
   /** The guest was reclaimed while this call was in flight. */
-  | 'destroyed_during_call';
+  | 'destroyed_during_call'
+  /**
+   * The operation failed but the page is still alive.
+   *
+   * Distinct from `guest_crashed` on purpose. Reporting a failed screenshot as a
+   * crash tells the agent every element ref it holds is dead — which, when the
+   * guest is in fact still `ready`, throws away a working session and sends it
+   * back to re-navigate for no reason. Observed live: `capturePage()` on an
+   * uncomposited guest rejects with `UnknownVizError` while the guest is fine.
+   */
+  | 'operation_failed';
 
 export interface AgentBrowserErrorInit {
   code: AgentBrowserErrorCode;

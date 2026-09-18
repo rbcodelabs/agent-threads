@@ -111,6 +111,23 @@ describe('snapshot script', () => {
     expect(match?.[1].length).toBe(MAX_ELEMENT_NAME_CHARS);
   });
 
+  it('names a link that contains only an image', () => {
+    // Observed live on iana.org: the logo link came back as `link ""`, which
+    // tells the agent nothing and makes the ref unusable for reasoning.
+    document.body.innerHTML = '<a href="/"><img src="logo.png" alt="IANA home"></a>';
+    giveElementsSize();
+    const result = runScript<RawSnapshot>(buildSnapshotScript(REF_KEY));
+    expect(result.snapshot).toContain('link "IANA home" [ref=e1]');
+  });
+
+  it('leaves a decorative image link unnamed rather than inventing a name', () => {
+    // alt="" is an explicit "this image carries no meaning" signal.
+    document.body.innerHTML = '<a href="/"><img src="spacer.gif" alt=""></a>';
+    giveElementsSize();
+    const result = runScript<RawSnapshot>(buildSnapshotScript(REF_KEY));
+    expect(result.snapshot).toContain('link "" [ref=e1]');
+  });
+
   it('reports element state so the agent can tell a checked box from an empty one', () => {
     document.body.innerHTML = '<input type="checkbox" aria-label="Agree" checked>';
     giveElementsSize();

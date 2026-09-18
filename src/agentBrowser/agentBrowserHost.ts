@@ -24,11 +24,12 @@ import { GUEST_HEIGHT, GUEST_WIDTH } from './agentBrowserPolicy';
 export const AGENT_BROWSER_HOST_ID = 'claude-threads-agent-browser-host';
 
 /**
- * Off-screen rather than hidden — see the module comment. `pointer-events:none`
- * and a negative z-index keep it inert even in the unlikely event that a layout
- * change brings it back on-screen.
+ * Where the container sits when nobody is looking at it.
+ *
+ * Off-screen rather than `display:none`, because a display-hidden guest does not
+ * paint at all and its timers get throttled until the page stalls.
  */
-const HOST_STYLE = [
+const PARKED_STYLE = [
   'position:fixed',
   'left:-20000px',
   'top:0',
@@ -37,6 +38,31 @@ const HOST_STYLE = [
   'overflow:hidden',
   'pointer-events:none',
   'opacity:0',
+  'z-index:-1',
+].join(';');
+
+/**
+ * Where the container sits for the moment a screenshot is taken.
+ *
+ * Parking a guest off-screen with `opacity:0` keeps it running but *not
+ * composited* — Chromium culls the layer, so there is no frame for
+ * `capturePage()` to return. Observed live: it rejects with `UnknownVizError`,
+ * and in a hidden window it can hang outright rather than reject, which is why
+ * every capture is also deadline-bounded.
+ *
+ * So for the duration of a capture the container is moved into the viewport at
+ * full opacity, where the compositor will actually draw it. `z-index:-1` and
+ * `pointer-events:none` keep it behind the app's own opaque content and inert;
+ * it is on screen for roughly a tenth of a second and never above anything.
+ */
+const COMPOSITING_STYLE = [
+  'position:fixed',
+  'left:0',
+  'top:0',
+  `width:${GUEST_WIDTH}px`,
+  `height:${GUEST_HEIGHT}px`,
+  'overflow:hidden',
+  'pointer-events:none',
   'z-index:-1',
 ].join(';');
 
@@ -56,6 +82,7 @@ export class AgentBrowserHost {
   private el: HTMLElement | null = null;
   private observer: MutationObserver | null = null;
   private destroyed = false;
+  private captureDepth = 0;
 
   constructor(doc: Document, options: AgentBrowserHostOptions) {
     this.doc = doc;
@@ -81,7 +108,7 @@ export class AgentBrowserHost {
       const el = this.doc.createElement('div');
       el.id = AGENT_BROWSER_HOST_ID;
       el.setAttribute('aria-hidden', 'true');
-      el.style.cssText = HOST_STYLE;
+      el.style.cssText = PARKED_STYLE;
       this.doc.body.appendChild(el);
       this.el = el;
     }
@@ -93,6 +120,29 @@ export class AgentBrowserHost {
   /** The container if it currently exists and is attached, else null. */
   get element(): HTMLElement | null {
     return this.el && this.el.isConnected ? this.el : null;
+  }
+
+  /**
+   * Move the container somewhere the compositor will draw it.
+   *
+   * Reference-counted because guests capture independently and two overlapping
+   * captures must not have the first one to finish park the container while the
+   * second is still waiting for its frame.
+   */
+  beginCapture(): void {
+    this.captureDepth += 1;
+    if (this.captureDepth === 1 && this.el) this.el.style.cssText = COMPOSITING_STYLE;
+  }
+
+  /** Park the container again once the last in-flight capture is done. */
+  endCapture(): void {
+    this.captureDepth = Math.max(0, this.captureDepth - 1);
+    if (this.captureDepth === 0 && this.el) this.el.style.cssText = PARKED_STYLE;
+  }
+
+  /** True while at least one capture is holding the container on-screen. */
+  get capturing(): boolean {
+    return this.captureDepth > 0;
   }
 
   /**

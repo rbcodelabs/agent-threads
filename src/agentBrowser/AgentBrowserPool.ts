@@ -228,6 +228,13 @@ export class AgentBrowserPool {
       urlPolicy: this.getUrlPolicy(),
       now: this.now,
       onDied: (reason, error) => this.handleGuestDied(threadId, reason, error),
+      // Screenshots need the container composited, which it is not while parked
+      // off-screen. Routed through the host so overlapping captures from
+      // different guests reference-count rather than fight over the style.
+      captureSurface: {
+        begin: () => this.host.beginCapture(),
+        end: () => this.host.endCapture(),
+      },
     });
 
     // Record the attempt before awaiting: a guest that dies during start still

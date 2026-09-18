@@ -89,6 +89,15 @@ export const CAPTURE_BUDGET = 100;
 // never rejects on its own; without racing a timer a single hostile page hangs
 // the agent's turn forever.
 
+/**
+ * How long to let the compositor draw a just-revealed guest before capturing.
+ *
+ * Roughly six frames at 60Hz. Short enough that the container is on-screen only
+ * momentarily, long enough that the first frame after the style change has
+ * actually been produced.
+ */
+export const COMPOSITE_SETTLE_MS = 100;
+
 export const DOM_READY_TIMEOUT_MS = 15_000;
 export const NAV_TIMEOUT_MS = 30_000;
 export const SCRIPT_TIMEOUT_MS = 10_000;
