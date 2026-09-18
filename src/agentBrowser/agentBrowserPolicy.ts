@@ -160,6 +160,21 @@ export const FD_PROBE_CACHE_MS = 2_000;
 export const GUEST_WIDTH = 1280;
 export const GUEST_HEIGHT = 800;
 
+// ── Extraction caps ──────────────────────────────────────────────────────────
+// Enforced *inside* the guest, before a value crosses `executeJavaScript`.
+// Truncating on the host side is too late: a multi-megabyte structured clone is
+// a cheap way for a page to push the host renderer into an out-of-memory crash,
+// which is the failure this whole feature exists to avoid.
+
+/** Interactive elements described in one snapshot. */
+export const MAX_SNAPSHOT_REFS = 500;
+/** Characters of snapshot text returned to the agent. */
+export const MAX_SNAPSHOT_CHARS = 40_000;
+/** Characters of page prose returned by a read-text call. */
+export const MAX_TEXT_CHARS = 20_000;
+/** Characters of a single element's accessible name. */
+export const MAX_ELEMENT_NAME_CHARS = 120;
+
 // ── URL policy ───────────────────────────────────────────────────────────────
 
 export type UrlDecision =

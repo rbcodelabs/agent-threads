@@ -529,6 +529,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
             return this.registerExternalMcpServer(input, interactive);
           },
           enableOpenUrl: (this.settings.enableWebViewerTool ?? true) && isWebViewerEnabled(this.app),
+          // Undefined when the pool is off or the host cannot support guests, in
+          // which case the browser_* tools are not registered at all. `capable`
+          // is checked here rather than inside the tools so an unsupported host
+          // costs nothing per turn instead of advertising tools that only refuse.
+          browser: this.agentBrowser?.capable ? this.createThreadBrowser(threadId) : undefined,
           openContextualFile: async (file) => {
             if (!this.isConversationFirst()) return false;
             await this.contextPanel.openFile(file);
@@ -2259,10 +2264,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         const { listInstalledSkills } = require('./skillManager') as typeof import('./skillManager');
         return (await listInstalledSkills(this.settings.skillSources ?? [])).map(skill => skill.name);
       },
-      getRedactionSecrets: () => [
-        ...(this.settings.secretEnvKeys ?? []).map((name) => this.app.secretStorage.getSecret(secretStorageKey(name))),
-        ...Object.entries(parseExtraEnv(effectiveExtraEnv(this.settings))).filter(([name]) => /(?:token|secret|key|password)/i.test(name)).map(([, value]) => value),
-      ].filter((value): value is string => Boolean(value)),
+      getRedactionSecrets: () => this.collectSecretValues(),
       getPublicState: () => this.settings.publicApiState,
       savePublicState: async (state) => { this.settings.publicApiState = state; await this.saveSettings(); },
       runConstrainedQuery: createConstrainedQueryRunner(() => this.settings, undefined, () => this.manager.secretEnvResolver?.() ?? {}),
@@ -2578,6 +2580,38 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { isConversationFirstPlacement } = require('./conversationFirstPlacement') as typeof import('./conversationFirstPlacement');
     return isConversationFirstPlacement(this.settings.threadViewPlacement, Platform.isMobile);
+  }
+
+  /**
+   * Stored secret values, for redaction and for refusing to type a credential
+   * into a web page. Synchronous because `secretStorage.getSecret` is.
+   */
+  collectSecretValues(): string[] {
+    return [
+      ...(this.settings.secretEnvKeys ?? []).map((name) => this.app.secretStorage.getSecret(secretStorageKey(name))),
+      ...Object.entries(parseExtraEnv(effectiveExtraEnv(this.settings)))
+        .filter(([name]) => /(?:token|secret|key|password)/i.test(name))
+        .map(([, value]) => value),
+    ].filter((value): value is string => Boolean(value));
+  }
+
+  /**
+   * Per-thread handle on the agent browser.
+   *
+   * Built fresh for each MCP session rather than cached on the plugin: element
+   * refs belong to a page and a snapshot generation, so a restarted session
+   * starting without them is correct — it forces a fresh snapshot instead of
+   * letting the agent act on refs whose page may have changed underneath it.
+   */
+  private createThreadBrowser(threadId: string): import('./agentBrowser/ThreadBrowser').ThreadBrowser | undefined {
+    if (!this.agentBrowser) return undefined;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { ThreadBrowser } = require('./agentBrowser/ThreadBrowser') as typeof import('./agentBrowser/ThreadBrowser');
+    return new ThreadBrowser({
+      threadId,
+      pool: this.agentBrowser,
+      getSecrets: () => this.collectSecretValues(),
+    });
   }
 
   async activateAgentView(): Promise<void> {

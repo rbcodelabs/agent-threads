@@ -36,6 +36,12 @@ export type AgentBrowserErrorCode =
   | 'script_timeout'
   /** A screenshot did not settle in time. */
   | 'capture_timeout'
+  /** Refs were produced by a different page, origin, or snapshot generation. */
+  | 'stale_snapshot'
+  /** The ref is unknown, or its element has left the page. */
+  | 'ref_not_found'
+  /** The element exists but cannot be acted on (disabled, or a refused input). */
+  | 'not_actionable'
   /** Too many operations already queued against this guest. */
   | 'queue_depth_exceeded'
   /** An operation waited too long behind others. */

@@ -15,6 +15,8 @@ import path from 'path';
 import { tokenizeQuery, findBestExcerpt } from './searchUtils';
 import { execFileSync } from 'child_process';
 import { secretStorageKey } from './secretUtils';
+import { AGENT_BROWSER_READ_ONLY_TOOL_NAMES, createAgentBrowserTools } from './agentBrowser/agentBrowserTools';
+import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
 import { resolveWorktreeRoot, worktreePathFor } from './worktreePaths';
 import type {
   InstalledSkillInfo,
@@ -334,6 +336,15 @@ export interface ObsidianMcpServerOptions {
    * has opted out in settings. Defaults to true.
    */
   enableOpenUrl?: boolean;
+  /**
+   * This thread's in-app browser, or undefined when unavailable — on mobile, on
+   * a host without process diagnostics, or with the feature switched off.
+   *
+   * Presence is the gate: when absent the browser_* tools are not registered at
+   * all rather than registered and always failing. A tool that can only refuse
+   * still costs context on every turn and invites the model to keep retrying it.
+   */
+  browser?: ThreadBrowser;
   /** Returns every visible skill — vault-installed and read-only ~/.claude/skills entries alike (content omitted — use onSkillsGet for a specific skill's full SKILL.md). */
   onSkillsListInstalled?: () => Promise<Array<Omit<InstalledSkillInfo, 'content'>>>;
   /** Searches the skills.sh marketplace registry for the given query. */
@@ -2668,6 +2679,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundListCommands,
       boundExecuteCommand,
       ...(options.enableOpenUrl !== false ? [boundOpenUrl] : []),
+      ...(options.browser ? createAgentBrowserTools(options.browser) : []),
       boundCreateThread,
       boundGetCurrentThread,
       boundListThreads,
@@ -2875,6 +2887,9 @@ export function toHarnessDynamicTools(tools: SdkMcpToolDefinition<any>[]): Harne
   const readOnlyToolNames = new Set([
     ...legacyReadOnlyToolNames,
     ...legacyReadOnlyToolNames.map(name => LEGACY_TO_CANONICAL_TOOL_NAMES[name] ?? name),
+    // Observing a page is read-only; navigating to one and clicking things is
+    // not, so only the inspection half bypasses the prompt.
+    ...AGENT_BROWSER_READ_ONLY_TOOL_NAMES,
   ]);
   return tools.map((toolDefinition) => ({
     name: toolDefinition.name,
