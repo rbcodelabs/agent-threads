@@ -3,6 +3,9 @@ import { createHarnessSession } from './HarnessFactory';
 import { resolveCodexPermissions, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
 import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
 import { AttachmentWriter } from './AttachmentWriter';
+// Safe to import statically on mobile: this module requires `fs`/`path` lazily,
+// inside functions, so nothing Node-only runs at module-init scope.
+import { removeStorageRoot, type ArtifactStorageFs } from './artifactStorage';
 import { collectPendingImageExternalizations } from './imageExternalization';
 import { effectiveExtraEnv } from './types';
 import { derivePrUrl } from './statusLine';
@@ -274,7 +277,7 @@ export class ThreadManager {
   /** Writes message images out to vault attachment files (ADR-0003, PR 1). */
   private attachmentWriter: AttachmentWriter;
   /** Injectable filesystem for artifact-storage GC; defaults to the real one. */
-  artifactStorageFs?: import('./artifactStorage').ArtifactStorageFs;
+  artifactStorageFs?: ArtifactStorageFs;
 
   constructor(settings: PluginSettings) {
     this.settings = settings;
@@ -572,7 +575,6 @@ export class ThreadManager {
     const vaultRoot = this.vaultRoot;
     const roots = (thread.artifacts ?? []).map(artifact => artifact.storageRoot).filter((root): root is string => !!root);
     if (!vaultRoot || roots.length === 0) return;
-    const { removeStorageRoot } = require('./artifactStorage') as typeof import('./artifactStorage');
     for (const root of roots) {
       void removeStorageRoot(vaultRoot, root, this.artifactStorageFs).catch(() => undefined);
     }
