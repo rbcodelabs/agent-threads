@@ -6762,8 +6762,13 @@ textarea.ct-settings-wide-input {
   }
 }
 
-/* Body: list + detail side-by-side */
+/* Body: list + detail side-by-side.
+   Also the query container for the narrow-mode collapse at the bottom of this
+   section — sized off this element, not the viewport, so the layout responds
+   to the pane's own width (sidebar vs. full-width tab) rather than the window's. */
 .ct-skills-body {
+  container-name: ct-skills-body;
+  container-type: inline-size;
   display: flex;
   flex: 1;
   overflow: hidden;
@@ -7302,6 +7307,87 @@ body.ct-skills-resizing {
   gap: 8px;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+/* ── Skills Manager — narrow / single-pane mode ─────────────────────────────
+   In a sidebar there is no room for list + detail side by side, so the two
+   panes stack into one: the list until something is selected, then the detail
+   pane behind a back bar. SkillsManagerView only toggles
+   `ct-skills-body--has-selection`; the breakpoint itself lives here, so no JS
+   measures widths or listens for resize.
+
+   The `!important` on the list width is deliberate: SkillsManagerView sets an
+   inline `width` for the drag-to-resize divider, and an inline style would
+   otherwise beat this rule and leave the list stuck at its wide-mode width. */
+
+/* Back bar is rendered on every detail pane but only ever shown below the
+   breakpoint — in wide mode the list is already on screen to click away to. */
+.ct-skills-detail-back {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ct-skills-back-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-accent);
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.ct-skills-back-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+.ct-skills-back-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+@container ct-skills-body (max-width: 480px) {
+  /* Nothing to drag when only one pane is visible. */
+  .ct-skills-divider {
+    display: none;
+  }
+
+  .ct-skills-list {
+    width: 100% !important;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .ct-skills-detail {
+    width: 100%;
+  }
+
+  /* Show exactly one pane: list while nothing is selected… */
+  .ct-skills-body:not(.ct-skills-body--has-selection) .ct-skills-detail {
+    display: none;
+  }
+
+  /* …detail (plus its back bar) once something is. */
+  .ct-skills-body--has-selection .ct-skills-list {
+    display: none;
+  }
+
+  .ct-skills-body--has-selection .ct-skills-detail-back {
+    display: flex;
+  }
 }
 
 /* ── Command pill (built-in slash command chip in the input row) ─────────── */
