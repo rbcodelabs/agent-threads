@@ -1045,6 +1045,41 @@ export class SkillsManagerView extends ItemView {
       : skill.realPath;
     pathRow.createEl('span', { text: pathText, cls: 'ct-skills-detail-path-text' });
 
+    // Toolbar lives in the header, above the editor, so the textarea below can
+    // claim the rest of the pane. Built before the editor so DOM order matches
+    // visual order, but `saveBtn` is wired to the textarea further down — hence
+    // the forward reference through `.ct-skills-btn-save` in the input handler.
+    const actions = header.createEl('div', { cls: 'ct-skills-actions ct-skills-detail-toolbar' });
+
+    const saveBtn = actions.createEl('button', {
+      cls: 'ct-skills-btn ct-skills-btn--primary ct-skills-btn-save',
+      text: 'Save',
+      attr: { disabled: this.isDirty ? null : 'true' },
+    });
+    saveBtn.disabled = !this.isDirty;
+
+    const revealBtn = actions.createEl('button', {
+      cls: 'ct-skills-btn',
+      text: 'Reveal in Finder',
+    });
+    revealBtn.addEventListener('click', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
+      electron.shell?.showItemInFolder(skill.skillMdPath);
+    });
+
+    // Reload button (re-reads file from disk)
+    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
+    reloadBtn.addEventListener('click', () => void this.reloadSkillContent(skill));
+
+    // Uninstall shares the toolbar row but is pushed to the far end, so the
+    // destructive action never sits flush against Save.
+    const uninstallBtn = actions.createEl('button', {
+      cls: 'ct-skills-btn ct-skills-btn--danger ct-skills-btn-uninstall',
+      text: 'Uninstall',
+    });
+    uninstallBtn.addEventListener('click', () => void this.uninstallSkill(skill));
+
     // Editor section
     const editorWrap = this.detailEl.createEl('div', { cls: 'ct-skills-editor-wrap' });
     const labelRow = editorWrap.createEl('div', { cls: 'ct-skills-editor-label' });
@@ -1066,42 +1101,11 @@ export class SkillsManagerView extends ItemView {
       } else if (!this.isDirty && dot) {
         dot.remove();
       }
-      const saveBtn = this.detailEl.querySelector<HTMLButtonElement>('.ct-skills-btn-save');
-      if (saveBtn) saveBtn.disabled = !this.isDirty;
+      const btn = this.detailEl.querySelector<HTMLButtonElement>('.ct-skills-btn-save');
+      if (btn) btn.disabled = !this.isDirty;
     });
 
-    // Primary actions
-    const actions = this.detailEl.createEl('div', { cls: 'ct-skills-actions' });
-
-    const saveBtn = actions.createEl('button', {
-      cls: 'ct-skills-btn ct-skills-btn--primary ct-skills-btn-save',
-      text: 'Save',
-      attr: { disabled: this.isDirty ? null : 'true' },
-    });
-    saveBtn.disabled = !this.isDirty;
     saveBtn.addEventListener('click', () => void this.saveSkillContent(skill, textarea));
-
-    const revealBtn = actions.createEl('button', {
-      cls: 'ct-skills-btn',
-      text: 'Reveal in Finder',
-    });
-    revealBtn.addEventListener('click', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
-      electron.shell?.showItemInFolder(skill.skillMdPath);
-    });
-
-    // Reload button (re-reads file from disk)
-    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
-    reloadBtn.addEventListener('click', () => void this.reloadSkillContent(skill));
-
-    // Danger zone
-    const danger = this.detailEl.createEl('div', { cls: 'ct-skills-danger-zone' });
-    const uninstallBtn = danger.createEl('button', {
-      cls: 'ct-skills-btn ct-skills-btn--danger',
-      text: 'Uninstall',
-    });
-    uninstallBtn.addEventListener('click', () => void this.uninstallSkill(skill));
   }
 
   /**
@@ -1126,6 +1130,16 @@ export class SkillsManagerView extends ItemView {
       cls: 'ct-skills-detail-path-text',
       text: skill.isSymlink ? `${skill.skillPath} → ${skill.realPath}` : skill.realPath,
     });
+
+    const actions = header.createEl('div', { cls: 'ct-skills-actions ct-skills-detail-toolbar' });
+    const revealBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reveal in Finder' });
+    revealBtn.addEventListener('click', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
+      electron.shell?.showItemInFolder(skill.skillMdPath);
+    });
+    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
+    reloadBtn.addEventListener('click', () => void this.reloadSkillContent(skill));
 
     const callout = this.detailEl.createEl('div', { cls: 'ct-skills-callout' });
     callout.createEl('div', {
@@ -1157,16 +1171,6 @@ export class SkillsManagerView extends ItemView {
       attr: { readonly: 'true' },
     });
     textarea.value = skill.content;
-
-    const actions = this.detailEl.createEl('div', { cls: 'ct-skills-actions' });
-    const revealBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reveal in Finder' });
-    revealBtn.addEventListener('click', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
-      electron.shell?.showItemInFolder(skill.skillMdPath);
-    });
-    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
-    reloadBtn.addEventListener('click', () => void this.reloadSkillContent(skill));
   }
 
   /**
@@ -1186,6 +1190,21 @@ export class SkillsManagerView extends ItemView {
     const pathRow = header.createEl('div', { cls: 'ct-skills-detail-path' });
     pathRow.createEl('span', { text: agent.agentPath, cls: 'ct-skills-detail-path-text' });
 
+    const actions = header.createEl('div', { cls: 'ct-skills-actions ct-skills-detail-toolbar' });
+
+    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
+    reloadBtn.addEventListener('click', () => void this.reloadAgentContent(agent));
+
+    const revealBtn = actions.createEl('button', {
+      cls: 'ct-skills-btn',
+      text: 'Reveal in Finder',
+    });
+    revealBtn.addEventListener('click', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
+      electron.shell?.showItemInFolder(agent.agentPath);
+    });
+
     const callout = this.detailEl.createEl('div', { cls: 'ct-skills-callout' });
     callout.createEl('div', {
       text: 'Managed by Claude Code. This plugin never writes to ~/.claude/ — edit or delete this agent with the `claude` CLI, or by hand.',
@@ -1204,21 +1223,6 @@ export class SkillsManagerView extends ItemView {
       attr: { readonly: 'true' },
     });
     textarea.value = agent.content;
-
-    const actions = this.detailEl.createEl('div', { cls: 'ct-skills-actions' });
-
-    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
-    reloadBtn.addEventListener('click', () => void this.reloadAgentContent(agent));
-
-    const revealBtn = actions.createEl('button', {
-      cls: 'ct-skills-btn',
-      text: 'Reveal in Finder',
-    });
-    revealBtn.addEventListener('click', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
-      electron.shell?.showItemInFolder(agent.agentPath);
-    });
   }
 
   private async reloadAgentContent(agent: InstalledAgent): Promise<void> {
@@ -1343,6 +1347,14 @@ export class SkillsManagerView extends ItemView {
     let content = '';
     try { content = fs.readFileSync(skillMdPath, 'utf-8'); } catch { content = '(Could not read SKILL.md)'; }
 
+    const actions = header.createEl('div', { cls: 'ct-skills-actions ct-skills-detail-toolbar' });
+    const revealBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reveal in Finder' });
+    revealBtn.addEventListener('click', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const electron = require('electron') as { shell?: { showItemInFolder: (p: string) => void } };
+      electron.shell?.showItemInFolder(skillMdPath);
+    });
+
     const editorWrap = this.detailEl.createEl('div', { cls: 'ct-skills-editor-wrap' });
     editorWrap.createEl('div', { cls: 'ct-skills-editor-label', text: 'SKILL.md (read-only)' });
     const editor = editorWrap.createEl('textarea', {
@@ -1350,14 +1362,6 @@ export class SkillsManagerView extends ItemView {
       attr: { readonly: 'true' },
     });
     editor.value = content;
-
-    const actions = this.detailEl.createEl('div', { cls: 'ct-skills-actions' });
-    const revealBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reveal in Finder' });
-    revealBtn.addEventListener('click', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const electron = require('electron') as { shell?: { showItemInFolder: (p: string) => void } };
-      electron.shell?.showItemInFolder(skillMdPath);
-    });
   }
 
   private async loadGithubSourceSkillsForInstalled(source: import('./types').SkillSource): Promise<void> {

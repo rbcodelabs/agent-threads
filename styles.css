@@ -7216,10 +7216,26 @@ body.ct-skills-resizing {
   color: #fff;
 }
 
-/* Danger zone (uninstall) */
-.ct-skills-danger-zone {
-  padding: 4px 14px 12px;
-  flex-shrink: 0;
+/* Detail toolbar: the action row hoisted into the header, above the editor, so
+   the textarea below can claim the rest of the pane instead of being pushed up
+   by buttons stacked underneath it.
+
+   Scoped to `.ct-skills-detail-toolbar` rather than overriding `.ct-skills-actions`
+   itself: that class is still used below-content in the panes that have no
+   editor to compete with (the GitHub source pane's Update/Reload row, the local
+   source pane's Pull Updates row), and those should keep their own padding. */
+.ct-skills-detail-toolbar {
+  /* `.ct-skills-detail-header` already supplies the 14px horizontal padding —
+     taking it again here would indent the buttons past the name/path above. */
+  padding: 0;
+  margin-top: 8px;
+}
+
+/* Push the destructive action to the far end so it never sits flush against
+   Save. On a narrow pane the row wraps and this lands it on its own line,
+   still trailing — which is the desired outcome either way. */
+.ct-skills-detail-toolbar .ct-skills-btn-uninstall {
+  margin-left: auto;
 }
 
 /* Browse tab: description section */
