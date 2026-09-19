@@ -1,8 +1,12 @@
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, addIcon, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createConstrainedQueryRunner } from './ConstrainedRun';
-import { ArtifactProviderRegistry, toArtifactRef } from './ArtifactContributions';
-import { createDesignArtifactContribution, DESIGN_PROVIDER_OWNER, previewDesignArtifact } from './designArtifactProvider';
+import { ArtifactProviderRegistry } from './ArtifactContributions';
+import { createArtifactStore } from './artifactStore';
+import {
+  createDesignArtifactContribution, DESIGN_ACTION_PREVIEW, DESIGN_ARTIFACT_KIND, DESIGN_ARTIFACT_SCHEMA_VERSION,
+  DESIGN_PROVIDER_ID, DESIGN_PROVIDER_OWNER,
+} from './designArtifactProvider';
 export { createClaudeThreadsApiV1 } from './PublicApi';
 export type { ClaudeThreadsApiV1 } from './PublicApi';
 // Desktop-only modules: type-only imports so their module-level code never runs on mobile.
@@ -2311,6 +2315,15 @@ export default class ClaudeThreadsPlugin extends Plugin {
       requestSecret: (secretName, reason, force) => this.requestSecretFromUser(secretName, reason, force),
       hasSecret: (name) => !!this.app.secretStorage.getSecret(secretStorageKey(name)),
       artifactProviders: this.artifactProviders,
+      artifactStore: createArtifactStore({
+        vaultRoot: () => this.manager.vaultRoot,
+        getThread: (id) => this.manager.getThread(id),
+        saveSettings: () => this.saveSettings(),
+        // Delegating to the view is what keeps a peer's invokeAction and a
+        // user's card click on one code path. Absent view ⇒ error result.
+        invokeAction: (threadId, artifactId, actionId) => this.getView()?.invokeArtifactAction(threadId, artifactId, actionId),
+        onChanged: () => this.getView()?.refreshArtifactCard(),
+      }),
     });
     this.publicApiService = service;
     this.api = Object.freeze({ v1: service.api });
@@ -2872,14 +2885,45 @@ export default class ClaudeThreadsPlugin extends Plugin {
       saveSettings: () => this.saveSettings(),
       openThread: id => this.openThreadInChatView(id),
       openPreview: async artifact => {
-        const view = this.getView();
-        if (!view) throw new Error('Agent Threads view is unavailable.');
-        view.refreshArtifactCard();
-        const preview = await previewDesignArtifact(artifact, view.artifactActionHost(threadId, toArtifactRef(artifact)));
+        const preview = await this.previewDesignArtifactAsPeer(threadId, artifact);
         if (preview.status !== 'opened') new Notice(preview.warning);
         return preview;
       },
     });
+  }
+
+  /**
+   * Creation-time preview, taken through public API v1 exactly as a
+   * third-party plugin would take it: attach the artifact under the Design
+   * provider, then invoke that provider's named preview action. No view, no
+   * DOM, no private manager access — which is the point. If this needs a
+   * privileged path, so would a peer, and the extraction is not real.
+   *
+   * `error` is reserved for "the host could not dispatch the action at all"
+   * (no view, no API, unknown artifact) and is raised, matching what the
+   * previous view-unavailable throw did. A `warning` means the provider ran
+   * and could not place the preview, which must never undo a durable artifact.
+   */
+  private async previewDesignArtifactAsPeer(
+    threadId: string,
+    artifact: import('./types').DesignArtifact,
+  ): Promise<import('./designArtifact').DesignPreviewResult> {
+    const api = this.api?.v1;
+    if (!api) throw new Error('Agent Threads public API is unavailable.');
+    const attached = await api.artifacts.attach(DESIGN_PROVIDER_OWNER, threadId, {
+      providerId: DESIGN_PROVIDER_ID,
+      kind: DESIGN_ARTIFACT_KIND,
+      schemaVersion: DESIGN_ARTIFACT_SCHEMA_VERSION,
+      id: artifact.id,
+      title: artifact.title,
+      storageRoot: artifact.root,
+      data: artifact,
+    });
+    if (!attached.success) throw new Error(attached.message);
+    const result = await api.artifacts.invokeAction(threadId, artifact.id, DESIGN_ACTION_PREVIEW);
+    if (result.status === 'ok') return { status: 'opened' };
+    if (result.status === 'warning') return { status: 'unavailable', warning: result.message };
+    throw new Error(result.message);
   }
 
   /**
@@ -2974,12 +3018,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         sendMessage: (threadId, message) => this.manager.sendMessage(threadId, message),
         openThread: (threadId) => this.openThreadInChatView(threadId),
         openPreview: async (artifact) => {
-          const view = this.getView();
-          if (!view) throw new Error('Agent Threads view is unavailable.');
-          const preview = await previewDesignArtifact(
-            artifact,
-            view.artifactActionHost(dispatchedThreadId, toArtifactRef(artifact)),
-          );
+          const preview = await this.previewDesignArtifactAsPeer(dispatchedThreadId, artifact);
           if (preview.status !== 'opened') new Notice(preview.warning);
         },
         onSendError: (error) => {

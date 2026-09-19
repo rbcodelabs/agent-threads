@@ -6,8 +6,13 @@ import { fixtureThreads } from './fixtures';
 import { mockLeaf, mockWorkspace } from './obsidian-mock';
 import { Platform } from 'obsidian';
 import { enterDesignMode, assertDesignWriteAllowed } from '../../src/designArtifact';
-import { ArtifactProviderRegistry, toArtifactRef } from '../../src/ArtifactContributions';
-import { createDesignArtifactContribution, DESIGN_PROVIDER_OWNER, previewDesignArtifact } from '../../src/designArtifactProvider';
+import { ArtifactProviderRegistry } from '../../src/ArtifactContributions';
+import { createArtifactStore } from '../../src/artifactStore';
+import { createClaudeThreadsApiV1 } from '../../src/PublicApi';
+import {
+  createDesignArtifactContribution, DESIGN_ACTION_PREVIEW, DESIGN_ARTIFACT_KIND, DESIGN_ARTIFACT_SCHEMA_VERSION,
+  DESIGN_PROVIDER_ID, DESIGN_PROVIDER_OWNER,
+} from '../../src/designArtifactProvider';
 
 if (new URLSearchParams(window.location.search).has('mobile')) Platform.isMobile = true;
 
@@ -61,9 +66,17 @@ const mockScheduler = {
   }
 };
 
-// The harness has no public API service, so it registers the built-in design
-// contribution straight into the registry the API would delegate to. The
-// contract exercised by the card below is identical either way.
+// The harness runs from file://, which Chromium does not treat as a secure
+// context, so crypto.randomUUID is withheld. The public API mints its
+// generation id with it at construction — shim it before that happens.
+if (typeof crypto !== 'undefined' && typeof (crypto as { randomUUID?: unknown }).randomUUID !== 'function') {
+  (crypto as unknown as { randomUUID: () => string }).randomUUID = () =>
+    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, char => {
+      const random = Math.floor(Math.random() * 16);
+      return (char === 'x' ? random : (random & 0x3) | 0x8).toString(16);
+    });
+}
+
 const artifactProviders = new ArtifactProviderRegistry();
 artifactProviders.register(DESIGN_PROVIDER_OWNER, createDesignArtifactContribution());
 
@@ -123,16 +136,54 @@ const designPreviewLeaf = {
   setViewState: async () => {},
   getViewState: () => ({ type: 'geode-artifact' }),
 };
+// A real public API v1 instance, so the design entry below takes exactly the
+// path a third-party peer would: attach through `artifacts`, then invoke a
+// named provider action. Only the artifact dependencies are real; the rest is
+// stubbed, because nothing in this harness exercises them.
+const harnessApi = createClaudeThreadsApiV1({
+  getThreads: () => [],
+  getThread: (id: string) => manager.getThread(id),
+  isRunning: () => false,
+  createThread: () => { throw new Error('Thread creation is not wired in this harness.'); },
+  sendMessage: async () => {},
+  openThread: async () => {},
+  subscribe: () => () => {},
+  listOrchestrators: () => [],
+  resolveOrchestrator: async () => null,
+  triggerHostEvent: () => {},
+  artifactProviders,
+  artifactStore: createArtifactStore({
+    vaultRoot: () => '/vault',
+    getThread: (id: string) => manager.getThread(id),
+    saveSettings: () => mockPlugin.saveSettings(),
+    invokeAction: (threadId: string, artifactId: string, actionId: string) =>
+      ((window as any).__view as ThreadsView | undefined)?.invokeArtifactAction(threadId, artifactId, actionId),
+    onChanged: () => ((window as any).__view as ThreadsView | undefined)?.refreshArtifactCard(),
+  }),
+} as never).api;
+(window as any).__api = harnessApi;
+
 (window as any).__enterDesignMode = (threadId: string, brief: string) => enterDesignMode(threadId, '/vault', brief, {
   getThread: id => manager.getThread(id),
   assertWritable: thread => assertDesignWriteAllowed(thread, settings.permissionMode),
   saveSettings: () => mockPlugin.saveSettings(),
   openThread: async id => { await (window as any).__view.focusThread(id); },
   openPreview: async artifact => {
-    const view = (window as any).__view as ThreadsView;
     Object.assign(mockWorkspace, { getLeavesOfType: () => [], getLeaf: () => designPreviewLeaf, revealLeaf: () => {} });
-    view.refreshArtifactCard();
-    return previewDesignArtifact(artifact, view.artifactActionHost(threadId, toArtifactRef(artifact)));
+    const attached = await harnessApi.artifacts.attach(DESIGN_PROVIDER_OWNER, threadId, {
+      providerId: DESIGN_PROVIDER_ID,
+      kind: DESIGN_ARTIFACT_KIND,
+      schemaVersion: DESIGN_ARTIFACT_SCHEMA_VERSION,
+      id: artifact.id,
+      title: artifact.title,
+      storageRoot: artifact.root,
+      data: artifact,
+    });
+    if (!attached.success) throw new Error(attached.message);
+    const result = await harnessApi.artifacts.invokeAction(threadId, artifact.id, DESIGN_ACTION_PREVIEW);
+    if (result.status === 'ok') return { status: 'opened' as const };
+    if (result.status === 'warning') return { status: 'unavailable' as const, warning: result.message };
+    throw new Error(result.message);
   },
 }, { mkdir: async () => {}, writeFile: async () => {} });
 (window as any).__contextLinkCalls = [];

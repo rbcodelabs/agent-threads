@@ -19,6 +19,12 @@ import type { DesignArtifact } from './types';
 
 export const DESIGN_PROVIDER_ID = 'agent-threads.design';
 export const DESIGN_ARTIFACT_KIND = 'design-static';
+/**
+ * Lives here rather than in `designArtifact.ts` so the design entry points can
+ * declare it without statically importing the filesystem-backed module, which
+ * the mobile bundle must not pull in.
+ */
+export const DESIGN_ARTIFACT_SCHEMA_VERSION = 1 as const;
 
 /** The plugin's own identity when it registers built-in capabilities. */
 export const DESIGN_PROVIDER_OWNER = Object.freeze({

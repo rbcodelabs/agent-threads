@@ -415,6 +415,13 @@ export interface ThreadArtifactRecord {
   title: string;
   providerId?: string;
   schemaVersion?: number;
+  /**
+   * Absolute directory holding this artifact's files, when it has any. Host
+   * visible on purpose: thread deletion garbage-collects it (ADR-0010).
+   * Optional because records persisted before providers existed carry no
+   * storage root, and because an artifact need not have files at all.
+   */
+  storageRoot?: string;
   createdAt: number;
   updatedAt: number;
 }

@@ -34,9 +34,9 @@ import { partitionThreads } from './threadRowState';
 import { agentLabel, buildAgentBreadcrumbs, summarizeAgentTeam } from './agentRuns/agentTreeModel';
 import { renderAgentPopoverTree } from './agentRuns/renderAgentPopoverTree';
 import { renderAgentActivity } from './agentRuns/renderAgentActivity';
-import { toArtifactRef } from './ArtifactContributions';
+import { HOST_OWNED_ARTIFACT_FIELDS, toArtifactRef } from './ArtifactContributions';
 import type {
-  ArtifactActionHost, ArtifactPresentation, ArtifactViewPlacement, ThreadArtifactRef,
+  ArtifactActionHost, ArtifactActionResult, ArtifactPresentation, ArtifactViewPlacement, ThreadArtifactRef,
 } from './ArtifactContributions';
 import { extractVisualizeMarkers } from './visualizeMarker';
 import { VisualizeMountManager, resolveVisualizeTokens, toFileUrl, type VisualizeFs } from './visualizeRenderer';
@@ -1598,7 +1598,7 @@ export class ThreadsView extends ItemView {
       if (primary && action.shortLabel) button.createSpan({ cls: 'ct-artifact-action-label', text: action.shortLabel });
       button.setAttribute('aria-label', action.label);
       button.setAttribute('title', action.tooltip ?? action.label);
-      button.addEventListener('click', () => { void this.invokeArtifactAction(threadId, ref, action.id); });
+      button.addEventListener('click', () => { void this.announceArtifactAction(threadId, ref.id, action.id); });
     }
   }
 
@@ -1606,10 +1606,26 @@ export class ThreadsView extends ItemView {
     this.renderArtifactCard();
   }
 
-  private async invokeArtifactAction(threadId: string, ref: ThreadArtifactRef, actionId: string): Promise<void> {
-    const result = await this.plugin.artifactProviders.invoke(actionId, ref, this.artifactActionHost(threadId, ref));
+  /** Card-click wrapper: the user-visible half of `invokeArtifactAction`. */
+  private async announceArtifactAction(threadId: string, artifactId: string, actionId: string): Promise<void> {
+    const result = await this.invokeArtifactAction(threadId, artifactId, actionId);
     if (result.message) new Notice(result.message);
+  }
+
+  /**
+   * The one place an artifact action is executed. Both a card click and
+   * `api.v1.artifacts.invokeAction` land here, so provider isolation, the
+   * invoke timeout and the result shape are shared by construction rather
+   * than by two implementations agreeing to stay in step. Takes ids, not a
+   * ref, so both callers resolve the artifact the same way.
+   */
+  async invokeArtifactAction(threadId: string, artifactId: string, actionId: string): Promise<ArtifactActionResult> {
+    const record = this.manager.getThread(threadId)?.artifacts?.find((candidate) => candidate.id === artifactId);
+    if (!record) return { status: 'error', message: `Artifact not found: ${artifactId}` };
+    const ref = toArtifactRef(record);
+    const result = await this.plugin.artifactProviders.invoke(actionId, ref, this.artifactActionHost(threadId, ref));
     this.renderArtifactCard();
+    return result;
   }
 
   /**
@@ -1617,7 +1633,7 @@ export class ThreadsView extends ItemView {
    * never receives this view, a workspace leaf, or a DOM node — only these
    * three brokered operations.
    */
-  artifactActionHost(threadId: string, ref: ThreadArtifactRef): ArtifactActionHost {
+  private artifactActionHost(threadId: string, ref: ThreadArtifactRef): ArtifactActionHost {
     return {
       openView: (state) => this.openArtifactView(state),
       revealInFolder: (target) => this.revealArtifactPath(target),
@@ -1628,8 +1644,11 @@ export class ThreadsView extends ItemView {
         if (patch.data && typeof patch.data === 'object') {
           const writable = record as unknown as Record<string, unknown>;
           for (const [key, value] of Object.entries(patch.data as Record<string, unknown>)) {
-            // Host-owned identity is not writable by the provider.
-            if (key === 'id' || key === 'kind' || key === 'providerId' || key === 'schemaVersion' || key === 'createdAt') continue;
+            // Host-owned identity is not writable by the provider. `storageRoot`
+            // is in that set: it is only ever set after the host has validated
+            // it, so a provider cannot redirect its own storage here and get a
+            // recursive delete pointed somewhere else later.
+            if (HOST_OWNED_ARTIFACT_FIELDS.includes(key)) continue;
             writable[key] = value;
           }
         }
