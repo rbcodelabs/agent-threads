@@ -1,10 +1,11 @@
-import type { ChatMessage, Thread, ThreadStatus } from './types';
+import type { ChatMessage, Thread, ThreadArtifactRecord, ThreadStatus } from './types';
 import type { ThreadEvent } from './ThreadManager';
 import type { RawLogTraceChunk, RawLogTraceMetadata } from './RawLogWriter';
 import type { McpRegistrationResult } from './mcpServerStore';
-import type { ArtifactContribution, ArtifactProviderRegistry, ArtifactRegistrationResult, PeerIdentity } from './ArtifactContributions';
+import type { ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactProviderRegistry, ArtifactRegistrationResult, ArtifactStoreHost, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
+import { HOST_OWNED_ARTIFACT_FIELDS, PROVIDER_ID_PATTERN, toArtifactRef } from './ArtifactContributions';
 
-export type { ArtifactAction, ArtifactActionHost, ArtifactActionResult, ArtifactContribution, ArtifactPresentation, ArtifactRegistrationResult, ArtifactViewPlacement, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
+export type { ArtifactAction, ArtifactActionHost, ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactPresentation, ArtifactRegistrationResult, ArtifactStoreHost, ArtifactViewPlacement, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
 
 export type PublicErrorCode = 'PLUGIN_UNAVAILABLE' | 'THREAD_NOT_FOUND' | 'RUN_NOT_FOUND' | 'RUN_FAILED' | 'RUN_INTERRUPTED' | 'THREAD_BUSY' | 'IDEMPOTENCY_CONFLICT' | 'TRACE_NOT_FOUND' | 'CURSOR_INVALID' | 'CONSTRAINT_UNSUPPORTED' | 'ORCHESTRATOR_NOT_FOUND' | 'INVALID_ARGUMENT';
 export interface PublicError { readonly code: PublicErrorCode; readonly message: string }
@@ -91,6 +92,25 @@ export interface ClaudeThreadsApiV1 {
   readonly extensions: {
     registerArtifactProvider(owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult;
   };
+  /**
+   * Artifact entry point (ADR-0010). Lets a peer create an artifact and open
+   * it without any view, DOM or private-manager access — the gap that made
+   * `extensions.registerArtifactProvider` presentation-only.
+   *
+   * `owner` is explicit on every mutating call because the API object is a
+   * single shared singleton: the host cannot infer which plugin is calling,
+   * so ownership has to be asserted rather than derived. It is checked against
+   * the identity that registered the provider, so a peer cannot write into
+   * another plugin's provider namespace.
+   */
+  readonly artifacts: {
+    list(threadId: string): Promise<readonly ThreadArtifactRef[]>;
+    attach(owner: PeerIdentity, threadId: string, ref: ThreadArtifactRef): Promise<ArtifactAttachResult>;
+    update(owner: PeerIdentity, threadId: string, artifactId: string, patch: ArtifactPatch): Promise<ArtifactMutationResult>;
+    detach(owner: PeerIdentity, threadId: string, artifactId: string): Promise<ArtifactMutationResult>;
+    /** Runs a named provider action on the same path a card click takes. */
+    invokeAction(threadId: string, artifactId: string, actionId: string): Promise<ArtifactActionResult>;
+  };
 }
 export interface PublicApiDependencies {
   getThreads(): Thread[]; getThread(id: string): Thread | undefined; isRunning(id: string): boolean; createThread(input: CreateThreadInput): Thread | Promise<Thread>;
@@ -109,6 +129,8 @@ export interface PublicApiDependencies {
   hasSecret?(secretName: string): boolean;
   /** Host-owned artifact provider registry; absent when the host cannot render artifacts. */
   artifactProviders?: ArtifactProviderRegistry;
+  /** Host-owned artifact persistence; absent when the host cannot store artifacts. */
+  artifactStore?: ArtifactStoreHost;
 }
 interface RunRecord { readonly runId: string; readonly threadId: string; result?: Exclude<RunResult, { status: 'timed_out' }>; waiters: Set<(result: Exclude<RunResult, { status: 'timed_out' }>) => void> }
 export interface ClaudeThreadsApiService { readonly api: ClaudeThreadsApiV1; start(): void; stop(): void }
@@ -127,6 +149,7 @@ function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   if (deps.registerMcpServer) capabilities.push('mcp.register');
   if (deps.requestSecret) capabilities.push('mcp.requestSecret');
   if (deps.artifactProviders) capabilities.push('extensions.registerArtifactProvider');
+  if (deps.artifactStore && deps.artifactProviders) capabilities.push('artifacts.list', 'artifacts.attach', 'artifacts.update', 'artifacts.detach', 'artifacts.invokeAction');
   return Object.freeze(capabilities);
 }
 function freeze<T extends object>(value: T): Readonly<T> { for (const nested of Object.values(value)) if (nested && typeof nested === 'object' && !Object.isFrozen(nested)) freeze(nested as object); return Object.freeze(value); }
@@ -145,6 +168,11 @@ const MAX_BUDGET_USD = 100;
 const MAX_TIMEOUT_MS = 600_000;
 const MAX_SECRET_NAME_LENGTH = 128;
 const MAX_SECRET_REASON_LENGTH = 500;
+const MAX_ARTIFACT_ID_LENGTH = 128;
+const MAX_ARTIFACT_KIND_LENGTH = 128;
+const MAX_ARTIFACT_TITLE_LENGTH = 512;
+/** Provider data rides along in the host's settings file, so it stays bounded. */
+const MAX_ARTIFACT_DATA_BYTES = 256 * 1024;
 function boundedString(value: unknown, name: string, max: number, required = false): string | undefined {
   if (value === undefined && !required) return undefined;
   if (typeof value !== 'string') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `${name} must be a string.`);
@@ -517,6 +545,206 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       dispose: () => { artifactRegistrations.delete(tracked); result.dispose(); },
     });
   };
+
+  // --- artifacts -----------------------------------------------------------
+  // Everything below returns a structured result and never throws for an
+  // input the caller could plausibly get wrong, so a peer branches on `status`
+  // instead of pattern-matching an exception (the `mcp.register` precedent).
+
+  type ArtifactFailure = Extract<ArtifactMutationResult, { success: false }>['status'];
+  type AuthorizationFailure = 'invalid' | 'conflict' | 'unknown-provider';
+
+  // Generic in the status literal so one helper serves both the attach and the
+  // mutation union without widening either.
+  const artifactFailure = <S extends ArtifactFailure>(artifactId: string, status: S, message: string) =>
+    freeze({ success: false as const, status, artifactId, message });
+
+  /** Resolves the owner/provider pair, or the reason the pair is not usable. */
+  const authorizeProvider = (
+    owner: PeerIdentity | undefined,
+    providerId: unknown,
+    artifactId: string,
+  ): { ok: true; providerId: string } | { ok: false; failure: ReturnType<typeof artifactFailure<AuthorizationFailure>> } => {
+    const registry = deps.artifactProviders!;
+    const pluginId = typeof owner?.pluginId === 'string' ? owner.pluginId.trim() : '';
+    if (!pluginId || pluginId.length > MAX_OWNER_LENGTH) {
+      return { ok: false, failure: artifactFailure(artifactId, 'invalid', 'owner.pluginId must be a non-empty string.') };
+    }
+    const id = typeof providerId === 'string' ? providerId.trim() : '';
+    if (!id || !PROVIDER_ID_PATTERN.test(id)) {
+      return { ok: false, failure: artifactFailure(artifactId, 'invalid', 'providerId must be namespaced, e.g. "my-plugin.artifacts".') };
+    }
+    const registered = registry.ownerOf(id);
+    if (!registered) {
+      return { ok: false, failure: artifactFailure(artifactId, 'unknown-provider', `No artifact provider is registered for "${id}".`) };
+    }
+    if (registered.pluginId !== pluginId) {
+      // The whole point of namespaced providers: one plugin cannot write
+      // artifacts into another plugin's namespace, deliberately or by typo.
+      return { ok: false, failure: artifactFailure(artifactId, 'conflict', `"${id}" is registered by "${registered.pluginId}", not "${pluginId}".`) };
+    }
+    return { ok: true, providerId: id };
+  };
+
+  /**
+   * Provider data is opaque but still persisted into the host's own settings
+   * file, so it must be JSON-representable and bounded. The round-trip also
+   * drops functions and prototypes a peer might otherwise smuggle into state.
+   */
+  const artifactData = (value: unknown): { ok: true; value: Record<string, unknown> } | { ok: false; message: string } => {
+    if (value === undefined || value === null) return { ok: true, value: {} };
+    if (typeof value !== 'object' || Array.isArray(value)) return { ok: false, message: 'data must be a plain object.' };
+    let serialized: string | undefined;
+    try { serialized = JSON.stringify(value); } catch { serialized = undefined; }
+    if (serialized === undefined) return { ok: false, message: 'data must be JSON-serializable.' };
+    if (new TextEncoder().encode(serialized).byteLength > MAX_ARTIFACT_DATA_BYTES) {
+      return { ok: false, message: `data must serialize to no more than ${MAX_ARTIFACT_DATA_BYTES} bytes.` };
+    }
+    return { ok: true, value: JSON.parse(serialized) as Record<string, unknown> };
+  };
+
+  /** Drops host-owned identity, so provider data can never rewrite it. */
+  const providerFields = (data: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(Object.entries(data).filter(([key]) => !HOST_OWNED_ARTIFACT_FIELDS.includes(key)));
+
+  const listArtifacts = async (threadId: string): Promise<readonly ThreadArtifactRef[]> => {
+    guard();
+    const stored = deps.artifactStore?.list(threadId);
+    return freeze((stored ?? []).map(toArtifactRef));
+  };
+
+  const attachArtifact = async (owner: PeerIdentity, threadId: string, ref: ThreadArtifactRef): Promise<ArtifactAttachResult> => {
+    guard();
+    const artifactId = typeof ref?.id === 'string' ? ref.id.trim() : '';
+    const store = deps.artifactStore;
+    if (!store || !deps.artifactProviders) {
+      return artifactFailure(artifactId, 'unavailable', 'Artifact attachment is not available in this host context.');
+    }
+    if (!artifactId || artifactId.length > MAX_ARTIFACT_ID_LENGTH) {
+      return artifactFailure(artifactId, 'invalid', `id must contain 1-${MAX_ARTIFACT_ID_LENGTH} characters.`);
+    }
+    const authorized = authorizeProvider(owner, ref?.providerId, artifactId);
+    if (!authorized.ok) return authorized.failure;
+
+    const kind = typeof ref?.kind === 'string' ? ref.kind.trim() : '';
+    if (!kind || kind.length > MAX_ARTIFACT_KIND_LENGTH) {
+      return artifactFailure(artifactId, 'invalid', `kind must contain 1-${MAX_ARTIFACT_KIND_LENGTH} characters.`);
+    }
+    if (!(deps.artifactProviders.kindsOf(authorized.providerId) ?? []).includes(kind)) {
+      return artifactFailure(artifactId, 'invalid', `"${authorized.providerId}" did not declare the artifact kind "${kind}".`);
+    }
+    const title = typeof ref?.title === 'string' ? ref.title.trim() : '';
+    if (!title || title.length > MAX_ARTIFACT_TITLE_LENGTH) {
+      return artifactFailure(artifactId, 'invalid', `title must contain 1-${MAX_ARTIFACT_TITLE_LENGTH} characters.`);
+    }
+    const schemaVersion = ref?.schemaVersion ?? 1;
+    if (!Number.isInteger(schemaVersion) || schemaVersion < 1) {
+      return artifactFailure(artifactId, 'invalid', 'schemaVersion must be a positive integer.');
+    }
+    let storageRoot: string | undefined;
+    if (ref?.storageRoot !== undefined) {
+      const resolved = store.resolveStorageRoot(ref.storageRoot);
+      // Never silently drop a rejected root and attach anyway: an artifact
+      // whose storage the host cannot safely collect must not be created.
+      if (resolved.status !== 'ok') return artifactFailure(artifactId, 'invalid', resolved.message);
+      storageRoot = resolved.path;
+    }
+    const data = artifactData(ref?.data);
+    if (!data.ok) return artifactFailure(artifactId, 'invalid', data.message);
+
+    const now = Date.now();
+    const record: ThreadArtifactRecord = {
+      // Provider fields first; host-owned identity below always wins.
+      ...providerFields(data.value),
+      id: artifactId, kind, title, providerId: authorized.providerId, schemaVersion,
+      ...(storageRoot ? { storageRoot } : {}),
+      createdAt: now, updatedAt: now,
+    };
+    const outcome = await store.put(threadId, record);
+    if (outcome === 'thread-not-found') return artifactFailure(artifactId, 'thread-not-found', `Thread not found: ${threadId}`);
+    return freeze({ success: true as const, status: outcome, artifactId });
+  };
+
+  const updateArtifact = async (owner: PeerIdentity, threadId: string, artifactId: string, patch: ArtifactPatch): Promise<ArtifactMutationResult> => {
+    guard();
+    const id = typeof artifactId === 'string' ? artifactId.trim() : '';
+    const store = deps.artifactStore;
+    if (!store || !deps.artifactProviders) {
+      return artifactFailure(id, 'unavailable', 'Artifact updates are not available in this host context.');
+    }
+    const stored = store.list(threadId);
+    if (!stored) return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
+    const existing = stored.find(candidate => candidate.id === id);
+    if (!existing) return artifactFailure(id, 'artifact-not-found', `Artifact not found: ${id}`);
+    const authorized = authorizeProvider(owner, existing.providerId, id);
+    if (!authorized.ok) return authorized.failure;
+
+    const next: ThreadArtifactRecord = { ...existing };
+    if (patch?.title !== undefined) {
+      const title = typeof patch.title === 'string' ? patch.title.trim() : '';
+      if (!title || title.length > MAX_ARTIFACT_TITLE_LENGTH) {
+        return artifactFailure(id, 'invalid', `title must contain 1-${MAX_ARTIFACT_TITLE_LENGTH} characters.`);
+      }
+      next.title = title;
+    }
+    if (patch?.data !== undefined) {
+      const data = artifactData(patch.data);
+      if (!data.ok) return artifactFailure(id, 'invalid', data.message);
+      Object.assign(next, providerFields(data.value));
+    }
+    if (patch?.storageRoot !== undefined) {
+      const resolved = store.resolveStorageRoot(patch.storageRoot);
+      if (resolved.status !== 'ok') return artifactFailure(id, 'invalid', resolved.message);
+      next.storageRoot = resolved.path;
+    }
+    next.updatedAt = Date.now();
+    const outcome = await store.put(threadId, next);
+    if (outcome === 'thread-not-found') return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
+    return freeze({ success: true as const, status: 'updated' as const, artifactId: id });
+  };
+
+  const detachArtifact = async (owner: PeerIdentity, threadId: string, artifactId: string): Promise<ArtifactMutationResult> => {
+    guard();
+    const id = typeof artifactId === 'string' ? artifactId.trim() : '';
+    const store = deps.artifactStore;
+    if (!store || !deps.artifactProviders) {
+      return artifactFailure(id, 'unavailable', 'Artifact detachment is not available in this host context.');
+    }
+    const stored = store.list(threadId);
+    if (!stored) return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
+    const existing = stored.find(candidate => candidate.id === id);
+    if (!existing) return artifactFailure(id, 'artifact-not-found', `Artifact not found: ${id}`);
+    const authorized = authorizeProvider(owner, existing.providerId, id);
+    if (!authorized.ok) return authorized.failure;
+    const outcome = await store.detach(threadId, id);
+    if (outcome === 'thread-not-found') return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
+    if (outcome === 'artifact-not-found') return artifactFailure(id, 'artifact-not-found', `Artifact not found: ${id}`);
+    return freeze({ success: true as const, status: 'detached' as const, artifactId: id });
+  };
+
+  /**
+   * Deliberately ownerless. Invoking an action runs the *owning* provider's
+   * own code against its own artifact, which is exactly what a user clicking
+   * the card does; gating it on caller identity would buy nothing, since both
+   * plugins are trusted in-process code either way (ADR-0008).
+   */
+  const invokeArtifactAction = async (threadId: string, artifactId: string, actionId: string): Promise<ArtifactActionResult> => {
+    guard();
+    const store = deps.artifactStore;
+    if (!store) return freeze({ status: 'error' as const, message: 'Artifact actions are not available in this host context.' });
+    const id = typeof artifactId === 'string' ? artifactId.trim() : '';
+    const action = typeof actionId === 'string' ? actionId.trim() : '';
+    if (!action) return freeze({ status: 'error' as const, message: 'actionId must be a non-empty string.' });
+    const stored = store.list(threadId);
+    if (!stored) return freeze({ status: 'error' as const, message: `Thread not found: ${threadId}` });
+    if (!stored.some(candidate => candidate.id === id)) {
+      return freeze({ status: 'error' as const, message: `Artifact not found: ${id}` });
+    }
+    // Same entry point the card click uses, so provider isolation, the invoke
+    // timeout and the result shape cannot drift between the two callers.
+    return freeze(await store.invokeAction(threadId, id, action));
+  };
+
   const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: computeCapabilities(deps),
     threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const owner = boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH); const explicitOrigin = boundedString(input.origin, 'origin', MAX_OWNER_LENGTH); if (owner && explicitOrigin && owner !== explicitOrigin) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match ownerPluginId.'); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: explicitOrigin ?? owner, externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, send, wait, cancel,
       open: async (threadId: string) => { guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.'); await deps.openThread(threadId); },
@@ -527,6 +755,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     agentTools: { createBundle: (profile) => { guard(); if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`); return freeze({ tools: VOICE_TOOLS, execute: executeTool }); } },
     mcp: { register: registerMcp, requestSecret: requestSecretMcp },
     extensions: { registerArtifactProvider },
+    artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
     stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };

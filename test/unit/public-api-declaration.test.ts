@@ -3,6 +3,11 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createClaudeThreadsApiV1 } from '../../src/PublicApi';
 import { ArtifactProviderRegistry } from '../../src/ArtifactContributions';
+import { createArtifactStore } from '../../src/artifactStore';
+
+const artifactStore = () => createArtifactStore({
+  vaultRoot: () => '/vault', getThread: () => undefined, saveSettings: async () => {},
+});
 
 /**
  * ADR-0008: the runtime capability list, the checked-in consumer declaration
@@ -69,7 +74,7 @@ function runtimeSurface(): Record<string, string[]> {
     runConstrainedQuery: async () => ({ output: '', usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 } }),
     registerMcpServer: async () => ({ success: true, status: 'registered', message: '' }),
     requestSecret: async () => true,
-    artifactProviders: new ArtifactProviderRegistry(),
+    artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(),
   } as never).api;
   const surface: Record<string, string[]> = {};
   for (const [key, value] of Object.entries(api as unknown as Record<string, unknown>)) {
@@ -101,7 +106,7 @@ describe('checked-in consumer declaration', () => {
       getTraceMetadata: async () => null, readTraceChunk: async () => null,
       runConstrainedQuery: vi.fn(),
       registerMcpServer: vi.fn(), requestSecret: vi.fn(),
-      artifactProviders: new ArtifactProviderRegistry(),
+      artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(),
     } as never).api;
     // agentTools advertises a profile rather than a method name; everything
     // else is `<namespace>.<method>`.

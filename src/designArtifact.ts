@@ -1,8 +1,9 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { DesignArtifact, Thread } from './types';
+import { DESIGN_ARTIFACT_KIND, DESIGN_ARTIFACT_SCHEMA_VERSION, DESIGN_PROVIDER_ID } from './designArtifactProvider';
 
-export const DESIGN_ARTIFACT_SCHEMA_VERSION = 1 as const;
+export { DESIGN_ARTIFACT_SCHEMA_VERSION };
 
 export interface DesignArtifactManifest {
   schemaVersion: typeof DESIGN_ARTIFACT_SCHEMA_VERSION;
@@ -212,6 +213,12 @@ export async function ensureDesignArtifact(
   );
   if (existing) {
     existing.updatedAt = now;
+    // Backfill host-owned identity on records written before providers and
+    // host-owned storage existed, so re-entering design mode is enough to make
+    // an older artifact garbage-collectable (ADR-0010). Nothing on disk moves.
+    existing.providerId ??= DESIGN_PROVIDER_ID;
+    existing.schemaVersion ??= DESIGN_ARTIFACT_SCHEMA_VERSION;
+    existing.storageRoot ??= existing.root;
     return existing;
   }
 
@@ -225,8 +232,13 @@ export async function ensureDesignArtifact(
 
   const artifact: DesignArtifact = {
     id: manifest.id,
-    kind: 'design-static',
+    kind: DESIGN_ARTIFACT_KIND,
     title: manifest.title,
+    providerId: DESIGN_PROVIDER_ID,
+    schemaVersion: DESIGN_ARTIFACT_SCHEMA_VERSION,
+    // Host-visible so thread deletion can collect it; re-validated by the host
+    // against the vault artifact root before it is ever stored or removed.
+    storageRoot: root,
     root,
     manifestPath: path.join(root, 'artifact.json'),
     entryPath: path.join(root, manifest.entry),

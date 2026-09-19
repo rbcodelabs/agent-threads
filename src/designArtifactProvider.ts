@@ -19,6 +19,12 @@ import type { DesignArtifact } from './types';
 
 export const DESIGN_PROVIDER_ID = 'agent-threads.design';
 export const DESIGN_ARTIFACT_KIND = 'design-static';
+/**
+ * Lives here rather than in `designArtifact.ts` so the design entry points can
+ * declare it without statically importing the filesystem-backed module, which
+ * the mobile bundle must not pull in.
+ */
+export const DESIGN_ARTIFACT_SCHEMA_VERSION = 1 as const;
 
 /** The plugin's own identity when it registers built-in capabilities. */
 export const DESIGN_PROVIDER_OWNER = Object.freeze({
@@ -34,6 +40,16 @@ export const DESIGN_ACTION_REVEAL = 'reveal';
 export type DesignPreviewOutcome =
   | { status: 'opened' }
   | { status: 'source-revealed' | 'unavailable'; warning: string };
+
+/**
+ * `ArtifactActionResult` carries ok/warning/error and a message — deliberately,
+ * since the host must not learn provider-specific outcome vocabularies. The
+ * design entry still reports the finer `source-revealed` state to its agent
+ * caller, so the provider exports its own warning text and recovers the
+ * distinction from it. This is provider-internal knowledge, not a host
+ * privilege: a peer can do exactly the same with its own constants.
+ */
+export const DESIGN_SOURCE_REVEALED_WARNING = 'Secure artifact preview requires Geode; revealed the source instead.';
 
 interface GeodeCaptureHost {
   captureArtifact?: (root: string) => Promise<{ path: string; width: number; height: number }>;
@@ -75,7 +91,7 @@ export async function previewDesignArtifact(
   if (placement !== 'unavailable') return { status: 'opened' };
   const revealed = await host.revealInFolder(artifact.manifestPath);
   if (revealed) {
-    return { status: 'source-revealed', warning: 'Secure artifact preview requires Geode; revealed the source instead.' };
+    return { status: 'source-revealed', warning: DESIGN_SOURCE_REVEALED_WARNING };
   }
   return { status: 'unavailable', warning: 'Could not open artifact preview or reveal source.' };
 }
