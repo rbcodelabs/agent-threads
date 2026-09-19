@@ -207,7 +207,9 @@ export async function ensureDesignArtifact(
   now = Date.now(),
   fileFs: DesignArtifactFs = defaultFs,
 ): Promise<DesignArtifact> {
-  const existing = thread.artifacts?.find((artifact) => artifact.kind === 'design-static');
+  const existing = thread.artifacts?.find(
+    (artifact): artifact is DesignArtifact => artifact.kind === 'design-static',
+  );
   if (existing) {
     existing.updatedAt = now;
     return existing;

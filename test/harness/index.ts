@@ -6,6 +6,8 @@ import { fixtureThreads } from './fixtures';
 import { mockLeaf, mockWorkspace } from './obsidian-mock';
 import { Platform } from 'obsidian';
 import { enterDesignMode, assertDesignWriteAllowed } from '../../src/designArtifact';
+import { ArtifactProviderRegistry, toArtifactRef } from '../../src/ArtifactContributions';
+import { createDesignArtifactContribution, DESIGN_PROVIDER_OWNER, previewDesignArtifact } from '../../src/designArtifactProvider';
 
 if (new URLSearchParams(window.location.search).has('mobile')) Platform.isMobile = true;
 
@@ -59,10 +61,17 @@ const mockScheduler = {
   }
 };
 
+// The harness has no public API service, so it registers the built-in design
+// contribution straight into the registry the API would delegate to. The
+// contract exercised by the card below is identical either way.
+const artifactProviders = new ArtifactProviderRegistry();
+artifactProviders.register(DESIGN_PROVIDER_OWNER, createDesignArtifactContribution());
+
 const mockPlugin = {
   app: (mockLeaf as any).app,
   settings,
   manager,
+  artifactProviders,
   persistence: null,
   scheduler: mockScheduler,
   summarizer: { summarize: async () => ({ title: '', summary: '' }) },
@@ -123,7 +132,7 @@ const designPreviewLeaf = {
     const view = (window as any).__view as ThreadsView;
     Object.assign(mockWorkspace, { getLeavesOfType: () => [], getLeaf: () => designPreviewLeaf, revealLeaf: () => {} });
     view.refreshArtifactCard();
-    return view.openArtifactPreview(artifact);
+    return previewDesignArtifact(artifact, view.artifactActionHost(threadId, toArtifactRef(artifact)));
   },
 }, { mkdir: async () => {}, writeFile: async () => {} });
 (window as any).__contextLinkCalls = [];
