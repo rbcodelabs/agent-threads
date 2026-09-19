@@ -281,8 +281,12 @@ export interface Thread {
   reviewed?: boolean;
   /** Paths of files written or edited during this thread's lifetime. */
   editedFiles?: string[];
-  /** Durable local design artifacts created from this thread. Source files remain canonical. */
-  artifacts?: DesignArtifact[];
+  /**
+   * Durable local artifacts created from this thread. The host owns identity
+   * and lifecycle; the owning provider owns the rest of the record's shape.
+   * Source files remain canonical.
+   */
+  artifacts?: ThreadArtifactRecord[];
   /** Subset of editedFiles where the user modified the proposed content in the permission dialog. */
   userModifiedFiles?: string[];
   /** Unsent draft message and attachments for this thread. */
@@ -395,16 +399,32 @@ export interface Thread {
   pendingQuestions?: AskQuestion[];
 }
 
-export interface DesignArtifact {
+/**
+ * Host-owned identity for a persisted artifact. Everything beyond these
+ * fields belongs to the provider that produced it and is opaque to the host
+ * (see `src/ArtifactContributions.ts`).
+ *
+ * `providerId` and `schemaVersion` are optional because records persisted
+ * before providers existed carry neither; they are defaulted at read time by
+ * `toArtifactRef()` rather than migrated on disk.
+ */
+export interface ThreadArtifactRecord {
   id: string;
-  kind: 'design-static';
+  /** Provider-scoped artifact kind. */
+  kind: string;
   title: string;
+  providerId?: string;
+  schemaVersion?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DesignArtifact extends ThreadArtifactRecord {
+  kind: 'design-static';
   /** Absolute local artifact directory containing artifact.json. */
   root: string;
   manifestPath: string;
   entryPath: string;
-  createdAt: number;
-  updatedAt: number;
   lastCapturePath?: string;
 }
 

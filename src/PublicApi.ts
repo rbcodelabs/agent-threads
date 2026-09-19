@@ -2,6 +2,9 @@ import type { ChatMessage, Thread, ThreadStatus } from './types';
 import type { ThreadEvent } from './ThreadManager';
 import type { RawLogTraceChunk, RawLogTraceMetadata } from './RawLogWriter';
 import type { McpRegistrationResult } from './mcpServerStore';
+import type { ArtifactContribution, ArtifactProviderRegistry, ArtifactRegistrationResult, PeerIdentity } from './ArtifactContributions';
+
+export type { ArtifactAction, ArtifactActionHost, ArtifactActionResult, ArtifactContribution, ArtifactPresentation, ArtifactRegistrationResult, ArtifactViewPlacement, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
 
 export type PublicErrorCode = 'PLUGIN_UNAVAILABLE' | 'THREAD_NOT_FOUND' | 'RUN_NOT_FOUND' | 'RUN_FAILED' | 'RUN_INTERRUPTED' | 'THREAD_BUSY' | 'IDEMPOTENCY_CONFLICT' | 'TRACE_NOT_FOUND' | 'CURSOR_INVALID' | 'CONSTRAINT_UNSUPPORTED' | 'ORCHESTRATOR_NOT_FOUND' | 'INVALID_ARGUMENT';
 export interface PublicError { readonly code: PublicErrorCode; readonly message: string }
@@ -81,6 +84,13 @@ export interface ClaudeThreadsApiV1 {
     register(input: McpRegisterInput): Promise<McpRegistrationResult>;
     requestSecret(input: RequestSecretInput): Promise<RequestSecretResult>;
   };
+  /**
+   * Contribution surface (ADR-0008). Every registration is disposable and is
+   * dropped both on the caller's dispose and on host `stop()`.
+   */
+  readonly extensions: {
+    registerArtifactProvider(owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult;
+  };
 }
 export interface PublicApiDependencies {
   getThreads(): Thread[]; getThread(id: string): Thread | undefined; isRunning(id: string): boolean; createThread(input: CreateThreadInput): Thread | Promise<Thread>;
@@ -97,11 +107,28 @@ export interface PublicApiDependencies {
   registerMcpServer?(input: unknown): Promise<McpRegistrationResult>;
   requestSecret?(secretName: string, reason: string, force?: boolean): Promise<boolean>;
   hasSecret?(secretName: string): boolean;
+  /** Host-owned artifact provider registry; absent when the host cannot render artifacts. */
+  artifactProviders?: ArtifactProviderRegistry;
 }
 interface RunRecord { readonly runId: string; readonly threadId: string; result?: Exclude<RunResult, { status: 'timed_out' }>; waiters: Set<(result: Exclude<RunResult, { status: 'timed_out' }>) => void> }
 export interface ClaudeThreadsApiService { readonly api: ClaudeThreadsApiV1; start(): void; stop(): void }
 
-const CAPABILITIES = Object.freeze(['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe', 'traces.listSources', 'traces.readChunk', 'traces.subscribe', 'constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel', 'orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration', 'mcp.register', 'mcp.requestSecret']);
+/**
+ * Capabilities are computed from the dependencies actually present, so
+ * discovery never advertises an operation that fails at call time (ADR-0008).
+ * `threads.*`, `orchestrators.*` and `agentTools.*` rest on required deps and
+ * are therefore always present.
+ */
+function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
+  const capabilities = ['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe'];
+  if (deps.getTraceMetadata && deps.readTraceChunk) capabilities.push('traces.listSources', 'traces.readChunk', 'traces.subscribe');
+  if (deps.runConstrainedQuery) capabilities.push('constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel');
+  capabilities.push('orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration');
+  if (deps.registerMcpServer) capabilities.push('mcp.register');
+  if (deps.requestSecret) capabilities.push('mcp.requestSecret');
+  if (deps.artifactProviders) capabilities.push('extensions.registerArtifactProvider');
+  return Object.freeze(capabilities);
+}
 function freeze<T extends object>(value: T): Readonly<T> { for (const nested of Object.values(value)) if (nested && typeof nested === 'object' && !Object.isFrozen(nested)) freeze(nested as object); return Object.freeze(value); }
 function snapshotMessage(message: ChatMessage): MessageSnapshot { return freeze({ id: message.id, role: message.role, content: String(message.content).slice(0, 100_000), timestamp: message.timestamp }); }
 function snapshotSummary(thread: Thread, running: boolean): ThreadSummary { return freeze({ id: thread.id, title: thread.title, status: thread.status ?? 'waiting', reviewed: thread.reviewed ?? false, cwd: thread.cwd, projectId: thread.projectId, agentHarness: thread.agentHarness ?? 'claude', origin: thread.origin, externalJobId: thread.externalJobId, ephemeral: thread.ephemeral, background: thread.background, createdAt: thread.createdAt, updatedAt: thread.updatedAt, isRunning: running, messageCount: thread.messages.length }); }
@@ -472,7 +499,25 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     if (saved) return freeze({ success: true, secretName: varName, alreadyExisted: false });
     return freeze({ success: false, reason: 'The user did not save the secret.' });
   };
-  const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: CAPABILITIES,
+  const artifactRegistrations = new Set<{ dispose: () => void }>();
+  const registerArtifactProvider = (owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult => {
+    guard();
+    const registry = deps.artifactProviders;
+    if (!registry) {
+      return freeze({ success: false as const, status: 'invalid' as const, providerId: String(contribution?.providerId ?? ''), message: 'Artifact contributions are not available in this host context.', dispose: () => {} });
+    }
+    const result = registry.register(owner, contribution);
+    if (!result.success) return freeze(result);
+    // Tracked so stop() can drop it the way event listeners are dropped; a
+    // plugin reload must never leave a provider bound to a dead generation.
+    const tracked = { dispose: result.dispose };
+    artifactRegistrations.add(tracked);
+    return freeze({
+      success: true as const, status: 'registered' as const, providerId: result.providerId,
+      dispose: () => { artifactRegistrations.delete(tracked); result.dispose(); },
+    });
+  };
+  const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: computeCapabilities(deps),
     threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const owner = boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH); const explicitOrigin = boundedString(input.origin, 'origin', MAX_OWNER_LENGTH); if (owner && explicitOrigin && owner !== explicitOrigin) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match ownerPluginId.'); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: explicitOrigin ?? owner, externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, send, wait, cancel,
       open: async (threadId: string) => { guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.'); await deps.openThread(threadId); },
       subscribe: (listener: (event: PublicThreadEvent) => void) => { guard(); listeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; listeners.delete(listener); } }); } },
@@ -481,9 +526,10 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input); } },
     agentTools: { createBundle: (profile) => { guard(); if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`); return freeze({ tools: VOICE_TOOLS, execute: executeTool }); } },
     mcp: { register: registerMcp, requestSecret: requestSecretMcp },
+    extensions: { registerArtifactProvider },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
-    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
+    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
 }
 
 function toolTimeout(args: Record<string, unknown>): number { return Math.min(Math.max(10, Number(args.timeout_secs) || 120), 300) * 1_000; }

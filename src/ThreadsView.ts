@@ -7,7 +7,7 @@ import { parseLoopArgs, formatLoopInterval } from './loopUtils';
 import { THREAD_BUILTIN_COMMANDS, THREAD_ARG_COMPLETIONS, MODEL_ALIASES, goalKickoffMessage, resolveCreatePrMessage, escalationCommand } from './slashCommands';
 import { isSetAsGoalEligible } from './goalContext';
 import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo } from './gitDiffUtils';
-import type { Thread, ChatMessage, ToolCallRecord, AskQuestion, ImageAttachment } from './types';
+import type { Thread, ChatMessage, ToolCallRecord, AskQuestion, ImageAttachment, DesignArtifact } from './types';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { SummarizeResult } from './InProcessSummarizer';
 import { shouldAutoSummarize, isUsableTitle } from './summarization';
@@ -34,8 +34,10 @@ import { partitionThreads } from './threadRowState';
 import { agentLabel, buildAgentBreadcrumbs, summarizeAgentTeam } from './agentRuns/agentTreeModel';
 import { renderAgentPopoverTree } from './agentRuns/renderAgentPopoverTree';
 import { renderAgentActivity } from './agentRuns/renderAgentActivity';
-import { designKickoffMessage, type DesignPreviewResult } from './designArtifact';
-import type { DesignArtifact } from './types';
+import { toArtifactRef } from './ArtifactContributions';
+import type {
+  ArtifactActionHost, ArtifactPresentation, ArtifactViewPlacement, ThreadArtifactRef,
+} from './ArtifactContributions';
 import { extractVisualizeMarkers } from './visualizeMarker';
 import { VisualizeMountManager, resolveVisualizeTokens, toFileUrl, type VisualizeFs } from './visualizeRenderer';
 import { deleteScheduledActivity, scheduledActivityForThread, scheduledActivitySummary, type ScheduledActivity } from './scheduledActivity';
@@ -1540,104 +1542,140 @@ export class ThreadsView extends ItemView {
     this.renderArtifactCard();
   }
 
-  private activeArtifact(): DesignArtifact | null {
-    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    return thread?.artifacts?.find((artifact) => artifact.kind === 'design-static') ?? null;
+  /**
+   * The artifact the card currently represents, adapted at read time. Records
+   * persisted before providers existed carry no `providerId`; nothing on disk
+   * is rewritten (ADR-0010).
+   */
+  private activeArtifact(): { threadId: string; ref: ThreadArtifactRef } | null {
+    const threadId = this.activeThreadId;
+    const thread = threadId ? this.manager.getThread(threadId) : null;
+    const record = thread?.artifacts?.[0];
+    return record && threadId ? { threadId, ref: toArtifactRef(record) } : null;
   }
 
-  /** Persisted artifact actions stay visible independently of edited-file history. */
+  /**
+   * Persisted artifact actions stay visible independently of edited-file
+   * history. The card is entirely generic: title, subtitle and actions come
+   * from whatever provider owns the artifact, and clicks dispatch by action
+   * id. The host never inspects an artifact's provider data.
+   */
   private renderArtifactCard(): void {
     this.artifactCardEl.empty();
-    const artifact = this.activeArtifact();
-    if (!artifact) {
+    const active = this.activeArtifact();
+    if (!active) {
       this.artifactCardEl.addClass('ct-hidden');
       return;
     }
     this.artifactCardEl.removeClass('ct-hidden');
+    const { threadId, ref } = active;
+
+    // An uninstalled or faulty provider degrades to an explanatory card.
+    // Prior work must never vanish or throw because a plugin went away.
+    const described = this.plugin.artifactProviders.present(ref);
+    const presentation: ArtifactPresentation = described.status === 'ok' ? described.presentation : {
+      title: ref.title,
+      subtitle: described.status === 'missing-provider'
+        ? `Unavailable — no plugin provides "${ref.providerId}"`
+        : `Unavailable — "${ref.providerId}" could not describe this artifact`,
+      actions: [],
+    };
 
     const icon = this.artifactCardEl.createSpan('ct-artifact-card-icon');
-    setIcon(icon, 'panels-top-left');
+    setIcon(icon, presentation.icon ?? 'panels-top-left');
     const copy = this.artifactCardEl.createDiv('ct-artifact-card-copy');
-    copy.createDiv({ cls: 'ct-artifact-card-title', text: artifact.title });
-    copy.createDiv({ cls: 'ct-artifact-card-meta', text: 'Static design artifact' });
+    copy.createDiv({ cls: 'ct-artifact-card-title', text: presentation.title });
+    if (presentation.subtitle) copy.createDiv({ cls: 'ct-artifact-card-meta', text: presentation.subtitle });
 
     const actions = this.artifactCardEl.createDiv('ct-artifact-card-actions');
-    const action = (label: string, iconName: string, handler: () => void | Promise<void>, primary = false) => {
+    for (const action of presentation.actions) {
+      const primary = action.variant === 'primary';
       const button = actions.createEl('button', {
         cls: `ct-artifact-action ${primary ? 'ct-artifact-action-primary' : 'ct-artifact-action-secondary'}`,
       });
       const iconEl = button.createSpan('ct-artifact-action-icon');
-      setIcon(iconEl, iconName);
-      if (primary) button.createSpan({ cls: 'ct-artifact-action-label', text: 'Preview' });
-      button.setAttribute('aria-label', label);
-      button.setAttribute('title', label);
-      button.addEventListener('click', () => { void handler(); });
-      return button;
-    };
-    action('Preview design', 'play', async () => { await this.openArtifactPreview(artifact); }, true);
-    action('Capture design screenshot', 'camera', () => this.captureArtifact(artifact));
-    action('Reveal design source', 'folder-open', () => this.revealArtifactSource(artifact));
+      setIcon(iconEl, action.icon ?? 'circle');
+      if (primary && action.shortLabel) button.createSpan({ cls: 'ct-artifact-action-label', text: action.shortLabel });
+      button.setAttribute('aria-label', action.label);
+      button.setAttribute('title', action.tooltip ?? action.label);
+      button.addEventListener('click', () => { void this.invokeArtifactAction(threadId, ref, action.id); });
+    }
   }
 
   refreshArtifactCard(): void {
     this.renderArtifactCard();
   }
 
-  async openArtifactPreview(artifact: DesignArtifact): Promise<DesignPreviewResult> {
+  private async invokeArtifactAction(threadId: string, ref: ThreadArtifactRef, actionId: string): Promise<void> {
+    const result = await this.plugin.artifactProviders.invoke(actionId, ref, this.artifactActionHost(threadId, ref));
+    if (result.message) new Notice(result.message);
+    this.renderArtifactCard();
+  }
+
+  /**
+   * Capabilities lent to a provider for the duration of one action. A provider
+   * never receives this view, a workspace leaf, or a DOM node — only these
+   * three brokered operations.
+   */
+  artifactActionHost(threadId: string, ref: ThreadArtifactRef): ArtifactActionHost {
+    return {
+      openView: (state) => this.openArtifactView(state),
+      revealInFolder: (target) => this.revealArtifactPath(target),
+      updateArtifact: async (patch) => {
+        const record = this.manager.getThread(threadId)?.artifacts?.find((candidate) => candidate.id === ref.id);
+        if (!record) return;
+        if (patch.title !== undefined) record.title = patch.title;
+        if (patch.data && typeof patch.data === 'object') {
+          const writable = record as unknown as Record<string, unknown>;
+          for (const [key, value] of Object.entries(patch.data as Record<string, unknown>)) {
+            // Host-owned identity is not writable by the provider.
+            if (key === 'id' || key === 'kind' || key === 'providerId' || key === 'schemaVersion' || key === 'createdAt') continue;
+            writable[key] = value;
+          }
+        }
+        await this.plugin.saveSettings();
+      },
+    };
+  }
+
+  /**
+   * Places a host view on the provider's behalf and reports where it landed.
+   * Conversation-first policy and context-panel leaf ownership are host
+   * internals a peer cannot see, so the decision stays here.
+   */
+  async openArtifactView(request: { type: string; state?: Record<string, unknown> }): Promise<ArtifactViewPlacement> {
     try {
       if (this.plugin.isConversationFirst()) {
-        await this.plugin.contextPanel.setViewState({
-          type: 'geode-artifact', active: true, state: { root: artifact.root },
-        });
-        if (this.plugin.contextPanel.getLeaf().getViewState().type !== 'geode-artifact') {
-          throw new Error('Secure artifact preview is unavailable.');
+        await this.plugin.contextPanel.setViewState({ type: request.type, active: true, state: request.state });
+        if (this.plugin.contextPanel.getLeaf().getViewState().type !== request.type) {
+          throw new Error('The host substituted another view.');
         }
-        return { status: 'opened' };
+        return 'context-panel';
       }
-      const existing = this.app.workspace.getLeavesOfType('geode-artifact');
-      const leaf = existing.find((candidate) =>
-        (candidate.getViewState().state as { root?: string } | undefined)?.root === artifact.root,
-      ) ?? existing[0] ?? this.app.workspace.getLeaf('tab');
-      await leaf.setViewState({ type: 'geode-artifact', active: true, state: { root: artifact.root } });
-      if (leaf.getViewState().type !== 'geode-artifact') throw new Error('Secure artifact preview is unavailable.');
+      const existing = this.app.workspace.getLeavesOfType(request.type);
+      const matches = (candidate: WorkspaceLeaf) => {
+        const current = candidate.getViewState().state as Record<string, unknown> | undefined;
+        return Object.entries(request.state ?? {}).every(([key, value]) => current?.[key] === value);
+      };
+      const leaf = existing.find(matches) ?? existing[0] ?? this.app.workspace.getLeaf('tab');
+      await leaf.setViewState({ type: request.type, active: true, state: request.state });
+      if (leaf.getViewState().type !== request.type) throw new Error('The host substituted another view.');
       await this.app.workspace.revealLeaf(leaf);
-      return { status: 'opened' };
+      return 'tab';
     } catch {
-      try {
-        const { shell } = require('electron') as { shell: { showItemInFolder: (target: string) => void } };
-        shell.showItemInFolder(artifact.manifestPath);
-        const warning = 'Secure artifact preview requires Geode; revealed the source instead.';
-        new Notice(warning);
-        return { status: 'source-revealed', warning };
-      } catch (error) {
-        return { status: 'unavailable', warning: `Could not open artifact preview or reveal source: ${error instanceof Error ? error.message : String(error)}` };
-      }
+      return 'unavailable';
     }
   }
 
-  private async captureArtifact(artifact: DesignArtifact): Promise<void> {
-    const host = (window as unknown as {
-      geode?: { captureArtifact?: (root: string) => Promise<{ path: string; width: number; height: number }> };
-    }).geode;
-    if (!host?.captureArtifact) {
-      new Notice('Artifact capture requires Geode with ArtifactView support.');
-      return;
-    }
+  /** Reveals a local path in the OS file manager; false when unsupported. */
+  async revealArtifactPath(target: string): Promise<boolean> {
     try {
-      const captured = await host.captureArtifact(artifact.root);
-      artifact.lastCapturePath = captured.path;
-      artifact.updatedAt = Date.now();
-      await this.plugin.saveSettings();
-      this.renderArtifactCard();
-      new Notice(`Captured ${captured.width}×${captured.height} artifact screenshot.`);
-    } catch (error) {
-      new Notice(`Artifact capture failed: ${(error as Error).message}`);
+      const { shell } = require('electron') as { shell: { showItemInFolder: (path: string) => void } };
+      shell.showItemInFolder(target);
+      return true;
+    } catch {
+      return false;
     }
-  }
-
-  private async revealArtifactSource(artifact: DesignArtifact): Promise<void> {
-    const { shell } = require('electron') as { shell: { showItemInFolder: (target: string) => void } };
-    shell.showItemInFolder(artifact.manifestPath);
   }
 
   // Switch to icon-only chips above this file count to keep the row compact
@@ -5623,6 +5661,9 @@ export class ThreadsView extends ItemView {
     }
     this.showCommandDivider(existing ? 'Revising design artifact…' : 'Design artifact created. Starting design turn…');
     const sendThreadId = thread.id;
+    // Loaded on demand: the view must not carry a build-time dependency on an
+    // optional capability (ADR-0008).
+    const { designKickoffMessage } = await import('./designArtifact');
     this.manager.sendMessage(sendThreadId, designKickoffMessage(artifact, brief)).catch((error) => {
       this.showCommandDivider(`Failed to start design turn: ${(error as Error).message}`, true);
       if (this.activeThreadId === sendThreadId) this.setRunningState(false);
