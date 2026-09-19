@@ -4,7 +4,7 @@ import { createConstrainedQueryRunner } from './ConstrainedRun';
 import { ArtifactProviderRegistry } from './ArtifactContributions';
 import { createArtifactStore } from './artifactStore';
 import {
-  createDesignArtifactContribution, DESIGN_ACTION_PREVIEW, DESIGN_ARTIFACT_KIND, DESIGN_ARTIFACT_SCHEMA_VERSION,
+  createDesignArtifactContribution, DESIGN_ACTION_PREVIEW, DESIGN_ARTIFACT_KIND, DESIGN_ARTIFACT_SCHEMA_VERSION, DESIGN_SOURCE_REVEALED_WARNING,
   DESIGN_PROVIDER_ID, DESIGN_PROVIDER_OWNER,
 } from './designArtifactProvider';
 export { createClaudeThreadsApiV1 } from './PublicApi';
@@ -2922,7 +2922,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     if (!attached.success) throw new Error(attached.message);
     const result = await api.artifacts.invokeAction(threadId, artifact.id, DESIGN_ACTION_PREVIEW);
     if (result.status === 'ok') return { status: 'opened' };
-    if (result.status === 'warning') return { status: 'unavailable', warning: result.message };
+    if (result.status === 'warning') {
+      const status = result.message === DESIGN_SOURCE_REVEALED_WARNING ? 'source-revealed' : 'unavailable';
+      return { status, warning: result.message };
+    }
     throw new Error(result.message);
   }
 

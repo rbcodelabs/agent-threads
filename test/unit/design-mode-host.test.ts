@@ -8,7 +8,7 @@ import { ThreadsView } from '../../src/ThreadsView';
 import { ArtifactProviderRegistry } from '../../src/ArtifactContributions';
 import { createArtifactStore } from '../../src/artifactStore';
 import { createClaudeThreadsApiV1 } from '../../src/PublicApi';
-import { createDesignArtifactContribution, DESIGN_PROVIDER_OWNER } from '../../src/designArtifactProvider';
+import { createDesignArtifactContribution, DESIGN_PROVIDER_OWNER, DESIGN_SOURCE_REVEALED_WARNING } from '../../src/designArtifactProvider';
 import type { Thread } from '../../src/types';
 
 const roots: string[] = [];
@@ -121,6 +121,20 @@ describe('design mode host callback', () => {
     expect(result.created).toBe(true);
     expect(result.preview.status).toBe('unavailable');
     expect(caller.artifacts).toHaveLength(1);
+  });
+
+  it('still reports source-revealed distinctly through the flattened action result', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'design-host-'));
+    roots.push(root);
+    const caller = { id: 'caller' } as Thread;
+    const { plugin, view } = wireDesignHost(root, { caller });
+    // Geode is absent, so the host cannot place the artifact view but can
+    // reveal the source. The agent-facing EnterDesignMode result serializes
+    // this status, so the finer state must survive the ok/warning/error hop.
+    Object.assign(view, { openArtifactView: async () => 'unavailable' as const, revealArtifactPath: async () => true });
+
+    const result = await plugin.enterDesignMode('caller', 'Settings');
+    expect(result.preview).toEqual({ status: 'source-revealed', warning: DESIGN_SOURCE_REVEALED_WARNING });
   });
 
   it('rejects non-filesystem hosts clearly', async () => {

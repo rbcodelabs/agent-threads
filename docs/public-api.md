@@ -28,6 +28,18 @@ Listen for `claude-threads:api-ready` and `claude-threads:api-stopping`, reacqui
 - Provider callbacks are isolated and bounded. A `present()` that throws degrades that one card to an explanatory placeholder; an `invoke()` that throws or exceeds the host timeout becomes an `error` result shown to the user. Neither can break thread rendering or execution.
 - A persisted artifact whose provider is not registered still renders, showing its stored title and naming the missing provider, with no actions. Uninstalling a plugin never makes prior work vanish.
 
+### Creating and opening an artifact
+
+`extensions.registerArtifactProvider` only covers presentation. The `artifacts` namespace is the entry point: it lets a peer attach an artifact to a thread and invoke one of its actions without a view, DOM, or private manager access.
+
+- `artifacts.attach(owner, threadId, ref)` persists an artifact and returns `attached` or `updated`. It is idempotent on `ref.id`: re-attaching the same id updates in place rather than producing a second card.
+- `owner` is explicit on `attach`, `update` and `detach` because the API object is a single shared singleton — the host cannot infer which plugin is calling, so ownership is asserted rather than derived. It is checked against the identity that registered `ref.providerId`, so one plugin cannot write artifacts into another plugin's namespace (`status: 'conflict'`). A provider nobody registered gives `unknown-provider`; a `kind` the provider never declared gives `invalid`.
+- `artifacts.invokeAction(threadId, artifactId, actionId)` runs a named action on exactly the path a card click takes, with the same provider isolation, the same invoke timeout and the same `ArtifactActionResult`. It is deliberately ownerless: it runs the owning provider's own code against its own artifact, which is what a user clicking the card already does.
+- Unknown thread, unknown artifact, unregistered provider and unknown action id each produce a distinct structured outcome. Nothing in this namespace throws for input a caller could plausibly get wrong; only a revoked generation throws (`PLUGIN_UNAVAILABLE`).
+- `ThreadArtifactRef.storageRoot` is optional and is the one deliberately non-opaque field: the host needs it to delete an artifact's files when the owning thread is deleted. It is resolved (through `..` and, where possible, symlinks) and must lie strictly inside `<vault>/.geode/artifacts/`. The artifact root itself, the vault root, relative paths and anything outside the tree are rejected, and a rejected root fails the whole `attach` rather than being silently dropped. `storageRoot` is host-owned thereafter: neither `updateArtifact()` nor provider data can rewrite it, only `artifacts.update` with a freshly validated value.
+- Deleting a thread removes the storage of its artifacts, re-validating each root immediately beforehand. A missing or already-deleted directory is not an error. Detaching an artifact deliberately does *not* delete storage — that is removing a card, not deleting a user's work.
+- Provider `data` must be a plain JSON-serializable object and is bounded (256 KiB serialized), because it is persisted inside the host's own settings file.
+
 The API serializes correlated operations and awaits atomic host persistence before returning their handles. Idempotency mappings and results are retained and evicted as pairs. A provider reload marks an in-flight operation interrupted; a consumer can reacquire v1 and reconcile it by run ID without duplicating work. Cancellation, completion, and provider shutdown use first-terminal-wins semantics.
 
 ## Security boundary
