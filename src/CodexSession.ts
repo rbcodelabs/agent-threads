@@ -7,6 +7,7 @@ import type { SessionCallbacks } from './ClaudeSession';
 import { resolveCodexPermissions, resolveDynamicToolApproval, type HarnessSessionOptions } from './HarnessSession';
 import { mergeUsageSnapshot, normalizeCodexAccountUsage, normalizeCodexRateLimitResponse, normalizeCodexTokenUsage, type UsageSnapshot } from './Usage';
 import { renderCodexAgentProfiles } from './AgentProfiles';
+import { CodexRawLog } from './CodexRawLog';
 
 type CodexTokenUsageBreakdown = {
   totalTokens: number;
@@ -139,6 +140,7 @@ export function codexContextUsage(tokenUsage: CodexThreadTokenUsage, model: stri
 export class CodexSession {
   private process: ChildProcessWithoutNullStreams | null = null;
   private buffer = '';
+  private rawLog = new CodexRawLog(() => this.options?.callbacks.onRawEvent);
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
   private options: HarnessSessionOptions | null = null;
@@ -191,13 +193,19 @@ export class CodexSession {
       env: { ...process.env, ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) },
       stdio: 'pipe',
     });
-    this.process.stdout.on('data', (chunk: Buffer) => this.consume(chunk.toString()));
+    const child = this.process;
+    this.buffer = '';
+    this.process.stdout.on('data', (chunk: Buffer) => { if (this.process === child) this.consume(chunk.toString()); });
     this.process.stderr.on('data', (chunk: Buffer) => console.warn('[ClaudeThreads] Codex app-server:', chunk.toString().trim()));
-    this.process.on('error', (error) => this.failAll(error));
+    this.process.on('error', (error) => { if (this.process === child) this.failAll(error); });
     this.process.on('exit', (code) => {
+      if (this.process !== child) return;
+      this.rawLog.flush();
       if (!this.closed && code !== 0) this.failAll(new Error(`Codex app-server exited (${code ?? 'unknown'})`));
       this.closed = true;
     });
+    // Pipes can deliver their final bytes after exit; close means stdio drained.
+    this.process.on('close', () => { if (this.process === child) this.rawLog.flush(); });
 
     await this.request('initialize', {
       clientInfo: { name: 'obsidian-claude-threads', title: 'Agent Threads', version: '0.24.0' },
@@ -611,11 +619,7 @@ export class CodexSession {
     if ((typeof message.id === 'number' || typeof message.id === 'string') && message.method) { this.handleServerRequest(message); return; }
     const callbacks = this.options?.callbacks; if (!callbacks) return;
     const params = message.params ?? {};
-    // Match Claude's raw-log behavior: persist complete protocol events but
-    // omit high-volume text deltas that are reconstructed by agentMessage.
-    if (message.method !== 'item/agentMessage/delta') {
-      callbacks.onRawEvent?.({ type: String(message.method ?? 'codex/event'), ...message });
-    }
+    this.rawLog.record(message);
     switch (message.method) {
       case 'item/agentMessage/delta': callbacks.onToken(String(params.delta ?? '')); break;
       case 'item/started': {
@@ -1083,6 +1087,7 @@ export class CodexSession {
   }
 
   private failAll(error: Error): void {
+    this.rawLog.flush();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
