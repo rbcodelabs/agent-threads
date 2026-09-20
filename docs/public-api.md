@@ -57,6 +57,37 @@ Listen for `claude-threads:api-ready` and `claude-threads:api-stopping`, reacqui
 
 The API serializes correlated operations and awaits atomic host persistence before returning their handles. Idempotency mappings and results are retained and evicted as pairs. A provider reload marks an in-flight operation interrupted; a consumer can reacquire v1 and reconcile it by run ID without duplicating work. Cancellation, completion, and provider shutdown use first-terminal-wins semantics.
 
+## Contributing a slash command
+
+Check `api.capabilities.includes('extensions.registerSlashCommand')`, then register one lowercase token (1–64 characters, letters/digits/hyphens, beginning with a letter), without a leading slash:
+
+```ts
+const registration = api.extensions.registerSlashCommand({ pluginId: 'example.boards' }, {
+  name: 'board',
+  thread: {
+    description: 'Open the board for this thread',
+    async invoke(context, host) {
+      if (host.signal.aborted) return { status: 'error', message: 'Cancelled' };
+      await openBoard(context.threadId, context.args);
+      host.report('Board opened');
+      return { status: 'ok' };
+    },
+  },
+});
+// On peer unload; also automatically disposed when the host generation stops.
+registration.dispose();
+```
+
+`thread` and `dispatch` are independent optional descriptors; provide at least one. Each has its own description and `invoke(context, host)` callback. Dispatch commands appear in both Agents List and Agent Board. Registration returns `registered`, `invalid`, `conflict`, or `unavailable`, always with an idempotent `dispose()`; a stopped API generation throws `PLUGIN_UNAVAILABLE`.
+
+The immutable context contains `surface`, original submitted `text`, parsed multiline `args`, `threadId` for the composer, the captured `agentHarness` and `projectId` when available, and `hasImages`/`hasAttachment`. Attachment contents, DOM nodes, views, and private managers are never lent to peers. A dispatch callback receives the selected project as context; it decides what operation to perform. Registration itself grants no additional permission.
+
+Core command names (including `/fork`) and the enabled escalation keyword are reserved, case-insensitively, at registration, discovery, and invocation. Peers cannot shadow each other. Matching consumes the entire command token: `/boardwalk` is not `/board`. Catalog changes update open dropdowns and pills, and a temporarily shadowed skill returns when the contribution is removed.
+
+Return `{ status: 'ok' | 'error', message?: string }`; `host.report(message, isError?)` supplies intermediate or deferred feedback scoped to the captured thread. A switched or deleted thread never receives another thread's inline feedback. Exceptions, invalid results, disposal, and the 60-second deadline become structured errors. Dispatch failures restore text and attachments while retaining any newer draft. A matched invocation never falls through to an ordinary agent prompt. Cancellation is cooperative: heed `host.signal`; the host cannot roll back arbitrary peer side effects. Disposal and host shutdown revoke both pending calls and later feedback; an old disposer cannot remove a replacement registration.
+
+Built-in Design registers `/design` through this public API. Its prepare and new-thread dispatch transaction still use explicit internal adapters, so this is **not full Design extraction**. Composer reopen/create/revise behavior, dispatch attachment rejection, harness selection, persistence/rollback, and the `EnterDesignMode` agent tool remain unchanged. Design dispatch currently does not apply the selected project; that existing behavior is preserved.
+
 ## Security boundary
 
 Trace projection and redaction are owned by Agent Threads. Consumers must still treat trace text as sensitive and apply their own policy before persistence. `constrainedRuns` returns only final text and sanitized usage; SDK events, environment variables, credentials, and session IDs are private.

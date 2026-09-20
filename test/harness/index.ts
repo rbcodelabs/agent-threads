@@ -9,6 +9,9 @@ import { enterDesignMode, assertDesignWriteAllowed } from '../../src/designArtif
 import { ArtifactProviderRegistry } from '../../src/ArtifactContributions';
 import { createArtifactStore } from '../../src/artifactStore';
 import { createClaudeThreadsApiV1 } from '../../src/PublicApi';
+import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
+import { createDesignSlashCommand } from '../../src/designSlashCommand';
+import { THREAD_BUILTIN_COMMANDS, DISPATCH_BUILTIN_COMMANDS, escalationCommand } from '../../src/slashCommands';
 import {
   createDesignArtifactContribution, DESIGN_ACTION_PREVIEW, DESIGN_ARTIFACT_KIND, DESIGN_ARTIFACT_SCHEMA_VERSION,
   DESIGN_PROVIDER_ID, DESIGN_PROVIDER_OWNER,
@@ -78,6 +81,10 @@ if (typeof crypto !== 'undefined' && typeof (crypto as { randomUUID?: unknown })
 }
 
 const artifactProviders = new ArtifactProviderRegistry();
+const slashCommands = new SlashCommandRegistry({ reservedNames: () => [
+  ...THREAD_BUILTIN_COMMANDS.map(c => c.name), ...DISPATCH_BUILTIN_COMMANDS.map(c => c.name),
+  'fork', escalationCommand(settings)?.name ?? '',
+] });
 artifactProviders.register(DESIGN_PROVIDER_OWNER, createDesignArtifactContribution());
 
 const mockPlugin = {
@@ -85,6 +92,7 @@ const mockPlugin = {
   settings,
   manager,
   artifactProviders,
+  slashCommands,
   persistence: null,
   scheduler: mockScheduler,
   summarizer: { summarize: async () => ({ title: '', summary: '' }) },
@@ -152,6 +160,7 @@ const harnessApi = createClaudeThreadsApiV1({
   resolveOrchestrator: async () => null,
   triggerHostEvent: () => {},
   artifactProviders,
+  slashCommands,
   artifactStore: createArtifactStore({
     vaultRoot: () => '/vault',
     getThread: (id: string) => manager.getThread(id),
@@ -162,6 +171,16 @@ const harnessApi = createClaudeThreadsApiV1({
   }),
 } as never).api;
 (window as any).__api = harnessApi;
+harnessApi.extensions.registerSlashCommand(DESIGN_PROVIDER_OWNER, createDesignSlashCommand({
+  getState: id => {
+    const thread = manager.getThread(id);
+    return thread ? { hasArtifacts: !!thread.artifacts?.length, existingTitle: thread.artifacts?.find(a => a.kind === 'design-static')?.title } : null;
+  },
+  isDesktopFilesystem: () => true,
+  prepare: (id, brief) => (window as any).__enterDesignMode(id, brief),
+  send: (id, prompt) => manager.sendMessage(id, prompt),
+  dispatch: async () => { throw new Error('Design dispatch is covered in the dispatch integration harness.'); },
+}));
 
 (window as any).__enterDesignMode = (threadId: string, brief: string) => enterDesignMode(threadId, '/vault', brief, {
   getThread: id => manager.getThread(id),

@@ -10,7 +10,7 @@ import { DEFAULT_SETTINGS } from '../../src/types';
 
 describe('DISPATCH_BUILTIN_COMMANDS', () => {
   it('advertises exactly the commands the dispatch flow intercepts', () => {
-    expect(DISPATCH_BUILTIN_COMMANDS.map((c) => c.name)).toEqual(['model', 'goal', 'loop', 'design']);
+    expect(DISPATCH_BUILTIN_COMMANDS.map((c) => c.name)).toEqual(['model', 'goal', 'loop']);
   });
 
   it('never advertises session-scoped commands (/compact, /clear, /cost)', () => {

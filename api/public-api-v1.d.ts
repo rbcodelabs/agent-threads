@@ -45,6 +45,13 @@ export type StorageAllocationResult = { readonly success: true; readonly status:
 export interface AgentToolResult { readonly content: readonly { readonly type: 'text'; readonly text: string }[]; readonly isError?: boolean }
 export interface AgentToolHost { permissions(): Promise<ThreadPermissionSnapshot | null>; allocateStorage(artifactId: string): Promise<StorageAllocationResult> }
 export interface AgentToolContribution { readonly name: string; readonly description: string; readonly inputSchema: unknown; readonly alwaysLoad?: boolean; readonly requiresApproval?: boolean; invoke(threadId: string, args: Record<string, unknown>, host: AgentToolHost): Promise<AgentToolResult> }
+export type SlashCommandScope = 'thread' | 'dispatch';
+export interface SlashCommandContext { readonly surface: SlashCommandScope; readonly text: string; readonly args: string; readonly threadId?: string; readonly agentHarness?: 'claude' | 'codex'; readonly projectId?: string; readonly hasImages: boolean; readonly hasAttachment: boolean }
+export interface SlashCommandHost { readonly signal: AbortSignal; report(message: string, isError?: boolean): void }
+export interface SlashCommandResult { readonly status: 'ok' | 'error'; readonly message?: string }
+export interface SlashCommandHandler { readonly description: string; invoke(context: Readonly<SlashCommandContext>, host: SlashCommandHost): Promise<SlashCommandResult> }
+export interface SlashCommandContribution { readonly name: string; readonly thread?: SlashCommandHandler; readonly dispatch?: SlashCommandHandler }
+export type SlashCommandRegistrationResult = { readonly success: true; readonly status: 'registered'; readonly name: string; readonly dispose: () => void } | { readonly success: false; readonly status: 'invalid' | 'conflict' | 'unavailable'; readonly name: string; readonly message: string; readonly dispose: () => void };
 export type AgentToolRegistrationResult = { readonly success: true; readonly status: 'registered'; readonly name: string; readonly dispose: () => void } | { readonly success: false; readonly status: 'invalid' | 'conflict' | 'unavailable'; readonly name: string; readonly message: string; readonly dispose: () => void };
 export interface AgentThreadsApiV1 {
   readonly apiVersion: 1; readonly generation: string; readonly capabilities: readonly string[];
@@ -54,7 +61,7 @@ export interface AgentThreadsApiV1 {
   readonly orchestrators: { list(): Promise<readonly OrchestratorSnapshot[]>; dispatch(target: { readonly id: string }, input: SendInput): Promise<{ readonly runId: string }> };
   readonly agentTools: { createBundle(profile: 'voice-orchestration'): AgentToolBundle };
   readonly mcp: { register(input: McpRegisterInput): Promise<McpRegistrationResult>; requestSecret(input: RequestSecretInput): Promise<RequestSecretResult> };
-  readonly extensions: { registerArtifactProvider(owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult; registerAgentTool(owner: PeerIdentity, contribution: AgentToolContribution): AgentToolRegistrationResult };
+  readonly extensions: { registerArtifactProvider(owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult; registerAgentTool(owner: PeerIdentity, contribution: AgentToolContribution): AgentToolRegistrationResult; registerSlashCommand(owner: PeerIdentity, contribution: SlashCommandContribution): SlashCommandRegistrationResult };
   readonly artifacts: { list(threadId: string): Promise<readonly ThreadArtifactRef[]>; attach(owner: PeerIdentity, threadId: string, ref: ThreadArtifactRef): Promise<ArtifactAttachResult>; update(owner: PeerIdentity, threadId: string, artifactId: string, patch: ArtifactPatch): Promise<ArtifactMutationResult>; detach(owner: PeerIdentity, threadId: string, artifactId: string): Promise<ArtifactMutationResult>; invokeAction(threadId: string, artifactId: string, actionId: string): Promise<ArtifactActionResult>; allocateStorage(threadId: string, artifactId: string): Promise<StorageAllocationResult> };
 }
 export type ClaudeThreadsApiV1 = AgentThreadsApiV1;

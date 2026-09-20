@@ -1,5 +1,7 @@
 import type { ChatMessage, StorageAllocationResult, Thread, ThreadArtifactRecord, ThreadPermissionSnapshot, ThreadStatus } from './types';
 import type { AgentToolContribution, AgentToolRegistrationResult, AgentToolRegistry } from './AgentToolContributions';
+import type { SlashCommandContribution, SlashCommandRegistrationResult, SlashCommandRegistry } from './SlashCommandContributions';
+export type { SlashCommandContribution, SlashCommandRegistrationResult, SlashCommandContext, SlashCommandHost, SlashCommandResult, SlashCommandScope } from './SlashCommandContributions';
 import type { ThreadEvent } from './ThreadManager';
 import type { RawLogTraceChunk, RawLogTraceMetadata } from './RawLogWriter';
 import type { McpRegistrationResult } from './mcpServerStore';
@@ -110,6 +112,7 @@ export interface ClaudeThreadsApiV1 {
      * peers' tools, so a contribution can never shadow `Read` or `Bash`.
      */
     registerAgentTool(owner: PeerIdentity, contribution: AgentToolContribution): AgentToolRegistrationResult;
+    registerSlashCommand(owner: PeerIdentity, contribution: SlashCommandContribution): SlashCommandRegistrationResult;
   };
   /**
    * Artifact entry point (ADR-0010). Lets a peer create an artifact and open
@@ -167,6 +170,7 @@ export interface PublicApiDependencies {
    * peer contributes through it without ever seeing the factory.
    */
   agentTools?: AgentToolRegistry;
+  slashCommands?: SlashCommandRegistry;
   /** Default permission mode, for resolving a thread with no override. */
   getDefaultPermissionMode?(): Thread['permissionMode'];
   /** Host-owned artifact persistence; absent when the host cannot store artifacts. */
@@ -190,6 +194,7 @@ function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   if (deps.requestSecret) capabilities.push('mcp.requestSecret');
   if (deps.artifactProviders) capabilities.push('extensions.registerArtifactProvider');
   if (deps.agentTools) capabilities.push('extensions.registerAgentTool');
+  if (deps.slashCommands) capabilities.push('extensions.registerSlashCommand');
   if (deps.getDefaultPermissionMode) capabilities.push('threads.permissions');
   if (deps.artifactStore && deps.artifactProviders) capabilities.push('artifacts.list', 'artifacts.attach', 'artifacts.update', 'artifacts.detach', 'artifacts.invokeAction', 'artifacts.allocateStorage');
   return Object.freeze(capabilities);
@@ -608,6 +613,18 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     });
   };
 
+  const slashCommandRegistrations = new Set<{ dispose: () => void }>();
+  const registerSlashCommand = (owner: PeerIdentity, contribution: SlashCommandContribution): SlashCommandRegistrationResult => {
+    guard();
+    if (!deps.slashCommands) return freeze({ success: false as const, status: 'unavailable' as const,
+      name: String(contribution?.name ?? ''), message: 'Slash commands are unavailable in this host context.', dispose: () => {} });
+    const result = deps.slashCommands.register(owner, contribution);
+    if (!result.success) return freeze(result);
+    const tracked = { dispose: result.dispose };
+    slashCommandRegistrations.add(tracked);
+    return freeze({ ...result, dispose: () => { slashCommandRegistrations.delete(tracked); result.dispose(); } });
+  };
+
   const threadPermissions = async (threadId: string): Promise<ThreadPermissionSnapshot | null> => {
     guard();
     const thread = deps.getThread(threadId);
@@ -856,11 +873,11 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input); } },
     agentTools: { createBundle: (profile) => { guard(); if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`); return freeze({ tools: VOICE_TOOLS, execute: executeTool }); } },
     mcp: { register: registerMcp, requestSecret: requestSecretMcp },
-    extensions: { registerArtifactProvider, registerAgentTool },
+    extensions: { registerArtifactProvider, registerAgentTool, registerSlashCommand },
     artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction, allocateStorage: allocateArtifactStorage },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
-    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
+    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
 }
 
 function toolTimeout(args: Record<string, unknown>): number { return Math.min(Math.max(10, Number(args.timeout_secs) || 120), 300) * 1_000; }

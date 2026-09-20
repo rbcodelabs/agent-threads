@@ -62,6 +62,39 @@ vi.mock('../../src/stt', () => {
 import { DispatchInput } from '../../src/DispatchInput';
 import { SttController } from '../../src/stt';
 import { App } from 'obsidian';
+import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
+
+describe('live contributed command discovery', () => {
+  it('refreshes an open dropdown, restores shadowed skills and revokes a selected pill', () => {
+    const registry = new SlashCommandRegistry();
+    const unsubscribe = vi.fn();
+    const input = new DispatchInput({ app: new App(), onSend: vi.fn(),
+      builtinCommands: () => registry.list('dispatch'),
+      subscribeCommands: listener => { const off = registry.subscribe(listener); return () => { off(); unsubscribe(); }; },
+    });
+    const root = input.mount(document.createElement('div'));
+    input.setAvailableCommands([{ name: 'board', description: 'Underlying skill' }]);
+    const textarea = root.querySelector('textarea')!;
+    input.setValue('/');
+    textarea.dispatchEvent(new Event('input'));
+    expect(root.textContent).toContain('Underlying skill');
+    const registration = registry.register({ pluginId: 'peer' }, { name: 'board', dispatch: {
+      description: 'Peer command', invoke: async () => ({ status: 'ok' }),
+    } });
+    expect(root.textContent).toContain('Peer command');
+    expect(root.textContent).not.toContain('Underlying skill');
+    input.setValue('/board draft');
+    expect(root.querySelector('.ct-command-pill')).not.toBeNull();
+    registration.dispose();
+    expect(input.getValue()).toBe('/board draft');
+    expect(root.querySelector('.ct-command-pill')).toBeNull();
+    input.setValue('/');
+    textarea.dispatchEvent(new Event('input'));
+    expect(root.textContent).toContain('Underlying skill');
+    input.destroy();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+});
 
 // Type helper: the mock factory attaches getLastInstance() to SttController.
 type MockSttConstructor = typeof SttController & {
