@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createDesignSlashCommand, type DesignSlashCommandDependencies } from '../../src/designSlashCommand';
+import { createDesignSlashCommand, type DesignSlashCommandDependencies } from '../harness/design-plugin/designSlashCommand';
 import type { SlashCommandContext, SlashCommandHost } from '../../src/SlashCommandContributions';
 
 function fixture() {

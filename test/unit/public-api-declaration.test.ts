@@ -70,6 +70,7 @@ function runtimeSurface(): Record<string, string[]> {
   const api = createClaudeThreadsApiV1({
     getThreads: () => [], getThread: () => undefined, isRunning: () => false,
     createThread: () => ({ id: 't' }), sendMessage: async () => {}, openThread: async () => {},
+    beginProvisionalThread: async () => ({ thread: { id: 't' }, commit: async () => {}, rollback: async () => {} }),
     subscribe: () => () => {}, listOrchestrators: () => [], resolveOrchestrator: async () => null,
     triggerHostEvent: () => {},
     getTraceMetadata: async () => null, readTraceChunk: async () => null,
@@ -104,6 +105,7 @@ describe('checked-in consumer declaration', () => {
     const api = createClaudeThreadsApiV1({
       getThreads: () => [], getThread: () => undefined, isRunning: () => false,
       createThread: () => ({ id: 't' }), sendMessage: async () => {}, openThread: async () => {},
+      beginProvisionalThread: async () => ({ thread: { id: 't' }, commit: async () => {}, rollback: async () => {} }),
       subscribe: () => () => {}, listOrchestrators: () => [], resolveOrchestrator: async () => null,
       triggerHostEvent: () => {},
       getTraceMetadata: async () => null, readTraceChunk: async () => null,

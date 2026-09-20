@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ThreadsView } from '../../src/ThreadsView';
 import { toArtifactRef } from '../../src/ArtifactContributions';
-import { previewDesignArtifact } from '../../src/designArtifactProvider';
+import { previewDesignArtifact } from '../harness/design-plugin/designArtifactProvider';
 import type { DesignArtifact } from '../../src/types';
 
 const artifact = {
