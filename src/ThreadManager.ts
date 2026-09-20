@@ -278,6 +278,14 @@ export class ThreadManager {
   private attachmentWriter: AttachmentWriter;
   /** Injectable filesystem for artifact-storage GC; defaults to the real one. */
   artifactStorageFs?: ArtifactStorageFs;
+  /**
+   * Settles once the artifact-storage cleanup fired by every deletion so far has
+   * finished. Production ignores this — deletion stays synchronous and never
+   * fails on cleanup. It exists so callers that need to observe the filesystem
+   * afterwards can await the real work instead of sleeping for a guessed
+   * interval, which is inherently racy on a loaded machine.
+   */
+  artifactCleanupSettled: Promise<void> = Promise.resolve();
 
   constructor(settings: PluginSettings) {
     this.settings = settings;
@@ -575,9 +583,12 @@ export class ThreadManager {
     const vaultRoot = this.vaultRoot;
     const roots = (thread.artifacts ?? []).map(artifact => artifact.storageRoot).filter((root): root is string => !!root);
     if (!vaultRoot || roots.length === 0) return;
-    for (const root of roots) {
-      void removeStorageRoot(vaultRoot, root, this.artifactStorageFs).catch(() => undefined);
-    }
+    const pending = roots.map(root => removeStorageRoot(vaultRoot, root, this.artifactStorageFs).catch(() => undefined));
+    // Chained rather than replaced, so awaiting after several deletions covers
+    // all of them rather than only the most recent.
+    this.artifactCleanupSettled = this.artifactCleanupSettled
+      .then(() => Promise.all(pending))
+      .then(() => undefined);
   }
 
   renameThread(id: string, title: string): void {

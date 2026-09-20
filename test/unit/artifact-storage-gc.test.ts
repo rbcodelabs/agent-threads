@@ -35,9 +35,13 @@ function managerFor(vaultRoot: string): ThreadManager {
   return manager;
 }
 
-/** `deleteThread` is synchronous and fires cleanup off; let it land. */
-async function settle(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 20));
+/**
+ * `deleteThread` is synchronous and fires cleanup off. Await the real work
+ * rather than sleeping: a fixed delay raced a real `rm` under load and failed
+ * intermittently.
+ */
+async function settle(manager: ThreadManager): Promise<void> {
+  await manager.artifactCleanupSettled;
 }
 
 describe('artifact storage garbage collection', () => {
@@ -53,7 +57,7 @@ describe('artifact storage garbage collection', () => {
     ];
 
     manager.deleteThread(thread.id);
-    await settle();
+    await settle(manager);
 
     await expect(stat(first)).rejects.toThrow();
     await expect(stat(second)).rejects.toThrow();
@@ -71,7 +75,7 @@ describe('artifact storage garbage collection', () => {
     }];
 
     expect(() => manager.deleteThread(thread.id)).not.toThrow();
-    await settle();
+    await settle(manager);
     expect(manager.getThread(thread.id)).toBeUndefined();
   });
 
@@ -92,7 +96,7 @@ describe('artifact storage garbage collection', () => {
     ];
 
     manager.deleteThread(thread.id);
-    await settle();
+    await settle(manager);
 
     expect(rmSpy).not.toHaveBeenCalled();
     expect((await stat(outside)).isDirectory()).toBe(true);
@@ -106,7 +110,7 @@ describe('artifact storage garbage collection', () => {
     thread.artifacts = [{ id: 'x', kind: 'board', title: 'B', storageRoot: '/anywhere', createdAt: 1, updatedAt: 1 }];
 
     expect(() => manager.deleteThread(thread.id)).not.toThrow();
-    await settle();
+    await settle(manager);
     expect(rmSpy).not.toHaveBeenCalled();
   });
 });
