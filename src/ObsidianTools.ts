@@ -2742,7 +2742,12 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   // never displace a built-in even if the registry's collision check were
   // bypassed. The registry rejects such a name first; this is defence in depth
   // on the path where a mistake would reach every thread on both harnesses.
-  const builtInNames = new Set(tools.map(definition => definition.name));
+  // Both spellings of every built-in. The definitions here carry their
+  // *legacy* names; the canonical rename happens further down, so checking
+  // only `definition.name` would let a contribution called `vault_search`
+  // through and land it twice on the canonical server.
+  const builtInNames = new Set(tools.flatMap(definition =>
+    [definition.name, LEGACY_TO_CANONICAL_TOOL_NAMES[definition.name] ?? definition.name]));
   const contributions = [...(options.contributedTools ?? [])];
   // Compatibility adapter: hosts and tests that pass `onEnterDesignMode`
   // instead of contributing the tool still get it, from the same single
@@ -2792,7 +2797,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     // reject a name that would shadow either. Captured before contributions
     // were appended, so a contributed tool never counts as a built-in — which
     // is what lets the design tool contribute its own name.
-    builtInToolNames: Object.freeze([...builtInNames, ...legacyTools.map(definition => definition.name).filter(name => builtInNames.has(LEGACY_TO_CANONICAL_TOOL_NAMES[name] ?? name))]),
+    builtInToolNames: Object.freeze([...builtInNames]),
   };
 }
 
