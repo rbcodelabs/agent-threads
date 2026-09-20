@@ -18,7 +18,11 @@ describe('design mode host callback', () => {
     const caller = { id: 'caller' } as Thread;
     const selected = { id: 'selected' } as Thread;
     const plugin = Object.create(ClaudeThreadsPlugin.prototype);
-    const view = { refreshArtifactCard: vi.fn(), openArtifactPreview: vi.fn(async () => ({ status: 'opened' })) };
+    const openView = vi.fn(async () => 'tab' as const);
+    const view = {
+      refreshArtifactCard: vi.fn(),
+      artifactActionHost: vi.fn(() => ({ openView, revealInFolder: vi.fn(async () => true), updateArtifact: vi.fn(async () => {}) })),
+    };
     Object.assign(plugin, {
       app: { vault: { adapter } }, settings: { permissionMode: 'default' },
       manager: { getThread: (id: string) => id === 'caller' ? caller : selected, sendMessage: vi.fn() },

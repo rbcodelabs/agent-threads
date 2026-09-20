@@ -24,6 +24,19 @@ export type ConstrainedRunResult = { readonly status: 'running'; readonly runId:
 export interface OrchestratorSnapshot { readonly id: string; readonly kind: 'portfolio' | 'project'; readonly threadId: string; readonly title: string; readonly projectId?: string }
 export interface AgentToolDefinition { readonly type: 'function'; readonly name: string; readonly description: string; readonly parameters: Readonly<Record<string, unknown>> }
 export interface AgentToolBundle { readonly tools: readonly AgentToolDefinition[]; execute(name: string, args: Record<string, unknown>): Promise<string> }
+export interface McpRegisterInput { readonly name: string; readonly type: 'stdio' | 'http' | 'sse' | 'oauth'; readonly command?: string; readonly args?: readonly string[]; readonly env?: Readonly<Record<string, string>>; readonly url?: string; readonly headers?: Readonly<Record<string, string>>; readonly scopes?: string; readonly tools?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] }; readonly clientId?: string; readonly authorizationServerUrl?: string; readonly redirectUri?: string }
+export interface McpRegistrationResult { success: boolean; status: 'registered' | 'unchanged' | 'conflict' | 'invalid' | 'cancelled' | 'unavailable' | 'failed'; message: string; requiredVariables?: string[] }
+export interface RequestSecretInput { readonly secretName: string; readonly reason: string; readonly force?: boolean }
+export type RequestSecretResult = { readonly success: true; readonly secretName: string; readonly alreadyExisted: boolean } | { readonly success: false; readonly reason: string };
+export interface PeerIdentity { readonly pluginId: string; readonly displayName?: string }
+export interface ThreadArtifactRef { readonly providerId: string; readonly kind: string; readonly schemaVersion: number; readonly id: string; readonly title: string; readonly data: unknown }
+export interface ArtifactAction { readonly id: string; readonly label: string; readonly tooltip?: string; readonly variant?: 'primary' | 'secondary'; readonly icon?: string; readonly shortLabel?: string }
+export interface ArtifactPresentation { readonly title: string; readonly subtitle?: string; readonly icon?: string; readonly actions: readonly ArtifactAction[] }
+export type ArtifactActionResult = { readonly status: 'ok'; readonly message?: string } | { readonly status: 'warning'; readonly message: string } | { readonly status: 'error'; readonly message: string };
+export type ArtifactViewPlacement = 'context-panel' | 'tab' | 'unavailable';
+export interface ArtifactActionHost { openView(state: { type: string; state?: Record<string, unknown> }): Promise<ArtifactViewPlacement>; revealInFolder(absolutePath: string): Promise<boolean>; updateArtifact(patch: { title?: string; data?: unknown }): Promise<void> }
+export interface ArtifactContribution { readonly providerId: string; readonly kinds: readonly string[]; present(ref: ThreadArtifactRef): ArtifactPresentation; invoke(actionId: string, ref: ThreadArtifactRef, host: ArtifactActionHost): Promise<ArtifactActionResult> }
+export type ArtifactRegistrationResult = { readonly success: true; readonly status: 'registered'; readonly providerId: string; readonly dispose: () => void } | { readonly success: false; readonly status: 'invalid' | 'conflict'; readonly providerId: string; readonly message: string; readonly dispose: () => void };
 export interface AgentThreadsApiV1 {
   readonly apiVersion: 1; readonly generation: string; readonly capabilities: readonly string[];
   readonly threads: { list(query?: { readonly projectId?: string | null; readonly status?: ThreadStatus; readonly limit?: number }): Promise<readonly ThreadSummary[]>; get(threadId: string): Promise<ThreadSnapshot | null>; create(input: CreateThreadInput): Promise<{ readonly threadId: string }>; send(threadId: string, input: SendInput): Promise<{ readonly runId: string }>; wait(runId: string, options?: { readonly timeoutMs?: number }): Promise<RunResult>; cancel(runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>>; open(threadId: string): Promise<void>; subscribe(listener: (event: PublicThreadEvent) => void): Disposable };
@@ -31,5 +44,7 @@ export interface AgentThreadsApiV1 {
   readonly constrainedRuns: { create(input: ConstrainedRunInput): Promise<{ readonly runId: string }>; get(runId: string): Promise<ConstrainedRunResult>; wait(runId: string, options?: { readonly timeoutMs?: number }): Promise<ConstrainedRunResult>; cancel(runId: string): Promise<ConstrainedRunResult> };
   readonly orchestrators: { list(): Promise<readonly OrchestratorSnapshot[]>; dispatch(target: { readonly id: string }, input: SendInput): Promise<{ readonly runId: string }> };
   readonly agentTools: { createBundle(profile: 'voice-orchestration'): AgentToolBundle };
+  readonly mcp: { register(input: McpRegisterInput): Promise<McpRegistrationResult>; requestSecret(input: RequestSecretInput): Promise<RequestSecretResult> };
+  readonly extensions: { registerArtifactProvider(owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult };
 }
 export type ClaudeThreadsApiV1 = AgentThreadsApiV1;

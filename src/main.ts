@@ -1,6 +1,8 @@
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, addIcon, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createConstrainedQueryRunner } from './ConstrainedRun';
+import { ArtifactProviderRegistry, toArtifactRef } from './ArtifactContributions';
+import { createDesignArtifactContribution, DESIGN_PROVIDER_OWNER, previewDesignArtifact } from './designArtifactProvider';
 export { createClaudeThreadsApiV1 } from './PublicApi';
 export type { ClaudeThreadsApiV1 } from './PublicApi';
 // Desktop-only modules: type-only imports so their module-level code never runs on mobile.
@@ -313,6 +315,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private pendingBgTaskTimers = new Map<string, number>();
   private persistenceWriterToken?: PersistenceWriterToken;
   private publicApiService?: ClaudeThreadsApiService;
+  /**
+   * Host-owned artifact provider registry. Built-in Design registers into it
+   * through the public `extensions.registerArtifactProvider` surface, exactly
+   * as a peer plugin would (ADR-0008).
+   */
+  readonly artifactProviders = new ArtifactProviderRegistry();
 
   /** Maximum number of poll attempts per thread before giving up on background task monitoring. */
   private static readonly BG_TASK_MAX_POLLS = 10;
@@ -2302,10 +2310,21 @@ export default class ClaudeThreadsPlugin extends Plugin {
       registerMcpServer: (input) => this.registerExternalMcpServer(input, this.mcpRegistrationAvailable),
       requestSecret: (secretName, reason, force) => this.requestSecretFromUser(secretName, reason, force),
       hasSecret: (name) => !!this.app.secretStorage.getSecret(secretStorageKey(name)),
+      artifactProviders: this.artifactProviders,
     });
     this.publicApiService = service;
     this.api = Object.freeze({ v1: service.api });
     service.start();
+    // Built-in Design is the reference consumer of the contribution API: it
+    // takes the same public path, with the same peer identity, that a
+    // third-party plugin would. Nothing pre-seeds the registry.
+    const registration = service.api.extensions.registerArtifactProvider(
+      DESIGN_PROVIDER_OWNER,
+      createDesignArtifactContribution(),
+    );
+    if (!registration.success) {
+      console.error(`[ClaudeThreads] Built-in design artifact provider was refused: ${registration.message}`);
+    }
   }
 
   revokePublicApi(): void {
@@ -2856,7 +2875,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
         const view = this.getView();
         if (!view) throw new Error('Agent Threads view is unavailable.');
         view.refreshArtifactCard();
-        return view.openArtifactPreview(artifact);
+        const preview = await previewDesignArtifact(artifact, view.artifactActionHost(threadId, toArtifactRef(artifact)));
+        if (preview.status !== 'opened') new Notice(preview.warning);
+        return preview;
       },
     });
   }
@@ -2930,13 +2951,19 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
 
     const { dispatchDesignThread } = require('./designArtifact') as typeof import('./designArtifact');
+    // The dispatch owns thread creation, so the artifact host below can only
+    // be bound to the new thread once it exists.
+    let dispatchedThreadId = '';
     return dispatchDesignThread(
       brief,
       agentHarness,
       adapter.getBasePath(),
       {
-        createThread: (title, harness) =>
-          this.manager.createThread(title, this.getEffectiveCwd(), undefined, harness),
+        createThread: (title, harness) => {
+          const thread = this.manager.createThread(title, this.getEffectiveCwd(), undefined, harness);
+          dispatchedThreadId = thread.id;
+          return thread;
+        },
         deleteThread: (threadId) => this.manager.deleteThread(threadId),
         getActiveThreadId: () => this.getActiveThreadId(),
         restoreActiveThread: async (threadId) => {
@@ -2949,7 +2976,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
         openPreview: async (artifact) => {
           const view = this.getView();
           if (!view) throw new Error('Agent Threads view is unavailable.');
-          await view.openArtifactPreview(artifact);
+          const preview = await previewDesignArtifact(
+            artifact,
+            view.artifactActionHost(dispatchedThreadId, toArtifactRef(artifact)),
+          );
+          if (preview.status !== 'opened') new Notice(preview.warning);
         },
         onSendError: (error) => {
           const message = error instanceof Error ? error.message : String(error);

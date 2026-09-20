@@ -1010,7 +1010,7 @@ Thread state in the plugin's `data.json` is canonical during normal startup. Whe
 
 ### Peer plugins
 
-Geode/Obsidian peer plugins can discover the generation-scoped Agent Threads API at `app.plugins.plugins['claude-threads']?.api?.v1`. It provides immutable thread operations, sanitized cursor-based trace projection, and fail-closed constrained Claude runs for input-only evaluation. See [Peer Plugin API v1](docs/public-api.md) and the checked-in [type contract](api/public-api-v1.d.ts).
+Geode/Obsidian peer plugins can discover the generation-scoped Agent Threads API at `app.plugins.plugins['claude-threads']?.api?.v1`. It provides immutable thread operations, sanitized cursor-based trace projection, fail-closed constrained Claude runs for input-only evaluation, host-confirmed MCP server and secret registration, and a contribution surface. `extensions.registerArtifactProvider` lets a plugin present its own durable artifact on a thread through a declarative contract — it returns a title and named actions, and never receives a view, a workspace leaf, or a DOM node. Built-in Design mode uses that same public path. `capabilities` is computed from what the host can actually do, so check it before calling. See [Peer Plugin API v1](docs/public-api.md) and the checked-in [type contract](api/public-api-v1.d.ts).
 
 ```bash
 git clone https://github.com/rbcodelabs/obsidian-claude-threads
