@@ -12,7 +12,7 @@ import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { partitionThreads } from './threadRowState';
 import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
-import { handleDesignDispatch } from './designDispatchRouting';
+import { handleContributedDispatch } from './slashCommandRouting';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
 import { parsePrUrlRepo } from './gitDiffUtils';
 import { groupDashboardThreads, normalizeAgentsGroupBy, toggleAgentsGrouping, type AgentsGroupBy, type AgentsGroupingDimension } from './dashboardProjectGroups';
@@ -158,28 +158,29 @@ export class AgentDashboard extends ItemView {
       placeholder: 'Dispatch a task...',
       builtinCommands: () => {
         const esc = escalationCommand(this.plugin.settings, true);
-        return esc ? [...DISPATCH_BUILTIN_COMMANDS, esc] : DISPATCH_BUILTIN_COMMANDS;
+        const commands = [...DISPATCH_BUILTIN_COMMANDS, ...(this.plugin.slashCommands?.list('dispatch') ?? [])];
+        return esc ? [...commands, esc] : commands;
       },
+      subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
       argCompletions: DISPATCH_ARG_COMPLETIONS,
       harnessPicker: { initialHarness: this.plugin.settings.agentHarness ?? 'claude' },
       onSend: async ({ text, images, attachment, agentHarness }) => {
-        // Intercept leading built-in commands (/model, /goal, /loop, /design) — apply
-        // them to the new thread instead of sending the text to Claude verbatim.
+        // Intercept contributed commands, then core model/goal/loop directives.
+        // Apply directives instead of sending command text to the agent verbatim.
         let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: 'claude' | 'codex'; projectId?: string } = {
           agentHarness,
           projectId: this.selectedProjectId || undefined,
         };
         let titleText = text;
+        if (await handleContributedDispatch({
+          registry: this.plugin.slashCommands, text, images, attachment, agentHarness,
+          projectId: dispatchOpts.projectId, input: this.dispatchComponent,
+        })) return;
         const directive = parseDispatchDirective(
           text,
           this.plugin.settings.escalationEnabled ? this.plugin.settings.escalationKeyword : undefined,
         );
         if (directive) {
-          if (await handleDesignDispatch({
-            directive, text, images, attachment, agentHarness,
-            input: this.dispatchComponent,
-            dispatch: (brief, harness) => this.plugin.dispatchNewDesignThread(brief, harness),
-          })) return;
           if (directive.error) {
             new Notice(directive.error);
             this.dispatchComponent.setValue(text);

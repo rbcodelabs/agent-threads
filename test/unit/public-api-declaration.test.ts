@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { createClaudeThreadsApiV1 } from '../../src/PublicApi';
 import { ArtifactProviderRegistry } from '../../src/ArtifactContributions';
 import { AgentToolRegistry } from '../../src/AgentToolContributions';
+import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
 import { createArtifactStore } from '../../src/artifactStore';
 
 const artifactStore = () => createArtifactStore({
@@ -76,7 +77,7 @@ function runtimeSurface(): Record<string, string[]> {
     registerMcpServer: async () => ({ success: true, status: 'registered', message: '' }),
     requestSecret: async () => true,
     artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(),
-    agentTools: new AgentToolRegistry(), getDefaultPermissionMode: () => 'default',
+    agentTools: new AgentToolRegistry(), slashCommands: new SlashCommandRegistry(), getDefaultPermissionMode: () => 'default',
   } as never).api;
   const surface: Record<string, string[]> = {};
   for (const [key, value] of Object.entries(api as unknown as Record<string, unknown>)) {
@@ -96,7 +97,7 @@ describe('checked-in consumer declaration', () => {
 
   it('still declares the mcp namespace that once drifted out of it', () => {
     expect(declaredSurface().mcp).toEqual(['register', 'requestSecret']);
-    expect(declaredSurface().extensions).toEqual(['registerAgentTool', 'registerArtifactProvider']);
+    expect(declaredSurface().extensions).toEqual(['registerAgentTool', 'registerArtifactProvider', 'registerSlashCommand']);
   });
 
   it('advertises one capability string per public operation', () => {
@@ -109,7 +110,7 @@ describe('checked-in consumer declaration', () => {
       runConstrainedQuery: vi.fn(),
       registerMcpServer: vi.fn(), requestSecret: vi.fn(),
       artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(),
-      agentTools: new AgentToolRegistry(), getDefaultPermissionMode: () => 'default',
+      agentTools: new AgentToolRegistry(), slashCommands: new SlashCommandRegistry(), getDefaultPermissionMode: () => 'default',
     } as never).api;
     // agentTools advertises a profile rather than a method name; everything
     // else is `<namespace>.<method>`.

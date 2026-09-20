@@ -177,6 +177,8 @@ In the Agents List, the selected thread has an accent-tinted background and a tr
 
 Type `/` in the input box to see built-in context commands and your installed Claude Code skills. Navigate with arrow keys, Tab, or Enter.
 
+Enabled peer plugins can also contribute commands to the thread composer and/or new-thread dispatch boxes through `extensions.registerSlashCommand`. Their commands appear immediately, use the same dropdown and command pills, and disappear when the peer disposes its registration. Host commands retain priority. A failed contributed dispatch restores the draft and attachments instead of sending the command text to the agent. Built-in `/design` uses this same registration path; its behavior is unchanged.
+
 **Built-in commands** (handled by the plugin):
 
 | Command | What it does |

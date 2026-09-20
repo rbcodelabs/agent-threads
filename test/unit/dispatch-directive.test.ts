@@ -1,5 +1,19 @@
 import { describe, it, expect } from 'vitest';
 import { parseDispatchDirective, goalKickoffMessage } from '../../src/slashCommands';
+import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
+import { createDesignSlashCommand } from '../../src/designSlashCommand';
+
+async function designDirective(text: string) {
+  const registry = new SlashCommandRegistry();
+  let brief: string | undefined;
+  registry.register({ pluginId: 'design' }, createDesignSlashCommand({
+    getState: () => null, isDesktopFilesystem: () => true,
+    prepare: async () => ({ artifact: { title: '' }, instructions: '' }), send: async () => {},
+    dispatch: async value => { brief = value; return 'thread'; },
+  }));
+  const result = await registry.invoke({ surface: 'dispatch', text, hasImages: false, hasAttachment: false });
+  return result ? { kind: 'design', brief: brief ?? '', ...(result.status === 'error' ? { error: result.message } : {}) } : null;
+}
 
 describe('parseDispatchDirective', () => {
   it('returns null for plain prompts', () => {
@@ -101,27 +115,29 @@ describe('parseDispatchDirective', () => {
 
   // ── /design ────────────────────────────────────────────────
 
-  it('parses /design with a brief', () => {
-    expect(parseDispatchDirective('/design create a responsive settings card')).toEqual({
+  it('routes /design with a brief through its contribution, not the core parser', async () => {
+    expect(parseDispatchDirective('/design create a responsive settings card')).toBeNull();
+    expect(await designDirective('/design create a responsive settings card')).toEqual({
       kind: 'design',
       brief: 'create a responsive settings card',
     });
   });
 
-  it('preserves multi-line design briefs and matches case-insensitively', () => {
-    expect(parseDispatchDirective('/DESIGN settings card\nwith mobile navigation')).toEqual({
+  it('preserves multi-line design briefs and matches case-insensitively', async () => {
+    expect(await designDirective('/DESIGN settings card\nwith mobile navigation')).toEqual({
       kind: 'design',
       brief: 'settings card\nwith mobile navigation',
     });
   });
 
-  it('errors on bare /design because a new thread has no artifact to reopen', () => {
-    const directive = parseDispatchDirective('/design');
+  it('errors on bare /design because a new thread has no artifact to reopen', async () => {
+    const directive = await designDirective('/design');
     expect(directive?.kind).toBe('design');
     expect(directive?.error).toContain('Include a brief');
   });
 
-  it('does not treat /designer as a design command', () => {
+  it('does not treat /designer as a design command', async () => {
+    expect(await designDirective('/designer create a settings card')).toBeNull();
     expect(parseDispatchDirective('/designer create a settings card')).toBeNull();
   });
 });

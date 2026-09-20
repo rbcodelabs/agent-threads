@@ -25,6 +25,7 @@ export interface DispatchInputOptions {
    * reflects the latest value on every keystroke without re-mounting.
    */
   builtinCommands?: { name: string; description: string }[] | (() => { name: string; description: string }[]);
+  subscribeCommands?: (listener: () => void) => () => void;
   /**
    * Argument completions per command name. When the input starts with
    * "/<command> " and the cursor is in the first argument word, the matching
@@ -133,6 +134,7 @@ export class DispatchInput {
   // /slash dropdown
   private skills: { name: string; description: string }[] = [];
   private skillDropdown: HTMLElement | null = null;
+  private unsubscribeCommands?: () => void;
   private skillDropdownItems: { name: string; description: string }[] = [];
   private skillDropdownIndex = 0;
   // 'command' completes the /command word itself; 'arg' completes its first argument
@@ -356,6 +358,7 @@ export class DispatchInput {
       }
     });
 
+    this.unsubscribeCommands = this.options.subscribeCommands?.(() => this.refreshCommands());
     return this.rootEl;
   }
 
@@ -376,6 +379,8 @@ export class DispatchInput {
   }
 
   destroy(): void {
+    this.unsubscribeCommands?.();
+    this.unsubscribeCommands = undefined;
     this.clearLongPressTimer();
     this.closeHarnessMenu();
     this.sttController?.destroy();
@@ -490,14 +495,7 @@ export class DispatchInput {
       // Project is deleted in another view). Merge the failed payload back
       // into anything the user typed or attached while the async dispatch was
       // pending so neither version of the draft is lost.
-      const newerText = this.getValue().trim();
-      this.setValue([text, newerText].filter(Boolean).join('\n\n'));
-      const attachmentParts = [attachment, this.pendingAttachment]
-        .filter((value): value is string => Boolean(value));
-      this.pendingAttachment = attachmentParts.length > 0 ? attachmentParts.join('\n\n') : null;
-      this.pendingImages = [...images, ...this.pendingImages];
-      this.autoGrow();
-      this.renderChips();
+      this.restoreFailedDraft(text, images, attachment);
       const message = err instanceof Error ? err.message : String(err);
       new Notice(`Could not dispatch: ${message}`);
     } finally {
@@ -506,6 +504,17 @@ export class DispatchInput {
   }
 
   // ── Kickoff harness picker ───────────────────────────────────────────────
+
+  /** Restore a failed submission without overwriting a draft typed while it ran. */
+  restoreFailedDraft(text: string, images: ImageAttachment[], attachment: string | null): void {
+    const newerText = this.getValue().trim();
+    this.setValue([text, newerText].filter(Boolean).join('\n\n'));
+    const parts = [attachment, this.pendingAttachment].filter((part): part is string => !!part);
+    this.pendingAttachment = parts.length ? parts.join('\n\n') : null;
+    this.pendingImages = [...images, ...this.pendingImages];
+    this.autoGrow();
+    this.renderChips();
+  }
 
   private configureHarnessPicker(): void {
     this.rootEl.addClass('ct-harness-picker-root');
@@ -890,16 +899,27 @@ export class DispatchInput {
 
   /**
    * Replace the cached skill list with the dynamically-discovered command list
-   * from an SDKCommandsChangedMessage. Filters to skill-type commands (excludes
-   * built-in commands that are already in builtinCommands).
+   * from an SDKCommandsChangedMessage. Deduplication happens at display time so
+   * removing a peer command restores any same-named underlying skill.
    */
   setAvailableCommands(commands: { name: string; description: string }[]): void {
-    const builtinNames = new Set(
-      this.getBuiltinCommands().map(c => c.name.toLowerCase()),
-    );
-    this.skills = commands
-      .filter(c => !builtinNames.has(c.name.toLowerCase()))
-      .map(c => ({ name: c.name, description: c.description }));
+    this.skills = commands.map(c => ({ name: c.name, description: c.description }));
+    this.refreshCommands();
+  }
+
+  /** Registry changes preserve the draft and the underlying SDK skill catalog. */
+  refreshCommands(): void {
+    if (!this.inputEl) return;
+    if (this.pendingCommand && !this.getBuiltinCommands().some(c => c.name === this.pendingCommand)) {
+      this.setValue(this.getValue());
+    }
+    if (this.skillDropdown) {
+      const arg = this.getArgQuery();
+      const query = this.getSlashQuery();
+      if (arg) this.showArgDropdown(arg.options, arg.partial);
+      else if (query !== null) this.showSkillDropdown(query);
+      else this.hideSkillDropdown();
+    }
   }
 
   private getSlashQuery(): string | null {
@@ -938,8 +958,10 @@ export class DispatchInput {
 
   private showSkillDropdown(query: string): void {
     const q = query.toLowerCase();
-    const builtins = this.getBuiltinCommands().filter(c => c.name.startsWith(q));
-    const skills = this.skills.filter(s => s.name.toLowerCase().startsWith(q));
+    const catalog = this.getBuiltinCommands();
+    const builtinNames = new Set(catalog.map(c => c.name.toLowerCase()));
+    const builtins = catalog.filter(c => c.name.toLowerCase().startsWith(q));
+    const skills = this.skills.filter(s => !builtinNames.has(s.name.toLowerCase()) && s.name.toLowerCase().startsWith(q));
     this.skillDropdownMode = 'command';
     this.openDropdownWith([...builtins, ...skills]);
   }

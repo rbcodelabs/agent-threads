@@ -16,6 +16,8 @@ import {
 } from './fixtures';
 import { getHeaderUpdateCalls, mockLeaf } from './obsidian-mock';
 import { Platform } from 'obsidian';
+import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
+import { createDesignSlashCommand } from '../../src/designSlashCommand';
 
 const settings = { ...DEFAULT_SETTINGS, claudeBinaryPath: '/opt/homebrew/bin/claude' };
 const dashboardMode = new URLSearchParams(window.location.search).has('dashboard');
@@ -94,6 +96,7 @@ const mockPlugin = {
   app: (mockLeaf as any).app,
   settings,
   manager,
+  slashCommands: new SlashCommandRegistry(),
   persistence: null,
   saveSettings: async () => { saveSettingsCalls += 1; },
   getActiveThreadId: () => null,
@@ -115,6 +118,12 @@ const mockPlugin = {
   },
   cancelWakeups: (threadId: string) => { pendingWakeups.delete(threadId); },
 };
+
+mockPlugin.slashCommands.register({ pluginId: 'agent-threads.design' }, createDesignSlashCommand({
+  getState: () => null, isDesktopFilesystem: () => true,
+  prepare: async () => { throw new Error('Thread preparation is not wired in this harness.'); },
+  send: async () => {}, dispatch: async () => 'design-thread',
+}));
 
 const container = document.getElementById('app')!;
 const view = dashboardMode

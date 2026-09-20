@@ -7,7 +7,7 @@ import { parseLoopArgs, formatLoopInterval } from './loopUtils';
 import { THREAD_BUILTIN_COMMANDS, THREAD_ARG_COMPLETIONS, MODEL_ALIASES, goalKickoffMessage, resolveCreatePrMessage, escalationCommand } from './slashCommands';
 import { isSetAsGoalEligible } from './goalContext';
 import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo } from './gitDiffUtils';
-import type { Thread, ChatMessage, ToolCallRecord, AskQuestion, ImageAttachment, DesignArtifact } from './types';
+import type { Thread, ChatMessage, ToolCallRecord, AskQuestion, ImageAttachment } from './types';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { SummarizeResult } from './InProcessSummarizer';
 import { shouldAutoSummarize, isUsableTitle } from './summarization';
@@ -848,8 +848,10 @@ export class ThreadsView extends ItemView {
       captureLongPaste: true,
       builtinCommands: () => {
         const esc = escalationCommand(this.plugin.settings);
-        return esc ? [...THREAD_BUILTIN_COMMANDS, esc] : THREAD_BUILTIN_COMMANDS;
+        const commands = [...THREAD_BUILTIN_COMMANDS, ...(this.plugin.slashCommands?.list('thread') ?? [])];
+        return esc ? [...commands, esc] : commands;
       },
+      subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
       argCompletions: THREAD_ARG_COMPLETIONS,
       extraSkillDirs,
       onInput: () => this.scheduleDraftSave(),
@@ -5646,49 +5648,6 @@ export class ThreadsView extends ItemView {
       });
   }
 
-  private async handleDesignCommand(brief: string): Promise<void> {
-    if (!this.activeThreadId) return;
-    const thread = this.manager.getThread(this.activeThreadId);
-    if (!thread) return;
-    if (!brief && !thread.artifacts?.length) {
-      this.showCommandDivider('Include a brief — e.g. /design a responsive pricing page for a developer tool', true);
-      return;
-    }
-
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter)) {
-      this.showCommandDivider('Design artifacts require a desktop vault with local filesystem access.', true);
-      return;
-    }
-    const existing = thread.artifacts?.find((artifact) => artifact.kind === 'design-static');
-    let artifact: DesignArtifact;
-    try {
-      const result = await this.plugin.enterDesignMode(
-        thread.id,
-        brief || existing?.title || 'Design artifact',
-        true,
-      );
-      artifact = result.artifact;
-    } catch (error) {
-      this.showCommandDivider(`Could not prepare the design artifact: ${(error as Error).message}`, true);
-      return;
-    }
-
-    if (!brief) {
-      this.showCommandDivider(`Opened design artifact: ${artifact.title}`);
-      return;
-    }
-    this.showCommandDivider(existing ? 'Revising design artifact…' : 'Design artifact created. Starting design turn…');
-    const sendThreadId = thread.id;
-    // Loaded on demand: the view must not carry a build-time dependency on an
-    // optional capability (ADR-0008).
-    const { designKickoffMessage } = await import('./designArtifact');
-    this.manager.sendMessage(sendThreadId, designKickoffMessage(artifact, brief)).catch((error) => {
-      this.showCommandDivider(`Failed to start design turn: ${(error as Error).message}`, true);
-      if (this.activeThreadId === sendThreadId) this.setRunningState(false);
-    });
-  }
-
   private async handleLoopCommand(arg: string): Promise<void> {
     if (!this.activeThreadId) return;
     const threadId = this.activeThreadId;
@@ -5772,6 +5731,37 @@ export class ThreadsView extends ItemView {
     attachment: string | null,
   ): Promise<void> {
     if (!this.activeThreadId) return;
+    const commandThreadId = this.activeThreadId;
+
+    // Capture command context before leaving a child-agent view or awaiting a
+    // peer. Feedback must never land in whichever thread happens to be active later.
+    if (this.plugin.slashCommands?.match(typed, 'thread')) {
+      const captured = this.manager.getThread(commandThreadId);
+      const context = {
+        surface: 'thread' as const, text: typed, threadId: commandThreadId,
+        agentHarness: captured?.agentHarness ?? this.plugin.settings.agentHarness,
+        projectId: captured?.projectId,
+        hasImages: images.length > 0, hasAttachment: !!attachment,
+      };
+      await this.exitAgentView();
+      if (!this.manager.getThread(commandThreadId)) return;
+      this.lastSentTexts.set(commandThreadId, typed);
+      if (captured) delete captured.draft;
+      if (this.activeThreadId === commandThreadId) this.hideSummaryBanner(false);
+      const report = (message: string, isError = false) => {
+        if (!this.manager.getThread(commandThreadId)) return;
+        if (this.activeThreadId === commandThreadId) {
+          this.showCommandDivider(message, isError);
+          if (isError) this.setRunningState(this.manager.isRunning(commandThreadId));
+        } else new Notice(message);
+      };
+      const result = await this.plugin.slashCommands.invoke(context, report);
+      if (result?.message) report(result.message, result.status === 'error');
+      // Even if a peer unloads while exitAgentView runs, this matched submission
+      // belongs to it and must not become an ordinary agent prompt.
+      if (!result) report('Command is no longer available. Please try again.', true);
+      return;
+    }
 
     // A message always goes to the thread, never to a child agent. Leave the
     // child view first so the send visibly lands in the main conversation
@@ -5843,13 +5833,6 @@ export class ThreadsView extends ItemView {
           return;
         }
       }
-    }
-
-    // /design [brief] — create/revise, or reopen the thread's static artifact.
-    const designMatch = typed.match(/^\/design(?:\s+([\s\S]+))?$/i);
-    if (designMatch) {
-      await this.handleDesignCommand((designMatch[1] ?? '').trim());
-      return;
     }
 
     // /goal [text | clear] — set/show/clear the persistent goal for this thread.

@@ -5,6 +5,9 @@ import { ArtifactProviderRegistry } from './ArtifactContributions';
 import { createArtifactStore } from './artifactStore';
 import { AgentToolRegistry, type AgentToolHost } from './AgentToolContributions';
 import { createDesignAgentTool, DESIGN_AGENT_TOOL_OWNER } from './designAgentTool';
+import { SlashCommandRegistry } from './SlashCommandContributions';
+import { createDesignSlashCommand } from './designSlashCommand';
+import { THREAD_BUILTIN_COMMANDS, DISPATCH_BUILTIN_COMMANDS, escalationCommand } from './slashCommands';
 import {
   createDesignArtifactContribution, DESIGN_ACTION_PREVIEW, DESIGN_ARTIFACT_KIND, DESIGN_ARTIFACT_SCHEMA_VERSION, DESIGN_SOURCE_REVEALED_WARNING,
   DESIGN_PROVIDER_ID, DESIGN_PROVIDER_OWNER,
@@ -337,6 +340,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * initialisation would run before `this.app` is usable.
    */
   readonly agentTools = new AgentToolRegistry({ reservedNames: () => this.reservedAgentToolNames() });
+  readonly slashCommands = new SlashCommandRegistry({ reservedNames: () => [
+    ...THREAD_BUILTIN_COMMANDS.map(command => command.name),
+    ...DISPATCH_BUILTIN_COMMANDS.map(command => command.name),
+    'fork',
+    ...(this.settings && escalationCommand(this.settings) ? [escalationCommand(this.settings)!.name] : []),
+  ] });
   private reservedAgentToolNamesCache?: readonly string[];
 
   private reservedAgentToolNames(): readonly string[] {
@@ -2360,6 +2369,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       hasSecret: (name) => !!this.app.secretStorage.getSecret(secretStorageKey(name)),
       artifactProviders: this.artifactProviders,
       agentTools: this.agentTools,
+      slashCommands: this.slashCommands,
       getDefaultPermissionMode: () => this.settings.permissionMode,
       artifactStore: createArtifactStore({
         vaultRoot: () => this.manager.vaultRoot,
@@ -2395,6 +2405,25 @@ export default class ClaudeThreadsPlugin extends Plugin {
     );
     if (!toolRegistration.success) {
       console.error(`[ClaudeThreads] Built-in design agent tool was refused: ${toolRegistration.message}`);
+    }
+    const commandRegistration = service.api.extensions.registerSlashCommand(
+      DESIGN_PROVIDER_OWNER,
+      createDesignSlashCommand({
+        getState: threadId => {
+          const thread = this.manager.getThread(threadId);
+          return thread ? { hasArtifacts: !!thread.artifacts?.length,
+            existingTitle: thread.artifacts?.find(artifact => artifact.kind === 'design-static')?.title } : null;
+        },
+        isDesktopFilesystem: () => this.app.vault.adapter instanceof FileSystemAdapter,
+        // Explicit internal adapters until dispatch transactions and preparation
+        // move behind the public artifact/thread contracts (ADR-0008).
+        prepare: (threadId, brief) => this.enterDesignMode(threadId, brief, true),
+        send: (threadId, prompt) => this.manager.sendMessage(threadId, prompt),
+        dispatch: (brief, harness) => this.dispatchNewDesignThread(brief, harness),
+      }),
+    );
+    if (!commandRegistration.success) {
+      console.error(`[ClaudeThreads] Built-in design command was refused: ${commandRegistration.message}`);
     }
   }
 
