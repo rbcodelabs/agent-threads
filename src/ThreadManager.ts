@@ -3,6 +3,9 @@ import { createHarnessSession } from './HarnessFactory';
 import { resolveCodexPermissions, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
 import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
 import { AttachmentWriter } from './AttachmentWriter';
+// Safe to import statically on mobile: this module requires `fs`/`path` lazily,
+// inside functions, so nothing Node-only runs at module-init scope.
+import { removeStorageRoot, type ArtifactStorageFs } from './artifactStorage';
 import { collectPendingImageExternalizations } from './imageExternalization';
 import { effectiveExtraEnv } from './types';
 import { derivePrUrl } from './statusLine';
@@ -273,6 +276,16 @@ export class ThreadManager {
   private rawLogWriter: RawLogWriter;
   /** Writes message images out to vault attachment files (ADR-0003, PR 1). */
   private attachmentWriter: AttachmentWriter;
+  /** Injectable filesystem for artifact-storage GC; defaults to the real one. */
+  artifactStorageFs?: ArtifactStorageFs;
+  /**
+   * Settles once the artifact-storage cleanup fired by every deletion so far has
+   * finished. Production ignores this — deletion stays synchronous and never
+   * fails on cleanup. It exists so callers that need to observe the filesystem
+   * afterwards can await the real work instead of sleeping for a guessed
+   * interval, which is inherently racy on a loaded machine.
+   */
+  artifactCleanupSettled: Promise<void> = Promise.resolve();
 
   constructor(settings: PluginSettings) {
     this.settings = settings;
@@ -536,6 +549,7 @@ export class ThreadManager {
     if (thread && !thread.noteFile) {
       void this.attachmentWriter.removeThreadDir(id);
     }
+    if (thread) this.removeArtifactStorage(thread);
     const session = this.sessions.get(id);
     if (session) {
       session.close();
@@ -552,6 +566,29 @@ export class ThreadManager {
     this.selectedAgentRuns.delete(id);
     this.threads.delete(id);
     this.emit(id, { type: 'thread_deleted' });
+  }
+
+  /**
+   * Garbage-collects artifact storage belonging to a deleted thread (ADR-0010).
+   *
+   * Until `storageRoot` became host-visible, nothing owned these directories:
+   * deleting a thread removed its attachment directory but left
+   * `.geode/artifacts/<id>` on disk forever. Every root is re-validated against
+   * the vault artifact root inside `removeStorageRoot` before anything is
+   * removed, so a hand-edited or hostile record cannot aim the delete
+   * elsewhere. Fire-and-forget, and a missing directory is not an error, so
+   * deletion stays synchronous and never fails on cleanup.
+   */
+  private removeArtifactStorage(thread: Thread): void {
+    const vaultRoot = this.vaultRoot;
+    const roots = (thread.artifacts ?? []).map(artifact => artifact.storageRoot).filter((root): root is string => !!root);
+    if (!vaultRoot || roots.length === 0) return;
+    const pending = roots.map(root => removeStorageRoot(vaultRoot, root, this.artifactStorageFs).catch(() => undefined));
+    // Chained rather than replaced, so awaiting after several deletions covers
+    // all of them rather than only the most recent.
+    this.artifactCleanupSettled = this.artifactCleanupSettled
+      .then(() => Promise.all(pending))
+      .then(() => undefined);
   }
 
   renameThread(id: string, title: string): void {

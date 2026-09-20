@@ -14,6 +14,7 @@
  */
 
 import type { ThreadArtifactRecord } from './types';
+import type { StorageRootResolution } from './artifactStorage';
 
 /** Namespaced owner identity supplied by the registering plugin. */
 export interface PeerIdentity {
@@ -32,6 +33,13 @@ export interface ThreadArtifactRef {
   readonly id: string;
   readonly title: string;
   readonly data: unknown;
+  /**
+   * Absolute directory this artifact's files live in, if it has any. The one
+   * deliberately non-opaque field: the host needs it to garbage-collect
+   * storage when the owning thread is deleted (ADR-0010). Validated against
+   * the vault artifact root on the way in — see `src/artifactStorage.ts`.
+   */
+  readonly storageRoot?: string;
 }
 
 export interface ArtifactAction {
@@ -94,6 +102,58 @@ export type ArtifactRegistrationResult =
       readonly dispose: () => void;
     };
 
+/**
+ * Outcome of attaching an artifact to a thread. Structured rather than thrown,
+ * following the `mcp.register` precedent: a peer branches on `status` instead
+ * of pattern-matching an exception.
+ */
+export type ArtifactAttachResult =
+  | { readonly success: true; readonly status: 'attached' | 'updated'; readonly artifactId: string }
+  | {
+      readonly success: false;
+      readonly status: 'invalid' | 'conflict' | 'unknown-provider' | 'thread-not-found' | 'unavailable';
+      readonly artifactId: string;
+      readonly message: string;
+    };
+
+/** Outcome of updating or detaching an already-attached artifact. */
+export type ArtifactMutationResult =
+  | { readonly success: true; readonly status: 'updated' | 'detached'; readonly artifactId: string }
+  | {
+      readonly success: false;
+      readonly status: 'invalid' | 'conflict' | 'unknown-provider' | 'thread-not-found' | 'artifact-not-found' | 'unavailable';
+      readonly artifactId: string;
+      readonly message: string;
+    };
+
+/** Patch a peer may apply to its own artifact. Host-owned identity is not in it. */
+export interface ArtifactPatch {
+  readonly title?: string;
+  readonly data?: unknown;
+  readonly storageRoot?: string;
+}
+
+/**
+ * Host-owned artifact persistence, behind the public `artifacts` namespace.
+ * Implemented by `createArtifactStore`; absent when the host cannot persist
+ * artifacts at all, which `attach` reports as `unavailable`.
+ */
+export interface ArtifactStoreHost {
+  /** Records for a thread, or `null` when no such thread exists. */
+  list(threadId: string): readonly ThreadArtifactRecord[] | null;
+  /** Validates a peer-supplied storage root against the vault artifact root. */
+  resolveStorageRoot(candidate: unknown): StorageRootResolution;
+  /** Inserts, or updates in place when an artifact with the same id exists. */
+  put(threadId: string, record: ThreadArtifactRecord): Promise<'attached' | 'updated' | 'thread-not-found'>;
+  detach(threadId: string, artifactId: string): Promise<'detached' | 'artifact-not-found' | 'thread-not-found'>;
+  /**
+   * Runs an action on exactly the path a card click takes. Deliberately takes
+   * ids rather than a ref, so both callers resolve the artifact identically
+   * and the two paths cannot drift.
+   */
+  invokeAction(threadId: string, artifactId: string, actionId: string): Promise<ArtifactActionResult>;
+}
+
 /** Outcome of asking the registry to describe an artifact. */
 export type ArtifactPresentationResult =
   | { readonly status: 'ok'; readonly presentation: ArtifactPresentation }
@@ -134,11 +194,22 @@ export function toArtifactRef(record: ThreadArtifactRecord): ThreadArtifactRef {
     schemaVersion: record.schemaVersion ?? 1,
     id: record.id,
     title: record.title,
+    storageRoot: record.storageRoot,
     // A copy, so a provider can never mutate persisted state behind the
     // host's back. Writes go through ArtifactActionHost.updateArtifact.
     data: Object.freeze({ ...record }),
   });
 }
+
+/**
+ * Record fields whose value the host owns. A provider may never write them,
+ * whether through `ArtifactActionHost.updateArtifact` or `artifacts.update`:
+ * identity must stay stable, and `storageRoot` is only ever set by the host
+ * after `resolveStorageRoot` has accepted it.
+ */
+export const HOST_OWNED_ARTIFACT_FIELDS: readonly string[] = Object.freeze([
+  'id', 'kind', 'providerId', 'schemaVersion', 'createdAt', 'storageRoot',
+]);
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -213,6 +284,22 @@ export class ArtifactProviderRegistry {
 
   has(providerId: string): boolean {
     return this.entries.has(providerId);
+  }
+
+  /**
+   * The plugin that registered `providerId`, if any. This is what makes
+   * artifact ownership enforceable: a peer attaching under a provider id it
+   * does not own is rejected rather than silently writing into another
+   * plugin's namespace.
+   */
+  ownerOf(providerId: string): PeerIdentity | undefined {
+    return this.entries.get(providerId)?.owner;
+  }
+
+  /** Artifact kinds `providerId` declared at registration. */
+  kindsOf(providerId: string): readonly string[] | undefined {
+    const kinds = this.entries.get(providerId)?.contribution.kinds;
+    return kinds ? Object.freeze([...kinds]) : undefined;
   }
 
   /** Registered provider ids, in registration order. */
