@@ -35,7 +35,18 @@ export interface ArtifactStorageFs {
   /** Resolves symlinks. Expected to throw for a path that does not exist. */
   realpathSync?(target: string): string;
   rm?(target: string, options: { recursive: true; force: true }): Promise<unknown>;
+  mkdir?(target: string, options: { recursive: true }): Promise<unknown>;
 }
+
+/**
+ * An artifact id, constrained to a single safe path segment.
+ *
+ * `allocateStorageRoot` turns an id into a directory name, so this is the
+ * first of two independent guards against `../` escaping the artifact root —
+ * `resolveStorageRoot` containment is the second. Neither is load-bearing
+ * alone, which is the point.
+ */
+export const ARTIFACT_ID_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 interface PathModule {
   join(...parts: string[]): string;
@@ -62,6 +73,7 @@ function nodeStorageFs(): ArtifactStorageFs {
       // from some shims, so fall back rather than throwing at import time.
       realpathSync: target => (typeof fs.realpathSync.native === 'function' ? fs.realpathSync.native(target) : fs.realpathSync(target)),
       rm: (target, options) => fs.promises.rm(target, options),
+      mkdir: (target, options) => fs.promises.mkdir(target, options),
     };
   } catch {
     return {};
@@ -152,6 +164,61 @@ export function resolveStorageRoot(
     return invalid(`storageRoot must resolve inside ${root}.`);
   }
   return { status: 'ok', path: resolved };
+}
+
+/**
+ * Creates and returns the host-owned storage root for one artifact.
+ *
+ * Before this existed, a peer had to *derive* its own root and hope the host
+ * would accept it: `attach` only takes a directory under
+ * `<vault>/.geode/artifacts/`, but the host never disclosed that location, so
+ * allocation was convention rather than contract. Design reproduced the layout
+ * by hand in `designArtifactRoot`.
+ *
+ * Containment is decided by `resolveStorageRoot` — the same validation
+ * `attach` and `removeStorageRoot` use, deliberately reused rather than
+ * reimplemented, so there is exactly one definition of "inside the artifact
+ * root" to keep correct.
+ *
+ * Idempotent: re-allocating an existing artifact's root returns it without
+ * touching anything inside. `mkdir` is recursive (so an existing directory is
+ * not an error) and nothing here writes files — the scaffold writes that do
+ * are already exclusive-create, so re-entry never overwrites a user's source.
+ */
+export async function allocateStorageRoot(
+  vaultRoot: string,
+  artifactId: unknown,
+  storageFs: ArtifactStorageFs = nodeStorageFs(),
+): Promise<StorageRootResolution & { existed?: boolean }> {
+  const id = typeof artifactId === 'string' ? artifactId.trim() : '';
+  if (!id || !ARTIFACT_ID_SEGMENT_PATTERN.test(id)) {
+    return invalid('artifactId must be a single path segment matching [A-Za-z0-9][A-Za-z0-9._-]*.');
+  }
+  if (!vaultRoot) {
+    return invalid('This host has no local vault, so artifact storage cannot be allocated.');
+  }
+  const pathModule = nodePath();
+  if (!pathModule) {
+    return invalid('This host has no local filesystem, so artifact storage cannot be allocated.');
+  }
+  const candidate = pathModule.join(artifactStorageRoot(vaultRoot), id);
+  const resolved = resolveStorageRoot(vaultRoot, candidate, storageFs);
+  if (resolved.status !== 'ok') return resolved;
+  if (!storageFs.mkdir) {
+    return invalid('This host cannot create artifact storage directories.');
+  }
+  let existed = false;
+  try {
+    existed = !!storageFs.realpathSync?.(resolved.path);
+  } catch {
+    existed = false;
+  }
+  try {
+    await storageFs.mkdir(resolved.path, { recursive: true });
+  } catch (error) {
+    return invalid(error instanceof Error ? error.message : String(error));
+  }
+  return { status: 'ok', path: resolved.path, existed };
 }
 
 /**

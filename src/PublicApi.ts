@@ -1,4 +1,5 @@
-import type { ChatMessage, Thread, ThreadArtifactRecord, ThreadStatus } from './types';
+import type { ChatMessage, StorageAllocationResult, Thread, ThreadArtifactRecord, ThreadPermissionSnapshot, ThreadStatus } from './types';
+import type { AgentToolContribution, AgentToolRegistrationResult, AgentToolRegistry } from './AgentToolContributions';
 import type { ThreadEvent } from './ThreadManager';
 import type { RawLogTraceChunk, RawLogTraceMetadata } from './RawLogWriter';
 import type { McpRegistrationResult } from './mcpServerStore';
@@ -6,6 +7,8 @@ import type { ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, 
 import { HOST_OWNED_ARTIFACT_FIELDS, PROVIDER_ID_PATTERN, toArtifactRef } from './ArtifactContributions';
 
 export type { ArtifactAction, ArtifactActionHost, ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactPresentation, ArtifactRegistrationResult, ArtifactStoreHost, ArtifactViewPlacement, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
+export type { AgentToolContribution, AgentToolHost, AgentToolRegistrationResult, AgentToolResult } from './AgentToolContributions';
+export type { StorageAllocationResult, ThreadPermissionSnapshot } from './types';
 
 export type PublicErrorCode = 'PLUGIN_UNAVAILABLE' | 'THREAD_NOT_FOUND' | 'RUN_NOT_FOUND' | 'RUN_FAILED' | 'RUN_INTERRUPTED' | 'THREAD_BUSY' | 'IDEMPOTENCY_CONFLICT' | 'TRACE_NOT_FOUND' | 'CURSOR_INVALID' | 'CONSTRAINT_UNSUPPORTED' | 'ORCHESTRATOR_NOT_FOUND' | 'INVALID_ARGUMENT';
 export interface PublicError { readonly code: PublicErrorCode; readonly message: string }
@@ -76,6 +79,12 @@ export interface ClaudeThreadsApiV1 {
     list(query?: ThreadQuery): Promise<readonly ThreadSummary[]>; get(threadId: string): Promise<ThreadSnapshot | null>;
     create(input: CreateThreadInput): Promise<{ readonly threadId: string }>; send(threadId: string, input: SendInput): Promise<{ readonly runId: string }>;
     wait(runId: string, options?: WaitOptions): Promise<RunResult>; cancel(runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>>; open(threadId: string): Promise<void>; subscribe(listener: (event: PublicThreadEvent) => void): Disposable;
+    /**
+     * Effective permission mode and pending-plan state, read-only (ADR-0008).
+     * Neither field appears on `ThreadSnapshot`, so a peer that writes on a
+     * thread's behalf has no way to tell whether writing is permitted.
+     */
+    permissions(threadId: string): Promise<ThreadPermissionSnapshot | null>;
   };
   readonly traces: { listSources(options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceSourcePage>; readChunk(sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk>; subscribe(listener: (event: PublicTraceEvent) => void): Disposable };
   readonly constrainedRuns: { create(input: ConstrainedRunInput): Promise<{ readonly runId: string }>; get(runId: string): Promise<ConstrainedRunResult>; wait(runId: string, options?: WaitOptions): Promise<ConstrainedRunResult>; cancel(runId: string): Promise<ConstrainedRunResult> };
@@ -91,6 +100,16 @@ export interface ClaudeThreadsApiV1 {
    */
   readonly extensions: {
     registerArtifactProvider(owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult;
+    /**
+     * Contributes an in-process agent tool (ADR-0008). The peer supplies a
+     * thread-agnostic `invoke`; the host binds it into every MCP server it
+     * builds and injects the calling thread id at invoke time. A peer never
+     * sees the per-thread server factory — that inversion is the point.
+     *
+     * Names are checked against host built-ins, core agent tools and other
+     * peers' tools, so a contribution can never shadow `Read` or `Bash`.
+     */
+    registerAgentTool(owner: PeerIdentity, contribution: AgentToolContribution): AgentToolRegistrationResult;
   };
   /**
    * Artifact entry point (ADR-0010). Lets a peer create an artifact and open
@@ -110,6 +129,19 @@ export interface ClaudeThreadsApiV1 {
     detach(owner: PeerIdentity, threadId: string, artifactId: string): Promise<ArtifactMutationResult>;
     /** Runs a named provider action on the same path a card click takes. */
     invokeAction(threadId: string, artifactId: string, actionId: string): Promise<ArtifactActionResult>;
+    /**
+     * Creates and returns the host-owned storage root for `artifactId`
+     * (ADR-0008). `attach` only accepts a root under the vault artifact
+     * directory — a location the host never disclosed — so without this,
+     * allocation was convention a peer had to reproduce, not a contract.
+     * Idempotent: re-allocating returns the existing root without clobbering.
+     *
+     * Ownerless, like `invokeAction`: allocation necessarily runs *before* the
+     * artifact exists, so there is no registered provider to check a caller
+     * against. It creates an empty directory and grants nothing — attaching
+     * under a provider id is still owner-checked.
+     */
+    allocateStorage(threadId: string, artifactId: string): Promise<StorageAllocationResult>;
   };
 }
 export interface PublicApiDependencies {
@@ -129,6 +161,14 @@ export interface PublicApiDependencies {
   hasSecret?(secretName: string): boolean;
   /** Host-owned artifact provider registry; absent when the host cannot render artifacts. */
   artifactProviders?: ArtifactProviderRegistry;
+  /**
+   * Host-owned agent tool registry; absent when the host builds no MCP
+   * servers. The registry is read by the per-thread MCP server factory, so a
+   * peer contributes through it without ever seeing the factory.
+   */
+  agentTools?: AgentToolRegistry;
+  /** Default permission mode, for resolving a thread with no override. */
+  getDefaultPermissionMode?(): Thread['permissionMode'];
   /** Host-owned artifact persistence; absent when the host cannot store artifacts. */
   artifactStore?: ArtifactStoreHost;
 }
@@ -149,7 +189,9 @@ function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   if (deps.registerMcpServer) capabilities.push('mcp.register');
   if (deps.requestSecret) capabilities.push('mcp.requestSecret');
   if (deps.artifactProviders) capabilities.push('extensions.registerArtifactProvider');
-  if (deps.artifactStore && deps.artifactProviders) capabilities.push('artifacts.list', 'artifacts.attach', 'artifacts.update', 'artifacts.detach', 'artifacts.invokeAction');
+  if (deps.agentTools) capabilities.push('extensions.registerAgentTool');
+  if (deps.getDefaultPermissionMode) capabilities.push('threads.permissions');
+  if (deps.artifactStore && deps.artifactProviders) capabilities.push('artifacts.list', 'artifacts.attach', 'artifacts.update', 'artifacts.detach', 'artifacts.invokeAction', 'artifacts.allocateStorage');
   return Object.freeze(capabilities);
 }
 function freeze<T extends object>(value: T): Readonly<T> { for (const nested of Object.values(value)) if (nested && typeof nested === 'object' && !Object.isFrozen(nested)) freeze(nested as object); return Object.freeze(value); }
@@ -546,6 +588,43 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     });
   };
 
+  const agentToolRegistrations = new Set<{ dispose: () => void }>();
+  const registerAgentTool = (owner: PeerIdentity, contribution: AgentToolContribution): AgentToolRegistrationResult => {
+    guard();
+    const registry = deps.agentTools;
+    if (!registry) {
+      return freeze({ success: false as const, status: 'unavailable' as const, name: String(contribution?.name ?? ''), message: 'Agent tool contributions are not available in this host context.', dispose: () => {} });
+    }
+    const result = registry.register(owner, contribution);
+    if (!result.success) return freeze(result);
+    // Tracked so stop() drops it the way event listeners and artifact
+    // providers already are: a reloaded peer must never leave a phantom tool
+    // advertised to sessions built after the reload.
+    const tracked = { dispose: result.dispose };
+    agentToolRegistrations.add(tracked);
+    return freeze({
+      success: true as const, status: 'registered' as const, name: result.name,
+      dispose: () => { agentToolRegistrations.delete(tracked); result.dispose(); },
+    });
+  };
+
+  const threadPermissions = async (threadId: string): Promise<ThreadPermissionSnapshot | null> => {
+    guard();
+    const thread = deps.getThread(threadId);
+    if (!thread || !deps.getDefaultPermissionMode) return null;
+    // Resolved against the global default here, because that default is itself
+    // host-private: returning only the per-thread override would leave the
+    // caller unable to work out the effective mode.
+    const override = thread.permissionMode;
+    return freeze({
+      threadId,
+      effectivePermissionMode: override ?? deps.getDefaultPermissionMode() ?? 'default',
+      overridden: override !== undefined,
+      planApprovalPending: thread.pendingPlan !== undefined,
+      questionPending: (thread.pendingQuestions?.length ?? 0) > 0,
+    });
+  };
+
   // --- artifacts -----------------------------------------------------------
   // Everything below returns a structured result and never throws for an
   // input the caller could plausibly get wrong, so a peer branches on `status`
@@ -745,20 +824,43 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     return freeze(await store.invokeAction(threadId, id, action));
   };
 
+  const allocateArtifactStorage = async (threadId: string, artifactId: string): Promise<StorageAllocationResult> => {
+    guard();
+    const id = typeof artifactId === 'string' ? artifactId.trim() : '';
+    const store = deps.artifactStore;
+    if (!store || !deps.artifactProviders) {
+      return artifactFailure(id, 'unavailable', 'Artifact storage allocation is not available in this host context.');
+    }
+    if (!id || id.length > MAX_ARTIFACT_ID_LENGTH) {
+      return artifactFailure(id, 'invalid', `artifactId must contain 1-${MAX_ARTIFACT_ID_LENGTH} characters.`);
+    }
+    // The thread has to exist: an allocated root is garbage-collected when its
+    // thread is deleted, so a root under no thread would never be collected.
+    if (!store.list(threadId)) return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
+    const resolved = await store.allocateStorageRoot(id);
+    if (resolved.status !== 'ok') return artifactFailure(id, 'invalid', resolved.message);
+    return freeze({
+      success: true as const,
+      status: resolved.existed ? ('existing' as const) : ('allocated' as const),
+      artifactId: id, path: resolved.path,
+    });
+  };
+
   const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: computeCapabilities(deps),
     threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const owner = boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH); const explicitOrigin = boundedString(input.origin, 'origin', MAX_OWNER_LENGTH); if (owner && explicitOrigin && owner !== explicitOrigin) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match ownerPluginId.'); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: explicitOrigin ?? owner, externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, send, wait, cancel,
       open: async (threadId: string) => { guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.'); await deps.openThread(threadId); },
-      subscribe: (listener: (event: PublicThreadEvent) => void) => { guard(); listeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; listeners.delete(listener); } }); } },
+      subscribe: (listener: (event: PublicThreadEvent) => void) => { guard(); listeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; listeners.delete(listener); } }); },
+      permissions: threadPermissions },
     traces: { listSources: listTraceSources, readChunk: readTraceChunk, subscribe: (listener: (event: PublicTraceEvent) => void) => { guard(); traceListeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; traceListeners.delete(listener); } }); } },
     constrainedRuns: { create: createConstrained, get: getConstrained, wait: waitConstrained, cancel: cancelConstrained },
     orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input); } },
     agentTools: { createBundle: (profile) => { guard(); if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`); return freeze({ tools: VOICE_TOOLS, execute: executeTool }); } },
     mcp: { register: registerMcp, requestSecret: requestSecretMcp },
-    extensions: { registerArtifactProvider },
-    artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction },
+    extensions: { registerArtifactProvider, registerAgentTool },
+    artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction, allocateStorage: allocateArtifactStorage },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
-    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
+    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
 }
 
 function toolTimeout(args: Record<string, unknown>): number { return Math.min(Math.max(10, Number(args.timeout_secs) || 120), 300) * 1_000; }

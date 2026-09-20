@@ -3,6 +3,8 @@ import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThre
 import { createConstrainedQueryRunner } from './ConstrainedRun';
 import { ArtifactProviderRegistry } from './ArtifactContributions';
 import { createArtifactStore } from './artifactStore';
+import { AgentToolRegistry, type AgentToolHost } from './AgentToolContributions';
+import { createDesignAgentTool, DESIGN_AGENT_TOOL_OWNER } from './designAgentTool';
 import {
   createDesignArtifactContribution, DESIGN_ACTION_PREVIEW, DESIGN_ARTIFACT_KIND, DESIGN_ARTIFACT_SCHEMA_VERSION, DESIGN_SOURCE_REVEALED_WARNING,
   DESIGN_PROVIDER_ID, DESIGN_PROVIDER_OWNER,
@@ -325,6 +327,39 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * as a peer plugin would (ADR-0008).
    */
   readonly artifactProviders = new ArtifactProviderRegistry();
+  /**
+   * Host-owned agent tool registry. Read by `mcpServerFactory` each time a
+   * session's MCP servers are built; peers write into it only through
+   * `extensions.registerAgentTool` (ADR-0008).
+   *
+   * Reserved names are resolved lazily and memoized: the built-in catalog is
+   * fixed for a given host, and computing it eagerly during field
+   * initialisation would run before `this.app` is usable.
+   */
+  readonly agentTools = new AgentToolRegistry({ reservedNames: () => this.reservedAgentToolNames() });
+  private reservedAgentToolNamesCache?: readonly string[];
+
+  private reservedAgentToolNames(): readonly string[] {
+    // Built with default options deliberately. The optional tools (Web Viewer,
+    // agent browser) are the *narrower* set, so reserving the full catalog
+    // means a contribution can never collide with a built-in that happens to
+    // be switched off right now and switched on later.
+    if (!this.reservedAgentToolNamesCache) {
+      try {
+        // Lazily required like every other ObsidianTools use in this file: the
+        // module pulls in Node built-ins and the Agent SDK, so a static import
+        // would break the mobile bundle.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { builtInMcpToolNames } = require('./ObsidianTools') as typeof import('./ObsidianTools');
+        this.reservedAgentToolNamesCache = builtInMcpToolNames(this.app);
+      } catch {
+        // A host that cannot build MCP servers runs no agent tools either, so
+        // there is nothing to collide with.
+        this.reservedAgentToolNamesCache = [];
+      }
+    }
+    return this.reservedAgentToolNamesCache;
+  }
 
   /** Maximum number of poll attempts per thread before giving up on background task monitoring. */
   private static readonly BG_TASK_MAX_POLLS = 10;
@@ -535,7 +570,16 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
       try {
         const mcpServers = createClaudeThreadsMcpServers(this.app, {
-          onEnterDesignMode: brief => this.enterDesignMode(threadId, brief),
+          // Contributed agent tools, bound to this thread here — the host does
+          // the binding so a peer never reaches the factory (ADR-0008). Built-in
+          // Design arrives through this list like any other contribution; there
+          // is no privileged onEnterDesignMode option any more.
+          //
+          // Bound at construction, so a tool registered before this session was
+          // built is present and one registered after is not. Retrofitting a
+          // live session is deliberately not attempted: the agent's tool
+          // catalog is already fixed for the turn in flight.
+          contributedTools: this.agentTools.bindAll(threadId, this.agentToolHost(threadId)),
           onWatchDocument: path => this.watchDocument(threadId, path),
           onUnwatchDocument: opts => this.unwatchDocument(threadId, opts),
           onListWatchedDocuments: () => this.listWatchedDocuments(threadId),
@@ -2315,6 +2359,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       requestSecret: (secretName, reason, force) => this.requestSecretFromUser(secretName, reason, force),
       hasSecret: (name) => !!this.app.secretStorage.getSecret(secretStorageKey(name)),
       artifactProviders: this.artifactProviders,
+      agentTools: this.agentTools,
+      getDefaultPermissionMode: () => this.settings.permissionMode,
       artifactStore: createArtifactStore({
         vaultRoot: () => this.manager.vaultRoot,
         getThread: (id) => this.manager.getThread(id),
@@ -2337,6 +2383,18 @@ export default class ClaudeThreadsPlugin extends Plugin {
     );
     if (!registration.success) {
       console.error(`[ClaudeThreads] Built-in design artifact provider was refused: ${registration.message}`);
+    }
+    // Same story for the design *agent tool*: registered through the public
+    // contribution surface with a real peer identity, not pre-seeded and not
+    // passed to the factory as a privileged option. The host binds it per
+    // thread and injects the thread id; the contribution itself never names a
+    // thread, which is exactly what a third-party plugin would write.
+    const toolRegistration = service.api.extensions.registerAgentTool(
+      DESIGN_AGENT_TOOL_OWNER,
+      createDesignAgentTool((threadId, brief) => this.enterDesignMode(threadId, brief)),
+    );
+    if (!toolRegistration.success) {
+      console.error(`[ClaudeThreads] Built-in design agent tool was refused: ${toolRegistration.message}`);
     }
   }
 
@@ -2868,6 +2926,28 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Fire and forget — dashboard will show the running row via subscription
     this.manager.sendMessage(thread.id, text, images).catch(console.error);
     return thread.id;
+  }
+
+  /**
+   * Per-invocation capabilities handed to a contributed agent tool, bound to
+   * the calling thread (ADR-0008).
+   *
+   * Both operations go through public API v1 rather than reaching into the
+   * manager, for the same reason `previewDesignArtifactAsPeer` does: if the
+   * built-in reference consumer needs a privileged path here, so would a peer,
+   * and the extraction would not be real.
+   */
+  private agentToolHost(threadId: string): AgentToolHost {
+    return {
+      permissions: async () => (await this.api?.v1.threads.permissions(threadId)) ?? null,
+      allocateStorage: async (artifactId: string) => {
+        const api = this.api?.v1;
+        if (!api) {
+          return { success: false, status: 'unavailable', artifactId, message: 'Agent Threads public API is unavailable.' };
+        }
+        return api.artifacts.allocateStorage(threadId, artifactId);
+      },
+    };
   }
 
   /** Caller-bound design entry; the composer shares preparation but owns its next turn. */
