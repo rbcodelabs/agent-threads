@@ -142,6 +142,13 @@ export class SkillsManagerView extends ItemView {
   private installingSlug: string | null = null;
   private installOutput = '';
 
+  /**
+   * True while the "New skill" authoring form owns the detail pane. Tracked as
+   * state rather than rendered ad-hoc so it survives a `renderDetail()` call
+   * and counts as a detail view for the narrow-mode single-pane collapse.
+   */
+  private isCreatingNewSkill = false;
+
   // Check for updates state
   private isCheckingUpdates = false;
 
@@ -149,6 +156,7 @@ export class SkillsManagerView extends ItemView {
   private tabsEl!: HTMLElement;
   private tabsListEl!: HTMLElement;
   private tabActionsEl!: HTMLElement;
+  private bodyEl!: HTMLElement;
   private listEl!: HTMLElement;
   private dividerEl!: HTMLElement;
   private detailEl!: HTMLElement;
@@ -293,8 +301,12 @@ export class SkillsManagerView extends ItemView {
     this.tabActionsEl = this.tabsEl.createEl('div', { cls: 'ct-skills-tabs-actions' });
     this.buildTabs();
 
-    // Body: left list + draggable divider + right detail
+    // Body: left list + draggable divider + right detail.
+    // Also the container for the narrow-mode query — sized off this element
+    // rather than the viewport so the layout responds to the pane's own width,
+    // which is what actually varies (sidebar vs. full-width tab).
     const body = root.createEl('div', { cls: 'ct-skills-body' });
+    this.bodyEl = body;
     this.listEl = body.createEl('div', { cls: 'ct-skills-list' });
     this.dividerEl = body.createEl('div', { cls: 'ct-skills-divider' });
     this.detailEl = body.createEl('div', { cls: 'ct-skills-detail' });
@@ -360,6 +372,83 @@ export class SkillsManagerView extends ItemView {
     });
   }
 
+  // ── Narrow-mode (single-pane) navigation ──────────────────────────────────
+  //
+  // Below the container breakpoint there is not enough room for list + detail
+  // side by side, so the CSS shows exactly one of them: the list until
+  // something is selected, then the detail pane with a back bar. The class
+  // toggled here is the only signal the stylesheet needs — the breakpoint
+  // itself lives entirely in CSS, so nothing here has to measure widths or
+  // listen for resizes.
+
+  /** True when the detail pane has something to show (any tab). Drives the single-pane swap. */
+  private hasActiveSelection(): boolean {
+    if (this.isCreatingNewSkill) return true;
+    if (this.activeTab === 'installed') {
+      return !!(
+        this.selectedInstalled ||
+        this.selectedAgent ||
+        this.selectedGithubSource ||
+        this.selectedGithubSourceSkill
+      );
+    }
+    if (this.browseSource !== 'registry') return !!this.selectedLocalSkill;
+    return !!this.selectedBrowse;
+  }
+
+  /** Mirrors `hasActiveSelection()` onto the body element for the container query to key off. */
+  private syncPaneVisibility(): void {
+    this.bodyEl?.toggleClass('ct-skills-body--has-selection', this.hasActiveSelection());
+  }
+
+  /** Clears whatever the detail pane is showing, returning the narrow layout to the list. */
+  private clearSelection(): void {
+    this.isCreatingNewSkill = false;
+    this.selectedInstalled = null;
+    this.selectedAgent = null;
+    this.selectedGithubSource = null;
+    this.selectedGithubSourceSkill = null;
+    this.selectedBrowse = null;
+    this.selectedLocalSkill = null;
+    this.editContent = '';
+    this.isDirty = false;
+    this.agentEditContent = '';
+    this.isAgentDirty = false;
+    this.renderList();
+    this.renderDetail();
+  }
+
+  /**
+   * Back navigation out of the detail pane. Unsaved edits would be silently
+   * dropped by `clearSelection()`, so confirm first — in narrow mode this is
+   * the only way back to the list, and hard-blocking it (as the "New skill"
+   * button does) would strand the user in the editor.
+   */
+  private goBackToList(): void {
+    if (this.isDirty || this.isAgentDirty) {
+      new ConfirmModal(
+        this.app,
+        'Discard unsaved changes to this file?',
+        'Discard',
+        (confirmed) => { if (confirmed) this.clearSelection(); },
+      ).open();
+      return;
+    }
+    this.clearSelection();
+  }
+
+  /** Back bar prepended to the detail pane. Rendered always; shown by CSS only in narrow mode. */
+  private renderDetailBackBar(): void {
+    const bar = this.detailEl.createEl('div', { cls: 'ct-skills-detail-back' });
+    const btn = bar.createEl('button', {
+      cls: 'ct-skills-back-btn',
+      attr: { 'aria-label': 'Back to skill list' },
+    });
+    setIcon(btn, 'arrow-left');
+    btn.createEl('span', { text: this.activeTab === 'installed' ? 'Skills' : 'Browse' });
+    btn.addEventListener('click', () => this.goBackToList());
+  }
+
   /** Import / Check-for-updates icon buttons, right-aligned in the tab bar. Installed-tab only. */
   private renderTabActions(): void {
     this.tabActionsEl.empty();
@@ -368,7 +457,7 @@ export class SkillsManagerView extends ItemView {
     const canInstall = !!this.plugin.getPluginSkillsRoot();
     const newBtn = this.tabActionsEl.createEl('button', { text: 'New skill', cls: 'ct-skills-btn ct-skills-author-btn' });
     newBtn.disabled = !this.plugin.getLocalSkillsRoot?.();
-    newBtn.addEventListener('click', () => this.renderNewSkill());
+    newBtn.addEventListener('click', () => this.startNewSkill());
     const importBtn = this.tabActionsEl.createEl('button', { cls: 'clickable-icon ct-skills-tab-action' });
     setIcon(importBtn, 'plus');
     importBtn.disabled = !canInstall;
@@ -465,6 +554,9 @@ export class SkillsManagerView extends ItemView {
       btn.addEventListener('click', () => {
         if (this.activeTab === tab.id) return;
         this.activeTab = tab.id;
+        // The authoring form belongs to the Installed tab; leaving the tab
+        // abandons it rather than letting it bleed into Browse.
+        this.isCreatingNewSkill = false;
         if (tab.id !== 'installed') {
           this.selectedGithubSource = null;
           this.selectedGithubSourceSkill = null;
@@ -892,7 +984,14 @@ export class SkillsManagerView extends ItemView {
 
   private renderDetail(): void {
     this.detailEl.empty();
-    if (this.activeTab === 'installed') {
+    // Single funnel for every detail pane, so the back bar and the narrow-mode
+    // class only have to be applied in one place.
+    this.syncPaneVisibility();
+    if (this.hasActiveSelection()) this.renderDetailBackBar();
+
+    if (this.isCreatingNewSkill) {
+      this.renderNewSkill();
+    } else if (this.activeTab === 'installed') {
       this.renderInstalledDetail();
     } else if (this.browseSource !== 'registry') {
       this.renderLocalDetail();
@@ -946,6 +1045,41 @@ export class SkillsManagerView extends ItemView {
       : skill.realPath;
     pathRow.createEl('span', { text: pathText, cls: 'ct-skills-detail-path-text' });
 
+    // Toolbar lives in the header, above the editor, so the textarea below can
+    // claim the rest of the pane. Built before the editor so DOM order matches
+    // visual order, but `saveBtn` is wired to the textarea further down — hence
+    // the forward reference through `.ct-skills-btn-save` in the input handler.
+    const actions = header.createEl('div', { cls: 'ct-skills-actions ct-skills-detail-toolbar' });
+
+    const saveBtn = actions.createEl('button', {
+      cls: 'ct-skills-btn ct-skills-btn--primary ct-skills-btn-save',
+      text: 'Save',
+      attr: { disabled: this.isDirty ? null : 'true' },
+    });
+    saveBtn.disabled = !this.isDirty;
+
+    const revealBtn = actions.createEl('button', {
+      cls: 'ct-skills-btn',
+      text: 'Reveal in Finder',
+    });
+    revealBtn.addEventListener('click', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
+      electron.shell?.showItemInFolder(skill.skillMdPath);
+    });
+
+    // Reload button (re-reads file from disk)
+    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
+    reloadBtn.addEventListener('click', () => void this.reloadSkillContent(skill));
+
+    // Uninstall shares the toolbar row but is pushed to the far end, so the
+    // destructive action never sits flush against Save.
+    const uninstallBtn = actions.createEl('button', {
+      cls: 'ct-skills-btn ct-skills-btn--danger ct-skills-btn-uninstall',
+      text: 'Uninstall',
+    });
+    uninstallBtn.addEventListener('click', () => void this.uninstallSkill(skill));
+
     // Editor section
     const editorWrap = this.detailEl.createEl('div', { cls: 'ct-skills-editor-wrap' });
     const labelRow = editorWrap.createEl('div', { cls: 'ct-skills-editor-label' });
@@ -967,42 +1101,11 @@ export class SkillsManagerView extends ItemView {
       } else if (!this.isDirty && dot) {
         dot.remove();
       }
-      const saveBtn = this.detailEl.querySelector<HTMLButtonElement>('.ct-skills-btn-save');
-      if (saveBtn) saveBtn.disabled = !this.isDirty;
+      const btn = this.detailEl.querySelector<HTMLButtonElement>('.ct-skills-btn-save');
+      if (btn) btn.disabled = !this.isDirty;
     });
 
-    // Primary actions
-    const actions = this.detailEl.createEl('div', { cls: 'ct-skills-actions' });
-
-    const saveBtn = actions.createEl('button', {
-      cls: 'ct-skills-btn ct-skills-btn--primary ct-skills-btn-save',
-      text: 'Save',
-      attr: { disabled: this.isDirty ? null : 'true' },
-    });
-    saveBtn.disabled = !this.isDirty;
     saveBtn.addEventListener('click', () => void this.saveSkillContent(skill, textarea));
-
-    const revealBtn = actions.createEl('button', {
-      cls: 'ct-skills-btn',
-      text: 'Reveal in Finder',
-    });
-    revealBtn.addEventListener('click', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
-      electron.shell?.showItemInFolder(skill.skillMdPath);
-    });
-
-    // Reload button (re-reads file from disk)
-    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
-    reloadBtn.addEventListener('click', () => void this.reloadSkillContent(skill));
-
-    // Danger zone
-    const danger = this.detailEl.createEl('div', { cls: 'ct-skills-danger-zone' });
-    const uninstallBtn = danger.createEl('button', {
-      cls: 'ct-skills-btn ct-skills-btn--danger',
-      text: 'Uninstall',
-    });
-    uninstallBtn.addEventListener('click', () => void this.uninstallSkill(skill));
   }
 
   /**
@@ -1027,6 +1130,16 @@ export class SkillsManagerView extends ItemView {
       cls: 'ct-skills-detail-path-text',
       text: skill.isSymlink ? `${skill.skillPath} → ${skill.realPath}` : skill.realPath,
     });
+
+    const actions = header.createEl('div', { cls: 'ct-skills-actions ct-skills-detail-toolbar' });
+    const revealBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reveal in Finder' });
+    revealBtn.addEventListener('click', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
+      electron.shell?.showItemInFolder(skill.skillMdPath);
+    });
+    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
+    reloadBtn.addEventListener('click', () => void this.reloadSkillContent(skill));
 
     const callout = this.detailEl.createEl('div', { cls: 'ct-skills-callout' });
     callout.createEl('div', {
@@ -1058,16 +1171,6 @@ export class SkillsManagerView extends ItemView {
       attr: { readonly: 'true' },
     });
     textarea.value = skill.content;
-
-    const actions = this.detailEl.createEl('div', { cls: 'ct-skills-actions' });
-    const revealBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reveal in Finder' });
-    revealBtn.addEventListener('click', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
-      electron.shell?.showItemInFolder(skill.skillMdPath);
-    });
-    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
-    reloadBtn.addEventListener('click', () => void this.reloadSkillContent(skill));
   }
 
   /**
@@ -1087,6 +1190,21 @@ export class SkillsManagerView extends ItemView {
     const pathRow = header.createEl('div', { cls: 'ct-skills-detail-path' });
     pathRow.createEl('span', { text: agent.agentPath, cls: 'ct-skills-detail-path-text' });
 
+    const actions = header.createEl('div', { cls: 'ct-skills-actions ct-skills-detail-toolbar' });
+
+    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
+    reloadBtn.addEventListener('click', () => void this.reloadAgentContent(agent));
+
+    const revealBtn = actions.createEl('button', {
+      cls: 'ct-skills-btn',
+      text: 'Reveal in Finder',
+    });
+    revealBtn.addEventListener('click', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
+      electron.shell?.showItemInFolder(agent.agentPath);
+    });
+
     const callout = this.detailEl.createEl('div', { cls: 'ct-skills-callout' });
     callout.createEl('div', {
       text: 'Managed by Claude Code. This plugin never writes to ~/.claude/ — edit or delete this agent with the `claude` CLI, or by hand.',
@@ -1105,21 +1223,6 @@ export class SkillsManagerView extends ItemView {
       attr: { readonly: 'true' },
     });
     textarea.value = agent.content;
-
-    const actions = this.detailEl.createEl('div', { cls: 'ct-skills-actions' });
-
-    const reloadBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reload' });
-    reloadBtn.addEventListener('click', () => void this.reloadAgentContent(agent));
-
-    const revealBtn = actions.createEl('button', {
-      cls: 'ct-skills-btn',
-      text: 'Reveal in Finder',
-    });
-    revealBtn.addEventListener('click', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const electron = require('electron') as { shell?: { showItemInFolder: (path: string) => void } };
-      electron.shell?.showItemInFolder(agent.agentPath);
-    });
   }
 
   private async reloadAgentContent(agent: InstalledAgent): Promise<void> {
@@ -1244,6 +1347,14 @@ export class SkillsManagerView extends ItemView {
     let content = '';
     try { content = fs.readFileSync(skillMdPath, 'utf-8'); } catch { content = '(Could not read SKILL.md)'; }
 
+    const actions = header.createEl('div', { cls: 'ct-skills-actions ct-skills-detail-toolbar' });
+    const revealBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reveal in Finder' });
+    revealBtn.addEventListener('click', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const electron = require('electron') as { shell?: { showItemInFolder: (p: string) => void } };
+      electron.shell?.showItemInFolder(skillMdPath);
+    });
+
     const editorWrap = this.detailEl.createEl('div', { cls: 'ct-skills-editor-wrap' });
     editorWrap.createEl('div', { cls: 'ct-skills-editor-label', text: 'SKILL.md (read-only)' });
     const editor = editorWrap.createEl('textarea', {
@@ -1251,14 +1362,6 @@ export class SkillsManagerView extends ItemView {
       attr: { readonly: 'true' },
     });
     editor.value = content;
-
-    const actions = this.detailEl.createEl('div', { cls: 'ct-skills-actions' });
-    const revealBtn = actions.createEl('button', { cls: 'ct-skills-btn', text: 'Reveal in Finder' });
-    revealBtn.addEventListener('click', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const electron = require('electron') as { shell?: { showItemInFolder: (p: string) => void } };
-      electron.shell?.showItemInFolder(skillMdPath);
-    });
   }
 
   private async loadGithubSourceSkillsForInstalled(source: import('./types').SkillSource): Promise<void> {
@@ -1721,9 +1824,24 @@ export class SkillsManagerView extends ItemView {
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
-  private renderNewSkill(): void {
+  /**
+   * Entry point for the "New skill" button. Flips the detail pane into the
+   * authoring form via state, so `renderDetail()` stays the only thing that
+   * writes to `detailEl` — which is what keeps the back bar and the
+   * narrow-mode pane swap working for this view too.
+   */
+  private startNewSkill(): void {
     if (this.isDirty || this.isAgentDirty) { new Notice('Save or reload your edits before creating a skill.'); return; }
-    this.detailEl.empty();
+    this.isCreatingNewSkill = true;
+    this.selectedInstalled = null;
+    this.selectedAgent = null;
+    this.selectedGithubSource = null;
+    this.selectedGithubSourceSkill = null;
+    this.renderList();
+    this.renderDetail();
+  }
+
+  private renderNewSkill(): void {
     this.detailEl.createEl('h3', { text: 'New local skill' });
     this.detailEl.createEl('p', { text: `Create in ${this.plugin.getLocalSkillsRoot()}. Available in new sessions.`, cls: 'ct-skills-availability' });
     const input = this.detailEl.createEl('input', { type: 'text', placeholder: 'meeting-notes', attr: { 'aria-label': 'Skill identifier' } });
@@ -1741,6 +1859,7 @@ export class SkillsManagerView extends ItemView {
           isSymlink: false, isDirectory: true, content, origin: 'local', isEditable: true, isRemovable: true,
         };
         this.installedSkills.push(skill);
+        this.isCreatingNewSkill = false;
         this.selectedInstalled = skill;
         this.selectedAgent = null;
         this.selectedGithubSource = null;
