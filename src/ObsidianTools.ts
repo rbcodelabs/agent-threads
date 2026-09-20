@@ -416,10 +416,27 @@ export type ObsidianMcpServerWithHarnessTools = McpSdkServerConfigWithInstance &
   harnessTools?: HarnessDynamicTool[];
 };
 
-function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {}): {
+/**
+ * A type alias, not an interface, on purpose: callers spread this into a
+ * `Record<string, McpServerConfig>`, and only type aliases get TypeScript's
+ * implicit index signature.
+ */
+export type McpToolSurfaces = {
   claude_threads: ObsidianMcpServerWithHarnessTools;
   obsidian: ObsidianMcpServerWithHarnessTools;
-} {
+};
+
+/**
+ * Internal shape. `builtInToolNames` is deliberately *not* on what
+ * `createClaudeThreadsMcpServers` returns: callers spread that result straight
+ * into a `Record<string, McpServerConfig>`, so an extra key there would be
+ * handed to the SDK as a malformed MCP server.
+ */
+type McpToolSurfacesInternal = McpToolSurfaces & {
+  builtInToolNames: readonly string[];
+};
+
+function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {}): McpToolSurfacesInternal {
   // ── In-session cwd tracking ────────────────────────────────────────────────
   // Unlike cwdAtStart in ThreadManager (which is frozen in the subprocess),
   // effectiveCwd is updated immediately by set_working_directory so worktree
@@ -2771,6 +2788,11 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   return {
     claude_threads: Object.assign(canonicalServer, { harnessTools: toHarnessDynamicTools(canonicalTools, contributedReadOnlyNames) }),
     obsidian: Object.assign(legacyServer, { harnessTools: toHarnessDynamicTools(legacyTools, contributedReadOnlyNames) }),
+    // Canonical *and* legacy built-in names, so the contribution registry can
+    // reject a name that would shadow either. Captured before contributions
+    // were appended, so a contributed tool never counts as a built-in — which
+    // is what lets the design tool contribute its own name.
+    builtInToolNames: Object.freeze([...builtInNames, ...legacyTools.map(definition => definition.name).filter(name => builtInNames.has(LEGACY_TO_CANONICAL_TOOL_NAMES[name] ?? name))]),
   };
 }
 
@@ -2778,8 +2800,18 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
 export function createClaudeThreadsMcpServers(
   app: App,
   options: ObsidianMcpServerOptions = {},
-): { claude_threads: ObsidianMcpServerWithHarnessTools; obsidian: ObsidianMcpServerWithHarnessTools } {
-  return createMcpToolSurfaces(app, options);
+): McpToolSurfaces {
+  const { claude_threads, obsidian } = createMcpToolSurfaces(app, options);
+  return { claude_threads, obsidian };
+}
+
+/**
+ * Built-in tool names on both the canonical and deprecated-alias servers,
+ * excluding anything contributed. This is what the contribution registry
+ * checks a new tool name against, so a peer cannot shadow a built-in.
+ */
+export function builtInMcpToolNames(app: App, options: ObsidianMcpServerOptions = {}): readonly string[] {
+  return createMcpToolSurfaces(app, options).builtInToolNames;
 }
 
 /** @deprecated Use createClaudeThreadsMcpServers().obsidian only for compatibility tests/callers. */
