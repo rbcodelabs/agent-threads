@@ -1564,6 +1564,152 @@ test.describe('Agent Threads UI', () => {
   });
   }
 
+  // Narrow widths collapse the list/detail split into one pane at a time, so a
+  // sidebar-sized Skills Manager shows the list, then swaps to the detail view
+  // behind a back button. These assert the swap in both directions — a pixel
+  // snapshot alone would not catch the list failing to come back.
+
+  test('skills manager — narrow width shows list, not detail', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeHidden();
+    await expect(page.locator('.ct-skills-divider')).toBeHidden();
+    // The list should claim the full width rather than the persisted split width.
+    const listWidth = (await page.locator('.ct-skills-list').boundingBox())!.width;
+    const bodyWidth = (await page.locator('.ct-skills-body').boundingBox())!.width;
+    expect(listWidth).toBeCloseTo(bodyWidth, 0);
+
+    await shot(page, 'skills-manager-narrow-list.png', { fullPage: true });
+  });
+
+  test('skills manager — narrow width swaps to detail and back', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    await page.locator('.ct-skills-tree-child-name', { hasText: 'release-manager' }).click();
+
+    // Detail takes over the pane; the list is gone until we navigate back.
+    await expect(page.locator('.ct-skills-detail')).toBeVisible();
+    await expect(page.locator('.ct-skills-list')).toBeHidden();
+    const backBtn = page.getByRole('button', { name: 'Back to skill list' });
+    await expect(backBtn).toBeVisible();
+    // Back button must be a usable tap target on a phone-width pane.
+    expect((await backBtn.boundingBox())!.height).toBeGreaterThanOrEqual(40);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+    await shot(page, 'skills-manager-narrow-detail.png', { fullPage: true });
+
+    await backBtn.click();
+
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Back to skill list' })).toBeHidden();
+  });
+
+  // The detail pane has several distinct sources (installed skill, agent,
+  // Browse result, authoring form). Each is a separate branch of the
+  // "is something selected" check that drives the narrow-mode swap, so each
+  // needs its own proof — one working branch does not imply the others.
+
+  test('skills manager — narrow width swaps for agents and the Browse tab', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    // Agent detail (read-only pane, ~/.claude/agents).
+    await page.locator('.ct-skills-tree-child-name', { hasText: 'engineer' }).click();
+    await expect(page.locator('.ct-skills-list')).toBeHidden();
+    await page.getByRole('button', { name: 'Back to skill list' }).click();
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+
+    // Browse tab: list until a result is picked, then the detail pane.
+    await page.getByRole('button', { name: 'Browse', exact: true }).click();
+    await page.waitForTimeout(300);
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeHidden();
+
+    // The harness has no network, so skills.sh returns nothing — seed a result
+    // directly rather than letting the assertions below pass vacuously.
+    await page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const view = (window as any).__skillsView;
+      view.browseQuery = 'demo';
+      view.isBrowseLoading = false;
+      view.browseResults = [{
+        slug: 'acme/demo/demo-skill',
+        skillId: 'demo-skill',
+        name: 'Demo Skill',
+        source: 'acme/demo',
+        installs: 1234,
+        isInstalled: false,
+      }];
+      view.renderList();
+      view.renderDetail();
+    });
+
+    const firstCard = page.locator('.ct-skills-card').first();
+    await expect(firstCard).toBeVisible();
+    await firstCard.click();
+    await expect(page.locator('.ct-skills-detail')).toBeVisible();
+    await expect(page.locator('.ct-skills-list')).toBeHidden();
+    await page.getByRole('button', { name: 'Back to skill list' }).click();
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeHidden();
+  });
+
+  test('skills manager — narrow width swaps for the New skill form', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    await page.getByRole('button', { name: 'New skill', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: 'Skill identifier' })).toBeVisible();
+    await expect(page.locator('.ct-skills-list')).toBeHidden();
+
+    // Abandoning the form returns to the list rather than stranding the user.
+    await page.getByRole('button', { name: 'Back to skill list' }).click();
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Skill identifier' })).toHaveCount(0);
+  });
+
+  test('skills manager — back with unsaved edits asks before discarding', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    await page.locator('.ct-skills-tree-child-name', { hasText: 'release-manager' }).click();
+    await page.locator('.ct-skills-textarea').fill('edited but not saved');
+    await page.getByRole('button', { name: 'Back to skill list' }).click();
+
+    // Back is the only exit in narrow mode, so it must not silently drop edits.
+    const modal = page.locator('.modal-container');
+    await expect(modal).toBeVisible();
+    await expect(page.locator('.ct-skills-list')).toBeHidden();
+
+    await modal.getByRole('button', { name: 'Discard', exact: true }).click();
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeHidden();
+  });
+
+  test('skills manager — wide width keeps both panes and hides back button', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 740 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    await page.locator('.ct-skills-tree-child-name', { hasText: 'release-manager' }).click();
+    await page.waitForSelector('.ct-skills-btn-save');
+
+    // Both panes stay on screen, and the back affordance is narrow-mode only.
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeVisible();
+    await expect(page.locator('.ct-skills-divider')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Back to skill list' })).toBeHidden();
+  });
+
   test('skills manager — installed tab', async ({ page }) => {
     const skillsUrl = 'file://' + path.resolve('test/harness/skills.html');
     await page.setViewportSize({ width: 1000, height: 740 });
