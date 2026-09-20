@@ -18,6 +18,8 @@ import { secretStorageKey } from './secretUtils';
 import { AGENT_BROWSER_READ_ONLY_TOOL_NAMES, createAgentBrowserTools } from './agentBrowser/agentBrowserTools';
 import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
 import { resolveWorktreeRoot, worktreePathFor } from './worktreePaths';
+import { bindAgentTool } from './AgentToolContributions';
+import { createDesignAgentTool, DESIGN_AGENT_TOOL_NAME } from './designAgentTool';
 import type {
   InstalledSkillInfo,
   MarketplaceSkill,
@@ -207,8 +209,25 @@ const addVaultBridgeSchema = {
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 export interface ObsidianMcpServerOptions {
-  /** Prepare the calling thread's artifact without queuing another turn. */
+  /**
+   * Prepare the calling thread's artifact without queuing another turn.
+   *
+   * @deprecated Contribute `EnterDesignMode` through
+   * `extensions.registerAgentTool` and pass it in `contributedTools` instead.
+   * Retained so hosts and tests that predate the contribution API keep
+   * working; it is adapted into the same single tool definition, never a
+   * second one.
+   */
   onEnterDesignMode?: (brief: string) => Promise<import('./designArtifact').DesignModeResult>;
+  /**
+   * Agent tools contributed by peers through `extensions.registerAgentTool`,
+   * already bound to this thread by the host (ADR-0008).
+   *
+   * The factory only installs them. It never sees a contribution, an owner or
+   * the registry — binding and thread-id injection happen before this point,
+   * which is what lets a peer contribute a tool without reaching the factory.
+   */
+  contributedTools?: readonly import('./AgentToolContributions').BoundAgentTool[];
   onRegisterMcpServer?: (input: unknown) => Promise<McpRegistrationResult>;
   /** Route agent-triggered file navigation through the host's contextual panel policy. */
   openContextualFile?: (file: TFile, newLeaf: boolean) => Promise<boolean>;
@@ -722,24 +741,6 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
       }
     },
-  );
-
-  const boundEnterDesignMode = tool(
-    'EnterDesignMode',
-    'Creates or reuses this thread\'s static design artifact, opens its preview and artifact controls, and returns paths and design instructions. Continue editing the artifact in this turn. Requires a desktop filesystem vault and write permission; unavailable during Plan mode or pending plan approval.',
-    { brief: z.string().trim().min(1).describe('The visual design brief or requested revision.') },
-    async (args) => {
-      try {
-        // Native harnesses invoke handlers directly, bypassing MCP schema parsing.
-        if (typeof args?.brief !== 'string' || !args.brief.trim()) throw new Error('A nonblank design brief is required.');
-        if (!options.onEnterDesignMode) throw new Error('Design mode is unavailable in this host.');
-        const result = await options.onEnterDesignMode(args.brief.trim());
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
-      } catch (error) {
-        return { content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
-      }
-    },
-    { alwaysLoad: true },
   );
 
   const boundScheduleWakeup = tool(
@@ -2670,7 +2671,6 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundGetNoteMetadata,
       boundSetWorkingDirectory,
       boundScheduleWakeup,
-      boundEnterDesignMode,
       boundWatchDocument,
       boundUnwatchDocument,
       boundListWatchedDocuments,
@@ -2717,6 +2717,45 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundSkillsUninstall,
       boundSkillsUpdate,
     ];
+
+  // --- contributed agent tools (ADR-0008) ----------------------------------
+  // Peers contribute through `extensions.registerAgentTool`; the host binds
+  // each one to this thread and appends it here. Contributions are appended
+  // *after* the built-ins and filtered against them, so a contribution can
+  // never displace a built-in even if the registry's collision check were
+  // bypassed. The registry rejects such a name first; this is defence in depth
+  // on the path where a mistake would reach every thread on both harnesses.
+  const builtInNames = new Set(tools.map(definition => definition.name));
+  const contributions = [...(options.contributedTools ?? [])];
+  // Compatibility adapter: hosts and tests that pass `onEnterDesignMode`
+  // instead of contributing the tool still get it, from the same single
+  // definition. Skipped when the design tool was contributed properly, so
+  // production (which contributes it) never registers both.
+  if (!contributions.some(binding => binding.name === DESIGN_AGENT_TOOL_NAME)) {
+    const adapted = bindAgentTool(createDesignAgentTool(
+      options.onEnterDesignMode && ((_threadId, brief) => options.onEnterDesignMode!(brief)),
+    ), '');
+    if (adapted) contributions.push(adapted);
+  }
+  const contributedTools = contributions
+    .filter(binding => !builtInNames.has(binding.name))
+    .map(binding => tool(
+      binding.name,
+      binding.description,
+      binding.inputSchema,
+      async (args: Record<string, unknown>) => {
+        const result = await binding.invoke(args ?? {});
+        // Copied onto a mutable array: the contract hands back a readonly
+        // result, and the SDK's CallToolResult is mutable.
+        return { content: [...result.content], ...(result.isError ? { isError: true } : {}) };
+      },
+      { alwaysLoad: binding.alwaysLoad },
+    ));
+  tools.push(...contributedTools);
+  const contributedReadOnlyNames = contributions
+    .filter(binding => !builtInNames.has(binding.name) && !binding.requiresApproval)
+    .map(binding => binding.name);
+
   const legacyTools = tools.map(toDeprecatedLegacyToolDefinition);
   const legacyServer = createSdkMcpServer({
     name: 'obsidian',
@@ -2730,8 +2769,8 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     alwaysLoad: true,
   });
   return {
-    claude_threads: Object.assign(canonicalServer, { harnessTools: toHarnessDynamicTools(canonicalTools) }),
-    obsidian: Object.assign(legacyServer, { harnessTools: toHarnessDynamicTools(legacyTools) }),
+    claude_threads: Object.assign(canonicalServer, { harnessTools: toHarnessDynamicTools(canonicalTools, contributedReadOnlyNames) }),
+    obsidian: Object.assign(legacyServer, { harnessTools: toHarnessDynamicTools(legacyTools, contributedReadOnlyNames) }),
   };
 }
 
@@ -2871,7 +2910,15 @@ export function harnessTextFromToolContent(content: readonly ToolResultContentBl
  *
  * Exported for tests (see test/unit/host-tool-harness-image-adapter.test.ts).
  */
-export function toHarnessDynamicTools(tools: SdkMcpToolDefinition<any>[]): HarnessDynamicTool[] {
+export function toHarnessDynamicTools(
+  tools: SdkMcpToolDefinition<any>[],
+  /**
+   * Contributed tools that declared `requiresApproval: false`. Contributions
+   * default to requiring approval, so this stays empty unless a peer opts out
+   * for a genuinely read-only tool.
+   */
+  contributedReadOnlyNames: readonly string[] = [],
+): HarnessDynamicTool[] {
   // Reuse the canonical MCP definitions for every harness. The conservative
   // read-only set bypasses prompts; every other operation is presented through
   // the same SessionCallbacks.onPermissionRequest UI Claude already uses.
@@ -2890,6 +2937,7 @@ export function toHarnessDynamicTools(tools: SdkMcpToolDefinition<any>[]): Harne
     // Observing a page is read-only; navigating to one and clicking things is
     // not, so only the inspection half bypasses the prompt.
     ...AGENT_BROWSER_READ_ONLY_TOOL_NAMES,
+    ...contributedReadOnlyNames,
   ]);
   return tools.map((toolDefinition) => ({
     name: toolDefinition.name,

@@ -400,6 +400,41 @@ export interface Thread {
 }
 
 /**
+ * Read-only view of the permission state a peer needs before writing on a
+ * thread's behalf (ADR-0008).
+ *
+ * `assertDesignWriteAllowed` reads `permissionMode` and `pendingPlan`, and
+ * neither appears on any public snapshot — so a peer currently cannot tell
+ * whether writing is permitted at all. `effectivePermissionMode` is already
+ * resolved against the global default, because the global default is itself
+ * host-private: handing back only the per-thread override would leave the
+ * caller unable to compute the answer.
+ *
+ * Deliberately values only. The live `pendingPlan` text and the callbacks that
+ * resolve it stay host-side; a peer needs to know that approval is pending,
+ * not what was proposed or how to answer it.
+ */
+export interface ThreadPermissionSnapshot {
+  readonly threadId: string;
+  readonly effectivePermissionMode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
+  /** True when the per-thread override is set, rather than inherited. */
+  readonly overridden: boolean;
+  /** True while an ExitPlanMode plan is awaiting approval. */
+  readonly planApprovalPending: boolean;
+  /** True while an AskUserQuestion prompt is awaiting an answer. */
+  readonly questionPending: boolean;
+}
+
+/**
+ * Outcome of `artifacts.allocateStorage`. The host creates the directory and
+ * returns it, so an artifact root is a contract rather than a convention a
+ * peer has to reproduce from an undisclosed vault layout.
+ */
+export type StorageAllocationResult =
+  | { readonly success: true; readonly status: 'allocated' | 'existing'; readonly artifactId: string; readonly path: string }
+  | { readonly success: false; readonly status: 'invalid' | 'conflict' | 'unknown-provider' | 'thread-not-found' | 'unavailable'; readonly artifactId: string; readonly message: string };
+
+/**
  * Host-owned identity for a persisted artifact. Everything beyond these
  * fields belongs to the provider that produced it and is opaque to the host
  * (see `src/ArtifactContributions.ts`).

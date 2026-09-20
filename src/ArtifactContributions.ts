@@ -143,6 +143,11 @@ export interface ArtifactStoreHost {
   list(threadId: string): readonly ThreadArtifactRecord[] | null;
   /** Validates a peer-supplied storage root against the vault artifact root. */
   resolveStorageRoot(candidate: unknown): StorageRootResolution;
+  /**
+   * Creates and returns the host-owned storage root for `artifactId`.
+   * Idempotent: an existing root comes back untouched, with `existed: true`.
+   */
+  allocateStorageRoot(artifactId: unknown): Promise<StorageRootResolution & { existed?: boolean }>;
   /** Inserts, or updates in place when an artifact with the same id exists. */
   put(threadId: string, record: ThreadArtifactRecord): Promise<'attached' | 'updated' | 'thread-not-found'>;
   detach(threadId: string, artifactId: string): Promise<'detached' | 'artifact-not-found' | 'thread-not-found'>;
