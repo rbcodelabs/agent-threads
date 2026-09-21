@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { parseDispatchDirective, goalKickoffMessage } from '../../src/slashCommands';
 import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
-import { createDesignSlashCommand } from '../../src/designSlashCommand';
+import { createDesignSlashCommand } from '../harness/design-plugin/designSlashCommand';
 
 async function designDirective(text: string) {
   const registry = new SlashCommandRegistry();

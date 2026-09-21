@@ -1,4 +1,4 @@
-import type { SlashCommandContribution, SlashCommandResult } from './SlashCommandContributions';
+import type { SlashCommandContribution, SlashCommandResult } from '../../../src/SlashCommandContributions';
 
 export interface DesignSlashCommandDependencies {
   getState(threadId: string): { hasArtifacts: boolean; existingTitle?: string } | null;

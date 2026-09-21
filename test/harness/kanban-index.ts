@@ -17,7 +17,7 @@ import {
 import { getHeaderUpdateCalls, mockLeaf } from './obsidian-mock';
 import { Platform } from 'obsidian';
 import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
-import { createDesignSlashCommand } from '../../src/designSlashCommand';
+import { createDesignSlashCommand } from './design-plugin/designSlashCommand';
 
 const settings = { ...DEFAULT_SETTINGS, claudeBinaryPath: '/opt/homebrew/bin/claude' };
 const dashboardMode = new URLSearchParams(window.location.search).has('dashboard');

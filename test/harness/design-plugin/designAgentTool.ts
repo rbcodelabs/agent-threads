@@ -24,8 +24,8 @@
  */
 
 import { z } from 'zod';
-import type { AgentToolContribution } from './AgentToolContributions';
-import type { PeerIdentity } from './ArtifactContributions';
+import type { AgentToolContribution } from '../../../src/AgentToolContributions';
+import type { PeerIdentity } from '../../../src/ArtifactContributions';
 import type { DesignModeResult } from './designArtifact';
 
 export const DESIGN_AGENT_TOOL_NAME = 'EnterDesignMode';
