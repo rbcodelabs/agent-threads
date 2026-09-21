@@ -31,11 +31,36 @@ import {
   type OAuthServerInfo,
 } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { AuthorizationServerMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { checkResourceAllowed, resourceUrlFromServerUrl } from '@modelcontextprotocol/sdk/shared/auth-utils.js';
 import type { TokenSet } from './OAuthTokenStore';
 import { parseRedirectUri, type ParsedRedirectUri } from './mcpServerStore';
 
 /** Result of AS discovery (RFC 9728 protected-resource metadata + RFC 8414/OIDC AS metadata). */
 export type OAuthASMetadata = OAuthServerInfo;
+
+/**
+ * RFC 8707 resource indicator for this AS, or `undefined` when the MCP server
+ * publishes no RFC 9728 protected-resource metadata.
+ *
+ * Mirrors the SDK's `selectResourceURL()` policy — only send `resource` when
+ * protected-resource metadata is actually present, and prefer the `resource`
+ * the server itself advertises over one derived from the URL we dialled. The
+ * SDK helper is not reused directly because it requires a full
+ * `OAuthClientProvider`, which this module deliberately does not implement.
+ *
+ * Servers differ on how much they care: Vercel's MCP server ignores the
+ * parameter, while v0 (`https://v0.app/api/mcp`) hard-rejects any authorization
+ * request that omits it with `400 invalid_target — resource must be
+ * https://v0.app/api/mcp`. Sending it whenever metadata advertises it satisfies
+ * both, and is what the MCP authorization spec requires of clients.
+ *
+ * The audience is validated once at discovery (see `discoverAS`), so callers
+ * here can trust `resourceMetadata.resource`.
+ */
+export function resourceIndicatorFor(asMetadata: OAuthASMetadata): URL | undefined {
+  const resource = asMetadata.resourceMetadata?.resource;
+  return resource === undefined ? undefined : new URL(resource);
+}
 
 export interface OAuthTokenStoreLike {
   store(serverName: string, tokens: TokenSet): void | Promise<void>;
@@ -166,7 +191,25 @@ export class OAuthMcpFlow {
    * metadata instead of an error (see src/requestUrlFetch.ts).
    */
   async discoverAS(serverUrl: string): Promise<OAuthASMetadata> {
-    return discoverOAuthServerInfo(serverUrl, { fetchFn: this.fetchFn });
+    const info = await discoverOAuthServerInfo(serverUrl, { fetchFn: this.fetchFn });
+
+    // Audience check for the RFC 8707 resource indicator derived from this
+    // metadata. Protected-resource metadata is fetched from the MCP server's own
+    // well-known endpoint, but it is still server-controlled input naming the
+    // audience our access token will be minted for: an unvalidated `resource`
+    // pointing at an unrelated origin is an audience-confusion vector. Checking
+    // here — the one place the dialled server URL and the metadata are both in
+    // hand — means `authorize()` and `refresh()` can use the value directly.
+    const resource = info.resourceMetadata?.resource;
+    if (resource !== undefined) {
+      const requestedResource = resourceUrlFromServerUrl(serverUrl);
+      if (!checkResourceAllowed({ requestedResource, configuredResource: resource })) {
+        throw new Error(
+          `MCP server "${serverUrl}" advertises protected-resource metadata for "${resource}", which does not cover it; refusing to request a token for a different audience.`,
+        );
+      }
+    }
+    return info;
   }
 
   /**
@@ -298,6 +341,10 @@ export class OAuthMcpFlow {
         authorizationUrl.searchParams.set('code_challenge_method', 'S256');
         authorizationUrl.searchParams.set('state', state);
         if (params.scopes) authorizationUrl.searchParams.set('scope', params.scopes);
+        // RFC 8707. Must also be repeated on the token exchange below, with an
+        // identical value — see handleCallback().
+        const resource = resourceIndicatorFor(params.asMetadata);
+        if (resource) authorizationUrl.searchParams.set('resource', resource.href);
 
         timeoutHandle = setTimeout(
           () => finish({ ok: false, error: new Error('OAuth authorization timed out waiting for consent.') }),
@@ -353,6 +400,10 @@ export class OAuthMcpFlow {
         authorizationCode: code,
         codeVerifier: ctx.verifier,
         redirectUri: ctx.redirectUri,
+        // RFC 8707 §2: the token request repeats the authorization request's
+        // resource. An AS that pinned the audience at consent will reject the
+        // exchange outright if it goes missing here.
+        resource: resourceIndicatorFor(ctx.asMetadata),
       });
       const tokenSet = toTokenSet(tokens);
       await this.tokenStore.store(ctx.serverName, tokenSet);
@@ -384,6 +435,9 @@ export class OAuthMcpFlow {
       metadata: asMetadata.authorizationServerMetadata,
       clientInformation: { client_id: clientId },
       refreshToken: current.refreshToken,
+      // Keeps the refreshed access token scoped to the same audience the
+      // original grant was issued for.
+      resource: resourceIndicatorFor(asMetadata),
     });
     const tokenSet = toTokenSet(tokens);
     await this.tokenStore.store(serverName, tokenSet);

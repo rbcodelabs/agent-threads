@@ -13,7 +13,7 @@ const sdkAuth = vi.hoisted(() => ({
 
 vi.mock('@modelcontextprotocol/sdk/client/auth.js', () => sdkAuth);
 
-const { OAuthMcpFlow, generatePkcePair, pkceChallengeForVerifier } = await import('../../src/OAuthMcpFlow');
+const { OAuthMcpFlow, generatePkcePair, pkceChallengeForVerifier, resourceIndicatorFor } = await import('../../src/OAuthMcpFlow');
 type TokenSet = import('../../src/OAuthTokenStore').TokenSet;
 type OAuthTokenStoreLike = import('../../src/OAuthMcpFlow').OAuthTokenStoreLike;
 
@@ -425,6 +425,109 @@ describe('OAuthMcpFlow.refresh', () => {
     const flow = new OAuthMcpFlow(tokenStore, vi.fn());
     await expect(flow.refresh('vercel', fixtureAsMetadata())).rejects.toThrow(/client_id/i);
     expect(sdkAuth.refreshAuthorization).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * RFC 8707 resource indicators.
+ *
+ * Motivated by a real failure: v0's MCP server (`https://v0.app/api/mcp`) rejects
+ * any authorization request without `resource`, responding
+ * `400 invalid_target — resource must be https://v0.app/api/mcp`. Omitting the
+ * parameter made v0 impossible to connect at all. Vercel's server ignores it, so
+ * the "no protected-resource metadata" path must stay byte-identical.
+ */
+describe('RFC 8707 resource indicator', () => {
+  /** Shaped after v0's live `/.well-known/oauth-protected-resource` response. */
+  function v0AsMetadata(resource = 'https://v0.app/api/mcp'): OAuthServerInfo {
+    return fixtureAsMetadata({
+      authorizationServerUrl: 'https://v0.app',
+      authorizationServerMetadata: {
+        issuer: 'https://v0.app',
+        authorization_endpoint: 'https://v0.app/api/mcp/oauth/authorize',
+        token_endpoint: 'https://v0.app/api/mcp/oauth/token',
+        response_types_supported: ['code'],
+      },
+      resourceMetadata: { resource, authorization_servers: ['https://v0.app'] },
+    });
+  }
+
+  it('resolves to the resource the server advertises, and to undefined when it advertises none', () => {
+    expect(resourceIndicatorFor(v0AsMetadata())?.href).toBe('https://v0.app/api/mcp');
+    expect(resourceIndicatorFor(fixtureAsMetadata())).toBeUndefined();
+  });
+
+  it('sends an identical resource on the authorization request and the token exchange', async () => {
+    let capturedUrl = undefined as unknown as URL;
+    const openUrl = vi.fn(async (url: string) => { capturedUrl = new URL(url); });
+    sdkAuth.exchangeAuthorization.mockResolvedValue({ access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 });
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({ serverName: 'v0', clientId: 'client-123', asMetadata: v0AsMetadata(), scopes: 'mcp' });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    expect(capturedUrl.searchParams.get('resource')).toBe('https://v0.app/api/mcp');
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
+    await promise;
+
+    // RFC 8707 §2 requires the same value on both legs; a URL instance, per the SDK's signature.
+    const exchanged = sdkAuth.exchangeAuthorization.mock.calls[0][1] as { resource?: URL };
+    expect(exchanged.resource).toBeInstanceOf(URL);
+    expect(exchanged.resource?.href).toBe('https://v0.app/api/mcp');
+  });
+
+  /**
+   * Negative control. Without this, a regression that hardcoded some resource
+   * value would still pass the assertions above while breaking every AS that
+   * validates the parameter it never advertised.
+   */
+  it('omits resource entirely when the MCP server publishes no protected-resource metadata', async () => {
+    let capturedUrl = undefined as unknown as URL;
+    const openUrl = vi.fn(async (url: string) => { capturedUrl = new URL(url); });
+    sdkAuth.exchangeAuthorization.mockResolvedValue({ access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 });
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({ serverName: 'vercel', clientId: 'client-123', asMetadata: fixtureAsMetadata() });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    expect(capturedUrl.searchParams.has('resource')).toBe(false);
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
+    await promise;
+    expect((sdkAuth.exchangeAuthorization.mock.calls[0][1] as { resource?: URL }).resource).toBeUndefined();
+  });
+
+  it('repeats the resource on refresh so the new access token keeps the same audience', async () => {
+    sdkAuth.refreshAuthorization.mockResolvedValue({ access_token: 'at-2', refresh_token: 'rt-2', token_type: 'bearer', expires_in: 1800 });
+    const tokenStore = fixtureTokenStore({ clientId: 'client-123', currentTokens: { accessToken: 'at-1', refreshToken: 'rt-1' } });
+    const flow = new OAuthMcpFlow(tokenStore, vi.fn());
+
+    await flow.refresh('v0', v0AsMetadata());
+    const refreshed = sdkAuth.refreshAuthorization.mock.calls[0][1] as { resource?: URL };
+    expect(refreshed.resource?.href).toBe('https://v0.app/api/mcp');
+  });
+
+  it('accepts protected-resource metadata whose resource covers the dialled server URL', async () => {
+    sdkAuth.discoverOAuthServerInfo.mockResolvedValue(v0AsMetadata('https://v0.app/api'));
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn());
+    await expect(flow.discoverAS('https://v0.app/api/mcp')).resolves.toMatchObject({
+      resourceMetadata: { resource: 'https://v0.app/api' },
+    });
+  });
+
+  /**
+   * Audience-confusion guard. Protected-resource metadata is server-controlled
+   * input that names the audience our token gets minted for, so a `resource`
+   * pointing somewhere unrelated must fail closed rather than mint a token an
+   * unrelated origin could accept.
+   */
+  it('rejects protected-resource metadata naming an unrelated origin', async () => {
+    sdkAuth.discoverOAuthServerInfo.mockResolvedValue(v0AsMetadata('https://evil.example.com/api/mcp'));
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn());
+    await expect(flow.discoverAS('https://v0.app/api/mcp')).rejects.toThrow(/different audience/i);
   });
 });
 
