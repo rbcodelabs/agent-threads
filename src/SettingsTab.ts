@@ -246,6 +246,8 @@ function runOutcomeLabel(outcome: RunEvent['outcome']): string {
       return 'Skipped (gate)';
     case 'skipped-active-hours':
       return 'Skipped (off-hours)';
+    case 'skipped-busy':
+      return 'Skipped (still running)';
     case 'error':
       return 'Error';
     default:
@@ -273,7 +275,10 @@ function renderRunHistory(container: HTMLElement, history: RunEvent[]): void {
 
   const fired = history.filter((e) => e.outcome === 'fired').length;
   const skipped = history.filter(
-    (e) => e.outcome === 'skipped-gate' || e.outcome === 'skipped-active-hours',
+    (e) =>
+      e.outcome === 'skipped-gate' ||
+      e.outcome === 'skipped-active-hours' ||
+      e.outcome === 'skipped-busy',
   ).length;
   const errored = history.filter((e) => e.outcome === 'error').length;
 
