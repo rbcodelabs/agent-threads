@@ -48,6 +48,9 @@ const fixtureScheduled: ScheduledItem[] = [
     runHistory: [
       { ts: FIXTURE_NOW - 48 * 60 * 60_000, outcome: 'skipped-gate', gateExitCode: 1 },
       { ts: FIXTURE_NOW - 24 * 60 * 60_000, outcome: 'fired' },
+      // A cycle dropped because the previous run was still in flight, so the
+      // run-history list renders the 'Skipped (still running)' label.
+      { ts: FIXTURE_NOW - 12 * 60 * 60_000, outcome: 'skipped-busy', threadId: 'thread-morning' },
     ],
   },
   {

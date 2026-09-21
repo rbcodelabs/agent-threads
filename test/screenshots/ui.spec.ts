@@ -1796,6 +1796,10 @@ test.describe('Agent Threads UI', () => {
     await expect(morning.getByRole('button', { name: 'Open last run' })).toBeVisible();
     await morning.locator('.ct-run-history-summary').click();
     await expect(morning.getByText('Fired', { exact: true })).toBeVisible();
+    // A cycle dropped by the overlapping-run guard reads as "still running"
+    // rather than a gate skip, and counts toward the skipped total.
+    await expect(morning.getByText('Skipped (still running)', { exact: true })).toBeVisible();
+    await expect(morning.locator('.ct-run-history-summary')).toContainText('2 skipped');
     await shot(page, 'settings-scheduled-expanded.png', { fullPage: true });
 
     await page.setViewportSize({ width: 360, height: 760 });
