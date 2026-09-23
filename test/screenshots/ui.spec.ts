@@ -2114,6 +2114,32 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'settings-mcp-add-oauth.png', { fullPage: true });
   });
 
+  test('settings — OAuth advanced section offers a masked client secret field', async ({ page }) => {
+    const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto(settingsUrl);
+    await page.waitForSelector('.ct-settings-tabs');
+    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForTimeout(200);
+    await page.getByRole('button', { name: 'Add MCP server' }).click();
+    await page.waitForSelector('.modal-overlay');
+    await page.getByRole('button', { name: 'OAuth', exact: true }).click();
+    // The confidential-client fields live behind Advanced: a public client with
+    // PKCE is the norm, so the secret must not be the first thing a user sees.
+    await page.locator('.modal-overlay details summary').click();
+    await page.waitForTimeout(200);
+
+    const secretField = page.locator('.modal-overlay input[type="password"]');
+    await expect(secretField).toBeVisible();
+    // Masked, and neither Obsidian nor the platform offers to remember it.
+    await expect(secretField).toHaveAttribute('autocomplete', 'off');
+    await expect(page.locator('.modal-overlay').getByText('Client secret', { exact: false })).toBeVisible();
+
+    // A typed value renders as dots, not as the secret itself.
+    await secretField.fill('super-secret-value');
+    await shot(page, 'settings-mcp-add-oauth-advanced.png', { fullPage: true });
+  });
+
   test('settings — OAuth type is offered when adding but not when editing', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });

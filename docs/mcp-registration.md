@@ -46,17 +46,43 @@ Fields specific to `oauth` (mutually exclusive with the stdio/http/sse fields ab
 | `tools.allow` | no | If set, only these tool names are exposed through the proxy. Mutually exclusive with `tools.deny`. |
 | `tools.deny` | no | Tool names hidden from `tools/list` and blocked (with an MCP `-32601` error) on `tools/call`. Mutually exclusive with `tools.allow`. |
 | `clientId` | no | Skip Dynamic Client Registration by supplying a known public client_id. |
+| `clientSecret` | no | For a confidential client only, and only as a `${NAME}` placeholder naming a secret already saved with `request_secret` — a literal is rejected. See [Confidential clients](#confidential-clients). |
 | `authorizationServerUrl` | no | Skip protected-resource discovery by pointing directly at the authorization server. |
 | `redirectUri` | no | Exact loopback URI to use for the OAuth callback, e.g. `http://localhost:3118/callback`. Required by providers (Slack) that register one exact redirect URI rather than relying on RFC 8252 §7.3's "any port" loopback allowance. Must be `http://` on a loopback host (`127.0.0.1`, `localhost` or `[::1]`) with an explicit port, and carry no credentials, query string or fragment. |
 
 Registering an `oauth` server is asynchronous and interactive — it is not a one-shot confirm-and-save like the other transports. On success the flow:
 
 1. Discovers the authorization server (RFC 9728 protected-resource metadata → RFC 8414 AS metadata).
-2. Registers a client via RFC 7591 Dynamic Client Registration, unless `clientId` is supplied.
+2. Registers a client via RFC 7591 Dynamic Client Registration, unless `clientId` is supplied. The registration asks for `token_endpoint_auth_method: "none"` (a public client), but if the authorization server issues a `client_secret` anyway — RFC 7591 §3.2.1 permits it — that secret is kept and used rather than dropped.
 3. Opens the consent screen in the host's Web Viewer and waits for you to complete sign-in, up to 5 minutes.
 4. Exchanges the authorization code (PKCE, S256) for tokens, starts the local proxy, and saves the server so newly initialized threads on both harnesses can use it.
 
 Denying consent, closing the tab, or letting the 5-minute window lapse leaves no partial state behind — nothing is saved, and no proxy is left running. The same interactive-host requirement as other registrations applies: scheduled threads cannot drive this flow and get an `unavailable` result instead of a stalled dialog.
+
+### Confidential clients
+
+Most MCP authorization servers treat the plugin as a **public client**: PKCE (S256) proves possession of the authorization request, and there is no client secret at all. That remains the default, and nothing below changes it.
+
+A few providers issue a `client_secret` and then require it on every token-endpoint call. Supply one in either of two places:
+
+- **Settings → MCP → Add MCP server → OAuth → Advanced → "Client secret"** — a masked field. What you type goes straight into the OS keychain.
+- **`mcp_register_server`**, as a `${NAME}` placeholder naming a secret you already saved with `request_secret`:
+
+  ```json
+  {
+    "name": "acme",
+    "type": "oauth",
+    "url": "https://mcp.acme.test/mcp",
+    "clientId": "acme-confidential-client",
+    "clientSecret": "${ACME_CLIENT_SECRET}"
+  }
+  ```
+
+  **A literal secret is rejected** with an `invalid` result, and so is a `${NAME}` whose secret is not in the keychain (the reply names the variable and points at `request_secret`). The reason is not style: a tool call's arguments are recorded verbatim in the thread transcript and the raw JSONL log, so a literal typed there would be persisted in plain text in the vault. The placeholder keeps the value in the keychain and the log free of it.
+
+Wherever it came from, the secret is stored under `OAUTH_MCP_{NAME}_CLIENT_SECRET` in the OS keychain. `data.json` records only a `hasClientSecret: true` flag — never the value — and the secret is sent only to the token and revocation endpoints (RFC 6749 §2.3.1, RFC 7009 §2.1), never on the authorization request, which travels through the browser's address bar and history. Which authentication form is used, `client_secret_basic` or `client_secret_post`, is negotiated from the authorization server's `token_endpoint_auth_methods_supported`. **Disconnect** wipes the secret along with the tokens.
+
+If the keychain entry disappears while the server stays registered — a keychain reset, a vault moved between machines — the server comes back as "Needs re-authorization" with an explanation rather than silently degrading to a public client and failing later with the authorization server's opaque `invalid_client`.
 
 ### Providers that require an exact redirect URI
 

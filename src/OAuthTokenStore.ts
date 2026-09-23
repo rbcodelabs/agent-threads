@@ -32,7 +32,7 @@ export interface TokenSet {
 /** Proactively refresh once fewer than this many ms remain before expiry. */
 const PROACTIVE_REFRESH_WINDOW_MS = 5 * 60 * 1000;
 
-const KEYCHAIN_FIELDS = ['CLIENT_ID', 'ACCESS_TOKEN', 'REFRESH_TOKEN', 'EXPIRES_AT'] as const;
+const KEYCHAIN_FIELDS = ['CLIENT_ID', 'CLIENT_SECRET', 'ACCESS_TOKEN', 'REFRESH_TOKEN', 'EXPIRES_AT'] as const;
 type KeychainField = typeof KEYCHAIN_FIELDS[number];
 
 function keyFor(serverName: string, field: KeychainField): string {
@@ -64,6 +64,25 @@ export class OAuthTokenStore {
 
   getClientId(serverName: string): string | undefined {
     return this.secretStorage.getSecret(keyFor(serverName, 'CLIENT_ID')) || undefined;
+  }
+
+  /**
+   * `client_secret` for a confidential client, kept in the keychain beside the
+   * client_id — never in `data.json`, which is why `StoredOAuthMcpServer` has no
+   * field for it and only records `hasClientSecret`.
+   *
+   * Most servers never reach this: the default registration is a public client
+   * authenticating with PKCE alone (`token_endpoint_auth_method: 'none'`). A
+   * secret exists only when the user supplied one for a provider that demands
+   * `client_secret_basic`/`client_secret_post`, or when the authorization server
+   * issued one unprompted during Dynamic Client Registration.
+   */
+  storeClientSecret(serverName: string, clientSecret: string): void {
+    this.secretStorage.setSecret(keyFor(serverName, 'CLIENT_SECRET'), clientSecret);
+  }
+
+  getClientSecret(serverName: string): string | undefined {
+    return this.secretStorage.getSecret(keyFor(serverName, 'CLIENT_SECRET')) || undefined;
   }
 
   /** Raw read with no refresh side effect — needed by revoke()/refresh() to see what's actually stored. */

@@ -65,8 +65,25 @@ export function resourceIndicatorFor(asMetadata: OAuthASMetadata): URL | undefin
 export interface OAuthTokenStoreLike {
   store(serverName: string, tokens: TokenSet): void | Promise<void>;
   getClientId(serverName: string): string | undefined | Promise<string | undefined>;
+  /** `client_secret` for a confidential client; `undefined` for the usual public+PKCE client. */
+  getClientSecret(serverName: string): string | undefined | Promise<string | undefined>;
   getCurrentTokens(serverName: string): TokenSet | undefined | Promise<TokenSet | undefined>;
   clear(serverName: string): void | Promise<void>;
+}
+
+/**
+ * Client credentials for one token-endpoint call.
+ *
+ * `clientSecret` is almost always absent: this plugin registers public clients
+ * that authenticate with PKCE alone. When it is present the SDK picks the
+ * concrete method (`client_secret_basic`, falling back to `client_secret_post`)
+ * from the AS's advertised `token_endpoint_auth_methods_supported` — see
+ * `applyClientAuthentication` in `@modelcontextprotocol/sdk/client/auth.js`. We
+ * deliberately don't pin a method ourselves, so an AS that supports only one of
+ * the two still works.
+ */
+function clientInformationFor(clientId: string, clientSecret?: string): { client_id: string; client_secret?: string } {
+  return clientSecret === undefined ? { client_id: clientId } : { client_id: clientId, client_secret: clientSecret };
 }
 
 const CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
@@ -213,13 +230,25 @@ export class OAuthMcpFlow {
   }
 
   /**
-   * RFC 7591 Dynamic Client Registration. Returns the issued client_id.
+   * RFC 7591 Dynamic Client Registration. Returns the issued client_id, plus a
+   * `client_secret` when the authorization server issued one.
    *
    * This method takes a bare registration endpoint rather than a server name (matching the
-   * plan's signature), so it has no key to store the client_id under — the caller persists it
-   * via `tokenStore.storeClientId(serverName, clientId)` once it knows which server this was for.
+   * plan's signature), so it has no key to store the credentials under — the caller persists them
+   * via `tokenStore.storeClientId`/`storeClientSecret` once it knows which server this was for.
+   *
+   * We still request `token_endpoint_auth_method: 'none'`, so the overwhelmingly
+   * common outcome is a public client with no secret. But RFC 7591 §3.2.1 lets
+   * the AS return a `client_secret` regardless of what was requested, and some
+   * do; dropping it silently then produced an `invalid_client` failure at the
+   * token exchange that looked like a consent problem rather than a discarded
+   * credential. Capturing it costs nothing when it's absent.
    */
-  async registerClient(registrationEndpoint: string, redirectUri: string, scopes?: string): Promise<string> {
+  async registerClient(
+    registrationEndpoint: string,
+    redirectUri: string,
+    scopes?: string,
+  ): Promise<{ clientId: string; clientSecret?: string }> {
     // The SDK's registerClient() only reads `metadata.registration_endpoint` when metadata is
     // supplied (see its implementation) — the other required AuthorizationServerMetadata fields
     // below are unused placeholders needed only to satisfy a type that models a full discovered
@@ -243,7 +272,7 @@ export class OAuthMcpFlow {
       },
       scope: scopes,
     });
-    return info.client_id;
+    return { clientId: info.client_id, clientSecret: info.client_secret };
   }
 
   /**
@@ -255,6 +284,14 @@ export class OAuthMcpFlow {
   async authorize(params: {
     serverName: string;
     clientId: string;
+    /**
+     * `client_secret` for a confidential client. Sent only on the token
+     * exchange, never on the authorization request — the authorization URL ends
+     * up in a browser address bar and in AS access logs, so a secret there would
+     * be leaked by construction. PKCE is still used either way; a secret
+     * supplements it rather than replacing it.
+     */
+    clientSecret?: string;
     asMetadata: OAuthASMetadata;
     scopes?: string;
     /**
@@ -360,7 +397,7 @@ export class OAuthMcpFlow {
   private async handleCallback(
     req: IncomingMessage,
     res: ServerResponse,
-    ctx: { serverName: string; clientId: string; asMetadata: OAuthASMetadata; redirectUri: string; callbackPath: string; verifier: string; expectedState: string },
+    ctx: { serverName: string; clientId: string; clientSecret?: string; asMetadata: OAuthASMetadata; redirectUri: string; callbackPath: string; verifier: string; expectedState: string },
     finish: (result: FinishResult) => void,
   ): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -396,7 +433,7 @@ export class OAuthMcpFlow {
       const tokens = await exchangeAuthorization(ctx.asMetadata.authorizationServerUrl, {
         fetchFn: this.fetchFn,
         metadata: ctx.asMetadata.authorizationServerMetadata,
-        clientInformation: { client_id: ctx.clientId },
+        clientInformation: clientInformationFor(ctx.clientId, ctx.clientSecret),
         authorizationCode: code,
         codeVerifier: ctx.verifier,
         redirectUri: ctx.redirectUri,
@@ -423,17 +460,22 @@ export class OAuthMcpFlow {
     }
   }
 
-  /** Refresh via the AS's token endpoint, using the client_id and refresh token already on file. */
+  /** Refresh via the AS's token endpoint, using the client credentials and refresh token already on file. */
   async refresh(serverName: string, asMetadata: OAuthASMetadata): Promise<TokenSet> {
     const current = await this.tokenStore.getCurrentTokens(serverName);
     if (!current?.refreshToken) throw new Error(`No refresh token available for "${serverName}"; re-authorization is required.`);
     const clientId = await this.tokenStore.getClientId(serverName);
     if (!clientId) throw new Error(`No client_id stored for "${serverName}"; re-authorization is required.`);
+    // A confidential client must re-authenticate on every token-endpoint call,
+    // not just the first: an AS that required client_secret at the exchange
+    // rejects a bare refresh with `invalid_client`, which surfaces as a
+    // spontaneous logout once the access token expires rather than at setup.
+    const clientSecret = await this.tokenStore.getClientSecret(serverName);
 
     const tokens = await refreshAuthorization(asMetadata.authorizationServerUrl, {
       fetchFn: this.fetchFn,
       metadata: asMetadata.authorizationServerMetadata,
-      clientInformation: { client_id: clientId },
+      clientInformation: clientInformationFor(clientId, clientSecret),
       refreshToken: current.refreshToken,
       // Keeps the refreshed access token scoped to the same audience the
       // original grant was issued for.
@@ -452,6 +494,11 @@ export class OAuthMcpFlow {
     const revocationEndpoint = asMeta && 'revocation_endpoint' in asMeta ? asMeta.revocation_endpoint : undefined;
     const current = await this.tokenStore.getCurrentTokens(serverName);
     const clientId = await this.tokenStore.getClientId(serverName);
+    // RFC 7009 §2.1: a confidential client authenticates to the revocation
+    // endpoint the same way it does to the token endpoint. Omitting the secret
+    // makes revocation fail silently (it's best-effort below), leaving a live
+    // refresh token on the AS after the user thought they had disconnected.
+    const clientSecret = await this.tokenStore.getClientSecret(serverName);
 
     if (revocationEndpoint && clientId && current) {
       const candidates: Array<[string | undefined, string]> = [
@@ -464,7 +511,12 @@ export class OAuthMcpFlow {
           const response = await this.fetchFn(revocationEndpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({ token, token_type_hint: tokenTypeHint, client_id: clientId }),
+            body: new URLSearchParams({
+              token,
+              token_type_hint: tokenTypeHint,
+              client_id: clientId,
+              ...(clientSecret === undefined ? {} : { client_secret: clientSecret }),
+            }),
           });
           if (!response.ok) throw await parseErrorResponse(response);
         } catch {

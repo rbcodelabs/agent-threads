@@ -97,7 +97,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   proxyUrl = 'http://127.0.0.1:5555/';
   discoverASMock.mockResolvedValue(fakeAsMetadata());
-  registerClientMock.mockResolvedValue('dcr-client-id');
+  registerClientMock.mockResolvedValue({ clientId: 'dcr-client-id' });
   authorizeMock.mockResolvedValue({ accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3600_000 });
   flowRefreshMock.mockResolvedValue({ accessToken: 'at-2', refreshToken: 'rt-1', expiresAt: Date.now() + 3600_000 });
   revokeMock.mockResolvedValue(undefined);
@@ -133,6 +133,71 @@ describe('OAuthMcpRegistry.registerServer', () => {
     expect(result.success).toBe(true);
     expect(registerClientMock).not.toHaveBeenCalled();
     expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'known-public-client' }));
+  });
+
+  /**
+   * The custody rule for a confidential client: the secret goes to the keychain
+   * and `data.json` records only that one exists. `StoredOAuthMcpServer` has no
+   * field to hold it, so this also pins the shape against a future regression
+   * that "helpfully" persists it alongside clientId.
+   */
+  it('puts a supplied client secret in the keychain, threads it to authorize, and records only a flag in settings', async () => {
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({
+      name: 'confidential', url: 'https://mcp.example.com/', clientId: 'known-client', clientSecret: 'shh-abc',
+    });
+
+    expect(result.success).toBe(true);
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'known-client', clientSecret: 'shh-abc' }));
+
+    const tokenStore = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    expect(tokenStore.getClientSecret('confidential')).toBe('shh-abc');
+
+    expect(settings.oauthMcpServers.confidential).toMatchObject({ clientId: 'known-client', hasClientSecret: true });
+    expect(JSON.stringify(settings.oauthMcpServers.confidential)).not.toContain('shh-abc');
+    expect(JSON.stringify(settings.oauthMcpState.confidential)).not.toContain('shh-abc');
+    expect(settings.oauthMcpState.confidential).toMatchObject({ hasClientSecret: true });
+  });
+
+  it('records no client-secret flag for a public client', async () => {
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    await registry.registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/' });
+
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ clientSecret: undefined }));
+    expect(settings.oauthMcpServers.vercel.hasClientSecret).toBeUndefined();
+    expect(settings.oauthMcpState.vercel).toMatchObject({ hasClientSecret: false });
+  });
+
+  /** RFC 7591 §3.2.1 — the AS may issue a secret even though DCR asked for `none`. */
+  it('captures and stores a client_secret issued by Dynamic Client Registration', async () => {
+    registerClientMock.mockResolvedValue({ clientId: 'dcr-client-id', clientSecret: 'dcr-secret' });
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/' });
+
+    expect(result.success).toBe(true);
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'dcr-client-id', clientSecret: 'dcr-secret' }));
+    const tokenStore = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    expect(tokenStore.getClientSecret('vercel')).toBe('dcr-secret');
+    expect(settings.oauthMcpServers.vercel).toMatchObject({ hasClientSecret: true });
+  });
+
+  it('leaves no client secret in the keychain when consent is denied', async () => {
+    authorizeMock.mockRejectedValue(new Error('OAuth authorization was denied: access_denied'));
+    const { host } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    await registry.registerServer({
+      name: 'confidential', url: 'https://mcp.example.com/', clientId: 'known-client', clientSecret: 'shh-abc',
+    });
+
+    const tokenStore = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    expect(tokenStore.getClientSecret('confidential')).toBeUndefined();
   });
 
   it('rejects a name that is already registered', async () => {
@@ -284,7 +349,7 @@ describe('OAuthMcpRegistry.registerServer', () => {
     // scope parameter entirely rather than sending an empty string.
     for (const scopesSupported of [null, []] as Array<string[] | null>) {
       vi.clearAllMocks();
-      registerClientMock.mockResolvedValue('dcr-client-id');
+      registerClientMock.mockResolvedValue({ clientId: 'dcr-client-id' });
       authorizeMock.mockResolvedValue({ accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3600_000 });
       proxyStartMock.mockResolvedValue(undefined);
       discoverASMock.mockResolvedValue(fakeAsMetadata({ scopesSupported }));
@@ -422,6 +487,38 @@ describe('OAuthMcpRegistry.configure', () => {
     await registry.configure();
 
     expect(settings.oauthMcpState.vercel).toMatchObject({ status: 'needs-auth' });
+  });
+
+  it('reconnects a confidential client and reports it as one', async () => {
+    const { host, settings } = makeHost();
+    settings.oauthMcpServers.confidential = { url: 'https://mcp.example.com/', hasClientSecret: true };
+    const tokenStore = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    tokenStore.storeClientId('confidential', 'client-abc');
+    tokenStore.storeClientSecret('confidential', 'shh-abc');
+    tokenStore.store('confidential', { accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3600_000 });
+
+    await new OAuthMcpRegistry(host).configure();
+
+    expect(settings.oauthMcpState.confidential).toMatchObject({ status: 'connected', hasClientSecret: true });
+  });
+
+  /**
+   * The vault's `data.json` says this is a confidential client but the keychain
+   * no longer has the secret — a keychain reset, or the vault synced to another
+   * machine. Every token refresh from here on would fail with `invalid_client`,
+   * so say so at startup instead of looking connected until the token expires.
+   */
+  it('flags needs-auth with an explanation when a confidential client\'s secret is gone from the keychain', async () => {
+    const { host, settings } = makeHost();
+    settings.oauthMcpServers.confidential = { url: 'https://mcp.example.com/', hasClientSecret: true };
+    const tokenStore = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    tokenStore.storeClientId('confidential', 'client-abc');
+    tokenStore.store('confidential', { accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3600_000 });
+
+    await new OAuthMcpRegistry(host).configure();
+
+    expect(settings.oauthMcpState.confidential).toMatchObject({ status: 'needs-auth', hasClientSecret: false });
+    expect(settings.oauthMcpState.confidential.errorMessage).toMatch(/client secret.*keychain/i);
   });
 
   it('skips a server with no stored tokens', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mcpRegistrationSchema } from '../../src/mcpServerStore';
+import { clientSecretVariableName, mcpRegistrationSchema } from '../../src/mcpServerStore';
 
 const base = { name: 'vercel', type: 'oauth' as const, url: 'https://mcp.vercel.com/' };
 
@@ -79,6 +79,30 @@ describe('mcpRegistrationSchema — oauth type', () => {
     expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'sse', url: 'https://x.test', redirectUri }).success).toBe(false);
   });
 
+  /**
+   * Tool-call arguments are recorded verbatim in the thread transcript and the raw
+   * JSONL log, so a literal secret typed by an agent would be persisted in plain
+   * text. Only a `${NAME}` reference to an already-stored keychain secret passes.
+   */
+  it('accepts a ${NAME} placeholder clientSecret and rejects a literal one', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, clientSecret: '${VERCEL_CLIENT_SECRET}' }).success).toBe(true);
+
+    for (const clientSecret of ['sk-live-abc123', 'VERCEL_CLIENT_SECRET', '${TWO} ${VARS}', 'prefix-${VAR}', '${lower ok but spaces not}']) {
+      const result = mcpRegistrationSchema.safeParse({ ...base, clientSecret });
+      expect(result.success, `expected ${clientSecret} to be rejected`).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some(i => i.message.includes('placeholder'))).toBe(true);
+      }
+    }
+  });
+
+  it('rejects clientSecret on a non-oauth entry', () => {
+    const clientSecret = '${SOME_SECRET}';
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'stdio', command: 'npx', clientSecret }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'http', url: 'https://x.test', clientSecret }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'sse', url: 'https://x.test', clientSecret }).success).toBe(false);
+  });
+
   it('accepts a deny list', () => {
     const result = mcpRegistrationSchema.safeParse({ ...base, tools: { deny: ['buy_pro', 'buy_credits'] } });
     expect(result.success).toBe(true);
@@ -133,5 +157,21 @@ describe('mcpRegistrationSchema — oauth type', () => {
 
   it('rejects unknown extra keys (still .strict())', () => {
     expect(mcpRegistrationSchema.safeParse({ ...base, extra: 'nope' }).success).toBe(false);
+  });
+});
+
+describe('clientSecretVariableName', () => {
+  it('extracts the variable name the placeholder refers to', () => {
+    expect(clientSecretVariableName('${VERCEL_CLIENT_SECRET}')).toBe('VERCEL_CLIENT_SECRET');
+  });
+
+  it('returns undefined for an absent clientSecret, so a public client stays public', () => {
+    expect(clientSecretVariableName(undefined)).toBeUndefined();
+  });
+
+  it('returns undefined for anything that is not a bare placeholder', () => {
+    for (const value of ['literal-secret', 'Bearer ${TOKEN}', '${}', '']) {
+      expect(clientSecretVariableName(value), value).toBeUndefined();
+    }
   });
 });

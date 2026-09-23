@@ -75,6 +75,12 @@ export interface McpRegisterInput {
   readonly scopes?: string;
   readonly tools?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] };
   readonly clientId?: string;
+  /**
+   * Confidential clients only, and only as a `${NAME}` placeholder naming a
+   * secret already in the keychain — a literal is rejected, because a peer's
+   * registration arguments are logged verbatim.
+   */
+  readonly clientSecret?: string;
   readonly authorizationServerUrl?: string;
   readonly redirectUri?: string;
 }

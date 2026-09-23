@@ -32,7 +32,7 @@ import {
 } from './compassHandoff';
 import { isWatchableDocument, watchMenuLabel } from './documentWatch';
 import { mergeMcpServers } from './mcpServerMerge';
-import { createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
+import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
@@ -2111,6 +2111,25 @@ export default class ClaudeThreadsPlugin extends Plugin {
         return { success: false, status: 'unavailable', message: 'OAuth MCP registration is unavailable in this context.' };
       }
       const data = parsed.data;
+      // `clientSecret` arrives as a `${NAME}` placeholder — the schema rejects
+      // literals so a secret never lands in the thread transcript — so resolve it
+      // from the keychain here, the first point with keychain access. A named-but-
+      // missing secret is reported rather than silently dropped: registering as a
+      // public client instead would fail at the token endpoint with the AS's own
+      // opaque `invalid_client`, long after the cause.
+      let clientSecret: string | undefined;
+      const clientSecretVar = clientSecretVariableName(data.clientSecret);
+      if (clientSecretVar !== undefined) {
+        clientSecret = this.app.secretStorage.getSecret(secretStorageKey(clientSecretVar)) || undefined;
+        if (clientSecret === undefined) {
+          return {
+            success: false,
+            status: 'invalid',
+            message: `No secret named ${clientSecretVar} is stored. Save it with request_secret, then register "${data.name}" again.`,
+            requiredVariables: [clientSecretVar],
+          };
+        }
+      }
       // Guaranteed non-empty for an oauth entry by mcpRegistrationSchema's superRefine.
       return this.oauthMcpRegistry.registerServer({
         name: data.name,
@@ -2118,6 +2137,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         scopes: data.scopes,
         tools: data.tools,
         clientId: data.clientId,
+        clientSecret,
         authorizationServerUrl: data.authorizationServerUrl,
         redirectUri: data.redirectUri,
       });
