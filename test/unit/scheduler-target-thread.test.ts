@@ -254,7 +254,10 @@ describe('Scheduler isThreadBusy (dedup pileup guard)', () => {
     scheduler.destroy();
   });
 
-  it('does not consult isThreadBusy for non-loop items (no targetThreadId)', async () => {
+  // A new-thread item IS overlap-guarded from its second cycle onward (see
+  // scheduler-overlap-skip.test.ts), but the first cycle has no previous run to
+  // conflict with, so a busy-reporting isThreadBusy must not block it.
+  it('fires a non-loop item on its first cycle even when isThreadBusy reports busy', async () => {
     const { options, sendMessage, createThread } = makeOptions({
       isThreadBusy: () => true,
     });

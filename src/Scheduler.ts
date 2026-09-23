@@ -555,6 +555,63 @@ export class Scheduler {
           return;
         }
 
+        // Overlap guard for new-thread jobs: an item that spawns a FRESH thread
+        // each cycle must not stack a second run on top of one that is still in
+        // flight. Without this, a job whose work outlasts its interval (a long
+        // agent turn on a 15m schedule) accumulates concurrent threads that all
+        // race on the same working directory and duplicate each other's
+        // side effects — the failure this guard exists to prevent.
+        //
+        // Unlike the reuse path above, this SKIPS rather than retries. A retry
+        // would merely defer the pile-up: the queue of deferred cycles grows for
+        // as long as the item stays busy, then stampedes when it frees up. A
+        // recurring job's contract is "run at the scheduled time", so the
+        // correct response to "still busy" is to drop this occurrence and take
+        // the next one on schedule.
+        //
+        // Placed before claimFire/thread creation (mirroring the active-hours
+        // skip) so a skipped cycle never contends for the fencing token.
+        // lastRun is left untouched because nothing actually ran; nextRun
+        // advances normally so the item stays on its cadence.
+        //
+        // Fails OPEN by design: isThreadBusy is absent on older callers and
+        // returns false for an unknown/archived thread, so an item whose
+        // previous thread is gone fires normally. A scheduler that guessed
+        // "busy" here would wedge the job permanently, which is strictly worse
+        // than an occasional overlap.
+        const priorThreadId = current.lastThreadId;
+        if (
+          !reuseTarget &&
+          !current.isOrchestratorHeartbeat &&
+          priorThreadId &&
+          (this.options.isThreadBusy?.(priorThreadId) ?? false)
+        ) {
+          console.warn(
+            `[Scheduler] Skipping cycle for "${current.name}" (${current.id}): ` +
+              `previous run in thread ${priorThreadId} is still in flight.`,
+          );
+          try {
+            const updated = await this.coordinator.update(current.id, (fresh) => {
+              fresh.nextRun = computeNextRun(fresh, true);
+              recordRunEvent(fresh, {
+                ts: Date.now(),
+                outcome: 'skipped-busy',
+                threadId: priorThreadId,
+              });
+              fresh.lastSkipReason = 'busy';
+              return fresh;
+            });
+            current = this.replaceLocal(updated);
+          } catch (err) {
+            console.error(
+              `[Scheduler] Failed to persist busy skip for "${current.name}" (${current.id}):`,
+              err,
+            );
+          }
+          this.armTimer(current);
+          return;
+        }
+
         // Defense-in-depth fencing guard: lets a caller confirm (against fresh
         // on-disk state) that no other Scheduler instance has already claimed
         // this cycle before we create a thread. Placed here — after the
@@ -708,6 +765,13 @@ export class Scheduler {
             await this.options.sendMessage(thread.id, promptToSend);
             current.lastThreadId = thread.id;
           }
+          // A cycle that actually dispatched clears any stale skip reason left
+          // by a previous cycle ('gate', 'active-hours' or 'busy'), so CronList
+          // reports why the LAST cycle was skipped rather than stranding the
+          // reason from whenever a skip last happened. The gate block above
+          // already clears its own reason pre-dispatch; this also covers the
+          // active-hours and busy paths, which previously had no clear at all.
+          current.lastSkipReason = undefined;
         }
       } catch (err) {
         fireError = err instanceof Error ? err.message : String(err);

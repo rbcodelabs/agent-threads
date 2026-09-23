@@ -6385,14 +6385,17 @@
 /* Outcome badge — small colored pill so fired vs skipped vs error scan fast */
 .ct-run-outcome {
   flex: 0 0 auto;
-  min-width: 118px;
+  /* Wide enough for the longest label ("Skipped (still running)") so the
+     timestamp column stays aligned across every row of the history list. */
+  min-width: 150px;
   font-weight: 600;
 }
 .ct-run-outcome-fired {
   color: var(--color-green, var(--text-success));
 }
 .ct-run-outcome-skipped-gate,
-.ct-run-outcome-skipped-active-hours {
+.ct-run-outcome-skipped-active-hours,
+.ct-run-outcome-skipped-busy {
   color: var(--text-muted);
 }
 .ct-run-outcome-error {

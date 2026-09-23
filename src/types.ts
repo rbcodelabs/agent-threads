@@ -595,10 +595,11 @@ export interface ScheduledItem {
   /**
    * Observability written by Scheduler.fire() and surfaced in CronList. Records
    * why the most recent due cycle was skipped, if it was: 'gate' (the gate
-   * command returned a clean non-zero exit) or 'active-hours' (the cycle came
-   * due outside the configured window).
+   * command returned a clean non-zero exit), 'active-hours' (the cycle came
+   * due outside the configured window), or 'busy' (the previous run of this
+   * item was still in flight, so the cycle was dropped rather than stacked).
    */
-  lastSkipReason?: 'gate' | 'active-hours';
+  lastSkipReason?: 'gate' | 'active-hours' | 'busy';
   /** Exit code of the most recent gate evaluation (0 on a fire, non-zero on a gated skip). */
   lastGateExitCode?: number;
   /** Bounded, sanitized detail when the most recent gate was indeterminate, timed out, or failed to spawn. */
@@ -636,10 +637,15 @@ export interface RunEvent {
    * - 'fired'                 → a thread was created or reused and the prompt sent
    * - 'skipped-gate'          → the gate deliberately skipped, or an indeterminate gate failed closed
    * - 'skipped-active-hours'  → the cycle came due outside the active-hours window
+   * - 'skipped-busy'          → the item's previous run was still in flight (overlap guard)
    * - 'error'                 → thread creation / send threw (see `note`)
    */
-  outcome: 'fired' | 'skipped-gate' | 'skipped-active-hours' | 'error';
-  /** For 'fired': the thread the prompt was sent to (absent for a stale heartbeat). */
+  outcome: 'fired' | 'skipped-gate' | 'skipped-active-hours' | 'skipped-busy' | 'error';
+  /**
+   * For 'fired': the thread the prompt was sent to (absent for a stale
+   * heartbeat). For 'skipped-busy': the still-running thread from the previous
+   * cycle that caused this one to be dropped.
+   */
   threadId?: string;
   /** Gate exit code when relevant, including exit 75 on an indeterminate evaluation. */
   gateExitCode?: number;
