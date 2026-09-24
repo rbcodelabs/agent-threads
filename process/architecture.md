@@ -44,6 +44,12 @@ container build --tag claude-threads-coding:1 sandbox/
 
 **Settings.** `vmImage` and `vmDefaultNetwork`, read lazily through `getVmImage` / `getVmDefaultNetwork` so a change applies on the next call rather than needing a session restart.
 
+**Execution boundaries.** The mount is read-write and edits persist. Host shell/file
+tools are not redirected. Internal-network reuse verifies `configuration.mode`
+is `hostOnly`. Commands use guest GNU `timeout` with a five-second kill grace;
+the host CLI deadline includes ten seconds of transport grace. See
+[`docs/sandbox-vms.md`](../docs/sandbox-vms.md) for setup and limitations.
+
 **No `Thread` field.** The container name is derived deterministically from the thread ID (`claude-threads-vm-<sanitized-id>`), so a container started before a plugin reload is still findable, adoptable by `vm_exec`, and removable by `exit_vm` afterwards. That gets persistence across reloads without persisting ephemeral OS state on the thread.
 
 **Mobile.** `sandboxVm.ts` requires `child_process` inside the runner closure only, so importing it is inert. Every tool returns a clean `{ success: false, error }` with a `brew install container` hint when the CLI is unavailable — it never throws and never affects plugin load.

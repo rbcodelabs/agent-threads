@@ -1167,7 +1167,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         'Container image to start. Defaults to the configured sandbox VM image (claude-threads-coding:1), built from sandbox/Dockerfile.',
       ),
       network: z.enum(VM_NETWORK_MODES as unknown as [string, ...string[]]).optional().describe(
-        'Network isolation: "default" = full egress (npm install, git remotes and web all work), "internal" = host-only with no internet, "none" = no network at all. Defaults to the configured setting, which ships as "default".',
+        'Network isolation: "default" = full egress (npm install, git remotes and web all work), "internal" = no internet but host and shared-network peers remain reachable, "none" = no network at all. Defaults to the configured setting, which ships as "default".',
       ),
       mountPath: z.string().optional().describe(
         'Absolute host directory to mount at /work. Defaults to the current effective working directory.',
@@ -1230,7 +1230,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         'Shell command to run inside the VM. Executed with `bash -lc` from /work.',
       ),
       timeoutSeconds: z.number().optional().describe(
-        'Seconds to wait before killing the command. Defaults to 300, capped at 3600.',
+        'Guest command deadline in seconds, followed by a five-second kill grace. Defaults to 300, capped at 3600. Requires GNU timeout in the image; timeout normally returns exit code 124.',
       ),
     },
     async (args, _extra) => {

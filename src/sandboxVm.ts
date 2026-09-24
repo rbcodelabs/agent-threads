@@ -244,6 +244,8 @@ export function buildRunArgs(opts: {
   network: VmNetworkMode;
   workdir?: string;
 }): string[] {
+  if (opts.mountPath.includes(':')) throw new Error('mountPath cannot contain a colon (the container volume delimiter).');
+  if (!opts.image.trim() || opts.image.startsWith('-')) throw new Error('Invalid container image reference.');
   const workdir = opts.workdir ?? VM_WORKDIR;
   return [
     'run',
@@ -264,10 +266,13 @@ export function buildExecArgs(opts: {
   containerName: string;
   command: string;
   workdir?: string;
+  timeoutSeconds?: number;
 }): string[] {
   // `bash -lc` (not a shell string passed to a shell) — the command is a single
   // argv element, so nothing here re-splits or re-expands it on the host side.
-  return ['exec', '--workdir', opts.workdir ?? VM_WORKDIR, opts.containerName, 'bash', '-lc', opts.command];
+  return ['exec', '--workdir', opts.workdir ?? VM_WORKDIR, opts.containerName,
+    'timeout', '--signal=TERM', '--kill-after=5s', `${resolveExecTimeoutSeconds(opts.timeoutSeconds)}s`,
+    'bash', '-lc', opts.command];
 }
 
 export function buildStopArgs(containerName: string): string[] {
@@ -381,13 +386,13 @@ export class SandboxVmManager {
     const listed = await this.exec(buildNetworkListArgs());
     if (listed.exitCode === 0) {
       const names = listed.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
-      if (names.includes(VM_INTERNAL_NETWORK_NAME)) return null;
+      if (names.includes(VM_INTERNAL_NETWORK_NAME)) return this.verifyInternalNetwork();
     }
     const created = await this.exec(buildNetworkCreateArgs(VM_INTERNAL_NETWORK_NAME));
-    if (created.exitCode === 0) return null;
+    if (created.exitCode === 0) return this.verifyInternalNetwork();
     // Lost a race with a concurrent create: the network is there, which is all
     // the caller needs.
-    if (await this.networkExists(VM_INTERNAL_NETWORK_NAME)) return null;
+    if (await this.networkExists(VM_INTERNAL_NETWORK_NAME)) return this.verifyInternalNetwork();
     return `Could not create the internal network "${VM_INTERNAL_NETWORK_NAME}": ${firstLine(created.stderr) || `exit code ${created.exitCode}`}`;
   }
 
@@ -395,6 +400,17 @@ export class SandboxVmManager {
     const listed = await this.exec(buildNetworkListArgs());
     if (listed.exitCode !== 0) return false;
     return listed.stdout.split('\n').map((l) => l.trim()).includes(name);
+  }
+
+  private async verifyInternalNetwork(): Promise<string | null> {
+    const inspected = await this.exec(['network', 'inspect', VM_INTERNAL_NETWORK_NAME]);
+    if (inspected.exitCode === 0) {
+      try {
+        const entries = JSON.parse(inspected.stdout);
+        if (Array.isArray(entries) && entries.length === 1 && entries[0]?.configuration?.mode === 'hostOnly') return null;
+      } catch { /* Invalid inspection data must not silently allow egress. */ }
+    }
+    return `Cannot verify that network "${VM_INTERNAL_NETWORK_NAME}" is host-only. Inspect or recreate it with container network create --internal before using network: internal.`;
   }
 
   /** `container --version`, used as the availability probe. */
@@ -490,8 +506,8 @@ export class SandboxVmManager {
       }
 
       const result = await this.exec(
-        buildExecArgs({ containerName, command: params.command }),
-        params.timeoutSeconds * 1000,
+        buildExecArgs({ containerName, command: params.command, timeoutSeconds: params.timeoutSeconds }),
+        (resolveExecTimeoutSeconds(params.timeoutSeconds) + 10) * 1000,
       );
       return {
         success: true,

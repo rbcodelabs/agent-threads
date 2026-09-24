@@ -51,7 +51,8 @@ function makeRunner(script: Record<string, Scripted> = {}) {
   const calls: string[][] = [];
   const run: VmCommandRunner = async (args) => {
     calls.push([...args]);
-    const entry = script[args.join(' ')];
+    const entry = script[args.join(' ')] ?? (args[0] === 'network' && args[1] === 'inspect'
+      ? { stdout: JSON.stringify([{ configuration: { mode: 'hostOnly' } }]) } : undefined);
     if (entry instanceof Error) throw entry;
     return { exitCode: 0, stdout: '', stderr: '', ...(entry ?? {}) };
   };
@@ -311,19 +312,19 @@ describe('vm_exec', () => {
 
   it('runs the command in the thread\'s container and returns exit code plus streams', async () => {
     const { exec, runner } = await started({
-      [`exec --workdir ${VM_WORKDIR} ${NAME} bash -lc npm test`]: { stdout: 'all good\n', stderr: 'warn\n' },
+      [`exec --workdir ${VM_WORKDIR} ${NAME} timeout --signal=TERM --kill-after=5s 300s bash -lc npm test`]: { stdout: 'all good\n', stderr: 'warn\n' },
     });
 
     const { isError, payload } = await call(exec, { command: 'npm test' });
 
     expect(isError).toBe(false);
     expect(payload).toEqual({ success: true, exitCode: 0, stdout: 'all good\n', stderr: 'warn\n' });
-    expect(runner.argvs()).toEqual([`exec --workdir ${VM_WORKDIR} ${NAME} bash -lc npm test`]);
+    expect(runner.argvs()).toEqual([`exec --workdir ${VM_WORKDIR} ${NAME} timeout --signal=TERM --kill-after=5s 300s bash -lc npm test`]);
   });
 
   it('reports a failing command as a successful tool call with a non-zero exit code', async () => {
     const { exec } = await started({
-      [`exec --workdir ${VM_WORKDIR} ${NAME} bash -lc exit 7`]: { exitCode: 7, stderr: 'boom' },
+      [`exec --workdir ${VM_WORKDIR} ${NAME} timeout --signal=TERM --kill-after=5s 300s bash -lc exit 7`]: { exitCode: 7, stderr: 'boom' },
     });
 
     const { isError, payload } = await call(exec, { command: 'exit 7' });

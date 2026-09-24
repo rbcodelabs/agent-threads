@@ -52,7 +52,8 @@ function makeRunner(script: Record<string, Scripted> = {}) {
   const calls: Array<{ args: string[]; timeoutMs: number }> = [];
   const run: VmCommandRunner = async (args, opts) => {
     calls.push({ args: [...args], timeoutMs: opts.timeoutMs });
-    const entry = script[args.join(' ')];
+    const entry = script[args.join(' ')] ?? (args[0] === 'network' && args[1] === 'inspect'
+      ? { stdout: JSON.stringify([{ configuration: { mode: 'hostOnly' } }]) } : undefined);
     if (entry instanceof Error) throw entry;
     return { exitCode: 0, stdout: '', stderr: '', ...(entry ?? {}) };
   };
@@ -85,6 +86,18 @@ const CLI_OK_NO_CONTAINER: Record<string, Scripted> = {
 // ── Pure helpers ─────────────────────────────────────────────────────────────
 
 describe('sandboxVm — sanitizeContainerName', () => {
+  it('rejects mount delimiters instead of changing the requested mount', () => {
+    expect(() => buildRunArgs({ containerName: 'c', image: 'node:22', mountPath: '/tmp/a:b', network: 'none' })).toThrow(/colon/i);
+  });
+
+  it('rejects an image that could be parsed as a runtime flag', () => {
+    expect(() => buildRunArgs({ containerName: 'c', image: '--privileged', mountPath: '/tmp/work', network: 'none' })).toThrow(/image/i);
+  });
+
+  it('enforces execution deadlines inside the guest', () => {
+    expect(buildExecArgs({ containerName: 'c', command: 'sleep 50', timeoutSeconds: 2 }))
+      .toEqual(['exec', '--workdir', VM_WORKDIR, 'c', 'timeout', '--signal=TERM', '--kill-after=5s', '2s', 'bash', '-lc', 'sleep 50']);
+  });
   it('passes a UUID thread ID through unchanged', () => {
     expect(sanitizeContainerName(THREAD_ID)).toBe(THREAD_ID);
   });
@@ -232,7 +245,7 @@ describe('sandboxVm — argument construction', () => {
 
   it('runs exec commands through bash -lc from /work', () => {
     expect(buildExecArgs({ containerName: 'c', command: 'npm test' }))
-      .toEqual(['exec', '--workdir', VM_WORKDIR, 'c', 'bash', '-lc', 'npm test']);
+      .toEqual(['exec', '--workdir', VM_WORKDIR, 'c', 'timeout', '--signal=TERM', '--kill-after=5s', '300s', 'bash', '-lc', 'npm test']);
   });
 
   it('keeps the whole command as one argv element, so the host never re-splits it', () => {
@@ -411,6 +424,16 @@ describe('SandboxVmManager — enter', () => {
 });
 
 describe('SandboxVmManager — execCommand', () => {
+  it('refuses a shared network whose name matches but mode permits egress', async () => {
+    const { manager, runner } = makeManager({
+      ...CLI_OK_NO_CONTAINER,
+      'network list --quiet': { stdout: VM_INTERNAL_NETWORK_NAME },
+      [`network inspect ${VM_INTERNAL_NETWORK_NAME}`]: { stdout: JSON.stringify([{ configuration: { mode: 'shared' } }]) },
+    });
+    const result = await manager.enter({ image: 'img:1', mountPath: '/a', network: 'internal' });
+    expect(result.success).toBe(false);
+    expect(runner.ran('run')).toBe(false);
+  });
   async function entered(extra: Record<string, Scripted> = {}) {
     const ctx = makeManager({ ...CLI_OK_NO_CONTAINER, ...extra });
     await ctx.manager.enter({ image: 'img:1', mountPath: '/a', network: 'default' });
@@ -420,25 +443,25 @@ describe('SandboxVmManager — execCommand', () => {
 
   it('runs the command in the tracked container from /work', async () => {
     const { manager, runner } = await entered({
-      [buildExecArgs({ containerName: NAME, command: 'npm test' }).join(' ')]: { stdout: 'ok\n' },
+      [buildExecArgs({ containerName: NAME, command: 'npm test', timeoutSeconds: 30 }).join(' ')]: { stdout: 'ok\n' },
     });
 
     const result = await manager.execCommand({ command: 'npm test', timeoutSeconds: 30 });
 
     expect(result).toEqual({ success: true, exitCode: 0, stdout: 'ok\n', stderr: '' });
-    expect(runner.argvs()).toEqual([`exec --workdir ${VM_WORKDIR} ${NAME} bash -lc npm test`]);
+    expect(runner.argvs()).toEqual([`exec --workdir ${VM_WORKDIR} ${NAME} timeout --signal=TERM --kill-after=5s 30s bash -lc npm test`]);
   });
 
   it('passes the timeout through in milliseconds', async () => {
     const { manager, runner } = await entered();
     await manager.execCommand({ command: 'sleep 1', timeoutSeconds: 45 });
-    expect(runner.calls[0]!.timeoutMs).toBe(45_000);
+    expect(runner.calls[0]!.timeoutMs).toBe(55_000);
   });
 
   it('reports a non-zero exit code as a normal result, not a tool error', async () => {
     // A failing test run is information the model needs, not an infrastructure fault.
     const { manager } = await entered({
-      [buildExecArgs({ containerName: NAME, command: 'false' }).join(' ')]:
+      [buildExecArgs({ containerName: NAME, command: 'false', timeoutSeconds: 5 }).join(' ')]:
         { exitCode: 3, stdout: 'partial', stderr: 'nope' },
     });
 
@@ -450,7 +473,7 @@ describe('SandboxVmManager — execCommand', () => {
     // 10x the cap — a real runaway build log, not a marginal overflow.
     const huge = 'y'.repeat(VM_OUTPUT_LIMIT_BYTES * 10);
     const { manager } = await entered({
-      [buildExecArgs({ containerName: NAME, command: 'noisy' }).join(' ')]: { stdout: huge, stderr: huge },
+      [buildExecArgs({ containerName: NAME, command: 'noisy', timeoutSeconds: 5 }).join(' ')]: { stdout: huge, stderr: huge },
     });
 
     const result = await manager.execCommand({ command: 'noisy', timeoutSeconds: 5 }) as
