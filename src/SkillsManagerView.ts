@@ -633,9 +633,16 @@ export class SkillsManagerView extends ItemView {
 
       // Source header row
       const sourceRow = inner.createEl('div', {
-        cls: 'ct-skills-tree-source' + (isSelected ? ' ct-skills-tree-source--active' : ''),
+        cls: 'ct-skills-tree-source ct-skills-tree-source--github' + (isSelected ? ' ct-skills-tree-source--active' : ''),
       });
-      const toggleEl = sourceRow.createEl('span', { cls: 'ct-skills-tree-toggle' });
+      const toggleEl = sourceRow.createEl('button', {
+        cls: 'ct-skills-tree-toggle ct-skills-tree-toggle--button',
+        attr: {
+          type: 'button',
+          'aria-label': `${isExpanded ? 'Collapse' : 'Expand'} ${source.name}`,
+          'aria-expanded': String(isExpanded),
+        },
+      });
       setIcon(toggleEl, isExpanded ? 'chevron-down' : 'chevron-right');
       sourceRow.createEl('span', { cls: 'ct-skills-tree-source-name', text: source.name });
       if (source.behindCount && source.behindCount > 0) {
@@ -647,7 +654,7 @@ export class SkillsManagerView extends ItemView {
         sourceRow.createEl('span', { cls: 'ct-skills-badge ct-skills-badge--global', text: 'GitHub' });
       }
 
-      sourceRow.addEventListener('click', () => {
+      const toggleSource = () => {
         const wasExpanded = this.expandedSources.has(source.id);
         if (wasExpanded) {
           this.expandedSources.delete(source.id);
@@ -657,6 +664,16 @@ export class SkillsManagerView extends ItemView {
             void this.loadGithubSourceSkillsForInstalled(source);
           }
         }
+      };
+
+      toggleEl.addEventListener('click', (event) => {
+        event.stopPropagation();
+        toggleSource();
+        this.renderList();
+      });
+
+      sourceRow.addEventListener('click', () => {
+        toggleSource();
         this.selectedGithubSource = source;
         this.selectedInstalled = null;
         this.selectedAgent = null;
