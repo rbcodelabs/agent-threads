@@ -636,7 +636,15 @@ export class ThreadManager {
     this.claimedHarnessHandoffs.delete(id);
     for (const item of queued) {
       this.emit(id, { type: 'dequeued', text: item.text, images: item.images });
-      await this.sendMessage(id, item.text, item.images);
+      try {
+        await this.sendMessage(id, item.text, item.images);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // The original caller already observed a successful queue operation,
+        // so disposition failures must be surfaced asynchronously without
+        // changing the outcome of the durable switch or stranding later items.
+        this.emit(id, { type: 'notification', text: message, priority: 'high' });
+      }
     }
   }
 
@@ -1623,8 +1631,8 @@ export class ThreadManager {
     this.threadActivity.delete(threadId);
 
     const resolvedPrompt = resolveHarnessPrompt(thread.agentHarness ?? 'claude', userText, this.settings);
-    // Claude escalation takes precedence. Codex keeps the literal keyword and
-    // never receives a Claude-only escalation model.
+    // Claude escalation takes precedence. Codex rejects the Claude-only
+    // keyword before creating a transcript entry or native session.
     const model = resolvedPrompt.model ?? thread.model
       ?? (thread.agentHarness === 'codex' ? undefined : (this.settings.defaultModel || undefined));
     const promptText = resolvedPrompt.promptText;

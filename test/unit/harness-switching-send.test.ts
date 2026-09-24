@@ -135,6 +135,33 @@ describe('harness handoff send lifecycle', () => {
     expect(fake.prompts.filter(prompt => prompt.includes('## Harness handoff'))).toHaveLength(1);
   });
 
+  it('keeps a committed switch successful and drains later messages when one queued send is invalid', async () => {
+    const manager = new ThreadManager({ ...DEFAULT_SETTINGS, escalationEnabled: true, escalationKeyword: '/escalate' });
+    const thread = switchedThread();
+    thread.agentHarness = 'claude';
+    delete thread.pendingHarnessHandoff;
+    manager.loadThreads([thread]);
+    const notifications: string[] = [];
+    manager.subscribe((_id, event) => {
+      if (event.type === 'notification') notifications.push(event.text);
+    });
+    let persist!: () => void;
+    const persistence = new Promise<void>(resolve => { persist = resolve; });
+    const switching = manager.switchHarness('t', 'codex', () => persistence);
+    await manager.sendMessage('t', '/escalate invalid on Codex');
+    await manager.sendMessage('t', 'normal queued');
+
+    persist();
+    await expect(switching).resolves.toBeUndefined();
+
+    expect(thread.agentHarness).toBe('codex');
+    expect(notifications).toEqual([expect.stringMatching(/Claude.*Codex/i)]);
+    expect(fake.prompts).toHaveLength(1);
+    expect(fake.prompts[0]).toContain('normal queued');
+    expect(fake.prompts[0]).toContain('## Harness handoff');
+    expect(manager.getQueuedCount('t')).toBe(0);
+  });
+
   it('rejects a Claude-only escalation keyword on Codex before transcript or startup', async () => {
     const manager = new ThreadManager({ ...DEFAULT_SETTINGS, escalationEnabled: true, escalationKeyword: '/escalate' });
     const thread = switchedThread();
