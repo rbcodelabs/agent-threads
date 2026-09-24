@@ -40,6 +40,15 @@ function isCanonicalThread(value: unknown): value is Thread {
     && Array.isArray(value.messages)
     && value.messages.every(isCanonicalMessage)
     && (value.sessionId === undefined || typeof value.sessionId === 'string')
+    && (value.sessionGeneration === undefined || (typeof value.sessionGeneration === 'number' && Number.isInteger(value.sessionGeneration) && value.sessionGeneration >= 0))
+    && (value.pendingHarnessHandoff === undefined || (
+      isRecord(value.pendingHarnessHandoff)
+      && (value.pendingHarnessHandoff.sourceHarness === 'claude' || value.pendingHarnessHandoff.sourceHarness === 'codex')
+      && (value.pendingHarnessHandoff.targetHarness === 'claude' || value.pendingHarnessHandoff.targetHarness === 'codex')
+      && typeof value.pendingHarnessHandoff.summary === 'string'
+      && typeof value.pendingHarnessHandoff.threadId === 'string'
+      && typeof value.pendingHarnessHandoff.createdAt === 'number'
+    ))
     && (value.agentHarness === undefined || value.agentHarness === 'claude' || value.agentHarness === 'codex');
 }
 

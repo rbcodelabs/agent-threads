@@ -118,7 +118,9 @@ export type ThreadEvent =
   | { type: 'question_ready'; questions: AskQuestion[] }
   | { type: 'pending_question_changed'; questions: AskQuestion[] | undefined }
   | { type: 'capabilities_discovered'; models: import('@anthropic-ai/claude-agent-sdk').ModelInfo[]; agents: import('@anthropic-ai/claude-agent-sdk').AgentInfo[] }
-  | { type: 'elicitation_request'; request: import('@anthropic-ai/claude-agent-sdk').ElicitationRequest; signal: AbortSignal; respond: (result: import('@anthropic-ai/claude-agent-sdk').ElicitationResult) => void };
+  | { type: 'elicitation_request'; request: import('@anthropic-ai/claude-agent-sdk').ElicitationRequest; signal: AbortSignal; respond: (result: import('@anthropic-ai/claude-agent-sdk').ElicitationResult) => void }
+  | { type: 'harness_switching'; targetHarness: 'claude' | 'codex' }
+  | { type: 'harness_changed'; sourceHarness: 'claude' | 'codex'; targetHarness: 'claude' | 'codex' };
 
 /**
  * Structural equality for the small, plain-data poll payloads (StatusTag[] /
@@ -193,6 +195,7 @@ export class ThreadManager {
    */
   private pendingUserMessageIds: Map<string, string[]> = new Map();
   private queuedMessages: Map<string, { text: string; images?: ImageAttachment[] }[]> = new Map();
+  private harnessSwitches = new Set<string>();
   /** Threads draining rejected-plan feedback in FIFO order. */
   private releasingPlanFeedback = new Set<string>();
   private threadActivity: Map<string, string> = new Map();
@@ -500,6 +503,106 @@ export class ThreadManager {
 
   getThread(id: string): Thread | undefined {
     return this.threads.get(id);
+  }
+
+  /** A single source of truth for whether a thread can safely change providers. */
+  getHarnessSwitchBlockReason(id: string): string | undefined {
+    const thread = this.threads.get(id);
+    if (!thread) return 'Thread not found.';
+    if (this.harnessSwitches.has(id)) return 'A harness switch is already in progress.';
+    if (this.isRunning(id)) return 'Wait for the active turn to finish.';
+    if (this.pendingUserMessageIds.get(id)?.length || this.getQueuedCount(id) > 0) return 'Wait for queued messages to finish.';
+    if (this.hasPendingPermission(id)) return 'Resolve the pending permission request first.';
+    if (this.hasPendingQuestion(id)) return 'Answer the pending question first.';
+    if (this.hasPendingPlan(id)) return 'Approve or reject the pending plan first.';
+    if (this.releasingPlanFeedback.has(id)) return 'Wait for plan feedback to finish.';
+    const goal = this.goalContextStates.get(id);
+    if (goal && (goal.processing || goal.refreshRequested || goal.persistencePendingRevision !== undefined || goal.desiredRevision !== goal.appliedRevision)) {
+      return 'Wait for the goal context transition to finish.';
+    }
+    if (this.hasActiveBackgroundTasks(id)) return 'Wait for background tasks and agents to finish.';
+    return undefined;
+  }
+
+  /** Transactionally changes the provider that owns the next native session. */
+  async switchHarness(
+    id: string,
+    targetHarness: 'claude' | 'codex',
+    persist: () => Promise<void>,
+  ): Promise<void> {
+    const thread = this.threads.get(id);
+    if (!thread) throw new Error(`Thread not found: ${id}`);
+    const sourceHarness = thread.agentHarness ?? 'claude';
+    if (sourceHarness === targetHarness) return;
+    const blocked = this.getHarnessSwitchBlockReason(id);
+    if (blocked) throw new Error(blocked);
+
+    const snapshot = {
+      agentHarness: thread.agentHarness, sessionGeneration: thread.sessionGeneration,
+      sessionId: thread.sessionId, model: thread.model, usageSnapshot: thread.usageSnapshot,
+      tasks: thread.tasks, pendingBackgroundTasks: thread.pendingBackgroundTasks,
+      recap: thread.recap, lastError: thread.lastError,
+      pendingHarnessHandoff: thread.pendingHarnessHandoff,
+      messages: thread.messages.map(message => ({ ...message })),
+    };
+    this.harnessSwitches.add(id);
+    this.emit(id, { type: 'harness_switching', targetHarness });
+    try {
+      // Confirmation may have taken time; the caller invokes this only after it,
+      // so revalidation here is the transaction's race boundary.
+      const reblocked = this.getHarnessSwitchBlockReasonIgnoringSelf(id);
+      if (reblocked) throw new Error(reblocked);
+      for (const message of thread.messages) {
+        if (message.role === 'assistant' && !message.agentHarness) message.agentHarness = sourceHarness;
+      }
+      thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
+      thread.agentHarness = targetHarness;
+      delete thread.sessionId;
+      delete thread.model;
+      delete thread.usageSnapshot;
+      delete thread.tasks;
+      delete thread.pendingBackgroundTasks;
+      delete thread.recap;
+      delete thread.lastError;
+      thread.pendingHarnessHandoff = createHarnessHandoff(thread, sourceHarness, targetHarness);
+      thread.updatedAt = Date.now();
+      await persist();
+      const oldSession = this.sessions.get(id);
+      if (oldSession) oldSession.close();
+      this.sessions.delete(id);
+      this.selectedAgentRuns.delete(id);
+      this.emit(id, { type: 'harness_changed', sourceHarness, targetHarness });
+    } catch (error) {
+      Object.assign(thread, snapshot);
+      if (snapshot.sessionId === undefined) delete thread.sessionId;
+      if (snapshot.model === undefined) delete thread.model;
+      if (snapshot.usageSnapshot === undefined) delete thread.usageSnapshot;
+      if (snapshot.tasks === undefined) delete thread.tasks;
+      if (snapshot.pendingBackgroundTasks === undefined) delete thread.pendingBackgroundTasks;
+      if (snapshot.recap === undefined) delete thread.recap;
+      if (snapshot.lastError === undefined) delete thread.lastError;
+      if (snapshot.pendingHarnessHandoff === undefined) delete thread.pendingHarnessHandoff;
+      throw error;
+    } finally {
+      this.harnessSwitches.delete(id);
+      this.flushQueuedMessages(id);
+    }
+  }
+
+  private getHarnessSwitchBlockReasonIgnoringSelf(id: string): string | undefined {
+    this.harnessSwitches.delete(id);
+    const reason = this.getHarnessSwitchBlockReason(id);
+    this.harnessSwitches.add(id);
+    return reason;
+  }
+
+  private flushQueuedMessages(id: string): void {
+    const queued = this.queuedMessages.get(id) ?? [];
+    this.queuedMessages.delete(id);
+    for (const item of queued) {
+      this.emit(id, { type: 'dequeued', text: item.text, images: item.images });
+      void this.sendMessage(id, item.text, item.images);
+    }
   }
 
   getAgentRuns(threadId: string): AgentRun[] { return this.agentRuns.getByThread(threadId); }
@@ -1482,7 +1585,7 @@ export class ThreadManager {
     // A completed plan is a real lifecycle gate, not merely a card rendered
     // over an otherwise-sendable session. Keep fresh user input out of the
     // provider until the user approves or rejects the plan explicitly.
-    if (this.hasPendingPlan(threadId) || this.releasingPlanFeedback.has(threadId)) {
+    if (this.harnessSwitches.has(threadId) || this.hasPendingPlan(threadId) || this.releasingPlanFeedback.has(threadId)) {
       const queue = this.queuedMessages.get(threadId) ?? [];
       queue.push({ text: userText, images });
       this.queuedMessages.set(threadId, queue);
@@ -1513,7 +1616,9 @@ export class ThreadManager {
 
     const keywordModel = this.resolveModel(userText);
     // Precedence: escalation keyword > per-thread /model override > settings default
-    const model = keywordModel ?? thread.model ?? (this.settings.defaultModel || undefined);
+    const model = thread.agentHarness === 'codex'
+      ? (thread.model || undefined)
+      : keywordModel ?? thread.model ?? (this.settings.defaultModel || undefined);
     const promptText = keywordModel ? this.stripKeyword(userText) : userText;
 
     const userMsg: ChatMessage = {
@@ -1591,9 +1696,14 @@ export class ThreadManager {
     // the prior turns as a preamble so Claude isn't amnesiac after the switch.
     const priorMessages = thread.messages.slice(0, -1); // excludes the just-pushed user msg
     const isFreshUnresumedSession = !thread.sessionId && priorMessages.length > 0;
-    const effectivePrompt = isFreshUnresumedSession
-      ? buildHistoryPreamble(priorMessages, thread.cwd) + promptText
-      : promptText;
+    const handoffPrompt = thread.pendingHarnessHandoff
+      ? buildHarnessHandoffPrompt(thread, thread.pendingHarnessHandoff.sourceHarness, thread.pendingHarnessHandoff.targetHarness)
+      : undefined;
+    const effectivePrompt = handoffPrompt
+      ? `${handoffPrompt}\n\n${promptText}`
+      : isFreshUnresumedSession
+        ? buildHistoryPreamble(priorMessages, thread.cwd) + promptText
+        : promptText;
 
     // The SDK's Task board IDs are small integers that restart at 1 for every
     // new session (~/.claude/tasks/<session-uuid>/1.json, 2.json, ...). Once we
@@ -1787,7 +1897,9 @@ export class ThreadManager {
       // and fall back to the plain thread.model — correct there, since a
       // cwd-change restart isn't a new user message and has no escalation
       // keyword to apply.
-      model: modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
+      model: thread.agentHarness === 'codex'
+        ? (modelOverride ?? thread.model ?? undefined)
+        : modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
       appendSystemPrompt,
       resumeFallbackHistory: thread.agentHarness === 'codex' && thread.sessionId
         ? buildHistoryPreamble(
@@ -1882,6 +1994,12 @@ export class ThreadManager {
     // guard below then refuses to write back a sessionId that belongs to the
     // OLD directory's project (see onDone).
     const cwdAtStart = thread.cwd;
+    const harnessAtStart = thread.agentHarness ?? 'claude';
+    const generationAtStart = thread.sessionGeneration ?? 0;
+    const isCurrentGeneration = () =>
+      this.threads.get(threadId) === thread
+      && (thread.agentHarness ?? 'claude') === harnessAtStart
+      && (thread.sessionGeneration ?? 0) === generationAtStart;
     return {
       onRawEvent: (event) => {
         if (!this.settings.saveRawLogs || !this.vaultRoot) return;
@@ -1898,10 +2016,12 @@ export class ThreadManager {
         );
       },
       onToken: (text) => {
+        if (!isCurrentGeneration()) return;
         this.clearReconnectingStatus(thread);
         this.emit(threadId, { type: 'token', text });
       },
       onToolUse: (record) => {
+        if (!isCurrentGeneration()) return;
         this.threadActivity.set(threadId, record.summary);
         // Persist file paths for Write/Edit tools so they survive tab switches.
         if (record.name === 'Write' || record.name === 'Edit') {
@@ -1928,6 +2048,7 @@ export class ThreadManager {
         this.emit(threadId, { type: 'recap', summary });
       },
       onMessage: (content, toolCalls) => {
+        if (!isCurrentGeneration()) return;
         this.clearReconnectingStatus(thread);
         const images = this.pendingToolResultImages.get(threadId);
         const assistantMsg: ChatMessage = {
@@ -1935,6 +2056,7 @@ export class ThreadManager {
           role: 'assistant',
           content,
           timestamp: Date.now(),
+          agentHarness: harnessAtStart,
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
           toolResultImages: images && images.length > 0 ? [...images] : undefined,
         };
@@ -1946,6 +2068,7 @@ export class ThreadManager {
         this.emit(threadId, { type: 'message', message: assistantMsg });
       },
       onDone: (sessionId, cost, _numTurns, metadata) => {
+        if (!isCurrentGeneration()) return;
         // Only persist this sessionId if the cwd hasn't changed since this
         // session was opened. setThreadCwd() (enter_worktree /
         // set_working_directory) clears thread.sessionId and defers the
@@ -1984,6 +2107,7 @@ export class ThreadManager {
         // same generation per ADR-0002 §2) has now been answered. Nothing to
         // roll back, just stop tracking them.
         this.pendingUserMessageIds.delete(threadId);
+        if (thread.pendingHarnessHandoff && thread.sessionId) delete thread.pendingHarnessHandoff;
 
         // Safety net: if a pending plan somehow survived to onDone (e.g. the
         // session completed without user action), clear it so a stale card
@@ -2026,6 +2150,7 @@ export class ThreadManager {
         this.scheduleQueuedMessageFlush(threadId);
       },
       onInterrupted: (_sessionId) => {
+        if (!isCurrentGeneration()) return;
         // Roll back every orphaned, unresolved user message — not just the
         // trailing one. Under the old per-turn model, sendMessage() gated on
         // "busy," so at most one user message could ever be unresolved when
@@ -2054,6 +2179,7 @@ export class ThreadManager {
         this.emitRunStateSettledWhenIdle(threadId);
       },
       onError: (err) => {
+        if (!isCurrentGeneration()) return;
         // Safety net: always clean up a pending plan card here, mirroring
         // the onDone safety net above — otherwise an errored session (e.g.
         // during a long ExitPlanMode wait) leaves the card stuck forever
@@ -2167,6 +2293,7 @@ export class ThreadManager {
         this.emit(threadId, { type: 'compact', message: compactMsg });
       },
       onTaskStarted: (taskId, description, skipTranscript, taskType, workflowName, subagentType, parentNativeAgentId, model) => {
+        if (!isCurrentGeneration()) return;
         this.threadActivity.set(threadId, description);
         // Background tasks use skipTranscript=true. Track them so we can detect
         // if they're still running when the session ends.
@@ -2177,7 +2304,7 @@ export class ThreadManager {
         }
         if (AgentRunStore.isAgentTask({ skipTranscript, taskType, subagentType })) {
           this.agentRuns.observeStart({
-            threadId, harness: thread.agentHarness ?? 'claude', nativeAgentId: taskId,
+            threadId, harness: harnessAtStart, nativeAgentId: taskId, sessionGeneration: generationAtStart,
             taskId, description, role: subagentType, parentNativeAgentId, model,
           });
           this.persistAgentRuns(thread);
@@ -2185,34 +2312,37 @@ export class ThreadManager {
         this.emit(threadId, { type: 'task_started', taskId, description, skipTranscript, taskType, workflowName, subagentType });
       },
       onTaskUpdated: (taskId, patch) => {
-        const run = this.agentRuns.getByNativeId(threadId, thread.agentHarness ?? 'claude', taskId);
+        if (!isCurrentGeneration()) return;
+        const run = this.agentRuns.getByNativeId(threadId, harnessAtStart, taskId, generationAtStart);
         if (run) {
           if (patch.description) run.description = patch.description;
           const status = patch.status === 'completed' ? 'completed' : patch.status === 'failed' ? 'failed' : patch.status === 'killed' ? 'interrupted' : patch.status === 'pending' ? 'waiting' : 'working';
-          this.agentRuns.observeStatus(threadId, run.harness, taskId, status, undefined, patch.error);
+          this.agentRuns.observeStatus(threadId, run.harness, taskId, status, undefined, patch.error, Date.now(), generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_updated', taskId, ...patch });
       },
       onTaskProgress: (taskId, description, lastToolName) => {
+        if (!isCurrentGeneration()) return;
         const suffix = lastToolName ? ` · ${lastToolName}` : '';
         this.threadActivity.set(threadId, description + suffix);
-        const run = this.agentRuns.getByNativeId(threadId, thread.agentHarness ?? 'claude', taskId);
+        const run = this.agentRuns.getByNativeId(threadId, harnessAtStart, taskId, generationAtStart);
         if (run) {
-          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: lastToolName ? 'tool' : 'activity', text: description, toolName: lastToolName, timestamp: Date.now() });
+          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: lastToolName ? 'tool' : 'activity', text: description, toolName: lastToolName, timestamp: Date.now() }, generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_progress', taskId, description, lastToolName });
       },
       onTaskNotification: (taskId, status, summary) => {
+        if (!isCurrentGeneration()) return;
         // Task resolved — remove from background tracking set.
         this.activeBgTasks.get(threadId)?.delete(taskId);
         // Also clear from persisted state (handles notifications that arrive
         // on a poll-resume after a previous session missed them).
         this.clearPendingBackgroundTask(threadId, taskId);
-        const run = this.agentRuns.getByNativeId(threadId, thread.agentHarness ?? 'claude', taskId);
+        const run = this.agentRuns.getByNativeId(threadId, harnessAtStart, taskId, generationAtStart);
         if (run) {
-          this.agentRuns.observeStatus(threadId, run.harness, taskId, status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'interrupted', summary);
+          this.agentRuns.observeStatus(threadId, run.harness, taskId, status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'interrupted', summary, undefined, Date.now(), generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_notification', taskId, status, summary });
@@ -2656,6 +2786,43 @@ export class ThreadManager {
     this.sessions.clear();
     this.releasingPlanFeedback.clear();
   }
+}
+
+const HARNESS_HANDOFF_SUMMARY_LIMIT = 2400;
+
+function createHarnessHandoff(
+  thread: Thread,
+  sourceHarness: 'claude' | 'codex',
+  targetHarness: 'claude' | 'codex',
+): NonNullable<Thread['pendingHarnessHandoff']> {
+  const messageSummary = [...thread.messages].reverse().find(message => message.summary?.trim())?.summary;
+  const fallback = `Continue the thread titled "${thread.title}"${thread.goal ? ` toward this goal: ${thread.goal}` : ''}.`;
+  return {
+    sourceHarness, targetHarness, threadId: thread.id,
+    summary: (thread.summary?.trim() || messageSummary?.trim() || fallback).slice(0, HARNESS_HANDOFF_SUMMARY_LIMIT),
+    noteFile: thread.noteFile, rawLogPath: thread.rawLogPath, createdAt: Date.now(),
+  };
+}
+
+/** Builds the one-time provider-neutral bridge; it deliberately contains no transcript replay. */
+export function buildHarnessHandoffPrompt(
+  thread: Thread,
+  sourceHarness: 'claude' | 'codex',
+  targetHarness: 'claude' | 'codex',
+): string {
+  const handoff = thread.pendingHarnessHandoff ?? createHarnessHandoff(thread, sourceHarness, targetHarness);
+  const references = [
+    `Use threads_get_messages with thread ID ${thread.id} when exact visible history is needed.`,
+    ...(handoff.rawLogPath ? [`Use threads_get_log for raw events; the persisted log path is ${handoff.rawLogPath}.`] : []),
+    ...(handoff.noteFile ? [`The archived thread note is ${handoff.noteFile}.`] : []),
+  ];
+  return [
+    `## Harness handoff (${sourceHarness} → ${targetHarness})`,
+    'This is the same Agent Threads conversation, but a fresh provider-native session.',
+    `Summary: ${handoff.summary.slice(0, HARNESS_HANDOFF_SUMMARY_LIMIT)}`,
+    ...references,
+    'Continue from the user message below. Do not claim native-session continuity.',
+  ].join('\n');
 }
 
 /**

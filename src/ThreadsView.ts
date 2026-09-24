@@ -2138,6 +2138,11 @@ export class ThreadsView extends ItemView {
       .setIcon('shield')
       .onClick(() => this.togglePermissionModeMenu(event))
     );
+    menu.addItem(item => item
+      .setTitle(`Harness: ${(thread.agentHarness ?? 'claude') === 'codex' ? 'Codex' : 'Claude'}`)
+      .setIcon('bot')
+      .onClick(() => this.toggleHarnessMenu(event, thread.id))
+    );
     menu.addSeparator();
     menu.addItem(item =>
       item
@@ -2339,6 +2344,50 @@ export class ThreadsView extends ItemView {
       });
     }
     menu.showAtMouseEvent(event);
+  }
+
+  private toggleHarnessMenu(event: MouseEvent, threadId: string): void {
+    const thread = this.manager.getThread(threadId);
+    if (!thread) return;
+    const current = thread.agentHarness ?? 'claude';
+    const blocked = this.manager.getHarnessSwitchBlockReason(threadId);
+    const menu = new Menu();
+    for (const option of [{ value: 'claude' as const, label: 'Claude' }, { value: 'codex' as const, label: 'Codex' }]) {
+      menu.addItem(item => {
+        item.setTitle(option.value !== current && blocked ? `${option.label} — ${blocked}` : option.label)
+          .setChecked(option.value === current)
+          .setDisabled(option.value !== current && !!blocked);
+        if (option.value !== current && !blocked) {
+          item.onClick(() => { void this.requestHarnessSwitch(threadId, option.value); });
+        }
+      });
+    }
+    menu.showAtMouseEvent(event);
+  }
+
+  private async requestHarnessSwitch(threadId: string, targetHarness: 'claude' | 'codex'): Promise<void> {
+    const thread = this.manager.getThread(threadId);
+    if (!thread) return;
+    if (thread.messages.some(message => message.role === 'user' || message.role === 'assistant')) {
+      const confirmed = await promptConfirm(this.app, {
+        message: `Switch this thread to ${targetHarness === 'codex' ? 'Codex' : 'Claude'}? The conversation stays here, but the model and native session reset. The new harness continues from a summary and transcript references.`,
+        confirmLabel: `Switch to ${targetHarness === 'codex' ? 'Codex' : 'Claude'}`,
+      });
+      if (!confirmed) return;
+    }
+    // The captured ID prevents navigation while the menu/modal is open from
+    // applying the choice to a different active thread.
+    try {
+      await this.manager.switchHarness(threadId, targetHarness, () => this.plugin.saveSettings());
+      if (threadId === this.activeThreadId) {
+        this.renderThreadInfo();
+        this.applyComposerPlaceholder();
+        this.setRunningState(false);
+      }
+      new Notice(`Switched thread to ${targetHarness === 'codex' ? 'Codex' : 'Claude'}.`);
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : String(error));
+    }
   }
 
   private toggleCompressView(): void {
