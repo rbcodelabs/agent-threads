@@ -26,8 +26,11 @@ delimiters. Mount only the directory intended for the task.
 The tools do not move the agent itself into the VM. Normal file tools and shell
 tools still run on the host. Only commands sent through `vm_exec` run in Linux.
 Guest commands can modify or delete files in the mounted directory, and those
-changes persist after `exit_vm`. Do not put secrets in that directory. The tools
-do not mount the vault, home directory, SSH agent, or credentials automatically.
+changes persist after `exit_vm`. Do not put secrets in that directory. No host
+directories are mounted beyond the selected workspace. If the thread's working
+directory is your vault or home, that directory becomes the mount; select a
+disposable worktree first. The SSH agent and host credentials are not automatically
+forwarded, but files inside the mount are exposed.
 A Git worktree's `.git` file can point outside the mount, so guest Git commands
 may fail; use host Git tools or a standalone checkout when guest Git is needed.
 Avoid sharing host `node_modules` with Linux; native dependencies differ.
