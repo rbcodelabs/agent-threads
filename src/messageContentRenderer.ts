@@ -33,6 +33,8 @@ export class MessageContentMountManager {
   private readonly unsubscribe: () => void;
   private disposed = false;
   private observer: MutationObserver | undefined;
+  private readonly pendingDocuments = new Map<Element, () => void>();
+  private visibilityObserver: IntersectionObserver | undefined;
   constructor(private readonly registry: MessageContentProviderRegistry | undefined, private readonly host: Omit<MessageContentActionHost, 'signal'>) {
     this.unsubscribe = registry?.subscribe(() => {
       for (const mount of this.mounts) {
@@ -40,14 +42,20 @@ export class MessageContentMountManager {
         if (mount.card.isConnected) void this.render(mount);
       }
     }) ?? (() => {});
+    if (typeof IntersectionObserver !== 'undefined') this.visibilityObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) if (entry.isIntersecting) {
+        const mountDocument = this.pendingDocuments.get(entry.target);
+        this.pendingDocuments.delete(entry.target); this.visibilityObserver?.unobserve(entry.target); mountDocument?.();
+      }
+    });
     if (typeof MutationObserver !== 'undefined') {
       this.observer = new MutationObserver(() => {
-        for (const mount of this.mounts) if (!mount.card.isConnected) { mount.controller.abort(); this.mounts.delete(mount); }
+        for (const mount of this.mounts) if (!mount.card.isConnected) { mount.controller.abort(); this.mounts.delete(mount); this.pendingDocuments.delete(mount.card); this.visibilityObserver?.unobserve(mount.card); }
       });
       this.observer.observe(document.body, { childList: true, subtree: true });
     }
   }
-  reset(): void { for (const mount of this.mounts) mount.controller.abort(); this.mounts.clear(); }
+  reset(): void { for (const mount of this.mounts) mount.controller.abort(); this.mounts.clear(); this.pendingDocuments.clear(); this.visibilityObserver?.disconnect(); }
   dispose(): void { this.disposed = true; this.reset(); this.unsubscribe(); this.observer?.disconnect(); }
 
   async hydrate(el: HTMLElement, markers: readonly MessageContentMarker[], context: MessageContentContext, options: { streaming?: boolean } = {}): Promise<void> {
@@ -79,7 +87,7 @@ export class MessageContentMountManager {
   private async render(mount: Mount): Promise<void> {
     const { controller } = mount;
     const valid = () => !this.disposed && !controller.signal.aborted && !mount.context.signal.aborted && this.mounts.has(mount) && mount.card.isConnected;
-    this.fallback(mount, mount.streaming ? 'Content will be available when the response finishes.' : 'Content unavailable');
+    this.fallback(mount, mount.streaming ? 'Content will be available when the response finishes.' : `Content unavailable — ${mount.marker.ref.providerId}`);
     if (mount.streaming || !this.registry || !valid()) return;
     const abort = () => controller.abort();
     mount.context.signal.addEventListener('abort', abort, { once: true });
@@ -104,11 +112,19 @@ export class MessageContentMountManager {
       card.appendChild(image);
     }
     if (presentation.kind === 'document') {
-      const frame = document.createElement('iframe'); frame.className = 'ct-inline-content-document'; frame.title = presentation.title;
-      frame.setAttribute('sandbox', 'allow-scripts'); frame.referrerPolicy = 'no-referrer';
-      frame.style.height = `${presentation.height ?? 360}px`;
-      frame.srcdoc = sandboxMessageDocument(presentation.html); card.appendChild(frame);
-      context.signal.addEventListener('abort', () => frame.remove(), { once: true });
+      const mountDocument = () => {
+        if (!valid()) return;
+        const frame = document.createElement('iframe'); frame.className = 'ct-inline-content-document'; frame.title = presentation.title;
+        frame.setAttribute('sandbox', 'allow-scripts'); frame.referrerPolicy = 'no-referrer';
+        frame.style.height = `${presentation.height ?? 360}px`;
+        frame.srcdoc = sandboxMessageDocument(presentation.html);
+        card.insertBefore(frame, card.querySelector('.ct-inline-content-actions'));
+        context.signal.addEventListener('abort', () => frame.remove(), { once: true });
+      };
+      if (this.visibilityObserver) {
+        this.pendingDocuments.set(card, mountDocument); this.visibilityObserver.observe(card);
+        context.signal.addEventListener('abort', () => { this.pendingDocuments.delete(card); this.visibilityObserver?.unobserve(card); }, { once: true });
+      } else mountDocument();
     }
     if (presentation.actions?.length) {
       const actions = this.text(card, 'ct-inline-content-actions', '');

@@ -32,6 +32,9 @@ describe('message content references', () => {
     const circular: Record<string, unknown> = {}; circular.self = circular;
     expect(validateMessageContentRef({ ...ref, data: circular })).toBeNull();
   });
+  it('bounds the number of hydrated references per message', () => {
+    expect(extractMessageContent(Array(100).fill(formatMessageContentReference(ref)).join('\n')).markers).toHaveLength(32);
+  });
 });
 
 describe('message content providers', () => {
@@ -115,6 +118,25 @@ describe('inline content mounts', () => {
     const rendering = manager.hydrate(el, extracted.markers, context());
     await Promise.resolve(); manager.reset(); resolve({ kind: 'card', title: 'Late' }); await rendering;
     expect(el.textContent).not.toContain('Late'); manager.dispose(); el.remove();
+  });
+  it('waits for document visibility before creating its iframe', async () => {
+    let intersect!: (entries: { target: Element; isIntersecting: boolean }[]) => void;
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: typeof intersect) { intersect = callback; }
+      observe() {} unobserve() {} disconnect() {}
+    });
+    try {
+      const registry = new MessageContentProviderRegistry();
+      registry.register({ pluginId: 'example' }, { providerId: ref.providerId, present: () => ({ kind: 'document', title: 'Preview', html: '<h1>Preview</h1>' }) });
+      const manager = new MessageContentMountManager(registry, { openView: async () => 'tab' });
+      const el = document.createElement('div'); document.body.appendChild(el);
+      const extracted = extractMessageContent(formatMessageContentReference(ref)); el.innerHTML = extracted.text;
+      await manager.hydrate(el, extracted.markers, context());
+      expect(el.querySelector('iframe')).toBeNull();
+      intersect([{ target: el.querySelector('.ct-inline-content')!, isIntersecting: true }]);
+      expect(el.querySelector('iframe')).not.toBeNull();
+      manager.dispose(); el.remove();
+    } finally { vi.unstubAllGlobals(); }
   });
   it('places a restrictive CSP first and removes navigation/resource containers', () => {
     const html = sandboxMessageDocument('<html><head><base href="https://evil.example"><meta http-equiv="refresh" content="0;url=https://evil.example"></head><body><iframe src="https://evil.example"></iframe><form action="https://evil.example"></form><a href="https://evil.example">go</a><script>window.answer=42</script></body></html>');

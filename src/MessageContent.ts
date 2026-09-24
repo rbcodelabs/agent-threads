@@ -76,17 +76,21 @@ export interface MessageContentMarker { readonly token: string; readonly ref: Me
 export function extractMessageContent(source: string, options: { streaming?: boolean } = {}): { text: string; markers: MessageContentMarker[] } {
   const markers: MessageContentMarker[] = [];
   let fence: string | undefined;
+  let fenceIndent = 3;
   const lines = source.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (/^(?: {4}|\t)/.test(line)) continue;
-    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (delimiter) {
-      if (!fence) fence = delimiter[1];
-      else if (delimiter[1][0] === fence[0] && delimiter[1].length >= fence.length && !delimiter[2].trim()) fence = undefined;
+    if (fence) {
+      const close = /^( *)(`{3,}|~{3,})\s*$/.exec(line);
+      if (close && close[1].length <= fenceIndent && close[2][0] === fence[0] && close[2].length >= fence.length) fence = undefined;
       continue;
     }
-    if (fence) continue;
+    if (/^(?: {4}|\t)/.test(line)) continue;
+    const delimiter = /^( {0,3}(?:(?:[-+*]|\d{1,9}[.)]) +)?)(`{3,}|~{3,})(.*)$/.exec(line);
+    if (delimiter) {
+      fence = delimiter[2]; fenceIndent = delimiter[1].length + 3;
+      continue;
+    }
     const body = line.trimStart();
     if (options.streaming && i === lines.length - 1 && body && 'agent-content'.startsWith(body)) { lines[i] = ''; continue; }
     if (!body.startsWith('agent-content{')) continue;
@@ -193,7 +197,11 @@ export class MessageContentProviderRegistry {
       if (ctx.signal.aborted || context.signal.aborted || this.entries.get(ref.providerId) !== entry || !bounded(state?.type, 256)) return 'unavailable';
       return host.openView(state);
     } })));
-    if (!result || !['ok', 'warning', 'error'].includes(result.status) || (result.message !== undefined && (typeof result.message !== 'string' || result.message.length > 4096))) return error;
-    return Object.freeze({ status: result.status, message: result.message }) as ArtifactActionResult;
+    try {
+      if (!result) return error;
+      const status = result.status; const message = result.message;
+      if (!['ok', 'warning', 'error'].includes(status) || (message !== undefined && (typeof message !== 'string' || message.length > 4096))) return error;
+      return Object.freeze({ status, message }) as ArtifactActionResult;
+    } catch { return error; }
   }
 }

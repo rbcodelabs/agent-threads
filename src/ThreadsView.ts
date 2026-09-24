@@ -1122,6 +1122,8 @@ export class ThreadsView extends ItemView {
   }
 
   private async setActiveThread(id: string): Promise<void> {
+    this.messageContentController?.abort();
+    this.messageContentManager?.reset();
     this.closeSwitcherPanel();
     this.closeAgentPopover();
     this.closeSchedulePopover();
@@ -2407,7 +2409,7 @@ export class ThreadsView extends ItemView {
     options: { streaming?: boolean; messageId?: string } = {},
   ): Promise<void> {
     const threadId = this.activeThreadId;
-    const signal = this.messageContentController.signal;
+    const signal = this.messageContentController?.signal ?? new AbortController().signal;
     const transcriptMessage = options.messageId && threadId ? this.manager.getThread(threadId)?.messages.find(message => message.id === options.messageId && message.role === 'assistant' && message.content === markdown) : undefined;
     const inline = transcriptMessage || options.streaming ? extractMessageContent(markdown, options) : { text: markdown, markers: [] };
     // Codex's `visualize` skill puts a wrapped content reference on its own line
