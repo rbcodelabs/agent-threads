@@ -103,4 +103,10 @@ describe('public thread lifecycle', () => {
     expect(deps.confirm).not.toHaveBeenCalled();
     expect(deps.archiveThread).not.toHaveBeenCalled();
   });
+  it('treats retained archived records as unavailable, not remaining live threads', async () => {
+    const { threads, lifecycle } = setup();
+    Object.assign(threads[0], { status: 'archived' });
+    await expect(lifecycle.markReviewed('one', () => {})).rejects.toMatchObject({ code: 'THREAD_NOT_FOUND' });
+    await expect(lifecycle.archive('two', () => {})).rejects.toThrow('last remaining');
+  });
 });

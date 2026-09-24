@@ -2018,6 +2018,9 @@ export class ThreadManager {
           this.emit(threadId, { type: 'background_tasks_pending', tasks: thread.pendingBackgroundTasks });
         }
 
+        // Peer review does not require a mounted list/board. Invalidate here
+        // before persistence listeners run, so completed work is always New.
+        thread.reviewed = false;
         this.emit(threadId, { type: 'done' });
         this.emitRunStateSettledWhenIdle(threadId);
         this.scheduleQueuedMessageFlush(threadId);

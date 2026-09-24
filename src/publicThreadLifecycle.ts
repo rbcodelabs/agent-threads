@@ -2,7 +2,7 @@ import { buildArchivePlan, type ArchiveConfirm } from './archivePlan';
 import { ClaudeThreadsApiError } from './PublicApi';
 import type { OrchestratorContext } from './orchestratorThreads';
 
-interface LifecycleThread { id: string; title: string; reviewed?: boolean; updatedAt: number }
+interface LifecycleThread { id: string; title: string; reviewed?: boolean; updatedAt: number; status?: string }
 export interface PublicThreadLifecycleDependencies {
   getThreads(): LifecycleThread[];
   isRunning(id: string): boolean;
@@ -23,14 +23,15 @@ export function createPublicThreadLifecycle(deps: PublicThreadLifecycleDependenc
     pending = result.catch(() => undefined);
     return result;
   };
+  const liveThreads = () => deps.getThreads().filter(thread => thread.status !== 'archived');
   const requireThread = (id: string) => {
-    const thread = deps.getThreads().find(candidate => candidate.id === id);
+    const thread = liveThreads().find(candidate => candidate.id === id);
     if (!thread) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.');
     return thread;
   };
   const planArchive = (id: string) => {
     requireThread(id);
-    const plan = buildArchivePlan([id], { threads: deps.getThreads(), isRunning: deps.isRunning, orchestrator: deps.getOrchestratorContext() });
+    const plan = buildArchivePlan([id], { threads: liveThreads(), isRunning: deps.isRunning, orchestrator: deps.getOrchestratorContext() });
     if (plan.blocked) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', plan.blockedMessage ?? 'Archive blocked.');
     return plan;
   };
@@ -84,7 +85,7 @@ export function createPublicThreadLifecycle(deps: PublicThreadLifecycleDependenc
       }
       // A new run can begin while settings are saved. Do not label its result
       // reviewed or claim success for a target removed during that wait.
-      if (deps.isRunning(threadId) || !deps.getThreads().includes(thread) || thread.updatedAt !== revision || !thread.reviewed) {
+      if (deps.isRunning(threadId) || !liveThreads().includes(thread) || thread.updatedAt !== revision || !thread.reviewed) {
         if (thread.updatedAt === revision && thread.reviewed === true) thread.reviewed = prior;
         await deps.saveSettings();
         throw new ClaudeThreadsApiError('THREAD_BUSY', 'Thread changed while saving review state; retry after it finishes.');
