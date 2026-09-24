@@ -77,6 +77,32 @@ export function parseRedirectUri(value: string): { ok: true; parsed: ParsedRedir
   return { ok: true, parsed: { hostname: url.hostname.replace(/^\[|\]$/g, ''), port, pathname: url.pathname } };
 }
 
+/**
+ * The only accepted shape for an `oauth` entry's `clientSecret`: a bare
+ * `${NAME}` placeholder naming a keychain secret.
+ *
+ * Unlike the `placeholder` pattern used for headers/env, no `Bearer `/`Basic `
+ * prefix is allowed — a client secret is a raw credential sent as a form
+ * parameter or in a Basic-auth header the SDK builds itself, so a prefix here
+ * could only be a mistake.
+ *
+ * Why this field refuses literals when the Settings UI accepts them: a value
+ * passed to `mcp_register_server` is an argument in a tool call, which is
+ * recorded verbatim in the thread transcript and the raw JSONL log. A human
+ * typing into the Settings password field writes only to the keychain, so that
+ * path takes a literal and never round-trips it through the schema.
+ */
+export const CLIENT_SECRET_PLACEHOLDER = /^\$\{([A-Z_][A-Z0-9_]*)\}$/i;
+
+/**
+ * The keychain variable an `oauth` entry's `clientSecret` placeholder names, or
+ * `undefined` when the value is absent or not a placeholder. Callers resolve the
+ * name themselves — this module has no keychain access.
+ */
+export function clientSecretVariableName(clientSecret: string | undefined): string | undefined {
+  return clientSecret === undefined ? undefined : CLIENT_SECRET_PLACEHOLDER.exec(clientSecret)?.[1];
+}
+
 /** Shared schema, including direct harness calls which do not parse SDK schemas. */
 export const mcpRegistrationSchema = z.object({
   name: z.string().trim().regex(/^[A-Za-z0-9_-]+$/).refine(name =>
@@ -108,6 +134,18 @@ export const mcpRegistrationSchema = z.object({
   clientId: z.string().optional().describe(
     'oauth only. Skip Dynamic Client Registration with a known public client_id. Usually omitted.',
   ),
+  /**
+   * `oauth` only: `client_secret` for a confidential client, as a `${NAME}`
+   * placeholder resolved from the keychain — never a literal. See
+   * `CLIENT_SECRET_PLACEHOLDER` for why this one field refuses literals even
+   * though the Settings UI accepts them.
+   */
+  clientSecret: z.string().trim().optional().describe(
+    'oauth only. Client secret for a provider that requires a confidential client (rejects ' +
+    'token_endpoint_auth_method "none"). Must be a ${NAME} placeholder naming a secret stored ' +
+    'with request_secret — a literal secret is rejected, since a tool call is recorded in the ' +
+    'thread transcript. Usually omitted: most servers use a public client with PKCE alone.',
+  ),
   /** `oauth` only: skip protected-resource discovery by supplying the AS metadata URL directly. */
   authorizationServerUrl: z.string().trim().url().startsWith('https://').optional().describe(
     'oauth only. Skip protected-resource discovery by naming the authorization server directly. Usually omitted.',
@@ -122,11 +160,12 @@ export const mcpRegistrationSchema = z.object({
   const invalid = () => ctx.addIssue({ code: 'custom', message: 'Invalid MCP configuration. Credentials must use ${NAME} placeholders; use request_secret to store them.' });
   const credentialKey = /authorization|cookie|token|secret|password|credential|api[-_]?key/i;
   const placeholder = /^(?:Bearer\s+|Basic\s+)?\$\{[A-Z_][A-Z0-9_]*\}$/i;
-  // scopes/tools/clientId/authorizationServerUrl/redirectUri only make sense for an
-  // oauth entry; a non-oauth entry carrying any of them is malformed input, not a
-  // silently-ignored extra.
+  // scopes/tools/clientId/clientSecret/authorizationServerUrl/redirectUri only make
+  // sense for an oauth entry; a non-oauth entry carrying any of them is malformed
+  // input, not a silently-ignored extra.
   const oauthOnlyFieldsSet = entry.scopes !== undefined || entry.tools !== undefined
-    || entry.clientId !== undefined || entry.authorizationServerUrl !== undefined
+    || entry.clientId !== undefined || entry.clientSecret !== undefined
+    || entry.authorizationServerUrl !== undefined
     || entry.redirectUri !== undefined;
   if (entry.type === 'stdio') {
     if (!entry.command || entry.url !== undefined || entry.headers !== undefined || oauthOnlyFieldsSet) invalid();
@@ -149,6 +188,16 @@ export const mcpRegistrationSchema = z.object({
     if (entry.redirectUri !== undefined) {
       const result = parseRedirectUri(entry.redirectUri);
       if (!result.ok) ctx.addIssue({ code: 'custom', message: result.error, path: ['redirectUri'] });
+    }
+    // A literal secret here would be persisted into the thread transcript and the
+    // raw JSONL log by the tool call itself, before this plugin ever sees it —
+    // rejecting it is the only point at which that is still preventable.
+    if (entry.clientSecret !== undefined && !CLIENT_SECRET_PLACEHOLDER.test(entry.clientSecret)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'clientSecret must be a ${NAME} placeholder naming a secret stored with request_secret, not a literal secret.',
+        path: ['clientSecret'],
+      });
     }
   } else {
     if (!entry.url || entry.command !== undefined || entry.args !== undefined || entry.env !== undefined || oauthOnlyFieldsSet) invalid();

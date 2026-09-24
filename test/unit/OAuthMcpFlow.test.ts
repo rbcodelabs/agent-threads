@@ -38,6 +38,7 @@ function fixtureTokenStore(initial: Partial<Record<string, unknown>> = {}): OAut
     stored,
     store: vi.fn(async (_serverName: string, tokens: TokenSet) => { stored.push(tokens); }),
     getClientId: vi.fn(async () => (initial.clientId as string | undefined)),
+    getClientSecret: vi.fn(async () => (initial.clientSecret as string | undefined)),
     getCurrentTokens: vi.fn(async () => (initial.currentTokens as TokenSet | undefined)),
     clear: vi.fn(async () => {}),
   };
@@ -147,8 +148,8 @@ describe('OAuthMcpFlow.registerClient', () => {
     };
     sdkAuth.registerClient.mockResolvedValue(info);
     const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn());
-    const clientId = await flow.registerClient('https://vercel.com/oauth/register', 'http://127.0.0.1:1234/callback', 'openid profile');
-    expect(clientId).toBe('client-123');
+    const registered = await flow.registerClient('https://vercel.com/oauth/register', 'http://127.0.0.1:1234/callback', 'openid profile');
+    expect(registered).toEqual({ clientId: 'client-123', clientSecret: undefined });
     expect(sdkAuth.registerClient).toHaveBeenCalledWith(
       'https://vercel.com/oauth/register',
       expect.objectContaining({
@@ -157,6 +158,35 @@ describe('OAuthMcpFlow.registerClient', () => {
         metadata: expect.objectContaining({ registration_endpoint: 'https://vercel.com/oauth/register' }),
       }),
     );
+  });
+
+  /**
+   * We keep asking for a public client, because that is what works with every
+   * server we know of and needs no secret custody.
+   */
+  it('still requests token_endpoint_auth_method "none"', async () => {
+    sdkAuth.registerClient.mockResolvedValue({ client_id: 'client-123', redirect_uris: ['http://127.0.0.1:1234/callback'] });
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn());
+    await flow.registerClient('https://vercel.com/oauth/register', 'http://127.0.0.1:1234/callback');
+    expect(sdkAuth.registerClient).toHaveBeenCalledWith('https://vercel.com/oauth/register', expect.objectContaining({
+      clientMetadata: expect.objectContaining({ token_endpoint_auth_method: 'none' }),
+    }));
+  });
+
+  /**
+   * RFC 7591 §3.2.1 lets the AS answer with a `client_secret` even when the
+   * request asked for `none`. Dropping it used to turn the next token exchange
+   * into an opaque `invalid_client`, which read like a consent failure.
+   */
+  it('returns a client_secret the AS issues despite the "none" request', async () => {
+    sdkAuth.registerClient.mockResolvedValue({
+      client_id: 'client-123',
+      client_secret: 'issued-secret',
+      redirect_uris: ['http://127.0.0.1:1234/callback'],
+    });
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn());
+    await expect(flow.registerClient('https://vercel.com/oauth/register', 'http://127.0.0.1:1234/callback'))
+      .resolves.toEqual({ clientId: 'client-123', clientSecret: 'issued-secret' });
   });
 });
 
@@ -199,6 +229,53 @@ describe('OAuthMcpFlow.authorize', () => {
       redirectUri,
       clientInformation: { client_id: 'client-123' },
     }));
+  });
+
+  /**
+   * A confidential client authenticates at the token endpoint only. The secret
+   * must never appear on the authorization request: that URL goes through the
+   * user's address bar, the AS's access logs and any referrer along the way.
+   */
+  it('sends a client_secret on the token exchange but never on the authorization URL', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({
+      serverName: 'confidential', clientId: 'client-123', clientSecret: 'shh-abc', asMetadata: fixtureAsMetadata(),
+    });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    expect(capturedUrl.searchParams.has('client_secret')).toBe(false);
+    expect(capturedUrl.href).not.toContain('shh-abc');
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
+    await promise;
+
+    // The SDK's applyClientAuthentication negotiates client_secret_basic vs
+    // client_secret_post from the AS metadata, so passing it through
+    // clientInformation is all this layer has to do.
+    expect(sdkAuth.exchangeAuthorization).toHaveBeenCalledWith('https://vercel.com', expect.objectContaining({
+      clientInformation: { client_id: 'client-123', client_secret: 'shh-abc' },
+    }));
+  });
+
+  it('omits client_secret from clientInformation entirely for a public client', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({ serverName: 'vercel', clientId: 'client-123', asMetadata: fixtureAsMetadata() });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
+    await promise;
+
+    // Not `client_secret: undefined` — an explicit undefined key would still make
+    // the SDK treat the client as confidential-with-a-blank-secret.
+    const exchanged = sdkAuth.exchangeAuthorization.mock.calls[0][1] as { clientInformation: Record<string, unknown> };
+    expect('client_secret' in exchanged.clientInformation).toBe(false);
   });
 
   it('rejects on a state mismatch without exchanging the code', async () => {
@@ -413,6 +490,24 @@ describe('OAuthMcpFlow.refresh', () => {
     expect(tokenStore.store).toHaveBeenCalledWith('vercel', result);
   });
 
+  /**
+   * An AS that required the secret at the exchange also requires it here. A bare
+   * refresh gets `invalid_client`, which surfaces to the user as a spontaneous
+   * logout hours after a connection that looked fine.
+   */
+  it('re-sends the stored client_secret on refresh', async () => {
+    sdkAuth.refreshAuthorization.mockResolvedValue({ access_token: 'at-2', refresh_token: 'rt-2', token_type: 'bearer', expires_in: 1800 });
+    const tokenStore = fixtureTokenStore({
+      clientId: 'client-123', clientSecret: 'shh-abc', currentTokens: { accessToken: 'at-1', refreshToken: 'rt-1' },
+    });
+    const flow = new OAuthMcpFlow(tokenStore, vi.fn());
+
+    await flow.refresh('confidential', fixtureAsMetadata());
+    expect(sdkAuth.refreshAuthorization).toHaveBeenCalledWith('https://vercel.com', expect.objectContaining({
+      clientInformation: { client_id: 'client-123', client_secret: 'shh-abc' },
+    }));
+  });
+
   it('rejects without calling the AS when there is no refresh token on file', async () => {
     const tokenStore = fixtureTokenStore({ clientId: 'client-123', currentTokens: { accessToken: 'at-1' } });
     const flow = new OAuthMcpFlow(tokenStore, vi.fn());
@@ -544,6 +639,38 @@ describe('OAuthMcpFlow.revoke', () => {
     expect(bodies.some((b) => b.get('token') === 'rt-1' && b.get('token_type_hint') === 'refresh_token')).toBe(true);
     expect(bodies.some((b) => b.get('token') === 'at-1' && b.get('token_type_hint') === 'access_token')).toBe(true);
     expect(tokenStore.clear).toHaveBeenCalledWith('vercel');
+  });
+
+  /** RFC 7009 §2.1 — a confidential client authenticates to the revocation endpoint too. */
+  it('authenticates the revocation calls with the stored client_secret', async () => {
+    const tokenStore = fixtureTokenStore({
+      clientId: 'client-123', clientSecret: 'shh-abc', currentTokens: { accessToken: 'at-1', refreshToken: 'rt-1' },
+    });
+    const fetchFn = vi.fn(async () => new Response(null, { status: 200 }));
+    const flow = new OAuthMcpFlow(tokenStore, vi.fn(), fetchFn as unknown as typeof fetch);
+
+    await flow.revoke('confidential', fixtureAsMetadata());
+
+    const bodies = fetchFn.mock.calls.map(([, init]) => (init as RequestInit).body as URLSearchParams);
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      expect(body.get('client_id')).toBe('client-123');
+      expect(body.get('client_secret')).toBe('shh-abc');
+    }
+  });
+
+  it('sends no client_secret key at all when revoking a public client', async () => {
+    const tokenStore = fixtureTokenStore({ clientId: 'client-123', currentTokens: { accessToken: 'at-1', refreshToken: 'rt-1' } });
+    const fetchFn = vi.fn(async () => new Response(null, { status: 200 }));
+    const flow = new OAuthMcpFlow(tokenStore, vi.fn(), fetchFn as unknown as typeof fetch);
+
+    await flow.revoke('vercel', fixtureAsMetadata());
+
+    for (const [, init] of fetchFn.mock.calls) {
+      const body = (init as RequestInit).body as URLSearchParams;
+      // An empty `client_secret=` would be a failed auth attempt, not no attempt.
+      expect(body.has('client_secret')).toBe(false);
+    }
   });
 
   it('still clears local state when the AS revocation call fails', async () => {

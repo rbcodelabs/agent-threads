@@ -785,6 +785,15 @@ export interface StoredOAuthMcpServer {
   scopes?: string;
   tools?: { allow?: string[]; deny?: string[] };
   clientId?: string;
+  /**
+   * Whether this server authenticates as a confidential client. The
+   * `client_secret` itself is deliberately absent — it lives only in the
+   * keychain (`OAuthTokenStore.storeClientSecret`). This flag exists so the
+   * Settings UI can say so, and so a reconnect that finds no keychain secret can
+   * report a cleared credential instead of silently downgrading to a public
+   * client and failing later at the token endpoint.
+   */
+  hasClientSecret?: boolean;
   authorizationServerUrl?: string;
   redirectUri?: string;
 }
@@ -793,6 +802,8 @@ export interface OAuthMcpState {
   serverName: string;
   /** DCR-issued client_id, or the user-provided `clientId` override. */
   clientId: string;
+  /** Whether a `client_secret` is on file in the keychain. Never the secret itself. */
+  hasClientSecret?: boolean;
   /** Resolved authorization server URL from discovery, cached to skip re-discovery. */
   asMetadataUrl: string;
   /** Local proxy port, assigned when the proxy starts. */

@@ -1089,6 +1089,14 @@ export class McpServerModal extends Modal {
     advanced.createEl('summary', { text: 'Advanced' });
     advanced.createEl('label', { text: 'Client ID (skips Dynamic Client Registration)', cls: 'ct-modal-label' });
     const clientIdInput = advanced.createEl('input', { type: 'text', cls: 'ct-modal-input' });
+    advanced.createEl('label', { text: 'Client secret (only for confidential clients)', cls: 'ct-modal-label' });
+    // `type=password` so the value is masked and browsers/Obsidian don't offer to
+    // remember it. The typed literal is passed straight to registerServer(), which
+    // puts it in the OS keychain — it is deliberately NOT added to `entry` below,
+    // because mcpRegistrationSchema rejects literal secrets (the agent tool path
+    // must use a ${NAME} placeholder, since tool arguments are logged verbatim).
+    const clientSecretInput = advanced.createEl('input', { type: 'password', cls: 'ct-modal-input' });
+    clientSecretInput.autocomplete = 'off';
     advanced.createEl('label', { text: 'Authorization server URL (skips discovery)', cls: 'ct-modal-label' });
     const asUrlInput = advanced.createEl('input', { type: 'text', cls: 'ct-modal-input' });
     advanced.createEl('label', { text: 'Redirect URI (optional — e.g. http://localhost:3118/callback for Slack)', cls: 'ct-modal-label' });
@@ -1160,6 +1168,8 @@ export class McpServerModal extends Modal {
           scopes: entry.scopes,
           tools: entry.tools,
           clientId: entry.clientId,
+          // Read here rather than from `entry` — see the input's declaration.
+          ...(clientSecretInput.value ? { clientSecret: clientSecretInput.value } : {}),
           authorizationServerUrl: entry.authorizationServerUrl,
           redirectUri: entry.redirectUri,
         });

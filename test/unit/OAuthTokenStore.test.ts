@@ -25,6 +25,21 @@ describe('OAuthTokenStore — keychain key naming', () => {
     expect(secretStorage.setSecret).toHaveBeenCalledWith(secretStorageKey('OAUTH_MCP_VERCEL_EXPIRES_AT'), expect.any(String));
   });
 
+  it('writes a client secret under OAUTH_MCP_{NAME}_CLIENT_SECRET and reads it back', () => {
+    const secretStorage = fakeSecretStorage();
+    const tokenStore = new OAuthTokenStore(secretStorage, vi.fn());
+    tokenStore.storeClientSecret('vercel', 'shh-abc');
+
+    expect(secretStorage.setSecret).toHaveBeenCalledWith(secretStorageKey('OAUTH_MCP_VERCEL_CLIENT_SECRET'), 'shh-abc');
+    expect(tokenStore.getClientSecret('vercel')).toBe('shh-abc');
+  });
+
+  it('reports no client secret for a public client', () => {
+    const tokenStore = new OAuthTokenStore(fakeSecretStorage(), vi.fn());
+    tokenStore.storeClientId('vercel', 'client-abc');
+    expect(tokenStore.getClientSecret('vercel')).toBeUndefined();
+  });
+
   it('uppercases a mixed-case server name into the key', () => {
     const secretStorage = fakeSecretStorage();
     const tokenStore = new OAuthTokenStore(secretStorage, vi.fn());
@@ -174,6 +189,18 @@ describe('OAuthTokenStore — clear', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('wipes the client secret too, so disconnect leaves no confidential credential behind', () => {
+    const secretStorage = fakeSecretStorage();
+    const tokenStore = new OAuthTokenStore(secretStorage, vi.fn());
+    tokenStore.storeClientId('vercel', 'client-abc');
+    tokenStore.storeClientSecret('vercel', 'shh-abc');
+
+    tokenStore.clear('vercel');
+
+    expect(tokenStore.getClientSecret('vercel')).toBeUndefined();
+    expect(secretStorage.store.get(secretStorageKey('OAUTH_MCP_VERCEL_CLIENT_SECRET'))).toBe('');
   });
 
   it('is a safe no-op for a server that was never stored', () => {

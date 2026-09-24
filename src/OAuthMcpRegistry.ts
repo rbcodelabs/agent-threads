@@ -11,8 +11,9 @@
  *
  * Persistence split, mirroring `OAuthMcpState`'s own doc comment: nonsecret
  * config/status lives in `host.getSettings()` (backed by data.json);
- * access/refresh tokens and the DCR-issued client_id live only in the OS
- * keychain via `OAuthTokenStore` — never here, never in data.json.
+ * access/refresh tokens, the DCR-issued client_id and any confidential-client
+ * client_secret live only in the OS keychain via `OAuthTokenStore` — never here,
+ * never in data.json, which records only a `hasClientSecret` flag.
  */
 
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
@@ -30,6 +31,17 @@ export interface OAuthRegistrationEntry {
   scopes?: string;
   tools?: ToolFilter;
   clientId?: string;
+  /**
+   * Resolved `client_secret` literal for a confidential client, or `undefined`
+   * for the usual public+PKCE client.
+   *
+   * Already resolved by the time it arrives here — callers differ in how:
+   * `main.ts` expands the `${NAME}` placeholder that `mcpRegistrationSchema`
+   * requires on the tool path, while the Settings modal passes the password
+   * field's value directly and never puts it in a schema-validated entry. This
+   * class only ever sees the literal, and hands it straight to the keychain.
+   */
+  clientSecret?: string;
   authorizationServerUrl?: string;
   redirectUri?: string;
 }
@@ -95,10 +107,11 @@ export class OAuthMcpRegistry {
     return { flow, tokenStore, setAsMetadata: (m: OAuthASMetadata) => { asMetadata = m; } };
   }
 
-  private buildState(name: string, clientId: string, asMetadata: OAuthASMetadata, proxy: OAuthMcpProxy, tokens: TokenSet, status: OAuthMcpState['status']): OAuthMcpState {
+  private buildState(name: string, clientId: string, hasClientSecret: boolean, asMetadata: OAuthASMetadata, proxy: OAuthMcpProxy, tokens: TokenSet, status: OAuthMcpState['status']): OAuthMcpState {
     return {
       serverName: name,
       clientId,
+      hasClientSecret,
       asMetadataUrl: asMetadata.authorizationServerUrl,
       proxyPort: portOf(proxy),
       status,
@@ -151,10 +164,24 @@ export class OAuthMcpRegistry {
 
         const clientId = tokenStore.getClientId(name) ?? entry.clientId ?? '';
         const accessExpired = tokens.expiresAt !== undefined && tokens.expiresAt <= Date.now();
-        const status: OAuthMcpState['status'] = (!accessExpired || tokens.refreshToken) ? 'connected' : 'needs-auth';
+        // A confidential client whose keychain secret has gone missing (keychain
+        // reset, vault copied to another machine) can still serve requests from the
+        // access token on hand, but every refresh from here will fail
+        // `invalid_client`. Flag it now rather than letting it read as connected
+        // until the token expires and the failure surfaces as a mystery logout.
+        const storedSecret = tokenStore.getClientSecret(name);
+        const secretMissing = entry.hasClientSecret === true && storedSecret === undefined;
+        const status: OAuthMcpState['status'] = secretMissing
+          ? 'needs-auth'
+          : (!accessExpired || tokens.refreshToken) ? 'connected' : 'needs-auth';
 
         this.connections.set(name, { flow, tokenStore, proxy, asMetadata });
-        settings.oauthMcpState[name] = this.buildState(name, clientId, asMetadata, proxy, tokens, status);
+        settings.oauthMcpState[name] = {
+          ...this.buildState(name, clientId, storedSecret !== undefined, asMetadata, proxy, tokens, status),
+          ...(secretMissing
+            ? { errorMessage: `The client secret for "${name}" is no longer in the keychain. Reconnect it in Settings to restore token refresh.` }
+            : {}),
+        };
         dirty = true;
       } catch (err) {
         console.error(`[OAuthMcpRegistry] Failed to reconnect OAuth MCP server "${name}":`, err);
@@ -162,6 +189,7 @@ export class OAuthMcpRegistry {
         settings.oauthMcpState[name] = {
           serverName: name,
           clientId: previous?.clientId ?? entry.clientId ?? '',
+          hasClientSecret: previous?.hasClientSecret ?? entry.hasClientSecret ?? false,
           asMetadataUrl: previous?.asMetadataUrl ?? entry.authorizationServerUrl ?? '',
           proxyPort: 0,
           status: 'error',
@@ -259,6 +287,9 @@ export class OAuthMcpRegistry {
     }
 
     let clientId = entry.clientId;
+    // A caller-supplied secret wins; DCR may also issue one below, in which case
+    // the AS's value is authoritative for the client it just created.
+    let clientSecret = entry.clientSecret;
     if (!clientId) {
       const registrationEndpoint = asMetadata.authorizationServerMetadata?.registration_endpoint;
       if (!registrationEndpoint) {
@@ -282,16 +313,25 @@ export class OAuthMcpRegistry {
         // without a caller-supplied `redirectUri` will reject the later
         // `authorize()` callback — that's the case this option exists to fix.
         const redirectUri = entry.redirectUri ?? 'http://127.0.0.1/callback';
-        clientId = await flow.registerClient(registrationEndpoint, redirectUri, effectiveScopes);
+        const registered = await flow.registerClient(registrationEndpoint, redirectUri, effectiveScopes);
+        clientId = registered.clientId;
+        // We asked for a public client, but RFC 7591 §3.2.1 permits the AS to
+        // issue a secret anyway — see registerClient(). Prefer it over anything
+        // the caller passed, since it belongs to this freshly created client.
+        if (registered.clientSecret !== undefined) clientSecret = registered.clientSecret;
       } catch (err) {
         return { success: false, status: 'failed', message: `Dynamic Client Registration failed for "${entry.name}": ${errorMessage(err)}` };
       }
     }
     tokenStore.storeClientId(entry.name, clientId);
+    // Stored before authorize() because the token exchange at the end of that
+    // round-trip reads the secret back from the store on the refresh path; the
+    // `tokenStore.clear()` in every failure branch below wipes it again.
+    if (clientSecret !== undefined) tokenStore.storeClientSecret(entry.name, clientSecret);
 
     let tokens: TokenSet;
     try {
-      tokens = await flow.authorize({ serverName: entry.name, clientId, asMetadata, scopes: effectiveScopes, redirectUri: entry.redirectUri });
+      tokens = await flow.authorize({ serverName: entry.name, clientId, clientSecret, asMetadata, scopes: effectiveScopes, redirectUri: entry.redirectUri });
     } catch (err) {
       tokenStore.clear(entry.name);
       const message = errorMessage(err);
@@ -318,11 +358,14 @@ export class OAuthMcpRegistry {
       scopes: effectiveScopes,
       tools: entry.tools,
       clientId,
+      // The flag, never the secret — that stays in the keychain. See
+      // StoredOAuthMcpServer.hasClientSecret.
+      ...(clientSecret !== undefined ? { hasClientSecret: true } : {}),
       authorizationServerUrl: entry.authorizationServerUrl,
       redirectUri: entry.redirectUri,
     };
     settings.oauthMcpServers[entry.name] = storedEntry;
-    settings.oauthMcpState[entry.name] = this.buildState(entry.name, clientId, asMetadata, proxy, tokens, 'connected');
+    settings.oauthMcpState[entry.name] = this.buildState(entry.name, clientId, clientSecret !== undefined, asMetadata, proxy, tokens, 'connected');
 
     try {
       await this.host.save();

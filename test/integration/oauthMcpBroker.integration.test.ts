@@ -112,6 +112,16 @@ class MockAuthorizationServer {
   omitRefreshToken = false;
   failNextRefresh = false;
   forceUnauthorizedOnce = false;
+  /**
+   * Confidential-client mode. RFC 7591 §3.2.1 lets an AS answer a DCR request
+   * with a `client_secret` even when the request asked for
+   * `token_endpoint_auth_method: 'none'` — which this plugin always does — and
+   * some deployments then *require* that secret at the token endpoint. Turning
+   * both knobs on models such a server: /register issues a secret, and /token
+   * and /revoke reject any call that fails to present it.
+   */
+  issueClientSecretOnRegister = false;
+  requireClientSecret = false;
 
   /** Inspection state for assertions. */
   registerLog: Array<{ clientId: string; redirectUris: string[] }> = [];
@@ -119,6 +129,10 @@ class MockAuthorizationServer {
   revocations: RevocationRecord[] = [];
   tokenEndpointHits = 0;
   refreshGrantHits = 0;
+  /** Client secrets issued by /register, keyed by client_id. */
+  issuedClientSecrets = new Map<string, string>();
+  /** How each authenticated request presented its secret, for assertions. */
+  clientAuthLog: Array<{ endpoint: 'token' | 'revoke'; method: 'basic' | 'post' | 'none'; clientId: string; secretMatched: boolean }> = [];
 
   private codes = new Map<string, CodeRecord>();
   private tokens = new Map<string, TokenRecord>();
@@ -175,6 +189,9 @@ class MockAuthorizationServer {
           token_endpoint: `${this.baseUrl}/token`,
           registration_endpoint: `${this.baseUrl}/register`,
           ...(this.includeRevocationEndpoint ? { revocation_endpoint: `${this.baseUrl}/revoke` } : {}),
+          // Advertised only in confidential mode; when absent the SDK defaults to
+          // client_secret_basic for a client that has a secret (RFC 8414 §2).
+          ...(this.requireClientSecret ? { token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'] } : {}),
           response_types_supported: ['code'],
           code_challenge_methods_supported: ['S256'],
           grant_types_supported: ['authorization_code', 'refresh_token'],
@@ -240,7 +257,44 @@ class MockAuthorizationServer {
     const body: { redirect_uris?: string[]; [key: string]: unknown } = raw ? JSON.parse(raw) : {};
     const clientId = `client_${randomBytes(8).toString('hex')}`;
     this.registerLog.push({ clientId, redirectUris: body.redirect_uris ?? [] });
-    this.replyJson(res, 201, { ...body, client_id: clientId, client_id_issued_at: Math.floor(Date.now() / 1000) });
+    let clientSecret: string | undefined;
+    if (this.issueClientSecretOnRegister) {
+      clientSecret = `secret_${randomBytes(12).toString('hex')}`;
+      this.issuedClientSecrets.set(clientId, clientSecret);
+    }
+    this.replyJson(res, 201, {
+      ...body,
+      client_id: clientId,
+      ...(clientSecret ? { client_secret: clientSecret } : {}),
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+    });
+  }
+
+  /**
+   * RFC 6749 §2.3.1 client authentication, accepting either HTTP Basic or a
+   * `client_secret` form field. Returns false when confidential mode is on and
+   * the caller presented no secret or the wrong one — the real `invalid_client`
+   * that a dropped secret produces.
+   */
+  private authenticateClient(req: IncomingMessage, params: URLSearchParams, endpoint: 'token' | 'revoke'): boolean {
+    const authHeader = req.headers.authorization ?? '';
+    let method: 'basic' | 'post' | 'none' = 'none';
+    let clientId = params.get('client_id') ?? '';
+    let presented: string | undefined;
+    if (authHeader.startsWith('Basic ')) {
+      method = 'basic';
+      const [id, secret] = Buffer.from(authHeader.slice('Basic '.length), 'base64').toString('utf8').split(':');
+      // RFC 6749 §2.3.1 mandates form-urlencoding the two halves before Basic.
+      clientId = decodeURIComponent(id ?? '');
+      presented = decodeURIComponent(secret ?? '');
+    } else if (params.get('client_secret')) {
+      method = 'post';
+      presented = params.get('client_secret') ?? undefined;
+    }
+    const expected = this.issuedClientSecrets.get(clientId);
+    const secretMatched = presented !== undefined && presented === expected;
+    this.clientAuthLog.push({ endpoint, method, clientId, secretMatched });
+    return !this.requireClientSecret || secretMatched;
   }
 
   private async handleToken(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -248,6 +302,11 @@ class MockAuthorizationServer {
     const raw = (await readBody(req)).toString('utf8');
     const params = new URLSearchParams(raw);
     const grantType = params.get('grant_type');
+
+    if (!this.authenticateClient(req, params, 'token')) {
+      this.replyJson(res, 401, { error: 'invalid_client', error_description: 'Client authentication failed.' });
+      return;
+    }
 
     if (grantType === 'authorization_code') {
       const code = params.get('code') ?? '';
@@ -297,6 +356,10 @@ class MockAuthorizationServer {
   private async handleRevoke(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const raw = (await readBody(req)).toString('utf8');
     const params = new URLSearchParams(raw);
+    if (!this.authenticateClient(req, params, 'revoke')) {
+      this.replyJson(res, 401, { error: 'invalid_client', error_description: 'Client authentication failed.' });
+      return;
+    }
     this.revocations.push({
       token: params.get('token') ?? '',
       tokenTypeHint: params.get('token_type_hint') ?? undefined,
@@ -759,6 +822,87 @@ describe('OAuth MCP broker integration — refresh token absent', () => {
 
     expect(settings.oauthMcpState.vercel).toMatchObject({ status: 'needs-auth' });
   }, 10_000);
+});
+
+// ── Scenario 9: confidential client ─────────────────────────────────────────
+
+/**
+ * An AS that hands out a `client_secret` at DCR and then requires it on every
+ * token-endpoint call. Before confidential-client support, `registerClient()`
+ * dropped the secret and this server answered the code exchange with
+ * `401 invalid_client` — indistinguishable, from the UI, from a denied consent.
+ */
+describe('OAuth MCP broker integration — confidential client', () => {
+  it('completes the whole flow against an AS that issues a client_secret at DCR and requires it thereafter', async () => {
+    const { as, upstream } = await setupServers();
+    as.issueClientSecretOnRegister = true;
+    as.requireClientSecret = true;
+    const { registry: reg, settings, host, raw } = registry();
+
+    const result = await reg.registerServer({ name: 'vercel', url: upstream.baseUrl });
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+
+    const issuedSecret = [...as.issuedClientSecrets.values()][0];
+    expect(issuedSecret).toBeTruthy();
+
+    // The code exchange authenticated — the mock would have 401'd otherwise.
+    // Which of the two RFC 6749 §2.3.1 forms the SDK picks is its business (it
+    // negotiates from `token_endpoint_auth_methods_supported`), so assert only
+    // that it authenticated with a real form and the secret matched.
+    const exchangeAuth = as.clientAuthLog.filter((entry) => entry.endpoint === 'token');
+    expect(exchangeAuth).toHaveLength(1);
+    expect(exchangeAuth[0].secretMatched).toBe(true);
+    expect(['basic', 'post']).toContain(exchangeAuth[0].method);
+
+    // Custody: keychain yes, data.json no.
+    const probe = new OAuthTokenStore(host.secretStorage, () => Promise.reject(new Error('no refresh')));
+    expect(probe.getClientSecret('vercel')).toBe(issuedSecret);
+    expect(settings.oauthMcpServers.vercel).toMatchObject({ hasClientSecret: true });
+    expect(JSON.stringify(settings)).not.toContain(issuedSecret);
+    // ...and it is in the keychain under this server's own namespaced key.
+    expect([...raw.values()]).toContain(issuedSecret);
+
+    // Tool calls work through the proxy.
+    const config = reg.serversForThread('thread-1').vercel as { url: string; headers: Record<string, string> };
+    expect((await callProxy(config, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status).toBe(200);
+
+    // A refresh must re-authenticate: an AS that required the secret at the
+    // exchange rejects a bare refresh, which surfaces as a spontaneous logout.
+    upstream.forceUnauthorizedOnce = true;
+    expect((await callProxy(config, { jsonrpc: '2.0', id: 2, method: 'tools/list' })).status).toBe(200);
+    expect(as.refreshGrantHits).toBe(1);
+    expect(as.clientAuthLog.filter((e) => e.endpoint === 'token')).toHaveLength(2);
+    expect(as.clientAuthLog.filter((e) => e.endpoint === 'token').every((e) => e.secretMatched)).toBe(true);
+
+    // RFC 7009 §2.1 — revocation authenticates too, and disconnect wipes the secret.
+    await reg.disconnect('vercel');
+    expect(as.revocations.map((r) => r.tokenTypeHint).sort()).toEqual(['access_token', 'refresh_token']);
+    expect(as.clientAuthLog.filter((e) => e.endpoint === 'revoke').every((e) => e.secretMatched)).toBe(true);
+    expect(probe.getClientSecret('vercel')).toBeUndefined();
+  }, 15_000);
+
+  it('rebuilds a confidential client after a restart and keeps refreshing', async () => {
+    const { as, upstream } = await setupServers();
+    as.issueClientSecretOnRegister = true;
+    as.requireClientSecret = true;
+    const { registry: reg, settings, host } = registry();
+
+    expect((await reg.registerServer({ name: 'vercel', url: upstream.baseUrl })).success).toBe(true);
+    reg.close();
+
+    // Simulate a plugin restart over the same settings + keychain.
+    const restarted = new OAuthMcpRegistry(host);
+    activeRegistries.push(restarted);
+    await restarted.configure();
+    activeRegistrations.push({ registry: restarted, name: 'vercel' });
+
+    expect(settings.oauthMcpState.vercel).toMatchObject({ status: 'connected', hasClientSecret: true });
+
+    const config = restarted.serversForThread('thread-1').vercel as { url: string; headers: Record<string, string> };
+    upstream.forceUnauthorizedOnce = true;
+    expect((await callProxy(config, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status).toBe(200);
+    expect(as.refreshGrantHits).toBe(1);
+  }, 15_000);
 });
 
 // ── Scenario 8: unregister while a thread holds a capability token ─────────
