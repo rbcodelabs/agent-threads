@@ -37,6 +37,9 @@ describe('harness switching', () => {
     ['permission', (manager: any) => manager.pendingPermissions.set('thread-1', { toolName: 'Write', detail: 'x' }), /permission/i],
     ['question', (manager: any) => manager.pendingQuestionResolvers.set('thread-1', () => {}), /question/i],
     ['background task', (manager: any) => manager.activeBgTasks.set('thread-1', new Map([['task', { description: 'x', startedAt: 1 }]])), /background/i],
+    ['recoverable background task', (manager: any) => {
+      manager.getThread('thread-1').pendingBackgroundTasks = [{ taskId: 'task', description: 'x', startedAt: 1, pollCount: 0 }];
+    }, /background/i],
     ['goal transition', (manager: any) => manager.goalContextStates.set('thread-1', { desiredRevision: 1, appliedRevision: 0, durableRevision: 0, durableGoal: undefined, refreshRequested: true, processing: false }), /goal/i],
     ['concurrent switch', (manager: any) => manager.harnessSwitches.add('thread-1'), /already in progress/i],
   ])('blocks switching for %s', (_label, setup, expected) => {
@@ -124,11 +127,26 @@ describe('harness switching', () => {
     expect(events).not.toContain('harness_changed');
   });
 
-  it('preserves Claude escalation syntax literally for Codex', () => {
-    expect(resolveHarnessPrompt('codex', '/escalate investigate', DEFAULT_SETTINGS)).toEqual({
-      promptText: '/escalate investigate', model: undefined,
-    });
+  it('rejects Claude escalation syntax for Codex', () => {
+    expect(() => resolveHarnessPrompt('codex', '/escalate investigate', DEFAULT_SETTINGS)).toThrow(/Claude.*Codex/i);
     expect(resolveHarnessPrompt('claude', '/escalate investigate', DEFAULT_SETTINGS).promptText).toBe('investigate');
+  });
+
+  it('surfaces a failed compensating save after deletion during persistence', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.loadThreads([thread()]);
+    let release!: () => void;
+    const first = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0;
+    const switching = manager.switchHarness('thread-1', 'codex', async () => {
+      calls++;
+      if (calls === 1) return first;
+      throw new Error('compensation disk failure');
+    });
+    manager.deleteThread('thread-1');
+    release();
+    await expect(switching).rejects.toThrow(/compensation.*failure/i);
+    expect(calls).toBe(2);
   });
 
   it('ignores all late UI events from a retired session generation', () => {

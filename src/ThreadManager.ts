@@ -544,6 +544,7 @@ export class ThreadManager {
       sessionId: thread.sessionId, model: thread.model, usageSnapshot: thread.usageSnapshot,
       tasks: thread.tasks, pendingBackgroundTasks: thread.pendingBackgroundTasks,
       recap: thread.recap, lastError: thread.lastError,
+      updatedAt: thread.updatedAt,
       pendingHarnessHandoff: thread.pendingHarnessHandoff,
       messages: thread.messages.map(message => ({ ...message })),
     };
@@ -593,12 +594,20 @@ export class ThreadManager {
       } else if (firstPersistenceCommitted) {
         // The first save may have captured the provisional switched thread.
         // Persist the now-authoritative deletion before returning the failure.
-        await persist().catch(() => {});
+        try {
+          await persist();
+        } catch (compensationError) {
+          const combined = new Error(
+            `Thread deletion was not durably saved after harness-switch compensation failure: ${compensationError instanceof Error ? compensationError.message : String(compensationError)}`,
+          ) as Error & { errors: unknown[] };
+          combined.errors = [error, compensationError];
+          throw combined;
+        }
       }
       throw error;
     } finally {
       this.harnessSwitches.delete(id);
-      if (this.threads.has(id)) this.flushQueuedMessages(id);
+      if (this.threads.has(id)) await this.flushQueuedMessages(id);
     }
   }
 
@@ -620,14 +629,14 @@ export class ThreadManager {
     return reason;
   }
 
-  private flushQueuedMessages(id: string): void {
+  private async flushQueuedMessages(id: string): Promise<void> {
     const queued = this.queuedMessages.get(id) ?? [];
     this.queuedMessages.delete(id);
     this.harnessSwitches.delete(id);
     this.claimedHarnessHandoffs.delete(id);
     for (const item of queued) {
       this.emit(id, { type: 'dequeued', text: item.text, images: item.images });
-      void this.sendMessage(id, item.text, item.images);
+      await this.sendMessage(id, item.text, item.images);
     }
   }
 
@@ -1334,33 +1343,6 @@ export class ThreadManager {
     thread.messages.push(message);
     thread.updatedAt = Date.now();
     this.emit(threadId, { type: 'message', message });
-  }
-
-  /**
-   * Detect whether the message triggers model escalation. Returns the model
-   * string to use for this turn if escalation should occur, or undefined
-   * if the default model should be used.
-   */
-  private resolveModel(userText: string): string | undefined {
-    if (!this.settings.escalationEnabled) return undefined;
-    const keyword = (this.settings.escalationKeyword ?? '/escalate').trim();
-    if (!keyword) return undefined;
-    // Match keyword anywhere in the message (case-insensitive)
-    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`, 'i');
-    return re.test(userText) ? (this.settings.escalationModel || 'opus') : undefined;
-  }
-
-  /**
-   * Strip the escalation keyword from the message so it isn't passed to Claude verbatim.
-   */
-  private stripKeyword(userText: string): string {
-    if (!this.settings.escalationEnabled) return userText;
-    const keyword = (this.settings.escalationKeyword ?? '/escalate').trim();
-    if (!keyword) return userText;
-    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`(?:^|\\s)${escaped}(?=\\s|$)`, 'gi');
-    return userText.replace(re, ' ').replace(/\s{2,}/g, ' ').trim();
   }
 
   private getGoalContextState(threadId: string): GoalContextState {
@@ -2860,14 +2842,15 @@ export function resolveHarnessPrompt(
   userText: string,
   settings: Pick<PluginSettings, 'escalationEnabled' | 'escalationKeyword' | 'escalationModel'>,
 ): { promptText: string; model: string | undefined } {
-  if (harness === 'codex' || !settings.escalationEnabled) {
-    return { promptText: userText, model: undefined };
-  }
+  if (!settings.escalationEnabled) return { promptText: userText, model: undefined };
   const keyword = (settings.escalationKeyword ?? '/escalate').trim();
   if (!keyword) return { promptText: userText, model: undefined };
   const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`, 'i');
   if (!match.test(userText)) return { promptText: userText, model: undefined };
+  if (harness === 'codex') {
+    throw new Error(`${keyword} is a Claude-only model escalation command and cannot be used in a Codex thread. Choose a Codex model from the thread menu instead.`);
+  }
   const strip = new RegExp(`(?:^|\\s)${escaped}(?=\\s|$)`, 'gi');
   return {
     promptText: userText.replace(strip, ' ').replace(/\s{2,}/g, ' ').trim(),
