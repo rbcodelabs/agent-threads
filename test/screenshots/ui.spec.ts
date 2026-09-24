@@ -1791,6 +1791,16 @@ test.describe('Agent Threads UI', () => {
     await expect(page.getByRole('button', { name: 'New project' })).toBeFocused();
   });
 
+  test('settings — compact selector fits a 375px pane', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 });
+    await page.goto('file://' + path.resolve('test/harness/settings.html'));
+    const sections = page.getByLabel('Settings section');
+    await sections.selectOption('projects');
+    expect((await sections.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await shot(page, 'settings-projects-375.png', { fullPage: true });
+  });
+
   test('settings — desktop section selector preserves the host content width', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto('file://' + path.resolve('test/harness/settings.html') + '?host=geode');
