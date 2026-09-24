@@ -874,10 +874,6 @@ Control the current thread's session state.
 | `enter_vm` | `image?`, `network?`, `mountPath?` | Starts a sandbox VM for this thread and bind-mounts the current effective cwd at `/work` inside it. Requires Apple's `container` runtime (macOS 26+, Apple silicon). `network` is one of `default` (full egress — the default), `internal` (no internet, host still reachable), or `none` (no route at all). Because each container is its own lightweight VM, guest code cannot reach any host path other than the mounted directory. |
 | `vm_exec` | `command`, `timeoutSeconds?` | Runs a shell command inside this thread's sandbox VM with cwd `/work`. Returns `exitCode`, `stdout`, and `stderr`; a non-zero exit is reported, not thrown. Each stream is truncated at 100,000 characters with an explicit marker. Defaults to a 300s guest deadline plus a five-second kill grace. Edits made on the host with `Read`/`Write`/`Edit` are visible immediately — there is no sync step. |
 | `exit_vm` | `force?` | Stops and removes this thread's sandbox VM. Pass `force: true` to skip the graceful stop. |
-
-See [Sandbox VMs](docs/sandbox-vms.md) for setup and a worktree workflow. Only
-`vm_exec` runs commands in the guest; host shell and file tools remain on the
-host. The selected directory is writable and guest edits persist after exit.
 | `threads_create` | `prompt`, `title?`, `cwd?`, `projectId?` | Creates a persistent thread and immediately queues its initial prompt. Working directory and project inherit from the caller when omitted; pass `projectId: null` to clear the project. |
 | `request_secret` | `secretName`, `reason`, `force?` | Prompts the user (via a modal) to provide a secret value such as an API key. The value is stored in the OS keychain under the plugin's namespace and injected into future sessions as an environment variable — it never appears in the conversation. Returns `{success: true, secretName, alreadyExisted: boolean}` if the user saves, or `{success: false, reason}` if cancelled. If a secret with the same name already exists, returns `alreadyExisted: true` immediately without prompting. Pass `force: true` to always re-prompt (e.g. when rotating a stale token) — the modal will indicate that the existing value will be replaced. |
 | `watch_document` | `path` | Watches a vault note for content changes, owned by the calling thread. Any subsequent edit — from you, another thread, or a sync — sends this thread an injected alert message referencing the file via an `@[[filename]]` mention. Re-watching an already-watched path is a no-op that keeps the existing watch. See [Watch a document](#watch-a-document). |
@@ -885,6 +881,10 @@ host. The selected directory is writable and guest edits persist after exit.
 | `list_watched_documents` | — | Returns the calling thread's own active watches: path, watch id, creation time, and last-alerted time. |
 
 ### Thread coordination tools
+
+See [Sandbox VMs](docs/sandbox-vms.md) for setup and a worktree workflow. Only
+`vm_exec` runs commands in the guest; host shell and file tools remain on the
+host. The selected directory is writable and guest edits persist after exit.
 
 Discover, read, and message other running threads. Project threads coordinate only within their Project; unassigned threads coordinate with unassigned threads. The Portfolio Orchestrator sees unassigned work by default and uses explicit per-call Project elevation for raw Project access. One narrow exception: an unassigned thread may place **itself** into any Project via `threads_set_project`, because nothing else can — that is an escape hatch out of statelessness, not a scope hop, and it does not extend to moving other threads or to a Project thread hopping to a different Project.
 

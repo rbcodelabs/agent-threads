@@ -1543,6 +1543,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Sandbox VM image')
+      .setClass('ct-sandbox-setting')
       .setDesc(
         'Container image enter_vm starts. Build it from sandbox/Dockerfile with '
         + '`container build --tag claude-threads-coding:1 sandbox/`. Requires Apple\'s '
@@ -1562,6 +1563,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Sandbox VM network')
+      .setClass('ct-sandbox-setting')
       .setDesc(
         'Network isolation enter_vm uses when a call does not pass one. '
         + 'Full egress is the default so npm install, git remotes and web access work.',
