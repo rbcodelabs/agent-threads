@@ -578,7 +578,7 @@ with the expanded Workspace scopes before reconnecting Google Docs Sync.
 Settings → **MCP** lists, adds, edits, and removes the external MCP servers referenced above (Compass, Helio, or any other HTTP/SSE/stdio server) — no manual JSON editing required for the common case.
 
 <p align="center">
-  <img src="docs/screenshot-mcp-servers.png" width="800" alt="Settings MCP tab: a list of configured MCP servers, each with a type badge (stdio, http, sse), a one-line summary, and Edit/Remove buttons, plus an Add MCP server button; one row warns that it will be skipped because its secret is not registered" />
+  <img src="docs/screenshot-mcp-servers.png" width="800" alt="Settings MCP section: a list of configured MCP servers, each with a type badge (stdio, http, sse), a one-line summary, and Edit/Remove buttons, plus an Add MCP server button; one row warns that it will be skipped because its secret is not registered" />
 </p>
 
 **These servers are stored in the plugin's own `data.json`** and injected into each session at runtime — on both the Claude and Codex harnesses. Nothing is written to `~/.claude/`, and the `claude` CLI does not see them (register a server with `claude mcp add` if you want it in CLI sessions too). Changes take effect for newly initialized or reinitialized sessions — existing session adapters keep whatever MCP servers they started with.
@@ -611,7 +611,7 @@ Both run the same flow and the same validation. Unlike the other transports it i
 Settings → **MCP → OAuth MCP servers** lists every connected server with a live status (connected + expiry countdown, expiring soon, needs re-authorization, or not configured) and a **Disconnect** button, which revokes the tokens upstream, clears the keychain, and stops the proxy. Changing a connected server means disconnecting and reconnecting rather than editing it in place, so the OAuth option appears only when adding. See [`docs/mcp-registration.md`](docs/mcp-registration.md#oauth-gated-servers-type-oauth) for the full field reference. Access and refresh tokens live only in the OS keychain, never in `data.json`.
 
 <p align="center">
-  <img src="docs/screenshot-mcp-oauth-servers.png" width="800" alt="Settings MCP tab: OAuth MCP servers section showing two connected servers with status dots and expiry countdowns, and a Disconnect button on each row" />
+  <img src="docs/screenshot-mcp-oauth-servers.png" width="800" alt="Settings MCP section: OAuth MCP servers showing two connected servers with status dots and expiry countdowns, and a Disconnect button on each row" />
 </p>
 
 Use `${NAME}` for every credential and `request_secret` to save its value securely. Common credential fields are validated, but arbitrary argument strings cannot be reliably classified: all literal values must be nonsecret. Registration returns status and required variable names, never resolved credentials. Missing variables are checked when a future session initializes. See [agent registration details](docs/mcp-registration.md).
@@ -1010,8 +1010,8 @@ In **Secrets**, choose **Add secret** or select an existing entry. Save the valu
 | Projects | Group threads and focus their initial cwd/context. Projects do not restrict the broader vault or configured tool roster. |
 | Auto-collapse side panel | Collapse the left, right, or both sidebars when the Agent Board opens, restoring them when it closes (default: `None`). See [Agent Board](#kanban-board). |
 | Stack scheduled job threads | Collapse repeat runs of the same scheduled/cron job into an expandable rollup in the Agent Board's quiet columns and the Agents List's Scheduled Jobs section (default: on). See [Agent Board](#kanban-board) and [Agents List](#agents-list). |
-| Scheduled work | The dedicated **Scheduled** tab groups recurring jobs, thread loops, and wakeups into collapsed rows showing status, cadence, next occurrence, Project, and execution target. Expand one for prompt, working directory, active hours, gate, history, and pause/resume/delete/open controls. |
-| Watched documents | A **Watched documents** section on the **Scheduled** tab lists every active watch (see [Watch a document](#watch-a-document)) with its path, owning thread, and last-alerted time, plus an unwatch control — the same view whether the watch was created from the file menu or the `watch_document` MCP tool. |
+| Scheduled work | The dedicated **Scheduled** section groups recurring jobs, thread loops, and wakeups into collapsed rows showing status, cadence, next occurrence, Project, and execution target. Expand one for prompt, working directory, active hours, gate, history, and pause/resume/delete/open controls. |
+| Watched documents | **Watched documents** within **Scheduled** lists every active watch (see [Watch a document](#watch-a-document)) with its path, owning thread, and last-alerted time, plus an unwatch control — the same view whether the watch was created from the file menu or the `watch_document` MCP tool. |
 | Diagnostics | Enable the always-on, local-only telemetry layer (counters + renderer CPU/memory samples) that powers the [Diagnostics report](#diagnostics-report). Nothing leaves your machine; on by default. Desktop only. |
 | Remote access | Enable/disable mobile remote access via WebSocket relay |
 | Room ID | Shared secret used to pair mobile (rotate to revoke all access) |
