@@ -14,7 +14,7 @@ for (const width of [1280, 390]) {
       };
       document.querySelector<HTMLElement>('#app')!.style.width = 'min(760px, 100vw)';
     });
-    await page.locator('.ct-settings-tab-btn').filter({ hasText: /^Agent$/ }).click();
+    await page.getByLabel('Settings section').selectOption('claude');
     const setting = page.locator('.setting-item').filter({ hasText: 'Codex computer use' });
     const toggle = setting.locator('.checkbox-container');
     await expect(toggle).not.toHaveClass(/is-enabled/);
@@ -28,8 +28,8 @@ for (const width of [1280, 390]) {
     await toggle.click();
     await expect(toggle).toHaveClass(/is-enabled/);
     await expect.poll(() => page.evaluate(() => (window as any).__computerUseSaves)).toEqual([true]);
-    await page.locator('.ct-settings-tab-btn').filter({ hasText: /^General$/ }).click();
-    await page.locator('.ct-settings-tab-btn').filter({ hasText: /^Agent$/ }).click();
+    await page.getByLabel('Settings section').selectOption('general');
+    await page.getByLabel('Settings section').selectOption('claude');
     await expect(toggle).toHaveClass(/is-enabled/);
     await shot(setting, `codex-computer-use-on-${width}.png`);
     await toggle.click();
