@@ -880,11 +880,11 @@ Control the current thread's session state.
 | `unwatch_document` | `path?`, `id?` | Removes a watch owned by the calling thread, by path or watch id (at least one required). Never affects another thread's watch on the same path. |
 | `list_watched_documents` | — | Returns the calling thread's own active watches: path, watch id, creation time, and last-alerted time. |
 
-### Thread coordination tools
-
 See [Sandbox VMs](docs/sandbox-vms.md) for setup and a worktree workflow. Only
 `vm_exec` runs commands in the guest; host shell and file tools remain on the
 host. The selected directory is writable and guest edits persist after exit.
+
+### Thread coordination tools
 
 Discover, read, and message other running threads. Project threads coordinate only within their Project; unassigned threads coordinate with unassigned threads. The Portfolio Orchestrator sees unassigned work by default and uses explicit per-call Project elevation for raw Project access. One narrow exception: an unassigned thread may place **itself** into any Project via `threads_set_project`, because nothing else can — that is an escape hatch out of statelessness, not a scope hop, and it does not extend to moving other threads or to a Project thread hopping to a different Project.
 
