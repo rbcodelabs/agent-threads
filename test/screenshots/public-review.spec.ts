@@ -28,6 +28,8 @@ for (const dashboard of [true, false]) {
       const manager = (window as any).__manager;
       return { selected: manager.activeThreadId, updatedAt: manager.getThread('k-unassigned-new').updatedAt };
     })).toEqual(before);
+    await reviewedGroup.getByText(title, { exact: true }).scrollIntoViewIfNeeded();
+    await expect(reviewedGroup.getByText(title, { exact: true })).toBeInViewport();
     await page.screenshot({ path: testInfo.outputPath('reviewed.png'), fullPage: true });
   });
   }
