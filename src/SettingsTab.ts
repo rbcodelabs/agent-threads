@@ -1571,7 +1571,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Codex computer use')
-      .setDesc('Allow Codex computer-use capabilities from your local Codex configuration. Off by default. Changes apply when a Codex session next starts or restarts; existing sessions keep their current access. Reload the plugin after active work finishes to apply to all sessions.')
+      .setDesc('Allow Codex computer-use capabilities from your local Codex configuration. Off by default; shared Codex browser tools may also be disabled. Changes apply when a Codex session next starts or restarts; existing sessions keep their current access. Use “Reload plugin (safe)” after active work finishes to apply to all sessions.')
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.codexComputerUseEnabled === true)
