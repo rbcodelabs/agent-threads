@@ -2002,6 +2002,7 @@ export class ThreadManager {
       && (thread.sessionGeneration ?? 0) === generationAtStart;
     return {
       onRawEvent: (event) => {
+        if (!isCurrentGeneration()) return;
         if (!this.settings.saveRawLogs || !this.vaultRoot) return;
         // Record the log path on the thread the first time we write, so the
         // markdown note's `raw_log` frontmatter can link to it.
@@ -2034,6 +2035,7 @@ export class ThreadManager {
         this.emit(threadId, { type: 'tool_use', record });
       },
       onFilesEdited: (paths) => {
+        if (!isCurrentGeneration()) return;
         const added: string[] = [];
         if (!thread.editedFiles) thread.editedFiles = [];
         for (const filePath of paths) {
@@ -2044,6 +2046,7 @@ export class ThreadManager {
         if (added.length > 0) this.emit(threadId, { type: 'files_edited', paths: added });
       },
       onRecap: (summary) => {
+        if (!isCurrentGeneration()) return;
         thread.recap = summary;
         this.emit(threadId, { type: 'recap', summary });
       },
@@ -2217,6 +2220,7 @@ export class ThreadManager {
         this.emitRunStateSettledWhenIdle(threadId);
       },
       onPermissionRequest: async (toolName, detail) => {
+        if (!isCurrentGeneration()) return false;
         this.pendingPermissions.set(threadId, { toolName, detail });
         this.emit(threadId, { type: 'permission_request', toolName, detail });
         try {
@@ -2228,6 +2232,7 @@ export class ThreadManager {
         }
       },
       onAskUserQuestion: async (questions) => {
+        if (!isCurrentGeneration()) return {};
         // Persist the question set so the card can be restored after a
         // reload/crash OR after the user switches threads mid-session,
         // mirroring the pendingPlan pattern.
@@ -2245,14 +2250,17 @@ export class ThreadManager {
         }
       },
       onAskUserQuestionCanceled: () => {
+        if (!isCurrentGeneration()) return;
         this.pendingQuestionResolvers.get(threadId)?.({});
       },
       onOpenNewTab: (title, initialPrompt) => this.openNewTabHandler(title, initialPrompt),
       onStatus: (status) => {
+        if (!isCurrentGeneration()) return;
         this.clearReconnectingStatus(thread);
         this.emit(threadId, { type: 'status', status });
       },
       onReconnecting: (error) => {
+        if (!isCurrentGeneration()) return;
         // Mirrors the old per-turn model's ThreadManager.sendMessage()
         // onError branch (see ClaudeSession.ts's SessionCallbacks.onReconnecting
         // doc comment) as closely as possible: mark the thread as
@@ -2267,6 +2275,7 @@ export class ThreadManager {
         this.emit(threadId, { type: 'reconnecting', error });
       },
       onRateLimitRetry: (attempt, maxRetries, delayMs) => {
+        if (!isCurrentGeneration()) return;
         // A rate-limit / overload reject that ThreadSession is silently
         // replaying after a backoff (see its pumpMessages() catch block).
         // Share the transport-error path's transient 'reconnecting' status —
@@ -2280,6 +2289,7 @@ export class ThreadManager {
         this.emit(threadId, { type: 'rate_limit_retry', attempt, maxRetries, delayMs });
       },
       onCompact: (trigger, preTokens) => {
+        if (!isCurrentGeneration()) return;
         const compactMsg: ChatMessage = {
           id: crypto.randomUUID(),
           role: 'compact',
@@ -2353,6 +2363,7 @@ export class ThreadManager {
       onPermissionDenied: (toolName, toolUseId, message, agentId, decisionReasonType) => this.emit(threadId, { type: 'permission_denied', toolName, toolUseId, message, agentId, decisionReasonType }),
       onRateLimit: (limitStatus, resetsAt) => this.emit(threadId, { type: 'rate_limit', limitStatus, resetsAt }),
       onUsage: (usage) => {
+        if (!isCurrentGeneration()) return;
         thread.usageSnapshot = usage;
         thread.updatedAt = Date.now();
         this.emit(threadId, { type: 'usage', usage });
@@ -2364,6 +2375,7 @@ export class ThreadManager {
       onMemoryRecall: (paths, mode) => this.emit(threadId, { type: 'memory_recall', paths, mode }),
       onCommandsChanged: (commands) => this.emit(threadId, { type: 'commands_changed', commands }),
       onTaskProgressSummary: (taskId, summary) => {
+        if (!isCurrentGeneration()) return;
         const run = this.agentRuns.getByNativeId(threadId, thread.agentHarness ?? 'claude', taskId);
         if (run) {
           this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: 'activity', text: summary, timestamp: Date.now() });
@@ -2375,6 +2387,7 @@ export class ThreadManager {
       onToolResult: (toolUseId, status, durationMs) => this.emit(threadId, { type: 'tool_result_status', toolUseId, status, durationMs }),
       onEnterPlanMode: () => this.emit(threadId, { type: 'enter_plan_mode' }),
       onPlanModeRequested: () => {
+        if (!isCurrentGeneration()) return;
         // Codex crosses a safe turn boundary before entering Plan mode. Persist
         // the reduced-capability state here; the adapter owns the matching
         // app-server settings update so there is one live control request.
@@ -2383,6 +2396,7 @@ export class ThreadManager {
         this.emit(threadId, { type: 'permission_mode_changed', mode: 'plan' });
       },
       onPlanApprovalCommitted: () => {
+        if (!isCurrentGeneration()) return;
         thread.permissionMode = 'default';
         thread.updatedAt = Date.now();
         this.emit(threadId, { type: 'permission_mode_changed', mode: 'default' });
@@ -2391,11 +2405,13 @@ export class ThreadManager {
         this.emit(threadId, { type: 'pending_plan_changed', planText: undefined });
       },
       onPlanTransitionError: (error) => {
+        if (!isCurrentGeneration()) return;
         thread.lastError = error.message;
         thread.updatedAt = Date.now();
         this.emit(threadId, { type: 'plan_transition_error', error });
       },
       onPlanReady: (planText, approve, reject) => {
+        if (!isCurrentGeneration()) return;
         // Persist the plan text so the card can be restored after a reload/crash
         // OR after the user switches threads mid-session.
         thread.pendingPlan = planText;
@@ -2437,23 +2453,32 @@ export class ThreadManager {
         this.pendingPlanResolvers.set(threadId, { approve: wrappedApprove, reject: wrappedReject });
         this.emit(threadId, { type: 'plan_ready', planText, approve: wrappedApprove, reject: wrappedReject });
       },
-      onCapabilitiesDiscovered: (models, agents) => this.emit(threadId, { type: 'capabilities_discovered', models, agents }),
-      onElicitation: (request, signal) =>
-        new Promise<import('@anthropic-ai/claude-agent-sdk').ElicitationResult>((resolve) => {
+      onCapabilitiesDiscovered: (models, agents) => {
+        if (isCurrentGeneration()) this.emit(threadId, { type: 'capabilities_discovered', models, agents });
+      },
+      onElicitation: (request, signal) => {
+        if (!isCurrentGeneration()) {
+          return Promise.resolve({ action: 'cancel' } as import('@anthropic-ai/claude-agent-sdk').ElicitationResult);
+        }
+        return new Promise<import('@anthropic-ai/claude-agent-sdk').ElicitationResult>((resolve) => {
           this.emit(threadId, { type: 'elicitation_request', request, signal, respond: resolve });
-        }),
+        });
+      },
       onFileUserModified: (filePath) => {
+        if (!isCurrentGeneration()) return;
         if (!thread.userModifiedFiles) thread.userModifiedFiles = [];
         if (!thread.userModifiedFiles.includes(filePath)) thread.userModifiedFiles.push(filePath);
         this.emit(threadId, { type: 'file_user_modified', filePath });
       },
       onToolResultImages: (images) => {
+        if (!isCurrentGeneration()) return;
         const existing = this.pendingToolResultImages.get(threadId) ?? [];
         existing.push(...images);
         this.pendingToolResultImages.set(threadId, existing);
         this.emit(threadId, { type: 'tool_result_images', images });
       },
       onTaskEvent: (event) => {
+        if (!isCurrentGeneration()) return;
         this.applyTaskEvent(thread, event);
         this.emit(threadId, { type: 'tasks_updated', tasks: thread.tasks ?? [] });
       },

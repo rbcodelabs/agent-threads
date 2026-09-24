@@ -109,7 +109,7 @@ Click the **message-square** icon in the left ribbon, or run **Open Agent Thread
 
 ### Agent harnesses
 
-New threads use the harness selected in **Settings → Agent → Agent harness**. A thread remembers the harness that created it, so changing the default never mixes Claude and Codex session IDs. Codex uses the `codex` executable on your PATH by default; set a custom path in the same settings panel when needed.
+New threads use the harness selected in **Settings → Agent → Agent harness**. A thread remembers its harness, so changing the default never mixes Claude and Codex session IDs. To move an idle existing thread, open its footer menu, choose **Harness**, and select Claude or Codex. The transcript and thread identity remain in place, while the target starts a fresh native session from a bounded summary and transcript references. Threads with active work, queued input, approvals, plans, questions, or background agents must settle first. Codex uses the `codex` executable on your PATH by default; set a custom path in the same settings panel when needed.
 
 | Capability | Claude Code | OpenAI Codex |
 |---|---:|---:|
@@ -422,7 +422,7 @@ Open the **Agents List** from the ribbon or command palette to see all threads a
 
 Adaptive two-line rows use **Working**, **Waiting**, **New**, **Reviewed**, **Failed**, and **Ready** status classification. The primary line shows status, title, orchestrator indicator when applicable, and recency; activity, repository/Project context, and agent count share a truncation-safe secondary line. Permission, question, plan, waiting, and AWS reauthentication states expand into dedicated action rows when your attention is required. Child-agent activity is summarized by one accessible agent-count control; it turns green only while at least one child agent is starting, working, or waiting, and otherwise uses the same faint secondary treatment as recency. Click it to open the team picker without losing your current agent selection.
 
-The dispatch button shows the harness that will run the new thread: **Claude** or **Codex**. Click normally to start with the shown harness. Right-click, press and hold, or use `Shift+F10` while the button is focused to open the harness menu; choosing an option changes the button without dispatching. That choice stays with the mounted dashboard while you launch more threads. **Settings → Agent harness** supplies the initial default only—the dashboard choice does not change the global setting, and existing threads remain on their original harness.
+The dispatch button shows the harness that will run the new thread: **Claude** or **Codex**. Click normally to start with the shown harness. Right-click, press and hold, or use `Shift+F10` while the button is focused to open the harness menu; choosing an option changes the button without dispatching. That choice stays with the mounted dashboard while you launch more threads. **Settings → Agent harness** supplies the initial default only—the dashboard choice does not change the global setting. Existing idle threads can be switched separately from the conversation footer menu.
 
 **Live activity (running threads):** While a thread is actively processing, the dashboard shows a live one-line summary of the current tool call or step — so you can see "Reading src/components/Header.tsx" or "Running npm test" without switching to that tab.
 

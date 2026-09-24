@@ -23,6 +23,7 @@ function isCanonicalMessage(value: unknown): value is ChatMessage {
     && typeof value.content === 'string'
     && typeof value.timestamp === 'number'
     && Number.isFinite(value.timestamp)
+    && (value.agentHarness === undefined || value.agentHarness === 'claude' || value.agentHarness === 'codex')
     && (value.toolCalls === undefined || (Array.isArray(value.toolCalls) && value.toolCalls.every((tool) => (
       isRecord(tool) && typeof tool.name === 'string' && typeof tool.summary === 'string'
     ))));

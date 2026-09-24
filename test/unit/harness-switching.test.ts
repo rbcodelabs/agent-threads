@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ThreadManager, buildHarnessHandoffPrompt } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS, type Thread } from '../../src/types';
+import { AgentRunStore } from '../../src/agentRuns/AgentRunStore';
+import { decodeThreadRecoverySnapshot, encodeThreadRecoverySnapshot } from '../../src/threadRecoverySnapshot';
 
 function thread(overrides: Partial<Thread> = {}): Thread {
   return {
@@ -53,5 +55,19 @@ describe('harness switching', () => {
     expect(original.agentHarness).toBe('claude');
     expect(original.sessionId).toBe('source');
     expect(original.model).toBe('opus');
+  });
+
+  it('round-trips pending handoff state and isolates reused native agent IDs by generation', () => {
+    const value = thread({ sessionGeneration: 2, pendingHarnessHandoff: {
+      sourceHarness: 'claude', targetHarness: 'codex', summary: 'Continue.',
+      threadId: 'thread-1', createdAt: 10,
+    } });
+    expect(decodeThreadRecoverySnapshot(encodeThreadRecoverySnapshot(value))?.pendingHarnessHandoff).toEqual(value.pendingHarnessHandoff);
+
+    const store = new AgentRunStore();
+    const first = store.observeStart({ threadId: 'thread-1', harness: 'claude', nativeAgentId: 'agent-1', description: 'first', sessionGeneration: 0 });
+    const second = store.observeStart({ threadId: 'thread-1', harness: 'claude', nativeAgentId: 'agent-1', description: 'second', sessionGeneration: 2 });
+    expect(second.id).not.toBe(first.id);
+    expect(store.getByThread('thread-1')).toHaveLength(2);
   });
 });
