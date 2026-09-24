@@ -8674,3 +8674,24 @@ button.ct-agent-crumb:focus-visible {
   text-align: center;
   align-self: center;
 }
+/* Peer content is rendered by the host in the transcript, never by peer DOM. */
+.ct-inline-content {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+  padding: 14px;
+  margin: 12px 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.ct-inline-content-title { font-weight: 600; overflow-wrap: anywhere; }
+.ct-inline-content-heading { display: flex; align-items: center; gap: 8px; }
+.ct-inline-content-icon { flex-shrink: 0; display: flex; }
+.ct-inline-content-subtitle { color: var(--text-muted); margin-top: 4px; overflow-wrap: anywhere; }
+.ct-inline-content-body { margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ct-inline-content-status, .ct-inline-content-action-status { margin-top: 8px; font-size: var(--font-ui-small); color: var(--text-muted); overflow-wrap: anywhere; }
+.ct-inline-content-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.ct-inline-content .ct-inline-content-action { max-width: 100%; white-space: normal; height: auto; min-height: 44px; overflow-wrap: anywhere; }
+.ct-inline-content-image { display: block; max-width: 100%; height: auto; border-radius: 6px; margin-top: 10px; }
+.ct-inline-content-document { display: block; width: 100%; height: 360px; border: 0; border-radius: 6px; margin-top: 10px; background: white; }

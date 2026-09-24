@@ -2,6 +2,7 @@ import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, addIcon, Notice, Platfor
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createConstrainedQueryRunner } from './ConstrainedRun';
 import { ArtifactProviderRegistry } from './ArtifactContributions';
+import { MessageContentProviderRegistry } from './MessageContent';
 import { createLegacyDesignArtifactContribution } from './legacyDesignArtifactProvider';
 import { createArtifactStore } from './artifactStore';
 import { AgentToolRegistry, type AgentToolHost } from './AgentToolContributions';
@@ -327,6 +328,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   readonly artifactProviders = new ArtifactProviderRegistry({
     fallbacks: [createLegacyDesignArtifactContribution()],
   });
+  readonly messageContentProviders = new MessageContentProviderRegistry();
   /**
    * Host-owned agent tool registry. Read by `mcpServerFactory` each time a
    * session's MCP servers are built; peers write into it only through
@@ -2366,6 +2368,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       requestSecret: (secretName, reason, force) => this.requestSecretFromUser(secretName, reason, force),
       hasSecret: (name) => !!this.app.secretStorage.getSecret(secretStorageKey(name)),
       artifactProviders: this.artifactProviders,
+      messageContentProviders: this.messageContentProviders,
       agentTools: this.agentTools,
       slashCommands: this.slashCommands,
       getDefaultPermissionMode: () => this.settings.permissionMode,

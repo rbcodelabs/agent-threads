@@ -17,7 +17,7 @@ import './obsidian-mock';
 import { MobileView } from '../../src/MobileView';
 import { MobileThreadStore } from '../../src/MobileThreadStore';
 import { mockLeaf } from './obsidian-mock';
-import { fixtureThreads } from './fixtures';
+import { fixtureThreads, inlineContentMessages } from './fixtures';
 import type { RelayFrame } from '../../src/relay-protocol';
 
 // ── Minimal RelayClient mock ───────────────────────────────────────────────
@@ -84,7 +84,19 @@ function serializedFixtures(activeThreadId: string | null) {
 
 // ── View routing ───────────────────────────────────────────────────────────────
 
-if (view === 'mobile-connected') {
+if (view === 'mobile-inline-content') {
+  const store = new MobileThreadStore();
+  const relay = new MockRelayClient();
+  store.applyFrame({ type: 'snapshot', activeThreadId: 'inline-thread', threads: [{
+    id: 'inline-thread', title: 'Quarterly review', messages: inlineContentMessages,
+    createdAt: 1768471200000, updatedAt: 1768471212000,
+  }] });
+  const mobileView = new MobileView(mockLeaf as any, relay as any, store);
+  app.appendChild(mobileView.containerEl);
+  mobileView.onOpen();
+  (window as any).__mobileView = mobileView;
+  (window as any).__store = store;
+} else if (view === 'mobile-connected') {
   // Seeded store with the first thread active and a streaming message in progress.
   const store = new MobileThreadStore();
   const relay = new MockRelayClient();
