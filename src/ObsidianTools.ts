@@ -19,7 +19,6 @@ import { AGENT_BROWSER_READ_ONLY_TOOL_NAMES, createAgentBrowserTools } from './a
 import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
 import { resolveWorktreeRoot, worktreePathFor } from './worktreePaths';
 import { bindAgentTool } from './AgentToolContributions';
-import { createDesignAgentTool, DESIGN_AGENT_TOOL_NAME } from './designAgentTool';
 import type {
   InstalledSkillInfo,
   MarketplaceSkill,
@@ -209,16 +208,6 @@ const addVaultBridgeSchema = {
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 export interface ObsidianMcpServerOptions {
-  /**
-   * Prepare the calling thread's artifact without queuing another turn.
-   *
-   * @deprecated Contribute `EnterDesignMode` through
-   * `extensions.registerAgentTool` and pass it in `contributedTools` instead.
-   * Retained so hosts and tests that predate the contribution API keep
-   * working; it is adapted into the same single tool definition, never a
-   * second one.
-   */
-  onEnterDesignMode?: (brief: string) => Promise<import('./designArtifact').DesignModeResult>;
   /**
    * Agent tools contributed by peers through `extensions.registerAgentTool`,
    * already bound to this thread by the host (ADR-0008).
@@ -2749,16 +2738,6 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   const builtInNames = new Set(tools.flatMap(definition =>
     [definition.name, LEGACY_TO_CANONICAL_TOOL_NAMES[definition.name] ?? definition.name]));
   const contributions = [...(options.contributedTools ?? [])];
-  // Compatibility adapter: hosts and tests that pass `onEnterDesignMode`
-  // instead of contributing the tool still get it, from the same single
-  // definition. Skipped when the design tool was contributed properly, so
-  // production (which contributes it) never registers both.
-  if (!contributions.some(binding => binding.name === DESIGN_AGENT_TOOL_NAME)) {
-    const adapted = bindAgentTool(createDesignAgentTool(
-      options.onEnterDesignMode && ((_threadId, brief) => options.onEnterDesignMode!(brief)),
-    ), '');
-    if (adapted) contributions.push(adapted);
-  }
   const contributedTools = contributions
     .filter(binding => !builtInNames.has(binding.name))
     .map(binding => tool(

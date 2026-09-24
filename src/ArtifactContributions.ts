@@ -148,6 +148,8 @@ export interface ArtifactStoreHost {
    * Idempotent: an existing root comes back untouched, with `existed: true`.
    */
   allocateStorageRoot(artifactId: unknown): Promise<StorageRootResolution & { existed?: boolean }>;
+  /** Removes an allocated root after a provisional operation rolls back. */
+  releaseStorageRoot(candidate: unknown): Promise<boolean>;
   /** Inserts, or updates in place when an artifact with the same id exists. */
   put(threadId: string, record: ThreadArtifactRecord): Promise<'attached' | 'updated' | 'thread-not-found'>;
   detach(threadId: string, artifactId: string): Promise<'detached' | 'artifact-not-found' | 'thread-not-found'>;
@@ -227,6 +229,8 @@ interface RegistryEntry {
 
 export interface ArtifactProviderRegistryOptions {
   readonly invokeTimeoutMs?: number;
+  /** Read-only compatibility providers. Live registrations always win. */
+  readonly fallbacks?: readonly ArtifactContribution[];
 }
 
 /**
@@ -237,10 +241,17 @@ export interface ArtifactProviderRegistryOptions {
  */
 export class ArtifactProviderRegistry {
   private readonly entries = new Map<string, RegistryEntry>();
+  private readonly fallbacks = new Map<string, RegistryEntry>();
   private readonly invokeTimeoutMs: number;
 
   constructor(options: ArtifactProviderRegistryOptions = {}) {
     this.invokeTimeoutMs = options.invokeTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
+    for (const contribution of options.fallbacks ?? []) {
+      this.fallbacks.set(contribution.providerId, {
+        owner: Object.freeze({ pluginId: 'claude-threads.legacy' }),
+        contribution,
+      });
+    }
   }
 
   register(owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult {
@@ -319,7 +330,7 @@ export class ArtifactProviderRegistry {
 
   /** Never throws: a broken provider degrades to a placeholder card. */
   present(ref: ThreadArtifactRef): ArtifactPresentationResult {
-    const entry = this.entries.get(ref.providerId);
+    const entry = this.entries.get(ref.providerId) ?? this.fallbacks.get(ref.providerId);
     if (!entry) return { status: 'missing-provider', providerId: ref.providerId };
     try {
       const presentation = entry.contribution.present(ref);
@@ -335,7 +346,7 @@ export class ArtifactProviderRegistry {
 
   /** Never throws and never hangs: faults become an `error` result. */
   async invoke(actionId: string, ref: ThreadArtifactRef, host: ArtifactActionHost): Promise<ArtifactActionResult> {
-    const entry = this.entries.get(ref.providerId);
+    const entry = this.entries.get(ref.providerId) ?? this.fallbacks.get(ref.providerId);
     if (!entry) {
       return { status: 'error', message: `No artifact provider is registered for "${ref.providerId}".` };
     }

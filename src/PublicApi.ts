@@ -26,6 +26,13 @@ export interface ThreadSnapshot extends ThreadSummary { readonly messages: reado
 export interface ThreadQuery { readonly projectId?: string | null; readonly status?: ThreadStatus; readonly limit?: number }
 export interface CorrelationInput { readonly ownerPluginId?: string; readonly idempotencyKey?: string }
 export interface CreateThreadInput extends CorrelationInput { readonly title?: string; readonly cwd?: string; readonly projectId?: string; readonly agentHarness?: 'claude' | 'codex'; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean }
+export type ProvisionalCommitResult = { readonly status: 'committed' | 'already-committed' | 'rolled-back'; readonly threadId: string };
+export type ProvisionalRollbackResult = { readonly status: 'rolled-back' | 'already-rolled-back' | 'committed'; readonly threadId: string };
+export interface ProvisionalThreadHandle {
+  readonly threadId: string;
+  commit(): Promise<ProvisionalCommitResult>;
+  rollback(): Promise<ProvisionalRollbackResult>;
+}
 export interface SendInput extends CorrelationInput { readonly prompt: string }
 export interface WaitOptions { readonly timeoutMs?: number }
 export type RunResult =
@@ -83,6 +90,7 @@ export interface ClaudeThreadsApiV1 {
   readonly threads: {
     list(query?: ThreadQuery): Promise<readonly ThreadSummary[]>; get(threadId: string): Promise<ThreadSnapshot | null>;
     create(input: CreateThreadInput): Promise<{ readonly threadId: string }>; send(threadId: string, input: SendInput): Promise<{ readonly runId: string }>;
+    beginProvisional(owner: PeerIdentity, input: CreateThreadInput): Promise<ProvisionalThreadHandle>;
     wait(runId: string, options?: WaitOptions): Promise<RunResult>; cancel(runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>>; open(threadId: string): Promise<void>; subscribe(listener: (event: PublicThreadEvent) => void): Disposable;
     /**
      * Effective permission mode and pending-plan state, read-only (ADR-0008).
@@ -154,6 +162,11 @@ export interface ClaudeThreadsApiV1 {
 }
 export interface PublicApiDependencies {
   getThreads(): Thread[]; getThread(id: string): Thread | undefined; isRunning(id: string): boolean; createThread(input: CreateThreadInput): Thread | Promise<Thread>;
+  beginProvisionalThread?(input: CreateThreadInput): Promise<{
+    thread: Thread;
+    commit(): Promise<void>;
+    rollback(): Promise<void>;
+  }>;
   sendMessage(id: string, prompt: string): Promise<void>; openThread(id: string): Promise<void>; subscribe(listener: (threadId: string, event: ThreadEvent) => void): () => void;
   interruptThread?(id: string): Promise<void>;
   getTraceMetadata?(id: string): Promise<RawLogTraceMetadata | null>;
@@ -193,6 +206,7 @@ export interface ClaudeThreadsApiService { readonly api: ClaudeThreadsApiV1; sta
  */
 function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   const capabilities = ['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe'];
+  if (deps.beginProvisionalThread) capabilities.push('threads.beginProvisional');
   if (deps.getTraceMetadata && deps.readTraceChunk) capabilities.push('traces.listSources', 'traces.readChunk', 'traces.subscribe');
   if (deps.runConstrainedQuery) capabilities.push('constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel');
   capabilities.push('orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration');
@@ -342,6 +356,14 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   for (const [runId, stored] of Object.entries(persisted.constrained)) if (stored.status === 'running') { reconciliationDirty = true; persisted.constrained[runId] = freeze({ status: 'failed', runId, error: freeze({ code: 'RUN_INTERRUPTED' as const, message: 'The agent run was interrupted.' }) }); }
   const runIdsByThread = new Map<string, Set<string>>(); const latestRunByThread = new Map<string, string>();
   const serial = new Map<string, Promise<unknown>>();
+  type ProvisionalState = {
+    readonly threadId: string;
+    status: 'pending' | 'committed' | 'rolled-back';
+    readonly host: Awaited<ReturnType<NonNullable<PublicApiDependencies['beginProvisionalThread']>>>;
+    operation: Promise<unknown>;
+    readonly allocatedRoots: Set<string>;
+  };
+  const provisionalThreads = new Map<string, ProvisionalState>();
   let active = true; let started = false; let stopped = false;
   const unavailable = () => new ClaudeThreadsApiError('PLUGIN_UNAVAILABLE', 'Agent Threads is not available.', generation);
   const guard = () => { if (!active) throw unavailable(); };
@@ -396,6 +418,9 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   });
   const send = async (threadId: string, input: SendInput): Promise<{ readonly runId: string }> => {
     guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.');
+    if (provisionalThreads.get(threadId)?.status === 'pending') {
+      throw new ClaudeThreadsApiError('THREAD_BUSY', 'The provisional thread must be committed before it can run.');
+    }
     const prompt = boundedString(input.prompt, 'prompt', MAX_PROMPT_LENGTH, true)!;
     const key = correlationKey('send', input, threadId); const fp = await fingerprint({ threadId, prompt });
     return serialize(key ?? `thread:${threadId}`, async () => {
@@ -417,6 +442,48 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   };
   const list = async (query?: ThreadQuery): Promise<readonly ThreadSummary[]> => { guard(); let values = deps.getThreads(); if (query?.projectId !== undefined) values = values.filter(thread => (thread.projectId ?? null) === query.projectId); if (query?.status) values = values.filter(thread => (thread.status ?? 'waiting') === query.status); if (query?.limit !== undefined) values = values.slice(0, Math.max(0, Math.floor(query.limit))); return freeze(values.map(thread => snapshotSummary(thread, deps.isRunning(thread.id)))); };
   const get = async (threadId: string): Promise<ThreadSnapshot | null> => { guard(); const thread = deps.getThread(threadId); return thread ? snapshotThread(thread, deps.isRunning(threadId)) : null; };
+  const beginProvisional = async (owner: PeerIdentity, input: CreateThreadInput): Promise<ProvisionalThreadHandle> => {
+    guard();
+    if (!deps.beginProvisionalThread) throw new ClaudeThreadsApiError('PLUGIN_UNAVAILABLE', 'Provisional threads are unavailable in this host.');
+    const pluginId = boundedString(owner?.pluginId, 'owner.pluginId', MAX_OWNER_LENGTH, true)!;
+    const declaredOwner = boundedString(input?.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH);
+    const explicitOrigin = boundedString(input?.origin, 'origin', MAX_OWNER_LENGTH);
+    if (declaredOwner && declaredOwner !== pluginId) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'ownerPluginId must match owner.pluginId.');
+    if (explicitOrigin && explicitOrigin !== pluginId) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match owner.pluginId.');
+    const normalized: CreateThreadInput = {
+      ...input,
+      title: boundedString(input?.title, 'title', 512),
+      origin: pluginId,
+      ownerPluginId: pluginId,
+      externalJobId: boundedString(input?.externalJobId, 'externalJobId', MAX_KEY_LENGTH),
+    };
+    const host = await deps.beginProvisionalThread(normalized);
+    const state: ProvisionalState = { threadId: host.thread.id, status: 'pending', host, operation: Promise.resolve(), allocatedRoots: new Set() };
+    provisionalThreads.set(state.threadId, state);
+    const serialized = <T>(action: () => Promise<T>): Promise<T> => {
+      const result = state.operation.catch(() => undefined).then(action);
+      state.operation = result;
+      return result;
+    };
+    const commit = (): Promise<ProvisionalCommitResult> => serialized(async () => {
+      if (state.status === 'committed') return freeze({ status: 'already-committed' as const, threadId: state.threadId });
+      if (state.status === 'rolled-back') return freeze({ status: 'rolled-back' as const, threadId: state.threadId });
+      await state.host.commit();
+      state.status = 'committed';
+      provisionalThreads.delete(state.threadId);
+      return freeze({ status: 'committed' as const, threadId: state.threadId });
+    });
+    const rollback = (): Promise<ProvisionalRollbackResult> => serialized(async () => {
+      if (state.status === 'committed') return freeze({ status: 'committed' as const, threadId: state.threadId });
+      if (state.status === 'rolled-back') return freeze({ status: 'already-rolled-back' as const, threadId: state.threadId });
+      await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root)));
+      await state.host.rollback();
+      state.status = 'rolled-back';
+      provisionalThreads.delete(state.threadId);
+      return freeze({ status: 'rolled-back' as const, threadId: state.threadId });
+    });
+    return freeze({ threadId: state.threadId, commit, rollback });
+  };
   const listTraceSources = async (options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceSourcePage> => {
     guard();
     const limit = positiveLimit(options?.limit, 100);
@@ -872,6 +939,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     if (!store.list(threadId)) return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
     const resolved = await store.allocateStorageRoot(id);
     if (resolved.status !== 'ok') return artifactFailure(id, 'invalid', resolved.message);
+    provisionalThreads.get(threadId)?.allocatedRoots.add(resolved.path);
     return freeze({
       success: true as const,
       status: resolved.existed ? ('existing' as const) : ('allocated' as const),
@@ -880,7 +948,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   };
 
   const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: computeCapabilities(deps),
-    threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const owner = boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH); const explicitOrigin = boundedString(input.origin, 'origin', MAX_OWNER_LENGTH); if (owner && explicitOrigin && owner !== explicitOrigin) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match ownerPluginId.'); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: explicitOrigin ?? owner, externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, send, wait, cancel,
+    threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const owner = boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH); const explicitOrigin = boundedString(input.origin, 'origin', MAX_OWNER_LENGTH); if (owner && explicitOrigin && owner !== explicitOrigin) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match ownerPluginId.'); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: explicitOrigin ?? owner, externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, beginProvisional, send, wait, cancel,
       open: async (threadId: string) => { guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.'); await deps.openThread(threadId); },
       subscribe: (listener: (event: PublicThreadEvent) => void) => { guard(); listeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; listeners.delete(listener); } }); },
       permissions: threadPermissions },
@@ -894,7 +962,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction, allocateStorage: allocateArtifactStorage },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
-    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
+    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const state of [...provisionalThreads.values()]) { const cleanup = state.operation.catch(() => undefined).then(async () => { if (state.status !== 'pending') return; await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root))); await state.host.rollback(); state.status = 'rolled-back'; provisionalThreads.delete(state.threadId); }); state.operation = cleanup; void cleanup.catch(error => console.error('[ClaudeThreads] Provisional rollback failed during API stop:', error)); } for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
 }
 
 function toolTimeout(args: Record<string, unknown>): number { return Math.min(Math.max(10, Number(args.timeout_secs) || 120), 300) * 1_000; }

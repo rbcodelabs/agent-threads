@@ -1,7 +1,7 @@
 # ADR-0008: Versioned peer-plugin contribution API
 
 **Date:** 2026-09-19
-**Status:** Accepted
+**Status:** Accepted and implemented
 
 ## Context
 
@@ -15,7 +15,9 @@ An inventory of Design's actual coupling shows the originally drafted sketch —
 
 Extend API v1 additively with an `extensions` namespace, modelled on the existing `mcp.register` precedent rather than on a generic plugin framework: the caller supplies a namespaced owner identity, the host may refuse, the result is a structured value rather than a thrown error, and every registration is disposable and is dropped both on peer unload and on host `stop()`.
 
-Contribution types are added one at a time, and each one must be proven by routing an existing built-in through it while that built-in still lives in this repository. Design is the reference consumer. No contribution type ships without a real consumer exercising it, and no extraction happens until the built-in uses no privileged path unavailable to a peer.
+Contribution types are added one at a time and proven by a real consumer. Design first ran through the public surface in-repository; it is now extracted to the private `rbcodelabs/threads-design` peer plugin. Agent Threads no longer registers Design commands, tools, or mutable artifact behavior.
+
+The final lifecycle gap is addressed by `threads.beginProvisional(owner, input)`. It returns a generation-bound, immutable commit/rollback handle. Pending threads cannot run. Rollback deletes the provisional thread, restores the prior selection, and releases host-allocated artifact roots; host shutdown rolls back any unresolved handles. This keeps thread deletion and selection repair private while allowing the peer to own create → scaffold → attach → preview → commit → send.
 
 `capabilities` becomes computed from the dependencies actually present at construction rather than a static constant, so discovery stops advertising operations that fail at call time.
 
@@ -25,7 +27,7 @@ Contribution types are added one at a time, and each one must be proven by routi
 | --- | --- | --- |
 | Continue private manager access | No new surface to design or support | Peers break on every internal refactor; no revocation, no compatibility window; duplicated execution logic across plugins |
 | Design a general extension framework up front | One coherent surface; no incremental churn | Speculative and unfalsifiable; the drafted sketch already proved incomplete against the first real consumer |
-| Incremental contribution types proven by a built-in reference provider (selected) | Each addition has a real consumer; the riskiest assumption is falsified before extraction | Slower; Design temporarily uses public contracts while still shipping in-repo |
+| Incremental contribution types proven by a reference provider, followed by extraction (selected) | Each addition has a real consumer; the riskiest assumption is falsified before extraction | Requires a temporary in-repo phase and coordinated plugin installation |
 
 ## Consequences and risks
 

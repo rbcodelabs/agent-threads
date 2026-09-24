@@ -3,16 +3,11 @@ import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThre
 import { createConstrainedQueryRunner } from './ConstrainedRun';
 import { ArtifactProviderRegistry } from './ArtifactContributions';
 import { MessageContentProviderRegistry } from './MessageContent';
+import { createLegacyDesignArtifactContribution } from './legacyDesignArtifactProvider';
 import { createArtifactStore } from './artifactStore';
 import { AgentToolRegistry, type AgentToolHost } from './AgentToolContributions';
-import { createDesignAgentTool, DESIGN_AGENT_TOOL_OWNER } from './designAgentTool';
 import { SlashCommandRegistry } from './SlashCommandContributions';
-import { createDesignSlashCommand } from './designSlashCommand';
 import { THREAD_BUILTIN_COMMANDS, DISPATCH_BUILTIN_COMMANDS, escalationCommand } from './slashCommands';
-import {
-  createDesignArtifactContribution, DESIGN_ACTION_PREVIEW, DESIGN_ARTIFACT_KIND, DESIGN_ARTIFACT_SCHEMA_VERSION, DESIGN_SOURCE_REVEALED_WARNING,
-  DESIGN_PROVIDER_ID, DESIGN_PROVIDER_OWNER,
-} from './designArtifactProvider';
 export { createClaudeThreadsApiV1 } from './PublicApi';
 export type { ClaudeThreadsApiV1 } from './PublicApi';
 // Desktop-only modules: type-only imports so their module-level code never runs on mobile.
@@ -330,7 +325,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * through the public `extensions.registerArtifactProvider` surface, exactly
    * as a peer plugin would (ADR-0008).
    */
-  readonly artifactProviders = new ArtifactProviderRegistry();
+  readonly artifactProviders = new ArtifactProviderRegistry({
+    fallbacks: [createLegacyDesignArtifactContribution()],
+  });
   readonly messageContentProviders = new MessageContentProviderRegistry();
   /**
    * Host-owned agent tool registry. Read by `mcpServerFactory` each time a
@@ -2341,6 +2338,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         await this.saveSettings();
         return thread;
       },
+      beginProvisionalThread: (input: CreateThreadInput) => this.beginPublicProvisionalThread(input),
       sendMessage: (id, prompt) => this.manager.sendMessage(id, prompt),
       interruptThread: (id) => this.manager.interrupt(id),
       getTraceMetadata: (id) => this.manager.getRawLogTraceMetadata(id),
@@ -2387,47 +2385,45 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.publicApiService = service;
     this.api = Object.freeze({ v1: service.api });
     service.start();
-    // Built-in Design is the reference consumer of the contribution API: it
-    // takes the same public path, with the same peer identity, that a
-    // third-party plugin would. Nothing pre-seeds the registry.
-    const registration = service.api.extensions.registerArtifactProvider(
-      DESIGN_PROVIDER_OWNER,
-      createDesignArtifactContribution(),
-    );
-    if (!registration.success) {
-      console.error(`[ClaudeThreads] Built-in design artifact provider was refused: ${registration.message}`);
+  }
+
+  /**
+   * Creates a reversible public-API thread while keeping deletion and view
+   * selection repair private to the host. The peer owns the work performed
+   * between begin and commit; this host handle owns only lifecycle rollback.
+   */
+  private async beginPublicProvisionalThread(input: CreateThreadInput) {
+    const project = input.projectId ? this.manager.getProject(input.projectId) : undefined;
+    if (input.projectId && !project) throw new Error(`Project not found: ${input.projectId}`);
+    const previousActiveThreadId = this.getActiveThreadId();
+    const cwd = input.cwd ?? (project ? this.manager.getProjectCwd(project) : this.getEffectiveCwd());
+    const thread = this.manager.createThread(input.title?.trim() || 'New Thread', cwd, project?.id, input.agentHarness, {
+      origin: input.origin, externalJobId: input.externalJobId, ephemeral: input.ephemeral, background: input.background,
+    });
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      this.manager.deleteThread(thread.id);
+      await this.getView()?.restoreThreadSelection(previousActiveThreadId);
+      throw error;
     }
-    // Same story for the design *agent tool*: registered through the public
-    // contribution surface with a real peer identity, not pre-seeded and not
-    // passed to the factory as a privileged option. The host binds it per
-    // thread and injects the thread id; the contribution itself never names a
-    // thread, which is exactly what a third-party plugin would write.
-    const toolRegistration = service.api.extensions.registerAgentTool(
-      DESIGN_AGENT_TOOL_OWNER,
-      createDesignAgentTool((threadId, brief) => this.enterDesignMode(threadId, brief)),
-    );
-    if (!toolRegistration.success) {
-      console.error(`[ClaudeThreads] Built-in design agent tool was refused: ${toolRegistration.message}`);
-    }
-    const commandRegistration = service.api.extensions.registerSlashCommand(
-      DESIGN_PROVIDER_OWNER,
-      createDesignSlashCommand({
-        getState: threadId => {
-          const thread = this.manager.getThread(threadId);
-          return thread ? { hasArtifacts: !!thread.artifacts?.length,
-            existingTitle: thread.artifacts?.find(artifact => artifact.kind === 'design-static')?.title } : null;
-        },
-        isDesktopFilesystem: () => this.app.vault.adapter instanceof FileSystemAdapter,
-        // Explicit internal adapters until dispatch transactions and preparation
-        // move behind the public artifact/thread contracts (ADR-0008).
-        prepare: (threadId, brief) => this.enterDesignMode(threadId, brief, true),
-        send: (threadId, prompt) => this.manager.sendMessage(threadId, prompt),
-        dispatch: (brief, harness) => this.dispatchNewDesignThread(brief, harness),
-      }),
-    );
-    if (!commandRegistration.success) {
-      console.error(`[ClaudeThreads] Built-in design command was refused: ${commandRegistration.message}`);
-    }
+    let settled = false;
+    return {
+      thread,
+      commit: async () => {
+        if (settled) return;
+        await this.saveSettings();
+        settled = true;
+      },
+      rollback: async () => {
+        if (settled) return;
+        this.manager.deleteThread(thread.id);
+        await this.getView()?.restoreThreadSelection(previousActiveThreadId);
+        await this.manager.artifactCleanupSettled;
+        await this.saveSettings();
+        settled = true;
+      },
+    };
   }
 
   revokePublicApi(): void {
@@ -2982,65 +2978,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     };
   }
 
-  /** Caller-bound design entry; the composer shares preparation but owns its next turn. */
-  async enterDesignMode(threadId: string, brief: string, fromComposer = false): Promise<import('./designArtifact').DesignModeResult> {
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter)) {
-      throw new Error('Design artifacts require a desktop vault with local filesystem access.');
-    }
-    const { enterDesignMode, assertDesignWriteAllowed } = await import('./designArtifact');
-    return enterDesignMode(threadId, adapter.getBasePath(), brief, {
-      getThread: id => this.manager.getThread(id),
-      assertWritable: thread => {
-        if (!fromComposer) assertDesignWriteAllowed(thread, this.settings.permissionMode);
-      },
-      saveSettings: () => this.saveSettings(),
-      openThread: id => this.openThreadInChatView(id),
-      openPreview: async artifact => {
-        const preview = await this.previewDesignArtifactAsPeer(threadId, artifact);
-        if (preview.status !== 'opened') new Notice(preview.warning);
-        return preview;
-      },
-    });
-  }
-
-  /**
-   * Creation-time preview, taken through public API v1 exactly as a
-   * third-party plugin would take it: attach the artifact under the Design
-   * provider, then invoke that provider's named preview action. No view, no
-   * DOM, no private manager access — which is the point. If this needs a
-   * privileged path, so would a peer, and the extraction is not real.
-   *
-   * `error` is reserved for "the host could not dispatch the action at all"
-   * (no view, no API, unknown artifact) and is raised, matching what the
-   * previous view-unavailable throw did. A `warning` means the provider ran
-   * and could not place the preview, which must never undo a durable artifact.
-   */
-  private async previewDesignArtifactAsPeer(
-    threadId: string,
-    artifact: import('./types').DesignArtifact,
-  ): Promise<import('./designArtifact').DesignPreviewResult> {
-    const api = this.api?.v1;
-    if (!api) throw new Error('Agent Threads public API is unavailable.');
-    const attached = await api.artifacts.attach(DESIGN_PROVIDER_OWNER, threadId, {
-      providerId: DESIGN_PROVIDER_ID,
-      kind: DESIGN_ARTIFACT_KIND,
-      schemaVersion: DESIGN_ARTIFACT_SCHEMA_VERSION,
-      id: artifact.id,
-      title: artifact.title,
-      storageRoot: artifact.root,
-      data: artifact,
-    });
-    if (!attached.success) throw new Error(attached.message);
-    const result = await api.artifacts.invokeAction(threadId, artifact.id, DESIGN_ACTION_PREVIEW);
-    if (result.status === 'ok') return { status: 'opened' };
-    if (result.status === 'warning') {
-      const status = result.message === DESIGN_SOURCE_REVEALED_WARNING ? 'source-revealed' : 'unavailable';
-      return { status, warning: result.message };
-    }
-    throw new Error(result.message);
-  }
-
   /**
    * Creates (or re-enables) a watch on `path`, owned by `threadId`. Resolves
    * the path the same way `obsidian_navigate_to_file` does. Primes the
@@ -3100,48 +3037,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return this.settings.watchedDocuments
       .filter((w) => w.threadId === threadId)
       .map(({ id, path, createdAt, lastAlertedAt }) => ({ id, path, createdAt, lastAlertedAt }));
-  }
-
-  /** Creates a new thread whose first turn uses the native static-artifact workflow. */
-  async dispatchNewDesignThread(brief: string, agentHarness?: 'claude' | 'codex'): Promise<string> {
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter)) {
-      throw new Error('Design artifacts require a desktop vault with local filesystem access.');
-    }
-
-    const { dispatchDesignThread } = require('./designArtifact') as typeof import('./designArtifact');
-    // The dispatch owns thread creation, so the artifact host below can only
-    // be bound to the new thread once it exists.
-    let dispatchedThreadId = '';
-    return dispatchDesignThread(
-      brief,
-      agentHarness,
-      adapter.getBasePath(),
-      {
-        createThread: (title, harness) => {
-          const thread = this.manager.createThread(title, this.getEffectiveCwd(), undefined, harness);
-          dispatchedThreadId = thread.id;
-          return thread;
-        },
-        deleteThread: (threadId) => this.manager.deleteThread(threadId),
-        getActiveThreadId: () => this.getActiveThreadId(),
-        restoreActiveThread: async (threadId) => {
-          const view = this.getView();
-          if (view) await view.restoreThreadSelection(threadId);
-        },
-        saveSettings: () => this.saveSettings(),
-        sendMessage: (threadId, message) => this.manager.sendMessage(threadId, message),
-        openThread: (threadId) => this.openThreadInChatView(threadId),
-        openPreview: async (artifact) => {
-          const preview = await this.previewDesignArtifactAsPeer(dispatchedThreadId, artifact);
-          if (preview.status !== 'opened') new Notice(preview.warning);
-        },
-        onSendError: (error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          new Notice(`Failed to start design turn: ${message}`);
-        },
-      },
-    );
   }
 
   getActiveThreadId(): string | null {

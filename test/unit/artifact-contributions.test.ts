@@ -83,6 +83,21 @@ describe('artifact provider registry', () => {
       .toEqual({ status: 'missing-provider', providerId: 'gone.plugin' });
   });
 
+  it('uses a fallback only until a live provider registers', () => {
+    const fallback = contribution({ present: () => ({ title: 'legacy', actions: [] }) });
+    const registry = new ArtifactProviderRegistry({ fallbacks: [fallback] });
+    const ref = toArtifactRef(record({ providerId: 'acme.artifacts' }));
+    expect(registry.present(ref)).toMatchObject({ status: 'ok', presentation: { title: 'legacy' } });
+    expect(registry.has('acme.artifacts')).toBe(false);
+    expect(registry.ownerOf('acme.artifacts')).toBeUndefined();
+
+    const live = registry.register({ pluginId: 'acme' }, contribution({ present: () => ({ title: 'live', actions: [] }) }));
+    expect(live.success).toBe(true);
+    expect(registry.present(ref)).toMatchObject({ status: 'ok', presentation: { title: 'live' } });
+    live.dispose();
+    expect(registry.present(ref)).toMatchObject({ status: 'ok', presentation: { title: 'legacy' } });
+  });
+
   it('turns a throwing or hanging invoke() into an error result', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const registry = new ArtifactProviderRegistry({ invokeTimeoutMs: 10 });
