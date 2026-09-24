@@ -1610,6 +1610,57 @@ test.describe('Agent Threads UI', () => {
     await expect(page.getByRole('button', { name: 'Back to skill list' })).toBeHidden();
   });
 
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }, { width: 375, height: 667 }]) {
+    test(`skills manager — GitHub source disclosure stays on the list ${viewport.width}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto('file://' + path.resolve('test/harness/skills.html'));
+      await page.locator('#app').evaluate((app, width) => {
+        app.style.width = `${Math.min(width, 960)}px`;
+      }, viewport.width);
+      await page.waitForSelector('.ct-skills-count');
+
+      await page.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const view = (window as any).__skillsView;
+        view.plugin.settings.skillSources = [{
+          id: 'agentic-pm',
+          name: 'Agentic PM Playbook',
+          type: 'github',
+          repoUrl: 'https://github.com/acme/agentic-pm',
+        }];
+        await view.refresh();
+      });
+
+      const sourceRow = page.locator('.ct-skills-tree-source').filter({ hasText: 'Agentic PM Playbook' });
+      const disclosure = sourceRow.getByRole('button', { name: 'Expand Agentic PM Playbook' });
+      await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+      if (viewport.width <= 480) {
+        expect((await disclosure.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+        expect((await disclosure.boundingBox())!.width).toBeGreaterThanOrEqual(44);
+      }
+
+      await disclosure.click();
+
+      await expect(sourceRow.getByRole('button', { name: 'Collapse Agentic PM Playbook' })).toHaveAttribute('aria-expanded', 'true');
+      await expect(page.locator('.ct-skills-list')).toBeVisible();
+      if (viewport.width <= 480) {
+        await expect(page.locator('.ct-skills-detail')).toBeHidden();
+      } else {
+        await expect(page.locator('.ct-skills-detail-empty')).toBeVisible();
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await shot(page, `skills-manager-source-disclosure-${viewport.width}.png`, { fullPage: true });
+
+      await sourceRow.locator('.ct-skills-tree-source-name').click();
+      await expect(page.locator('.ct-skills-detail')).toBeVisible();
+      if (viewport.width <= 480) {
+        await expect(page.locator('.ct-skills-list')).toBeHidden();
+      } else {
+        await expect(page.locator('.ct-skills-list')).toBeVisible();
+      }
+    });
+  }
+
   // The detail pane has several distinct sources (installed skill, agent,
   // Browse result, authoring form). Each is a separate branch of the
   // "is something selected" check that drives the narrow-mode swap, so each

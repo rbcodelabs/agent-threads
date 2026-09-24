@@ -7405,6 +7405,17 @@ body.ct-skills-resizing {
     max-width: none;
   }
 
+  .ct-skills-list .ct-skills-tree-source--github {
+    min-height: 44px;
+    padding-block: 0;
+  }
+
+  .ct-skills-tree-source .ct-skills-tree-toggle--button {
+    width: 44px;
+    height: 44px;
+    margin-left: -10px;
+  }
+
   .ct-skills-detail {
     width: 100%;
   }
@@ -8110,6 +8121,20 @@ body.ct-skills-resizing {
   align-items: center;
   flex-shrink: 0;
   color: var(--text-faint);
+}
+.ct-skills-tree-toggle--button {
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  cursor: pointer;
+}
+.ct-skills-tree-toggle--button:hover,
+.ct-skills-tree-toggle--button:focus-visible {
+  background: var(--background-modifier-hover);
 }
 .ct-skills-tree-toggle svg {
   width: 12px;
