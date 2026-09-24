@@ -24,6 +24,7 @@ import {
   VM_NETWORK_MODES,
   VM_WORKDIR,
   containerNameForThread,
+  isVmNetworkMode,
   resolveExecTimeoutSeconds,
   resolveVmImage,
   resolveVmNetwork,
@@ -1176,6 +1177,11 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     async (args, _extra) => {
       try {
         const mountPath = args.mountPath ?? effectiveCwd;
+        // Native harnesses invoke handlers directly, without SDK Zod parsing.
+        // An invalid requested isolation mode must never silently enable egress.
+        if (args.network !== undefined && !isVmNetworkMode(args.network)) {
+          return vmErrorResult('network must be default, internal, or none.');
+        }
         if (!mountPath) {
           return vmErrorResult('No working directory set. Call set_working_directory first, or pass mountPath.');
         }

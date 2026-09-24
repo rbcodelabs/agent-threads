@@ -302,6 +302,13 @@ describe('enter_vm', () => {
 // ── vm_exec ──────────────────────────────────────────────────────────────────
 
 describe('vm_exec', () => {
+  it('rejects an invalid network on direct harness invocation instead of allowing egress', async () => {
+    const runner = makeRunner(CLI_OK_NO_CONTAINER);
+    const { enter } = vmTools({ vmCommandRunner: runner.run });
+    const result = await call(enter, { network: 'isolated' });
+    expect(result.isError).toBe(true);
+    expect(runner.calls).toHaveLength(0);
+  });
   async function started(script: Record<string, Scripted> = {}) {
     const runner = makeRunner({ ...CLI_OK_NO_CONTAINER, ...script });
     const tools = vmTools({ vmCommandRunner: runner.run });
