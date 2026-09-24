@@ -2,11 +2,12 @@ import './obsidian-mock'; // must be first — sets up HTMLElement.prototype
 import { ThreadsView } from '../../src/ThreadsView';
 import { ThreadManager } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS } from '../../src/types';
-import { fixtureThreads } from './fixtures';
+import { fixtureThreads, inlineContentMessages } from './fixtures';
 import { mockLeaf, mockWorkspace } from './obsidian-mock';
 import { Platform } from 'obsidian';
 import { enterDesignMode, assertDesignWriteAllowed } from '../../src/designArtifact';
 import { ArtifactProviderRegistry } from '../../src/ArtifactContributions';
+import { MessageContentProviderRegistry } from '../../src/MessageContent';
 import { createArtifactStore } from '../../src/artifactStore';
 import { createClaudeThreadsApiV1 } from '../../src/PublicApi';
 import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
@@ -81,6 +82,7 @@ if (typeof crypto !== 'undefined' && typeof (crypto as { randomUUID?: unknown })
 }
 
 const artifactProviders = new ArtifactProviderRegistry();
+const messageContentProviders = new MessageContentProviderRegistry();
 const slashCommands = new SlashCommandRegistry({ reservedNames: () => [
   ...THREAD_BUILTIN_COMMANDS.map(c => c.name), ...DISPATCH_BUILTIN_COMMANDS.map(c => c.name),
   'fork', escalationCommand(settings)?.name ?? '',
@@ -93,6 +95,7 @@ const mockPlugin = {
   manager,
   artifactProviders,
   slashCommands,
+  messageContentProviders,
   persistence: null,
   scheduler: mockScheduler,
   summarizer: { summarize: async () => ({ title: '', summary: '' }) },
@@ -161,6 +164,7 @@ const harnessApi = createClaudeThreadsApiV1({
   triggerHostEvent: () => {},
   artifactProviders,
   slashCommands,
+  messageContentProviders,
   artifactStore: createArtifactStore({
     vaultRoot: () => '/vault',
     getThread: (id: string) => manager.getThread(id),
@@ -314,6 +318,12 @@ view.onOpen();
 // Expose for Playwright
 (window as any).__view = view;
 (window as any).__manager = manager;
+(window as any).__showInlineContent = async () => {
+  const thread = manager.getThread('thread-new')!;
+  thread.title = 'Quarterly review';
+  thread.messages = JSON.parse(JSON.stringify(inlineContentMessages));
+  await view.focusThread(thread.id);
+};
 (window as any).__setDocumentPane = (enabled: boolean) => {
   hostHeader.style.display = enabled ? 'flex' : 'none';
   mockWorkspace.trigger('layout-change');

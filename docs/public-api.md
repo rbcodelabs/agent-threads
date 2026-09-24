@@ -88,6 +88,103 @@ Return `{ status: 'ok' | 'error', message?: string }`; `host.report(message, isE
 
 Built-in Design registers `/design` through this public API. Its prepare and new-thread dispatch transaction still use explicit internal adapters, so this is **not full Design extraction**. Composer reopen/create/revise behavior, dispatch attachment rejection, harness selection, persistence/rollback, and the `EnterDesignMode` agent tool remain unchanged. Design dispatch currently does not apply the selected project; that existing behavior is preserved.
 
+## Inline message content
+
+`extensions.registerMessageContentProvider(owner, contribution)` lets a sibling
+plugin contribute rich content at a specific position in an assistant reply.
+Unlike attached artifacts above the composer, these cards live within the
+transcript, between the surrounding paragraphs.
+
+Check `capabilities` for `extensions.registerMessageContentProvider`. Register
+the provider once per API generation and dispose it when your plugin unloads.
+The host owns every card, image, button and sandbox frame; providers never
+receive host DOM.
+
+```ts
+const registration = api.extensions.registerMessageContentProvider(
+  { pluginId: 'example-reports' },
+  {
+    providerId: 'example.reports',
+    present(ref, context) {
+      // References are untrusted input. Validate your data/schema before use.
+      if (ref.schemaVersion !== 1 || typeof ref.data.reportId !== 'string') {
+        throw new Error('Unsupported report reference');
+      }
+      return {
+        kind: 'card',
+        title: ref.title,
+        subtitle: 'Quarterly review',
+        body: 'Open the report to review its supporting details.',
+        actions: [{ id: 'open', label: 'Open report', variant: 'primary' }],
+      };
+    },
+    async invoke(actionId, ref, context, host) {
+      if (context.signal.aborted || actionId !== 'open') {
+        return { status: 'error', message: 'Action unavailable' };
+      }
+      const placement = await host.openView({
+        type: 'example-report-view',
+        state: { reportId: ref.data.reportId },
+      });
+      return placement === 'unavailable'
+        ? { status: 'error', message: 'Could not open report' }
+        : { status: 'ok' };
+    },
+  },
+);
+
+const reference = api.messageContent.formatReference({
+  providerId: 'example.reports',
+  id: 'report-q3',
+  schemaVersion: 1,
+  title: 'Quarterly report',
+  data: { reportId: 'report-q3' },
+});
+// Return reference from a contributed tool and instruct the assistant to put
+// it verbatim on its own line, outside a code block, in its reply.
+// registration.dispose() on peer unload.
+```
+
+The canonical marker is `agent-content` immediately followed by the serialized
+JSON object. Use the formatter instead of assembling the marker manually.
+Registration and formatting do not send a message or start an agent turn.
+A contributed tool can return the reference as text; the assistant chooses its
+position in the reply. Both Claude and Codex use the same rendering path.
+
+Presentations are a discriminated union:
+
+| Kind | Content |
+|---|---|
+| `card` | Title, optional subtitle/icon, optional plain-text body and named actions |
+| `image` | Title, image source and alt text, optional subtitle and named actions |
+| `document` | Title and self-contained HTML, optional subtitle, bounded height and named actions |
+
+Images accept supported raster data URLs and HTTPS sources; HTTPS images make
+an ordinary browser request, so use inline raster data to avoid external loads.
+Documents run in nested opaque-origin frames with scripts permitted, but remote
+resources, navigation, host access, forms, popups and downloads blocked. Keep
+CSS, JavaScript and raster assets within the supplied HTML. Documents have no
+bridge to host APIs; expose host operations through named card actions.
+
+Only assistant transcript content activates providers. User messages, code
+examples and plan text cannot activate them. During streaming, references show
+inert fallback cards; provider callbacks and document scripts begin after the
+message settles. The relay mobile view retains readable fallback cards without
+executing desktop providers or forwarding their actions.
+
+The reference is persisted as ordinary message content. Its fallback title
+remains visible if the provider is absent, removed or fails. References are
+immutable; peers own any external assets and schema migrations. Data can be
+archived or relayed with the conversation: use identifiers and non-secret values.
+
+Provider callbacks are bounded and receive captured `threadId`, `messageId`
+and an abort signal. Thread switching, rerendering, provider disposal and host
+shutdown cancel pending work and revoke stale actions. Providers must honor
+cancellation and validate reference data; cancellation cannot undo their own
+side effects. `present` should resolve display data without performing mutations.
+Invalid or duplicate registrations return structured failures; callback errors
+degrade the affected card rather than the conversation.
+
 ## Security boundary
 
 Trace projection and redaction are owned by Agent Threads. Consumers must still treat trace text as sensitive and apply their own policy before persistence. `constrainedRuns` returns only final text and sanitized usage; SDK events, environment variables, credentials, and session IDs are private.
