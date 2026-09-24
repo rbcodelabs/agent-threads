@@ -386,7 +386,7 @@ export class AgentDashboard extends ItemView {
     }
     // A wake-up was registered, fired, or cancelled — re-partition so the
     // thread moves into/out of the "Waiting" group.
-    if (event.type === 'wakeup_changed') {
+    if (event.type === 'wakeup_changed' || event.type === 'reviewed_changed') {
       this.scheduleRender();
       return;
     }

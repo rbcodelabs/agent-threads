@@ -40,6 +40,36 @@ function makeHarness() {
 }
 
 describe('Claude Threads public API v1 contract', () => {
+  it('exposes lifecycle tools only when backed by host capabilities and rejects stale calls', async () => {
+    const { service } = makeHarness();
+    expect(service.api.agentTools.createBundle('voice-orchestration').tools.map(t => t.name)).not.toContain('ct_archive_thread');
+    await expect(service.api.threads.archive('one')).rejects.toMatchObject({ code: 'PLUGIN_UNAVAILABLE' });
+  });
+
+  it('routes public lifecycle methods and bundle results through guarded host callbacks', async () => {
+    const archiveThread = vi.fn(async (threadId: string, assertActive: () => void) => { assertActive(); return { status: 'archived' as const, threadId }; });
+    const markThreadReviewed = vi.fn(async (threadId: string, assertActive: () => void) => { assertActive(); return { threadId, reviewed: true as const, changed: true }; });
+    const service = createClaudeThreadsApiV1({
+      getThreads: () => [], getThread: () => undefined, isRunning: () => false,
+      createThread: vi.fn(), sendMessage: vi.fn(), openThread: vi.fn(), subscribe: () => () => {},
+      listOrchestrators: () => [], resolveOrchestrator: async () => null, triggerHostEvent: vi.fn(),
+      archiveThread, markThreadReviewed,
+    });
+    expect(service.api.capabilities).toEqual(expect.arrayContaining(['threads.archive', 'threads.markReviewed']));
+    const bundle = service.api.agentTools.createBundle('voice-orchestration');
+    expect(bundle.tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['ct_archive_thread', 'ct_mark_reviewed']));
+    await expect(bundle.execute('ct_archive_thread', { thread_id: 'one' })).resolves.toBe('Archived thread one.');
+    await expect(bundle.execute('ct_mark_reviewed', { thread_id: 'one' })).resolves.toBe('Marked thread one reviewed.');
+    await expect(bundle.execute('ct_archive_thread', { thread_id: 123 })).resolves.toMatch(/^Error:/);
+    await expect(service.api.threads.archive('')).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    archiveThread.mockResolvedValueOnce({ status: 'cancelled', threadId: 'one' } as any);
+    await expect(bundle.execute('ct_archive_thread', { thread_id: 'one' })).resolves.toBe('Archive cancelled for thread one.');
+    const calls = archiveThread.mock.calls.length;
+    service.stop();
+    await expect(service.api.threads.archive('one')).rejects.toMatchObject({ code: 'PLUGIN_UNAVAILABLE' });
+    await expect(bundle.execute('ct_mark_reviewed', { thread_id: 'one' })).resolves.toMatch(/^Error:/);
+    expect(archiveThread).toHaveBeenCalledTimes(calls);
+  });
   it('publishes version, generation, immutable capabilities, and the ready host signal', () => {
     const { service, hostSignals } = makeHarness();
     expect(service.api.apiVersion).toBe(1);

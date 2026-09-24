@@ -92,6 +92,7 @@ export type ThreadEvent =
   | { type: 'tool_result_images'; images: Array<{ mediaType: string; data: string }> }
   | { type: 'tasks_updated'; tasks: TaskItem[] }
   | { type: 'wakeup_changed' }
+  | { type: 'reviewed_changed' }
   | { type: 'manager_notes_changed' }
   | { type: 'proposed_reply_changed' }
   | { type: 'run_state_settled' }
@@ -2514,6 +2515,10 @@ export class ThreadManager {
    */
   notifyWakeupChanged(threadId: string): void {
     this.emit(threadId, { type: 'wakeup_changed' });
+  }
+
+  notifyReviewedChanged(threadId: string): void {
+    this.emit(threadId, { type: 'reviewed_changed' });
   }
 
   /** Notify listeners that a thread's orchestrator tracking notes changed. */

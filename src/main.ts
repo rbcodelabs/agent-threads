@@ -1,5 +1,7 @@
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, addIcon, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
+import { createPublicThreadLifecycle } from './publicThreadLifecycle';
+import { promptConfirm } from './confirmModal';
 import { createConstrainedQueryRunner } from './ConstrainedRun';
 import { ArtifactProviderRegistry } from './ArtifactContributions';
 import { MessageContentProviderRegistry } from './MessageContent';
@@ -2324,6 +2326,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   initializePublicApi(): void {
     this.revokePublicApi();
+    const lifecycle = createPublicThreadLifecycle({
+      getThreads: () => this.manager.getThreads(),
+      isRunning: id => this.manager.isRunning(id),
+      getOrchestratorContext: () => ({ portfolioThreadId: this.settings.orchestratorThreadId, projects: this.manager.getProjects() }),
+      confirm: spec => promptConfirm(this.app, spec),
+      cancelWakeups: async id => {
+        const wakeups = this.scheduler.listItems().filter(item => item.origin === 'wakeup' && item.targetThreadId === id);
+        for (const item of wakeups) await this.scheduler.deleteItem(item.id);
+        if (wakeups.length) this.manager.notifyWakeupChanged(id);
+      },
+      archiveThread: (id, assertSafe) => this.archiveThreadById(id, false, assertSafe),
+      saveSettings: () => this.saveSettings(),
+      notifyReviewed: id => this.manager.notifyReviewedChanged(id),
+    });
     const service = createClaudeThreadsApiV1({
       getThreads: () => this.manager.getThreads(),
       getThread: (id) => this.manager.getThread(id),
@@ -2352,6 +2368,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       savePublicState: async (state) => { this.settings.publicApiState = state; await this.saveSettings(); },
       runConstrainedQuery: createConstrainedQueryRunner(() => this.settings, undefined, () => this.manager.secretEnvResolver?.() ?? {}),
       openThread: (id) => this.openThreadInChatView(id),
+      archiveThread: lifecycle.archive,
+      markThreadReviewed: lifecycle.markReviewed,
       subscribe: (listener) => this.manager.subscribe(listener),
       listOrchestrators: () => this.listPublicOrchestrators(),
       resolveOrchestrator: (target) => this.resolvePublicOrchestrator(target),
@@ -2464,10 +2482,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * data.json. Does NOT call saveSettings. Each caller persists once (the sweep
    * saves once after its whole loop rather than per thread).
    */
-  async archiveThreadById(id: string, onlyIfHasMessages = false): Promise<void> {
+  async archiveThreadById(id: string, onlyIfHasMessages = false, assertSafe?: () => void): Promise<void> {
+    assertSafe?.();
     const thread = this.manager.getThread(id);
     if (!thread) throw new Error(`Thread not found: ${id}`);
     const originalSnapshot = { ...thread };
+    const wasPortfolio = this.settings.orchestratorThreadId === id;
     const project = this.manager.getProjects().find(candidate => candidate.orchestratorThreadId === id);
     const priorProjectEnabled = project?.orchestratorEnabled;
     if (project) {
@@ -2486,12 +2506,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
         throw error;
       }
     }
+    let retired = false;
     try {
+      assertSafe?.();
       await this.retireOrchestratorThread(id, project ? { projectId: project.id, priorEnabled: priorProjectEnabled ?? true } : undefined);
+      retired = true;
+      assertSafe?.();
     } catch (error) {
+      if (!retired && project) this.manager.updateProject(project.id, { orchestratorEnabled: priorProjectEnabled ?? true, orchestratorThreadId: id });
       if (persistedArchive) await this.persistence!.saveThread(originalSnapshot).catch(rollbackError => {
         console.error('[ClaudeThreads] Failed to restore live thread note after orchestrator retirement failure:', rollbackError);
       });
+      if (retired && (project || wasPortfolio)) {
+        throw new Error(`Archive stopped after orchestrator retirement; the thread remains live but its heartbeat may be disabled. ${error instanceof Error ? error.message : String(error)}`);
+      }
       throw error;
     }
     this.manager.deleteThread(id);

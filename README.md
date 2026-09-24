@@ -928,7 +928,14 @@ Enabled desktop plugins can integrate with Agent Threads through the versioned `
 
 Peer plugins should verify `apiVersion` and the advertised `capabilities`, listen for the host events `claude-threads:api-ready` and `claude-threads:api-stopping`, and reacquire the API after a plugin reload. Every API generation is revocable: calls through a stale reference fail with `PLUGIN_UNAVAILABLE` instead of operating on a replacement plugin instance.
 
-The TypeScript contract and structured error codes are defined in [`src/PublicApi.ts`](src/PublicApi.ts). API v1 intentionally excludes archive/delete operations, cross-Project elevation, generic extension registration, and direct access to private views or runtime sessions.
+Orchestrator can use the host's `voice-orchestration` bundle to respond to “Archive [thread name]” and “Mark [thread name] reviewed.” The host advertises `threads.archive` and `threads.markReviewed` and supplies `ct_archive_thread` / `ct_mark_reviewed` only when their implementations are available. Agents must resolve an exact thread ID from discovery and clarify ambiguous names. Start a new voice session after updating the host so its tool schemas are refreshed.
+
+- `threads.archive(threadId)` returns `{ status: 'archived' | 'cancelled', threadId }`. It blocks the last remaining thread and displays a host confirmation dialog for running threads and Portfolio/Project orchestrators. It awaits wakeup cancellation, archive persistence and settings persistence before success. Conversation retention follows **Save threads to vault**; disabling that setting means no archive note is written. A failure can leave wakeups cancelled or a saved archive note; it is reported as an error, never success. If state changes during an archive, retry from fresh discovery.
+- `threads.markReviewed(threadId)` returns `{ threadId, reviewed: true, changed }`. It accepts idle live threads, saves the reviewed flag and refreshes the Agents List/Board without opening the thread or changing its recency. Repeated calls return `changed: false`. New work invalidates review state.
+
+These are trusted in-process peer-plugin operations, not the internal assistant MCP tools: MCP Project boundaries and approval prompts do not automatically apply to peers. Archive safety checks are enforced by the host API; a model-supplied confirmation flag cannot bypass the dialog. Orchestrator records the invoked tool, exact target and observed result in its conversation transcript. The internal assistant self-archive policy is unchanged.
+
+The TypeScript contract and structured error codes are defined in [`src/PublicApi.ts`](src/PublicApi.ts), with the standalone consumer declaration in [`api/public-api-v1.d.ts`](api/public-api-v1.d.ts). API v1 excludes hard-delete operations, cross-Project elevation, and direct access to private views or runtime sessions.
 
 `api.v1.mcp` lets a peer plugin reuse Agent Threads' own MCP-registration and secret-storage machinery instead of reinventing OS-keychain storage or its own MCP config UI:
 

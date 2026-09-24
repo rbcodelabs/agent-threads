@@ -1333,6 +1333,7 @@ export class KanbanView extends ItemView {
       event.type === 'agent_runs_changed' ||
       event.type === 'status_tags' ||
       event.type === 'wakeup_changed' ||
+      event.type === 'reviewed_changed' ||
       event.type === 'run_state_settled';
     if (isStateChange) {
       // Patch the card in place when its column membership is unchanged; only

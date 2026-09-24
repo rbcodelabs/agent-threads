@@ -858,6 +858,7 @@ export class Scheduler {
   async deleteItem(id: string): Promise<void> {
     const idx = this.items.findIndex((i) => i.id === id);
     if (idx < 0) return;
+    const original = this.items[idx];
 
     // Cancel timer
     this.cancelWakeSources(id);
@@ -869,6 +870,9 @@ export class Scheduler {
       this.activateCoordinator();
       await this.coordinator.delete(id);
     } catch (err) {
+      // Keep failed deletions discoverable for a durable retry. Leave timers
+      // stopped: a wakeup requested for removal must not fire in the meantime.
+      if (!this.items.some(item => item.id === id)) this.items.push(original);
       console.error(`[Scheduler] Failed to persist deletion of item ${id}:`, err);
       throw err;
     }
