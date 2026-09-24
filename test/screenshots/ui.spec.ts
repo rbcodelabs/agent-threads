@@ -1781,6 +1781,35 @@ test.describe('Agent Threads UI', () => {
 
   // ─── Settings tab ────────────────────────────────────────────────────────
 
+  test('settings — desktop section selector preserves the host content width', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto('file://' + path.resolve('test/harness/settings.html') + '?host=geode');
+    const sections = page.getByLabel('Settings section');
+    await expect(sections).toBeVisible();
+    await sections.selectOption('projects');
+    await expect(page.getByLabel('Geode settings')).toBeVisible();
+    await expect(sections.locator('optgroup')).toHaveCount(4);
+    await expect(page.locator('.ct-settings-sidebar')).toHaveCount(0);
+    const body = await page.locator('.ct-settings-tab-body').boundingBox();
+    const shell = await page.locator('.ct-settings-shell').boundingBox();
+    expect(body!.width).toBeGreaterThanOrEqual(shell!.width - 1);
+    await shot(page, 'settings-geode-projects.png', { fullPage: true });
+    await sections.selectOption('secrets');
+    await expect(page.getByLabel('Variable name')).toBeVisible();
+    await shot(page, 'settings-geode-secrets.png', { fullPage: true });
+    await page.setViewportSize({ width: 800, height: 800 });
+    await sections.selectOption('projects');
+    const list = await page.locator('.ct-manager-list').boundingBox();
+    const detail = await page.locator('.ct-manager-detail').boundingBox();
+    expect(detail!.y).toBeGreaterThanOrEqual(list!.y + list!.height - 1);
+    await expect.poll(() => page.locator('.vertical-tab-content').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await page.getByLabel('Project name').fill('Host-width edit');
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__settings.projects[0].name)).toBe('Host-width edit');
+    await page.locator('.vertical-tab-content').evaluate(el => { el.scrollTop = 0; });
+    await shot(page, 'settings-geode-projects-narrow.png', { fullPage: true });
+  });
+
   test('settings — general tab', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
@@ -1816,7 +1845,7 @@ test.describe('Agent Threads UI', () => {
     // The tab whose id is 'claude' is now labelled "Agent" (harness-agnostic
     // naming since the Codex harness landed); the screenshot keeps the historical
     // settings-claude.png name to match the tab id.
-    await page.getByRole('button', { name: 'Agent' }).click();
+    await page.getByLabel('Settings section').selectOption('claude');
     await page.waitForTimeout(200);
     await shot(page, 'settings-claude.png', { fullPage: true });
   });
@@ -1826,7 +1855,7 @@ test.describe('Agent Threads UI', () => {
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
     await page.waitForSelector('.ct-settings-shell');
-    await page.getByRole('button', { name: 'Agent' }).click();
+    await page.getByLabel('Settings section').selectOption('claude');
 
     const harnessSetting = page.locator('.setting-item').filter({ hasText: 'Agent harness' });
     await harnessSetting.locator('select').selectOption('codex');
@@ -1841,7 +1870,7 @@ test.describe('Agent Threads UI', () => {
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
     await page.waitForSelector('.ct-settings-shell');
-    await page.getByRole('button', { name: 'Tools' }).click();
+    await page.getByLabel('Settings section').selectOption('tools');
     await page.waitForTimeout(200);
     await shot(page, 'settings-tools.png', { fullPage: true });
   });
@@ -1851,7 +1880,7 @@ test.describe('Agent Threads UI', () => {
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
     await page.waitForSelector('.ct-settings-shell');
-    await page.getByRole('button', { name: 'Projects' }).click();
+    await page.getByLabel('Settings section').selectOption('projects');
     await expect(page.getByText('/Users/mock/projects/acme-webapp').first()).toBeVisible();
     await expect(page.getByPlaceholder('Search projects')).toBeVisible();
     const override = page.getByLabel('Filesystem working directory');
@@ -1883,7 +1912,7 @@ test.describe('Agent Threads UI', () => {
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
     await page.waitForSelector('.ct-settings-shell');
-    await page.getByRole('button', { name: 'Secrets' }).click();
+    await page.getByLabel('Settings section').selectOption('secrets');
     await expect(page.getByPlaceholder('Search secrets')).toBeVisible();
     await expect(page.getByLabel('Variable name')).toBeDisabled();
     await page.getByLabel('Replace value').fill('replacement-value');
@@ -1902,8 +1931,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("Scheduled")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('scheduled');
     await expect(page.getByRole('heading', { name: 'Next up' })).toHaveCount(0);
     // 5 scheduled-work cards + 2 watched-document cards share the same
     // .ct-scheduled-card markup (see "Watched documents" checks below).
@@ -2020,8 +2049,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
     // Collapse the fixed-height harness shell to the content so the docs
     // screenshot (copied out by posttest:screenshots:update) crops tight
@@ -2068,7 +2097,7 @@ test.describe('Agent Threads UI', () => {
   }
   test('Google Workspace services are opt-in and persisted independently', async ({ page }) => {
     await page.goto('file://' + path.resolve('test/harness/settings.html'));
-    await page.getByLabel('Settings section').selectOption('mcp', { force: true });
+    await page.getByLabel('Settings section').selectOption('mcp');
     for (const name of ['Google Docs', 'Google Drive', 'Google Sheets', 'Google Slides']) {
       const toggle = page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: new RegExp(`^${name}$`) }) }).locator('.checkbox-container');
       await expect(toggle).not.toHaveClass(/is-enabled/);
@@ -2076,8 +2105,8 @@ test.describe('Agent Threads UI', () => {
       await expect(toggle).toHaveClass(/is-enabled/);
     }
     await expect(page.getByText('Google Workspace requires desktop Google Docs Sync with a connected account.', { exact: true })).toBeVisible();
-    await page.getByLabel('Settings section').selectOption('general', { force: true });
-    await page.getByLabel('Settings section').selectOption('mcp', { force: true });
+    await page.getByLabel('Settings section').selectOption('general');
+    await page.getByLabel('Settings section').selectOption('mcp');
     for (const name of ['Google Docs', 'Google Drive', 'Google Sheets', 'Google Slides']) {
       await expect(page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: new RegExp(`^${name}$`) }) }).locator('.checkbox-container')).toHaveClass(/is-enabled/);
     }
@@ -2087,7 +2116,7 @@ test.describe('Agent Threads UI', () => {
     test(`Google Workspace settings at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 844 });
       await page.goto('file://' + path.resolve('test/harness/settings.html'));
-      await page.getByLabel('Settings section').selectOption('mcp', { force: true });
+      await page.getByLabel('Settings section').selectOption('mcp');
       await page.evaluate(() => { document.getElementById('app')!.style.height = 'auto'; });
       await expect(page.getByText('Google Workspace', { exact: true })).toBeVisible();
       await expect(page.locator('.setting-item-name').filter({ hasText: /^Google (Docs|Drive|Sheets|Slides)$/ })).toHaveCount(4);
@@ -2106,7 +2135,7 @@ test.describe('Agent Threads UI', () => {
         configure: async (selection: unknown) => { calls.push(JSON.stringify(selection)); },
       };
     });
-    await page.getByLabel('Settings section').selectOption('mcp', { force: true });
+    await page.getByLabel('Settings section').selectOption('mcp');
     await expect(page.getByText('Connected through Google Docs Sync.', { exact: false })).toBeVisible();
     await page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: /^Google Sheets$/ }) }).locator('.checkbox-container').click();
     await expect.poll(() => page.evaluate(() => (window as any).__workspaceCalls)).toEqual(['save', '{"sheets":true}']);
@@ -2115,8 +2144,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
     // Open the edit modal on the stdio server so the form shows real values,
     // including an ${ENV_VAR} placeholder in the environment field. Targeted by
@@ -2136,8 +2165,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
     await page.getByRole('button', { name: 'Add MCP server' }).click();
     await page.waitForSelector('.modal-overlay');
@@ -2154,8 +2183,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
 
     await page.getByRole('button', { name: 'Add MCP server' }).click();
@@ -2184,7 +2213,7 @@ test.describe('Agent Threads UI', () => {
       await page.setViewportSize({ width, height: 760 });
       await page.goto(settingsUrl);
       await page.waitForSelector('.ct-settings-shell');
-      await page.getByLabel('Settings section').selectOption('mcp', { force: true });
+      await page.getByLabel('Settings section').selectOption('mcp');
       await page.waitForTimeout(200);
       await page.getByRole('button', { name: 'Add MCP server' }).click();
       await page.waitForSelector('.modal-overlay');
@@ -2206,8 +2235,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
     // Collapse the fixed-height harness shell to the content, same as the
     // "settings — mcp tab" screenshot above, so this crops tight to the

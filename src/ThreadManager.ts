@@ -1801,6 +1801,7 @@ export class ThreadManager {
         sessionOptions: this.buildSessionOptions(thread, agentProfiles),
       },
       codex: {
+        computerUseEnabled: this.settings.codexComputerUseEnabled === true,
         localSkillsRoot: this.localSkillsRoot(),
         ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
         ...(this.settings.codexEffort && this.settings.codexEffort !== 'default'

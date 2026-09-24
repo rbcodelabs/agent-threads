@@ -297,6 +297,21 @@ const mockPlugin = {
 
 const tab = new ClaudeThreadsSettingTab(mockApp as any, mockPlugin as any);
 const container = document.getElementById('app')!;
+if (new URLSearchParams(location.search).get('host') === 'geode') {
+  document.body.classList.add('geode-settings-host');
+  // Host chrome mirrors the approved Geode Ivory mock; all content is synthetic.
+  const nav = document.createElement('nav');
+  nav.className = 'geode-settings-nav';
+  nav.setAttribute('aria-label', 'Geode settings');
+  for (const name of ['Appearance', 'Hotkeys', 'Daily Notes', 'Core plugins', 'Community plugins & themes', 'Sync', 'Advanced', 'Project folders', 'Performance', 'PLUGIN OPTIONS', 'Agent Threads', 'Calendar (Beta)', 'Google Docs Sync', 'Terminal']) {
+    const item = document.createElement('div');
+    item.textContent = name;
+    if (name === 'Agent Threads') item.className = 'is-selected';
+    if (name === 'PLUGIN OPTIONS') item.className = 'geode-settings-group';
+    nav.appendChild(item);
+  }
+  container.appendChild(nav);
+}
 container.appendChild(tab.containerEl);
 tab.display();
 

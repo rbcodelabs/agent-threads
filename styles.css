@@ -6104,16 +6104,11 @@
 
 /* ── Settings tab ────────────────────────────────────────────────────────── */
 
-.ct-settings-shell { display: grid; grid-template-columns: 172px minmax(0, 1fr); gap: 24px; min-height: 100%; }
-.ct-settings-sidebar { border-right: 1px solid var(--background-modifier-border); padding-right: 14px; }
-.ct-settings-brand { display: flex; flex-direction: column; gap: 1px; padding: 2px 8px 16px; }
-.ct-settings-brand span, .ct-settings-nav-group { color: var(--text-muted); font-size: var(--font-ui-smaller); }
-.ct-settings-nav-group { margin: 14px 8px 4px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
-.ct-settings-nav-btn { appearance: none; width: 100%; text-align: left; border: 0; box-shadow: none; background: transparent; color: var(--text-muted); border-radius: var(--radius-s); padding: 7px 9px; cursor: pointer; }
-.ct-settings-nav-btn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
-.ct-settings-nav-btn.is-active { background: color-mix(in srgb, var(--interactive-accent) 18%, transparent); color: var(--text-accent); font-weight: 600; }
+.ct-settings-shell { min-width: 0; min-height: 100%; container-type: inline-size; container-name: ct-settings; }
 .ct-settings-tab-body { min-width: 0; }
-.ct-settings-compact-nav { display: none; }
+.ct-settings-compact-nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 16px; margin-bottom: 24px; border-bottom: 1px solid var(--background-modifier-border); }
+.ct-settings-compact-nav label { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: var(--font-ui-small); }
+.ct-settings-compact-nav select { width: 190px; max-width: 100%; min-height: 36px; }
 .ct-settings-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .ct-settings-page-header h1 { margin: 0; font-size: 1.55rem; }
 .ct-settings-page-header p { margin: 4px 0 0; color: var(--text-muted); }
@@ -6154,15 +6149,15 @@
 .ct-manager-empty { margin: auto; max-width: 280px; text-align: center; color: var(--text-muted); }
 .ct-secret-storage-notice { margin-top: 0; }
 
-@media (max-width: 720px) {
-  .ct-settings-shell { display: block; }
-  .ct-settings-sidebar { display: none; }
-  .ct-settings-compact-nav { display: block; margin-bottom: 16px; }
-  .ct-settings-compact-nav label { display: flex; flex-direction: column; gap: 5px; color: var(--text-muted); font-size: var(--font-ui-small); }
-  .ct-settings-compact-nav select { width: 100%; }
+@container ct-settings (max-width: 620px) {
   .ct-settings-manager { grid-template-columns: 1fr; }
   .ct-manager-list { border-right: 0; border-bottom: 1px solid var(--background-modifier-border); max-height: 250px; }
   .ct-manager-detail { min-height: 500px; }
+}
+@container ct-settings (max-width: 420px) {
+  .ct-settings-compact-nav { align-items: stretch; flex-direction: column; gap: 10px; }
+  .ct-settings-compact-nav label { justify-content: space-between; }
+  .ct-settings-compact-nav select { min-height: 44px; width: 60%; }
 }
 
 /* Empty-state text inside settings lists */

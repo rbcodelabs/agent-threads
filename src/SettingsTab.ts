@@ -1219,8 +1219,6 @@ const TAB_GROUPS: { label: string; tabs: { id: SettingsTabId; label: string }[] 
   { label: 'Connectivity', tabs: [{ id: 'remote', label: 'Remote' }] },
 ];
 
-const TABS = TAB_GROUPS.flatMap(group => group.tabs);
-
 /** Fallback model list shown before any session has run and populated discoveredModels. */
 const FALLBACK_MODELS: { value: string; displayName: string }[] = [
   { value: 'claude-fable-5', displayName: 'Claude Fable 5' },
@@ -1295,29 +1293,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
     const shell = containerEl.createDiv({ cls: 'ct-settings-shell' });
     const compact = shell.createDiv({ cls: 'ct-settings-compact-nav' });
+    compact.createEl('strong', { text: 'Agent Threads' });
     const selectLabel = compact.createEl('label');
     selectLabel.createSpan({ text: 'Settings section' });
     const select = selectLabel.createEl('select', { attr: { 'aria-label': 'Settings section' } });
-    for (const tab of TABS) select.createEl('option', { text: tab.label, value: tab.id });
+    for (const group of TAB_GROUPS) {
+      const options = select.createEl('optgroup', { attr: { label: group.label } });
+      for (const tab of group.tabs) options.createEl('option', { text: tab.label, value: tab.id });
+    }
     select.value = this.activeTab;
     select.addEventListener('change', () => { this.activeTab = select.value as SettingsTabId; this.display(); });
-
-    const sidebar = shell.createEl('aside', { cls: 'ct-settings-sidebar', attr: { 'aria-label': 'Agent Threads settings' } });
-    const brand = sidebar.createDiv({ cls: 'ct-settings-brand' });
-    brand.createEl('strong', { text: 'Agent Threads' });
-    brand.createEl('span', { text: 'Settings' });
-    const nav = sidebar.createEl('nav', { cls: 'ct-settings-tabs' });
-    for (const group of TAB_GROUPS) {
-      nav.createEl('p', { text: group.label, cls: 'ct-settings-nav-group' });
-      for (const tab of group.tabs) {
-        const btn = nav.createEl('button', {
-          text: tab.label,
-          cls: 'ct-settings-nav-btn ct-settings-tab-btn' + (tab.id === this.activeTab ? ' is-active' : ''),
-          attr: { type: 'button', 'aria-current': tab.id === this.activeTab ? 'page' : 'false' },
-        });
-        btn.addEventListener('click', () => { this.activeTab = tab.id; this.display(); });
-      }
-    }
 
     const body = shell.createDiv({ cls: 'ct-settings-tab-body' });
     switch (this.activeTab) {
@@ -1505,6 +1490,19 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.codexBinaryPath ?? 'codex')
           .onChange(async (value) => {
             this.plugin.settings.codexBinaryPath = value || 'codex';
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Codex computer use')
+      .setDesc('Allow Codex computer-use capabilities from your local Codex configuration. Off by default; shared Codex browser tools may also be disabled. Changes apply when a Codex session next starts or restarts; existing sessions keep their current access. Use “Reload plugin (safe)” after active work finishes to apply to all sessions.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.codexComputerUseEnabled === true)
+          .onChange(async (value) => {
+            this.plugin.settings.codexComputerUseEnabled = value;
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
           }),
