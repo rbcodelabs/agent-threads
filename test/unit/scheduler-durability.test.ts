@@ -58,6 +58,18 @@ function makeSharedDisk(initial: ScheduledItem[] = []) {
 }
 
 describe('Scheduler mutator durability', () => {
+  it('keeps a failed deletion discoverable so an archive retry must persist it', async () => {
+    const removeItem = vi.fn().mockRejectedValueOnce(new Error('disk unavailable')).mockResolvedValue(undefined);
+    const { options } = makeOptions({ removeItem });
+    const scheduler = new Scheduler(options);
+    const item = await scheduler.createItem({ name: 'Wake', prompt: 'Wake', schedule: { type: 'interval', intervalSeconds: 3600 } });
+    await expect(scheduler.deleteItem(item.id)).rejects.toThrow('disk unavailable');
+    expect(scheduler.listItems().map(item => item.id)).toContain(item.id);
+    await scheduler.deleteItem(item.id);
+    expect(removeItem).toHaveBeenCalledTimes(2);
+    expect(scheduler.listItems()).toEqual([]);
+    scheduler.destroy();
+  });
   it('updateItem does not resolve until saveItem resolves, even though in-memory state updates immediately', async () => {
     let resolveSave: (() => void) | undefined;
     const saveItem = vi.fn().mockImplementation(

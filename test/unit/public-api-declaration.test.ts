@@ -112,6 +112,7 @@ describe('checked-in consumer declaration', () => {
       getTraceMetadata: async () => null, readTraceChunk: async () => null,
       runConstrainedQuery: vi.fn(),
       registerMcpServer: vi.fn(), requestSecret: vi.fn(),
+      archiveThread: vi.fn(), markThreadReviewed: vi.fn(),
       artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(), messageContentProviders: new MessageContentProviderRegistry(),
       agentTools: new AgentToolRegistry(), slashCommands: new SlashCommandRegistry(), getDefaultPermissionMode: () => 'default',
     } as never).api;

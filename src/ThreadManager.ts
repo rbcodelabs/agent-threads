@@ -92,6 +92,7 @@ export type ThreadEvent =
   | { type: 'tool_result_images'; images: Array<{ mediaType: string; data: string }> }
   | { type: 'tasks_updated'; tasks: TaskItem[] }
   | { type: 'wakeup_changed' }
+  | { type: 'reviewed_changed' }
   | { type: 'manager_notes_changed' }
   | { type: 'proposed_reply_changed' }
   | { type: 'run_state_settled' }
@@ -2017,6 +2018,9 @@ export class ThreadManager {
           this.emit(threadId, { type: 'background_tasks_pending', tasks: thread.pendingBackgroundTasks });
         }
 
+        // Peer review does not require a mounted list/board. Invalidate here
+        // before persistence listeners run, so completed work is always New.
+        thread.reviewed = false;
         this.emit(threadId, { type: 'done' });
         this.emitRunStateSettledWhenIdle(threadId);
         this.scheduleQueuedMessageFlush(threadId);
@@ -2514,6 +2518,10 @@ export class ThreadManager {
    */
   notifyWakeupChanged(threadId: string): void {
     this.emit(threadId, { type: 'wakeup_changed' });
+  }
+
+  notifyReviewedChanged(threadId: string): void {
+    this.emit(threadId, { type: 'reviewed_changed' });
   }
 
   /** Notify listeners that a thread's orchestrator tracking notes changed. */

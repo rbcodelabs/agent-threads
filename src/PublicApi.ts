@@ -82,6 +82,8 @@ export interface McpRegisterInput {
   readonly redirectUri?: string;
 }
 export interface RequestSecretInput { readonly secretName: string; readonly reason: string; readonly force?: boolean }
+export interface ArchiveThreadResult { readonly status: 'archived' | 'cancelled'; readonly threadId: string }
+export interface MarkReviewedResult { readonly threadId: string; readonly reviewed: true; readonly changed: boolean }
 export type RequestSecretResult =
   | { readonly success: true; readonly secretName: string; readonly alreadyExisted: boolean }
   | { readonly success: false; readonly reason: string };
@@ -98,6 +100,8 @@ export interface ClaudeThreadsApiV1 {
      * thread's behalf has no way to tell whether writing is permitted.
      */
     permissions(threadId: string): Promise<ThreadPermissionSnapshot | null>;
+    archive(threadId: string): Promise<ArchiveThreadResult>;
+    markReviewed(threadId: string): Promise<MarkReviewedResult>;
   };
   readonly traces: { listSources(options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceSourcePage>; readChunk(sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk>; subscribe(listener: (event: PublicTraceEvent) => void): Disposable };
   readonly constrainedRuns: { create(input: ConstrainedRunInput): Promise<{ readonly runId: string }>; get(runId: string): Promise<ConstrainedRunResult>; wait(runId: string, options?: WaitOptions): Promise<ConstrainedRunResult>; cancel(runId: string): Promise<ConstrainedRunResult> };
@@ -170,6 +174,8 @@ export interface PublicApiDependencies {
   }>;
   sendMessage(id: string, prompt: string): Promise<void>; openThread(id: string): Promise<void>; subscribe(listener: (threadId: string, event: ThreadEvent) => void): () => void;
   interruptThread?(id: string): Promise<void>;
+  archiveThread?(id: string, assertActive: () => void): Promise<ArchiveThreadResult>;
+  markThreadReviewed?(id: string, assertActive: () => void): Promise<MarkReviewedResult>;
   getTraceMetadata?(id: string): Promise<RawLogTraceMetadata | null>;
   readTraceChunk?(id: string, options: { byteOffset: number; eventIndex: number; limit: number }): Promise<RawLogTraceChunk | null>;
   getRegisteredSkillNames?(): Promise<readonly string[]>;
@@ -208,6 +214,8 @@ export interface ClaudeThreadsApiService { readonly api: ClaudeThreadsApiV1; sta
 function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   const capabilities = ['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe'];
   if (deps.beginProvisionalThread) capabilities.push('threads.beginProvisional');
+  if (deps.archiveThread) capabilities.push('threads.archive');
+  if (deps.markThreadReviewed) capabilities.push('threads.markReviewed');
   if (deps.getTraceMetadata && deps.readTraceChunk) capabilities.push('traces.listSources', 'traces.readChunk', 'traces.subscribe');
   if (deps.runConstrainedQuery) capabilities.push('constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel');
   capabilities.push('orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration');
@@ -625,6 +633,14 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       if (name === 'ct_get_thread') { const threadId = String(args.thread_id ?? '').trim(); const thread = await get(threadId); if (!thread) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', `Thread not found: ${threadId}`); const lastN = Math.min(Math.max(1, Number(args.last_n) || 5), 20); return JSON.stringify({ ...thread, messages: thread.messages.slice(-lastN) }, null, 2); }
       if (name === 'ct_list_threads') { const status = String(args.status ?? 'all'); const limit = Math.min(Math.max(1, Number(args.limit) || 15), 30); let threads = [...await list()].sort((a, b) => b.updatedAt - a.updatedAt); threads = threads.filter(thread => toolStatus(thread) === status || status === 'all' || (status === 'waiting' && thread.status === 'waiting')).slice(0, limit); return JSON.stringify({ count: threads.length, threads }, null, 2); }
       if (name === 'ct_open_thread') { const threadId = String(args.thread_id ?? '').trim(); await api.threads.open(threadId); return `Opened thread ${threadId} in the Agent Threads panel.`; }
+      if (name === 'ct_archive_thread') {
+        const result = await api.threads.archive(args.thread_id as string);
+        return result.status === 'archived' ? `Archived thread ${result.threadId}.` : `Archive cancelled for thread ${result.threadId}.`;
+      }
+      if (name === 'ct_mark_reviewed') {
+        const result = await api.threads.markReviewed(args.thread_id as string);
+        return result.changed ? `Marked thread ${result.threadId} reviewed.` : `Thread ${result.threadId} is already reviewed.`;
+      }
       return `Error: Agent Threads tool "${name}" is not available in public API v1.`;
     } catch (error) { return `Error: ${error instanceof Error ? error.message : String(error)}`; }
   };
@@ -951,12 +967,21 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: computeCapabilities(deps),
     threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const owner = boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH); const explicitOrigin = boundedString(input.origin, 'origin', MAX_OWNER_LENGTH); if (owner && explicitOrigin && owner !== explicitOrigin) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match ownerPluginId.'); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: explicitOrigin ?? owner, externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, beginProvisional, send, wait, cancel,
       open: async (threadId: string) => { guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.'); await deps.openThread(threadId); },
+      archive: async (threadId: string) => { guard(); if (!deps.archiveThread) throw unavailable(); const id = boundedString(threadId, 'threadId', 512, true)!; return freeze(await deps.archiveThread(id, guard)); },
+      markReviewed: async (threadId: string) => { guard(); if (!deps.markThreadReviewed) throw unavailable(); const id = boundedString(threadId, 'threadId', 512, true)!; return freeze(await deps.markThreadReviewed(id, guard)); },
       subscribe: (listener: (event: PublicThreadEvent) => void) => { guard(); listeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; listeners.delete(listener); } }); },
       permissions: threadPermissions },
     traces: { listSources: listTraceSources, readChunk: readTraceChunk, subscribe: (listener: (event: PublicTraceEvent) => void) => { guard(); traceListeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; traceListeners.delete(listener); } }); } },
     constrainedRuns: { create: createConstrained, get: getConstrained, wait: waitConstrained, cancel: cancelConstrained },
     orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input); } },
-    agentTools: { createBundle: (profile) => { guard(); if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`); return freeze({ tools: VOICE_TOOLS, execute: executeTool }); } },
+    agentTools: { createBundle: (profile) => {
+      guard();
+      if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`);
+      const tools = [...VOICE_TOOLS];
+      if (deps.archiveThread) tools.push(tool('ct_archive_thread', 'Archive one thread when the user requests it. Use its exact thread_id from ct_list_threads; clarify ambiguous names. The host asks for confirmation for running threads and orchestrators. Cancellation is not success. Conversation retention follows host storage settings.', { thread_id: stringProp() }, ['thread_id']));
+      if (deps.markThreadReviewed) tools.push(tool('ct_mark_reviewed', 'Mark one idle thread reviewed when the user requests it, without opening it. Use its exact thread_id from ct_list_threads; clarify ambiguous names. Running threads must finish first.', { thread_id: stringProp() }, ['thread_id']));
+      return freeze({ tools, execute: executeTool });
+    } },
     mcp: { register: registerMcp, requestSecret: requestSecretMcp },
     extensions: { registerArtifactProvider, registerAgentTool, registerSlashCommand, registerMessageContentProvider },
     messageContent: { formatReference: (ref: MessageContentRef) => { guard(); try { return formatMessageContentReference(ref); } catch { throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'Invalid message content reference.'); } } },
