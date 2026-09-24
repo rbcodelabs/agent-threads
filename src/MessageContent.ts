@@ -31,6 +31,8 @@ export type MessageContentRegistrationResult =
   | { readonly success: false; readonly status: 'invalid' | 'conflict' | 'unavailable'; readonly providerId: string; readonly message: string; readonly dispose: () => void };
 
 const MAX_REFERENCE = 32_768;
+// JSON Unicode escapes can expand each decoded character to six wire characters.
+const MAX_REFERENCE_WIRE = MAX_REFERENCE * 6;
 const MAX_DOCUMENT = 1_000_000;
 const plain = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 const bounded = (value: unknown, limit: number): value is string => typeof value === 'string' && !!value.trim() && value.length <= limit;
@@ -94,12 +96,13 @@ export function extractMessageContent(source: string, options: { streaming?: boo
     const body = line.trimStart();
     if (options.streaming && i === lines.length - 1 && body && 'agent-content'.startsWith(body)) { lines[i] = ''; continue; }
     if (!body.startsWith('agent-content{')) continue;
+    if (body.length > MAX_REFERENCE_WIRE + 13) continue;
     const end = scanBalancedObject(body, 13);
     if (end === -1) {
       if (options.streaming && i === lines.length - 1) lines[i] = '';
       continue;
     }
-    if (end > MAX_REFERENCE + 13 || body.slice(end).trim()) continue;
+    if (body.slice(end).trim()) continue;
     let ref: MessageContentRef | null;
     try { ref = validateMessageContentRef(JSON.parse(body.slice(13, end))); } catch { continue; }
     if (!ref || markers.length >= 32) continue;

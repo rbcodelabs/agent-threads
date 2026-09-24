@@ -126,6 +126,8 @@ export interface ClaudeThreadsApiV1 {
     registerAgentTool(owner: PeerIdentity, contribution: AgentToolContribution): AgentToolRegistrationResult;
     registerSlashCommand(owner: PeerIdentity, contribution: SlashCommandContribution): SlashCommandRegistrationResult;
   };
+  /** Formats a bounded, durable inline content reference for an assistant message. */
+  readonly messageContent: { formatReference(ref: MessageContentRef): string };
   /**
    * Artifact entry point (ADR-0010). Lets a peer create an artifact and open
    * it without any view, DOM or private-manager access — the gap that made
@@ -137,7 +139,6 @@ export interface ClaudeThreadsApiV1 {
    * the identity that registered the provider, so a peer cannot write into
    * another plugin's provider namespace.
    */
-  readonly messageContent: { formatReference(ref: MessageContentRef): string };
   readonly artifacts: {
     list(threadId: string): Promise<readonly ThreadArtifactRef[]>;
     attach(owner: PeerIdentity, threadId: string, ref: ThreadArtifactRef): Promise<ArtifactAttachResult>;

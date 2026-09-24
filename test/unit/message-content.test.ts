@@ -35,6 +35,12 @@ describe('message content references', () => {
   it('bounds the number of hydrated references per message', () => {
     expect(extractMessageContent(Array(100).fill(formatMessageContentReference(ref)).join('\n')).markers).toHaveLength(32);
   });
+  it('round trips accepted formatter output even when HTML escaping expands the wire representation', () => {
+    const expanded = { ...ref, data: { html: '<'.repeat(6000) } };
+    const marker = formatMessageContentReference(expanded);
+    expect(marker.length).toBeGreaterThan(32768);
+    expect(extractMessageContent(marker).markers[0]?.ref).toEqual(expanded);
+  });
 });
 
 describe('message content providers', () => {
