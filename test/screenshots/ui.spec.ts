@@ -1781,6 +1781,16 @@ test.describe('Agent Threads UI', () => {
 
   // ─── Settings tab ────────────────────────────────────────────────────────
 
+  test('settings — section change retains keyboard focus', async ({ page }) => {
+    await page.goto('file://' + path.resolve('test/harness/settings.html'));
+    const sections = page.getByLabel('Settings section');
+    await sections.focus();
+    await sections.selectOption('projects');
+    await expect(sections).toBeFocused();
+    await sections.press('Tab');
+    await expect(page.getByRole('button', { name: 'New project' })).toBeFocused();
+  });
+
   test('settings — desktop section selector preserves the host content width', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto('file://' + path.resolve('test/harness/settings.html') + '?host=geode');

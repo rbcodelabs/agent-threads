@@ -1302,7 +1302,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       for (const tab of group.tabs) options.createEl('option', { text: tab.label, value: tab.id });
     }
     select.value = this.activeTab;
-    select.addEventListener('change', () => { this.activeTab = select.value as SettingsTabId; this.display(); });
+    select.addEventListener('change', () => {
+      const retainFocus = select === select.ownerDocument.activeElement;
+      this.activeTab = select.value as SettingsTabId;
+      this.display();
+      if (retainFocus) containerEl.querySelector<HTMLSelectElement>('.ct-settings-compact-nav select')?.focus();
+    });
 
     const body = shell.createDiv({ cls: 'ct-settings-tab-body' });
     switch (this.activeTab) {
