@@ -130,6 +130,8 @@ Codex `request_user_input` prompts use the same persisted question card as Claud
 
 Codex reasoning effort is configured separately from Claude effort. Selecting **Ultra** enables Codex's proactive native-agent behavior on models that advertise Ultra support. Unsupported model/effort combinations fail before a turn starts with a clear error, and Agent Threads never sends Codex's deprecated `multiAgentMode` field.
 
+**Codex computer use** is off by default in **Settings → Agent**. Off requests denied default app access and disables Codex's bundled computer-use plugins and known desktop-capable MCP entry points, including the legacy `node_repl` server. This can also remove the shared Codex browser REPL; Agent Threads' own browser tools are unaffected. On inherits your local Codex configuration, without installing tools or overriding its access restrictions. Changes apply when sessions next start or restart, including resumed threads. Existing running and idle sessions keep their current access; use **Reload plugin (safe)** after active work finishes to apply the choice to all sessions. This setting does not restrict arbitrary third-party automation tools or replace OS permissions.
+
 Agent profiles supplied by installed GitHub plugin sources remain native agent definitions in Claude and are available to Codex as role instructions for delegation.
 
 ### Tabs
@@ -976,6 +978,7 @@ Everything the [Skills Manager](#skills-manager) panel can do — browse the [sk
 |---|---|
 | Claude binary path | Path to the `claude` executable (auto-detected) |
 | Agent harness | Initial Claude or Codex default for new kickoff selectors. A selection made in the Agents List or Agent Board is local to that mounted view and does not rewrite this setting. |
+| Codex computer use | Off by default. Disables bundled Codex desktop-control capabilities for newly initialized sessions. On inherits local Codex configuration. Existing sessions require a restart; shared Codex browser REPL capabilities may also be unavailable while off. |
 | Default working directory | `cwd` for new threads; defaults to vault root |
 | Worktree location | Root directory for worktrees created by `enter_worktree` (default: `~/.geode/worktrees`, laid out as `<repo>/<branch>`). Must be durable storage — a temp directory is cleared on reboot, which deletes the worktree and any uncommitted work in it. |
 | Save threads to vault | Auto-save readable Markdown notes plus versioned machine recovery snapshots |

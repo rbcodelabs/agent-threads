@@ -22,6 +22,13 @@ describe('ThreadManager — thread lifecycle', () => {
     expect(manager.getThread(t.id)).toBe(t);
   });
 
+  it.each([false, true])('passes the computer-use choice %s to newly initialized Codex sessions', (enabled) => {
+    const m = makeManager({ codexComputerUseEnabled: enabled });
+    const thread = m.createThread('Computer-use policy', process.cwd(), undefined, 'codex');
+    const options = (m as any).buildThreadSessionOptions(thread.id, thread);
+    expect(options.codex.computerUseEnabled).toBe(enabled);
+  });
+
   it('createThread uses an explicit harness override without changing the default', () => {
     const m = makeManager({ agentHarness: 'claude' });
 

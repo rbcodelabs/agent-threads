@@ -58,6 +58,8 @@ export interface ClaudeHarnessOptions {
 
 /** Codex-specific transport settings; kept separate as its app-server grows. */
 export interface CodexHarnessOptions {
+  /** Defaults off; true inherits local Codex computer-use configuration. */
+  computerUseEnabled?: boolean;
   approvalPolicy: 'untrusted' | 'on-request' | 'never';
   sandbox: 'read-only' | 'workspace-write' | 'danger-full-access';
   /** Omitted to use the app-server/model default. Ultra enables proactive native agents where supported. */
