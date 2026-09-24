@@ -812,6 +812,8 @@ export interface PluginSettings {
   agentHarness: 'claude' | 'codex';
   /** Path to the Codex CLI executable (the app-server is launched from it). */
   codexBinaryPath: string;
+  /** Allow inherited Codex computer-use capabilities in newly initialized sessions. */
+  codexComputerUseEnabled: boolean;
   /**
    * Root directory for worktrees created by `enter_worktree`.
    *
@@ -1072,6 +1074,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   claudeBinaryPath: '/opt/homebrew/bin/claude',
   agentHarness: 'claude',
   codexBinaryPath: 'codex',
+  codexComputerUseEnabled: false,
   worktreeRoot: '',
   defaultCwd: '',
   saveThreadsToVault: true,

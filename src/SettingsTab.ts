@@ -1570,6 +1570,19 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName('Codex computer use')
+      .setDesc('Allow Codex computer-use capabilities from your local Codex configuration. Off by default; shared Codex browser tools may also be disabled. Changes apply when a Codex session next starts or restarts; existing sessions keep their current access. Use “Reload plugin (safe)” after active work finishes to apply to all sessions.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.codexComputerUseEnabled === true)
+          .onChange(async (value) => {
+            this.plugin.settings.codexComputerUseEnabled = value;
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName('Worktree location')
       .setDesc(
         'Where enter_worktree creates worktrees. Leave empty to use ~/.geode/worktrees. '

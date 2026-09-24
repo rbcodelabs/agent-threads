@@ -232,7 +232,27 @@ export class CodexSession {
 
     const savedCodexThread = options.resume;
     const mcpServers = codexMcpServers(options.codex?.mcpServers);
-    const threadConfig = Object.keys(mcpServers).length > 0 ? { mcp_servers: mcpServers } : undefined;
+    // Opt-in inherits the user's configuration; it never overrides local or
+    // managed denies. Disable the legacy REPL too: it can expose desktop tools
+    // independently of the bundled computer-use plugins.
+    const computerUseDisabled = options.codex?.computerUseEnabled !== true;
+    if (computerUseDisabled) {
+      for (const name of ['node_repl', 'cua_repl', 'computer-use']) {
+        // A disabled server still needs a valid transport when it does not
+        // exist in the user's config. Codex never launches this placeholder.
+        mcpServers[name] = { command: 'node', enabled: false };
+      }
+    }
+    const threadConfig = {
+      ...(Object.keys(mcpServers).length > 0 ? { mcp_servers: mcpServers } : {}),
+      ...(computerUseDisabled ? {
+        computer_use: { default_app_access: 'deny' },
+        plugins: {
+          'unified-computer-use@openai-bundled': { enabled: false },
+          'computer-use@openai-bundled': { enabled: false },
+        },
+      } : {}),
+    };
     let result: any;
     if (savedCodexThread) {
       try {
