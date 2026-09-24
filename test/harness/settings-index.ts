@@ -3,6 +3,7 @@ import { ClaudeThreadsSettingTab, RequestSecretModal } from '../../src/SettingsT
 import { DEFAULT_SETTINGS, type PluginSettings, type Project, type ScheduledItem, type WatchedDocument } from '../../src/types';
 import { mockApp } from './obsidian-mock';
 import { McpRegistrationModal } from '../../src/confirmModal';
+import { secretStorageKey } from '../../src/secretUtils';
 
 (window as any).__openMcpRegistration = (type: 'stdio' | 'http' = 'stdio') => {
   (window as any).__mcpRegistrationResult = undefined;
@@ -11,6 +12,7 @@ import { McpRegistrationModal } from '../../src/confirmModal';
     : { name: 'example-tools', type, url: 'https://mcp.example.com/agent/tools', headers: { Authorization: 'Bearer ${EXAMPLE_TOKEN}' } };
   new McpRegistrationModal(mockApp as any, entry, result => { (window as any).__mcpRegistrationResult = result; }).open();
 };
+(window as any).__getSettingsSecret = (name: string) => mockApp.secretStorage.getSecret(secretStorageKey(name));
 
 const fixtureProjects: Project[] = [
   {
@@ -227,8 +229,15 @@ const mockPlugin = {
       const project = settings.projects.find((candidate) => candidate.id === id);
       if (project) Object.assign(project, updates);
     },
-    deleteProject: () => {},
-    createProject: () => {},
+    getThreadsByProject: (id: string) => id === 'proj-1'
+      ? [{ id: 'thread-1' }, { id: 'thread-2' }]
+      : [{ id: 'thread-3' }],
+    deleteProject: (id: string) => { settings.projects = settings.projects.filter(project => project.id !== id); },
+    createProject: (name: string, vaultFolder: string, description?: string, cwdOverride?: string) => {
+      const project = { id: `proj-${settings.projects.length + 1}`, name, vaultFolder, description, cwdOverride, orchestratorEnabled: true, createdAt: Date.now() };
+      settings.projects.push(project);
+      return project;
+    },
     updateSettings: () => {},
     getThread: (id: string) => {
       if (id === 'thread-morning') return { id, title: 'Morning inbox triage run' };
@@ -263,6 +272,8 @@ const mockPlugin = {
   initDesktopRelayClient: () => {},
   initMobileRelayClient: () => {},
   saveSettings: async () => {},
+  ensureProjectOrchestratorThread: async () => {},
+  deleteProject: async (id: string) => { settings.projects = settings.projects.filter(project => project.id !== id); },
   getView: () => null,
   getEffectiveCwd: () => '/Users/mock/vault',
   dispatchNewThread: async (prompt: string, _images: unknown, title: string | undefined) => {
@@ -286,6 +297,21 @@ const mockPlugin = {
 
 const tab = new ClaudeThreadsSettingTab(mockApp as any, mockPlugin as any);
 const container = document.getElementById('app')!;
+if (new URLSearchParams(location.search).get('host') === 'geode') {
+  document.body.classList.add('geode-settings-host');
+  // Host chrome mirrors the approved Geode Ivory mock; all content is synthetic.
+  const nav = document.createElement('nav');
+  nav.className = 'geode-settings-nav';
+  nav.setAttribute('aria-label', 'Geode settings');
+  for (const name of ['Appearance', 'Hotkeys', 'Daily Notes', 'Core plugins', 'Community plugins & themes', 'Sync', 'Advanced', 'Project folders', 'Performance', 'PLUGIN OPTIONS', 'Agent Threads', 'Calendar (Beta)', 'Google Docs Sync', 'Terminal']) {
+    const item = document.createElement('div');
+    item.textContent = name;
+    if (name === 'Agent Threads') item.className = 'is-selected';
+    if (name === 'PLUGIN OPTIONS') item.className = 'geode-settings-group';
+    nav.appendChild(item);
+  }
+  container.appendChild(nav);
+}
 container.appendChild(tab.containerEl);
 tab.display();
 
