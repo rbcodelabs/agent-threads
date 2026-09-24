@@ -1283,19 +1283,21 @@ export class McpServerModal extends Modal {
 // Settings tab
 // ───────────────────────────────────────────────────────────────────────────
 
-type SettingsTabId = 'general' | 'claude' | 'tools' | 'vault' | 'features' | 'scheduled' | 'remote' | 'skills' | 'mcp';
+type SettingsTabId = 'general' | 'claude' | 'tools' | 'vault' | 'features' | 'projects' | 'secrets' | 'scheduled' | 'remote' | 'skills' | 'mcp';
 
-const TABS: { id: SettingsTabId; label: string }[] = [
-  { id: 'general', label: 'General' },
-  { id: 'claude', label: 'Agent' },
-  { id: 'tools', label: 'Tools' },
-  { id: 'vault', label: 'Vault' },
-  { id: 'features', label: 'Features' },
-  { id: 'scheduled', label: 'Scheduled' },
-  { id: 'remote', label: 'Remote' },
-  { id: 'skills', label: 'Skills' },
-  { id: 'mcp', label: 'MCP' },
+const TAB_GROUPS: { label: string; tabs: { id: SettingsTabId; label: string }[] }[] = [
+  { label: 'Preferences', tabs: [
+    { id: 'general', label: 'General' }, { id: 'claude', label: 'Agent' },
+    { id: 'tools', label: 'Tools' }, { id: 'vault', label: 'Vault' }, { id: 'features', label: 'Features' },
+  ] },
+  { label: 'Workspace', tabs: [
+    { id: 'projects', label: 'Projects' }, { id: 'secrets', label: 'Secrets' }, { id: 'scheduled', label: 'Scheduled' },
+  ] },
+  { label: 'Extensions', tabs: [{ id: 'skills', label: 'Skills' }, { id: 'mcp', label: 'MCP' }] },
+  { label: 'Connectivity', tabs: [{ id: 'remote', label: 'Remote' }] },
 ];
+
+const TABS = TAB_GROUPS.flatMap(group => group.tabs);
 
 /** Fallback model list shown before any session has run and populated discoveredModels. */
 const FALLBACK_MODELS: { value: string; displayName: string }[] = [
@@ -1308,6 +1310,8 @@ const FALLBACK_MODELS: { value: string; displayName: string }[] = [
 export class ClaudeThreadsSettingTab extends PluginSettingTab {
   /** Survives re-renders (display() is called after toggles, modals, etc.). */
   private activeTab: SettingsTabId = 'general';
+  private selectedProjectId: string | null = null;
+  private selectedSecretName: string | null = null;
 
   constructor(
     app: App,
@@ -1367,26 +1371,41 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       return;
     }
 
-    // Tab navigation
-    const nav = containerEl.createDiv({ cls: 'ct-settings-tabs' });
-    for (const tab of TABS) {
-      const btn = nav.createEl('button', {
-        text: tab.label,
-        cls: 'ct-settings-tab-btn' + (tab.id === this.activeTab ? ' is-active' : ''),
-      });
-      btn.addEventListener('click', () => {
-        this.activeTab = tab.id;
-        this.display();
-      });
+    const shell = containerEl.createDiv({ cls: 'ct-settings-shell' });
+    const compact = shell.createDiv({ cls: 'ct-settings-compact-nav' });
+    const selectLabel = compact.createEl('label');
+    selectLabel.createSpan({ text: 'Settings section' });
+    const select = selectLabel.createEl('select', { attr: { 'aria-label': 'Settings section' } });
+    for (const tab of TABS) select.createEl('option', { text: tab.label, value: tab.id });
+    select.value = this.activeTab;
+    select.addEventListener('change', () => { this.activeTab = select.value as SettingsTabId; this.display(); });
+
+    const sidebar = shell.createEl('aside', { cls: 'ct-settings-sidebar', attr: { 'aria-label': 'Agent Threads settings' } });
+    const brand = sidebar.createDiv({ cls: 'ct-settings-brand' });
+    brand.createEl('strong', { text: 'Agent Threads' });
+    brand.createEl('span', { text: 'Settings' });
+    const nav = sidebar.createEl('nav', { cls: 'ct-settings-tabs' });
+    for (const group of TAB_GROUPS) {
+      nav.createEl('p', { text: group.label, cls: 'ct-settings-nav-group' });
+      for (const tab of group.tabs) {
+        const btn = nav.createEl('button', {
+          text: tab.label,
+          cls: 'ct-settings-nav-btn ct-settings-tab-btn' + (tab.id === this.activeTab ? ' is-active' : ''),
+          attr: { type: 'button', 'aria-current': tab.id === this.activeTab ? 'page' : 'false' },
+        });
+        btn.addEventListener('click', () => { this.activeTab = tab.id; this.display(); });
+      }
     }
 
-    const body = containerEl.createDiv({ cls: 'ct-settings-tab-body' });
+    const body = shell.createDiv({ cls: 'ct-settings-tab-body' });
     switch (this.activeTab) {
       case 'general': this.renderGeneralTab(body); break;
       case 'claude': this.renderClaudeTab(body); break;
       case 'tools': this.renderToolsTab(body); break;
       case 'vault': this.renderVaultTab(body); break;
       case 'features': this.renderFeaturesTab(body); break;
+      case 'projects': this.renderProjectsTab(body); break;
+      case 'secrets': this.renderSecretsTab(body); break;
       case 'scheduled': this.renderScheduledTab(body); break;
       case 'remote': this.renderRemoteTab(body); break;
       case 'skills': this.renderSkillsTab(body); break;
@@ -1748,66 +1767,6 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
-    const secretsList = containerEl.createDiv({ cls: 'ct-secrets-list' });
-    const renderSecrets = () => {
-      secretsList.empty();
-      const keys = this.plugin.settings.secretEnvKeys ?? [];
-      if (keys.length === 0) {
-        secretsList.createEl('p', { text: 'No secrets configured yet.', cls: 'ct-settings-empty' });
-      } else {
-        for (const varName of keys) {
-          const existingVal = this.plugin.app.secretStorage.getSecret(secretStorageKey(varName));
-          const maskedVal = existingVal
-            ? (existingVal.length <= 8 ? '••••••••' : existingVal.slice(0, 4) + '••••' + existingVal.slice(-4))
-            : '(not set)';
-          new Setting(secretsList)
-            .setName(varName)
-            .setDesc(maskedVal)
-            .addButton((btn) =>
-              btn.setButtonText('Change').onClick(() => {
-                new SecretEnvModal(this.app, varName, (newVal) => {
-                  this.plugin.app.secretStorage.setSecret(secretStorageKey(varName), newVal);
-                  renderSecrets();
-                }).open();
-              }),
-            )
-            .addButton((btn) =>
-              btn.setButtonText('Remove').setWarning().onClick(async () => {
-                this.plugin.settings.secretEnvKeys =
-                  this.plugin.settings.secretEnvKeys.filter((k) => k !== varName);
-                this.plugin.app.secretStorage.setSecret(secretStorageKey(varName), '');
-                await this.plugin.saveSettings();
-                renderSecrets();
-              }),
-            );
-          this.renderSecretScopeRow(secretsList, varName, renderSecrets);
-        }
-      }
-    };
-
-    const secretsSetting = new Setting(containerEl)
-      .setName('Secret environment variables')
-      .addButton((btn) =>
-        btn.setButtonText('Add secret').setCta().onClick(() => {
-          new SecretEnvModal(this.app, '', async (val, varName) => {
-            if (!varName) return;
-            if (!this.plugin.settings.secretEnvKeys.includes(varName)) {
-              this.plugin.settings.secretEnvKeys.push(varName);
-              await this.plugin.saveSettings();
-            }
-            this.plugin.app.secretStorage.setSecret(secretStorageKey(varName), val);
-            renderSecrets();
-          }).open();
-        }),
-      );
-    applySecretStorageCopy(
-      this.app,
-      secretsSetting.descEl,
-      (storage) => `API keys and tokens injected into every Claude session, never into data.json. ${storage}`,
-    );
-    containerEl.appendChild(secretsList);
-    renderSecrets();
-
     // macOS privacy notice
     const macOSNote = containerEl.createDiv({ cls: 'ct-settings-notice' });
     macOSNote.createEl('strong', { text: 'macOS users: ' });
@@ -2093,175 +2052,237 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
-    // — Projects —
-    new Setting(containerEl)
-      .setName('Projects')
-      .setDesc('Projects group threads and focus their working context. They do not restrict vault access, tools, MCP servers, skills, or secrets.')
-      .setHeading();
+  }
 
-    const projectsListEl = containerEl.createDiv({ cls: 'ct-projects-list' });
-    const renderProjects = () => {
-      projectsListEl.empty();
-      const projects = this.plugin.manager.getProjects();
-      if (projects.length === 0) {
-        projectsListEl.createEl('p', { text: 'No projects yet.', cls: 'ct-settings-empty' });
-      } else {
-        for (const project of projects) {
-          this.renderProjectRow(projectsListEl, project, renderProjects);
-        }
+  private renderManagerHeader(container: HTMLElement, title: string, description: string, actionLabel: string, onAction: () => void): void {
+    const header = container.createDiv({ cls: 'ct-settings-page-header' });
+    const copy = header.createDiv();
+    copy.createEl('h1', { text: title });
+    copy.createEl('p', { text: description });
+    const action = header.createEl('button', { text: actionLabel, cls: 'mod-cta', attr: { type: 'button' } });
+    action.addEventListener('click', onAction);
+  }
+
+  private createManagerField(
+    container: HTMLElement,
+    label: string,
+    value: string,
+    options: { textarea?: boolean; placeholder?: string; disabled?: boolean; description?: string; type?: string } = {},
+  ): HTMLInputElement | HTMLTextAreaElement {
+    const field = container.createEl('label', { cls: 'ct-manager-field' });
+    field.createSpan({ text: label, cls: 'ct-manager-field-label' });
+    const input = options.textarea
+      ? field.createEl('textarea', { attr: { rows: '6', 'aria-label': label } })
+      : field.createEl('input', { type: options.type ?? 'text', attr: { 'aria-label': label } });
+    input.value = value;
+    if (options.placeholder) input.setAttribute('placeholder', options.placeholder);
+    if (options.disabled && input instanceof HTMLInputElement) input.disabled = true;
+    if (options.description) field.createEl('small', { text: options.description });
+    return input;
+  }
+
+  private renderProjectsTab(containerEl: HTMLElement): void {
+    this.renderManagerHeader(containerEl, 'Projects', 'Group threads and keep each agent focused on the right context.', 'New project', () => {
+      this.selectedProjectId = '';
+      this.display();
+      this.containerEl.querySelector<HTMLInputElement>('[aria-label="Project name"]')?.focus();
+    });
+
+    const projects = this.plugin.manager.getProjects();
+    if (this.selectedProjectId === null || (this.selectedProjectId && !projects.some(project => project.id === this.selectedProjectId))) {
+      this.selectedProjectId = projects[0]?.id ?? '';
+    }
+    const manager = containerEl.createDiv({ cls: 'ct-settings-manager' });
+    const list = manager.createEl('section', { cls: 'ct-manager-list', attr: { 'aria-label': 'Projects' } });
+    const search = list.createEl('input', { type: 'search', placeholder: 'Search projects', attr: { 'aria-label': 'Search projects' } });
+    const rows = list.createDiv({ cls: 'ct-manager-list-rows' });
+    const renderRows = () => {
+      rows.empty();
+      const query = search.value.trim().toLowerCase();
+      const matches = projects.filter(project => `${project.name} ${project.vaultFolder} ${this.plugin.manager.getProjectCwd(project)}`.toLowerCase().includes(query));
+      if (matches.length === 0) rows.createEl('p', { cls: 'ct-settings-empty', text: projects.length === 0 ? 'No projects yet.' : 'No matching projects.' });
+      for (const project of matches) {
+        const threadCount = this.plugin.manager.getThreadsByProject(project.id).length;
+        const row = rows.createEl('button', { cls: `ct-manager-list-item${project.id === this.selectedProjectId ? ' is-selected' : ''}`, attr: { type: 'button' } });
+        row.createEl('strong', { text: project.name });
+        row.createEl('small', { text: this.plugin.manager.getProjectCwd(project) });
+        row.createEl('span', { text: `${project.orchestratorThreadId ? 'Orchestrator active' : 'No orchestrator'} · ${threadCount} thread${threadCount === 1 ? '' : 's'}` });
+        row.addEventListener('click', () => { this.selectedProjectId = project.id; this.display(); });
       }
     };
-    renderProjects();
+    search.addEventListener('input', renderRows);
+    renderRows();
+    list.createEl('footer', { text: `${projects.length} project${projects.length === 1 ? '' : 's'}` });
 
-    let nameInput: HTMLInputElement | null = null;
-    let folderInput: HTMLInputElement | null = null;
-    let cwdInput: HTMLInputElement | null = null;
-    new Setting(containerEl)
-      .setName('New project')
-      .addText((text) => {
-        text.setPlaceholder('Project name');
-        nameInput = text.inputEl;
-      })
-      .addText((text) => {
-        text.setPlaceholder('Vault folder (e.g. Work/Acme)');
-        folderInput = text.inputEl;
-      })
-      .addText((text) => {
-        text.setPlaceholder('Filesystem cwd (optional)');
-        cwdInput = text.inputEl;
-      })
-      .addButton((btn) =>
-        btn.setButtonText('Add').setCta().onClick(async () => {
-          const name = nameInput?.value.trim() ?? '';
-          const folder = folderInput?.value.trim() ?? '';
-          if (!name || !folder) {
-            new Notice('Enter both a project name and vault folder.');
-            return;
-          }
-          const cwdOverride = cwdInput?.value.trim() || undefined;
-          this.plugin.manager.createProject(name, folder, undefined, cwdOverride);
-          await this.plugin.saveSettings();
-          if (nameInput) nameInput.value = '';
-          if (folderInput) folderInput.value = '';
-          if (cwdInput) cwdInput.value = '';
-          renderProjects();
-        }),
-      );
-  }
-
-  /**
-   * Renders the per-secret Project scope control below a secret's row in
-   * `renderSecrets()`. Absent or empty `secretEnvScopes[varName]` is Global —
-   * the default, matching pre-scoping behavior. Checking a project restricts
-   * that secret's value to threads/scheduled items whose projectId is
-   * checked here; a project-less thread never receives a scoped secret.
-   */
-  private renderSecretScopeRow(container: HTMLElement, varName: string, refresh: () => void): void {
-    const projects = this.plugin.settings.projects ?? [];
-    const scopedIds = this.plugin.settings.secretEnvScopes?.[varName] ?? [];
-    const scopeEl = container.createDiv({ cls: 'ct-secret-scope' });
-    scopeEl.createEl('div', {
-      cls: 'ct-settings-empty',
-      text: scopedIds.length === 0
-        ? 'Scope: Global (every project, and project-less threads)'
-        : `Scope: restricted to ${scopedIds.length} project${scopedIds.length === 1 ? '' : 's'}`,
-    });
-    if (projects.length === 0) return;
-    for (const project of projects) {
-      new Setting(scopeEl)
-        .setName(project.name)
-        .setClass('ct-secret-scope-project')
-        .addToggle((toggle) =>
-          toggle.setValue(scopedIds.includes(project.id)).onChange(async (checked) => {
-            const scopes = this.plugin.settings.secretEnvScopes ?? (this.plugin.settings.secretEnvScopes = {});
-            const nextIds = new Set(scopes[varName] ?? []);
-            if (checked) nextIds.add(project.id);
-            else nextIds.delete(project.id);
-            if (nextIds.size === 0) delete scopes[varName];
-            else scopes[varName] = [...nextIds];
-            await this.plugin.saveSettings();
-            refresh();
-          }),
-        );
+    const detail = manager.createEl('section', { cls: 'ct-manager-detail' });
+    const project = projects.find(candidate => candidate.id === this.selectedProjectId);
+    const isNew = this.selectedProjectId === '';
+    if (!project && !isNew) {
+      detail.createEl('div', { cls: 'ct-manager-empty', text: 'Create a project to group related threads and working context.' });
+      return;
     }
+    const heading = detail.createDiv({ cls: 'ct-manager-detail-header' });
+    heading.createEl('h2', { text: isNew ? 'New project' : project!.name });
+    if (project) {
+      const orchestrator = heading.createEl('button', { text: project.orchestratorThreadId ? 'Open orchestrator' : 'Create orchestrator', attr: { type: 'button' } });
+      orchestrator.addEventListener('click', async () => { await this.plugin.ensureProjectOrchestratorThread(project.id, true); this.display(); });
+    }
+    const form = detail.createDiv({ cls: 'ct-manager-form' });
+    const name = this.createManagerField(form, 'Project name', project?.name ?? '', { placeholder: 'Project name' }) as HTMLInputElement;
+    const folder = this.createManagerField(form, 'Vault folder', project?.vaultFolder ?? '', {
+      placeholder: 'Products/My Project', description: 'Changing this updates future context. Existing files are not moved.',
+    }) as HTMLInputElement;
+    const cwd = this.createManagerField(form, 'Filesystem working directory', project?.cwdOverride ?? '', {
+      placeholder: 'Optional absolute path', description: project ? `Effective cwd: ${this.plugin.manager.getProjectCwd(project)}` : 'Leave blank to derive it from the vault folder.',
+    }) as HTMLInputElement;
+    const description = this.createManagerField(form, 'Project context', project?.description ?? '', {
+      textarea: true, placeholder: 'Goals, conventions, and key files…', description: 'Injected into the agent system prompt for every thread in this project.',
+    }) as HTMLTextAreaElement;
+    const error = detail.createEl('p', { cls: 'ct-manager-error', attr: { role: 'alert' } });
+    error.style.display = 'none';
+    if (project) {
+      const danger = detail.createDiv({ cls: 'ct-manager-danger' });
+      const warning = danger.createDiv();
+      warning.createEl('strong', { text: 'Delete project' });
+      warning.createEl('small', { text: 'Threads are kept and detached. Schedules retain their current cwd.' });
+      const remove = danger.createEl('button', { text: 'Delete…', cls: 'mod-warning', attr: { type: 'button' } });
+      remove.addEventListener('click', async () => {
+        const threadCount = this.plugin.manager.getThreadsByProject(project.id).length;
+        const scheduleCount = (this.plugin.settings.scheduledItems ?? []).filter(item => item.projectId === project.id).length;
+        if (!window.confirm(`Delete ${project.name}? ${threadCount} thread(s) will be detached and ${scheduleCount} schedule(s) will keep their current effective cwd.`)) return;
+        await this.plugin.deleteProject(project.id);
+        this.selectedProjectId = null;
+        this.display();
+      });
+    }
+    const actions = detail.createEl('footer', { cls: 'ct-manager-actions' });
+    const state = actions.createEl('span', { text: isNew ? 'New project draft' : 'No unsaved changes' });
+    for (const input of [name, folder, cwd, description]) input.addEventListener('input', () => { state.textContent = 'Unsaved changes'; });
+    const cancel = actions.createEl('button', { text: 'Cancel', attr: { type: 'button' } });
+    cancel.addEventListener('click', () => { if (isNew) this.selectedProjectId = projects[0]?.id ?? null; this.display(); });
+    const save = actions.createEl('button', { text: isNew ? 'Create project' : 'Save changes', cls: 'mod-cta', attr: { type: 'button' } });
+    save.addEventListener('click', async () => {
+      const projectName = name.value.trim();
+      const vaultFolder = folder.value.trim();
+      if (!projectName || !vaultFolder) { error.textContent = 'Project name and vault folder are required.'; error.style.display = ''; return; }
+      if (project) this.plugin.manager.updateProject(project.id, { name: projectName, vaultFolder, cwdOverride: cwd.value.trim() || undefined, description: description.value });
+      else this.selectedProjectId = this.plugin.manager.createProject(projectName, vaultFolder, description.value, cwd.value.trim() || undefined).id;
+      await this.plugin.saveSettings();
+      this.display();
+    });
   }
 
-  private renderProjectRow(container: HTMLElement, project: Project, refresh: () => void): void {
-    const row = new Setting(container)
-      .setName(project.name)
-      .setDesc(`Vault folder: ${project.vaultFolder} · Effective cwd: ${this.plugin.manager.getProjectCwd(project)}`);
+  private renderSecretsTab(containerEl: HTMLElement): void {
+    this.renderManagerHeader(containerEl, 'Secrets', 'Securely provide API keys and tokens to agent sessions.', 'Add secret', () => {
+      this.selectedSecretName = '';
+      this.display();
+      this.containerEl.querySelector<HTMLInputElement>('[aria-label="Variable name"]')?.focus();
+    });
+    const notice = containerEl.createDiv({ cls: 'ct-settings-notice ct-secret-storage-notice' });
+    applySecretStorageCopy(this.app, notice, storage => `${storage} Values never appear in data.json. Only names and project access are saved with plugin settings.`);
 
-    row.addText((text) =>
-      text
-        .setValue(project.name)
-        .setPlaceholder('Project name')
-        .onChange(async (val) => {
-          if (val.trim()) {
-            this.plugin.manager.updateProject(project.id, { name: val.trim() });
-            await this.plugin.saveSettings();
-          }
-        }),
-    );
+    const keys = this.plugin.settings.secretEnvKeys ?? [];
+    if (this.selectedSecretName === null || (this.selectedSecretName && !keys.includes(this.selectedSecretName))) this.selectedSecretName = keys[0] ?? '';
+    const manager = containerEl.createDiv({ cls: 'ct-settings-manager' });
+    const list = manager.createEl('section', { cls: 'ct-manager-list', attr: { 'aria-label': 'Secrets' } });
+    const search = list.createEl('input', { type: 'search', placeholder: 'Search secrets', attr: { 'aria-label': 'Search secrets' } });
+    const rows = list.createDiv({ cls: 'ct-manager-list-rows' });
+    const mask = (value: string | null) => !value ? 'No value stored' : value.length <= 8 ? '••••••••' : `${value.slice(0, 4)}••••${value.slice(-4)}`;
+    const renderRows = () => {
+      rows.empty();
+      const query = search.value.trim().toLowerCase();
+      const matches = keys.filter(key => key.toLowerCase().includes(query));
+      if (matches.length === 0) rows.createEl('p', { cls: 'ct-settings-empty', text: keys.length === 0 ? 'No secrets configured yet.' : 'No matching secrets.' });
+      for (const key of matches) {
+        const value = this.plugin.app.secretStorage.getSecret(secretStorageKey(key));
+        const scoped = this.plugin.settings.secretEnvScopes?.[key] ?? [];
+        const row = rows.createEl('button', { cls: `ct-manager-list-item${key === this.selectedSecretName ? ' is-selected' : ''}`, attr: { type: 'button' } });
+        row.createEl('strong', { text: key });
+        row.createEl('small', { text: mask(value) });
+        row.createEl('span', { text: `${value ? 'Set' : 'Missing'} · ${scoped.length ? `${scoped.length} project${scoped.length === 1 ? '' : 's'}` : 'Global'}` });
+        row.addEventListener('click', () => { this.selectedSecretName = key; this.display(); });
+      }
+    };
+    search.addEventListener('input', renderRows);
+    renderRows();
 
-    row.addButton((btn) =>
-      btn
-        .setButtonText(project.orchestratorThreadId ? 'Open orchestrator' : 'Create orchestrator')
-        .onClick(async () => {
-          await this.plugin.ensureProjectOrchestratorThread(project.id, true);
-          refresh();
-        }),
-    );
-
-    row.addButton((btn) =>
-      btn
-        .setIcon('trash')
-        .setWarning()
-        .setTooltip('Delete project (threads are kept)')
-        .onClick(async () => {
-          const threadCount = this.plugin.manager.getThreadsByProject(project.id).length;
-          const scheduleCount = (this.plugin.settings.scheduledItems ?? []).filter(item => item.projectId === project.id).length;
-          const confirmed = window.confirm(`Delete ${project.name}? ${threadCount} thread(s) will be detached and ${scheduleCount} schedule(s) will keep their current effective cwd.`);
-          if (!confirmed) return;
-          await this.plugin.deleteProject(project.id);
-          refresh();
-        }),
-    );
-
-    new Setting(container)
-      .setName('Filesystem cwd override')
-      .setDesc(`Optional absolute path. Clear it to derive cwd from the vault folder. Effective cwd: ${this.plugin.manager.getProjectCwd(project)}`)
-      .setClass('ct-project-cwd-setting')
-      .addText((text) => {
-        text
-          .setPlaceholder('Derived from vault folder')
-          .setValue(project.cwdOverride ?? '');
-        text.inputEl.addClass('ct-settings-wide-input');
-        // Commit on blur so the effective-cwd description refreshes once the
-        // edit is complete without rebuilding the row on every keystroke.
-        text.inputEl.addEventListener('blur', async () => {
-          const cwdOverride = text.inputEl.value.trim() || undefined;
-          if (cwdOverride === project.cwdOverride) return;
-          this.plugin.manager.updateProject(project.id, { cwdOverride });
-          await this.plugin.saveSettings();
-          refresh();
-        });
+    const detail = manager.createEl('section', { cls: 'ct-manager-detail' });
+    const isNew = this.selectedSecretName === '';
+    const secretName = isNew ? '' : this.selectedSecretName!;
+    if (!isNew && !keys.includes(secretName)) { detail.createEl('div', { cls: 'ct-manager-empty', text: 'Add a secret to securely provide credentials to agent sessions.' }); return; }
+    detail.createEl('h2', { text: isNew ? 'New secret' : secretName });
+    const currentValue = isNew ? null : this.plugin.app.secretStorage.getSecret(secretStorageKey(secretName));
+    const form = detail.createDiv({ cls: 'ct-manager-form' });
+    const name = this.createManagerField(form, 'Variable name', secretName, {
+      placeholder: 'MY_API_KEY', disabled: !isNew, description: isNew ? 'Use an environment-variable identifier.' : 'Names cannot change because integrations may reference this identifier.',
+    }) as HTMLInputElement;
+    const replacement = this.createManagerField(form, isNew ? 'Value' : 'Replace value', '', {
+      type: 'password', placeholder: isNew ? 'Paste the secret value' : 'Leave blank to keep the current value', description: !isNew ? `Current value: ${mask(currentValue)}` : undefined,
+    }) as HTMLInputElement;
+    const scope = form.createEl('fieldset', { cls: 'ct-secret-scope-choice' });
+    scope.createEl('legend', { text: 'Project access' });
+    const existingScope = this.plugin.settings.secretEnvScopes?.[secretName] ?? [];
+    const globalLabel = scope.createEl('label');
+    const globalRadio = globalLabel.createEl('input', { type: 'radio', attr: { name: 'secret-scope', 'aria-label': 'Global' } });
+    globalRadio.checked = existingScope.length === 0;
+    globalLabel.createSpan({ text: 'Global — every project and project-less thread.' });
+    const selectedLabel = scope.createEl('label');
+    const selectedRadio = selectedLabel.createEl('input', { type: 'radio', attr: { name: 'secret-scope', 'aria-label': 'Selected projects' } });
+    selectedRadio.checked = existingScope.length > 0;
+    selectedLabel.createSpan({ text: 'Selected projects' });
+    const checklist = form.createDiv({ cls: 'ct-secret-projects' });
+    const projectSearch = checklist.createEl('input', { type: 'search', placeholder: 'Filter projects', attr: { 'aria-label': 'Filter projects' } });
+    const checks = checklist.createDiv();
+    const chosen = new Set(existingScope);
+    const renderChecks = () => {
+      checks.empty();
+      const query = projectSearch.value.trim().toLowerCase();
+      for (const project of this.plugin.manager.getProjects().filter(project => project.name.toLowerCase().includes(query))) {
+        const label = checks.createEl('label');
+        const checkbox = label.createEl('input', { type: 'checkbox', attr: { 'aria-label': project.name } });
+        checkbox.checked = chosen.has(project.id);
+        checkbox.addEventListener('change', () => checkbox.checked ? chosen.add(project.id) : chosen.delete(project.id));
+        label.createSpan({ text: project.name });
+      }
+    };
+    projectSearch.addEventListener('input', renderChecks);
+    renderChecks();
+    const updateScopeVisibility = () => checklist.toggleClass('is-hidden', !selectedRadio.checked);
+    globalRadio.addEventListener('change', updateScopeVisibility);
+    selectedRadio.addEventListener('change', updateScopeVisibility);
+    updateScopeVisibility();
+    const error = detail.createEl('p', { cls: 'ct-manager-error', attr: { role: 'alert' } });
+    error.style.display = 'none';
+    if (!isNew) {
+      const danger = detail.createDiv({ cls: 'ct-manager-danger' });
+      const warning = danger.createDiv(); warning.createEl('strong', { text: 'Remove secret' }); warning.createEl('small', { text: 'Clears the stored value and project access.' });
+      const remove = danger.createEl('button', { text: 'Remove…', cls: 'mod-warning', attr: { type: 'button' } });
+      remove.addEventListener('click', async () => {
+        if (!window.confirm(`Remove ${secretName}? Its stored value and project access will be cleared.`)) return;
+        this.plugin.app.secretStorage.setSecret(secretStorageKey(secretName), '');
+        this.plugin.settings.secretEnvKeys = keys.filter(key => key !== secretName);
+        if (this.plugin.settings.secretEnvScopes) delete this.plugin.settings.secretEnvScopes[secretName];
+        await this.plugin.saveSettings(); this.selectedSecretName = null; this.display();
       });
-
-    new Setting(container)
-      .setName('Project context')
-      .setDesc('Injected into Claude\'s system prompt for every message in this project.')
-      .setClass('ct-project-context-setting')
-      .addTextArea((area) => {
-        area
-          .setPlaceholder('Goals, conventions, key files — anything Claude should always know…')
-          .setValue(project.description ?? '')
-          .onChange(async (val) => {
-            this.plugin.manager.updateProject(project.id, { description: val });
-            await this.plugin.saveSettings();
-          });
-        area.inputEl.rows = 4;
-        area.inputEl.addClass('ct-settings-wide-input');
-      });
+    }
+    const actions = detail.createEl('footer', { cls: 'ct-manager-actions' });
+    const state = actions.createEl('span', { text: isNew ? 'New secret draft' : 'No unsaved changes' });
+    for (const input of [name, replacement, globalRadio, selectedRadio]) input.addEventListener('input', () => { state.textContent = 'Unsaved changes'; });
+    const cancel = actions.createEl('button', { text: 'Cancel', attr: { type: 'button' } });
+    cancel.addEventListener('click', () => { if (isNew) this.selectedSecretName = keys[0] ?? null; this.display(); });
+    const save = actions.createEl('button', { text: isNew ? 'Add secret' : 'Save changes', cls: 'mod-cta', attr: { type: 'button' } });
+    save.addEventListener('click', async () => {
+      const resolvedName = name.value.trim().toUpperCase();
+      if (!/^[A-Z_][A-Z0-9_]*$/.test(resolvedName)) { error.textContent = 'Use a valid environment-variable name (letters, numbers, and underscores).'; error.style.display = ''; return; }
+      if (isNew && keys.includes(resolvedName)) { error.textContent = 'A secret with this name already exists.'; error.style.display = ''; return; }
+      if (isNew && !replacement.value.trim()) { error.textContent = 'A value is required for a new secret.'; error.style.display = ''; return; }
+      if (selectedRadio.checked && chosen.size === 0) { error.textContent = 'Select at least one project, or choose Global.'; error.style.display = ''; return; }
+      if (replacement.value.trim()) this.plugin.app.secretStorage.setSecret(secretStorageKey(resolvedName), replacement.value.trim());
+      if (isNew) this.plugin.settings.secretEnvKeys = [...keys, resolvedName];
+      const scopes = this.plugin.settings.secretEnvScopes ?? (this.plugin.settings.secretEnvScopes = {});
+      if (selectedRadio.checked) scopes[resolvedName] = [...chosen]; else delete scopes[resolvedName];
+      await this.plugin.saveSettings(); this.selectedSecretName = resolvedName; this.display();
+    });
   }
 
   // ── Features ────────────────────────────────────────────────────────────

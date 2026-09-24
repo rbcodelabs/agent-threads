@@ -1785,7 +1785,7 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
+    await page.waitForSelector('.ct-settings-shell');
     await page.waitForTimeout(200);
 
     const createPr = page.locator('.setting-item', { hasText: 'Create PR message' }).locator('textarea');
@@ -1812,11 +1812,11 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
+    await page.waitForSelector('.ct-settings-shell');
     // The tab whose id is 'claude' is now labelled "Agent" (harness-agnostic
     // naming since the Codex harness landed); the screenshot keeps the historical
     // settings-claude.png name to match the tab id.
-    await page.click('.ct-settings-tab-btn:has-text("Agent")');
+    await page.getByRole('button', { name: 'Agent' }).click();
     await page.waitForTimeout(200);
     await shot(page, 'settings-claude.png', { fullPage: true });
   });
@@ -1825,8 +1825,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("Agent")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByRole('button', { name: 'Agent' }).click();
 
     const harnessSetting = page.locator('.setting-item').filter({ hasText: 'Agent harness' });
     await harnessSetting.locator('select').selectOption('codex');
@@ -1840,26 +1840,42 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("Tools")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByRole('button', { name: 'Tools' }).click();
     await page.waitForTimeout(200);
     await shot(page, 'settings-tools.png', { fullPage: true });
   });
 
-  test('settings — Projects show editable cwd overrides and effective cwd', async ({ page }) => {
+  test('settings — Projects use an explicit searchable list-detail draft', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("Vault")');
-    await expect(page.getByText('Effective cwd: /Users/mock/projects/acme-webapp').first()).toBeVisible();
-    await expect(page.getByPlaceholder('Filesystem cwd (optional)')).toBeVisible();
-    const override = page.locator('.ct-project-cwd-setting input').first();
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByRole('button', { name: 'Projects' }).click();
+    await expect(page.getByText('/Users/mock/projects/acme-webapp').first()).toBeVisible();
+    await expect(page.getByPlaceholder('Search projects')).toBeVisible();
+    const override = page.getByLabel('Filesystem working directory');
     await expect(override).toHaveValue('/Users/mock/projects/acme-webapp');
     await shot(page, 'settings-projects.png', { fullPage: true });
     await override.fill('');
-    await override.blur();
-    await expect(page.getByText('Effective cwd: /Users/mock/vault/Work/Acme').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect(page.getByText('Effective cwd: /Users/mock/vault/Work/Acme')).toBeVisible();
+  });
+
+  test('settings — Secrets save value and selected-project scope together', async ({ page }) => {
+    const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto(settingsUrl);
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByRole('button', { name: 'Secrets' }).click();
+    await expect(page.getByPlaceholder('Search secrets')).toBeVisible();
+    await expect(page.getByLabel('Variable name')).toBeDisabled();
+    await page.getByLabel('Replace value').fill('replacement-value');
+    await page.getByLabel('Selected projects').check();
+    await page.getByLabel('Acme Webapp').check();
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__settings.secretEnvScopes.STRIPE_SECRET_KEY)).toEqual(['proj-1']);
+    await shot(page, 'settings-secrets.png', { fullPage: true });
   });
 
   test('settings — scheduled work dashboard', async ({ page }) => {

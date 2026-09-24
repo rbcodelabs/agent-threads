@@ -227,8 +227,15 @@ const mockPlugin = {
       const project = settings.projects.find((candidate) => candidate.id === id);
       if (project) Object.assign(project, updates);
     },
-    deleteProject: () => {},
-    createProject: () => {},
+    getThreadsByProject: (id: string) => id === 'proj-1'
+      ? [{ id: 'thread-1' }, { id: 'thread-2' }]
+      : [{ id: 'thread-3' }],
+    deleteProject: (id: string) => { settings.projects = settings.projects.filter(project => project.id !== id); },
+    createProject: (name: string, vaultFolder: string, description?: string, cwdOverride?: string) => {
+      const project = { id: `proj-${settings.projects.length + 1}`, name, vaultFolder, description, cwdOverride, orchestratorEnabled: true, createdAt: Date.now() };
+      settings.projects.push(project);
+      return project;
+    },
     updateSettings: () => {},
     getThread: (id: string) => {
       if (id === 'thread-morning') return { id, title: 'Morning inbox triage run' };
@@ -263,6 +270,8 @@ const mockPlugin = {
   initDesktopRelayClient: () => {},
   initMobileRelayClient: () => {},
   saveSettings: async () => {},
+  ensureProjectOrchestratorThread: async () => {},
+  deleteProject: async (id: string) => { settings.projects = settings.projects.filter(project => project.id !== id); },
   getView: () => null,
   getEffectiveCwd: () => '/Users/mock/vault',
   dispatchNewThread: async (prompt: string, _images: unknown, title: string | undefined) => {
