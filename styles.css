@@ -3780,9 +3780,30 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-blue, #4a90d9) 20%, transparent);
 }
 
+.ct-plan-rejection-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ct-plan-rejection-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+}
+
+.ct-plan-rejection-textarea {
+  min-height: 96px;
+  font-family: var(--font-interface);
+}
+
 /* Action buttons */
 .ct-plan-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
 }
@@ -3795,6 +3816,11 @@
   cursor: pointer;
   font-weight: 500;
   transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.ct-plan-btn:focus-visible {
+  outline: 2px solid var(--color-blue, #4a90d9);
+  outline-offset: 2px;
 }
 
 .ct-root .ct-plan-reject {
@@ -3823,6 +3849,14 @@
 }
 .ct-plan-approve:hover {
   opacity: 0.88;
+}
+
+.ct-plan-rejection-submit {
+  margin-left: auto;
+}
+
+.ct-root.ct-mobile .ct-plan-btn {
+  min-height: 44px;
 }
 
 /* -- Inline question card (AskUserQuestion) -------------------------- */

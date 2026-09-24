@@ -171,7 +171,7 @@ describe('pendingPlan — set and persist', () => {
     expect(manager.getPendingPlanResolvers(thread.id)).toBeDefined();
   });
 
-  it('releases queued rejection feedback in FIFO order and reports it to the card', async () => {
+  it('appends an explicit rejection reason after queued feedback without suppressing it', async () => {
     const manager = makeManager();
     const thread = manager.createThread('T', os.tmpdir());
     const dequeued: string[] = [];
@@ -185,7 +185,7 @@ describe('pendingPlan — set and persist', () => {
     await manager.sendMessage(thread.id, 'Second revision feedback');
 
     const hadFeedback = manager.getPendingPlanResolvers(thread.id)!.reject();
-    await manager.sendMessage(thread.id, 'Feedback racing the reject click');
+    await manager.sendMessage(thread.id, 'Explicit rejection reason');
     await vi.waitFor(() => expect(dequeued).toHaveLength(3));
 
     expect(hadFeedback).toBe(true);
@@ -193,7 +193,7 @@ describe('pendingPlan — set and persist', () => {
     expect(dequeued).toEqual([
       'First revision feedback',
       'Second revision feedback',
-      'Feedback racing the reject click',
+      'Explicit rejection reason',
     ]);
   });
 

@@ -63,7 +63,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 - **First-run onboarding** — on first install, a welcome guide walks you through setup and opens a three-panel workspace (conversation, Agents List, and an example thread) so the layout makes sense before you write a single message
 - **Context recap banner** — when you return to a thread you haven't viewed in over a minute, a floating banner shows the thread summary and how long ago you were last active; auto-dismisses after 10 seconds
 - **Keep computer awake** — prevents the computer from sleeping while Claude is active; shows a ☕ indicator in the status bar (uses Geode's native Electron power-save blocker when available, with `caffeinate -i` for Obsidian on macOS and the Web Wake Lock API as fallback)
-- **Plan Mode** — Claude and Codex can propose a written plan before making any mutations, and Codex can autonomously invoke `EnterPlanMode` when a task needs investigation first. An inline card lets you **Approve**, **Edit**, or **Reject** the plan before execution begins
+- **Plan Mode** — Claude and Codex can propose a written plan before making any mutations, and Codex can autonomously invoke `EnterPlanMode` when a task needs investigation first. An inline card lets you **Approve**, **Edit**, or **Reject** the plan with optional revision feedback before execution begins
 - **Thinking mode** — enable extended thinking for harder problems, with a configurable token budget for how long Claude reasons before responding
 - **Provider-aware effort** — Claude keeps its `low` through `max` effort controls; Codex has a separate setting through `ultra`, where Ultra enables proactive native agents on models that advertise support
 - **MCP Elicitation** — when an MCP server needs OAuth or a form filled mid-session, a card appears inline in the conversation (URL auth or structured form fields) so you can respond without leaving Agent Threads
@@ -524,7 +524,7 @@ Set **Permission Mode → `plan`** globally in settings, or use the **Permission
 4. You pick one of three actions on the card:
    - **Approve** — the agent returns to its normal permission mode and executes the plan immediately.
    - **Edit** — the plan text becomes editable in-place; submitting the edited version sends it back as the confirmed plan before execution.
-   - **Reject** — the agent remains in Plan mode; no edits are made. You can send a follow-up message to redirect or request a revision.
+   - **Reject** — opens an inline feedback field while keeping the proposed plan visible for reference. Add an optional reason and choose **Reject plan** (or press <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd>) to send it as the next visible Plan-mode message; press <kbd>Escape</kbd> or choose **Cancel** to return to the original card. An empty reason keeps the existing generic revision prompt. In every case the agent remains in Plan mode and no edits are made.
 
 Plan Mode is useful for risky or large-scale tasks where you want to review the approach before any files are touched.
 

@@ -1826,7 +1826,7 @@ test.describe('Agent Threads UI', () => {
     await page.goto(skillsUrl);
     await page.waitForSelector('.ct-skills-tabs');
     await page.getByText('Browse').click();
-    await page.waitForTimeout(200);
+    await expect(page.getByText('Type to search skills.sh')).toBeVisible();
     await shot(page, 'skills-manager-browse.png', { fullPage: true });
   });
 
@@ -3479,7 +3479,7 @@ test.describe('Agent Threads UI', () => {
   });
 
   test('plan mode — approve/reject card', async ({ page }) => {
-    await page.setViewportSize({ width: 420, height: 740 });
+    await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto(harnessUrl);
     await page.waitForSelector('.ct-title-row');
     await page.waitForSelector('.ct-messages');
@@ -3487,6 +3487,9 @@ test.describe('Agent Threads UI', () => {
     // Render the plan approval card with sample plan text.
     await page.evaluate(() => {
       const view = (window as any).__view;
+      const manager = (window as any).__manager;
+      manager.getThread(view['activeThreadId']).cwd = '/Users/mock/projects/demo-project';
+      view['renderComposerContext']();
       view['createStreamingEl']();
       const planText = [
         '## Plan: Fix the auth middleware',
@@ -3513,6 +3516,33 @@ test.describe('Agent Threads UI', () => {
     await expect(page.locator('.ct-plan-md')).toBeVisible();
     await expect(page.locator('.ct-plan-textarea')).not.toBeVisible();
     await shot(page, 'plan-mode-approve-reject.png', { fullPage: true });
+
+    await page.locator('.ct-plan-reject').click();
+    await expect(page.getByLabel('Why are you rejecting this plan?')).toBeFocused();
+    await expect(page.locator('.ct-plan-md')).toBeVisible();
+    await expect(page.locator('.ct-plan-rejection-cancel')).toBeVisible();
+    await expect(page.locator('.ct-plan-rejection-submit')).toBeVisible();
+    await expect(page.getByLabel('Why are you rejecting this plan?')).toHaveCSS('box-shadow', /rgb/);
+    await shot(page, 'plan-mode-rejection-reason.png', { fullPage: true });
+
+    await page.locator('.ct-root').evaluate((root) => root.classList.add('ct-mobile'));
+    for (const viewport of [
+      { width: 390, height: 844, name: 'plan-mode-rejection-reason-mobile.png' },
+      { width: 375, height: 667, name: 'plan-mode-rejection-reason-mobile-se.png' },
+    ]) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      const layout = await page.locator('.ct-plan-card').evaluate((card) => ({
+        clientWidth: card.clientWidth,
+        scrollWidth: card.scrollWidth,
+        buttonHeights: Array.from(card.querySelectorAll<HTMLButtonElement>('.ct-plan-btn'))
+          .map((button) => button.getBoundingClientRect())
+          .filter((rect) => rect.width > 0 && rect.height > 0)
+          .map((rect) => rect.height),
+      }));
+      expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
+      expect(layout.buttonHeights.every((height) => height >= 44)).toBe(true);
+      await shot(page, viewport.name, { fullPage: true });
+    }
   });
 
   test('proposed reply — inline card', async ({ page }) => {
