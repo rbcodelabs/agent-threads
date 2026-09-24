@@ -33,10 +33,10 @@ export class AgentRunStore {
     const existing = existingId ? this.runs.get(existingId) : undefined;
     if (existing) {
       Object.assign(existing, { description: input.description || existing.description, role: input.role ?? existing.role, model: input.model ?? existing.model, taskId: input.taskId ?? existing.taskId, status: terminal.has(existing.status) ? existing.status : 'working', updatedAt: now });
-      this.resolveParents(input.threadId, input.harness);
+      this.resolveParents(input.threadId, input.harness, input.sessionGeneration ?? 0);
       return existing;
     }
-    const parent = input.parentNativeAgentId ? this.getByNativeId(input.threadId, input.harness, input.parentNativeAgentId) : undefined;
+    const parent = input.parentNativeAgentId ? this.getByNativeId(input.threadId, input.harness, input.parentNativeAgentId, input.sessionGeneration ?? 0) : undefined;
     const run: AgentRun = {
       id: crypto.randomUUID(), threadId: input.threadId, harness: input.harness,
       nativeAgentId: input.nativeAgentId, parentAgentRunId: parent?.id,
@@ -49,7 +49,7 @@ export class AgentRunStore {
     };
     this.runs.set(run.id, run);
     this.nativeIndex.set(key, run.id);
-    this.resolveParents(input.threadId, input.harness);
+    this.resolveParents(input.threadId, input.harness, input.sessionGeneration ?? 0);
     return run;
   }
 
@@ -98,10 +98,13 @@ export class AgentRunStore {
     return roots;
   }
 
-  private resolveParents(threadId: string, harness?: 'claude' | 'codex'): void {
+  private resolveParents(threadId: string, harness?: 'claude' | 'codex', sessionGeneration?: number): void {
     for (const run of this.getByThread(threadId)) {
       if (harness && run.harness !== harness) continue;
-      if (!run.parentAgentRunId && run.parentNativeAgentId) run.parentAgentRunId = this.getByNativeId(threadId, run.harness, run.parentNativeAgentId)?.id;
+      if (sessionGeneration !== undefined && (run.sessionGeneration ?? 0) !== sessionGeneration) continue;
+      if (!run.parentAgentRunId && run.parentNativeAgentId) {
+        run.parentAgentRunId = this.getByNativeId(threadId, run.harness, run.parentNativeAgentId, run.sessionGeneration ?? 0)?.id;
+      }
     }
   }
 }

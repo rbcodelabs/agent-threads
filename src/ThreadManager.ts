@@ -196,6 +196,8 @@ export class ThreadManager {
   private pendingUserMessageIds: Map<string, string[]> = new Map();
   private queuedMessages: Map<string, { text: string; images?: ImageAttachment[] }[]> = new Map();
   private harnessSwitches = new Set<string>();
+  /** In-memory one-shot claim; durable handoff remains until target completion. */
+  private claimedHarnessHandoffs = new Set<string>();
   /** Threads draining rejected-plan feedback in FIFO order. */
   private releasingPlanFeedback = new Set<string>();
   private threadActivity: Map<string, string> = new Map();
@@ -547,6 +549,7 @@ export class ThreadManager {
     };
     this.harnessSwitches.add(id);
     this.emit(id, { type: 'harness_switching', targetHarness });
+    let firstPersistenceCommitted = false;
     try {
       // Confirmation may have taken time; the caller invokes this only after it,
       // so revalidation here is the transaction's race boundary.
@@ -567,26 +570,47 @@ export class ThreadManager {
       thread.pendingHarnessHandoff = createHarnessHandoff(thread, sourceHarness, targetHarness);
       thread.updatedAt = Date.now();
       await persist();
+      firstPersistenceCommitted = true;
+      if (this.threads.get(id) !== thread || !this.harnessSwitches.has(id)) {
+        throw new Error('Thread was deleted while the harness switch was being saved.');
+      }
       const oldSession = this.sessions.get(id);
       if (oldSession) oldSession.close();
       this.sessions.delete(id);
       this.selectedAgentRuns.delete(id);
       this.emit(id, { type: 'harness_changed', sourceHarness, targetHarness });
     } catch (error) {
-      Object.assign(thread, snapshot);
-      if (snapshot.sessionId === undefined) delete thread.sessionId;
-      if (snapshot.model === undefined) delete thread.model;
-      if (snapshot.usageSnapshot === undefined) delete thread.usageSnapshot;
-      if (snapshot.tasks === undefined) delete thread.tasks;
-      if (snapshot.pendingBackgroundTasks === undefined) delete thread.pendingBackgroundTasks;
-      if (snapshot.recap === undefined) delete thread.recap;
-      if (snapshot.lastError === undefined) delete thread.lastError;
-      if (snapshot.pendingHarnessHandoff === undefined) delete thread.pendingHarnessHandoff;
+      if (this.threads.get(id) === thread) {
+        Object.assign(thread, snapshot);
+        if (snapshot.sessionId === undefined) delete thread.sessionId;
+        if (snapshot.model === undefined) delete thread.model;
+        if (snapshot.usageSnapshot === undefined) delete thread.usageSnapshot;
+        if (snapshot.tasks === undefined) delete thread.tasks;
+        if (snapshot.pendingBackgroundTasks === undefined) delete thread.pendingBackgroundTasks;
+        if (snapshot.recap === undefined) delete thread.recap;
+        if (snapshot.lastError === undefined) delete thread.lastError;
+        if (snapshot.pendingHarnessHandoff === undefined) delete thread.pendingHarnessHandoff;
+      } else if (firstPersistenceCommitted) {
+        // The first save may have captured the provisional switched thread.
+        // Persist the now-authoritative deletion before returning the failure.
+        await persist().catch(() => {});
+      }
       throw error;
     } finally {
       this.harnessSwitches.delete(id);
-      this.flushQueuedMessages(id);
+      if (this.threads.has(id)) this.flushQueuedMessages(id);
     }
+  }
+
+  private claimHarnessHandoff(id: string): Thread['pendingHarnessHandoff'] {
+    const thread = this.threads.get(id);
+    if (!thread?.pendingHarnessHandoff || this.claimedHarnessHandoffs.has(id)) return undefined;
+    this.claimedHarnessHandoffs.add(id);
+    return thread.pendingHarnessHandoff;
+  }
+
+  private releaseHarnessHandoffClaim(id: string): void {
+    this.claimedHarnessHandoffs.delete(id);
   }
 
   private getHarnessSwitchBlockReasonIgnoringSelf(id: string): string | undefined {
@@ -599,6 +623,8 @@ export class ThreadManager {
   private flushQueuedMessages(id: string): void {
     const queued = this.queuedMessages.get(id) ?? [];
     this.queuedMessages.delete(id);
+    this.harnessSwitches.delete(id);
+    this.claimedHarnessHandoffs.delete(id);
     for (const item of queued) {
       this.emit(id, { type: 'dequeued', text: item.text, images: item.images });
       void this.sendMessage(id, item.text, item.images);
@@ -1614,12 +1640,13 @@ export class ThreadManager {
     thread.status = 'active';
     this.threadActivity.delete(threadId);
 
-    const keywordModel = this.resolveModel(userText);
-    // Precedence: escalation keyword > per-thread /model override > settings default
-    const model = thread.agentHarness === 'codex'
-      ? (thread.model || undefined)
-      : keywordModel ?? thread.model ?? (this.settings.defaultModel || undefined);
-    const promptText = keywordModel ? this.stripKeyword(userText) : userText;
+    const resolvedPrompt = resolveHarnessPrompt(thread.agentHarness ?? 'claude', userText, this.settings);
+    // Claude escalation takes precedence. Codex keeps the literal keyword and
+    // never receives a Claude-only escalation model.
+    const model = resolvedPrompt.model ?? thread.model
+      ?? (thread.agentHarness === 'codex' ? undefined : (this.settings.defaultModel || undefined));
+    const promptText = resolvedPrompt.promptText;
+    const claimedHandoff = this.claimHarnessHandoff(threadId);
 
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -1689,15 +1716,18 @@ export class ThreadManager {
     // ensureCwdExists() for the repair strategy. Bail out (an 'error' event
     // has already been emitted) if the cwd is still missing afterward.
     const options = this.buildThreadSessionOptions(threadId, thread, model);
-    if (!options) return;
+    if (!options) {
+      if (claimedHandoff) this.releaseHarnessHandoffClaim(threadId);
+      return;
+    }
 
     // If there is no session to resume but there IS prior history, the cwd must
     // have changed mid-conversation (via obsidian_set_working_directory). Inject
     // the prior turns as a preamble so Claude isn't amnesiac after the switch.
     const priorMessages = thread.messages.slice(0, -1); // excludes the just-pushed user msg
     const isFreshUnresumedSession = !thread.sessionId && priorMessages.length > 0;
-    const handoffPrompt = thread.pendingHarnessHandoff
-      ? buildHarnessHandoffPrompt(thread, thread.pendingHarnessHandoff.sourceHarness, thread.pendingHarnessHandoff.targetHarness)
+    const handoffPrompt = claimedHandoff
+      ? buildHarnessHandoffPrompt(thread, claimedHandoff.sourceHarness, claimedHandoff.targetHarness)
       : undefined;
     const effectivePrompt = handoffPrompt
       ? `${handoffPrompt}\n\n${promptText}`
@@ -1729,6 +1759,7 @@ export class ThreadManager {
         thread.lastError = error.message;
         this.emit(threadId, { type: 'error', error });
         this.sessions.delete(threadId);
+        if (claimedHandoff) this.releaseHarnessHandoffClaim(threadId);
         return;
       }
     } else {
@@ -1759,8 +1790,13 @@ export class ThreadManager {
       // a closed ThreadSession is reopened on the SAME instance rather than
       // raced against a second one (ADR-0002 §2).
       console.warn('[ClaudeThreads] sendMessage: send() on a closed ThreadSession — restarting:', err);
-      await session.start(options);
-      session.send(effectivePrompt, images, userMsg.id);
+      try {
+        await session.start(options);
+        session.send(effectivePrompt, images, userMsg.id);
+      } catch (retryError) {
+        if (claimedHandoff) this.releaseHarnessHandoffClaim(threadId);
+        throw retryError;
+      }
     }
   }
 
@@ -2110,6 +2146,7 @@ export class ThreadManager {
         // roll back, just stop tracking them.
         this.pendingUserMessageIds.delete(threadId);
         if (thread.pendingHarnessHandoff && thread.sessionId) delete thread.pendingHarnessHandoff;
+        this.releaseHarnessHandoffClaim(threadId);
 
         // Safety net: if a pending plan somehow survived to onDone (e.g. the
         // session completed without user action), clear it so a stale card
@@ -2153,6 +2190,7 @@ export class ThreadManager {
       },
       onInterrupted: (_sessionId) => {
         if (!isCurrentGeneration()) return;
+        this.releaseHarnessHandoffClaim(threadId);
         // Roll back every orphaned, unresolved user message — not just the
         // trailing one. Under the old per-turn model, sendMessage() gated on
         // "busy," so at most one user message could ever be unresolved when
@@ -2182,6 +2220,7 @@ export class ThreadManager {
       },
       onError: (err) => {
         if (!isCurrentGeneration()) return;
+        this.releaseHarnessHandoffClaim(threadId);
         // Safety net: always clean up a pending plan card here, mirroring
         // the onDone safety net above — otherwise an errored session (e.g.
         // during a long ExitPlanMode wait) leaves the card stuck forever
@@ -2252,7 +2291,9 @@ export class ThreadManager {
         if (!isCurrentGeneration()) return;
         this.pendingQuestionResolvers.get(threadId)?.({});
       },
-      onOpenNewTab: (title, initialPrompt) => this.openNewTabHandler(title, initialPrompt),
+      onOpenNewTab: (title, initialPrompt) => isCurrentGeneration()
+        ? this.openNewTabHandler(title, initialPrompt)
+        : Promise.resolve({ threadId: '', title: '' }),
       onStatus: (status) => {
         if (!isCurrentGeneration()) return;
         this.clearReconnectingStatus(thread);
@@ -2357,34 +2398,34 @@ export class ThreadManager {
         this.emit(threadId, { type: 'task_notification', taskId, status, summary });
         this.scheduleGoalContextProcessing(threadId);
       },
-      onNotification: (text, priority) => this.emit(threadId, { type: 'notification', text, priority }),
-      onApiRetry: (attempt, maxRetries, error) => this.emit(threadId, { type: 'api_retry', attempt, maxRetries, error }),
-      onPermissionDenied: (toolName, toolUseId, message, agentId, decisionReasonType) => this.emit(threadId, { type: 'permission_denied', toolName, toolUseId, message, agentId, decisionReasonType }),
-      onRateLimit: (limitStatus, resetsAt) => this.emit(threadId, { type: 'rate_limit', limitStatus, resetsAt }),
+      onNotification: (text, priority) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'notification', text, priority }); },
+      onApiRetry: (attempt, maxRetries, error) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'api_retry', attempt, maxRetries, error }); },
+      onPermissionDenied: (toolName, toolUseId, message, agentId, decisionReasonType) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'permission_denied', toolName, toolUseId, message, agentId, decisionReasonType }); },
+      onRateLimit: (limitStatus, resetsAt) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'rate_limit', limitStatus, resetsAt }); },
       onUsage: (usage) => {
         if (!isCurrentGeneration()) return;
         thread.usageSnapshot = usage;
         thread.updatedAt = Date.now();
         this.emit(threadId, { type: 'usage', usage });
       },
-      onModelFallback: (trigger, fromModel, toModel) => this.emit(threadId, { type: 'model_fallback', trigger, fromModel, toModel }),
-      onModelRefusalFallback: (refusal) => this.emit(threadId, { type: 'model_refusal_fallback', ...refusal }),
-      onModelRefusalNoFallback: (refusal) => this.emit(threadId, { type: 'model_refusal_no_fallback', ...refusal }),
-      onToolProgress: (toolUseId, toolName, elapsedSeconds) => this.emit(threadId, { type: 'tool_progress', toolUseId, toolName, elapsedSeconds }),
-      onMemoryRecall: (paths, mode) => this.emit(threadId, { type: 'memory_recall', paths, mode }),
-      onCommandsChanged: (commands) => this.emit(threadId, { type: 'commands_changed', commands }),
+      onModelFallback: (trigger, fromModel, toModel) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'model_fallback', trigger, fromModel, toModel }); },
+      onModelRefusalFallback: (refusal) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'model_refusal_fallback', ...refusal }); },
+      onModelRefusalNoFallback: (refusal) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'model_refusal_no_fallback', ...refusal }); },
+      onToolProgress: (toolUseId, toolName, elapsedSeconds) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'tool_progress', toolUseId, toolName, elapsedSeconds }); },
+      onMemoryRecall: (paths, mode) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'memory_recall', paths, mode }); },
+      onCommandsChanged: (commands) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'commands_changed', commands }); },
       onTaskProgressSummary: (taskId, summary) => {
         if (!isCurrentGeneration()) return;
-        const run = this.agentRuns.getByNativeId(threadId, thread.agentHarness ?? 'claude', taskId);
+        const run = this.agentRuns.getByNativeId(threadId, harnessAtStart, taskId, generationAtStart);
         if (run) {
-          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: 'activity', text: summary, timestamp: Date.now() });
+          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: 'activity', text: summary, timestamp: Date.now() }, generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_progress_summary', taskId, summary });
       },
-      onGitOperation: (summary) => this.emit(threadId, { type: 'git_operation', summary }),
-      onToolResult: (toolUseId, status, durationMs) => this.emit(threadId, { type: 'tool_result_status', toolUseId, status, durationMs }),
-      onEnterPlanMode: () => this.emit(threadId, { type: 'enter_plan_mode' }),
+      onGitOperation: (summary) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'git_operation', summary }); },
+      onToolResult: (toolUseId, status, durationMs) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'tool_result_status', toolUseId, status, durationMs }); },
+      onEnterPlanMode: () => { if (isCurrentGeneration()) this.emit(threadId, { type: 'enter_plan_mode' }); },
       onPlanModeRequested: () => {
         if (!isCurrentGeneration()) return;
         // Codex crosses a safe turn boundary before entering Plan mode. Persist
@@ -2813,6 +2854,26 @@ export class ThreadManager {
 }
 
 const HARNESS_HANDOFF_SUMMARY_LIMIT = 2400;
+
+export function resolveHarnessPrompt(
+  harness: 'claude' | 'codex',
+  userText: string,
+  settings: Pick<PluginSettings, 'escalationEnabled' | 'escalationKeyword' | 'escalationModel'>,
+): { promptText: string; model: string | undefined } {
+  if (harness === 'codex' || !settings.escalationEnabled) {
+    return { promptText: userText, model: undefined };
+  }
+  const keyword = (settings.escalationKeyword ?? '/escalate').trim();
+  if (!keyword) return { promptText: userText, model: undefined };
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`, 'i');
+  if (!match.test(userText)) return { promptText: userText, model: undefined };
+  const strip = new RegExp(`(?:^|\\s)${escaped}(?=\\s|$)`, 'gi');
+  return {
+    promptText: userText.replace(strip, ' ').replace(/\s{2,}/g, ' ').trim(),
+    model: settings.escalationModel || 'opus',
+  };
+}
 
 function createHarnessHandoff(
   thread: Thread,
