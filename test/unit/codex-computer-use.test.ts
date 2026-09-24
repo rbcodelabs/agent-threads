@@ -43,11 +43,30 @@ describe('Codex computer-use session policy', () => {
         expect(config.computer_use.default_app_access).toBe('deny');
         expect(config.plugins['unified-computer-use@openai-bundled'].enabled).toBe(false);
         expect(config.plugins['computer-use@openai-bundled'].enabled).toBe(false);
-        expect(config.mcp_servers.node_repl.enabled).toBe(false);
-        expect(config.mcp_servers.cua_repl.enabled).toBe(false);
-        expect(config.mcp_servers['computer-use'].enabled).toBe(false);
+        for (const name of ['node_repl', 'cua_repl', 'computer-use']) {
+          // Absent inherited servers require a complete disabled transport.
+          expect(config.mcp_servers[name]).toEqual({ command: 'node', enabled: false });
+        }
       }
       session.close();
     }
+  });
+
+  it('keeps computer use disabled when a failed resume falls back to a fresh thread', async () => {
+    const session = new CodexSession('codex');
+    const request = vi.spyOn(session as any, 'request').mockImplementation(async (method) => {
+      if (method === 'thread/resume') throw new Error('Saved thread unavailable');
+      return { thread: { id: 'replacement' }, data: [] };
+    });
+    await session.start({
+      cwd: '/workspace', permissionMode: 'default', extraEnvRaw: '', resume: 'saved-thread',
+      callbacks: {} as any,
+    });
+    const resumeConfig = (request.mock.calls.find(([method]) => method === 'thread/resume')![1] as any).config;
+    const startConfig = (request.mock.calls.find(([method]) => method === 'thread/start')![1] as any).config;
+    expect(startConfig).toEqual(resumeConfig);
+    expect(startConfig.computer_use.default_app_access).toBe('deny');
+    expect(startConfig.mcp_servers.node_repl).toEqual({ command: 'node', enabled: false });
+    session.close();
   });
 });
