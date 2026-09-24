@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createClaudeThreadsApiV1 } from '../../src/PublicApi';
 import { ArtifactProviderRegistry } from '../../src/ArtifactContributions';
+import { MessageContentProviderRegistry } from '../../src/MessageContent';
 import { AgentToolRegistry } from '../../src/AgentToolContributions';
 import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
 import { createArtifactStore } from '../../src/artifactStore';
@@ -76,7 +77,7 @@ function runtimeSurface(): Record<string, string[]> {
     runConstrainedQuery: async () => ({ output: '', usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 } }),
     registerMcpServer: async () => ({ success: true, status: 'registered', message: '' }),
     requestSecret: async () => true,
-    artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(),
+    artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(), messageContentProviders: new MessageContentProviderRegistry(),
     agentTools: new AgentToolRegistry(), slashCommands: new SlashCommandRegistry(), getDefaultPermissionMode: () => 'default',
   } as never).api;
   const surface: Record<string, string[]> = {};
@@ -97,7 +98,7 @@ describe('checked-in consumer declaration', () => {
 
   it('still declares the mcp namespace that once drifted out of it', () => {
     expect(declaredSurface().mcp).toEqual(['register', 'requestSecret']);
-    expect(declaredSurface().extensions).toEqual(['registerAgentTool', 'registerArtifactProvider', 'registerSlashCommand']);
+    expect(declaredSurface().extensions).toEqual(['registerAgentTool', 'registerArtifactProvider', 'registerMessageContentProvider', 'registerSlashCommand']);
   });
 
   it('advertises one capability string per public operation', () => {
@@ -109,7 +110,7 @@ describe('checked-in consumer declaration', () => {
       getTraceMetadata: async () => null, readTraceChunk: async () => null,
       runConstrainedQuery: vi.fn(),
       registerMcpServer: vi.fn(), requestSecret: vi.fn(),
-      artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(),
+      artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(), messageContentProviders: new MessageContentProviderRegistry(),
       agentTools: new AgentToolRegistry(), slashCommands: new SlashCommandRegistry(), getDefaultPermissionMode: () => 'default',
     } as never).api;
     // agentTools advertises a profile rather than a method name; everything

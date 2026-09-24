@@ -16,6 +16,7 @@ import type { SerializedThread, SerializedMessage, PendingPermission, PendingQue
 import type { ToolCallRecord, ImageAttachment } from './types';
 import { formatToolName, getToolIcon, groupToolCalls, smoothToolGroups, ACTIVITY_LABELS, type ToolCallGroup } from './toolNameUtils';
 import { splitErrorMessage } from './dashboardUtils';
+import { extractMessageContent } from './MessageContent';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from './linkUtils';
 import {
   VISUALIZE_SLOT_ATTR,
@@ -527,12 +528,13 @@ export class MobileView extends ItemView {
     this.scrollToBottom();
   }
 
-  private async renderMarkdown(markdown: string, el: HTMLElement): Promise<void> {
+  private async renderMarkdown(markdown: string, el: HTMLElement, options: { streaming?: boolean } = {}): Promise<void> {
     // Codex's wrapped `visualize` content references become inert cards here. The
     // mobile client is a relay: the fragment lives on the desktop machine's
     // disk, and renderConversation() rebuilds the whole list on every finalized
     // message with no throttle, so mounting sandboxed iframes is doubly wrong.
-    const visualize = extractVisualizeMarkers(markdown);
+    const inline = extractMessageContent(markdown, options);
+    const visualize = extractVisualizeMarkers(inline.text);
 
     // Pre-process [[wikilinks]] and [[target|alias]] into inline HTML anchors
     // before handing off to marked. Mirrors the ThreadsView approach — see that
@@ -548,6 +550,16 @@ export class MobileView extends ItemView {
     );
     el.appendChild(sanitizeHTMLToDom(await marked.parse(processed)));
     this.hydrateVisualizeSlots(el, visualize.markers);
+    // Relay clients have no local peer provider or remote action protocol.
+    for (const marker of inline.markers) {
+      const slots = Array.from(el.querySelectorAll<HTMLElement>('.ct-message-content-slot')).filter(slot => slot.getAttribute('data-ct-content') === marker.token);
+      if (slots.length !== 1) continue;
+      const card = document.createElement('section'); card.className = 'ct-inline-content'; card.dataset.kind = 'fallback';
+      const title = document.createElement('div'); title.className = 'ct-inline-content-title'; title.textContent = marker.ref.title; card.appendChild(title);
+      const status = document.createElement('div'); status.className = 'ct-inline-content-status'; status.textContent = options.streaming ? 'Content will be available when the response finishes.' : 'Content unavailable on this device'; card.appendChild(status);
+      const slot = slots[0];
+      if (slot.parentElement?.tagName === 'P' && slot.parentElement.childNodes.length === 1) slot.parentElement.replaceWith(card); else slot.replaceWith(card);
+    }
     // Wrap tables in a scrollable container so wide tables don't overflow.
     el.querySelectorAll<HTMLTableElement>('table').forEach((table) => {
       const wrapper = document.createElement('div');
@@ -709,7 +721,7 @@ export class MobileView extends ItemView {
 
     if (content) {
       try {
-        await this.renderMarkdown(content, contentEl);
+        await this.renderMarkdown(content, contentEl, { streaming: true });
         this.wrapTablesForMobileScroll(contentEl);
       } catch {
         contentEl.createEl('p', { text: content });

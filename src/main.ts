@@ -2,6 +2,7 @@ import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, addIcon, Notice, Platfor
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createConstrainedQueryRunner } from './ConstrainedRun';
 import { ArtifactProviderRegistry } from './ArtifactContributions';
+import { MessageContentProviderRegistry } from './MessageContent';
 import { createArtifactStore } from './artifactStore';
 import { AgentToolRegistry, type AgentToolHost } from './AgentToolContributions';
 import { createDesignAgentTool, DESIGN_AGENT_TOOL_OWNER } from './designAgentTool';
@@ -330,6 +331,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * as a peer plugin would (ADR-0008).
    */
   readonly artifactProviders = new ArtifactProviderRegistry();
+  readonly messageContentProviders = new MessageContentProviderRegistry();
   /**
    * Host-owned agent tool registry. Read by `mcpServerFactory` each time a
    * session's MCP servers are built; peers write into it only through
@@ -2368,6 +2370,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       requestSecret: (secretName, reason, force) => this.requestSecretFromUser(secretName, reason, force),
       hasSecret: (name) => !!this.app.secretStorage.getSecret(secretStorageKey(name)),
       artifactProviders: this.artifactProviders,
+      messageContentProviders: this.messageContentProviders,
       agentTools: this.agentTools,
       slashCommands: this.slashCommands,
       getDefaultPermissionMode: () => this.settings.permissionMode,

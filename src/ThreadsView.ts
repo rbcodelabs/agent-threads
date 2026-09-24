@@ -39,6 +39,8 @@ import type {
   ArtifactActionHost, ArtifactActionResult, ArtifactPresentation, ArtifactViewPlacement, ThreadArtifactRef,
 } from './ArtifactContributions';
 import { extractVisualizeMarkers } from './visualizeMarker';
+import { extractMessageContent } from './MessageContent';
+import { MessageContentMountManager } from './messageContentRenderer';
 import { VisualizeMountManager, resolveVisualizeTokens, toFileUrl, type VisualizeFs } from './visualizeRenderer';
 import { deleteScheduledActivity, scheduledActivityForThread, scheduledActivitySummary, type ScheduledActivity } from './scheduledActivity';
 import { ConversationViewPlacementState, resolveHostRestoredActiveThread } from './conversationFirstPlacement';
@@ -65,6 +67,8 @@ export class ThreadsView extends ItemView {
    * scroller in buildUI(), torn down in onClose().
    */
   private visualizeManager: VisualizeMountManager | null = null;
+  private messageContentManager: MessageContentMountManager | null = null;
+  private messageContentController = new AbortController();
   private streamingRenderTimer: ReturnType<typeof setTimeout> | null = null;
   /** A render is queued whenever new streamed text arrives. */
   private streamingRenderDirty = false;
@@ -385,6 +389,7 @@ export class ThreadsView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.buildUI();
+    this.messageContentManager = new MessageContentMountManager(this.plugin.messageContentProviders, { openView: state => this.openArtifactView(state) });
     this.createNativeHeaderActions();
     // Delegate within the view so host title refreshes cannot detach the handler.
     this.registerDomEvent(this.containerEl, 'dblclick', (event) => {
@@ -697,6 +702,9 @@ export class ThreadsView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.messageContentController.abort();
+    this.messageContentManager?.dispose();
+    this.messageContentManager = null;
     this.unsubscribe?.();
     this.stopWakeupCountdown();
     if (this.staleInterval) clearInterval(this.staleInterval);
@@ -2396,16 +2404,20 @@ export class ThreadsView extends ItemView {
   private async renderMarkdown(
     markdown: string,
     el: HTMLElement,
-    options: { streaming?: boolean } = {},
+    options: { streaming?: boolean; messageId?: string } = {},
   ): Promise<void> {
+    const threadId = this.activeThreadId;
+    const signal = this.messageContentController.signal;
+    const transcriptMessage = options.messageId && threadId ? this.manager.getThread(threadId)?.messages.find(message => message.id === options.messageId && message.role === 'assistant' && message.content === markdown) : undefined;
+    const inline = transcriptMessage || options.streaming ? extractMessageContent(markdown, options) : { text: markdown, markers: [] };
     // Codex's `visualize` skill puts a wrapped content reference on its own line
     // where an inline visual belongs. Rewrite those lines into anchor
     // placeholders here, before marked runs, so the markdown is parsed exactly
     // once — splitting into segments and parsing each would break ordered-list
     // numbering, reference links, and footnotes that span a marker.
     const visualize = this.plugin.settings.enableInlineVisualizations !== false
-      ? extractVisualizeMarkers(markdown, { streaming: options.streaming })
-      : { text: markdown, markers: [] };
+      ? extractVisualizeMarkers(inline.text, { streaming: options.streaming })
+      : { text: inline.text, markers: [] };
 
     // Pre-process [[wikilinks]] and [[target|alias]] into inline HTML anchors
     // before handing off to marked. marked passes inline HTML through unchanged,
@@ -2425,6 +2437,7 @@ export class ThreadsView extends ItemView {
     // messages — during streaming the marker renders as inert card chrome, so
     // a frame is never rebuilt on every token.
     this.visualizeManager?.hydrate(el, visualize.markers, { interactive: !options.streaming });
+    if (threadId && !signal.aborted) void this.messageContentManager?.hydrate(el, inline.markers, { threadId, messageId: transcriptMessage?.id ?? 'streaming', signal }, options);
     // Wrap tables in a scrollable container so wide tables don't overflow.
     el.querySelectorAll<HTMLTableElement>('table').forEach((table) => {
       const wrapper = document.createElement('div');
@@ -2628,7 +2641,7 @@ export class ThreadsView extends ItemView {
         this.renderToolCalls(msgEl, msg.toolCalls);
       }
       const msgContent = msgEl.createDiv('ct-message-content');
-      await this.renderMarkdown(msg.content, msgContent);
+      await this.renderMarkdown(msg.content, msgContent, { messageId: msg.id });
       lastMsgEl = msgEl;
     }
 
@@ -2808,6 +2821,9 @@ export class ThreadsView extends ItemView {
   }
 
   private async renderMessages(): Promise<void> {
+    this.messageContentController.abort();
+    this.messageContentController = new AbortController();
+    this.messageContentManager?.reset();
     this.messagesEl.empty();
     this.messagesEl.removeClass('ct-messages-agent-view');
     this.agentViewBodyEl = null;
@@ -3258,7 +3274,7 @@ export class ThreadsView extends ItemView {
 
         // Full content (hidden by default)
         const fullContent = content.createDiv('ct-full-content ct-hidden');
-        await this.renderMarkdown(msg.content, fullContent);
+        await this.renderMarkdown(msg.content, fullContent, { messageId: msg.id });
 
         let expanded = false;
         expandBtn.addEventListener('click', () => {
@@ -3278,7 +3294,7 @@ export class ThreadsView extends ItemView {
           this.generateMessageSummary(msg);
         }
       } else {
-        await this.renderMarkdown(msg.content, content);
+        await this.renderMarkdown(msg.content, content, { messageId: msg.id });
       }
       // Only render the copy button when there is actual text to copy. Desktop
       // hides this button by default (opacity: 0, revealed on hover), so an

@@ -7,6 +7,9 @@ import type { RawLogTraceChunk, RawLogTraceMetadata } from './RawLogWriter';
 import type { McpRegistrationResult } from './mcpServerStore';
 import type { ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactProviderRegistry, ArtifactRegistrationResult, ArtifactStoreHost, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
 import { HOST_OWNED_ARTIFACT_FIELDS, PROVIDER_ID_PATTERN, toArtifactRef } from './ArtifactContributions';
+import { formatMessageContentReference } from './MessageContent';
+import type { MessageContentContribution, MessageContentProviderRegistry, MessageContentRef, MessageContentRegistrationResult } from './MessageContent';
+export type { MessageContentJson, MessageContentRef, MessageContentContext, MessageContentPresentation, MessageContentActionHost, MessageContentContribution, MessageContentRegistrationResult } from './MessageContent';
 
 export type { ArtifactAction, ArtifactActionHost, ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactPresentation, ArtifactRegistrationResult, ArtifactStoreHost, ArtifactViewPlacement, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
 export type { AgentToolContribution, AgentToolHost, AgentToolRegistrationResult, AgentToolResult } from './AgentToolContributions';
@@ -101,6 +104,7 @@ export interface ClaudeThreadsApiV1 {
    * dropped both on the caller's dispose and on host `stop()`.
    */
   readonly extensions: {
+    registerMessageContentProvider(owner: PeerIdentity, contribution: MessageContentContribution): MessageContentRegistrationResult;
     registerArtifactProvider(owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult;
     /**
      * Contributes an in-process agent tool (ADR-0008). The peer supplies a
@@ -125,6 +129,7 @@ export interface ClaudeThreadsApiV1 {
    * the identity that registered the provider, so a peer cannot write into
    * another plugin's provider namespace.
    */
+  readonly messageContent: { formatReference(ref: MessageContentRef): string };
   readonly artifacts: {
     list(threadId: string): Promise<readonly ThreadArtifactRef[]>;
     attach(owner: PeerIdentity, threadId: string, ref: ThreadArtifactRef): Promise<ArtifactAttachResult>;
@@ -164,6 +169,7 @@ export interface PublicApiDependencies {
   hasSecret?(secretName: string): boolean;
   /** Host-owned artifact provider registry; absent when the host cannot render artifacts. */
   artifactProviders?: ArtifactProviderRegistry;
+  messageContentProviders?: MessageContentProviderRegistry;
   /**
    * Host-owned agent tool registry; absent when the host builds no MCP
    * servers. The registry is read by the per-thread MCP server factory, so a
@@ -193,6 +199,8 @@ function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   if (deps.registerMcpServer) capabilities.push('mcp.register');
   if (deps.requestSecret) capabilities.push('mcp.requestSecret');
   if (deps.artifactProviders) capabilities.push('extensions.registerArtifactProvider');
+  capabilities.push('messageContent.formatReference');
+  if (deps.messageContentProviders) capabilities.push('extensions.registerMessageContentProvider');
   if (deps.agentTools) capabilities.push('extensions.registerAgentTool');
   if (deps.slashCommands) capabilities.push('extensions.registerSlashCommand');
   if (deps.getDefaultPermissionMode) capabilities.push('threads.permissions');
@@ -575,6 +583,14 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     return freeze({ success: false, reason: 'The user did not save the secret.' });
   };
   const artifactRegistrations = new Set<{ dispose: () => void }>();
+  const registerMessageContentProvider = (owner: PeerIdentity, contribution: MessageContentContribution): MessageContentRegistrationResult => {
+    guard();
+    if (!deps.messageContentProviders) return freeze({ success: false, status: 'unavailable', providerId: String(contribution?.providerId ?? ''), message: 'Message content providers are unavailable in this host.', dispose: () => {} });
+    const registration = deps.messageContentProviders.register(owner, contribution);
+    if (!registration.success) return registration;
+    const tracked = { dispose: registration.dispose }; artifactRegistrations.add(tracked);
+    return freeze({ ...registration, dispose: () => { artifactRegistrations.delete(tracked); registration.dispose(); } });
+  };
   const registerArtifactProvider = (owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult => {
     guard();
     const registry = deps.artifactProviders;
@@ -873,7 +889,8 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input); } },
     agentTools: { createBundle: (profile) => { guard(); if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`); return freeze({ tools: VOICE_TOOLS, execute: executeTool }); } },
     mcp: { register: registerMcp, requestSecret: requestSecretMcp },
-    extensions: { registerArtifactProvider, registerAgentTool, registerSlashCommand },
+    extensions: { registerArtifactProvider, registerAgentTool, registerSlashCommand, registerMessageContentProvider },
+    messageContent: { formatReference: (ref: MessageContentRef) => { guard(); try { return formatMessageContentReference(ref); } catch { throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'Invalid message content reference.'); } } },
     artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction, allocateStorage: allocateArtifactStorage },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
