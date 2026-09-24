@@ -128,21 +128,88 @@ test('provider disposal removes actions and registering again restores persisted
   await expect(page.locator('.ct-inline-content-document')).toHaveCount(1);
 });
 
+test('streaming references stay inert until the assistant message settles', async ({ page }) => {
+  await openFixture(page);
+  await page.evaluate(async () => {
+    const host = window as any;
+    const thread = host.__manager.getThread('thread-new');
+    thread.messages = [];
+    await host.__view.renderMessages();
+    host.__contentPresentations = [];
+    const marker = host.__api.messageContent.formatReference({
+      providerId: 'example.reports', id: 'streamed', schemaVersion: 1,
+      title: 'Streamed report', data: { kind: 'card' },
+    });
+    host.__streamedMarker = marker;
+    host.__emitEvent(thread.id, { type: 'token', text: 'A report is being prepared.\n\n' + marker });
+  });
+  await expect(page.locator('.ct-inline-content')).toHaveCount(1);
+  await expect(page.locator('.ct-inline-content button')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__contentPresentations)).toEqual([]);
+  await page.evaluate(() => {
+    const host = window as any;
+    const message = { id: 'streamed-assistant', role: 'assistant', content: 'A report is ready.\n\n' + host.__streamedMarker, timestamp: Date.now() };
+    host.__manager.getThread('thread-new').messages.push(message);
+    host.__emitEvent('thread-new', { type: 'message', message });
+  });
+  await expect(page.getByRole('button', { name: 'Open report', exact: true })).toHaveCount(1);
+  expect(await page.evaluate(() => (window as any).__contentPresentations)).toEqual([
+    { id: 'streamed', threadId: 'thread-new', messageId: 'streamed-assistant' },
+  ]);
+});
+
+test('user messages and assistant code examples do not activate a provider', async ({ page }) => {
+  await openFixture(page);
+  await page.evaluate(async () => {
+    const host = window as any;
+    const marker = host.__api.messageContent.formatReference({
+      providerId: 'example.reports', id: 'quoted', schemaVersion: 1, title: 'Quoted report', data: {},
+    });
+    host.__manager.getThread('thread-new').messages = [
+      { id: 'user-example', role: 'user', content: marker, timestamp: Date.now() },
+      { id: 'assistant-example', role: 'assistant', content: 'Example:\n\n~~~text\n' + marker + '\n~~~', timestamp: Date.now() },
+    ];
+    host.__contentPresentations = [];
+    await host.__view.renderMessages();
+  });
+  await expect(page.locator('.ct-inline-content')).toHaveCount(0);
+  await expect(page.locator('code')).toContainText('agent-content');
+  expect(await page.evaluate(() => (window as any).__contentPresentations)).toEqual([]);
+});
+
 test('inline document scripts work while navigation, fetch and parent access are blocked', async ({ page }) => {
   await openFixture(page);
   const requests: string[] = [];
   await page.route('https://example.test/**', route => { requests.push(route.request().url()); return route.abort(); });
   await page.evaluate(() => (window as any).__contentRegistration.dispose());
-  await registerProvider(page, '<!doctype html><body><button id="probe">Run probe</button><p id="result"></p><script>document.getElementById("probe").onclick=()=>{let blocked=false;try{parent.document.body.innerHTML="escaped"}catch{blocked=true}document.getElementById("result").textContent=blocked?"Parent blocked":"Parent accessed";fetch("https://example.test/fetch").catch(()=>{});const i=new Image();i.src="https://example.test/image";document.body.append(i);const a=document.createElement("a");a.href="https://example.test/link";document.body.append(a);a.click();location.href="https://example.test/navigation";const m=document.createElement("meta");m.httpEquiv="refresh";m.content="0;url=https://example.test/refresh";document.head.append(m);};</script></body>');
+  await registerProvider(page, '<!doctype html><body><img src="https://example.test/initial-image"><button id="probe">Run probe</button><button id="navigate">Try navigation</button><p id="result"></p><script>document.getElementById("probe").onclick=()=>{let blocked=false;try{parent.document.body.innerHTML="escaped"}catch{blocked=true}document.getElementById("result").textContent=blocked?"Parent blocked":"Parent accessed";fetch("https://example.test/fetch").catch(()=>{});const i=new Image();i.src="https://example.test/image";document.body.append(i);};document.getElementById("navigate").onclick=()=>{location.href="https://example.test/navigation";};</script></body>');
   const inner = page.frameLocator('.ct-inline-content-document').frameLocator('iframe');
   await inner.getByRole('button', { name: 'Run probe' }).click();
   await expect(inner.locator('#result')).toHaveText('Parent blocked');
+  await inner.getByRole('button', { name: 'Try navigation' }).click();
   // Observe the immediate navigation and zero-delay refresh attempts.
   await page.waitForTimeout(300);
   expect(requests).toEqual([]);
   await expect(page.locator('.ct-messages')).toBeVisible();
   await expect(page.locator('.ct-inline-content-document')).toHaveAttribute('sandbox', 'allow-scripts');
 });
+
+for (const attempt of ['link', 'refresh']) {
+  test('inline document blocks external ' + attempt, async ({ page }) => {
+    await openFixture(page);
+    const requests: string[] = [];
+    await page.route('https://example.test/**', route => { requests.push(route.request().url()); return route.abort(); });
+    await page.evaluate(() => (window as any).__contentRegistration.dispose());
+    const script = attempt === 'link'
+      ? 'const a=document.createElement("a");a.href="https://example.test/link";document.body.append(a);a.click();'
+      : 'const m=document.createElement("meta");m.httpEquiv="refresh";m.content="0;url=https://example.test/refresh";document.head.append(m);';
+    await registerProvider(page, '<!doctype html><body><button id="try">Try navigation</button><script>document.getElementById("try").onclick=()=>{' + script + '};</script></body>');
+    await page.frameLocator('.ct-inline-content-document').frameLocator('iframe').getByRole('button', { name: 'Try navigation' }).click();
+    await page.waitForTimeout(300);
+    expect(requests).toEqual([]);
+    await expect(page.locator('.ct-messages')).toBeVisible();
+  });
+}
 
 for (const [width, height] of [[390, 844], [375, 667]]) {
   test('mobile relay retains inert inline references at ' + width + 'px', async ({ page }) => {

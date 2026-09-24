@@ -854,18 +854,6 @@ Interact with the active Obsidian or Geode workspace.
 | `host_execute_command` | `commandId` | Runs any host command by its ID (e.g. `obsidian-git:push`, `editor:toggle-bold`). Third-party command IDs are unchanged. |
 | `host_open_url` | `url`, `newTab?` | Opens a URL in the host Web Viewer panel. Reuses an existing tab by default; set `newTab: true` to force a fresh tab. |
 
-### Inline cards from peer plugins
-
-Sibling Geode/Obsidian plugins can contribute cards, images and self-contained
-interactive documents inside assistant replies through
-`extensions.registerMessageContentProvider`. The agent places a durable content
-reference on its own line, and Threads renders it at that position with
-host-owned presentation and named action buttons. Cards stay readable when a
-provider is unavailable; streaming and mobile relay views show inert fallbacks.
-Embedded documents run in isolated frames with external resources and navigation
-blocked. See [Inline message content](docs/public-api.md#inline-message-content)
-for registration, reference formatting, lifecycle and image-source details.
-
 ### Session tools
 
 Control the current thread's session state.
@@ -1029,6 +1017,16 @@ Thread state in the plugin's `data.json` is canonical during normal startup. Whe
 ### Peer plugins
 
 Geode/Obsidian peer plugins can discover the generation-scoped Agent Threads API at `app.plugins.plugins['claude-threads']?.api?.v1`. It provides immutable thread operations, sanitized trace projection, constrained runs, host-confirmed MCP registration, and contribution surfaces for artifacts, agent tools, and slash commands. `threads.beginProvisional` adds a reversible create transaction for peer-owned workflows: pending threads cannot run, and rollback removes the thread plus storage allocated through `artifacts.allocateStorage`. Design for Agent Threads is the reference peer consumer; Agent Threads itself retains only read-only legacy artifact fallback. `capabilities` is computed from what the host can actually do, so check it before calling. See [Peer Plugin API v1](docs/public-api.md) and the checked-in [type contract](api/public-api-v1.d.ts).
+
+Sibling Geode/Obsidian plugins can also contribute cards, images and self-contained
+interactive documents inside assistant replies through
+`extensions.registerMessageContentProvider`. The agent places a durable content
+reference on its own line, and Threads renders it at that position with
+host-owned presentation and named action buttons. Cards stay readable when a
+provider is unavailable; streaming and mobile relay views show inert fallbacks.
+Embedded documents run in isolated frames with external resources and navigation
+blocked. See [Inline message content](docs/public-api.md#inline-message-content)
+for registration, reference formatting, lifecycle and image-source details.
 
 ```bash
 git clone https://github.com/rbcodelabs/obsidian-claude-threads
