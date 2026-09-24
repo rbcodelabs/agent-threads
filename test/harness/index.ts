@@ -5,17 +5,17 @@ import { DEFAULT_SETTINGS } from '../../src/types';
 import { fixtureThreads } from './fixtures';
 import { mockLeaf, mockWorkspace } from './obsidian-mock';
 import { Platform } from 'obsidian';
-import { enterDesignMode, assertDesignWriteAllowed } from '../../src/designArtifact';
+import { enterDesignMode, assertDesignWriteAllowed } from './design-plugin/designArtifact';
 import { ArtifactProviderRegistry } from '../../src/ArtifactContributions';
 import { createArtifactStore } from '../../src/artifactStore';
 import { createClaudeThreadsApiV1 } from '../../src/PublicApi';
 import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
-import { createDesignSlashCommand } from '../../src/designSlashCommand';
+import { createDesignSlashCommand } from './design-plugin/designSlashCommand';
 import { THREAD_BUILTIN_COMMANDS, DISPATCH_BUILTIN_COMMANDS, escalationCommand } from '../../src/slashCommands';
 import {
   createDesignArtifactContribution, DESIGN_ACTION_PREVIEW, DESIGN_ARTIFACT_KIND, DESIGN_ARTIFACT_SCHEMA_VERSION,
   DESIGN_PROVIDER_ID, DESIGN_PROVIDER_OWNER,
-} from '../../src/designArtifactProvider';
+} from './design-plugin/designArtifactProvider';
 
 if (new URLSearchParams(window.location.search).has('mobile')) Platform.isMobile = true;
 

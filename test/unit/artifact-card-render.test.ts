@@ -3,7 +3,7 @@ import '../setup/obsidian-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { ThreadsView } from '../../src/ThreadsView';
 import { ArtifactProviderRegistry, type ArtifactActionHost, type ArtifactContribution, type ThreadArtifactRef } from '../../src/ArtifactContributions';
-import { createDesignArtifactContribution, DESIGN_PROVIDER_OWNER } from '../../src/designArtifactProvider';
+import { createDesignArtifactContribution, DESIGN_PROVIDER_OWNER } from '../harness/design-plugin/designArtifactProvider';
 import type { ThreadArtifactRecord } from '../../src/types';
 
 const legacyDesignArtifact: ThreadArtifactRecord = {

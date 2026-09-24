@@ -31,7 +31,7 @@ import { KanbanView } from '../../src/KanbanView';
 import { ThreadManager } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS, type ImageAttachment } from '../../src/types';
 import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
-import { createDesignSlashCommand } from '../../src/designSlashCommand';
+import { createDesignSlashCommand } from '../harness/design-plugin/designSlashCommand';
 import { createClaudeThreadsApiV1 } from '../../src/PublicApi';
 import { ThreadsView } from '../../src/ThreadsView';
 

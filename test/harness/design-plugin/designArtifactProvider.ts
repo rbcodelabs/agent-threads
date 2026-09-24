@@ -14,8 +14,8 @@ import type {
   ArtifactContribution,
   ArtifactPresentation,
   ThreadArtifactRef,
-} from './ArtifactContributions';
-import type { DesignArtifact } from './types';
+} from '../../../src/ArtifactContributions';
+import type { DesignArtifact } from '../../../src/types';
 
 export const DESIGN_PROVIDER_ID = 'agent-threads.design';
 export const DESIGN_ARTIFACT_KIND = 'design-static';
