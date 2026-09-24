@@ -1860,6 +1860,22 @@ test.describe('Agent Threads UI', () => {
     await override.fill('');
     await page.getByRole('button', { name: 'Save changes' }).click();
     await expect(page.getByText('Effective cwd: /Users/mock/vault/Work/Acme')).toBeVisible();
+    await page.getByRole('button', { name: 'New project' }).click();
+    await expect(page.getByLabel('Project name')).toHaveValue('');
+    await page.getByLabel('Project name').fill('Discarded draft');
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.getByLabel('Project name')).toHaveValue('Acme Webapp');
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => {
+      const app = document.getElementById('app');
+      const content = app?.querySelector<HTMLElement>('.vertical-tab-content');
+      if (app) app.style.height = 'auto';
+      if (content) { content.style.flex = 'none'; content.style.overflow = 'visible'; }
+    });
+    await expect(page.getByLabel('Settings section')).toBeVisible();
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await shot(page, 'settings-projects-narrow.png', { fullPage: true });
   });
 
   test('settings — Secrets save value and selected-project scope together', async ({ page }) => {
@@ -1875,6 +1891,10 @@ test.describe('Agent Threads UI', () => {
     await page.getByLabel('Acme Webapp').check();
     await page.getByRole('button', { name: 'Save changes' }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__settings.secretEnvScopes.STRIPE_SECRET_KEY)).toEqual(['proj-1']);
+    await expect.poll(() => page.evaluate(() => (window as any).__getSettingsSecret('STRIPE_SECRET_KEY'))).toBe('replacement-value');
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__getSettingsSecret('STRIPE_SECRET_KEY'))).toBe('replacement-value');
+    await page.locator('.vertical-tab-content').evaluate(element => { element.scrollTop = 0; });
     await shot(page, 'settings-secrets.png', { fullPage: true });
   });
 
@@ -2048,7 +2068,7 @@ test.describe('Agent Threads UI', () => {
   }
   test('Google Workspace services are opt-in and persisted independently', async ({ page }) => {
     await page.goto('file://' + path.resolve('test/harness/settings.html'));
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.getByLabel('Settings section').selectOption('mcp', { force: true });
     for (const name of ['Google Docs', 'Google Drive', 'Google Sheets', 'Google Slides']) {
       const toggle = page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: new RegExp(`^${name}$`) }) }).locator('.checkbox-container');
       await expect(toggle).not.toHaveClass(/is-enabled/);
@@ -2056,8 +2076,8 @@ test.describe('Agent Threads UI', () => {
       await expect(toggle).toHaveClass(/is-enabled/);
     }
     await expect(page.getByText('Google Workspace requires desktop Google Docs Sync with a connected account.', { exact: true })).toBeVisible();
-    await page.click('.ct-settings-tab-btn:has-text("General")');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.getByLabel('Settings section').selectOption('general', { force: true });
+    await page.getByLabel('Settings section').selectOption('mcp', { force: true });
     for (const name of ['Google Docs', 'Google Drive', 'Google Sheets', 'Google Slides']) {
       await expect(page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: new RegExp(`^${name}$`) }) }).locator('.checkbox-container')).toHaveClass(/is-enabled/);
     }
@@ -2067,7 +2087,7 @@ test.describe('Agent Threads UI', () => {
     test(`Google Workspace settings at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 844 });
       await page.goto('file://' + path.resolve('test/harness/settings.html'));
-      await page.click('.ct-settings-tab-btn:has-text("MCP")');
+      await page.getByLabel('Settings section').selectOption('mcp', { force: true });
       await page.evaluate(() => { document.getElementById('app')!.style.height = 'auto'; });
       await expect(page.getByText('Google Workspace', { exact: true })).toBeVisible();
       await expect(page.locator('.setting-item-name').filter({ hasText: /^Google (Docs|Drive|Sheets|Slides)$/ })).toHaveCount(4);
@@ -2086,7 +2106,7 @@ test.describe('Agent Threads UI', () => {
         configure: async (selection: unknown) => { calls.push(JSON.stringify(selection)); },
       };
     });
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.getByLabel('Settings section').selectOption('mcp', { force: true });
     await expect(page.getByText('Connected through Google Docs Sync.', { exact: false })).toBeVisible();
     await page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: /^Google Sheets$/ }) }).locator('.checkbox-container').click();
     await expect.poll(() => page.evaluate(() => (window as any).__workspaceCalls)).toEqual(['save', '{"sheets":true}']);
@@ -2163,8 +2183,8 @@ test.describe('Agent Threads UI', () => {
       const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
       await page.setViewportSize({ width, height: 760 });
       await page.goto(settingsUrl);
-      await page.waitForSelector('.ct-settings-tabs');
-      await page.click('.ct-settings-tab-btn:has-text("MCP")');
+      await page.waitForSelector('.ct-settings-shell');
+      await page.getByLabel('Settings section').selectOption('mcp', { force: true });
       await page.waitForTimeout(200);
       await page.getByRole('button', { name: 'Add MCP server' }).click();
       await page.waitForSelector('.modal-overlay');

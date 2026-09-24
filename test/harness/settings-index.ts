@@ -3,6 +3,7 @@ import { ClaudeThreadsSettingTab, RequestSecretModal } from '../../src/SettingsT
 import { DEFAULT_SETTINGS, type PluginSettings, type Project, type ScheduledItem, type WatchedDocument } from '../../src/types';
 import { mockApp } from './obsidian-mock';
 import { McpRegistrationModal } from '../../src/confirmModal';
+import { secretStorageKey } from '../../src/secretUtils';
 
 (window as any).__openMcpRegistration = (type: 'stdio' | 'http' = 'stdio') => {
   (window as any).__mcpRegistrationResult = undefined;
@@ -11,6 +12,7 @@ import { McpRegistrationModal } from '../../src/confirmModal';
     : { name: 'example-tools', type, url: 'https://mcp.example.com/agent/tools', headers: { Authorization: 'Bearer ${EXAMPLE_TOKEN}' } };
   new McpRegistrationModal(mockApp as any, entry, result => { (window as any).__mcpRegistrationResult = result; }).open();
 };
+(window as any).__getSettingsSecret = (name: string) => mockApp.secretStorage.getSecret(secretStorageKey(name));
 
 const fixtureProjects: Project[] = [
   {
