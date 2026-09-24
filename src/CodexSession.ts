@@ -101,10 +101,10 @@ export function codexContextUsage(tokenUsage: CodexThreadTokenUsage, model: stri
   const output = Math.max(0, usage.outputTokens - (usage.reasoningOutputTokens ?? 0));
   const reasoning = Math.max(0, usage.reasoningOutputTokens ?? 0);
   const categories = [
-    { name: 'Input', tokens: uncachedInput, color: '#4b9cd3' },
-    { name: 'Cached input', tokens: cached, color: '#7cb9e8' },
-    { name: 'Output', tokens: output, color: '#97c1e8' },
-    { name: 'Reasoning', tokens: reasoning, color: '#b0cfe8' },
+    { name: 'Input', tokens: uncachedInput, color: '#4b9cd3', kind: 'used' as const },
+    { name: 'Cached input', tokens: cached, color: '#7cb9e8', kind: 'used' as const },
+    { name: 'Output', tokens: output, color: '#97c1e8', kind: 'used' as const },
+    { name: 'Reasoning', tokens: reasoning, color: '#b0cfe8', kind: 'used' as const },
   ];
   const totalTokens = Math.max(0, usage.totalTokens);
   return {
