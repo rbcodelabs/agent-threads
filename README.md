@@ -8,7 +8,7 @@ Direct child-agent messaging and single-agent interruption are capability-gated.
 
 A native Obsidian and Geode plugin for running multiple Claude Code sessions in parallel — with streaming markdown responses, tab management, and deep vault integration.
 
-![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.44.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
+![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.45.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
 
 <p align="center">
   <img src="docs/screenshot-main.png" width="800" alt="Main view: conversation panel with tool calls and Agents List showing thread summaries" />
@@ -231,6 +231,8 @@ Open the **Skills Manager** from the ribbon (puzzle icon) or command palette to 
 **Installed tab** — shows everything installed as a collapsible source tree. The top-right corner of the tab bar has two icon buttons (Installed tab only): **Import** (+) opens a menu with **Folder…** and **File (.skill)…**, letting you install a skill directly from a local folder or a packaged `.skill`/`.zip` archive without going through GitHub; and **Check for updates** (↻, shown once you have at least one GitHub plugin source) re-fetches staleness for all GitHub plugin sources in parallel — its icon spins while running, and a toast reports the result when it finishes (including which sources failed to check, e.g. if you're offline). An indicator dot appears on the button afterward if any plugin has updates (hover either button for its full status/tooltip). GitHub plugin sources appear as top-level nodes with a badge (`•N`) when updates are available; clicking one expands it to reveal its skills and opens a detail panel with **Update** (git pull, highlighted when updates are available), **Reload** (re-scan from disk), **Reinstall** (delete and re-clone for broken installs), and **Remove Source**. Two more nodes sit at the bottom. **Vault** lists the skills this plugin installed into your vault — click one to view and edit it, with **Save**, **Reload**, **Reveal in Finder**, and **Uninstall**. **Claude Code** lists everything in `~/.claude/` (skills *and* agent profiles), marked `read-only`: the plugin shows them because the Claude CLI genuinely loads them into every session, but it never writes to that directory, so those panes offer only **Reload** and **Reveal in Finder**. Edit or remove them with the `claude` CLI, or by hand.
 
 > **Where installs go.** Everything the Skills Manager installs or imports lands in `<vault>/.obsidian/plugins/claude-threads/skills/`, beside the plugin's `skill-sources/` clones — never in `~/.claude/`. That folder shares the plugin folder's fate: community-plugin *updates* leave unknown subdirectories alone, but manually uninstalling and reinstalling the plugin will delete your installed skills along with it.
+
+Click a GitHub source's **chevron** to expand or collapse its skills while staying in the list. Click the rest of the source row to open its details. In narrow panes, this lets you browse the expanded skills without switching screens.
 
 #### Authoring local skills
 

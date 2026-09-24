@@ -2254,8 +2254,7 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
     await page.getByRole('button', { name: 'Add MCP server' }).click();
     await page.waitForSelector('.modal-overlay');

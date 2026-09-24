@@ -11,7 +11,10 @@ const sdkAuth = vi.hoisted(() => ({
   parseErrorResponse: vi.fn(async (input: Response | string) => new Error(typeof input === 'string' ? input : `HTTP ${input.status}`)),
 }));
 
-vi.mock('@modelcontextprotocol/sdk/client/auth.js', () => sdkAuth);
+vi.mock('@modelcontextprotocol/sdk/client/auth.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@modelcontextprotocol/sdk/client/auth.js')>(),
+  ...sdkAuth,
+}));
 
 const { OAuthMcpFlow, generatePkcePair, pkceChallengeForVerifier, resourceIndicatorFor } = await import('../../src/OAuthMcpFlow');
 type TokenSet = import('../../src/OAuthTokenStore').TokenSet;
@@ -649,7 +652,9 @@ describe('OAuthMcpFlow.revoke', () => {
     const fetchFn = vi.fn(async () => new Response(null, { status: 200 }));
     const flow = new OAuthMcpFlow(tokenStore, vi.fn(), fetchFn as unknown as typeof fetch);
 
-    await flow.revoke('confidential', fixtureAsMetadata());
+    const metadata = fixtureAsMetadata();
+    metadata.authorizationServerMetadata!.token_endpoint_auth_methods_supported = ['client_secret_post'];
+    await flow.revoke('confidential', metadata);
 
     const bodies = fetchFn.mock.calls.map(([, init]) => (init as RequestInit).body as URLSearchParams);
     expect(bodies).toHaveLength(2);
@@ -657,6 +662,29 @@ describe('OAuthMcpFlow.revoke', () => {
       expect(body.get('client_id')).toBe('client-123');
       expect(body.get('client_secret')).toBe('shh-abc');
     }
+  });
+
+  it.each([
+    { methods: undefined, revocationMethods: undefined },
+    { methods: ['client_secret_basic'], revocationMethods: undefined },
+    { methods: ['client_secret_post'], revocationMethods: ['client_secret_basic'] },
+  ])('revokes tokens with Basic authentication for $methods / $revocationMethods', async ({ methods, revocationMethods }) => {
+    const tokenStore = fixtureTokenStore({
+      clientId: 'client-123', clientSecret: 'shh-abc', currentTokens: { accessToken: 'at-1', refreshToken: 'rt-1' },
+    });
+    const accepted: string[] = [];
+    const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = init!.body as URLSearchParams;
+      const authorized = new Headers(init!.headers).get('Authorization') === `Basic ${btoa('client-123:shh-abc')}`;
+      if (authorized && !body.has('client_secret')) accepted.push(body.get('token')!);
+      return new Response(null, { status: authorized ? 200 : 401 });
+    });
+    const metadata = fixtureAsMetadata();
+    metadata.authorizationServerMetadata!.token_endpoint_auth_methods_supported = methods;
+    Object.assign(metadata.authorizationServerMetadata!, { revocation_endpoint_auth_methods_supported: revocationMethods });
+    await new OAuthMcpFlow(tokenStore, vi.fn(), fetchFn as typeof fetch).revoke('confidential', metadata);
+    expect(accepted).toEqual(['rt-1', 'at-1']);
+    expect(tokenStore.clear).toHaveBeenCalledWith('confidential');
   });
 
   it('sends no client_secret key at all when revoking a public client', async () => {

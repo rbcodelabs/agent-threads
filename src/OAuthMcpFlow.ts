@@ -28,6 +28,7 @@ import {
   parseErrorResponse,
   refreshAuthorization,
   registerClient as sdkRegisterClient,
+  selectClientAuthMethod,
   type OAuthServerInfo,
 } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { AuthorizationServerMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
@@ -508,15 +509,24 @@ export class OAuthMcpFlow {
       for (const [token, tokenTypeHint] of candidates) {
         if (!token) continue;
         try {
+          const headers = new Headers({ 'Content-Type': 'application/x-www-form-urlencoded' });
+          const body = new URLSearchParams({ token, token_type_hint: tokenTypeHint });
+          const revocationMethods = asMeta && 'revocation_endpoint_auth_methods_supported' in asMeta
+            ? asMeta.revocation_endpoint_auth_methods_supported : undefined;
+          const method = selectClientAuthMethod(
+            clientInformationFor(clientId, clientSecret),
+            Array.isArray(revocationMethods) ? revocationMethods : asMeta?.token_endpoint_auth_methods_supported ?? [],
+          );
+          if (method === 'client_secret_basic') {
+            headers.set('Authorization', `Basic ${btoa(`${clientId}:${clientSecret}`)}`);
+          } else {
+            body.set('client_id', clientId);
+            if (method === 'client_secret_post' && clientSecret !== undefined) body.set('client_secret', clientSecret);
+          }
           const response = await this.fetchFn(revocationEndpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({
-              token,
-              token_type_hint: tokenTypeHint,
-              client_id: clientId,
-              ...(clientSecret === undefined ? {} : { client_secret: clientSecret }),
-            }),
+            headers,
+            body,
           });
           if (!response.ok) throw await parseErrorResponse(response);
         } catch {
