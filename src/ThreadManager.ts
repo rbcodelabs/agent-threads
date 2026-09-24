@@ -1998,7 +1998,6 @@ export class ThreadManager {
     const generationAtStart = thread.sessionGeneration ?? 0;
     const isCurrentGeneration = () =>
       this.threads.get(threadId) === thread
-      && (thread.agentHarness ?? 'claude') === harnessAtStart
       && (thread.sessionGeneration ?? 0) === generationAtStart;
     return {
       onRawEvent: (event) => {
