@@ -8,6 +8,7 @@
  * No Obsidian or Node imports on purpose.
  */
 import type { AgentHarness, SkillSource } from './types';
+import { stripTrailingPathSeparators, stripTrailingSlashes } from './trailingSlashes';
 
 export const CHIEF_OF_STAFF_REPO_URL = 'https://github.com/rbcodelabs/chief-of-staff';
 /**
@@ -66,12 +67,8 @@ export function chooseChiefOfStaffHarness(
 }
 
 function normalizeRepoUrl(url: string): string {
-  return url
-    .trim()
-    .toLowerCase()
-    .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
-    .replace(/\/+$/, '')
-    .replace(/\.git$/, '');
+  const withoutScheme = url.trim().toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '');
+  return stripTrailingSlashes(withoutScheme).replace(/\.git$/, '');
 }
 
 /** True when a GitHub-type source for `repoUrl` is already configured. */
@@ -108,7 +105,7 @@ export function isBinaryResolvable(
   return (env.pathEnv ?? '')
     .split(sep)
     .filter(Boolean)
-    .some(dir => env.exists(`${dir.replace(/[\\/]+$/, '')}${dirSep}${value}`));
+    .some(dir => env.exists(`${stripTrailingPathSeparators(dir)}${dirSep}${value}`));
 }
 
 /** Appends the one-line pointer to the command, used by the fallback guide. */

@@ -22,6 +22,7 @@ import { execFile, execSync } from 'child_process';
 import { createHash } from 'crypto';
 import type { SkillSource } from './types';
 import { getSkillsDirForSource, readPluginManifest } from './claudeSettings';
+import { stripTrailingSlashes } from './trailingSlashes';
 import {
   type SkillRoots,
   getSkillRoots,
@@ -625,14 +626,14 @@ function execErrorMessage(err: unknown): string {
  * `git@github.com:o/r` all hash to the same id.
  */
 export function normalizeRepoUrlForId(repoUrl: string): string {
-  return repoUrl
+  const withoutPrefix = repoUrl
     .trim()
     .toLowerCase()
     .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
     .replace(/^git@([^:/]+):/, '$1/')
     .replace(/^[^/@]+@/, '')
-    .replace(/\.git$/, '')
-    .replace(/\/+$/, '');
+    .replace(/\.git$/, '');
+  return stripTrailingSlashes(withoutPrefix);
 }
 
 /**
@@ -652,7 +653,7 @@ export function deriveSourceIdFromRepoUrl(repoUrl: string): string {
 
 /** `git clone` needs the `.git` suffix even though we display and store the bare URL. */
 export function githubCloneUrl(repoUrl: string): string {
-  const trimmed = repoUrl.trim().replace(/\/+$/, '');
+  const trimmed = stripTrailingSlashes(repoUrl.trim());
   return trimmed.endsWith('.git') ? trimmed : `${trimmed}.git`;
 }
 
@@ -777,7 +778,7 @@ export async function addGithubSkillSource(opts: {
   ref?: string;
   timeoutMs?: number;
 }): Promise<SkillSource> {
-  const repoUrl = opts.repoUrl.trim().replace(/\/+$/, '').replace(/\.git$/, '');
+  const repoUrl = stripTrailingSlashes(opts.repoUrl.trim()).replace(/\.git$/, '');
   const id = opts.id ?? deriveSourceIdFromRepoUrl(repoUrl);
   const clonePath = path.join(opts.cloneBase, id);
 
@@ -825,8 +826,8 @@ export async function checkGitAvailable(env: {
   if (await ok('xcode-select', ['-p'])) return ok('git', ['--version']);
   const nonStub = (env.pathEnv ?? '')
     .split(':')
-    .filter(dir => dir && dir.replace(/\/+$/, '') !== '/usr/bin')
-    .map(dir => `${dir.replace(/\/+$/, '')}/git`)
+    .filter(dir => dir && stripTrailingSlashes(dir) !== '/usr/bin')
+    .map(dir => `${stripTrailingSlashes(dir)}/git`)
     .find(candidate => env.exists(candidate));
   return nonStub ? ok(nonStub, ['--version']) : false;
 }
