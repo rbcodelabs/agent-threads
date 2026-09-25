@@ -25,6 +25,62 @@ export interface VaultListAdapter {
   list(path: string): Promise<{ files: string[]; folders: string[] }>;
 }
 
+/** The slice of the host's abstract file tree (`Vault.getRoot` / `getAbstractFileByPath`) this needs. */
+export interface VaultTree {
+  getRoot(): VaultTreeNode;
+  getAbstractFileByPath(path: string): VaultTreeNode | null;
+}
+
+/** A `TFolder` (has `children`) or `TFile` (has `stat`), duck-typed so tests need no host classes. */
+export interface VaultTreeNode {
+  path: string;
+  children?: VaultTreeNode[];
+  stat?: { size?: number; mtime?: number };
+}
+
+/**
+ * A `VaultListAdapter` over the vault's in-memory file tree, for hosts whose
+ * `DataAdapter` has no `list()` — Geode's FileSystemAdapter does not implement
+ * it. Same entries, errors and rules as the adapter path, because `listVault`
+ * still applies them; the one difference is that the tree never contains the
+ * host config dir, so it cannot be listed even when requested explicitly.
+ */
+export function vaultTreeAdapter(vault: VaultTree): VaultListAdapter {
+  const node = (path: string): VaultTreeNode | null => {
+    const key = relative(path);
+    return key === '' ? vault.getRoot() : vault.getAbstractFileByPath(key);
+  };
+  return {
+    exists: async (path) => node(path) !== null,
+    stat: async (path) => {
+      const found = node(path);
+      if (!found) return null;
+      if (Array.isArray(found.children)) return { type: 'folder' };
+      return { type: 'file', size: found.stat?.size, mtime: found.stat?.mtime };
+    },
+    list: async (path) => {
+      const found = node(path);
+      if (!found || !Array.isArray(found.children)) throw new VaultListError(`Folder not found: ${relative(path)}`);
+      const files: string[] = [];
+      const folders: string[] = [];
+      for (const child of found.children) (Array.isArray(child.children) ? folders : files).push(child.path);
+      return { files, folders };
+    },
+  };
+}
+
+/**
+ * The listing source for a host: its `DataAdapter` when that implements
+ * `list()` (Obsidian), otherwise the vault's file tree (Geode).
+ */
+export function vaultListSource(vault: VaultTree & { adapter?: unknown }): VaultListAdapter {
+  const adapter = vault.adapter as Partial<VaultListAdapter> | undefined;
+  if (adapter && typeof adapter.list === 'function' && typeof adapter.stat === 'function' && typeof adapter.exists === 'function') {
+    return adapter as VaultListAdapter;
+  }
+  return vaultTreeAdapter(vault);
+}
+
 export interface VaultListEntry {
   path: string;
   type: 'file' | 'folder';

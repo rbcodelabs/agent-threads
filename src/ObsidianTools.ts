@@ -16,7 +16,7 @@ import { tokenizeQuery, findBestExcerpt } from './searchUtils';
 import { execFileSync } from 'child_process';
 import { secretStorageKey } from './secretUtils';
 import { AGENT_BROWSER_READ_ONLY_TOOL_NAMES, createAgentBrowserTools } from './agentBrowser/agentBrowserTools';
-import { listVault, type VaultListAdapter } from './vaultList';
+import { listVault, vaultListSource } from './vaultList';
 import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
 import { resolveWorktreeRoot, worktreePathFor } from './worktreePaths';
 import { bindAgentTool } from './AgentToolContributions';
@@ -797,7 +797,9 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     vaultListSchema,
     async (args, _extra) => {
       try {
-        const result = await listVault(app.vault.adapter as unknown as VaultListAdapter, {
+        // Obsidian's adapter implements list(); Geode's does not, so fall back to
+        // the vault's file tree there (see vaultListSource).
+        const result = await listVault(vaultListSource(app.vault as unknown as Parameters<typeof vaultListSource>[0]), {
           path: args.path,
           recursive: args.recursive,
           limit: args.limit,

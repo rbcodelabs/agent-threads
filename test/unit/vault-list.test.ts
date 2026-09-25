@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { App } from 'obsidian';
-import { listVault, normalizeVaultListPath, VaultListError, type VaultListAdapter } from '../../src/vaultList';
+import { listVault, normalizeVaultListPath, vaultTreeAdapter, VaultListError, type VaultListAdapter } from '../../src/vaultList';
 
 /** In-memory adapter: keys are vault-relative paths; folders end in '/'. */
 function fakeAdapter(tree: Record<string, { size?: number; mtime?: number } | 'folder'>): VaultListAdapter & { listCalls: string[] } {
@@ -194,5 +194,110 @@ describe('vault_list registration', () => {
     const bad = await vaultList.handler({ path: '../etc' }, {});
     expect(bad.isError).toBe(true);
     expect(bad.content[0]!.text).toMatch(/inside the vault/);
+  });
+});
+
+
+// ─── Geode: the vault adapter has no list(), so walk the vault's file tree ──
+
+/**
+ * Minimal stand-in for the host's abstract file tree (TFolder / TFile): folders
+ * have `children`, files have `stat`. Like Obsidian and Geode, the tree does
+ * not contain the config dir.
+ */
+function fakeVault(paths: Record<string, { size: number; mtime: number } | 'folder'>) {
+  type Node = { path: string; name: string; children?: Node[]; stat?: { size: number; mtime: number }; parent?: Node };
+  const root: Node = { path: '/', name: '', children: [] };
+  const byPath = new Map<string, Node>([['/', root]]);
+  for (const [p, entry] of Object.entries(paths).sort(([a], [b]) => a.localeCompare(b))) {
+    const parentPath = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '/';
+    const parent = byPath.get(parentPath)!;
+    const node: Node = entry === 'folder'
+      ? { path: p, name: p.split('/').pop()!, children: [], parent }
+      : { path: p, name: p.split('/').pop()!, stat: entry, parent };
+    parent.children!.push(node);
+    byPath.set(p, node);
+  }
+  return {
+    getRoot: () => root,
+    getAbstractFileByPath: (p: string) => byPath.get(p) ?? null,
+  };
+}
+
+const TREE_VAULT = {
+  'Daily': 'folder',
+  'Daily/2026-09-25.md': { size: 120, mtime: 1000 },
+  'Daily/2026-09-24.md': { size: 80, mtime: 900 },
+  'Projects': 'folder',
+  'Projects/Chief of Staff': 'folder',
+  'Projects/Chief of Staff/Spec.md': { size: 3000, mtime: 2000 },
+  'Welcome.md': { size: 42, mtime: 10 },
+} as const;
+
+describe('vaultTreeAdapter (hosts whose adapter has no list(), e.g. Geode)', () => {
+  it('lists the root non-recursively with folders and file size/mtime', async () => {
+    const result = await listVault(vaultTreeAdapter(fakeVault(TREE_VAULT)), { configDir: '.geode' });
+    expect(result).toEqual({
+      path: '',
+      truncated: false,
+      entries: [
+        { path: 'Daily', type: 'folder' },
+        { path: 'Projects', type: 'folder' },
+        { path: 'Welcome.md', type: 'file', size: 42, mtime: 10 },
+      ],
+    });
+  });
+
+  it('recurses, sorted', async () => {
+    const result = await listVault(vaultTreeAdapter(fakeVault(TREE_VAULT)), { recursive: true, configDir: '.geode' });
+    expect(result.entries.map((e) => e.path)).toEqual([
+      'Daily',
+      'Daily/2026-09-24.md',
+      'Daily/2026-09-25.md',
+      'Projects',
+      'Projects/Chief of Staff',
+      'Projects/Chief of Staff/Spec.md',
+      'Welcome.md',
+    ]);
+  });
+
+  it('keeps limit/truncation, the missing-folder and not-a-folder errors, and escape rejection', async () => {
+    const source = vaultTreeAdapter(fakeVault(TREE_VAULT));
+    const limited = await listVault(source, { recursive: true, limit: 2, configDir: '.geode' });
+    expect(limited).toMatchObject({ truncated: true, entries: [{ path: 'Daily' }, { path: 'Daily/2026-09-24.md' }] });
+    await expect(listVault(source, { path: 'Nope', configDir: '.geode' })).rejects.toThrow('Folder not found: Nope');
+    await expect(listVault(source, { path: 'Welcome.md', configDir: '.geode' })).rejects.toThrow('Not a folder: Welcome.md');
+    await expect(listVault(source, { path: '../x', configDir: '.geode' })).rejects.toThrow(VaultListError);
+  });
+
+  it('still skips a config dir if the host tree happens to contain one', async () => {
+    const result = await listVault(vaultTreeAdapter(fakeVault({ ...TREE_VAULT, '.geode': 'folder', '.geode/app.json': { size: 1, mtime: 1 } })), { configDir: '.geode' });
+    expect(result.entries.map((e) => e.path)).not.toContain('.geode');
+  });
+
+  it('the vault_list tool uses the file tree when app.vault.adapter has no list()', async () => {
+    const { createClaudeThreadsMcpServers } = await import('../../src/ObsidianTools');
+    const tree = fakeVault(TREE_VAULT);
+    const app = {
+      plugins: { plugins: {} },
+      workspace: { getLeavesOfType: () => [], onLayoutReady: (cb: () => void) => cb() },
+      // Geode's FileSystemAdapter: no list().
+      vault: { ...tree, getMarkdownFiles: () => [], adapter: { exists: async () => true }, configDir: '.geode' },
+      metadataCache: { on: () => {} },
+    } as unknown as App;
+    const servers = createClaudeThreadsMcpServers(app) as unknown as {
+      claude_threads: { tools: Array<{ name: string; handler: (args: unknown, extra: unknown) => Promise<{ content: Array<{ text: string }>; isError?: boolean }> }> };
+    };
+    const vaultList = servers.claude_threads.tools.find((t) => t.name === 'vault_list')!;
+    const result = await vaultList.handler({ path: 'Daily' }, {});
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({
+      path: 'Daily',
+      truncated: false,
+      entries: [
+        { path: 'Daily/2026-09-24.md', type: 'file', size: 80, mtime: 900 },
+        { path: 'Daily/2026-09-25.md', type: 'file', size: 120, mtime: 1000 },
+      ],
+    });
   });
 });
