@@ -4280,7 +4280,7 @@ export class ThreadsView extends ItemView {
    * Shown in response to the /context slash command.
    */
   private renderContextUsageCard(
-    usage: import('@anthropic-ai/claude-agent-sdk').SDKControlGetContextUsageResponse,
+    usage: import('./HarnessSession').HarnessContextUsage,
   ): void {
     const container = this.cardContainer();
     const card = container.createDiv('ct-context-usage-card');

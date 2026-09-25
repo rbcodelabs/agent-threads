@@ -4,7 +4,7 @@ import fs from 'fs';
 import type { AskQuestion, ImageAttachment } from './types';
 import { parseExtraEnv } from './types';
 import type { SessionCallbacks } from './ClaudeSession';
-import { resolveCodexPermissions, resolveDynamicToolApproval, type HarnessSessionOptions } from './HarnessSession';
+import { resolveCodexPermissions, resolveDynamicToolApproval, type HarnessContextUsage, type HarnessPermissionMode, type HarnessSessionOptions } from './HarnessSession';
 import { mergeUsageSnapshot, normalizeCodexAccountUsage, normalizeCodexRateLimitResponse, normalizeCodexTokenUsage, type UsageSnapshot } from './Usage';
 import { renderCodexAgentProfiles } from './AgentProfiles';
 import { CodexRawLog } from './CodexRawLog';
@@ -24,7 +24,7 @@ type CodexThreadTokenUsage = {
   modelContextWindow: number | null;
 };
 
-type ContextUsage = import('@anthropic-ai/claude-agent-sdk').SDKControlGetContextUsageResponse;
+type ContextUsage = HarnessContextUsage;
 
 function canonicalSkillPath(value: string): string {
   try { return fs.realpathSync(value); } catch { return path.resolve(value); }
@@ -68,12 +68,12 @@ export function codexResumeInstructions(options: HarnessSessionOptions): { devel
   return { developerInstructions: codexDeveloperInstructions(options) };
 }
 
-/** Convert Claude's process-transport MCP shapes to Codex config.toml keys. */
+/** Convert neutral process-transport MCP shapes to Codex config.toml keys. */
 export function codexMcpServers(servers: NonNullable<HarnessSessionOptions['codex']>['mcpServers']): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [name, server] of Object.entries(servers ?? {})) {
-    if (!server || server.type === 'sdk') continue;
-    if (server.type === 'http' || server.type === 'sse') {
+    if (!server) continue;
+    if ('url' in server) {
       result[name] = {
         url: server.url,
         ...(server.headers ? { http_headers: server.headers } : {}),
@@ -81,6 +81,9 @@ export function codexMcpServers(servers: NonNullable<HarnessSessionOptions['code
       };
       continue;
     }
+    // Defensive: in-process SDK servers never reach here via serializableMcpServers,
+    // but a stray one must not become a command-less stdio entry.
+    if (typeof server.command !== 'string') continue;
     result[name] = {
       command: server.command,
       ...(server.args ? { args: server.args } : {}),
@@ -111,20 +114,8 @@ export function codexContextUsage(tokenUsage: CodexThreadTokenUsage, model: stri
     categories,
     totalTokens,
     maxTokens,
-    rawMaxTokens: maxTokens,
     percentage: Math.min(100, (totalTokens / maxTokens) * 100),
-    gridRows: [],
     model,
-    memoryFiles: [],
-    mcpTools: [],
-    agents: [],
-    isAutoCompactEnabled: true,
-    apiUsage: {
-      input_tokens: usage.inputTokens,
-      output_tokens: usage.outputTokens,
-      cache_creation_input_tokens: usage.cacheWriteInputTokens ?? 0,
-      cache_read_input_tokens: cached,
-    },
   };
 }
 
@@ -380,7 +371,7 @@ export class CodexSession {
     return resolved;
   }
 
-  async setPermissionMode(mode: any): Promise<void> {
+  async setPermissionMode(mode: HarnessPermissionMode): Promise<void> {
     if (!this.codexThreadId) {
       if (this.options) this.options.permissionMode = mode;
       return;
