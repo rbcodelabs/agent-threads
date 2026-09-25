@@ -11,7 +11,7 @@
     "shots": "npm run shot:main && npm run shot:slash && npm run shot:stream && npm run shot:permission"
   },
   "dependencies": {
-    "@remotion/cli": "4.0.252",
+    "@remotion/cli": "4.0.528",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "remotion": "4.0.252"
