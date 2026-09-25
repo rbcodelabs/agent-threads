@@ -19,6 +19,17 @@ import { AGENT_BROWSER_READ_ONLY_TOOL_NAMES, createAgentBrowserTools } from './a
 import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
 import { resolveWorktreeRoot, worktreePathFor } from './worktreePaths';
 import { bindAgentTool } from './AgentToolContributions';
+import {
+  SandboxVmManager,
+  VM_NETWORK_MODES,
+  VM_WORKDIR,
+  containerNameForThread,
+  isVmNetworkMode,
+  resolveExecTimeoutSeconds,
+  resolveVmImage,
+  resolveVmNetwork,
+  type VmCommandRunner,
+} from './sandboxVm';
 import type {
   InstalledSkillInfo,
   MarketplaceSkill,
@@ -252,6 +263,24 @@ export interface ObsidianMcpServerOptions {
    * takes effect on the next tool call instead of requiring a session restart.
    */
   getWorktreeRoot?: () => string | undefined;
+  /**
+   * Returns the configured container image for `enter_vm`. Undefined/blank
+   * falls back to `claude-threads-coding:1`. Read lazily for the same reason as
+   * {@link getWorktreeRoot}.
+   */
+  getVmImage?: () => string | undefined;
+  /**
+   * Returns the configured default network mode for `enter_vm` when the call
+   * does not pass one. Anything unrecognised falls back to `'default'`
+   * (full egress). Read lazily for the same reason as {@link getWorktreeRoot}.
+   */
+  getVmDefaultNetwork?: () => string | undefined;
+  /**
+   * Overrides how sandbox VM commands are executed. Tests inject a fake so
+   * command construction and lifecycle transitions are exercised without a
+   * macOS 26 container runtime.
+   */
+  vmCommandRunner?: VmCommandRunner;
   /** Creates a persistent thread and queues its initial prompt. */
   createThread?: (params: {
     prompt: string;
@@ -434,6 +463,12 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
 
   // worktreePath → originalGitRoot, for tracking active worktrees this session.
   const activeWorktrees = new Map<string, string>();
+
+  // Sandbox VM container names are derived from the thread ID so a container
+  // survives a plugin reload and can still be found. When no thread ID was
+  // supplied (ad-hoc/test surfaces) fall back to a per-session random ID: two
+  // such sessions must not collide on one container.
+  const fallbackVmSessionId = crypto.randomUUID();
 
   const boundGetOpenTabs = tool(
     'obsidian_get_open_tabs',
@@ -1091,6 +1126,173 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
           content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: msg }) }],
           isError: true,
         };
+      }
+    },
+  );
+
+  // ── Sandbox VM tools ────────────────────────────────────────────────────────
+  // A sandboxed VM for running COMMANDS only. Read/Write/Edit/Bash keep running
+  // on the host, so the thread's working directory is bind-mounted into the
+  // guest at /work rather than copied — file edits stay on the host and are
+  // visible inside the VM immediately, with no sync step and no divergence.
+  //
+  // Backed by Apple's `container` CLI (macOS 26+, Apple silicon), where each
+  // container is its own lightweight VM with a separate kernel and no view of
+  // the host filesystem beyond that mount. See src/sandboxVm.ts for the full
+  // rationale, and sandbox/Dockerfile for the image.
+  //
+  // The container name is derived deterministically from the thread ID, so a
+  // container started before a plugin reload can still be found and cleaned up
+  // afterwards without persisting anything on the Thread.
+
+  const vmManager = new SandboxVmManager({
+    containerName: () => containerNameForThread(options.threadId ?? fallbackVmSessionId),
+    run: options.vmCommandRunner,
+  });
+
+  const vmErrorResult = (error: string) => ({
+    content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error }) }],
+    isError: true,
+  });
+
+  const boundEnterVm = tool(
+    'enter_vm',
+    [
+      'Starts a sandboxed Linux VM for this thread and bind-mounts the current effective working directory into it at /work.',
+      'File editing stays on the host — use vm_exec to run commands inside the VM, where the container has its own kernel and cannot see the rest of the host filesystem.',
+      'Requires Apple\'s container runtime (macOS 26+ on Apple silicon); desktop only.',
+      'Use exit_vm to stop and remove the VM.',
+    ].join(' '),
+    {
+      image: z.string().optional().describe(
+        'Container image to start. Defaults to the configured sandbox VM image (claude-threads-coding:1), built from sandbox/Dockerfile.',
+      ),
+      network: z.enum(VM_NETWORK_MODES as unknown as [string, ...string[]]).optional().describe(
+        'Network isolation: "default" = full egress (npm install, git remotes and web all work), "internal" = no internet but host and shared-network peers remain reachable, "none" = no network at all. Defaults to the configured setting, which ships as "default".',
+      ),
+      mountPath: z.string().optional().describe(
+        'Absolute host directory to mount at /work. Defaults to the current effective working directory.',
+      ),
+    },
+    async (args, _extra) => {
+      try {
+        const mountPath = args.mountPath ?? effectiveCwd;
+        // Native harnesses invoke handlers directly, without SDK Zod parsing.
+        // An invalid requested isolation mode must never silently enable egress.
+        if (args.network !== undefined && !isVmNetworkMode(args.network)) {
+          return vmErrorResult('network must be default, internal, or none.');
+        }
+        if (!mountPath) {
+          return vmErrorResult('No working directory set. Call set_working_directory first, or pass mountPath.');
+        }
+        if (!path.isAbsolute(mountPath)) {
+          return vmErrorResult(`mountPath must be an absolute path: ${mountPath}`);
+        }
+        // Checked on the host before starting anything: `container run` with a
+        // nonexistent --volume source fails deep in the runtime with a message
+        // that does not name the path.
+        if (!fs.existsSync(mountPath) || !fs.statSync(mountPath).isDirectory()) {
+          return vmErrorResult(`mountPath is not an existing directory: ${mountPath}`);
+        }
+
+        const result = await vmManager.enter({
+          image: resolveVmImage(args.image, options.getVmImage?.()),
+          mountPath,
+          network: resolveVmNetwork(args.network, options.getVmDefaultNetwork?.()),
+        });
+        if (!result.success) return vmErrorResult(result.error);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              containerName: result.containerName,
+              image: result.image,
+              mountedFrom: result.mountedFrom,
+              network: result.network,
+              containerWorkdir: VM_WORKDIR,
+              message: `Sandbox VM running. ${result.mountedFrom} is mounted at ${VM_WORKDIR}. Run commands with vm_exec; keep editing files with the normal file tools on the host.`,
+            }, null, 2),
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return vmErrorResult(msg);
+      }
+    },
+  );
+
+  const boundVmExec = tool(
+    'vm_exec',
+    [
+      'Runs a shell command inside this thread\'s sandboxed VM, with the working directory set to /work (the bind-mounted host directory).',
+      'Call enter_vm first.',
+      'Returns the exit code plus stdout and stderr; a non-zero exit code is reported as a normal result, not an error.',
+      'Very long output is truncated with an explicit marker.',
+    ].join(' '),
+    {
+      command: z.string().min(1).describe(
+        'Shell command to run inside the VM. Executed with `bash -lc` from /work.',
+      ),
+      timeoutSeconds: z.number().optional().describe(
+        'Guest command deadline in seconds, followed by a five-second kill grace. Defaults to 300, capped at 3600. Requires GNU timeout in the image; timeout normally returns exit code 124.',
+      ),
+    },
+    async (args, _extra) => {
+      try {
+        const result = await vmManager.execCommand({
+          command: args.command,
+          timeoutSeconds: resolveExecTimeoutSeconds(args.timeoutSeconds),
+        });
+        if (!result.success) return vmErrorResult(result.error);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              exitCode: result.exitCode,
+              stdout: result.stdout,
+              stderr: result.stderr,
+            }, null, 2),
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return vmErrorResult(msg);
+      }
+    },
+  );
+
+  const boundExitVm = tool(
+    'exit_vm',
+    [
+      'Stops and removes this thread\'s sandboxed VM.',
+      'The bind-mounted host directory and everything written into it is untouched — only the VM\'s own ephemeral root filesystem goes away.',
+    ].join(' '),
+    {
+      force: z.boolean().optional().describe(
+        'Kill the VM immediately instead of stopping it gracefully first (default: false).',
+      ),
+    },
+    async (args, _extra) => {
+      try {
+        const result = await vmManager.exit({ force: args.force });
+        if (!result.success) return vmErrorResult(result.error);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              removedContainer: result.removedContainer,
+            }, null, 2),
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return vmErrorResult(msg);
       }
     },
   );
@@ -2682,6 +2884,9 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundListWatchedDocuments,
       boundEnterWorktree,
       boundExitWorktree,
+      boundEnterVm,
+      boundVmExec,
+      boundExitVm,
       boundListCommands,
       boundExecuteCommand,
       ...(options.enableOpenUrl !== false ? [boundOpenUrl] : []),

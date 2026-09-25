@@ -1921,6 +1921,27 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'settings-claude.png', { fullPage: true });
   });
 
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }, { width: 375, height: 667 }]) {
+    test(`settings — sandbox VM controls ${viewport.width}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto('file://' + path.resolve('test/harness/settings.html'));
+      await page.getByLabel('Settings section').selectOption('claude');
+      const imageRow = page.locator('.setting-item').filter({ has: page.getByText('Sandbox VM image', { exact: true }) });
+      const networkRow = page.locator('.setting-item').filter({ has: page.getByText('Sandbox VM network', { exact: true }) });
+      await imageRow.scrollIntoViewIfNeeded();
+      await expect(imageRow.locator('input')).toHaveValue('claude-threads-coding:1');
+      await networkRow.locator('select').selectOption('none');
+      await expect(networkRow.locator('select')).toHaveValue('none');
+      await networkRow.scrollIntoViewIfNeeded();
+      const bounds = await networkRow.locator('select').boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+      if (viewport.width < 480) expect(bounds!.height).toBeGreaterThanOrEqual(44);
+      await shot(page, `settings-sandbox-vm-${viewport.width}.png`);
+    });
+  }
+
   test('settings — switching harness reveals Codex Ultra effort without overwriting Claude effort', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });

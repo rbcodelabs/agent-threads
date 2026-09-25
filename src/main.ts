@@ -624,6 +624,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // Read lazily so changing the setting takes effect on the next
           // enter_worktree call rather than requiring a session restart.
           getWorktreeRoot: () => this.settings.worktreeRoot,
+          // Same lazy-read rationale as getWorktreeRoot: changing the image or
+          // network setting takes effect on the next enter_vm call rather than
+          // needing a session restart.
+          getVmImage: () => this.settings.vmImage,
+          getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
           onScheduleWakeup: async (delayMs: number, prompt: string, reason: string) => {
             // Durable one-shot Scheduler item instead of a bare window.setTimeout:
             // the old implementation tracked wake-ups only in an in-memory Map

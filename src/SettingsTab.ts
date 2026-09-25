@@ -1542,6 +1542,46 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName('Sandbox VM image')
+      .setClass('ct-sandbox-setting')
+      .setDesc(
+        'Container image enter_vm starts. Build it from sandbox/Dockerfile with '
+        + '`container build --tag claude-threads-coding:1 sandbox/`. Requires Apple\'s '
+        + 'container runtime (macOS 26+, Apple silicon): `brew install container` then '
+        + '`container system start`. Leave empty for claude-threads-coding:1.',
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('claude-threads-coding:1')
+          .setValue(this.plugin.settings.vmImage ?? '')
+          .onChange(async (value) => {
+            this.plugin.settings.vmImage = value.trim();
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Sandbox VM network')
+      .setClass('ct-sandbox-setting')
+      .setDesc(
+        'Network isolation enter_vm uses when a call does not pass one. '
+        + 'Full egress is the default so npm install, git remotes and web access work.',
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('default', 'Full egress (default)')
+          .addOption('internal', 'Internal — host only, no internet')
+          .addOption('none', 'None — no network at all')
+          .setValue(this.plugin.settings.vmDefaultNetwork ?? 'default')
+          .onChange(async (value) => {
+            this.plugin.settings.vmDefaultNetwork = value as PluginSettings['vmDefaultNetwork'];
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName('Claude binary path')
       .setDesc('Path to the claude executable. Leave empty to find it on $PATH.')
       .addText((text) =>
