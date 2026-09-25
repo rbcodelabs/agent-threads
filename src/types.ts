@@ -994,6 +994,14 @@ export interface PluginSettings {
   /** Set to true after the first-run onboarding flow has completed. Prevents the welcome guide and panel auto-layout from triggering on subsequent loads. */
   hasSeenWelcome: boolean;
   /**
+   * Brand-new installs start a "Chief of Staff" thread (cloning the
+   * rbcodelabs/chief-of-staff skill source) instead of the static welcome guide.
+   * Off restores the static-guide first run. Default: true.
+   */
+  offerChiefOfStaffOnFirstRun: boolean;
+  /** Id of the Chief of Staff home thread, so "Set up Chief of Staff" focuses it instead of creating another. */
+  chiefOfStaffThreadId?: string;
+  /**
    * Hotkey for push-to-talk recording. Serialized as e.g. "Alt+Space" or "Control+Shift+Space".
    * Empty string disables PTT. Default: "Alt+Space" (Option+Space on Mac).
    */
@@ -1204,6 +1212,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   telemetryEnabled: true,
   threadViewPlacement: 'conversation-first',
   hasSeenWelcome: false,
+  offerChiefOfStaffOnFirstRun: true,
   imageExternalizationComplete: false,
   autoArchiveIdleDays: 14,
   pttKey: 'Alt+Space',

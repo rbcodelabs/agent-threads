@@ -21,7 +21,7 @@ import * as os from 'os';
 import { execFile, execSync } from 'child_process';
 import { createHash } from 'crypto';
 import type { SkillSource } from './types';
-import { getSkillsDirForSource } from './claudeSettings';
+import { getSkillsDirForSource, readPluginManifest } from './claudeSettings';
 import {
   type SkillRoots,
   getSkillRoots,
@@ -712,6 +712,49 @@ export async function cloneGithubSource(
     try { fs.rmSync(clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
     throw err instanceof Error ? err : new Error(String(err));
   }
+}
+
+/**
+ * Validates a user-entered GitHub repo URL and returns it in the bare form we
+ * store (`https://github.com/owner/repo`, no `.git`, no trailing slash), or
+ * `null` when it is not a GitHub owner/repo URL.
+ */
+export function parseGithubRepoUrl(raw: string): string | null {
+  const trimmed = raw.trim();
+  const match = trimmed.match(/^(https?:\/\/github\.com\/[^/]+\/[^/]+?)(?:\.git)?\/?$/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Clones a GitHub repo as a new managed skill source and returns the
+ * `SkillSource` to add. The single "add a GitHub source" implementation, shared
+ * by the Add skill source modal and Chief of Staff onboarding.
+ *
+ * Does not touch settings: the caller pushes the result into
+ * `settings.skillSources` and persists. Throws on clone failure, having already
+ * removed any partial clone (see `cloneGithubSource`).
+ *
+ * `id` defaults to the deterministic repo-derived id; the modal passes a random
+ * UUID to keep its historical behavior.
+ */
+export async function addGithubSkillSource(opts: {
+  repoUrl: string;
+  cloneBase: string;
+  displayName?: string;
+  id?: string;
+  timeoutMs?: number;
+}): Promise<SkillSource> {
+  const repoUrl = opts.repoUrl.trim().replace(/\/+$/, '').replace(/\.git$/, '');
+  const id = opts.id ?? deriveSourceIdFromRepoUrl(repoUrl);
+  const clonePath = path.join(opts.cloneBase, id);
+
+  await cloneGithubSource(repoUrl, clonePath, { timeoutMs: opts.timeoutMs });
+
+  const manifest = readPluginManifest(clonePath);
+  const repoName = repoUrl.split('/').pop() || 'Unknown';
+  const name = opts.displayName?.trim() || manifest?.displayName || manifest?.name || repoName;
+
+  return { id, name, type: 'github', repoUrl, clonePath, lastFetched: Date.now() };
 }
 
 export interface EnsureGithubSourcesResult {

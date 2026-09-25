@@ -45,6 +45,8 @@ import {
   githubCloneUrl,
   isGitWorkingCopy,
   cloneGithubSource,
+  addGithubSkillSource,
+  parseGithubRepoUrl,
   ensureGithubSourcesCloned,
   checkSourceForUpdates,
   checkAllSourcesForUpdates,
@@ -589,6 +591,62 @@ describe('cloneGithubSource', () => {
       cloneGithubSource(path.join(tmpHome, 'does-not-exist'), dest),
     ).rejects.toThrow();
     expect(fs.existsSync(dest)).toBe(false);
+  });
+});
+
+describe('parseGithubRepoUrl', () => {
+  it('accepts github repo URLs and returns the bare URL', () => {
+    expect(parseGithubRepoUrl('https://github.com/owner/repo')).toBe('https://github.com/owner/repo');
+    expect(parseGithubRepoUrl('  https://github.com/owner/repo.git  ')).toBe('https://github.com/owner/repo');
+    expect(parseGithubRepoUrl('https://github.com/owner/repo/')).toBe('https://github.com/owner/repo');
+  });
+
+  it('rejects anything that is not a github owner/repo URL', () => {
+    expect(parseGithubRepoUrl('')).toBeNull();
+    expect(parseGithubRepoUrl('https://gitlab.com/owner/repo')).toBeNull();
+    expect(parseGithubRepoUrl('https://github.com/owner')).toBeNull();
+  });
+});
+
+describe('addGithubSkillSource (shared by the add-source modal and Chief of Staff onboarding)', () => {
+  let origin: string;
+  let cloneBase: string;
+
+  beforeEach(() => {
+    origin = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'skillmanager-add-')), 'fixture.git');
+    initGitRepo(origin);
+    cloneBase = path.join(tmpVault, MANIFEST_DIR, 'skill-sources');
+  });
+
+  afterEach(() => {
+    fs.rmSync(path.dirname(origin), { recursive: true, force: true });
+  });
+
+  it('clones into <cloneBase>/<id> and names the source from plugin.json', async () => {
+    fs.mkdirSync(path.join(origin, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(path.join(origin, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'cos', displayName: 'Chief of Staff' }));
+    execSync('git add . && git commit --quiet -m manifest', { cwd: origin });
+
+    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-fixed' });
+    expect(source).toMatchObject({ id: 'gh-fixed', name: 'Chief of Staff', type: 'github', clonePath: path.join(cloneBase, 'gh-fixed') });
+    expect(isGitWorkingCopy(source.clonePath!)).toBe(true);
+    expect(source.repoUrl).toBe(origin.replace(/\.git$/, ''));
+  });
+
+  it('prefers an explicit display name, and derives a deterministic id when none is given', async () => {
+    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, displayName: 'Mine' });
+    expect(source.name).toBe('Mine');
+    expect(source.id).toBe(deriveSourceIdFromRepoUrl(origin.replace(/\.git$/, '')));
+  });
+
+  it('falls back to the repo name when there is no manifest', async () => {
+    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-n' });
+    expect(source.name).toBe('fixture');
+  });
+
+  it('throws and leaves nothing behind when the clone fails', async () => {
+    await expect(addGithubSkillSource({ repoUrl: path.join(tmpHome, 'nope.git'), cloneBase, id: 'gh-bad' })).rejects.toThrow();
+    expect(fs.existsSync(path.join(cloneBase, 'gh-bad'))).toBe(false);
   });
 });
 
