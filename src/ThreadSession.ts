@@ -6,6 +6,7 @@ import {
   type SDKUserMessage,
   type PermissionMode,
 } from '@anthropic-ai/claude-agent-sdk';
+import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
 import type { ToolCallRecord, ImageAttachment } from './types';
 import { parseExtraEnv } from './types';
 import { debugLog } from './logger';
@@ -412,30 +413,33 @@ export class ThreadSession {
     // exactly what a subsequent rate-limit rejection must re-send, and
     // re-recording the same replayed turn is idempotent.
     this.lastUserTurn = { text, images, userMessageUuid };
+    type UserContent = SDKUserMessage['message']['content'];
+    const blocks: Exclude<UserContent, string> = [
+      ...(text.trim() ? [{ type: 'text' as const, text }] : []),
+      // See ClaudeSession: a live send always carries base64; an image
+      // with only an externalized `path` can't be sent inline.
+      ...(images ?? [])
+        .filter((img): img is ImageAttachment & { base64: string } => img.base64 != null)
+        .map(img => ({
+          type: 'image' as const,
+          source: {
+            type: 'base64' as const,
+            media_type: img.mediaType,
+            data: img.base64,
+          },
+        })),
+    ];
+    // Per-turn clock as its own text block after the user's content (see
+    // currentTimeContext.ts). A slash-command turn keeps its plain-string
+    // shape so the CLI still recognises the command.
+    const addClock = shouldAddCurrentTimeContext(text);
+    if (addClock) blocks.push({ type: 'text', text: formatCurrentTimeContext() });
+    const content: UserContent = addClock || (images && images.length > 0) ? blocks : text;
     const message: SDKUserMessage = {
       type: 'user',
       ...(userMessageUuid ? { uuid: userMessageUuid as NonNullable<SDKUserMessage['uuid']> } : {}),
       parent_tool_use_id: null,
-      message: {
-        role: 'user',
-        content: images && images.length > 0
-          ? [
-              ...(text.trim() ? [{ type: 'text' as const, text }] : []),
-              // See ClaudeSession: a live send always carries base64; an image
-              // with only an externalized `path` can't be sent inline.
-              ...images
-                .filter((img): img is ImageAttachment & { base64: string } => img.base64 != null)
-                .map(img => ({
-                  type: 'image' as const,
-                  source: {
-                    type: 'base64' as const,
-                    media_type: img.mediaType,
-                    data: img.base64,
-                  },
-                })),
-            ]
-          : text,
-      },
+      message: { role: 'user', content },
     };
     this.pushToChannel(message);
     this._turnInFlight = true;

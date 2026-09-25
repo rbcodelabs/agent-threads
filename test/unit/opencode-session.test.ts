@@ -159,6 +159,7 @@ describe('OpenCodeSession lifecycle', () => {
       parts: [
         { type: 'text', text: 'hello' },
         { type: 'file', mime: 'image/png', filename: 'image-1', url: 'data:image/png;base64,AAAA' },
+        { type: 'text', text: expect.stringMatching(/^\[Current local time: /) },
       ],
       agent: 'build',
       model: { providerID: 'openai', modelID: 'gpt-5' },

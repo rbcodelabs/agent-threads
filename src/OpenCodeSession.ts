@@ -15,6 +15,7 @@
  * mobile, where HarnessFactory is never reached.
  */
 import type { ChildProcess } from 'child_process';
+import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
 import type { AgentHarness, AskQuestion, ImageAttachment, TaskItemStatus } from './types';
 import { parseExtraEnv } from './types';
 import type { SessionCallbacks } from './ClaudeSession';
@@ -466,6 +467,9 @@ export class OpenCodeSession {
     for (const [index, image] of (images ?? []).entries()) {
       parts.push({ type: 'file', mime: image.mediaType, filename: `image-${index + 1}`, url: `data:${image.mediaType};base64,${image.base64}` });
     }
+    // Per-turn clock as its own text part (see currentTimeContext.ts). A plain
+    // part, not `synthetic`, so it is guaranteed to reach the model.
+    if (shouldAddCurrentTimeContext(text)) parts.push({ type: 'text', text: formatCurrentTimeContext() });
     const body = {
       parts,
       agent: openCodeAgentForMode(mode),
