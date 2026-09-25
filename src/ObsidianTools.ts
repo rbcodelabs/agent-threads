@@ -16,6 +16,7 @@ import { tokenizeQuery, findBestExcerpt } from './searchUtils';
 import { execFileSync } from 'child_process';
 import { secretStorageKey } from './secretUtils';
 import { AGENT_BROWSER_READ_ONLY_TOOL_NAMES, createAgentBrowserTools } from './agentBrowser/agentBrowserTools';
+import { listVault, type VaultListAdapter } from './vaultList';
 import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
 import { resolveWorktreeRoot, worktreePathFor } from './worktreePaths';
 import { bindAgentTool } from './AgentToolContributions';
@@ -46,6 +47,12 @@ const pathSchema = { path: z.string().describe('Vault-relative path of the file'
 const navigateToFileSchema = {
   path: z.string().describe('Vault-relative path of the file to open'),
   newLeaf: z.boolean().optional().describe('If true, open in a new tab'),
+};
+
+const vaultListSchema = {
+  path: z.string().optional().describe('Vault-relative folder to list. Omit (or "") for the vault root. Absolute paths and ".." are rejected.'),
+  recursive: z.boolean().optional().describe('List subfolders too (default false).'),
+  limit: z.number().int().positive().optional().describe('Maximum entries to return (default 500, max 2000).'),
 };
 
 const searchVaultSchema = {
@@ -776,6 +783,26 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
           headings: (cache?.headings ?? []).map((h) => ({ level: h.level, heading: h.heading })),
         };
 
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
+      }
+    },
+  );
+
+  const boundVaultList = tool(
+    'vault_list',
+    'Lists a vault folder (read-only; no shell). Returns { path, entries: [{ path, type: "file"|"folder", size?, mtime? }], truncated }, with vault-relative paths sorted by path. `path` is a vault-relative folder (default: vault root); absolute paths and ".." are rejected. `recursive` walks subfolders (default false). `limit` caps entries (default 500, max 2000); `truncated` is true when more exist. The host config folder (e.g. .obsidian) is skipped unless you list it explicitly. Use this instead of ls/find.',
+    vaultListSchema,
+    async (args, _extra) => {
+      try {
+        const result = await listVault(app.vault.adapter as unknown as VaultListAdapter, {
+          path: args.path,
+          recursive: args.recursive,
+          limit: args.limit,
+          configDir: app.vault.configDir,
+        });
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -2877,6 +2904,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundGetOutgoingLinks,
       boundInsertAtCursor,
       boundGetNoteMetadata,
+      boundVaultList,
       boundSetWorkingDirectory,
       boundScheduleWakeup,
       boundWatchDocument,
@@ -3148,7 +3176,7 @@ export function toHarnessDynamicTools(
     'obsidian_get_backlinks', 'obsidian_get_outgoing_links', 'obsidian_get_note_metadata',
     'obsidian_list_commands', 'obsidian_get_current_thread', 'obsidian_list_threads',
     'obsidian_list_projects', 'obsidian_get_thread_messages', 'obsidian_get_thread_log',
-    'obsidian_list_vault_bridges', 'obsidian_get_file_history', 'CronList',
+    'obsidian_list_vault_bridges', 'obsidian_get_file_history', 'CronList', 'vault_list',
     'skills_list_installed', 'skills_search', 'skills_get', 'skills_list_sources',
     'skills_check_updates',
   ];
