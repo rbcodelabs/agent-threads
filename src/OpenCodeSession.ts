@@ -152,6 +152,8 @@ const OPENCODE_TOOL_NAMES: Record<string, string> = {
 };
 
 export function openCodeToolName(tool: string): string {
+  const hostPrefix = `${OPENCODE_HOST_TOOLS_SERVER}_`;
+  if (tool.startsWith(hostPrefix)) return tool.slice(hostPrefix.length);
   return OPENCODE_TOOL_NAMES[tool] ?? tool;
 }
 
@@ -159,8 +161,13 @@ export function openCodeToolSummary(tool: string, input: Record<string, unknown>
   const value = input?.command ?? input?.filePath ?? input?.path ?? input?.pattern ?? input?.url ?? input?.query ?? input?.description;
   if (typeof value === 'string' && value.trim()) return value;
   if (title && title.trim()) return title;
-  return tool;
+  return openCodeToolName(tool);
 }
+
+const OPENCODE_UNLOGGED_EVENTS = new Set([
+  'message.part.delta', 'server.heartbeat', 'server.connected', 'plugin.added', 'catalog.updated',
+  'reference.updated', 'integration.updated', 'lsp.updated', 'file.watcher.updated',
+]);
 
 const FILE_EDIT_TOOLS = new Set(['edit', 'write', 'patch', 'apply_patch', 'multiedit']);
 
@@ -510,7 +517,11 @@ export class OpenCodeSession {
     const callbacks = this.options?.callbacks;
     if (!callbacks || this.closed) return;
     const props = event.properties ?? {};
-    callbacks.onRawEvent?.({ type: `opencode/${event.type}`, ...(props as Record<string, unknown>) });
+    // Token deltas are covered by the completed part; heartbeats and plugin/catalog
+    // chatter carry no thread information. Keeping them out bounds raw-log size.
+    if (!OPENCODE_UNLOGGED_EVENTS.has(event.type)) {
+      callbacks.onRawEvent?.({ type: `opencode/${event.type}`, ...(props as Record<string, unknown>) });
+    }
 
     if (event.type === 'session.created' || event.type === 'session.updated') {
       const info = props.info ?? {};
@@ -599,6 +610,9 @@ export class OpenCodeSession {
     if (role === 'user') return;
 
     if (part.type === 'text' && isRoot) {
+      // An aborted turn can finalize its partial text part after session.error;
+      // the streamed tokens already cover it, so do not append a late message.
+      if (!this._turnInFlight) return;
       if (part.time?.end && typeof part.text === 'string' && part.text.trim() && !part.synthetic && !this.completedTextParts.has(partId)) {
         this.completedTextParts.add(partId);
         callbacks.onMessage(part.text, []);

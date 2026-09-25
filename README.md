@@ -82,6 +82,8 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
   - AWS Bedrock / SSO users: set `AWS_PROFILE` and `AWS_REGION` in the plugin's Extra Environment Variables setting
 - Or [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) installed and authenticated
   - Select **OpenAI Codex** in Settings → Agent → Agent harness. The plugin launches Codex's local app-server, so its threads retain Codex session history, streaming output, tool visibility, interruption, and approval prompts.
+- Or [OpenCode](https://opencode.ai) installed (desktop only), with at least one provider configured in OpenCode (for example `OPENAI_API_KEY` in your environment or Extra Environment Variables, or `opencode auth login`)
+  - Select **OpenCode** in Settings → Agent → Agent harness. Each OpenCode thread runs its own local `opencode serve`, so any provider OpenCode supports can drive a thread. Usage is billed by that provider to your API key.
 
 ## Roadmap
 
@@ -110,18 +112,21 @@ Click the **message-square** icon in the left ribbon, or run **Open Agent Thread
 
 ### Agent harnesses
 
-New threads use the harness selected in **Settings → Agent → Agent harness**. A thread remembers its harness, so changing the default never mixes Claude and Codex session IDs. To move an idle existing thread, open its footer menu, choose **Harness**, and select Claude or Codex. The transcript and thread identity remain in place, while the target starts a fresh native session from a bounded summary and transcript references. Threads with active work, queued input, approvals, plans, questions, or background agents must settle first. Codex uses the `codex` executable on your PATH by default; set a custom path in the same settings panel when needed.
+New threads use the harness selected in **Settings → Agent → Agent harness**. A thread remembers its harness, so changing the default never mixes Claude, Codex, and OpenCode session IDs. To move an idle existing thread, open its footer menu, choose **Harness**, and select Claude, Codex, or OpenCode. The transcript and thread identity remain in place, while the target starts a fresh native session from a bounded summary and transcript references. Threads with active work, queued input, approvals, plans, questions, or background agents must settle first. Codex uses the `codex` executable on your PATH by default and OpenCode uses `opencode` (auto-detected in Homebrew, `/usr/local/bin`, and `~/.opencode/bin`); set a custom path in the same settings panel when needed. OpenCode model IDs use `provider/model` form (for example `openai/gpt-5`); the thread model menu lists the models OpenCode reports.
 
-| Capability | Claude Code | OpenAI Codex |
-|---|---:|---:|
-| Persistent sessions, streaming, tools, images, interruption | ✓ | ✓ |
-| Models, permission modes, approvals, and plan review | ✓ | ✓ |
-| Built-in vault/workspace tools and external stdio/HTTP/SSE MCP servers | ✓ | ✓ |
-| MCP form/URL elicitation | ✓ | ✓ |
-| Persisted user-question cards on desktop and mobile | ✓ `AskUserQuestion` | ✓ `request_user_input` |
-| Context usage, compaction, and raw event logs | ✓ | ✓ |
-| Skills and sub-agent/task activity | ✓ Claude-native | ✓ Codex-native |
-| Monetary API cost attribution | ✓ | — protocol does not report cost |
+| Capability | Claude Code | OpenAI Codex | OpenCode |
+|---|---:|---:|---:|
+| Persistent sessions, streaming, tools, images, interruption | ✓ | ✓ | ✓ |
+| Models, permission modes, and approvals | ✓ | ✓ | ✓ any OpenCode provider |
+| Plan review card | ✓ | ✓ | — read-only `plan` agent, no approval card |
+| Built-in vault/workspace tools and external stdio/HTTP/SSE MCP servers | ✓ | ✓ | ✓ via a local MCP bridge |
+| MCP form/URL elicitation | ✓ | ✓ | — |
+| Persisted user-question cards on desktop and mobile | ✓ `AskUserQuestion` | ✓ `request_user_input` | ✓ `question` |
+| Context usage and raw event logs | ✓ | ✓ | ✓ |
+| Skills and sub-agent/task activity | ✓ Claude-native | ✓ Codex-native | — child sessions run, not shown as agents |
+| Monetary API cost attribution | ✓ | — protocol does not report cost | ✓ |
+
+OpenCode permission modes are applied live by Agent Threads: read-only tools (read, glob, grep, list) always run; **Accept edits** auto-approves file edits; **Bypass**/**Auto** approve everything; **Don't ask** denies anything that would prompt (so scheduled runs never stall); **Plan** uses OpenCode's read-only `plan` agent and refuses edits.
 
 Codex JSONL logs compact repetitive protocol updates automatically. Completed items (including command output and plans) are preserved unchanged. The latest diff snapshot per thread/turn is kept; snapshots larger than 512 KiB retain a UTF-8 tail with explicit omission counts. Command-output and plan deltas retain at most 64 KiB per item until completion; when all streamed bytes fit and the completed output contains them, the duplicate is discarded. Otherwise a `codex/log/compacted` diagnostic records the tail, source event, original/retained/omitted byte counts, and flush reason. Pending payload is limited to 4 MiB and 128 entries; older entries flush when either limit is reached. Pending events also flush at turn completion and session close/process exit or error. An abrupt host crash can lose pending buffers. This reduces redundant logging but is not a hard file-size cap, and existing logs are not rewritten.
 

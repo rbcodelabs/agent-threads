@@ -15,5 +15,6 @@ addIcon('openai-blossom', `<g transform="scale(2.43902439)"><path d="M37.5324 16
 // Official OpenCode mark (opencode.ai favicon, MIT project). Monochrome here:
 // the frame uses currentColor and the inner block a translucent currentColor,
 // matching the source's white frame over a grey inner block. Scale converts its
-// 512 × 512 source viewbox to Obsidian's 100 × 100 addIcon() wrapper.
-addIcon('opencode-mark', `<g transform="scale(0.1953125)"><path d="M320 224V352H192V224H320Z" fill="currentColor" opacity="0.45"/><path fill-rule="evenodd" clip-rule="evenodd" d="M384 416H128V96H384V416ZM320 160H192V352H320V160Z" fill="currentColor"/></g>`);
+// glyph bounds (x 128–384, y 96–416 of a 512 × 512 viewbox) to fill
+// Obsidian's 100 × 100 addIcon() wrapper, centred like the other marks.
+addIcon('opencode-mark', `<g transform="translate(-30 -30) scale(0.3125)"><path d="M320 224V352H192V224H320Z" fill="currentColor" opacity="0.45"/><path fill-rule="evenodd" clip-rule="evenodd" d="M384 416H128V96H384V416ZM320 160H192V352H320V160Z" fill="currentColor"/></g>`);

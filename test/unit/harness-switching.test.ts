@@ -127,6 +127,30 @@ describe('harness switching', () => {
     expect(events).not.toContain('harness_changed');
   });
 
+  it.each([
+    ['claude', 'opencode'],
+    ['opencode', 'codex'],
+    ['opencode', 'claude'],
+  ] as const)('switches %s -> %s with a fenced generation and a fresh native session', async (source, target) => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    const value = thread({ agentHarness: source, sessionId: 'native', model: 'openai/gpt-5', sessionGeneration: 3,
+      messages: [{ id: 'a1', role: 'assistant', content: 'prior', timestamp: 2 }] });
+    manager.loadThreads([value]);
+    await manager.switchHarness('thread-1', target, vi.fn().mockResolvedValue(undefined));
+    expect(value.agentHarness).toBe(target);
+    expect(value.sessionGeneration).toBe(4);
+    expect(value.sessionId).toBeUndefined();
+    expect(value.model).toBeUndefined();
+    expect(value.messages[0].agentHarness).toBe(source);
+    expect(value.pendingHarnessHandoff).toMatchObject({ sourceHarness: source, targetHarness: target });
+    expect(buildHarnessHandoffPrompt(value, source, target)).toContain(`## Harness handoff (${source} → ${target})`);
+    expect(decodeThreadRecoverySnapshot(encodeThreadRecoverySnapshot(value))?.agentHarness).toBe(target);
+  });
+
+  it('rejects Claude escalation syntax for OpenCode', () => {
+    expect(() => resolveHarnessPrompt('opencode', '/escalate investigate', DEFAULT_SETTINGS)).toThrow(/Claude.*OpenCode/i);
+  });
+
   it('rejects Claude escalation syntax for Codex', () => {
     expect(() => resolveHarnessPrompt('codex', '/escalate investigate', DEFAULT_SETTINGS)).toThrow(/Claude.*Codex/i);
     expect(resolveHarnessPrompt('claude', '/escalate investigate', DEFAULT_SETTINGS).promptText).toBe('investigate');
