@@ -360,7 +360,7 @@ test.describe('Agent Threads UI', () => {
         contentWidth,
         messageWidths,
         noticeInsideTimeline: notice.left >= message.left && notice.right <= message.right,
-        noticeIsCentered: Math.abs((notice.left - message.left) - (message.right - notice.right)) < 1,
+        noticeStartsAtTimelineEdge: Math.abs(notice.left - message.left) < 1,
         messages: rect('.ct-messages'),
         composerWrapper: rect('.ct-panel-wrapper'),
         composerPanel: rect('.ct-floating-panel'),
@@ -372,7 +372,7 @@ test.describe('Agent Threads UI', () => {
     expect(layout.messageWidths.length).toBeGreaterThan(0);
     for (const width of layout.messageWidths) expect(width).toBeCloseTo(layout.contentWidth, 0);
     expect(layout.noticeInsideTimeline).toBe(true);
-    expect(layout.noticeIsCentered).toBe(true);
+    expect(layout.noticeStartsAtTimelineEdge).toBe(true);
     expect(layout.composerWrapper.width).toBeCloseTo(layout.messages.width, 0);
     expect(layout.composerPanel.left - layout.composerWrapper.left).toBeCloseTo(10, 0);
     expect(layout.composerWrapper.right - layout.composerPanel.right).toBeCloseTo(10, 0);
@@ -845,6 +845,26 @@ test.describe('Agent Threads UI', () => {
     await page.evaluate(() => (window as any).__view.focusThread('thread-notice'));
     await page.waitForSelector('.ct-notice-row');
     await page.waitForTimeout(200);
+
+    // Notice icons render full size (not the 24%-scale dot a 100×100-viewBox
+    // addIcon override produces) and share the tool rows' leading-icon column.
+    const geometry = await page.evaluate(() => {
+      const box = (el: Element) => el.getBoundingClientRect();
+      const toolIcon = box(document.querySelector('.ct-tool-pill-icon svg')!);
+      const noticeIcons = Array.from(document.querySelectorAll('.ct-notice-icon svg')).map((svg) => {
+        const r = box(svg);
+        return { left: r.left, width: r.width, height: r.height, viewBox: svg.getAttribute('viewBox') };
+      });
+      return { toolIcon: { left: toolIcon.left, width: toolIcon.width }, noticeIcons };
+    });
+    expect(geometry.noticeIcons).toHaveLength(2);
+    for (const icon of geometry.noticeIcons) {
+      expect(icon.viewBox).toBe('0 0 24 24');
+      expect(icon.width).toBeCloseTo(12, 0);
+      expect(icon.height).toBeCloseTo(12, 0);
+      expect(icon.left).toBeCloseTo(geometry.toolIcon.left, 0);
+      expect(icon.width).toBeCloseTo(geometry.toolIcon.width, 0);
+    }
     await shot(page, 'background-task-notice-row.png', { fullPage: true });
   });
 
