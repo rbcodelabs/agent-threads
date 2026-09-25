@@ -87,6 +87,10 @@ export interface McpRegisterInput {
   readonly clientSecret?: string;
   readonly authorizationServerUrl?: string;
   readonly redirectUri?: string;
+  /** Omit for the interactive default; `client_credentials` is machine-to-machine and opens no browser. */
+  readonly grantType?: 'authorization_code' | 'client_credentials';
+  /** `audience` parameter on the token request. Nonsecret — pass the literal value. */
+  readonly audience?: string;
 }
 export interface RequestSecretInput { readonly secretName: string; readonly reason: string; readonly force?: boolean }
 export interface ArchiveThreadResult { readonly status: 'archived' | 'cancelled'; readonly threadId: string }

@@ -144,13 +144,15 @@ const fixtureMcpServers: PluginSettings['mcpServers'] = {
   },
 };
 
-// Two OAuth MCP servers for the Settings → MCP tab's "OAuth MCP servers"
-// panel, covering the two visually distinct statuses `describeOAuthMcpStatus`
-// renders: a healthy 'connected' server (green dot, live countdown) and an
-// 'error' server (red dot, plus the inline warning line). The countdown is a
-// fixed offset from FIXTURE_NOW (not Date.now()) so "expires in 2h 45m"
-// renders identically on every run — using the real clock would make the
-// screenshot's text drift and fail the pixel-diff a few minutes later.
+// Three OAuth MCP servers for the Settings → MCP tab's "OAuth MCP servers"
+// panel, covering the visually distinct statuses `describeOAuthMcpStatus`
+// renders: a healthy 'connected' server (green dot, live countdown), an
+// 'error' server (red dot, plus the inline warning line), and a
+// client_credentials server, whose countdown reads "renews in" rather than
+// "expires in" because it re-mints unattended from the keychain secret. The
+// countdown is a fixed offset from FIXTURE_NOW (not Date.now()) so "expires in
+// 2h 45m" renders identically on every run — using the real clock would make
+// the screenshot's text drift and fail the pixel-diff a few minutes later.
 const fixtureOAuthMcpServers: PluginSettings['oauthMcpServers'] = {
   vercel: {
     url: 'https://mcp.vercel.com/',
@@ -160,6 +162,14 @@ const fixtureOAuthMcpServers: PluginSettings['oauthMcpServers'] = {
   figma: {
     url: 'https://mcp.figma.com/',
     authorizationServerUrl: 'https://mcp.figma.com/',
+  },
+  bankrate: {
+    url: 'https://products-mcp.bankrate.com/mcp',
+    authorizationServerUrl: 'https://auth.bankrate.com/',
+    clientId: 'm2m-client-bankrate',
+    hasClientSecret: true,
+    grantType: 'client_credentials',
+    audience: 'bankrate-api',
   },
 };
 
@@ -183,6 +193,21 @@ const fixtureOAuthMcpState: PluginSettings['oauthMcpState'] = {
     errorMessage: 'Refresh failed: invalid_grant — re-authorize this server.',
     hasRefreshToken: false,
     tokenEndpoint: 'https://mcp.figma.com/oauth/token',
+  },
+  // No refresh token, by construction: RFC 6749 §4.4.3 says the
+  // client_credentials grant SHOULD NOT issue one. The row must still read as
+  // healthy — treating the absence as breakage is the bug this fixture guards.
+  bankrate: {
+    serverName: 'bankrate',
+    clientId: 'm2m-client-bankrate',
+    hasClientSecret: true,
+    grantType: 'client_credentials',
+    asMetadataUrl: 'https://auth.bankrate.com/',
+    proxyPort: 51232,
+    status: 'connected',
+    accessTokenExpiresAt: FIXTURE_NOW + 1440 * 60_000, // -> "renews in 24h 0m"
+    hasRefreshToken: false,
+    tokenEndpoint: 'https://auth.bankrate.com/oauth/token',
   },
 };
 

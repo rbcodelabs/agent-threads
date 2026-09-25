@@ -103,6 +103,96 @@ describe('mcpRegistrationSchema — oauth type', () => {
     expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'sse', url: 'https://x.test', clientSecret }).success).toBe(false);
   });
 
+  it('accepts a client_credentials entry with a clientId, audience and placeholder secret', () => {
+    const result = mcpRegistrationSchema.safeParse({
+      ...base,
+      grantType: 'client_credentials',
+      clientId: 'reTmVHKuhRrGiXOo3lqvS4zMUxagdXZC',
+      clientSecret: '${OAUTH_MCP_BANKRATE_CLIENT_SECRET}',
+      audience: 'bankrate-api',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts an explicit authorization_code grantType, the default', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, grantType: 'authorization_code' }).success).toBe(true);
+  });
+
+  it('rejects an unknown grantType', () => {
+    for (const grantType of ['password', 'implicit', 'refresh_token', 'client-credentials', '']) {
+      expect(mcpRegistrationSchema.safeParse({ ...base, grantType }).success, grantType).toBe(false);
+    }
+  });
+
+  /**
+   * There is no browser leg, so no dynamic-registration round trip either: the
+   * client has to already exist at the AS and be named here.
+   */
+  it('rejects a client_credentials entry with no clientId', () => {
+    const result = mcpRegistrationSchema.safeParse({
+      ...base, grantType: 'client_credentials', clientSecret: '${SOME_SECRET}',
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some(i => i.path.join('.') === 'clientId')).toBe(true);
+    }
+  });
+
+  /**
+   * Nothing redirects anywhere in a machine-to-machine grant, so accepting a
+   * redirectUri would imply a callback that is never registered nor listened on.
+   */
+  it('rejects a redirectUri on a client_credentials entry', () => {
+    const result = mcpRegistrationSchema.safeParse({
+      ...base,
+      grantType: 'client_credentials',
+      clientId: 'm2m',
+      clientSecret: '${SOME_SECRET}',
+      redirectUri: 'http://localhost:3118/callback',
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some(i => i.path.join('.') === 'redirectUri')).toBe(true);
+    }
+  });
+
+  /**
+   * The schema deliberately does not require a clientSecret here — the Settings
+   * modal keeps the typed literal out of the entry it validates, so a rule here
+   * would make the schema unsatisfiable from the UI. `registerServer()` enforces
+   * it instead, at the one point that holds the resolved literal.
+   */
+  it('accepts a client_credentials entry with no clientSecret, leaving that rule to registerServer', () => {
+    expect(mcpRegistrationSchema.safeParse({
+      ...base, grantType: 'client_credentials', clientId: 'm2m',
+    }).success).toBe(true);
+  });
+
+  it('still rejects a literal clientSecret under the client_credentials grant', () => {
+    const result = mcpRegistrationSchema.safeParse({
+      ...base, grantType: 'client_credentials', clientId: 'm2m', clientSecret: 'sk-live-abc123',
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some(i => i.message.includes('placeholder'))).toBe(true);
+    }
+  });
+
+  it('rejects grantType and audience on non-oauth entries', () => {
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'stdio', command: 'npx', grantType: 'client_credentials' }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'http', url: 'https://x.test', grantType: 'authorization_code' }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'sse', url: 'https://x.test', audience: 'bankrate-api' }).success).toBe(false);
+  });
+
+  it('rejects a blank audience rather than sending an empty parameter', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, audience: '' }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ ...base, audience: '   ' }).success).toBe(false);
+  });
+
+  it('accepts a bare audience on an authorization_code entry — some providers want it there too', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, audience: 'bankrate-api' }).success).toBe(true);
+  });
+
   it('accepts a deny list', () => {
     const result = mcpRegistrationSchema.safeParse({ ...base, tools: { deny: ['buy_pro', 'buy_credits'] } });
     expect(result.success).toBe(true);

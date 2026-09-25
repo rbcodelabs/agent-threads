@@ -2330,6 +2330,38 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'settings-mcp-add-oauth-advanced.png', { fullPage: true });
   });
 
+  test('settings — client credentials grant reshapes the OAuth form', async ({ page }) => {
+    const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto(settingsUrl);
+    await page.getByLabel('Settings section').selectOption('mcp');
+    await page.waitForTimeout(200);
+    await page.getByRole('button', { name: 'Add MCP server' }).click();
+    await page.waitForSelector('.modal-overlay');
+    await page.getByRole('button', { name: 'OAuth', exact: true }).click();
+
+    const modal = page.locator('.modal-overlay');
+    // Redirect URI is on offer for the interactive grant — behind Advanced,
+    // where a collapsed disclosure hides it, so open that first to compare
+    // like with like.
+    await modal.locator('details summary').click();
+    await expect(modal.getByPlaceholder('http://localhost:3118/callback')).toBeVisible();
+
+    await page.getByLabel('Grant type').selectOption('client_credentials');
+    await page.waitForTimeout(200);
+
+    // Gone for the machine-to-machine grant, which the shared schema rejects it
+    // for outright. Advanced stays open — the handler forces it, so the two
+    // credentials this grant cannot work without are never left behind a
+    // collapsed disclosure labelled "Advanced".
+    await expect(modal.getByPlaceholder('http://localhost:3118/callback')).toBeHidden();
+    await expect(modal.locator('details')).toHaveAttribute('open', '');
+    await expect(modal.getByText('Client ID (required)', { exact: true })).toBeVisible();
+    await expect(modal.getByText('Client secret (required)', { exact: true })).toBeVisible();
+    await expect(modal.getByText('no browser and no sign-in', { exact: false })).toBeVisible();
+    await shot(page, 'settings-mcp-add-oauth-client-credentials.png', { fullPage: true });
+  });
+
   test('settings — OAuth type is offered when adding but not when editing', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
@@ -2406,6 +2438,12 @@ test.describe('Agent Threads UI', () => {
     const vercelRow = page.locator('.ct-oauth-mcp-servers-list .setting-item').filter({ hasText: 'vercel' });
     await expect(vercelRow.getByText('Connected · expires in 2h 45m', { exact: false })).toBeVisible();
     await expect(vercelRow.getByRole('button', { name: 'Disconnect' })).toBeVisible();
+    // The client_credentials server renews itself from the keychain secret, so
+    // its countdown says "renews in" and it reads as healthy despite holding no
+    // refresh token — the grant never issues one (RFC 6749 §4.4.3).
+    const bankrateRow = page.locator('.ct-oauth-mcp-servers-list .setting-item').filter({ hasText: 'bankrate' });
+    await expect(bankrateRow.getByText('Connected · renews in 24h 0m', { exact: false })).toBeVisible();
+    await expect(bankrateRow.getByText('Needs re-authorization')).toHaveCount(0);
     await shot(page, 'settings-oauth-mcp.png', { fullPage: true });
   });
 

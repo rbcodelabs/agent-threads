@@ -31,7 +31,7 @@ import {
   selectClientAuthMethod,
   type OAuthServerInfo,
 } from '@modelcontextprotocol/sdk/client/auth.js';
-import type { AuthorizationServerMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { OAuthTokensSchema, type AuthorizationServerMetadata, type OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { checkResourceAllowed, resourceUrlFromServerUrl } from '@modelcontextprotocol/sdk/shared/auth-utils.js';
 import type { TokenSet } from './OAuthTokenStore';
 import { parseRedirectUri, type ParsedRedirectUri } from './mcpServerStore';
@@ -484,6 +484,82 @@ export class OAuthMcpFlow {
     });
     const tokenSet = toTokenSet(tokens);
     await this.tokenStore.store(serverName, tokenSet);
+    return tokenSet;
+  }
+
+  /**
+   * RFC 6749 §4.4 client-credentials grant: mint an access token by
+   * authenticating as the client itself, with no user and no browser.
+   *
+   * Used when the authorization server will not register a loopback callback —
+   * common on production tenants — or when the MCP server represents a service
+   * rather than a signed-in person. Every interactive step is absent by
+   * construction, not by flag: no PKCE pair, no `state`, no callback listener,
+   * no `openUrl`, and no authorization URL is ever built. That matters beyond
+   * tidiness, because a guessed authorization endpoint is what turns a
+   * misconfigured server into an opaque provider error page in a popup.
+   *
+   * `audience` is Auth0's (and several others') way of asking for a token
+   * scoped to a specific API; RFC 8707's `resource` is the standards-track
+   * equivalent and is sent alongside it whenever the MCP server advertises one,
+   * since providers ignore the parameter they don't implement.
+   *
+   * No refresh token is stored even if the AS returns one: RFC 6749 §4.4.3 says
+   * it SHOULD NOT, and re-minting from the secret is strictly better than
+   * refreshing — it needs no extra state and cannot be invalidated separately.
+   * `OAuthTokenStore` reads the absence of a refresh token as "re-mint", so this
+   * is what keeps expiry recoverable without a human.
+   */
+  async clientCredentials(params: {
+    serverName: string;
+    clientId: string;
+    clientSecret: string;
+    asMetadata: OAuthASMetadata;
+    scopes?: string;
+    audience?: string;
+  }): Promise<TokenSet> {
+    const asMeta = params.asMetadata.authorizationServerMetadata;
+    // Fail fast rather than guessing `<origin>/token`. A server that publishes no
+    // metadata is a configuration problem the user can fix in one field, and
+    // saying so beats a 404 or a WAF 403 from a URL we invented.
+    const tokenEndpoint = asMeta?.token_endpoint;
+    if (!tokenEndpoint) {
+      throw new Error(
+        `No token endpoint found for "${params.serverName}": ${params.asMetadata.authorizationServerUrl} publishes no OAuth `
+        + 'authorization-server metadata. Set the authorization server URL to the provider\'s issuer '
+        + '— the host that serves /.well-known/openid-configuration or /.well-known/oauth-authorization-server.',
+      );
+    }
+
+    const headers = new Headers({
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json',
+    });
+    const body = new URLSearchParams({ grant_type: 'client_credentials' });
+    if (params.scopes) body.set('scope', params.scopes);
+    if (params.audience) body.set('audience', params.audience);
+    const resource = resourceIndicatorFor(params.asMetadata);
+    if (resource) body.set('resource', resource.href);
+
+    // Same negotiation as every other token-endpoint call in this module: let the
+    // AS's advertised methods decide between Basic and a form parameter.
+    const method = selectClientAuthMethod(
+      clientInformationFor(params.clientId, params.clientSecret),
+      asMeta?.token_endpoint_auth_methods_supported ?? [],
+    );
+    if (method === 'client_secret_basic') {
+      headers.set('Authorization', `Basic ${btoa(`${params.clientId}:${params.clientSecret}`)}`);
+    } else {
+      body.set('client_id', params.clientId);
+      if (method === 'client_secret_post') body.set('client_secret', params.clientSecret);
+    }
+
+    const response = await this.fetchFn(tokenEndpoint, { method: 'POST', headers, body });
+    if (!response.ok) throw await parseErrorResponse(response);
+    const tokens = OAuthTokensSchema.parse(await response.json());
+
+    const tokenSet: TokenSet = { ...toTokenSet(tokens), refreshToken: undefined };
+    await this.tokenStore.store(params.serverName, tokenSet);
     return tokenSet;
   }
 

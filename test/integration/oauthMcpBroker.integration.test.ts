@@ -129,6 +129,9 @@ class MockAuthorizationServer {
   revocations: RevocationRecord[] = [];
   tokenEndpointHits = 0;
   refreshGrantHits = 0;
+  clientCredentialsGrantHits = 0;
+  /** What each client_credentials token request carried, for wire assertions. */
+  clientCredentialsLog: Array<{ clientId: string; audience?: string; scope?: string; resource?: string; interactiveParams: string[] }> = [];
   /** Client secrets issued by /register, keyed by client_id. */
   issuedClientSecrets = new Map<string, string>();
   /** How each authenticated request presented its secret, for assertions. */
@@ -194,7 +197,7 @@ class MockAuthorizationServer {
           ...(this.requireClientSecret ? { token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'] } : {}),
           response_types_supported: ['code'],
           code_challenge_methods_supported: ['S256'],
-          grant_types_supported: ['authorization_code', 'refresh_token'],
+          grant_types_supported: ['authorization_code', 'refresh_token', 'client_credentials'],
         });
         return;
       }
@@ -350,7 +353,38 @@ class MockAuthorizationServer {
       return;
     }
 
+    /**
+     * RFC 6749 §4.4. No code, no PKCE, no redirect_uri — the client authenticates
+     * as itself and gets a token. §4.4.3: "A refresh token SHOULD NOT be
+     * included", so this arm never issues one even when `omitRefreshToken` is off.
+     */
+    if (grantType === 'client_credentials') {
+      this.clientCredentialsGrantHits++;
+      const clientId = this.clientIdFromRequest(req, params);
+      this.clientCredentialsLog.push({
+        clientId,
+        audience: params.get('audience') ?? undefined,
+        scope: params.get('scope') ?? undefined,
+        resource: params.get('resource') ?? undefined,
+        interactiveParams: ['code', 'code_verifier', 'code_challenge', 'redirect_uri', 'state'].filter((p) => params.has(p)),
+      });
+      const accessToken = `at_${randomBytes(12).toString('hex')}`;
+      this.tokens.set(accessToken, { clientId, refreshToken: undefined, expiresAt: Date.now() + this.expiresInSeconds * 1000 });
+      this.replyJson(res, 200, { access_token: accessToken, expires_in: this.expiresInSeconds, token_type: 'Bearer' });
+      return;
+    }
+
     this.replyJson(res, 400, { error: 'unsupported_grant_type' });
+  }
+
+  /** The client id may arrive in the Basic header or the form body, per RFC 6749 §2.3.1. */
+  private clientIdFromRequest(req: IncomingMessage, params: URLSearchParams): string {
+    const authHeader = req.headers.authorization ?? '';
+    if (authHeader.startsWith('Basic ')) {
+      const [id] = Buffer.from(authHeader.slice('Basic '.length), 'base64').toString('utf8').split(':');
+      return decodeURIComponent(id ?? '');
+    }
+    return params.get('client_id') ?? '';
   }
 
   private async handleRevoke(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -902,6 +936,139 @@ describe('OAuth MCP broker integration — confidential client', () => {
     upstream.forceUnauthorizedOnce = true;
     expect((await callProxy(config, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status).toBe(200);
     expect(as.refreshGrantHits).toBe(1);
+  }, 15_000);
+});
+
+// ── Scenario 7b: machine-to-machine (client_credentials) ───────────────────
+
+describe('OAuth MCP broker integration — client_credentials grant', () => {
+  /**
+   * An `openUrl` that fails loudly if anything reaches for a browser, and records
+   * what it was asked to open so the assertion can name it.
+   */
+  function forbidBrowser(): { open: (url: string) => Promise<unknown>; calls: string[] } {
+    const calls: string[] = [];
+    return {
+      calls,
+      open: async (url: string) => {
+        calls.push(url);
+        throw new Error(`the browser must never open for client_credentials, but something asked for ${url}`);
+      },
+    };
+  }
+
+  /**
+   * The grant exists because `auth.bankrate.com` will not register a loopback
+   * redirect URI at all, so the authorization-code path is unavailable there
+   * however correctly it is implemented. The load-bearing assertions are the
+   * negative ones: no browser, no DCR, no code, no PKCE, no redirect_uri.
+   */
+  it('registers and serves tool calls with no browser, no DCR and no interactive parameters', async () => {
+    const { as, upstream } = await setupServers();
+    as.requireClientSecret = true;
+    as.issuedClientSecrets.set('m2m-client', 'm2m-secret');
+    const browser = forbidBrowser();
+    const { registry: reg, settings, host, raw } = registry(browser.open);
+
+    const result = await reg.registerServer({
+      name: 'bankrate',
+      url: upstream.baseUrl,
+      grantType: 'client_credentials',
+      clientId: 'm2m-client',
+      clientSecret: 'm2m-secret',
+      audience: 'bankrate-api',
+    });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(browser.calls).toEqual([]);
+    expect(as.authorizeLog).toHaveLength(0);
+    expect(as.registerLog).toHaveLength(0);
+
+    expect(as.clientCredentialsGrantHits).toBe(1);
+    expect(as.clientCredentialsLog[0]).toMatchObject({ clientId: 'm2m-client', audience: 'bankrate-api' });
+    expect(as.clientCredentialsLog[0].interactiveParams).toEqual([]);
+    // It authenticated as a confidential client — the mock would have 401'd otherwise.
+    const tokenAuth = as.clientAuthLog.filter((e) => e.endpoint === 'token');
+    expect(tokenAuth).toHaveLength(1);
+    expect(tokenAuth[0].secretMatched).toBe(true);
+    expect(['basic', 'post']).toContain(tokenAuth[0].method);
+
+    // Custody: keychain yes, data.json no.
+    const probe = new OAuthTokenStore(host.secretStorage, () => Promise.reject(new Error('no refresh')));
+    expect(probe.getClientSecret('bankrate')).toBe('m2m-secret');
+    expect(JSON.stringify(settings)).not.toContain('m2m-secret');
+    expect([...raw.values()]).toContain('m2m-secret');
+
+    // No refresh token, yet connected: the secret is the renewal material.
+    expect(settings.oauthMcpServers.bankrate).toMatchObject({ grantType: 'client_credentials', audience: 'bankrate-api' });
+    expect(settings.oauthMcpState.bankrate).toMatchObject({ status: 'connected', hasRefreshToken: false, grantType: 'client_credentials' });
+
+    const config = reg.serversForThread('thread-1').bankrate as { url: string; headers: Record<string, string> };
+    expect((await callProxy(config, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status).toBe(200);
+  }, 15_000);
+
+  /**
+   * The failure this grant is most prone to: with no refresh token, a naive
+   * implementation either hands back a dead access token forever or calls the
+   * refresh grant with nothing to present. It must re-mint from the secret.
+   */
+  it('re-mints a token from the client secret when the access token goes stale, never using the refresh grant', async () => {
+    const { as, upstream } = await setupServers();
+    as.requireClientSecret = true;
+    as.issuedClientSecrets.set('m2m-client', 'm2m-secret');
+    const { registry: reg } = registry(forbidBrowser().open);
+
+    expect((await reg.registerServer({
+      name: 'bankrate', url: upstream.baseUrl, grantType: 'client_credentials', clientId: 'm2m-client', clientSecret: 'm2m-secret',
+    })).success).toBe(true);
+
+    const config = reg.serversForThread('thread-1').bankrate as { url: string; headers: Record<string, string> };
+    upstream.forceUnauthorizedOnce = true;
+    expect((await callProxy(config, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status).toBe(200);
+
+    expect(as.refreshGrantHits).toBe(0);
+    expect(as.clientCredentialsGrantHits).toBe(2);
+  }, 15_000);
+
+  it('rebuilds after a restart from the keychain secret alone, with no stored refresh token', async () => {
+    const { as, upstream } = await setupServers();
+    as.requireClientSecret = true;
+    as.issuedClientSecrets.set('m2m-client', 'm2m-secret');
+    const { registry: reg, settings, host } = registry(forbidBrowser().open);
+
+    expect((await reg.registerServer({
+      name: 'bankrate', url: upstream.baseUrl, grantType: 'client_credentials', clientId: 'm2m-client', clientSecret: 'm2m-secret', audience: 'bankrate-api',
+    })).success).toBe(true);
+    reg.close();
+
+    const restarted = new OAuthMcpRegistry(host);
+    activeRegistries.push(restarted);
+    await restarted.configure();
+    activeRegistrations.push({ registry: restarted, name: 'bankrate' });
+
+    expect(settings.oauthMcpState.bankrate).toMatchObject({ status: 'connected', hasClientSecret: true, grantType: 'client_credentials' });
+
+    const config = restarted.serversForThread('thread-1').bankrate as { url: string; headers: Record<string, string> };
+    upstream.forceUnauthorizedOnce = true;
+    expect((await callProxy(config, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status).toBe(200);
+    expect(as.refreshGrantHits).toBe(0);
+    expect(as.clientCredentialsGrantHits).toBe(2);
+  }, 15_000);
+
+  it('fails the registration, stores nothing, and keeps no secret when the credentials are wrong', async () => {
+    const { as, upstream } = await setupServers();
+    as.requireClientSecret = true;
+    as.issuedClientSecrets.set('m2m-client', 'm2m-secret');
+    const { registry: reg, settings, host } = registry(forbidBrowser().open);
+
+    const result = await reg.registerServer({
+      name: 'bankrate', url: upstream.baseUrl, grantType: 'client_credentials', clientId: 'm2m-client', clientSecret: 'wrong-secret',
+    });
+
+    expect(result).toMatchObject({ success: false, status: 'failed' });
+    expect(settings.oauthMcpServers.bankrate).toBeUndefined();
+    const probe = new OAuthTokenStore(host.secretStorage, () => Promise.reject(new Error('no refresh')));
+    expect(probe.getClientSecret('bankrate')).toBeUndefined();
   }, 15_000);
 });
 
