@@ -12,6 +12,7 @@
 | `src/KanbanView.ts` | Kanban board view |
 | `src/ObsidianTools.ts` | All MCP tool definitions and TypeScript interfaces |
 | `src/skillManager.ts` | Headless list/search/install/uninstall/update logic for `~/.claude/skills/` and configured `SkillSource`s — single source of truth for both `SkillsManagerView.ts` (UI) and the `skills_*` MCP tools in `ObsidianTools.ts` |
+| `src/chiefOfStaffOnboarding.ts` | Pure first-run decision logic and the dependency-injected `setUpChiefOfStaff()` flow (spec §10): new vs upgrading install, the "Offer Chief of Staff on first run" setting, adding the `rbcodelabs/chief-of-staff` skill source, clone/harness/thread failure → static-guide fallback, and the idempotent "Set up Chief of Staff" command (home thread id in `settings.chiefOfStaffThreadId`). No Obsidian/Node deps |
 | `src/SkillsManagerView.ts` | Skills Manager panel UI — delegates all list/search/install/uninstall/update logic to `src/skillManager.ts` |
 | `src/VaultPersistence.ts` | Vault note save/load/archive |
 | `src/types.ts` | Shared TypeScript types (`Thread`, `ThreadStatus`, etc.) |
