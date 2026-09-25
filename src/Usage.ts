@@ -1,4 +1,5 @@
-export type UsageProvider = 'claude' | 'codex';
+import type { AgentHarness } from './types';
+export type UsageProvider = AgentHarness;
 
 export interface UsageTokenTotals {
   total?: number;

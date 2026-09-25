@@ -1,3 +1,4 @@
+import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { App, setIcon, setTooltip, Notice } from 'obsidian';
 import type { ImageAttachment, ImageMediaType } from './types';
 import { MAX_ATTACHMENT_BYTES } from './attachmentUtils';
@@ -7,12 +8,18 @@ import path from 'path';
 import os from 'os';
 import './harnessBrandIcons';
 
+const HARNESS_BRAND_ICONS: Record<AgentHarness, string> = {
+  claude: 'claude-spark',
+  codex: 'openai-blossom',
+  opencode: 'opencode-mark',
+};
+
 export interface DispatchPayload {
   text: string;
   images: ImageAttachment[];
   attachment: string | null;
   /** Harness selected by a kickoff picker, when that picker is enabled. */
-  agentHarness?: 'claude' | 'codex';
+  agentHarness?: AgentHarness;
 }
 
 export interface DispatchInputOptions {
@@ -75,7 +82,7 @@ export interface DispatchInputOptions {
   /** Title tooltip for the send button (default: 'Start task') */
   sendBtnTitle?: string;
   /** Turn the send button into a locally sticky kickoff harness picker. */
-  harnessPicker?: { initialHarness: 'claude' | 'codex' };
+  harnessPicker?: { initialHarness: AgentHarness };
   /**
    * Called on every keydown/keyup to retrieve the current push-to-talk hotkey
    * string (e.g. "Alt+Space"). When provided, hold-to-record PTT is enabled.
@@ -147,7 +154,7 @@ export class DispatchInput {
 
   private sttController: SttController | null = null;
   private dispatching = false;
-  private selectedHarness: 'claude' | 'codex' | null = null;
+  private selectedHarness: AgentHarness | null = null;
   private harnessMenu: HTMLElement | null = null;
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressNextSendClick = false;
@@ -554,7 +561,7 @@ export class DispatchInput {
 
   private renderHarnessIdentity(): void {
     if (!this.selectedHarness) return;
-    const name = this.selectedHarness === 'claude' ? 'Claude' : 'Codex';
+    const name = agentHarnessLabel(this.selectedHarness);
     this.sendBtn.empty();
     this.createHarnessMark(this.sendBtn, this.selectedHarness);
     const label = `Start task with ${name}; right-click or hold to change agent`;
@@ -568,8 +575,8 @@ export class DispatchInput {
     if (this.harnessMenu) return;
     const menu = this.rootEl.createDiv({ cls: 'ct-harness-menu', attr: { role: 'menu', 'aria-label': 'Choose agent harness' } });
     this.harnessMenu = menu;
-    for (const harness of ['claude', 'codex'] as const) {
-      const name = harness === 'claude' ? 'Claude' : 'Codex';
+    for (const harness of AGENT_HARNESSES) {
+      const name = agentHarnessLabel(harness);
       const item = menu.createEl('button', {
         cls: 'ct-harness-menu-item',
         attr: {
@@ -601,8 +608,8 @@ export class DispatchInput {
     menu.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
   }
 
-  private createHarnessMark(container: HTMLElement, harness: 'claude' | 'codex'): void {
-    const icon = harness === 'claude' ? 'claude-spark' : 'openai-blossom';
+  private createHarnessMark(container: HTMLElement, harness: AgentHarness): void {
+    const icon = HARNESS_BRAND_ICONS[harness];
     const mark = container.createSpan({
       cls: `ct-harness-mark ct-harness-mark-${harness}`,
       attr: { 'aria-hidden': 'true', 'data-icon': icon },

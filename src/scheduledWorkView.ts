@@ -1,3 +1,4 @@
+import { agentHarnessLabel, type AgentHarness } from './types';
 import type { ScheduledItem, Thread } from './types';
 
 export interface ScheduledWorkGroups {
@@ -33,8 +34,8 @@ export function classifyScheduledItems(items: ScheduledItem[]): ScheduledWorkGro
   };
 }
 
-function harnessLabel(harness: 'claude' | 'codex'): string {
-  return harness === 'codex' ? 'Codex' : 'Claude';
+function harnessLabel(harness: AgentHarness): string {
+  return agentHarnessLabel(harness);
 }
 
 function modelLabel(model: string | undefined): string {
@@ -43,7 +44,7 @@ function modelLabel(model: string | undefined): string {
 
 export function describeScheduledExecution(
   item: ScheduledItem,
-  globalHarness: 'claude' | 'codex',
+  globalHarness: AgentHarness,
   globalModel: string,
   targetThread?: Pick<Thread, 'agentHarness' | 'model'>,
 ): ScheduledExecutionDisplay {

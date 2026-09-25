@@ -1,9 +1,10 @@
+import type { AgentHarness } from '../types';
 import type { AgentRun, AgentRunEvent, AgentRunStatus } from '../types';
 
 export interface AgentTreeNode { run: AgentRun; children: AgentTreeNode[] }
 export interface AgentStartInput {
   threadId: string;
-  harness: 'claude' | 'codex';
+  harness: AgentHarness;
   nativeAgentId: string;
   parentNativeAgentId?: string;
   description: string;
@@ -53,7 +54,7 @@ export class AgentRunStore {
     return run;
   }
 
-  observeActivity(threadId: string, harness: 'claude' | 'codex', nativeId: string, event: AgentRunEvent, sessionGeneration = 0): AgentRun | undefined {
+  observeActivity(threadId: string, harness: AgentHarness, nativeId: string, event: AgentRunEvent, sessionGeneration = 0): AgentRun | undefined {
     const run = this.getByNativeId(threadId, harness, nativeId, sessionGeneration);
     if (!run) return undefined;
     if (!event.nativeEventId || !run.events.some(e => e.nativeEventId === event.nativeEventId)) run.events.push(event);
@@ -63,7 +64,7 @@ export class AgentRunStore {
     return run;
   }
 
-  observeStatus(threadId: string, harness: 'claude' | 'codex', nativeId: string, status: AgentRunStatus, summary?: string, error?: string, now = Date.now(), sessionGeneration = 0): AgentRun | undefined {
+  observeStatus(threadId: string, harness: AgentHarness, nativeId: string, status: AgentRunStatus, summary?: string, error?: string, now = Date.now(), sessionGeneration = 0): AgentRun | undefined {
     const run = this.getByNativeId(threadId, harness, nativeId, sessionGeneration);
     if (!run) return undefined;
     run.status = status; run.updatedAt = now; run.resultSummary = summary ?? run.resultSummary; run.error = error ?? run.error;
@@ -85,7 +86,7 @@ export class AgentRunStore {
 
   snapshot(threadId: string): AgentRun[] { return this.getByThread(threadId).map(r => ({ ...r, capabilities: { ...r.capabilities }, events: r.events.map(e => ({ ...e })) })); }
   getById(id: string): AgentRun | undefined { return this.runs.get(id); }
-  getByNativeId(threadId: string, harness: 'claude' | 'codex', nativeId: string, sessionGeneration = 0): AgentRun | undefined { const id = this.nativeIndex.get(this.nativeKey(threadId, harness, nativeId, sessionGeneration)); return id ? this.runs.get(id) : undefined; }
+  getByNativeId(threadId: string, harness: AgentHarness, nativeId: string, sessionGeneration = 0): AgentRun | undefined { const id = this.nativeIndex.get(this.nativeKey(threadId, harness, nativeId, sessionGeneration)); return id ? this.runs.get(id) : undefined; }
   getByThread(threadId: string): AgentRun[] { return [...this.runs.values()].filter(r => r.threadId === threadId).sort((a, b) => a.startedAt - b.startedAt); }
 
   getTree(threadId: string): AgentTreeNode[] {
@@ -98,7 +99,7 @@ export class AgentRunStore {
     return roots;
   }
 
-  private resolveParents(threadId: string, harness?: 'claude' | 'codex', sessionGeneration?: number): void {
+  private resolveParents(threadId: string, harness?: AgentHarness, sessionGeneration?: number): void {
     for (const run of this.getByThread(threadId)) {
       if (harness && run.harness !== harness) continue;
       if (sessionGeneration !== undefined && (run.sessionGeneration ?? 0) !== sessionGeneration) continue;
