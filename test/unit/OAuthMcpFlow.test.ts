@@ -235,6 +235,57 @@ describe('OAuthMcpFlow.authorize', () => {
   });
 
   /**
+   * `audience` (Auth0's non-standard "which API is this token for") is a
+   * general `oauth`-entry field with no grant-type restriction — see
+   * `mcpRegistrationSchema`'s `superRefine`. It must reach the interactive
+   * flow's authorization URL, not just `clientCredentials()`'s token request,
+   * or Auth0's `/authorize` mints an opaque identity-only token instead of
+   * one scoped to the target API.
+   */
+  it('sends the audience parameter on the authorization URL when supplied', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({
+      serverName: 'bankrate', clientId: 'client-123', asMetadata: fixtureAsMetadata(), audience: 'bankrate-api',
+    });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    expect(capturedUrl.searchParams.get('audience')).toBe('bankrate-api');
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
+    await promise;
+
+    // Auth0's own docs place `audience` at the authorize step only for this grant —
+    // the issued code already encodes it, and the SDK's exchangeAuthorization() has
+    // no `audience` parameter to repeat it through even if a server wanted that.
+    const exchanged = sdkAuth.exchangeAuthorization.mock.calls[0][1] as Record<string, unknown>;
+    expect('audience' in exchanged).toBe(false);
+  });
+
+  /**
+   * Negative control, same shape as the RFC 8707 resource one below: without
+   * this, a regression that hardcoded some audience value would still pass
+   * the assertion above while sending an unwanted `audience` to every AS.
+   */
+  it('omits audience entirely when not supplied', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({ serverName: 'vercel', clientId: 'client-123', asMetadata: fixtureAsMetadata() });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    expect(capturedUrl.searchParams.has('audience')).toBe(false);
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
+    await promise;
+  });
+
+  /**
    * A confidential client authenticates at the token endpoint only. The secret
    * must never appear on the authorization request: that URL goes through the
    * user's address bar, the AS's access logs and any referrer along the way.
@@ -596,6 +647,32 @@ describe('RFC 8707 resource indicator', () => {
     await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
     await promise;
     expect((sdkAuth.exchangeAuthorization.mock.calls[0][1] as { resource?: URL }).resource).toBeUndefined();
+  });
+
+  /**
+   * `resource` (RFC 8707) and `audience` (Auth0) are meant to coexist, not be
+   * mutually exclusive — `clientCredentials()` already sends both together
+   * whenever both are set (see its own describe block), since providers
+   * ignore whichever parameter they don't implement. `authorize()` must do
+   * the same on the interactive path.
+   */
+  it('sends both the resource indicator and the audience on the authorization request when both are set', async () => {
+    let capturedUrl = undefined as unknown as URL;
+    const openUrl = vi.fn(async (url: string) => { capturedUrl = new URL(url); });
+    sdkAuth.exchangeAuthorization.mockResolvedValue({ access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 });
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({
+      serverName: 'v0', clientId: 'client-123', asMetadata: v0AsMetadata(), scopes: 'mcp', audience: 'v0-api',
+    });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    expect(capturedUrl.searchParams.get('resource')).toBe('https://v0.app/api/mcp');
+    expect(capturedUrl.searchParams.get('audience')).toBe('v0-api');
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
+    await promise;
   });
 
   it('repeats the resource on refresh so the new access token keeps the same audience', async () => {

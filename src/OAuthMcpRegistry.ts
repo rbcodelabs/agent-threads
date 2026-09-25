@@ -456,7 +456,7 @@ export class OAuthMcpRegistry {
       }
     } else {
       try {
-        tokens = await flow.authorize({ serverName: entry.name, clientId, clientSecret, asMetadata, scopes: effectiveScopes, redirectUri: entry.redirectUri });
+        tokens = await flow.authorize({ serverName: entry.name, clientId, clientSecret, asMetadata, scopes: effectiveScopes, redirectUri: entry.redirectUri, audience: entry.audience });
       } catch (err) {
         tokenStore.clear(entry.name);
         const message = errorMessage(err);

@@ -309,6 +309,21 @@ export class OAuthMcpFlow {
      * `127.0.0.1` and get it rejected.
      */
     redirectUri?: string;
+    /**
+     * `audience` parameter on the authorization request (Auth0's non-standard
+     * way of asking for a token scoped to a specific API — see
+     * `clientCredentials`'s doc comment). Sent only here, not on the token
+     * exchange in `handleCallback()`: Auth0's own docs describe `audience` as
+     * an `/authorize`-time parameter for the authorization_code grant — the
+     * issued code already encodes the requested audience, so the token
+     * endpoint has nothing new to be told. This mirrors RFC 8707 `resource`
+     * for shape (both travel on the authorization URL), but not for
+     * repetition at exchange: unlike `resource` (RFC 8707 §2, and enforced by
+     * some ASes that reject a token request which omits it), the SDK's
+     * `exchangeAuthorization()` has no `audience` parameter at all, so there
+     * is no SDK-supported way to repeat it even if a server wanted that.
+     */
+    audience?: string;
   }): Promise<TokenSet> {
     const { verifier, challenge } = generatePkcePair();
     const state = randomBytes(16).toString('hex');
@@ -383,6 +398,9 @@ export class OAuthMcpFlow {
         // identical value — see handleCallback().
         const resource = resourceIndicatorFor(params.asMetadata);
         if (resource) authorizationUrl.searchParams.set('resource', resource.href);
+        // Auth0-style audience — see the `audience` param's doc comment above
+        // for why this is authorize-only and not repeated at token exchange.
+        if (params.audience) authorizationUrl.searchParams.set('audience', params.audience);
 
         timeoutHandle = setTimeout(
           () => finish({ ok: false, error: new Error('OAuth authorization timed out waiting for consent.') }),
@@ -481,6 +499,12 @@ export class OAuthMcpFlow {
       // Keeps the refreshed access token scoped to the same audience the
       // original grant was issued for.
       resource: resourceIndicatorFor(asMetadata),
+      // No `audience` here by design, unlike `authorize()`. Auth0 (the
+      // parameter's origin) reissues a refreshed token for whatever audience
+      // the original authorization granted, without needing it repeated —
+      // and the SDK's `refreshAuthorization()` has no parameter to repeat it
+      // through even if a server wanted that (only `resource` is supported,
+      // matching `exchangeAuthorization()`).
     });
     const tokenSet = toTokenSet(tokens);
     await this.tokenStore.store(serverName, tokenSet);

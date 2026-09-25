@@ -125,7 +125,7 @@ class MockAuthorizationServer {
 
   /** Inspection state for assertions. */
   registerLog: Array<{ clientId: string; redirectUris: string[] }> = [];
-  authorizeLog: Array<{ clientId: string; redirectUri: string }> = [];
+  authorizeLog: Array<{ clientId: string; redirectUri: string; audience?: string; resource?: string }> = [];
   revocations: RevocationRecord[] = [];
   tokenEndpointHits = 0;
   refreshGrantHits = 0;
@@ -248,7 +248,12 @@ class MockAuthorizationServer {
 
     const code = `code_${randomBytes(12).toString('hex')}`;
     this.codes.set(code, { clientId, codeChallenge, redirectUri });
-    this.authorizeLog.push({ clientId, redirectUri });
+    this.authorizeLog.push({
+      clientId,
+      redirectUri,
+      audience: url.searchParams.get('audience') ?? undefined,
+      resource: url.searchParams.get('resource') ?? undefined,
+    });
     redirect.searchParams.set('code', code);
     redirect.searchParams.set('state', state);
     res.writeHead(302, { Location: redirect.toString() });
@@ -649,6 +654,28 @@ describe('OAuth MCP broker integration — full registration flow', () => {
     expect(res.status).toBe(200);
     const payload = await res.json();
     expect(payload.result.tools.map((t: { name: string }) => t.name)).toEqual(['allowed_tool', 'denied_tool', 'stream_tool']);
+  });
+
+  /**
+   * `audience` has no grant-type restriction in `mcpRegistrationSchema` (see
+   * `OAuthMcpRegistry.registerServer`'s comment on the same rule for
+   * `client_credentials`), so it must reach the interactive `authorize()` leg
+   * end to end, not just `clientCredentials()`'s token request — asserted at
+   * the unit level in `OAuthMcpFlow.test.ts`; this proves the real wiring
+   * through `OAuthMcpRegistry.registerServer()` and onto the wire.
+   */
+  it('wires a configured audience through the interactive authorization_code flow onto the wire', async () => {
+    const { as, upstream } = await setupServers();
+    const { registry: reg, settings } = registry();
+
+    const result = await reg.registerServer({ name: 'bankrate', url: upstream.baseUrl, audience: 'bankrate-api' });
+    if (result.success) activeRegistrations.push({ registry: reg, name: 'bankrate' });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(as.authorizeLog).toHaveLength(1);
+    expect(as.authorizeLog[0].audience).toBe('bankrate-api');
+    // Persisted so a later reconnect/re-register reproduces the same grant.
+    expect(settings.oauthMcpServers.bankrate).toMatchObject({ audience: 'bankrate-api' });
   });
 
   // End-to-end shape of the reported bug: OAuth completes, the first tool call

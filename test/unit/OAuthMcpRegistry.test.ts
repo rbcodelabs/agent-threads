@@ -433,6 +433,34 @@ describe('OAuthMcpRegistry.registerServer', () => {
   });
 
   /**
+   * `audience` (Auth0's API identifier) is a general `oauth`-entry field with
+   * no grant-type restriction in `mcpRegistrationSchema` — it must thread
+   * through to `authorize()` for the default `authorization_code` grant too,
+   * not just `clientCredentials()` (covered separately below), or setting it
+   * on an interactive entry silently does nothing.
+   */
+  it('threads a configured audience through to authorize() for the authorization_code grant', async () => {
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({ name: 'bankrate', url: 'https://mcp.bankrate.com/', audience: 'bankrate-api' });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ audience: 'bankrate-api' }));
+    expect(settings.oauthMcpServers.bankrate).toMatchObject({ audience: 'bankrate-api' });
+  });
+
+  it('does not pass audience to authorize() when none is configured', async () => {
+    const { host } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/' });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ audience: undefined }));
+  });
+
+  /**
    * Regression guard for the failure Atlassian's MCP server produces: registered
    * with no `scopes`, no `scope` parameter reaches the authorization request, the
    * AS issues its own default (identity-only) grant, and every real API call
