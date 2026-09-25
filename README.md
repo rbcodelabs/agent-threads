@@ -8,7 +8,7 @@ Direct child-agent messaging and single-agent interruption are capability-gated.
 
 A native Obsidian and Geode plugin for running multiple Claude Code sessions in parallel — with streaming markdown responses, tab management, and deep vault integration.
 
-![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.45.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
+![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.46.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
 
 <p align="center">
   <img src="docs/screenshot-main.png" width="800" alt="Main view: conversation panel with tool calls and Agents List showing thread summaries" />
@@ -33,6 +33,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 **Key features:**
 
 - **Multi-tab sessions** — open as many Claude threads as you need, switch between them instantly
+- **Opt-in sandbox VMs** — Claude and Codex can run explicit coding commands in a Linux VM through Apple Container on Apple-silicon Macs with macOS 26+. Only the selected working directory is mounted (writable); ordinary host tools remain outside the VM. See the [setup and safety guide](docs/sandbox-vms.md).
 - **Streaming responses** — tokens stream in with live markdown rendering (code blocks, tables, lists, etc.)
 - **Responsive conversation width** — wide conversation panes center the complete timeline and composer in a readable-width column, while narrow panes remain full width
 - **Clickable links in messages** — both `[[wikilinks]]` and ordinary `[label](path.md)` Markdown links in a response open the target note, in the sidebar and in conversation-first placement alike. Agents writing from outside Obsidian often emit an absolute filesystem path rather than a vault-relative one; when that path lands inside your vault, it still resolves to the right note — heading and block anchors included. A path that points outside the vault says so rather than opening (or creating) anything. An ordinary `http(s)://` link in a message opens the same way status-line pill links do — in a fresh tab in the host's in-app Web Viewer when enabled (in the conversation-first context region when that placement is active), otherwise the system browser; Cmd-click (Ctrl-click) always forces the system browser
