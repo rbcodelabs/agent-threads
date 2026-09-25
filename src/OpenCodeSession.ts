@@ -288,7 +288,14 @@ export const launchOpenCodeServer: OpenCodeLauncher = async ({ binaryPath, cwd, 
       closed = true;
       eventRequest?.destroy();
       eventRequest = null;
-      if (child.exitCode === null) child.kill('SIGTERM');
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGTERM');
+        // Never leave an orphaned server behind if SIGTERM is ignored.
+        const escalate = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        }, 3000);
+        (escalate as { unref?: () => void }).unref?.();
+      }
     },
   };
 };
