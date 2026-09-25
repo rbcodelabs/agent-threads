@@ -3852,7 +3852,8 @@ export class ThreadsView extends ItemView {
    * Renders the plan approval card shown when Claude calls ExitPlanMode.
    * The card is anchored to the current streaming element (or messagesEl) so it
    * sits visually inside the current response turn.
-   * Approve proceeds with implementation; Reject cancels the session with interrupt.
+   * Approve proceeds with implementation; Reject first asks for optional feedback,
+   * then keeps the session in Plan mode so the agent can revise its proposal.
    * Edit opens a textarea pre-populated with the plan so the user can revise it.
    */
   private renderPlanCard(
@@ -3886,17 +3887,66 @@ export class ThreadsView extends ItemView {
     const rejectThreadId = this.activeThreadId;
     const rejectBtn = actions.createEl('button', { text: 'Reject', cls: 'ct-plan-btn ct-plan-reject' });
     rejectBtn.addEventListener('click', () => {
-      card.remove();
-      const hadFeedback = reject();
-      // Inject a follow-up turn so Claude acknowledges the rejection and offers
-      // to revise. sendMessage() queues automatically while the session is still
-      // active and fires as a new turn once the denial response lands.
-      if (rejectThreadId && !hadFeedback) {
-        void this.manager.sendMessage(
-          rejectThreadId,
-          'I rejected the plan. Please ask what changes I\'d like, or suggest alternative approaches.',
-        );
-      }
+      actions.style.display = 'none';
+
+      const rejectionField = card.createDiv('ct-plan-rejection-field');
+      const label = rejectionField.createEl('label', { cls: 'ct-plan-rejection-label' });
+      label.createSpan({ text: 'Why are you rejecting this plan?' });
+      const rejectionTextarea = label.createEl('textarea', {
+        cls: 'ct-plan-textarea ct-plan-rejection-textarea',
+      });
+      rejectionTextarea.rows = 4;
+
+      const rejectionActions = rejectionField.createDiv('ct-plan-actions ct-plan-rejection-actions');
+      const cancelBtn = rejectionActions.createEl('button', {
+        text: 'Cancel',
+        cls: 'ct-plan-btn ct-plan-edit ct-plan-rejection-cancel',
+      });
+      const submitBtn = rejectionActions.createEl('button', {
+        text: 'Reject plan',
+        cls: 'ct-plan-btn ct-plan-reject ct-plan-rejection-submit',
+      });
+
+      let submitting = false;
+      const cancelRejection = () => {
+        if (submitting) return;
+        rejectionField.remove();
+        actions.style.display = '';
+        rejectBtn.focus();
+      };
+      const submitRejection = () => {
+        if (submitting) return;
+        submitting = true;
+        submitBtn.disabled = true;
+        cancelBtn.disabled = true;
+
+        const feedback = rejectionTextarea.value.trim();
+        const hadFeedback = reject();
+        // sendMessage() keeps existing queued messages in FIFO order. Explicit
+        // feedback is never suppressed by that queue; only an empty response
+        // falls back to the legacy generic prompt when nothing else is waiting.
+        if (rejectThreadId && (feedback || !hadFeedback)) {
+          void this.manager.sendMessage(
+            rejectThreadId,
+            feedback || 'I rejected the plan. Please ask what changes I\'d like, or suggest alternative approaches.',
+          );
+        }
+        card.remove();
+      };
+
+      cancelBtn.addEventListener('click', cancelRejection);
+      submitBtn.addEventListener('click', submitRejection);
+      rejectionTextarea.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          cancelRejection();
+        } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          submitRejection();
+        }
+      });
+      rejectionTextarea.focus();
+      this.scrollToBottom();
     });
 
     const editBtn = actions.createEl('button', { text: 'Edit', cls: 'ct-plan-btn ct-plan-edit' });
@@ -3981,8 +4031,8 @@ export class ThreadsView extends ItemView {
         void this.manager.sendMessage(threadId, msg);
       },
       () => {
-        // Reject: just clear the persisted plan. The follow-up sendMessage is
-        // injected by renderPlanCard's reject button handler (same as live path).
+        // Reject: just clear the persisted plan. The rejection-entry submit
+        // handler injects the user's feedback (or legacy fallback) afterward.
         clearPlan();
         return false;
       },
