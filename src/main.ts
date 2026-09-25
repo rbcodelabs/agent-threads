@@ -24,7 +24,7 @@ import type { ThreadManager } from './ThreadManager';
 import type { VaultPersistence } from './VaultPersistence';
 import type { InProcessSummarizer } from './InProcessSummarizer';
 import type { WakeLockService } from './WakeLockService';
-import type { createClaudeThreadsMcpServers, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
+import type { createClaudeThreadsMcpServers, CronCreateParams, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
 import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
@@ -52,6 +52,7 @@ import {
   type ScheduledItem,
   type WatchedDocument,
   type SkillSource,
+  type Thread,
 } from './types';
 import { serializeThreadForSave } from './imageExternalization';
 import { selectIdleThreadsForArchive } from './autoArchive';
@@ -73,6 +74,7 @@ import {
   sharedPersistenceWriterFence,
   type PersistenceWriterToken,
 } from './PersistenceWriterFence';
+import { mergeDisallowedTools, withCreatorToolRestrictions } from './toolRestrictions';
 import { DIAGNOSTICS_FOLDER, mergePersistedSettings, selectWelcomeGuidePath } from './productIdentity';
 import {
   CHIEF_OF_STAFF_COMMAND_ID,
@@ -670,7 +672,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
           createThread: createAgentThreadCallback({
             sourceThreadId: threadId,
             getThread: id => this.manager.getThread(id),
-            createThread: (title, cwd, projectId) => this.manager.createThread(title, cwd, projectId),
+            createThread: (title, cwd, projectId) => this.createThreadFromAgent(threadId, title, cwd, projectId),
             saveSettings: () => this.saveSettings(),
             sendMessage: (id, prompt) => this.manager.sendMessage(id, prompt),
             authorizeProject: (projectId, elevatedProjectId) => {
@@ -829,7 +831,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
             this.manager.notifyProposedReplyChanged(id);
             this.saveSettings().catch(console.error);
           },
-          onCronCreate: (params) => this.scheduler.createItem(params),
+          onCronCreate: (params) => this.createCronItemFromThread(threadId, params),
           onCronList: () => this.scheduler.listItems(),
           onCronUpdate: (id, patch) => this.scheduler.updateItem(id, patch),
           onCronDelete: (id) => this.scheduler.deleteItem(id),
@@ -1126,25 +1128,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
           throw error;
         }
       },
-      createThread: (title, cwd, projectId, scheduledItemId) => {
-        const thread = this.manager.createThread(title, cwd, projectId);
-        // Scheduled sessions should not block on permission prompts. When the
-        // global permissionMode is 'default' (ask every time), override to
-        // 'dontAsk' so unattended runs complete without hanging.
-        if (!thread.permissionMode && this.settings.permissionMode === 'default') {
-          thread.permissionMode = 'dontAsk';
-        }
-        // Record the scheduled item that created this thread, for the
-        // "Scheduled: <name>" footer pill. Captured once at creation time —
-        // not kept in sync with later renames of the scheduled item.
-        if (scheduledItemId) {
-          thread.scheduledItemId = scheduledItemId;
-          thread.scheduledItemName = (this.settings.scheduledItems ?? []).find(
-            (i) => i.id === scheduledItemId
-          )?.name;
-        }
-        return thread;
-      },
+      createThread: (title, cwd, projectId, scheduledItemId) => this.createScheduledThread(title, cwd, projectId, scheduledItemId),
       sendMessage: (threadId, prompt) => this.manager.sendMessage(threadId, prompt),
       getDefaultCwd: () => this.getEffectiveCwd(),
       getProjectCwd: (projectId) => {
@@ -1796,6 +1780,50 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
   }
 
+  /** Thread for one run of a scheduled item (the Scheduler's createThread). */
+  createScheduledThread(title: string, cwd: string, projectId?: string, scheduledItemId?: string): Thread {
+    const thread = this.manager.createThread(title, cwd, projectId);
+    // Scheduled sessions should not block on permission prompts. When the
+    // global permissionMode is 'default' (ask every time), override to
+    // 'dontAsk' so unattended runs complete without hanging.
+    if (!thread.permissionMode && this.settings.permissionMode === 'default') {
+      thread.permissionMode = 'dontAsk';
+    }
+    // Record the scheduled item that created this thread, for the
+    // "Scheduled: <name>" footer pill. Captured once at creation time —
+    // not kept in sync with later renames of the scheduled item.
+    if (scheduledItemId) {
+      const item = (this.settings.scheduledItems ?? []).find((i) => i.id === scheduledItemId);
+      thread.scheduledItemId = scheduledItemId;
+      thread.scheduledItemName = item?.name;
+      // Denylist inherited from the thread that created the item
+      // (restriction-only; see toolRestrictions.ts).
+      if (item?.disallowedTools?.length) {
+        thread.disallowedTools = mergeDisallowedTools(thread.disallowedTools, item.disallowedTools);
+      }
+    }
+    return thread;
+  }
+
+  /**
+   * A scheduled item created by an agent's CronCreate call. The creating
+   * thread's denylist is copied onto the item, keyed by that thread's id and
+   * never by the item's name, so threads the item spawns inherit it.
+   */
+  createCronItemFromThread(creatorThreadId: string, params: CronCreateParams): Promise<ScheduledItem> {
+    return this.scheduler.createItem(withCreatorToolRestrictions(params, this.manager.getThread(creatorThreadId)));
+  }
+
+  /** A thread an agent creates via threads_create; it inherits the creator's denylist. */
+  createThreadFromAgent(creatorThreadId: string, title: string, cwd?: string, projectId?: string): Thread {
+    const thread = this.manager.createThread(title, cwd, projectId);
+    const creator = this.manager.getThread(creatorThreadId);
+    if (creator?.disallowedTools?.length) {
+      thread.disallowedTools = mergeDisallowedTools(thread.disallowedTools, creator.disallowedTools);
+    }
+    return thread;
+  }
+
   /**
    * Absolute directory managed GitHub skill-source clones live in
    * (`<vault>/<plugin-dir>/skill-sources`), or null when the vault is not on a
@@ -1894,6 +1922,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
         // Pin the title: the home thread is found by title/id and must not be
         // renamed by the auto-summarizer (applyAutoTitle honors titleUserSet).
         thread.titleUserSet = true;
+        // Enforced, not just prompted: the home thread (and every scheduled run
+        // and sub-thread it creates) may never use the shell.
+        thread.disallowedTools = mergeDisallowedTools(thread.disallowedTools, ['Bash']);
         return thread;
       },
       sendPrompt: (id, prompt) => { this.manager.sendMessage(id, prompt).catch(console.error); },

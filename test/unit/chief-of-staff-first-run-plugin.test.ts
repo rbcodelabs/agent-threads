@@ -129,6 +129,13 @@ describe('first run — live QA fixes', () => {
     expect(home!.titleUserSet).toBe(true);
   });
 
+  it('enforces no shell on the home thread: Bash is on its per-thread denylist', async () => {
+    const { plugin } = makePlugin();
+    await plugin.firstRunSetup(true);
+    const [home] = plugin.manager.getThreads();
+    expect(home!.disallowedTools).toEqual(['Bash']);
+  });
+
   it('a successful first run ends with exactly one thread, Chief of Staff (no auto-created "Thread 1")', async () => {
     const { plugin } = makePlugin();
     await plugin.firstRunSetup(true);

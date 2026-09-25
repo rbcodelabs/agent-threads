@@ -59,6 +59,12 @@ export interface HarnessSession {
 export interface HarnessSessionOptions {
   cwd: string;
   permissionMode: HarnessPermissionMode;
+  /**
+   * Per-thread denylist (restriction-only). Claude also receives it merged into
+   * `claude.disallowedTools`; Codex and OpenCode enforce `Bash` natively where
+   * they can (see src/toolRestrictions.ts).
+   */
+  disallowedTools?: string[];
   extraEnvRaw: string;
   resume?: string;
   callbacks: SessionCallbacks;

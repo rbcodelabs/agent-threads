@@ -1,4 +1,5 @@
 import { agentHarnessLabel, type AgentHarness } from './types';
+import { mergeDisallowedTools } from './toolRestrictions';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
 import { resolveCodexPermissions, serializableMcpServers, type HarnessContextUsage, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
@@ -1923,6 +1924,8 @@ export class ThreadManager {
     return {
       cwd: thread.cwd,
       permissionMode: thread.permissionMode ?? this.settings.permissionMode,
+      // Per-thread denylist (restriction-only; see toolRestrictions.ts).
+      ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
       extraEnvRaw: effectiveExtraEnv(this.settings),
       // Session IDs are harness-specific. Existing threads predate the field
       // and are Claude threads, so they never get passed to Codex.
@@ -1956,7 +1959,7 @@ export class ThreadManager {
       secretEnv: resolvedSecretEnv,
       claude: {
         mcpServers: sessionMcpServers,
-        disallowedTools: this.settings.disallowedTools,
+        disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
         sessionOptions: this.buildSessionOptions(thread, agentProfiles),
       },
       codex: {

@@ -398,6 +398,14 @@ export interface Thread {
    */
   titleUserSet?: boolean;
   /**
+   * Tools this thread's sessions may never use (e.g. ['Bash'] on the Chief of
+   * Staff home thread). Restriction-only: merged as a union with the global
+   * `settings.disallowedTools`, inherited by scheduled items and threads this
+   * thread creates, and never shrunk. Absent = no per-thread restriction.
+   * See src/toolRestrictions.ts.
+   */
+  disallowedTools?: string[];
+  /**
    * Background tasks (Bash run_in_background: true) that started during a session
    * but didn't emit a task_notification before the stream ended. The plugin polls
    * these automatically and clears them when completions arrive.
@@ -584,6 +592,14 @@ export interface ScheduledItem {
   nextRun?: number;
   /** Thread ID of the most recent run */
   lastThreadId?: string;
+  /**
+   * Tools denied to every thread this item spawns — copied at CronCreate time
+   * from the creating thread's `disallowedTools` (restriction-only; see
+   * src/toolRestrictions.ts). Absent = no restriction.
+   */
+  disallowedTools?: string[];
+  /** Id of the thread whose CronCreate call made this item, when it carried a denylist. */
+  createdByThreadId?: string;
   /**
    * When set, fire the prompt into this existing thread instead of creating a
    * new one (used by the /loop command). Falls back to creating a new thread
