@@ -92,6 +92,8 @@ export interface ChatMessage {
   toolResultImages?: Array<{ mediaType: string; data?: string; path?: string }>;
   /** For role 'notice': the completion status of the background task, drives the icon. */
   noticeStatus?: 'completed' | 'failed' | 'stopped';
+  /** Harness that produced an assistant message. Enables accurate mixed-provider archives. */
+  agentHarness?: 'claude' | 'codex';
 }
 
 export interface ThreadDraft {
@@ -139,6 +141,8 @@ export interface AgentRun {
   parentNativeAgentId?: string;
   taskId?: string;
   harness: 'claude' | 'codex';
+  /** Thread session generation that owns this native identity. */
+  sessionGeneration?: number;
   role?: string;
   description: string;
   model?: string;
@@ -215,6 +219,18 @@ export interface Thread {
   /** Harness that owns this thread's persisted session ID. Kept per-thread so
    * switching the default never attempts to resume a Claude session in Codex. */
   agentHarness?: 'claude' | 'codex';
+  /** Monotonic fence for callbacks from retired harness adapters. */
+  sessionGeneration?: number;
+  /** One-time context bridge consumed only by the first successful target turn. */
+  pendingHarnessHandoff?: {
+    sourceHarness: 'claude' | 'codex';
+    targetHarness: 'claude' | 'codex';
+    summary: string;
+    threadId: string;
+    noteFile?: string;
+    rawLogPath?: string;
+    createdAt: number;
+  };
   /** Latest provider usage/quota snapshot; replaces older samples rather than building history. */
   usageSnapshot?: import('./Usage').UsageSnapshot;
   title: string;

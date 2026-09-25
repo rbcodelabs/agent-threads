@@ -1199,11 +1199,24 @@ test.describe('Agent Threads UI', () => {
     await page.waitForSelector('.menu');
     await expect(page.locator('.menu')).toContainText('Model: Default');
     await expect(page.locator('.menu')).toContainText('Permissions: Global default');
+    await expect(page.locator('.menu')).toContainText('Harness: Claude');
     await expect(page.locator('.ct-model-btn')).toHaveCount(0);
     await expect(page.locator('.ct-permission-mode-btn')).toHaveCount(0);
     // Move mouse away so no menu item is in hover state
     await page.mouse.move(0, 0);
     await shot(page, 'model-switcher-menu.png', { fullPage: true });
+  });
+
+  test('composer menu exposes existing-thread harness selector', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(harnessUrl);
+    await page.waitForSelector('.ct-title-row');
+    await page.hover('.ct-floating-panel');
+    await page.click('.ct-thread-more-btn');
+    await page.getByText('Harness: Claude', { exact: true }).click();
+    await expect(page.locator('.menu')).toContainText('Claude');
+    await expect(page.locator('.menu')).toContainText('Codex');
+    await shot(page, 'harness-switcher-menu.png', { fullPage: true });
   });
 
   test('composer menu changes model and permission using existing selectors', async ({ page }) => {

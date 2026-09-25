@@ -257,7 +257,9 @@ export class VaultPersistence {
 
   private messageToMarkdown(msg: ChatMessage): string {
     if (msg.role === 'compact' || msg.role === 'notice') return '';
-    const prefix = msg.role === 'user' ? '**You:**' : '**Claude:**';
+    const prefix = msg.role === 'user'
+      ? '**You:**'
+      : msg.agentHarness === 'codex' ? '**Codex:**' : '**Claude:**';
     let body = `${prefix}\n\n${msg.content}`;
     if (msg.toolCalls && msg.toolCalls.length > 0) {
       const tools = msg.toolCalls.map((t) => `  - \`${t.summary}\``).join('\n');

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { ThreadManager } from '../../src/ThreadManager';
+import { ThreadManager, resolveHarnessPrompt } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS } from '../../src/types';
 import { defaultWorktreeRoot } from '../../src/worktreePaths';
 
@@ -276,41 +276,32 @@ describe('ThreadManager — secretEnvResolver projectId threading', () => {
   });
 });
 
-describe('ThreadManager — model escalation (resolveModel / stripKeyword)', () => {
-  // resolveModel/stripKeyword are private; reach through for direct unit coverage.
-  const resolve = (manager: ThreadManager, text: string): string | undefined =>
-    (manager as unknown as { resolveModel(t: string): string | undefined }).resolveModel(text);
-  const strip = (manager: ThreadManager, text: string): string =>
-    (manager as unknown as { stripKeyword(t: string): string }).stripKeyword(text);
+describe('ThreadManager — model escalation', () => {
+  const resolve = (overrides: Partial<typeof DEFAULT_SETTINGS>, text: string) =>
+    resolveHarnessPrompt('claude', text, { ...DEFAULT_SETTINGS, ...overrides });
 
   it('escalates to the configured escalation model', () => {
-    const manager = makeManager({ escalationEnabled: true, escalationKeyword: '/escalate', escalationModel: 'fable' });
-    expect(resolve(manager, 'please /escalate fix this')).toBe('fable');
+    expect(resolve({ escalationEnabled: true, escalationKeyword: '/escalate', escalationModel: 'fable' }, 'please /escalate fix this').model).toBe('fable');
   });
 
   it('falls back to opus when escalationModel is empty', () => {
-    const manager = makeManager({ escalationEnabled: true, escalationKeyword: '/escalate', escalationModel: '' });
-    expect(resolve(manager, '/escalate do it')).toBe('opus');
+    expect(resolve({ escalationEnabled: true, escalationKeyword: '/escalate', escalationModel: '' }, '/escalate do it').model).toBe('opus');
   });
 
   it('returns undefined when the keyword is absent', () => {
-    const manager = makeManager({ escalationEnabled: true, escalationKeyword: '/escalate', escalationModel: 'fable' });
-    expect(resolve(manager, 'just a normal message')).toBeUndefined();
+    expect(resolve({ escalationEnabled: true, escalationKeyword: '/escalate', escalationModel: 'fable' }, 'just a normal message').model).toBeUndefined();
   });
 
   it('does not escalate when disabled', () => {
-    const manager = makeManager({ escalationEnabled: false, escalationKeyword: '/escalate', escalationModel: 'fable' });
-    expect(resolve(manager, '/escalate do it')).toBeUndefined();
+    expect(resolve({ escalationEnabled: false, escalationKeyword: '/escalate', escalationModel: 'fable' }, '/escalate do it').model).toBeUndefined();
   });
 
   it('supports a custom keyword', () => {
-    const manager = makeManager({ escalationEnabled: true, escalationKeyword: '/opus', escalationModel: 'opus' });
-    expect(resolve(manager, 'fix this /opus please')).toBe('opus');
+    expect(resolve({ escalationEnabled: true, escalationKeyword: '/opus', escalationModel: 'opus' }, 'fix this /opus please').model).toBe('opus');
   });
 
   it('strips the keyword from the middle of a message', () => {
-    const manager = makeManager({ escalationEnabled: true, escalationKeyword: '/escalate', escalationModel: 'fable' });
-    expect(strip(manager, 'please /escalate fix this')).toBe('please fix this');
+    expect(resolve({ escalationEnabled: true, escalationKeyword: '/escalate', escalationModel: 'fable' }, 'please /escalate fix this').promptText).toBe('please fix this');
   });
 });
 
