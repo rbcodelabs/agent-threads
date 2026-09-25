@@ -1,7 +1,7 @@
 {
   "id": "claude-threads",
   "name": "Agent Threads",
-  "version": "0.46.0",
+  "version": "0.47.0",
   "minAppVersion": "1.0.0",
   "description": "Multi-agent Claude Code and OpenAI Codex sessions in Obsidian and Geode.",
   "author": "Rick Bowman",
