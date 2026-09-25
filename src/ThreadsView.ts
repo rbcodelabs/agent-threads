@@ -4199,7 +4199,8 @@ export class ThreadsView extends ItemView {
     const bar = card.createDiv('ct-context-usage-bar');
     let offset = 0;
     for (const cat of usage.categories) {
-      if (cat.tokens <= 0) continue;
+      // Deferred tool schemas sit outside the window; list them but keep them off the bar.
+      if (cat.tokens <= 0 || cat.kind === 'deferred') continue;
       const catPct = (cat.tokens / usage.maxTokens) * 100;
       const seg = bar.createDiv('ct-context-usage-seg');
       seg.style.width = `${catPct}%`;
