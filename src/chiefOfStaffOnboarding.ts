@@ -17,7 +17,7 @@ export const CHIEF_OF_STAFF_REPO_URL = 'https://github.com/rbcodelabs/chief-of-s
  * plugin version always installs a known pack version. The tag must exist on
  * rbcodelabs/chief-of-staff before a release that references it ships.
  */
-export const CHIEF_OF_STAFF_REF = 'v0.1.4';
+export const CHIEF_OF_STAFF_REF = 'v0.1.5';
 export const CHIEF_OF_STAFF_THREAD_TITLE = 'Chief of Staff';
 export const CHIEF_OF_STAFF_SETUP_PROMPT = 'Run the cos-setup skill to set me up with my Chief of Staff.';
 export const CHIEF_OF_STAFF_COMMAND_ID = 'set-up-chief-of-staff';
