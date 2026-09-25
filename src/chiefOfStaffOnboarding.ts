@@ -7,9 +7,16 @@
  *
  * No Obsidian or Node imports on purpose.
  */
-import type { SkillSource } from './types';
+import type { AgentHarness, SkillSource } from './types';
 
 export const CHIEF_OF_STAFF_REPO_URL = 'https://github.com/rbcodelabs/chief-of-staff';
+/**
+ * Tag of the Chief of Staff pack that first run and "Set up Chief of Staff"
+ * clone (`--branch <ref> --depth 1`). Bumped per plugin release so a given
+ * plugin version always installs a known pack version. The tag must exist on
+ * rbcodelabs/chief-of-staff before a release that references it ships.
+ */
+export const CHIEF_OF_STAFF_REF = 'v0.1.0';
 export const CHIEF_OF_STAFF_THREAD_TITLE = 'Chief of Staff';
 export const CHIEF_OF_STAFF_SETUP_PROMPT = 'Run the cos-setup skill to set me up with my Chief of Staff.';
 export const CHIEF_OF_STAFF_COMMAND_ID = 'set-up-chief-of-staff';
@@ -27,10 +34,35 @@ export function decideFirstRun(input: {
   hasSeenWelcome: boolean;
   threadCount: number;
   offerChiefOfStaff: boolean;
+  /**
+   * True only when the plugin had no saved data at all (`loadData()` returned
+   * null). A pre-flag install with saved settings but no threads is not fresh
+   * and keeps the old static-guide first run.
+   */
+  isFreshInstall: boolean;
 }): FirstRunDecision {
   if (input.hasSeenWelcome) return 'none';
   if (input.threadCount > 0) return 'mark-seen';
-  return input.offerChiefOfStaff ? 'chief-of-staff' : 'static-guide';
+  return input.offerChiefOfStaff && input.isFreshInstall ? 'chief-of-staff' : 'static-guide';
+}
+
+/** A genuinely new install has no saved plugin data at all (`loadData()` → null/undefined). */
+export function isFreshInstallData(saved: unknown): boolean {
+  return saved == null;
+}
+
+/**
+ * Harness for the Chief of Staff thread: the selected one if it can load skill
+ * sources and resolves, else Claude, else Codex. OpenCode is never chosen —
+ * its sessions do not receive skill sources, so `cos-setup` would not exist.
+ */
+export function chooseChiefOfStaffHarness(
+  selected: AgentHarness,
+  canResolve: (harness: AgentHarness) => boolean,
+): AgentHarness | undefined {
+  const skillCapable: AgentHarness[] = ['claude', 'codex'];
+  const order = skillCapable.includes(selected) ? [selected, ...skillCapable.filter(h => h !== selected)] : skillCapable;
+  return order.find(h => canResolve(h));
 }
 
 function normalizeRepoUrl(url: string): string {
@@ -87,25 +119,33 @@ export function withChiefOfStaffPointer(guide: string): string {
 
 export interface ChiefOfStaffDeps {
   getSkillSources(): readonly SkillSource[];
-  /** Clone + add the source and persist it. Throws on failure. */
-  addGithubSkillSource(repoUrl: string): Promise<void>;
-  isHarnessReady(): boolean;
+  /** Checked before any clone, so a missing git falls back without a clone attempt. */
+  isGitAvailable(): Promise<boolean>;
+  /** Clone (pinned to `ref`) + add the source and persist it. Throws on failure. */
+  addGithubSkillSource(repoUrl: string, ref: string): Promise<void>;
+  /** A skill-capable harness to run the thread on, or undefined when none resolves. */
+  resolveHarness(): AgentHarness | undefined;
+  /**
+   * Makes an existing thread pick up newly added skills. Returns true when a
+   * live session was scheduled to restart (skills load on its next turn).
+   */
+  reloadThreadSkills(threadId: string): boolean;
   listThreads(): readonly { id: string; title: string }[];
   getStoredThreadId(): string | undefined;
   setStoredThreadId(id: string | undefined): void;
-  /** Creates a persistent thread. Throws on failure. */
-  createThread(title: string): { id: string };
+  /** Creates a persistent thread on `harness`. Throws on failure. */
+  createThread(title: string, harness: AgentHarness): { id: string };
   /** Starts the first turn. Fire-and-forget. */
   sendPrompt(threadId: string, prompt: string): void;
   openThread(threadId: string): Promise<void>;
   saveSettings(): Promise<void>;
 }
 
-export type ChiefOfStaffFailureReason = 'clone-failed' | 'harness-unavailable' | 'thread-failed';
+export type ChiefOfStaffFailureReason = 'git-unavailable' | 'clone-failed' | 'harness-unavailable' | 'thread-failed';
 
 export type ChiefOfStaffResult =
-  | { status: 'created'; threadId: string; sourceAdded: boolean }
-  | { status: 'focused-existing'; threadId: string; sourceError?: string }
+  | { status: 'created'; threadId: string; sourceAdded: boolean; harness: AgentHarness }
+  | { status: 'focused-existing'; threadId: string; sourceAdded: boolean; skillsReloadPending: boolean; sourceError?: string }
   | { status: 'failed'; reason: ChiefOfStaffFailureReason; error: string };
 
 function message(err: unknown): string {
@@ -123,12 +163,19 @@ export async function setUpChiefOfStaff(deps: ChiefOfStaffDeps): Promise<ChiefOf
 
   let sourceAdded = false;
   let sourceError: string | undefined;
+  let sourceFailure: ChiefOfStaffFailureReason | undefined;
   if (!hasSkillSourceForRepo(deps.getSkillSources(), CHIEF_OF_STAFF_REPO_URL)) {
-    try {
-      await deps.addGithubSkillSource(CHIEF_OF_STAFF_REPO_URL);
-      sourceAdded = true;
-    } catch (err) {
-      sourceError = message(err);
+    if (!(await deps.isGitAvailable())) {
+      sourceFailure = 'git-unavailable';
+      sourceError = 'git is not installed, so the Chief of Staff skills cannot be downloaded.';
+    } else {
+      try {
+        await deps.addGithubSkillSource(CHIEF_OF_STAFF_REPO_URL, CHIEF_OF_STAFF_REF);
+        sourceAdded = true;
+      } catch (err) {
+        sourceFailure = 'clone-failed';
+        sourceError = message(err);
+      }
     }
   }
 
@@ -137,20 +184,28 @@ export async function setUpChiefOfStaff(deps: ChiefOfStaffDeps): Promise<ChiefOf
       deps.setStoredThreadId(existingId);
       await deps.saveSettings();
     }
+    // Skills are resolved when a session starts, so a live session would not
+    // see a source added just now until it restarts.
+    const skillsReloadPending = sourceAdded ? deps.reloadThreadSkills(existingId) : false;
     await deps.openThread(existingId);
-    return sourceError === undefined
-      ? { status: 'focused-existing', threadId: existingId }
-      : { status: 'focused-existing', threadId: existingId, sourceError };
+    const result: ChiefOfStaffResult = { status: 'focused-existing', threadId: existingId, sourceAdded, skillsReloadPending };
+    if (sourceError !== undefined) result.sourceError = sourceError;
+    return result;
   }
 
-  if (sourceError !== undefined) return { status: 'failed', reason: 'clone-failed', error: sourceError };
-  if (!deps.isHarnessReady()) {
-    return { status: 'failed', reason: 'harness-unavailable', error: 'The selected agent harness is not installed or configured.' };
+  if (sourceFailure) return { status: 'failed', reason: sourceFailure, error: sourceError ?? sourceFailure };
+  const harness = deps.resolveHarness();
+  if (!harness) {
+    return {
+      status: 'failed',
+      reason: 'harness-unavailable',
+      error: 'Chief of Staff needs Claude Code or Codex installed (OpenCode sessions do not load skill sources yet).',
+    };
   }
 
   let threadId: string;
   try {
-    threadId = deps.createThread(CHIEF_OF_STAFF_THREAD_TITLE).id;
+    threadId = deps.createThread(CHIEF_OF_STAFF_THREAD_TITLE, harness).id;
   } catch (err) {
     return { status: 'failed', reason: 'thread-failed', error: message(err) };
   }
@@ -161,5 +216,5 @@ export async function setUpChiefOfStaff(deps: ChiefOfStaffDeps): Promise<ChiefOf
   await deps.saveSettings();
   deps.sendPrompt(threadId, CHIEF_OF_STAFF_SETUP_PROMPT);
   await deps.openThread(threadId);
-  return { status: 'created', threadId, sourceAdded };
+  return { status: 'created', threadId, sourceAdded, harness };
 }

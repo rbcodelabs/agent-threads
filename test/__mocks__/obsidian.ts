@@ -124,9 +124,14 @@ export class WorkspaceLeaf {
 
 export class Notice {
   static messages: Array<{ message: string; duration?: number }> = [];
+  static hidden: string[] = [];
 
-  constructor(message: string, duration?: number) {
+  constructor(private readonly message: string, duration?: number) {
     Notice.messages.push({ message, duration });
+  }
+
+  hide(): void {
+    Notice.hidden.push(this.message);
   }
 }
 

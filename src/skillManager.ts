@@ -688,14 +688,14 @@ export function isGitWorkingCopy(dirPath: string): boolean {
 export async function cloneGithubSource(
   repoUrl: string,
   clonePath: string,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; ref?: string } = {},
 ): Promise<void> {
   await fsp.mkdir(path.dirname(clonePath), { recursive: true });
   try {
     await new Promise<void>((resolve, reject) => {
       execFile(
         'git',
-        ['clone', '--depth', '1', '--', githubCloneUrl(repoUrl), clonePath],
+        ['clone', '--depth', '1', ...(options.ref ? ['--branch', options.ref] : []), '--', githubCloneUrl(repoUrl), clonePath],
         {
           timeout: options.timeoutMs ?? SKILL_SOURCE_CLONE_TIMEOUT_MS,
           windowsHide: true,
@@ -725,36 +725,117 @@ export function parseGithubRepoUrl(raw: string): string | null {
   return match ? match[1] : null;
 }
 
+/** Runs git with an argument array (never a shell), non-interactively. */
+function runGit(args: string[], timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    execFile(
+      'git',
+      args,
+      { timeout: timeoutMs, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo' } },
+      (err, _stdout, stderr) => {
+        if (!err) return resolve();
+        const detail = stderr ? String(stderr).trim() : '';
+        reject(new Error(detail || err.message));
+      },
+    );
+  });
+}
+
+/**
+ * Moves an existing working copy to `ref` (tag or branch): a shallow fetch of
+ * that ref from origin, then a detached checkout of what was fetched. Throws on
+ * failure and never deletes anything.
+ */
+export async function checkoutGithubSourceRef(clonePath: string, ref: string, timeoutMs = SKILL_SOURCE_CLONE_TIMEOUT_MS): Promise<void> {
+  await runGit(['-C', clonePath, 'fetch', '--depth', '1', '--', 'origin', ref], timeoutMs);
+  await runGit(['-C', clonePath, 'checkout', '--quiet', '--detach', 'FETCH_HEAD'], timeoutMs);
+}
+
 /**
  * Clones a GitHub repo as a new managed skill source and returns the
  * `SkillSource` to add. The single "add a GitHub source" implementation, shared
  * by the Add skill source modal and Chief of Staff onboarding.
  *
  * Does not touch settings: the caller pushes the result into
- * `settings.skillSources` and persists. Throws on clone failure, having already
- * removed any partial clone (see `cloneGithubSource`).
+ * `settings.skillSources` and persists.
  *
- * `id` defaults to the deterministic repo-derived id; the modal passes a random
- * UUID to keep its historical behavior.
+ * - `id` defaults to the deterministic repo-derived id; the modal passes a
+ *   random UUID to keep its historical behavior.
+ * - `ref` pins the clone to a tag/branch (`--branch <ref> --depth 1`) and is
+ *   recorded on the source. Omit it for the default branch.
+ * - A git working copy already at the clone path (a source that was removed
+ *   from settings but left on disk, since the path is deterministic) is
+ *   **adopted**: moved to `ref` if one is given, otherwise used as-is.
+ * - Anything else already at the clone path is refused, never deleted. Only a
+ *   directory this call created is removed on failure (see `cloneGithubSource`).
  */
 export async function addGithubSkillSource(opts: {
   repoUrl: string;
   cloneBase: string;
   displayName?: string;
   id?: string;
+  ref?: string;
   timeoutMs?: number;
 }): Promise<SkillSource> {
   const repoUrl = opts.repoUrl.trim().replace(/\/+$/, '').replace(/\.git$/, '');
   const id = opts.id ?? deriveSourceIdFromRepoUrl(repoUrl);
   const clonePath = path.join(opts.cloneBase, id);
 
-  await cloneGithubSource(repoUrl, clonePath, { timeoutMs: opts.timeoutMs });
+  if (isGitWorkingCopy(clonePath)) {
+    if (opts.ref) await checkoutGithubSourceRef(clonePath, opts.ref, opts.timeoutMs);
+  } else if (fs.existsSync(clonePath)) {
+    throw new Error(`"${clonePath}" already exists and is not a git working copy — refusing to replace it`);
+  } else {
+    await cloneGithubSource(repoUrl, clonePath, { timeoutMs: opts.timeoutMs, ref: opts.ref });
+  }
 
   const manifest = readPluginManifest(clonePath);
   const repoName = repoUrl.split('/').pop() || 'Unknown';
   const name = opts.displayName?.trim() || manifest?.displayName || manifest?.name || repoName;
 
-  return { id, name, type: 'github', repoUrl, clonePath, lastFetched: Date.now() };
+  const source: SkillSource = { id, name, type: 'github', repoUrl, clonePath, lastFetched: Date.now() };
+  if (opts.ref) source.ref = opts.ref;
+  return source;
+}
+
+/**
+ * Whether git can be run, checked before a clone so a missing git becomes a
+ * clean fallback rather than a failed clone.
+ *
+ * On macOS, `/usr/bin/git` is a stub that pops the "install developer tools"
+ * dialog when the Command Line Tools are missing. So on darwin this asks
+ * `xcode-select -p` first and only runs `git --version` when the tools exist;
+ * otherwise it accepts a non-stub git found elsewhere on PATH (e.g. Homebrew)
+ * and never touches the stub. Accepted limitation: the clone itself still runs
+ * `git` by name, so a PATH that lists /usr/bin before Homebrew on a machine
+ * without the tools would still reach the stub.
+ */
+export async function checkGitAvailable(env: {
+  platform: string;
+  pathEnv: string | undefined;
+  exists: (p: string) => boolean;
+  run: (cmd: string, args: string[], timeoutMs: number) => Promise<void>;
+  timeoutMs?: number;
+}): Promise<boolean> {
+  const timeoutMs = env.timeoutMs ?? 5_000;
+  const ok = async (cmd: string, args: string[]) => {
+    try { await env.run(cmd, args, timeoutMs); return true; } catch { return false; }
+  };
+  if (env.platform !== 'darwin') return ok('git', ['--version']);
+  if (await ok('xcode-select', ['-p'])) return ok('git', ['--version']);
+  const nonStub = (env.pathEnv ?? '')
+    .split(':')
+    .filter(dir => dir && dir.replace(/\/+$/, '') !== '/usr/bin')
+    .map(dir => `${dir.replace(/\/+$/, '')}/git`)
+    .find(candidate => env.exists(candidate));
+  return nonStub ? ok(nonStub, ['--version']) : false;
+}
+
+/** Runs a command with a timeout and no shell; rejects on non-zero exit. */
+export function runCommandQuietly(cmd: string, args: string[], timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    execFile(cmd, args, { timeout: timeoutMs, windowsHide: true }, err => (err ? reject(err) : resolve()));
+  });
 }
 
 export interface EnsureGithubSourcesResult {
@@ -839,7 +920,7 @@ export async function ensureGithubSourcesCloned(
         fs.rmSync(source.clonePath, { recursive: true, force: true });
       }
 
-      await cloneGithubSource(source.repoUrl, source.clonePath, options);
+      await cloneGithubSource(source.repoUrl, source.clonePath, { ...options, ref: source.ref });
       source.lastFetched = Date.now();
       source.behindCount = 0;
       result.changed = true;
@@ -867,6 +948,8 @@ export async function checkSourceForUpdates(source: SkillSource): Promise<Source
   if (!source.clonePath) {
     return { id: source.id, name: source.name, error: 'No clone path configured for this source' };
   }
+  // A pinned source is current by definition; it moves only when the ref does.
+  if (source.ref) return { id: source.id, name: source.name, behindCount: 0, lastFetched: Date.now() };
   try {
     // Note: `git fetch` has no `--timeout` flag (that was a pre-existing bug —
     // this call always failed with "unknown option" on real git). The
@@ -902,6 +985,11 @@ export async function checkAllSourcesForUpdates(skillSources: SkillSource[] = []
 export async function pullGithubSourceUpdates(source: SkillSource): Promise<{ behindCount: number; lastFetched: number }> {
   if (!source.clonePath) {
     throw new Error(`Source "${source.name}" has no clone path configured`);
+  }
+  if (source.ref) {
+    // Detached at a tag/branch: re-sync to the pinned ref instead of `git pull`.
+    await checkoutGithubSourceRef(source.clonePath, source.ref, 60_000);
+    return { behindCount: 0, lastFetched: Date.now() };
   }
   execSync(`git -C "${source.clonePath}" pull`, { stdio: 'pipe', timeout: 60_000 });
   return { behindCount: 0, lastFetched: Date.now() };

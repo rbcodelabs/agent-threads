@@ -13,6 +13,8 @@ import {
   CHIEF_OF_STAFF_SETUP_PROMPT,
   CHIEF_OF_STAFF_THREAD_TITLE,
   CHIEF_OF_STAFF_COMMAND_NAME,
+  CHIEF_OF_STAFF_REF,
+  chooseChiefOfStaffHarness,
   decideFirstRun,
   findChiefOfStaffThreadId,
   hasSkillSourceForRepo,
@@ -31,14 +33,16 @@ function makeDeps(overrides: Partial<ChiefOfStaffDeps> & { threads?: { id: strin
   let counter = 0;
   const deps: ChiefOfStaffDeps = {
     getSkillSources: () => sources,
-    addGithubSkillSource: vi.fn(async (repoUrl: string) => {
-      sources.push({ id: 'gh-x', name: 'Chief of Staff', type: 'github', repoUrl, clonePath: '/tmp/x' });
+    isGitAvailable: vi.fn(async () => true),
+    addGithubSkillSource: vi.fn(async (repoUrl: string, ref: string) => {
+      sources.push({ id: 'gh-x', name: 'Chief of Staff', type: 'github', repoUrl, ref, clonePath: '/tmp/x' });
     }),
-    isHarnessReady: () => true,
+    resolveHarness: () => 'claude',
+    reloadThreadSkills: vi.fn(() => false),
     listThreads: () => threads,
     getStoredThreadId: () => storedId,
     setStoredThreadId: vi.fn((id: string | undefined) => { storedId = id; }),
-    createThread: vi.fn((title: string) => {
+    createThread: vi.fn((title: string, _harness: string) => {
       const thread = { id: `t${++counter}`, title };
       threads.push(thread);
       return thread;
@@ -57,6 +61,7 @@ describe('constants', () => {
     expect(CHIEF_OF_STAFF_THREAD_TITLE).toBe('Chief of Staff');
     expect(CHIEF_OF_STAFF_SETUP_PROMPT).toMatch(/cos-setup/);
     expect(CHIEF_OF_STAFF_COMMAND_NAME).toBe('Set up Chief of Staff');
+    expect(CHIEF_OF_STAFF_REF).toBe('v0.1.0');
   });
 });
 
@@ -79,21 +84,45 @@ describe('settings defaults', () => {
 });
 
 describe('decideFirstRun', () => {
+  const fresh = { isFreshInstall: true };
   it('does nothing once the welcome has been seen', () => {
-    expect(decideFirstRun({ hasSeenWelcome: true, threadCount: 0, offerChiefOfStaff: true })).toBe('none');
+    expect(decideFirstRun({ ...fresh, hasSeenWelcome: true, threadCount: 0, offerChiefOfStaff: true })).toBe('none');
   });
 
   it('silently marks upgrading users (existing threads) as seen', () => {
-    expect(decideFirstRun({ hasSeenWelcome: false, threadCount: 3, offerChiefOfStaff: true })).toBe('mark-seen');
-    expect(decideFirstRun({ hasSeenWelcome: false, threadCount: 3, offerChiefOfStaff: false })).toBe('mark-seen');
+    expect(decideFirstRun({ hasSeenWelcome: false, threadCount: 3, offerChiefOfStaff: true, isFreshInstall: false })).toBe('mark-seen');
+    expect(decideFirstRun({ hasSeenWelcome: false, threadCount: 3, offerChiefOfStaff: false, isFreshInstall: false })).toBe('mark-seen');
   });
 
   it('offers Chief of Staff to brand-new installs when the setting is on', () => {
-    expect(decideFirstRun({ hasSeenWelcome: false, threadCount: 0, offerChiefOfStaff: true })).toBe('chief-of-staff');
+    expect(decideFirstRun({ ...fresh, hasSeenWelcome: false, threadCount: 0, offerChiefOfStaff: true })).toBe('chief-of-staff');
   });
 
   it('falls back to the static guide when the setting is off', () => {
-    expect(decideFirstRun({ hasSeenWelcome: false, threadCount: 0, offerChiefOfStaff: false })).toBe('static-guide');
+    expect(decideFirstRun({ ...fresh, hasSeenWelcome: false, threadCount: 0, offerChiefOfStaff: false })).toBe('static-guide');
+  });
+
+  it('gives a pre-flag user with saved data but no threads the old static guide, not Chief of Staff', () => {
+    expect(decideFirstRun({ hasSeenWelcome: false, threadCount: 0, offerChiefOfStaff: true, isFreshInstall: false })).toBe('static-guide');
+  });
+});
+
+describe('chooseChiefOfStaffHarness', () => {
+  const only = (...ok: string[]) => (h: string) => ok.includes(h);
+  it('uses the selected harness when it resolves', () => {
+    expect(chooseChiefOfStaffHarness('claude', only('claude', 'codex'))).toBe('claude');
+    expect(chooseChiefOfStaffHarness('codex', only('claude', 'codex'))).toBe('codex');
+  });
+
+  it('never picks OpenCode (its sessions do not receive skill sources), preferring Claude then Codex', () => {
+    expect(chooseChiefOfStaffHarness('opencode', only('opencode', 'claude', 'codex'))).toBe('claude');
+    expect(chooseChiefOfStaffHarness('opencode', only('opencode', 'codex'))).toBe('codex');
+    expect(chooseChiefOfStaffHarness('opencode', only('opencode'))).toBeUndefined();
+  });
+
+  it('falls through to another skill-capable harness when the selected one is missing', () => {
+    expect(chooseChiefOfStaffHarness('claude', only('codex'))).toBe('codex');
+    expect(chooseChiefOfStaffHarness('claude', only())).toBeUndefined();
   });
 });
 
@@ -159,25 +188,27 @@ describe('withChiefOfStaffPointer', () => {
 });
 
 describe('setUpChiefOfStaff', () => {
-  it('adds the source, creates the thread, sends the cos-setup prompt, persists the id and opens it', async () => {
+  it('adds the pinned source, creates the thread on the chosen harness, sends cos-setup, persists the id and opens it', async () => {
     const { deps, sources, getStoredId } = makeDeps();
     const result = await setUpChiefOfStaff(deps);
 
-    expect(result).toEqual({ status: 'created', threadId: 't1', sourceAdded: true });
-    expect(deps.addGithubSkillSource).toHaveBeenCalledWith(CHIEF_OF_STAFF_REPO_URL);
-    expect(sources).toHaveLength(1);
-    expect(deps.createThread).toHaveBeenCalledWith(CHIEF_OF_STAFF_THREAD_TITLE);
+    expect(result).toEqual({ status: 'created', threadId: 't1', sourceAdded: true, harness: 'claude' });
+    expect(deps.isGitAvailable).toHaveBeenCalled();
+    expect(deps.addGithubSkillSource).toHaveBeenCalledWith(CHIEF_OF_STAFF_REPO_URL, CHIEF_OF_STAFF_REF);
+    expect(sources[0]!.ref).toBe('v0.1.0');
+    expect(deps.createThread).toHaveBeenCalledWith(CHIEF_OF_STAFF_THREAD_TITLE, 'claude');
     expect(getStoredId()).toBe('t1');
     expect(deps.saveSettings).toHaveBeenCalled();
     expect(deps.sendPrompt).toHaveBeenCalledWith('t1', CHIEF_OF_STAFF_SETUP_PROMPT);
     expect(deps.openThread).toHaveBeenCalledWith('t1');
   });
 
-  it('skips the clone when the source is already configured', async () => {
+  it('skips the git check and the clone when the source is already configured', async () => {
     const { deps } = makeDeps({ sources: [{ id: 's', name: 'CoS', type: 'github', repoUrl: 'https://github.com/rbcodelabs/chief-of-staff.git' }] });
     const result = await setUpChiefOfStaff(deps);
-    expect(result).toEqual({ status: 'created', threadId: 't1', sourceAdded: false });
+    expect(result).toEqual({ status: 'created', threadId: 't1', sourceAdded: false, harness: 'claude' });
     expect(deps.addGithubSkillSource).not.toHaveBeenCalled();
+    expect(deps.isGitAvailable).not.toHaveBeenCalled();
   });
 
   it('persists the thread id before sending the prompt (a crash mid-turn still finds the home thread)', async () => {
@@ -188,6 +219,14 @@ describe('setUpChiefOfStaff', () => {
     });
     await setUpChiefOfStaff(deps);
     expect(order.indexOf('save')).toBeLessThan(order.indexOf('send'));
+  });
+
+  it('reports git-unavailable without attempting a clone when git is missing', async () => {
+    const { deps, threads } = makeDeps({ isGitAvailable: vi.fn(async () => false) });
+    const result = await setUpChiefOfStaff(deps);
+    expect(result.status === 'failed' && result.reason).toBe('git-unavailable');
+    expect(deps.addGithubSkillSource).not.toHaveBeenCalled();
+    expect(threads).toHaveLength(0);
   });
 
   it('reports clone-failed and creates no thread when the clone fails (e.g. offline)', async () => {
@@ -201,12 +240,18 @@ describe('setUpChiefOfStaff', () => {
     expect(deps.openThread).not.toHaveBeenCalled();
   });
 
-  it('reports harness-unavailable and creates no thread when the harness is not ready', async () => {
-    const { deps, threads } = makeDeps({ isHarnessReady: () => false });
+  it('reports harness-unavailable and creates no thread when no skill-capable harness resolves', async () => {
+    const { deps, threads } = makeDeps({ resolveHarness: () => undefined });
     const result = await setUpChiefOfStaff(deps);
-    expect(result.status).toBe('failed');
     expect(result.status === 'failed' && result.reason).toBe('harness-unavailable');
     expect(threads).toHaveLength(0);
+  });
+
+  it('creates the thread on the harness the resolver picked (e.g. Claude when OpenCode is selected)', async () => {
+    const { deps } = makeDeps({ resolveHarness: () => 'codex' });
+    const result = await setUpChiefOfStaff(deps);
+    expect(result.status === 'created' && result.harness).toBe('codex');
+    expect(deps.createThread).toHaveBeenCalledWith(CHIEF_OF_STAFF_THREAD_TITLE, 'codex');
   });
 
   it('reports thread-failed when thread creation throws', async () => {
@@ -224,21 +269,32 @@ describe('setUpChiefOfStaff', () => {
       const second = await setUpChiefOfStaff(deps);
 
       expect(first.status).toBe('created');
-      expect(second).toEqual({ status: 'focused-existing', threadId: 't1' });
+      expect(second).toEqual({ status: 'focused-existing', threadId: 't1', sourceAdded: false, skillsReloadPending: false });
       expect(threads).toHaveLength(1);
       expect(deps.createThread).toHaveBeenCalledTimes(1);
       expect(deps.sendPrompt).toHaveBeenCalledTimes(1);
       expect(deps.addGithubSkillSource).toHaveBeenCalledTimes(1);
+      expect(deps.reloadThreadSkills).not.toHaveBeenCalled();
       expect(deps.openThread).toHaveBeenLastCalledWith('t1');
     });
 
     it('focuses an existing thread titled Chief of Staff and records its id', async () => {
-      const { deps, getStoredId } = makeDeps({ threads: [{ id: 'old', title: 'Chief of Staff' }] });
+      const { deps, getStoredId } = makeDeps({
+        threads: [{ id: 'old', title: 'Chief of Staff' }],
+        sources: [{ id: 's', name: 'CoS', type: 'github', repoUrl: CHIEF_OF_STAFF_REPO_URL }],
+      });
       const result = await setUpChiefOfStaff(deps);
-      expect(result).toEqual({ status: 'focused-existing', threadId: 'old' });
+      expect(result).toEqual({ status: 'focused-existing', threadId: 'old', sourceAdded: false, skillsReloadPending: false });
       expect(getStoredId()).toBe('old');
       expect(deps.createThread).not.toHaveBeenCalled();
       expect(deps.sendPrompt).not.toHaveBeenCalled();
+    });
+
+    it('re-adding a removed source reloads the existing thread skills', async () => {
+      const { deps } = makeDeps({ threads: [{ id: 'home', title: 'Chief of Staff' }], reloadThreadSkills: vi.fn(() => true) });
+      const result = await setUpChiefOfStaff(deps);
+      expect(result).toEqual({ status: 'focused-existing', threadId: 'home', sourceAdded: true, skillsReloadPending: true });
+      expect(deps.reloadThreadSkills).toHaveBeenCalledWith('home');
     });
 
     it('still focuses the existing thread when re-adding a removed source fails', async () => {
@@ -248,7 +304,7 @@ describe('setUpChiefOfStaff', () => {
         addGithubSkillSource: vi.fn(async () => { throw new Error('offline'); }),
       });
       const result = await setUpChiefOfStaff(deps);
-      expect(result).toEqual({ status: 'focused-existing', threadId: 'home', sourceError: 'offline' });
+      expect(result).toEqual({ status: 'focused-existing', threadId: 'home', sourceAdded: false, skillsReloadPending: false, sourceError: 'offline' });
       expect(deps.openThread).toHaveBeenCalledWith('home');
     });
 

@@ -156,6 +156,8 @@ export class ThreadManager {
    * "busy right now" from "warm but idle."
    */
   private sessions: Map<string, HarnessSession> = new Map();
+  /** Threads whose live session must be rebuilt at the next safe turn boundary (see requestSessionRestart). */
+  private sessionRestartRequested = new Set<string>();
   /**
    * Initialization context cannot be mutated on a live Claude or Codex
    * adapter. Track the goal revision each adapter was built with and retire it
@@ -1091,6 +1093,20 @@ export class ThreadManager {
     return result;
   }
 
+  /**
+   * Asks for a thread's live session to be rebuilt at the next safe turn
+   * boundary, resuming the same conversation (`thread.sessionId`). Used when
+   * something a session reads only at start — e.g. skill sources — changes.
+   * Same deferred pattern as the cwd-change rebuild in `sendMessage`: never
+   * closes a session mid-turn. Returns false when there is no live session
+   * (the next turn starts fresh anyway).
+   */
+  requestSessionRestart(threadId: string): boolean {
+    if (!this.sessions.has(threadId)) return false;
+    this.sessionRestartRequested.add(threadId);
+    return true;
+  }
+
   /** ADR-0002 §2: a simple event-derived boolean off the single session map — no second map to check. */
   isRunning(id: string): boolean {
     return this.sessions.get(id)?.turnInFlight ?? false;
@@ -1684,11 +1700,14 @@ export class ThreadManager {
     // boundary. Guard on !turnInFlight so a rare concurrent send mid-turn can't
     // re-introduce the mid-turn close(); that message coalesces into the current
     // generation and the rebuild happens on the following turn.
-    if (session && session.cwd !== undefined && session.cwd !== thread.cwd && !session.turnInFlight) {
+    const cwdChanged = !!session && session.cwd !== undefined && session.cwd !== thread.cwd;
+    const restartRequested = this.sessionRestartRequested.has(threadId);
+    if (session && (cwdChanged || restartRequested) && !session.turnInFlight) {
       session.close();
       this.sessions.delete(threadId);
       session = undefined;
     }
+    if (!session) this.sessionRestartRequested.delete(threadId);
     const isNewSession = !session;
     if (!session) {
       session = createHarnessSession(thread, this.settings);

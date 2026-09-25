@@ -77,8 +77,10 @@ import { DIAGNOSTICS_FOLDER, mergePersistedSettings, selectWelcomeGuidePath } fr
 import {
   CHIEF_OF_STAFF_COMMAND_ID,
   CHIEF_OF_STAFF_COMMAND_NAME,
+  chooseChiefOfStaffHarness,
   decideFirstRun,
   isBinaryResolvable,
+  isFreshInstallData,
   setUpChiefOfStaff,
   withChiefOfStaffPointer,
   type ChiefOfStaffResult,
@@ -1781,6 +1783,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       hasSeenWelcome: this.settings.hasSeenWelcome,
       threadCount: this.settings.threads.length,
       offerChiefOfStaff: this.settings.offerChiefOfStaffOnFirstRun ?? true,
+      isFreshInstall: this.isFreshInstall,
     });
     if (firstRun === 'chief-of-staff' || firstRun === 'static-guide') {
       this.app.workspace.onLayoutReady(() => {
@@ -1806,24 +1809,37 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   /** Clones `repoUrl` as a managed GitHub skill source and persists it. Throws on failure. */
-  async addManagedGithubSkillSource(repoUrl: string): Promise<SkillSource> {
+  async addManagedGithubSkillSource(repoUrl: string, ref?: string): Promise<SkillSource> {
     const cloneBase = this.getSkillSourceCloneBase();
     if (!cloneBase) throw new Error('This vault is not on a local filesystem, so skill sources cannot be cloned.');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { addGithubSkillSource } = require('./skillManager') as typeof import('./skillManager');
-    const source = await addGithubSkillSource({ repoUrl, cloneBase });
+    const source = await addGithubSkillSource({ repoUrl, cloneBase, ref });
     this.settings.skillSources = [...(this.settings.skillSources ?? []), source];
     await this.saveSettings();
     return source;
   }
 
-  /** Whether the selected harness's binary can be found, so a first turn can start. */
-  private isSelectedHarnessReady(): boolean {
+  /** Whether git can run, without triggering the macOS developer-tools install dialog. */
+  private async isGitAvailable(): Promise<boolean> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { checkGitAvailable, runCommandQuietly } = require('./skillManager') as typeof import('./skillManager');
+    return checkGitAvailable({
+      platform: process.platform,
+      pathEnv: process.env.PATH,
+      exists: p => { try { return fs.existsSync(p); } catch { return false; } },
+      run: runCommandQuietly,
+    });
+  }
+
+  /** Whether `harness`'s configured binary can be found, so a first turn can start. */
+  private isHarnessResolvable(harness: AgentHarness): boolean {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const pathNode = require('path') as typeof import('path');
-    const harness = this.settings.agentHarness ?? 'claude';
     const binary = harness === 'codex'
       ? this.settings.codexBinaryPath
       : harness === 'opencode'
@@ -1845,23 +1861,34 @@ export default class ClaudeThreadsPlugin extends Plugin {
   async setUpChiefOfStaff(): Promise<ChiefOfStaffResult> {
     // Concurrent callers (first run racing the command, a double-trigger) share
     // one run, so the clone await cannot let two home threads be created.
-    this.chiefOfStaffSetupInFlight ??= this.runChiefOfStaffSetup().finally(() => {
-      this.chiefOfStaffSetupInFlight = undefined;
-    });
+    if (!this.chiefOfStaffSetupInFlight) {
+      // Persistent progress notice: a first clone can take several seconds.
+      const progress = new Notice('Setting up your Chief of Staff…', 0);
+      this.chiefOfStaffSetupInFlight = this.runChiefOfStaffSetup().finally(() => {
+        progress.hide();
+        this.chiefOfStaffSetupInFlight = undefined;
+      });
+    }
     return this.chiefOfStaffSetupInFlight;
   }
 
   private chiefOfStaffSetupInFlight?: Promise<ChiefOfStaffResult>;
+  /** True when loadData() found no saved data: a genuinely new install. */
+  private isFreshInstall = false;
 
   private runChiefOfStaffSetup(): Promise<ChiefOfStaffResult> {
     return setUpChiefOfStaff({
       getSkillSources: () => this.settings.skillSources ?? [],
-      addGithubSkillSource: async (repoUrl) => { await this.addManagedGithubSkillSource(repoUrl); },
-      isHarnessReady: () => this.isSelectedHarnessReady(),
+      isGitAvailable: () => this.isGitAvailable(),
+      addGithubSkillSource: async (repoUrl, ref) => { await this.addManagedGithubSkillSource(repoUrl, ref); },
+      resolveHarness: () => chooseChiefOfStaffHarness(this.settings.agentHarness ?? 'claude', h => this.isHarnessResolvable(h)),
+      reloadThreadSkills: (id) => this.manager.requestSessionRestart(id),
       listThreads: () => this.manager.getThreads(),
       getStoredThreadId: () => this.settings.chiefOfStaffThreadId,
       setStoredThreadId: (id) => { this.settings.chiefOfStaffThreadId = id; },
-      createThread: (title) => this.manager.createThread(title, this.getEffectiveCwd(), undefined, this.settings.agentHarness),
+      // Inherits the global permission mode (acceptEdits on a fresh install);
+      // cos-setup writes nothing until the user says go.
+      createThread: (title, harness) => this.manager.createThread(title, this.getEffectiveCwd(), undefined, harness),
       sendPrompt: (id, prompt) => { this.manager.sendMessage(id, prompt).catch(console.error); },
       openThread: (id) => this.openThreadInChatView(id),
       saveSettings: () => this.saveSettings(),
@@ -1875,6 +1902,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
         new Notice(`Could not set up Chief of Staff: ${result.error}`, 10_000);
       } else if (result.status === 'focused-existing' && result.sourceError) {
         new Notice(`Opened your Chief of Staff thread, but the Chief of Staff skills could not be added: ${result.sourceError}`, 10_000);
+      } else if (result.status === 'focused-existing' && result.skillsReloadPending) {
+        new Notice('Chief of Staff skills added. The thread restarts on your next message so they load.', 10_000);
       }
     } catch (err) {
       console.error('[ClaudeThreads] Set up Chief of Staff failed:', err);
@@ -3455,6 +3484,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const data = await this.loadData();
+    // No saved data at all = a genuinely new install (gates the Chief of Staff first run).
+    this.isFreshInstall = isFreshInstallData(data);
     this.settings = mergePersistedSettings(DEFAULT_SETTINGS, data);
     const { sanitizeConversationCompanionSettings } = require('./conversationFirstPlacement') as typeof import('./conversationFirstPlacement');
     sanitizeConversationCompanionSettings(this.settings as unknown as Record<string, unknown>);

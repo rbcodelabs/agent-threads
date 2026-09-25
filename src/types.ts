@@ -746,6 +746,14 @@ export interface SkillSource {
    * Omit it in a declared source — it is computed from the plugin dir and `id`.
    */
   clonePath?: string;
+  /**
+   * Tag or branch the clone is pinned to (`git clone --branch <ref> --depth 1`),
+   * e.g. the Chief of Staff pack at `CHIEF_OF_STAFF_REF`. Omitted = default
+   * branch. A pinned source is detached at that ref: update checks report it as
+   * current and "Pull updates" re-syncs it to the same ref rather than moving to
+   * the default branch. The plugin moves it by bumping the ref in a release.
+   */
+  ref?: string;
   /** ms epoch of the last git fetch (for staleness display) */
   lastFetched?: number;
   /** Commits behind remote (0 = up to date, undefined = not yet fetched) */

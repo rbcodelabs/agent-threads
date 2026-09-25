@@ -47,6 +47,7 @@ import {
   cloneGithubSource,
   addGithubSkillSource,
   parseGithubRepoUrl,
+  checkGitAvailable,
   ensureGithubSourcesCloned,
   checkSourceForUpdates,
   checkAllSourcesForUpdates,
@@ -608,6 +609,45 @@ describe('parseGithubRepoUrl', () => {
   });
 });
 
+describe('checkGitAvailable', () => {
+  function runner(ok: Record<string, boolean>) {
+    const calls: string[] = [];
+    const run = async (cmd: string, args: string[]) => {
+      const key = [cmd, ...args].join(' ');
+      calls.push(key);
+      if (!ok[key]) throw new Error(`${key} failed`);
+    };
+    return { run, calls };
+  }
+
+  it('runs git --version on non-macOS platforms', async () => {
+    const { run } = runner({ 'git --version': true });
+    expect(await checkGitAvailable({ platform: 'linux', pathEnv: '/usr/bin', exists: () => true, run })).toBe(true);
+    const failing = runner({});
+    expect(await checkGitAvailable({ platform: 'linux', pathEnv: '/usr/bin', exists: () => true, run: failing.run })).toBe(false);
+  });
+
+  it('on macOS checks xcode-select first and runs git only when developer tools exist', async () => {
+    const { run, calls } = runner({ 'xcode-select -p': true, 'git --version': true });
+    expect(await checkGitAvailable({ platform: 'darwin', pathEnv: '/usr/bin', exists: () => true, run })).toBe(true);
+    expect(calls).toEqual(['xcode-select -p', 'git --version']);
+  });
+
+  it('on macOS without developer tools never invokes the /usr/bin/git stub (which pops an install dialog)', async () => {
+    const { run, calls } = runner({});
+    const exists = (p: string) => p === '/usr/bin/git';
+    expect(await checkGitAvailable({ platform: 'darwin', pathEnv: '/usr/bin:/bin', exists, run })).toBe(false);
+    expect(calls).toEqual(['xcode-select -p']);
+  });
+
+  it('on macOS without developer tools accepts a non-stub git elsewhere on PATH (e.g. Homebrew)', async () => {
+    const { run, calls } = runner({ '/opt/homebrew/bin/git --version': true });
+    const exists = (p: string) => p === '/opt/homebrew/bin/git' || p === '/usr/bin/git';
+    expect(await checkGitAvailable({ platform: 'darwin', pathEnv: '/usr/bin:/opt/homebrew/bin', exists, run })).toBe(true);
+    expect(calls).toEqual(['xcode-select -p', '/opt/homebrew/bin/git --version']);
+  });
+});
+
 describe('addGithubSkillSource (shared by the add-source modal and Chief of Staff onboarding)', () => {
   let origin: string;
   let cloneBase: string;
@@ -642,6 +682,60 @@ describe('addGithubSkillSource (shared by the add-source modal and Chief of Staf
   it('falls back to the repo name when there is no manifest', async () => {
     const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-n' });
     expect(source.name).toBe('fixture');
+  });
+
+  it('pins the clone to a tag with ref, and records the ref on the source', async () => {
+    execSync('git tag v0.1.0', { cwd: origin });
+    fs.writeFileSync(path.join(origin, 'file.txt'), 'v2', 'utf-8');
+    execSync('git commit --quiet -am later', { cwd: origin });
+
+    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-ref', ref: 'v0.1.0' });
+    expect(source.ref).toBe('v0.1.0');
+    expect(fs.readFileSync(path.join(source.clonePath!, 'file.txt'), 'utf-8')).toBe('v1');
+  });
+
+  it('omits ref (default branch) when none is given', async () => {
+    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-def' });
+    expect(source.ref).toBeUndefined();
+  });
+
+  it('adopts an existing working copy at the clone path instead of failing, checking out the ref', async () => {
+    execSync('git tag v0.1.0', { cwd: origin });
+    const dest = path.join(cloneBase, 'gh-adopt');
+    fs.mkdirSync(cloneBase, { recursive: true });
+    execSync(`git clone --quiet "${origin}" "${dest}"`);
+    fs.writeFileSync(path.join(origin, 'file.txt'), 'v2', 'utf-8');
+    execSync('git commit --quiet -am later', { cwd: origin });
+    execSync('git pull --quiet', { cwd: dest });
+    expect(fs.readFileSync(path.join(dest, 'file.txt'), 'utf-8')).toBe('v2');
+
+    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-adopt', ref: 'v0.1.0' });
+    expect(source.clonePath).toBe(dest);
+    expect(fs.readFileSync(path.join(dest, 'file.txt'), 'utf-8')).toBe('v1');
+  });
+
+  it('adopts an existing working copy as-is when no ref is given', async () => {
+    const dest = path.join(cloneBase, 'gh-adopt2');
+    fs.mkdirSync(cloneBase, { recursive: true });
+    execSync(`git clone --quiet "${origin}" "${dest}"`);
+    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-adopt2' });
+    expect(isGitWorkingCopy(source.clonePath!)).toBe(true);
+  });
+
+  it('refuses a pre-existing non-git directory and does not delete it', async () => {
+    const dest = path.join(cloneBase, 'gh-junk');
+    fs.mkdirSync(dest, { recursive: true });
+    fs.writeFileSync(path.join(dest, 'mine.txt'), 'keep', 'utf-8');
+    await expect(addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-junk' })).rejects.toThrow(/not a git/);
+    expect(fs.readFileSync(path.join(dest, 'mine.txt'), 'utf-8')).toBe('keep');
+  });
+
+  it('does not delete an adopted working copy when checking out the ref fails', async () => {
+    const dest = path.join(cloneBase, 'gh-badref');
+    fs.mkdirSync(cloneBase, { recursive: true });
+    execSync(`git clone --quiet "${origin}" "${dest}"`);
+    await expect(addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-badref', ref: 'no-such-tag' })).rejects.toThrow();
+    expect(isGitWorkingCopy(dest)).toBe(true);
   });
 
   it('throws and leaves nothing behind when the clone fails', async () => {
