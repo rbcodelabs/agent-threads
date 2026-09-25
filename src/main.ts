@@ -1889,7 +1889,13 @@ export default class ClaudeThreadsPlugin extends Plugin {
       setStoredThreadId: (id) => { this.settings.chiefOfStaffThreadId = id; },
       // Inherits the global permission mode (acceptEdits on a fresh install);
       // cos-setup writes nothing until the user says go.
-      createThread: (title, harness) => this.manager.createThread(title, this.getEffectiveCwd(), undefined, harness),
+      createThread: (title, harness) => {
+        const thread = this.manager.createThread(title, this.getEffectiveCwd(), undefined, harness);
+        // Pin the title: the home thread is found by title/id and must not be
+        // renamed by the auto-summarizer (applyAutoTitle honors titleUserSet).
+        thread.titleUserSet = true;
+        return thread;
+      },
       sendPrompt: (id, prompt) => { this.manager.sendMessage(id, prompt).catch(console.error); },
       openThread: (id) => this.openThreadInChatView(id),
       saveSettings: () => this.saveSettings(),
