@@ -1427,29 +1427,37 @@
   letter-spacing: 0;
 }
 
-/* Background-task completion notice — a subtle centered row in the transcript,
-   shown instead of a global toast when a background task finishes on an idle
-   thread. Visually kin to .ct-compact-divider but with a status icon. */
+/* Background-task completion notice — a subtle left-aligned row in the
+   transcript, shown instead of a global toast when a background task finishes
+   on an idle thread. It shares the tool rows' leading-icon column: 8px of left
+   padding stands in for .ct-tool-pill's 2px border + 6px padding, and the
+   12px icon and 6px gap match .ct-tool-pill-icon, so the status icon and text
+   line up with the tool icons and tool names above it. */
 .ct-notice-row {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: flex-start;
   gap: 6px;
-  margin: 8px 16px;
+  margin: 8px 0;
+  padding-left: 8px;
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  line-height: 1.5;
   letter-spacing: 0.02em;
   opacity: 0.85;
 }
 
+/* One text line tall, so the icon stays centred on the first line when a
+   long notice wraps. */
 .ct-notice-icon {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
+  height: 1.5em;
 }
 
 .ct-notice-icon .svg-icon {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
 }
 
 .ct-notice-text {

@@ -300,6 +300,9 @@ const threadNoticeMessages: ChatMessage[] = [
     role: 'assistant',
     content: `Both background tasks are running now — I'll post here when they finish.`,
     timestamp: T3 + 5000,
+    // A leading tool row lets the screenshot (and layout assertion) show the
+    // notice icons sitting in the same column as the tool-row icons.
+    toolCalls: [{ name: 'Bash', summary: 'npm run lint -- --fix &', toolUseId: 'tn-1', timestamp: T3 + 4000, status: 'success' }],
   },
   {
     id: 'msg-tn-3',

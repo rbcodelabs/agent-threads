@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, addIcon, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
+import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createPublicThreadLifecycle } from './publicThreadLifecycle';
 import { promptConfirm } from './confirmModal';
@@ -382,16 +382,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const fence = sharedPersistenceWriterFence();
     this.persistenceWriterToken = fence.claim();
     await fence.drain();
-    // Register icons that may not be in Obsidian's internal Lucide subset
-    addIcon('send', '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>');
-    addIcon('square', '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>');
-    addIcon('wrench', '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>');
-    // git-branch is in Obsidian's built-in Lucide subset — no custom registration needed.
-    // (Registering it here with 24×24 paths in a 100×100 viewBox would make it invisible.)
-    addIcon('play', '<polygon points="6 3 20 12 6 21 6 3"/>');
-    addIcon('check-circle', '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/>');
-    addIcon('alert-circle', '<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>');
-    addIcon('brain-circuit', '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/>');
+    // Built-in Lucide icon names need no registration. Never register a raw
+    // 24×24 Lucide fragment via addIcon(): it wraps content in a 100×100
+    // viewBox, so the glyph renders as a tiny dot in the top-left corner, and a
+    // custom icon shadows the built-in of the same name everywhere. Custom
+    // brand marks live in harnessBrandIcons.ts, pre-scaled to 100×100.
 
     await this.loadSettings();
 
