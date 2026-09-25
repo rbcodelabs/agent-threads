@@ -79,6 +79,7 @@ import {
   CHIEF_OF_STAFF_COMMAND_NAME,
   chooseChiefOfStaffHarness,
   decideFirstRun,
+  describeChiefOfStaffFailure,
   isBinaryResolvable,
   isFreshInstallData,
   setUpChiefOfStaff,
@@ -1899,39 +1900,52 @@ export default class ClaudeThreadsPlugin extends Plugin {
     try {
       const result = await this.setUpChiefOfStaff();
       if (result.status === 'failed') {
-        new Notice(`Could not set up Chief of Staff: ${result.error}`, 10_000);
+        console.warn('[ClaudeThreads] Set up Chief of Staff failed:', result.reason, result.error);
+        new Notice(`Couldn\u2019t set up Chief of Staff: ${describeChiefOfStaffFailure(result.reason, result.error)}.`, 10_000);
       } else if (result.status === 'focused-existing' && result.sourceError) {
-        new Notice(`Opened your Chief of Staff thread, but the Chief of Staff skills could not be added: ${result.sourceError}`, 10_000);
+        console.warn('[ClaudeThreads] Chief of Staff skills could not be re-added:', result.sourceError);
+        const reason = describeChiefOfStaffFailure(result.sourceFailure ?? 'clone-failed', result.sourceError);
+        new Notice(`Opened your Chief of Staff thread, but the Chief of Staff skills couldn\u2019t be added: ${reason}.`, 10_000);
       } else if (result.status === 'focused-existing' && result.skillsReloadPending) {
         new Notice('Chief of Staff skills added. The thread restarts on your next message so they load.', 10_000);
       }
     } catch (err) {
       console.error('[ClaudeThreads] Set up Chief of Staff failed:', err);
-      new Notice(`Could not set up Chief of Staff: ${err instanceof Error ? err.message : String(err)}`, 10_000);
+      new Notice(`Couldn\u2019t set up Chief of Staff: ${describeChiefOfStaffFailure('unexpected', '')}.`, 10_000);
     }
   }
 
   private async firstRunSetup(offerChiefOfStaff: boolean): Promise<void> {
-    // 1. Open Chat and the Agents List as before; the Chief of Staff thread (or
-    //    the static guide) then lands in them.
-    await this.openFirstRunPanels();
-
+    // Set up Chief of Staff BEFORE opening Chat. Building ThreadsView with no
+    // threads auto-creates an empty "Thread 1"; creating the home thread first
+    // means a successful first run ends with exactly one thread. (Setup opens
+    // Chat itself when it focuses the new thread.) The fallback opens Chat with
+    // no threads, which keeps the previous single "Thread 1".
     let chiefOfStaffStarted = false;
     let fallbackReason: string | undefined;
     if (offerChiefOfStaff) {
       try {
         const result = await this.setUpChiefOfStaff();
-        if (result.status === 'failed') fallbackReason = result.error;
-        else chiefOfStaffStarted = true;
+        if (result.status === 'failed') {
+          fallbackReason = describeChiefOfStaffFailure(result.reason, result.error);
+          console.warn('[ClaudeThreads] Chief of Staff first run fell back to the static guide:', result.reason, result.error);
+        } else {
+          chiefOfStaffStarted = true;
+        }
       } catch (err) {
-        fallbackReason = err instanceof Error ? err.message : String(err);
+        fallbackReason = describeChiefOfStaffFailure('unexpected', '');
+        console.warn('[ClaudeThreads] Chief of Staff first run fell back to the static guide:', err);
       }
-      if (fallbackReason) console.warn('[ClaudeThreads] Chief of Staff first run fell back to the static guide:', fallbackReason);
     }
 
+    // Open Chat and the Agents List as before (no-ops for a view setup already opened).
+    await this.openFirstRunPanels();
+
     if (!chiefOfStaffStarted) {
-      await this.openWelcomeGuide(offerChiefOfStaff);
-      new Notice('Welcome to Agent Threads! Check the guide to get started.');
+      await this.openWelcomeGuide(offerChiefOfStaff, fallbackReason);
+      new Notice(fallbackReason
+        ? `Chief of Staff setup couldn\u2019t finish: ${fallbackReason}. Check the guide to get started.`
+        : 'Welcome to Agent Threads! Check the guide to get started.');
     } else {
       new Notice('Welcome to Agent Threads! Your Chief of Staff is getting you set up.');
     }
@@ -1973,7 +1987,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * `withPointer` is set — the Chief of Staff fallback — the guide gains one
    * line pointing at the "Set up Chief of Staff" command.
    */
-  private async openWelcomeGuide(withPointer: boolean): Promise<void> {
+  private async openWelcomeGuide(withPointer: boolean, failureReason?: string): Promise<void> {
     const { workspace, vault } = this.app;
 
     // Write welcome guide to vault
@@ -1988,7 +2002,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         if (!vault.getAbstractFileByPath(folderPath)) {
           await vault.createFolder(folderPath);
         }
-        await vault.create(guidePath, withPointer ? withChiefOfStaffPointer(WELCOME_GUIDE) : WELCOME_GUIDE);
+        await vault.create(guidePath, withPointer ? withChiefOfStaffPointer(WELCOME_GUIDE, failureReason) : WELCOME_GUIDE);
       }
     } catch (err) {
       console.error('[ClaudeThreads] Failed to create welcome guide:', err);

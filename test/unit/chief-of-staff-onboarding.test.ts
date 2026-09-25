@@ -16,6 +16,7 @@ import {
   CHIEF_OF_STAFF_REF,
   chooseChiefOfStaffHarness,
   decideFirstRun,
+  describeChiefOfStaffFailure,
   findChiefOfStaffThreadId,
   hasSkillSourceForRepo,
   isBinaryResolvable,
@@ -178,7 +179,63 @@ describe('isBinaryResolvable', () => {
   });
 });
 
+describe('describeChiefOfStaffFailure', () => {
+  it('maps network clone errors to a connection hint', () => {
+    for (const err of [
+      'Cloning into x...\nfatal: unable to access \'https://github.com/rbcodelabs/chief-of-staff.git/\': Could not resolve host: github.com',
+      'fatal: unable to access: Failed to connect to github.com port 443: Operation timed out',
+      'Command failed: git clone (timed out)',
+      'ssl_read: Connection reset by peer',
+      'network is unreachable',
+    ]) {
+      expect(describeChiefOfStaffFailure('clone-failed', err)).toBe('couldn\u2019t download the Chief of Staff skills \u2014 check your internet connection');
+    }
+  });
+
+  it('maps a missing repo or tag to "not available yet"', () => {
+    expect(describeChiefOfStaffFailure('clone-failed', 'warning: Could not find remote branch v0.1.0 to clone.\nfatal: Remote branch v0.1.0 not found in upstream origin'))
+      .toBe('the Chief of Staff skills aren\u2019t available to download yet');
+    expect(describeChiefOfStaffFailure('clone-failed', 'remote: Repository not found.\nfatal: repository \'https://github.com/x/y.git/\' not found'))
+      .toBe('the Chief of Staff skills aren\u2019t available to download yet');
+  });
+
+  it('maps a non-filesystem vault', () => {
+    expect(describeChiefOfStaffFailure('clone-failed', 'This vault is not on a local filesystem, so skill sources cannot be cloned.'))
+      .toBe('this vault isn\u2019t on a local disk, so skills can\u2019t be downloaded');
+  });
+
+  it('falls back to a generic download message for other clone errors', () => {
+    expect(describeChiefOfStaffFailure('clone-failed', 'fatal: destination path exists')).toBe('couldn\u2019t download the Chief of Staff skills');
+  });
+
+  it('maps the other reasons', () => {
+    expect(describeChiefOfStaffFailure('git-unavailable', '')).toBe('git isn\u2019t installed');
+    expect(describeChiefOfStaffFailure('harness-unavailable', 'x')).toBe('no Claude Code or Codex found');
+    expect(describeChiefOfStaffFailure('thread-failed', 'Error: boom\n    at foo (/x/y.js:1:2)')).toBe('couldn\u2019t start the thread');
+    expect(describeChiefOfStaffFailure('unexpected', 'TypeError: x')).toBe('something went wrong during setup');
+  });
+
+  it('never leaks the raw error, URLs or stack frames', () => {
+    const raw = 'fatal: unable to access \'https://github.com/rbcodelabs/chief-of-staff.git/\': Could not resolve host\n    at run (/Users/x/main.js:1:1)';
+    for (const reason of ['git-unavailable', 'clone-failed', 'harness-unavailable', 'thread-failed', 'unexpected'] as const) {
+      const text = describeChiefOfStaffFailure(reason, raw);
+      expect(text).not.toMatch(/https?:|\/Users\/|\bat \w+ \(|fatal/);
+    }
+  });
+});
+
 describe('withChiefOfStaffPointer', () => {
+  it('adds the failure reason as a line next to the pointer when given', () => {
+    const out = withChiefOfStaffPointer('# Guide\n', 'git isn\u2019t installed');
+    expect(out).toContain('Chief of Staff setup couldn\u2019t finish: git isn\u2019t installed.');
+    expect(out.indexOf('couldn\u2019t finish')).toBeLessThan(out.indexOf('"Set up Chief of Staff"') + 200);
+  });
+
+  it('omits the reason line when none is given', () => {
+    expect(withChiefOfStaffPointer('# Guide\n')).not.toContain('couldn\u2019t finish');
+  });
+
+
   it('appends one line naming the command, leaving the guide intact', () => {
     const out = withChiefOfStaffPointer('# Guide\n\nBody\n');
     expect(out.startsWith('# Guide\n\nBody\n')).toBe(true);
@@ -304,7 +361,7 @@ describe('setUpChiefOfStaff', () => {
         addGithubSkillSource: vi.fn(async () => { throw new Error('offline'); }),
       });
       const result = await setUpChiefOfStaff(deps);
-      expect(result).toEqual({ status: 'focused-existing', threadId: 'home', sourceAdded: false, skillsReloadPending: false, sourceError: 'offline' });
+      expect(result).toEqual({ status: 'focused-existing', threadId: 'home', sourceAdded: false, skillsReloadPending: false, sourceError: 'offline', sourceFailure: 'clone-failed' });
       expect(deps.openThread).toHaveBeenCalledWith('home');
     });
 

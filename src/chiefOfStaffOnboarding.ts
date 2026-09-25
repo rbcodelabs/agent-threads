@@ -109,9 +109,10 @@ export function isBinaryResolvable(
 }
 
 /** Appends the one-line pointer to the command, used by the fallback guide. */
-export function withChiefOfStaffPointer(guide: string): string {
+export function withChiefOfStaffPointer(guide: string, failureReason?: string): string {
   const base = guide.endsWith('\n') ? guide : `${guide}\n`;
-  return `${base}\n> [!tip] Chief of Staff\n> Run **"${CHIEF_OF_STAFF_COMMAND_NAME}"** from the command palette (\`Cmd+P\`) any time to add the Chief of Staff skills and start your Chief of Staff thread.\n`;
+  const reasonLine = failureReason ? `> Chief of Staff setup couldn\u2019t finish: ${failureReason}.\n>\n` : '';
+  return `${base}\n> [!tip] Chief of Staff\n${reasonLine}> Run **"${CHIEF_OF_STAFF_COMMAND_NAME}"** from the command palette (\`Cmd+P\`) any time to add the Chief of Staff skills and start your Chief of Staff thread.\n`;
 }
 
 export interface ChiefOfStaffDeps {
@@ -140,9 +141,35 @@ export interface ChiefOfStaffDeps {
 
 export type ChiefOfStaffFailureReason = 'git-unavailable' | 'clone-failed' | 'harness-unavailable' | 'thread-failed';
 
+const NETWORK_ERROR = /could not resolve host|unable to access|failed to connect|timed out|timeout|connection (?:reset|refused|closed)|network is unreachable|could not read from remote|ssl|tls|early eof|rpc failed/i;
+const MISSING_REMOTE = /repository not found|remote branch .* not found|could not find remote branch|couldn't find remote ref|not found in upstream/i;
+
+/**
+ * A short, human reason for a failed setup, safe to show in a Notice or the
+ * guide. Deliberately a fixed set of phrases: the raw error (git output, URLs,
+ * stack frames) only ever goes to the console.
+ */
+export function describeChiefOfStaffFailure(reason: ChiefOfStaffFailureReason | 'unexpected', error: string): string {
+  switch (reason) {
+    case 'git-unavailable':
+      return 'git isn\u2019t installed';
+    case 'harness-unavailable':
+      return 'no Claude Code or Codex found';
+    case 'thread-failed':
+      return 'couldn\u2019t start the thread';
+    case 'clone-failed':
+      if (/not on a local filesystem/i.test(error)) return 'this vault isn\u2019t on a local disk, so skills can\u2019t be downloaded';
+      if (MISSING_REMOTE.test(error)) return 'the Chief of Staff skills aren\u2019t available to download yet';
+      if (NETWORK_ERROR.test(error)) return 'couldn\u2019t download the Chief of Staff skills \u2014 check your internet connection';
+      return 'couldn\u2019t download the Chief of Staff skills';
+    default:
+      return 'something went wrong during setup';
+  }
+}
+
 export type ChiefOfStaffResult =
   | { status: 'created'; threadId: string; sourceAdded: boolean; harness: AgentHarness }
-  | { status: 'focused-existing'; threadId: string; sourceAdded: boolean; skillsReloadPending: boolean; sourceError?: string }
+  | { status: 'focused-existing'; threadId: string; sourceAdded: boolean; skillsReloadPending: boolean; sourceError?: string; sourceFailure?: ChiefOfStaffFailureReason }
   | { status: 'failed'; reason: ChiefOfStaffFailureReason; error: string };
 
 function message(err: unknown): string {
@@ -186,7 +213,10 @@ export async function setUpChiefOfStaff(deps: ChiefOfStaffDeps): Promise<ChiefOf
     const skillsReloadPending = sourceAdded ? deps.reloadThreadSkills(existingId) : false;
     await deps.openThread(existingId);
     const result: ChiefOfStaffResult = { status: 'focused-existing', threadId: existingId, sourceAdded, skillsReloadPending };
-    if (sourceError !== undefined) result.sourceError = sourceError;
+    if (sourceError !== undefined) {
+      result.sourceError = sourceError;
+      result.sourceFailure = sourceFailure;
+    }
     return result;
   }
 

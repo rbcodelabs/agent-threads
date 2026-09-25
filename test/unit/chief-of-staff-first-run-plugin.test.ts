@@ -36,9 +36,14 @@ function makePlugin(opts: { harnessReady?: boolean; resolvable?: string[]; gitAv
   plugin.manager = new ThreadManager(plugin.settings);
   const sendMessage = vi.spyOn(plugin.manager, 'sendMessage').mockResolvedValue(undefined as never);
   (plugin as unknown as { saveData: (d: unknown) => Promise<void> }).saveData = vi.fn().mockResolvedValue(undefined);
-  const openThread = vi.fn().mockResolvedValue(undefined);
+  // Opening the Chat view builds ThreadsView, which auto-creates "Thread 1"
+  // when there are no threads (ThreadsView buildUI). Mirror that here.
+  const simulateChatOpen = () => {
+    if (plugin.manager.getThreads().length === 0) plugin.manager.createThread('Thread 1', '/tmp');
+  };
+  const openThread = vi.fn(async () => { simulateChatOpen(); });
   (plugin as unknown as { openThreadInChatView: typeof openThread }).openThreadInChatView = openThread;
-  plugin.openFirstRunPanels = vi.fn().mockResolvedValue(undefined);
+  plugin.openFirstRunPanels = vi.fn(async () => { simulateChatOpen(); });
   plugin.isHarnessResolvable = (h: string) => (opts.harnessReady === false ? false : (opts.resolvable ?? ['claude', 'codex', 'opencode']).includes(h));
   plugin.isGitAvailable = vi.fn(async () => opts.gitAvailable ?? true);
   plugin.getSkillSourceCloneBase = () => '/tmp/vault/.obsidian/plugins/claude-threads/skill-sources';
@@ -91,7 +96,7 @@ describe('first run — Chief of Staff offered', () => {
     const { plugin, created } = makePlugin({ cloneFails: true });
     await plugin.firstRunSetup(true);
 
-    expect(plugin.manager.getThreads()).toHaveLength(0);
+    expect(plugin.manager.getThreads().map(t => t.title)).toEqual(['Thread 1']); // no Chief of Staff thread; Chat's auto-created one only
     const [path, content] = [...created.entries()][0]!;
     expect(path).toMatch(/Getting Started with Agent Threads\.md$/);
     expect(content).toContain('# Getting Started with Agent Threads');
@@ -102,16 +107,65 @@ describe('first run — Chief of Staff offered', () => {
   it('falls back to the static guide when the harness is not ready', async () => {
     const { plugin, created } = makePlugin({ harnessReady: false });
     await plugin.firstRunSetup(true);
-    expect(plugin.manager.getThreads()).toHaveLength(0);
+    expect(plugin.manager.getThreads().map(t => t.title)).toEqual(['Thread 1']); // no Chief of Staff thread; Chat's auto-created one only
     expect([...created.values()][0]).toContain(CHIEF_OF_STAFF_COMMAND_NAME);
   });
 
   it('falls back to the static guide when thread creation throws', async () => {
     const { plugin, created } = makePlugin();
-    vi.spyOn(plugin.manager, 'createThread').mockImplementation(() => { throw new Error('boom'); });
+    vi.spyOn(plugin.manager, 'createThread').mockImplementationOnce(() => { throw new Error('boom'); });
     await plugin.firstRunSetup(true);
     expect([...created.values()][0]).toContain(CHIEF_OF_STAFF_COMMAND_NAME);
     expect(plugin.settings.hasSeenWelcome).toBe(true);
+  });
+});
+
+describe('first run — live QA fixes', () => {
+  it('a successful first run ends with exactly one thread, Chief of Staff (no auto-created "Thread 1")', async () => {
+    const { plugin } = makePlugin();
+    await plugin.firstRunSetup(true);
+    expect(plugin.manager.getThreads().map(t => t.title)).toEqual(['Chief of Staff']);
+    expect(plugin.openFirstRunPanels).toHaveBeenCalled();
+  });
+
+  it('the fallback keeps today’s behaviour: one "Thread 1"', async () => {
+    const { plugin } = makePlugin({ cloneFails: true });
+    await plugin.firstRunSetup(true);
+    expect(plugin.manager.getThreads().map(t => t.title)).toEqual(['Thread 1']);
+  });
+
+  it('the fallback notice says setup couldn’t finish and why, without the raw error', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { plugin, created } = makePlugin({ cloneFails: true });
+    await plugin.firstRunSetup(true);
+    const messages = Notice.messages.map(n => n.message);
+    expect(messages).toContain('Chief of Staff setup couldn\u2019t finish: couldn\u2019t download the Chief of Staff skills \u2014 check your internet connection. Check the guide to get started.');
+    expect(messages.join('\n')).not.toMatch(/resolve host|github\.com/);
+    expect(messages).not.toContain('Welcome to Agent Threads! Check the guide to get started.');
+    const guide = [...created.values()][0]!;
+    expect(guide).toContain('Chief of Staff setup couldn\u2019t finish: couldn\u2019t download the Chief of Staff skills \u2014 check your internet connection.');
+    expect(guide).not.toMatch(/resolve host/);
+    expect(warn.mock.calls.flat().join(' ')).toMatch(/Could not resolve host: github\.com/);
+    warn.mockRestore();
+  });
+
+  it('names the harness reason in the fallback notice', async () => {
+    const { plugin } = makePlugin({ resolvable: ['opencode'] });
+    plugin.settings.agentHarness = 'opencode';
+    await plugin.firstRunSetup(true);
+    expect(Notice.messages.map(n => n.message)).toContain('Chief of Staff setup couldn\u2019t finish: no Claude Code or Codex found. Check the guide to get started.');
+  });
+
+  it('keeps the plain welcome notice when the offer is off', async () => {
+    const { plugin } = makePlugin();
+    await plugin.firstRunSetup(false);
+    expect(Notice.messages.map(n => n.message)).toContain('Welcome to Agent Threads! Check the guide to get started.');
+  });
+
+  it('the command failure notice uses the category, not the raw error', async () => {
+    const { plugin } = makePlugin({ cloneFails: true });
+    await plugin.runChiefOfStaffCommand();
+    expect(Notice.messages.map(n => n.message)).toContain('Couldn\u2019t set up Chief of Staff: couldn\u2019t download the Chief of Staff skills \u2014 check your internet connection.');
   });
 });
 
@@ -133,7 +187,7 @@ describe('first run — review fixes', () => {
     const { plugin, created, addSource } = makePlugin({ gitAvailable: false });
     await plugin.firstRunSetup(true);
     expect(addSource).not.toHaveBeenCalled();
-    expect(plugin.manager.getThreads()).toHaveLength(0);
+    expect(plugin.manager.getThreads().map(t => t.title)).toEqual(['Thread 1']); // no Chief of Staff thread; Chat's auto-created one only
     expect([...created.values()][0]).toContain(CHIEF_OF_STAFF_COMMAND_NAME);
   });
 
@@ -142,7 +196,7 @@ describe('first run — review fixes', () => {
     plugin.addManagedGithubSkillSource = realAddSource;
     plugin.getSkillSourceCloneBase = () => null;
     await plugin.firstRunSetup(true);
-    expect(plugin.manager.getThreads()).toHaveLength(0);
+    expect(plugin.manager.getThreads().map(t => t.title)).toEqual(['Thread 1']); // no Chief of Staff thread; Chat's auto-created one only
     expect([...created.values()][0]).toContain(CHIEF_OF_STAFF_COMMAND_NAME);
     expect(plugin.settings.hasSeenWelcome).toBe(true);
   });
@@ -166,7 +220,7 @@ describe('first run — review fixes', () => {
     const { plugin, created } = makePlugin({ resolvable: ['opencode'] });
     plugin.settings.agentHarness = 'opencode';
     await plugin.firstRunSetup(true);
-    expect(plugin.manager.getThreads()).toHaveLength(0);
+    expect(plugin.manager.getThreads().map(t => t.title)).toEqual(['Thread 1']); // no Chief of Staff thread; Chat's auto-created one only
     expect([...created.values()][0]).toContain(CHIEF_OF_STAFF_COMMAND_NAME);
   });
 });
@@ -188,10 +242,10 @@ describe('fresh-install gate', () => {
 });
 
 describe('first run — offer turned off', () => {
-  it('writes the original static guide with no pointer and touches no source or thread', async () => {
+  it('writes the original static guide with no pointer and creates no source or Chief of Staff thread', async () => {
     const { plugin, created, addSource } = makePlugin();
     await plugin.firstRunSetup(false);
-    expect(plugin.manager.getThreads()).toHaveLength(0);
+    expect(plugin.manager.getThreads().map(t => t.title)).toEqual(['Thread 1']); // no Chief of Staff thread; Chat's auto-created one only
     expect(addSource).not.toHaveBeenCalled();
     const content = [...created.values()][0]!;
     expect(content).toContain('# Getting Started with Agent Threads');
@@ -227,7 +281,7 @@ describe('"Set up Chief of Staff" command', () => {
     await plugin.runChiefOfStaffCommand();
     expect(openThread).toHaveBeenCalledWith(home.id);
     expect(Notice.messages.map(n => n.message)).toContain(
-      'Opened your Chief of Staff thread, but the Chief of Staff skills could not be added: Could not resolve host: github.com',
+      'Opened your Chief of Staff thread, but the Chief of Staff skills couldn\u2019t be added: couldn\u2019t download the Chief of Staff skills \u2014 check your internet connection.',
     );
   });
 
@@ -245,7 +299,7 @@ describe('"Set up Chief of Staff" command', () => {
     plugin.settings.agentHarness = 'opencode';
     await plugin.runChiefOfStaffCommand();
     expect(plugin.manager.getThreads()).toHaveLength(0);
-    expect(Notice.messages.map(n => n.message).join('\n')).toMatch(/OpenCode sessions do not load skill sources/);
+    expect(Notice.messages.map(n => n.message)).toContain('Couldn\u2019t set up Chief of Staff: no Claude Code or Codex found.');
   });
 
   it('works for an existing user who already has the source and other threads', async () => {
