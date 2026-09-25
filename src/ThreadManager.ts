@@ -1,6 +1,6 @@
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
-import { resolveCodexPermissions, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
+import { resolveCodexPermissions, serializableMcpServers, type HarnessContextUsage, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
 import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
 import { AttachmentWriter } from './AttachmentWriter';
 // Safe to import statically on mobile: this module requires `fs`/`path` lazily,
@@ -20,7 +20,7 @@ import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
 import type { App } from 'obsidian';
 import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun } from './types';
-import type { McpServerConfig, SdkBeta, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
+import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 
 type ThreadStateListener = (threadId: string, event: ThreadEvent) => void;
@@ -993,7 +993,7 @@ export class ThreadManager {
       const session = this.sessions.get(id);
       if (session) {
         const effectiveMode = mode ?? this.settings.permissionMode;
-        session.setPermissionMode(effectiveMode as PermissionMode).catch((err) => {
+        session.setPermissionMode(effectiveMode).catch((err) => {
           console.error('[ClaudeThreads] setThreadPermissionMode: live setPermissionMode() failed:', err);
         });
       }
@@ -1763,7 +1763,7 @@ export class ThreadManager {
       // closest equivalent under a persistent Query.
       try {
         await session.setModel(model);
-        await session.setPermissionMode(options.permissionMode as PermissionMode);
+        await session.setPermissionMode(options.permissionMode);
       } catch (err) {
         console.error('[ClaudeThreads] sendMessage: failed to sync model/permission mode before send:', err);
       }
@@ -1895,9 +1895,7 @@ export class ThreadManager {
     // Codex through its app-server dynamic-tool adapter. Serializable external
     // stdio/HTTP/SSE servers are mirrored into Codex's per-thread config.
     const codexDynamicTools = selectCanonicalHarnessTools<import('./HarnessSession').HarnessDynamicTool>(sessionMcpServers);
-    const codexMcpServers = Object.fromEntries(
-      Object.entries(sessionMcpServers ?? {}).filter(([, server]) => (server as { type?: string }).type !== 'sdk'),
-    );
+    const codexMcpServers = serializableMcpServers(sessionMcpServers);
     const resolvedSecretEnv = this.secretEnvResolver ? this.secretEnvResolver(project?.id) : {};
     const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
 
@@ -2651,7 +2649,7 @@ export class ThreadManager {
    * Returns a context usage snapshot for the active session on the given thread.
    * Returns null when no session is running or the SDK call fails.
    */
-  async getContextUsage(threadId: string): Promise<import('@anthropic-ai/claude-agent-sdk').SDKControlGetContextUsageResponse | null> {
+  async getContextUsage(threadId: string): Promise<HarnessContextUsage | null> {
     const session = this.sessions.get(threadId);
     if (!session) return null;
     return session.getContextUsage();

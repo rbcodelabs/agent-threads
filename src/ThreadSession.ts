@@ -18,7 +18,7 @@ import { formatToolName, getToolIcon } from './toolNameUtils';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ClaudeSession';
 export { formatToolName, getToolIcon };
 export type { SessionCallbacks, TaskTrackerEvent };
-import type { HarnessSessionOptions } from './HarnessSession';
+import type { HarnessContextUsage, HarnessSessionOptions } from './HarnessSession';
 import {
   isTransportClosedError,
   shouldAutoRetryTransportError,
@@ -40,6 +40,25 @@ import { mergeUsageSnapshot, normalizeClaudeRateLimit, normalizeClaudeResult, no
  * generator is safe unconditionally, mid-turn or not, so there is no
  * per-turn "build a new prompt" step the way `ClaudeSession.run()` had one).
  */
+/** Map the SDK context-usage response onto the harness-neutral snapshot. */
+export function claudeContextUsage(
+  usage: import('@anthropic-ai/claude-agent-sdk').SDKControlGetContextUsageResponse,
+): HarnessContextUsage {
+  return {
+    categories: usage.categories.map((category) => ({
+      name: category.name,
+      tokens: category.tokens,
+      color: category.color,
+      kind: category.kind,
+    })),
+    totalTokens: usage.totalTokens,
+    maxTokens: usage.maxTokens,
+    percentage: usage.percentage,
+    model: usage.model,
+    ...(usage.autoCompactThreshold !== undefined ? { autoCompactThreshold: usage.autoCompactThreshold } : {}),
+  };
+}
+
 /** @deprecated Use HarnessSessionOptions for harness-neutral callers. */
 export type ThreadSessionOptions = HarnessSessionOptions;
 
@@ -486,10 +505,10 @@ export class ThreadSession {
    * Returns a snapshot of current context window usage from the live query.
    * Returns null when no session is open or the call fails.
    */
-  async getContextUsage(): Promise<import('@anthropic-ai/claude-agent-sdk').SDKControlGetContextUsageResponse | null> {
+  async getContextUsage(): Promise<HarnessContextUsage | null> {
     if (!this.query) return null;
     try {
-      return await this.query.getContextUsage();
+      return claudeContextUsage(await this.query.getContextUsage());
     } catch {
       return null;
     }
