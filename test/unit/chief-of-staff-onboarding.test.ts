@@ -62,7 +62,7 @@ describe('constants', () => {
     expect(CHIEF_OF_STAFF_THREAD_TITLE).toBe('Chief of Staff');
     expect(CHIEF_OF_STAFF_SETUP_PROMPT).toMatch(/cos-setup/);
     expect(CHIEF_OF_STAFF_COMMAND_NAME).toBe('Set up Chief of Staff');
-    expect(CHIEF_OF_STAFF_REF).toBe('v0.1.0');
+    expect(CHIEF_OF_STAFF_REF).toBe('v0.1.1');
   });
 });
 
@@ -252,7 +252,7 @@ describe('setUpChiefOfStaff', () => {
     expect(result).toEqual({ status: 'created', threadId: 't1', sourceAdded: true, harness: 'claude' });
     expect(deps.isGitAvailable).toHaveBeenCalled();
     expect(deps.addGithubSkillSource).toHaveBeenCalledWith(CHIEF_OF_STAFF_REPO_URL, CHIEF_OF_STAFF_REF);
-    expect(sources[0]!.ref).toBe('v0.1.0');
+    expect(sources[0]!.ref).toBe('v0.1.1');
     expect(deps.createThread).toHaveBeenCalledWith(CHIEF_OF_STAFF_THREAD_TITLE, 'claude');
     expect(getStoredId()).toBe('t1');
     expect(deps.saveSettings).toHaveBeenCalled();
