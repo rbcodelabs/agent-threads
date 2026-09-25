@@ -185,24 +185,36 @@ function cronExpression(schedule: ScheduledItemSchedule): string {
 }
 
 function nextCalendarRun(item: ScheduledItem, fromMs: number): number {
-  // node-cron calculates in local time and owns DST/calendar edge cases. Its
-  // public getNextRun API only returns a value for a started task, so start and
-  // immediately destroy this calculation-only task.
+  // The deterministic local-time walker is the source of truth. It walks the
+  // calendar with Date's local setters, which already handle DST, so it
+  // always returns the earliest matching wall-clock slot strictly after fromMs.
+  //
+  // node-cron 4.2.1's getNextRun() is NOT trustworthy on its own: for
+  // `0 8 * * 1-5` evaluated on a Friday after 08:00 it returns the following
+  // Thursday, silently skipping Mon–Wed — and that answer passed the old
+  // "allowed weekday within 8 days" validity check. So node-cron is only a
+  // cross-check now: its candidate is used when it is valid and no later than
+  // the walker's (i.e. when it agrees), and the earliest valid instant wins.
+  const expected = item.schedule.type === 'weekly'
+    ? nextWeeklyRun(item.schedule.timeOfDay ?? '09:00', item.schedule.daysOfWeek ?? [1], fromMs)
+    : nextTimeOfDay(item.schedule.timeOfDay ?? '09:00', fromMs);
+
   let task: ScheduledTask | undefined;
   try {
+    // Its public getNextRun API only returns a value for a started task, so
+    // start and immediately destroy this calculation-only task.
     task = cron.createTask(cronExpression(item.schedule), () => undefined);
     task.start();
     const candidate = task.getNextRun()?.getTime();
-    if (candidate && isValidCalendarCandidate(item.schedule, fromMs, candidate)) return candidate;
-    // 4.2.1's public matcher is the primary calculator. Keep a defensive
-    // local-time fallback for an invalid/null result (including its known
-    // far-future weekday walker edge case) so persisted nextRun stays sane.
-    return item.schedule.type === 'weekly'
-      ? nextWeeklyRun(item.schedule.timeOfDay ?? '09:00', item.schedule.daysOfWeek ?? [1], fromMs)
-      : nextTimeOfDay(item.schedule.timeOfDay ?? '09:00', fromMs);
+    if (candidate && isValidCalendarCandidate(item.schedule, fromMs, candidate) && candidate < expected) {
+      return candidate;
+    }
+  } catch {
+    // A node-cron failure never blocks scheduling; the walker already has the answer.
   } finally {
     task?.destroy();
   }
+  return expected;
 }
 
 function isValidCalendarCandidate(schedule: ScheduledItemSchedule, fromMs: number, candidateMs: number): boolean {
