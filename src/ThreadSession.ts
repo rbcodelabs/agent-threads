@@ -45,7 +45,7 @@ export function claudeContextUsage(
   usage: import('@anthropic-ai/claude-agent-sdk').SDKControlGetContextUsageResponse,
 ): HarnessContextUsage {
   return {
-    categories: usage.categories.map((category) => ({
+    categories: (usage.categories ?? []).map((category) => ({
       name: category.name,
       tokens: category.tokens,
       color: category.color,
