@@ -1,3 +1,4 @@
+import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import type { ViewStateResult } from 'obsidian';
@@ -844,7 +845,7 @@ export class ThreadsView extends ItemView {
 
     this.dispatchInput = new DispatchInput({
       app: this.app,
-      placeholder: this.plugin.settings.agentHarness === 'codex' ? 'Message Codex' : 'Message Claude',
+      placeholder: `Message ${agentHarnessLabel(this.plugin.settings.agentHarness)}`,
       inputCls: 'ct-input',
       sendBtnText: '↵',
       sendBtnTitle: 'Send message',
@@ -2139,7 +2140,7 @@ export class ThreadsView extends ItemView {
       .onClick(() => this.togglePermissionModeMenu(event))
     );
     menu.addItem(item => item
-      .setTitle(`Harness: ${(thread.agentHarness ?? 'claude') === 'codex' ? 'Codex' : 'Claude'}`)
+      .setTitle(`Harness: ${agentHarnessLabel(thread.agentHarness)}`)
       .setIcon('bot')
       .onClick(() => this.toggleHarnessMenu(event, thread.id))
     );
@@ -2276,8 +2277,9 @@ export class ThreadsView extends ItemView {
     const model = this.currentModel();
     if (!model) return 'Default';
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    const options = thread?.agentHarness === 'codex'
-      ? this.plugin.discoveredModelsByHarness.codex.map((m) => ({ label: m.displayName, value: m.value }))
+    const harness = thread?.agentHarness ?? 'claude';
+    const options = harness !== 'claude'
+      ? this.plugin.discoveredModelsByHarness[harness].map((m) => ({ label: m.displayName, value: m.value }))
       : ThreadsView.CLAUDE_MODEL_OPTIONS;
     return options.find(option => option.value === model)?.label ?? model;
   }
@@ -2296,8 +2298,9 @@ export class ThreadsView extends ItemView {
     const current = this.currentModel();
     const menu = new Menu();
     const thread = this.manager.getThread(this.activeThreadId);
-    const options = thread?.agentHarness === 'codex'
-      ? [{ label: 'Default', value: undefined }, ...this.plugin.discoveredModelsByHarness.codex.map((m) => ({ label: m.displayName, value: m.value }))]
+    const harness = thread?.agentHarness ?? 'claude';
+    const options = harness !== 'claude'
+      ? [{ label: 'Default', value: undefined }, ...this.plugin.discoveredModelsByHarness[harness].map((m) => ({ label: m.displayName, value: m.value }))]
       : ThreadsView.CLAUDE_MODEL_OPTIONS;
     for (const opt of options) {
       menu.addItem(item => {
@@ -2352,7 +2355,7 @@ export class ThreadsView extends ItemView {
     const current = thread.agentHarness ?? 'claude';
     const blocked = this.manager.getHarnessSwitchBlockReason(threadId);
     const menu = new Menu();
-    for (const option of [{ value: 'claude' as const, label: 'Claude' }, { value: 'codex' as const, label: 'Codex' }]) {
+    for (const option of AGENT_HARNESSES.map((value) => ({ value, label: agentHarnessLabel(value) }))) {
       menu.addItem(item => {
         item.setTitle(option.value !== current && blocked ? `${option.label} — ${blocked}` : option.label)
           .setChecked(option.value === current)
@@ -2365,13 +2368,13 @@ export class ThreadsView extends ItemView {
     menu.showAtMouseEvent(event);
   }
 
-  private async requestHarnessSwitch(threadId: string, targetHarness: 'claude' | 'codex'): Promise<void> {
+  private async requestHarnessSwitch(threadId: string, targetHarness: AgentHarness): Promise<void> {
     const thread = this.manager.getThread(threadId);
     if (!thread) return;
     if (thread.messages.some(message => message.role === 'user' || message.role === 'assistant')) {
       const confirmed = await promptConfirm(this.app, {
-        message: `Switch this thread to ${targetHarness === 'codex' ? 'Codex' : 'Claude'}? The conversation stays here, but the model and native session reset. The new harness continues from a summary and transcript references.`,
-        confirmLabel: `Switch to ${targetHarness === 'codex' ? 'Codex' : 'Claude'}`,
+        message: `Switch this thread to ${agentHarnessLabel(targetHarness)}? The conversation stays here, but the model and native session reset. The new harness continues from a summary and transcript references.`,
+        confirmLabel: `Switch to ${agentHarnessLabel(targetHarness)}`,
       });
       if (!confirmed) return;
     }
@@ -2384,7 +2387,7 @@ export class ThreadsView extends ItemView {
         this.applyComposerPlaceholder();
         this.setRunningState(false);
       }
-      new Notice(`Switched thread to ${targetHarness === 'codex' ? 'Codex' : 'Claude'}.`);
+      new Notice(`Switched thread to ${agentHarnessLabel(targetHarness)}.`);
     } catch (error) {
       new Notice(error instanceof Error ? error.message : String(error));
     }
@@ -3262,7 +3265,7 @@ export class ThreadsView extends ItemView {
   private applyComposerPlaceholder(): void {
     if (!this.dispatchInput) return;
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    const base = thread?.agentHarness === 'codex' ? 'Message Codex' : 'Message Claude';
+    const base = `Message ${agentHarnessLabel(thread?.agentHarness)}`;
     // Kept short: a long placeholder wraps and clips in a narrow side panel.
     this.dispatchInput.setPlaceholder(
       this.currentAgentViewId() ? `${base} (main conversation)` : base,
@@ -3810,7 +3813,7 @@ export class ThreadsView extends ItemView {
     const header = card.createDiv('ct-question-card-header');
     const iconEl = header.createSpan('ct-question-card-icon');
     setIcon(iconEl, 'help-circle');
-    const source = questions.some((question) => question.source === 'codex') ? 'Codex' : 'Claude';
+    const source = agentHarnessLabel(questions.find((question) => question.source)?.source);
     header.createSpan({ cls: 'ct-question-card-label', text: `${source} needs your input` });
 
     const body = card.createDiv('ct-question-card-body');
@@ -6060,14 +6063,17 @@ export class ThreadsView extends ItemView {
         return;
       }
       const activeThread = this.manager.getThread(this.activeThreadId);
-      const isCodex = activeThread?.agentHarness === 'codex';
+      const harness = activeThread?.agentHarness ?? 'claude';
+      // Non-Claude harnesses validate against their own discovered catalog.
+      const isCodex = harness !== 'claude';
+      const harnessName = agentHarnessLabel(harness);
       const codexModel = isCodex
-        ? this.plugin.discoveredModelsByHarness.codex.find((model) => model.value.toLowerCase() === arg)
+        ? this.plugin.discoveredModelsByHarness[harness].find((model) => model.value.toLowerCase() === arg)
         : undefined;
       if (isCodex && arg !== 'default' && !codexModel) {
         const errEl = this.messagesEl.createDiv('ct-message ct-error');
-        const available = this.plugin.discoveredModelsByHarness.codex.map((model) => model.value).join(', ') || 'the Codex default (start a Codex thread to load its catalog)';
-        errEl.createEl('p', { text: `Unknown Codex model "${arg}". Available: ${available}` });
+        const available = this.plugin.discoveredModelsByHarness[harness].map((model) => model.value).join(', ') || `the ${harnessName} default (start a ${harnessName} thread to load its catalog)`;
+        errEl.createEl('p', { text: `Unknown ${harnessName} model "${arg}". Available: ${available}` });
         this.scrollToBottom();
         return;
       }

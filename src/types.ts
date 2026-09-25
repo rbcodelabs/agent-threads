@@ -6,6 +6,23 @@ import type { VmNetworkMode } from './sandboxVm';
 
 export type MessageRole = 'user' | 'assistant' | 'compact' | 'notice';
 
+/** Local coding-agent harnesses that can own a thread's native session. */
+export type AgentHarness = 'claude' | 'codex' | 'opencode';
+export const AGENT_HARNESSES: readonly AgentHarness[] = ['claude', 'codex', 'opencode'];
+
+export function isAgentHarness(value: unknown): value is AgentHarness {
+  return typeof value === 'string' && (AGENT_HARNESSES as readonly string[]).includes(value);
+}
+
+/** Short user-facing name for a harness (undefined means a legacy Claude thread). */
+export function agentHarnessLabel(harness: AgentHarness | undefined): string {
+  switch (harness) {
+    case 'codex': return 'Codex';
+    case 'opencode': return 'OpenCode';
+    default: return 'Claude';
+  }
+}
+
 export type ThreadStatus = 'waiting' | 'active' | 'error' | 'archived' | 'reconnecting';
 
 export type LayoutDensity = 'compact' | 'comfortable' | 'spacious';
@@ -49,7 +66,7 @@ export interface AskQuestion {
   /** Masks the free-form input without persisting its value. */
   isSecret?: boolean;
   /** Provider label used by the shared desktop/mobile card. */
-  source?: 'claude' | 'codex';
+  source?: AgentHarness;
   /** Codex tool-call item that owns this question set. */
   requestItemId?: string;
   /** Whether Codex waits indefinitely for this answer. */
@@ -93,7 +110,7 @@ export interface ChatMessage {
   /** For role 'notice': the completion status of the background task, drives the icon. */
   noticeStatus?: 'completed' | 'failed' | 'stopped';
   /** Harness that produced an assistant message. Enables accurate mixed-provider archives. */
-  agentHarness?: 'claude' | 'codex';
+  agentHarness?: AgentHarness;
 }
 
 export interface ThreadDraft {
@@ -140,7 +157,7 @@ export interface AgentRun {
   /** Retained until a late parent-start event resolves parentAgentRunId. */
   parentNativeAgentId?: string;
   taskId?: string;
-  harness: 'claude' | 'codex';
+  harness: AgentHarness;
   /** Thread session generation that owns this native identity. */
   sessionGeneration?: number;
   role?: string;
@@ -218,13 +235,13 @@ export interface Thread {
   sessionId?: string;
   /** Harness that owns this thread's persisted session ID. Kept per-thread so
    * switching the default never attempts to resume a Claude session in Codex. */
-  agentHarness?: 'claude' | 'codex';
+  agentHarness?: AgentHarness;
   /** Monotonic fence for callbacks from retired harness adapters. */
   sessionGeneration?: number;
   /** One-time context bridge consumed only by the first successful target turn. */
   pendingHarnessHandoff?: {
-    sourceHarness: 'claude' | 'codex';
-    targetHarness: 'claude' | 'codex';
+    sourceHarness: AgentHarness;
+    targetHarness: AgentHarness;
     summary: string;
     threadId: string;
     noteFile?: string;
@@ -840,9 +857,11 @@ export interface OAuthMcpState {
 export interface PluginSettings {
   claudeBinaryPath: string;
   /** Which local coding-agent harness new threads use. */
-  agentHarness: 'claude' | 'codex';
+  agentHarness: AgentHarness;
   /** Path to the Codex CLI executable (the app-server is launched from it). */
   codexBinaryPath: string;
+  /** Path to the OpenCode CLI executable (`opencode serve` is launched from it). Desktop only. */
+  opencodeBinaryPath: string;
   /** Allow inherited Codex computer-use capabilities in newly initialized sessions. */
   codexComputerUseEnabled: boolean;
   /**
@@ -1120,6 +1139,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   claudeBinaryPath: '/opt/homebrew/bin/claude',
   agentHarness: 'claude',
   codexBinaryPath: 'codex',
+  opencodeBinaryPath: 'opencode',
   codexComputerUseEnabled: false,
   worktreeRoot: '',
   vmImage: 'claude-threads-coding:1',

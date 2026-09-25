@@ -1,3 +1,4 @@
+import { agentHarnessLabel } from './types';
 import { App, TFile, normalizePath } from 'obsidian';
 import type { Thread, ChatMessage } from './types';
 import { imageEmbedMarkdown } from './imageExternalization';
@@ -259,7 +260,7 @@ export class VaultPersistence {
     if (msg.role === 'compact' || msg.role === 'notice') return '';
     const prefix = msg.role === 'user'
       ? '**You:**'
-      : msg.agentHarness === 'codex' ? '**Codex:**' : '**Claude:**';
+      : `**${agentHarnessLabel(msg.agentHarness)}:**`;
     let body = `${prefix}\n\n${msg.content}`;
     if (msg.toolCalls && msg.toolCalls.length > 0) {
       const tools = msg.toolCalls.map((t) => `  - \`${t.summary}\``).join('\n');

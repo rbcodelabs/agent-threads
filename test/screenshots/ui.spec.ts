@@ -1236,6 +1236,7 @@ test.describe('Agent Threads UI', () => {
     await page.getByText('Harness: Claude', { exact: true }).click();
     await expect(page.locator('.menu')).toContainText('Claude');
     await expect(page.locator('.menu')).toContainText('Codex');
+    await expect(page.locator('.menu')).toContainText('OpenCode');
     await shot(page, 'harness-switcher-menu.png', { fullPage: true });
   });
 
@@ -2818,6 +2819,23 @@ test.describe('Agent Threads UI', () => {
     await expect(activeCard.locator('.ct-kanban-agent-count')).toHaveClass(/ct-agent-count-active/);
   });
 
+  test('kanban kickoff harness picker selects OpenCode with its brand mark', async ({ page }) => {
+    await page.setViewportSize({ width: 1240, height: 820 });
+    await page.goto(kanbanUrl);
+    await page.waitForSelector('.ct-kanban-board');
+
+    const harnessButton = page.locator('.ct-kanban-dispatch .ct-harness-send-btn');
+    await harnessButton.click({ button: 'right' });
+    const menu = page.locator('.ct-harness-menu');
+    await expect(menu.getByRole('menuitemradio', { name: 'OpenCode' }).locator('.ct-harness-mark-opencode svg')).toHaveCount(1);
+    await menu.getByRole('menuitemradio', { name: 'OpenCode' }).click();
+    await expect(menu).toHaveCount(0);
+    await expect(harnessButton).toHaveAttribute('aria-label', /OpenCode/);
+    await expect(harnessButton.locator('.ct-harness-mark-opencode')).toHaveAttribute('data-icon', 'opencode-mark');
+    expect(await page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(0);
+    await shot(page.locator('.ct-kanban-dispatch'), 'kanban-harness-picker-opencode.png');
+  });
+
   test('kanban kickoff harness picker selects without dispatching', async ({ page }) => {
     await page.setViewportSize({ width: 1240, height: 820 });
     await page.goto(kanbanUrl);
@@ -2840,6 +2858,7 @@ test.describe('Agent Threads UI', () => {
     await harnessButton.click({ button: 'right' });
     const reopenedMenu = page.locator('.ct-harness-menu');
     await expect(reopenedMenu).toBeVisible();
+    await expect(reopenedMenu.getByRole('menuitemradio', { name: 'OpenCode' })).toHaveCSS('min-height', '44px');
     await shot(reopenedMenu, 'kanban-harness-picker.png');
   });
 

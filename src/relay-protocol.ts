@@ -6,6 +6,7 @@
  * these types elsewhere.
  */
 
+import type { AgentHarness } from './types';
 import type { MessageRole, ToolCallRecord, AskQuestion } from './types';
 
 // ── Serialized domain objects ──────────────────────────────────────────────
@@ -39,7 +40,7 @@ export interface SerializedThread {
   createdAt: number;
   updatedAt: number;
   sessionId?: string;
-  agentHarness?: 'claude' | 'codex';
+  agentHarness?: AgentHarness;
   recap?: string;
   summary?: string;
   lastError?: string;

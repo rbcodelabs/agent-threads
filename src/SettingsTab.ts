@@ -1,3 +1,4 @@
+import { isAgentHarness } from './types';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
@@ -1282,8 +1283,8 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       dropdown.addOption('haiku', 'Haiku (latest)');
     }
     const discovered = this.plugin.discoveredModelsByHarness[harness];
-    // Codex intentionally has no guessed fallback: wait for model/list so we
-    // never offer a model unavailable to the signed-in Codex account.
+    // Codex and OpenCode intentionally have no guessed fallback: wait for their
+    // native model catalogs so we never offer a model the account cannot use.
     const pinned = harness === 'claude'
       ? (discovered.length > 0 ? discovered : FALLBACK_MODELS)
       : discovered;
@@ -1487,9 +1488,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         dropdown
           .addOption('claude', 'Claude Code')
           .addOption('codex', 'OpenAI Codex')
+          .addOption('opencode', 'OpenCode')
           .setValue(this.plugin.settings.agentHarness ?? 'claude')
           .onChange(async (value) => {
-            this.plugin.settings.agentHarness = value as 'claude' | 'codex';
+            this.plugin.settings.agentHarness = isAgentHarness(value) ? value : 'claude';
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
             this.display();
@@ -1505,6 +1507,20 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.codexBinaryPath ?? 'codex')
           .onChange(async (value) => {
             this.plugin.settings.codexBinaryPath = value || 'codex';
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('OpenCode binary path')
+      .setDesc('Path to the opencode executable (desktop only). OpenCode threads run a local "opencode serve" per session and use the providers, API keys, and models configured in OpenCode. Model IDs use provider/model form, e.g. openai/gpt-5.')
+      .addText((text) =>
+        text
+          .setPlaceholder('opencode')
+          .setValue(this.plugin.settings.opencodeBinaryPath ?? 'opencode')
+          .onChange(async (value) => {
+            this.plugin.settings.opencodeBinaryPath = value || 'opencode';
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
           }),

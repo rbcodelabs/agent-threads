@@ -1,3 +1,4 @@
+import { agentHarnessLabel, type AgentHarness } from './types';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
 import { resolveCodexPermissions, serializableMcpServers, type HarnessContextUsage, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
@@ -119,8 +120,8 @@ export type ThreadEvent =
   | { type: 'pending_question_changed'; questions: AskQuestion[] | undefined }
   | { type: 'capabilities_discovered'; models: import('@anthropic-ai/claude-agent-sdk').ModelInfo[]; agents: import('@anthropic-ai/claude-agent-sdk').AgentInfo[] }
   | { type: 'elicitation_request'; request: import('@anthropic-ai/claude-agent-sdk').ElicitationRequest; signal: AbortSignal; respond: (result: import('@anthropic-ai/claude-agent-sdk').ElicitationResult) => void }
-  | { type: 'harness_switching'; targetHarness: 'claude' | 'codex' }
-  | { type: 'harness_changed'; sourceHarness: 'claude' | 'codex'; targetHarness: 'claude' | 'codex' };
+  | { type: 'harness_switching'; targetHarness: AgentHarness }
+  | { type: 'harness_changed'; sourceHarness: AgentHarness; targetHarness: AgentHarness };
 
 /**
  * Structural equality for the small, plain-data poll payloads (StatusTag[] /
@@ -529,7 +530,7 @@ export class ThreadManager {
   /** Transactionally changes the provider that owns the next native session. */
   async switchHarness(
     id: string,
-    targetHarness: 'claude' | 'codex',
+    targetHarness: AgentHarness,
     persist: () => Promise<void>,
   ): Promise<void> {
     const thread = this.threads.get(id);
@@ -669,7 +670,7 @@ export class ThreadManager {
     this.emit(thread.id, { type: 'agent_runs_changed', agentRuns: thread.agentRuns });
   }
 
-  createThread(title: string, cwd?: string, projectId?: string, agentHarness?: 'claude' | 'codex', metadata?: Pick<Thread, 'origin' | 'externalJobId' | 'ephemeral' | 'background'>): Thread {
+  createThread(title: string, cwd?: string, projectId?: string, agentHarness?: AgentHarness, metadata?: Pick<Thread, 'origin' | 'externalJobId' | 'ephemeral' | 'background'>): Thread {
     const thread: Thread = {
       id: crypto.randomUUID(),
       title: title || `Thread ${this.threads.size + 1}`,
@@ -1634,7 +1635,7 @@ export class ThreadManager {
     // Claude escalation takes precedence. Codex rejects the Claude-only
     // keyword before creating a transcript entry or native session.
     const model = resolvedPrompt.model ?? thread.model
-      ?? (thread.agentHarness === 'codex' ? undefined : (this.settings.defaultModel || undefined));
+      ?? ((thread.agentHarness ?? 'claude') !== 'claude' ? undefined : (this.settings.defaultModel || undefined));
     const promptText = resolvedPrompt.promptText;
     const claimedHandoff = this.claimHarnessHandoff(threadId);
 
@@ -1892,8 +1893,9 @@ export class ThreadManager {
       .join('\n\n');
     const sessionMcpServers = this.mcpServerFactory ? this.mcpServerFactory(threadId, thread.cwd) : this.mcpServers;
     // The Agent Threads MCP server exposes the same canonical tool definitions to
-    // Codex through its app-server dynamic-tool adapter. Serializable external
-    // stdio/HTTP/SSE servers are mirrored into Codex's per-thread config.
+    // Codex through its app-server dynamic-tool adapter and to OpenCode through a
+    // loopback MCP bridge. Serializable external stdio/HTTP/SSE servers are
+    // mirrored into both harnesses' per-session config.
     const codexDynamicTools = selectCanonicalHarnessTools<import('./HarnessSession').HarnessDynamicTool>(sessionMcpServers);
     const codexMcpServers = serializableMcpServers(sessionMcpServers);
     const resolvedSecretEnv = this.secretEnvResolver ? this.secretEnvResolver(project?.id) : {};
@@ -1921,11 +1923,12 @@ export class ThreadManager {
       // and fall back to the plain thread.model — correct there, since a
       // cwd-change restart isn't a new user message and has no escalation
       // keyword to apply.
-      model: thread.agentHarness === 'codex'
+      // settings.defaultModel holds Claude aliases; other harnesses use their own default.
+      model: (thread.agentHarness ?? 'claude') !== 'claude'
         ? (modelOverride ?? thread.model ?? undefined)
         : modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
       appendSystemPrompt,
-      resumeFallbackHistory: thread.agentHarness === 'codex' && thread.sessionId
+      resumeFallbackHistory: (thread.agentHarness === 'codex' || thread.agentHarness === 'opencode') && thread.sessionId
         ? buildHistoryPreamble(
             latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
             thread.cwd,
@@ -1957,6 +1960,10 @@ export class ThreadManager {
         dynamicTools: codexDynamicTools,
         mcpServers: codexMcpServers,
         agentProfiles,
+      },
+      opencode: {
+        dynamicTools: codexDynamicTools,
+        mcpServers: codexMcpServers,
       },
     };
   }
@@ -2844,7 +2851,7 @@ export class ThreadManager {
 const HARNESS_HANDOFF_SUMMARY_LIMIT = 2400;
 
 export function resolveHarnessPrompt(
-  harness: 'claude' | 'codex',
+  harness: AgentHarness,
   userText: string,
   settings: Pick<PluginSettings, 'escalationEnabled' | 'escalationKeyword' | 'escalationModel'>,
 ): { promptText: string; model: string | undefined } {
@@ -2854,8 +2861,9 @@ export function resolveHarnessPrompt(
   const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`, 'i');
   if (!match.test(userText)) return { promptText: userText, model: undefined };
-  if (harness === 'codex') {
-    throw new Error(`${keyword} is a Claude-only model escalation command and cannot be used in a Codex thread. Choose a Codex model from the thread menu instead.`);
+  if (harness !== 'claude') {
+    const name = agentHarnessLabel(harness);
+    throw new Error(`${keyword} is a Claude-only model escalation command and cannot be used in a ${name} thread. Choose a ${name} model from the thread menu instead.`);
   }
   const strip = new RegExp(`(?:^|\\s)${escaped}(?=\\s|$)`, 'gi');
   return {
@@ -2866,8 +2874,8 @@ export function resolveHarnessPrompt(
 
 function createHarnessHandoff(
   thread: Thread,
-  sourceHarness: 'claude' | 'codex',
-  targetHarness: 'claude' | 'codex',
+  sourceHarness: AgentHarness,
+  targetHarness: AgentHarness,
 ): NonNullable<Thread['pendingHarnessHandoff']> {
   const messageSummary = [...thread.messages].reverse().find(message => message.summary?.trim())?.summary;
   const fallback = `Continue the thread titled "${thread.title}"${thread.goal ? ` toward this goal: ${thread.goal}` : ''}.`;
@@ -2881,8 +2889,8 @@ function createHarnessHandoff(
 /** Builds the one-time provider-neutral bridge; it deliberately contains no transcript replay. */
 export function buildHarnessHandoffPrompt(
   thread: Thread,
-  sourceHarness: 'claude' | 'codex',
-  targetHarness: 'claude' | 'codex',
+  sourceHarness: AgentHarness,
+  targetHarness: AgentHarness,
 ): string {
   const handoff = thread.pendingHarnessHandoff ?? createHarnessHandoff(thread, sourceHarness, targetHarness);
   const references = [

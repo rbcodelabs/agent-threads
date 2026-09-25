@@ -1,3 +1,4 @@
+import type { AgentHarness } from './types';
 import type { PeerIdentity } from './ArtifactContributions';
 
 export type SlashCommandScope = 'thread' | 'dispatch';
@@ -6,7 +7,7 @@ export interface SlashCommandContext {
   readonly text: string;
   readonly args: string;
   readonly threadId?: string;
-  readonly agentHarness?: 'claude' | 'codex';
+  readonly agentHarness?: AgentHarness;
   readonly projectId?: string;
   readonly hasImages: boolean;
   readonly hasAttachment: boolean;

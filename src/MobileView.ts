@@ -8,6 +8,7 @@
  * VaultPersistence — all state comes through the relay.
  */
 
+import { agentHarnessLabel } from './types';
 import { ItemView, WorkspaceLeaf, Notice, sanitizeHTMLToDom, setIcon } from 'obsidian';
 import { marked } from 'marked';
 import type { RelayClient } from './RelayClient';
@@ -285,7 +286,7 @@ export class MobileView extends ItemView {
     this.updateQueueBanner(activeId);
 
     const thread = activeId ? this.store.getThread(activeId) : null;
-    this.inputEl.placeholder = thread?.agentHarness === 'codex' ? 'Message Codex' : 'Message Claude';
+    this.inputEl.placeholder = `Message ${agentHarnessLabel(thread?.agentHarness)}`;
     const msgCount = thread?.messages.length ?? 0;
     const permCount = activeId ? (this.store.getPendingPermissionsForThread(activeId)?.length ?? 0) : 0;
     const questionCount = activeId ? (this.store.getPendingQuestionsForThread(activeId)?.length ?? 0) : 0;
@@ -941,7 +942,7 @@ export class MobileView extends ItemView {
     const header = card.createDiv('ct-mobile-question-header');
     const iconEl = header.createSpan({ cls: 'ct-mobile-question-icon' });
     setIcon(iconEl, getToolIcon('AskUserQuestion'));
-    const source = pending.questions.some((question) => question.source === 'codex') ? 'Codex' : 'Claude';
+    const source = agentHarnessLabel(pending.questions.find((question) => question.source)?.source);
     header.createSpan({ cls: 'ct-mobile-question-label', text: `${source} needs your input` });
 
     const body = card.createDiv('ct-mobile-question-body');

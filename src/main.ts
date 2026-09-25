@@ -1,3 +1,4 @@
+import type { AgentHarness } from './types';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createPublicThreadLifecycle } from './publicThreadLifecycle';
@@ -312,9 +313,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
    */
   discoveredModels: import('@anthropic-ai/claude-agent-sdk').ModelInfo[] = [];
   /** Model catalogs are distinct: a Codex model ID must never populate a Claude picker (or vice versa). */
-  discoveredModelsByHarness: Record<'claude' | 'codex', import('@anthropic-ai/claude-agent-sdk').ModelInfo[]> = {
+  discoveredModelsByHarness: Record<AgentHarness, import('@anthropic-ai/claude-agent-sdk').ModelInfo[]> = {
     claude: [],
     codex: [],
+    opencode: [],
   };
 
 
@@ -520,6 +522,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
     this.detectClaudeBinary();
     this.detectCodexBinary();
+    this.detectOpenCodeBinary();
     this.migrateGithubSourcesIntoVault();
     this.scheduleGithubSourceClonePass();
 
@@ -2706,6 +2709,27 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.settings.claudeBinaryPath = 'claude';
   }
 
+  private detectOpenCodeBinary(): void {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    if (this.settings.opencodeBinaryPath && fs.existsSync(this.settings.opencodeBinaryPath)) return;
+    // A customized value that is not a path (e.g. a PATH-resolved name) is respected.
+    if (this.settings.opencodeBinaryPath && this.settings.opencodeBinaryPath !== 'opencode') return;
+    for (const candidate of [
+      '/opt/homebrew/bin/opencode',
+      '/usr/local/bin/opencode',
+      `${process.env.HOME}/.opencode/bin/opencode`,
+      `${process.env.HOME}/.local/bin/opencode`,
+    ]) {
+      if (fs.existsSync(candidate)) {
+        this.settings.opencodeBinaryPath = candidate;
+        return;
+      }
+    }
+    // `opencode` on PATH is the CLI's documented invocation.
+    this.settings.opencodeBinaryPath = 'opencode';
+  }
+
   private detectCodexBinary(): void {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
@@ -2971,7 +2995,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
        * the dispatch itself. */
       loop?: { intervalSeconds: number };
       /** Harness override selected at kickoff; does not change Settings. */
-      agentHarness?: 'claude' | 'codex';
+      agentHarness?: AgentHarness;
       /** Project selected by a dispatch surface. Omit for deliberate Unassigned. */
       projectId?: string;
     },

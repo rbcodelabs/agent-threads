@@ -70,6 +70,7 @@ export interface HarnessSessionOptions {
   secretEnv?: Record<string, string>;
   claude?: ClaudeHarnessOptions;
   codex?: CodexHarnessOptions;
+  opencode?: OpenCodeHarnessOptions;
 }
 
 /** Claude-only capabilities intentionally kept out of the shared contract. */
@@ -104,6 +105,14 @@ export interface CodexHarnessOptions {
   mcpServers?: Record<string, HarnessMcpServerConfig>;
   /** Harness-neutral profiles rendered into Codex delegation instructions. */
   agentProfiles?: AgentProfileMap;
+}
+
+/** OpenCode-specific inputs; permission and model use the shared fields. */
+export interface OpenCodeHarnessOptions {
+  /** Host tools, served to OpenCode through a loopback MCP bridge. */
+  dynamicTools?: HarnessDynamicTool[];
+  /** Serializable external MCP servers mirrored into OpenCode's `mcp` config. */
+  mcpServers?: Record<string, HarnessMcpServerConfig>;
 }
 
 /** A host-owned capability exposed through a harness's native tool protocol. */

@@ -1,3 +1,4 @@
+import type { AgentHarness } from './types';
 import type { ChatMessage, StorageAllocationResult, Thread, ThreadArtifactRecord, ThreadPermissionSnapshot, ThreadStatus } from './types';
 import type { AgentToolContribution, AgentToolRegistrationResult, AgentToolRegistry } from './AgentToolContributions';
 import type { SlashCommandContribution, SlashCommandRegistrationResult, SlashCommandRegistry } from './SlashCommandContributions';
@@ -21,11 +22,11 @@ export class ClaudeThreadsApiError extends Error implements PublicError {
   constructor(public readonly code: PublicErrorCode, message: string, public readonly generation?: string) { super(message); this.name = 'ClaudeThreadsApiError'; }
 }
 export interface MessageSnapshot { readonly id: string; readonly role: ChatMessage['role']; readonly content: string; readonly timestamp: number }
-export interface ThreadSummary { readonly id: string; readonly title: string; readonly status: ThreadStatus; readonly reviewed: boolean; readonly cwd?: string; readonly projectId?: string; readonly agentHarness: 'claude' | 'codex'; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean; readonly createdAt: number; readonly updatedAt: number; readonly isRunning: boolean; readonly messageCount: number }
+export interface ThreadSummary { readonly id: string; readonly title: string; readonly status: ThreadStatus; readonly reviewed: boolean; readonly cwd?: string; readonly projectId?: string; readonly agentHarness: AgentHarness; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean; readonly createdAt: number; readonly updatedAt: number; readonly isRunning: boolean; readonly messageCount: number }
 export interface ThreadSnapshot extends ThreadSummary { readonly messages: readonly MessageSnapshot[] }
 export interface ThreadQuery { readonly projectId?: string | null; readonly status?: ThreadStatus; readonly limit?: number }
 export interface CorrelationInput { readonly ownerPluginId?: string; readonly idempotencyKey?: string }
-export interface CreateThreadInput extends CorrelationInput { readonly title?: string; readonly cwd?: string; readonly projectId?: string; readonly agentHarness?: 'claude' | 'codex'; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean }
+export interface CreateThreadInput extends CorrelationInput { readonly title?: string; readonly cwd?: string; readonly projectId?: string; readonly agentHarness?: AgentHarness; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean }
 export type ProvisionalCommitResult = { readonly status: 'committed' | 'already-committed' | 'rolled-back'; readonly threadId: string };
 export type ProvisionalRollbackResult = { readonly status: 'rolled-back' | 'already-rolled-back' | 'committed'; readonly threadId: string };
 export interface ProvisionalThreadHandle {
@@ -47,7 +48,7 @@ export type PublicThreadEvent =
   | { readonly kind: 'thread.removed'; readonly threadId: string; readonly at: number };
 export interface Disposable { dispose(): void }
 export interface PublicUsage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly durationMs?: number; readonly turns?: number }
-export interface TraceSource { readonly sourceId: string; readonly threadId: string; readonly projectId?: string; readonly harness: 'claude' | 'codex'; readonly revision: string; readonly contentHash: string; readonly byteLength: number; readonly updatedAt: number }
+export interface TraceSource { readonly sourceId: string; readonly threadId: string; readonly projectId?: string; readonly harness: AgentHarness; readonly revision: string; readonly contentHash: string; readonly byteLength: number; readonly updatedAt: number }
 export interface TraceSourcePage { readonly sources: readonly TraceSource[]; readonly nextCursor?: string; readonly eof: boolean }
 export interface SkillRunOutcome { readonly invokedSkill: string; readonly runOutcome: 'success' | 'failure'; readonly invocationIndex: number }
 export interface TraceEvent { readonly index: number; readonly timestamp: string; readonly type: string; readonly invokedSkill?: string; readonly skillLoadOutcome?: 'loaded'; readonly skillRunOutcomes?: readonly SkillRunOutcome[]; readonly data: unknown }

@@ -1,3 +1,4 @@
+import { isAgentHarness } from './types';
 import type { ChatMessage, Thread } from './types';
 import { serializeThreadForSave } from './imageExternalization';
 
@@ -23,7 +24,7 @@ function isCanonicalMessage(value: unknown): value is ChatMessage {
     && typeof value.content === 'string'
     && typeof value.timestamp === 'number'
     && Number.isFinite(value.timestamp)
-    && (value.agentHarness === undefined || value.agentHarness === 'claude' || value.agentHarness === 'codex')
+    && (value.agentHarness === undefined || isAgentHarness(value.agentHarness))
     && (value.toolCalls === undefined || (Array.isArray(value.toolCalls) && value.toolCalls.every((tool) => (
       isRecord(tool) && typeof tool.name === 'string' && typeof tool.summary === 'string'
     ))));
@@ -44,13 +45,13 @@ function isCanonicalThread(value: unknown): value is Thread {
     && (value.sessionGeneration === undefined || (typeof value.sessionGeneration === 'number' && Number.isInteger(value.sessionGeneration) && value.sessionGeneration >= 0))
     && (value.pendingHarnessHandoff === undefined || (
       isRecord(value.pendingHarnessHandoff)
-      && (value.pendingHarnessHandoff.sourceHarness === 'claude' || value.pendingHarnessHandoff.sourceHarness === 'codex')
-      && (value.pendingHarnessHandoff.targetHarness === 'claude' || value.pendingHarnessHandoff.targetHarness === 'codex')
+      && isAgentHarness(value.pendingHarnessHandoff.sourceHarness)
+      && isAgentHarness(value.pendingHarnessHandoff.targetHarness)
       && typeof value.pendingHarnessHandoff.summary === 'string'
       && typeof value.pendingHarnessHandoff.threadId === 'string'
       && typeof value.pendingHarnessHandoff.createdAt === 'number'
     ))
-    && (value.agentHarness === undefined || value.agentHarness === 'claude' || value.agentHarness === 'codex');
+    && (value.agentHarness === undefined || isAgentHarness(value.agentHarness));
 }
 
 /** Serialize only the canonical persisted Thread projection; rendered prose is never included. */

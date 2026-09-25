@@ -1,3 +1,4 @@
+import type { AgentHarness } from './types';
 import { Notice } from 'obsidian';
 import type { DispatchInput } from './DispatchInput';
 import type { ImageAttachment } from './types';
@@ -9,7 +10,7 @@ export async function handleContributedDispatch(args: {
   text: string;
   images: ImageAttachment[];
   attachment: string | null;
-  agentHarness?: 'claude' | 'codex';
+  agentHarness?: AgentHarness;
   projectId?: string;
   input: DispatchInput;
 }): Promise<boolean> {

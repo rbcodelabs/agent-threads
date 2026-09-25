@@ -21,10 +21,24 @@
 | `src/statusLine.ts` | Pure parser for `statusLineCommand` output (JSON tags or legacy plaintext → `StatusTag[]`) + `derivePrUrl`/`resolveTagIcon`/`planFooter`. No Obsidian/Node deps |
 | `src/gitDiffUtils.ts` | Pure helpers for the git diff bar: `parseShortStat`, `parseRemoteToOwnerRepo`, `buildComparePrUrl`, plus `gitDiffBarVisible`/`parsePrNumber`/`prButtonLabel`. No Obsidian/Node deps |
 | `src/StatusLineService.ts` | Desktop-only service that polls `statusLineCommand` per thread cwd (coalesced, capped, cached, idle-paused) and writes `statusTags` + derived `prUrl`. See `docs/adr/0001-structured-status-line-tags.md` |
+| `src/HarnessSession.ts` | Provider-neutral harness contract (`HarnessSession`, `HarnessPermissionMode`, `HarnessMcpServerConfig`, `HarnessContextUsage`). Adapters map their native types at the boundary |
+| `src/HarnessFactory.ts` | Picks the adapter from `thread.agentHarness`: `ThreadSession` (Claude), `CodexSession`, `OpenCodeSession` |
+| `src/OpenCodeSession.ts` | OpenCode adapter over a per-session `opencode serve` (HTTP + SSE). Pure mapping helpers are exported for tests. See `docs/adr/0013-opencode-harness.md` |
+| `src/OpenCodeHostTools.ts` | Token-guarded loopback MCP endpoint that serves host tools to OpenCode |
 | `src/sandboxVm.ts` | Sandbox VM command construction + lifecycle (`SandboxVmManager`) behind Apple's `container` CLI. Pure helpers plus an injectable command seam; no top-level Node requires |
 | `sandbox/Dockerfile` | Image for the sandbox VM — `node:22-bookworm-slim` + git, ripgrep, jq, curl, wget, build-essential, python3, openssh-client. Non-root `node` (uid 1000), `WORKDIR /work`, no secrets baked in |
 
 ---
+
+## Agent Harnesses
+
+`AgentHarness` (`src/types.ts`) is `'claude' | 'codex' | 'opencode'`; use `AGENT_HARNESSES`, `isAgentHarness` and `agentHarnessLabel` instead of enumerating names. ThreadManager only talks to `HarnessSession`, built by `createHarnessSession()`. Every session callback goes through ThreadManager's generation fence (ADR-0012), so a new adapter gets switching safety without extra work.
+
+**OpenCode (ADR-0013).** One `opencode serve` per session, launched from `opencodeBinaryPath` with per-session config in `OPENCODE_CONFIG_CONTENT`:
+- Events: `message.part.delta` → `onToken` (assistant text parts only); completed text part → `onMessage`; tool part `running`/`completed`/`error` → `onToolUse`/`onToolResult` (+ `onFilesEdited` for edit tools); `step-finish` → context usage and cost; `todo.updated` → task tracker; `session.idle` after `busy` → `onDone`; `session.error` `MessageAbortedError` → `onInterrupted`.
+- Permissions: config asks for everything but read-only tools; `resolveOpenCodePermission()` answers each `permission.asked` from the live permission mode. Child sessions created by the `task` tool are tracked so their prompts are not dropped.
+- Host tools: `OpenCodeHostToolsBridge` registers as remote MCP server `agent-threads` (tools appear as `agent-threads_<tool>`; OpenCode is told to allow them and the bridge applies `resolveDynamicToolApproval`).
+- The screenshot harness aliases `http` to a throwing stub (`test/harness/mocks/http.ts`) because ThreadManager pulls the adapter into the bundle.
 
 ## Sandbox VM Tools (`enter_vm` / `vm_exec` / `exit_vm`)
 
