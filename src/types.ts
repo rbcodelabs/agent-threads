@@ -833,6 +833,25 @@ export interface StoredOAuthMcpServer {
   hasClientSecret?: boolean;
   authorizationServerUrl?: string;
   redirectUri?: string;
+  /**
+   * Which OAuth grant renews this server's tokens. Absent means
+   * `authorization_code`, so every entry written before this field existed keeps
+   * its original interactive behavior.
+   *
+   * Persisting it is what makes a reconnect correct: on plugin load there is no
+   * refresh token for a `client_credentials` server (it never has one), and
+   * without this field that state is indistinguishable from an
+   * authorization-code server whose refresh token was revoked — which reads as
+   * "needs re-authorization" and would send the user hunting for a consent
+   * screen that does not exist.
+   */
+  grantType?: 'authorization_code' | 'client_credentials';
+  /**
+   * `audience` parameter sent on the token request, naming the API the access
+   * token is minted for (Auth0's non-standard precursor to RFC 8707 `resource`).
+   * Nonsecret configuration — it identifies an API and carries no authority.
+   */
+  audience?: string;
 }
 
 export interface OAuthMcpState {
@@ -841,6 +860,12 @@ export interface OAuthMcpState {
   clientId: string;
   /** Whether a `client_secret` is on file in the keychain. Never the secret itself. */
   hasClientSecret?: boolean;
+  /**
+   * Grant in force for this connection, mirrored from `StoredOAuthMcpServer` so
+   * the Settings UI can describe a non-interactive connection without having to
+   * cross-reference the config map. Absent means `authorization_code`.
+   */
+  grantType?: 'authorization_code' | 'client_credentials';
   /** Resolved authorization server URL from discovery, cached to skip re-discovery. */
   asMetadataUrl: string;
   /** Local proxy port, assigned when the proxy starts. */

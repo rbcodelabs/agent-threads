@@ -235,6 +235,57 @@ describe('OAuthMcpFlow.authorize', () => {
   });
 
   /**
+   * `audience` (Auth0's non-standard "which API is this token for") is a
+   * general `oauth`-entry field with no grant-type restriction — see
+   * `mcpRegistrationSchema`'s `superRefine`. It must reach the interactive
+   * flow's authorization URL, not just `clientCredentials()`'s token request,
+   * or Auth0's `/authorize` mints an opaque identity-only token instead of
+   * one scoped to the target API.
+   */
+  it('sends the audience parameter on the authorization URL when supplied', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({
+      serverName: 'bankrate', clientId: 'client-123', asMetadata: fixtureAsMetadata(), audience: 'bankrate-api',
+    });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    expect(capturedUrl.searchParams.get('audience')).toBe('bankrate-api');
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
+    await promise;
+
+    // Auth0's own docs place `audience` at the authorize step only for this grant —
+    // the issued code already encodes it, and the SDK's exchangeAuthorization() has
+    // no `audience` parameter to repeat it through even if a server wanted that.
+    const exchanged = sdkAuth.exchangeAuthorization.mock.calls[0][1] as Record<string, unknown>;
+    expect('audience' in exchanged).toBe(false);
+  });
+
+  /**
+   * Negative control, same shape as the RFC 8707 resource one below: without
+   * this, a regression that hardcoded some audience value would still pass
+   * the assertion above while sending an unwanted `audience` to every AS.
+   */
+  it('omits audience entirely when not supplied', async () => {
+    const tokens: OAuthTokens = { access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 };
+    sdkAuth.exchangeAuthorization.mockResolvedValue(tokens);
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({ serverName: 'vercel', clientId: 'client-123', asMetadata: fixtureAsMetadata() });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    expect(capturedUrl.searchParams.has('audience')).toBe(false);
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
+    await promise;
+  });
+
+  /**
    * A confidential client authenticates at the token endpoint only. The secret
    * must never appear on the authorization request: that URL goes through the
    * user's address bar, the AS's access logs and any referrer along the way.
@@ -598,6 +649,32 @@ describe('RFC 8707 resource indicator', () => {
     expect((sdkAuth.exchangeAuthorization.mock.calls[0][1] as { resource?: URL }).resource).toBeUndefined();
   });
 
+  /**
+   * `resource` (RFC 8707) and `audience` (Auth0) are meant to coexist, not be
+   * mutually exclusive — `clientCredentials()` already sends both together
+   * whenever both are set (see its own describe block), since providers
+   * ignore whichever parameter they don't implement. `authorize()` must do
+   * the same on the interactive path.
+   */
+  it('sends both the resource indicator and the audience on the authorization request when both are set', async () => {
+    let capturedUrl = undefined as unknown as URL;
+    const openUrl = vi.fn(async (url: string) => { capturedUrl = new URL(url); });
+    sdkAuth.exchangeAuthorization.mockResolvedValue({ access_token: 'at-1', refresh_token: 'rt-1', token_type: 'bearer', expires_in: 3600 });
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl);
+
+    const promise = flow.authorize({
+      serverName: 'v0', clientId: 'client-123', asMetadata: v0AsMetadata(), scopes: 'mcp', audience: 'v0-api',
+    });
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalled());
+
+    expect(capturedUrl.searchParams.get('resource')).toBe('https://v0.app/api/mcp');
+    expect(capturedUrl.searchParams.get('audience')).toBe('v0-api');
+
+    const redirectUri = capturedUrl.searchParams.get('redirect_uri')!;
+    await httpGet(`${redirectUri}?code=auth-code-1&state=${capturedUrl.searchParams.get('state')}`);
+    await promise;
+  });
+
   it('repeats the resource on refresh so the new access token keeps the same audience', async () => {
     sdkAuth.refreshAuthorization.mockResolvedValue({ access_token: 'at-2', refresh_token: 'rt-2', token_type: 'bearer', expires_in: 1800 });
     const tokenStore = fixtureTokenStore({ clientId: 'client-123', currentTokens: { accessToken: 'at-1', refreshToken: 'rt-1' } });
@@ -626,6 +703,163 @@ describe('RFC 8707 resource indicator', () => {
     sdkAuth.discoverOAuthServerInfo.mockResolvedValue(v0AsMetadata('https://evil.example.com/api/mcp'));
     const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn());
     await expect(flow.discoverAS('https://v0.app/api/mcp')).rejects.toThrow(/different audience/i);
+  });
+});
+
+describe('OAuthMcpFlow.clientCredentials', () => {
+  const tokenResponse = (extra: Record<string, unknown> = {}) => new Response(
+    JSON.stringify({ access_token: 'm2m-at', token_type: 'Bearer', expires_in: 86400, ...extra }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+
+  it('posts grant_type=client_credentials with the audience and persists the token set', async () => {
+    const tokenStore = fixtureTokenStore();
+    const fetchFn = vi.fn(async () => tokenResponse());
+    const flow = new OAuthMcpFlow(tokenStore, vi.fn(), fetchFn as unknown as typeof fetch);
+
+    const tokens = await flow.clientCredentials({
+      serverName: 'bankrate',
+      clientId: 'client-123',
+      clientSecret: 'shh-abc',
+      asMetadata: fixtureAsMetadata(),
+      scopes: 'read:products',
+      audience: 'bankrate-api',
+    });
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://vercel.com/oauth/token');
+    expect(init.method).toBe('POST');
+    const body = init.body as URLSearchParams;
+    expect(body.get('grant_type')).toBe('client_credentials');
+    expect(body.get('audience')).toBe('bankrate-api');
+    expect(body.get('scope')).toBe('read:products');
+    expect(tokens.accessToken).toBe('m2m-at');
+    expect(tokenStore.stored).toHaveLength(1);
+    expect(tokenStore.stored[0].accessToken).toBe('m2m-at');
+  });
+
+  /**
+   * The defining property of this grant: every interactive step is absent. A
+   * regression that reintroduced any of them would still return a usable token on
+   * a machine with a browser, so assert their absence directly rather than
+   * inferring it from a passing happy path.
+   */
+  it('opens no browser and sends no authorization-code or PKCE parameters', async () => {
+    const openUrl = vi.fn(async () => undefined);
+    const fetchFn = vi.fn(async () => tokenResponse());
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), openUrl, fetchFn as unknown as typeof fetch);
+
+    await flow.clientCredentials({
+      serverName: 'bankrate', clientId: 'client-123', clientSecret: 'shh-abc', asMetadata: fixtureAsMetadata(),
+    });
+
+    expect(openUrl).not.toHaveBeenCalled();
+    const body = (fetchFn.mock.calls[0][1] as RequestInit).body as URLSearchParams;
+    for (const key of ['code', 'code_verifier', 'code_challenge', 'code_challenge_method', 'redirect_uri', 'state']) {
+      expect(body.has(key)).toBe(false);
+    }
+  });
+
+  it('authenticates with HTTP Basic by default and never puts the secret in the body', async () => {
+    const fetchFn = vi.fn(async () => tokenResponse());
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn(), fetchFn as unknown as typeof fetch);
+
+    await flow.clientCredentials({
+      serverName: 'bankrate', clientId: 'client-123', clientSecret: 'shh-abc', asMetadata: fixtureAsMetadata(),
+    });
+
+    const init = fetchFn.mock.calls[0][1] as RequestInit;
+    expect(new Headers(init.headers).get('Authorization')).toBe(`Basic ${btoa('client-123:shh-abc')}`);
+    expect((init.body as URLSearchParams).has('client_secret')).toBe(false);
+  });
+
+  it('switches to client_secret_post when that is the only method the AS advertises', async () => {
+    const fetchFn = vi.fn(async () => tokenResponse());
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn(), fetchFn as unknown as typeof fetch);
+    const metadata = fixtureAsMetadata();
+    metadata.authorizationServerMetadata!.token_endpoint_auth_methods_supported = ['client_secret_post'];
+
+    await flow.clientCredentials({
+      serverName: 'bankrate', clientId: 'client-123', clientSecret: 'shh-abc', asMetadata: metadata,
+    });
+
+    const init = fetchFn.mock.calls[0][1] as RequestInit;
+    expect(new Headers(init.headers).has('Authorization')).toBe(false);
+    const body = init.body as URLSearchParams;
+    expect(body.get('client_id')).toBe('client-123');
+    expect(body.get('client_secret')).toBe('shh-abc');
+  });
+
+  it('omits audience and scope entirely when neither is supplied', async () => {
+    const fetchFn = vi.fn(async () => tokenResponse());
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn(), fetchFn as unknown as typeof fetch);
+
+    await flow.clientCredentials({
+      serverName: 'bankrate', clientId: 'client-123', clientSecret: 'shh-abc', asMetadata: fixtureAsMetadata(),
+    });
+
+    const body = (fetchFn.mock.calls[0][1] as RequestInit).body as URLSearchParams;
+    expect(body.has('audience')).toBe(false);
+    expect(body.has('scope')).toBe(false);
+  });
+
+  /**
+   * RFC 6749 §4.4.3: "A refresh token SHOULD NOT be included." Some servers send
+   * one anyway. Keeping it would route renewal through the refresh-token path,
+   * which for this grant is both unnecessary and liable to fail against a server
+   * that never intended to honor it.
+   */
+  it('discards a refresh token the AS returns anyway', async () => {
+    const tokenStore = fixtureTokenStore();
+    const fetchFn = vi.fn(async () => tokenResponse({ refresh_token: 'rt-should-be-dropped' }));
+    const flow = new OAuthMcpFlow(tokenStore, vi.fn(), fetchFn as unknown as typeof fetch);
+
+    const tokens = await flow.clientCredentials({
+      serverName: 'bankrate', clientId: 'client-123', clientSecret: 'shh-abc', asMetadata: fixtureAsMetadata(),
+    });
+
+    expect(tokens.refreshToken).toBeUndefined();
+    expect(tokenStore.stored[0].refreshToken).toBeUndefined();
+  });
+
+  it('sends the RFC 8707 resource indicator alongside the audience when the resource advertises one', async () => {
+    const fetchFn = vi.fn(async () => tokenResponse());
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn(), fetchFn as unknown as typeof fetch);
+    const metadata = fixtureAsMetadata({ resourceMetadata: { resource: 'https://vercel.com/' } as never });
+
+    await flow.clientCredentials({
+      serverName: 'bankrate', clientId: 'client-123', clientSecret: 'shh-abc', asMetadata: metadata, audience: 'bankrate-api',
+    });
+
+    const body = (fetchFn.mock.calls[0][1] as RequestInit).body as URLSearchParams;
+    expect(body.get('resource')).toBe('https://vercel.com/');
+    expect(body.get('audience')).toBe('bankrate-api');
+  });
+
+  it('fails with an actionable message, before any request, when the AS publishes no token endpoint', async () => {
+    const fetchFn = vi.fn(async () => tokenResponse());
+    const flow = new OAuthMcpFlow(fixtureTokenStore(), vi.fn(), fetchFn as unknown as typeof fetch);
+    const metadata = fixtureAsMetadata({ authorizationServerMetadata: undefined });
+
+    await expect(flow.clientCredentials({
+      serverName: 'bankrate', clientId: 'client-123', clientSecret: 'shh-abc', asMetadata: metadata,
+    })).rejects.toThrow(/no token endpoint/i);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the authorization server error and stores nothing when the token request fails', async () => {
+    const tokenStore = fixtureTokenStore();
+    const fetchFn = vi.fn(async () => new Response(
+      JSON.stringify({ error: 'access_denied', error_description: 'Unauthorized' }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } },
+    ));
+    const flow = new OAuthMcpFlow(tokenStore, vi.fn(), fetchFn as unknown as typeof fetch);
+
+    await expect(flow.clientCredentials({
+      serverName: 'bankrate', clientId: 'client-123', clientSecret: 'wrong', asMetadata: fixtureAsMetadata(),
+    })).rejects.toThrow();
+    expect(tokenStore.stored).toHaveLength(0);
   });
 });
 

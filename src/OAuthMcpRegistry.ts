@@ -44,6 +44,18 @@ export interface OAuthRegistrationEntry {
   clientSecret?: string;
   authorizationServerUrl?: string;
   redirectUri?: string;
+  /**
+   * Which grant to use. Omitted means `authorization_code` — the interactive
+   * PKCE flow, so existing callers are unaffected.
+   *
+   * `client_credentials` skips the browser leg entirely: no PKCE, no loopback
+   * listener, no consent screen. It requires `clientId` and `clientSecret`,
+   * since a machine-to-machine client cannot be public and cannot be registered
+   * on the fly without a redirect URI.
+   */
+  grantType?: 'authorization_code' | 'client_credentials';
+  /** `audience` parameter on the token request (Auth0 API identifier). Nonsecret. */
+  audience?: string;
 }
 
 export interface OAuthMcpRegistryHost {
@@ -64,6 +76,19 @@ interface Connection {
   tokenStore: OAuthTokenStore;
   proxy: OAuthMcpProxy;
   asMetadata: OAuthASMetadata;
+}
+
+/**
+ * Everything the token store needs to renew a token set on its own, once the
+ * interactive registration (or plugin-load rebuild) is over. Held in a box
+ * rather than passed per call because renewal fires from a proxy request or a
+ * background timer, long after the call that established the connection.
+ */
+interface GrantConfig {
+  grantType: 'authorization_code' | 'client_credentials';
+  clientId: string;
+  scopes?: string;
+  audience?: string;
 }
 
 function errorMessage(err: unknown): string {
@@ -93,18 +118,58 @@ export class OAuthMcpRegistry {
    * practice both callers assign `asMetadata` before any refresh can actually
    * fire, since refreshes only ever happen later, in response to a real
    * proxy request.
+   *
+   * `setGrant` is a second such box, for the same reason plus one more: the
+   * grant's `clientId` may not exist yet at construction time (DCR mints it, and
+   * `configure()` reads it back out of the keychain), so it cannot be a
+   * constructor argument. Leaving it unset keeps the historical behavior —
+   * renewal via the authorization-code refresh token.
    */
-  private buildPair(serverName: string): { flow: OAuthMcpFlow; tokenStore: OAuthTokenStore; setAsMetadata: (m: OAuthASMetadata) => void } {
+  private buildPair(serverName: string): {
+    flow: OAuthMcpFlow;
+    tokenStore: OAuthTokenStore;
+    setAsMetadata: (m: OAuthASMetadata) => void;
+    setGrant: (g: GrantConfig) => void;
+  } {
     let asMetadata: OAuthASMetadata | undefined;
+    let grant: GrantConfig | undefined;
     let flow: OAuthMcpFlow;
-    const tokenStore: OAuthTokenStore = new OAuthTokenStore(this.host.secretStorage, (name: string): Promise<TokenSet> => {
-      if (!asMetadata) return Promise.reject(new Error(`No cached authorization-server metadata for "${name}"; re-authorize in Settings.`));
-      return flow.refresh(name, asMetadata);
-    });
+    const tokenStore: OAuthTokenStore = new OAuthTokenStore(
+      this.host.secretStorage,
+      (name: string): Promise<TokenSet> => {
+        if (!asMetadata) return Promise.reject(new Error(`No cached authorization-server metadata for "${name}"; re-authorize in Settings.`));
+        // A client_credentials server has no refresh token to present, so
+        // "renewal" means minting a brand-new token from the client's own
+        // credentials — the same call that established the connection.
+        if (grant?.grantType === 'client_credentials') {
+          const clientSecret = tokenStore.getClientSecret(name);
+          if (!clientSecret) {
+            return Promise.reject(new Error(
+              `No client secret in the keychain for "${name}", so its token cannot be renewed. Reconnect it in Settings.`,
+            ));
+          }
+          return flow.clientCredentials({
+            serverName: name,
+            clientId: grant.clientId,
+            clientSecret,
+            asMetadata,
+            scopes: grant.scopes,
+            audience: grant.audience,
+          });
+        }
+        return flow.refresh(name, asMetadata);
+      },
+      () => grant?.grantType === 'client_credentials',
+    );
     // Must be the requestUrl-backed fetch, not the renderer's: see
     // src/requestUrlFetch.ts. `this.host.fetchFn` lets tests inject a stub.
     flow = new OAuthMcpFlow(tokenStore, this.host.openUrl, this.host.fetchFn ?? createRequestUrlFetch());
-    return { flow, tokenStore, setAsMetadata: (m: OAuthASMetadata) => { asMetadata = m; } };
+    return {
+      flow,
+      tokenStore,
+      setAsMetadata: (m: OAuthASMetadata) => { asMetadata = m; },
+      setGrant: (g: GrantConfig) => { grant = g; },
+    };
   }
 
   private buildState(name: string, clientId: string, hasClientSecret: boolean, asMetadata: OAuthASMetadata, proxy: OAuthMcpProxy, tokens: TokenSet, status: OAuthMcpState['status']): OAuthMcpState {
@@ -152,9 +217,15 @@ export class OAuthMcpRegistry {
         const tokens = probe.getCurrentTokens(name);
         if (!tokens) continue; // Never authorized (or already cleared) — nothing to rebuild.
 
-        const { flow, tokenStore, setAsMetadata } = this.buildPair(name);
+        const { flow, tokenStore, setAsMetadata, setGrant } = this.buildPair(name);
         const asMetadata = await flow.discoverAS(entry.authorizationServerUrl ?? entry.url);
         setAsMetadata(asMetadata);
+        setGrant({
+          grantType: entry.grantType ?? 'authorization_code',
+          clientId: tokenStore.getClientId(name) ?? entry.clientId ?? '',
+          scopes: entry.scopes,
+          audience: entry.audience,
+        });
 
         const proxy = new OAuthMcpProxy(name, entry.url, {
           getAccessToken: (n) => tokenStore.getAccessToken(n),
@@ -171,13 +242,22 @@ export class OAuthMcpRegistry {
         // until the token expires and the failure surfaces as a mystery logout.
         const storedSecret = tokenStore.getClientSecret(name);
         const secretMissing = entry.hasClientSecret === true && storedSecret === undefined;
+        // An expired access token is only a problem if nothing can renew it. The
+        // authorization-code grant needs a refresh token for that;
+        // client_credentials needs only the secret it already has, so an expired
+        // token there is routine and self-healing — reporting it as 'needs-auth'
+        // would point the user at a consent screen that does not exist.
+        const canRenew = entry.grantType === 'client_credentials'
+          ? storedSecret !== undefined
+          : !!tokens.refreshToken;
         const status: OAuthMcpState['status'] = secretMissing
           ? 'needs-auth'
-          : (!accessExpired || tokens.refreshToken) ? 'connected' : 'needs-auth';
+          : (!accessExpired || canRenew) ? 'connected' : 'needs-auth';
 
         this.connections.set(name, { flow, tokenStore, proxy, asMetadata });
         settings.oauthMcpState[name] = {
           ...this.buildState(name, clientId, storedSecret !== undefined, asMetadata, proxy, tokens, status),
+          ...(entry.grantType ? { grantType: entry.grantType } : {}),
           ...(secretMissing
             ? { errorMessage: `The client secret for "${name}" is no longer in the keychain. Reconnect it in Settings to restore token refresh.` }
             : {}),
@@ -190,6 +270,7 @@ export class OAuthMcpRegistry {
           serverName: name,
           clientId: previous?.clientId ?? entry.clientId ?? '',
           hasClientSecret: previous?.hasClientSecret ?? entry.hasClientSecret ?? false,
+          ...(entry.grantType ? { grantType: entry.grantType } : {}),
           asMetadataUrl: previous?.asMetadataUrl ?? entry.authorizationServerUrl ?? '',
           proxyPort: 0,
           status: 'error',
@@ -238,6 +319,10 @@ export class OAuthMcpRegistry {
    * interactive consent via the injected `openUrl`, then persistence and
    * proxy start. Any failure along the way leaves no partial
    * `oauthMcpServers`/`oauthMcpState` entry and no stray running proxy.
+   *
+   * With `grantType: 'client_credentials'` the consent leg is replaced by a
+   * single token request; DCR is unreachable (the grant requires a `clientId`),
+   * and nothing opens a browser.
    */
   async registerServer(entry: OAuthRegistrationEntry): Promise<McpRegistrationResult> {
     const settings = this.host.getSettings();
@@ -245,7 +330,23 @@ export class OAuthMcpRegistry {
       return { success: false, status: 'conflict', message: `An MCP server named "${entry.name}" already exists.` };
     }
 
-    const { flow, tokenStore, setAsMetadata } = this.buildPair(entry.name);
+    const grantType = entry.grantType ?? 'authorization_code';
+    // Enforced here rather than in `mcpRegistrationSchema` because the Settings
+    // modal keeps the typed literal out of the entry it validates — see the
+    // matching comment in mcpServerStore.ts. Both entry points reach this line,
+    // and this is the only place holding the resolved secret, so it is the one
+    // place the rule can actually be checked. Failing before any network call
+    // also turns Auth0's opaque "access_denied: Unauthorized" into a named field.
+    if (grantType === 'client_credentials') {
+      if (!entry.clientId) {
+        return { success: false, status: 'failed', message: `"${entry.name}" uses the client_credentials grant, which requires a client ID: there is no browser leg, so the client cannot be registered on the fly.` };
+      }
+      if (!entry.clientSecret) {
+        return { success: false, status: 'failed', message: `"${entry.name}" uses the client_credentials grant, which requires a client secret — a machine-to-machine client cannot be public.` };
+      }
+    }
+
+    const { flow, tokenStore, setAsMetadata, setGrant } = this.buildPair(entry.name);
 
     let asMetadata: OAuthASMetadata;
     try {
@@ -329,14 +430,39 @@ export class OAuthMcpRegistry {
     // `tokenStore.clear()` in every failure branch below wipes it again.
     if (clientSecret !== undefined) tokenStore.storeClientSecret(entry.name, clientSecret);
 
+    // Set before the first token call so a renewal triggered by an early proxy
+    // request cannot fall through to the authorization-code refresh path.
+    setGrant({ grantType, clientId, scopes: effectiveScopes, audience: entry.audience });
+
     let tokens: TokenSet;
-    try {
-      tokens = await flow.authorize({ serverName: entry.name, clientId, clientSecret, asMetadata, scopes: effectiveScopes, redirectUri: entry.redirectUri });
-    } catch (err) {
-      tokenStore.clear(entry.name);
-      const message = errorMessage(err);
-      const cancelled = /denied/i.test(message);
-      return { success: false, status: cancelled ? 'cancelled' : 'failed', message: `OAuth authorization ${cancelled ? 'was denied' : 'failed'} for "${entry.name}": ${message}` };
+    if (grantType === 'client_credentials') {
+      try {
+        // clientSecret is non-undefined here: the guard at the top of this method
+        // rejects a client_credentials entry without one, and the DCR block above
+        // is unreachable for this grant (it requires clientId).
+        tokens = await flow.clientCredentials({
+          serverName: entry.name,
+          clientId,
+          clientSecret: clientSecret!,
+          asMetadata,
+          scopes: effectiveScopes,
+          audience: entry.audience,
+        });
+      } catch (err) {
+        tokenStore.clear(entry.name);
+        // No 'cancelled' status is possible: there is no user in this flow to
+        // decline anything, so every failure is a configuration or network fault.
+        return { success: false, status: 'failed', message: `Client-credentials token request failed for "${entry.name}": ${errorMessage(err)}` };
+      }
+    } else {
+      try {
+        tokens = await flow.authorize({ serverName: entry.name, clientId, clientSecret, asMetadata, scopes: effectiveScopes, redirectUri: entry.redirectUri, audience: entry.audience });
+      } catch (err) {
+        tokenStore.clear(entry.name);
+        const message = errorMessage(err);
+        const cancelled = /denied/i.test(message);
+        return { success: false, status: cancelled ? 'cancelled' : 'failed', message: `OAuth authorization ${cancelled ? 'was denied' : 'failed'} for "${entry.name}": ${message}` };
+      }
     }
 
     const proxy = new OAuthMcpProxy(entry.name, entry.url, {
@@ -363,9 +489,16 @@ export class OAuthMcpRegistry {
       ...(clientSecret !== undefined ? { hasClientSecret: true } : {}),
       authorizationServerUrl: entry.authorizationServerUrl,
       redirectUri: entry.redirectUri,
+      // Only persisted when non-default, so an authorization-code entry written
+      // now is byte-identical to one written before this grant existed.
+      ...(entry.grantType ? { grantType: entry.grantType } : {}),
+      ...(entry.audience !== undefined ? { audience: entry.audience } : {}),
     };
     settings.oauthMcpServers[entry.name] = storedEntry;
-    settings.oauthMcpState[entry.name] = this.buildState(entry.name, clientId, clientSecret !== undefined, asMetadata, proxy, tokens, 'connected');
+    settings.oauthMcpState[entry.name] = {
+      ...this.buildState(entry.name, clientId, clientSecret !== undefined, asMetadata, proxy, tokens, 'connected'),
+      ...(entry.grantType ? { grantType: entry.grantType } : {}),
+    };
 
     try {
       await this.host.save();

@@ -31,7 +31,7 @@ import {
   selectClientAuthMethod,
   type OAuthServerInfo,
 } from '@modelcontextprotocol/sdk/client/auth.js';
-import type { AuthorizationServerMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { OAuthTokensSchema, type AuthorizationServerMetadata, type OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { checkResourceAllowed, resourceUrlFromServerUrl } from '@modelcontextprotocol/sdk/shared/auth-utils.js';
 import type { TokenSet } from './OAuthTokenStore';
 import { parseRedirectUri, type ParsedRedirectUri } from './mcpServerStore';
@@ -309,6 +309,21 @@ export class OAuthMcpFlow {
      * `127.0.0.1` and get it rejected.
      */
     redirectUri?: string;
+    /**
+     * `audience` parameter on the authorization request (Auth0's non-standard
+     * way of asking for a token scoped to a specific API — see
+     * `clientCredentials`'s doc comment). Sent only here, not on the token
+     * exchange in `handleCallback()`: Auth0's own docs describe `audience` as
+     * an `/authorize`-time parameter for the authorization_code grant — the
+     * issued code already encodes the requested audience, so the token
+     * endpoint has nothing new to be told. This mirrors RFC 8707 `resource`
+     * for shape (both travel on the authorization URL), but not for
+     * repetition at exchange: unlike `resource` (RFC 8707 §2, and enforced by
+     * some ASes that reject a token request which omits it), the SDK's
+     * `exchangeAuthorization()` has no `audience` parameter at all, so there
+     * is no SDK-supported way to repeat it even if a server wanted that.
+     */
+    audience?: string;
   }): Promise<TokenSet> {
     const { verifier, challenge } = generatePkcePair();
     const state = randomBytes(16).toString('hex');
@@ -383,6 +398,9 @@ export class OAuthMcpFlow {
         // identical value — see handleCallback().
         const resource = resourceIndicatorFor(params.asMetadata);
         if (resource) authorizationUrl.searchParams.set('resource', resource.href);
+        // Auth0-style audience — see the `audience` param's doc comment above
+        // for why this is authorize-only and not repeated at token exchange.
+        if (params.audience) authorizationUrl.searchParams.set('audience', params.audience);
 
         timeoutHandle = setTimeout(
           () => finish({ ok: false, error: new Error('OAuth authorization timed out waiting for consent.') }),
@@ -481,9 +499,91 @@ export class OAuthMcpFlow {
       // Keeps the refreshed access token scoped to the same audience the
       // original grant was issued for.
       resource: resourceIndicatorFor(asMetadata),
+      // No `audience` here by design, unlike `authorize()`. Auth0 (the
+      // parameter's origin) reissues a refreshed token for whatever audience
+      // the original authorization granted, without needing it repeated —
+      // and the SDK's `refreshAuthorization()` has no parameter to repeat it
+      // through even if a server wanted that (only `resource` is supported,
+      // matching `exchangeAuthorization()`).
     });
     const tokenSet = toTokenSet(tokens);
     await this.tokenStore.store(serverName, tokenSet);
+    return tokenSet;
+  }
+
+  /**
+   * RFC 6749 §4.4 client-credentials grant: mint an access token by
+   * authenticating as the client itself, with no user and no browser.
+   *
+   * Used when the authorization server will not register a loopback callback —
+   * common on production tenants — or when the MCP server represents a service
+   * rather than a signed-in person. Every interactive step is absent by
+   * construction, not by flag: no PKCE pair, no `state`, no callback listener,
+   * no `openUrl`, and no authorization URL is ever built. That matters beyond
+   * tidiness, because a guessed authorization endpoint is what turns a
+   * misconfigured server into an opaque provider error page in a popup.
+   *
+   * `audience` is Auth0's (and several others') way of asking for a token
+   * scoped to a specific API; RFC 8707's `resource` is the standards-track
+   * equivalent and is sent alongside it whenever the MCP server advertises one,
+   * since providers ignore the parameter they don't implement.
+   *
+   * No refresh token is stored even if the AS returns one: RFC 6749 §4.4.3 says
+   * it SHOULD NOT, and re-minting from the secret is strictly better than
+   * refreshing — it needs no extra state and cannot be invalidated separately.
+   * `OAuthTokenStore` reads the absence of a refresh token as "re-mint", so this
+   * is what keeps expiry recoverable without a human.
+   */
+  async clientCredentials(params: {
+    serverName: string;
+    clientId: string;
+    clientSecret: string;
+    asMetadata: OAuthASMetadata;
+    scopes?: string;
+    audience?: string;
+  }): Promise<TokenSet> {
+    const asMeta = params.asMetadata.authorizationServerMetadata;
+    // Fail fast rather than guessing `<origin>/token`. A server that publishes no
+    // metadata is a configuration problem the user can fix in one field, and
+    // saying so beats a 404 or a WAF 403 from a URL we invented.
+    const tokenEndpoint = asMeta?.token_endpoint;
+    if (!tokenEndpoint) {
+      throw new Error(
+        `No token endpoint found for "${params.serverName}": ${params.asMetadata.authorizationServerUrl} publishes no OAuth `
+        + 'authorization-server metadata. Set the authorization server URL to the provider\'s issuer '
+        + '— the host that serves /.well-known/openid-configuration or /.well-known/oauth-authorization-server.',
+      );
+    }
+
+    const headers = new Headers({
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json',
+    });
+    const body = new URLSearchParams({ grant_type: 'client_credentials' });
+    if (params.scopes) body.set('scope', params.scopes);
+    if (params.audience) body.set('audience', params.audience);
+    const resource = resourceIndicatorFor(params.asMetadata);
+    if (resource) body.set('resource', resource.href);
+
+    // Same negotiation as every other token-endpoint call in this module: let the
+    // AS's advertised methods decide between Basic and a form parameter.
+    const method = selectClientAuthMethod(
+      clientInformationFor(params.clientId, params.clientSecret),
+      asMeta?.token_endpoint_auth_methods_supported ?? [],
+    );
+    if (method === 'client_secret_basic') {
+      headers.set('Authorization', `Basic ${btoa(`${params.clientId}:${params.clientSecret}`)}`);
+    } else {
+      body.set('client_id', params.clientId);
+      if (method === 'client_secret_post') body.set('client_secret', params.clientSecret);
+    }
+
+    const response = await this.fetchFn(tokenEndpoint, { method: 'POST', headers, body });
+    if (!response.ok) throw await parseErrorResponse(response);
+    const tokens = OAuthTokensSchema.parse(await response.json());
+
+    const tokenSet: TokenSet = { ...toTokenSet(tokens), refreshToken: undefined };
+    await this.tokenStore.store(params.serverName, tokenSet);
     return tokenSet;
   }
 

@@ -5,6 +5,7 @@ const discoverASMock = vi.fn();
 const registerClientMock = vi.fn();
 const authorizeMock = vi.fn();
 const flowRefreshMock = vi.fn();
+const clientCredentialsMock = vi.fn();
 const revokeMock = vi.fn();
 
 vi.mock('../../src/OAuthMcpFlow', () => ({
@@ -16,6 +17,7 @@ vi.mock('../../src/OAuthMcpFlow', () => ({
       registerClient: registerClientMock,
       authorize: authorizeMock,
       refresh: flowRefreshMock,
+      clientCredentials: clientCredentialsMock,
       revoke: revokeMock,
     };
   }),
@@ -27,8 +29,17 @@ const capabilityTokenForMock = vi.fn();
 const proxyRetainThreadsMock = vi.fn();
 let proxyUrl = 'http://127.0.0.1:5555/';
 
+/**
+ * The third constructor argument is the token accessor the proxy calls on every
+ * request. Capturing it is the only seam onto the registry's private token
+ * store, and therefore the only way to exercise the renewal path a running
+ * server actually takes.
+ */
+const proxyTokenAccessors: Array<{ getAccessToken(name: string): Promise<string | null>; refresh(name: string): Promise<unknown> }> = [];
+
 vi.mock('../../src/OAuthMcpProxy', () => ({
-  OAuthMcpProxy: vi.fn().mockImplementation(function OAuthMcpProxy() {
+  OAuthMcpProxy: vi.fn().mockImplementation(function OAuthMcpProxy(_name: string, _url: string, tokens: { getAccessToken(name: string): Promise<string | null>; refresh(name: string): Promise<unknown> }) {
+    proxyTokenAccessors.push(tokens);
     return {
       start: proxyStartMock,
       stop: proxyStopMock,
@@ -95,11 +106,14 @@ function makeHost() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  proxyTokenAccessors.length = 0;
   proxyUrl = 'http://127.0.0.1:5555/';
   discoverASMock.mockResolvedValue(fakeAsMetadata());
   registerClientMock.mockResolvedValue({ clientId: 'dcr-client-id' });
   authorizeMock.mockResolvedValue({ accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3600_000 });
   flowRefreshMock.mockResolvedValue({ accessToken: 'at-2', refreshToken: 'rt-1', expiresAt: Date.now() + 3600_000 });
+  // No refresh token: RFC 6749 §4.4.3 says the client_credentials grant SHOULD NOT issue one.
+  clientCredentialsMock.mockResolvedValue({ accessToken: 'm2m-at', expiresAt: Date.now() + 86_400_000 });
   revokeMock.mockResolvedValue(undefined);
   proxyStartMock.mockResolvedValue(undefined);
   proxyStopMock.mockResolvedValue(undefined);
@@ -198,6 +212,119 @@ describe('OAuthMcpRegistry.registerServer', () => {
 
     const tokenStore = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
     expect(tokenStore.getClientSecret('confidential')).toBeUndefined();
+  });
+
+  /**
+   * The whole point of the grant: no browser, no consent screen, no loopback
+   * listener. `authorize` never being called is the assertion that matters here —
+   * `auth.bankrate.com` will not register a loopback redirect URI at all.
+   */
+  it('mints a token from client credentials without ever opening a browser', async () => {
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({
+      name: 'bankrate',
+      url: 'https://products-mcp.bankrate.com/mcp',
+      grantType: 'client_credentials',
+      clientId: 'reTmVHKuhRrGiXOo3lqvS4zMUxagdXZC',
+      clientSecret: 'shh-abc',
+      audience: 'bankrate-api',
+    });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(authorizeMock).not.toHaveBeenCalled();
+    expect(registerClientMock).not.toHaveBeenCalled();
+    expect(host.openUrl).not.toHaveBeenCalled();
+    expect(clientCredentialsMock).toHaveBeenCalledWith(expect.objectContaining({
+      serverName: 'bankrate',
+      clientId: 'reTmVHKuhRrGiXOo3lqvS4zMUxagdXZC',
+      clientSecret: 'shh-abc',
+      audience: 'bankrate-api',
+    }));
+    expect(proxyStartMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists grantType and audience so a restart reconnects the same way', async () => {
+    const { host, settings } = makeHost();
+
+    await new OAuthMcpRegistry(host).registerServer({
+      name: 'bankrate',
+      url: 'https://products-mcp.bankrate.com/mcp',
+      grantType: 'client_credentials',
+      clientId: 'm2m',
+      clientSecret: 'shh-abc',
+      audience: 'bankrate-api',
+    });
+
+    expect(settings.oauthMcpServers.bankrate).toMatchObject({
+      grantType: 'client_credentials', audience: 'bankrate-api', clientId: 'm2m', hasClientSecret: true,
+    });
+    expect(settings.oauthMcpState.bankrate).toMatchObject({ status: 'connected', grantType: 'client_credentials' });
+    // No refresh token by construction, yet still connected — the secret is the renewal material.
+    expect(settings.oauthMcpState.bankrate.hasRefreshToken).toBe(false);
+    expect(JSON.stringify(settings.oauthMcpServers.bankrate)).not.toContain('shh-abc');
+  });
+
+  /**
+   * Backward compatibility is deliberate: an authorization_code entry written
+   * after this feature must be byte-identical to one written before it, or a
+   * downgrade would read fields it does not understand.
+   */
+  it('writes no grantType or audience key for the default authorization_code grant', async () => {
+    const { host, settings } = makeHost();
+
+    await new OAuthMcpRegistry(host).registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/' });
+
+    expect(Object.keys(settings.oauthMcpServers.vercel)).not.toContain('grantType');
+    expect(Object.keys(settings.oauthMcpServers.vercel)).not.toContain('audience');
+    expect(Object.keys(settings.oauthMcpState.vercel)).not.toContain('grantType');
+  });
+
+  it('refuses a client_credentials registration with no clientId, before any network call', async () => {
+    const { host, settings } = makeHost();
+
+    const result = await new OAuthMcpRegistry(host).registerServer({
+      name: 'bankrate', url: 'https://products-mcp.bankrate.com/mcp', grantType: 'client_credentials', clientSecret: 'shh-abc',
+    });
+
+    expect(result).toMatchObject({ success: false, status: 'failed' });
+    expect(result.message).toMatch(/client ID/i);
+    expect(discoverASMock).not.toHaveBeenCalled();
+    expect(settings.oauthMcpServers.bankrate).toBeUndefined();
+  });
+
+  /** There is no such thing as a public machine-to-machine client. */
+  it('refuses a client_credentials registration with no clientSecret', async () => {
+    const { host, settings } = makeHost();
+
+    const result = await new OAuthMcpRegistry(host).registerServer({
+      name: 'bankrate', url: 'https://products-mcp.bankrate.com/mcp', grantType: 'client_credentials', clientId: 'm2m',
+    });
+
+    expect(result).toMatchObject({ success: false, status: 'failed' });
+    expect(result.message).toMatch(/client secret/i);
+    expect(discoverASMock).not.toHaveBeenCalled();
+    expect(settings.oauthMcpServers.bankrate).toBeUndefined();
+  });
+
+  /**
+   * `cancelled` means a human declined at a consent screen. There is no human
+   * here, so a token failure is always `failed` — reporting it as cancelled
+   * would suggest retrying the same credentials will help.
+   */
+  it('reports a rejected client_credentials token request as failed, never cancelled', async () => {
+    clientCredentialsMock.mockRejectedValue(new Error('Token request failed: access_denied'));
+    const { host, settings } = makeHost();
+
+    const result = await new OAuthMcpRegistry(host).registerServer({
+      name: 'bankrate', url: 'https://products-mcp.bankrate.com/mcp', grantType: 'client_credentials', clientId: 'm2m', clientSecret: 'wrong',
+    });
+
+    expect(result).toMatchObject({ success: false, status: 'failed' });
+    expect(settings.oauthMcpServers.bankrate).toBeUndefined();
+    const tokenStore = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    expect(tokenStore.getClientSecret('bankrate')).toBeUndefined();
   });
 
   it('rejects a name that is already registered', async () => {
@@ -303,6 +430,34 @@ describe('OAuthMcpRegistry.registerServer', () => {
     );
     expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ redirectUri: undefined }));
     expect(settings.oauthMcpServers.vercel.redirectUri).toBeUndefined();
+  });
+
+  /**
+   * `audience` (Auth0's API identifier) is a general `oauth`-entry field with
+   * no grant-type restriction in `mcpRegistrationSchema` — it must thread
+   * through to `authorize()` for the default `authorization_code` grant too,
+   * not just `clientCredentials()` (covered separately below), or setting it
+   * on an interactive entry silently does nothing.
+   */
+  it('threads a configured audience through to authorize() for the authorization_code grant', async () => {
+    const { host, settings } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({ name: 'bankrate', url: 'https://mcp.bankrate.com/', audience: 'bankrate-api' });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ audience: 'bankrate-api' }));
+    expect(settings.oauthMcpServers.bankrate).toMatchObject({ audience: 'bankrate-api' });
+  });
+
+  it('does not pass audience to authorize() when none is configured', async () => {
+    const { host } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+
+    const result = await registry.registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/' });
+
+    expect(result).toMatchObject({ success: true, status: 'registered' });
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ audience: undefined }));
   });
 
   /**
@@ -487,6 +642,91 @@ describe('OAuthMcpRegistry.configure', () => {
     await registry.configure();
 
     expect(settings.oauthMcpState.vercel).toMatchObject({ status: 'needs-auth' });
+  });
+
+  /**
+   * The sibling of the test directly above. An expired token with no refresh
+   * token is *not* broken for this grant — the keychain secret is the renewal
+   * material, so the right answer is `connected`, not `needs-auth`.
+   */
+  it('reconnects an expired client_credentials server as connected, because its secret can re-mint', async () => {
+    const { host, settings } = makeHost();
+    settings.oauthMcpServers.bankrate = {
+      url: 'https://products-mcp.bankrate.com/mcp',
+      grantType: 'client_credentials',
+      audience: 'bankrate-api',
+      clientId: 'm2m',
+      hasClientSecret: true,
+    };
+    const tokenStore = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    tokenStore.storeClientId('bankrate', 'm2m');
+    tokenStore.storeClientSecret('bankrate', 'shh-abc');
+    tokenStore.store('bankrate', { accessToken: 'at-1', expiresAt: Date.now() - 1000 });
+
+    await new OAuthMcpRegistry(host).configure();
+
+    expect(settings.oauthMcpState.bankrate).toMatchObject({ status: 'connected', grantType: 'client_credentials' });
+    expect(proxyStartMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('flags needs-auth for a client_credentials server whose secret is gone from the keychain', async () => {
+    const { host, settings } = makeHost();
+    settings.oauthMcpServers.bankrate = {
+      url: 'https://products-mcp.bankrate.com/mcp', grantType: 'client_credentials', clientId: 'm2m', hasClientSecret: true,
+    };
+    const tokenStore = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    tokenStore.storeClientId('bankrate', 'm2m');
+    tokenStore.store('bankrate', { accessToken: 'at-1', expiresAt: Date.now() + 3600_000 });
+
+    await new OAuthMcpRegistry(host).configure();
+
+    expect(settings.oauthMcpState.bankrate).toMatchObject({ status: 'needs-auth', hasClientSecret: false });
+  });
+
+  /**
+   * The renewal path a client_credentials server actually takes at runtime: the
+   * token store's refresh hook must route to `clientCredentials`, not `refresh`,
+   * which has no refresh token to present and would throw.
+   */
+  it('renews a client_credentials server through clientCredentials rather than refresh', async () => {
+    const { host, settings } = makeHost();
+    settings.oauthMcpServers.bankrate = {
+      url: 'https://products-mcp.bankrate.com/mcp',
+      grantType: 'client_credentials',
+      audience: 'bankrate-api',
+      clientId: 'm2m',
+      hasClientSecret: true,
+    };
+    const seed = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    seed.storeClientId('bankrate', 'm2m');
+    seed.storeClientSecret('bankrate', 'shh-abc');
+    // Inside the 5-minute proactive-renewal window, so the next read renews.
+    seed.store('bankrate', { accessToken: 'at-1', expiresAt: Date.now() + 60_000 });
+
+    await new OAuthMcpRegistry(host).configure();
+
+    // Exactly what the proxy does on the next request it serves.
+    await expect(proxyTokenAccessors[0].getAccessToken('bankrate')).resolves.toBe('m2m-at');
+
+    expect(flowRefreshMock).not.toHaveBeenCalled();
+    expect(clientCredentialsMock).toHaveBeenCalledWith(expect.objectContaining({
+      serverName: 'bankrate', clientId: 'm2m', clientSecret: 'shh-abc', audience: 'bankrate-api',
+    }));
+  });
+
+  /** The authorization-code sibling must keep taking the refresh-token path. */
+  it('still renews an authorization_code server through refresh, not clientCredentials', async () => {
+    const { host, settings } = makeHost();
+    settings.oauthMcpServers.vercel = { url: 'https://mcp.vercel.com/' };
+    const seed = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    seed.storeClientId('vercel', 'client-abc');
+    seed.store('vercel', { accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 60_000 });
+
+    await new OAuthMcpRegistry(host).configure();
+    await expect(proxyTokenAccessors[0].getAccessToken('vercel')).resolves.toBe('at-2');
+
+    expect(flowRefreshMock).toHaveBeenCalledTimes(1);
+    expect(clientCredentialsMock).not.toHaveBeenCalled();
   });
 
   it('reconnects a confidential client and reports it as one', async () => {

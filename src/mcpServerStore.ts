@@ -156,17 +156,47 @@ export const mcpRegistrationSchema = z.object({
     'required by providers (Slack) that register one exact redirect URI. Must be http on a loopback host with an ' +
     'explicit port. Omit to use an ephemeral 127.0.0.1 port.',
   ),
+  /**
+   * `oauth` only: which grant to use. Omitted means `authorization_code` — the
+   * interactive PKCE flow every existing registration uses, so leaving this
+   * unset changes nothing.
+   *
+   * `client_credentials` is the machine-to-machine grant (RFC 6749 §4.4): the
+   * plugin authenticates as itself, so there is no browser, no redirect URI and
+   * no refresh token. Pick it when the authorization server will not register a
+   * loopback callback, or when the MCP server represents a service rather than
+   * a signed-in user.
+   */
+  grantType: z.enum(['authorization_code', 'client_credentials']).optional().describe(
+    'oauth only. Which OAuth grant to use. Omit for the default "authorization_code" (interactive: ' +
+    'PKCE plus a browser consent screen). Use "client_credentials" for a machine-to-machine client ' +
+    'with no user to sign in — it never opens a browser and requires both clientId and clientSecret.',
+  ),
+  /**
+   * `oauth` only: the `audience` parameter on the token request. Auth0 (and
+   * several others) require it to mint an access token for a specific API
+   * rather than an opaque token only its own userinfo endpoint accepts.
+   *
+   * Unlike `clientSecret` this is nonsecret configuration — it names an API,
+   * carries no authority on its own, and is safe to pass as a literal.
+   */
+  audience: z.string().trim().min(1).optional().describe(
+    'oauth only. Value of the "audience" parameter on the token request, naming the API the token ' +
+    'is minted for (e.g. an Auth0 API identifier such as "bankrate-api"). Not a secret — pass the ' +
+    'literal value, not a ${NAME} placeholder. Omit unless the provider requires it.',
+  ),
 }).strict().superRefine((entry, ctx) => {
   const invalid = () => ctx.addIssue({ code: 'custom', message: 'Invalid MCP configuration. Credentials must use ${NAME} placeholders; use request_secret to store them.' });
   const credentialKey = /authorization|cookie|token|secret|password|credential|api[-_]?key/i;
   const placeholder = /^(?:Bearer\s+|Basic\s+)?\$\{[A-Z_][A-Z0-9_]*\}$/i;
-  // scopes/tools/clientId/clientSecret/authorizationServerUrl/redirectUri only make
-  // sense for an oauth entry; a non-oauth entry carrying any of them is malformed
-  // input, not a silently-ignored extra.
+  // scopes/tools/clientId/clientSecret/authorizationServerUrl/redirectUri/grantType/
+  // audience only make sense for an oauth entry; a non-oauth entry carrying any of
+  // them is malformed input, not a silently-ignored extra.
   const oauthOnlyFieldsSet = entry.scopes !== undefined || entry.tools !== undefined
     || entry.clientId !== undefined || entry.clientSecret !== undefined
     || entry.authorizationServerUrl !== undefined
-    || entry.redirectUri !== undefined;
+    || entry.redirectUri !== undefined
+    || entry.grantType !== undefined || entry.audience !== undefined;
   if (entry.type === 'stdio') {
     if (!entry.command || entry.url !== undefined || entry.headers !== undefined || oauthOnlyFieldsSet) invalid();
     for (let i = 0; i < (entry.args?.length ?? 0); i++) {
@@ -198,6 +228,34 @@ export const mcpRegistrationSchema = z.object({
         message: 'clientSecret must be a ${NAME} placeholder naming a secret stored with request_secret, not a literal secret.',
         path: ['clientSecret'],
       });
+    }
+    if (entry.grantType === 'client_credentials') {
+      if (entry.clientId === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'clientId is required for the client_credentials grant: there is no browser leg, so the client cannot be registered on the fly.',
+          path: ['clientId'],
+        });
+      }
+      // Deliberately NOT checked here: that a client_credentials entry carries a
+      // clientSecret. There is no such thing as a public machine-to-machine
+      // client, so the requirement is real — but this schema is the wrong place
+      // to enforce it. The Settings modal keeps the typed secret out of the entry
+      // it validates (see SettingsTab.renderOAuthForm) precisely because a
+      // literal is rejected two blocks up, so a rule here would make the schema
+      // unsatisfiable from the UI. `OAuthMcpRegistry.registerServer()` enforces
+      // it instead: both entry points converge there, and it is the only place
+      // that actually holds the resolved literal.
+      //
+      // No browser leg means nothing ever redirects anywhere. Accepting a
+      // redirectUri would imply a callback that is never registered or listened on.
+      if (entry.redirectUri !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'redirectUri does not apply to the client_credentials grant: no browser is opened and no callback is listened for.',
+          path: ['redirectUri'],
+        });
+      }
     }
   } else {
     if (!entry.url || entry.command !== undefined || entry.args !== undefined || entry.env !== undefined || oauthOnlyFieldsSet) invalid();

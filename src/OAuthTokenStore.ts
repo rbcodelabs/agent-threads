@@ -47,6 +47,21 @@ export class OAuthTokenStore {
   constructor(
     private readonly secretStorage: SecretStorageLike,
     private readonly refreshFn: (serverName: string) => Promise<TokenSet>,
+    /**
+     * Whether `refreshFn` can produce a new token set for `serverName` even
+     * though no refresh token is stored.
+     *
+     * False for the authorization-code grant, where a refresh token is the only
+     * thing that can renew without sending the user back through consent — so
+     * its absence means "there is nothing to try".
+     *
+     * True for the client_credentials grant, which has no refresh token by
+     * construction (RFC 6749 §4.4.3: "A refresh token SHOULD NOT be included")
+     * and instead re-mints from the client's own credentials. Without this hook
+     * `getAccessToken()` would hand back an expired token forever, since its
+     * no-refresh-token branch predates any grant that renews without one.
+     */
+    private readonly canRenewWithoutRefreshToken: (serverName: string) => boolean = () => false,
   ) {}
 
   /** Write tokens to the keychain after a successful auth or refresh, and (re)schedule proactive refresh. */
@@ -101,7 +116,9 @@ export class OAuthTokenStore {
     if (!current) return null;
     const nearExpiry = current.expiresAt !== undefined && current.expiresAt - Date.now() < PROACTIVE_REFRESH_WINDOW_MS;
     if (!nearExpiry) return current.accessToken;
-    if (!current.refreshToken) return current.accessToken; // Nothing to refresh with; let a 401 surface the real problem.
+    // Nothing to renew with; let a 401 surface the real problem. A grant that
+    // re-mints from client credentials rather than a refresh token opts out here.
+    if (!current.refreshToken && !this.canRenewWithoutRefreshToken(serverName)) return current.accessToken;
     try {
       const refreshed = await this.refresh(serverName);
       return refreshed.accessToken;

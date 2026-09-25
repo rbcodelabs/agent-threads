@@ -2110,6 +2110,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const parsed = mcpRegistrationSchema.safeParse(input);
     // The OAuth consent round-trip needs an interactive human even more than a
     // static server registration does, so it shares the exact same guard.
+    //
+    // The guard stays in force for `client_credentials` too, even though that
+    // grant opens no consent screen and needs nobody present: what it gates is
+    // the host's confirmation of a new MCP server, which grants tools to every
+    // future thread. Exempting the non-interactive grant would let a scheduled
+    // thread register a server with no human ever seeing it.
     if (parsed.success && parsed.data.type === 'oauth') {
       if (!interactive) {
         return { success: false, status: 'unavailable', message: 'Interactive host confirmation is unavailable. Register this server from an interactive thread.' };
@@ -2147,6 +2153,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
         clientSecret,
         authorizationServerUrl: data.authorizationServerUrl,
         redirectUri: data.redirectUri,
+        grantType: data.grantType,
+        audience: data.audience,
       });
     }
     if (!this.registerMcpServerFn) {

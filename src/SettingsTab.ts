@@ -41,15 +41,21 @@ function formatOAuthDuration(ms: number): string {
 /** Status dot color + human-readable label for one OAuth MCP server row. */
 export function describeOAuthMcpStatus(state: OAuthMcpState | undefined): { label: string; tone: 'green' | 'yellow' | 'red' | 'grey' } {
   if (!state) return { label: 'Not configured', tone: 'grey' };
+  // A client_credentials connection renews itself from the stored secret with no
+  // user involved, so an approaching expiry is routine rather than something to
+  // warn about, and a broken one needs a new secret — not a trip through a
+  // consent screen that this grant never had.
+  const selfRenewing = state.grantType === 'client_credentials';
   if (state.status === 'connected') {
     if (state.accessTokenExpiresAt !== undefined) {
       const remaining = state.accessTokenExpiresAt - Date.now();
+      if (selfRenewing) return { label: `Connected · renews in ${formatOAuthDuration(remaining)}`, tone: 'green' };
       if (remaining < 15 * 60_000) return { label: 'Expires soon', tone: 'yellow' };
       return { label: `Connected · expires in ${formatOAuthDuration(remaining)}`, tone: 'green' };
     }
     return { label: 'Connected', tone: 'green' };
   }
-  return { label: 'Needs re-authorization', tone: 'red' };
+  return { label: selfRenewing ? 'Needs new credentials' : 'Needs re-authorization', tone: 'red' };
 }
 
 export function isWebViewerEnabled(app: App): boolean {
@@ -1050,7 +1056,10 @@ export class McpServerModal extends Modal {
   private renderOAuthForm(): void {
     const el = this.contentEl2;
 
-    el.createEl('p', {
+    // Kept generic because the sign-in sentence is false for the
+    // client_credentials grant, which opens no browser at all. The grant selector
+    // below carries the flow-specific explanation instead.
+    const introEl = el.createEl('p', {
       cls: 'ct-modal-desc',
       text:
         'Connecting opens the provider\'s sign-in page in the Web Viewer. Tokens are stored ' +
@@ -1067,6 +1076,11 @@ export class McpServerModal extends Modal {
       cls: 'ct-modal-input',
     });
 
+    el.createEl('label', { text: 'Grant type', cls: 'ct-modal-label' });
+    const grantSelect = el.createEl('select', { cls: 'ct-modal-input', attr: { 'aria-label': 'Grant type' } });
+    grantSelect.createEl('option', { text: 'Authorization code (sign in as yourself)', value: 'authorization_code' });
+    grantSelect.createEl('option', { text: 'Client credentials (machine-to-machine, no sign-in)', value: 'client_credentials' });
+
     el.createEl('label', { text: 'Scopes (optional, space-separated)', cls: 'ct-modal-label' });
     const scopesInput = el.createEl('input', {
       type: 'text',
@@ -1075,7 +1089,7 @@ export class McpServerModal extends Modal {
     });
 
     el.createEl('label', { text: 'Tool filter (optional)', cls: 'ct-modal-label' });
-    const filterModeSelect = el.createEl('select', { cls: 'ct-modal-input' });
+    const filterModeSelect = el.createEl('select', { cls: 'ct-modal-input', attr: { 'aria-label': 'Tool filter' } });
     filterModeSelect.createEl('option', { text: 'No filter', value: 'none' });
     filterModeSelect.createEl('option', { text: 'Allow only these', value: 'allow' });
     filterModeSelect.createEl('option', { text: 'Deny these', value: 'deny' });
@@ -1088,9 +1102,9 @@ export class McpServerModal extends Modal {
 
     const advanced = el.createEl('details');
     advanced.createEl('summary', { text: 'Advanced' });
-    advanced.createEl('label', { text: 'Client ID (skips Dynamic Client Registration)', cls: 'ct-modal-label' });
+    const clientIdLabel = advanced.createEl('label', { text: 'Client ID (skips Dynamic Client Registration)', cls: 'ct-modal-label' });
     const clientIdInput = advanced.createEl('input', { type: 'text', cls: 'ct-modal-input' });
-    advanced.createEl('label', { text: 'Client secret (only for confidential clients)', cls: 'ct-modal-label' });
+    const clientSecretLabel = advanced.createEl('label', { text: 'Client secret (only for confidential clients)', cls: 'ct-modal-label' });
     // `type=password` so the value is masked and browsers/Obsidian don't offer to
     // remember it. The typed literal is passed straight to registerServer(), which
     // puts it in the OS keychain — it is deliberately NOT added to `entry` below,
@@ -1100,12 +1114,46 @@ export class McpServerModal extends Modal {
     clientSecretInput.autocomplete = 'off';
     advanced.createEl('label', { text: 'Authorization server URL (skips discovery)', cls: 'ct-modal-label' });
     const asUrlInput = advanced.createEl('input', { type: 'text', cls: 'ct-modal-input' });
-    advanced.createEl('label', { text: 'Redirect URI (optional — e.g. http://localhost:3118/callback for Slack)', cls: 'ct-modal-label' });
+    const audienceLabel = advanced.createEl('label', { text: 'Audience (optional — Auth0 API identifier)', cls: 'ct-modal-label' });
+    const audienceInput = advanced.createEl('input', {
+      type: 'text',
+      placeholder: 'bankrate-api',
+      cls: 'ct-modal-input',
+    });
+    const redirectUriLabel = advanced.createEl('label', { text: 'Redirect URI (optional — e.g. http://localhost:3118/callback for Slack)', cls: 'ct-modal-label' });
     const redirectUriInput = advanced.createEl('input', {
       type: 'text',
       placeholder: 'http://localhost:3118/callback',
       cls: 'ct-modal-input',
     });
+
+    /**
+     * Reshape the form for the selected grant. Redirect URI is hidden rather
+     * than merely ignored for client_credentials because the schema rejects it
+     * outright — leaving it visible would invite a value that fails validation
+     * with no indication of why. Client ID and secret stop being optional
+     * niceties and become the whole of the credentials, so Advanced is forced
+     * open: otherwise the two fields the grant cannot work without are behind a
+     * collapsed disclosure labelled "Advanced".
+     */
+    const applyGrantVisibility = () => {
+      const m2m = grantSelect.value === 'client_credentials';
+      introEl.textContent = m2m
+        ? 'The plugin authenticates as itself using a client ID and secret — no browser and no sign-in. '
+          + 'The secret is stored in the OS keychain, never in this plugin\'s data.json.'
+        : 'Connecting opens the provider\'s sign-in page in the Web Viewer. Tokens are stored '
+          + 'in the OS keychain, never in this plugin\'s data.json.';
+      redirectUriLabel.style.display = m2m ? 'none' : '';
+      redirectUriInput.style.display = m2m ? 'none' : '';
+      audienceLabel.textContent = m2m
+        ? 'Audience (required by some providers — e.g. an Auth0 API identifier)'
+        : 'Audience (optional — Auth0 API identifier)';
+      clientIdLabel.textContent = m2m ? 'Client ID (required)' : 'Client ID (skips Dynamic Client Registration)';
+      clientSecretLabel.textContent = m2m ? 'Client secret (required)' : 'Client secret (only for confidential clients)';
+      if (m2m) advanced.open = true;
+    };
+    grantSelect.addEventListener('change', applyGrantVisibility);
+    applyGrantVisibility();
 
     const errorEl = el.createEl('p', { cls: 'ct-modal-error' });
     errorEl.style.display = 'none';
@@ -1132,6 +1180,7 @@ export class McpServerModal extends Modal {
 
       const mode = filterModeSelect.value;
       const toolNames = toolsInput.value.split('\n').map(t => t.trim()).filter(Boolean);
+      const isClientCredentials = grantSelect.value === 'client_credentials';
       const entry = {
         name: nameInput.value.trim(),
         type: 'oauth' as const,
@@ -1140,11 +1189,23 @@ export class McpServerModal extends Modal {
         ...(mode !== 'none' && toolNames.length > 0 ? { tools: { [mode]: toolNames } } : {}),
         ...(clientIdInput.value.trim() ? { clientId: clientIdInput.value.trim() } : {}),
         ...(asUrlInput.value.trim() ? { authorizationServerUrl: asUrlInput.value.trim() } : {}),
-        ...(redirectUriInput.value.trim() ? { redirectUri: redirectUriInput.value.trim() } : {}),
+        // Suppressed for client_credentials, which the schema rejects it for. The
+        // field is hidden in that mode, but a value typed before switching grant
+        // would otherwise survive in the DOM and fail validation.
+        ...(!isClientCredentials && redirectUriInput.value.trim() ? { redirectUri: redirectUriInput.value.trim() } : {}),
+        ...(isClientCredentials ? { grantType: 'client_credentials' as const } : {}),
+        ...(audienceInput.value.trim() ? { audience: audienceInput.value.trim() } : {}),
       };
 
       if (!entry.name) { showError('Name is required.'); return; }
       if (!entry.url) { showError('URL is required.'); return; }
+      // The schema cannot check this: the typed secret is deliberately kept out of
+      // `entry` (see the input's declaration), so registerServer() owns the rule.
+      // Checking here too turns a round-trip failure into an inline message.
+      if (isClientCredentials && !clientSecretInput.value) {
+        showError('The client credentials grant requires a client secret.');
+        return;
+      }
 
       // Validate against the same schema the agent tool path uses, so the two
       // entry points cannot drift on what counts as a valid OAuth server.
@@ -1158,7 +1219,9 @@ export class McpServerModal extends Modal {
       saveBtn.setAttribute('disabled', 'true');
       cancelBtn.setAttribute('disabled', 'true');
       saveBtn.textContent = 'Connecting…';
-      statusEl.textContent = 'Waiting for you to finish signing in…';
+      statusEl.textContent = isClientCredentials
+        ? 'Requesting a token…'
+        : 'Waiting for you to finish signing in…';
       statusEl.style.display = '';
 
       let result: { success: boolean; message: string };
@@ -1173,6 +1236,8 @@ export class McpServerModal extends Modal {
           ...(clientSecretInput.value ? { clientSecret: clientSecretInput.value } : {}),
           authorizationServerUrl: entry.authorizationServerUrl,
           redirectUri: entry.redirectUri,
+          grantType: entry.grantType,
+          audience: entry.audience,
         });
       } catch (err) {
         result = { success: false, message: err instanceof Error ? err.message : String(err) };

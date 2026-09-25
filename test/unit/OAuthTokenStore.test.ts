@@ -89,6 +89,38 @@ describe('OAuthTokenStore — getAccessToken', () => {
     await expect(tokenStore.getAccessToken('vercel')).resolves.toBe('at-1');
   });
 
+  /**
+   * The client_credentials grant has no refresh token by construction (RFC 6749
+   * §4.4.3), so the guard above would hand back an expired token forever. The
+   * third constructor argument opts such a server back into renewal, which
+   * re-mints from the client's own credentials instead.
+   */
+  it('renews near expiry with no refresh token when the grant can re-mint from client credentials', async () => {
+    const secretStorage = fakeSecretStorage();
+    const refreshFn = vi.fn(async (): Promise<TokenSet> => ({ accessToken: 'at-2', expiresAt: Date.now() + 86_400_000 }));
+    const tokenStore = new OAuthTokenStore(secretStorage, refreshFn, (name) => name === 'bankrate');
+    tokenStore.store('bankrate', { accessToken: 'at-1', expiresAt: Date.now() + 60_000 });
+    await expect(tokenStore.getAccessToken('bankrate')).resolves.toBe('at-2');
+    expect(refreshFn).toHaveBeenCalledWith('bankrate');
+  });
+
+  it('applies the opt-in per server name, so a sibling authorization_code server still short-circuits', async () => {
+    const secretStorage = fakeSecretStorage();
+    const refreshFn = vi.fn(async (): Promise<TokenSet> => ({ accessToken: 'at-2', expiresAt: Date.now() + 86_400_000 }));
+    const tokenStore = new OAuthTokenStore(secretStorage, refreshFn, (name) => name === 'bankrate');
+    tokenStore.store('vercel', { accessToken: 'at-1', expiresAt: Date.now() + 60_000 });
+    await expect(tokenStore.getAccessToken('vercel')).resolves.toBe('at-1');
+    expect(refreshFn).not.toHaveBeenCalled();
+  });
+
+  it('defaults to not renewing without a refresh token when the hook is omitted', async () => {
+    const refreshFn = vi.fn();
+    const tokenStore = new OAuthTokenStore(fakeSecretStorage(), refreshFn);
+    tokenStore.store('vercel', { accessToken: 'at-1', expiresAt: Date.now() + 60_000 });
+    await expect(tokenStore.getAccessToken('vercel')).resolves.toBe('at-1');
+    expect(refreshFn).not.toHaveBeenCalled();
+  });
+
   it('dedups concurrent refresh calls into a single refreshFn invocation', async () => {
     const secretStorage = fakeSecretStorage();
     let resolveRefresh!: (tokens: TokenSet) => void;
