@@ -335,6 +335,7 @@ Claude reads that, hands back a ref, and acts on it. No coordinate guessing, no 
 | `browser_screenshot` | PNG of the current page |
 | `browser_status` | How many sessions are open, and the cap |
 | `browser_close` | End this thread's session |
+| `browser_resize` | Resize the viewport (320-1920 wide, 240-1080 tall) and return a fresh snapshot |
 
 **Watching it work.** Run **Open Agent Browser** from the command palette for a sidebar pane showing live frames, the page, session age, and a stop button. It streams only while visible, and closing it never closes Claude's session.
 

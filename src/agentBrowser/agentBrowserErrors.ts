@@ -30,6 +30,8 @@ export type AgentBrowserErrorCode =
   | 'guest_recycled'
   /** URL policy refused the navigation. */
   | 'navigation_blocked'
+  /** Requested viewport dimensions were rejected by policy (out of range or not finite integers). */
+  | 'invalid_viewport'
   /** Navigation did not settle in time. */
   | 'navigation_timeout'
   /** An injected script did not settle in time. */

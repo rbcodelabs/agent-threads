@@ -16,12 +16,17 @@ import {
   FD_RED,
   HARD_TTL_MS,
   IDLE_REAP_MS,
+  MAX_VIEWPORT_HEIGHT,
+  MAX_VIEWPORT_WIDTH,
   MIN_CREATE_INTERVAL_MS,
+  MIN_VIEWPORT_HEIGHT,
+  MIN_VIEWPORT_WIDTH,
   OP_QUEUE_DEPTH,
   REAPER_TICK_MS,
   SCRIPT_TIMEOUT_MS,
   clampMaxGuests,
   evaluateUrl,
+  evaluateViewport,
 } from '../../src/agentBrowser/agentBrowserPolicy';
 import { FdGate, type FdPressureSnapshot } from '../../src/agentBrowser/fdGate';
 import { AgentBrowserHost, AGENT_BROWSER_HOST_ID } from '../../src/agentBrowser/agentBrowserHost';
@@ -175,6 +180,36 @@ describe('agentBrowserPolicy', () => {
     expect(evaluateUrl('').allowed).toBe(false);
     expect(evaluateUrl('not a url').allowed).toBe(false);
     expect(evaluateUrl('example.com').allowed).toBe(false); // not absolute
+  });
+
+  it('accepts a viewport within the supported range', () => {
+    expect(evaluateViewport(800, 600)).toEqual({ ok: true, width: 800, height: 600 });
+    expect(evaluateViewport(MIN_VIEWPORT_WIDTH, MIN_VIEWPORT_HEIGHT).ok).toBe(true);
+    expect(evaluateViewport(MAX_VIEWPORT_WIDTH, MAX_VIEWPORT_HEIGHT).ok).toBe(true);
+  });
+
+  it('rejects a viewport below the minimum', () => {
+    const decision = evaluateViewport(MIN_VIEWPORT_WIDTH - 1, 600);
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) expect(decision.reason).toContain(`${MIN_VIEWPORT_WIDTH}`);
+    expect(evaluateViewport(800, MIN_VIEWPORT_HEIGHT - 1).ok).toBe(false);
+  });
+
+  it('rejects a viewport above the maximum', () => {
+    const decision = evaluateViewport(MAX_VIEWPORT_WIDTH + 1, 600);
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) expect(decision.reason).toContain(`${MAX_VIEWPORT_WIDTH}`);
+    expect(evaluateViewport(800, MAX_VIEWPORT_HEIGHT + 1).ok).toBe(false);
+  });
+
+  it('rejects non-integer dimensions', () => {
+    expect(evaluateViewport(800.5, 600).ok).toBe(false);
+    expect(evaluateViewport(800, 600.5).ok).toBe(false);
+  });
+
+  it('rejects non-finite dimensions without throwing', () => {
+    expect(evaluateViewport(Number.NaN, 600).ok).toBe(false);
+    expect(evaluateViewport(800, Number.POSITIVE_INFINITY).ok).toBe(false);
   });
 });
 
@@ -407,6 +442,36 @@ describe('AgentBrowserGuest', () => {
       code: 'navigation_blocked',
     });
     expect((el as unknown as { loadURL: ReturnType<typeof vi.fn> }).loadURL).not.toHaveBeenCalled();
+  });
+
+  it('resizes the element without clobbering other inline styles', async () => {
+    const { guest } = await makeGuest();
+    const el = guest.element!;
+    const borderBefore = el.style.border;
+    expect(borderBefore).toBe('0px');
+
+    const result = await guest.resize(800, 600);
+
+    expect(result).toEqual({ width: 800, height: 600 });
+    expect(el.style.width).toBe('800px');
+    expect(el.style.height).toBe('600px');
+    // The rest of the inline style set once in start() must survive.
+    expect(el.style.border).toBe(borderBefore);
+    expect(el.style.display).toBe('flex');
+    expect(guest.facts().viewport).toEqual({ width: 800, height: 600 });
+  });
+
+  it('rejects an out-of-range resize without touching the element', async () => {
+    const { guest } = await makeGuest();
+    const el = guest.element!;
+    const widthBefore = el.style.width;
+    const heightBefore = el.style.height;
+
+    await expect(guest.resize(10, 600)).rejects.toMatchObject({ code: 'invalid_viewport' });
+
+    expect(el.style.width).toBe(widthBefore);
+    expect(el.style.height).toBe(heightBefore);
+    expect(guest.facts().viewport).toEqual({ width: 1280, height: 800 });
   });
 
   it('reports one death for a doubled crash event', async () => {

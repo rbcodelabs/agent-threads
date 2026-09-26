@@ -114,6 +114,7 @@ export function getToolIcon(raw: string): string {
     case 'browser_screenshot':   return 'camera';
     case 'browser_status':       return 'activity';
     case 'browser_close':        return 'circle-x';
+    case 'browser_resize':       return 'maximize';
     default:               return 'wrench';
   }
 }
@@ -145,6 +146,7 @@ const CANONICAL_BUILT_IN_TOOLS = new Set([
   // exposed under the legacy obsidian_ names and need no compatibility alias.
   'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
   'browser_type', 'browser_screenshot', 'browser_status', 'browser_close',
+  'browser_resize',
 ]);
 
 /** True only for a known first-party tool on the canonical or compatibility server. */
@@ -206,6 +208,7 @@ export function getActivityKind(raw: string): ActivityKind {
     case 'browser_screenshot':
     case 'browser_status':
     case 'browser_close':
+    case 'browser_resize':
       return 'researching';
     case 'ToolSearch':
     case 'Agent':
