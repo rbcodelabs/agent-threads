@@ -862,6 +862,7 @@ export class ThreadsView extends ItemView {
       },
       subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
       argCompletions: THREAD_ARG_COMPLETIONS,
+      peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'thread'),
       extraSkillDirs,
       onInput: () => this.scheduleDraftSave(),
       onChipChange: () => this.scheduleDraftSave(),

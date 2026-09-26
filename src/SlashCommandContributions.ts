@@ -23,6 +23,13 @@ export interface SlashCommandResult {
 export interface SlashCommandHandler {
   readonly description: string;
   invoke(context: Readonly<SlashCommandContext>, host: SlashCommandHost): Promise<SlashCommandResult>;
+  /**
+   * Optional argument-completion suggestions offered in the composer's arg
+   * dropdown once this command's name has been typed (e.g. "/board "),
+   * matching the shape of the host's own built-in argCompletions. Capped at
+   * 20 entries; each name ≤64 characters and description ≤256 characters.
+   */
+  readonly argCompletions?: readonly { name: string; description: string }[];
 }
 export interface SlashCommandContribution {
   readonly name: string;
@@ -76,7 +83,28 @@ export class SlashCommandRegistry {
       if (!description || description.length > 4096 || typeof handler?.invoke !== 'function') {
         return reject('invalid', `${scope} must have a description of 1-4096 characters and invoke().`);
       }
-      handlers[scope] = Object.freeze({ description, invoke: handler.invoke.bind(handler) });
+      const rawArgCompletions = handler?.argCompletions;
+      let argCompletions: readonly { name: string; description: string }[] | undefined;
+      if (rawArgCompletions !== undefined) {
+        if (!Array.isArray(rawArgCompletions) || rawArgCompletions.length > 20) {
+          return reject('invalid', `${scope}.argCompletions must be an array of at most 20 entries.`);
+        }
+        const validated: { name: string; description: string }[] = [];
+        for (const entry of rawArgCompletions) {
+          const entryName = typeof entry?.name === 'string' ? entry.name.trim() : '';
+          const entryDescription = typeof entry?.description === 'string' ? entry.description.trim() : '';
+          if (!entryName || entryName.length > 64 || !entryDescription || entryDescription.length > 256) {
+            return reject('invalid', `${scope}.argCompletions entries must have a name of 1-64 characters and a description of 1-256 characters.`);
+          }
+          validated.push({ name: entryName, description: entryDescription });
+        }
+        argCompletions = Object.freeze(validated);
+      }
+      handlers[scope] = Object.freeze({
+        description,
+        invoke: handler.invoke.bind(handler),
+        ...(argCompletions ? { argCompletions } : {}),
+      });
     }
     if (!handlers.thread && !handlers.dispatch) return reject('invalid', 'At least one command handler is required.');
     if (this.isReserved(name)) return reject('conflict', `"${name}" is reserved by the host.`);
@@ -105,6 +133,18 @@ export class SlashCommandRegistry {
 
   match(text: string, scope: SlashCommandScope): boolean {
     return this.resolve(text, scope) !== null;
+  }
+
+  /**
+   * Argument-completion suggestions a peer registered for `name` in `scope`,
+   * or undefined when the command, scope, or field doesn't exist. Respects
+   * the same reserved-name/existence rules as list().
+   */
+  argCompletionsFor(name: string, scope: SlashCommandScope): readonly { name: string; description: string }[] | undefined {
+    const trimmed = typeof name === 'string' ? name.trim().toLowerCase() : '';
+    if (!trimmed || this.isReserved(trimmed)) return undefined;
+    const entry = this.entries.get(trimmed);
+    return entry?.handlers[scope]?.argCompletions;
   }
 
   async invoke(context: Omit<SlashCommandContext, 'args'>, report?: (message: string, isError?: boolean) => void): Promise<SlashCommandResult | null> {
