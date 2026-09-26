@@ -54,6 +54,20 @@ export const VIEW_TYPE = 'claude-threads:chat';
 // parses (plus DOM rebuilds) per second.
 const STREAMING_RENDER_INTERVAL_MS = 250;
 
+/** Distance from the true bottom (px) within which the scroller counts as "at bottom". */
+const SCROLL_BOTTOM_THRESHOLD_PX = 40;
+
+/**
+ * A remembered scroll position plus whether it was effectively at the bottom
+ * when captured. Restoring `scrollTop` verbatim replays a stale absolute pixel
+ * offset once content has streamed in since capture — `atBottom` lets the
+ * restore land on the *current* bottom instead of a now-wrong fixed offset.
+ */
+interface AgentScrollState {
+  scrollTop: number;
+  atBottom: boolean;
+}
+
 export class ThreadsView extends ItemView {
   private plugin: ClaudeThreadsPlugin;
   private manager: ThreadManager;
@@ -115,9 +129,11 @@ export class ThreadsView extends ItemView {
   /** Timeline body of the in-place child activity view, refreshed live. */
   private agentViewBodyEl: HTMLElement | null = null;
   /** Remembered scroll offsets, keyed "<threadId>:main" or "<threadId>:<agentRunId>". */
-  private agentScroll: Map<string, number> = new Map();
+  private agentScroll: Map<string, AgentScrollState> = new Map();
   /** One-shot scroll target consumed by the next main-conversation render. */
-  private pendingMainScroll: number | null = null;
+  private pendingMainScroll: AgentScrollState | null = null;
+  /** Floating "scroll to bottom" pill, shown whenever the scroller isn't parked at the tail. */
+  private scrollBottomBtn: HTMLButtonElement | null = null;
   private moreBtn!: HTMLButtonElement;
   private statusRailEl!: HTMLElement;
   private queueRowsEl!: HTMLElement;
@@ -792,9 +808,23 @@ export class ThreadsView extends ItemView {
 
     this.mainEl = root.createDiv('ct-main');
     this.messagesEl = this.mainEl.createDiv('ct-messages');
+    this.messagesEl.addEventListener('scroll', () => this.updateScrollBottomPillVisibility());
     this.visualizeManager?.detach();
     this.visualizeManager = new VisualizeMountManager(this.messagesEl, this.buildVisualizeHost());
     this.visualizeManager.attach();
+
+    // In-flow zero-height anchor sitting exactly at the boundary between the
+    // scrolling transcript and the composer below, regardless of the composer's
+    // own height (collapsed, multi-line draft, etc.) — the pill positions off
+    // this anchor's edge rather than off .ct-main's, so it always sits just
+    // above the composer without needing to track the composer's height.
+    const scrollBottomAnchor = this.mainEl.createDiv('ct-scroll-bottom-anchor');
+    this.scrollBottomBtn = scrollBottomAnchor.createEl('button', {
+      cls: 'ct-scroll-bottom-pill ct-hidden',
+      attr: { type: 'button', 'aria-label': 'Scroll to bottom', title: 'Scroll to bottom' },
+    });
+    setIcon(this.scrollBottomBtn, 'chevron-down');
+    this.scrollBottomBtn.addEventListener('click', () => this.scrollToBottom());
 
     const panelWrapper = this.mainEl.createDiv('ct-panel-wrapper');
     const floatingPanel = panelWrapper.createDiv('ct-floating-panel ct-panel-collapsible');
@@ -2875,6 +2905,19 @@ export class ThreadsView extends ItemView {
   }
 
   private async renderMessages(): Promise<void> {
+    // .empty() would remove the floating scroll-bottom pill too, since it
+    // shares .ct-main's positioning but was never appended into .ct-messages
+    // — see setup, where it's mounted on a separate anchor sibling. Recompute
+    // its visibility once at the end regardless of which branch below returns,
+    // rather than duplicating the call at every early return.
+    try {
+      await this.renderMessagesBody();
+    } finally {
+      this.updateScrollBottomPillVisibility();
+    }
+  }
+
+  private async renderMessagesBody(): Promise<void> {
     this.messageContentController.abort();
     this.messageContentController = new AbortController();
     this.messageContentManager?.reset();
@@ -2991,16 +3034,35 @@ export class ThreadsView extends ItemView {
       pendingQ.cardEl = cardEl;
     }
 
-    // Returning from a child agent view restores where the user left the
-    // conversation; every other render still lands at the bottom.
+    this.applyPendingMainScroll();
+    this.setRunningState(this.manager.isRunning(this.activeThreadId));
+  }
+
+  /**
+   * Applies the scroll target for the conversation that renderMessagesBody()
+   * just (re)rendered: either a remembered offset restored from before an
+   * agent-view detour, or the bottom by default. When the user was at the
+   * bottom before entering the child view, scrollToBottom() (which reads the
+   * *current* scrollHeight) is used instead of the stale captured offset, so
+   * streaming that happened while the panel was open doesn't strand the user
+   * above a now-longer conversation. Split out from renderMessagesBody() so
+   * this can be exercised directly in tests without driving the full render.
+   */
+  private applyPendingMainScroll(): void {
     if (this.pendingMainScroll !== null) {
       const target = this.pendingMainScroll;
       this.pendingMainScroll = null;
-      requestAnimationFrame(() => { this.messagesEl.scrollTop = target; });
+      if (target.atBottom) {
+        this.scrollToBottom();
+      } else {
+        requestAnimationFrame(() => {
+          this.messagesEl.scrollTop = target.scrollTop;
+          this.updateScrollBottomPillVisibility();
+        });
+      }
     } else {
       this.scrollToBottom();
     }
-    this.setRunningState(this.manager.isRunning(this.activeThreadId));
   }
 
   // ── Sub-agent pill, popover and in-place activity view ────────────────────
@@ -3166,7 +3228,9 @@ export class ThreadsView extends ItemView {
   private rememberAgentScroll(): void {
     const key = this.agentScrollKey();
     if (!key || !this.messagesEl) return;
-    this.agentScroll.set(key, this.messagesEl.scrollTop);
+    const scroller = this.messagesEl;
+    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
+    this.agentScroll.set(key, { scrollTop: scroller.scrollTop, atBottom });
   }
 
   private async enterAgentView(agentRunId: string): Promise<void> {
@@ -3238,7 +3302,13 @@ export class ThreadsView extends ItemView {
 
     const remembered = this.agentScroll.get(`${this.activeThreadId}:${agentRunId}`);
     requestAnimationFrame(() => {
-      this.messagesEl.scrollTop = remembered ?? this.messagesEl.scrollHeight;
+      // No memory, or the user was parked at the tail last time: land on the
+      // *current* bottom rather than replaying a stale absolute offset that
+      // may now undershoot content the run streamed in since last viewed.
+      this.messagesEl.scrollTop = (!remembered || remembered.atBottom)
+        ? this.messagesEl.scrollHeight
+        : remembered.scrollTop;
+      this.updateScrollBottomPillVisibility();
     });
   }
 
@@ -5655,9 +5725,24 @@ export class ThreadsView extends ItemView {
     // so the browser keeps ct-messages sized correctly automatically.
     requestAnimationFrame(() => {
       this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+      this.updateScrollBottomPillVisibility();
     });
   }
 
+  /**
+   * Shows the floating "scroll to bottom" pill whenever the scroller is more
+   * than the stick threshold away from the tail — a safety net for this class
+   * of bug (stale scroll restores, future scroll jumps) in either the main
+   * conversation or the sub-agent activity view, since both render into the
+   * same .ct-messages element this listens on.
+   */
+  private updateScrollBottomPillVisibility(): void {
+    const btn = this.scrollBottomBtn;
+    if (!btn || !this.messagesEl) return;
+    const scroller = this.messagesEl;
+    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
+    btn.classList.toggle('ct-hidden', atBottom);
+  }
 
   /** Render a one-line centered status divider in the message list. */
   private showCommandDivider(text: string, isError = false): void {

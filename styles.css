@@ -642,6 +642,46 @@
   overflow: hidden;
 }
 
+/* ── Scroll-to-bottom pill ────────────────────────────────────────────────── */
+/* Zero-height in-flow anchor sitting exactly where .ct-messages hands off to
+   the composer, so the pill floats just above it without tracking the
+   composer's own (variable) height. */
+.ct-scroll-bottom-anchor {
+  position: relative;
+  height: 0;
+}
+
+.ct-scroll-bottom-pill {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 50%;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15), 0 1px 3px rgba(0, 0, 0, 0.08);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.ct-scroll-bottom-pill.ct-hidden { display: none; }
+
+.ct-scroll-bottom-pill svg { width: 14px; height: 14px; }
+
+.ct-scroll-bottom-pill:hover,
+.ct-scroll-bottom-pill:focus-visible {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
 /* Slash command autocomplete */
 .ct-skill-dropdown {
   position: absolute;
