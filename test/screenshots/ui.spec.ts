@@ -2586,6 +2586,7 @@ test.describe('Agent Threads UI', () => {
     await expect(pill).toBeVisible();
     await expect(pill).toHaveText('4/5 tasks');
     await expect(page.locator('.ct-panel-context .ct-task-row')).toHaveCount(0);
+    await shot(page.locator('.ct-input-footer'), 'task-list-pill.png');
 
     await page.click('.ct-tasklist-pill');
     await page.waitForSelector('.ct-tasklist-popover');
