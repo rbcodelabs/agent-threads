@@ -63,6 +63,13 @@ export interface PoolStatus {
   guests: GuestFacts[];
 }
 
+/**
+ * Which per-thread map a guest belongs to. The MCP tool surface (`peek()`/
+ * `acquire()`) only ever sees `'primary'`; `'login'` is the ADR-0014
+ * take-control guest, UI-only, with no MCP visibility at all.
+ */
+type GuestRole = 'primary' | 'login';
+
 /** One lifecycle transition, for the status UI and leak audits. */
 export interface PoolEvent {
   at: number;
@@ -98,6 +105,14 @@ export class AgentBrowserPool {
   private readonly partition: string;
 
   private readonly guests = new Map<string, AgentBrowserGuest>();
+  /**
+   * The login-handoff role (ADR-0014): at most one per thread, created only in
+   * response to a user accepting a denied `window.open()` popup. Kept as a
+   * second map rather than folded into `guests` so `peek()`/`acquire()` — the
+   * MCP tool surface — can never see or return one; the login guest has no MCP
+   * surface at all, it is UI-only.
+   */
+  private readonly loginGuests = new Map<string, AgentBrowserGuest>();
   private readonly crashes = new Map<string, CrashRecord>();
   private readonly events: PoolEvent[] = [];
   /** Creation timestamps, pruned to one minute, for the rate limiter. */
@@ -107,6 +122,8 @@ export class AgentBrowserPool {
   private destroyed = false;
   /** In-flight creations, so two concurrent calls cannot both pass the cap. */
   private readonly creating = new Map<string, Promise<AgentBrowserGuest>>();
+  /** In-flight login-guest creations, mirroring `creating` for the login role. */
+  private readonly creatingLogin = new Map<string, Promise<AgentBrowserGuest>>();
 
   constructor(options: AgentBrowserPoolOptions) {
     this.doc = options.doc;
@@ -149,6 +166,45 @@ export class AgentBrowserPool {
   /** The live guest for a thread, or null. Never creates. */
   peek(threadId: string): AgentBrowserGuest | null {
     return this.guests.get(threadId) ?? null;
+  }
+
+  /** The live login-handoff guest for a thread, or null. Never creates. UI-only — no MCP tool sees this. */
+  peekLoginGuest(threadId: string): AgentBrowserGuest | null {
+    return this.loginGuests.get(threadId) ?? null;
+  }
+
+  /**
+   * Resolve a denied `window.open()`'s `guestId` (a `getWebContentsId()` value)
+   * back to the thread whose *primary* guest requested it.
+   *
+   * Only ever scans `guests` — a login guest can never itself open a further
+   * popup as far as this lookup is concerned (ADR-0014's one-hop assumption).
+   */
+  findPrimaryByWebContentsId(webContentsId: number): string | null {
+    for (const [threadId, guest] of this.guests) {
+      const el = guest.element;
+      if (!el) continue;
+      try {
+        if (el.getWebContentsId() === webContentsId) return threadId;
+      } catch {
+        continue; // guest is mid-teardown; not a match
+      }
+    }
+    return null;
+  }
+
+  /** Resolve an `agent-browser-window-close`/`-focus` `guestId` to its owning thread's login guest. */
+  findLoginByWebContentsId(webContentsId: number): string | null {
+    for (const [threadId, guest] of this.loginGuests) {
+      const el = guest.element;
+      if (!el) continue;
+      try {
+        if (el.getWebContentsId() === webContentsId) return threadId;
+      } catch {
+        continue;
+      }
+    }
+    return null;
   }
 
   /**
@@ -216,9 +272,80 @@ export class AgentBrowserPool {
     return creation;
   }
 
-  private async create(threadId: string): Promise<AgentBrowserGuest> {
+  /**
+   * Acquire this thread's login-handoff guest, creating it and navigating it to
+   * `url` if needed.
+   *
+   * Routes through the exact same `admit()` gate as `acquire()` (ADR-0014 §3) —
+   * this is a second *role*, not a second creation path. Never touches
+   * `guests`: `peek()`/`acquire()` (the MCP tool surface) cannot see or return
+   * what this method produces.
+   *
+   * Reusing a live login guest re-navigates it to `url` rather than creating a
+   * second one — the design assumes at most one login guest per thread at a
+   * time (ADR-0014's Limitations: one hop from opener to login guest).
+   */
+  async acquireLoginGuest(threadId: string, url: string): Promise<AgentBrowserGuest> {
+    if (this.destroyed) {
+      throw new AgentBrowserError({
+        code: 'capability_unavailable',
+        message: 'The agent browser has been shut down.',
+        retryable: false,
+      });
+    }
+
+    const existing = this.loginGuests.get(threadId);
+    if (existing && existing.isAlive()) {
+      await existing.navigate(url);
+      return existing;
+    }
+    if (existing) this.retireLogin(threadId, 'crash');
+
+    const inFlight = this.creatingLogin.get(threadId);
+    if (inFlight) return inFlight;
+
+    const creation = this.createLoginGuest(threadId, url).finally(() => {
+      this.creatingLogin.delete(threadId);
+    });
+    this.creatingLogin.set(threadId, creation);
+    return creation;
+  }
+
+  /** Reclaim a thread's login-handoff guest. Safe to call when none exists. */
+  releaseLoginGuest(threadId: string, reason: GuestEndReason = 'login-complete'): void {
+    this.retireLogin(threadId, reason);
+  }
+
+  private async createLoginGuest(threadId: string, url: string): Promise<AgentBrowserGuest> {
+    const guest = await this.createGuest(threadId, 'login');
+    try {
+      // Same evaluateUrl() every other navigation goes through (via
+      // AgentBrowserGuest.navigate), applied against this thread's own
+      // urlPolicy — a second, independent check beyond whatever reason Geode's
+      // own scheme/host rules already denied the popup for.
+      await guest.navigate(url);
+    } catch (error) {
+      this.retireLogin(threadId, 'crash');
+      throw error;
+    }
+    return guest;
+  }
+
+  private create(threadId: string): Promise<AgentBrowserGuest> {
+    return this.createGuest(threadId, 'primary');
+  }
+
+  /**
+   * Build and register a guest under either role.
+   *
+   * The one thing this must never do is duplicate `admit()` — both roles pass
+   * through the identical gate (crash cooldown, create rate limit, cap, FD
+   * pressure), just against a role-specific map for bookkeeping.
+   */
+  private async createGuest(threadId: string, role: GuestRole): Promise<AgentBrowserGuest> {
     await this.admit(threadId);
 
+    const map = this.mapFor(role);
     const container = this.host.ensure();
     const guest = new AgentBrowserGuest({
       threadId,
@@ -227,7 +354,7 @@ export class AgentBrowserPool {
       partition: this.partition,
       urlPolicy: this.getUrlPolicy(),
       now: this.now,
-      onDied: (reason, error) => this.handleGuestDied(threadId, reason, error),
+      onDied: (reason, error) => this.handleGuestDied(threadId, role, reason, error),
       // Screenshots need the container composited, which it is not while parked
       // off-screen. Routed through the host so overlapping captures from
       // different guests reference-count rather than fight over the style.
@@ -242,17 +369,25 @@ export class AgentBrowserPool {
     const at = this.now();
     this.createTimes.push(at);
     this.lastCreateAt = at;
-    this.guests.set(threadId, guest);
-    this.log('agent-browser: create', { threadId, inUse: this.guests.size });
+    map.set(threadId, guest);
+    this.log(`agent-browser: create${role === 'login' ? ' (login)' : ''}`, {
+      threadId,
+      inUse: this.guests.size,
+      loginInUse: this.loginGuests.size,
+    });
     this.record({ at, kind: 'create', threadId });
 
     try {
       await guest.start();
     } catch (error) {
-      this.guests.delete(threadId);
+      map.delete(threadId);
       throw error;
     }
     return guest;
+  }
+
+  private mapFor(role: GuestRole): Map<string, AgentBrowserGuest> {
+    return role === 'login' ? this.loginGuests : this.guests;
   }
 
   /**
@@ -305,10 +440,14 @@ export class AgentBrowserPool {
     }
 
     const max = clampMaxGuests(this.getMaxGuests());
-    if (this.guests.size >= max) {
+    // A login guest counts against the same shared ceiling as a primary guest
+    // (ADR-0014 §3): it is rare, human-paced, and short-lived, so in practice
+    // it is essentially never refused — but under genuine resource pressure it
+    // is refused exactly like any other guest creation, not given a bypass.
+    if (this.guests.size + this.loginGuests.size >= max) {
       // Try to make room from genuinely idle guests before refusing.
       this.reapIdle();
-      if (this.guests.size >= max) {
+      if (this.guests.size + this.loginGuests.size >= max) {
         const holders = [...this.guests.keys()];
         throw new AgentBrowserError({
           code: 'admission_denied_cap',
@@ -345,29 +484,49 @@ export class AgentBrowserPool {
 
   // ── Reclamation ────────────────────────────────────────────────────────────
 
-  /** Remove a guest from the registry and destroy it. Safe to call repeatedly. */
+  /** Remove a primary guest from the registry and destroy it. Safe to call repeatedly. */
   private retire(threadId: string, reason: GuestEndReason): void {
-    const guest = this.guests.get(threadId);
+    this.retireFrom(this.guests, threadId, reason, 'primary');
+  }
+
+  /** Remove a login-handoff guest from the registry and destroy it. Safe to call repeatedly. */
+  private retireLogin(threadId: string, reason: GuestEndReason): void {
+    this.retireFrom(this.loginGuests, threadId, reason, 'login');
+  }
+
+  private retireFrom(
+    map: Map<string, AgentBrowserGuest>,
+    threadId: string,
+    reason: GuestEndReason,
+    role: GuestRole,
+  ): void {
+    const guest = map.get(threadId);
     if (!guest) return;
-    this.guests.delete(threadId);
+    map.delete(threadId);
     guest.destroy(reason);
-    this.log('agent-browser: destroy', { threadId, reason, inUse: this.guests.size });
+    this.log(`agent-browser: destroy${role === 'login' ? ' (login)' : ''}`, {
+      threadId,
+      reason,
+      inUse: this.guests.size,
+      loginInUse: this.loginGuests.size,
+    });
     this.record({ at: this.now(), kind: 'destroy', threadId, reason });
   }
 
-  /** Public reclaim for one thread — delete, archive, or an explicit close. */
+  /** Public reclaim for one thread's primary guest — delete, archive, or an explicit close. */
   destroyForThread(threadId: string, reason: GuestEndReason = 'tool'): void {
     this.retire(threadId, reason);
   }
 
   /**
-   * Reclaim everything.
+   * Reclaim everything, in both roles.
    *
    * Synchronous, because it runs from plugin unload, which is not awaited, and
    * from `pagehide`, where there is no later.
    */
   destroyAll(reason: GuestEndReason): void {
     for (const threadId of [...this.guests.keys()]) this.retire(threadId, reason);
+    for (const threadId of [...this.loginGuests.keys()]) this.retireLogin(threadId, reason);
   }
 
   destroy(): void {
@@ -381,36 +540,31 @@ export class AgentBrowserPool {
   }
 
   private reapIdle(): void {
-    for (const [threadId, guest] of [...this.guests]) {
+    this.reapIdleFrom(this.guests, (threadId) => this.retire(threadId, 'reap'));
+    this.reapIdleFrom(this.loginGuests, (threadId) => this.retireLogin(threadId, 'reap'));
+  }
+
+  private reapIdleFrom(map: Map<string, AgentBrowserGuest>, retireFn: (threadId: string) => void): void {
+    for (const [threadId, guest] of [...map]) {
       if (guest.currentState === 'busy') continue;
-      if (guest.idleMs >= IDLE_REAP_MS) this.retire(threadId, 'reap');
+      if (guest.idleMs >= IDLE_REAP_MS) retireFn(threadId);
     }
   }
 
   /**
    * Periodic sweep: idle reap, hard TTL, budget recycle, dead-guest collection,
    * and a background FD reading so pressure is noticed before the next request
-   * rather than at it.
+   * rather than at it. Applies identically to both roles — an abandoned login
+   * handoff is reclaimed on the same schedule as any other guest, rather than
+   * needing its own timeout logic (ADR-0014's Risks).
    */
   private async tick(): Promise<void> {
     if (this.destroyed) return;
 
-    for (const [threadId, guest] of [...this.guests]) {
-      if (!guest.isAlive() && guest.currentState !== 'busy') {
-        this.retire(threadId, 'crash');
-        continue;
-      }
-      if (guest.currentState === 'busy') continue;
-      if (guest.idleMs >= IDLE_REAP_MS) {
-        this.retire(threadId, 'reap');
-      } else if (guest.ageMs >= HARD_TTL_MS) {
-        this.retire(threadId, 'ttl');
-      } else if (guest.budgetExhausted()) {
-        this.retire(threadId, 'budget');
-      }
-    }
+    this.sweep(this.guests, (threadId, reason) => this.retire(threadId, reason));
+    this.sweep(this.loginGuests, (threadId, reason) => this.retireLogin(threadId, reason));
 
-    if (this.guests.size === 0) return;
+    if (this.guests.size === 0 && this.loginGuests.size === 0) return;
 
     const verdict = await this.fdGate.evaluate();
     if (verdict.kind === 'deny-exhausted') {
@@ -421,16 +575,39 @@ export class AgentBrowserPool {
     }
   }
 
+  private sweep(
+    map: Map<string, AgentBrowserGuest>,
+    retireFn: (threadId: string, reason: GuestEndReason) => void,
+  ): void {
+    for (const [threadId, guest] of [...map]) {
+      if (!guest.isAlive() && guest.currentState !== 'busy') {
+        retireFn(threadId, 'crash');
+        continue;
+      }
+      if (guest.currentState === 'busy') continue;
+      if (guest.idleMs >= IDLE_REAP_MS) {
+        retireFn(threadId, 'reap');
+      } else if (guest.ageMs >= HARD_TTL_MS) {
+        retireFn(threadId, 'ttl');
+      } else if (guest.budgetExhausted()) {
+        retireFn(threadId, 'budget');
+      }
+    }
+  }
+
   /**
    * A guest died on its own. Record it for the circuit breaker and drop it.
    *
    * The breaker exists because the alternative to bounding repeated crashes is a
    * process-spawn loop: the agent retries, the page kills the renderer again, and
-   * the machine loses ground on every cycle.
+   * the machine loses ground on every cycle. Keyed by `threadId` alone, so a
+   * page that crashes a login guest counts against the same cooldown as one
+   * that crashes the primary guest — either way, this thread's page is what
+   * keeps killing the renderer.
    */
-  private handleGuestDied(threadId: string, reason: GuestEndReason, error: AgentBrowserError): void {
-    this.guests.delete(threadId);
-    this.log('agent-browser: died', { threadId, reason, code: error.code });
+  private handleGuestDied(threadId: string, role: GuestRole, reason: GuestEndReason, error: AgentBrowserError): void {
+    this.mapFor(role).delete(threadId);
+    this.log('agent-browser: died', { threadId, role, reason, code: error.code });
     this.record({ at: this.now(), kind: 'died', threadId, reason, code: error.code });
 
     if (reason !== 'crash' && reason !== 'hang') return;
@@ -453,7 +630,7 @@ export class AgentBrowserPool {
    * must be cleared rather than handed out.
    */
   private handleHostDetached(): void {
-    this.log('agent-browser: host container detached', { inUse: this.guests.size });
+    this.log('agent-browser: host container detached', { inUse: this.guests.size, loginInUse: this.loginGuests.size });
     this.destroyAll('detach');
   }
 }
