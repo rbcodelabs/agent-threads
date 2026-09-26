@@ -6,7 +6,7 @@ When Claude or Codex reports an agent, a compact pill appears in the composer fo
 
 Click the pill to open a popover above the composer listing every agent in the thread, indented by parent. Arrow keys move between rows, `Escape` closes it, and clicking outside dismisses it.
 
-Selecting an agent replaces the message pane with that agent's harness-exposed activity, lifecycle, errors, and result, without creating a separate thread. A sticky breadcrumb at the top (`Main conversation › parent › child`) walks back up the tree, and a close button returns to the conversation directly. Your scroll position in the main conversation is restored when you come back.
+Selecting an agent replaces the message pane with that agent's harness-exposed activity, lifecycle, errors, and result, without creating a separate thread. A sticky breadcrumb at the top (`Main conversation › parent › child`) walks back up the tree, and a close button returns to the conversation directly. Your scroll position in the main conversation is restored when you come back — if you were reading further up, you land back there; if you were caught up, you land on the current bottom, even if the conversation kept streaming while the panel was open. A small floating button appears over the transcript any time you're scrolled away from the bottom (in either the main conversation or an agent's activity view) as a one-click way back down.
 
 The composer stays live while a child view is open. Its placeholder notes that a message goes to the main conversation, and sending one visibly returns you there rather than silently redirecting.
 
