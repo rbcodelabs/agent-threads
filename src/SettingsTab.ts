@@ -668,72 +668,39 @@ class AddSkillSourceModal extends Modal {
       const rawUrl = urlInput.value.trim();
       if (!rawUrl) { showError('GitHub URL is required.'); return; }
 
-      // Validate it's a github URL
-      const ghMatch = rawUrl.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/);
-      if (!ghMatch) { showError('Please enter a valid GitHub repo URL (e.g. https://github.com/owner/repo).'); return; }
+      // Required lazily (not imported at the top of this file) because
+      // skillManager pulls in Node built-ins, and SettingsTab loads on mobile too.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { parseGithubRepoUrl, addGithubSkillSource } = require('./skillManager') as typeof import('./skillManager');
+
+      const repoUrl = parseGithubRepoUrl(rawUrl);
+      if (!repoUrl) { showError('Please enter a valid GitHub repo URL (e.g. https://github.com/owner/repo).'); return; }
+
+      // Clones live inside the vault's plugin folder, never the home directory.
+      const cloneBase = this.plugin.getSkillSourceCloneBase();
+      if (!cloneBase) {
+        showError('Cannot resolve the vault folder on this platform, so there is nowhere to clone to. Skill sources need a desktop vault on a real filesystem.');
+        return;
+      }
 
       addBtn.setAttribute('disabled', 'true');
       showProgress('Cloning repository…');
 
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const fsNode = require('fs') as typeof import('fs');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pathNode = require('path') as typeof import('path');
-      // Required lazily (not imported at the top of this file) because
-      // skillManager pulls in Node built-ins, and SettingsTab loads on mobile too.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { cloneGithubSource } = require('./skillManager') as typeof import('./skillManager');
-
-      // A source the user adds by hand gets a random id; only *declared* sources
-      // arriving without one need the deterministic, repo-derived id.
-      const id = crypto.randomUUID();
-      // Store clones inside the vault's plugin folder so they are vault-local
-      // and don't bleed across vaults. FileSystemAdapter.getBasePath() gives the
-      // absolute vault root; manifest.dir is the plugin folder relative to it.
-      //
-      // No home-directory fallback: this used to land clones in
-      // ~/<manifest.dir>/skill-sources/ whenever the adapter was not a
-      // FileSystemAdapter, writing outside the vault entirely.
-      const { FileSystemAdapter } = require('obsidian') as typeof import('obsidian');
-      const adapter = this.plugin.app.vault.adapter;
-      if (!(adapter instanceof FileSystemAdapter) || !this.plugin.manifest.dir) {
-        showError('Cannot resolve the vault folder on this platform, so there is nowhere to clone to. Skill sources need a desktop vault on a real filesystem.');
-        return;
-      }
-      const cloneBase = pathNode.join(adapter.getBasePath(), this.plugin.manifest.dir, 'skill-sources');
-      const clonePath = pathNode.join(cloneBase, id);
-
       try {
-        fsNode.mkdirSync(cloneBase, { recursive: true });
-
-        // Clone via the shared helper (normalizes the URL to .git, runs git
-        // non-interactively, and cleans up a partial clone on failure).
-        await cloneGithubSource(rawUrl, clonePath);
-
-        showProgress('Reading plugin manifest…');
-
-        const { readPluginManifest } = await import('./claudeSettings');
-        const manifest = readPluginManifest(clonePath);
-
-        // Derive display name: user input > manifest displayName > manifest name > repo name from URL
-        const repoName = rawUrl.replace(/\.git$/, '').split('/').pop() ?? 'Unknown';
-        const displayName = nameInput.value.trim() || manifest?.displayName || manifest?.name || repoName;
-
-        const source: SkillSource = {
-          id,
-          name: displayName,
-          type: 'github',
-          repoUrl: rawUrl.replace(/\.git$/, ''),
-          clonePath,
-        };
-
+        // Shared with Chief of Staff onboarding: clones non-interactively,
+        // removes a partial clone on failure, and names the source from
+        // plugin.json. A hand-added source keeps its random id.
+        const source: SkillSource = await addGithubSkillSource({
+          repoUrl,
+          cloneBase,
+          displayName: nameInput.value,
+          id: crypto.randomUUID(),
+        });
         this.plugin.settings.skillSources.push(source);
         await this.plugin.saveSettings();
         this.close();
         this.onAdded();
       } catch (err) {
-        // Clean up failed clone
-        try { fsNode.rmSync(clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
         showError(`Clone failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     };
@@ -1497,6 +1464,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           });
         area.inputEl.addClass('ct-settings-wide-input');
       });
+
+    new Setting(containerEl)
+      .setName('Offer Chief of Staff on first run')
+      .setDesc('On a brand-new install, add the Chief of Staff skills and start a Chief of Staff thread. Off shows the static getting-started guide instead. Run "Set up Chief of Staff" from the command palette any time.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.offerChiefOfStaffOnFirstRun ?? true).onChange(async (value) => {
+          this.plugin.settings.offerChiefOfStaffOnFirstRun = value;
+          await this.plugin.saveSettings();
+        }),
+      );
 
     new Setting(containerEl)
       .setName('Keep computer awake')

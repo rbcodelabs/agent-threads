@@ -24,7 +24,7 @@ import type { ThreadManager } from './ThreadManager';
 import type { VaultPersistence } from './VaultPersistence';
 import type { InProcessSummarizer } from './InProcessSummarizer';
 import type { WakeLockService } from './WakeLockService';
-import type { createClaudeThreadsMcpServers, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
+import type { createClaudeThreadsMcpServers, CronCreateParams, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
 import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
@@ -51,6 +51,8 @@ import {
   type ImageAttachment,
   type ScheduledItem,
   type WatchedDocument,
+  type SkillSource,
+  type Thread,
 } from './types';
 import { serializeThreadForSave } from './imageExternalization';
 import { selectIdleThreadsForArchive } from './autoArchive';
@@ -72,7 +74,20 @@ import {
   sharedPersistenceWriterFence,
   type PersistenceWriterToken,
 } from './PersistenceWriterFence';
+import { mergeDisallowedTools, withCreatorToolRestrictions } from './toolRestrictions';
 import { DIAGNOSTICS_FOLDER, mergePersistedSettings, selectWelcomeGuidePath } from './productIdentity';
+import {
+  CHIEF_OF_STAFF_COMMAND_ID,
+  CHIEF_OF_STAFF_COMMAND_NAME,
+  chooseChiefOfStaffHarness,
+  decideFirstRun,
+  describeChiefOfStaffFailure,
+  isBinaryResolvable,
+  isFreshInstallData,
+  setUpChiefOfStaff,
+  withChiefOfStaffPointer,
+  type ChiefOfStaffResult,
+} from './chiefOfStaffOnboarding';
 
 // View-type string constants. Must match the values exported by each view module.
 // Defined here as literals so both desktop and mobile code can reference them without
@@ -657,7 +672,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
           createThread: createAgentThreadCallback({
             sourceThreadId: threadId,
             getThread: id => this.manager.getThread(id),
-            createThread: (title, cwd, projectId) => this.manager.createThread(title, cwd, projectId),
+            createThread: (title, cwd, projectId) => this.createThreadFromAgent(threadId, title, cwd, projectId),
             saveSettings: () => this.saveSettings(),
             sendMessage: (id, prompt) => this.manager.sendMessage(id, prompt),
             authorizeProject: (projectId, elevatedProjectId) => {
@@ -816,7 +831,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
             this.manager.notifyProposedReplyChanged(id);
             this.saveSettings().catch(console.error);
           },
-          onCronCreate: (params) => this.scheduler.createItem(params),
+          onCronCreate: (params) => this.createCronItemFromThread(threadId, params),
           onCronList: () => this.scheduler.listItems(),
           onCronUpdate: (id, patch) => this.scheduler.updateItem(id, patch),
           onCronDelete: (id) => this.scheduler.deleteItem(id),
@@ -1113,25 +1128,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
           throw error;
         }
       },
-      createThread: (title, cwd, projectId, scheduledItemId) => {
-        const thread = this.manager.createThread(title, cwd, projectId);
-        // Scheduled sessions should not block on permission prompts. When the
-        // global permissionMode is 'default' (ask every time), override to
-        // 'dontAsk' so unattended runs complete without hanging.
-        if (!thread.permissionMode && this.settings.permissionMode === 'default') {
-          thread.permissionMode = 'dontAsk';
-        }
-        // Record the scheduled item that created this thread, for the
-        // "Scheduled: <name>" footer pill. Captured once at creation time —
-        // not kept in sync with later renames of the scheduled item.
-        if (scheduledItemId) {
-          thread.scheduledItemId = scheduledItemId;
-          thread.scheduledItemName = (this.settings.scheduledItems ?? []).find(
-            (i) => i.id === scheduledItemId
-          )?.name;
-        }
-        return thread;
-      },
+      createThread: (title, cwd, projectId, scheduledItemId) => this.createScheduledThread(title, cwd, projectId, scheduledItemId),
       sendMessage: (threadId, prompt) => this.manager.sendMessage(threadId, prompt),
       getDefaultCwd: () => this.getEffectiveCwd(),
       getProjectCwd: (projectId) => {
@@ -1549,6 +1546,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: CHIEF_OF_STAFF_COMMAND_ID,
+      name: CHIEF_OF_STAFF_COMMAND_NAME,
+      callback: () => { void this.runChiefOfStaffCommand(); },
+    });
+
+    this.addCommand({
       id: 'open-skills-manager',
       name: 'Open Skills Manager',
       callback: () => this.activateSkillsView(),
@@ -1757,44 +1760,240 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // peer may call the API from its api-ready handler immediately.
     this.initializePublicApi();
 
-    // First-run onboarding: auto-open panels + welcome guide for brand-new installs.
-    // Migration guard: if the user already has threads they're upgrading from a prior
-    // version — mark hasSeenWelcome silently rather than hijacking their layout.
-    if (!this.settings.hasSeenWelcome) {
-      if (this.settings.threads.length === 0) {
-        this.app.workspace.onLayoutReady(() => {
-          this.firstRunSetup().catch(console.error);
-        });
-      } else {
-        // Existing user upgrading — skip onboarding, just flip the flag
-        this.settings.hasSeenWelcome = true;
-        this.saveSettings().catch(console.error);
-      }
+    // First-run onboarding for brand-new installs: open the panels, then start a
+    // Chief of Staff thread (or show the static guide when that is turned off or
+    // fails). Migration guard: a user who already has threads is upgrading from
+    // a prior version — mark hasSeenWelcome silently rather than hijacking their layout.
+    const firstRun = decideFirstRun({
+      hasSeenWelcome: this.settings.hasSeenWelcome,
+      threadCount: this.settings.threads.length,
+      offerChiefOfStaff: this.settings.offerChiefOfStaffOnFirstRun ?? true,
+      isFreshInstall: this.isFreshInstall,
+    });
+    if (firstRun === 'chief-of-staff' || firstRun === 'static-guide') {
+      this.app.workspace.onLayoutReady(() => {
+        this.firstRunSetup(firstRun === 'chief-of-staff').catch(console.error);
+      });
+    } else if (firstRun === 'mark-seen') {
+      this.settings.hasSeenWelcome = true;
+      this.saveSettings().catch(console.error);
     }
   }
 
-  private async firstRunSetup(): Promise<void> {
-    const { workspace, vault } = this.app;
+  /** Thread for one run of a scheduled item (the Scheduler's createThread). */
+  createScheduledThread(title: string, cwd: string, projectId?: string, scheduledItemId?: string): Thread {
+    const thread = this.manager.createThread(title, cwd, projectId);
+    // Scheduled sessions should not block on permission prompts. When the
+    // global permissionMode is 'default' (ask every time), override to
+    // 'dontAsk' so unattended runs complete without hanging.
+    if (!thread.permissionMode && this.settings.permissionMode === 'default') {
+      thread.permissionMode = 'dontAsk';
+    }
+    // Record the scheduled item that created this thread, for the
+    // "Scheduled: <name>" footer pill. Captured once at creation time —
+    // not kept in sync with later renames of the scheduled item.
+    if (scheduledItemId) {
+      const item = (this.settings.scheduledItems ?? []).find((i) => i.id === scheduledItemId);
+      thread.scheduledItemId = scheduledItemId;
+      thread.scheduledItemName = item?.name;
+      // Denylist inherited from the thread that created the item
+      // (restriction-only; see toolRestrictions.ts).
+      if (item?.disallowedTools?.length) {
+        thread.disallowedTools = mergeDisallowedTools(thread.disallowedTools, item.disallowedTools);
+      }
+    }
+    return thread;
+  }
 
-    // 1. Write welcome guide to vault
-    const selectedGuide = selectWelcomeGuidePath(
-      this.settings.vaultFolder,
-      path => Boolean(vault.getAbstractFileByPath(normalizePath(path))),
-    );
-    const guidePath = normalizePath(selectedGuide.path);
+  /**
+   * A scheduled item created by an agent's CronCreate call. The creating
+   * thread's denylist is copied onto the item, keyed by that thread's id and
+   * never by the item's name, so threads the item spawns inherit it.
+   */
+  createCronItemFromThread(creatorThreadId: string, params: CronCreateParams): Promise<ScheduledItem> {
+    return this.scheduler.createItem(withCreatorToolRestrictions(params, this.manager.getThread(creatorThreadId)));
+  }
+
+  /** A thread an agent creates via threads_create; it inherits the creator's denylist. */
+  createThreadFromAgent(creatorThreadId: string, title: string, cwd?: string, projectId?: string): Thread {
+    const thread = this.manager.createThread(title, cwd, projectId);
+    const creator = this.manager.getThread(creatorThreadId);
+    if (creator?.disallowedTools?.length) {
+      thread.disallowedTools = mergeDisallowedTools(thread.disallowedTools, creator.disallowedTools);
+    }
+    return thread;
+  }
+
+  /**
+   * Absolute directory managed GitHub skill-source clones live in
+   * (`<vault>/<plugin-dir>/skill-sources`), or null when the vault is not on a
+   * real filesystem. Never falls back to the home directory.
+   */
+  getSkillSourceCloneBase(): string | null {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter) || !this.manifest?.dir) return null;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pathNode = require('path') as typeof import('path');
+    return pathNode.join(adapter.getBasePath(), this.manifest.dir, 'skill-sources');
+  }
+
+  /** Clones `repoUrl` as a managed GitHub skill source and persists it. Throws on failure. */
+  async addManagedGithubSkillSource(repoUrl: string, ref?: string): Promise<SkillSource> {
+    const cloneBase = this.getSkillSourceCloneBase();
+    if (!cloneBase) throw new Error('This vault is not on a local filesystem, so skill sources cannot be cloned.');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { addGithubSkillSource } = require('./skillManager') as typeof import('./skillManager');
+    const source = await addGithubSkillSource({ repoUrl, cloneBase, ref });
+    this.settings.skillSources = [...(this.settings.skillSources ?? []), source];
+    await this.saveSettings();
+    return source;
+  }
+
+  /** Whether git can run, without triggering the macOS developer-tools install dialog. */
+  private async isGitAvailable(): Promise<boolean> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { checkGitAvailable, runCommandQuietly } = require('./skillManager') as typeof import('./skillManager');
+    return checkGitAvailable({
+      platform: process.platform,
+      pathEnv: process.env.PATH,
+      exists: p => { try { return fs.existsSync(p); } catch { return false; } },
+      run: runCommandQuietly,
+    });
+  }
+
+  /** Whether `harness`'s configured binary can be found, so a first turn can start. */
+  private isHarnessResolvable(harness: AgentHarness): boolean {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pathNode = require('path') as typeof import('path');
+    const binary = harness === 'codex'
+      ? this.settings.codexBinaryPath
+      : harness === 'opencode'
+        ? this.settings.opencodeBinaryPath
+        : this.settings.claudeBinaryPath;
+    return isBinaryResolvable(binary ?? '', {
+      exists: p => { try { return fs.existsSync(p); } catch { return false; } },
+      pathEnv: process.env.PATH,
+      pathSeparator: pathNode.delimiter,
+      dirSeparator: pathNode.sep,
+    });
+  }
+
+  /**
+   * Adds the Chief of Staff skill source if needed, then focuses the existing
+   * Chief of Staff thread or creates one that runs `cos-setup`. Shared by first
+   * run and the "Set up Chief of Staff" command.
+   */
+  async setUpChiefOfStaff(): Promise<ChiefOfStaffResult> {
+    // Concurrent callers (first run racing the command, a double-trigger) share
+    // one run, so the clone await cannot let two home threads be created.
+    if (!this.chiefOfStaffSetupInFlight) {
+      // Persistent progress notice: a first clone can take several seconds.
+      const progress = new Notice('Setting up your Chief of Staff…', 0);
+      this.chiefOfStaffSetupInFlight = this.runChiefOfStaffSetup().finally(() => {
+        progress.hide();
+        this.chiefOfStaffSetupInFlight = undefined;
+      });
+    }
+    return this.chiefOfStaffSetupInFlight;
+  }
+
+  private chiefOfStaffSetupInFlight?: Promise<ChiefOfStaffResult>;
+  /** True when loadData() found no saved data: a genuinely new install. */
+  private isFreshInstall = false;
+
+  private runChiefOfStaffSetup(): Promise<ChiefOfStaffResult> {
+    return setUpChiefOfStaff({
+      getSkillSources: () => this.settings.skillSources ?? [],
+      isGitAvailable: () => this.isGitAvailable(),
+      addGithubSkillSource: async (repoUrl, ref) => { await this.addManagedGithubSkillSource(repoUrl, ref); },
+      resolveHarness: () => chooseChiefOfStaffHarness(this.settings.agentHarness ?? 'claude', h => this.isHarnessResolvable(h)),
+      reloadThreadSkills: (id) => this.manager.requestSessionRestart(id),
+      listThreads: () => this.manager.getThreads(),
+      getStoredThreadId: () => this.settings.chiefOfStaffThreadId,
+      setStoredThreadId: (id) => { this.settings.chiefOfStaffThreadId = id; },
+      // Inherits the global permission mode (acceptEdits on a fresh install);
+      // cos-setup writes nothing until the user says go.
+      createThread: (title, harness) => {
+        const thread = this.manager.createThread(title, this.getEffectiveCwd(), undefined, harness);
+        // Pin the title: the home thread is found by title/id and must not be
+        // renamed by the auto-summarizer (applyAutoTitle honors titleUserSet).
+        thread.titleUserSet = true;
+        // Enforced, not just prompted: the home thread (and every scheduled run
+        // and sub-thread it creates) may never use the shell.
+        thread.disallowedTools = mergeDisallowedTools(thread.disallowedTools, ['Bash']);
+        return thread;
+      },
+      sendPrompt: (id, prompt) => { this.manager.sendMessage(id, prompt).catch(console.error); },
+      openThread: (id) => this.openThreadInChatView(id),
+      saveSettings: () => this.saveSettings(),
+    });
+  }
+
+  private async runChiefOfStaffCommand(): Promise<void> {
     try {
-      if (selectedGuide.shouldCreate) {
-        const folderPath = normalizePath(this.settings.vaultFolder);
-        if (!vault.getAbstractFileByPath(folderPath)) {
-          await vault.createFolder(folderPath);
-        }
-        await vault.create(guidePath, WELCOME_GUIDE);
+      const result = await this.setUpChiefOfStaff();
+      if (result.status === 'failed') {
+        console.warn('[ClaudeThreads] Set up Chief of Staff failed:', result.reason, result.error);
+        new Notice(`Couldn\u2019t set up Chief of Staff: ${describeChiefOfStaffFailure(result.reason, result.error)}.`, 10_000);
+      } else if (result.status === 'focused-existing' && result.sourceError) {
+        console.warn('[ClaudeThreads] Chief of Staff skills could not be re-added:', result.sourceError);
+        const reason = describeChiefOfStaffFailure(result.sourceFailure ?? 'clone-failed', result.sourceError);
+        new Notice(`Opened your Chief of Staff thread, but the Chief of Staff skills couldn\u2019t be added: ${reason}.`, 10_000);
+      } else if (result.status === 'focused-existing' && result.skillsReloadPending) {
+        new Notice('Chief of Staff skills added. The thread restarts on your next message so they load.', 10_000);
       }
     } catch (err) {
-      console.error('[ClaudeThreads] Failed to create welcome guide:', err);
+      console.error('[ClaudeThreads] Set up Chief of Staff failed:', err);
+      new Notice(`Couldn\u2019t set up Chief of Staff: ${describeChiefOfStaffFailure('unexpected', '')}.`, 10_000);
+    }
+  }
+
+  private async firstRunSetup(offerChiefOfStaff: boolean): Promise<void> {
+    // Set up Chief of Staff BEFORE opening Chat. Building ThreadsView with no
+    // threads auto-creates an empty "Thread 1"; creating the home thread first
+    // means a successful first run ends with exactly one thread. (Setup opens
+    // Chat itself when it focuses the new thread.) The fallback opens Chat with
+    // no threads, which keeps the previous single "Thread 1".
+    let chiefOfStaffStarted = false;
+    let fallbackReason: string | undefined;
+    if (offerChiefOfStaff) {
+      try {
+        const result = await this.setUpChiefOfStaff();
+        if (result.status === 'failed') {
+          fallbackReason = describeChiefOfStaffFailure(result.reason, result.error);
+          console.warn('[ClaudeThreads] Chief of Staff first run fell back to the static guide:', result.reason, result.error);
+        } else {
+          chiefOfStaffStarted = true;
+        }
+      } catch (err) {
+        fallbackReason = describeChiefOfStaffFailure('unexpected', '');
+        console.warn('[ClaudeThreads] Chief of Staff first run fell back to the static guide:', err);
+      }
     }
 
-    // 2. Open chat according to the desktop-aware placement policy.
+    // Open Chat and the Agents List as before (no-ops for a view setup already opened).
+    await this.openFirstRunPanels();
+
+    if (!chiefOfStaffStarted) {
+      await this.openWelcomeGuide(offerChiefOfStaff, fallbackReason);
+      new Notice(fallbackReason
+        ? `Chief of Staff setup couldn\u2019t finish: ${fallbackReason}. Check the guide to get started.`
+        : 'Welcome to Agent Threads! Check the guide to get started.');
+    } else {
+      new Notice('Welcome to Agent Threads! Your Chief of Staff is getting you set up.');
+    }
+
+    // Persist the flag so this never fires again
+    this.settings.hasSeenWelcome = true;
+    await this.saveSettings();
+  }
+
+  private async openFirstRunPanels(): Promise<void> {
+    const { workspace } = this.app;
     try {
       if (this.isConversationFirst()) {
         await this.activateView();
@@ -1806,7 +2005,47 @@ export default class ClaudeThreadsPlugin extends Plugin {
       console.error('[ClaudeThreads] Failed to open chat in left sidebar:', err);
     }
 
-    // 3. Open welcome guide in the CENTER editor
+    try {
+      const existingDash = workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
+      if (!existingDash) {
+        const dashLeaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+        await dashLeaf.setViewState({ type: AGENT_VIEW_TYPE, active: true });
+        workspace.revealLeaf(dashLeaf);
+      } else {
+        workspace.revealLeaf(existingDash);
+      }
+    } catch (err) {
+      console.error('[ClaudeThreads] Failed to open Agents List:', err);
+    }
+  }
+
+  /**
+   * Writes (if missing) and opens the static getting-started guide. When
+   * `withPointer` is set — the Chief of Staff fallback — the guide gains one
+   * line pointing at the "Set up Chief of Staff" command.
+   */
+  private async openWelcomeGuide(withPointer: boolean, failureReason?: string): Promise<void> {
+    const { workspace, vault } = this.app;
+
+    // Write welcome guide to vault
+    const selectedGuide = selectWelcomeGuidePath(
+      this.settings.vaultFolder,
+      path => Boolean(vault.getAbstractFileByPath(normalizePath(path))),
+    );
+    const guidePath = normalizePath(selectedGuide.path);
+    try {
+      if (selectedGuide.shouldCreate) {
+        const folderPath = normalizePath(this.settings.vaultFolder);
+        if (!vault.getAbstractFileByPath(folderPath)) {
+          await vault.createFolder(folderPath);
+        }
+        await vault.create(guidePath, withPointer ? withChiefOfStaffPointer(WELCOME_GUIDE, failureReason) : WELCOME_GUIDE);
+      }
+    } catch (err) {
+      console.error('[ClaudeThreads] Failed to create welcome guide:', err);
+    }
+
+    // Open the guide in the CENTER editor (or the companion panel).
     try {
       const guideFile = vault.getAbstractFileByPath(guidePath);
       if (guideFile instanceof TFile) {
@@ -1821,27 +2060,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     } catch (err) {
       console.error('[ClaudeThreads] Failed to open welcome guide:', err);
     }
-
-    // 4. Open the Agents List in the RIGHT sidebar
-    try {
-      const existingDash = workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
-      if (!existingDash) {
-        const dashLeaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
-        await dashLeaf.setViewState({ type: AGENT_VIEW_TYPE, active: true });
-        workspace.revealLeaf(dashLeaf);
-      } else {
-        workspace.revealLeaf(existingDash);
-      }
-    } catch (err) {
-      console.error('[ClaudeThreads] Failed to open Agents List:', err);
-    }
-
-    // 5. Welcome notice
-    new Notice('Welcome to Agent Threads! Check the guide to get started.');
-
-    // 6. Persist the flag so this never fires again
-    this.settings.hasSeenWelcome = true;
-    await this.saveSettings();
   }
 
   private async onloadMobile(): Promise<void> {
@@ -2026,11 +2244,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const sources = this.settings.skillSources ?? [];
     if (!sources.some(s => s.type === 'github')) return;
 
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter) || !this.manifest?.dir) return;
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pathNode = require('path') as typeof import('path');
-    const cloneBase = pathNode.join(adapter.getBasePath(), this.manifest.dir, 'skill-sources');
+    const cloneBase = this.getSkillSourceCloneBase();
+    if (!cloneBase) return;
 
     this.app.workspace.onLayoutReady(() => {
       void (async () => {
@@ -3320,6 +3535,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const data = await this.loadData();
+    // No saved data at all = a genuinely new install (gates the Chief of Staff first run).
+    this.isFreshInstall = isFreshInstallData(data);
     this.settings = mergePersistedSettings(DEFAULT_SETTINGS, data);
     const { sanitizeConversationCompanionSettings } = require('./conversationFirstPlacement') as typeof import('./conversationFirstPlacement');
     sanitizeConversationCompanionSettings(this.settings as unknown as Record<string, unknown>);

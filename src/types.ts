@@ -398,6 +398,14 @@ export interface Thread {
    */
   titleUserSet?: boolean;
   /**
+   * Tools this thread's sessions may never use (e.g. ['Bash'] on the Chief of
+   * Staff home thread). Restriction-only: merged as a union with the global
+   * `settings.disallowedTools`, inherited by scheduled items and threads this
+   * thread creates, and never shrunk. Absent = no per-thread restriction.
+   * See src/toolRestrictions.ts.
+   */
+  disallowedTools?: string[];
+  /**
    * Background tasks (Bash run_in_background: true) that started during a session
    * but didn't emit a task_notification before the stream ended. The plugin polls
    * these automatically and clears them when completions arrive.
@@ -585,6 +593,14 @@ export interface ScheduledItem {
   /** Thread ID of the most recent run */
   lastThreadId?: string;
   /**
+   * Tools denied to every thread this item spawns — copied at CronCreate time
+   * from the creating thread's `disallowedTools` (restriction-only; see
+   * src/toolRestrictions.ts). Absent = no restriction.
+   */
+  disallowedTools?: string[];
+  /** Id of the thread whose CronCreate call made this item, when it carried a denylist. */
+  createdByThreadId?: string;
+  /**
    * When set, fire the prompt into this existing thread instead of creating a
    * new one (used by the /loop command). Falls back to creating a new thread
    * if the target thread no longer exists.
@@ -746,6 +762,14 @@ export interface SkillSource {
    * Omit it in a declared source — it is computed from the plugin dir and `id`.
    */
   clonePath?: string;
+  /**
+   * Tag or branch the clone is pinned to (`git clone --branch <ref> --depth 1`),
+   * e.g. the Chief of Staff pack at `CHIEF_OF_STAFF_REF`. Omitted = default
+   * branch. A pinned source is detached at that ref: update checks report it as
+   * current and "Pull updates" re-syncs it to the same ref rather than moving to
+   * the default branch. The plugin moves it by bumping the ref in a release.
+   */
+  ref?: string;
   /** ms epoch of the last git fetch (for staleness display) */
   lastFetched?: number;
   /** Commits behind remote (0 = up to date, undefined = not yet fetched) */
@@ -994,6 +1018,14 @@ export interface PluginSettings {
   /** Set to true after the first-run onboarding flow has completed. Prevents the welcome guide and panel auto-layout from triggering on subsequent loads. */
   hasSeenWelcome: boolean;
   /**
+   * Brand-new installs start a "Chief of Staff" thread (cloning the
+   * rbcodelabs/chief-of-staff skill source) instead of the static welcome guide.
+   * Off restores the static-guide first run. Default: true.
+   */
+  offerChiefOfStaffOnFirstRun: boolean;
+  /** Id of the Chief of Staff home thread, so "Set up Chief of Staff" focuses it instead of creating another. */
+  chiefOfStaffThreadId?: string;
+  /**
    * Hotkey for push-to-talk recording. Serialized as e.g. "Alt+Space" or "Control+Shift+Space".
    * Empty string disables PTT. Default: "Alt+Space" (Option+Space on Mac).
    */
@@ -1204,6 +1236,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   telemetryEnabled: true,
   threadViewPlacement: 'conversation-first',
   hasSeenWelcome: false,
+  offerChiefOfStaffOnFirstRun: true,
   imageExternalizationComplete: false,
   autoArchiveIdleDays: 14,
   pttKey: 'Alt+Space',

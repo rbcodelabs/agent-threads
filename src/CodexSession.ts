@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
+import { isShellDenied } from './toolRestrictions';
 import * as path from 'path';
 import fs from 'fs';
 import type { AskQuestion, ImageAttachment } from './types';
@@ -942,6 +943,14 @@ export class CodexSession {
     }
     const isApproval = /requestApproval$/.test(message.method);
     if (!callbacks || !isApproval) { this.respond(message.id, {}); return; }
+    // Per-thread denylist (restriction-only): with Bash denied, every shell
+    // command Codex asks to run is declined without prompting. Codex does not
+    // ask for every command (its sandbox runs some without approval), so this
+    // is the strongest native restriction available, not a guarantee.
+    if (/commandExecution/i.test(message.method) && isShellDenied(this.options?.disallowedTools)) {
+      this.respond(message.id, { decision: 'decline' });
+      return;
+    }
     const detail = String(params.command ?? params.reason ?? 'Codex requests permission to continue');
     callbacks.onPermissionRequest('Codex', detail).then((allow) => {
       const decision = allow ? 'accept' : 'decline';

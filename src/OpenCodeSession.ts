@@ -18,6 +18,7 @@ import type { ChildProcess } from 'child_process';
 import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
 import type { AgentHarness, AskQuestion, ImageAttachment, TaskItemStatus } from './types';
 import { parseExtraEnv } from './types';
+import { isShellDenied } from './toolRestrictions';
 import type { SessionCallbacks } from './ClaudeSession';
 import type {
   HarnessContextUsage,
@@ -44,10 +45,13 @@ const OPENCODE_READ_ONLY_PERMISSIONS = ['read', 'glob', 'grep', 'list', 'lsp', '
  * permission mode (see resolveOpenCodePermission). Host tools are approved by
  * the MCP bridge itself, so OpenCode must not ask a second time.
  */
-export function openCodePermissionConfig(): Record<string, 'ask' | 'allow'> {
-  const config: Record<string, 'ask' | 'allow'> = { '*': 'ask' };
+export function openCodePermissionConfig(disallowedTools?: readonly string[]): Record<string, 'ask' | 'allow' | 'deny'> {
+  const config: Record<string, 'ask' | 'allow' | 'deny'> = { '*': 'ask' };
   for (const permission of OPENCODE_READ_ONLY_PERMISSIONS) config[permission] = 'allow';
   config[`${OPENCODE_HOST_TOOLS_SERVER}_*`] = 'allow';
+  // Per-thread denylist (restriction-only): OpenCode's native `deny` refuses
+  // the shell tool outright, before any prompt.
+  if (isShellDenied(disallowedTools)) config.bash = 'deny';
   return config;
 }
 
@@ -370,7 +374,7 @@ export class OpenCodeSession {
         cwd: options.cwd,
         env: { ...process.env, ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) },
         config: {
-          permission: openCodePermissionConfig(),
+          permission: openCodePermissionConfig(options.disallowedTools),
           ...(Object.keys(mcp).length > 0 ? { mcp } : {}),
         },
       });
@@ -713,7 +717,11 @@ export class OpenCodeSession {
         reply: decision, ...(message ? { message } : {}),
       }).catch((error) => console.warn('[ClaudeThreads] Could not answer OpenCode permission:', error));
     };
-    const decision = resolveOpenCodePermission(this.options?.permissionMode ?? 'default', permission);
+    // Defence in depth for the per-thread denylist: refuse bash even if the
+    // launch config was not honoured.
+    const decision = permission === 'bash' && isShellDenied(this.options?.disallowedTools)
+      ? 'deny'
+      : resolveOpenCodePermission(this.options?.permissionMode ?? 'default', permission);
     if (decision === 'allow') { reply('once'); return; }
     if (decision === 'deny') { reply('reject', `${permission} is not allowed in the current permission mode.`); return; }
     this.pendingPermissions.add(requestId);
