@@ -15,11 +15,16 @@
  * `display:none`, zero-size, or `visibility:hidden` subtrees, so a genuinely
  * hidden guest returns blank screenshots, and an occluded one is
  * background-throttled until its timers stall. The container is instead a real
- * 1280x800 box parked off-screen, which keeps the guest painting and its clocks
- * running.
+ * box parked off-screen, which keeps the guest painting and its clocks
+ * running. The box is sized to `MAX_VIEWPORT_WIDTH`/`MAX_VIEWPORT_HEIGHT`
+ * (not the guest's default size) so it can never clip a guest that has been
+ * resized up to the largest viewport `browser_resize` allows — a `<webview>`'s
+ * compositor surface is embedded/clipped by ancestor CSS the same way an
+ * iframe is, and this container's `overflow:hidden` would otherwise cut off
+ * anything larger than its own box.
  */
 
-import { GUEST_HEIGHT, GUEST_WIDTH } from './agentBrowserPolicy';
+import { MAX_VIEWPORT_HEIGHT, MAX_VIEWPORT_WIDTH } from './agentBrowserPolicy';
 
 export const AGENT_BROWSER_HOST_ID = 'claude-threads-agent-browser-host';
 
@@ -33,8 +38,8 @@ const PARKED_STYLE = [
   'position:fixed',
   'left:-20000px',
   'top:0',
-  `width:${GUEST_WIDTH}px`,
-  `height:${GUEST_HEIGHT}px`,
+  `width:${MAX_VIEWPORT_WIDTH}px`,
+  `height:${MAX_VIEWPORT_HEIGHT}px`,
   'overflow:hidden',
   'pointer-events:none',
   'opacity:0',
@@ -59,8 +64,8 @@ const COMPOSITING_STYLE = [
   'position:fixed',
   'left:0',
   'top:0',
-  `width:${GUEST_WIDTH}px`,
-  `height:${GUEST_HEIGHT}px`,
+  `width:${MAX_VIEWPORT_WIDTH}px`,
+  `height:${MAX_VIEWPORT_HEIGHT}px`,
   'overflow:hidden',
   'pointer-events:none',
   'z-index:-1',

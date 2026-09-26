@@ -28,6 +28,7 @@ import {
   SCRIPT_TIMEOUT_MS,
   UNRESPONSIVE_GRACE_MS,
   evaluateUrl,
+  evaluateViewport,
   type UrlPolicyOptions,
 } from './agentBrowserPolicy';
 import { AgentBrowserError, REFS_INVALIDATED_HINT } from './agentBrowserErrors';
@@ -85,6 +86,7 @@ export interface GuestFacts {
   navCount: number;
   scriptCount: number;
   captureCount: number;
+  viewport: { width: number; height: number };
 }
 
 export interface AgentBrowserGuestOptions {
@@ -162,6 +164,8 @@ export class AgentBrowserGuest {
   private navCount = 0;
   private scriptCount = 0;
   private captureCount = 0;
+  private width = GUEST_WIDTH;
+  private height = GUEST_HEIGHT;
 
   /**
    * Some Electron/macOS builds emit both `render-process-gone` and the legacy
@@ -222,6 +226,7 @@ export class AgentBrowserGuest {
       navCount: this.navCount,
       scriptCount: this.scriptCount,
       captureCount: this.captureCount,
+      viewport: { width: this.width, height: this.height },
     };
   }
 
@@ -591,6 +596,36 @@ export class AgentBrowserGuest {
         },
       );
       return { url: safeUrl(el), title: safeTitle(el) };
+    });
+  }
+
+  /**
+   * Resize the guest's viewport, enforcing policy before anything is enqueued.
+   *
+   * Sets `style.width`/`style.height` individually rather than overwriting
+   * `style.cssText`, so the `border`/`display` set once in `start()` survive.
+   * Awaits the same settle delay `capture()` uses so a subsequent
+   * snapshot/screenshot reflects the new layout rather than racing it.
+   */
+  resize(width: number, height: number): Promise<{ width: number; height: number }> {
+    const decision = evaluateViewport(width, height);
+    if (!decision.ok) {
+      return Promise.reject(
+        new AgentBrowserError({
+          code: 'invalid_viewport',
+          message: decision.reason,
+          retryable: false,
+        }),
+      );
+    }
+    return this.enqueue(async () => {
+      const el = this.requireElement();
+      el.style.width = `${decision.width}px`;
+      el.style.height = `${decision.height}px`;
+      this.width = decision.width;
+      this.height = decision.height;
+      await new Promise((resolve) => setTimeout(resolve, COMPOSITE_SETTLE_MS));
+      return { width: decision.width, height: decision.height };
     });
   }
 

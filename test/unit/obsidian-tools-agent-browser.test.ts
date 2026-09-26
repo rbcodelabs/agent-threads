@@ -71,6 +71,10 @@ function fakeBrowser(overrides: Partial<ThreadBrowser> = {}): ThreadBrowser {
     screenshot: vi.fn().mockResolvedValue(new Uint8Array([137, 80, 78, 71])),
     close: vi.fn(),
     status: vi.fn().mockReturnValue({ inUse: 1, max: 2, fdBlocked: false, fdAvailable: true, guests: [], threadHasSession: true }),
+    resize: vi.fn().mockResolvedValue({
+      url: 'https://example.com/', title: 'Example', origin: 'https://example.com',
+      epoch: 3, count: 1, truncated: false, snapshot: '- link "Home" [ref=e1]',
+    }),
     ...overrides,
   } as unknown as ThreadBrowser;
 }
@@ -185,5 +189,34 @@ describe('agent browser tool behaviour', () => {
     const result = await getTool(server, 'browser_close')._handler({});
     expect(browser.close).toHaveBeenCalled();
     expect(parse(result).closed).toBe(true);
+  });
+
+  it('passes width and height through to the browser and returns a fresh snapshot', async () => {
+    const browser = fakeBrowser();
+    const server = createObsidianMcpServer(makeApp(), { browser }) as unknown as CapturedServer;
+    const result = await getTool(server, 'browser_resize')._handler({ width: 800, height: 600 });
+    expect(browser.resize).toHaveBeenCalledWith(800, 600);
+    const payload = parse(result);
+    expect(payload.success).toBe(true);
+    expect(payload.epoch).toBe(3);
+    expect(payload.snapshot).toContain('[ref=e1]');
+  });
+
+  it('reports a resize refusal as a value, never as a thrown exception', async () => {
+    const browser = fakeBrowser({
+      resize: vi.fn().mockRejectedValue(
+        new AgentBrowserError({
+          code: 'invalid_viewport',
+          message: 'Viewport width must be between 320 and 1920 (got 10).',
+          retryable: false,
+        }),
+      ) as unknown as ThreadBrowser['resize'],
+    });
+    const server = createObsidianMcpServer(makeApp(), { browser }) as unknown as CapturedServer;
+    const result = await getTool(server, 'browser_resize')._handler({ width: 10, height: 600 });
+    expect(result.isError).toBe(true);
+    const payload = parse(result) as { error: Record<string, unknown> };
+    expect(payload.error.code).toBe('invalid_viewport');
+    expect(payload.error.retryable).toBe(false);
   });
 });

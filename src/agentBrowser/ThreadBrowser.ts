@@ -92,6 +92,20 @@ export class ThreadBrowser {
     return this.snapshotWith(guest);
   }
 
+  /**
+   * Resize the viewport and return a fresh snapshot.
+   *
+   * A resize can reflow a responsive page and change every ref, so — exactly
+   * like `navigate()` — this re-snapshots rather than returning just the new
+   * dimensions, bumping the epoch so stale pre-resize refs are implicitly
+   * invalidated the same way they are after a navigation.
+   */
+  async resize(width: number, height: number): Promise<SnapshotResult> {
+    const guest = await this.guest();
+    await guest.resize(width, height);
+    return this.snapshotWith(guest);
+  }
+
   async snapshot(): Promise<SnapshotResult> {
     return this.snapshotWith(await this.guest());
   }

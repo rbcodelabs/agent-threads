@@ -21,6 +21,7 @@ import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 
 import { AgentBrowserError } from './agentBrowserErrors';
 import { base64FromBytes } from './agentBrowserImage';
+import { MAX_VIEWPORT_HEIGHT, MAX_VIEWPORT_WIDTH, MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH } from './agentBrowserPolicy';
 import type { ThreadBrowser } from './ThreadBrowser';
 
 /** Names registered by this module. Kept in one place for the wiring maps. */
@@ -33,6 +34,7 @@ export const AGENT_BROWSER_TOOL_NAMES = [
   'browser_screenshot',
   'browser_status',
   'browser_close',
+  'browser_resize',
 ] as const;
 
 /**
@@ -212,6 +214,26 @@ export function createAgentBrowserTools(browser: ThreadBrowser): SdkMcpToolDefin
     },
   );
 
+  const boundResize = tool(
+    'browser_resize',
+    [
+      `Resizes this thread's in-app browser viewport to the given CSS pixel dimensions ` +
+        `(width ${MIN_VIEWPORT_WIDTH}-${MAX_VIEWPORT_WIDTH}, height ${MIN_VIEWPORT_HEIGHT}-${MAX_VIEWPORT_HEIGHT}).`,
+      'A resize can reflow a responsive page and invalidate every prior element ref, so the response is a fresh accessibility snapshot — act on its refs and epoch, not any from before this call.',
+    ].join(' '),
+    {
+      width: z.number().describe(`Viewport width in CSS pixels (${MIN_VIEWPORT_WIDTH}-${MAX_VIEWPORT_WIDTH}).`),
+      height: z.number().describe(`Viewport height in CSS pixels (${MIN_VIEWPORT_HEIGHT}-${MAX_VIEWPORT_HEIGHT}).`),
+    },
+    async (args) => {
+      try {
+        return ok({ success: true, ...(await browser.resize(args.width, args.height)) });
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
   const boundClose = tool(
     'browser_close',
     [
@@ -238,5 +260,6 @@ export function createAgentBrowserTools(browser: ThreadBrowser): SdkMcpToolDefin
     boundScreenshot,
     boundStatus,
     boundClose,
+    boundResize,
   ];
 }

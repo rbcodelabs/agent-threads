@@ -169,6 +169,54 @@ export const FD_PROBE_CACHE_MS = 2_000;
 export const GUEST_WIDTH = 1280;
 export const GUEST_HEIGHT = 800;
 
+/**
+ * Bounds on a caller-requested viewport resize.
+ *
+ * Below `MIN_*`, page layouts and the injected snapshot/act scripts misbehave.
+ * Above `MAX_*`, the cost is real: this is a capped shared resource, not a
+ * user's own browser window, and compositing/memory cost scales with pixel
+ * area per guest. 1920x1080 is a deliberate, generous-but-bounded ceiling —
+ * roughly 2x the default's area — in keeping with this module's whole ethos of
+ * bounding every dimension rather than trusting the caller.
+ */
+export const MIN_VIEWPORT_WIDTH = 320;
+export const MIN_VIEWPORT_HEIGHT = 240;
+export const MAX_VIEWPORT_WIDTH = 1920;
+export const MAX_VIEWPORT_HEIGHT = 1080;
+
+export type ViewportDecision =
+  | { ok: true; width: number; height: number }
+  | { ok: false; reason: string };
+
+/**
+ * Decide whether a caller-requested viewport size may be applied.
+ *
+ * Mirrors `evaluateUrl`'s discriminated-union style: a bad request comes back
+ * as a value with a reason, never a thrown error, so the caller can enforce
+ * policy before anything is enqueued against the guest.
+ */
+export function evaluateViewport(width: number, height: number): ViewportDecision {
+  if (!Number.isInteger(width) || !Number.isInteger(height)) {
+    return {
+      ok: false,
+      reason: `Viewport width and height must be finite integers (got ${width}x${height}).`,
+    };
+  }
+  if (width < MIN_VIEWPORT_WIDTH || width > MAX_VIEWPORT_WIDTH) {
+    return {
+      ok: false,
+      reason: `Viewport width must be between ${MIN_VIEWPORT_WIDTH} and ${MAX_VIEWPORT_WIDTH} (got ${width}).`,
+    };
+  }
+  if (height < MIN_VIEWPORT_HEIGHT || height > MAX_VIEWPORT_HEIGHT) {
+    return {
+      ok: false,
+      reason: `Viewport height must be between ${MIN_VIEWPORT_HEIGHT} and ${MAX_VIEWPORT_HEIGHT} (got ${height}).`,
+    };
+  }
+  return { ok: true, width, height };
+}
+
 // ── Extraction caps ──────────────────────────────────────────────────────────
 // Enforced *inside* the guest, before a value crosses `executeJavaScript`.
 // Truncating on the host side is too late: a multi-megabyte structured clone is
