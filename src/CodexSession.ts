@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
 import * as path from 'path';
 import fs from 'fs';
 import type { AskQuestion, ImageAttachment } from './types';
@@ -420,6 +421,8 @@ export class CodexSession {
     // App-server's documented Skill input selects the package even when names collide.
     if (skill) input.push({ type: 'skill', name: skill.name, path: skill.path });
     for (const image of images ?? []) input.push({ type: 'image', url: `data:${image.mediaType};base64,${image.base64}` });
+    // Per-turn clock as its own input item (see currentTimeContext.ts).
+    if (shouldAddCurrentTimeContext(invocationText)) input.push({ type: 'text', text: formatCurrentTimeContext(), text_elements: [] });
     this.turnStartPromise = this.request('turn/start', {
       threadId: this.codexThreadId,
       input,

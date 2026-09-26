@@ -174,11 +174,11 @@ describe('ThreadSession — rate-limit auto-retry', () => {
     expect(errors).toHaveLength(0);
     expect(session.turnInFlight).toBe(true);
 
-    // The replayed turn is byte-for-byte the original — no synthetic
-    // continuation prompt, no new user text.
+    // The replayed turn carries the original user text unchanged — no synthetic
+    // continuation prompt, no new user text (the clock block is recomputed).
     const replayed = await firstInput(sdk.generations[1]);
     expect(replayed.role).toBe('user');
-    expect(replayed.content).toBe('do the thing');
+    expect(replayed.content).toEqual([{ type: 'text', text: 'do the thing' }, { type: 'text', text: expect.stringMatching(/^\[Current local time: /) }]);
     expect(replayed.uuid).toBe('0198f7b2-aaaa-7bbb-8ccc-123456789abc');
 
     session.close();

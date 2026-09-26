@@ -213,7 +213,7 @@ describe('ThreadSession — push-channel content shape', () => {
     session.close();
   });
 
-  it('pushes a plain-text user message for a text-only send()', async () => {
+  it('pushes the user text, then the per-turn current-time block, for a text-only send()', async () => {
     sdk.generations = [];
     sdk.nextIterable = makeChannel();
     const session = new ThreadSession('/fake/claude');
@@ -229,7 +229,7 @@ describe('ThreadSession — push-channel content shape', () => {
     expect(msg.type).toBe('user');
     expect(msg.parent_tool_use_id).toBeNull();
     expect(msg.message.role).toBe('user');
-    expect(msg.message.content).toBe('hello there');
+    expect(msg.message.content).toEqual([{ type: 'text', text: 'hello there' }, { type: 'text', text: expect.stringMatching(/^\[Current local time: /) }]);
 
     session.close();
   });
@@ -299,7 +299,7 @@ describe('ThreadSession — proactive compaction guard', () => {
     expect(onDone).not.toHaveBeenCalled();
     session.send('next user message');
     const userTurn = await iter.next();
-    expect((userTurn.value as { message: { content: string } }).message.content).toBe('next user message');
+    expect((userTurn.value as { message: { content: Array<{ text: string }> } }).message.content[0]).toEqual({ type: 'text', text: 'next user message' });
     session.close();
     sdk.contextUsage = null;
   });
@@ -404,7 +404,7 @@ describe('ThreadSession — channel stays open regardless of turn state (no rele
     const second = await iter.next();
     expect(second.done).toBe(false);
     const msg = second.value as { message: { content: unknown } };
-    expect(msg.message.content).toBe('second message');
+    expect((msg.message.content as Array<{ text: string }>)[0]).toEqual({ type: 'text', text: 'second message' });
 
     // The permission request is still exactly as pending as before — sending
     // more input never force-rejected it.
