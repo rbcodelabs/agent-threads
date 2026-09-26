@@ -119,6 +119,51 @@ describe('slash command contributions', () => {
     expect(report).not.toHaveBeenCalled();
   });
 
+  it('accepts valid argCompletions and exposes them per scope via argCompletionsFor()', () => {
+    const registry = new SlashCommandRegistry();
+    const argCompletions = [{ name: 'sprint', description: 'Current sprint board' }, { name: 'backlog', description: 'Full backlog board' }];
+    const registered = registry.register(OWNER, {
+      name: 'board',
+      thread: { description: 'Open a board', invoke: vi.fn(async () => ({ status: 'ok' })), argCompletions },
+      dispatch: { description: 'Open a board', invoke: vi.fn(async () => ({ status: 'ok' })) },
+    });
+    expect(registered.success).toBe(true);
+    expect(registry.argCompletionsFor('board', 'thread')).toEqual(argCompletions);
+    expect(registry.argCompletionsFor('board', 'dispatch')).toBeUndefined();
+    expect(registry.argCompletionsFor('unknown-command', 'thread')).toBeUndefined();
+  });
+
+  it('leaves absent argCompletions fully backward compatible', () => {
+    const registry = new SlashCommandRegistry();
+    expect(registry.register(OWNER, contribution()).success).toBe(true);
+    expect(registry.argCompletionsFor('design', 'thread')).toBeUndefined();
+  });
+
+  it('respects reserved names and scope-existence when looking up argCompletionsFor', () => {
+    let reserved: string[] = [];
+    const registry = new SlashCommandRegistry({ reservedNames: () => reserved });
+    registry.register(OWNER, { name: 'board', thread: { description: 'Open a board', invoke: vi.fn(async () => ({ status: 'ok' })), argCompletions: [{ name: 'sprint', description: 'Current sprint' }] } });
+    expect(registry.argCompletionsFor('board', 'thread')).toEqual([{ name: 'sprint', description: 'Current sprint' }]);
+    reserved = ['board'];
+    expect(registry.argCompletionsFor('board', 'thread')).toBeUndefined();
+  });
+
+  it.each([
+    { argCompletions: 'not-an-array' },
+    { argCompletions: Array.from({ length: 21 }, (_, i) => ({ name: `n${i}`, description: 'd' })) },
+    { argCompletions: [{ name: '', description: 'd' }] },
+    { argCompletions: [{ name: 'a'.repeat(65), description: 'd' }] },
+    { argCompletions: [{ name: 'n', description: '' }] },
+    { argCompletions: [{ name: 'n', description: 'd'.repeat(257) }] },
+  ])('rejects malformed argCompletions entries %j', (overrides) => {
+    const registry = new SlashCommandRegistry();
+    const result = registry.register(OWNER, {
+      name: 'board',
+      thread: { description: 'Open a board', invoke: vi.fn(async () => ({ status: 'ok' })), ...(overrides as object) },
+    });
+    expect(result).toMatchObject({ status: 'invalid' });
+  });
+
   it('allows async send feedback after success until the registration is revoked', async () => {
     const registry = new SlashCommandRegistry();
     let host!: SlashCommandHost;

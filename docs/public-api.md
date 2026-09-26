@@ -85,6 +85,26 @@ The immutable context contains `surface`, original submitted `text`, parsed mult
 
 Core command names (including `/fork`) and the enabled escalation keyword are reserved, case-insensitively, at registration, discovery, and invocation. Peers cannot shadow each other. Matching consumes the entire command token: `/boardwalk` is not `/board`. Catalog changes update open dropdowns and pills, and a temporarily shadowed skill returns when the contribution is removed.
 
+A handler may also supply `argCompletions`: up to 20 `{ name, description }` entries (name ≤64 characters, description ≤256) offered in the composer's existing argument dropdown once the command name has been typed, e.g. typing `/board ` suggests the entries below the same way the host's own `/model fable|opus|sonnet|haiku|default` does today. A malformed entry rejects the whole registration with `status: 'invalid'`.
+
+```ts
+api.extensions.registerSlashCommand({ pluginId: 'example.boards' }, {
+  name: 'board',
+  dispatch: {
+    description: 'Open a board by name',
+    argCompletions: [
+      { name: 'sprint', description: 'Current sprint board' },
+      { name: 'backlog', description: 'Full backlog board' },
+      { name: 'archive', description: 'Closed/archived board' },
+    ],
+    async invoke(context, host) {
+      await openBoard(context.args);
+      return { status: 'ok' };
+    },
+  },
+});
+```
+
 Return `{ status: 'ok' | 'error', message?: string }`; `host.report(message, isError?)` supplies intermediate or deferred feedback scoped to the captured thread. A switched or deleted thread never receives another thread's inline feedback. Exceptions, invalid results, disposal, and the 60-second deadline become structured errors. Dispatch failures restore text and attachments while retaining any newer draft. A matched invocation never falls through to an ordinary agent prompt. Cancellation is cooperative: heed `host.signal`; the host cannot roll back arbitrary peer side effects. Disposal and host shutdown revoke both pending calls and later feedback; an old disposer cannot remove a replacement registration.
 
 Design for Agent Threads is now a separate peer plugin. It registers `/design`, `EnterDesignMode`, and the `agent-threads.design` artifact provider through this API. New-thread dispatch uses `threads.beginProvisional`: pre-commit preparation or preview errors roll back the thread and allocated storage; preview warnings are durable; a kickoff-send failure after commit preserves the artifact and reports the error. When the peer is absent, Agent Threads exposes no Design command or tool and retains only the read-only legacy source fallback.
