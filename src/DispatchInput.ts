@@ -39,6 +39,14 @@ export interface DispatchInputOptions {
    * options are offered in the same dropdown (e.g. /model → fable|opus|...).
    */
   argCompletions?: Record<string, { name: string; description: string }[]>;
+  /**
+   * Fallback resolver for argument completions of a peer-registered command
+   * (one not present in the static argCompletions record above). Consulted
+   * only when that record has no entry for the command name — a built-in
+   * entry always wins, and a peer command name can never collide with a
+   * built-in one per the registry's own reserved-name check.
+   */
+  peerArgCompletions?: (commandName: string) => readonly { name: string; description: string }[] | undefined;
   /** Called with the raw payload after the user submits */
   onSend: (payload: DispatchPayload) => Promise<void> | void;
 
@@ -945,7 +953,17 @@ export class DispatchInput {
    */
   private getArgQuery(): { options: { name: string; description: string }[]; partial: string } | null {
     const completions = this.options.argCompletions;
-    if (!completions) return null;
+    const peerCompletions = this.options.peerArgCompletions;
+    if (!completions && !peerCompletions) return null;
+    // Built-in entries always win; a peer command name can never collide
+    // with one (the registry rejects reserved names at registration), so no
+    // merging is needed — just fall back when the static record has nothing.
+    const resolveOptions = (commandName: string): { name: string; description: string }[] | undefined => {
+      const builtin = completions?.[commandName];
+      if (builtin) return builtin;
+      const peer = peerCompletions?.(commandName);
+      return peer ? [...peer] : undefined;
+    };
     const val = this.inputEl.value;
     const pos = this.inputEl.selectionStart ?? val.length;
     const before = val.slice(0, pos);
@@ -953,12 +971,12 @@ export class DispatchInput {
     // offer completions while the cursor is in the first word.
     if (this.pendingCommand) {
       if (!/^\S*$/.test(before)) return null;
-      const options = completions[this.pendingCommand];
+      const options = resolveOptions(this.pendingCommand);
       return options ? { options, partial: before } : null;
     }
     const match = before.match(/^\/(\S+)\s+(\S*)$/);
     if (!match) return null;
-    const options = completions[match[1].toLowerCase()];
+    const options = resolveOptions(match[1].toLowerCase());
     if (!options) return null;
     return { options, partial: match[2] };
   }

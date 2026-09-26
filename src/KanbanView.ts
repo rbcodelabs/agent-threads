@@ -277,6 +277,7 @@ export class KanbanView extends ItemView {
       },
       subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
       argCompletions: DISPATCH_ARG_COMPLETIONS,
+      peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
       harnessPicker: { initialHarness: this.plugin.settings.agentHarness ?? 'claude' },
       onSend: async ({ text, images, attachment, agentHarness }) => {
         // Intercept contributed commands, then core model/goal/loop directives.

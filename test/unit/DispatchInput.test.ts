@@ -227,6 +227,66 @@ describe('DispatchInput — dynamic builtinCommands', () => {
   });
 });
 
+// Regression guard for peer-registered slash commands supplying their own
+// argument completions: getArgQuery() must fall back to peerArgCompletions
+// only when the static built-in argCompletions record has no entry for that
+// command name — built-ins always win, no merging.
+describe('DispatchInput — peer argument completions', () => {
+  function typeAndTriggerInput(root: HTMLElement, value: string): void {
+    const textarea = root.querySelector('textarea')!;
+    textarea.value = value;
+    textarea.dispatchEvent(new Event('input'));
+  }
+
+  it('offers a peer command\'s argCompletions once its name is typed', () => {
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend: vi.fn(),
+      builtinCommands: [{ name: 'board', description: 'Open a board' }],
+      peerArgCompletions: name => name === 'board'
+        ? [{ name: 'sprint', description: 'Current sprint board' }, { name: 'backlog', description: 'Full backlog board' }]
+        : undefined,
+    });
+    const root = di.mount(makeContainer());
+
+    typeAndTriggerInput(root, '/board sp');
+
+    expect(root.textContent).toContain('Current sprint board');
+    expect(root.textContent).not.toContain('Full backlog board');
+  });
+
+  it('never consults peerArgCompletions for a command name with a built-in entry', () => {
+    const peerArgCompletions = vi.fn(() => [{ name: 'ignored', description: 'should never appear' }]);
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend: vi.fn(),
+      builtinCommands: [{ name: 'model', description: 'Set the model' }],
+      argCompletions: { model: [{ name: 'opus', description: 'Claude Opus' }] },
+      peerArgCompletions,
+    });
+    const root = di.mount(makeContainer());
+
+    typeAndTriggerInput(root, '/model o');
+
+    expect(root.textContent).toContain('Claude Opus');
+    expect(peerArgCompletions).not.toHaveBeenCalled();
+  });
+
+  it('returns no dropdown when peerArgCompletions has nothing for the typed command', () => {
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend: vi.fn(),
+      builtinCommands: [{ name: 'board', description: 'Open a board' }],
+      peerArgCompletions: () => undefined,
+    });
+    const root = di.mount(makeContainer());
+
+    typeAndTriggerInput(root, '/board sp');
+
+    expect(root.querySelector('.ct-skill-dropdown')).toBeNull();
+  });
+});
+
 describe('DispatchInput — interactive wait controls', () => {
   it('keeps both Send and Stop visible when sending is allowed during a stream', () => {
     const di = new DispatchInput({
