@@ -372,6 +372,9 @@ export interface ObsidianMcpServerOptions {
    * value, write it to the OS keychain under `ct-secret-<secretName>`, and
    * resolve with true if the user saved the value or false if they cancelled.
    * When `force` is true the modal should clarify that the existing value will be replaced.
+   * A thread-aware implementation should also flag the calling thread's live
+   * session for restart on success, so the new secret becomes available to
+   * that same thread starting its next turn rather than only in future sessions.
    */
   onRequestSecret?: (secretName: string, reason: string, force?: boolean) => Promise<boolean>;
   /**
@@ -2817,7 +2820,9 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   // ── Secret request tool ──────────────────────────────────────────────────
   // Lets agents ask the user for a credential at runtime without that credential
   // ever appearing in the conversation. The value is stored in the OS keychain
-  // and injected into future sessions via secretEnvResolver.
+  // and injected into future sessions via secretEnvResolver — and, when the
+  // caller restarts the calling thread's session on success (see
+  // requestSecretForThread in main.ts), into this same thread's next turn too.
 
   const boundRegisterMcpServer = tool(
     'mcp_register_server',
@@ -2843,7 +2848,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     [
       'Ask the user to provide a secret (API key, token, password) and store it securely in the OS keychain.',
       'Use this when a skill or workflow needs a credential that hasn\'t been configured yet.',
-      'The secret is stored under the name you provide and injected into future sessions as an environment variable.',
+      'The secret is stored under the name you provide and injected into future sessions as an environment variable; a successful save also makes it available to this same thread starting its next turn.',
       'Returns {success: true, secretName, alreadyExisted: boolean} on success, or {success: false, reason} if the user cancelled.',
       'IMPORTANT: never ask the user to paste a secret directly into the conversation — always use this tool.',
       'Use force: true to re-prompt the user even when a secret with this name already exists — useful when a token has been rotated or a stale keychain entry needs replacing.',

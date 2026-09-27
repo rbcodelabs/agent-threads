@@ -886,7 +886,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
             return result;
           },
           onRequestSecret: (secretName: string, reason: string, force?: boolean) =>
-            this.requestSecretFromUser(secretName, reason, force),
+            this.requestSecretForThread(threadId, secretName, reason, force),
         });
         const mcpDebug = Object.fromEntries(Object.entries(mcpServers).map(([key, server]) => [key, {
           type: (server as unknown as Record<string, unknown>).type,
@@ -2395,6 +2395,21 @@ export default class ClaudeThreadsPlugin extends Plugin {
         resolve(saved);
       }, force).open();
     });
+  }
+
+  /**
+   * Thread-scoped wrapper around requestSecretFromUser(): after a successful
+   * save, flags the calling thread's live session for restart so the new
+   * secret is picked up starting the thread's next turn (secretEnvResolver is
+   * only consulted at session start — see ThreadManager.secretEnvResolver /
+   * buildThreadSessionOptions). Mirrors the reloadThreadSkills pattern
+   * (requestSessionRestart is a no-op / returns false if there's no live
+   * session yet, which is fine — the next-anyway-fresh session already gets it).
+   */
+  private async requestSecretForThread(threadId: string, secretName: string, reason: string, force?: boolean): Promise<boolean> {
+    const saved = await this.requestSecretFromUser(secretName, reason, force);
+    if (saved) this.manager.requestSessionRestart(threadId);
+    return saved;
   }
 
   getPluginSkillsRoot(): string {
