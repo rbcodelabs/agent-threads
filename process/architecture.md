@@ -1,5 +1,11 @@
 # Architecture Notes
 
+> **ADRs live in Compass, not this repo.** Architecture Decision Records for this
+> plugin are Compass docs in the "Claude Threads" workspace, nested under
+> [Architecture Decision Records](https://compass.rbcodelabs.com/rbcodelabs/claude-threads/docs/5e7c4e86-3075-4417-992d-3251ec3ecc33).
+> `docs/adr/` no longer exists in the repo (migrated 2026-09-27). Create new ADRs
+> as Compass docs nested under that parent, not as new files here.
+
 ## Key Files
 
 | File | Purpose |
@@ -21,10 +27,10 @@
 | `src/Scheduler.ts` | Built-in scheduler for cron items and `/loop` recurrences, persisted in `settings.scheduledItems` |
 | `src/statusLine.ts` | Pure parser for `statusLineCommand` output (JSON tags or legacy plaintext → `StatusTag[]`) + `derivePrUrl`/`resolveTagIcon`/`planFooter`. No Obsidian/Node deps |
 | `src/gitDiffUtils.ts` | Pure helpers for the git diff bar: `parseShortStat`, `parseRemoteToOwnerRepo`, `buildComparePrUrl`, plus `gitDiffBarVisible`/`parsePrNumber`/`prButtonLabel`. No Obsidian/Node deps |
-| `src/StatusLineService.ts` | Desktop-only service that polls `statusLineCommand` per thread cwd (coalesced, capped, cached, idle-paused) and writes `statusTags` + derived `prUrl`. See `docs/adr/0001-structured-status-line-tags.md` |
+| `src/StatusLineService.ts` | Desktop-only service that polls `statusLineCommand` per thread cwd (coalesced, capped, cached, idle-paused) and writes `statusTags` + derived `prUrl`. See [ADR-0001](https://compass.rbcodelabs.com/rbcodelabs/claude-threads/docs/445c5f26-1091-4147-8750-0ecfa9b16e40) |
 | `src/HarnessSession.ts` | Provider-neutral harness contract (`HarnessSession`, `HarnessPermissionMode`, `HarnessMcpServerConfig`, `HarnessContextUsage`). Adapters map their native types at the boundary |
 | `src/HarnessFactory.ts` | Picks the adapter from `thread.agentHarness`: `ThreadSession` (Claude), `CodexSession`, `OpenCodeSession` |
-| `src/OpenCodeSession.ts` | OpenCode adapter over a per-session `opencode serve` (HTTP + SSE). Pure mapping helpers are exported for tests. See `docs/adr/0013-opencode-harness.md` |
+| `src/OpenCodeSession.ts` | OpenCode adapter over a per-session `opencode serve` (HTTP + SSE). Pure mapping helpers are exported for tests. See [ADR-0013](https://compass.rbcodelabs.com/rbcodelabs/claude-threads/docs/d7b8c236-d8ac-48a4-a8e4-6524ff74e886) |
 | `src/OpenCodeHostTools.ts` | Token-guarded loopback MCP endpoint that serves host tools to OpenCode |
 | `src/sandboxVm.ts` | Sandbox VM command construction + lifecycle (`SandboxVmManager`) behind Apple's `container` CLI. Pure helpers plus an injectable command seam; no top-level Node requires |
 | `sandbox/Dockerfile` | Image for the sandbox VM — `node:22-bookworm-slim` + git, ripgrep, jq, curl, wget, build-essential, python3, openssh-client. Non-root `node` (uid 1000), `WORKDIR /work`, no secrets baked in |
@@ -33,9 +39,9 @@
 
 ## Agent Harnesses
 
-`AgentHarness` (`src/types.ts`) is `'claude' | 'codex' | 'opencode'`; use `AGENT_HARNESSES`, `isAgentHarness` and `agentHarnessLabel` instead of enumerating names. ThreadManager only talks to `HarnessSession`, built by `createHarnessSession()`. Every session callback goes through ThreadManager's generation fence (ADR-0012), so a new adapter gets switching safety without extra work.
+`AgentHarness` (`src/types.ts`) is `'claude' | 'codex' | 'opencode'`; use `AGENT_HARNESSES`, `isAgentHarness` and `agentHarnessLabel` instead of enumerating names. ThreadManager only talks to `HarnessSession`, built by `createHarnessSession()`. Every session callback goes through ThreadManager's generation fence ([ADR-0012](https://compass.rbcodelabs.com/rbcodelabs/claude-threads/docs/61af3355-8c96-4676-8dd7-07f6bd9f648e)), so a new adapter gets switching safety without extra work.
 
-**OpenCode (ADR-0013).** One `opencode serve` per session, launched from `opencodeBinaryPath` with per-session config in `OPENCODE_CONFIG_CONTENT`:
+**OpenCode ([ADR-0013](https://compass.rbcodelabs.com/rbcodelabs/claude-threads/docs/d7b8c236-d8ac-48a4-a8e4-6524ff74e886)).** One `opencode serve` per session, launched from `opencodeBinaryPath` with per-session config in `OPENCODE_CONFIG_CONTENT`:
 - Events: `message.part.delta` → `onToken` (assistant text parts only); completed text part → `onMessage`; tool part `running`/`completed`/`error` → `onToolUse`/`onToolResult` (+ `onFilesEdited` for edit tools); `step-finish` → context usage and cost; `todo.updated` → task tracker; `session.idle` after `busy` → `onDone`; `session.error` `MessageAbortedError` → `onInterrupted`.
 - Permissions: config asks for everything but read-only tools; `resolveOpenCodePermission()` answers each `permission.asked` from the live permission mode. Child sessions created by the `task` tool are tracked so their prompts are not dropped.
 - Host tools: `OpenCodeHostToolsBridge` registers as remote MCP server `agent-threads` (tools appear as `agent-threads_<tool>`; OpenCode is told to allow them and the bridge applies `resolveDynamicToolApproval`).

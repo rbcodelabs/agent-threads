@@ -216,7 +216,7 @@ add a `build()` block in `test/harness/esbuild.mjs`. Current pages:
 | `skills.html` | `skills-bundle.js` | `SkillsManagerView` |
 | `settings.html` | `settings-bundle.js` | settings tabs |
 | `kanban.html` | `kanban-bundle.js` | `KanbanView` (status board + folder swimlanes) |
-| `agent-browser-preview.html` | `agent-browser-preview-bundle.js` | `AgentBrowserPreviewView` (login-handoff banner, ADR-0014) |
+| `agent-browser-preview.html` | `agent-browser-preview-bundle.js` | `AgentBrowserPreviewView` (login-handoff banner, [ADR-0014](https://compass.rbcodelabs.com/rbcodelabs/claude-threads/docs/e9540afa-52a5-485e-865d-93114b8016a9)) |
 
 Running/awaiting state isn't stored on `Thread` — it lives in the
 `ThreadManager`'s private `sessions` / `pendingPermissions` maps. The kanban
@@ -225,7 +225,7 @@ Awaiting columns deterministically.
 
 ### Faking Geode/Electron dependencies (login-handoff banner)
 
-`AgentBrowserPreviewView`'s login-handoff banner (ADR-0014) is driven by
+`AgentBrowserPreviewView`'s login-handoff banner ([ADR-0014](https://compass.rbcodelabs.com/rbcodelabs/claude-threads/docs/e9540afa-52a5-485e-865d-93114b8016a9)) is driven by
 `window.geode.onAgentBrowserWindowOpen` and two Electron `ipcRenderer` channels
 (`agent-browser-window-close`/`-focus`) — both dependency-injected on purpose
 (see `AgentBrowserLoginBridge.ts`'s doc comment) so a harness page can fake
