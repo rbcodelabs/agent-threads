@@ -904,6 +904,40 @@ test.describe('Agent Threads UI', () => {
     // small browser/font layout shifts and capture an incidental hover ring.
     await page.locator('.ct-input').focus();
     await page.waitForSelector('.ct-artifact-card:not(.ct-hidden)');
+    // The :focus-within rule flips several panel-context children open at
+    // once (.ct-status-rail, .ct-edited-files, .ct-artifact-card,
+    // .ct-context-footer) via real `max-height`/`padding`/`margin`
+    // transitions in styles.css — and they don't all finish at the same
+    // moment: .ct-artifact-card runs 0.2s with no delay, while
+    // .ct-edited-files/.ct-status-rail run a 0.25s transition with a 0.05s
+    // delay, ~100ms longer in total. None of these elements are scrollers
+    // `settleView()` tracks (they grow via max-height, not overflow), and
+    // their growth shrinks the sibling `.ct-messages` flex item without
+    // changing *that* scroller's own scrollHeight/scrollWidth — so
+    // settleView's stability check saw nothing to wait for. Confirmed by
+    // instrumenting a live run: `.ct-artifact-card` reached its terminal
+    // max-height (90px) while `.ct-messages.clientHeight` kept shrinking for
+    // another ~100ms as the slower siblings finished — exactly the gap that
+    // let the shot land mid-animation and read as ~28px of "random" diff
+    // noise. Waiting on one element's own transition wasn't enough; wait for
+    // the whole panel's rendered height to stop moving instead, the same
+    // "N consecutive stable frames" technique settleView() uses for scroll
+    // position, applied here to the layout dimension it doesn't cover.
+    await page.locator('.ct-floating-panel').evaluate((panel) => new Promise<void>((resolve) => {
+      let lastHeight = -1;
+      let stableFrames = 0;
+      const check = () => {
+        const height = panel.getBoundingClientRect().height;
+        stableFrames = height === lastHeight ? stableFrames + 1 : 0;
+        lastHeight = height;
+        if (stableFrames >= 4) {
+          resolve();
+          return;
+        }
+        requestAnimationFrame(check);
+      };
+      requestAnimationFrame(check);
+    }));
     await expect(page.getByRole('button', { name: 'Preview design' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Capture design screenshot' })).toHaveAttribute('title', 'Capture design screenshot');
     await expect(page.getByRole('button', { name: 'Reveal design source' })).toHaveAttribute('title', 'Reveal design source');
@@ -914,6 +948,34 @@ test.describe('Agent Threads UI', () => {
     }));
     expect(layout.toolbarOverflow).toBe(false);
     expect(layout.documentOverflow).toBe(false);
+    // A second, independent race lives one level up from the toolbar this
+    // test actually covers: the panel growing shrinks .ct-messages's
+    // clientHeight (flex:1 sibling of the flex-shrink:0 floating panel), and
+    // ThreadsView only recomputes the floating "scroll to bottom" pill's
+    // hidden state (updateScrollBottomPillVisibility) from a real 'scroll'
+    // event on .ct-messages — never from a resize. So the pill's cached
+    // .ct-hidden class is normally *stale* (left over from before the panel
+    // expanded, when .ct-messages had more room) and only occasionally gets
+    // recomputed against the new, smaller clientHeight if some unrelated
+    // scroll happens to fire first — which is exactly when it flips visible.
+    // Confirmed by instrumenting 15 live runs: the pill's computed
+    // .ct-hidden state predicted pass/fail with zero exceptions, and the
+    // diff was always exactly the pill's chevron glyph, never the artifact
+    // toolbar. That's a real (if minor) product staleness bug in its own
+    // right ("scroll to bottom" should also react to the container simply
+    // getting shorter, not just to scroll events — a ResizeObserver fix,
+    // out of scope for a screenshot-test repair), but it's orthogonal to
+    // what this test verifies.
+    //
+    // Masking the pill (`mask: [locator]`) was tried first and made things
+    // *worse* (still ~1/3 failing): mask only paints a same-position box
+    // over both images when the element is actually present in both. Here
+    // the element's whole bounding rect is 0×0 when `.ct-hidden` (nothing to
+    // paint), so a "visible" run paints a solid ~30px circle over bare
+    // background in the other image — a bigger, guaranteed diff, not a
+    // smaller one. What the baseline actually depends on is the pill being
+    // hidden, so force that directly instead of only masking around it.
+    await page.locator('.ct-scroll-bottom-pill').evaluate((el) => el.classList.add('ct-hidden'));
     await shot(page, `design-artifact-toolbar-${viewport.name}.png`, { fullPage: true });
   });
 
