@@ -313,11 +313,14 @@ export class ThreadsView extends ItemView {
 
   private floatingPanelEl!: HTMLElement;
 
-  // Task list card (Claude Code's TodoWrite/TaskCreate checklist)
-  private taskCardEl: HTMLElement | null = null;
-  private taskCardCollapsed = false;
-  /** Thread IDs whose task card has been auto-dismissed after all tasks completed. */
-  private taskCardDismissed = new Set<string>();
+  // Task list pill (Claude Code's TodoWrite/TaskCreate checklist) — mirrors the
+  // sub-agent pill: a small always-visible footer indicator + popover instead of
+  // a card that expands into the main view.
+  private taskPillEl: HTMLElement | null = null;
+  private taskPopoverEl: HTMLElement | null = null;
+  private taskPopoverOutsideHandler: ((e: MouseEvent) => void) | null = null;
+  /** Thread IDs whose task pill has been auto-dismissed after all tasks completed. */
+  private taskPillDismissed = new Set<string>();
 
   // Thread-orchestrator UI: proposed replies render inline in the conversation
   // flow (see renderProposedReplyCard) rather than via a dedicated element
@@ -732,6 +735,7 @@ export class ThreadsView extends ItemView {
     this.closeSwitcherPanel();
     this.closeAgentPopover();
     this.closeSchedulePopover();
+    this.closeTaskPopover();
     this.agentScroll.clear();
     this.dispatchInput?.destroy();
     // Leaves an IntersectionObserver and a window-level message listener
@@ -834,7 +838,6 @@ export class ThreadsView extends ItemView {
     this.managerNotesPanelEl = panelContext.createDiv('ct-manager-notes-panel ct-hidden');
     this.statusRailEl = panelContext.createDiv('ct-status-rail');
     this.queueRowsEl = panelContext.createDiv('ct-queue-rows ct-hidden');
-    this.taskCardEl = panelContext.createDiv('ct-task-card ct-hidden');
     this.artifactCardEl = panelContext.createDiv('ct-artifact-card ct-hidden');
     this.editedFilesEl = panelContext.createDiv('ct-edited-files ct-hidden');
 
@@ -917,6 +920,19 @@ export class ThreadsView extends ItemView {
           this.toggleSchedulePopover();
         });
         this.renderScheduledActivity();
+
+        this.taskPillEl = container.createEl('button', {
+          cls: 'ct-tasklist-pill ct-hidden',
+          attr: { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' },
+        });
+        const taskPillIcon = this.taskPillEl.createSpan('ct-tasklist-pill-icon');
+        setIcon(taskPillIcon, 'list-checks');
+        this.taskPillEl.createSpan('ct-tasklist-pill-text');
+        this.taskPillEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.toggleTaskPopover();
+        });
+        this.renderTaskPill();
 
         // Deliberately NOT .ct-footer-pill: that class belongs to the status-line
         // pills in .ct-context-footer, and several tests locate it unqualified.
@@ -1159,6 +1175,7 @@ export class ThreadsView extends ItemView {
     this.closeSwitcherPanel();
     this.closeAgentPopover();
     this.closeSchedulePopover();
+    this.closeTaskPopover();
     this.rememberAgentScroll();
     const previousId = this.activeThreadId;
 
@@ -1931,7 +1948,7 @@ export class ThreadsView extends ItemView {
     if (!thread) return;
 
     this.renderComposerContext();
-    this.renderTaskCard();
+    this.renderTaskPill();
 
     // Re-render queue rows in case the thread changed.
     this.renderQueueRows();
@@ -1949,57 +1966,135 @@ export class ThreadsView extends ItemView {
   }
 
   /**
-   * Renders the Claude Code task list as a checklist card pinned above the
-   * input panel: completed tasks struck through, the in-progress task bolded
-   * with an accent marker, matching the CLI's task view.
+   * Refreshes the composer-footer task pill from the active thread's task list
+   * (Claude Code's TodoWrite/TaskCreate checklist). Mirrors renderAgentPill:
+   * `.ct-hidden` while there are no tasks (or all tasks are done and the user has
+   * since moved on — see taskPillDismissed); otherwise a small always-visible
+   * summary that opens the full checklist in a popover on click, keeping the
+   * conversation the conversation instead of a card that grows into the main view.
    */
-  private renderTaskCard(): void {
-    if (!this.taskCardEl) return;
+  private renderTaskPill(): void {
+    if (!this.taskPillEl) return;
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : undefined;
     const tasks = thread?.tasks ?? [];
-    this.taskCardEl.empty();
+
     if (tasks.length === 0) {
-      this.taskCardEl.addClass('ct-hidden');
+      this.taskPillEl.addClass('ct-hidden');
+      this.closeTaskPopover();
       return;
     }
+
     const allDone = tasks.every(t => t.status === 'completed');
     // If tasks exist but are no longer all done, clear the dismissed flag so the
-    // card reappears (e.g. Claude creates new tasks on the next turn).
-    if (!allDone && this.activeThreadId) this.taskCardDismissed.delete(this.activeThreadId);
-    // Auto-hide after all tasks complete: card dismissed by user moving on.
-    if (allDone && this.activeThreadId && this.taskCardDismissed.has(this.activeThreadId)) {
-      this.taskCardEl.addClass('ct-hidden');
+    // pill reappears (e.g. Claude creates new tasks on the next turn).
+    if (!allDone && this.activeThreadId) this.taskPillDismissed.delete(this.activeThreadId);
+    // Auto-hide after all tasks complete: pill dismissed once the user moves on
+    // (see the user_message_added handler), same UX as the old card had.
+    if (allDone && this.activeThreadId && this.taskPillDismissed.has(this.activeThreadId)) {
+      this.taskPillEl.addClass('ct-hidden');
+      this.closeTaskPopover();
       return;
     }
-    this.taskCardEl.removeClass('ct-hidden');
+
+    this.taskPillEl.removeClass('ct-hidden');
 
     const done = tasks.filter(t => t.status === 'completed').length;
     const inProgress = tasks.filter(t => t.status === 'in_progress').length;
-    const open = tasks.length - done - inProgress;
 
-    const header = this.taskCardEl.createDiv('ct-task-card-header');
-    const chevronEl = header.createSpan({ cls: 'ct-task-card-chevron' });
-    setIcon(chevronEl, this.taskCardCollapsed ? 'chevron-right' : 'chevron-down');
-    header.createSpan({
-      cls: 'ct-task-card-title',
-      text: `${tasks.length} task${tasks.length === 1 ? '' : 's'}`,
+    const textEl = this.taskPillEl.querySelector('.ct-tasklist-pill-text');
+    if (textEl) textEl.textContent = `${done}/${tasks.length} tasks`;
+    this.taskPillEl.toggleClass('ct-tasklist-pill-active', !allDone && inProgress > 0);
+    this.taskPillEl.toggleClass('ct-tasklist-pill-done', allDone);
+    setTooltip(this.taskPillEl, `${done}/${tasks.length} tasks done — open the task list`);
+
+    // Keep an already-open popover live as tasks_updated events stream in.
+    if (this.taskPopoverEl) this.renderTaskPopoverList();
+  }
+
+  private toggleTaskPopover(): void {
+    if (this.taskPopoverEl) {
+      this.closeTaskPopover();
+      this.taskPillEl?.focus();
+    } else {
+      this.openTaskPopover();
+    }
+  }
+
+  /** Opens the full task checklist above the composer. Mirrors openAgentPopover. */
+  private openTaskPopover(): void {
+    if (!this.activeThreadId || !this.taskPillEl) return;
+    const wrapper = this.mainEl?.querySelector('.ct-panel-wrapper') as HTMLElement | null;
+    if (!wrapper) return;
+
+    const popover = wrapper.createDiv('ct-tasklist-popover');
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('aria-label', 'Tasks in this thread');
+    this.taskPopoverEl = popover;
+    this.taskPillEl.setAttribute('aria-expanded', 'true');
+
+    const header = popover.createDiv('ct-tasklist-popover-header');
+    header.createSpan({ cls: 'ct-tasklist-popover-title', text: 'Tasks' });
+    const closeBtn = header.createEl('button', {
+      cls: 'ct-tasklist-popover-close',
+      attr: { type: 'button', 'aria-label': 'Close task list' },
     });
-    header.createSpan({
-      cls: 'ct-task-card-counts',
-      text: `(${done} done, ${inProgress} in progress, ${open} open)`,
-    });
-    header.addEventListener('click', () => {
-      this.taskCardCollapsed = !this.taskCardCollapsed;
-      this.renderTaskCard();
+    setIcon(closeBtn, 'x');
+    closeBtn.addEventListener('click', () => {
+      this.closeTaskPopover();
+      this.taskPillEl?.focus();
     });
 
-    if (this.taskCardCollapsed) return;
-    const list = this.taskCardEl.createDiv('ct-task-card-list');
+    popover.createDiv('ct-tasklist-popover-list');
+    this.renderTaskPopoverList();
+
+    popover.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        this.closeTaskPopover();
+        this.taskPillEl?.focus();
+      }
+    });
+
+    // Move focus into the popover (task rows aren't focusable, so the close
+    // button) so Escape reaches the keydown handler above — mirrors
+    // openAgentPopover, which focuses its first row.
+    closeBtn.focus();
+
+    // Outside-click dismissal, registered next tick so the click that opened the
+    // popover doesn't immediately close it again (mirrors openAgentPopover).
+    setTimeout(() => {
+      const outsideHandler = (e: MouseEvent) => {
+        if (!popover.contains(e.target as Node) && !this.taskPillEl?.contains(e.target as Node)) {
+          this.closeTaskPopover();
+        }
+      };
+      this.taskPopoverOutsideHandler = outsideHandler;
+      document.addEventListener('mousedown', outsideHandler, true);
+    }, 0);
+  }
+
+  /** Repaints the popover's checklist in place, so live tasks_updated events don't close it. */
+  private renderTaskPopoverList(): void {
+    const list = this.taskPopoverEl?.querySelector('.ct-tasklist-popover-list') as HTMLElement | null;
+    if (!list || !this.activeThreadId) return;
+    list.empty();
+    const tasks = this.manager.getThread(this.activeThreadId)?.tasks ?? [];
     for (const task of tasks) {
       const row = list.createDiv(`ct-task-row ct-task-row-${task.status}`);
       const iconEl = row.createSpan({ cls: 'ct-task-row-icon' });
       setIcon(iconEl, task.status === 'completed' ? 'circle-check' : task.status === 'in_progress' ? 'loader-circle' : 'circle');
       row.createSpan({ cls: 'ct-task-row-text', text: task.content });
+    }
+  }
+
+  private closeTaskPopover(): void {
+    this.taskPopoverEl?.remove();
+    this.taskPopoverEl = null;
+    this.taskPillEl?.setAttribute('aria-expanded', 'false');
+    if (this.taskPopoverOutsideHandler) {
+      document.removeEventListener('mousedown', this.taskPopoverOutsideHandler, true);
+      this.taskPopoverOutsideHandler = null;
     }
   }
 
@@ -4578,14 +4673,14 @@ export class ThreadsView extends ItemView {
       }
 
       case 'user_message_added': {
-        // Auto-dismiss the task card if all tasks completed on the previous turn.
+        // Auto-dismiss the task pill if all tasks completed on the previous turn.
         // This hides the checklist the moment the user moves on, rather than
         // immediately when the last task is ticked — giving them a chance to review.
         if (this.activeThreadId) {
           const tasks = this.manager.getThread(this.activeThreadId)?.tasks ?? [];
           if (tasks.length > 0 && tasks.every(t => t.status === 'completed')) {
-            this.taskCardDismissed.add(this.activeThreadId);
-            this.renderTaskCard();
+            this.taskPillDismissed.add(this.activeThreadId);
+            this.renderTaskPill();
           }
         }
         // Only create the bubble when the message came from an external caller
@@ -5124,7 +5219,7 @@ export class ThreadsView extends ItemView {
       }
 
       case 'tasks_updated': {
-        this.renderTaskCard();
+        this.renderTaskPill();
         break;
       }
 

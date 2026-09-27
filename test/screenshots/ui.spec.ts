@@ -2578,24 +2578,27 @@ test.describe('Agent Threads UI', () => {
     await page.goto(harnessUrl);
     await page.waitForSelector('.ct-title-row');
     await page.evaluate(() => (window as any).__view.focusThread('thread-tasks'));
-    await page.waitForSelector('.ct-task-card:not(.ct-hidden)');
-    // Hover the panel so the task card is expanded (it collapses at rest via CSS)
-    await page.hover('.ct-floating-panel');
-    await page.waitForTimeout(300); // let expand animation complete
-    const header = await page.locator('.ct-task-card-header').innerText();
-    if (!header.includes('5 tasks') || !header.includes('4 done, 1 in progress, 0 open')) {
-      throw new Error(`Unexpected task card header: ${header}`);
-    }
-    await expect(page.locator('.ct-task-row-completed')).toHaveCount(4);
-    await expect(page.locator('.ct-task-row-in_progress')).toHaveCount(1);
     await expect.poll(() => page.evaluate(() => (window as any).__view.getActiveThreadId())).toBe('thread-tasks');
-    // Capture the intended bottom after async rendering and composer expansion.
-    await anchorFocusedComposerToBottom(page);
-    await shot(page, 'task-list-card.png', { fullPage: true });
 
-    // Collapse on header click
-    await page.click('.ct-task-card-header');
-    await expect(page.locator('.ct-task-row')).toHaveCount(0);
+    // The pill must be visible at rest — no hover — like the sub-agent pill.
+    // The task list no longer occupies the main view at all.
+    const pill = page.locator('.ct-tasklist-pill');
+    await expect(pill).toBeVisible();
+    await expect(pill).toHaveText('4/5 tasks');
+    await expect(page.locator('.ct-panel-context .ct-task-row')).toHaveCount(0);
+    await shot(page.locator('.ct-input-footer'), 'task-list-pill.png');
+
+    await page.click('.ct-tasklist-pill');
+    await page.waitForSelector('.ct-tasklist-popover');
+    await expect(pill).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('.ct-tasklist-popover .ct-task-row-completed')).toHaveCount(4);
+    await expect(page.locator('.ct-tasklist-popover .ct-task-row-in_progress')).toHaveCount(1);
+    await shot(page.locator('.ct-tasklist-popover'), 'task-list-popover.png');
+
+    // Escape dismisses and returns the pill to its collapsed state.
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.ct-tasklist-popover')).toHaveCount(0);
+    await expect(pill).toHaveAttribute('aria-expanded', 'false');
   });
 
   test('status line — structured tag pills', async ({ page }) => {

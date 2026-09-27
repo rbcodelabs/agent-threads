@@ -7547,54 +7547,7 @@ body.ct-skills-resizing {
   opacity: 1;
 }
 
-/* ── Task list card (Claude Code TodoWrite/TaskCreate checklist) ─────────── */
-
-.ct-task-card {
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  background: var(--background-secondary);
-  padding: 6px 10px;
-  margin-bottom: 6px;
-  font-size: var(--font-ui-smaller);
-}
-
-.ct-task-card-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  user-select: none;
-  color: var(--text-muted);
-}
-
-.ct-task-card-chevron {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-}
-
-.ct-task-card-chevron svg {
-  width: 12px;
-  height: 12px;
-}
-
-.ct-task-card-title {
-  font-weight: 600;
-  color: var(--text-normal);
-}
-
-.ct-task-card-counts {
-  color: var(--text-muted);
-}
-
-.ct-task-card-list {
-  margin-top: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 180px;
-  overflow-y: auto;
-}
+/* ── Task rows (shared by the footer popover) ─────────────────────────────── */
 
 .ct-task-row {
   display: flex;
@@ -7753,6 +7706,13 @@ body.ct-skills-resizing {
   transition: max-height 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
 }
 
+.ct-panel-collapsible:has(.ct-tasklist-pill:not(.ct-hidden)) .ct-input-footer {
+  max-height: 50px;
+  opacity: 1;
+  pointer-events: auto;
+  transition: max-height 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
+}
+
 /* — Left actions in inline layout (KanbanView: attach + mic) ────────────── */
 .ct-kanban-dispatch.ct-panel-collapsible .ct-dispatch-left-actions {
   max-width: 0;
@@ -7859,32 +7819,6 @@ body.ct-skills-resizing {
   .ct-artifact-card-icon { display: none; }
   .ct-artifact-card-meta { display: none; }
   .ct-root .ct-artifact-action { min-height: 32px; }
-}
-
-/* — Task list card (ThreadsView: TodoWrite / TaskCreate checklist) ──────────── */
-/* ct-task-card has padding: 6px 10px, margin-bottom: 6px, border: 1px solid   */
-.ct-floating-panel.ct-panel-collapsible .ct-task-card:not(.ct-hidden) {
-  max-height: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  margin-bottom: 0;
-  border-width: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transition: max-height 0.2s ease, padding 0.2s ease, margin 0.2s ease, border-width 0.2s ease, opacity 0.16s ease;
-}
-
-.ct-floating-panel.ct-panel-collapsible:hover .ct-task-card:not(.ct-hidden),
-.ct-floating-panel.ct-panel-collapsible:focus-within .ct-task-card:not(.ct-hidden) {
-  max-height: 240px;
-  padding-top: 6px;
-  padding-bottom: 6px;
-  margin-bottom: 6px;
-  border-width: 1px;
-  opacity: 1;
-  pointer-events: auto;
-  transition: max-height 0.25s ease 0.05s, padding 0.25s ease 0.05s, margin 0.25s ease 0.05s, border-width 0.2s ease 0.05s, opacity 0.2s ease 0.07s;
 }
 
 /* — Status line pills row (ThreadsView: branch / PR / dev-URL footer) ──────── */
@@ -8362,6 +8296,7 @@ body.ct-skills-resizing {
     overflow: hidden;
   }
   .ct-agent-pill,
+  .ct-tasklist-pill,
   .ct-schedule-pill {
     min-width: 0;
     max-width: 100%;
@@ -8545,6 +8480,114 @@ body.ct-skills-resizing {
   font-size: var(--font-ui-smaller);
 }
 
+/* — The always-visible task pill ─────────────────────────────────────────── */
+.ct-tasklist-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px 1px 5px;
+  min-height: 22px;
+  max-width: 240px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--background-modifier-border) 60%, transparent);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.ct-tasklist-pill.ct-hidden { display: none; }
+
+.ct-tasklist-pill-icon {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.ct-tasklist-pill-icon svg { width: 11px; height: 11px; }
+
+.ct-tasklist-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ct-tasklist-pill:hover,
+.ct-tasklist-pill:focus-visible,
+.ct-tasklist-pill[aria-expanded="true"] {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.ct-tasklist-pill-active { color: var(--text-accent, var(--interactive-accent)); }
+.ct-tasklist-pill-active .ct-tasklist-pill-icon { opacity: 1; }
+.ct-tasklist-pill-done { color: var(--color-green, #4caf50); }
+
+/* — The task popover, anchored above the composer ────────────────────────── */
+.ct-tasklist-popover {
+  position: absolute;
+  bottom: 100%;
+  left: 10px;
+  right: 10px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  max-height: min(320px, 45vh);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.ct-tasklist-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px 7px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ct-tasklist-popover-title {
+  font-weight: 600;
+  font-size: var(--font-ui-small);
+}
+
+.ct-tasklist-popover-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.ct-tasklist-popover-close:hover,
+.ct-tasklist-popover-close:focus-visible {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.ct-tasklist-popover-list {
+  padding: 4px 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* .ct-task-row used to inherit this from the removed .ct-task-card. */
+  font-size: var(--font-ui-smaller);
+}
+
 /* — Agent rows (shared by the popover; flat DOM, indent via --ct-agent-level) */
 .ct-agent-state, .ct-agent-meta { color: var(--text-muted); font-size: var(--font-ui-smaller); }
 .ct-agent-row-button {
@@ -8678,20 +8721,24 @@ button.ct-agent-crumb:focus-visible {
 .ct-root.ct-mobile .ct-agent-state { grid-column: 3; }
 .ct-root.ct-mobile .ct-agent-pill,
 .ct-root.ct-mobile .ct-schedule-pill,
+.ct-root.ct-mobile .ct-tasklist-pill,
 .ct-root.ct-mobile .ct-agent-crumb,
 .ct-root.ct-mobile .ct-agent-view-close,
 .ct-root.ct-mobile .ct-agent-popover-close,
+.ct-root.ct-mobile .ct-tasklist-popover-close,
 .ct-root.ct-mobile .ct-schedule-popover-close,
 .ct-root.ct-mobile .ct-schedule-action { min-height: 44px; }
 .ct-root.ct-mobile .ct-agent-view-close,
 .ct-root.ct-mobile .ct-agent-popover-close,
+.ct-root.ct-mobile .ct-tasklist-popover-close,
 .ct-root.ct-mobile .ct-schedule-popover-close { min-width: 44px; }
 .ct-root.ct-mobile .ct-agent-pill,
-.ct-root.ct-mobile .ct-schedule-pill { border-radius: 12px; padding-inline: 9px; }
+.ct-root.ct-mobile .ct-schedule-pill,
+.ct-root.ct-mobile .ct-tasklist-pill { border-radius: 12px; padding-inline: 9px; }
 /* Taller footer so a 44px pill is not clipped by the collapsible max-height. */
 .ct-root.ct-mobile .ct-panel-collapsible:hover .ct-input-footer,
 .ct-root.ct-mobile .ct-panel-collapsible:focus-within .ct-input-footer,
-.ct-root.ct-mobile .ct-panel-collapsible:has(.ct-agent-pill:not(.ct-hidden), .ct-schedule-pill:not(.ct-hidden)) .ct-input-footer { max-height: 58px; }
+.ct-root.ct-mobile .ct-panel-collapsible:has(.ct-agent-pill:not(.ct-hidden), .ct-schedule-pill:not(.ct-hidden), .ct-tasklist-pill:not(.ct-hidden)) .ct-input-footer { max-height: 58px; }
 
 @media (max-width: 480px) {
   .ct-sandbox-setting.setting-item {
@@ -8711,6 +8758,7 @@ button.ct-agent-crumb:focus-visible {
   }
 
   .ct-agent-popover { left: 6px; right: 6px; max-height: min(260px, 50vh); }
+  .ct-tasklist-popover { left: 6px; right: 6px; max-height: min(260px, 50vh); }
   .ct-schedule-popover { left: 6px; right: 6px; max-height: min(320px, 55vh); }
   /* Halve the indent step so deep nesting still fits a 375px screen. */
   .ct-agent-row-button { padding-left: calc(6px + min(var(--ct-agent-level, 0), 3) * 8px); }
