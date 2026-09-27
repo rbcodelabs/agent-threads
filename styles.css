@@ -4194,6 +4194,21 @@
   font-size: var(--font-ui-smaller);
   border-radius: 4px;
   cursor: pointer;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: none;
+}
+.ct-auth-btn:hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+}
+.ct-auth-signin-btn {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+.ct-auth-signin-btn:hover:not(:disabled) {
+  background: var(--interactive-accent-hover);
 }
 .ct-auth-btn:disabled {
   opacity: 0.6;
