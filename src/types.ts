@@ -288,6 +288,13 @@ export interface Thread {
   summary?: string;
   lastError?: string;
   /**
+   * Set when a turn failed to authenticate with Claude even after the silent
+   * fresh-process retry (see claudeAuthRecovery.ts). Drives the in-thread
+   * "Sign in to Claude" banner; the thread's last user message is the one
+   * awaiting a retry. Cleared by the next send or by `retryAfterSignIn()`.
+   */
+  authRequired?: { message: string; at: number };
+  /**
    * Auto-retry budget tracker for the closed-source CLI's spurious
    * "Stream closed" transport errors (see transportErrorRecovery.ts).
    * Reset to 0 on a successful onDone; incremented on each auto-retry.

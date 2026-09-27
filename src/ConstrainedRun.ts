@@ -1,8 +1,11 @@
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { effectiveExtraEnv, parseExtraEnv, type PluginSettings } from './types';
 import type { ConstrainedQueryInput, ConstrainedQueryOutput } from './PublicApi';
+import { classifyClaudeAuthFailure, formatSignInExpiredMessage, shouldAutoRetryAuthError } from './claudeAuthRecovery';
 
 type QueryFunction = typeof query;
+
+class ClaudeAuthFailure extends Error {}
 
 /**
  * Input-only Claude execution used by peer plugins for evaluation. The option
@@ -29,34 +32,63 @@ export function createConstrainedQueryRunner(
     const abort = () => abortController.abort();
     signal.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(abort, Math.min(Math.max(options.timeoutMs, 1), 600_000));
+    // Each attempt spawns a fresh CLI process. An expired/raced OAuth token
+    // (claudeAuthRecovery.ts) gets exactly one retry — the new process
+    // re-reads the keychain — then fails with a clear, actionable message.
+    // Unattended: there is no one to click a sign-in button here.
+    const attempt = async (): Promise<Extract<SDKMessage, { type: 'result' }> | undefined> => {
+      let result: Extract<SDKMessage, { type: 'result' }> | undefined;
+      let authFailure: string | null = null;
+      try {
+        for await (const message of runQuery({
+          prompt,
+          options: {
+            abortController,
+            pathToClaudeCodeExecutable: settings.claudeBinaryPath,
+            env: constrainedEnvironment(cwd, { ...parseExtraEnv(effectiveExtraEnv(settings)), ...getAuthentication() }),
+            cwd,
+            model: options.model,
+            systemPrompt: options.systemInstructions,
+            tools: [],
+            allowedTools: [],
+            mcpServers: {},
+            strictMcpConfig: true,
+            settingSources: [],
+            skills: [],
+            plugins: [],
+            persistSession: false,
+            permissionMode: 'dontAsk',
+            canUseTool: async () => ({ behavior: 'deny', message: 'Tools are disabled for constrained runs.' }),
+            maxTurns: 1,
+            maxBudgetUsd: options.maxBudgetUsd,
+            enableFileCheckpointing: false,
+          },
+        })) {
+          if (message.type === 'assistant' && message.message.content.some(block => block.type === 'tool_use')) throw new Error('Constraint violation: tool use emitted.');
+          authFailure ??= classifyClaudeAuthFailure(message);
+          if (message.type === 'result') result = message;
+        }
+      } catch (err) {
+        const thrownAuthFailure = abortController.signal.aborted ? null : classifyClaudeAuthFailure(err);
+        if (!thrownAuthFailure) throw err;
+        authFailure = thrownAuthFailure;
+      }
+      if (authFailure && (!result || result.is_error)) throw new ClaudeAuthFailure(authFailure);
+      return result;
+    };
+
     try {
       let result: Extract<SDKMessage, { type: 'result' }> | undefined;
-      for await (const message of runQuery({
-        prompt,
-        options: {
-          abortController,
-          pathToClaudeCodeExecutable: settings.claudeBinaryPath,
-          env: constrainedEnvironment(cwd, { ...parseExtraEnv(effectiveExtraEnv(settings)), ...getAuthentication() }),
-          cwd,
-          model: options.model,
-          systemPrompt: options.systemInstructions,
-          tools: [],
-          allowedTools: [],
-          mcpServers: {},
-          strictMcpConfig: true,
-          settingSources: [],
-          skills: [],
-          plugins: [],
-          persistSession: false,
-          permissionMode: 'dontAsk',
-          canUseTool: async () => ({ behavior: 'deny', message: 'Tools are disabled for constrained runs.' }),
-          maxTurns: 1,
-          maxBudgetUsd: options.maxBudgetUsd,
-          enableFileCheckpointing: false,
-        },
-      })) {
-        if (message.type === 'assistant' && message.message.content.some(block => block.type === 'tool_use')) throw new Error('Constraint violation: tool use emitted.');
-        if (message.type === 'result') result = message;
+      for (let retries = 0; ; retries++) {
+        try {
+          result = await attempt();
+          break;
+        } catch (err) {
+          if (!(err instanceof ClaudeAuthFailure)) throw err;
+          if (!shouldAutoRetryAuthError(retries) || abortController.signal.aborted) {
+            throw new Error(formatSignInExpiredMessage(err.message));
+          }
+        }
       }
       if (!result || result.subtype !== 'success' || result.is_error) throw new Error('Constrained run failed.');
       if (result.result.length > 100_000) throw new Error('Constrained run output exceeds the 100000 character limit.');
