@@ -1,12 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
+import { isShellDenied } from './toolRestrictions';
 import * as path from 'path';
 import fs from 'fs';
 import type { AskQuestion, ImageAttachment } from './types';
 import { parseExtraEnv } from './types';
 import type { SessionCallbacks } from './ClaudeSession';
-import { resolveCodexPermissions, resolveDynamicToolApproval, type HarnessSessionOptions } from './HarnessSession';
+import { resolveCodexPermissions, resolveDynamicToolApproval, type HarnessContextUsage, type HarnessPermissionMode, type HarnessSessionOptions } from './HarnessSession';
 import { mergeUsageSnapshot, normalizeCodexAccountUsage, normalizeCodexRateLimitResponse, normalizeCodexTokenUsage, type UsageSnapshot } from './Usage';
 import { renderCodexAgentProfiles } from './AgentProfiles';
+import { CodexRawLog } from './CodexRawLog';
 
 type CodexTokenUsageBreakdown = {
   totalTokens: number;
@@ -23,7 +26,7 @@ type CodexThreadTokenUsage = {
   modelContextWindow: number | null;
 };
 
-type ContextUsage = import('@anthropic-ai/claude-agent-sdk').SDKControlGetContextUsageResponse;
+type ContextUsage = HarnessContextUsage;
 
 function canonicalSkillPath(value: string): string {
   try { return fs.realpathSync(value); } catch { return path.resolve(value); }
@@ -67,12 +70,12 @@ export function codexResumeInstructions(options: HarnessSessionOptions): { devel
   return { developerInstructions: codexDeveloperInstructions(options) };
 }
 
-/** Convert Claude's process-transport MCP shapes to Codex config.toml keys. */
+/** Convert neutral process-transport MCP shapes to Codex config.toml keys. */
 export function codexMcpServers(servers: NonNullable<HarnessSessionOptions['codex']>['mcpServers']): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [name, server] of Object.entries(servers ?? {})) {
-    if (!server || server.type === 'sdk') continue;
-    if (server.type === 'http' || server.type === 'sse') {
+    if (!server) continue;
+    if ('url' in server) {
       result[name] = {
         url: server.url,
         ...(server.headers ? { http_headers: server.headers } : {}),
@@ -80,6 +83,9 @@ export function codexMcpServers(servers: NonNullable<HarnessSessionOptions['code
       };
       continue;
     }
+    // Defensive: in-process SDK servers never reach here via serializableMcpServers,
+    // but a stray one must not become a command-less stdio entry.
+    if (typeof server.command !== 'string') continue;
     result[name] = {
       command: server.command,
       ...(server.args ? { args: server.args } : {}),
@@ -100,30 +106,18 @@ export function codexContextUsage(tokenUsage: CodexThreadTokenUsage, model: stri
   const output = Math.max(0, usage.outputTokens - (usage.reasoningOutputTokens ?? 0));
   const reasoning = Math.max(0, usage.reasoningOutputTokens ?? 0);
   const categories = [
-    { name: 'Input', tokens: uncachedInput, color: '#4b9cd3' },
-    { name: 'Cached input', tokens: cached, color: '#7cb9e8' },
-    { name: 'Output', tokens: output, color: '#97c1e8' },
-    { name: 'Reasoning', tokens: reasoning, color: '#b0cfe8' },
+    { name: 'Input', tokens: uncachedInput, color: '#4b9cd3', kind: 'used' as const },
+    { name: 'Cached input', tokens: cached, color: '#7cb9e8', kind: 'used' as const },
+    { name: 'Output', tokens: output, color: '#97c1e8', kind: 'used' as const },
+    { name: 'Reasoning', tokens: reasoning, color: '#b0cfe8', kind: 'used' as const },
   ];
   const totalTokens = Math.max(0, usage.totalTokens);
   return {
     categories,
     totalTokens,
     maxTokens,
-    rawMaxTokens: maxTokens,
     percentage: Math.min(100, (totalTokens / maxTokens) * 100),
-    gridRows: [],
     model,
-    memoryFiles: [],
-    mcpTools: [],
-    agents: [],
-    isAutoCompactEnabled: true,
-    apiUsage: {
-      input_tokens: usage.inputTokens,
-      output_tokens: usage.outputTokens,
-      cache_creation_input_tokens: usage.cacheWriteInputTokens ?? 0,
-      cache_read_input_tokens: cached,
-    },
   };
 }
 
@@ -139,6 +133,7 @@ export function codexContextUsage(tokenUsage: CodexThreadTokenUsage, model: stri
 export class CodexSession {
   private process: ChildProcessWithoutNullStreams | null = null;
   private buffer = '';
+  private rawLog = new CodexRawLog(() => this.options?.callbacks.onRawEvent);
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
   private options: HarnessSessionOptions | null = null;
@@ -191,13 +186,19 @@ export class CodexSession {
       env: { ...process.env, ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) },
       stdio: 'pipe',
     });
-    this.process.stdout.on('data', (chunk: Buffer) => this.consume(chunk.toString()));
+    const child = this.process;
+    this.buffer = '';
+    this.process.stdout.on('data', (chunk: Buffer) => { if (this.process === child) this.consume(chunk.toString()); });
     this.process.stderr.on('data', (chunk: Buffer) => console.warn('[ClaudeThreads] Codex app-server:', chunk.toString().trim()));
-    this.process.on('error', (error) => this.failAll(error));
+    this.process.on('error', (error) => { if (this.process === child) this.failAll(error); });
     this.process.on('exit', (code) => {
+      if (this.process !== child) return;
+      this.rawLog.flush();
       if (!this.closed && code !== 0) this.failAll(new Error(`Codex app-server exited (${code ?? 'unknown'})`));
       this.closed = true;
     });
+    // Pipes can deliver their final bytes after exit; close means stdio drained.
+    this.process.on('close', () => { if (this.process === child) this.rawLog.flush(); });
 
     await this.request('initialize', {
       clientInfo: { name: 'obsidian-claude-threads', title: 'Agent Threads', version: '0.24.0' },
@@ -224,7 +225,27 @@ export class CodexSession {
 
     const savedCodexThread = options.resume;
     const mcpServers = codexMcpServers(options.codex?.mcpServers);
-    const threadConfig = Object.keys(mcpServers).length > 0 ? { mcp_servers: mcpServers } : undefined;
+    // Opt-in inherits the user's configuration; it never overrides local or
+    // managed denies. Disable the legacy REPL too: it can expose desktop tools
+    // independently of the bundled computer-use plugins.
+    const computerUseDisabled = options.codex?.computerUseEnabled !== true;
+    if (computerUseDisabled) {
+      for (const name of ['node_repl', 'cua_repl', 'computer-use']) {
+        // A disabled server still needs a valid transport when it does not
+        // exist in the user's config. Codex never launches this placeholder.
+        mcpServers[name] = { command: 'node', enabled: false };
+      }
+    }
+    const threadConfig = {
+      ...(Object.keys(mcpServers).length > 0 ? { mcp_servers: mcpServers } : {}),
+      ...(computerUseDisabled ? {
+        computer_use: { default_app_access: 'deny' },
+        plugins: {
+          'unified-computer-use@openai-bundled': { enabled: false },
+          'computer-use@openai-bundled': { enabled: false },
+        },
+      } : {}),
+    };
     let result: any;
     if (savedCodexThread) {
       try {
@@ -352,7 +373,7 @@ export class CodexSession {
     return resolved;
   }
 
-  async setPermissionMode(mode: any): Promise<void> {
+  async setPermissionMode(mode: HarnessPermissionMode): Promise<void> {
     if (!this.codexThreadId) {
       if (this.options) this.options.permissionMode = mode;
       return;
@@ -401,6 +422,8 @@ export class CodexSession {
     // App-server's documented Skill input selects the package even when names collide.
     if (skill) input.push({ type: 'skill', name: skill.name, path: skill.path });
     for (const image of images ?? []) input.push({ type: 'image', url: `data:${image.mediaType};base64,${image.base64}` });
+    // Per-turn clock as its own input item (see currentTimeContext.ts).
+    if (shouldAddCurrentTimeContext(invocationText)) input.push({ type: 'text', text: formatCurrentTimeContext(), text_elements: [] });
     this.turnStartPromise = this.request('turn/start', {
       threadId: this.codexThreadId,
       input,
@@ -611,11 +634,7 @@ export class CodexSession {
     if ((typeof message.id === 'number' || typeof message.id === 'string') && message.method) { this.handleServerRequest(message); return; }
     const callbacks = this.options?.callbacks; if (!callbacks) return;
     const params = message.params ?? {};
-    // Match Claude's raw-log behavior: persist complete protocol events but
-    // omit high-volume text deltas that are reconstructed by agentMessage.
-    if (message.method !== 'item/agentMessage/delta') {
-      callbacks.onRawEvent?.({ type: String(message.method ?? 'codex/event'), ...message });
-    }
+    this.rawLog.record(message);
     switch (message.method) {
       case 'item/agentMessage/delta': callbacks.onToken(String(params.delta ?? '')); break;
       case 'item/started': {
@@ -924,6 +943,14 @@ export class CodexSession {
     }
     const isApproval = /requestApproval$/.test(message.method);
     if (!callbacks || !isApproval) { this.respond(message.id, {}); return; }
+    // Per-thread denylist (restriction-only): with Bash denied, every shell
+    // command Codex asks to run is declined without prompting. Codex does not
+    // ask for every command (its sandbox runs some without approval), so this
+    // is the strongest native restriction available, not a guarantee.
+    if (/commandExecution/i.test(message.method) && isShellDenied(this.options?.disallowedTools)) {
+      this.respond(message.id, { decision: 'decline' });
+      return;
+    }
     const detail = String(params.command ?? params.reason ?? 'Codex requests permission to continue');
     callbacks.onPermissionRequest('Codex', detail).then((allow) => {
       const decision = allow ? 'accept' : 'decline';
@@ -1083,6 +1110,7 @@ export class CodexSession {
   }
 
   private failAll(error: Error): void {
+    this.rawLog.flush();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }

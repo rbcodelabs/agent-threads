@@ -322,8 +322,14 @@ export class ClaudeSession {
         const detail = opts.description ?? opts.decisionReason ?? opts.blockedPath ?? JSON.stringify(input).slice(0, 120);
         const title = opts.title ?? toolName;
         const allowed = await callbacks.onPermissionRequest(title, detail);
+        // Never return `updatedPermissions` (e.g. `opts.suggestions`): the CLI
+        // persists those rules to `.claude/settings.local.json`, turning every
+        // one-shot "Allow" — and every auto-allow of an already-trusted tool —
+        // into a permanent, invisible rule. "Always Allow" is persisted by the
+        // plugin itself (`settings.alwaysAllowedTools`), which the permission
+        // handler consults, so nothing is lost.
         return allowed
-          ? { behavior: 'allow' as const, updatedInput: input, ...(opts.suggestions ? { updatedPermissions: opts.suggestions } : {}) }
+          ? { behavior: 'allow' as const, updatedInput: input }
           : { behavior: 'deny' as const, message: 'Denied by user' };
       } catch (err) {
         console.error('[ClaudeThreads] canUseTool error:', err);

@@ -1,7 +1,20 @@
-import type { ChatMessage, Thread, ThreadStatus } from './types';
+import type { AgentHarness } from './types';
+import type { ChatMessage, StorageAllocationResult, Thread, ThreadArtifactRecord, ThreadPermissionSnapshot, ThreadStatus } from './types';
+import type { AgentToolContribution, AgentToolRegistrationResult, AgentToolRegistry } from './AgentToolContributions';
+import type { SlashCommandContribution, SlashCommandRegistrationResult, SlashCommandRegistry } from './SlashCommandContributions';
+export type { SlashCommandContribution, SlashCommandRegistrationResult, SlashCommandContext, SlashCommandHost, SlashCommandResult, SlashCommandScope } from './SlashCommandContributions';
 import type { ThreadEvent } from './ThreadManager';
 import type { RawLogTraceChunk, RawLogTraceMetadata } from './RawLogWriter';
 import type { McpRegistrationResult } from './mcpServerStore';
+import type { ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactProviderRegistry, ArtifactRegistrationResult, ArtifactStoreHost, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
+import { HOST_OWNED_ARTIFACT_FIELDS, PROVIDER_ID_PATTERN, toArtifactRef } from './ArtifactContributions';
+import { formatMessageContentReference } from './MessageContent';
+import type { MessageContentContribution, MessageContentProviderRegistry, MessageContentRef, MessageContentRegistrationResult } from './MessageContent';
+export type { MessageContentJson, MessageContentRef, MessageContentContext, MessageContentPresentation, MessageContentActionHost, MessageContentContribution, MessageContentRegistrationResult } from './MessageContent';
+
+export type { ArtifactAction, ArtifactActionHost, ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactPresentation, ArtifactRegistrationResult, ArtifactStoreHost, ArtifactViewPlacement, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
+export type { AgentToolContribution, AgentToolHost, AgentToolRegistrationResult, AgentToolResult } from './AgentToolContributions';
+export type { StorageAllocationResult, ThreadPermissionSnapshot } from './types';
 
 export type PublicErrorCode = 'PLUGIN_UNAVAILABLE' | 'THREAD_NOT_FOUND' | 'RUN_NOT_FOUND' | 'RUN_FAILED' | 'RUN_INTERRUPTED' | 'THREAD_BUSY' | 'IDEMPOTENCY_CONFLICT' | 'TRACE_NOT_FOUND' | 'CURSOR_INVALID' | 'CONSTRAINT_UNSUPPORTED' | 'ORCHESTRATOR_NOT_FOUND' | 'INVALID_ARGUMENT';
 export interface PublicError { readonly code: PublicErrorCode; readonly message: string }
@@ -9,11 +22,18 @@ export class ClaudeThreadsApiError extends Error implements PublicError {
   constructor(public readonly code: PublicErrorCode, message: string, public readonly generation?: string) { super(message); this.name = 'ClaudeThreadsApiError'; }
 }
 export interface MessageSnapshot { readonly id: string; readonly role: ChatMessage['role']; readonly content: string; readonly timestamp: number }
-export interface ThreadSummary { readonly id: string; readonly title: string; readonly status: ThreadStatus; readonly reviewed: boolean; readonly cwd?: string; readonly projectId?: string; readonly agentHarness: 'claude' | 'codex'; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean; readonly createdAt: number; readonly updatedAt: number; readonly isRunning: boolean; readonly messageCount: number }
+export interface ThreadSummary { readonly id: string; readonly title: string; readonly status: ThreadStatus; readonly reviewed: boolean; readonly cwd?: string; readonly projectId?: string; readonly agentHarness: AgentHarness; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean; readonly createdAt: number; readonly updatedAt: number; readonly isRunning: boolean; readonly messageCount: number }
 export interface ThreadSnapshot extends ThreadSummary { readonly messages: readonly MessageSnapshot[] }
 export interface ThreadQuery { readonly projectId?: string | null; readonly status?: ThreadStatus; readonly limit?: number }
 export interface CorrelationInput { readonly ownerPluginId?: string; readonly idempotencyKey?: string }
-export interface CreateThreadInput extends CorrelationInput { readonly title?: string; readonly cwd?: string; readonly projectId?: string; readonly agentHarness?: 'claude' | 'codex'; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean }
+export interface CreateThreadInput extends CorrelationInput { readonly title?: string; readonly cwd?: string; readonly projectId?: string; readonly agentHarness?: AgentHarness; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean }
+export type ProvisionalCommitResult = { readonly status: 'committed' | 'already-committed' | 'rolled-back'; readonly threadId: string };
+export type ProvisionalRollbackResult = { readonly status: 'rolled-back' | 'already-rolled-back' | 'committed'; readonly threadId: string };
+export interface ProvisionalThreadHandle {
+  readonly threadId: string;
+  commit(): Promise<ProvisionalCommitResult>;
+  rollback(): Promise<ProvisionalRollbackResult>;
+}
 export interface SendInput extends CorrelationInput { readonly prompt: string }
 export interface WaitOptions { readonly timeoutMs?: number }
 export type RunResult =
@@ -28,7 +48,7 @@ export type PublicThreadEvent =
   | { readonly kind: 'thread.removed'; readonly threadId: string; readonly at: number };
 export interface Disposable { dispose(): void }
 export interface PublicUsage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly durationMs?: number; readonly turns?: number }
-export interface TraceSource { readonly sourceId: string; readonly threadId: string; readonly projectId?: string; readonly harness: 'claude' | 'codex'; readonly revision: string; readonly contentHash: string; readonly byteLength: number; readonly updatedAt: number }
+export interface TraceSource { readonly sourceId: string; readonly threadId: string; readonly projectId?: string; readonly harness: AgentHarness; readonly revision: string; readonly contentHash: string; readonly byteLength: number; readonly updatedAt: number }
 export interface TraceSourcePage { readonly sources: readonly TraceSource[]; readonly nextCursor?: string; readonly eof: boolean }
 export interface SkillRunOutcome { readonly invokedSkill: string; readonly runOutcome: 'success' | 'failure'; readonly invocationIndex: number }
 export interface TraceEvent { readonly index: number; readonly timestamp: string; readonly type: string; readonly invokedSkill?: string; readonly skillLoadOutcome?: 'loaded'; readonly skillRunOutcomes?: readonly SkillRunOutcome[]; readonly data: unknown }
@@ -59,10 +79,22 @@ export interface McpRegisterInput {
   readonly scopes?: string;
   readonly tools?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] };
   readonly clientId?: string;
+  /**
+   * Confidential clients only, and only as a `${NAME}` placeholder naming a
+   * secret already in the keychain — a literal is rejected, because a peer's
+   * registration arguments are logged verbatim.
+   */
+  readonly clientSecret?: string;
   readonly authorizationServerUrl?: string;
   readonly redirectUri?: string;
+  /** Omit for the interactive default; `client_credentials` is machine-to-machine and opens no browser. */
+  readonly grantType?: 'authorization_code' | 'client_credentials';
+  /** `audience` parameter on the token request. Nonsecret — pass the literal value. */
+  readonly audience?: string;
 }
 export interface RequestSecretInput { readonly secretName: string; readonly reason: string; readonly force?: boolean }
+export interface ArchiveThreadResult { readonly status: 'archived' | 'cancelled'; readonly threadId: string }
+export interface MarkReviewedResult { readonly threadId: string; readonly reviewed: true; readonly changed: boolean }
 export type RequestSecretResult =
   | { readonly success: true; readonly secretName: string; readonly alreadyExisted: boolean }
   | { readonly success: false; readonly reason: string };
@@ -71,7 +103,16 @@ export interface ClaudeThreadsApiV1 {
   readonly threads: {
     list(query?: ThreadQuery): Promise<readonly ThreadSummary[]>; get(threadId: string): Promise<ThreadSnapshot | null>;
     create(input: CreateThreadInput): Promise<{ readonly threadId: string }>; send(threadId: string, input: SendInput): Promise<{ readonly runId: string }>;
+    beginProvisional(owner: PeerIdentity, input: CreateThreadInput): Promise<ProvisionalThreadHandle>;
     wait(runId: string, options?: WaitOptions): Promise<RunResult>; cancel(runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>>; open(threadId: string): Promise<void>; subscribe(listener: (event: PublicThreadEvent) => void): Disposable;
+    /**
+     * Effective permission mode and pending-plan state, read-only (ADR-0008).
+     * Neither field appears on `ThreadSnapshot`, so a peer that writes on a
+     * thread's behalf has no way to tell whether writing is permitted.
+     */
+    permissions(threadId: string): Promise<ThreadPermissionSnapshot | null>;
+    archive(threadId: string): Promise<ArchiveThreadResult>;
+    markReviewed(threadId: string): Promise<MarkReviewedResult>;
   };
   readonly traces: { listSources(options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceSourcePage>; readChunk(sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk>; subscribe(listener: (event: PublicTraceEvent) => void): Disposable };
   readonly constrainedRuns: { create(input: ConstrainedRunInput): Promise<{ readonly runId: string }>; get(runId: string): Promise<ConstrainedRunResult>; wait(runId: string, options?: WaitOptions): Promise<ConstrainedRunResult>; cancel(runId: string): Promise<ConstrainedRunResult> };
@@ -81,11 +122,71 @@ export interface ClaudeThreadsApiV1 {
     register(input: McpRegisterInput): Promise<McpRegistrationResult>;
     requestSecret(input: RequestSecretInput): Promise<RequestSecretResult>;
   };
+  /**
+   * Contribution surface (ADR-0008). Every registration is disposable and is
+   * dropped both on the caller's dispose and on host `stop()`.
+   */
+  readonly extensions: {
+    registerMessageContentProvider(owner: PeerIdentity, contribution: MessageContentContribution): MessageContentRegistrationResult;
+    registerArtifactProvider(owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult;
+    /**
+     * Contributes an in-process agent tool (ADR-0008). The peer supplies a
+     * thread-agnostic `invoke`; the host binds it into every MCP server it
+     * builds and injects the calling thread id at invoke time. A peer never
+     * sees the per-thread server factory — that inversion is the point.
+     *
+     * Names are checked against host built-ins, core agent tools and other
+     * peers' tools, so a contribution can never shadow `Read` or `Bash`.
+     */
+    registerAgentTool(owner: PeerIdentity, contribution: AgentToolContribution): AgentToolRegistrationResult;
+    registerSlashCommand(owner: PeerIdentity, contribution: SlashCommandContribution): SlashCommandRegistrationResult;
+  };
+  /** Formats a bounded, durable inline content reference for an assistant message. */
+  readonly messageContent: { formatReference(ref: MessageContentRef): string };
+  /**
+   * Artifact entry point (ADR-0010). Lets a peer create an artifact and open
+   * it without any view, DOM or private-manager access — the gap that made
+   * `extensions.registerArtifactProvider` presentation-only.
+   *
+   * `owner` is explicit on every mutating call because the API object is a
+   * single shared singleton: the host cannot infer which plugin is calling,
+   * so ownership has to be asserted rather than derived. It is checked against
+   * the identity that registered the provider, so a peer cannot write into
+   * another plugin's provider namespace.
+   */
+  readonly artifacts: {
+    list(threadId: string): Promise<readonly ThreadArtifactRef[]>;
+    attach(owner: PeerIdentity, threadId: string, ref: ThreadArtifactRef): Promise<ArtifactAttachResult>;
+    update(owner: PeerIdentity, threadId: string, artifactId: string, patch: ArtifactPatch): Promise<ArtifactMutationResult>;
+    detach(owner: PeerIdentity, threadId: string, artifactId: string): Promise<ArtifactMutationResult>;
+    /** Runs a named provider action on the same path a card click takes. */
+    invokeAction(threadId: string, artifactId: string, actionId: string): Promise<ArtifactActionResult>;
+    /**
+     * Creates and returns the host-owned storage root for `artifactId`
+     * (ADR-0008). `attach` only accepts a root under the vault artifact
+     * directory — a location the host never disclosed — so without this,
+     * allocation was convention a peer had to reproduce, not a contract.
+     * Idempotent: re-allocating returns the existing root without clobbering.
+     *
+     * Ownerless, like `invokeAction`: allocation necessarily runs *before* the
+     * artifact exists, so there is no registered provider to check a caller
+     * against. It creates an empty directory and grants nothing — attaching
+     * under a provider id is still owner-checked.
+     */
+    allocateStorage(threadId: string, artifactId: string): Promise<StorageAllocationResult>;
+  };
 }
 export interface PublicApiDependencies {
   getThreads(): Thread[]; getThread(id: string): Thread | undefined; isRunning(id: string): boolean; createThread(input: CreateThreadInput): Thread | Promise<Thread>;
+  beginProvisionalThread?(input: CreateThreadInput): Promise<{
+    thread: Thread;
+    commit(): Promise<void>;
+    rollback(): Promise<void>;
+  }>;
   sendMessage(id: string, prompt: string): Promise<void>; openThread(id: string): Promise<void>; subscribe(listener: (threadId: string, event: ThreadEvent) => void): () => void;
   interruptThread?(id: string): Promise<void>;
+  archiveThread?(id: string, assertActive: () => void): Promise<ArchiveThreadResult>;
+  markThreadReviewed?(id: string, assertActive: () => void): Promise<MarkReviewedResult>;
   getTraceMetadata?(id: string): Promise<RawLogTraceMetadata | null>;
   readTraceChunk?(id: string, options: { byteOffset: number; eventIndex: number; limit: number }): Promise<RawLogTraceChunk | null>;
   getRegisteredSkillNames?(): Promise<readonly string[]>;
@@ -97,11 +198,49 @@ export interface PublicApiDependencies {
   registerMcpServer?(input: unknown): Promise<McpRegistrationResult>;
   requestSecret?(secretName: string, reason: string, force?: boolean): Promise<boolean>;
   hasSecret?(secretName: string): boolean;
+  /** Host-owned artifact provider registry; absent when the host cannot render artifacts. */
+  artifactProviders?: ArtifactProviderRegistry;
+  messageContentProviders?: MessageContentProviderRegistry;
+  /**
+   * Host-owned agent tool registry; absent when the host builds no MCP
+   * servers. The registry is read by the per-thread MCP server factory, so a
+   * peer contributes through it without ever seeing the factory.
+   */
+  agentTools?: AgentToolRegistry;
+  slashCommands?: SlashCommandRegistry;
+  /** Default permission mode, for resolving a thread with no override. */
+  getDefaultPermissionMode?(): Thread['permissionMode'];
+  /** Host-owned artifact persistence; absent when the host cannot store artifacts. */
+  artifactStore?: ArtifactStoreHost;
 }
 interface RunRecord { readonly runId: string; readonly threadId: string; result?: Exclude<RunResult, { status: 'timed_out' }>; waiters: Set<(result: Exclude<RunResult, { status: 'timed_out' }>) => void> }
 export interface ClaudeThreadsApiService { readonly api: ClaudeThreadsApiV1; start(): void; stop(): void }
 
-const CAPABILITIES = Object.freeze(['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe', 'traces.listSources', 'traces.readChunk', 'traces.subscribe', 'constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel', 'orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration', 'mcp.register', 'mcp.requestSecret']);
+/**
+ * Capabilities are computed from the dependencies actually present, so
+ * discovery never advertises an operation that fails at call time (ADR-0008).
+ * `threads.*`, `orchestrators.*` and `agentTools.*` rest on required deps and
+ * are therefore always present.
+ */
+function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
+  const capabilities = ['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe'];
+  if (deps.beginProvisionalThread) capabilities.push('threads.beginProvisional');
+  if (deps.archiveThread) capabilities.push('threads.archive');
+  if (deps.markThreadReviewed) capabilities.push('threads.markReviewed');
+  if (deps.getTraceMetadata && deps.readTraceChunk) capabilities.push('traces.listSources', 'traces.readChunk', 'traces.subscribe');
+  if (deps.runConstrainedQuery) capabilities.push('constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel');
+  capabilities.push('orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration');
+  if (deps.registerMcpServer) capabilities.push('mcp.register');
+  if (deps.requestSecret) capabilities.push('mcp.requestSecret');
+  if (deps.artifactProviders) capabilities.push('extensions.registerArtifactProvider');
+  capabilities.push('messageContent.formatReference');
+  if (deps.messageContentProviders) capabilities.push('extensions.registerMessageContentProvider');
+  if (deps.agentTools) capabilities.push('extensions.registerAgentTool');
+  if (deps.slashCommands) capabilities.push('extensions.registerSlashCommand');
+  if (deps.getDefaultPermissionMode) capabilities.push('threads.permissions');
+  if (deps.artifactStore && deps.artifactProviders) capabilities.push('artifacts.list', 'artifacts.attach', 'artifacts.update', 'artifacts.detach', 'artifacts.invokeAction', 'artifacts.allocateStorage');
+  return Object.freeze(capabilities);
+}
 function freeze<T extends object>(value: T): Readonly<T> { for (const nested of Object.values(value)) if (nested && typeof nested === 'object' && !Object.isFrozen(nested)) freeze(nested as object); return Object.freeze(value); }
 function snapshotMessage(message: ChatMessage): MessageSnapshot { return freeze({ id: message.id, role: message.role, content: String(message.content).slice(0, 100_000), timestamp: message.timestamp }); }
 function snapshotSummary(thread: Thread, running: boolean): ThreadSummary { return freeze({ id: thread.id, title: thread.title, status: thread.status ?? 'waiting', reviewed: thread.reviewed ?? false, cwd: thread.cwd, projectId: thread.projectId, agentHarness: thread.agentHarness ?? 'claude', origin: thread.origin, externalJobId: thread.externalJobId, ephemeral: thread.ephemeral, background: thread.background, createdAt: thread.createdAt, updatedAt: thread.updatedAt, isRunning: running, messageCount: thread.messages.length }); }
@@ -118,6 +257,11 @@ const MAX_BUDGET_USD = 100;
 const MAX_TIMEOUT_MS = 600_000;
 const MAX_SECRET_NAME_LENGTH = 128;
 const MAX_SECRET_REASON_LENGTH = 500;
+const MAX_ARTIFACT_ID_LENGTH = 128;
+const MAX_ARTIFACT_KIND_LENGTH = 128;
+const MAX_ARTIFACT_TITLE_LENGTH = 512;
+/** Provider data rides along in the host's settings file, so it stays bounded. */
+const MAX_ARTIFACT_DATA_BYTES = 256 * 1024;
 function boundedString(value: unknown, name: string, max: number, required = false): string | undefined {
   if (value === undefined && !required) return undefined;
   if (typeof value !== 'string') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `${name} must be a string.`);
@@ -232,6 +376,14 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   for (const [runId, stored] of Object.entries(persisted.constrained)) if (stored.status === 'running') { reconciliationDirty = true; persisted.constrained[runId] = freeze({ status: 'failed', runId, error: freeze({ code: 'RUN_INTERRUPTED' as const, message: 'The agent run was interrupted.' }) }); }
   const runIdsByThread = new Map<string, Set<string>>(); const latestRunByThread = new Map<string, string>();
   const serial = new Map<string, Promise<unknown>>();
+  type ProvisionalState = {
+    readonly threadId: string;
+    status: 'pending' | 'committed' | 'rolled-back';
+    readonly host: Awaited<ReturnType<NonNullable<PublicApiDependencies['beginProvisionalThread']>>>;
+    operation: Promise<unknown>;
+    readonly allocatedRoots: Set<string>;
+  };
+  const provisionalThreads = new Map<string, ProvisionalState>();
   let active = true; let started = false; let stopped = false;
   const unavailable = () => new ClaudeThreadsApiError('PLUGIN_UNAVAILABLE', 'Agent Threads is not available.', generation);
   const guard = () => { if (!active) throw unavailable(); };
@@ -286,6 +438,9 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   });
   const send = async (threadId: string, input: SendInput): Promise<{ readonly runId: string }> => {
     guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.');
+    if (provisionalThreads.get(threadId)?.status === 'pending') {
+      throw new ClaudeThreadsApiError('THREAD_BUSY', 'The provisional thread must be committed before it can run.');
+    }
     const prompt = boundedString(input.prompt, 'prompt', MAX_PROMPT_LENGTH, true)!;
     const key = correlationKey('send', input, threadId); const fp = await fingerprint({ threadId, prompt });
     return serialize(key ?? `thread:${threadId}`, async () => {
@@ -307,6 +462,48 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   };
   const list = async (query?: ThreadQuery): Promise<readonly ThreadSummary[]> => { guard(); let values = deps.getThreads(); if (query?.projectId !== undefined) values = values.filter(thread => (thread.projectId ?? null) === query.projectId); if (query?.status) values = values.filter(thread => (thread.status ?? 'waiting') === query.status); if (query?.limit !== undefined) values = values.slice(0, Math.max(0, Math.floor(query.limit))); return freeze(values.map(thread => snapshotSummary(thread, deps.isRunning(thread.id)))); };
   const get = async (threadId: string): Promise<ThreadSnapshot | null> => { guard(); const thread = deps.getThread(threadId); return thread ? snapshotThread(thread, deps.isRunning(threadId)) : null; };
+  const beginProvisional = async (owner: PeerIdentity, input: CreateThreadInput): Promise<ProvisionalThreadHandle> => {
+    guard();
+    if (!deps.beginProvisionalThread) throw new ClaudeThreadsApiError('PLUGIN_UNAVAILABLE', 'Provisional threads are unavailable in this host.');
+    const pluginId = boundedString(owner?.pluginId, 'owner.pluginId', MAX_OWNER_LENGTH, true)!;
+    const declaredOwner = boundedString(input?.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH);
+    const explicitOrigin = boundedString(input?.origin, 'origin', MAX_OWNER_LENGTH);
+    if (declaredOwner && declaredOwner !== pluginId) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'ownerPluginId must match owner.pluginId.');
+    if (explicitOrigin && explicitOrigin !== pluginId) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match owner.pluginId.');
+    const normalized: CreateThreadInput = {
+      ...input,
+      title: boundedString(input?.title, 'title', 512),
+      origin: pluginId,
+      ownerPluginId: pluginId,
+      externalJobId: boundedString(input?.externalJobId, 'externalJobId', MAX_KEY_LENGTH),
+    };
+    const host = await deps.beginProvisionalThread(normalized);
+    const state: ProvisionalState = { threadId: host.thread.id, status: 'pending', host, operation: Promise.resolve(), allocatedRoots: new Set() };
+    provisionalThreads.set(state.threadId, state);
+    const serialized = <T>(action: () => Promise<T>): Promise<T> => {
+      const result = state.operation.catch(() => undefined).then(action);
+      state.operation = result;
+      return result;
+    };
+    const commit = (): Promise<ProvisionalCommitResult> => serialized(async () => {
+      if (state.status === 'committed') return freeze({ status: 'already-committed' as const, threadId: state.threadId });
+      if (state.status === 'rolled-back') return freeze({ status: 'rolled-back' as const, threadId: state.threadId });
+      await state.host.commit();
+      state.status = 'committed';
+      provisionalThreads.delete(state.threadId);
+      return freeze({ status: 'committed' as const, threadId: state.threadId });
+    });
+    const rollback = (): Promise<ProvisionalRollbackResult> => serialized(async () => {
+      if (state.status === 'committed') return freeze({ status: 'committed' as const, threadId: state.threadId });
+      if (state.status === 'rolled-back') return freeze({ status: 'already-rolled-back' as const, threadId: state.threadId });
+      await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root)));
+      await state.host.rollback();
+      state.status = 'rolled-back';
+      provisionalThreads.delete(state.threadId);
+      return freeze({ status: 'rolled-back' as const, threadId: state.threadId });
+    });
+    return freeze({ threadId: state.threadId, commit, rollback });
+  };
   const listTraceSources = async (options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceSourcePage> => {
     guard();
     const limit = positiveLimit(options?.limit, 100);
@@ -447,6 +644,14 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       if (name === 'ct_get_thread') { const threadId = String(args.thread_id ?? '').trim(); const thread = await get(threadId); if (!thread) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', `Thread not found: ${threadId}`); const lastN = Math.min(Math.max(1, Number(args.last_n) || 5), 20); return JSON.stringify({ ...thread, messages: thread.messages.slice(-lastN) }, null, 2); }
       if (name === 'ct_list_threads') { const status = String(args.status ?? 'all'); const limit = Math.min(Math.max(1, Number(args.limit) || 15), 30); let threads = [...await list()].sort((a, b) => b.updatedAt - a.updatedAt); threads = threads.filter(thread => toolStatus(thread) === status || status === 'all' || (status === 'waiting' && thread.status === 'waiting')).slice(0, limit); return JSON.stringify({ count: threads.length, threads }, null, 2); }
       if (name === 'ct_open_thread') { const threadId = String(args.thread_id ?? '').trim(); await api.threads.open(threadId); return `Opened thread ${threadId} in the Agent Threads panel.`; }
+      if (name === 'ct_archive_thread') {
+        const result = await api.threads.archive(args.thread_id as string);
+        return result.status === 'archived' ? `Archived thread ${result.threadId}.` : `Archive cancelled for thread ${result.threadId}.`;
+      }
+      if (name === 'ct_mark_reviewed') {
+        const result = await api.threads.markReviewed(args.thread_id as string);
+        return result.changed ? `Marked thread ${result.threadId} reviewed.` : `Thread ${result.threadId} is already reviewed.`;
+      }
       return `Error: Agent Threads tool "${name}" is not available in public API v1.`;
     } catch (error) { return `Error: ${error instanceof Error ? error.message : String(error)}`; }
   };
@@ -472,18 +677,329 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     if (saved) return freeze({ success: true, secretName: varName, alreadyExisted: false });
     return freeze({ success: false, reason: 'The user did not save the secret.' });
   };
-  const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: CAPABILITIES,
-    threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const owner = boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH); const explicitOrigin = boundedString(input.origin, 'origin', MAX_OWNER_LENGTH); if (owner && explicitOrigin && owner !== explicitOrigin) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match ownerPluginId.'); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: explicitOrigin ?? owner, externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, send, wait, cancel,
+  const artifactRegistrations = new Set<{ dispose: () => void }>();
+  const registerMessageContentProvider = (owner: PeerIdentity, contribution: MessageContentContribution): MessageContentRegistrationResult => {
+    guard();
+    if (!deps.messageContentProviders) return freeze({ success: false, status: 'unavailable', providerId: String(contribution?.providerId ?? ''), message: 'Message content providers are unavailable in this host.', dispose: () => {} });
+    const registration = deps.messageContentProviders.register(owner, contribution);
+    if (!registration.success) return registration;
+    const tracked = { dispose: registration.dispose }; artifactRegistrations.add(tracked);
+    return freeze({ ...registration, dispose: () => { artifactRegistrations.delete(tracked); registration.dispose(); } });
+  };
+  const registerArtifactProvider = (owner: PeerIdentity, contribution: ArtifactContribution): ArtifactRegistrationResult => {
+    guard();
+    const registry = deps.artifactProviders;
+    if (!registry) {
+      return freeze({ success: false as const, status: 'invalid' as const, providerId: String(contribution?.providerId ?? ''), message: 'Artifact contributions are not available in this host context.', dispose: () => {} });
+    }
+    const result = registry.register(owner, contribution);
+    if (!result.success) return freeze(result);
+    // Tracked so stop() can drop it the way event listeners are dropped; a
+    // plugin reload must never leave a provider bound to a dead generation.
+    const tracked = { dispose: result.dispose };
+    artifactRegistrations.add(tracked);
+    return freeze({
+      success: true as const, status: 'registered' as const, providerId: result.providerId,
+      dispose: () => { artifactRegistrations.delete(tracked); result.dispose(); },
+    });
+  };
+
+  const agentToolRegistrations = new Set<{ dispose: () => void }>();
+  const registerAgentTool = (owner: PeerIdentity, contribution: AgentToolContribution): AgentToolRegistrationResult => {
+    guard();
+    const registry = deps.agentTools;
+    if (!registry) {
+      return freeze({ success: false as const, status: 'unavailable' as const, name: String(contribution?.name ?? ''), message: 'Agent tool contributions are not available in this host context.', dispose: () => {} });
+    }
+    const result = registry.register(owner, contribution);
+    if (!result.success) return freeze(result);
+    // Tracked so stop() drops it the way event listeners and artifact
+    // providers already are: a reloaded peer must never leave a phantom tool
+    // advertised to sessions built after the reload.
+    const tracked = { dispose: result.dispose };
+    agentToolRegistrations.add(tracked);
+    return freeze({
+      success: true as const, status: 'registered' as const, name: result.name,
+      dispose: () => { agentToolRegistrations.delete(tracked); result.dispose(); },
+    });
+  };
+
+  const slashCommandRegistrations = new Set<{ dispose: () => void }>();
+  const registerSlashCommand = (owner: PeerIdentity, contribution: SlashCommandContribution): SlashCommandRegistrationResult => {
+    guard();
+    if (!deps.slashCommands) return freeze({ success: false as const, status: 'unavailable' as const,
+      name: String(contribution?.name ?? ''), message: 'Slash commands are unavailable in this host context.', dispose: () => {} });
+    const result = deps.slashCommands.register(owner, contribution);
+    if (!result.success) return freeze(result);
+    const tracked = { dispose: result.dispose };
+    slashCommandRegistrations.add(tracked);
+    return freeze({ ...result, dispose: () => { slashCommandRegistrations.delete(tracked); result.dispose(); } });
+  };
+
+  const threadPermissions = async (threadId: string): Promise<ThreadPermissionSnapshot | null> => {
+    guard();
+    const thread = deps.getThread(threadId);
+    if (!thread || !deps.getDefaultPermissionMode) return null;
+    // Resolved against the global default here, because that default is itself
+    // host-private: returning only the per-thread override would leave the
+    // caller unable to work out the effective mode.
+    const override = thread.permissionMode;
+    return freeze({
+      threadId,
+      effectivePermissionMode: override ?? deps.getDefaultPermissionMode() ?? 'default',
+      overridden: override !== undefined,
+      planApprovalPending: thread.pendingPlan !== undefined,
+      questionPending: (thread.pendingQuestions?.length ?? 0) > 0,
+    });
+  };
+
+  // --- artifacts -----------------------------------------------------------
+  // Everything below returns a structured result and never throws for an
+  // input the caller could plausibly get wrong, so a peer branches on `status`
+  // instead of pattern-matching an exception (the `mcp.register` precedent).
+
+  type ArtifactFailure = Extract<ArtifactMutationResult, { success: false }>['status'];
+  type AuthorizationFailure = 'invalid' | 'conflict' | 'unknown-provider';
+
+  // Generic in the status literal so one helper serves both the attach and the
+  // mutation union without widening either.
+  const artifactFailure = <S extends ArtifactFailure>(artifactId: string, status: S, message: string) =>
+    freeze({ success: false as const, status, artifactId, message });
+
+  /** Resolves the owner/provider pair, or the reason the pair is not usable. */
+  const authorizeProvider = (
+    owner: PeerIdentity | undefined,
+    providerId: unknown,
+    artifactId: string,
+  ): { ok: true; providerId: string } | { ok: false; failure: ReturnType<typeof artifactFailure<AuthorizationFailure>> } => {
+    const registry = deps.artifactProviders!;
+    const pluginId = typeof owner?.pluginId === 'string' ? owner.pluginId.trim() : '';
+    if (!pluginId || pluginId.length > MAX_OWNER_LENGTH) {
+      return { ok: false, failure: artifactFailure(artifactId, 'invalid', 'owner.pluginId must be a non-empty string.') };
+    }
+    const id = typeof providerId === 'string' ? providerId.trim() : '';
+    if (!id || !PROVIDER_ID_PATTERN.test(id)) {
+      return { ok: false, failure: artifactFailure(artifactId, 'invalid', 'providerId must be namespaced, e.g. "my-plugin.artifacts".') };
+    }
+    const registered = registry.ownerOf(id);
+    if (!registered) {
+      return { ok: false, failure: artifactFailure(artifactId, 'unknown-provider', `No artifact provider is registered for "${id}".`) };
+    }
+    if (registered.pluginId !== pluginId) {
+      // The whole point of namespaced providers: one plugin cannot write
+      // artifacts into another plugin's namespace, deliberately or by typo.
+      return { ok: false, failure: artifactFailure(artifactId, 'conflict', `"${id}" is registered by "${registered.pluginId}", not "${pluginId}".`) };
+    }
+    return { ok: true, providerId: id };
+  };
+
+  /**
+   * Provider data is opaque but still persisted into the host's own settings
+   * file, so it must be JSON-representable and bounded. The round-trip also
+   * drops functions and prototypes a peer might otherwise smuggle into state.
+   */
+  const artifactData = (value: unknown): { ok: true; value: Record<string, unknown> } | { ok: false; message: string } => {
+    if (value === undefined || value === null) return { ok: true, value: {} };
+    if (typeof value !== 'object' || Array.isArray(value)) return { ok: false, message: 'data must be a plain object.' };
+    let serialized: string | undefined;
+    try { serialized = JSON.stringify(value); } catch { serialized = undefined; }
+    if (serialized === undefined) return { ok: false, message: 'data must be JSON-serializable.' };
+    if (new TextEncoder().encode(serialized).byteLength > MAX_ARTIFACT_DATA_BYTES) {
+      return { ok: false, message: `data must serialize to no more than ${MAX_ARTIFACT_DATA_BYTES} bytes.` };
+    }
+    return { ok: true, value: JSON.parse(serialized) as Record<string, unknown> };
+  };
+
+  /** Drops host-owned identity, so provider data can never rewrite it. */
+  const providerFields = (data: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(Object.entries(data).filter(([key]) => !HOST_OWNED_ARTIFACT_FIELDS.includes(key)));
+
+  const listArtifacts = async (threadId: string): Promise<readonly ThreadArtifactRef[]> => {
+    guard();
+    const stored = deps.artifactStore?.list(threadId);
+    return freeze((stored ?? []).map(toArtifactRef));
+  };
+
+  const attachArtifact = async (owner: PeerIdentity, threadId: string, ref: ThreadArtifactRef): Promise<ArtifactAttachResult> => {
+    guard();
+    const artifactId = typeof ref?.id === 'string' ? ref.id.trim() : '';
+    const store = deps.artifactStore;
+    if (!store || !deps.artifactProviders) {
+      return artifactFailure(artifactId, 'unavailable', 'Artifact attachment is not available in this host context.');
+    }
+    if (!artifactId || artifactId.length > MAX_ARTIFACT_ID_LENGTH) {
+      return artifactFailure(artifactId, 'invalid', `id must contain 1-${MAX_ARTIFACT_ID_LENGTH} characters.`);
+    }
+    const authorized = authorizeProvider(owner, ref?.providerId, artifactId);
+    if (!authorized.ok) return authorized.failure;
+
+    const kind = typeof ref?.kind === 'string' ? ref.kind.trim() : '';
+    if (!kind || kind.length > MAX_ARTIFACT_KIND_LENGTH) {
+      return artifactFailure(artifactId, 'invalid', `kind must contain 1-${MAX_ARTIFACT_KIND_LENGTH} characters.`);
+    }
+    if (!(deps.artifactProviders.kindsOf(authorized.providerId) ?? []).includes(kind)) {
+      return artifactFailure(artifactId, 'invalid', `"${authorized.providerId}" did not declare the artifact kind "${kind}".`);
+    }
+    const title = typeof ref?.title === 'string' ? ref.title.trim() : '';
+    if (!title || title.length > MAX_ARTIFACT_TITLE_LENGTH) {
+      return artifactFailure(artifactId, 'invalid', `title must contain 1-${MAX_ARTIFACT_TITLE_LENGTH} characters.`);
+    }
+    const schemaVersion = ref?.schemaVersion ?? 1;
+    if (!Number.isInteger(schemaVersion) || schemaVersion < 1) {
+      return artifactFailure(artifactId, 'invalid', 'schemaVersion must be a positive integer.');
+    }
+    let storageRoot: string | undefined;
+    if (ref?.storageRoot !== undefined) {
+      const resolved = store.resolveStorageRoot(ref.storageRoot);
+      // Never silently drop a rejected root and attach anyway: an artifact
+      // whose storage the host cannot safely collect must not be created.
+      if (resolved.status !== 'ok') return artifactFailure(artifactId, 'invalid', resolved.message);
+      storageRoot = resolved.path;
+    }
+    const data = artifactData(ref?.data);
+    if (!data.ok) return artifactFailure(artifactId, 'invalid', data.message);
+
+    const now = Date.now();
+    const record: ThreadArtifactRecord = {
+      // Provider fields first; host-owned identity below always wins.
+      ...providerFields(data.value),
+      id: artifactId, kind, title, providerId: authorized.providerId, schemaVersion,
+      ...(storageRoot ? { storageRoot } : {}),
+      createdAt: now, updatedAt: now,
+    };
+    const outcome = await store.put(threadId, record);
+    if (outcome === 'thread-not-found') return artifactFailure(artifactId, 'thread-not-found', `Thread not found: ${threadId}`);
+    return freeze({ success: true as const, status: outcome, artifactId });
+  };
+
+  const updateArtifact = async (owner: PeerIdentity, threadId: string, artifactId: string, patch: ArtifactPatch): Promise<ArtifactMutationResult> => {
+    guard();
+    const id = typeof artifactId === 'string' ? artifactId.trim() : '';
+    const store = deps.artifactStore;
+    if (!store || !deps.artifactProviders) {
+      return artifactFailure(id, 'unavailable', 'Artifact updates are not available in this host context.');
+    }
+    const stored = store.list(threadId);
+    if (!stored) return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
+    const existing = stored.find(candidate => candidate.id === id);
+    if (!existing) return artifactFailure(id, 'artifact-not-found', `Artifact not found: ${id}`);
+    const authorized = authorizeProvider(owner, existing.providerId, id);
+    if (!authorized.ok) return authorized.failure;
+
+    const next: ThreadArtifactRecord = { ...existing };
+    if (patch?.title !== undefined) {
+      const title = typeof patch.title === 'string' ? patch.title.trim() : '';
+      if (!title || title.length > MAX_ARTIFACT_TITLE_LENGTH) {
+        return artifactFailure(id, 'invalid', `title must contain 1-${MAX_ARTIFACT_TITLE_LENGTH} characters.`);
+      }
+      next.title = title;
+    }
+    if (patch?.data !== undefined) {
+      const data = artifactData(patch.data);
+      if (!data.ok) return artifactFailure(id, 'invalid', data.message);
+      Object.assign(next, providerFields(data.value));
+    }
+    if (patch?.storageRoot !== undefined) {
+      const resolved = store.resolveStorageRoot(patch.storageRoot);
+      if (resolved.status !== 'ok') return artifactFailure(id, 'invalid', resolved.message);
+      next.storageRoot = resolved.path;
+    }
+    next.updatedAt = Date.now();
+    const outcome = await store.put(threadId, next);
+    if (outcome === 'thread-not-found') return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
+    return freeze({ success: true as const, status: 'updated' as const, artifactId: id });
+  };
+
+  const detachArtifact = async (owner: PeerIdentity, threadId: string, artifactId: string): Promise<ArtifactMutationResult> => {
+    guard();
+    const id = typeof artifactId === 'string' ? artifactId.trim() : '';
+    const store = deps.artifactStore;
+    if (!store || !deps.artifactProviders) {
+      return artifactFailure(id, 'unavailable', 'Artifact detachment is not available in this host context.');
+    }
+    const stored = store.list(threadId);
+    if (!stored) return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
+    const existing = stored.find(candidate => candidate.id === id);
+    if (!existing) return artifactFailure(id, 'artifact-not-found', `Artifact not found: ${id}`);
+    const authorized = authorizeProvider(owner, existing.providerId, id);
+    if (!authorized.ok) return authorized.failure;
+    const outcome = await store.detach(threadId, id);
+    if (outcome === 'thread-not-found') return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
+    if (outcome === 'artifact-not-found') return artifactFailure(id, 'artifact-not-found', `Artifact not found: ${id}`);
+    return freeze({ success: true as const, status: 'detached' as const, artifactId: id });
+  };
+
+  /**
+   * Deliberately ownerless. Invoking an action runs the *owning* provider's
+   * own code against its own artifact, which is exactly what a user clicking
+   * the card does; gating it on caller identity would buy nothing, since both
+   * plugins are trusted in-process code either way (ADR-0008).
+   */
+  const invokeArtifactAction = async (threadId: string, artifactId: string, actionId: string): Promise<ArtifactActionResult> => {
+    guard();
+    const store = deps.artifactStore;
+    if (!store) return freeze({ status: 'error' as const, message: 'Artifact actions are not available in this host context.' });
+    const id = typeof artifactId === 'string' ? artifactId.trim() : '';
+    const action = typeof actionId === 'string' ? actionId.trim() : '';
+    if (!action) return freeze({ status: 'error' as const, message: 'actionId must be a non-empty string.' });
+    const stored = store.list(threadId);
+    if (!stored) return freeze({ status: 'error' as const, message: `Thread not found: ${threadId}` });
+    if (!stored.some(candidate => candidate.id === id)) {
+      return freeze({ status: 'error' as const, message: `Artifact not found: ${id}` });
+    }
+    // Same entry point the card click uses, so provider isolation, the invoke
+    // timeout and the result shape cannot drift between the two callers.
+    return freeze(await store.invokeAction(threadId, id, action));
+  };
+
+  const allocateArtifactStorage = async (threadId: string, artifactId: string): Promise<StorageAllocationResult> => {
+    guard();
+    const id = typeof artifactId === 'string' ? artifactId.trim() : '';
+    const store = deps.artifactStore;
+    if (!store || !deps.artifactProviders) {
+      return artifactFailure(id, 'unavailable', 'Artifact storage allocation is not available in this host context.');
+    }
+    if (!id || id.length > MAX_ARTIFACT_ID_LENGTH) {
+      return artifactFailure(id, 'invalid', `artifactId must contain 1-${MAX_ARTIFACT_ID_LENGTH} characters.`);
+    }
+    // The thread has to exist: an allocated root is garbage-collected when its
+    // thread is deleted, so a root under no thread would never be collected.
+    if (!store.list(threadId)) return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
+    const resolved = await store.allocateStorageRoot(id);
+    if (resolved.status !== 'ok') return artifactFailure(id, 'invalid', resolved.message);
+    provisionalThreads.get(threadId)?.allocatedRoots.add(resolved.path);
+    return freeze({
+      success: true as const,
+      status: resolved.existed ? ('existing' as const) : ('allocated' as const),
+      artifactId: id, path: resolved.path,
+    });
+  };
+
+  const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: computeCapabilities(deps),
+    threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const owner = boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH); const explicitOrigin = boundedString(input.origin, 'origin', MAX_OWNER_LENGTH); if (owner && explicitOrigin && owner !== explicitOrigin) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match ownerPluginId.'); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: explicitOrigin ?? owner, externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, beginProvisional, send, wait, cancel,
       open: async (threadId: string) => { guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.'); await deps.openThread(threadId); },
-      subscribe: (listener: (event: PublicThreadEvent) => void) => { guard(); listeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; listeners.delete(listener); } }); } },
+      archive: async (threadId: string) => { guard(); if (!deps.archiveThread) throw unavailable(); const id = boundedString(threadId, 'threadId', 512, true)!; return freeze(await deps.archiveThread(id, guard)); },
+      markReviewed: async (threadId: string) => { guard(); if (!deps.markThreadReviewed) throw unavailable(); const id = boundedString(threadId, 'threadId', 512, true)!; return freeze(await deps.markThreadReviewed(id, guard)); },
+      subscribe: (listener: (event: PublicThreadEvent) => void) => { guard(); listeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; listeners.delete(listener); } }); },
+      permissions: threadPermissions },
     traces: { listSources: listTraceSources, readChunk: readTraceChunk, subscribe: (listener: (event: PublicTraceEvent) => void) => { guard(); traceListeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; traceListeners.delete(listener); } }); } },
     constrainedRuns: { create: createConstrained, get: getConstrained, wait: waitConstrained, cancel: cancelConstrained },
     orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input); } },
-    agentTools: { createBundle: (profile) => { guard(); if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`); return freeze({ tools: VOICE_TOOLS, execute: executeTool }); } },
+    agentTools: { createBundle: (profile) => {
+      guard();
+      if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`);
+      const tools = [...VOICE_TOOLS];
+      if (deps.archiveThread) tools.push(tool('ct_archive_thread', 'Archive one thread when the user requests it. Use its exact thread_id from ct_list_threads; clarify ambiguous names. The host asks for confirmation for running threads and orchestrators. Cancellation is not success. Conversation retention follows host storage settings.', { thread_id: stringProp() }, ['thread_id']));
+      if (deps.markThreadReviewed) tools.push(tool('ct_mark_reviewed', 'Mark one idle thread reviewed when the user requests it, without opening it. Use its exact thread_id from ct_list_threads; clarify ambiguous names. Running threads must finish first.', { thread_id: stringProp() }, ['thread_id']));
+      return freeze({ tools, execute: executeTool });
+    } },
     mcp: { register: registerMcp, requestSecret: requestSecretMcp },
+    extensions: { registerArtifactProvider, registerAgentTool, registerSlashCommand, registerMessageContentProvider },
+    messageContent: { formatReference: (ref: MessageContentRef) => { guard(); try { return formatMessageContentReference(ref); } catch { throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'Invalid message content reference.'); } } },
+    artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction, allocateStorage: allocateArtifactStorage },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
-    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
+    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const state of [...provisionalThreads.values()]) { const cleanup = state.operation.catch(() => undefined).then(async () => { if (state.status !== 'pending') return; await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root))); await state.host.rollback(); state.status = 'rolled-back'; provisionalThreads.delete(state.threadId); }); state.operation = cleanup; void cleanup.catch(error => console.error('[ClaudeThreads] Provisional rollback failed during API stop:', error)); } for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
 }
 
 function toolTimeout(args: Record<string, unknown>): number { return Math.min(Math.max(10, Number(args.timeout_secs) || 120), 300) * 1_000; }

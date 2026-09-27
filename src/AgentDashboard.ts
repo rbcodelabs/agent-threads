@@ -1,3 +1,4 @@
+import type { AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, setIcon, Notice, Platform, Menu, SearchComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
@@ -12,7 +13,7 @@ import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { partitionThreads } from './threadRowState';
 import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
-import { handleDesignDispatch } from './designDispatchRouting';
+import { handleContributedDispatch } from './slashCommandRouting';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
 import { parsePrUrlRepo } from './gitDiffUtils';
 import { groupDashboardThreads, normalizeAgentsGroupBy, toggleAgentsGrouping, type AgentsGroupBy, type AgentsGroupingDimension } from './dashboardProjectGroups';
@@ -158,28 +159,30 @@ export class AgentDashboard extends ItemView {
       placeholder: 'Dispatch a task...',
       builtinCommands: () => {
         const esc = escalationCommand(this.plugin.settings, true);
-        return esc ? [...DISPATCH_BUILTIN_COMMANDS, esc] : DISPATCH_BUILTIN_COMMANDS;
+        const commands = [...DISPATCH_BUILTIN_COMMANDS, ...(this.plugin.slashCommands?.list('dispatch') ?? [])];
+        return esc ? [...commands, esc] : commands;
       },
+      subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
       argCompletions: DISPATCH_ARG_COMPLETIONS,
+      peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
       harnessPicker: { initialHarness: this.plugin.settings.agentHarness ?? 'claude' },
       onSend: async ({ text, images, attachment, agentHarness }) => {
-        // Intercept leading built-in commands (/model, /goal, /loop, /design) — apply
-        // them to the new thread instead of sending the text to Claude verbatim.
-        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: 'claude' | 'codex'; projectId?: string } = {
+        // Intercept contributed commands, then core model/goal/loop directives.
+        // Apply directives instead of sending command text to the agent verbatim.
+        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; projectId?: string } = {
           agentHarness,
           projectId: this.selectedProjectId || undefined,
         };
         let titleText = text;
+        if (await handleContributedDispatch({
+          registry: this.plugin.slashCommands, text, images, attachment, agentHarness,
+          projectId: dispatchOpts.projectId, input: this.dispatchComponent,
+        })) return;
         const directive = parseDispatchDirective(
           text,
           this.plugin.settings.escalationEnabled ? this.plugin.settings.escalationKeyword : undefined,
         );
         if (directive) {
-          if (await handleDesignDispatch({
-            directive, text, images, attachment, agentHarness,
-            input: this.dispatchComponent,
-            dispatch: (brief, harness) => this.plugin.dispatchNewDesignThread(brief, harness),
-          })) return;
           if (directive.error) {
             new Notice(directive.error);
             this.dispatchComponent.setValue(text);
@@ -385,7 +388,7 @@ export class AgentDashboard extends ItemView {
     }
     // A wake-up was registered, fired, or cancelled — re-partition so the
     // thread moves into/out of the "Waiting" group.
-    if (event.type === 'wakeup_changed') {
+    if (event.type === 'wakeup_changed' || event.type === 'reviewed_changed') {
       this.scheduleRender();
       return;
     }

@@ -37,7 +37,13 @@ const OUT_FILE = path.join(REPO_ROOT, 'test', 'harness', 'lucide-icons.generated
  * harness screenshot shows the loud magenta "missing icon" marker but grepping
  * `src/` for the literal turns up nothing.
  */
-const EXTRA_ICONS: string[] = [];
+const EXTRA_ICONS: string[] = [
+  // Used only by the harness's own design-plugin fixture
+  // (test/harness/design-plugin/designArtifactProvider.ts), which the src/
+  // scan does not cover. It used to be picked up incidentally from a stray
+  // addIcon('play', ...) in src/main.ts.
+  'play',
+];
 
 /**
  * Icon names arrive in two confidence tiers.

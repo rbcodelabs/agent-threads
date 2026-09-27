@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { enterDesignMode, assertDesignWriteAllowed, type DesignModeDeps } from '../../src/designArtifact';
+import { enterDesignMode, assertDesignWriteAllowed, type DesignModeDeps } from '../harness/design-plugin/designArtifact';
 import type { Thread } from '../../src/types';
 
 function setup() {

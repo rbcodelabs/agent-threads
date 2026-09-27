@@ -62,6 +62,39 @@ vi.mock('../../src/stt', () => {
 import { DispatchInput } from '../../src/DispatchInput';
 import { SttController } from '../../src/stt';
 import { App } from 'obsidian';
+import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
+
+describe('live contributed command discovery', () => {
+  it('refreshes an open dropdown, restores shadowed skills and revokes a selected pill', () => {
+    const registry = new SlashCommandRegistry();
+    const unsubscribe = vi.fn();
+    const input = new DispatchInput({ app: new App(), onSend: vi.fn(),
+      builtinCommands: () => registry.list('dispatch'),
+      subscribeCommands: listener => { const off = registry.subscribe(listener); return () => { off(); unsubscribe(); }; },
+    });
+    const root = input.mount(document.createElement('div'));
+    input.setAvailableCommands([{ name: 'board', description: 'Underlying skill' }]);
+    const textarea = root.querySelector('textarea')!;
+    input.setValue('/');
+    textarea.dispatchEvent(new Event('input'));
+    expect(root.textContent).toContain('Underlying skill');
+    const registration = registry.register({ pluginId: 'peer' }, { name: 'board', dispatch: {
+      description: 'Peer command', invoke: async () => ({ status: 'ok' }),
+    } });
+    expect(root.textContent).toContain('Peer command');
+    expect(root.textContent).not.toContain('Underlying skill');
+    input.setValue('/board draft');
+    expect(root.querySelector('.ct-command-pill')).not.toBeNull();
+    registration.dispose();
+    expect(input.getValue()).toBe('/board draft');
+    expect(root.querySelector('.ct-command-pill')).toBeNull();
+    input.setValue('/');
+    textarea.dispatchEvent(new Event('input'));
+    expect(root.textContent).toContain('Underlying skill');
+    input.destroy();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+});
 
 // Type helper: the mock factory attaches getLastInstance() to SttController.
 type MockSttConstructor = typeof SttController & {
@@ -191,6 +224,66 @@ describe('DispatchInput — dynamic builtinCommands', () => {
     // raw text stays in the textarea as a plain (non-intercepted) prompt.
     expect(root.querySelector('.ct-command-pill')).toBeFalsy();
     expect(di.getValue()).toBe('/escalate ');
+  });
+});
+
+// Regression guard for peer-registered slash commands supplying their own
+// argument completions: getArgQuery() must fall back to peerArgCompletions
+// only when the static built-in argCompletions record has no entry for that
+// command name — built-ins always win, no merging.
+describe('DispatchInput — peer argument completions', () => {
+  function typeAndTriggerInput(root: HTMLElement, value: string): void {
+    const textarea = root.querySelector('textarea')!;
+    textarea.value = value;
+    textarea.dispatchEvent(new Event('input'));
+  }
+
+  it('offers a peer command\'s argCompletions once its name is typed', () => {
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend: vi.fn(),
+      builtinCommands: [{ name: 'board', description: 'Open a board' }],
+      peerArgCompletions: name => name === 'board'
+        ? [{ name: 'sprint', description: 'Current sprint board' }, { name: 'backlog', description: 'Full backlog board' }]
+        : undefined,
+    });
+    const root = di.mount(makeContainer());
+
+    typeAndTriggerInput(root, '/board sp');
+
+    expect(root.textContent).toContain('Current sprint board');
+    expect(root.textContent).not.toContain('Full backlog board');
+  });
+
+  it('never consults peerArgCompletions for a command name with a built-in entry', () => {
+    const peerArgCompletions = vi.fn(() => [{ name: 'ignored', description: 'should never appear' }]);
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend: vi.fn(),
+      builtinCommands: [{ name: 'model', description: 'Set the model' }],
+      argCompletions: { model: [{ name: 'opus', description: 'Claude Opus' }] },
+      peerArgCompletions,
+    });
+    const root = di.mount(makeContainer());
+
+    typeAndTriggerInput(root, '/model o');
+
+    expect(root.textContent).toContain('Claude Opus');
+    expect(peerArgCompletions).not.toHaveBeenCalled();
+  });
+
+  it('returns no dropdown when peerArgCompletions has nothing for the typed command', () => {
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend: vi.fn(),
+      builtinCommands: [{ name: 'board', description: 'Open a board' }],
+      peerArgCompletions: () => undefined,
+    });
+    const root = di.mount(makeContainer());
+
+    typeAndTriggerInput(root, '/board sp');
+
+    expect(root.querySelector('.ct-skill-dropdown')).toBeNull();
   });
 });
 

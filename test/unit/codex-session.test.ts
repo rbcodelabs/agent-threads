@@ -743,7 +743,7 @@ describe('CodexSession protocol notifications', () => {
     expect(internal.awaitingPlanApproval).toBe(false);
     expect(internal.options.permissionMode).toBe('default');
     expect(request).toHaveBeenCalledWith('turn/start', expect.objectContaining({
-      input: [expect.objectContaining({ text: 'The plan was approved with these edits. Implement it now:\n\nEdited plan' })],
+      input: [expect.objectContaining({ text: 'The plan was approved with these edits. Implement it now:\n\nEdited plan' }), expect.objectContaining({ text: expect.stringMatching(/^\[Current local time: /) })],
     }));
     expect(internal.queuedTurns).toHaveLength(3);
   });
@@ -1110,7 +1110,7 @@ describe('CodexSession protocol notifications', () => {
     const approve = onPlanReady.mock.calls[0][1];
     approve('1. Ship it\n2. Verify it');
     await vi.waitFor(() => expect(internal.request).toHaveBeenCalledWith('turn/start', expect.objectContaining({
-      input: [expect.objectContaining({ text: 'The plan was approved with these edits. Implement it now:\n\n1. Ship it\n2. Verify it' })],
+      input: [expect.objectContaining({ text: 'The plan was approved with these edits. Implement it now:\n\n1. Ship it\n2. Verify it' }), expect.objectContaining({ text: expect.stringMatching(/^\[Current local time: /) })],
     })));
     expect(internal.options.permissionMode).toBe('default');
   });

@@ -1,6 +1,27 @@
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
+// Type-only: sandboxVm.ts has no module-scope side effects and no top-level
+// Node requires, and `import type` is erased at build time, so this stays safe
+// for the mobile bundle.
+import type { VmNetworkMode } from './sandboxVm';
 
 export type MessageRole = 'user' | 'assistant' | 'compact' | 'notice';
+
+/** Local coding-agent harnesses that can own a thread's native session. */
+export type AgentHarness = 'claude' | 'codex' | 'opencode';
+export const AGENT_HARNESSES: readonly AgentHarness[] = ['claude', 'codex', 'opencode'];
+
+export function isAgentHarness(value: unknown): value is AgentHarness {
+  return typeof value === 'string' && (AGENT_HARNESSES as readonly string[]).includes(value);
+}
+
+/** Short user-facing name for a harness (undefined means a legacy Claude thread). */
+export function agentHarnessLabel(harness: AgentHarness | undefined): string {
+  switch (harness) {
+    case 'codex': return 'Codex';
+    case 'opencode': return 'OpenCode';
+    default: return 'Claude';
+  }
+}
 
 export type ThreadStatus = 'waiting' | 'active' | 'error' | 'archived' | 'reconnecting';
 
@@ -45,7 +66,7 @@ export interface AskQuestion {
   /** Masks the free-form input without persisting its value. */
   isSecret?: boolean;
   /** Provider label used by the shared desktop/mobile card. */
-  source?: 'claude' | 'codex';
+  source?: AgentHarness;
   /** Codex tool-call item that owns this question set. */
   requestItemId?: string;
   /** Whether Codex waits indefinitely for this answer. */
@@ -88,6 +109,8 @@ export interface ChatMessage {
   toolResultImages?: Array<{ mediaType: string; data?: string; path?: string }>;
   /** For role 'notice': the completion status of the background task, drives the icon. */
   noticeStatus?: 'completed' | 'failed' | 'stopped';
+  /** Harness that produced an assistant message. Enables accurate mixed-provider archives. */
+  agentHarness?: AgentHarness;
 }
 
 export interface ThreadDraft {
@@ -134,7 +157,9 @@ export interface AgentRun {
   /** Retained until a late parent-start event resolves parentAgentRunId. */
   parentNativeAgentId?: string;
   taskId?: string;
-  harness: 'claude' | 'codex';
+  harness: AgentHarness;
+  /** Thread session generation that owns this native identity. */
+  sessionGeneration?: number;
   role?: string;
   description: string;
   model?: string;
@@ -210,7 +235,19 @@ export interface Thread {
   sessionId?: string;
   /** Harness that owns this thread's persisted session ID. Kept per-thread so
    * switching the default never attempts to resume a Claude session in Codex. */
-  agentHarness?: 'claude' | 'codex';
+  agentHarness?: AgentHarness;
+  /** Monotonic fence for callbacks from retired harness adapters. */
+  sessionGeneration?: number;
+  /** One-time context bridge consumed only by the first successful target turn. */
+  pendingHarnessHandoff?: {
+    sourceHarness: AgentHarness;
+    targetHarness: AgentHarness;
+    summary: string;
+    threadId: string;
+    noteFile?: string;
+    rawLogPath?: string;
+    createdAt: number;
+  };
   /** Latest provider usage/quota snapshot; replaces older samples rather than building history. */
   usageSnapshot?: import('./Usage').UsageSnapshot;
   title: string;
@@ -281,8 +318,12 @@ export interface Thread {
   reviewed?: boolean;
   /** Paths of files written or edited during this thread's lifetime. */
   editedFiles?: string[];
-  /** Durable local design artifacts created from this thread. Source files remain canonical. */
-  artifacts?: DesignArtifact[];
+  /**
+   * Durable local artifacts created from this thread. The host owns identity
+   * and lifecycle; the owning provider owns the rest of the record's shape.
+   * Source files remain canonical.
+   */
+  artifacts?: ThreadArtifactRecord[];
   /** Subset of editedFiles where the user modified the proposed content in the permission dialog. */
   userModifiedFiles?: string[];
   /** Unsent draft message and attachments for this thread. */
@@ -357,6 +398,14 @@ export interface Thread {
    */
   titleUserSet?: boolean;
   /**
+   * Tools this thread's sessions may never use (e.g. ['Bash'] on the Chief of
+   * Staff home thread). Restriction-only: merged as a union with the global
+   * `settings.disallowedTools`, inherited by scheduled items and threads this
+   * thread creates, and never shrunk. Absent = no per-thread restriction.
+   * See src/toolRestrictions.ts.
+   */
+  disallowedTools?: string[];
+  /**
    * Background tasks (Bash run_in_background: true) that started during a session
    * but didn't emit a task_notification before the stream ended. The plugin polls
    * these automatically and clears them when completions arrive.
@@ -395,16 +444,74 @@ export interface Thread {
   pendingQuestions?: AskQuestion[];
 }
 
-export interface DesignArtifact {
+/**
+ * Read-only view of the permission state a peer needs before writing on a
+ * thread's behalf (ADR-0008).
+ *
+ * `assertDesignWriteAllowed` reads `permissionMode` and `pendingPlan`, and
+ * neither appears on any public snapshot — so a peer currently cannot tell
+ * whether writing is permitted at all. `effectivePermissionMode` is already
+ * resolved against the global default, because the global default is itself
+ * host-private: handing back only the per-thread override would leave the
+ * caller unable to compute the answer.
+ *
+ * Deliberately values only. The live `pendingPlan` text and the callbacks that
+ * resolve it stay host-side; a peer needs to know that approval is pending,
+ * not what was proposed or how to answer it.
+ */
+export interface ThreadPermissionSnapshot {
+  readonly threadId: string;
+  readonly effectivePermissionMode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
+  /** True when the per-thread override is set, rather than inherited. */
+  readonly overridden: boolean;
+  /** True while an ExitPlanMode plan is awaiting approval. */
+  readonly planApprovalPending: boolean;
+  /** True while an AskUserQuestion prompt is awaiting an answer. */
+  readonly questionPending: boolean;
+}
+
+/**
+ * Outcome of `artifacts.allocateStorage`. The host creates the directory and
+ * returns it, so an artifact root is a contract rather than a convention a
+ * peer has to reproduce from an undisclosed vault layout.
+ */
+export type StorageAllocationResult =
+  | { readonly success: true; readonly status: 'allocated' | 'existing'; readonly artifactId: string; readonly path: string }
+  | { readonly success: false; readonly status: 'invalid' | 'conflict' | 'unknown-provider' | 'thread-not-found' | 'unavailable'; readonly artifactId: string; readonly message: string };
+
+/**
+ * Host-owned identity for a persisted artifact. Everything beyond these
+ * fields belongs to the provider that produced it and is opaque to the host
+ * (see `src/ArtifactContributions.ts`).
+ *
+ * `providerId` and `schemaVersion` are optional because records persisted
+ * before providers existed carry neither; they are defaulted at read time by
+ * `toArtifactRef()` rather than migrated on disk.
+ */
+export interface ThreadArtifactRecord {
   id: string;
-  kind: 'design-static';
+  /** Provider-scoped artifact kind. */
+  kind: string;
   title: string;
+  providerId?: string;
+  schemaVersion?: number;
+  /**
+   * Absolute directory holding this artifact's files, when it has any. Host
+   * visible on purpose: thread deletion garbage-collects it (ADR-0010).
+   * Optional because records persisted before providers existed carry no
+   * storage root, and because an artifact need not have files at all.
+   */
+  storageRoot?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DesignArtifact extends ThreadArtifactRecord {
+  kind: 'design-static';
   /** Absolute local artifact directory containing artifact.json. */
   root: string;
   manifestPath: string;
   entryPath: string;
-  createdAt: number;
-  updatedAt: number;
   lastCapturePath?: string;
 }
 
@@ -485,6 +592,14 @@ export interface ScheduledItem {
   nextRun?: number;
   /** Thread ID of the most recent run */
   lastThreadId?: string;
+  /**
+   * Tools denied to every thread this item spawns — copied at CronCreate time
+   * from the creating thread's `disallowedTools` (restriction-only; see
+   * src/toolRestrictions.ts). Absent = no restriction.
+   */
+  disallowedTools?: string[];
+  /** Id of the thread whose CronCreate call made this item, when it carried a denylist. */
+  createdByThreadId?: string;
   /**
    * When set, fire the prompt into this existing thread instead of creating a
    * new one (used by the /loop command). Falls back to creating a new thread
@@ -653,6 +768,14 @@ export interface SkillSource {
    * Omit it in a declared source — it is computed from the plugin dir and `id`.
    */
   clonePath?: string;
+  /**
+   * Tag or branch the clone is pinned to (`git clone --branch <ref> --depth 1`),
+   * e.g. the Chief of Staff pack at `CHIEF_OF_STAFF_REF`. Omitted = default
+   * branch. A pinned source is detached at that ref: update checks report it as
+   * current and "Pull updates" re-syncs it to the same ref rather than moving to
+   * the default branch. The plugin moves it by bumping the ref in a release.
+   */
+  ref?: string;
   /** ms epoch of the last git fetch (for staleness display) */
   lastFetched?: number;
   /** Commits behind remote (0 = up to date, undefined = not yet fetched) */
@@ -729,14 +852,50 @@ export interface StoredOAuthMcpServer {
   scopes?: string;
   tools?: { allow?: string[]; deny?: string[] };
   clientId?: string;
+  /**
+   * Whether this server authenticates as a confidential client. The
+   * `client_secret` itself is deliberately absent — it lives only in the
+   * keychain (`OAuthTokenStore.storeClientSecret`). This flag exists so the
+   * Settings UI can say so, and so a reconnect that finds no keychain secret can
+   * report a cleared credential instead of silently downgrading to a public
+   * client and failing later at the token endpoint.
+   */
+  hasClientSecret?: boolean;
   authorizationServerUrl?: string;
   redirectUri?: string;
+  /**
+   * Which OAuth grant renews this server's tokens. Absent means
+   * `authorization_code`, so every entry written before this field existed keeps
+   * its original interactive behavior.
+   *
+   * Persisting it is what makes a reconnect correct: on plugin load there is no
+   * refresh token for a `client_credentials` server (it never has one), and
+   * without this field that state is indistinguishable from an
+   * authorization-code server whose refresh token was revoked — which reads as
+   * "needs re-authorization" and would send the user hunting for a consent
+   * screen that does not exist.
+   */
+  grantType?: 'authorization_code' | 'client_credentials';
+  /**
+   * `audience` parameter sent on the token request, naming the API the access
+   * token is minted for (Auth0's non-standard precursor to RFC 8707 `resource`).
+   * Nonsecret configuration — it identifies an API and carries no authority.
+   */
+  audience?: string;
 }
 
 export interface OAuthMcpState {
   serverName: string;
   /** DCR-issued client_id, or the user-provided `clientId` override. */
   clientId: string;
+  /** Whether a `client_secret` is on file in the keychain. Never the secret itself. */
+  hasClientSecret?: boolean;
+  /**
+   * Grant in force for this connection, mirrored from `StoredOAuthMcpServer` so
+   * the Settings UI can describe a non-interactive connection without having to
+   * cross-reference the config map. Absent means `authorization_code`.
+   */
+  grantType?: 'authorization_code' | 'client_credentials';
   /** Resolved authorization server URL from discovery, cached to skip re-discovery. */
   asMetadataUrl: string;
   /** Local proxy port, assigned when the proxy starts. */
@@ -753,9 +912,13 @@ export interface OAuthMcpState {
 export interface PluginSettings {
   claudeBinaryPath: string;
   /** Which local coding-agent harness new threads use. */
-  agentHarness: 'claude' | 'codex';
+  agentHarness: AgentHarness;
   /** Path to the Codex CLI executable (the app-server is launched from it). */
   codexBinaryPath: string;
+  /** Path to the OpenCode CLI executable (`opencode serve` is launched from it). Desktop only. */
+  opencodeBinaryPath: string;
+  /** Allow inherited Codex computer-use capabilities in newly initialized sessions. */
+  codexComputerUseEnabled: boolean;
   /**
    * Root directory for worktrees created by `enter_worktree`.
    *
@@ -764,6 +927,21 @@ export interface PluginSettings {
    * on reboot — silently destroying any uncommitted work inside them.
    */
   worktreeRoot: string;
+  /**
+   * Container image `enter_vm` starts. Built from `sandbox/Dockerfile`
+   * (`container build --tag claude-threads-coding:1 sandbox/`).
+   *
+   * Blank falls back to `claude-threads-coding:1`.
+   */
+  vmImage: string;
+  /**
+   * Network isolation `enter_vm` uses when the call does not specify one.
+   *
+   * Defaults to `'default'` — FULL EGRESS — by explicit product decision: a
+   * sandbox where `npm install` and git remotes fail is one nobody uses.
+   * `'internal'` (host-only) and `'none'` (no route) remain first-class.
+   */
+  vmDefaultNetwork: VmNetworkMode;
   defaultCwd: string;
   saveThreadsToVault: boolean;
   /**
@@ -845,6 +1023,14 @@ export interface PluginSettings {
   conversationCompanionMarker?: string;
   /** Set to true after the first-run onboarding flow has completed. Prevents the welcome guide and panel auto-layout from triggering on subsequent loads. */
   hasSeenWelcome: boolean;
+  /**
+   * Brand-new installs start a "Chief of Staff" thread (cloning the
+   * rbcodelabs/chief-of-staff skill source) instead of the static welcome guide.
+   * Off restores the static-guide first run. Default: true.
+   */
+  offerChiefOfStaffOnFirstRun: boolean;
+  /** Id of the Chief of Staff home thread, so "Set up Chief of Staff" focuses it instead of creating another. */
+  chiefOfStaffThreadId?: string;
   /**
    * Hotkey for push-to-talk recording. Serialized as e.g. "Alt+Space" or "Control+Shift+Space".
    * Empty string disables PTT. Default: "Alt+Space" (Option+Space on Mac).
@@ -971,6 +1157,30 @@ export interface PluginSettings {
    * Defaults to true so the tool is available out of the box.
    */
   enableWebViewerTool?: boolean;
+
+  /**
+   * When true, Claude can drive an in-app browser built on the host's embedded
+   * `<webview>`, instead of an external browser CLI that spawns its own Chrome.
+   *
+   * Defaults to false: each session is a real sandboxed renderer process, so
+   * this stays opt-in until it has been dogfooded. Requires a host that reports
+   * process diagnostics (Geode desktop) — the pool refuses to create anything
+   * without the file-descriptor probe it uses to avoid launching a guest that
+   * would immediately die.
+   */
+  enableAgentBrowser?: boolean;
+
+  /**
+   * Maximum concurrent agent browser sessions across all threads.
+   * Clamped to 1..4 at read time; see `clampMaxGuests` in agentBrowserPolicy.
+   */
+  agentBrowserMaxGuests?: number;
+
+  /**
+   * Permit the agent browser to reach RFC1918 / `.local` addresses.
+   * Cloud metadata endpoints (169.254.0.0/16) stay blocked regardless.
+   */
+  agentBrowserAllowPrivateNetwork?: boolean;
   /**
    * When true, a canonical wrapped `visualize` content reference in an
    * assistant message renders as a live sandboxed visualization inline instead
@@ -992,7 +1202,11 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   claudeBinaryPath: '/opt/homebrew/bin/claude',
   agentHarness: 'claude',
   codexBinaryPath: 'codex',
+  opencodeBinaryPath: 'opencode',
+  codexComputerUseEnabled: false,
   worktreeRoot: '',
+  vmImage: 'claude-threads-coding:1',
+  vmDefaultNetwork: 'default',
   defaultCwd: '',
   saveThreadsToVault: true,
   saveRawLogs: true,
@@ -1028,6 +1242,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   telemetryEnabled: true,
   threadViewPlacement: 'conversation-first',
   hasSeenWelcome: false,
+  offerChiefOfStaffOnFirstRun: true,
   imageExternalizationComplete: false,
   autoArchiveIdleDays: 14,
   pttKey: 'Alt+Space',
@@ -1046,6 +1261,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   scheduledItems: [],
   watchedDocuments: [],
   enableWebViewerTool: true,
+  enableAgentBrowser: false,
+  agentBrowserMaxGuests: 2,
+  agentBrowserAllowPrivateNetwork: false,
   enableInlineVisualizations: true,
   kanbanGroupBy: 'status',
   kanbanCollapseSide: 'none',

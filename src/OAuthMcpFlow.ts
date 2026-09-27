@@ -28,20 +28,63 @@ import {
   parseErrorResponse,
   refreshAuthorization,
   registerClient as sdkRegisterClient,
+  selectClientAuthMethod,
   type OAuthServerInfo,
 } from '@modelcontextprotocol/sdk/client/auth.js';
-import type { AuthorizationServerMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { OAuthTokensSchema, type AuthorizationServerMetadata, type OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { checkResourceAllowed, resourceUrlFromServerUrl } from '@modelcontextprotocol/sdk/shared/auth-utils.js';
 import type { TokenSet } from './OAuthTokenStore';
 import { parseRedirectUri, type ParsedRedirectUri } from './mcpServerStore';
 
 /** Result of AS discovery (RFC 9728 protected-resource metadata + RFC 8414/OIDC AS metadata). */
 export type OAuthASMetadata = OAuthServerInfo;
 
+/**
+ * RFC 8707 resource indicator for this AS, or `undefined` when the MCP server
+ * publishes no RFC 9728 protected-resource metadata.
+ *
+ * Mirrors the SDK's `selectResourceURL()` policy — only send `resource` when
+ * protected-resource metadata is actually present, and prefer the `resource`
+ * the server itself advertises over one derived from the URL we dialled. The
+ * SDK helper is not reused directly because it requires a full
+ * `OAuthClientProvider`, which this module deliberately does not implement.
+ *
+ * Servers differ on how much they care: Vercel's MCP server ignores the
+ * parameter, while v0 (`https://v0.app/api/mcp`) hard-rejects any authorization
+ * request that omits it with `400 invalid_target — resource must be
+ * https://v0.app/api/mcp`. Sending it whenever metadata advertises it satisfies
+ * both, and is what the MCP authorization spec requires of clients.
+ *
+ * The audience is validated once at discovery (see `discoverAS`), so callers
+ * here can trust `resourceMetadata.resource`.
+ */
+export function resourceIndicatorFor(asMetadata: OAuthASMetadata): URL | undefined {
+  const resource = asMetadata.resourceMetadata?.resource;
+  return resource === undefined ? undefined : new URL(resource);
+}
+
 export interface OAuthTokenStoreLike {
   store(serverName: string, tokens: TokenSet): void | Promise<void>;
   getClientId(serverName: string): string | undefined | Promise<string | undefined>;
+  /** `client_secret` for a confidential client; `undefined` for the usual public+PKCE client. */
+  getClientSecret(serverName: string): string | undefined | Promise<string | undefined>;
   getCurrentTokens(serverName: string): TokenSet | undefined | Promise<TokenSet | undefined>;
   clear(serverName: string): void | Promise<void>;
+}
+
+/**
+ * Client credentials for one token-endpoint call.
+ *
+ * `clientSecret` is almost always absent: this plugin registers public clients
+ * that authenticate with PKCE alone. When it is present the SDK picks the
+ * concrete method (`client_secret_basic`, falling back to `client_secret_post`)
+ * from the AS's advertised `token_endpoint_auth_methods_supported` — see
+ * `applyClientAuthentication` in `@modelcontextprotocol/sdk/client/auth.js`. We
+ * deliberately don't pin a method ourselves, so an AS that supports only one of
+ * the two still works.
+ */
+function clientInformationFor(clientId: string, clientSecret?: string): { client_id: string; client_secret?: string } {
+  return clientSecret === undefined ? { client_id: clientId } : { client_id: clientId, client_secret: clientSecret };
 }
 
 const CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
@@ -166,17 +209,47 @@ export class OAuthMcpFlow {
    * metadata instead of an error (see src/requestUrlFetch.ts).
    */
   async discoverAS(serverUrl: string): Promise<OAuthASMetadata> {
-    return discoverOAuthServerInfo(serverUrl, { fetchFn: this.fetchFn });
+    const info = await discoverOAuthServerInfo(serverUrl, { fetchFn: this.fetchFn });
+
+    // Audience check for the RFC 8707 resource indicator derived from this
+    // metadata. Protected-resource metadata is fetched from the MCP server's own
+    // well-known endpoint, but it is still server-controlled input naming the
+    // audience our access token will be minted for: an unvalidated `resource`
+    // pointing at an unrelated origin is an audience-confusion vector. Checking
+    // here — the one place the dialled server URL and the metadata are both in
+    // hand — means `authorize()` and `refresh()` can use the value directly.
+    const resource = info.resourceMetadata?.resource;
+    if (resource !== undefined) {
+      const requestedResource = resourceUrlFromServerUrl(serverUrl);
+      if (!checkResourceAllowed({ requestedResource, configuredResource: resource })) {
+        throw new Error(
+          `MCP server "${serverUrl}" advertises protected-resource metadata for "${resource}", which does not cover it; refusing to request a token for a different audience.`,
+        );
+      }
+    }
+    return info;
   }
 
   /**
-   * RFC 7591 Dynamic Client Registration. Returns the issued client_id.
+   * RFC 7591 Dynamic Client Registration. Returns the issued client_id, plus a
+   * `client_secret` when the authorization server issued one.
    *
    * This method takes a bare registration endpoint rather than a server name (matching the
-   * plan's signature), so it has no key to store the client_id under — the caller persists it
-   * via `tokenStore.storeClientId(serverName, clientId)` once it knows which server this was for.
+   * plan's signature), so it has no key to store the credentials under — the caller persists them
+   * via `tokenStore.storeClientId`/`storeClientSecret` once it knows which server this was for.
+   *
+   * We still request `token_endpoint_auth_method: 'none'`, so the overwhelmingly
+   * common outcome is a public client with no secret. But RFC 7591 §3.2.1 lets
+   * the AS return a `client_secret` regardless of what was requested, and some
+   * do; dropping it silently then produced an `invalid_client` failure at the
+   * token exchange that looked like a consent problem rather than a discarded
+   * credential. Capturing it costs nothing when it's absent.
    */
-  async registerClient(registrationEndpoint: string, redirectUri: string, scopes?: string): Promise<string> {
+  async registerClient(
+    registrationEndpoint: string,
+    redirectUri: string,
+    scopes?: string,
+  ): Promise<{ clientId: string; clientSecret?: string }> {
     // The SDK's registerClient() only reads `metadata.registration_endpoint` when metadata is
     // supplied (see its implementation) — the other required AuthorizationServerMetadata fields
     // below are unused placeholders needed only to satisfy a type that models a full discovered
@@ -200,7 +273,7 @@ export class OAuthMcpFlow {
       },
       scope: scopes,
     });
-    return info.client_id;
+    return { clientId: info.client_id, clientSecret: info.client_secret };
   }
 
   /**
@@ -212,6 +285,14 @@ export class OAuthMcpFlow {
   async authorize(params: {
     serverName: string;
     clientId: string;
+    /**
+     * `client_secret` for a confidential client. Sent only on the token
+     * exchange, never on the authorization request — the authorization URL ends
+     * up in a browser address bar and in AS access logs, so a secret there would
+     * be leaked by construction. PKCE is still used either way; a secret
+     * supplements it rather than replacing it.
+     */
+    clientSecret?: string;
     asMetadata: OAuthASMetadata;
     scopes?: string;
     /**
@@ -228,6 +309,21 @@ export class OAuthMcpFlow {
      * `127.0.0.1` and get it rejected.
      */
     redirectUri?: string;
+    /**
+     * `audience` parameter on the authorization request (Auth0's non-standard
+     * way of asking for a token scoped to a specific API — see
+     * `clientCredentials`'s doc comment). Sent only here, not on the token
+     * exchange in `handleCallback()`: Auth0's own docs describe `audience` as
+     * an `/authorize`-time parameter for the authorization_code grant — the
+     * issued code already encodes the requested audience, so the token
+     * endpoint has nothing new to be told. This mirrors RFC 8707 `resource`
+     * for shape (both travel on the authorization URL), but not for
+     * repetition at exchange: unlike `resource` (RFC 8707 §2, and enforced by
+     * some ASes that reject a token request which omits it), the SDK's
+     * `exchangeAuthorization()` has no `audience` parameter at all, so there
+     * is no SDK-supported way to repeat it even if a server wanted that.
+     */
+    audience?: string;
   }): Promise<TokenSet> {
     const { verifier, challenge } = generatePkcePair();
     const state = randomBytes(16).toString('hex');
@@ -298,6 +394,13 @@ export class OAuthMcpFlow {
         authorizationUrl.searchParams.set('code_challenge_method', 'S256');
         authorizationUrl.searchParams.set('state', state);
         if (params.scopes) authorizationUrl.searchParams.set('scope', params.scopes);
+        // RFC 8707. Must also be repeated on the token exchange below, with an
+        // identical value — see handleCallback().
+        const resource = resourceIndicatorFor(params.asMetadata);
+        if (resource) authorizationUrl.searchParams.set('resource', resource.href);
+        // Auth0-style audience — see the `audience` param's doc comment above
+        // for why this is authorize-only and not repeated at token exchange.
+        if (params.audience) authorizationUrl.searchParams.set('audience', params.audience);
 
         timeoutHandle = setTimeout(
           () => finish({ ok: false, error: new Error('OAuth authorization timed out waiting for consent.') }),
@@ -313,7 +416,7 @@ export class OAuthMcpFlow {
   private async handleCallback(
     req: IncomingMessage,
     res: ServerResponse,
-    ctx: { serverName: string; clientId: string; asMetadata: OAuthASMetadata; redirectUri: string; callbackPath: string; verifier: string; expectedState: string },
+    ctx: { serverName: string; clientId: string; clientSecret?: string; asMetadata: OAuthASMetadata; redirectUri: string; callbackPath: string; verifier: string; expectedState: string },
     finish: (result: FinishResult) => void,
   ): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -349,10 +452,14 @@ export class OAuthMcpFlow {
       const tokens = await exchangeAuthorization(ctx.asMetadata.authorizationServerUrl, {
         fetchFn: this.fetchFn,
         metadata: ctx.asMetadata.authorizationServerMetadata,
-        clientInformation: { client_id: ctx.clientId },
+        clientInformation: clientInformationFor(ctx.clientId, ctx.clientSecret),
         authorizationCode: code,
         codeVerifier: ctx.verifier,
         redirectUri: ctx.redirectUri,
+        // RFC 8707 §2: the token request repeats the authorization request's
+        // resource. An AS that pinned the audience at consent will reject the
+        // exchange outright if it goes missing here.
+        resource: resourceIndicatorFor(ctx.asMetadata),
       });
       const tokenSet = toTokenSet(tokens);
       await this.tokenStore.store(ctx.serverName, tokenSet);
@@ -372,21 +479,111 @@ export class OAuthMcpFlow {
     }
   }
 
-  /** Refresh via the AS's token endpoint, using the client_id and refresh token already on file. */
+  /** Refresh via the AS's token endpoint, using the client credentials and refresh token already on file. */
   async refresh(serverName: string, asMetadata: OAuthASMetadata): Promise<TokenSet> {
     const current = await this.tokenStore.getCurrentTokens(serverName);
     if (!current?.refreshToken) throw new Error(`No refresh token available for "${serverName}"; re-authorization is required.`);
     const clientId = await this.tokenStore.getClientId(serverName);
     if (!clientId) throw new Error(`No client_id stored for "${serverName}"; re-authorization is required.`);
+    // A confidential client must re-authenticate on every token-endpoint call,
+    // not just the first: an AS that required client_secret at the exchange
+    // rejects a bare refresh with `invalid_client`, which surfaces as a
+    // spontaneous logout once the access token expires rather than at setup.
+    const clientSecret = await this.tokenStore.getClientSecret(serverName);
 
     const tokens = await refreshAuthorization(asMetadata.authorizationServerUrl, {
       fetchFn: this.fetchFn,
       metadata: asMetadata.authorizationServerMetadata,
-      clientInformation: { client_id: clientId },
+      clientInformation: clientInformationFor(clientId, clientSecret),
       refreshToken: current.refreshToken,
+      // Keeps the refreshed access token scoped to the same audience the
+      // original grant was issued for.
+      resource: resourceIndicatorFor(asMetadata),
+      // No `audience` here by design, unlike `authorize()`. Auth0 (the
+      // parameter's origin) reissues a refreshed token for whatever audience
+      // the original authorization granted, without needing it repeated —
+      // and the SDK's `refreshAuthorization()` has no parameter to repeat it
+      // through even if a server wanted that (only `resource` is supported,
+      // matching `exchangeAuthorization()`).
     });
     const tokenSet = toTokenSet(tokens);
     await this.tokenStore.store(serverName, tokenSet);
+    return tokenSet;
+  }
+
+  /**
+   * RFC 6749 §4.4 client-credentials grant: mint an access token by
+   * authenticating as the client itself, with no user and no browser.
+   *
+   * Used when the authorization server will not register a loopback callback —
+   * common on production tenants — or when the MCP server represents a service
+   * rather than a signed-in person. Every interactive step is absent by
+   * construction, not by flag: no PKCE pair, no `state`, no callback listener,
+   * no `openUrl`, and no authorization URL is ever built. That matters beyond
+   * tidiness, because a guessed authorization endpoint is what turns a
+   * misconfigured server into an opaque provider error page in a popup.
+   *
+   * `audience` is Auth0's (and several others') way of asking for a token
+   * scoped to a specific API; RFC 8707's `resource` is the standards-track
+   * equivalent and is sent alongside it whenever the MCP server advertises one,
+   * since providers ignore the parameter they don't implement.
+   *
+   * No refresh token is stored even if the AS returns one: RFC 6749 §4.4.3 says
+   * it SHOULD NOT, and re-minting from the secret is strictly better than
+   * refreshing — it needs no extra state and cannot be invalidated separately.
+   * `OAuthTokenStore` reads the absence of a refresh token as "re-mint", so this
+   * is what keeps expiry recoverable without a human.
+   */
+  async clientCredentials(params: {
+    serverName: string;
+    clientId: string;
+    clientSecret: string;
+    asMetadata: OAuthASMetadata;
+    scopes?: string;
+    audience?: string;
+  }): Promise<TokenSet> {
+    const asMeta = params.asMetadata.authorizationServerMetadata;
+    // Fail fast rather than guessing `<origin>/token`. A server that publishes no
+    // metadata is a configuration problem the user can fix in one field, and
+    // saying so beats a 404 or a WAF 403 from a URL we invented.
+    const tokenEndpoint = asMeta?.token_endpoint;
+    if (!tokenEndpoint) {
+      throw new Error(
+        `No token endpoint found for "${params.serverName}": ${params.asMetadata.authorizationServerUrl} publishes no OAuth `
+        + 'authorization-server metadata. Set the authorization server URL to the provider\'s issuer '
+        + '— the host that serves /.well-known/openid-configuration or /.well-known/oauth-authorization-server.',
+      );
+    }
+
+    const headers = new Headers({
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json',
+    });
+    const body = new URLSearchParams({ grant_type: 'client_credentials' });
+    if (params.scopes) body.set('scope', params.scopes);
+    if (params.audience) body.set('audience', params.audience);
+    const resource = resourceIndicatorFor(params.asMetadata);
+    if (resource) body.set('resource', resource.href);
+
+    // Same negotiation as every other token-endpoint call in this module: let the
+    // AS's advertised methods decide between Basic and a form parameter.
+    const method = selectClientAuthMethod(
+      clientInformationFor(params.clientId, params.clientSecret),
+      asMeta?.token_endpoint_auth_methods_supported ?? [],
+    );
+    if (method === 'client_secret_basic') {
+      headers.set('Authorization', `Basic ${btoa(`${params.clientId}:${params.clientSecret}`)}`);
+    } else {
+      body.set('client_id', params.clientId);
+      if (method === 'client_secret_post') body.set('client_secret', params.clientSecret);
+    }
+
+    const response = await this.fetchFn(tokenEndpoint, { method: 'POST', headers, body });
+    if (!response.ok) throw await parseErrorResponse(response);
+    const tokens = OAuthTokensSchema.parse(await response.json());
+
+    const tokenSet: TokenSet = { ...toTokenSet(tokens), refreshToken: undefined };
+    await this.tokenStore.store(params.serverName, tokenSet);
     return tokenSet;
   }
 
@@ -398,6 +595,11 @@ export class OAuthMcpFlow {
     const revocationEndpoint = asMeta && 'revocation_endpoint' in asMeta ? asMeta.revocation_endpoint : undefined;
     const current = await this.tokenStore.getCurrentTokens(serverName);
     const clientId = await this.tokenStore.getClientId(serverName);
+    // RFC 7009 §2.1: a confidential client authenticates to the revocation
+    // endpoint the same way it does to the token endpoint. Omitting the secret
+    // makes revocation fail silently (it's best-effort below), leaving a live
+    // refresh token on the AS after the user thought they had disconnected.
+    const clientSecret = await this.tokenStore.getClientSecret(serverName);
 
     if (revocationEndpoint && clientId && current) {
       const candidates: Array<[string | undefined, string]> = [
@@ -407,10 +609,24 @@ export class OAuthMcpFlow {
       for (const [token, tokenTypeHint] of candidates) {
         if (!token) continue;
         try {
+          const headers = new Headers({ 'Content-Type': 'application/x-www-form-urlencoded' });
+          const body = new URLSearchParams({ token, token_type_hint: tokenTypeHint });
+          const revocationMethods = asMeta && 'revocation_endpoint_auth_methods_supported' in asMeta
+            ? asMeta.revocation_endpoint_auth_methods_supported : undefined;
+          const method = selectClientAuthMethod(
+            clientInformationFor(clientId, clientSecret),
+            Array.isArray(revocationMethods) ? revocationMethods : asMeta?.token_endpoint_auth_methods_supported ?? [],
+          );
+          if (method === 'client_secret_basic') {
+            headers.set('Authorization', `Basic ${btoa(`${clientId}:${clientSecret}`)}`);
+          } else {
+            body.set('client_id', clientId);
+            if (method === 'client_secret_post' && clientSecret !== undefined) body.set('client_secret', clientSecret);
+          }
           const response = await this.fetchFn(revocationEndpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({ token, token_type_hint: tokenTypeHint, client_id: clientId }),
+            headers,
+            body,
           });
           if (!response.ok) throw await parseErrorResponse(response);
         } catch {

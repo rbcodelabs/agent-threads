@@ -9,7 +9,7 @@ import {
   dispatchDesignThread,
   ensureDesignArtifact,
   type DesignArtifactFs,
-} from '../../src/designArtifact';
+} from '../harness/design-plugin/designArtifact';
 import type { Thread } from '../../src/types';
 
 describe('design artifact contract', () => {

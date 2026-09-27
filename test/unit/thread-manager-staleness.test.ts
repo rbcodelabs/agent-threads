@@ -82,6 +82,14 @@ afterEach(() => {
 });
 
 describe('ThreadManager — STALE_MS constant', () => {
+  it('invalidates reviewed state when a new run completes without any views mounted', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('Reviewed work', '/tmp');
+    thread.reviewed = true;
+    await manager.sendMessage(thread.id, 'More work');
+    mock.callbacks!.onDone('sess-review', 0.001, 1);
+    expect(thread.reviewed).toBe(false);
+  });
   it('is exported and equals 45s', () => {
     expect(STALE_MS).toBe(45_000);
   });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mcpRegistrationSchema } from '../../src/mcpServerStore';
+import { clientSecretVariableName, mcpRegistrationSchema } from '../../src/mcpServerStore';
 
 const base = { name: 'vercel', type: 'oauth' as const, url: 'https://mcp.vercel.com/' };
 
@@ -79,6 +79,120 @@ describe('mcpRegistrationSchema — oauth type', () => {
     expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'sse', url: 'https://x.test', redirectUri }).success).toBe(false);
   });
 
+  /**
+   * Tool-call arguments are recorded verbatim in the thread transcript and the raw
+   * JSONL log, so a literal secret typed by an agent would be persisted in plain
+   * text. Only a `${NAME}` reference to an already-stored keychain secret passes.
+   */
+  it('accepts a ${NAME} placeholder clientSecret and rejects a literal one', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, clientSecret: '${VERCEL_CLIENT_SECRET}' }).success).toBe(true);
+
+    for (const clientSecret of ['sk-live-abc123', 'VERCEL_CLIENT_SECRET', '${TWO} ${VARS}', 'prefix-${VAR}', '${lower ok but spaces not}']) {
+      const result = mcpRegistrationSchema.safeParse({ ...base, clientSecret });
+      expect(result.success, `expected ${clientSecret} to be rejected`).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some(i => i.message.includes('placeholder'))).toBe(true);
+      }
+    }
+  });
+
+  it('rejects clientSecret on a non-oauth entry', () => {
+    const clientSecret = '${SOME_SECRET}';
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'stdio', command: 'npx', clientSecret }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'http', url: 'https://x.test', clientSecret }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'sse', url: 'https://x.test', clientSecret }).success).toBe(false);
+  });
+
+  it('accepts a client_credentials entry with a clientId, audience and placeholder secret', () => {
+    const result = mcpRegistrationSchema.safeParse({
+      ...base,
+      grantType: 'client_credentials',
+      clientId: 'reTmVHKuhRrGiXOo3lqvS4zMUxagdXZC',
+      clientSecret: '${OAUTH_MCP_BANKRATE_CLIENT_SECRET}',
+      audience: 'bankrate-api',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts an explicit authorization_code grantType, the default', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, grantType: 'authorization_code' }).success).toBe(true);
+  });
+
+  it('rejects an unknown grantType', () => {
+    for (const grantType of ['password', 'implicit', 'refresh_token', 'client-credentials', '']) {
+      expect(mcpRegistrationSchema.safeParse({ ...base, grantType }).success, grantType).toBe(false);
+    }
+  });
+
+  /**
+   * There is no browser leg, so no dynamic-registration round trip either: the
+   * client has to already exist at the AS and be named here.
+   */
+  it('rejects a client_credentials entry with no clientId', () => {
+    const result = mcpRegistrationSchema.safeParse({
+      ...base, grantType: 'client_credentials', clientSecret: '${SOME_SECRET}',
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some(i => i.path.join('.') === 'clientId')).toBe(true);
+    }
+  });
+
+  /**
+   * Nothing redirects anywhere in a machine-to-machine grant, so accepting a
+   * redirectUri would imply a callback that is never registered nor listened on.
+   */
+  it('rejects a redirectUri on a client_credentials entry', () => {
+    const result = mcpRegistrationSchema.safeParse({
+      ...base,
+      grantType: 'client_credentials',
+      clientId: 'm2m',
+      clientSecret: '${SOME_SECRET}',
+      redirectUri: 'http://localhost:3118/callback',
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some(i => i.path.join('.') === 'redirectUri')).toBe(true);
+    }
+  });
+
+  /**
+   * The schema deliberately does not require a clientSecret here — the Settings
+   * modal keeps the typed literal out of the entry it validates, so a rule here
+   * would make the schema unsatisfiable from the UI. `registerServer()` enforces
+   * it instead, at the one point that holds the resolved literal.
+   */
+  it('accepts a client_credentials entry with no clientSecret, leaving that rule to registerServer', () => {
+    expect(mcpRegistrationSchema.safeParse({
+      ...base, grantType: 'client_credentials', clientId: 'm2m',
+    }).success).toBe(true);
+  });
+
+  it('still rejects a literal clientSecret under the client_credentials grant', () => {
+    const result = mcpRegistrationSchema.safeParse({
+      ...base, grantType: 'client_credentials', clientId: 'm2m', clientSecret: 'sk-live-abc123',
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some(i => i.message.includes('placeholder'))).toBe(true);
+    }
+  });
+
+  it('rejects grantType and audience on non-oauth entries', () => {
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'stdio', command: 'npx', grantType: 'client_credentials' }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'http', url: 'https://x.test', grantType: 'authorization_code' }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ name: 'x', type: 'sse', url: 'https://x.test', audience: 'bankrate-api' }).success).toBe(false);
+  });
+
+  it('rejects a blank audience rather than sending an empty parameter', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, audience: '' }).success).toBe(false);
+    expect(mcpRegistrationSchema.safeParse({ ...base, audience: '   ' }).success).toBe(false);
+  });
+
+  it('accepts a bare audience on an authorization_code entry — some providers want it there too', () => {
+    expect(mcpRegistrationSchema.safeParse({ ...base, audience: 'bankrate-api' }).success).toBe(true);
+  });
+
   it('accepts a deny list', () => {
     const result = mcpRegistrationSchema.safeParse({ ...base, tools: { deny: ['buy_pro', 'buy_credits'] } });
     expect(result.success).toBe(true);
@@ -133,5 +247,21 @@ describe('mcpRegistrationSchema — oauth type', () => {
 
   it('rejects unknown extra keys (still .strict())', () => {
     expect(mcpRegistrationSchema.safeParse({ ...base, extra: 'nope' }).success).toBe(false);
+  });
+});
+
+describe('clientSecretVariableName', () => {
+  it('extracts the variable name the placeholder refers to', () => {
+    expect(clientSecretVariableName('${VERCEL_CLIENT_SECRET}')).toBe('VERCEL_CLIENT_SECRET');
+  });
+
+  it('returns undefined for an absent clientSecret, so a public client stays public', () => {
+    expect(clientSecretVariableName(undefined)).toBeUndefined();
+  });
+
+  it('returns undefined for anything that is not a bare placeholder', () => {
+    for (const value of ['literal-secret', 'Bearer ${TOKEN}', '${}', '']) {
+      expect(clientSecretVariableName(value), value).toBeUndefined();
+    }
   });
 });

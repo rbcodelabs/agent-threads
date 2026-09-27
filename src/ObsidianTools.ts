@@ -15,7 +15,22 @@ import path from 'path';
 import { tokenizeQuery, findBestExcerpt } from './searchUtils';
 import { execFileSync } from 'child_process';
 import { secretStorageKey } from './secretUtils';
+import { AGENT_BROWSER_READ_ONLY_TOOL_NAMES, createAgentBrowserTools } from './agentBrowser/agentBrowserTools';
+import { listVault, vaultListSource } from './vaultList';
+import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
 import { resolveWorktreeRoot, worktreePathFor } from './worktreePaths';
+import { bindAgentTool } from './AgentToolContributions';
+import {
+  SandboxVmManager,
+  VM_NETWORK_MODES,
+  VM_WORKDIR,
+  containerNameForThread,
+  isVmNetworkMode,
+  resolveExecTimeoutSeconds,
+  resolveVmImage,
+  resolveVmNetwork,
+  type VmCommandRunner,
+} from './sandboxVm';
 import type {
   InstalledSkillInfo,
   MarketplaceSkill,
@@ -32,6 +47,12 @@ const pathSchema = { path: z.string().describe('Vault-relative path of the file'
 const navigateToFileSchema = {
   path: z.string().describe('Vault-relative path of the file to open'),
   newLeaf: z.boolean().optional().describe('If true, open in a new tab'),
+};
+
+const vaultListSchema = {
+  path: z.string().optional().describe('Vault-relative folder to list. Omit (or "") for the vault root. Absolute paths and ".." are rejected.'),
+  recursive: z.boolean().optional().describe('List subfolders too (default false).'),
+  limit: z.number().int().positive().optional().describe('Maximum entries to return (default 500, max 2000).'),
 };
 
 const searchVaultSchema = {
@@ -205,8 +226,15 @@ const addVaultBridgeSchema = {
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 export interface ObsidianMcpServerOptions {
-  /** Prepare the calling thread's artifact without queuing another turn. */
-  onEnterDesignMode?: (brief: string) => Promise<import('./designArtifact').DesignModeResult>;
+  /**
+   * Agent tools contributed by peers through `extensions.registerAgentTool`,
+   * already bound to this thread by the host (ADR-0008).
+   *
+   * The factory only installs them. It never sees a contribution, an owner or
+   * the registry — binding and thread-id injection happen before this point,
+   * which is what lets a peer contribute a tool without reaching the factory.
+   */
+  contributedTools?: readonly import('./AgentToolContributions').BoundAgentTool[];
   onRegisterMcpServer?: (input: unknown) => Promise<McpRegistrationResult>;
   /** Route agent-triggered file navigation through the host's contextual panel policy. */
   openContextualFile?: (file: TFile, newLeaf: boolean) => Promise<boolean>;
@@ -242,6 +270,24 @@ export interface ObsidianMcpServerOptions {
    * takes effect on the next tool call instead of requiring a session restart.
    */
   getWorktreeRoot?: () => string | undefined;
+  /**
+   * Returns the configured container image for `enter_vm`. Undefined/blank
+   * falls back to `claude-threads-coding:1`. Read lazily for the same reason as
+   * {@link getWorktreeRoot}.
+   */
+  getVmImage?: () => string | undefined;
+  /**
+   * Returns the configured default network mode for `enter_vm` when the call
+   * does not pass one. Anything unrecognised falls back to `'default'`
+   * (full egress). Read lazily for the same reason as {@link getWorktreeRoot}.
+   */
+  getVmDefaultNetwork?: () => string | undefined;
+  /**
+   * Overrides how sandbox VM commands are executed. Tests inject a fake so
+   * command construction and lifecycle transitions are exercised without a
+   * macOS 26 container runtime.
+   */
+  vmCommandRunner?: VmCommandRunner;
   /** Creates a persistent thread and queues its initial prompt. */
   createThread?: (params: {
     prompt: string;
@@ -326,6 +372,9 @@ export interface ObsidianMcpServerOptions {
    * value, write it to the OS keychain under `ct-secret-<secretName>`, and
    * resolve with true if the user saved the value or false if they cancelled.
    * When `force` is true the modal should clarify that the existing value will be replaced.
+   * A thread-aware implementation should also flag the calling thread's live
+   * session for restart on success, so the new secret becomes available to
+   * that same thread starting its next turn rather than only in future sessions.
    */
   onRequestSecret?: (secretName: string, reason: string, force?: boolean) => Promise<boolean>;
   /**
@@ -334,6 +383,15 @@ export interface ObsidianMcpServerOptions {
    * has opted out in settings. Defaults to true.
    */
   enableOpenUrl?: boolean;
+  /**
+   * This thread's in-app browser, or undefined when unavailable — on mobile, on
+   * a host without process diagnostics, or with the feature switched off.
+   *
+   * Presence is the gate: when absent the browser_* tools are not registered at
+   * all rather than registered and always failing. A tool that can only refuse
+   * still costs context on every turn and invites the model to keep retrying it.
+   */
+  browser?: ThreadBrowser;
   /** Returns every visible skill — vault-installed and read-only ~/.claude/skills entries alike (content omitted — use onSkillsGet for a specific skill's full SKILL.md). */
   onSkillsListInstalled?: () => Promise<Array<Omit<InstalledSkillInfo, 'content'>>>;
   /** Searches the skills.sh marketplace registry for the given query. */
@@ -386,10 +444,27 @@ export type ObsidianMcpServerWithHarnessTools = McpSdkServerConfigWithInstance &
   harnessTools?: HarnessDynamicTool[];
 };
 
-function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {}): {
+/**
+ * A type alias, not an interface, on purpose: callers spread this into a
+ * `Record<string, McpServerConfig>`, and only type aliases get TypeScript's
+ * implicit index signature.
+ */
+export type McpToolSurfaces = {
   claude_threads: ObsidianMcpServerWithHarnessTools;
   obsidian: ObsidianMcpServerWithHarnessTools;
-} {
+};
+
+/**
+ * Internal shape. `builtInToolNames` is deliberately *not* on what
+ * `createClaudeThreadsMcpServers` returns: callers spread that result straight
+ * into a `Record<string, McpServerConfig>`, so an extra key there would be
+ * handed to the SDK as a malformed MCP server.
+ */
+type McpToolSurfacesInternal = McpToolSurfaces & {
+  builtInToolNames: readonly string[];
+};
+
+function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {}): McpToolSurfacesInternal {
   // ── In-session cwd tracking ────────────────────────────────────────────────
   // Unlike cwdAtStart in ThreadManager (which is frozen in the subprocess),
   // effectiveCwd is updated immediately by set_working_directory so worktree
@@ -398,6 +473,12 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
 
   // worktreePath → originalGitRoot, for tracking active worktrees this session.
   const activeWorktrees = new Map<string, string>();
+
+  // Sandbox VM container names are derived from the thread ID so a container
+  // survives a plugin reload and can still be found. When no thread ID was
+  // supplied (ad-hoc/test surfaces) fall back to a per-session random ID: two
+  // such sessions must not collide on one container.
+  const fallbackVmSessionId = crypto.randomUUID();
 
   const boundGetOpenTabs = tool(
     'obsidian_get_open_tabs',
@@ -713,22 +794,26 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     },
   );
 
-  const boundEnterDesignMode = tool(
-    'EnterDesignMode',
-    'Creates or reuses this thread\'s static design artifact, opens its preview and artifact controls, and returns paths and design instructions. Continue editing the artifact in this turn. Requires a desktop filesystem vault and write permission; unavailable during Plan mode or pending plan approval.',
-    { brief: z.string().trim().min(1).describe('The visual design brief or requested revision.') },
-    async (args) => {
+  const boundVaultList = tool(
+    'vault_list',
+    'Lists a vault folder (read-only; no shell). Returns { path, entries: [{ path, type: "file"|"folder", size?, mtime? }], truncated }, with vault-relative paths sorted by path. `path` is a vault-relative folder (default: vault root); absolute paths and ".." are rejected. `recursive` walks subfolders (default false). `limit` caps entries (default 500, max 2000); `truncated` is true when more exist. The host config folder (e.g. .obsidian) is skipped unless you list it explicitly. Use this instead of ls/find.',
+    vaultListSchema,
+    async (args, _extra) => {
       try {
-        // Native harnesses invoke handlers directly, bypassing MCP schema parsing.
-        if (typeof args?.brief !== 'string' || !args.brief.trim()) throw new Error('A nonblank design brief is required.');
-        if (!options.onEnterDesignMode) throw new Error('Design mode is unavailable in this host.');
-        const result = await options.onEnterDesignMode(args.brief.trim());
+        // Obsidian's adapter implements list(); Geode's does not, so fall back to
+        // the vault's file tree there (see vaultListSource).
+        const result = await listVault(vaultListSource(app.vault as unknown as Parameters<typeof vaultListSource>[0]), {
+          path: args.path,
+          recursive: args.recursive,
+          limit: args.limit,
+          configDir: app.vault.configDir,
+        });
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
-      } catch (error) {
-        return { content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
       }
     },
-    { alwaysLoad: true },
   );
 
   const boundScheduleWakeup = tool(
@@ -1073,6 +1158,173 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
           content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: msg }) }],
           isError: true,
         };
+      }
+    },
+  );
+
+  // ── Sandbox VM tools ────────────────────────────────────────────────────────
+  // A sandboxed VM for running COMMANDS only. Read/Write/Edit/Bash keep running
+  // on the host, so the thread's working directory is bind-mounted into the
+  // guest at /work rather than copied — file edits stay on the host and are
+  // visible inside the VM immediately, with no sync step and no divergence.
+  //
+  // Backed by Apple's `container` CLI (macOS 26+, Apple silicon), where each
+  // container is its own lightweight VM with a separate kernel and no view of
+  // the host filesystem beyond that mount. See src/sandboxVm.ts for the full
+  // rationale, and sandbox/Dockerfile for the image.
+  //
+  // The container name is derived deterministically from the thread ID, so a
+  // container started before a plugin reload can still be found and cleaned up
+  // afterwards without persisting anything on the Thread.
+
+  const vmManager = new SandboxVmManager({
+    containerName: () => containerNameForThread(options.threadId ?? fallbackVmSessionId),
+    run: options.vmCommandRunner,
+  });
+
+  const vmErrorResult = (error: string) => ({
+    content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error }) }],
+    isError: true,
+  });
+
+  const boundEnterVm = tool(
+    'enter_vm',
+    [
+      'Starts a sandboxed Linux VM for this thread and bind-mounts the current effective working directory into it at /work.',
+      'File editing stays on the host — use vm_exec to run commands inside the VM, where the container has its own kernel and cannot see the rest of the host filesystem.',
+      'Requires Apple\'s container runtime (macOS 26+ on Apple silicon); desktop only.',
+      'Use exit_vm to stop and remove the VM.',
+    ].join(' '),
+    {
+      image: z.string().optional().describe(
+        'Container image to start. Defaults to the configured sandbox VM image (claude-threads-coding:1), built from sandbox/Dockerfile.',
+      ),
+      network: z.enum(VM_NETWORK_MODES as unknown as [string, ...string[]]).optional().describe(
+        'Network isolation: "default" = full egress (npm install, git remotes and web all work), "internal" = no internet but host and shared-network peers remain reachable, "none" = no network at all. Defaults to the configured setting, which ships as "default".',
+      ),
+      mountPath: z.string().optional().describe(
+        'Absolute host directory to mount at /work. Defaults to the current effective working directory.',
+      ),
+    },
+    async (args, _extra) => {
+      try {
+        const mountPath = args.mountPath ?? effectiveCwd;
+        // Native harnesses invoke handlers directly, without SDK Zod parsing.
+        // An invalid requested isolation mode must never silently enable egress.
+        if (args.network !== undefined && !isVmNetworkMode(args.network)) {
+          return vmErrorResult('network must be default, internal, or none.');
+        }
+        if (!mountPath) {
+          return vmErrorResult('No working directory set. Call set_working_directory first, or pass mountPath.');
+        }
+        if (!path.isAbsolute(mountPath)) {
+          return vmErrorResult(`mountPath must be an absolute path: ${mountPath}`);
+        }
+        // Checked on the host before starting anything: `container run` with a
+        // nonexistent --volume source fails deep in the runtime with a message
+        // that does not name the path.
+        if (!fs.existsSync(mountPath) || !fs.statSync(mountPath).isDirectory()) {
+          return vmErrorResult(`mountPath is not an existing directory: ${mountPath}`);
+        }
+
+        const result = await vmManager.enter({
+          image: resolveVmImage(args.image, options.getVmImage?.()),
+          mountPath,
+          network: resolveVmNetwork(args.network, options.getVmDefaultNetwork?.()),
+        });
+        if (!result.success) return vmErrorResult(result.error);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              containerName: result.containerName,
+              image: result.image,
+              mountedFrom: result.mountedFrom,
+              network: result.network,
+              containerWorkdir: VM_WORKDIR,
+              message: `Sandbox VM running. ${result.mountedFrom} is mounted at ${VM_WORKDIR}. Run commands with vm_exec; keep editing files with the normal file tools on the host.`,
+            }, null, 2),
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return vmErrorResult(msg);
+      }
+    },
+  );
+
+  const boundVmExec = tool(
+    'vm_exec',
+    [
+      'Runs a shell command inside this thread\'s sandboxed VM, with the working directory set to /work (the bind-mounted host directory).',
+      'Call enter_vm first.',
+      'Returns the exit code plus stdout and stderr; a non-zero exit code is reported as a normal result, not an error.',
+      'Very long output is truncated with an explicit marker.',
+    ].join(' '),
+    {
+      command: z.string().min(1).describe(
+        'Shell command to run inside the VM. Executed with `bash -lc` from /work.',
+      ),
+      timeoutSeconds: z.number().optional().describe(
+        'Guest command deadline in seconds, followed by a five-second kill grace. Defaults to 300, capped at 3600. Requires GNU timeout in the image; timeout normally returns exit code 124.',
+      ),
+    },
+    async (args, _extra) => {
+      try {
+        const result = await vmManager.execCommand({
+          command: args.command,
+          timeoutSeconds: resolveExecTimeoutSeconds(args.timeoutSeconds),
+        });
+        if (!result.success) return vmErrorResult(result.error);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              exitCode: result.exitCode,
+              stdout: result.stdout,
+              stderr: result.stderr,
+            }, null, 2),
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return vmErrorResult(msg);
+      }
+    },
+  );
+
+  const boundExitVm = tool(
+    'exit_vm',
+    [
+      'Stops and removes this thread\'s sandboxed VM.',
+      'The bind-mounted host directory and everything written into it is untouched — only the VM\'s own ephemeral root filesystem goes away.',
+    ].join(' '),
+    {
+      force: z.boolean().optional().describe(
+        'Kill the VM immediately instead of stopping it gracefully first (default: false).',
+      ),
+    },
+    async (args, _extra) => {
+      try {
+        const result = await vmManager.exit({ force: args.force });
+        if (!result.success) return vmErrorResult(result.error);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              removedContainer: result.removedContainer,
+            }, null, 2),
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return vmErrorResult(msg);
       }
     },
   );
@@ -1499,7 +1751,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
 
   const boundGetThreadLog = tool(
     'obsidian_get_thread_log',
-    'Returns parsed entries from a thread\'s raw JSONL conversation log — the verbatim SDK event stream captured per turn: tool calls with full inputs, tool results/outputs, assistant messages, result events (cost/usage/turns), system events, and a synthetic session_start marker (prompt, cwd, model, resume target) at the head of each turn. Each entry is an envelope { ts, threadId, sessionId, type, event } where event is the raw SDK payload, untouched. Use this to audit exactly what another thread (or a sub-agent) did and with what arguments — far more detail than threads_get_messages, which only returns rendered message text. Logs can be large, so results are filtered by type (if given) and then tailed to the most recent N entries (default 100). The returned `path` is the absolute log file path — Read it directly for the complete, unfiltered stream. Defaults to the current thread when threadId is omitted. Note: per-token streaming deltas are intentionally not logged (they are reconstructed in the final assistant message).',
+    'Returns parsed entries from a thread\'s raw JSONL conversation log: tool calls, completed outputs, assistant messages, result events, system events, and a synthetic session_start marker. Each entry is an envelope { ts, threadId, sessionId, type, event }. Completed protocol events are preserved; token deltas are omitted. Codex diff snapshots are coalesced per thread/turn (up to 512 KiB); command and plan deltas retain bounded 64 KiB diagnostic tails when needed. Synthetic codex/log/compacted events identify source, reason, tail, and original/retained/omitted byte counts. Pending updates flush at completion, session shutdown, or memory limits, so this is not a verbatim stream and pending events may be absent while running or after a host crash. Use this for more detail than threads_get_messages. Results are filtered by type (if given) and tailed to the most recent N entries (default 100). The returned `path` is the absolute log file path for all stored entries. Defaults to the current thread when threadId is omitted.',
     {
       threadId: z.string().optional().describe('ID of the thread whose log to read. Defaults to the current thread.'),
       limit: z.number().int().nonnegative().optional().describe('Return only the most recent N entries (default 100). Pass 0 for all entries. Type filtering is applied before tailing.'),
@@ -2568,7 +2820,9 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   // ── Secret request tool ──────────────────────────────────────────────────
   // Lets agents ask the user for a credential at runtime without that credential
   // ever appearing in the conversation. The value is stored in the OS keychain
-  // and injected into future sessions via secretEnvResolver.
+  // and injected into future sessions via secretEnvResolver — and, when the
+  // caller restarts the calling thread's session on success (see
+  // requestSecretForThread in main.ts), into this same thread's next turn too.
 
   const boundRegisterMcpServer = tool(
     'mcp_register_server',
@@ -2594,7 +2848,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     [
       'Ask the user to provide a secret (API key, token, password) and store it securely in the OS keychain.',
       'Use this when a skill or workflow needs a credential that hasn\'t been configured yet.',
-      'The secret is stored under the name you provide and injected into future sessions as an environment variable.',
+      'The secret is stored under the name you provide and injected into future sessions as an environment variable; a successful save also makes it available to this same thread starting its next turn.',
       'Returns {success: true, secretName, alreadyExisted: boolean} on success, or {success: false, reason} if the user cancelled.',
       'IMPORTANT: never ask the user to paste a secret directly into the conversation — always use this tool.',
       'Use force: true to re-prompt the user even when a secret with this name already exists — useful when a token has been rotated or a stale keychain entry needs replacing.',
@@ -2657,17 +2911,21 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundGetOutgoingLinks,
       boundInsertAtCursor,
       boundGetNoteMetadata,
+      boundVaultList,
       boundSetWorkingDirectory,
       boundScheduleWakeup,
-      boundEnterDesignMode,
       boundWatchDocument,
       boundUnwatchDocument,
       boundListWatchedDocuments,
       boundEnterWorktree,
       boundExitWorktree,
+      boundEnterVm,
+      boundVmExec,
+      boundExitVm,
       boundListCommands,
       boundExecuteCommand,
       ...(options.enableOpenUrl !== false ? [boundOpenUrl] : []),
+      ...(options.browser ? createAgentBrowserTools(options.browser) : []),
       boundCreateThread,
       boundGetCurrentThread,
       boundListThreads,
@@ -2705,6 +2963,40 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundSkillsUninstall,
       boundSkillsUpdate,
     ];
+
+  // --- contributed agent tools (ADR-0008) ----------------------------------
+  // Peers contribute through `extensions.registerAgentTool`; the host binds
+  // each one to this thread and appends it here. Contributions are appended
+  // *after* the built-ins and filtered against them, so a contribution can
+  // never displace a built-in even if the registry's collision check were
+  // bypassed. The registry rejects such a name first; this is defence in depth
+  // on the path where a mistake would reach every thread on both harnesses.
+  // Both spellings of every built-in. The definitions here carry their
+  // *legacy* names; the canonical rename happens further down, so checking
+  // only `definition.name` would let a contribution called `vault_search`
+  // through and land it twice on the canonical server.
+  const builtInNames = new Set(tools.flatMap(definition =>
+    [definition.name, LEGACY_TO_CANONICAL_TOOL_NAMES[definition.name] ?? definition.name]));
+  const contributions = [...(options.contributedTools ?? [])];
+  const contributedTools = contributions
+    .filter(binding => !builtInNames.has(binding.name))
+    .map(binding => tool(
+      binding.name,
+      binding.description,
+      binding.inputSchema,
+      async (args: Record<string, unknown>) => {
+        const result = await binding.invoke(args ?? {});
+        // Copied onto a mutable array: the contract hands back a readonly
+        // result, and the SDK's CallToolResult is mutable.
+        return { content: [...result.content], ...(result.isError ? { isError: true } : {}) };
+      },
+      { alwaysLoad: binding.alwaysLoad },
+    ));
+  tools.push(...contributedTools);
+  const contributedReadOnlyNames = contributions
+    .filter(binding => !builtInNames.has(binding.name) && !binding.requiresApproval)
+    .map(binding => binding.name);
+
   const legacyTools = tools.map(toDeprecatedLegacyToolDefinition);
   const legacyServer = createSdkMcpServer({
     name: 'obsidian',
@@ -2718,8 +3010,13 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     alwaysLoad: true,
   });
   return {
-    claude_threads: Object.assign(canonicalServer, { harnessTools: toHarnessDynamicTools(canonicalTools) }),
-    obsidian: Object.assign(legacyServer, { harnessTools: toHarnessDynamicTools(legacyTools) }),
+    claude_threads: Object.assign(canonicalServer, { harnessTools: toHarnessDynamicTools(canonicalTools, contributedReadOnlyNames) }),
+    obsidian: Object.assign(legacyServer, { harnessTools: toHarnessDynamicTools(legacyTools, contributedReadOnlyNames) }),
+    // Canonical *and* legacy built-in names, so the contribution registry can
+    // reject a name that would shadow either. Captured before contributions
+    // were appended, so a contributed tool never counts as a built-in — which
+    // is what lets the design tool contribute its own name.
+    builtInToolNames: Object.freeze([...builtInNames]),
   };
 }
 
@@ -2727,8 +3024,18 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
 export function createClaudeThreadsMcpServers(
   app: App,
   options: ObsidianMcpServerOptions = {},
-): { claude_threads: ObsidianMcpServerWithHarnessTools; obsidian: ObsidianMcpServerWithHarnessTools } {
-  return createMcpToolSurfaces(app, options);
+): McpToolSurfaces {
+  const { claude_threads, obsidian } = createMcpToolSurfaces(app, options);
+  return { claude_threads, obsidian };
+}
+
+/**
+ * Built-in tool names on both the canonical and deprecated-alias servers,
+ * excluding anything contributed. This is what the contribution registry
+ * checks a new tool name against, so a peer cannot shadow a built-in.
+ */
+export function builtInMcpToolNames(app: App, options: ObsidianMcpServerOptions = {}): readonly string[] {
+  return createMcpToolSurfaces(app, options).builtInToolNames;
 }
 
 /** @deprecated Use createClaudeThreadsMcpServers().obsidian only for compatibility tests/callers. */
@@ -2859,7 +3166,15 @@ export function harnessTextFromToolContent(content: readonly ToolResultContentBl
  *
  * Exported for tests (see test/unit/host-tool-harness-image-adapter.test.ts).
  */
-export function toHarnessDynamicTools(tools: SdkMcpToolDefinition<any>[]): HarnessDynamicTool[] {
+export function toHarnessDynamicTools(
+  tools: SdkMcpToolDefinition<any>[],
+  /**
+   * Contributed tools that declared `requiresApproval: false`. Contributions
+   * default to requiring approval, so this stays empty unless a peer opts out
+   * for a genuinely read-only tool.
+   */
+  contributedReadOnlyNames: readonly string[] = [],
+): HarnessDynamicTool[] {
   // Reuse the canonical MCP definitions for every harness. The conservative
   // read-only set bypasses prompts; every other operation is presented through
   // the same SessionCallbacks.onPermissionRequest UI Claude already uses.
@@ -2868,13 +3183,17 @@ export function toHarnessDynamicTools(tools: SdkMcpToolDefinition<any>[]): Harne
     'obsidian_get_backlinks', 'obsidian_get_outgoing_links', 'obsidian_get_note_metadata',
     'obsidian_list_commands', 'obsidian_get_current_thread', 'obsidian_list_threads',
     'obsidian_list_projects', 'obsidian_get_thread_messages', 'obsidian_get_thread_log',
-    'obsidian_list_vault_bridges', 'obsidian_get_file_history', 'CronList',
+    'obsidian_list_vault_bridges', 'obsidian_get_file_history', 'CronList', 'vault_list',
     'skills_list_installed', 'skills_search', 'skills_get', 'skills_list_sources',
     'skills_check_updates',
   ];
   const readOnlyToolNames = new Set([
     ...legacyReadOnlyToolNames,
     ...legacyReadOnlyToolNames.map(name => LEGACY_TO_CANONICAL_TOOL_NAMES[name] ?? name),
+    // Observing a page is read-only; navigating to one and clicking things is
+    // not, so only the inspection half bypasses the prompt.
+    ...AGENT_BROWSER_READ_ONLY_TOOL_NAMES,
+    ...contributedReadOnlyNames,
   ]);
   return tools.map((toolDefinition) => ({
     name: toolDefinition.name,

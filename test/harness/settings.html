@@ -208,6 +208,35 @@
 
   <link rel="stylesheet" href="./obsidian-base.css" />
   <link rel="stylesheet" href="../../styles.css" />
+  <style>
+    /* Geode host-inclusive fixture, using the approved Ivory host proportions. */
+    body.geode-settings-host {
+      background: #93998c;
+      --background-primary: #fff;
+      --background-secondary: #f6f7f2;
+      --background-secondary-alt: #fafbf7;
+      --background-modifier-border: #e3e5dc;
+      --background-modifier-form-field: #fff;
+      --background-modifier-hover: #eaf0e5;
+      --text-normal: #292e28;
+      --text-muted: #747c6b;
+      --text-faint: #747c6b;
+      --interactive-normal: #f8faf5;
+      --interactive-accent: #2e4938;
+      --text-accent: #2e4938;
+      --color-red: #a24141;
+    }
+    body.geode-settings-host #app { width: 80vw; height: 80vh; display: grid; grid-template-columns: 12% minmax(0, 1fr); }
+    .geode-settings-nav { background: var(--background-secondary); border-right: 1px solid var(--background-modifier-border); padding: 12px 7px; overflow: auto; font-size: 11px; line-height: 1.5; }
+    .geode-settings-nav > div { padding: 7px 9px; border-radius: 3px; }
+    .geode-settings-nav .is-selected { background: var(--interactive-accent); color: white; }
+    .geode-settings-nav .geode-settings-group { font-size: 9px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--background-modifier-border); color: var(--text-muted); }
+    body.geode-settings-host #app > .vertical-tab-content { min-width: 0; padding: 20px 24px; }
+    @media (max-width: 840px) {
+      body.geode-settings-host #app { width: 92vw; height: 86vh; grid-template-columns: 130px minmax(0, 1fr); }
+      body.geode-settings-host #app > .vertical-tab-content { padding: 18px; }
+    }
+  </style>
 </head>
 <body>
   <div id="app"></div>

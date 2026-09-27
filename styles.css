@@ -642,6 +642,46 @@
   overflow: hidden;
 }
 
+/* ── Scroll-to-bottom pill ────────────────────────────────────────────────── */
+/* Zero-height in-flow anchor sitting exactly where .ct-messages hands off to
+   the composer, so the pill floats just above it without tracking the
+   composer's own (variable) height. */
+.ct-scroll-bottom-anchor {
+  position: relative;
+  height: 0;
+}
+
+.ct-scroll-bottom-pill {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 50%;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15), 0 1px 3px rgba(0, 0, 0, 0.08);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.ct-scroll-bottom-pill.ct-hidden { display: none; }
+
+.ct-scroll-bottom-pill svg { width: 14px; height: 14px; }
+
+.ct-scroll-bottom-pill:hover,
+.ct-scroll-bottom-pill:focus-visible {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
 /* Slash command autocomplete */
 .ct-skill-dropdown {
   position: absolute;
@@ -1427,29 +1467,37 @@
   letter-spacing: 0;
 }
 
-/* Background-task completion notice — a subtle centered row in the transcript,
-   shown instead of a global toast when a background task finishes on an idle
-   thread. Visually kin to .ct-compact-divider but with a status icon. */
+/* Background-task completion notice — a subtle left-aligned row in the
+   transcript, shown instead of a global toast when a background task finishes
+   on an idle thread. It shares the tool rows' leading-icon column: 8px of left
+   padding stands in for .ct-tool-pill's 2px border + 6px padding, and the
+   12px icon and 6px gap match .ct-tool-pill-icon, so the status icon and text
+   line up with the tool icons and tool names above it. */
 .ct-notice-row {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: flex-start;
   gap: 6px;
-  margin: 8px 16px;
+  margin: 8px 0;
+  padding-left: 8px;
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  line-height: 1.5;
   letter-spacing: 0.02em;
   opacity: 0.85;
 }
 
+/* One text line tall, so the icon stays centred on the first line when a
+   long notice wraps. */
 .ct-notice-icon {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
+  height: 1.5em;
 }
 
 .ct-notice-icon .svg-icon {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
 }
 
 .ct-notice-text {
@@ -3780,9 +3828,30 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-blue, #4a90d9) 20%, transparent);
 }
 
+.ct-plan-rejection-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ct-plan-rejection-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+}
+
+.ct-plan-rejection-textarea {
+  min-height: 96px;
+  font-family: var(--font-interface);
+}
+
 /* Action buttons */
 .ct-plan-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
 }
@@ -3795,6 +3864,11 @@
   cursor: pointer;
   font-weight: 500;
   transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.ct-plan-btn:focus-visible {
+  outline: 2px solid var(--color-blue, #4a90d9);
+  outline-offset: 2px;
 }
 
 .ct-root .ct-plan-reject {
@@ -3823,6 +3897,14 @@
 }
 .ct-plan-approve:hover {
   opacity: 0.88;
+}
+
+.ct-plan-rejection-submit {
+  margin-left: auto;
+}
+
+.ct-root.ct-mobile .ct-plan-btn {
+  min-height: 44px;
 }
 
 /* -- Inline question card (AskUserQuestion) -------------------------- */
@@ -6104,42 +6186,60 @@
 
 /* ── Settings tab ────────────────────────────────────────────────────────── */
 
-/* Tab navigation bar */
-.ct-settings-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-bottom: 20px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--background-modifier-border);
-}
+.ct-settings-shell { min-width: 0; min-height: 100%; container-type: inline-size; container-name: ct-settings; }
+.ct-settings-tab-body { min-width: 0; }
+.ct-settings-compact-nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 16px; margin-bottom: 24px; border-bottom: 1px solid var(--background-modifier-border); }
+.ct-settings-compact-nav label { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: var(--font-ui-small); }
+.ct-settings-compact-nav select { width: 190px; max-width: 100%; min-height: 36px; }
+.ct-settings-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.ct-settings-page-header h1 { margin: 0; font-size: 1.55rem; }
+.ct-settings-page-header p { margin: 4px 0 0; color: var(--text-muted); }
+.ct-settings-page-header button, .ct-manager-detail button { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); background: var(--interactive-normal); color: var(--text-normal); padding: 6px 12px; cursor: pointer; }
+.ct-settings-page-header button.mod-cta, .ct-manager-detail button.mod-cta { background: var(--interactive-accent); border-color: transparent; color: var(--text-on-accent); }
+.ct-manager-detail button.mod-warning { color: var(--color-red); }
+.ct-settings-manager { display: grid; grid-template-columns: minmax(190px, .78fr) minmax(300px, 1.35fr); border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; min-height: 510px; }
+.ct-manager-list { display: flex; flex-direction: column; min-width: 0; background: var(--background-secondary); border-right: 1px solid var(--background-modifier-border); padding: 12px; }
+.ct-manager-list > input, .ct-secret-projects > input { width: 100%; margin-bottom: 10px; }
+.ct-manager-list-rows { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.ct-manager-list-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 10px; text-align: left; border: 0; box-shadow: none; background: transparent; color: var(--text-normal); border-radius: 6px; cursor: pointer; min-width: 0; }
+.ct-manager-list-item:hover { background: var(--background-modifier-hover); }
+.ct-manager-list-item.is-selected { background: color-mix(in srgb, var(--interactive-accent) 18%, transparent); }
+.ct-manager-list-item strong, .ct-manager-list-item small, .ct-manager-list-item span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-manager-list-item small, .ct-manager-list-item span, .ct-manager-list footer { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.ct-manager-list footer { padding: 10px 4px 0; }
+.ct-manager-detail { display: flex; flex-direction: column; min-width: 0; padding: 20px; }
+.ct-manager-detail h2 { margin: 0 0 16px; }
+.ct-manager-detail-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.ct-manager-detail-header h2 { margin: 0; }
+.ct-manager-form { display: flex; flex-direction: column; gap: 14px; }
+.ct-manager-field { display: flex; flex-direction: column; gap: 5px; }
+.ct-manager-field-label, .ct-secret-scope-choice legend { font-weight: 600; font-size: var(--font-ui-small); }
+.ct-manager-field input, .ct-manager-field textarea { width: 100%; }
+.ct-manager-field input, .ct-manager-field textarea, .ct-manager-list > input, .ct-secret-projects > input, .ct-settings-compact-nav select { background: var(--background-modifier-form-field); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); color: var(--text-normal); font-size: var(--font-ui-small); padding: 7px 9px; }
+.ct-manager-field input:disabled { color: var(--text-muted); opacity: .8; }
+.ct-manager-field small, .ct-manager-danger small { color: var(--text-muted); font-size: var(--font-ui-smaller); line-height: 1.4; }
+.ct-secret-scope-choice { display: flex; flex-direction: column; gap: 8px; border: 0; padding: 0; margin: 2px 0 0; }
+.ct-secret-scope-choice label, .ct-secret-projects label { display: flex; align-items: center; gap: 8px; font-size: var(--font-ui-small); }
+.ct-secret-projects { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--background-modifier-border); border-radius: 6px; }
+.ct-secret-projects > div { display: flex; flex-direction: column; gap: 7px; }
+.ct-secret-projects.is-hidden { display: none; }
+.ct-manager-danger { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; padding: 12px; border: 1px solid color-mix(in srgb, var(--color-red) 45%, var(--background-modifier-border)); border-radius: 6px; }
+.ct-manager-danger > div { display: flex; flex-direction: column; gap: 2px; }
+.ct-manager-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: auto; padding-top: 18px; }
+.ct-manager-actions > span { margin-right: auto; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.ct-manager-error { color: var(--color-red); font-size: var(--font-ui-small); margin: 10px 0 0; }
+.ct-manager-empty { margin: auto; max-width: 280px; text-align: center; color: var(--text-muted); }
+.ct-secret-storage-notice { margin-top: 0; }
 
-.ct-settings-tab-btn {
-  appearance: none;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  border-radius: var(--radius-s);
-  padding: 6px 14px;
-  font-size: var(--font-ui-small);
-  font-weight: 500;
-  color: var(--text-muted);
-  cursor: pointer;
+@container ct-settings (max-width: 620px) {
+  .ct-settings-manager { grid-template-columns: 1fr; }
+  .ct-manager-list { border-right: 0; border-bottom: 1px solid var(--background-modifier-border); max-height: 250px; }
+  .ct-manager-detail { min-height: 500px; }
 }
-
-.ct-settings-tab-btn:hover {
-  background: var(--background-modifier-hover);
-  color: var(--text-normal);
-}
-
-.ct-settings-tab-btn.is-active {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-}
-
-.ct-settings-tab-btn.is-active:hover {
-  background: var(--interactive-accent-hover);
-  color: var(--text-on-accent);
+@container ct-settings (max-width: 420px) {
+  .ct-settings-compact-nav { align-items: stretch; flex-direction: column; gap: 10px; }
+  .ct-settings-compact-nav label { justify-content: space-between; }
+  .ct-settings-compact-nav select { min-height: 44px; width: 60%; }
 }
 
 /* Empty-state text inside settings lists */
@@ -6765,8 +6865,13 @@ textarea.ct-settings-wide-input {
   }
 }
 
-/* Body: list + detail side-by-side */
+/* Body: list + detail side-by-side.
+   Also the query container for the narrow-mode collapse at the bottom of this
+   section — sized off this element, not the viewport, so the layout responds
+   to the pane's own width (sidebar vs. full-width tab) rather than the window's. */
 .ct-skills-body {
+  container-name: ct-skills-body;
+  container-type: inline-size;
   display: flex;
   flex: 1;
   overflow: hidden;
@@ -7214,10 +7319,26 @@ body.ct-skills-resizing {
   color: #fff;
 }
 
-/* Danger zone (uninstall) */
-.ct-skills-danger-zone {
-  padding: 4px 14px 12px;
-  flex-shrink: 0;
+/* Detail toolbar: the action row hoisted into the header, above the editor, so
+   the textarea below can claim the rest of the pane instead of being pushed up
+   by buttons stacked underneath it.
+
+   Scoped to `.ct-skills-detail-toolbar` rather than overriding `.ct-skills-actions`
+   itself: that class is still used below-content in the panes that have no
+   editor to compete with (the GitHub source pane's Update/Reload row, the local
+   source pane's Pull Updates row), and those should keep their own padding. */
+.ct-skills-detail-toolbar {
+  /* `.ct-skills-detail-header` already supplies the 14px horizontal padding —
+     taking it again here would indent the buttons past the name/path above. */
+  padding: 0;
+  margin-top: 8px;
+}
+
+/* Push the destructive action to the far end so it never sits flush against
+   Save. On a narrow pane the row wraps and this lands it on its own line,
+   still trailing — which is the desired outcome either way. */
+.ct-skills-detail-toolbar .ct-skills-btn-uninstall {
+  margin-left: auto;
 }
 
 /* Browse tab: description section */
@@ -7307,6 +7428,98 @@ body.ct-skills-resizing {
   margin-top: 16px;
 }
 
+/* ── Skills Manager — narrow / single-pane mode ─────────────────────────────
+   In a sidebar there is no room for list + detail side by side, so the two
+   panes stack into one: the list until something is selected, then the detail
+   pane behind a back bar. SkillsManagerView only toggles
+   `ct-skills-body--has-selection`; the breakpoint itself lives here, so no JS
+   measures widths or listens for resize.
+
+   The `!important` on the list width is deliberate: SkillsManagerView sets an
+   inline `width` for the drag-to-resize divider, and an inline style would
+   otherwise beat this rule and leave the list stuck at its wide-mode width. */
+
+/* Back bar is rendered on every detail pane but only ever shown below the
+   breakpoint — in wide mode the list is already on screen to click away to. */
+.ct-skills-detail-back {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ct-skills-back-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-accent);
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.ct-skills-back-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+.ct-skills-back-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+@container ct-skills-body (max-width: 480px) {
+  /* Nothing to drag when only one pane is visible. */
+  .ct-skills-divider {
+    display: none;
+  }
+
+  .ct-skills-list {
+    width: 100% !important;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .ct-skills-list .ct-skills-tree-source--github {
+    min-height: 44px;
+    padding-block: 0;
+  }
+
+  .ct-skills-tree-source .ct-skills-tree-toggle--button {
+    width: 44px;
+    height: 44px;
+    margin-left: -10px;
+  }
+
+  .ct-skills-detail {
+    width: 100%;
+  }
+
+  /* Show exactly one pane: list while nothing is selected… */
+  .ct-skills-body:not(.ct-skills-body--has-selection) .ct-skills-detail {
+    display: none;
+  }
+
+  /* …detail (plus its back bar) once something is. */
+  .ct-skills-body--has-selection .ct-skills-list {
+    display: none;
+  }
+
+  .ct-skills-body--has-selection .ct-skills-detail-back {
+    display: flex;
+  }
+}
+
 /* ── Command pill (built-in slash command chip in the input row) ─────────── */
 
 .ct-command-pill {
@@ -7337,54 +7550,7 @@ body.ct-skills-resizing {
   opacity: 1;
 }
 
-/* ── Task list card (Claude Code TodoWrite/TaskCreate checklist) ─────────── */
-
-.ct-task-card {
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  background: var(--background-secondary);
-  padding: 6px 10px;
-  margin-bottom: 6px;
-  font-size: var(--font-ui-smaller);
-}
-
-.ct-task-card-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  user-select: none;
-  color: var(--text-muted);
-}
-
-.ct-task-card-chevron {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-}
-
-.ct-task-card-chevron svg {
-  width: 12px;
-  height: 12px;
-}
-
-.ct-task-card-title {
-  font-weight: 600;
-  color: var(--text-normal);
-}
-
-.ct-task-card-counts {
-  color: var(--text-muted);
-}
-
-.ct-task-card-list {
-  margin-top: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 180px;
-  overflow-y: auto;
-}
+/* ── Task rows (shared by the footer popover) ─────────────────────────────── */
 
 .ct-task-row {
   display: flex;
@@ -7543,6 +7709,13 @@ body.ct-skills-resizing {
   transition: max-height 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
 }
 
+.ct-panel-collapsible:has(.ct-tasklist-pill:not(.ct-hidden)) .ct-input-footer {
+  max-height: 50px;
+  opacity: 1;
+  pointer-events: auto;
+  transition: max-height 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
+}
+
 /* — Left actions in inline layout (KanbanView: attach + mic) ────────────── */
 .ct-kanban-dispatch.ct-panel-collapsible .ct-dispatch-left-actions {
   max-width: 0;
@@ -7649,32 +7822,6 @@ body.ct-skills-resizing {
   .ct-artifact-card-icon { display: none; }
   .ct-artifact-card-meta { display: none; }
   .ct-root .ct-artifact-action { min-height: 32px; }
-}
-
-/* — Task list card (ThreadsView: TodoWrite / TaskCreate checklist) ──────────── */
-/* ct-task-card has padding: 6px 10px, margin-bottom: 6px, border: 1px solid   */
-.ct-floating-panel.ct-panel-collapsible .ct-task-card:not(.ct-hidden) {
-  max-height: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  margin-bottom: 0;
-  border-width: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transition: max-height 0.2s ease, padding 0.2s ease, margin 0.2s ease, border-width 0.2s ease, opacity 0.16s ease;
-}
-
-.ct-floating-panel.ct-panel-collapsible:hover .ct-task-card:not(.ct-hidden),
-.ct-floating-panel.ct-panel-collapsible:focus-within .ct-task-card:not(.ct-hidden) {
-  max-height: 240px;
-  padding-top: 6px;
-  padding-bottom: 6px;
-  margin-bottom: 6px;
-  border-width: 1px;
-  opacity: 1;
-  pointer-events: auto;
-  transition: max-height 0.25s ease 0.05s, padding 0.25s ease 0.05s, margin 0.25s ease 0.05s, border-width 0.2s ease 0.05s, opacity 0.2s ease 0.07s;
 }
 
 /* — Status line pills row (ThreadsView: branch / PR / dev-URL footer) ──────── */
@@ -7994,6 +8141,20 @@ body.ct-skills-resizing {
   flex-shrink: 0;
   color: var(--text-faint);
 }
+.ct-skills-tree-toggle--button {
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  cursor: pointer;
+}
+.ct-skills-tree-toggle--button:hover,
+.ct-skills-tree-toggle--button:focus-visible {
+  background: var(--background-modifier-hover);
+}
 .ct-skills-tree-toggle svg {
   width: 12px;
   height: 12px;
@@ -8138,6 +8299,7 @@ body.ct-skills-resizing {
     overflow: hidden;
   }
   .ct-agent-pill,
+  .ct-tasklist-pill,
   .ct-schedule-pill {
     min-width: 0;
     max-width: 100%;
@@ -8321,6 +8483,114 @@ body.ct-skills-resizing {
   font-size: var(--font-ui-smaller);
 }
 
+/* — The always-visible task pill ─────────────────────────────────────────── */
+.ct-tasklist-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px 1px 5px;
+  min-height: 22px;
+  max-width: 240px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--background-modifier-border) 60%, transparent);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.ct-tasklist-pill.ct-hidden { display: none; }
+
+.ct-tasklist-pill-icon {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.ct-tasklist-pill-icon svg { width: 11px; height: 11px; }
+
+.ct-tasklist-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ct-tasklist-pill:hover,
+.ct-tasklist-pill:focus-visible,
+.ct-tasklist-pill[aria-expanded="true"] {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.ct-tasklist-pill-active { color: var(--text-accent, var(--interactive-accent)); }
+.ct-tasklist-pill-active .ct-tasklist-pill-icon { opacity: 1; }
+.ct-tasklist-pill-done { color: var(--color-green, #4caf50); }
+
+/* — The task popover, anchored above the composer ────────────────────────── */
+.ct-tasklist-popover {
+  position: absolute;
+  bottom: 100%;
+  left: 10px;
+  right: 10px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  max-height: min(320px, 45vh);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.ct-tasklist-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px 7px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ct-tasklist-popover-title {
+  font-weight: 600;
+  font-size: var(--font-ui-small);
+}
+
+.ct-tasklist-popover-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.ct-tasklist-popover-close:hover,
+.ct-tasklist-popover-close:focus-visible {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.ct-tasklist-popover-list {
+  padding: 4px 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* .ct-task-row used to inherit this from the removed .ct-task-card. */
+  font-size: var(--font-ui-smaller);
+}
+
 /* — Agent rows (shared by the popover; flat DOM, indent via --ct-agent-level) */
 .ct-agent-state, .ct-agent-meta { color: var(--text-muted); font-size: var(--font-ui-smaller); }
 .ct-agent-row-button {
@@ -8454,23 +8724,44 @@ button.ct-agent-crumb:focus-visible {
 .ct-root.ct-mobile .ct-agent-state { grid-column: 3; }
 .ct-root.ct-mobile .ct-agent-pill,
 .ct-root.ct-mobile .ct-schedule-pill,
+.ct-root.ct-mobile .ct-tasklist-pill,
 .ct-root.ct-mobile .ct-agent-crumb,
 .ct-root.ct-mobile .ct-agent-view-close,
 .ct-root.ct-mobile .ct-agent-popover-close,
+.ct-root.ct-mobile .ct-tasklist-popover-close,
 .ct-root.ct-mobile .ct-schedule-popover-close,
 .ct-root.ct-mobile .ct-schedule-action { min-height: 44px; }
 .ct-root.ct-mobile .ct-agent-view-close,
 .ct-root.ct-mobile .ct-agent-popover-close,
+.ct-root.ct-mobile .ct-tasklist-popover-close,
 .ct-root.ct-mobile .ct-schedule-popover-close { min-width: 44px; }
 .ct-root.ct-mobile .ct-agent-pill,
-.ct-root.ct-mobile .ct-schedule-pill { border-radius: 12px; padding-inline: 9px; }
+.ct-root.ct-mobile .ct-schedule-pill,
+.ct-root.ct-mobile .ct-tasklist-pill { border-radius: 12px; padding-inline: 9px; }
 /* Taller footer so a 44px pill is not clipped by the collapsible max-height. */
 .ct-root.ct-mobile .ct-panel-collapsible:hover .ct-input-footer,
 .ct-root.ct-mobile .ct-panel-collapsible:focus-within .ct-input-footer,
-.ct-root.ct-mobile .ct-panel-collapsible:has(.ct-agent-pill:not(.ct-hidden), .ct-schedule-pill:not(.ct-hidden)) .ct-input-footer { max-height: 58px; }
+.ct-root.ct-mobile .ct-panel-collapsible:has(.ct-agent-pill:not(.ct-hidden), .ct-schedule-pill:not(.ct-hidden), .ct-tasklist-pill:not(.ct-hidden)) .ct-input-footer { max-height: 58px; }
 
 @media (max-width: 480px) {
+  .ct-sandbox-setting.setting-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ct-sandbox-setting .setting-item-control {
+    justify-content: stretch;
+    margin-top: 12px;
+  }
+
+  .ct-sandbox-setting input,
+  .ct-sandbox-setting select {
+    width: 100%;
+    min-height: 44px;
+  }
+
   .ct-agent-popover { left: 6px; right: 6px; max-height: min(260px, 50vh); }
+  .ct-tasklist-popover { left: 6px; right: 6px; max-height: min(260px, 50vh); }
   .ct-schedule-popover { left: 6px; right: 6px; max-height: min(320px, 55vh); }
   /* Halve the indent step so deep nesting still fits a 375px screen. */
   .ct-agent-row-button { padding-left: calc(6px + min(var(--ct-agent-level, 0), 3) * 8px); }
@@ -8496,3 +8787,121 @@ button.ct-agent-crumb:focus-visible {
   overflow-wrap: anywhere;
 }
 .ct-skills-root .ct-skills-author-btn { min-height: 44px; min-width: 44px; }
+
+/* ── Agent browser preview ─────────────────────────────────────────────────
+   Shows frames captured from the agent's browser guest. The guest itself is
+   never parented here: workspace tab groups clear their pane host on switch,
+   which would destroy it. See AgentBrowserPreviewView.ts. */
+.ct-browser-preview {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 8px;
+  padding: 8px;
+}
+.ct-browser-preview-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ct-browser-preview-text {
+  flex: 1;
+  min-width: 0;
+}
+.ct-browser-preview-summary {
+  font-weight: var(--font-semibold);
+}
+.ct-browser-preview-detail {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
+}
+.ct-browser-preview-stop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  min-width: 32px;
+  flex-shrink: 0;
+}
+.ct-browser-preview-stop.is-hidden { display: none; }
+.ct-browser-preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+}
+.ct-browser-preview-frame {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+.ct-browser-preview-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  padding: 16px;
+  text-align: center;
+  align-self: center;
+}
+/* Focus ring while the frame is receiving forwarded input during a login
+   handoff (ADR-0014) — otherwise a focusable <img> gives no visual cue at all. */
+.ct-browser-preview-frame:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -2px;
+}
+
+/* ── Agent browser login handoff (ADR-0014) ────────────────────────────────
+   "This page wants you to sign in" banner, and the active "you have control"
+   state once the user accepts. See AgentBrowserLoginBridge.ts/
+   AgentBrowserPreviewView.ts. */
+.ct-browser-login-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-s);
+  background: var(--background-modifier-hover);
+  font-size: var(--font-ui-small);
+}
+.ct-browser-login-banner.is-handoff-active {
+  background: var(--background-modifier-success);
+  color: var(--text-on-accent);
+}
+.ct-browser-login-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+.ct-browser-login-banner-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.ct-browser-login-banner-action {
+  white-space: nowrap;
+}
+/* Peer content is rendered by the host in the transcript, never by peer DOM. */
+.ct-inline-content {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+  padding: 14px;
+  margin: 12px 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.ct-inline-content-title { font-weight: 600; overflow-wrap: anywhere; }
+.ct-inline-content-heading { display: flex; align-items: center; gap: 8px; }
+.ct-inline-content-icon { flex-shrink: 0; display: flex; }
+.ct-inline-content-subtitle { color: var(--text-muted); margin-top: 4px; overflow-wrap: anywhere; }
+.ct-inline-content-body { margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ct-inline-content-status, .ct-inline-content-action-status { margin-top: 8px; font-size: var(--font-ui-small); color: var(--text-muted); overflow-wrap: anywhere; }
+.ct-inline-content-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.ct-inline-content .ct-inline-content-action { max-width: 100%; white-space: normal; height: auto; min-height: 44px; overflow-wrap: anywhere; }
+.ct-inline-content-image { display: block; max-width: 100%; height: auto; border-radius: 6px; margin-top: 10px; }
+.ct-inline-content-document { display: block; width: 100%; height: 360px; border: 0; border-radius: 6px; margin-top: 10px; background: white; }

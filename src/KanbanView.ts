@@ -1,3 +1,4 @@
+import type { AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, setIcon, Notice, Platform } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
@@ -13,7 +14,7 @@ import { buildMessageWithAttachment, deriveDispatchTitle } from './attachmentUti
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { partitionThreads, classifyThreadRow, type ThreadRowState } from './threadRowState';
 import { telemetry } from './telemetry';
-import { handleDesignDispatch } from './designDispatchRouting';
+import { handleContributedDispatch } from './slashCommandRouting';
 import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps } from './threadArchiveMenu';
 import { promptConfirm } from './confirmModal';
 import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
@@ -271,28 +272,30 @@ export class KanbanView extends ItemView {
       inlineLayout: true,
       builtinCommands: () => {
         const esc = escalationCommand(this.plugin.settings, true);
-        return esc ? [...DISPATCH_BUILTIN_COMMANDS, esc] : DISPATCH_BUILTIN_COMMANDS;
+        const commands = [...DISPATCH_BUILTIN_COMMANDS, ...(this.plugin.slashCommands?.list('dispatch') ?? [])];
+        return esc ? [...commands, esc] : commands;
       },
+      subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
       argCompletions: DISPATCH_ARG_COMPLETIONS,
+      peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
       harnessPicker: { initialHarness: this.plugin.settings.agentHarness ?? 'claude' },
       onSend: async ({ text, images, attachment, agentHarness }) => {
-        // Intercept leading built-in commands (/model, /goal, /loop, /design) — apply
-        // them to the new thread instead of sending the text to Claude verbatim.
-        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: 'claude' | 'codex'; projectId?: string } = {
+        // Intercept contributed commands, then core model/goal/loop directives.
+        // Apply directives instead of sending command text to the agent verbatim.
+        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; projectId?: string } = {
           agentHarness,
           projectId: this.selectedProjectId || undefined,
         };
         let titleText = text;
+        if (await handleContributedDispatch({
+          registry: this.plugin.slashCommands, text, images, attachment, agentHarness,
+          projectId: dispatchOpts.projectId, input: this.dispatchInput,
+        })) return;
         const directive = parseDispatchDirective(
           text,
           this.plugin.settings.escalationEnabled ? this.plugin.settings.escalationKeyword : undefined,
         );
         if (directive) {
-          if (await handleDesignDispatch({
-            directive, text, images, attachment, agentHarness,
-            input: this.dispatchInput,
-            dispatch: (brief, harness) => this.plugin.dispatchNewDesignThread(brief, harness),
-          })) return;
           if (directive.error) {
             new Notice(directive.error);
             this.dispatchInput.setValue(text);
@@ -1332,6 +1335,7 @@ export class KanbanView extends ItemView {
       event.type === 'agent_runs_changed' ||
       event.type === 'status_tags' ||
       event.type === 'wakeup_changed' ||
+      event.type === 'reviewed_changed' ||
       event.type === 'run_state_settled';
     if (isStateChange) {
       // Patch the card in place when its column membership is unchanged; only

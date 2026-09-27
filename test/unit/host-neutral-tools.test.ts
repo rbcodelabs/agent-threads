@@ -19,24 +19,9 @@ const app = {
 } as unknown as App;
 
 describe('host-neutral MCP catalogs', () => {
-  it('enters design through matching MCP and native handlers with mutation approval', async () => {
-    const result = { artifact: { root: '/artifact' }, created: true, preview: { status: 'opened' }, instructions: 'Edit here' };
-    const onEnterDesignMode = vi.fn(async () => result);
-    const server = createClaudeThreadsMcpServers(app, { onEnterDesignMode }).claude_threads;
-    const native = server.harnessTools.find(tool => tool.name === 'EnterDesignMode')!;
-    expect(native).toBeDefined();
-    expect(native.requiresApproval).toBe(true);
-    const definitions = server as unknown as { tools: Array<{ name: string; handler: (args: unknown, extra: unknown) => Promise<unknown> }> };
-    const sdk = definitions.tools.find(tool => tool.name === 'EnterDesignMode')!;
-    expect(await sdk.handler({ brief: ' Settings ' }, {})).toEqual({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
-    expect(await native.invoke({ brief: ' Settings ' })).toEqual({ success: true, text: JSON.stringify(result, null, 2) });
-    expect(onEnterDesignMode).toHaveBeenCalledWith('Settings');
-    for (const args of [{}, { brief: '   ' }, { brief: 42 }]) {
-      expect((await native.invoke(args)).success).toBe(false);
-    }
-    expect(onEnterDesignMode).toHaveBeenCalledTimes(2);
-    const missing = createClaudeThreadsMcpServers(app).claude_threads.harnessTools.find(tool => tool.name === 'EnterDesignMode')!;
-    expect(await missing.invoke({ brief: 'Settings' })).toMatchObject({ success: false, text: expect.stringContaining('unavailable') });
+  it('does not expose Design tools unless a peer contributes them', () => {
+    const server = createClaudeThreadsMcpServers(app).claude_threads;
+    expect(server.harnessTools.some(tool => tool.name === 'EnterDesignMode')).toBe(false);
   });
   it('exposes canonical and deprecated legacy servers without collisions', () => {
     const servers = createClaudeThreadsMcpServers(app);

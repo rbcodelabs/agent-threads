@@ -24,7 +24,6 @@ export const THREAD_BUILTIN_COMMANDS: SlashCommand[] = [
   { name: 'context', description: 'Show current context window usage breakdown' },
   { name: 'usage', description: 'Show token usage, quota windows, and account activity' },
   { name: 'create-pr', description: 'Send the configured Create PR message (add --draft for the draft message)' },
-  { name: 'design', description: 'Create or revise a live static UI artifact: /design <brief>' },
 ];
 
 /**
@@ -38,7 +37,6 @@ export const DISPATCH_BUILTIN_COMMANDS: SlashCommand[] = [
   { name: 'model', description: 'Dispatch on a specific model: /model fable|opus|sonnet|haiku <prompt>' },
   { name: 'goal', description: 'Dispatch a thread with a persistent goal: /goal <text>' },
   { name: 'loop', description: 'Dispatch a thread that re-runs a prompt: /loop 10m <prompt>' },
-  { name: 'design', description: 'Dispatch a thread with a live static UI artifact: /design <brief>' },
 ];
 
 /**
@@ -158,7 +156,6 @@ export type DispatchDirective =
   | { kind: 'model'; model: string | undefined; rest: string; error?: string }
   | { kind: 'goal'; goal: string; error?: string }
   | { kind: 'loop'; intervalSeconds: number; prompt: string; error?: string }
-  | { kind: 'design'; brief: string; error?: string }
   | { kind: 'escalate'; error: string };
 
 /**
@@ -210,15 +207,6 @@ export function parseDispatchDirective(text: string, escalationKeyword?: string)
       return { kind: 'loop', intervalSeconds: 0, prompt: '', error: 'Usage: /loop <interval> <prompt> — interval like 30s, 5m, 1h. Example: /loop 10m check CI status' };
     }
     return { kind: 'loop', intervalSeconds: parsed.intervalSeconds, prompt: parsed.prompt };
-  }
-
-  const designMatch = text.trim().match(/^\/design(?:\s+([\s\S]+))?$/i);
-  if (designMatch) {
-    const brief = (designMatch[1] ?? '').trim();
-    if (!brief) {
-      return { kind: 'design', brief: '', error: 'Include a brief — e.g. "/design a responsive pricing page for a developer tool"' };
-    }
-    return { kind: 'design', brief };
   }
 
   return null;

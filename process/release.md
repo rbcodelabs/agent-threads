@@ -55,6 +55,8 @@ Also update the README version badge:
 ![Version](https://img.shields.io/badge/version-X.Y.Z-blue)
 ```
 
+**Chief of Staff pack ref.** `CHIEF_OF_STAFF_REF` in `src/chiefOfStaffOnboarding.ts` pins the tag of `rbcodelabs/chief-of-staff` that first run and "Set up Chief of Staff" clone. Bump it to the pack's latest release tag when the pack has changed, and confirm the tag exists before tagging the plugin (`git ls-remote --tags https://github.com/rbcodelabs/chief-of-staff <ref>`). A missing tag makes every new install fall back to the static guide.
+
 ---
 
 ## Step 4 — Regenerate Screenshots

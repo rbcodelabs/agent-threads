@@ -1,3 +1,4 @@
+import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { App, setIcon, setTooltip, Notice } from 'obsidian';
 import type { ImageAttachment, ImageMediaType } from './types';
 import { MAX_ATTACHMENT_BYTES } from './attachmentUtils';
@@ -7,12 +8,18 @@ import path from 'path';
 import os from 'os';
 import './harnessBrandIcons';
 
+const HARNESS_BRAND_ICONS: Record<AgentHarness, string> = {
+  claude: 'claude-spark',
+  codex: 'openai-blossom',
+  opencode: 'opencode-mark',
+};
+
 export interface DispatchPayload {
   text: string;
   images: ImageAttachment[];
   attachment: string | null;
   /** Harness selected by a kickoff picker, when that picker is enabled. */
-  agentHarness?: 'claude' | 'codex';
+  agentHarness?: AgentHarness;
 }
 
 export interface DispatchInputOptions {
@@ -25,12 +32,21 @@ export interface DispatchInputOptions {
    * reflects the latest value on every keystroke without re-mounting.
    */
   builtinCommands?: { name: string; description: string }[] | (() => { name: string; description: string }[]);
+  subscribeCommands?: (listener: () => void) => () => void;
   /**
    * Argument completions per command name. When the input starts with
    * "/<command> " and the cursor is in the first argument word, the matching
    * options are offered in the same dropdown (e.g. /model → fable|opus|...).
    */
   argCompletions?: Record<string, { name: string; description: string }[]>;
+  /**
+   * Fallback resolver for argument completions of a peer-registered command
+   * (one not present in the static argCompletions record above). Consulted
+   * only when that record has no entry for the command name — a built-in
+   * entry always wins, and a peer command name can never collide with a
+   * built-in one per the registry's own reserved-name check.
+   */
+  peerArgCompletions?: (commandName: string) => readonly { name: string; description: string }[] | undefined;
   /** Called with the raw payload after the user submits */
   onSend: (payload: DispatchPayload) => Promise<void> | void;
 
@@ -74,7 +90,7 @@ export interface DispatchInputOptions {
   /** Title tooltip for the send button (default: 'Start task') */
   sendBtnTitle?: string;
   /** Turn the send button into a locally sticky kickoff harness picker. */
-  harnessPicker?: { initialHarness: 'claude' | 'codex' };
+  harnessPicker?: { initialHarness: AgentHarness };
   /**
    * Called on every keydown/keyup to retrieve the current push-to-talk hotkey
    * string (e.g. "Alt+Space"). When provided, hold-to-record PTT is enabled.
@@ -133,6 +149,7 @@ export class DispatchInput {
   // /slash dropdown
   private skills: { name: string; description: string }[] = [];
   private skillDropdown: HTMLElement | null = null;
+  private unsubscribeCommands?: () => void;
   private skillDropdownItems: { name: string; description: string }[] = [];
   private skillDropdownIndex = 0;
   // 'command' completes the /command word itself; 'arg' completes its first argument
@@ -145,7 +162,7 @@ export class DispatchInput {
 
   private sttController: SttController | null = null;
   private dispatching = false;
-  private selectedHarness: 'claude' | 'codex' | null = null;
+  private selectedHarness: AgentHarness | null = null;
   private harnessMenu: HTMLElement | null = null;
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressNextSendClick = false;
@@ -356,6 +373,7 @@ export class DispatchInput {
       }
     });
 
+    this.unsubscribeCommands = this.options.subscribeCommands?.(() => this.refreshCommands());
     return this.rootEl;
   }
 
@@ -376,6 +394,8 @@ export class DispatchInput {
   }
 
   destroy(): void {
+    this.unsubscribeCommands?.();
+    this.unsubscribeCommands = undefined;
     this.clearLongPressTimer();
     this.closeHarnessMenu();
     this.sttController?.destroy();
@@ -490,14 +510,7 @@ export class DispatchInput {
       // Project is deleted in another view). Merge the failed payload back
       // into anything the user typed or attached while the async dispatch was
       // pending so neither version of the draft is lost.
-      const newerText = this.getValue().trim();
-      this.setValue([text, newerText].filter(Boolean).join('\n\n'));
-      const attachmentParts = [attachment, this.pendingAttachment]
-        .filter((value): value is string => Boolean(value));
-      this.pendingAttachment = attachmentParts.length > 0 ? attachmentParts.join('\n\n') : null;
-      this.pendingImages = [...images, ...this.pendingImages];
-      this.autoGrow();
-      this.renderChips();
+      this.restoreFailedDraft(text, images, attachment);
       const message = err instanceof Error ? err.message : String(err);
       new Notice(`Could not dispatch: ${message}`);
     } finally {
@@ -506,6 +519,17 @@ export class DispatchInput {
   }
 
   // ── Kickoff harness picker ───────────────────────────────────────────────
+
+  /** Restore a failed submission without overwriting a draft typed while it ran. */
+  restoreFailedDraft(text: string, images: ImageAttachment[], attachment: string | null): void {
+    const newerText = this.getValue().trim();
+    this.setValue([text, newerText].filter(Boolean).join('\n\n'));
+    const parts = [attachment, this.pendingAttachment].filter((part): part is string => !!part);
+    this.pendingAttachment = parts.length ? parts.join('\n\n') : null;
+    this.pendingImages = [...images, ...this.pendingImages];
+    this.autoGrow();
+    this.renderChips();
+  }
 
   private configureHarnessPicker(): void {
     this.rootEl.addClass('ct-harness-picker-root');
@@ -545,7 +569,7 @@ export class DispatchInput {
 
   private renderHarnessIdentity(): void {
     if (!this.selectedHarness) return;
-    const name = this.selectedHarness === 'claude' ? 'Claude' : 'Codex';
+    const name = agentHarnessLabel(this.selectedHarness);
     this.sendBtn.empty();
     this.createHarnessMark(this.sendBtn, this.selectedHarness);
     const label = `Start task with ${name}; right-click or hold to change agent`;
@@ -559,8 +583,8 @@ export class DispatchInput {
     if (this.harnessMenu) return;
     const menu = this.rootEl.createDiv({ cls: 'ct-harness-menu', attr: { role: 'menu', 'aria-label': 'Choose agent harness' } });
     this.harnessMenu = menu;
-    for (const harness of ['claude', 'codex'] as const) {
-      const name = harness === 'claude' ? 'Claude' : 'Codex';
+    for (const harness of AGENT_HARNESSES) {
+      const name = agentHarnessLabel(harness);
       const item = menu.createEl('button', {
         cls: 'ct-harness-menu-item',
         attr: {
@@ -592,8 +616,8 @@ export class DispatchInput {
     menu.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
   }
 
-  private createHarnessMark(container: HTMLElement, harness: 'claude' | 'codex'): void {
-    const icon = harness === 'claude' ? 'claude-spark' : 'openai-blossom';
+  private createHarnessMark(container: HTMLElement, harness: AgentHarness): void {
+    const icon = HARNESS_BRAND_ICONS[harness];
     const mark = container.createSpan({
       cls: `ct-harness-mark ct-harness-mark-${harness}`,
       attr: { 'aria-hidden': 'true', 'data-icon': icon },
@@ -890,16 +914,27 @@ export class DispatchInput {
 
   /**
    * Replace the cached skill list with the dynamically-discovered command list
-   * from an SDKCommandsChangedMessage. Filters to skill-type commands (excludes
-   * built-in commands that are already in builtinCommands).
+   * from an SDKCommandsChangedMessage. Deduplication happens at display time so
+   * removing a peer command restores any same-named underlying skill.
    */
   setAvailableCommands(commands: { name: string; description: string }[]): void {
-    const builtinNames = new Set(
-      this.getBuiltinCommands().map(c => c.name.toLowerCase()),
-    );
-    this.skills = commands
-      .filter(c => !builtinNames.has(c.name.toLowerCase()))
-      .map(c => ({ name: c.name, description: c.description }));
+    this.skills = commands.map(c => ({ name: c.name, description: c.description }));
+    this.refreshCommands();
+  }
+
+  /** Registry changes preserve the draft and the underlying SDK skill catalog. */
+  refreshCommands(): void {
+    if (!this.inputEl) return;
+    if (this.pendingCommand && !this.getBuiltinCommands().some(c => c.name === this.pendingCommand)) {
+      this.setValue(this.getValue());
+    }
+    if (this.skillDropdown) {
+      const arg = this.getArgQuery();
+      const query = this.getSlashQuery();
+      if (arg) this.showArgDropdown(arg.options, arg.partial);
+      else if (query !== null) this.showSkillDropdown(query);
+      else this.hideSkillDropdown();
+    }
   }
 
   private getSlashQuery(): string | null {
@@ -918,7 +953,17 @@ export class DispatchInput {
    */
   private getArgQuery(): { options: { name: string; description: string }[]; partial: string } | null {
     const completions = this.options.argCompletions;
-    if (!completions) return null;
+    const peerCompletions = this.options.peerArgCompletions;
+    if (!completions && !peerCompletions) return null;
+    // Built-in entries always win; a peer command name can never collide
+    // with one (the registry rejects reserved names at registration), so no
+    // merging is needed — just fall back when the static record has nothing.
+    const resolveOptions = (commandName: string): { name: string; description: string }[] | undefined => {
+      const builtin = completions?.[commandName];
+      if (builtin) return builtin;
+      const peer = peerCompletions?.(commandName);
+      return peer ? [...peer] : undefined;
+    };
     const val = this.inputEl.value;
     const pos = this.inputEl.selectionStart ?? val.length;
     const before = val.slice(0, pos);
@@ -926,20 +971,22 @@ export class DispatchInput {
     // offer completions while the cursor is in the first word.
     if (this.pendingCommand) {
       if (!/^\S*$/.test(before)) return null;
-      const options = completions[this.pendingCommand];
+      const options = resolveOptions(this.pendingCommand);
       return options ? { options, partial: before } : null;
     }
     const match = before.match(/^\/(\S+)\s+(\S*)$/);
     if (!match) return null;
-    const options = completions[match[1].toLowerCase()];
+    const options = resolveOptions(match[1].toLowerCase());
     if (!options) return null;
     return { options, partial: match[2] };
   }
 
   private showSkillDropdown(query: string): void {
     const q = query.toLowerCase();
-    const builtins = this.getBuiltinCommands().filter(c => c.name.startsWith(q));
-    const skills = this.skills.filter(s => s.name.toLowerCase().startsWith(q));
+    const catalog = this.getBuiltinCommands();
+    const builtinNames = new Set(catalog.map(c => c.name.toLowerCase()));
+    const builtins = catalog.filter(c => c.name.toLowerCase().startsWith(q));
+    const skills = this.skills.filter(s => !builtinNames.has(s.name.toLowerCase()) && s.name.toLowerCase().startsWith(q));
     this.skillDropdownMode = 'command';
     this.openDropdownWith([...builtins, ...skills]);
   }

@@ -1,3 +1,4 @@
+import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import type { ViewStateResult } from 'obsidian';
@@ -34,9 +35,13 @@ import { partitionThreads } from './threadRowState';
 import { agentLabel, buildAgentBreadcrumbs, summarizeAgentTeam } from './agentRuns/agentTreeModel';
 import { renderAgentPopoverTree } from './agentRuns/renderAgentPopoverTree';
 import { renderAgentActivity } from './agentRuns/renderAgentActivity';
-import { designKickoffMessage, type DesignPreviewResult } from './designArtifact';
-import type { DesignArtifact } from './types';
+import { HOST_OWNED_ARTIFACT_FIELDS, toArtifactRef } from './ArtifactContributions';
+import type {
+  ArtifactActionHost, ArtifactActionResult, ArtifactPresentation, ArtifactViewPlacement, ThreadArtifactRef,
+} from './ArtifactContributions';
 import { extractVisualizeMarkers } from './visualizeMarker';
+import { extractMessageContent } from './MessageContent';
+import { MessageContentMountManager } from './messageContentRenderer';
 import { VisualizeMountManager, resolveVisualizeTokens, toFileUrl, type VisualizeFs } from './visualizeRenderer';
 import { deleteScheduledActivity, scheduledActivityForThread, scheduledActivitySummary, type ScheduledActivity } from './scheduledActivity';
 import { ConversationViewPlacementState, resolveHostRestoredActiveThread } from './conversationFirstPlacement';
@@ -48,6 +53,20 @@ export const VIEW_TYPE = 'claude-threads:chat';
 // refresh rate: at 80ms, a long response could trigger 12.5 complete Markdown
 // parses (plus DOM rebuilds) per second.
 const STREAMING_RENDER_INTERVAL_MS = 250;
+
+/** Distance from the true bottom (px) within which the scroller counts as "at bottom". */
+const SCROLL_BOTTOM_THRESHOLD_PX = 40;
+
+/**
+ * A remembered scroll position plus whether it was effectively at the bottom
+ * when captured. Restoring `scrollTop` verbatim replays a stale absolute pixel
+ * offset once content has streamed in since capture — `atBottom` lets the
+ * restore land on the *current* bottom instead of a now-wrong fixed offset.
+ */
+interface AgentScrollState {
+  scrollTop: number;
+  atBottom: boolean;
+}
 
 export class ThreadsView extends ItemView {
   private plugin: ClaudeThreadsPlugin;
@@ -63,6 +82,8 @@ export class ThreadsView extends ItemView {
    * scroller in buildUI(), torn down in onClose().
    */
   private visualizeManager: VisualizeMountManager | null = null;
+  private messageContentManager: MessageContentMountManager | null = null;
+  private messageContentController = new AbortController();
   private streamingRenderTimer: ReturnType<typeof setTimeout> | null = null;
   /** A render is queued whenever new streamed text arrives. */
   private streamingRenderDirty = false;
@@ -108,9 +129,11 @@ export class ThreadsView extends ItemView {
   /** Timeline body of the in-place child activity view, refreshed live. */
   private agentViewBodyEl: HTMLElement | null = null;
   /** Remembered scroll offsets, keyed "<threadId>:main" or "<threadId>:<agentRunId>". */
-  private agentScroll: Map<string, number> = new Map();
+  private agentScroll: Map<string, AgentScrollState> = new Map();
   /** One-shot scroll target consumed by the next main-conversation render. */
-  private pendingMainScroll: number | null = null;
+  private pendingMainScroll: AgentScrollState | null = null;
+  /** Floating "scroll to bottom" pill, shown whenever the scroller isn't parked at the tail. */
+  private scrollBottomBtn: HTMLButtonElement | null = null;
   private moreBtn!: HTMLButtonElement;
   private statusRailEl!: HTMLElement;
   private queueRowsEl!: HTMLElement;
@@ -290,11 +313,14 @@ export class ThreadsView extends ItemView {
 
   private floatingPanelEl!: HTMLElement;
 
-  // Task list card (Claude Code's TodoWrite/TaskCreate checklist)
-  private taskCardEl: HTMLElement | null = null;
-  private taskCardCollapsed = false;
-  /** Thread IDs whose task card has been auto-dismissed after all tasks completed. */
-  private taskCardDismissed = new Set<string>();
+  // Task list pill (Claude Code's TodoWrite/TaskCreate checklist) — mirrors the
+  // sub-agent pill: a small always-visible footer indicator + popover instead of
+  // a card that expands into the main view.
+  private taskPillEl: HTMLElement | null = null;
+  private taskPopoverEl: HTMLElement | null = null;
+  private taskPopoverOutsideHandler: ((e: MouseEvent) => void) | null = null;
+  /** Thread IDs whose task pill has been auto-dismissed after all tasks completed. */
+  private taskPillDismissed = new Set<string>();
 
   // Thread-orchestrator UI: proposed replies render inline in the conversation
   // flow (see renderProposedReplyCard) rather than via a dedicated element
@@ -383,6 +409,7 @@ export class ThreadsView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.buildUI();
+    this.messageContentManager = new MessageContentMountManager(this.plugin.messageContentProviders, { openView: state => this.openArtifactView(state) });
     this.createNativeHeaderActions();
     // Delegate within the view so host title refreshes cannot detach the handler.
     this.registerDomEvent(this.containerEl, 'dblclick', (event) => {
@@ -695,6 +722,9 @@ export class ThreadsView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.messageContentController.abort();
+    this.messageContentManager?.dispose();
+    this.messageContentManager = null;
     this.unsubscribe?.();
     this.stopWakeupCountdown();
     if (this.staleInterval) clearInterval(this.staleInterval);
@@ -705,6 +735,7 @@ export class ThreadsView extends ItemView {
     this.closeSwitcherPanel();
     this.closeAgentPopover();
     this.closeSchedulePopover();
+    this.closeTaskPopover();
     this.agentScroll.clear();
     this.dispatchInput?.destroy();
     // Leaves an IntersectionObserver and a window-level message listener
@@ -781,9 +812,23 @@ export class ThreadsView extends ItemView {
 
     this.mainEl = root.createDiv('ct-main');
     this.messagesEl = this.mainEl.createDiv('ct-messages');
+    this.messagesEl.addEventListener('scroll', () => this.updateScrollBottomPillVisibility());
     this.visualizeManager?.detach();
     this.visualizeManager = new VisualizeMountManager(this.messagesEl, this.buildVisualizeHost());
     this.visualizeManager.attach();
+
+    // In-flow zero-height anchor sitting exactly at the boundary between the
+    // scrolling transcript and the composer below, regardless of the composer's
+    // own height (collapsed, multi-line draft, etc.) — the pill positions off
+    // this anchor's edge rather than off .ct-main's, so it always sits just
+    // above the composer without needing to track the composer's height.
+    const scrollBottomAnchor = this.mainEl.createDiv('ct-scroll-bottom-anchor');
+    this.scrollBottomBtn = scrollBottomAnchor.createEl('button', {
+      cls: 'ct-scroll-bottom-pill ct-hidden',
+      attr: { type: 'button', 'aria-label': 'Scroll to bottom', title: 'Scroll to bottom' },
+    });
+    setIcon(this.scrollBottomBtn, 'chevron-down');
+    this.scrollBottomBtn.addEventListener('click', () => this.scrollToBottom());
 
     const panelWrapper = this.mainEl.createDiv('ct-panel-wrapper');
     const floatingPanel = panelWrapper.createDiv('ct-floating-panel ct-panel-collapsible');
@@ -793,7 +838,6 @@ export class ThreadsView extends ItemView {
     this.managerNotesPanelEl = panelContext.createDiv('ct-manager-notes-panel ct-hidden');
     this.statusRailEl = panelContext.createDiv('ct-status-rail');
     this.queueRowsEl = panelContext.createDiv('ct-queue-rows ct-hidden');
-    this.taskCardEl = panelContext.createDiv('ct-task-card ct-hidden');
     this.artifactCardEl = panelContext.createDiv('ct-artifact-card ct-hidden');
     this.editedFilesEl = panelContext.createDiv('ct-edited-files ct-hidden');
 
@@ -834,7 +878,7 @@ export class ThreadsView extends ItemView {
 
     this.dispatchInput = new DispatchInput({
       app: this.app,
-      placeholder: this.plugin.settings.agentHarness === 'codex' ? 'Message Codex' : 'Message Claude',
+      placeholder: `Message ${agentHarnessLabel(this.plugin.settings.agentHarness)}`,
       inputCls: 'ct-input',
       sendBtnText: '↵',
       sendBtnTitle: 'Send message',
@@ -846,9 +890,12 @@ export class ThreadsView extends ItemView {
       captureLongPaste: true,
       builtinCommands: () => {
         const esc = escalationCommand(this.plugin.settings);
-        return esc ? [...THREAD_BUILTIN_COMMANDS, esc] : THREAD_BUILTIN_COMMANDS;
+        const commands = [...THREAD_BUILTIN_COMMANDS, ...(this.plugin.slashCommands?.list('thread') ?? [])];
+        return esc ? [...commands, esc] : commands;
       },
+      subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
       argCompletions: THREAD_ARG_COMPLETIONS,
+      peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'thread'),
       extraSkillDirs,
       onInput: () => this.scheduleDraftSave(),
       onChipChange: () => this.scheduleDraftSave(),
@@ -873,6 +920,19 @@ export class ThreadsView extends ItemView {
           this.toggleSchedulePopover();
         });
         this.renderScheduledActivity();
+
+        this.taskPillEl = container.createEl('button', {
+          cls: 'ct-tasklist-pill ct-hidden',
+          attr: { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' },
+        });
+        const taskPillIcon = this.taskPillEl.createSpan('ct-tasklist-pill-icon');
+        setIcon(taskPillIcon, 'list-checks');
+        this.taskPillEl.createSpan('ct-tasklist-pill-text');
+        this.taskPillEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.toggleTaskPopover();
+        });
+        this.renderTaskPill();
 
         // Deliberately NOT .ct-footer-pill: that class belongs to the status-line
         // pills in .ct-context-footer, and several tests locate it unqualified.
@@ -1110,9 +1170,12 @@ export class ThreadsView extends ItemView {
   }
 
   private async setActiveThread(id: string): Promise<void> {
+    this.messageContentController?.abort();
+    this.messageContentManager?.reset();
     this.closeSwitcherPanel();
     this.closeAgentPopover();
     this.closeSchedulePopover();
+    this.closeTaskPopover();
     this.rememberAgentScroll();
     const previousId = this.activeThreadId;
 
@@ -1540,104 +1603,159 @@ export class ThreadsView extends ItemView {
     this.renderArtifactCard();
   }
 
-  private activeArtifact(): DesignArtifact | null {
-    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    return thread?.artifacts?.find((artifact) => artifact.kind === 'design-static') ?? null;
+  /**
+   * The artifact the card currently represents, adapted at read time. Records
+   * persisted before providers existed carry no `providerId`; nothing on disk
+   * is rewritten (ADR-0010).
+   */
+  private activeArtifact(): { threadId: string; ref: ThreadArtifactRef } | null {
+    const threadId = this.activeThreadId;
+    const thread = threadId ? this.manager.getThread(threadId) : null;
+    const record = thread?.artifacts?.[0];
+    return record && threadId ? { threadId, ref: toArtifactRef(record) } : null;
   }
 
-  /** Persisted artifact actions stay visible independently of edited-file history. */
+  /**
+   * Persisted artifact actions stay visible independently of edited-file
+   * history. The card is entirely generic: title, subtitle and actions come
+   * from whatever provider owns the artifact, and clicks dispatch by action
+   * id. The host never inspects an artifact's provider data.
+   */
   private renderArtifactCard(): void {
     this.artifactCardEl.empty();
-    const artifact = this.activeArtifact();
-    if (!artifact) {
+    const active = this.activeArtifact();
+    if (!active) {
       this.artifactCardEl.addClass('ct-hidden');
       return;
     }
     this.artifactCardEl.removeClass('ct-hidden');
+    const { threadId, ref } = active;
+
+    // An uninstalled or faulty provider degrades to an explanatory card.
+    // Prior work must never vanish or throw because a plugin went away.
+    const described = this.plugin.artifactProviders.present(ref);
+    const presentation: ArtifactPresentation = described.status === 'ok' ? described.presentation : {
+      title: ref.title,
+      subtitle: described.status === 'missing-provider'
+        ? `Unavailable — no plugin provides "${ref.providerId}"`
+        : `Unavailable — "${ref.providerId}" could not describe this artifact`,
+      actions: [],
+    };
 
     const icon = this.artifactCardEl.createSpan('ct-artifact-card-icon');
-    setIcon(icon, 'panels-top-left');
+    setIcon(icon, presentation.icon ?? 'panels-top-left');
     const copy = this.artifactCardEl.createDiv('ct-artifact-card-copy');
-    copy.createDiv({ cls: 'ct-artifact-card-title', text: artifact.title });
-    copy.createDiv({ cls: 'ct-artifact-card-meta', text: 'Static design artifact' });
+    copy.createDiv({ cls: 'ct-artifact-card-title', text: presentation.title });
+    if (presentation.subtitle) copy.createDiv({ cls: 'ct-artifact-card-meta', text: presentation.subtitle });
 
     const actions = this.artifactCardEl.createDiv('ct-artifact-card-actions');
-    const action = (label: string, iconName: string, handler: () => void | Promise<void>, primary = false) => {
+    for (const action of presentation.actions) {
+      const primary = action.variant === 'primary';
       const button = actions.createEl('button', {
         cls: `ct-artifact-action ${primary ? 'ct-artifact-action-primary' : 'ct-artifact-action-secondary'}`,
       });
       const iconEl = button.createSpan('ct-artifact-action-icon');
-      setIcon(iconEl, iconName);
-      if (primary) button.createSpan({ cls: 'ct-artifact-action-label', text: 'Preview' });
-      button.setAttribute('aria-label', label);
-      button.setAttribute('title', label);
-      button.addEventListener('click', () => { void handler(); });
-      return button;
-    };
-    action('Preview design', 'play', async () => { await this.openArtifactPreview(artifact); }, true);
-    action('Capture design screenshot', 'camera', () => this.captureArtifact(artifact));
-    action('Reveal design source', 'folder-open', () => this.revealArtifactSource(artifact));
+      setIcon(iconEl, action.icon ?? 'circle');
+      if (primary && action.shortLabel) button.createSpan({ cls: 'ct-artifact-action-label', text: action.shortLabel });
+      button.setAttribute('aria-label', action.label);
+      button.setAttribute('title', action.tooltip ?? action.label);
+      button.addEventListener('click', () => { void this.announceArtifactAction(threadId, ref.id, action.id); });
+    }
   }
 
   refreshArtifactCard(): void {
     this.renderArtifactCard();
   }
 
-  async openArtifactPreview(artifact: DesignArtifact): Promise<DesignPreviewResult> {
+  /** Card-click wrapper: the user-visible half of `invokeArtifactAction`. */
+  private async announceArtifactAction(threadId: string, artifactId: string, actionId: string): Promise<void> {
+    const result = await this.invokeArtifactAction(threadId, artifactId, actionId);
+    if (result.message) new Notice(result.message);
+  }
+
+  /**
+   * The one place an artifact action is executed. Both a card click and
+   * `api.v1.artifacts.invokeAction` land here, so provider isolation, the
+   * invoke timeout and the result shape are shared by construction rather
+   * than by two implementations agreeing to stay in step. Takes ids, not a
+   * ref, so both callers resolve the artifact the same way.
+   */
+  async invokeArtifactAction(threadId: string, artifactId: string, actionId: string): Promise<ArtifactActionResult> {
+    const record = this.manager.getThread(threadId)?.artifacts?.find((candidate) => candidate.id === artifactId);
+    if (!record) return { status: 'error', message: `Artifact not found: ${artifactId}` };
+    const ref = toArtifactRef(record);
+    const result = await this.plugin.artifactProviders.invoke(actionId, ref, this.artifactActionHost(threadId, ref));
+    this.renderArtifactCard();
+    return result;
+  }
+
+  /**
+   * Capabilities lent to a provider for the duration of one action. A provider
+   * never receives this view, a workspace leaf, or a DOM node — only these
+   * three brokered operations.
+   */
+  private artifactActionHost(threadId: string, ref: ThreadArtifactRef): ArtifactActionHost {
+    return {
+      openView: (state) => this.openArtifactView(state),
+      revealInFolder: (target) => this.revealArtifactPath(target),
+      updateArtifact: async (patch) => {
+        const record = this.manager.getThread(threadId)?.artifacts?.find((candidate) => candidate.id === ref.id);
+        if (!record) return;
+        if (patch.title !== undefined) record.title = patch.title;
+        if (patch.data && typeof patch.data === 'object') {
+          const writable = record as unknown as Record<string, unknown>;
+          for (const [key, value] of Object.entries(patch.data as Record<string, unknown>)) {
+            // Host-owned identity is not writable by the provider. `storageRoot`
+            // is in that set: it is only ever set after the host has validated
+            // it, so a provider cannot redirect its own storage here and get a
+            // recursive delete pointed somewhere else later.
+            if (HOST_OWNED_ARTIFACT_FIELDS.includes(key)) continue;
+            writable[key] = value;
+          }
+        }
+        await this.plugin.saveSettings();
+      },
+    };
+  }
+
+  /**
+   * Places a host view on the provider's behalf and reports where it landed.
+   * Conversation-first policy and context-panel leaf ownership are host
+   * internals a peer cannot see, so the decision stays here.
+   */
+  async openArtifactView(request: { type: string; state?: Record<string, unknown> }): Promise<ArtifactViewPlacement> {
     try {
       if (this.plugin.isConversationFirst()) {
-        await this.plugin.contextPanel.setViewState({
-          type: 'geode-artifact', active: true, state: { root: artifact.root },
-        });
-        if (this.plugin.contextPanel.getLeaf().getViewState().type !== 'geode-artifact') {
-          throw new Error('Secure artifact preview is unavailable.');
+        await this.plugin.contextPanel.setViewState({ type: request.type, active: true, state: request.state });
+        if (this.plugin.contextPanel.getLeaf().getViewState().type !== request.type) {
+          throw new Error('The host substituted another view.');
         }
-        return { status: 'opened' };
+        return 'context-panel';
       }
-      const existing = this.app.workspace.getLeavesOfType('geode-artifact');
-      const leaf = existing.find((candidate) =>
-        (candidate.getViewState().state as { root?: string } | undefined)?.root === artifact.root,
-      ) ?? existing[0] ?? this.app.workspace.getLeaf('tab');
-      await leaf.setViewState({ type: 'geode-artifact', active: true, state: { root: artifact.root } });
-      if (leaf.getViewState().type !== 'geode-artifact') throw new Error('Secure artifact preview is unavailable.');
+      const existing = this.app.workspace.getLeavesOfType(request.type);
+      const matches = (candidate: WorkspaceLeaf) => {
+        const current = candidate.getViewState().state as Record<string, unknown> | undefined;
+        return Object.entries(request.state ?? {}).every(([key, value]) => current?.[key] === value);
+      };
+      const leaf = existing.find(matches) ?? existing[0] ?? this.app.workspace.getLeaf('tab');
+      await leaf.setViewState({ type: request.type, active: true, state: request.state });
+      if (leaf.getViewState().type !== request.type) throw new Error('The host substituted another view.');
       await this.app.workspace.revealLeaf(leaf);
-      return { status: 'opened' };
+      return 'tab';
     } catch {
-      try {
-        const { shell } = require('electron') as { shell: { showItemInFolder: (target: string) => void } };
-        shell.showItemInFolder(artifact.manifestPath);
-        const warning = 'Secure artifact preview requires Geode; revealed the source instead.';
-        new Notice(warning);
-        return { status: 'source-revealed', warning };
-      } catch (error) {
-        return { status: 'unavailable', warning: `Could not open artifact preview or reveal source: ${error instanceof Error ? error.message : String(error)}` };
-      }
+      return 'unavailable';
     }
   }
 
-  private async captureArtifact(artifact: DesignArtifact): Promise<void> {
-    const host = (window as unknown as {
-      geode?: { captureArtifact?: (root: string) => Promise<{ path: string; width: number; height: number }> };
-    }).geode;
-    if (!host?.captureArtifact) {
-      new Notice('Artifact capture requires Geode with ArtifactView support.');
-      return;
-    }
+  /** Reveals a local path in the OS file manager; false when unsupported. */
+  async revealArtifactPath(target: string): Promise<boolean> {
     try {
-      const captured = await host.captureArtifact(artifact.root);
-      artifact.lastCapturePath = captured.path;
-      artifact.updatedAt = Date.now();
-      await this.plugin.saveSettings();
-      this.renderArtifactCard();
-      new Notice(`Captured ${captured.width}×${captured.height} artifact screenshot.`);
-    } catch (error) {
-      new Notice(`Artifact capture failed: ${(error as Error).message}`);
+      const { shell } = require('electron') as { shell: { showItemInFolder: (path: string) => void } };
+      shell.showItemInFolder(target);
+      return true;
+    } catch {
+      return false;
     }
-  }
-
-  private async revealArtifactSource(artifact: DesignArtifact): Promise<void> {
-    const { shell } = require('electron') as { shell: { showItemInFolder: (target: string) => void } };
-    shell.showItemInFolder(artifact.manifestPath);
   }
 
   // Switch to icon-only chips above this file count to keep the row compact
@@ -1830,7 +1948,7 @@ export class ThreadsView extends ItemView {
     if (!thread) return;
 
     this.renderComposerContext();
-    this.renderTaskCard();
+    this.renderTaskPill();
 
     // Re-render queue rows in case the thread changed.
     this.renderQueueRows();
@@ -1848,57 +1966,135 @@ export class ThreadsView extends ItemView {
   }
 
   /**
-   * Renders the Claude Code task list as a checklist card pinned above the
-   * input panel: completed tasks struck through, the in-progress task bolded
-   * with an accent marker, matching the CLI's task view.
+   * Refreshes the composer-footer task pill from the active thread's task list
+   * (Claude Code's TodoWrite/TaskCreate checklist). Mirrors renderAgentPill:
+   * `.ct-hidden` while there are no tasks (or all tasks are done and the user has
+   * since moved on — see taskPillDismissed); otherwise a small always-visible
+   * summary that opens the full checklist in a popover on click, keeping the
+   * conversation the conversation instead of a card that grows into the main view.
    */
-  private renderTaskCard(): void {
-    if (!this.taskCardEl) return;
+  private renderTaskPill(): void {
+    if (!this.taskPillEl) return;
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : undefined;
     const tasks = thread?.tasks ?? [];
-    this.taskCardEl.empty();
+
     if (tasks.length === 0) {
-      this.taskCardEl.addClass('ct-hidden');
+      this.taskPillEl.addClass('ct-hidden');
+      this.closeTaskPopover();
       return;
     }
+
     const allDone = tasks.every(t => t.status === 'completed');
     // If tasks exist but are no longer all done, clear the dismissed flag so the
-    // card reappears (e.g. Claude creates new tasks on the next turn).
-    if (!allDone && this.activeThreadId) this.taskCardDismissed.delete(this.activeThreadId);
-    // Auto-hide after all tasks complete: card dismissed by user moving on.
-    if (allDone && this.activeThreadId && this.taskCardDismissed.has(this.activeThreadId)) {
-      this.taskCardEl.addClass('ct-hidden');
+    // pill reappears (e.g. Claude creates new tasks on the next turn).
+    if (!allDone && this.activeThreadId) this.taskPillDismissed.delete(this.activeThreadId);
+    // Auto-hide after all tasks complete: pill dismissed once the user moves on
+    // (see the user_message_added handler), same UX as the old card had.
+    if (allDone && this.activeThreadId && this.taskPillDismissed.has(this.activeThreadId)) {
+      this.taskPillEl.addClass('ct-hidden');
+      this.closeTaskPopover();
       return;
     }
-    this.taskCardEl.removeClass('ct-hidden');
+
+    this.taskPillEl.removeClass('ct-hidden');
 
     const done = tasks.filter(t => t.status === 'completed').length;
     const inProgress = tasks.filter(t => t.status === 'in_progress').length;
-    const open = tasks.length - done - inProgress;
 
-    const header = this.taskCardEl.createDiv('ct-task-card-header');
-    const chevronEl = header.createSpan({ cls: 'ct-task-card-chevron' });
-    setIcon(chevronEl, this.taskCardCollapsed ? 'chevron-right' : 'chevron-down');
-    header.createSpan({
-      cls: 'ct-task-card-title',
-      text: `${tasks.length} task${tasks.length === 1 ? '' : 's'}`,
+    const textEl = this.taskPillEl.querySelector('.ct-tasklist-pill-text');
+    if (textEl) textEl.textContent = `${done}/${tasks.length} tasks`;
+    this.taskPillEl.toggleClass('ct-tasklist-pill-active', !allDone && inProgress > 0);
+    this.taskPillEl.toggleClass('ct-tasklist-pill-done', allDone);
+    setTooltip(this.taskPillEl, `${done}/${tasks.length} tasks done — open the task list`);
+
+    // Keep an already-open popover live as tasks_updated events stream in.
+    if (this.taskPopoverEl) this.renderTaskPopoverList();
+  }
+
+  private toggleTaskPopover(): void {
+    if (this.taskPopoverEl) {
+      this.closeTaskPopover();
+      this.taskPillEl?.focus();
+    } else {
+      this.openTaskPopover();
+    }
+  }
+
+  /** Opens the full task checklist above the composer. Mirrors openAgentPopover. */
+  private openTaskPopover(): void {
+    if (!this.activeThreadId || !this.taskPillEl) return;
+    const wrapper = this.mainEl?.querySelector('.ct-panel-wrapper') as HTMLElement | null;
+    if (!wrapper) return;
+
+    const popover = wrapper.createDiv('ct-tasklist-popover');
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('aria-label', 'Tasks in this thread');
+    this.taskPopoverEl = popover;
+    this.taskPillEl.setAttribute('aria-expanded', 'true');
+
+    const header = popover.createDiv('ct-tasklist-popover-header');
+    header.createSpan({ cls: 'ct-tasklist-popover-title', text: 'Tasks' });
+    const closeBtn = header.createEl('button', {
+      cls: 'ct-tasklist-popover-close',
+      attr: { type: 'button', 'aria-label': 'Close task list' },
     });
-    header.createSpan({
-      cls: 'ct-task-card-counts',
-      text: `(${done} done, ${inProgress} in progress, ${open} open)`,
-    });
-    header.addEventListener('click', () => {
-      this.taskCardCollapsed = !this.taskCardCollapsed;
-      this.renderTaskCard();
+    setIcon(closeBtn, 'x');
+    closeBtn.addEventListener('click', () => {
+      this.closeTaskPopover();
+      this.taskPillEl?.focus();
     });
 
-    if (this.taskCardCollapsed) return;
-    const list = this.taskCardEl.createDiv('ct-task-card-list');
+    popover.createDiv('ct-tasklist-popover-list');
+    this.renderTaskPopoverList();
+
+    popover.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        this.closeTaskPopover();
+        this.taskPillEl?.focus();
+      }
+    });
+
+    // Move focus into the popover (task rows aren't focusable, so the close
+    // button) so Escape reaches the keydown handler above — mirrors
+    // openAgentPopover, which focuses its first row.
+    closeBtn.focus();
+
+    // Outside-click dismissal, registered next tick so the click that opened the
+    // popover doesn't immediately close it again (mirrors openAgentPopover).
+    setTimeout(() => {
+      const outsideHandler = (e: MouseEvent) => {
+        if (!popover.contains(e.target as Node) && !this.taskPillEl?.contains(e.target as Node)) {
+          this.closeTaskPopover();
+        }
+      };
+      this.taskPopoverOutsideHandler = outsideHandler;
+      document.addEventListener('mousedown', outsideHandler, true);
+    }, 0);
+  }
+
+  /** Repaints the popover's checklist in place, so live tasks_updated events don't close it. */
+  private renderTaskPopoverList(): void {
+    const list = this.taskPopoverEl?.querySelector('.ct-tasklist-popover-list') as HTMLElement | null;
+    if (!list || !this.activeThreadId) return;
+    list.empty();
+    const tasks = this.manager.getThread(this.activeThreadId)?.tasks ?? [];
     for (const task of tasks) {
       const row = list.createDiv(`ct-task-row ct-task-row-${task.status}`);
       const iconEl = row.createSpan({ cls: 'ct-task-row-icon' });
       setIcon(iconEl, task.status === 'completed' ? 'circle-check' : task.status === 'in_progress' ? 'loader-circle' : 'circle');
       row.createSpan({ cls: 'ct-task-row-text', text: task.content });
+    }
+  }
+
+  private closeTaskPopover(): void {
+    this.taskPopoverEl?.remove();
+    this.taskPopoverEl = null;
+    this.taskPillEl?.setAttribute('aria-expanded', 'false');
+    if (this.taskPopoverOutsideHandler) {
+      document.removeEventListener('mousedown', this.taskPopoverOutsideHandler, true);
+      this.taskPopoverOutsideHandler = null;
     }
   }
 
@@ -2069,6 +2265,11 @@ export class ThreadsView extends ItemView {
       .setIcon('shield')
       .onClick(() => this.togglePermissionModeMenu(event))
     );
+    menu.addItem(item => item
+      .setTitle(`Harness: ${agentHarnessLabel(thread.agentHarness)}`)
+      .setIcon('bot')
+      .onClick(() => this.toggleHarnessMenu(event, thread.id))
+    );
     menu.addSeparator();
     menu.addItem(item =>
       item
@@ -2202,8 +2403,9 @@ export class ThreadsView extends ItemView {
     const model = this.currentModel();
     if (!model) return 'Default';
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    const options = thread?.agentHarness === 'codex'
-      ? this.plugin.discoveredModelsByHarness.codex.map((m) => ({ label: m.displayName, value: m.value }))
+    const harness = thread?.agentHarness ?? 'claude';
+    const options = harness !== 'claude'
+      ? this.plugin.discoveredModelsByHarness[harness].map((m) => ({ label: m.displayName, value: m.value }))
       : ThreadsView.CLAUDE_MODEL_OPTIONS;
     return options.find(option => option.value === model)?.label ?? model;
   }
@@ -2222,8 +2424,9 @@ export class ThreadsView extends ItemView {
     const current = this.currentModel();
     const menu = new Menu();
     const thread = this.manager.getThread(this.activeThreadId);
-    const options = thread?.agentHarness === 'codex'
-      ? [{ label: 'Default', value: undefined }, ...this.plugin.discoveredModelsByHarness.codex.map((m) => ({ label: m.displayName, value: m.value }))]
+    const harness = thread?.agentHarness ?? 'claude';
+    const options = harness !== 'claude'
+      ? [{ label: 'Default', value: undefined }, ...this.plugin.discoveredModelsByHarness[harness].map((m) => ({ label: m.displayName, value: m.value }))]
       : ThreadsView.CLAUDE_MODEL_OPTIONS;
     for (const opt of options) {
       menu.addItem(item => {
@@ -2270,6 +2473,50 @@ export class ThreadsView extends ItemView {
       });
     }
     menu.showAtMouseEvent(event);
+  }
+
+  private toggleHarnessMenu(event: MouseEvent, threadId: string): void {
+    const thread = this.manager.getThread(threadId);
+    if (!thread) return;
+    const current = thread.agentHarness ?? 'claude';
+    const blocked = this.manager.getHarnessSwitchBlockReason(threadId);
+    const menu = new Menu();
+    for (const option of AGENT_HARNESSES.map((value) => ({ value, label: agentHarnessLabel(value) }))) {
+      menu.addItem(item => {
+        item.setTitle(option.value !== current && blocked ? `${option.label} — ${blocked}` : option.label)
+          .setChecked(option.value === current)
+          .setDisabled(option.value !== current && !!blocked);
+        if (option.value !== current && !blocked) {
+          item.onClick(() => { void this.requestHarnessSwitch(threadId, option.value); });
+        }
+      });
+    }
+    menu.showAtMouseEvent(event);
+  }
+
+  private async requestHarnessSwitch(threadId: string, targetHarness: AgentHarness): Promise<void> {
+    const thread = this.manager.getThread(threadId);
+    if (!thread) return;
+    if (thread.messages.some(message => message.role === 'user' || message.role === 'assistant')) {
+      const confirmed = await promptConfirm(this.app, {
+        message: `Switch this thread to ${agentHarnessLabel(targetHarness)}? The conversation stays here, but the model and native session reset. The new harness continues from a summary and transcript references.`,
+        confirmLabel: `Switch to ${agentHarnessLabel(targetHarness)}`,
+      });
+      if (!confirmed) return;
+    }
+    // The captured ID prevents navigation while the menu/modal is open from
+    // applying the choice to a different active thread.
+    try {
+      await this.manager.switchHarness(threadId, targetHarness, () => this.plugin.saveSettings());
+      if (threadId === this.activeThreadId) {
+        this.renderThreadInfo();
+        this.applyComposerPlaceholder();
+        this.setRunningState(false);
+      }
+      new Notice(`Switched thread to ${agentHarnessLabel(targetHarness)}.`);
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : String(error));
+    }
   }
 
   private toggleCompressView(): void {
@@ -2337,16 +2584,20 @@ export class ThreadsView extends ItemView {
   private async renderMarkdown(
     markdown: string,
     el: HTMLElement,
-    options: { streaming?: boolean } = {},
+    options: { streaming?: boolean; messageId?: string } = {},
   ): Promise<void> {
+    const threadId = this.activeThreadId;
+    const signal = this.messageContentController?.signal ?? new AbortController().signal;
+    const transcriptMessage = options.messageId && threadId ? this.manager.getThread(threadId)?.messages.find(message => message.id === options.messageId && message.role === 'assistant' && message.content === markdown) : undefined;
+    const inline = transcriptMessage || options.streaming ? extractMessageContent(markdown, options) : { text: markdown, markers: [] };
     // Codex's `visualize` skill puts a wrapped content reference on its own line
     // where an inline visual belongs. Rewrite those lines into anchor
     // placeholders here, before marked runs, so the markdown is parsed exactly
     // once — splitting into segments and parsing each would break ordered-list
     // numbering, reference links, and footnotes that span a marker.
     const visualize = this.plugin.settings.enableInlineVisualizations !== false
-      ? extractVisualizeMarkers(markdown, { streaming: options.streaming })
-      : { text: markdown, markers: [] };
+      ? extractVisualizeMarkers(inline.text, { streaming: options.streaming })
+      : { text: inline.text, markers: [] };
 
     // Pre-process [[wikilinks]] and [[target|alias]] into inline HTML anchors
     // before handing off to marked. marked passes inline HTML through unchanged,
@@ -2366,6 +2617,7 @@ export class ThreadsView extends ItemView {
     // messages — during streaming the marker renders as inert card chrome, so
     // a frame is never rebuilt on every token.
     this.visualizeManager?.hydrate(el, visualize.markers, { interactive: !options.streaming });
+    if (threadId && !signal.aborted) void this.messageContentManager?.hydrate(el, inline.markers, { threadId, messageId: transcriptMessage?.id ?? 'streaming', signal }, options);
     // Wrap tables in a scrollable container so wide tables don't overflow.
     el.querySelectorAll<HTMLTableElement>('table').forEach((table) => {
       const wrapper = document.createElement('div');
@@ -2569,7 +2821,7 @@ export class ThreadsView extends ItemView {
         this.renderToolCalls(msgEl, msg.toolCalls);
       }
       const msgContent = msgEl.createDiv('ct-message-content');
-      await this.renderMarkdown(msg.content, msgContent);
+      await this.renderMarkdown(msg.content, msgContent, { messageId: msg.id });
       lastMsgEl = msgEl;
     }
 
@@ -2749,6 +3001,22 @@ export class ThreadsView extends ItemView {
   }
 
   private async renderMessages(): Promise<void> {
+    // .empty() would remove the floating scroll-bottom pill too, since it
+    // shares .ct-main's positioning but was never appended into .ct-messages
+    // — see setup, where it's mounted on a separate anchor sibling. Recompute
+    // its visibility once at the end regardless of which branch below returns,
+    // rather than duplicating the call at every early return.
+    try {
+      await this.renderMessagesBody();
+    } finally {
+      this.updateScrollBottomPillVisibility();
+    }
+  }
+
+  private async renderMessagesBody(): Promise<void> {
+    this.messageContentController.abort();
+    this.messageContentController = new AbortController();
+    this.messageContentManager?.reset();
     this.messagesEl.empty();
     this.messagesEl.removeClass('ct-messages-agent-view');
     this.agentViewBodyEl = null;
@@ -2862,16 +3130,35 @@ export class ThreadsView extends ItemView {
       pendingQ.cardEl = cardEl;
     }
 
-    // Returning from a child agent view restores where the user left the
-    // conversation; every other render still lands at the bottom.
+    this.applyPendingMainScroll();
+    this.setRunningState(this.manager.isRunning(this.activeThreadId));
+  }
+
+  /**
+   * Applies the scroll target for the conversation that renderMessagesBody()
+   * just (re)rendered: either a remembered offset restored from before an
+   * agent-view detour, or the bottom by default. When the user was at the
+   * bottom before entering the child view, scrollToBottom() (which reads the
+   * *current* scrollHeight) is used instead of the stale captured offset, so
+   * streaming that happened while the panel was open doesn't strand the user
+   * above a now-longer conversation. Split out from renderMessagesBody() so
+   * this can be exercised directly in tests without driving the full render.
+   */
+  private applyPendingMainScroll(): void {
     if (this.pendingMainScroll !== null) {
       const target = this.pendingMainScroll;
       this.pendingMainScroll = null;
-      requestAnimationFrame(() => { this.messagesEl.scrollTop = target; });
+      if (target.atBottom) {
+        this.scrollToBottom();
+      } else {
+        requestAnimationFrame(() => {
+          this.messagesEl.scrollTop = target.scrollTop;
+          this.updateScrollBottomPillVisibility();
+        });
+      }
     } else {
       this.scrollToBottom();
     }
-    this.setRunningState(this.manager.isRunning(this.activeThreadId));
   }
 
   // ── Sub-agent pill, popover and in-place activity view ────────────────────
@@ -3037,7 +3324,9 @@ export class ThreadsView extends ItemView {
   private rememberAgentScroll(): void {
     const key = this.agentScrollKey();
     if (!key || !this.messagesEl) return;
-    this.agentScroll.set(key, this.messagesEl.scrollTop);
+    const scroller = this.messagesEl;
+    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
+    this.agentScroll.set(key, { scrollTop: scroller.scrollTop, atBottom });
   }
 
   private async enterAgentView(agentRunId: string): Promise<void> {
@@ -3109,7 +3398,13 @@ export class ThreadsView extends ItemView {
 
     const remembered = this.agentScroll.get(`${this.activeThreadId}:${agentRunId}`);
     requestAnimationFrame(() => {
-      this.messagesEl.scrollTop = remembered ?? this.messagesEl.scrollHeight;
+      // No memory, or the user was parked at the tail last time: land on the
+      // *current* bottom rather than replaying a stale absolute offset that
+      // may now undershoot content the run streamed in since last viewed.
+      this.messagesEl.scrollTop = (!remembered || remembered.atBottom)
+        ? this.messagesEl.scrollHeight
+        : remembered.scrollTop;
+      this.updateScrollBottomPillVisibility();
     });
   }
 
@@ -3136,7 +3431,7 @@ export class ThreadsView extends ItemView {
   private applyComposerPlaceholder(): void {
     if (!this.dispatchInput) return;
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    const base = thread?.agentHarness === 'codex' ? 'Message Codex' : 'Message Claude';
+    const base = `Message ${agentHarnessLabel(thread?.agentHarness)}`;
     // Kept short: a long placeholder wraps and clips in a narrow side panel.
     this.dispatchInput.setPlaceholder(
       this.currentAgentViewId() ? `${base} (main conversation)` : base,
@@ -3199,7 +3494,7 @@ export class ThreadsView extends ItemView {
 
         // Full content (hidden by default)
         const fullContent = content.createDiv('ct-full-content ct-hidden');
-        await this.renderMarkdown(msg.content, fullContent);
+        await this.renderMarkdown(msg.content, fullContent, { messageId: msg.id });
 
         let expanded = false;
         expandBtn.addEventListener('click', () => {
@@ -3219,7 +3514,7 @@ export class ThreadsView extends ItemView {
           this.generateMessageSummary(msg);
         }
       } else {
-        await this.renderMarkdown(msg.content, content);
+        await this.renderMarkdown(msg.content, content, { messageId: msg.id });
       }
       // Only render the copy button when there is actual text to copy. Desktop
       // hides this button by default (opacity: 0, revealed on hover), so an
@@ -3684,7 +3979,7 @@ export class ThreadsView extends ItemView {
     const header = card.createDiv('ct-question-card-header');
     const iconEl = header.createSpan('ct-question-card-icon');
     setIcon(iconEl, 'help-circle');
-    const source = questions.some((question) => question.source === 'codex') ? 'Codex' : 'Claude';
+    const source = agentHarnessLabel(questions.find((question) => question.source)?.source);
     header.createSpan({ cls: 'ct-question-card-label', text: `${source} needs your input` });
 
     const body = card.createDiv('ct-question-card-body');
@@ -3775,7 +4070,8 @@ export class ThreadsView extends ItemView {
    * Renders the plan approval card shown when Claude calls ExitPlanMode.
    * The card is anchored to the current streaming element (or messagesEl) so it
    * sits visually inside the current response turn.
-   * Approve proceeds with implementation; Reject cancels the session with interrupt.
+   * Approve proceeds with implementation; Reject first asks for optional feedback,
+   * then keeps the session in Plan mode so the agent can revise its proposal.
    * Edit opens a textarea pre-populated with the plan so the user can revise it.
    */
   private renderPlanCard(
@@ -3809,17 +4105,66 @@ export class ThreadsView extends ItemView {
     const rejectThreadId = this.activeThreadId;
     const rejectBtn = actions.createEl('button', { text: 'Reject', cls: 'ct-plan-btn ct-plan-reject' });
     rejectBtn.addEventListener('click', () => {
-      card.remove();
-      const hadFeedback = reject();
-      // Inject a follow-up turn so Claude acknowledges the rejection and offers
-      // to revise. sendMessage() queues automatically while the session is still
-      // active and fires as a new turn once the denial response lands.
-      if (rejectThreadId && !hadFeedback) {
-        void this.manager.sendMessage(
-          rejectThreadId,
-          'I rejected the plan. Please ask what changes I\'d like, or suggest alternative approaches.',
-        );
-      }
+      actions.style.display = 'none';
+
+      const rejectionField = card.createDiv('ct-plan-rejection-field');
+      const label = rejectionField.createEl('label', { cls: 'ct-plan-rejection-label' });
+      label.createSpan({ text: 'Why are you rejecting this plan?' });
+      const rejectionTextarea = label.createEl('textarea', {
+        cls: 'ct-plan-textarea ct-plan-rejection-textarea',
+      });
+      rejectionTextarea.rows = 4;
+
+      const rejectionActions = rejectionField.createDiv('ct-plan-actions ct-plan-rejection-actions');
+      const cancelBtn = rejectionActions.createEl('button', {
+        text: 'Cancel',
+        cls: 'ct-plan-btn ct-plan-edit ct-plan-rejection-cancel',
+      });
+      const submitBtn = rejectionActions.createEl('button', {
+        text: 'Reject plan',
+        cls: 'ct-plan-btn ct-plan-reject ct-plan-rejection-submit',
+      });
+
+      let submitting = false;
+      const cancelRejection = () => {
+        if (submitting) return;
+        rejectionField.remove();
+        actions.style.display = '';
+        rejectBtn.focus();
+      };
+      const submitRejection = () => {
+        if (submitting) return;
+        submitting = true;
+        submitBtn.disabled = true;
+        cancelBtn.disabled = true;
+
+        const feedback = rejectionTextarea.value.trim();
+        const hadFeedback = reject();
+        // sendMessage() keeps existing queued messages in FIFO order. Explicit
+        // feedback is never suppressed by that queue; only an empty response
+        // falls back to the legacy generic prompt when nothing else is waiting.
+        if (rejectThreadId && (feedback || !hadFeedback)) {
+          void this.manager.sendMessage(
+            rejectThreadId,
+            feedback || 'I rejected the plan. Please ask what changes I\'d like, or suggest alternative approaches.',
+          );
+        }
+        card.remove();
+      };
+
+      cancelBtn.addEventListener('click', cancelRejection);
+      submitBtn.addEventListener('click', submitRejection);
+      rejectionTextarea.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          cancelRejection();
+        } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          submitRejection();
+        }
+      });
+      rejectionTextarea.focus();
+      this.scrollToBottom();
     });
 
     const editBtn = actions.createEl('button', { text: 'Edit', cls: 'ct-plan-btn ct-plan-edit' });
@@ -3904,8 +4249,8 @@ export class ThreadsView extends ItemView {
         void this.manager.sendMessage(threadId, msg);
       },
       () => {
-        // Reject: just clear the persisted plan. The follow-up sendMessage is
-        // injected by renderPlanCard's reject button handler (same as live path).
+        // Reject: just clear the persisted plan. The rejection-entry submit
+        // handler injects the user's feedback (or legacy fallback) afterward.
         clearPlan();
         return false;
       },
@@ -4104,7 +4449,7 @@ export class ThreadsView extends ItemView {
    * Shown in response to the /context slash command.
    */
   private renderContextUsageCard(
-    usage: import('@anthropic-ai/claude-agent-sdk').SDKControlGetContextUsageResponse,
+    usage: import('./HarnessSession').HarnessContextUsage,
   ): void {
     const container = this.cardContainer();
     const card = container.createDiv('ct-context-usage-card');
@@ -4122,7 +4467,8 @@ export class ThreadsView extends ItemView {
     const bar = card.createDiv('ct-context-usage-bar');
     let offset = 0;
     for (const cat of usage.categories) {
-      if (cat.tokens <= 0) continue;
+      // Deferred tool schemas sit outside the window; list them but keep them off the bar.
+      if (cat.tokens <= 0 || cat.kind === 'deferred') continue;
       const catPct = (cat.tokens / usage.maxTokens) * 100;
       const seg = bar.createDiv('ct-context-usage-seg');
       seg.style.width = `${catPct}%`;
@@ -4327,14 +4673,14 @@ export class ThreadsView extends ItemView {
       }
 
       case 'user_message_added': {
-        // Auto-dismiss the task card if all tasks completed on the previous turn.
+        // Auto-dismiss the task pill if all tasks completed on the previous turn.
         // This hides the checklist the moment the user moves on, rather than
         // immediately when the last task is ticked — giving them a chance to review.
         if (this.activeThreadId) {
           const tasks = this.manager.getThread(this.activeThreadId)?.tasks ?? [];
           if (tasks.length > 0 && tasks.every(t => t.status === 'completed')) {
-            this.taskCardDismissed.add(this.activeThreadId);
-            this.renderTaskCard();
+            this.taskPillDismissed.add(this.activeThreadId);
+            this.renderTaskPill();
           }
         }
         // Only create the bubble when the message came from an external caller
@@ -4873,7 +5219,7 @@ export class ThreadsView extends ItemView {
       }
 
       case 'tasks_updated': {
-        this.renderTaskCard();
+        this.renderTaskPill();
         break;
       }
 
@@ -5475,9 +5821,24 @@ export class ThreadsView extends ItemView {
     // so the browser keeps ct-messages sized correctly automatically.
     requestAnimationFrame(() => {
       this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+      this.updateScrollBottomPillVisibility();
     });
   }
 
+  /**
+   * Shows the floating "scroll to bottom" pill whenever the scroller is more
+   * than the stick threshold away from the tail — a safety net for this class
+   * of bug (stale scroll restores, future scroll jumps) in either the main
+   * conversation or the sub-agent activity view, since both render into the
+   * same .ct-messages element this listens on.
+   */
+  private updateScrollBottomPillVisibility(): void {
+    const btn = this.scrollBottomBtn;
+    if (!btn || !this.messagesEl) return;
+    const scroller = this.messagesEl;
+    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
+    btn.classList.toggle('ct-hidden', atBottom);
+  }
 
   /** Render a one-line centered status divider in the message list. */
   private showCommandDivider(text: string, isError = false): void {
@@ -5589,46 +5950,6 @@ export class ThreadsView extends ItemView {
       });
   }
 
-  private async handleDesignCommand(brief: string): Promise<void> {
-    if (!this.activeThreadId) return;
-    const thread = this.manager.getThread(this.activeThreadId);
-    if (!thread) return;
-    if (!brief && !thread.artifacts?.length) {
-      this.showCommandDivider('Include a brief — e.g. /design a responsive pricing page for a developer tool', true);
-      return;
-    }
-
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter)) {
-      this.showCommandDivider('Design artifacts require a desktop vault with local filesystem access.', true);
-      return;
-    }
-    const existing = thread.artifacts?.find((artifact) => artifact.kind === 'design-static');
-    let artifact: DesignArtifact;
-    try {
-      const result = await this.plugin.enterDesignMode(
-        thread.id,
-        brief || existing?.title || 'Design artifact',
-        true,
-      );
-      artifact = result.artifact;
-    } catch (error) {
-      this.showCommandDivider(`Could not prepare the design artifact: ${(error as Error).message}`, true);
-      return;
-    }
-
-    if (!brief) {
-      this.showCommandDivider(`Opened design artifact: ${artifact.title}`);
-      return;
-    }
-    this.showCommandDivider(existing ? 'Revising design artifact…' : 'Design artifact created. Starting design turn…');
-    const sendThreadId = thread.id;
-    this.manager.sendMessage(sendThreadId, designKickoffMessage(artifact, brief)).catch((error) => {
-      this.showCommandDivider(`Failed to start design turn: ${(error as Error).message}`, true);
-      if (this.activeThreadId === sendThreadId) this.setRunningState(false);
-    });
-  }
-
   private async handleLoopCommand(arg: string): Promise<void> {
     if (!this.activeThreadId) return;
     const threadId = this.activeThreadId;
@@ -5712,6 +6033,37 @@ export class ThreadsView extends ItemView {
     attachment: string | null,
   ): Promise<void> {
     if (!this.activeThreadId) return;
+    const commandThreadId = this.activeThreadId;
+
+    // Capture command context before leaving a child-agent view or awaiting a
+    // peer. Feedback must never land in whichever thread happens to be active later.
+    if (this.plugin.slashCommands?.match(typed, 'thread')) {
+      const captured = this.manager.getThread(commandThreadId);
+      const context = {
+        surface: 'thread' as const, text: typed, threadId: commandThreadId,
+        agentHarness: captured?.agentHarness ?? this.plugin.settings.agentHarness,
+        projectId: captured?.projectId,
+        hasImages: images.length > 0, hasAttachment: !!attachment,
+      };
+      await this.exitAgentView();
+      if (!this.manager.getThread(commandThreadId)) return;
+      this.lastSentTexts.set(commandThreadId, typed);
+      if (captured) delete captured.draft;
+      if (this.activeThreadId === commandThreadId) this.hideSummaryBanner(false);
+      const report = (message: string, isError = false) => {
+        if (!this.manager.getThread(commandThreadId)) return;
+        if (this.activeThreadId === commandThreadId) {
+          this.showCommandDivider(message, isError);
+          if (isError) this.setRunningState(this.manager.isRunning(commandThreadId));
+        } else new Notice(message);
+      };
+      const result = await this.plugin.slashCommands.invoke(context, report);
+      if (result?.message) report(result.message, result.status === 'error');
+      // Even if a peer unloads while exitAgentView runs, this matched submission
+      // belongs to it and must not become an ordinary agent prompt.
+      if (!result) report('Command is no longer available. Please try again.', true);
+      return;
+    }
 
     // A message always goes to the thread, never to a child agent. Leave the
     // child view first so the send visibly lands in the main conversation
@@ -5783,13 +6135,6 @@ export class ThreadsView extends ItemView {
           return;
         }
       }
-    }
-
-    // /design [brief] — create/revise, or reopen the thread's static artifact.
-    const designMatch = typed.match(/^\/design(?:\s+([\s\S]+))?$/i);
-    if (designMatch) {
-      await this.handleDesignCommand((designMatch[1] ?? '').trim());
-      return;
     }
 
     // /goal [text | clear] — set/show/clear the persistent goal for this thread.
@@ -5899,14 +6244,17 @@ export class ThreadsView extends ItemView {
         return;
       }
       const activeThread = this.manager.getThread(this.activeThreadId);
-      const isCodex = activeThread?.agentHarness === 'codex';
+      const harness = activeThread?.agentHarness ?? 'claude';
+      // Non-Claude harnesses validate against their own discovered catalog.
+      const isCodex = harness !== 'claude';
+      const harnessName = agentHarnessLabel(harness);
       const codexModel = isCodex
-        ? this.plugin.discoveredModelsByHarness.codex.find((model) => model.value.toLowerCase() === arg)
+        ? this.plugin.discoveredModelsByHarness[harness].find((model) => model.value.toLowerCase() === arg)
         : undefined;
       if (isCodex && arg !== 'default' && !codexModel) {
         const errEl = this.messagesEl.createDiv('ct-message ct-error');
-        const available = this.plugin.discoveredModelsByHarness.codex.map((model) => model.value).join(', ') || 'the Codex default (start a Codex thread to load its catalog)';
-        errEl.createEl('p', { text: `Unknown Codex model "${arg}". Available: ${available}` });
+        const available = this.plugin.discoveredModelsByHarness[harness].map((model) => model.value).join(', ') || `the ${harnessName} default (start a ${harnessName} thread to load its catalog)`;
+        errEl.createEl('p', { text: `Unknown ${harnessName} model "${arg}". Available: ${available}` });
         this.scrollToBottom();
         return;
       }

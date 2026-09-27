@@ -360,7 +360,7 @@ test.describe('Agent Threads UI', () => {
         contentWidth,
         messageWidths,
         noticeInsideTimeline: notice.left >= message.left && notice.right <= message.right,
-        noticeIsCentered: Math.abs((notice.left - message.left) - (message.right - notice.right)) < 1,
+        noticeStartsAtTimelineEdge: Math.abs(notice.left - message.left) < 1,
         messages: rect('.ct-messages'),
         composerWrapper: rect('.ct-panel-wrapper'),
         composerPanel: rect('.ct-floating-panel'),
@@ -372,7 +372,7 @@ test.describe('Agent Threads UI', () => {
     expect(layout.messageWidths.length).toBeGreaterThan(0);
     for (const width of layout.messageWidths) expect(width).toBeCloseTo(layout.contentWidth, 0);
     expect(layout.noticeInsideTimeline).toBe(true);
-    expect(layout.noticeIsCentered).toBe(true);
+    expect(layout.noticeStartsAtTimelineEdge).toBe(true);
     expect(layout.composerWrapper.width).toBeCloseTo(layout.messages.width, 0);
     expect(layout.composerPanel.left - layout.composerWrapper.left).toBeCloseTo(10, 0);
     expect(layout.composerWrapper.right - layout.composerPanel.right).toBeCloseTo(10, 0);
@@ -845,6 +845,26 @@ test.describe('Agent Threads UI', () => {
     await page.evaluate(() => (window as any).__view.focusThread('thread-notice'));
     await page.waitForSelector('.ct-notice-row');
     await page.waitForTimeout(200);
+
+    // Notice icons render full size (not the 24%-scale dot a 100×100-viewBox
+    // addIcon override produces) and share the tool rows' leading-icon column.
+    const geometry = await page.evaluate(() => {
+      const box = (el: Element) => el.getBoundingClientRect();
+      const toolIcon = box(document.querySelector('.ct-tool-pill-icon svg')!);
+      const noticeIcons = Array.from(document.querySelectorAll('.ct-notice-icon svg')).map((svg) => {
+        const r = box(svg);
+        return { left: r.left, width: r.width, height: r.height, viewBox: svg.getAttribute('viewBox') };
+      });
+      return { toolIcon: { left: toolIcon.left, width: toolIcon.width }, noticeIcons };
+    });
+    expect(geometry.noticeIcons).toHaveLength(2);
+    for (const icon of geometry.noticeIcons) {
+      expect(icon.viewBox).toBe('0 0 24 24');
+      expect(icon.width).toBeCloseTo(12, 0);
+      expect(icon.height).toBeCloseTo(12, 0);
+      expect(icon.left).toBeCloseTo(geometry.toolIcon.left, 0);
+      expect(icon.width).toBeCloseTo(geometry.toolIcon.width, 0);
+    }
     await shot(page, 'background-task-notice-row.png', { fullPage: true });
   });
 
@@ -1199,11 +1219,25 @@ test.describe('Agent Threads UI', () => {
     await page.waitForSelector('.menu');
     await expect(page.locator('.menu')).toContainText('Model: Default');
     await expect(page.locator('.menu')).toContainText('Permissions: Global default');
+    await expect(page.locator('.menu')).toContainText('Harness: Claude');
     await expect(page.locator('.ct-model-btn')).toHaveCount(0);
     await expect(page.locator('.ct-permission-mode-btn')).toHaveCount(0);
     // Move mouse away so no menu item is in hover state
     await page.mouse.move(0, 0);
     await shot(page, 'model-switcher-menu.png', { fullPage: true });
+  });
+
+  test('composer menu exposes existing-thread harness selector', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(harnessUrl);
+    await page.waitForSelector('.ct-title-row');
+    await page.hover('.ct-floating-panel');
+    await page.click('.ct-thread-more-btn');
+    await page.getByText('Harness: Claude', { exact: true }).click();
+    await expect(page.locator('.menu')).toContainText('Claude');
+    await expect(page.locator('.menu')).toContainText('Codex');
+    await expect(page.locator('.menu')).toContainText('OpenCode');
+    await shot(page, 'harness-switcher-menu.png', { fullPage: true });
   });
 
   test('composer menu changes model and permission using existing selectors', async ({ page }) => {
@@ -1564,6 +1598,203 @@ test.describe('Agent Threads UI', () => {
   });
   }
 
+  // Narrow widths collapse the list/detail split into one pane at a time, so a
+  // sidebar-sized Skills Manager shows the list, then swaps to the detail view
+  // behind a back button. These assert the swap in both directions — a pixel
+  // snapshot alone would not catch the list failing to come back.
+
+  test('skills manager — narrow width shows list, not detail', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeHidden();
+    await expect(page.locator('.ct-skills-divider')).toBeHidden();
+    // The list should claim the full width rather than the persisted split width.
+    const listWidth = (await page.locator('.ct-skills-list').boundingBox())!.width;
+    const bodyWidth = (await page.locator('.ct-skills-body').boundingBox())!.width;
+    expect(listWidth).toBeCloseTo(bodyWidth, 0);
+
+    await shot(page, 'skills-manager-narrow-list.png', { fullPage: true });
+  });
+
+  test('skills manager — narrow width swaps to detail and back', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    await page.locator('.ct-skills-tree-child-name', { hasText: 'release-manager' }).click();
+
+    // Detail takes over the pane; the list is gone until we navigate back.
+    await expect(page.locator('.ct-skills-detail')).toBeVisible();
+    await expect(page.locator('.ct-skills-list')).toBeHidden();
+    const backBtn = page.getByRole('button', { name: 'Back to skill list' });
+    await expect(backBtn).toBeVisible();
+    // Back button must be a usable tap target on a phone-width pane.
+    expect((await backBtn.boundingBox())!.height).toBeGreaterThanOrEqual(40);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+    await shot(page, 'skills-manager-narrow-detail.png', { fullPage: true });
+
+    await backBtn.click();
+
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Back to skill list' })).toBeHidden();
+  });
+
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }, { width: 375, height: 667 }]) {
+    test(`skills manager — GitHub source disclosure stays on the list ${viewport.width}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto('file://' + path.resolve('test/harness/skills.html'));
+      await page.locator('#app').evaluate((app, width) => {
+        app.style.width = `${Math.min(width, 960)}px`;
+      }, viewport.width);
+      await page.waitForSelector('.ct-skills-count');
+
+      await page.evaluate(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const view = (window as any).__skillsView;
+        view.plugin.settings.skillSources = [{
+          id: 'agentic-pm',
+          name: 'Agentic PM Playbook',
+          type: 'github',
+          repoUrl: 'https://github.com/acme/agentic-pm',
+        }];
+        await view.refresh();
+      });
+
+      const sourceRow = page.locator('.ct-skills-tree-source').filter({ hasText: 'Agentic PM Playbook' });
+      const disclosure = sourceRow.getByRole('button', { name: 'Expand Agentic PM Playbook' });
+      await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+      if (viewport.width <= 480) {
+        expect((await disclosure.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+        expect((await disclosure.boundingBox())!.width).toBeGreaterThanOrEqual(44);
+      }
+
+      await disclosure.click();
+
+      await expect(sourceRow.getByRole('button', { name: 'Collapse Agentic PM Playbook' })).toHaveAttribute('aria-expanded', 'true');
+      await expect(page.locator('.ct-skills-list')).toBeVisible();
+      if (viewport.width <= 480) {
+        await expect(page.locator('.ct-skills-detail')).toBeHidden();
+      } else {
+        await expect(page.locator('.ct-skills-detail-empty')).toBeVisible();
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await shot(page, `skills-manager-source-disclosure-${viewport.width}.png`, { fullPage: true });
+
+      await sourceRow.locator('.ct-skills-tree-source-name').click();
+      await expect(page.locator('.ct-skills-detail')).toBeVisible();
+      if (viewport.width <= 480) {
+        await expect(page.locator('.ct-skills-list')).toBeHidden();
+      } else {
+        await expect(page.locator('.ct-skills-list')).toBeVisible();
+      }
+    });
+  }
+
+  // The detail pane has several distinct sources (installed skill, agent,
+  // Browse result, authoring form). Each is a separate branch of the
+  // "is something selected" check that drives the narrow-mode swap, so each
+  // needs its own proof — one working branch does not imply the others.
+
+  test('skills manager — narrow width swaps for agents and the Browse tab', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    // Agent detail (read-only pane, ~/.claude/agents).
+    await page.locator('.ct-skills-tree-child-name', { hasText: 'engineer' }).click();
+    await expect(page.locator('.ct-skills-list')).toBeHidden();
+    await page.getByRole('button', { name: 'Back to skill list' }).click();
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+
+    // Browse tab: list until a result is picked, then the detail pane.
+    await page.getByRole('button', { name: 'Browse', exact: true }).click();
+    await page.waitForTimeout(300);
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeHidden();
+
+    // The harness has no network, so skills.sh returns nothing — seed a result
+    // directly rather than letting the assertions below pass vacuously.
+    await page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const view = (window as any).__skillsView;
+      view.browseQuery = 'demo';
+      view.isBrowseLoading = false;
+      view.browseResults = [{
+        slug: 'acme/demo/demo-skill',
+        skillId: 'demo-skill',
+        name: 'Demo Skill',
+        source: 'acme/demo',
+        installs: 1234,
+        isInstalled: false,
+      }];
+      view.renderList();
+      view.renderDetail();
+    });
+
+    const firstCard = page.locator('.ct-skills-card').first();
+    await expect(firstCard).toBeVisible();
+    await firstCard.click();
+    await expect(page.locator('.ct-skills-detail')).toBeVisible();
+    await expect(page.locator('.ct-skills-list')).toBeHidden();
+    await page.getByRole('button', { name: 'Back to skill list' }).click();
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeHidden();
+  });
+
+  test('skills manager — narrow width swaps for the New skill form', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    await page.getByRole('button', { name: 'New skill', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: 'Skill identifier' })).toBeVisible();
+    await expect(page.locator('.ct-skills-list')).toBeHidden();
+
+    // Abandoning the form returns to the list rather than stranding the user.
+    await page.getByRole('button', { name: 'Back to skill list' }).click();
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Skill identifier' })).toHaveCount(0);
+  });
+
+  test('skills manager — back with unsaved edits asks before discarding', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    await page.locator('.ct-skills-tree-child-name', { hasText: 'release-manager' }).click();
+    await page.locator('.ct-skills-textarea').fill('edited but not saved');
+    await page.getByRole('button', { name: 'Back to skill list' }).click();
+
+    // Back is the only exit in narrow mode, so it must not silently drop edits.
+    const modal = page.locator('.modal-container');
+    await expect(modal).toBeVisible();
+    await expect(page.locator('.ct-skills-list')).toBeHidden();
+
+    await modal.getByRole('button', { name: 'Discard', exact: true }).click();
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeHidden();
+  });
+
+  test('skills manager — wide width keeps both panes and hides back button', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 740 });
+    await page.goto('file://' + path.resolve('test/harness/skills.html'));
+    await page.waitForSelector('.ct-skills-count');
+
+    await page.locator('.ct-skills-tree-child-name', { hasText: 'release-manager' }).click();
+    await page.waitForSelector('.ct-skills-btn-save');
+
+    // Both panes stay on screen, and the back affordance is narrow-mode only.
+    await expect(page.locator('.ct-skills-list')).toBeVisible();
+    await expect(page.locator('.ct-skills-detail')).toBeVisible();
+    await expect(page.locator('.ct-skills-divider')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Back to skill list' })).toBeHidden();
+  });
+
   test('skills manager — installed tab', async ({ page }) => {
     const skillsUrl = 'file://' + path.resolve('test/harness/skills.html');
     await page.setViewportSize({ width: 1000, height: 740 });
@@ -1629,17 +1860,66 @@ test.describe('Agent Threads UI', () => {
     await page.goto(skillsUrl);
     await page.waitForSelector('.ct-skills-tabs');
     await page.getByText('Browse').click();
-    await page.waitForTimeout(200);
+    await expect(page.getByText('Type to search skills.sh')).toBeVisible();
     await shot(page, 'skills-manager-browse.png', { fullPage: true });
   });
 
   // ─── Settings tab ────────────────────────────────────────────────────────
 
+  test('settings — section change retains keyboard focus', async ({ page }) => {
+    await page.goto('file://' + path.resolve('test/harness/settings.html'));
+    const sections = page.getByLabel('Settings section');
+    await sections.focus();
+    await sections.selectOption('projects');
+    await expect(sections).toBeFocused();
+    await sections.press('Tab');
+    await expect(page.getByRole('button', { name: 'New project' })).toBeFocused();
+  });
+
+  test('settings — compact selector fits a 375px pane', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 });
+    await page.goto('file://' + path.resolve('test/harness/settings.html'));
+    const sections = page.getByLabel('Settings section');
+    await sections.selectOption('projects');
+    expect((await sections.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await shot(page, 'settings-projects-375.png', { fullPage: true });
+  });
+
+  test('settings — desktop section selector preserves the host content width', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto('file://' + path.resolve('test/harness/settings.html') + '?host=geode');
+    const sections = page.getByLabel('Settings section');
+    await expect(sections).toBeVisible();
+    await sections.selectOption('projects');
+    await expect(page.getByLabel('Geode settings')).toBeVisible();
+    await expect(sections.locator('optgroup')).toHaveCount(4);
+    await expect(page.locator('.ct-settings-sidebar')).toHaveCount(0);
+    const body = await page.locator('.ct-settings-tab-body').boundingBox();
+    const shell = await page.locator('.ct-settings-shell').boundingBox();
+    expect(body!.width).toBeGreaterThanOrEqual(shell!.width - 1);
+    await shot(page, 'settings-geode-projects.png', { fullPage: true });
+    await sections.selectOption('secrets');
+    await expect(page.getByLabel('Variable name')).toBeVisible();
+    await shot(page, 'settings-geode-secrets.png', { fullPage: true });
+    await page.setViewportSize({ width: 800, height: 800 });
+    await sections.selectOption('projects');
+    const list = await page.locator('.ct-manager-list').boundingBox();
+    const detail = await page.locator('.ct-manager-detail').boundingBox();
+    expect(detail!.y).toBeGreaterThanOrEqual(list!.y + list!.height - 1);
+    await expect.poll(() => page.locator('.vertical-tab-content').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await page.getByLabel('Project name').fill('Host-width edit');
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__settings.projects[0].name)).toBe('Host-width edit');
+    await page.locator('.vertical-tab-content').evaluate(el => { el.scrollTop = 0; });
+    await shot(page, 'settings-geode-projects-narrow.png', { fullPage: true });
+  });
+
   test('settings — general tab', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
+    await page.waitForSelector('.ct-settings-shell');
     await page.waitForTimeout(200);
 
     const createPr = page.locator('.setting-item', { hasText: 'Create PR message' }).locator('textarea');
@@ -1666,21 +1946,42 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
+    await page.waitForSelector('.ct-settings-shell');
     // The tab whose id is 'claude' is now labelled "Agent" (harness-agnostic
     // naming since the Codex harness landed); the screenshot keeps the historical
     // settings-claude.png name to match the tab id.
-    await page.click('.ct-settings-tab-btn:has-text("Agent")');
+    await page.getByLabel('Settings section').selectOption('claude');
     await page.waitForTimeout(200);
     await shot(page, 'settings-claude.png', { fullPage: true });
   });
+
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }, { width: 375, height: 667 }]) {
+    test(`settings — sandbox VM controls ${viewport.width}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto('file://' + path.resolve('test/harness/settings.html'));
+      await page.getByLabel('Settings section').selectOption('claude');
+      const imageRow = page.locator('.setting-item').filter({ has: page.getByText('Sandbox VM image', { exact: true }) });
+      const networkRow = page.locator('.setting-item').filter({ has: page.getByText('Sandbox VM network', { exact: true }) });
+      await imageRow.scrollIntoViewIfNeeded();
+      await expect(imageRow.locator('input')).toHaveValue('claude-threads-coding:1');
+      await networkRow.locator('select').selectOption('none');
+      await expect(networkRow.locator('select')).toHaveValue('none');
+      await networkRow.scrollIntoViewIfNeeded();
+      const bounds = await networkRow.locator('select').boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+      if (viewport.width < 480) expect(bounds!.height).toBeGreaterThanOrEqual(44);
+      await shot(page, `settings-sandbox-vm-${viewport.width}.png`);
+    });
+  }
 
   test('settings — switching harness reveals Codex Ultra effort without overwriting Claude effort', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("Agent")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('claude');
 
     const harnessSetting = page.locator('.setting-item').filter({ hasText: 'Agent harness' });
     await harnessSetting.locator('select').selectOption('codex');
@@ -1694,34 +1995,70 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("Tools")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('tools');
     await page.waitForTimeout(200);
     await shot(page, 'settings-tools.png', { fullPage: true });
   });
 
-  test('settings — Projects show editable cwd overrides and effective cwd', async ({ page }) => {
+  test('settings — Projects use an explicit searchable list-detail draft', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("Vault")');
-    await expect(page.getByText('Effective cwd: /Users/mock/projects/acme-webapp').first()).toBeVisible();
-    await expect(page.getByPlaceholder('Filesystem cwd (optional)')).toBeVisible();
-    const override = page.locator('.ct-project-cwd-setting input').first();
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('projects');
+    await expect(page.getByText('/Users/mock/projects/acme-webapp').first()).toBeVisible();
+    await expect(page.getByPlaceholder('Search projects')).toBeVisible();
+    const override = page.getByLabel('Filesystem working directory');
     await expect(override).toHaveValue('/Users/mock/projects/acme-webapp');
     await shot(page, 'settings-projects.png', { fullPage: true });
     await override.fill('');
-    await override.blur();
-    await expect(page.getByText('Effective cwd: /Users/mock/vault/Work/Acme').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect(page.getByText('Effective cwd: /Users/mock/vault/Work/Acme')).toBeVisible();
+    await page.getByRole('button', { name: 'New project' }).click();
+    await expect(page.getByLabel('Project name')).toHaveValue('');
+    await page.getByLabel('Project name').fill('Discarded draft');
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.getByLabel('Project name')).toHaveValue('Acme Webapp');
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => {
+      const app = document.getElementById('app');
+      const content = app?.querySelector<HTMLElement>('.vertical-tab-content');
+      if (app) app.style.height = 'auto';
+      if (content) { content.style.flex = 'none'; content.style.overflow = 'visible'; }
+    });
+    await expect(page.getByLabel('Settings section')).toBeVisible();
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await shot(page, 'settings-projects-narrow.png', { fullPage: true });
+  });
+
+  test('settings — Secrets save value and selected-project scope together', async ({ page }) => {
+    const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto(settingsUrl);
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('secrets');
+    await expect(page.getByPlaceholder('Search secrets')).toBeVisible();
+    await expect(page.getByLabel('Variable name')).toBeDisabled();
+    await page.getByLabel('Replace value').fill('replacement-value');
+    await page.getByLabel('Selected projects').check();
+    await page.getByLabel('Acme Webapp').check();
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__settings.secretEnvScopes.STRIPE_SECRET_KEY)).toEqual(['proj-1']);
+    await expect.poll(() => page.evaluate(() => (window as any).__getSettingsSecret('STRIPE_SECRET_KEY'))).toBe('replacement-value');
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__getSettingsSecret('STRIPE_SECRET_KEY'))).toBe('replacement-value');
+    await page.locator('.vertical-tab-content').evaluate(element => { element.scrollTop = 0; });
+    await shot(page, 'settings-secrets.png', { fullPage: true });
   });
 
   test('settings — scheduled work dashboard', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("Scheduled")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('scheduled');
     await expect(page.getByRole('heading', { name: 'Next up' })).toHaveCount(0);
     // 5 scheduled-work cards + 2 watched-document cards share the same
     // .ct-scheduled-card markup (see "Watched documents" checks below).
@@ -1842,8 +2179,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
     // Collapse the fixed-height harness shell to the content so the docs
     // screenshot (copied out by posttest:screenshots:update) crops tight
@@ -1890,7 +2227,7 @@ test.describe('Agent Threads UI', () => {
   }
   test('Google Workspace services are opt-in and persisted independently', async ({ page }) => {
     await page.goto('file://' + path.resolve('test/harness/settings.html'));
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.getByLabel('Settings section').selectOption('mcp');
     for (const name of ['Google Docs', 'Google Drive', 'Google Sheets', 'Google Slides']) {
       const toggle = page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: new RegExp(`^${name}$`) }) }).locator('.checkbox-container');
       await expect(toggle).not.toHaveClass(/is-enabled/);
@@ -1898,8 +2235,8 @@ test.describe('Agent Threads UI', () => {
       await expect(toggle).toHaveClass(/is-enabled/);
     }
     await expect(page.getByText('Google Workspace requires desktop Google Docs Sync with a connected account.', { exact: true })).toBeVisible();
-    await page.click('.ct-settings-tab-btn:has-text("General")');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.getByLabel('Settings section').selectOption('general');
+    await page.getByLabel('Settings section').selectOption('mcp');
     for (const name of ['Google Docs', 'Google Drive', 'Google Sheets', 'Google Slides']) {
       await expect(page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: new RegExp(`^${name}$`) }) }).locator('.checkbox-container')).toHaveClass(/is-enabled/);
     }
@@ -1909,7 +2246,7 @@ test.describe('Agent Threads UI', () => {
     test(`Google Workspace settings at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 844 });
       await page.goto('file://' + path.resolve('test/harness/settings.html'));
-      await page.click('.ct-settings-tab-btn:has-text("MCP")');
+      await page.getByLabel('Settings section').selectOption('mcp');
       await page.evaluate(() => { document.getElementById('app')!.style.height = 'auto'; });
       await expect(page.getByText('Google Workspace', { exact: true })).toBeVisible();
       await expect(page.locator('.setting-item-name').filter({ hasText: /^Google (Docs|Drive|Sheets|Slides)$/ })).toHaveCount(4);
@@ -1928,7 +2265,7 @@ test.describe('Agent Threads UI', () => {
         configure: async (selection: unknown) => { calls.push(JSON.stringify(selection)); },
       };
     });
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await expect(page.getByText('Connected through Google Docs Sync.', { exact: false })).toBeVisible();
     await page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: /^Google Sheets$/ }) }).locator('.checkbox-container').click();
     await expect.poll(() => page.evaluate(() => (window as any).__workspaceCalls)).toEqual(['save', '{"sheets":true}']);
@@ -1937,8 +2274,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
     // Open the edit modal on the stdio server so the form shows real values,
     // including an ${ENV_VAR} placeholder in the environment field. Targeted by
@@ -1958,8 +2295,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
     await page.getByRole('button', { name: 'Add MCP server' }).click();
     await page.waitForSelector('.modal-overlay');
@@ -1972,12 +2309,69 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'settings-mcp-add-oauth.png', { fullPage: true });
   });
 
+  test('settings — OAuth advanced section offers a masked client secret field', async ({ page }) => {
+    const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto(settingsUrl);
+    await page.getByLabel('Settings section').selectOption('mcp');
+    await page.waitForTimeout(200);
+    await page.getByRole('button', { name: 'Add MCP server' }).click();
+    await page.waitForSelector('.modal-overlay');
+    await page.getByRole('button', { name: 'OAuth', exact: true }).click();
+    // The confidential-client fields live behind Advanced: a public client with
+    // PKCE is the norm, so the secret must not be the first thing a user sees.
+    await page.locator('.modal-overlay details summary').click();
+    await page.waitForTimeout(200);
+
+    const secretField = page.locator('.modal-overlay input[type="password"]');
+    await expect(secretField).toBeVisible();
+    // Masked, and neither Obsidian nor the platform offers to remember it.
+    await expect(secretField).toHaveAttribute('autocomplete', 'off');
+    await expect(page.locator('.modal-overlay').getByText('Client secret', { exact: false })).toBeVisible();
+
+    // A typed value renders as dots, not as the secret itself.
+    await secretField.fill('super-secret-value');
+    await shot(page, 'settings-mcp-add-oauth-advanced.png', { fullPage: true });
+  });
+
+  test('settings — client credentials grant reshapes the OAuth form', async ({ page }) => {
+    const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto(settingsUrl);
+    await page.getByLabel('Settings section').selectOption('mcp');
+    await page.waitForTimeout(200);
+    await page.getByRole('button', { name: 'Add MCP server' }).click();
+    await page.waitForSelector('.modal-overlay');
+    await page.getByRole('button', { name: 'OAuth', exact: true }).click();
+
+    const modal = page.locator('.modal-overlay');
+    // Redirect URI is on offer for the interactive grant — behind Advanced,
+    // where a collapsed disclosure hides it, so open that first to compare
+    // like with like.
+    await modal.locator('details summary').click();
+    await expect(modal.getByPlaceholder('http://localhost:3118/callback')).toBeVisible();
+
+    await page.getByLabel('Grant type').selectOption('client_credentials');
+    await page.waitForTimeout(200);
+
+    // Gone for the machine-to-machine grant, which the shared schema rejects it
+    // for outright. Advanced stays open — the handler forces it, so the two
+    // credentials this grant cannot work without are never left behind a
+    // collapsed disclosure labelled "Advanced".
+    await expect(modal.getByPlaceholder('http://localhost:3118/callback')).toBeHidden();
+    await expect(modal.locator('details')).toHaveAttribute('open', '');
+    await expect(modal.getByText('Client ID (required)', { exact: true })).toBeVisible();
+    await expect(modal.getByText('Client secret (required)', { exact: true })).toBeVisible();
+    await expect(modal.getByText('no browser and no sign-in', { exact: false })).toBeVisible();
+    await shot(page, 'settings-mcp-add-oauth-client-credentials.png', { fullPage: true });
+  });
+
   test('settings — OAuth type is offered when adding but not when editing', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
 
     await page.getByRole('button', { name: 'Add MCP server' }).click();
@@ -2005,8 +2399,8 @@ test.describe('Agent Threads UI', () => {
       const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
       await page.setViewportSize({ width, height: 760 });
       await page.goto(settingsUrl);
-      await page.waitForSelector('.ct-settings-tabs');
-      await page.click('.ct-settings-tab-btn:has-text("MCP")');
+      await page.waitForSelector('.ct-settings-shell');
+      await page.getByLabel('Settings section').selectOption('mcp');
       await page.waitForTimeout(200);
       await page.getByRole('button', { name: 'Add MCP server' }).click();
       await page.waitForSelector('.modal-overlay');
@@ -2028,8 +2422,8 @@ test.describe('Agent Threads UI', () => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
     await page.goto(settingsUrl);
-    await page.waitForSelector('.ct-settings-tabs');
-    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
     await page.waitForTimeout(200);
     // Collapse the fixed-height harness shell to the content, same as the
     // "settings — mcp tab" screenshot above, so this crops tight to the
@@ -2048,6 +2442,12 @@ test.describe('Agent Threads UI', () => {
     const vercelRow = page.locator('.ct-oauth-mcp-servers-list .setting-item').filter({ hasText: 'vercel' });
     await expect(vercelRow.getByText('Connected · expires in 2h 45m', { exact: false })).toBeVisible();
     await expect(vercelRow.getByRole('button', { name: 'Disconnect' })).toBeVisible();
+    // The client_credentials server renews itself from the keychain secret, so
+    // its countdown says "renews in" and it reads as healthy despite holding no
+    // refresh token — the grant never issues one (RFC 6749 §4.4.3).
+    const bankrateRow = page.locator('.ct-oauth-mcp-servers-list .setting-item').filter({ hasText: 'bankrate' });
+    await expect(bankrateRow.getByText('Connected · renews in 24h 0m', { exact: false })).toBeVisible();
+    await expect(bankrateRow.getByText('Needs re-authorization')).toHaveCount(0);
     await shot(page, 'settings-oauth-mcp.png', { fullPage: true });
   });
 
@@ -2182,24 +2582,27 @@ test.describe('Agent Threads UI', () => {
     await page.goto(harnessUrl);
     await page.waitForSelector('.ct-title-row');
     await page.evaluate(() => (window as any).__view.focusThread('thread-tasks'));
-    await page.waitForSelector('.ct-task-card:not(.ct-hidden)');
-    // Hover the panel so the task card is expanded (it collapses at rest via CSS)
-    await page.hover('.ct-floating-panel');
-    await page.waitForTimeout(300); // let expand animation complete
-    const header = await page.locator('.ct-task-card-header').innerText();
-    if (!header.includes('5 tasks') || !header.includes('4 done, 1 in progress, 0 open')) {
-      throw new Error(`Unexpected task card header: ${header}`);
-    }
-    await expect(page.locator('.ct-task-row-completed')).toHaveCount(4);
-    await expect(page.locator('.ct-task-row-in_progress')).toHaveCount(1);
     await expect.poll(() => page.evaluate(() => (window as any).__view.getActiveThreadId())).toBe('thread-tasks');
-    // Capture the intended bottom after async rendering and composer expansion.
-    await anchorFocusedComposerToBottom(page);
-    await shot(page, 'task-list-card.png', { fullPage: true });
 
-    // Collapse on header click
-    await page.click('.ct-task-card-header');
-    await expect(page.locator('.ct-task-row')).toHaveCount(0);
+    // The pill must be visible at rest — no hover — like the sub-agent pill.
+    // The task list no longer occupies the main view at all.
+    const pill = page.locator('.ct-tasklist-pill');
+    await expect(pill).toBeVisible();
+    await expect(pill).toHaveText('4/5 tasks');
+    await expect(page.locator('.ct-panel-context .ct-task-row')).toHaveCount(0);
+    await shot(page.locator('.ct-input-footer'), 'task-list-pill.png');
+
+    await page.click('.ct-tasklist-pill');
+    await page.waitForSelector('.ct-tasklist-popover');
+    await expect(pill).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('.ct-tasklist-popover .ct-task-row-completed')).toHaveCount(4);
+    await expect(page.locator('.ct-tasklist-popover .ct-task-row-in_progress')).toHaveCount(1);
+    await shot(page.locator('.ct-tasklist-popover'), 'task-list-popover.png');
+
+    // Escape dismisses and returns the pill to its collapsed state.
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.ct-tasklist-popover')).toHaveCount(0);
+    await expect(pill).toHaveAttribute('aria-expanded', 'false');
   });
 
   test('status line — structured tag pills', async ({ page }) => {
@@ -2461,6 +2864,23 @@ test.describe('Agent Threads UI', () => {
     await expect(activeCard.locator('.ct-kanban-agent-count')).toHaveClass(/ct-agent-count-active/);
   });
 
+  test('kanban kickoff harness picker selects OpenCode with its brand mark', async ({ page }) => {
+    await page.setViewportSize({ width: 1240, height: 820 });
+    await page.goto(kanbanUrl);
+    await page.waitForSelector('.ct-kanban-board');
+
+    const harnessButton = page.locator('.ct-kanban-dispatch .ct-harness-send-btn');
+    await harnessButton.click({ button: 'right' });
+    const menu = page.locator('.ct-harness-menu');
+    await expect(menu.getByRole('menuitemradio', { name: 'OpenCode' }).locator('.ct-harness-mark-opencode svg')).toHaveCount(1);
+    await menu.getByRole('menuitemradio', { name: 'OpenCode' }).click();
+    await expect(menu).toHaveCount(0);
+    await expect(harnessButton).toHaveAttribute('aria-label', /OpenCode/);
+    await expect(harnessButton.locator('.ct-harness-mark-opencode')).toHaveAttribute('data-icon', 'opencode-mark');
+    expect(await page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(0);
+    await shot(page.locator('.ct-kanban-dispatch'), 'kanban-harness-picker-opencode.png');
+  });
+
   test('kanban kickoff harness picker selects without dispatching', async ({ page }) => {
     await page.setViewportSize({ width: 1240, height: 820 });
     await page.goto(kanbanUrl);
@@ -2483,6 +2903,7 @@ test.describe('Agent Threads UI', () => {
     await harnessButton.click({ button: 'right' });
     const reopenedMenu = page.locator('.ct-harness-menu');
     await expect(reopenedMenu).toBeVisible();
+    await expect(reopenedMenu.getByRole('menuitemradio', { name: 'OpenCode' })).toHaveCSS('min-height', '44px');
     await shot(reopenedMenu, 'kanban-harness-picker.png');
   });
 
@@ -3176,7 +3597,7 @@ test.describe('Agent Threads UI', () => {
   });
 
   test('plan mode — approve/reject card', async ({ page }) => {
-    await page.setViewportSize({ width: 420, height: 740 });
+    await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto(harnessUrl);
     await page.waitForSelector('.ct-title-row');
     await page.waitForSelector('.ct-messages');
@@ -3184,6 +3605,9 @@ test.describe('Agent Threads UI', () => {
     // Render the plan approval card with sample plan text.
     await page.evaluate(() => {
       const view = (window as any).__view;
+      const manager = (window as any).__manager;
+      manager.getThread(view['activeThreadId']).cwd = '/Users/mock/projects/demo-project';
+      view['renderComposerContext']();
       view['createStreamingEl']();
       const planText = [
         '## Plan: Fix the auth middleware',
@@ -3210,6 +3634,33 @@ test.describe('Agent Threads UI', () => {
     await expect(page.locator('.ct-plan-md')).toBeVisible();
     await expect(page.locator('.ct-plan-textarea')).not.toBeVisible();
     await shot(page, 'plan-mode-approve-reject.png', { fullPage: true });
+
+    await page.locator('.ct-plan-reject').click();
+    await expect(page.getByLabel('Why are you rejecting this plan?')).toBeFocused();
+    await expect(page.locator('.ct-plan-md')).toBeVisible();
+    await expect(page.locator('.ct-plan-rejection-cancel')).toBeVisible();
+    await expect(page.locator('.ct-plan-rejection-submit')).toBeVisible();
+    await expect(page.getByLabel('Why are you rejecting this plan?')).toHaveCSS('box-shadow', /rgb/);
+    await shot(page, 'plan-mode-rejection-reason.png', { fullPage: true });
+
+    await page.locator('.ct-root').evaluate((root) => root.classList.add('ct-mobile'));
+    for (const viewport of [
+      { width: 390, height: 844, name: 'plan-mode-rejection-reason-mobile.png' },
+      { width: 375, height: 667, name: 'plan-mode-rejection-reason-mobile-se.png' },
+    ]) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      const layout = await page.locator('.ct-plan-card').evaluate((card) => ({
+        clientWidth: card.clientWidth,
+        scrollWidth: card.scrollWidth,
+        buttonHeights: Array.from(card.querySelectorAll<HTMLButtonElement>('.ct-plan-btn'))
+          .map((button) => button.getBoundingClientRect())
+          .filter((rect) => rect.width > 0 && rect.height > 0)
+          .map((rect) => rect.height),
+      }));
+      expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
+      expect(layout.buttonHeights.every((height) => height >= 44)).toBe(true);
+      await shot(page, viewport.name, { fullPage: true });
+    }
   });
 
   test('proposed reply — inline card', async ({ page }) => {

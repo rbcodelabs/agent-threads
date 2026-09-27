@@ -52,6 +52,8 @@ export class ItemView {
 
   registerEvent(_event: unknown) {}
   registerDomEvent(_el: unknown, _type: string, _handler: unknown) {}
+  /** Real Obsidian ties the timer to the view's lifetime and returns the id. */
+  registerInterval(id: number): number { return id; }
   addAction(_icon: string, title: string, callback: (evt: MouseEvent) => unknown): HTMLElement {
     const action = document.createElement('button');
     action.className = 'clickable-icon view-action';
@@ -122,9 +124,14 @@ export class WorkspaceLeaf {
 
 export class Notice {
   static messages: Array<{ message: string; duration?: number }> = [];
+  static hidden: string[] = [];
 
-  constructor(message: string, duration?: number) {
+  constructor(private readonly message: string, duration?: number) {
     Notice.messages.push({ message, duration });
+  }
+
+  hide(): void {
+    Notice.hidden.push(this.message);
   }
 }
 

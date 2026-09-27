@@ -235,6 +235,25 @@ You can open any of them directly from here.`,
   },
 ];
 
+// Opt-in peer content fixture; kept out of fixtureThreads to avoid changing
+// unrelated thread-list screenshots.
+export const inlineContentMessages: ChatMessage[] = [
+  { id: 'inline-user', role: 'user', content: 'Show the quarterly report and campaign preview.', timestamp: T3 },
+  {
+    id: 'inline-assistant', role: 'assistant', timestamp: T3 + 12000,
+    content: [
+      'The quarterly report is ready.',
+      'agent-content{"providerId":"example.reports","id":"report","schemaVersion":1,"title":"Quarterly report","data":{"kind":"card"}}',
+      'Here is the campaign preview.',
+      'agent-content{"providerId":"example.reports","id":"image","schemaVersion":1,"title":"Campaign preview","data":{"kind":"image"}}',
+      'Explore the breakdown below.',
+      'agent-content{"providerId":"example.reports","id":"document","schemaVersion":1,"title":"Revenue by region","data":{"kind":"document"}}',
+      'Saved references remain available when a plugin is removed.',
+      'agent-content{"providerId":"example.research","id":"missing","schemaVersion":1,"title":"Research notes","data":{}}',
+    ].join('\n\n'),
+  },
+];
+
 // ─── Thread: inline visualization ────────────────────────────────────────────
 // Used by ui.spec.ts's "inline visualization card" test. Codex's `visualize`
 // skill emits a canonical wrapped content reference on its own line where the
@@ -281,6 +300,9 @@ const threadNoticeMessages: ChatMessage[] = [
     role: 'assistant',
     content: `Both background tasks are running now — I'll post here when they finish.`,
     timestamp: T3 + 5000,
+    // A leading tool row lets the screenshot (and layout assertion) show the
+    // notice icons sitting in the same column as the tool-row icons.
+    toolCalls: [{ name: 'Bash', summary: 'npm run lint -- --fix &', toolUseId: 'tn-1', timestamp: T3 + 4000, status: 'success' }],
   },
   {
     id: 'msg-tn-3',

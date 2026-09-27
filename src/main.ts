@@ -1,6 +1,16 @@
-import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, addIcon, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
+import type { AgentHarness } from './types';
+import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
+import { createPublicThreadLifecycle } from './publicThreadLifecycle';
+import { promptConfirm } from './confirmModal';
 import { createConstrainedQueryRunner } from './ConstrainedRun';
+import { ArtifactProviderRegistry } from './ArtifactContributions';
+import { MessageContentProviderRegistry } from './MessageContent';
+import { createLegacyDesignArtifactContribution } from './legacyDesignArtifactProvider';
+import { createArtifactStore } from './artifactStore';
+import { AgentToolRegistry, type AgentToolHost } from './AgentToolContributions';
+import { SlashCommandRegistry } from './SlashCommandContributions';
+import { THREAD_BUILTIN_COMMANDS, DISPATCH_BUILTIN_COMMANDS, escalationCommand } from './slashCommands';
 export { createClaudeThreadsApiV1 } from './PublicApi';
 export type { ClaudeThreadsApiV1 } from './PublicApi';
 // Desktop-only modules: type-only imports so their module-level code never runs on mobile.
@@ -14,7 +24,7 @@ import type { ThreadManager } from './ThreadManager';
 import type { VaultPersistence } from './VaultPersistence';
 import type { InProcessSummarizer } from './InProcessSummarizer';
 import type { WakeLockService } from './WakeLockService';
-import type { createClaudeThreadsMcpServers, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
+import type { createClaudeThreadsMcpServers, CronCreateParams, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
 import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
@@ -26,7 +36,7 @@ import {
 } from './compassHandoff';
 import { isWatchableDocument, watchMenuLabel } from './documentWatch';
 import { mergeMcpServers } from './mcpServerMerge';
-import { createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
+import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
@@ -41,6 +51,8 @@ import {
   type ImageAttachment,
   type ScheduledItem,
   type WatchedDocument,
+  type SkillSource,
+  type Thread,
 } from './types';
 import { serializeThreadForSave } from './imageExternalization';
 import { selectIdleThreadsForArchive } from './autoArchive';
@@ -62,7 +74,20 @@ import {
   sharedPersistenceWriterFence,
   type PersistenceWriterToken,
 } from './PersistenceWriterFence';
+import { mergeDisallowedTools, withCreatorToolRestrictions } from './toolRestrictions';
 import { DIAGNOSTICS_FOLDER, mergePersistedSettings, selectWelcomeGuidePath } from './productIdentity';
+import {
+  CHIEF_OF_STAFF_COMMAND_ID,
+  CHIEF_OF_STAFF_COMMAND_NAME,
+  chooseChiefOfStaffHarness,
+  decideFirstRun,
+  describeChiefOfStaffFailure,
+  isBinaryResolvable,
+  isFreshInstallData,
+  setUpChiefOfStaff,
+  withChiefOfStaffPointer,
+  type ChiefOfStaffResult,
+} from './chiefOfStaffOnboarding';
 
 // View-type string constants. Must match the values exported by each view module.
 // Defined here as literals so both desktop and mobile code can reference them without
@@ -71,6 +96,10 @@ const VIEW_TYPE = 'claude-threads:chat';
 const AGENT_VIEW_TYPE = 'claude-threads:agents';
 const KANBAN_VIEW_TYPE = 'claude-threads:kanban';
 const SKILLS_VIEW_TYPE = 'claude-threads:skills';
+// Literal rather than an import: main.ts is bundle-init on every platform, and
+// value-importing the view would drag its module into eager scope.
+// Kept in sync with AGENT_BROWSER_VIEW_TYPE in agentBrowser/AgentBrowserPreviewView.ts.
+const AGENT_BROWSER_VIEW_TYPE = 'claude-threads:browser-preview';
 
 interface AgentThreadCreateParams {
   prompt: string;
@@ -255,6 +284,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   gitDiff: import('./GitDiffService').GitDiffService | null = null;
   orchestratorWakeup: import('./OrchestratorWakeup').OrchestratorWakeup | null = null;
   documentWatch: import('./DocumentWatchService').DocumentWatchService | null = null;
+  agentBrowser: import('./agentBrowser/AgentBrowserPool').AgentBrowserPool | null = null;
   contextPanel!: ContextPanelController;
   googleWorkspaceMcp?: import('./GoogleWorkspaceMcp').GoogleWorkspaceMcp;
   oauthMcpRegistry?: import('./OAuthMcpRegistry').OAuthMcpRegistry;
@@ -298,9 +328,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
    */
   discoveredModels: import('@anthropic-ai/claude-agent-sdk').ModelInfo[] = [];
   /** Model catalogs are distinct: a Codex model ID must never populate a Claude picker (or vice versa). */
-  discoveredModelsByHarness: Record<'claude' | 'codex', import('@anthropic-ai/claude-agent-sdk').ModelInfo[]> = {
+  discoveredModelsByHarness: Record<AgentHarness, import('@anthropic-ai/claude-agent-sdk').ModelInfo[]> = {
     claude: [],
     codex: [],
+    opencode: [],
   };
 
 
@@ -308,6 +339,54 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private pendingBgTaskTimers = new Map<string, number>();
   private persistenceWriterToken?: PersistenceWriterToken;
   private publicApiService?: ClaudeThreadsApiService;
+  /**
+   * Host-owned artifact provider registry. Built-in Design registers into it
+   * through the public `extensions.registerArtifactProvider` surface, exactly
+   * as a peer plugin would (ADR-0008).
+   */
+  readonly artifactProviders = new ArtifactProviderRegistry({
+    fallbacks: [createLegacyDesignArtifactContribution()],
+  });
+  readonly messageContentProviders = new MessageContentProviderRegistry();
+  /**
+   * Host-owned agent tool registry. Read by `mcpServerFactory` each time a
+   * session's MCP servers are built; peers write into it only through
+   * `extensions.registerAgentTool` (ADR-0008).
+   *
+   * Reserved names are resolved lazily and memoized: the built-in catalog is
+   * fixed for a given host, and computing it eagerly during field
+   * initialisation would run before `this.app` is usable.
+   */
+  readonly agentTools = new AgentToolRegistry({ reservedNames: () => this.reservedAgentToolNames() });
+  readonly slashCommands = new SlashCommandRegistry({ reservedNames: () => [
+    ...THREAD_BUILTIN_COMMANDS.map(command => command.name),
+    ...DISPATCH_BUILTIN_COMMANDS.map(command => command.name),
+    'fork',
+    ...(this.settings && escalationCommand(this.settings) ? [escalationCommand(this.settings)!.name] : []),
+  ] });
+  private reservedAgentToolNamesCache?: readonly string[];
+
+  private reservedAgentToolNames(): readonly string[] {
+    // Built with default options deliberately. The optional tools (Web Viewer,
+    // agent browser) are the *narrower* set, so reserving the full catalog
+    // means a contribution can never collide with a built-in that happens to
+    // be switched off right now and switched on later.
+    if (!this.reservedAgentToolNamesCache) {
+      try {
+        // Lazily required like every other ObsidianTools use in this file: the
+        // module pulls in Node built-ins and the Agent SDK, so a static import
+        // would break the mobile bundle.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { builtInMcpToolNames } = require('./ObsidianTools') as typeof import('./ObsidianTools');
+        this.reservedAgentToolNamesCache = builtInMcpToolNames(this.app);
+      } catch {
+        // A host that cannot build MCP servers runs no agent tools either, so
+        // there is nothing to collide with.
+        this.reservedAgentToolNamesCache = [];
+      }
+    }
+    return this.reservedAgentToolNamesCache;
+  }
 
   /** Maximum number of poll attempts per thread before giving up on background task monitoring. */
   private static readonly BG_TASK_MAX_POLLS = 10;
@@ -320,16 +399,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const fence = sharedPersistenceWriterFence();
     this.persistenceWriterToken = fence.claim();
     await fence.drain();
-    // Register icons that may not be in Obsidian's internal Lucide subset
-    addIcon('send', '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>');
-    addIcon('square', '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>');
-    addIcon('wrench', '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>');
-    // git-branch is in Obsidian's built-in Lucide subset — no custom registration needed.
-    // (Registering it here with 24×24 paths in a 100×100 viewBox would make it invisible.)
-    addIcon('play', '<polygon points="6 3 20 12 6 21 6 3"/>');
-    addIcon('check-circle', '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/>');
-    addIcon('alert-circle', '<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>');
-    addIcon('brain-circuit', '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/>');
+    // Built-in Lucide icon names need no registration. Never register a raw
+    // 24×24 Lucide fragment via addIcon(): it wraps content in a 100×100
+    // viewBox, so the glyph renders as a tiny dot in the top-left corner, and a
+    // custom icon shadows the built-in of the same name everywhere. Custom
+    // brand marks live in harnessBrandIcons.ts, pre-scaled to 100×100.
 
     await this.loadSettings();
 
@@ -463,6 +537,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
     this.detectClaudeBinary();
     this.detectCodexBinary();
+    this.detectOpenCodeBinary();
     this.migrateGithubSourcesIntoVault();
     this.scheduleGithubSourceClonePass();
 
@@ -518,7 +593,16 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
       try {
         const mcpServers = createClaudeThreadsMcpServers(this.app, {
-          onEnterDesignMode: brief => this.enterDesignMode(threadId, brief),
+          // Contributed agent tools, bound to this thread here — the host does
+          // the binding so a peer never reaches the factory (ADR-0008). Built-in
+          // Design arrives through this list like any other contribution; there
+          // is no privileged onEnterDesignMode option any more.
+          //
+          // Bound at construction, so a tool registered before this session was
+          // built is present and one registered after is not. Retrofitting a
+          // live session is deliberately not attempted: the agent's tool
+          // catalog is already fixed for the turn in flight.
+          contributedTools: this.agentTools.bindAll(threadId, this.agentToolHost(threadId)),
           onWatchDocument: path => this.watchDocument(threadId, path),
           onUnwatchDocument: opts => this.unwatchDocument(threadId, opts),
           onListWatchedDocuments: () => this.listWatchedDocuments(threadId),
@@ -528,6 +612,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
             return this.registerExternalMcpServer(input, interactive);
           },
           enableOpenUrl: (this.settings.enableWebViewerTool ?? true) && isWebViewerEnabled(this.app),
+          // Undefined when the pool is off or the host cannot support guests, in
+          // which case the browser_* tools are not registered at all. `capable`
+          // is checked here rather than inside the tools so an unsupported host
+          // costs nothing per turn instead of advertising tools that only refuse.
+          browser: this.agentBrowser?.capable ? this.createThreadBrowser(threadId) : undefined,
           openContextualFile: async (file) => {
             if (!this.isConversationFirst()) return false;
             await this.contextPanel.openFile(file);
@@ -548,6 +637,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // Read lazily so changing the setting takes effect on the next
           // enter_worktree call rather than requiring a session restart.
           getWorktreeRoot: () => this.settings.worktreeRoot,
+          // Same lazy-read rationale as getWorktreeRoot: changing the image or
+          // network setting takes effect on the next enter_vm call rather than
+          // needing a session restart.
+          getVmImage: () => this.settings.vmImage,
+          getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
           onScheduleWakeup: async (delayMs: number, prompt: string, reason: string) => {
             // Durable one-shot Scheduler item instead of a bare window.setTimeout:
             // the old implementation tracked wake-ups only in an in-memory Map
@@ -578,7 +672,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
           createThread: createAgentThreadCallback({
             sourceThreadId: threadId,
             getThread: id => this.manager.getThread(id),
-            createThread: (title, cwd, projectId) => this.manager.createThread(title, cwd, projectId),
+            createThread: (title, cwd, projectId) => this.createThreadFromAgent(threadId, title, cwd, projectId),
             saveSettings: () => this.saveSettings(),
             sendMessage: (id, prompt) => this.manager.sendMessage(id, prompt),
             authorizeProject: (projectId, elevatedProjectId) => {
@@ -737,7 +831,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
             this.manager.notifyProposedReplyChanged(id);
             this.saveSettings().catch(console.error);
           },
-          onCronCreate: (params) => this.scheduler.createItem(params),
+          onCronCreate: (params) => this.createCronItemFromThread(threadId, params),
           onCronList: () => this.scheduler.listItems(),
           onCronUpdate: (id, patch) => this.scheduler.updateItem(id, patch),
           onCronDelete: (id) => this.scheduler.deleteItem(id),
@@ -792,7 +886,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
             return result;
           },
           onRequestSecret: (secretName: string, reason: string, force?: boolean) =>
-            this.requestSecretFromUser(secretName, reason, force),
+            this.requestSecretForThread(threadId, secretName, reason, force),
         });
         const mcpDebug = Object.fromEntries(Object.entries(mcpServers).map(([key, server]) => [key, {
           type: (server as unknown as Record<string, unknown>).type,
@@ -1034,25 +1128,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
           throw error;
         }
       },
-      createThread: (title, cwd, projectId, scheduledItemId) => {
-        const thread = this.manager.createThread(title, cwd, projectId);
-        // Scheduled sessions should not block on permission prompts. When the
-        // global permissionMode is 'default' (ask every time), override to
-        // 'dontAsk' so unattended runs complete without hanging.
-        if (!thread.permissionMode && this.settings.permissionMode === 'default') {
-          thread.permissionMode = 'dontAsk';
-        }
-        // Record the scheduled item that created this thread, for the
-        // "Scheduled: <name>" footer pill. Captured once at creation time —
-        // not kept in sync with later renames of the scheduled item.
-        if (scheduledItemId) {
-          thread.scheduledItemId = scheduledItemId;
-          thread.scheduledItemName = (this.settings.scheduledItems ?? []).find(
-            (i) => i.id === scheduledItemId
-          )?.name;
-        }
-        return thread;
-      },
+      createThread: (title, cwd, projectId, scheduledItemId) => this.createScheduledThread(title, cwd, projectId, scheduledItemId),
       sendMessage: (threadId, prompt) => this.manager.sendMessage(threadId, prompt),
       getDefaultCwd: () => this.getEffectiveCwd(),
       getProjectCwd: (projectId) => {
@@ -1223,6 +1299,60 @@ export default class ClaudeThreadsPlugin extends Plugin {
       });
       this.documentWatch.start();
       this.register(() => this.documentWatch?.stop());
+    }
+
+    // Agent browser pool: owns every in-app browser guest and, more importantly,
+    // reclaims them. Each guest is a sandboxed renderer process, so the failure
+    // mode of getting this wrong is not a stale record but an app that slowly
+    // runs the machine out of file descriptors — which is exactly what the
+    // external browser CLI this replaces used to do.
+    //
+    // Desktop-only by construction: the pool refuses to create anything unless
+    // the host exposes FD diagnostics, which only Geode desktop does.
+    if (this.settings.enableAgentBrowser) {
+      const { AgentBrowserPool } = require('./agentBrowser/AgentBrowserPool') as typeof import('./agentBrowser/AgentBrowserPool');
+      this.agentBrowser = new AgentBrowserPool({
+        doc: document,
+        hostWindow: window,
+        getMaxGuests: () => this.settings.agentBrowserMaxGuests ?? 2,
+        getUrlPolicy: () => ({ allowPrivateNetwork: this.settings.agentBrowserAllowPrivateNetwork ?? false }),
+        notify: (message) => { new Notice(message); },
+        log: (message, meta) => { debugLog(message, meta); },
+      });
+      this.agentBrowser.start();
+
+      // Teardown goes through register() rather than onunload(): register
+      // callbacks run synchronously inside Component.unload(), whereas
+      // onunload() is not awaited and already sits behind an up-to-10s
+      // gracefulShutdown wait. A guest must not survive that long past unload.
+      this.register(() => this.agentBrowser?.destroy());
+
+      // A deleted thread's guest goes with it. emit() dispatches to listeners
+      // synchronously, so this reclaims inside deleteThread's own call stack.
+      this.register(this.manager.subscribe((threadId, event) => {
+        if (event.type === 'thread_deleted') {
+          this.agentBrowser?.destroyForThread(threadId, 'thread-delete');
+        }
+      }));
+
+      // Last-ditch: a page teardown that skips plugin unload entirely.
+      this.registerDomEvent(window, 'pagehide', () => {
+        this.agentBrowser?.destroyAll('unload');
+      });
+
+      // Preview pane. Registered with the pool rather than unconditionally, so
+      // the view type simply does not exist when the feature is off.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { AgentBrowserPreviewView } = require('./agentBrowser/AgentBrowserPreviewView') as typeof import('./agentBrowser/AgentBrowserPreviewView');
+      this.registerView(
+        AGENT_BROWSER_VIEW_TYPE,
+        (leaf) => new AgentBrowserPreviewView(leaf, () => this.agentBrowser),
+      );
+      this.addCommand({
+        id: 'open-agent-browser-preview',
+        name: 'Open Agent Browser',
+        callback: () => { void this.activateAgentBrowserView(); },
+      });
     }
 
     // Repair any threads whose cwd points to a deleted worktree — removed by
@@ -1413,6 +1543,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
       id: 'open-kanban-board',
       name: 'Open Agent Board',
       callback: () => this.activateKanbanView(),
+    });
+
+    this.addCommand({
+      id: CHIEF_OF_STAFF_COMMAND_ID,
+      name: CHIEF_OF_STAFF_COMMAND_NAME,
+      callback: () => { void this.runChiefOfStaffCommand(); },
     });
 
     this.addCommand({
@@ -1624,44 +1760,240 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // peer may call the API from its api-ready handler immediately.
     this.initializePublicApi();
 
-    // First-run onboarding: auto-open panels + welcome guide for brand-new installs.
-    // Migration guard: if the user already has threads they're upgrading from a prior
-    // version — mark hasSeenWelcome silently rather than hijacking their layout.
-    if (!this.settings.hasSeenWelcome) {
-      if (this.settings.threads.length === 0) {
-        this.app.workspace.onLayoutReady(() => {
-          this.firstRunSetup().catch(console.error);
-        });
-      } else {
-        // Existing user upgrading — skip onboarding, just flip the flag
-        this.settings.hasSeenWelcome = true;
-        this.saveSettings().catch(console.error);
-      }
+    // First-run onboarding for brand-new installs: open the panels, then start a
+    // Chief of Staff thread (or show the static guide when that is turned off or
+    // fails). Migration guard: a user who already has threads is upgrading from
+    // a prior version — mark hasSeenWelcome silently rather than hijacking their layout.
+    const firstRun = decideFirstRun({
+      hasSeenWelcome: this.settings.hasSeenWelcome,
+      threadCount: this.settings.threads.length,
+      offerChiefOfStaff: this.settings.offerChiefOfStaffOnFirstRun ?? true,
+      isFreshInstall: this.isFreshInstall,
+    });
+    if (firstRun === 'chief-of-staff' || firstRun === 'static-guide') {
+      this.app.workspace.onLayoutReady(() => {
+        this.firstRunSetup(firstRun === 'chief-of-staff').catch(console.error);
+      });
+    } else if (firstRun === 'mark-seen') {
+      this.settings.hasSeenWelcome = true;
+      this.saveSettings().catch(console.error);
     }
   }
 
-  private async firstRunSetup(): Promise<void> {
-    const { workspace, vault } = this.app;
+  /** Thread for one run of a scheduled item (the Scheduler's createThread). */
+  createScheduledThread(title: string, cwd: string, projectId?: string, scheduledItemId?: string): Thread {
+    const thread = this.manager.createThread(title, cwd, projectId);
+    // Scheduled sessions should not block on permission prompts. When the
+    // global permissionMode is 'default' (ask every time), override to
+    // 'dontAsk' so unattended runs complete without hanging.
+    if (!thread.permissionMode && this.settings.permissionMode === 'default') {
+      thread.permissionMode = 'dontAsk';
+    }
+    // Record the scheduled item that created this thread, for the
+    // "Scheduled: <name>" footer pill. Captured once at creation time —
+    // not kept in sync with later renames of the scheduled item.
+    if (scheduledItemId) {
+      const item = (this.settings.scheduledItems ?? []).find((i) => i.id === scheduledItemId);
+      thread.scheduledItemId = scheduledItemId;
+      thread.scheduledItemName = item?.name;
+      // Denylist inherited from the thread that created the item
+      // (restriction-only; see toolRestrictions.ts).
+      if (item?.disallowedTools?.length) {
+        thread.disallowedTools = mergeDisallowedTools(thread.disallowedTools, item.disallowedTools);
+      }
+    }
+    return thread;
+  }
 
-    // 1. Write welcome guide to vault
-    const selectedGuide = selectWelcomeGuidePath(
-      this.settings.vaultFolder,
-      path => Boolean(vault.getAbstractFileByPath(normalizePath(path))),
-    );
-    const guidePath = normalizePath(selectedGuide.path);
+  /**
+   * A scheduled item created by an agent's CronCreate call. The creating
+   * thread's denylist is copied onto the item, keyed by that thread's id and
+   * never by the item's name, so threads the item spawns inherit it.
+   */
+  createCronItemFromThread(creatorThreadId: string, params: CronCreateParams): Promise<ScheduledItem> {
+    return this.scheduler.createItem(withCreatorToolRestrictions(params, this.manager.getThread(creatorThreadId)));
+  }
+
+  /** A thread an agent creates via threads_create; it inherits the creator's denylist. */
+  createThreadFromAgent(creatorThreadId: string, title: string, cwd?: string, projectId?: string): Thread {
+    const thread = this.manager.createThread(title, cwd, projectId);
+    const creator = this.manager.getThread(creatorThreadId);
+    if (creator?.disallowedTools?.length) {
+      thread.disallowedTools = mergeDisallowedTools(thread.disallowedTools, creator.disallowedTools);
+    }
+    return thread;
+  }
+
+  /**
+   * Absolute directory managed GitHub skill-source clones live in
+   * (`<vault>/<plugin-dir>/skill-sources`), or null when the vault is not on a
+   * real filesystem. Never falls back to the home directory.
+   */
+  getSkillSourceCloneBase(): string | null {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter) || !this.manifest?.dir) return null;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pathNode = require('path') as typeof import('path');
+    return pathNode.join(adapter.getBasePath(), this.manifest.dir, 'skill-sources');
+  }
+
+  /** Clones `repoUrl` as a managed GitHub skill source and persists it. Throws on failure. */
+  async addManagedGithubSkillSource(repoUrl: string, ref?: string): Promise<SkillSource> {
+    const cloneBase = this.getSkillSourceCloneBase();
+    if (!cloneBase) throw new Error('This vault is not on a local filesystem, so skill sources cannot be cloned.');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { addGithubSkillSource } = require('./skillManager') as typeof import('./skillManager');
+    const source = await addGithubSkillSource({ repoUrl, cloneBase, ref });
+    this.settings.skillSources = [...(this.settings.skillSources ?? []), source];
+    await this.saveSettings();
+    return source;
+  }
+
+  /** Whether git can run, without triggering the macOS developer-tools install dialog. */
+  private async isGitAvailable(): Promise<boolean> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { checkGitAvailable, runCommandQuietly } = require('./skillManager') as typeof import('./skillManager');
+    return checkGitAvailable({
+      platform: process.platform,
+      pathEnv: process.env.PATH,
+      exists: p => { try { return fs.existsSync(p); } catch { return false; } },
+      run: runCommandQuietly,
+    });
+  }
+
+  /** Whether `harness`'s configured binary can be found, so a first turn can start. */
+  private isHarnessResolvable(harness: AgentHarness): boolean {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pathNode = require('path') as typeof import('path');
+    const binary = harness === 'codex'
+      ? this.settings.codexBinaryPath
+      : harness === 'opencode'
+        ? this.settings.opencodeBinaryPath
+        : this.settings.claudeBinaryPath;
+    return isBinaryResolvable(binary ?? '', {
+      exists: p => { try { return fs.existsSync(p); } catch { return false; } },
+      pathEnv: process.env.PATH,
+      pathSeparator: pathNode.delimiter,
+      dirSeparator: pathNode.sep,
+    });
+  }
+
+  /**
+   * Adds the Chief of Staff skill source if needed, then focuses the existing
+   * Chief of Staff thread or creates one that runs `cos-setup`. Shared by first
+   * run and the "Set up Chief of Staff" command.
+   */
+  async setUpChiefOfStaff(): Promise<ChiefOfStaffResult> {
+    // Concurrent callers (first run racing the command, a double-trigger) share
+    // one run, so the clone await cannot let two home threads be created.
+    if (!this.chiefOfStaffSetupInFlight) {
+      // Persistent progress notice: a first clone can take several seconds.
+      const progress = new Notice('Setting up your Chief of Staff…', 0);
+      this.chiefOfStaffSetupInFlight = this.runChiefOfStaffSetup().finally(() => {
+        progress.hide();
+        this.chiefOfStaffSetupInFlight = undefined;
+      });
+    }
+    return this.chiefOfStaffSetupInFlight;
+  }
+
+  private chiefOfStaffSetupInFlight?: Promise<ChiefOfStaffResult>;
+  /** True when loadData() found no saved data: a genuinely new install. */
+  private isFreshInstall = false;
+
+  private runChiefOfStaffSetup(): Promise<ChiefOfStaffResult> {
+    return setUpChiefOfStaff({
+      getSkillSources: () => this.settings.skillSources ?? [],
+      isGitAvailable: () => this.isGitAvailable(),
+      addGithubSkillSource: async (repoUrl, ref) => { await this.addManagedGithubSkillSource(repoUrl, ref); },
+      resolveHarness: () => chooseChiefOfStaffHarness(this.settings.agentHarness ?? 'claude', h => this.isHarnessResolvable(h)),
+      reloadThreadSkills: (id) => this.manager.requestSessionRestart(id),
+      listThreads: () => this.manager.getThreads(),
+      getStoredThreadId: () => this.settings.chiefOfStaffThreadId,
+      setStoredThreadId: (id) => { this.settings.chiefOfStaffThreadId = id; },
+      // Inherits the global permission mode (acceptEdits on a fresh install);
+      // cos-setup writes nothing until the user says go.
+      createThread: (title, harness) => {
+        const thread = this.manager.createThread(title, this.getEffectiveCwd(), undefined, harness);
+        // Pin the title: the home thread is found by title/id and must not be
+        // renamed by the auto-summarizer (applyAutoTitle honors titleUserSet).
+        thread.titleUserSet = true;
+        // Enforced, not just prompted: the home thread (and every scheduled run
+        // and sub-thread it creates) may never use the shell.
+        thread.disallowedTools = mergeDisallowedTools(thread.disallowedTools, ['Bash']);
+        return thread;
+      },
+      sendPrompt: (id, prompt) => { this.manager.sendMessage(id, prompt).catch(console.error); },
+      openThread: (id) => this.openThreadInChatView(id),
+      saveSettings: () => this.saveSettings(),
+    });
+  }
+
+  private async runChiefOfStaffCommand(): Promise<void> {
     try {
-      if (selectedGuide.shouldCreate) {
-        const folderPath = normalizePath(this.settings.vaultFolder);
-        if (!vault.getAbstractFileByPath(folderPath)) {
-          await vault.createFolder(folderPath);
-        }
-        await vault.create(guidePath, WELCOME_GUIDE);
+      const result = await this.setUpChiefOfStaff();
+      if (result.status === 'failed') {
+        console.warn('[ClaudeThreads] Set up Chief of Staff failed:', result.reason, result.error);
+        new Notice(`Couldn\u2019t set up Chief of Staff: ${describeChiefOfStaffFailure(result.reason, result.error)}.`, 10_000);
+      } else if (result.status === 'focused-existing' && result.sourceError) {
+        console.warn('[ClaudeThreads] Chief of Staff skills could not be re-added:', result.sourceError);
+        const reason = describeChiefOfStaffFailure(result.sourceFailure ?? 'clone-failed', result.sourceError);
+        new Notice(`Opened your Chief of Staff thread, but the Chief of Staff skills couldn\u2019t be added: ${reason}.`, 10_000);
+      } else if (result.status === 'focused-existing' && result.skillsReloadPending) {
+        new Notice('Chief of Staff skills added. The thread restarts on your next message so they load.', 10_000);
       }
     } catch (err) {
-      console.error('[ClaudeThreads] Failed to create welcome guide:', err);
+      console.error('[ClaudeThreads] Set up Chief of Staff failed:', err);
+      new Notice(`Couldn\u2019t set up Chief of Staff: ${describeChiefOfStaffFailure('unexpected', '')}.`, 10_000);
+    }
+  }
+
+  private async firstRunSetup(offerChiefOfStaff: boolean): Promise<void> {
+    // Set up Chief of Staff BEFORE opening Chat. Building ThreadsView with no
+    // threads auto-creates an empty "Thread 1"; creating the home thread first
+    // means a successful first run ends with exactly one thread. (Setup opens
+    // Chat itself when it focuses the new thread.) The fallback opens Chat with
+    // no threads, which keeps the previous single "Thread 1".
+    let chiefOfStaffStarted = false;
+    let fallbackReason: string | undefined;
+    if (offerChiefOfStaff) {
+      try {
+        const result = await this.setUpChiefOfStaff();
+        if (result.status === 'failed') {
+          fallbackReason = describeChiefOfStaffFailure(result.reason, result.error);
+          console.warn('[ClaudeThreads] Chief of Staff first run fell back to the static guide:', result.reason, result.error);
+        } else {
+          chiefOfStaffStarted = true;
+        }
+      } catch (err) {
+        fallbackReason = describeChiefOfStaffFailure('unexpected', '');
+        console.warn('[ClaudeThreads] Chief of Staff first run fell back to the static guide:', err);
+      }
     }
 
-    // 2. Open chat according to the desktop-aware placement policy.
+    // Open Chat and the Agents List as before (no-ops for a view setup already opened).
+    await this.openFirstRunPanels();
+
+    if (!chiefOfStaffStarted) {
+      await this.openWelcomeGuide(offerChiefOfStaff, fallbackReason);
+      new Notice(fallbackReason
+        ? `Chief of Staff setup couldn\u2019t finish: ${fallbackReason}. Check the guide to get started.`
+        : 'Welcome to Agent Threads! Check the guide to get started.');
+    } else {
+      new Notice('Welcome to Agent Threads! Your Chief of Staff is getting you set up.');
+    }
+
+    // Persist the flag so this never fires again
+    this.settings.hasSeenWelcome = true;
+    await this.saveSettings();
+  }
+
+  private async openFirstRunPanels(): Promise<void> {
+    const { workspace } = this.app;
     try {
       if (this.isConversationFirst()) {
         await this.activateView();
@@ -1673,7 +2005,47 @@ export default class ClaudeThreadsPlugin extends Plugin {
       console.error('[ClaudeThreads] Failed to open chat in left sidebar:', err);
     }
 
-    // 3. Open welcome guide in the CENTER editor
+    try {
+      const existingDash = workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
+      if (!existingDash) {
+        const dashLeaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+        await dashLeaf.setViewState({ type: AGENT_VIEW_TYPE, active: true });
+        workspace.revealLeaf(dashLeaf);
+      } else {
+        workspace.revealLeaf(existingDash);
+      }
+    } catch (err) {
+      console.error('[ClaudeThreads] Failed to open Agents List:', err);
+    }
+  }
+
+  /**
+   * Writes (if missing) and opens the static getting-started guide. When
+   * `withPointer` is set — the Chief of Staff fallback — the guide gains one
+   * line pointing at the "Set up Chief of Staff" command.
+   */
+  private async openWelcomeGuide(withPointer: boolean, failureReason?: string): Promise<void> {
+    const { workspace, vault } = this.app;
+
+    // Write welcome guide to vault
+    const selectedGuide = selectWelcomeGuidePath(
+      this.settings.vaultFolder,
+      path => Boolean(vault.getAbstractFileByPath(normalizePath(path))),
+    );
+    const guidePath = normalizePath(selectedGuide.path);
+    try {
+      if (selectedGuide.shouldCreate) {
+        const folderPath = normalizePath(this.settings.vaultFolder);
+        if (!vault.getAbstractFileByPath(folderPath)) {
+          await vault.createFolder(folderPath);
+        }
+        await vault.create(guidePath, withPointer ? withChiefOfStaffPointer(WELCOME_GUIDE, failureReason) : WELCOME_GUIDE);
+      }
+    } catch (err) {
+      console.error('[ClaudeThreads] Failed to create welcome guide:', err);
+    }
+
+    // Open the guide in the CENTER editor (or the companion panel).
     try {
       const guideFile = vault.getAbstractFileByPath(guidePath);
       if (guideFile instanceof TFile) {
@@ -1688,27 +2060,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     } catch (err) {
       console.error('[ClaudeThreads] Failed to open welcome guide:', err);
     }
-
-    // 4. Open the Agents List in the RIGHT sidebar
-    try {
-      const existingDash = workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
-      if (!existingDash) {
-        const dashLeaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
-        await dashLeaf.setViewState({ type: AGENT_VIEW_TYPE, active: true });
-        workspace.revealLeaf(dashLeaf);
-      } else {
-        workspace.revealLeaf(existingDash);
-      }
-    } catch (err) {
-      console.error('[ClaudeThreads] Failed to open Agents List:', err);
-    }
-
-    // 5. Welcome notice
-    new Notice('Welcome to Agent Threads! Check the guide to get started.');
-
-    // 6. Persist the flag so this never fires again
-    this.settings.hasSeenWelcome = true;
-    await this.saveSettings();
   }
 
   private async onloadMobile(): Promise<void> {
@@ -1893,11 +2244,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const sources = this.settings.skillSources ?? [];
     if (!sources.some(s => s.type === 'github')) return;
 
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter) || !this.manifest?.dir) return;
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pathNode = require('path') as typeof import('path');
-    const cloneBase = pathNode.join(adapter.getBasePath(), this.manifest.dir, 'skill-sources');
+    const cloneBase = this.getSkillSourceCloneBase();
+    if (!cloneBase) return;
 
     this.app.workspace.onLayoutReady(() => {
       void (async () => {
@@ -1977,6 +2325,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const parsed = mcpRegistrationSchema.safeParse(input);
     // The OAuth consent round-trip needs an interactive human even more than a
     // static server registration does, so it shares the exact same guard.
+    //
+    // The guard stays in force for `client_credentials` too, even though that
+    // grant opens no consent screen and needs nobody present: what it gates is
+    // the host's confirmation of a new MCP server, which grants tools to every
+    // future thread. Exempting the non-interactive grant would let a scheduled
+    // thread register a server with no human ever seeing it.
     if (parsed.success && parsed.data.type === 'oauth') {
       if (!interactive) {
         return { success: false, status: 'unavailable', message: 'Interactive host confirmation is unavailable. Register this server from an interactive thread.' };
@@ -1985,6 +2339,25 @@ export default class ClaudeThreadsPlugin extends Plugin {
         return { success: false, status: 'unavailable', message: 'OAuth MCP registration is unavailable in this context.' };
       }
       const data = parsed.data;
+      // `clientSecret` arrives as a `${NAME}` placeholder — the schema rejects
+      // literals so a secret never lands in the thread transcript — so resolve it
+      // from the keychain here, the first point with keychain access. A named-but-
+      // missing secret is reported rather than silently dropped: registering as a
+      // public client instead would fail at the token endpoint with the AS's own
+      // opaque `invalid_client`, long after the cause.
+      let clientSecret: string | undefined;
+      const clientSecretVar = clientSecretVariableName(data.clientSecret);
+      if (clientSecretVar !== undefined) {
+        clientSecret = this.app.secretStorage.getSecret(secretStorageKey(clientSecretVar)) || undefined;
+        if (clientSecret === undefined) {
+          return {
+            success: false,
+            status: 'invalid',
+            message: `No secret named ${clientSecretVar} is stored. Save it with request_secret, then register "${data.name}" again.`,
+            requiredVariables: [clientSecretVar],
+          };
+        }
+      }
       // Guaranteed non-empty for an oauth entry by mcpRegistrationSchema's superRefine.
       return this.oauthMcpRegistry.registerServer({
         name: data.name,
@@ -1992,8 +2365,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
         scopes: data.scopes,
         tools: data.tools,
         clientId: data.clientId,
+        clientSecret,
         authorizationServerUrl: data.authorizationServerUrl,
         redirectUri: data.redirectUri,
+        grantType: data.grantType,
+        audience: data.audience,
       });
     }
     if (!this.registerMcpServerFn) {
@@ -2019,6 +2395,21 @@ export default class ClaudeThreadsPlugin extends Plugin {
         resolve(saved);
       }, force).open();
     });
+  }
+
+  /**
+   * Thread-scoped wrapper around requestSecretFromUser(): after a successful
+   * save, flags the calling thread's live session for restart so the new
+   * secret is picked up starting the thread's next turn (secretEnvResolver is
+   * only consulted at session start — see ThreadManager.secretEnvResolver /
+   * buildThreadSessionOptions). Mirrors the reloadThreadSkills pattern
+   * (requestSessionRestart is a no-op / returns false if there's no live
+   * session yet, which is fine — the next-anyway-fresh session already gets it).
+   */
+  private async requestSecretForThread(threadId: string, secretName: string, reason: string, force?: boolean): Promise<boolean> {
+    const saved = await this.requestSecretFromUser(secretName, reason, force);
+    if (saved) this.manager.requestSessionRestart(threadId);
+    return saved;
   }
 
   getPluginSkillsRoot(): string {
@@ -2124,6 +2515,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // independently fire the same due item. Destroying synchronously here closes
     // that race window immediately, regardless of how long thread shutdown takes.
     this.scheduler?.destroy();
+    // Same reasoning as the scheduler: every agent browser guest is a live
+    // renderer process, and this must not wait for the gracefulShutdown poll
+    // below. register() already covers the normal unload path; this is the
+    // belt-and-braces call for teardown orders that reach onunload() first.
+    // destroy() is idempotent, so running twice is free.
+    this.agentBrowser?.destroy();
     this.googleWorkspaceMcp?.close();
     this.oauthMcpRegistry?.close();
 
@@ -2190,6 +2587,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   initializePublicApi(): void {
     this.revokePublicApi();
+    const lifecycle = createPublicThreadLifecycle({
+      getThreads: () => this.manager.getThreads(),
+      isRunning: id => this.manager.isRunning(id),
+      getOrchestratorContext: () => ({ portfolioThreadId: this.settings.orchestratorThreadId, projects: this.manager.getProjects() }),
+      confirm: spec => promptConfirm(this.app, spec),
+      cancelWakeups: async id => {
+        const wakeups = this.scheduler.listItems().filter(item => item.origin === 'wakeup' && item.targetThreadId === id);
+        for (const item of wakeups) await this.scheduler.deleteItem(item.id);
+        if (wakeups.length) this.manager.notifyWakeupChanged(id);
+      },
+      archiveThread: (id, assertSafe) => this.archiveThreadById(id, false, assertSafe),
+      saveSettings: () => this.saveSettings(),
+      notifyReviewed: id => this.manager.notifyReviewedChanged(id),
+    });
     const service = createClaudeThreadsApiV1({
       getThreads: () => this.manager.getThreads(),
       getThread: (id) => this.manager.getThread(id),
@@ -2204,6 +2615,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         await this.saveSettings();
         return thread;
       },
+      beginProvisionalThread: (input: CreateThreadInput) => this.beginPublicProvisionalThread(input),
       sendMessage: (id, prompt) => this.manager.sendMessage(id, prompt),
       interruptThread: (id) => this.manager.interrupt(id),
       getTraceMetadata: (id) => this.manager.getRawLogTraceMetadata(id),
@@ -2212,14 +2624,13 @@ export default class ClaudeThreadsPlugin extends Plugin {
         const { listInstalledSkills } = require('./skillManager') as typeof import('./skillManager');
         return (await listInstalledSkills(this.settings.skillSources ?? [])).map(skill => skill.name);
       },
-      getRedactionSecrets: () => [
-        ...(this.settings.secretEnvKeys ?? []).map((name) => this.app.secretStorage.getSecret(secretStorageKey(name))),
-        ...Object.entries(parseExtraEnv(effectiveExtraEnv(this.settings))).filter(([name]) => /(?:token|secret|key|password)/i.test(name)).map(([, value]) => value),
-      ].filter((value): value is string => Boolean(value)),
+      getRedactionSecrets: () => this.collectSecretValues(),
       getPublicState: () => this.settings.publicApiState,
       savePublicState: async (state) => { this.settings.publicApiState = state; await this.saveSettings(); },
       runConstrainedQuery: createConstrainedQueryRunner(() => this.settings, undefined, () => this.manager.secretEnvResolver?.() ?? {}),
       openThread: (id) => this.openThreadInChatView(id),
+      archiveThread: lifecycle.archive,
+      markThreadReviewed: lifecycle.markReviewed,
       subscribe: (listener) => this.manager.subscribe(listener),
       listOrchestrators: () => this.listPublicOrchestrators(),
       resolveOrchestrator: (target) => this.resolvePublicOrchestrator(target),
@@ -2235,10 +2646,63 @@ export default class ClaudeThreadsPlugin extends Plugin {
       registerMcpServer: (input) => this.registerExternalMcpServer(input, this.mcpRegistrationAvailable),
       requestSecret: (secretName, reason, force) => this.requestSecretFromUser(secretName, reason, force),
       hasSecret: (name) => !!this.app.secretStorage.getSecret(secretStorageKey(name)),
+      artifactProviders: this.artifactProviders,
+      messageContentProviders: this.messageContentProviders,
+      agentTools: this.agentTools,
+      slashCommands: this.slashCommands,
+      getDefaultPermissionMode: () => this.settings.permissionMode,
+      artifactStore: createArtifactStore({
+        vaultRoot: () => this.manager.vaultRoot,
+        getThread: (id) => this.manager.getThread(id),
+        saveSettings: () => this.saveSettings(),
+        // Delegating to the view is what keeps a peer's invokeAction and a
+        // user's card click on one code path. Absent view ⇒ error result.
+        invokeAction: (threadId, artifactId, actionId) => this.getView()?.invokeArtifactAction(threadId, artifactId, actionId),
+        onChanged: () => this.getView()?.refreshArtifactCard(),
+      }),
     });
     this.publicApiService = service;
     this.api = Object.freeze({ v1: service.api });
     service.start();
+  }
+
+  /**
+   * Creates a reversible public-API thread while keeping deletion and view
+   * selection repair private to the host. The peer owns the work performed
+   * between begin and commit; this host handle owns only lifecycle rollback.
+   */
+  private async beginPublicProvisionalThread(input: CreateThreadInput) {
+    const project = input.projectId ? this.manager.getProject(input.projectId) : undefined;
+    if (input.projectId && !project) throw new Error(`Project not found: ${input.projectId}`);
+    const previousActiveThreadId = this.getActiveThreadId();
+    const cwd = input.cwd ?? (project ? this.manager.getProjectCwd(project) : this.getEffectiveCwd());
+    const thread = this.manager.createThread(input.title?.trim() || 'New Thread', cwd, project?.id, input.agentHarness, {
+      origin: input.origin, externalJobId: input.externalJobId, ephemeral: input.ephemeral, background: input.background,
+    });
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      this.manager.deleteThread(thread.id);
+      await this.getView()?.restoreThreadSelection(previousActiveThreadId);
+      throw error;
+    }
+    let settled = false;
+    return {
+      thread,
+      commit: async () => {
+        if (settled) return;
+        await this.saveSettings();
+        settled = true;
+      },
+      rollback: async () => {
+        if (settled) return;
+        this.manager.deleteThread(thread.id);
+        await this.getView()?.restoreThreadSelection(previousActiveThreadId);
+        await this.manager.artifactCleanupSettled;
+        await this.saveSettings();
+        settled = true;
+      },
+    };
   }
 
   revokePublicApi(): void {
@@ -2279,10 +2743,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * data.json. Does NOT call saveSettings. Each caller persists once (the sweep
    * saves once after its whole loop rather than per thread).
    */
-  async archiveThreadById(id: string, onlyIfHasMessages = false): Promise<void> {
+  async archiveThreadById(id: string, onlyIfHasMessages = false, assertSafe?: () => void): Promise<void> {
+    assertSafe?.();
     const thread = this.manager.getThread(id);
     if (!thread) throw new Error(`Thread not found: ${id}`);
     const originalSnapshot = { ...thread };
+    const wasPortfolio = this.settings.orchestratorThreadId === id;
     const project = this.manager.getProjects().find(candidate => candidate.orchestratorThreadId === id);
     const priorProjectEnabled = project?.orchestratorEnabled;
     if (project) {
@@ -2301,12 +2767,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
         throw error;
       }
     }
+    let retired = false;
     try {
+      assertSafe?.();
       await this.retireOrchestratorThread(id, project ? { projectId: project.id, priorEnabled: priorProjectEnabled ?? true } : undefined);
+      retired = true;
+      assertSafe?.();
     } catch (error) {
+      if (!retired && project) this.manager.updateProject(project.id, { orchestratorEnabled: priorProjectEnabled ?? true, orchestratorThreadId: id });
       if (persistedArchive) await this.persistence!.saveThread(originalSnapshot).catch(rollbackError => {
         console.error('[ClaudeThreads] Failed to restore live thread note after orchestrator retirement failure:', rollbackError);
       });
+      if (retired && (project || wasPortfolio)) {
+        throw new Error(`Archive stopped after orchestrator retirement; the thread remains live but its heartbeat may be disabled. ${error instanceof Error ? error.message : String(error)}`);
+      }
       throw error;
     }
     this.manager.deleteThread(id);
@@ -2473,6 +2947,27 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.settings.claudeBinaryPath = 'claude';
   }
 
+  private detectOpenCodeBinary(): void {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    if (this.settings.opencodeBinaryPath && fs.existsSync(this.settings.opencodeBinaryPath)) return;
+    // A customized value that is not a path (e.g. a PATH-resolved name) is respected.
+    if (this.settings.opencodeBinaryPath && this.settings.opencodeBinaryPath !== 'opencode') return;
+    for (const candidate of [
+      '/opt/homebrew/bin/opencode',
+      '/usr/local/bin/opencode',
+      `${process.env.HOME}/.opencode/bin/opencode`,
+      `${process.env.HOME}/.local/bin/opencode`,
+    ]) {
+      if (fs.existsSync(candidate)) {
+        this.settings.opencodeBinaryPath = candidate;
+        return;
+      }
+    }
+    // `opencode` on PATH is the CLI's documented invocation.
+    this.settings.opencodeBinaryPath = 'opencode';
+  }
+
   private detectCodexBinary(): void {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
@@ -2533,6 +3028,38 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return isConversationFirstPlacement(this.settings.threadViewPlacement, Platform.isMobile);
   }
 
+  /**
+   * Stored secret values, for redaction and for refusing to type a credential
+   * into a web page. Synchronous because `secretStorage.getSecret` is.
+   */
+  collectSecretValues(): string[] {
+    return [
+      ...(this.settings.secretEnvKeys ?? []).map((name) => this.app.secretStorage.getSecret(secretStorageKey(name))),
+      ...Object.entries(parseExtraEnv(effectiveExtraEnv(this.settings)))
+        .filter(([name]) => /(?:token|secret|key|password)/i.test(name))
+        .map(([, value]) => value),
+    ].filter((value): value is string => Boolean(value));
+  }
+
+  /**
+   * Per-thread handle on the agent browser.
+   *
+   * Built fresh for each MCP session rather than cached on the plugin: element
+   * refs belong to a page and a snapshot generation, so a restarted session
+   * starting without them is correct — it forces a fresh snapshot instead of
+   * letting the agent act on refs whose page may have changed underneath it.
+   */
+  private createThreadBrowser(threadId: string): import('./agentBrowser/ThreadBrowser').ThreadBrowser | undefined {
+    if (!this.agentBrowser) return undefined;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { ThreadBrowser } = require('./agentBrowser/ThreadBrowser') as typeof import('./agentBrowser/ThreadBrowser');
+    return new ThreadBrowser({
+      threadId,
+      pool: this.agentBrowser,
+      getSecrets: () => this.collectSecretValues(),
+    });
+  }
+
   async activateAgentView(): Promise<void> {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
@@ -2563,6 +3090,23 @@ export default class ClaudeThreadsPlugin extends Plugin {
       // the main area is free for editing, so a tab still makes sense.
       leaf = (this.isConversationFirst() ? workspace.getRightLeaf(false) : workspace.getLeaf('tab')) as WorkspaceLeaf;
       await leaf.setViewState({ type: SKILLS_VIEW_TYPE, active: true });
+    }
+    workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * Show the agent browser preview, in the right sidebar.
+   *
+   * Always a sidebar leaf rather than a main-area tab: this is something you
+   * glance at while the agent works, and putting it in the main area would mean
+   * it competes with the conversation for the space you are actually reading.
+   */
+  async activateAgentBrowserView(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(AGENT_BROWSER_VIEW_TYPE)[0];
+    if (!leaf) {
+      leaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+      await leaf.setViewState({ type: AGENT_BROWSER_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
   }
@@ -2689,7 +3233,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
        * the dispatch itself. */
       loop?: { intervalSeconds: number };
       /** Harness override selected at kickoff; does not change Settings. */
-      agentHarness?: 'claude' | 'codex';
+      agentHarness?: AgentHarness;
       /** Project selected by a dispatch surface. Omit for deliberate Unassigned. */
       projectId?: string;
     },
@@ -2722,27 +3266,26 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return thread.id;
   }
 
-  /** Caller-bound design entry; the composer shares preparation but owns its next turn. */
-  async enterDesignMode(threadId: string, brief: string, fromComposer = false): Promise<import('./designArtifact').DesignModeResult> {
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter)) {
-      throw new Error('Design artifacts require a desktop vault with local filesystem access.');
-    }
-    const { enterDesignMode, assertDesignWriteAllowed } = await import('./designArtifact');
-    return enterDesignMode(threadId, adapter.getBasePath(), brief, {
-      getThread: id => this.manager.getThread(id),
-      assertWritable: thread => {
-        if (!fromComposer) assertDesignWriteAllowed(thread, this.settings.permissionMode);
+  /**
+   * Per-invocation capabilities handed to a contributed agent tool, bound to
+   * the calling thread (ADR-0008).
+   *
+   * Both operations go through public API v1 rather than reaching into the
+   * manager, for the same reason `previewDesignArtifactAsPeer` does: if the
+   * built-in reference consumer needs a privileged path here, so would a peer,
+   * and the extraction would not be real.
+   */
+  private agentToolHost(threadId: string): AgentToolHost {
+    return {
+      permissions: async () => (await this.api?.v1.threads.permissions(threadId)) ?? null,
+      allocateStorage: async (artifactId: string) => {
+        const api = this.api?.v1;
+        if (!api) {
+          return { success: false, status: 'unavailable', artifactId, message: 'Agent Threads public API is unavailable.' };
+        }
+        return api.artifacts.allocateStorage(threadId, artifactId);
       },
-      saveSettings: () => this.saveSettings(),
-      openThread: id => this.openThreadInChatView(id),
-      openPreview: async artifact => {
-        const view = this.getView();
-        if (!view) throw new Error('Agent Threads view is unavailable.');
-        view.refreshArtifactCard();
-        return view.openArtifactPreview(artifact);
-      },
-    });
+    };
   }
 
   /**
@@ -2804,43 +3347,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return this.settings.watchedDocuments
       .filter((w) => w.threadId === threadId)
       .map(({ id, path, createdAt, lastAlertedAt }) => ({ id, path, createdAt, lastAlertedAt }));
-  }
-
-  /** Creates a new thread whose first turn uses the native static-artifact workflow. */
-  async dispatchNewDesignThread(brief: string, agentHarness?: 'claude' | 'codex'): Promise<string> {
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter)) {
-      throw new Error('Design artifacts require a desktop vault with local filesystem access.');
-    }
-
-    const { dispatchDesignThread } = require('./designArtifact') as typeof import('./designArtifact');
-    return dispatchDesignThread(
-      brief,
-      agentHarness,
-      adapter.getBasePath(),
-      {
-        createThread: (title, harness) =>
-          this.manager.createThread(title, this.getEffectiveCwd(), undefined, harness),
-        deleteThread: (threadId) => this.manager.deleteThread(threadId),
-        getActiveThreadId: () => this.getActiveThreadId(),
-        restoreActiveThread: async (threadId) => {
-          const view = this.getView();
-          if (view) await view.restoreThreadSelection(threadId);
-        },
-        saveSettings: () => this.saveSettings(),
-        sendMessage: (threadId, message) => this.manager.sendMessage(threadId, message),
-        openThread: (threadId) => this.openThreadInChatView(threadId),
-        openPreview: async (artifact) => {
-          const view = this.getView();
-          if (!view) throw new Error('Agent Threads view is unavailable.');
-          await view.openArtifactPreview(artifact);
-        },
-        onSendError: (error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          new Notice(`Failed to start design turn: ${message}`);
-        },
-      },
-    );
   }
 
   getActiveThreadId(): string | null {
@@ -3044,6 +3550,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const data = await this.loadData();
+    // No saved data at all = a genuinely new install (gates the Chief of Staff first run).
+    this.isFreshInstall = isFreshInstallData(data);
     this.settings = mergePersistedSettings(DEFAULT_SETTINGS, data);
     const { sanitizeConversationCompanionSettings } = require('./conversationFirstPlacement') as typeof import('./conversationFirstPlacement');
     sanitizeConversationCompanionSettings(this.settings as unknown as Record<string, unknown>);

@@ -1,7 +1,7 @@
 /**
  * Tests for Group 5 dynamic discovery + context usage:
  *   - supportedModels() / supportedAgents() fire onCapabilitiesDiscovered
- *   - getContextUsage() returns the SDK response (or null when no session)
+ *   - getContextUsage() maps the SDK response to the neutral snapshot (or null when no session)
  *   - /context slash command is in THREAD_BUILTIN_COMMANDS
  */
 
@@ -31,9 +31,22 @@ const capMock = vi.hoisted(() => ({
   models: [{ id: 'claude-sonnet-4-5', displayName: 'Claude Sonnet 4.5' }] as unknown[],
   agents: [{ id: 'code', displayName: 'Code agent' }] as unknown[],
   getContextUsageResult: {
-    system_prompt: { tokens: 500 },
-    messages: { tokens: 1200 },
-    tools: { tokens: 200 },
+    categories: [
+      { name: 'System prompt', tokens: 500, color: '#111', kind: 'used' },
+      { name: 'Messages', tokens: 1200, color: '#222', kind: 'used' },
+    ],
+    totalTokens: 1700,
+    maxTokens: 200000,
+    rawMaxTokens: 200000,
+    percentage: 0.85,
+    gridRows: [],
+    model: 'claude-sonnet-4-5',
+    memoryFiles: [],
+    mcpTools: [],
+    agents: [],
+    autoCompactThreshold: 180000,
+    isAutoCompactEnabled: true,
+    apiUsage: null,
   } as unknown,
 }));
 
@@ -142,7 +155,7 @@ describe('ThreadSession.getContextUsage', () => {
     expect(result).toBeNull();
   });
 
-  it('returns the SDK usage response during an active session', async () => {
+  it('maps the SDK usage response to the harness-neutral snapshot during an active session', async () => {
     const { __setIterable } = await import('@anthropic-ai/claude-agent-sdk') as any;
 
     // Use a promise to pause the session mid-run so we can call getContextUsage
@@ -171,9 +184,17 @@ describe('ThreadSession.getContextUsage', () => {
     await new Promise<void>((r) => setTimeout(r, 0));
 
     const usage = await session.getContextUsage();
-    expect(usage).not.toBeNull();
-    expect(usage).toHaveProperty('system_prompt');
-    expect(usage).toHaveProperty('messages');
+    expect(usage).toEqual({
+      categories: [
+        { name: 'System prompt', tokens: 500, color: '#111', kind: 'used' },
+        { name: 'Messages', tokens: 1200, color: '#222', kind: 'used' },
+      ],
+      totalTokens: 1700,
+      maxTokens: 200000,
+      percentage: 0.85,
+      model: 'claude-sonnet-4-5',
+      autoCompactThreshold: 180000,
+    });
 
     // Resume the session so its detached pump can complete.
     pauseResolve!();

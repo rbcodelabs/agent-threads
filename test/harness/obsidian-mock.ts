@@ -248,6 +248,15 @@ export class ItemView {
     actions.className = 'view-actions';
     header.append(left, titleContainer, actions);
     const content = document.createElement('div');
+    // Real Obsidian gives the ItemView content element the `view-content`
+    // class, and views add their own root class alongside it (e.g.
+    // `containerEl.children[1].addClass('ct-skills-root')`). Stylesheet rules
+    // are written against BOTH — `.view-content.ct-skills-root { display:flex }`
+    // — so omitting it here silently dropped those rules in the harness only:
+    // the pane fell back to `display:block`, `flex:1` children stopped
+    // stretching, and screenshots captured a content-height layout that the
+    // real plugin never renders.
+    content.className = 'view-content';
     this.containerEl.appendChild(header);
     this.containerEl.appendChild(content);
     if (_leaf === mockLeaf) mockLeaf.view = this;

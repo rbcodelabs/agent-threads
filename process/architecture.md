@@ -12,6 +12,7 @@
 | `src/KanbanView.ts` | Kanban board view |
 | `src/ObsidianTools.ts` | All MCP tool definitions and TypeScript interfaces |
 | `src/skillManager.ts` | Headless list/search/install/uninstall/update logic for `~/.claude/skills/` and configured `SkillSource`s — single source of truth for both `SkillsManagerView.ts` (UI) and the `skills_*` MCP tools in `ObsidianTools.ts` |
+| `src/chiefOfStaffOnboarding.ts` | Pure first-run decision logic and the dependency-injected `setUpChiefOfStaff()` flow (spec §10): new vs upgrading install, the "Offer Chief of Staff on first run" setting, adding the `rbcodelabs/chief-of-staff` skill source, clone/harness/thread failure → static-guide fallback, and the idempotent "Set up Chief of Staff" command (home thread id in `settings.chiefOfStaffThreadId`). The pack is cloned at `CHIEF_OF_STAFF_REF` (a tag, recorded as `SkillSource.ref`), **bumped per plugin release** — see `process/release.md` Step 3; pinned sources report as current and "Pull updates" re-syncs them to the ref. The thread runs on Claude or Codex, never OpenCode (its sessions do not load skill sources). No Obsidian/Node deps |
 | `src/SkillsManagerView.ts` | Skills Manager panel UI — delegates all list/search/install/uninstall/update logic to `src/skillManager.ts` |
 | `src/VaultPersistence.ts` | Vault note save/load/archive |
 | `src/types.ts` | Shared TypeScript types (`Thread`, `ThreadStatus`, etc.) |
@@ -21,6 +22,52 @@
 | `src/statusLine.ts` | Pure parser for `statusLineCommand` output (JSON tags or legacy plaintext → `StatusTag[]`) + `derivePrUrl`/`resolveTagIcon`/`planFooter`. No Obsidian/Node deps |
 | `src/gitDiffUtils.ts` | Pure helpers for the git diff bar: `parseShortStat`, `parseRemoteToOwnerRepo`, `buildComparePrUrl`, plus `gitDiffBarVisible`/`parsePrNumber`/`prButtonLabel`. No Obsidian/Node deps |
 | `src/StatusLineService.ts` | Desktop-only service that polls `statusLineCommand` per thread cwd (coalesced, capped, cached, idle-paused) and writes `statusTags` + derived `prUrl`. See `docs/adr/0001-structured-status-line-tags.md` |
+| `src/HarnessSession.ts` | Provider-neutral harness contract (`HarnessSession`, `HarnessPermissionMode`, `HarnessMcpServerConfig`, `HarnessContextUsage`). Adapters map their native types at the boundary |
+| `src/HarnessFactory.ts` | Picks the adapter from `thread.agentHarness`: `ThreadSession` (Claude), `CodexSession`, `OpenCodeSession` |
+| `src/OpenCodeSession.ts` | OpenCode adapter over a per-session `opencode serve` (HTTP + SSE). Pure mapping helpers are exported for tests. See `docs/adr/0013-opencode-harness.md` |
+| `src/OpenCodeHostTools.ts` | Token-guarded loopback MCP endpoint that serves host tools to OpenCode |
+| `src/sandboxVm.ts` | Sandbox VM command construction + lifecycle (`SandboxVmManager`) behind Apple's `container` CLI. Pure helpers plus an injectable command seam; no top-level Node requires |
+| `sandbox/Dockerfile` | Image for the sandbox VM — `node:22-bookworm-slim` + git, ripgrep, jq, curl, wget, build-essential, python3, openssh-client. Non-root `node` (uid 1000), `WORKDIR /work`, no secrets baked in |
+
+---
+
+## Agent Harnesses
+
+`AgentHarness` (`src/types.ts`) is `'claude' | 'codex' | 'opencode'`; use `AGENT_HARNESSES`, `isAgentHarness` and `agentHarnessLabel` instead of enumerating names. ThreadManager only talks to `HarnessSession`, built by `createHarnessSession()`. Every session callback goes through ThreadManager's generation fence (ADR-0012), so a new adapter gets switching safety without extra work.
+
+**OpenCode (ADR-0013).** One `opencode serve` per session, launched from `opencodeBinaryPath` with per-session config in `OPENCODE_CONFIG_CONTENT`:
+- Events: `message.part.delta` → `onToken` (assistant text parts only); completed text part → `onMessage`; tool part `running`/`completed`/`error` → `onToolUse`/`onToolResult` (+ `onFilesEdited` for edit tools); `step-finish` → context usage and cost; `todo.updated` → task tracker; `session.idle` after `busy` → `onDone`; `session.error` `MessageAbortedError` → `onInterrupted`.
+- Permissions: config asks for everything but read-only tools; `resolveOpenCodePermission()` answers each `permission.asked` from the live permission mode. Child sessions created by the `task` tool are tracked so their prompts are not dropped.
+- Host tools: `OpenCodeHostToolsBridge` registers as remote MCP server `agent-threads` (tools appear as `agent-threads_<tool>`; OpenCode is told to allow them and the bridge applies `resolveDynamicToolApproval`).
+- The screenshot harness aliases `http` to a throwing stub (`test/harness/mocks/http.ts`) because ThreadManager pulls the adapter into the bundle.
+
+## Sandbox VM Tools (`enter_vm` / `vm_exec` / `exit_vm`)
+
+Runs a thread's **commands** inside a lightweight Linux VM while file editing stays on the host.
+
+The agent's `Read`/`Write`/`Edit`/`Bash` tools run on the host, so the sandbox cannot own the filesystem. Instead `enter_vm` bind-mounts the thread's effective cwd into the guest at `/work` and `vm_exec` runs commands there. Host edits are visible inside the VM immediately — no sync step, no divergence.
+
+Backed by Apple's `container` CLI (macOS 26+, Apple silicon), where each container is its own VM with a separate kernel and no view of the host filesystem beyond that mount.
+
+**Setup:** `brew install container` → `container system start` → build the image:
+
+```sh
+container build --tag claude-threads-coding:1 sandbox/
+```
+
+**Networking.** `default` is **full egress** by explicit product decision — `npm install`, git remotes and web access have to work out of the box. `internal` attaches a shared `--internal` network (host reachable, no internet), created on demand; `none` passes `--network none`.
+
+**Settings.** `vmImage` and `vmDefaultNetwork`, read lazily through `getVmImage` / `getVmDefaultNetwork` so a change applies on the next call rather than needing a session restart.
+
+**Execution boundaries.** The mount is read-write and edits persist. Host shell/file
+tools are not redirected. Internal-network reuse verifies `configuration.mode`
+is `hostOnly`. Commands use guest GNU `timeout` with a five-second kill grace;
+the host CLI deadline includes ten seconds of transport grace. See
+[`docs/sandbox-vms.md`](../docs/sandbox-vms.md) for setup and limitations.
+
+**No `Thread` field.** The container name is derived deterministically from the thread ID (`claude-threads-vm-<sanitized-id>`), so a container started before a plugin reload is still findable, adoptable by `vm_exec`, and removable by `exit_vm` afterwards. That gets persistence across reloads without persisting ephemeral OS state on the thread.
+
+**Mobile.** `sandboxVm.ts` requires `child_process` inside the runner closure only, so importing it is inert. Every tool returns a clean `{ success: false, error }` with a `brew install container` hint when the CLI is unavailable — it never throws and never affects plugin load.
 
 ---
 
@@ -51,6 +98,7 @@ Key fields worth knowing:
 | `prUrl?: string` | URL of the thread's GitHub PR. **Derived** by `StatusLineService` from `statusTags` (a `kind:'pr'` tag or `/pull/N` url) — no longer scanned from assistant prose. **Sticky**: only overwritten when a poll finds a PR, never cleared on absence, so the release archive-on-merge flow still matches after merge. Surfaced in `obsidian_list_threads` / `obsidian_get_current_thread`. |
 | `statusTags?: StatusTag[]` | Context-footer pills for this thread, set by `StatusLineService` from the `statusLineCommand` output (JSON tags or legacy plaintext, see `src/statusLine.ts`). **Ephemeral** — stripped before persisting to data.json, re-derived each poll; `undefined` on mobile / no script. |
 | `titleUserSet?: boolean` | When `true`, the auto-titler will not overwrite the thread's title. Set to `true` only when the user explicitly renames the thread (not on blur/escape with no change). |
+| `disallowedTools?: string[]` | Per-thread tool denylist, **restriction-only** (`src/toolRestrictions.ts`). It is merged as a union with `settings.disallowedTools` into Claude's SDK `disallowedTools`, which removes those tools from the model's context. OpenCode: `Bash` becomes `permission.bash: 'deny'` in the launch config, plus a deny in the permission path. Codex: shell-command approval requests are declined without asking; commands Codex's sandbox runs without approval can't be blocked. Inherited by scheduled items the thread creates via CronCreate (copied onto `ScheduledItem.disallowedTools` with `createdByThreadId`, keyed by the creator's id, never by name), by the threads those items spawn, and by threads it creates via `threads_create`. Nothing removes entries. The Chief of Staff home thread is created with `['Bash']`. Absent = no restriction. Not exposed in `ThreadSnapshot`. |
 | `noteFile?: string` | Vault-relative path of the saved vault note. Used by `VaultPersistence` to detect and delete stale files when the title changes. |
 | `cwd?: string` | Working directory for the Claude process. Auto-repaired via `originRepoPath` (if present and still on disk) or else the nearest valid ancestor if the original worktree path no longer exists. |
 | `originRepoPath?: string` | Git root of the origin repo a worktree `cwd` was cut from, captured by `enter_worktree` (cleared by `exit_worktree`). Lets project-name resolution (`resolveThreadProjectName` in `pathUtils.ts`) and `ThreadManager.repairStaleCwds()` recover even after the worktree directory itself is deleted. |

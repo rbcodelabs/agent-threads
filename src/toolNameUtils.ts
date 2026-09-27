@@ -101,8 +101,20 @@ export function getToolIcon(raw: string): string {
     case 'set_working_directory': return 'folder-symlink';
     case 'enter_worktree':       return 'git-branch-plus';
     case 'exit_worktree':        return 'git-branch';
+    case 'enter_vm':             return 'box';
+    case 'vm_exec':              return 'terminal';
+    case 'exit_vm':              return 'square-x';
     case 'get_open_tabs':        return 'layout-panel-top';
     case 'ScheduleWakeup':       return 'alarm-clock';
+    case 'browser_navigate':     return 'globe';
+    case 'browser_snapshot':     return 'scan-eye';
+    case 'browser_read_text':    return 'file-text';
+    case 'browser_click':        return 'mouse-pointer-click';
+    case 'browser_type':         return 'keyboard';
+    case 'browser_screenshot':   return 'camera';
+    case 'browser_status':       return 'activity';
+    case 'browser_close':        return 'circle-x';
+    case 'browser_resize':       return 'maximize';
     default:               return 'wrench';
   }
 }
@@ -121,7 +133,7 @@ const LEGACY_BUILT_IN_TOOLS = new Set([
   'obsidian_clear_thread_proposed_reply',
 ]);
 const CANONICAL_BUILT_IN_TOOLS = new Set([
-  'vault_search', 'vault_get_note_metadata', 'vault_get_backlinks', 'vault_get_outgoing_links',
+  'vault_search', 'vault_list', 'vault_get_note_metadata', 'vault_get_backlinks', 'vault_get_outgoing_links',
   'vault_get_file_history', 'vault_restore_file_version', 'vault_list_bridges', 'vault_add_bridge',
   'workspace_get_active_file', 'workspace_get_open_tabs', 'workspace_navigate_to_file',
   'workspace_insert_at_cursor', 'host_list_commands', 'host_execute_command', 'host_open_url',
@@ -130,6 +142,11 @@ const CANONICAL_BUILT_IN_TOOLS = new Set([
   'threads_open',
   'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_proposed_reply',
   'threads_clear_proposed_reply',
+  // Agent browser. Canonical-only: these are new tools, so they were never
+  // exposed under the legacy obsidian_ names and need no compatibility alias.
+  'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
+  'browser_type', 'browser_screenshot', 'browser_status', 'browser_close',
+  'browser_resize',
 ]);
 
 /** True only for a known first-party tool on the canonical or compatibility server. */
@@ -183,6 +200,15 @@ export function getActivityKind(raw: string): ActivityKind {
       return 'planning';
     case 'WebFetch':
     case 'WebSearch':
+    case 'browser_navigate':
+    case 'browser_snapshot':
+    case 'browser_read_text':
+    case 'browser_click':
+    case 'browser_type':
+    case 'browser_screenshot':
+    case 'browser_status':
+    case 'browser_close':
+    case 'browser_resize':
       return 'researching';
     case 'ToolSearch':
     case 'Agent':

@@ -27,7 +27,7 @@ import { debugLog } from './logger';
  * Both are worth stating because fixing only the `mkdir` call would have left
  * the bug fully intact. Note also that Geode DOES implement
  * `vault.createFolder`, so under Geode `ensureDir` now succeeds via that
- * branch; it is the write itself that still falls through to rung 3.
+ * branch. The write itself now goes through rung 1 (`window.geode.writeBinary`).
  *
  * Removal has the same shape and therefore its own two-rung ladder (see
  * `removeThreadDir`). `adapter.rmdir` does not exist on Geode's shim either, so
@@ -52,11 +52,24 @@ import { debugLog } from './logger';
  *
  * Duck-typed, never version-checked: Geode reports no version to plugins, so
  * "is this a function?" is the only safe test. Same posture as
- * `WakeLockService.detectNativeBridge`. Geode does not implement this yet -
- * this rung is forward-looking and simply never fires until it does.
+ * `WakeLockService.detectNativeBridge`.
+ *
+ * Mirrors Geode's real contract (geode `src/main/preload.ts`,
+ * `src/main/vault-write.ts`): the data is an `ArrayBuffer`, and the main
+ * process writes `new Uint8Array(data)`. It must never be handed a base64
+ * string: `new Uint8Array("<string>")` is length 0, so the IPC call resolves
+ * successfully having written an empty file. That is exactly how every
+ * attachment written under Geode from ~Sep 15 came out 0 bytes.
+ *
+ * The result may be `void` because other hosts may return nothing; when a numeric `size` comes back it is checked against the decoded
+ * byte length (see `assertWriteSize`).
  */
 export interface HostBinaryWriteBridge {
-  writeBinary(path: string, base64: string): Promise<unknown>;
+  writeBinary(
+    path: string,
+    data: ArrayBuffer,
+    options?: { mtime?: number; ctime?: number },
+  ): Promise<{ mtime: number; ctime: number; size: number } | void>;
 }
 
 interface HostWindowLike {
@@ -79,13 +92,30 @@ interface ProbedVault {
 interface ProbedAdapter {
   getBasePath?(): string;
   exists?(path: string): Promise<boolean> | boolean;
-  writeBinary?(path: string, data: ArrayBuffer): Promise<void>;
+  /** Obsidian returns void; a host shim may return `{ size }` (checked if so). */
+  writeBinary?(path: string, data: ArrayBuffer): Promise<unknown>;
   mkdir?(path: string): Promise<void>;
   rmdir?(path: string, recursive: boolean): Promise<void>;
 }
 
 function defaultHostWindow(): HostWindowLike {
   return (globalThis as unknown as { window?: HostWindowLike }).window ?? {};
+}
+
+/**
+ * Guard against a write that "succeeds" but stores the wrong bytes. When the
+ * host reports a numeric `size` for what it wrote, it must equal the decoded
+ * length; otherwise throw so `write` falls through to the next rung. A result
+ * with no `size` (Obsidian's void returns) is accepted as-is - this relies only
+ * on what the host already returns and never re-reads the file.
+ */
+function assertWriteSize(result: unknown, expectedBytes: number): void {
+  if (typeof result !== 'object' || result === null) return;
+  const size = (result as { size?: unknown }).size;
+  if (typeof size !== 'number') return;
+  if (size !== expectedBytes) {
+    throw new Error(`host reported ${size} bytes written, expected ${expectedBytes}`);
+  }
 }
 
 export class AttachmentWriter {
@@ -119,6 +149,10 @@ export class AttachmentWriter {
    *   2. The Obsidian vault API (`modifyBinary` / `adapter.writeBinary` /
    *      `createBinary`): registers with the metadata cache.
    *   3. Node `fs` straight to disk: see `writeThroughNodeFs` for the caveat.
+   *
+   * A rung whose host reports a written `size` that differs from the decoded
+   * byte length is treated as failed (see `assertWriteSize`), so a silently
+   * truncated write degrades to the next rung instead of leaving a 0-byte file.
    */
   async write(
     threadId: string,
@@ -132,11 +166,15 @@ export class AttachmentWriter {
 
     const rel = buildAttachmentPath(this.getVaultFolder(), threadId, messageId, index, mediaType);
 
-    // Rung 1: native host bridge.
+    // Rung 1: native host bridge. Takes an ArrayBuffer, never the base64
+    // string (see HostBinaryWriteBridge). Decoded per rung because an IPC
+    // bridge may transfer (detach) the buffer it is given.
     const bridge = this.hostBinaryWriter();
     if (bridge) {
       try {
-        await bridge.writeBinary(rel, base64);
+        const buffer = base64ToArrayBuffer(base64);
+        const expectedBytes = buffer.byteLength;
+        assertWriteSize(await bridge.writeBinary(rel, buffer), expectedBytes);
         return rel;
       } catch (err) {
         debugLog('[ClaudeThreads] attachment write via host bridge failed:', rel, String(err));
@@ -260,7 +298,8 @@ export class AttachmentWriter {
     // exists" throw.
     if (typeof adapter.exists === 'function' && (await adapter.exists(rel))) {
       if (typeof adapter.writeBinary !== 'function') throw new Error('adapter.writeBinary unavailable');
-      await adapter.writeBinary(rel, buffer);
+      const expectedBytes = buffer.byteLength;
+      assertWriteSize(await adapter.writeBinary(rel, buffer), expectedBytes);
       return;
     }
 
@@ -290,8 +329,9 @@ export class AttachmentWriter {
    *
    * Either way this beats the alternative it replaces: a silent no-op that
    * left multi-megabyte base64 inline in data.json forever, the exact bloat
-   * ADR-0003 was written to eliminate. Rung 1 removes the question entirely
-   * once Geode ships `window.geode.writeBinary`.
+   * ADR-0003 was written to eliminate. Under current Geode, which ships
+   * `window.geode.writeBinary`, rung 1 handles the write and this rung is
+   * reached only if that bridge throws or reports a truncated write.
    *
    * `fs`/`path` are required lazily, never at module scope: ThreadManager
    * imports this module eagerly and Obsidian Mobile's require() interceptor

@@ -8,7 +8,7 @@ Direct child-agent messaging and single-agent interruption are capability-gated.
 
 A native Obsidian and Geode plugin for running multiple Claude Code sessions in parallel — with streaming markdown responses, tab management, and deep vault integration.
 
-![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.40.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
+![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.52.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
 
 <p align="center">
   <img src="docs/screenshot-main.png" width="800" alt="Main view: conversation panel with tool calls and Agents List showing thread summaries" />
@@ -33,6 +33,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 **Key features:**
 
 - **Multi-tab sessions** — open as many Claude threads as you need, switch between them instantly
+- **Opt-in sandbox VMs** — Claude and Codex can run explicit coding commands in a Linux VM through Apple Container on Apple-silicon Macs with macOS 26+. Only the selected working directory is mounted (writable); ordinary host tools remain outside the VM. See the [setup and safety guide](docs/sandbox-vms.md).
 - **Streaming responses** — tokens stream in with live markdown rendering (code blocks, tables, lists, etc.)
 - **Responsive conversation width** — wide conversation panes center the complete timeline and composer in a readable-width column, while narrow panes remain full width
 - **Clickable links in messages** — both `[[wikilinks]]` and ordinary `[label](path.md)` Markdown links in a response open the target note, in the sidebar and in conversation-first placement alike. Agents writing from outside Obsidian often emit an absolute filesystem path rather than a vault-relative one; when that path lands inside your vault, it still resolves to the right note — heading and block anchors included. A path that points outside the vault says so rather than opening (or creating) anything. An ordinary `http(s)://` link in a message opens the same way status-line pill links do — in a fresh tab in the host's in-app Web Viewer when enabled (in the conversation-first context region when that placement is active), otherwise the system browser; Cmd-click (Ctrl-click) always forces the system browser
@@ -48,9 +49,10 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 - **Native document header** — when the conversation is in a main document pane, its title and thread controls use the host's native header instead of adding a second title bar. The compact custom title bar remains available in sidebars, and the view adapts automatically when you drag it between the two
 - **Slash commands** — built-in context commands plus every skill the session can see (`~/.claude/skills/`, vault-installed, and plugin sources), browseable with `/`
 - **Model switching** — set a persistent model per thread with `/model fable|opus|sonnet|haiku`, or a global default in settings
+- **Agent browser** — Claude drives a browser inside Geode using the embedded web view, reading pages as accessibility snapshots and acting on element refs, with no second Chrome process. Sessions are capped, reclaimed when idle, and closed with their thread; a sidebar pane lets you watch one work and stop it. Geode desktop only, off by default
 - **Claude or Bedrock** — authenticate with your Claude account or route every session through Amazon Bedrock (one dropdown in settings)
 - **Goals and loops** — pin a persistent goal on a thread with `/goal`, or re-run a prompt on an interval with `/loop 10m <prompt>`
-- **Task list card** — Claude Code's task checklist (TodoWrite / TaskCreate) and Codex's `update_plan` checklist render live above the input box: completed tasks struck through, the in-progress one highlighted, with done/in-progress/open counts
+- **Task list pill** — Claude Code's task checklist (TodoWrite / TaskCreate) and Codex's `update_plan` checklist show as a small "3/5 tasks" pill in the composer footer, next to the schedule and sub-agent pills, so the checklist never takes over the conversation. Click it to open the live list in a popover (completed tasks struck through, the in-progress one highlighted); Escape or an outside click closes it
 - **Context compaction** — auto and manual compaction shown as persistent dividers in the conversation
 - **Permission dialogs** — Claude asks before writing files or running commands; you approve or deny inline
 - **@ file mentions** — type `@` in the input to search vault files by name; selecting one injects its full content into the prompt as context; type `@this` to reference the currently open file without searching
@@ -59,10 +61,10 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 - **Push-to-talk voice input** — hold a configurable hotkey to dictate a message via speech-to-text (uses the Claude Code STT pipeline); transcript populates the input box ready to send or edit
 - **Projects** — group threads, choose their initial working directory, and inject shared context into every message (a context aid, not a tool or filesystem security boundary)
 - **Draft persistence** — input text and attachments auto-save when switching threads and survive plugin reloads
-- **First-run onboarding** — on first install, a welcome guide walks you through setup and opens a three-panel workspace (conversation, Agents List, and an example thread) so the layout makes sense before you write a single message
+- **First-run onboarding** — on a brand-new install, Agent Threads opens the conversation and Agents List panels, adds the [Chief of Staff](https://github.com/rbcodelabs/chief-of-staff) skill source (pinned to the pack release that shipped with this plugin version; each plugin release bumps it), and starts a **Chief of Staff** thread that runs `cos-setup` to get you set up. It runs on Claude Code or Codex (OpenCode sessions don't load skill sources yet). If that can't start (offline, git or a supported agent harness not installed yet), you get the static getting-started guide instead. The Chief of Staff thread can't use the shell: Bash is blocked for it and for the scheduled rituals and sub-threads it creates. Run **Set up Chief of Staff** from the command palette any time; it reopens your existing Chief of Staff thread rather than creating a second one. Turn off **Settings → General → Offer Chief of Staff on first run** to always get the static guide.
 - **Context recap banner** — when you return to a thread you haven't viewed in over a minute, a floating banner shows the thread summary and how long ago you were last active; auto-dismisses after 10 seconds
 - **Keep computer awake** — prevents the computer from sleeping while Claude is active; shows a ☕ indicator in the status bar (uses Geode's native Electron power-save blocker when available, with `caffeinate -i` for Obsidian on macOS and the Web Wake Lock API as fallback)
-- **Plan Mode** — Claude and Codex can propose a written plan before making any mutations, and Codex can autonomously invoke `EnterPlanMode` when a task needs investigation first. An inline card lets you **Approve**, **Edit**, or **Reject** the plan before execution begins
+- **Plan Mode** — Claude and Codex can propose a written plan before making any mutations, and Codex can autonomously invoke `EnterPlanMode` when a task needs investigation first. An inline card lets you **Approve**, **Edit**, or **Reject** the plan with optional revision feedback before execution begins
 - **Thinking mode** — enable extended thinking for harder problems, with a configurable token budget for how long Claude reasons before responding
 - **Provider-aware effort** — Claude keeps its `low` through `max` effort controls; Codex has a separate setting through `ultra`, where Ultra enables proactive native agents on models that advertise support
 - **MCP Elicitation** — when an MCP server needs OAuth or a form filled mid-session, a card appears inline in the conversation (URL auth or structured form fields) so you can respond without leaving Agent Threads
@@ -80,6 +82,8 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
   - AWS Bedrock / SSO users: set `AWS_PROFILE` and `AWS_REGION` in the plugin's Extra Environment Variables setting
 - Or [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) installed and authenticated
   - Select **OpenAI Codex** in Settings → Agent → Agent harness. The plugin launches Codex's local app-server, so its threads retain Codex session history, streaming output, tool visibility, interruption, and approval prompts.
+- Or [OpenCode](https://opencode.ai) installed (desktop only), with at least one provider configured in OpenCode (for example `OPENAI_API_KEY` in your environment or Extra Environment Variables, or `opencode auth login`)
+  - Select **OpenCode** in Settings → Agent → Agent harness. Each OpenCode thread runs its own local `opencode serve`, so any provider OpenCode supports can drive a thread. Usage is billed by that provider to your API key.
 
 ## Roadmap
 
@@ -108,24 +112,31 @@ Click the **message-square** icon in the left ribbon, or run **Open Agent Thread
 
 ### Agent harnesses
 
-New threads use the harness selected in **Settings → Agent → Agent harness**. A thread remembers the harness that created it, so changing the default never mixes Claude and Codex session IDs. Codex uses the `codex` executable on your PATH by default; set a custom path in the same settings panel when needed.
+New threads use the harness selected in **Settings → Agent → Agent harness**. A thread remembers its harness, so changing the default never mixes Claude, Codex, and OpenCode session IDs. To move an idle existing thread, open its footer menu, choose **Harness**, and select Claude, Codex, or OpenCode. The transcript and thread identity remain in place, while the target starts a fresh native session from a bounded summary and transcript references. Threads with active work, queued input, approvals, plans, questions, or background agents must settle first. Codex uses the `codex` executable on your PATH by default and OpenCode uses `opencode` (auto-detected in Homebrew, `/usr/local/bin`, and `~/.opencode/bin`); set a custom path in the same settings panel when needed. OpenCode model IDs use `provider/model` form (for example `openai/gpt-5`); the thread model menu lists the models OpenCode reports.
 
-| Capability | Claude Code | OpenAI Codex |
-|---|---:|---:|
-| Persistent sessions, streaming, tools, images, interruption | ✓ | ✓ |
-| Models, permission modes, approvals, and plan review | ✓ | ✓ |
-| Built-in vault/workspace tools and external stdio/HTTP/SSE MCP servers | ✓ | ✓ |
-| MCP form/URL elicitation | ✓ | ✓ |
-| Persisted user-question cards on desktop and mobile | ✓ `AskUserQuestion` | ✓ `request_user_input` |
-| Context usage, compaction, and raw event logs | ✓ | ✓ |
-| Skills and sub-agent/task activity | ✓ Claude-native | ✓ Codex-native |
-| Monetary API cost attribution | ✓ | — protocol does not report cost |
+| Capability | Claude Code | OpenAI Codex | OpenCode |
+|---|---:|---:|---:|
+| Persistent sessions, streaming, tools, images, interruption | ✓ | ✓ | ✓ |
+| Models, permission modes, and approvals | ✓ | ✓ | ✓ any OpenCode provider |
+| Plan review card | ✓ | ✓ | — read-only `plan` agent, no approval card |
+| Built-in vault/workspace tools and external stdio/HTTP/SSE MCP servers | ✓ | ✓ | ✓ via a local MCP bridge |
+| MCP form/URL elicitation | ✓ | ✓ | — |
+| Persisted user-question cards on desktop and mobile | ✓ `AskUserQuestion` | ✓ `request_user_input` | ✓ `question` |
+| Context usage and raw event logs | ✓ | ✓ | ✓ |
+| Skills and sub-agent/task activity | ✓ Claude-native | ✓ Codex-native | — child sessions run, not shown as agents |
+| Monetary API cost attribution | ✓ | — protocol does not report cost | ✓ |
+
+OpenCode permission modes are applied live by Agent Threads: read-only tools (read, glob, grep, list) always run; **Accept edits** auto-approves file edits; **Bypass**/**Auto** approve everything; **Don't ask** denies anything that would prompt (so scheduled runs never stall); **Plan** uses OpenCode's read-only `plan` agent and refuses edits.
+
+Codex JSONL logs compact repetitive protocol updates automatically. Completed items (including command output and plans) are preserved unchanged. The latest diff snapshot per thread/turn is kept; snapshots larger than 512 KiB retain a UTF-8 tail with explicit omission counts. Command-output and plan deltas retain at most 64 KiB per item until completion; when all streamed bytes fit and the completed output contains them, the duplicate is discarded. Otherwise a `codex/log/compacted` diagnostic records the tail, source event, original/retained/omitted byte counts, and flush reason. Pending payload is limited to 4 MiB and 128 entries; older entries flush when either limit is reached. Pending events also flush at turn completion and session close/process exit or error. An abrupt host crash can lose pending buffers. This reduces redundant logging but is not a hard file-size cap, and existing logs are not rewritten.
 
 Harness-native skills and sub-agents use their respective CLI's definitions and event protocol; they are presented through the same slash-command and task UI where the protocols expose equivalent data.
 
 Codex `request_user_input` prompts use the same persisted question card as Claude: option labels and descriptions are preserved, free-form answers use stable Codex question IDs, and secret fields are masked on desktop and mobile. Default-mode questions are enabled only when the installed app-server advertises the required runtime feature; older Codex installations continue normally without that Default-mode capability.
 
 Codex reasoning effort is configured separately from Claude effort. Selecting **Ultra** enables Codex's proactive native-agent behavior on models that advertise Ultra support. Unsupported model/effort combinations fail before a turn starts with a clear error, and Agent Threads never sends Codex's deprecated `multiAgentMode` field.
+
+**Codex computer use** is off by default in **Settings → Agent**. Off requests denied default app access and disables Codex's bundled computer-use plugins and known desktop-capable MCP entry points, including the legacy `node_repl` server. This can also remove the shared Codex browser REPL; Agent Threads' own browser tools are unaffected. On inherits your local Codex configuration, without installing tools or overriding its access restrictions. Changes apply when sessions next start or restart, including resumed threads. Existing running and idle sessions keep their current access; use **Reload plugin (safe)** after active work finishes to apply the choice to all sessions. This setting does not restrict arbitrary third-party automation tools or replace OS permissions.
 
 Agent profiles supplied by installed GitHub plugin sources remain native agent definitions in Claude and are available to Codex as role instructions for delegation.
 
@@ -176,6 +187,8 @@ In the Agents List, the selected thread has an accent-tinted background and a tr
 
 Type `/` in the input box to see built-in context commands and your installed Claude Code skills. Navigate with arrow keys, Tab, or Enter.
 
+Enabled peer plugins can also contribute commands to the thread composer and/or new-thread dispatch boxes through `extensions.registerSlashCommand`. Their commands appear immediately, use the same dropdown and command pills, and disappear when the peer disposes its registration. Host commands retain priority. A failed contributed dispatch restores the draft and attachments instead of sending the command text to the agent. `/design` is supplied by the separate **Design for Agent Threads** plugin.
+
 **Built-in commands** (handled by the plugin):
 
 | Command | What it does |
@@ -199,7 +212,9 @@ Type `/` in the input box to see built-in context commands and your installed Cl
 
 ### Design artifacts in Geode
 
-Agents can call `EnterDesignMode({ brief })` in an existing Claude or Codex thread to create or reuse its artifact, open the preview, and show the same artifact controls as `/design`. The tool returns the artifact paths, whether it was created or reused, the preview outcome, and design instructions; the agent continues editing in its current turn. It requires a desktop filesystem vault and write permission, and is unavailable in read-only Plan mode or while plan approval is pending. If preview opening fails, the saved artifact remains available and the result explains whether source was revealed or the preview is unavailable. On older versions, submit `/design <brief>` in the composer.
+Install and enable **Design for Agent Threads** alongside Agent Threads to add `/design`, `EnterDesignMode`, previews, capture, and artifact creation. Without it, existing legacy design artifacts remain visible and their source can still be revealed, but new Design commands and tools are not registered.
+
+Starting in v0.43.0, Design is no longer built in. Download [Design v0.1.0](https://github.com/rbcodelabs/threads-design/releases/tag/v0.1.0) and follow its installation instructions; its repository is currently private and requires access. Enable Agent Threads first, then Design. If you need Design but cannot access that repository, keep v0.42.0 until you can obtain the companion plugin. Interactive preview and screenshot capture require Geode; Obsidian reveals the artifact source instead.
 
 Use `/design <brief>` from the Agents List or Agent Board dispatch box to create a new design thread, or use it in an existing thread to create or revise that thread's artifact. Threads creates a zero-install static UI artifact under `.geode/artifacts/` in your vault, and the agent edits ordinary `index.html`, `styles.css`, `app.js`, and local asset files. The artifact card keeps a primary **Preview** button plus icon-only **Capture design screenshot** and **Reveal design source** buttons (hover either for its label) available after the turn and after reopening the thread. Run `/design` with no brief inside a thread to reopen its existing preview; a new-thread dispatch always requires a brief. Design dispatch does not currently accept image or text attachments.
 
@@ -213,6 +228,8 @@ Geode's ArtifactView previews the result with live reload, desktop/tablet/mobile
 
 Open the **Skills Manager** from the ribbon (puzzle icon) or command palette to browse, install, and edit Claude Code skills. New views open in the right sidebar under conversation-first placement (creating it if it isn't open yet), or a main document tab under classic placement — matching where the Agents List opens; if Skills Manager is already open, it is focused without moving it or discarding edits. The list and detail panels are split by a **draggable divider** — drag it to resize, double-click to reset to the default width; your chosen width is remembered next time you open the view.
 
+**In a narrow pane** — a sidebar, a split view, or on mobile — there isn't room for both panels side by side, so the view shows **one at a time**: the list until you pick something, then that item's detail panel with a **← back** button to return to the list. The divider is hidden in this mode, and the panel responds to its own width rather than the window's, so widening the sidebar past roughly 480px restores the two-panel layout on the spot. If you have unsaved edits, going back asks before discarding them.
+
 <p align="center">
   <img src="docs/screenshot-skills-manager.png" width="800" alt="Skills Manager: source tree on the left with skill/agent detail and editor on the right" />
 </p>
@@ -220,6 +237,8 @@ Open the **Skills Manager** from the ribbon (puzzle icon) or command palette to 
 **Installed tab** — shows everything installed as a collapsible source tree. The top-right corner of the tab bar has two icon buttons (Installed tab only): **Import** (+) opens a menu with **Folder…** and **File (.skill)…**, letting you install a skill directly from a local folder or a packaged `.skill`/`.zip` archive without going through GitHub; and **Check for updates** (↻, shown once you have at least one GitHub plugin source) re-fetches staleness for all GitHub plugin sources in parallel — its icon spins while running, and a toast reports the result when it finishes (including which sources failed to check, e.g. if you're offline). An indicator dot appears on the button afterward if any plugin has updates (hover either button for its full status/tooltip). GitHub plugin sources appear as top-level nodes with a badge (`•N`) when updates are available; clicking one expands it to reveal its skills and opens a detail panel with **Update** (git pull, highlighted when updates are available), **Reload** (re-scan from disk), **Reinstall** (delete and re-clone for broken installs), and **Remove Source**. Two more nodes sit at the bottom. **Vault** lists the skills this plugin installed into your vault — click one to view and edit it, with **Save**, **Reload**, **Reveal in Finder**, and **Uninstall**. **Claude Code** lists everything in `~/.claude/` (skills *and* agent profiles), marked `read-only`: the plugin shows them because the Claude CLI genuinely loads them into every session, but it never writes to that directory, so those panes offer only **Reload** and **Reveal in Finder**. Edit or remove them with the `claude` CLI, or by hand.
 
 > **Where installs go.** Everything the Skills Manager installs or imports lands in `<vault>/.obsidian/plugins/claude-threads/skills/`, beside the plugin's `skill-sources/` clones — never in `~/.claude/`. That folder shares the plugin folder's fate: community-plugin *updates* leave unknown subdirectories alone, but manually uninstalling and reinstalling the plugin will delete your installed skills along with it.
+
+Click a GitHub source's **chevron** to expand or collapse its skills while staying in the list. Click the rest of the source row to open its details. In narrow panes, this lets you browse the expanded skills without switching screens.
 
 #### Authoring local skills
 
@@ -290,6 +309,43 @@ To have a thread notice when a note changes without polling it yourself, use **W
 The watch is owned by whichever thread is currently active when you trigger it — only that thread is alerted, and it stays alerted even if you switch away. If no thread is open, a notice asks you to open or start one first. When the note's content changes — from you, from another thread's edit, from a sync, from anyone — the owning thread receives an injected message referencing the file with the same `@[[filename]]` mention the composer uses, so the full content is right there in the alert. Saving a note with no actual content change (e.g. a no-op resave) does not trigger an alert, and a burst of edits to multiple watched files collapses into one batched message instead of one per file. Renaming a watched file keeps the watch attached; deleting it sends one final alert and removes the watch.
 
 Agents can do all of this without the menu via three MCP tools — see [`watch_document`](#session-tools) below. Manage active watches, see who owns each one, and unwatch from outside the file itself under **Settings → Scheduled → Watched documents**.
+
+### Agent browser
+
+Claude can drive a browser **inside Geode**, using the same embedded web view that powers Web Viewer tabs, instead of launching a separate Chrome. That removes the second browser process entirely — and with it the pile of orphaned Chrome instances that an external automation CLI leaves behind.
+
+Turn it on under **Settings → Tools → Agent browser**, then reload. The toggle is disabled on hosts that can't support it (see *Limits* below).
+
+Pages are read as an **accessibility snapshot** rather than screenshots or raw HTML — a compact list of the things a person could actually interact with:
+
+```
+- textbox "What needs doing?" [ref=e1]
+- button "Submit the form" [ref=e2]
+- link "Documentation" [ref=e3]
+```
+
+Claude reads that, hands back a ref, and acts on it. No coordinate guessing, no brittle CSS selectors. Hidden and disabled elements are left out, so every ref is something you could have clicked yourself.
+
+| Tool | What it does |
+|---|---|
+| `browser_navigate` | Open a URL and return a snapshot |
+| `browser_snapshot` | Re-read the current page |
+| `browser_read_text` | Visible page prose, for when the snapshot isn't enough |
+| `browser_click` / `browser_type` | Act on a ref |
+| `browser_screenshot` | PNG of the current page |
+| `browser_status` | How many sessions are open, and the cap |
+| `browser_close` | End this thread's session |
+| `browser_resize` | Resize the viewport (320-1920 wide, 240-1080 tall) and return a fresh snapshot |
+
+**Watching it work.** Run **Open Agent Browser** from the command palette for a sidebar pane showing live frames, the page, session age, and a stop button. It streams only while visible, and closing it never closes Claude's session.
+
+**Signing in.** Some sites open a separate popup for login (Google, GitHub, SSO) — the kind of flow Claude can't complete on its own, since it never sees or drives popups. When a page tries to open one, the preview pane shows a *"This page wants you to sign in — Take control?"* banner with a 30-second countdown. Accepting opens a second, temporary browser page in the same pane; typing and clicking there go to that page, not to Claude's session, which is left completely untouched. Click **Return control** (or just close the temporary page) when you're done, and Claude picks up wherever the sign-in left things — reading whatever the identity provider left on the page, the same as any other page state. If the countdown lapses before you click, the request expires and the banner says so; trigger sign-in on the page again to retry. This is mouse clicks and typing only — no drag, hover, or right-click — and keyboard support covers printable characters plus the common editing/navigation keys, which is what a login or MFA form needs.
+
+**Resource limits.** Each session is a real browser process, so they're capped (2 by default, 4 maximum), reclaimed after 5 minutes idle, recycled after 30 minutes, and closed automatically when their thread is deleted or the plugin unloads. Geode measures file-descriptor pressure, and the browser refuses to start a session when the app is running low — the specific condition under which a sandboxed page process dies on arrival.
+
+**Safety.** Sessions use their own cookie jar, separate from your Web Viewer tabs, so you'll be logged out of most sites. Page text is handed to Claude wrapped as untrusted data rather than as instructions. Typing a stored secret into a page is refused outright. `file:`, `javascript:` and cloud metadata addresses are blocked; private network addresses are behind an opt-in.
+
+**Limits.** Geode desktop only — it needs the process diagnostics Obsidian doesn't expose, and mobile has no embedded web view at all. Top frame only, no iframes, file uploads, or multiple tabs. It also can't drive Electron desktop apps, evade bot detection, or use cloud browsers; the `agent-browser` CLI skill still covers those.
 
 ### Model switching
 
@@ -375,7 +431,7 @@ Open the **Agents List** from the ribbon or command palette to see all threads a
 
 Adaptive two-line rows use **Working**, **Waiting**, **New**, **Reviewed**, **Failed**, and **Ready** status classification. The primary line shows status, title, orchestrator indicator when applicable, and recency; activity, repository/Project context, and agent count share a truncation-safe secondary line. Permission, question, plan, waiting, and AWS reauthentication states expand into dedicated action rows when your attention is required. Child-agent activity is summarized by one accessible agent-count control; it turns green only while at least one child agent is starting, working, or waiting, and otherwise uses the same faint secondary treatment as recency. Click it to open the team picker without losing your current agent selection.
 
-The dispatch button shows the harness that will run the new thread: **Claude** or **Codex**. Click normally to start with the shown harness. Right-click, press and hold, or use `Shift+F10` while the button is focused to open the harness menu; choosing an option changes the button without dispatching. That choice stays with the mounted dashboard while you launch more threads. **Settings → Agent harness** supplies the initial default only—the dashboard choice does not change the global setting, and existing threads remain on their original harness.
+The dispatch button shows the harness that will run the new thread: **Claude** or **Codex**. Click normally to start with the shown harness. Right-click, press and hold, or use `Shift+F10` while the button is focused to open the harness menu; choosing an option changes the button without dispatching. That choice stays with the mounted dashboard while you launch more threads. **Settings → Agent harness** supplies the initial default only—the dashboard choice does not change the global setting. Existing idle threads can be switched separately from the conversation footer menu.
 
 **Live activity (running threads):** While a thread is actively processing, the dashboard shows a live one-line summary of the current tool call or step — so you can see "Reading src/components/Header.tsx" or "Running npm test" without switching to that tab.
 
@@ -387,7 +443,7 @@ You can also send messages to any thread directly from the dashboard without swi
 
 **Background tasks stay "Working."** A thread that spawns a background subagent (`Agent(..., run_in_background: true)`) or runs the `Workflow` tool can have its own turn finish — and its activity line stop updating — before that spawned work actually completes server-side. Rather than misclassifying the thread as New/Reviewed/Ready the moment the outer turn ends, the Agents List (and the [Agent Board](#kanban-board)) keeps it under **Working** until the background task or workflow reports back.
 
-If a background task finishes while its thread is actively streaming, the running turn's live task pill shows the result inline. If it finishes after the thread has gone idle, a ✓/✗ summary is appended directly into that thread's conversation as a subtle centered notice row, instead of a transient top-right toast — so it's still there if you open the thread later or scroll back, rather than something you had to catch in the moment.
+If a background task finishes while its thread is actively streaming, the running turn's live task pill shows the result inline. If it finishes after the thread has gone idle, a ✓/✗ summary is appended directly into that thread's conversation as a subtle notice row (aligned with the tool rows above it), instead of a transient top-right toast — so it's still there if you open the thread later or scroll back, rather than something you had to catch in the moment.
 
 **Scheduled Jobs.** An hourly (or more frequent) recurring cron task (see `CronCreate` / `ScheduleWakeup` below) can produce dozens of quiet threads a day, burying the manually-created ones you actually need to triage. When a run created by the scheduler is unreviewed, reviewed, or empty — never one that's running, awaiting a permission/question, or errored — it's pulled out of its normal group into a **Scheduled Jobs** section at the bottom of the dashboard, one collapsed row per job showing its name, run count, and the latest run's time. Click a row to expand it into the individual runs. Disable via **Settings → Features → Stack scheduled job threads**.
 
@@ -479,7 +535,7 @@ Set **Permission Mode → `plan`** globally in settings, or use the **Permission
 4. You pick one of three actions on the card:
    - **Approve** — the agent returns to its normal permission mode and executes the plan immediately.
    - **Edit** — the plan text becomes editable in-place; submitting the edited version sends it back as the confirmed plan before execution.
-   - **Reject** — the agent remains in Plan mode; no edits are made. You can send a follow-up message to redirect or request a revision.
+   - **Reject** — opens an inline feedback field while keeping the proposed plan visible for reference. Add an optional reason and choose **Reject plan** (or press <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd>) to send it as the next visible Plan-mode message; press <kbd>Escape</kbd> or choose **Cancel** to return to the original card. An empty reason keeps the existing generic revision prompt. In every case the agent remains in Plan mode and no edits are made.
 
 Plan Mode is useful for risky or large-scale tasks where you want to review the approach before any files are touched.
 
@@ -535,7 +591,7 @@ with the expanded Workspace scopes before reconnecting Google Docs Sync.
 Settings → **MCP** lists, adds, edits, and removes the external MCP servers referenced above (Compass, Helio, or any other HTTP/SSE/stdio server) — no manual JSON editing required for the common case.
 
 <p align="center">
-  <img src="docs/screenshot-mcp-servers.png" width="800" alt="Settings MCP tab: a list of configured MCP servers, each with a type badge (stdio, http, sse), a one-line summary, and Edit/Remove buttons, plus an Add MCP server button; one row warns that it will be skipped because its secret is not registered" />
+  <img src="docs/screenshot-mcp-servers.png" width="800" alt="Settings MCP section: a list of configured MCP servers, each with a type badge (stdio, http, sse), a one-line summary, and Edit/Remove buttons, plus an Add MCP server button; one row warns that it will be skipped because its secret is not registered" />
 </p>
 
 **These servers are stored in the plugin's own `data.json`** and injected into each session at runtime — on both the Claude and Codex harnesses. Nothing is written to `~/.claude/`, and the `claude` CLI does not see them (register a server with `claude mcp add` if you want it in CLI sessions too). Changes take effect for newly initialized or reinitialized sessions — existing session adapters keep whatever MCP servers they started with.
@@ -563,12 +619,20 @@ Connect one either way:
 - **Settings → MCP → Add MCP server → OAuth.** Fill in a name and the server's URL; scopes, a tool allow/deny filter, and `clientId`/`authorizationServerUrl`/`redirectUri` overrides are optional. Set `redirectUri` for providers that register one exact callback URI instead of accepting any loopback port — Slack's MCP server requires `http://localhost:3118/callback` (note `localhost`, not `127.0.0.1`: exact string matching makes those different URIs).
 - **Ask an agent** to call `mcp_register_server` with `type: "oauth"`.
 
-Both run the same flow and the same validation. Unlike the other transports it is asynchronous and interactive: discovery runs, the provider's consent screen opens in the host's Web Viewer, and the flow waits up to 5 minutes for you to finish signing in before exchanging the code for tokens and starting the proxy. Denying consent or letting the window lapse leaves no partial state behind. Because it needs a real consent screen, scheduled threads can't drive it — they get an `unavailable` result rather than a stalled dialog.
+The plugin is a public client by default — PKCE, no secret at all. For the few providers that issue a `client_secret` and then require it at the token endpoint, the OAuth form's Advanced section has a masked **Client secret** field, and the tool takes `clientSecret` as a `${NAME}` placeholder naming a secret already saved with `request_secret` (a literal is rejected, because tool arguments are logged verbatim). Either way the secret lives only in the OS keychain; `data.json` records only that one exists.
 
-Settings → **MCP → OAuth MCP servers** lists every connected server with a live status (connected + expiry countdown, expiring soon, needs re-authorization, or not configured) and a **Disconnect** button, which revokes the tokens upstream, clears the keychain, and stops the proxy. Changing a connected server means disconnecting and reconnecting rather than editing it in place, so the OAuth option appears only when adding. See [`docs/mcp-registration.md`](docs/mcp-registration.md#oauth-gated-servers-type-oauth) for the full field reference. Access and refresh tokens live only in the OS keychain, never in `data.json`.
+Some authorization servers refuse to register a loopback callback at all, which makes the browser flow impossible rather than merely awkward. Set **Grant type → Client credentials** (or `grantType: "client_credentials"`) for those, and for any MCP server that stands for a service rather than a signed-in user: the plugin authenticates as itself with a client ID and secret, so no browser opens and no callback is needed. That grant requires both a client ID and a secret, rejects `redirectUri`, and takes an optional `audience` — nonsecret, passed literally — for providers like Auth0 that mint a token per API. It keeps no refresh token (RFC 6749 §4.4.3 says it shouldn't get one) and re-mints from the keychain secret instead, so its status row reads "Connected · renews in …" and a failure reads "Needs new credentials".
 
 <p align="center">
-  <img src="docs/screenshot-mcp-oauth-servers.png" width="800" alt="Settings MCP tab: OAuth MCP servers section showing two connected servers with status dots and expiry countdowns, and a Disconnect button on each row" />
+  <img src="docs/screenshot-mcp-oauth-client-credentials.png" width="800" alt="Add MCP server dialog on the OAuth tab with Grant type set to Client credentials: the Redirect URI field is gone, Advanced is open, and Client ID and Client secret are both labelled required alongside an Audience field" />
+</p>
+
+Both run the same flow and the same validation. Unlike the other transports the default grant is asynchronous and interactive: discovery runs, the provider's consent screen opens in the host's Web Viewer, and the flow waits up to 5 minutes for you to finish signing in before exchanging the code for tokens and starting the proxy. Denying consent or letting the window lapse leaves no partial state behind. Client credentials skips all of that and just calls the token endpoint. Either way a scheduled thread gets an `unavailable` result rather than a stalled dialog — a registration that grants the plugin a new outbound connection wants a human present, and the grant without a consent screen wants one more, not less.
+
+Settings → **MCP → OAuth MCP servers** lists every connected server with a live status (connected + expiry countdown, expiring soon, needs re-authorization, or — for a machine-to-machine server — connected + renewal countdown) and a **Disconnect** button, which revokes the tokens upstream, clears the keychain, and stops the proxy. Changing a connected server means disconnecting and reconnecting rather than editing it in place, so the OAuth option appears only when adding. See [`docs/mcp-registration.md`](docs/mcp-registration.md#oauth-gated-servers-type-oauth) for the full field reference. Access and refresh tokens live only in the OS keychain, never in `data.json`.
+
+<p align="center">
+  <img src="docs/screenshot-mcp-oauth-servers.png" width="800" alt="Settings MCP section: OAuth MCP servers listing three servers with status dots — one connected with an expiry countdown, one needing re-authorization, and one machine-to-machine server connected with a renewal countdown — and a Disconnect button on each row" />
 </p>
 
 Use `${NAME}` for every credential and `request_secret` to save its value securely. Common credential fields are validated, but arbitrary argument strings cannot be reliably classified: all literal values must be nonsecret. Registration returns status and required variable names, never resolved credentials. Missing variables are checked when a future session initializes. See [agent registration details](docs/mcp-registration.md).
@@ -665,13 +729,13 @@ When you switch back to a thread you haven't viewed in over a minute, a **contex
 
 Projects group related threads, choose their initial working directory, inject shared context, and may own a Project Orchestrator. Project coordination tools are operationally scoped; vault tools, MCP server/skill registration, and filesystem access remain broader capabilities rather than a security boundary. Secrets are the one exception: a keychain secret can optionally be restricted to specific Projects (see [Settings](#settings)) — unscoped secrets remain global, and a Project-less thread never receives a Project-scoped secret.
 
-**Creating a project:** Go to Settings → Vault → Projects, enter a project name and vault folder path, and click **Add**. Optionally set a filesystem cwd override for a repo outside the vault. Settings shows the resolved effective cwd; clear the override to derive it from the vault folder again. You can also add a project context prompt — a few sentences describing the project's goals, conventions, and key files that Claude should always keep in mind.
+**Creating a project:** Open Settings → Agent Threads, choose **Projects** in the **Settings section** selector, and click **New project**. Enter a project name and vault folder path, then **Create project**. Optionally set a filesystem cwd override for a repo outside the vault. Settings shows the resolved effective cwd; clear the override to derive it from the vault folder again. You can also add a project context prompt — a few sentences describing the project's goals, conventions, and key files that Claude should always keep in mind.
 
 **Opening a thread in a project:** The Agents List and Agent Board kickoff panels have an accessible **Project** selector. Choose a Project before dispatching, or deliberately leave **No Project** in the Agents List (**Unassigned** in Agent Board) to use the global default cwd. Model, goal, loop, attachment, image, and harness kickoff options preserve that selection. The chat view's New Thread flow and agent-created child threads keep their existing Project inheritance behavior.
 
 **Moving an existing thread:** Open the **⋯** menu in the chat view and choose **Move to Project…**, then pick a Project or **(No project)**. This works regardless of coordination scope, so a thread started outside any Project — including one that just created the Project — is never stranded. Moving into a Project switches the thread to that Project's working directory, which starts a fresh session on the next message; detaching leaves the cwd alone. The item is hidden for the Portfolio Orchestrator and for any thread that owns a Project, since neither can be reassigned.
 
-**Managing projects:** Edit the name, cwd override, or context prompt at any time in Settings → Vault → Projects. Create or open the Project Orchestrator from the same row; the first completed Project thread also creates it automatically without stealing focus. Intentionally archiving a Project Orchestrator disables that automatic recreation (including after a synced-settings reload) until you deliberately choose Create/Open again. Changing a Project cwd affects new dispatches and Project-derived new-thread scheduled jobs that do not store an explicit cwd; it does not silently move existing sessions. Deleting a Project detaches its threads, clears pending proposals, removes its orchestrator heartbeat, and pins affected schedules to the Project's former effective cwd.
+**Managing projects:** Choose **Projects** in Agent Threads settings, search or select a project, and edit its details. **Save changes** applies the draft; **Cancel** discards it. Create or open the Project Orchestrator from the detail pane; the first completed Project thread also creates it automatically without stealing focus. Intentionally archiving a Project Orchestrator disables that automatic recreation (including after a synced-settings reload) until you deliberately choose Create/Open again. Changing a Project cwd affects new dispatches and Project-derived new-thread scheduled jobs that do not store an explicit cwd; it does not silently move existing sessions. Deletion requires confirmation, detaches its threads, clears pending proposals, removes its orchestrator heartbeat, and pins affected schedules to the Project's former effective cwd.
 
 **Giving an orchestrator direction:** A Project's context prompt can act as its goal contract. The headings are optional, but this shape gives the orchestrator the clearest operating boundaries:
 
@@ -793,6 +857,7 @@ Read and search your vault from within any thread.
 | Tool | Parameters | Description |
 |---|---|---|
 | `vault_search` | `query`, `limit?` | Full-text search across all Markdown files. Tokenizes multi-word queries so each term is matched independently. Returns results ranked by relevance (filename hits weighted 10×) with a ~300-char excerpt from the densest matching region. Default limit: 20. |
+| `vault_list` | `path?`, `recursive?`, `limit?` | Lists a vault folder, read-only and without a shell, through the vault adapter (or, on hosts whose adapter has no `list()` such as Geode, the vault's file tree). Returns `{ path, entries: [{ path, type: "file" \| "folder", size?, mtime? }], truncated }`, with vault-relative paths sorted by path. `path` is a vault-relative folder (default: vault root); absolute paths and `..` are rejected. `recursive` defaults to `false`; `limit` defaults to 500 (max 2000), and `truncated` is true when more entries exist. The config folder (`.obsidian` / `.geode`) is skipped unless listed explicitly. Auto-allowed like the other read-only vault tools; lets Bash-free skills list folders instead of calling `ls`/`find`. |
 | `vault_get_note_metadata` | `path` | Returns the full metadata cache entry for a note: frontmatter, tags, wikilinks, and headings. |
 | `vault_get_backlinks` | `path` | Returns all notes that link to the specified file, with source path and original link text. |
 | `vault_get_outgoing_links` | `path` | Returns all wikilinks and Markdown links a note makes to other files, with display text and resolved vault paths. |
@@ -824,11 +889,18 @@ Control the current thread's session state.
 | `ScheduleWakeup` | `delaySeconds`, `prompt`, `reason` | Schedules a message to be injected into this thread after a delay. Useful for polling CI, waiting for a deploy, or self-pacing loop work. While the wake-up is pending the thread shows a waiting indicator — a "Waiting" group with a live countdown (`Resumes in 4m — <reason>`) in the Agents List and the [Agent Board](#kanban-board). In the thread composer, a compact `Resumes in …` pill opens scheduled activity with the wakeup reason, exact time, and an item-specific **Cancel** control. |
 | `EnterWorktree` | `branch?`, `baseBranch?`, `repoPath?` | Creates a git worktree for the current repo and switches the session cwd to it. Automatically routed to the plugin's MCP implementation, which tracks the in-session cwd correctly after `set_working_directory`. |
 | `ExitWorktree` | `worktreePath?`, `force?` | Removes the worktree and restores the session cwd to the original repo root. Defaults to the current effective cwd. Pass `force: true` to remove even if there are uncommitted changes. |
+| `enter_vm` | `image?`, `network?`, `mountPath?` | Starts a sandbox VM for this thread and bind-mounts the current effective cwd at `/work` inside it. Requires Apple's `container` runtime (macOS 26+, Apple silicon). `network` is one of `default` (full egress — the default), `internal` (no internet, host still reachable), or `none` (no route at all). Because each container is its own lightweight VM, guest code cannot reach any host path other than the mounted directory. |
+| `vm_exec` | `command`, `timeoutSeconds?` | Runs a shell command inside this thread's sandbox VM with cwd `/work`. Returns `exitCode`, `stdout`, and `stderr`; a non-zero exit is reported, not thrown. Each stream is truncated at 100,000 characters with an explicit marker. Defaults to a 300s guest deadline plus a five-second kill grace. Edits made on the host with `Read`/`Write`/`Edit` are visible immediately — there is no sync step. |
+| `exit_vm` | `force?` | Stops and removes this thread's sandbox VM. Pass `force: true` to skip the graceful stop. |
 | `threads_create` | `prompt`, `title?`, `cwd?`, `projectId?` | Creates a persistent thread and immediately queues its initial prompt. Working directory and project inherit from the caller when omitted; pass `projectId: null` to clear the project. |
-| `request_secret` | `secretName`, `reason`, `force?` | Prompts the user (via a modal) to provide a secret value such as an API key. The value is stored in the OS keychain under the plugin's namespace and injected into future sessions as an environment variable — it never appears in the conversation. Returns `{success: true, secretName, alreadyExisted: boolean}` if the user saves, or `{success: false, reason}` if cancelled. If a secret with the same name already exists, returns `alreadyExisted: true` immediately without prompting. Pass `force: true` to always re-prompt (e.g. when rotating a stale token) — the modal will indicate that the existing value will be replaced. |
+| `request_secret` | `secretName`, `reason`, `force?` | Prompts the user (via a modal) to provide a secret value such as an API key. The value is stored in the OS keychain under the plugin's namespace and injected into future sessions as an environment variable — it never appears in the conversation. On success, the calling thread's live session is also flagged to restart at its next turn (conversation history is preserved via session resume), so the new secret becomes available to *this same thread* right away rather than only in later sessions. Returns `{success: true, secretName, alreadyExisted: boolean}` if the user saves, or `{success: false, reason}` if cancelled. If a secret with the same name already exists, returns `alreadyExisted: true` immediately without prompting. Pass `force: true` to always re-prompt (e.g. when rotating a stale token) — the modal will indicate that the existing value will be replaced. |
 | `watch_document` | `path` | Watches a vault note for content changes, owned by the calling thread. Any subsequent edit — from you, another thread, or a sync — sends this thread an injected alert message referencing the file via an `@[[filename]]` mention. Re-watching an already-watched path is a no-op that keeps the existing watch. See [Watch a document](#watch-a-document). |
 | `unwatch_document` | `path?`, `id?` | Removes a watch owned by the calling thread, by path or watch id (at least one required). Never affects another thread's watch on the same path. |
 | `list_watched_documents` | — | Returns the calling thread's own active watches: path, watch id, creation time, and last-alerted time. |
+
+See [Sandbox VMs](docs/sandbox-vms.md) for setup and a worktree workflow. Only
+`vm_exec` runs commands in the guest; host shell and file tools remain on the
+host. The selected directory is writable and guest edits persist after exit.
 
 ### Thread coordination tools
 
@@ -885,7 +957,14 @@ Enabled desktop plugins can integrate with Agent Threads through the versioned `
 
 Peer plugins should verify `apiVersion` and the advertised `capabilities`, listen for the host events `claude-threads:api-ready` and `claude-threads:api-stopping`, and reacquire the API after a plugin reload. Every API generation is revocable: calls through a stale reference fail with `PLUGIN_UNAVAILABLE` instead of operating on a replacement plugin instance.
 
-The TypeScript contract and structured error codes are defined in [`src/PublicApi.ts`](src/PublicApi.ts). API v1 intentionally excludes archive/delete operations, cross-Project elevation, generic extension registration, and direct access to private views or runtime sessions.
+Orchestrator can use the host's `voice-orchestration` bundle to respond to “Archive [thread name]” and “Mark [thread name] reviewed.” The host advertises `threads.archive` and `threads.markReviewed` and supplies `ct_archive_thread` / `ct_mark_reviewed` only when their implementations are available. Agents must resolve an exact thread ID from discovery and clarify ambiguous names. Start a new voice session after updating the host so its tool schemas are refreshed.
+
+- `threads.archive(threadId)` returns `{ status: 'archived' | 'cancelled', threadId }`. It blocks the last remaining thread and displays a host confirmation dialog for running threads and Portfolio/Project orchestrators. It awaits wakeup cancellation, archive persistence and settings persistence before success. Conversation retention follows **Save threads to vault**; disabling that setting means no archive note is written. A failure can leave wakeups cancelled or a saved archive note; it is reported as an error, never success. If state changes during an archive, retry from fresh discovery.
+- `threads.markReviewed(threadId)` returns `{ threadId, reviewed: true, changed }`. It accepts idle live threads, saves the reviewed flag and refreshes the Agents List/Board without opening the thread or changing its recency. Repeated calls return `changed: false`. New work invalidates review state.
+
+These are trusted in-process peer-plugin operations, not the internal assistant MCP tools: MCP Project boundaries and approval prompts do not automatically apply to peers. Archive safety checks are enforced by the host API; a model-supplied confirmation flag cannot bypass the dialog. Orchestrator records the invoked tool, exact target and observed result in its conversation transcript. The internal assistant self-archive policy is unchanged.
+
+The TypeScript contract and structured error codes are defined in [`src/PublicApi.ts`](src/PublicApi.ts), with the standalone consumer declaration in [`api/public-api-v1.d.ts`](api/public-api-v1.d.ts). API v1 excludes hard-delete operations, cross-Project elevation, and direct access to private views or runtime sessions.
 
 `api.v1.mcp` lets a peer plugin reuse Agent Threads' own MCP-registration and secret-storage machinery instead of reinventing OS-keychain storage or its own MCP config UI:
 
@@ -931,16 +1010,23 @@ Everything the [Skills Manager](#skills-manager) panel can do — browse the [sk
 
 ## Settings
 
+Open **Settings → Agent Threads** in Geode or Obsidian. The compact **Settings section** selector groups all eleven desktop sections under Preferences, Workspace, Extensions, and Connectivity. The host keeps its own settings navigation; the plugin does not add a second sidebar. **Projects** and **Secrets** provide searchable lists with a detail editor beside them, stacking vertically when the available settings pane is narrow. Mobile retains its pairing and relay settings screen.
+
+In **Secrets**, choose **Add secret** or select an existing entry. Save the value and its **Global** or **Selected projects** access together with **Add secret** for a new entry or **Save changes** for an existing one; **Cancel** discards the draft. A blank replacement preserves an existing value. Removing a secret requires confirmation. Values stay in OS-backed secret storage, never in `data.json`.
+
 | Setting | Description |
 |---|---|
 | Claude binary path | Path to the `claude` executable (auto-detected) |
 | Agent harness | Initial Claude or Codex default for new kickoff selectors. A selection made in the Agents List or Agent Board is local to that mounted view and does not rewrite this setting. |
+| Codex computer use | Off by default. Disables bundled Codex desktop-control capabilities for newly initialized sessions. On inherits local Codex configuration. Existing sessions require a restart; shared Codex browser REPL capabilities may also be unavailable while off. |
 | Default working directory | `cwd` for new threads; defaults to vault root |
 | Worktree location | Root directory for worktrees created by `enter_worktree` (default: `~/.geode/worktrees`, laid out as `<repo>/<branch>`). Must be durable storage — a temp directory is cleared on reboot, which deletes the worktree and any uncommitted work in it. |
+| Sandbox VM image | Container image `enter_vm` starts (default: `claude-threads-coding:1`). Build it from the bundled `sandbox/Dockerfile` with `container build --tag claude-threads-coding:1 sandbox/`. Requires Apple's container runtime on macOS 26+ / Apple silicon: `brew install container`, then `container system start`. |
+| Sandbox VM network | Network isolation `enter_vm` applies when a call does not pass one. `Full egress` (default) lets `npm install`, git remotes, and web access work. `Internal` blocks the internet but leaves the host reachable; `None` removes the route entirely. |
 | Save threads to vault | Auto-save readable Markdown notes plus versioned machine recovery snapshots |
 | Vault folder | Folder for saved thread notes (default: `Agent Threads/`) |
 | Extra environment variables | `KEY=VALUE` pairs injected into Claude's environment (useful for `AWS_PROFILE`, `AWS_REGION`) |
-| Secret environment variables | Keychain-backed env vars (values stored in the OS keychain, never in `data.json`) — for API keys and tokens. Each secret defaults to Global (available to every Project and to Project-less threads); optionally restrict it to specific Projects via the checkboxes under its row. MCP server and skill *registration* stays global regardless — only whether a scoped secret's value resolves is gated by Project. |
+| Secret environment variables | Managed in **Secrets** with explicit Save/Cancel. Values are stored in the OS keychain, never in `data.json`. Each secret defaults to Global (available to every Project and to Project-less threads); choose Selected projects in its detail pane to restrict resolution. MCP server and skill *registration* stays global regardless — only whether a scoped secret's value resolves is gated by Project. |
 | Permission mode | How the selected Claude or Codex harness handles tool-use confirmation. Options: `default` (CLI default), `acceptEdits` (auto-approve file edits), `bypassPermissions` (skip all prompts), `plan` (propose a plan first — see [Plan Mode](#plan-mode)), `dontAsk` (no dialogs; for unattended/scheduled sessions), `auto` (the selected harness decides). See [Permissions](#permissions). |
 | Thinking mode | `disabled` (default), `enabled`, or `auto` — controls whether Claude uses extended thinking for harder problems |
 | Thinking budget tokens | Maximum tokens Claude can spend on reasoning when thinking mode is `enabled` (default: 8 000). Only shown when thinking mode is `enabled` |
@@ -962,8 +1048,8 @@ Everything the [Skills Manager](#skills-manager) panel can do — browse the [sk
 | Projects | Group threads and focus their initial cwd/context. Projects do not restrict the broader vault or configured tool roster. |
 | Auto-collapse side panel | Collapse the left, right, or both sidebars when the Agent Board opens, restoring them when it closes (default: `None`). See [Agent Board](#kanban-board). |
 | Stack scheduled job threads | Collapse repeat runs of the same scheduled/cron job into an expandable rollup in the Agent Board's quiet columns and the Agents List's Scheduled Jobs section (default: on). See [Agent Board](#kanban-board) and [Agents List](#agents-list). |
-| Scheduled work | The dedicated **Scheduled** tab groups recurring jobs, thread loops, and wakeups into collapsed rows showing status, cadence, next occurrence, Project, and execution target. Expand one for prompt, working directory, active hours, gate, history, and pause/resume/delete/open controls. |
-| Watched documents | A **Watched documents** section on the **Scheduled** tab lists every active watch (see [Watch a document](#watch-a-document)) with its path, owning thread, and last-alerted time, plus an unwatch control — the same view whether the watch was created from the file menu or the `watch_document` MCP tool. |
+| Scheduled work | The dedicated **Scheduled** section groups recurring jobs, thread loops, and wakeups into collapsed rows showing status, cadence, next occurrence, Project, and execution target. Expand one for prompt, working directory, active hours, gate, history, and pause/resume/delete/open controls. |
+| Watched documents | **Watched documents** within **Scheduled** lists every active watch (see [Watch a document](#watch-a-document)) with its path, owning thread, and last-alerted time, plus an unwatch control — the same view whether the watch was created from the file menu or the `watch_document` MCP tool. |
 | Diagnostics | Enable the always-on, local-only telemetry layer (counters + renderer CPU/memory samples) that powers the [Diagnostics report](#diagnostics-report). Nothing leaves your machine; on by default. Desktop only. |
 | Remote access | Enable/disable mobile remote access via WebSocket relay |
 | Room ID | Shared secret used to pair mobile (rotate to revoke all access) |
@@ -975,7 +1061,17 @@ Thread state in the plugin's `data.json` is canonical during normal startup. Whe
 
 ### Peer plugins
 
-Geode/Obsidian peer plugins can discover the generation-scoped Agent Threads API at `app.plugins.plugins['claude-threads']?.api?.v1`. It provides immutable thread operations, sanitized cursor-based trace projection, and fail-closed constrained Claude runs for input-only evaluation. See [Peer Plugin API v1](docs/public-api.md) and the checked-in [type contract](api/public-api-v1.d.ts).
+Geode/Obsidian peer plugins can discover the generation-scoped Agent Threads API at `app.plugins.plugins['claude-threads']?.api?.v1`. It provides immutable thread operations, sanitized trace projection, constrained runs, host-confirmed MCP registration, and contribution surfaces for artifacts, agent tools, and slash commands. `threads.beginProvisional` adds a reversible create transaction for peer-owned workflows: pending threads cannot run, and rollback removes the thread plus storage allocated through `artifacts.allocateStorage`. Design for Agent Threads is the reference peer consumer; Agent Threads itself retains only read-only legacy artifact fallback. `capabilities` is computed from what the host can actually do, so check it before calling. See [Peer Plugin API v1](docs/public-api.md) and the checked-in [type contract](api/public-api-v1.d.ts).
+
+Sibling Geode/Obsidian plugins can also contribute cards, images and self-contained
+interactive documents inside assistant replies through
+`extensions.registerMessageContentProvider`. The agent places a durable content
+reference on its own line, and Threads renders it at that position with
+host-owned presentation and named action buttons. Cards stay readable when a
+provider is unavailable; streaming and mobile relay views show inert fallbacks.
+Embedded documents run in isolated frames with external resources and navigation
+blocked. See [Inline message content](docs/public-api.md#inline-message-content)
+for registration, reference formatting, lifecycle and image-source details.
 
 ```bash
 git clone https://github.com/rbcodelabs/obsidian-claude-threads

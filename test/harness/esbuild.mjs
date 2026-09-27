@@ -35,6 +35,9 @@ const sharedConfig = {
     // crypto is statically imported by skillManager (createHash, for the
     // deterministic skill-source id) — stub it for the same reason.
     'crypto':                           resolve('./mocks/crypto.ts'),
+    // http is required lazily by OpenCodeSession / OpenCodeHostTools, which
+    // HarnessFactory pulls in; the harness never starts an OpenCode session.
+    'http':                             resolve('./mocks/http.ts'),
     // electron is used in dynamic require() calls inside click handlers;
     // inject a no-op so those code paths don't crash when reached in tests.
     'electron':                         resolve('./mocks/electron.ts'),

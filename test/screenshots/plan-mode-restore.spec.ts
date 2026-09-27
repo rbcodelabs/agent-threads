@@ -106,7 +106,7 @@ test.describe('Plan mode — restored card (pendingPlan)', () => {
     expect(pendingPlan).toBeUndefined();
   });
 
-  test('reject calls sendMessage with follow-up and clears pendingPlan', async ({ page }) => {
+  test('reject keeps pendingPlan until explicit feedback is submitted, then clears it once', async ({ page }) => {
     await page.setViewportSize({ width: 420, height: 740 });
     await page.goto(harnessUrl);
     await page.waitForSelector('.ct-title-row');
@@ -130,11 +130,23 @@ test.describe('Plan mode — restored card (pendingPlan)', () => {
 
     await page.locator('.ct-plan-reject').click();
 
+    await expect(page.locator('.ct-plan-card')).toBeVisible();
+    await expect(page.getByLabel('Why are you rejecting this plan?')).toBeFocused();
+    expect(await page.evaluate(() => (window as any).__sendMessageCalls)).toHaveLength(0);
+    expect(await page.evaluate(() => {
+      const manager = (window as any).__manager;
+      const view = (window as any).__view;
+      return manager.getThread(view['activeThreadId']).pendingPlan;
+    })).toBe(PLAN_TEXT);
+
+    await page.getByLabel('Why are you rejecting this plan?').fill('  Keep the middleware change smaller.  ');
+    await page.locator('.ct-plan-rejection-submit').click();
+
     await expect(page.locator('.ct-plan-card')).not.toBeAttached();
 
     const calls = await page.evaluate(() => (window as any).__sendMessageCalls);
     expect(calls).toHaveLength(1);
-    expect(calls[0].text).toContain('rejected');
+    expect(calls[0].text).toBe('Keep the middleware change smaller.');
 
     const pendingPlan = await page.evaluate(() => {
       const manager = (window as any).__manager;

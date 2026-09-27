@@ -6,13 +6,19 @@ When Claude or Codex reports an agent, a compact pill appears in the composer fo
 
 Click the pill to open a popover above the composer listing every agent in the thread, indented by parent. Arrow keys move between rows, `Escape` closes it, and clicking outside dismisses it.
 
-Selecting an agent replaces the message pane with that agent's harness-exposed activity, lifecycle, errors, and result, without creating a separate thread. A sticky breadcrumb at the top (`Main conversation › parent › child`) walks back up the tree, and a close button returns to the conversation directly. Your scroll position in the main conversation is restored when you come back.
+Selecting an agent replaces the message pane with that agent's harness-exposed activity, lifecycle, errors, and result, without creating a separate thread. A sticky breadcrumb at the top (`Main conversation › parent › child`) walks back up the tree, and a close button returns to the conversation directly. Your scroll position in the main conversation is restored when you come back — if you were reading further up, you land back there; if you were caught up, you land on the current bottom, even if the conversation kept streaming while the panel was open. A small floating button appears over the transcript any time you're scrolled away from the bottom (in either the main conversation or an agent's activity view) as a one-click way back down.
 
 The composer stays live while a child view is open. Its placeholder notes that a message goes to the main conversation, and sending one visibly returns you there rather than silently redirecting.
 
 ## Choosing the harness at kickoff
 
-The Agents List and Agent Board dispatch controls show the harness that will own the new thread. A normal click dispatches with the shown Claude or Codex harness. Right-click, press and hold, or focus the button and press `Shift+F10` to choose the other harness without sending. The selection remains local to that mounted view; the Agent harness setting is only its initial default, and changing the kickoff selection never switches an existing thread.
+The Agents List and Agent Board dispatch controls show the harness that will own the new thread. A normal click dispatches with the shown Claude or Codex harness. Right-click, press and hold, or focus the button and press `Shift+F10` to choose the other harness without sending. The selection remains local to that mounted view; the Agent harness setting is only its initial default.
+
+## Switching an existing thread
+
+An idle desktop thread can move between Claude and Codex from **Harness** in the conversation footer menu. The thread ID, transcript, project, working directory, goal, and completed child-agent history stay intact. The target receives a fresh provider-native session, with a one-time bounded summary and references to the thread messages and available raw log/note. Its model override, usage snapshot, task board, and other provider-native state reset.
+
+Established conversations ask for confirmation. Switching is unavailable while a turn, queued send, permission, question, plan, goal transition, background task, or child agent is unsettled; the menu names the blocking condition. Assistant messages retain their provider attribution so mixed Claude/Codex vault transcripts remain accurate.
 
 The Agents List groups conversations by resolved Project and orders adaptive two-line rows into Working, Waiting, New, Reviewed, Failed, and Ready sections. Status, title, and recency occupy the primary line; activity, repository/path, and agent count share a truncation-safe secondary line. Permission, question, plan, waiting, and AWS reauthentication states expand into dedicated action rows when required. Child-agent activity is summarized by one accessible agent-count control that opens the team picker without changing the current selection. The count is green only while at least one child is starting, working, or waiting; otherwise it uses the faint secondary treatment in both the list and Agent Board. Agent role, task, and current activity remain included in list search.
 

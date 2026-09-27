@@ -16,6 +16,10 @@ describe('harness brand icons', () => {
     const registrations = new Map(addIcon.mock.calls.map(([name, svg]) => [name, svg]));
     expect(registrations.get('claude-spark')).toContain('fill="currentColor"');
     expect(registrations.get('openai-blossom')).toContain('fill="currentColor"');
+    expect(registrations.get('opencode-mark')).toContain('fill="currentColor"');
+    expect(registrations.get('opencode-mark')).not.toContain('#131010');
+    // Glyph bounds (256 x 320 of a 512 viewbox) fill Obsidian's 100 x 100 wrapper.
+    expect(registrations.get('opencode-mark')).toContain('translate(-30 -30) scale(0.3125)');
     expect(registrations.get('claude-spark')).not.toContain('#D97757');
   });
 

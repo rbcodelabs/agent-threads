@@ -114,7 +114,11 @@ describe('AttachmentWriter fallback ladder', () => {
       .write('thread-1', 'msg-1', 0, 'image/png', PNG_BASE64);
 
     expect(result).toBe(EXPECTED_REL);
-    expect(writeBinary).toHaveBeenCalledWith(EXPECTED_REL, PNG_BASE64);
+    expect(writeBinary).toHaveBeenCalledTimes(1);
+    const [calledPath, calledData] = writeBinary.mock.calls[0] as unknown as [string, unknown];
+    expect(calledPath).toBe(EXPECTED_REL);
+    expect(calledData).toBeInstanceOf(ArrayBuffer);
+    expect(Buffer.from(calledData as ArrayBuffer).toString('base64')).toBe(PNG_BASE64);
   });
 
   it('rung 1 wins over rung 2: the host bridge is preferred whenever it exists', async () => {
@@ -228,6 +232,93 @@ describe('AttachmentWriter fallback ladder', () => {
  * every hard-delete into a silent no-op, leaving `attachments/<threadId>/`
  * orphaned on disk forever.
  */
+/**
+ * Geode's real `window.geode.writeBinary` contract (geode src/main/preload.ts,
+ * src/main/vault-write.ts): `(path, data: ArrayBuffer) => Promise<{ mtime,
+ * ctime, size }>`, and the main process writes `new Uint8Array(data)`. Passing
+ * a base64 *string* there yields `new Uint8Array("...")` - length 0 - so the
+ * write resolved successfully with an empty file. Every attachment written
+ * under Geode since ~Sep 15 was a 0-byte file because of exactly that.
+ */
+function makeGeodeBridge() {
+  const written = new Map<string, Uint8Array>();
+  const writeBinary = vi.fn(async (p: string, data: unknown) => {
+    const bytes = new Uint8Array(data as ArrayBuffer);
+    written.set(p, bytes);
+    return { mtime: 1, ctime: 1, size: bytes.byteLength };
+  });
+  return { written, writeBinary };
+}
+
+describe('AttachmentWriter rung 1 against Geode\'s real writeBinary contract', () => {
+  it('writes the decoded image bytes, not an empty file', async () => {
+    const adapter = makeAdapter({ exists: async () => false });
+    const app = makeApp({ getAbstractFileByPath: () => null }, adapter);
+    const bridge = makeGeodeBridge();
+
+    const result = await writerFor(app, { geode: { writeBinary: bridge.writeBinary } })
+      .write('thread-1', 'msg-1', 0, 'image/png', PNG_BASE64);
+
+    expect(result).toBe(EXPECTED_REL);
+    const bytes = bridge.written.get(EXPECTED_REL);
+    expect(bytes).toBeDefined();
+    expect(Buffer.from(bytes!).toString('base64')).toBe(PNG_BASE64);
+  });
+
+  it('treats a host-reported size of 0 as a failed write and falls through to rung 2', async () => {
+    const tree = makeDirTree();
+    const createBinary = vi.fn(async () => new TFile(EXPECTED_REL));
+    const adapter = makeAdapter({ getBasePath: () => '/unused', exists: tree.exists, mkdir: tree.mkdir });
+    const app = makeApp({ getAbstractFileByPath: () => null, createBinary }, adapter);
+    const writeBinary = vi.fn(async () => ({ mtime: 1, ctime: 1, size: 0 }));
+
+    await expect(
+      writerFor(app, { geode: { writeBinary } }).write('thread-1', 'msg-1', 0, 'image/png', PNG_BASE64),
+    ).resolves.toBe(EXPECTED_REL);
+    expect(writeBinary).toHaveBeenCalledTimes(1);
+    expect(createBinary).toHaveBeenCalledTimes(1);
+    expect(Buffer.from(createBinary.mock.calls[0]![1] as ArrayBuffer).toString('base64')).toBe(PNG_BASE64);
+  });
+
+  it('treats a host-reported size that differs from the decoded length as a failed write', async () => {
+    const tree = makeDirTree();
+    const createBinary = vi.fn(async () => new TFile(EXPECTED_REL));
+    const adapter = makeAdapter({ getBasePath: () => '/unused', exists: tree.exists, mkdir: tree.mkdir });
+    const app = makeApp({ getAbstractFileByPath: () => null, createBinary }, adapter);
+    const writeBinary = vi.fn(async () => ({ mtime: 1, ctime: 1, size: 3 }));
+
+    await expect(
+      writerFor(app, { geode: { writeBinary } }).write('thread-1', 'msg-1', 0, 'image/png', PNG_BASE64),
+    ).resolves.toBe(EXPECTED_REL);
+    expect(createBinary).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a rung 2 adapter write that reports size 0 as a failure and falls through to rung 3', async () => {
+    const root = makeTempVault();
+    const tree = makeDirTree();
+    // File already on disk but not in the metadata cache, so rung 2 uses adapter.writeBinary.
+    tree.dirs.add(EXPECTED_REL);
+    const writeBinary = vi.fn(async () => ({ mtime: 1, ctime: 1, size: 0 }));
+    const adapter = makeAdapter({ getBasePath: () => root, exists: tree.exists, mkdir: tree.mkdir, writeBinary });
+    const app = makeApp({ getAbstractFileByPath: () => null }, adapter);
+
+    await expect(writerFor(app).write('thread-1', 'msg-1', 0, 'image/png', PNG_BASE64))
+      .resolves.toBe(EXPECTED_REL);
+    expect(writeBinary).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(path.join(root, EXPECTED_REL)).toString('base64')).toBe(PNG_BASE64);
+  });
+
+  it('accepts a host that reports no size at all (older bridge / void return)', async () => {
+    const adapter = makeAdapter({ exists: async () => false });
+    const app = makeApp({ getAbstractFileByPath: () => null }, adapter);
+    const writeBinary = vi.fn(async () => undefined);
+
+    await expect(
+      writerFor(app, { geode: { writeBinary } }).write('thread-1', 'msg-1', 0, 'image/png', PNG_BASE64),
+    ).resolves.toBe(EXPECTED_REL);
+  });
+});
+
 describe('AttachmentWriter.removeThreadDir fallback ladder', () => {
   const THREAD_DIR = 'Claude/attachments/thread-1';
 

@@ -1,3 +1,4 @@
+import { isAgentHarness } from './types';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
@@ -40,15 +41,21 @@ function formatOAuthDuration(ms: number): string {
 /** Status dot color + human-readable label for one OAuth MCP server row. */
 export function describeOAuthMcpStatus(state: OAuthMcpState | undefined): { label: string; tone: 'green' | 'yellow' | 'red' | 'grey' } {
   if (!state) return { label: 'Not configured', tone: 'grey' };
+  // A client_credentials connection renews itself from the stored secret with no
+  // user involved, so an approaching expiry is routine rather than something to
+  // warn about, and a broken one needs a new secret — not a trip through a
+  // consent screen that this grant never had.
+  const selfRenewing = state.grantType === 'client_credentials';
   if (state.status === 'connected') {
     if (state.accessTokenExpiresAt !== undefined) {
       const remaining = state.accessTokenExpiresAt - Date.now();
+      if (selfRenewing) return { label: `Connected · renews in ${formatOAuthDuration(remaining)}`, tone: 'green' };
       if (remaining < 15 * 60_000) return { label: 'Expires soon', tone: 'yellow' };
       return { label: `Connected · expires in ${formatOAuthDuration(remaining)}`, tone: 'green' };
     }
     return { label: 'Connected', tone: 'green' };
   }
-  return { label: 'Needs re-authorization', tone: 'red' };
+  return { label: selfRenewing ? 'Needs new credentials' : 'Needs re-authorization', tone: 'red' };
 }
 
 export function isWebViewerEnabled(app: App): boolean {
@@ -362,84 +369,6 @@ class OpenAiKeyModal extends Modal {
 }
 
 /**
- * Modal for adding or changing a secret environment variable.
- * When adding (varName is empty), renders both a name field and a value field.
- * When changing (varName is pre-filled), only asks for the new value.
- */
-class SecretEnvModal extends Modal {
-  private nameInput: HTMLInputElement | null = null;
-  private valueInput: HTMLInputElement | null = null;
-
-  constructor(
-    app: App,
-    private varName: string,
-    private onSave: (value: string, resolvedName: string) => void,
-  ) {
-    super(app);
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-
-    const isNew = !this.varName;
-    contentEl.createEl('h2', { text: isNew ? 'Add secret variable' : `Change: ${this.varName}` });
-
-    if (isNew) {
-      // "never written to disk" was false on a host without encrypted storage —
-      // plaintext in localStorage is very much on disk. data.json is the
-      // invariant that actually holds everywhere, so that is what it claims now.
-      applySecretStorageCopy(
-        this.app,
-        contentEl.createEl('p', { cls: 'setting-item-description' }),
-        (storage) => `${storage} It is never written to data.json.`,
-      );
-
-      contentEl.createEl('label', { text: 'Variable name', cls: 'ct-modal-label' });
-      this.nameInput = contentEl.createEl('input', {
-        type: 'text',
-        placeholder: 'MY_API_KEY',
-        cls: 'ct-modal-input ct-modal-input-mono',
-      });
-    }
-
-    contentEl.createEl('label', {
-      text: isNew ? 'Value' : 'New value',
-      cls: 'ct-modal-label',
-    });
-    this.valueInput = contentEl.createEl('input', {
-      type: 'password',
-      placeholder: isNew ? 'paste your secret here' : 'paste new value',
-      cls: 'ct-modal-input',
-    });
-
-    const buttonRow = contentEl.createDiv('ct-modal-button-row');
-
-    const cancelBtn = buttonRow.createEl('button', { text: 'Cancel' });
-    cancelBtn.addEventListener('click', () => this.close());
-
-    const saveBtn = buttonRow.createEl('button', { text: 'Save', cls: 'mod-cta' });
-    saveBtn.addEventListener('click', () => {
-      const val = this.valueInput?.value.trim() ?? '';
-      const name = this.varName || (this.nameInput?.value.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_') ?? '');
-      if (!val || !name) return;
-      this.onSave(val, name);
-      this.close();
-    });
-
-    const handleEnter = (e: KeyboardEvent) => { if (e.key === 'Enter') saveBtn.click(); };
-    this.nameInput?.addEventListener('keydown', handleEnter);
-    this.valueInput.addEventListener('keydown', handleEnter);
-
-    setTimeout(() => (this.nameInput ?? this.valueInput)?.focus(), 50);
-  }
-
-  onClose(): void {
-    this.contentEl.empty();
-  }
-}
-
-/**
  * Modal opened when an agent calls the `request_secret` MCP tool.
  * Shows the secret name and the agent's reason for requesting it, collects
  * a password-type value, writes it to `app.secretStorage` (the OS keychain on a
@@ -744,72 +673,39 @@ class AddSkillSourceModal extends Modal {
       const rawUrl = urlInput.value.trim();
       if (!rawUrl) { showError('GitHub URL is required.'); return; }
 
-      // Validate it's a github URL
-      const ghMatch = rawUrl.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/);
-      if (!ghMatch) { showError('Please enter a valid GitHub repo URL (e.g. https://github.com/owner/repo).'); return; }
+      // Required lazily (not imported at the top of this file) because
+      // skillManager pulls in Node built-ins, and SettingsTab loads on mobile too.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { parseGithubRepoUrl, addGithubSkillSource } = require('./skillManager') as typeof import('./skillManager');
+
+      const repoUrl = parseGithubRepoUrl(rawUrl);
+      if (!repoUrl) { showError('Please enter a valid GitHub repo URL (e.g. https://github.com/owner/repo).'); return; }
+
+      // Clones live inside the vault's plugin folder, never the home directory.
+      const cloneBase = this.plugin.getSkillSourceCloneBase();
+      if (!cloneBase) {
+        showError('Cannot resolve the vault folder on this platform, so there is nowhere to clone to. Skill sources need a desktop vault on a real filesystem.');
+        return;
+      }
 
       addBtn.setAttribute('disabled', 'true');
       showProgress('Cloning repository…');
 
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const fsNode = require('fs') as typeof import('fs');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pathNode = require('path') as typeof import('path');
-      // Required lazily (not imported at the top of this file) because
-      // skillManager pulls in Node built-ins, and SettingsTab loads on mobile too.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { cloneGithubSource } = require('./skillManager') as typeof import('./skillManager');
-
-      // A source the user adds by hand gets a random id; only *declared* sources
-      // arriving without one need the deterministic, repo-derived id.
-      const id = crypto.randomUUID();
-      // Store clones inside the vault's plugin folder so they are vault-local
-      // and don't bleed across vaults. FileSystemAdapter.getBasePath() gives the
-      // absolute vault root; manifest.dir is the plugin folder relative to it.
-      //
-      // No home-directory fallback: this used to land clones in
-      // ~/<manifest.dir>/skill-sources/ whenever the adapter was not a
-      // FileSystemAdapter, writing outside the vault entirely.
-      const { FileSystemAdapter } = require('obsidian') as typeof import('obsidian');
-      const adapter = this.plugin.app.vault.adapter;
-      if (!(adapter instanceof FileSystemAdapter) || !this.plugin.manifest.dir) {
-        showError('Cannot resolve the vault folder on this platform, so there is nowhere to clone to. Skill sources need a desktop vault on a real filesystem.');
-        return;
-      }
-      const cloneBase = pathNode.join(adapter.getBasePath(), this.plugin.manifest.dir, 'skill-sources');
-      const clonePath = pathNode.join(cloneBase, id);
-
       try {
-        fsNode.mkdirSync(cloneBase, { recursive: true });
-
-        // Clone via the shared helper (normalizes the URL to .git, runs git
-        // non-interactively, and cleans up a partial clone on failure).
-        await cloneGithubSource(rawUrl, clonePath);
-
-        showProgress('Reading plugin manifest…');
-
-        const { readPluginManifest } = await import('./claudeSettings');
-        const manifest = readPluginManifest(clonePath);
-
-        // Derive display name: user input > manifest displayName > manifest name > repo name from URL
-        const repoName = rawUrl.replace(/\.git$/, '').split('/').pop() ?? 'Unknown';
-        const displayName = nameInput.value.trim() || manifest?.displayName || manifest?.name || repoName;
-
-        const source: SkillSource = {
-          id,
-          name: displayName,
-          type: 'github',
-          repoUrl: rawUrl.replace(/\.git$/, ''),
-          clonePath,
-        };
-
+        // Shared with Chief of Staff onboarding: clones non-interactively,
+        // removes a partial clone on failure, and names the source from
+        // plugin.json. A hand-added source keeps its random id.
+        const source: SkillSource = await addGithubSkillSource({
+          repoUrl,
+          cloneBase,
+          displayName: nameInput.value,
+          id: crypto.randomUUID(),
+        });
         this.plugin.settings.skillSources.push(source);
         await this.plugin.saveSettings();
         this.close();
         this.onAdded();
       } catch (err) {
-        // Clean up failed clone
-        try { fsNode.rmSync(clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
         showError(`Clone failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     };
@@ -1132,7 +1028,10 @@ export class McpServerModal extends Modal {
   private renderOAuthForm(): void {
     const el = this.contentEl2;
 
-    el.createEl('p', {
+    // Kept generic because the sign-in sentence is false for the
+    // client_credentials grant, which opens no browser at all. The grant selector
+    // below carries the flow-specific explanation instead.
+    const introEl = el.createEl('p', {
       cls: 'ct-modal-desc',
       text:
         'Connecting opens the provider\'s sign-in page in the Web Viewer. Tokens are stored ' +
@@ -1149,6 +1048,11 @@ export class McpServerModal extends Modal {
       cls: 'ct-modal-input',
     });
 
+    el.createEl('label', { text: 'Grant type', cls: 'ct-modal-label' });
+    const grantSelect = el.createEl('select', { cls: 'ct-modal-input', attr: { 'aria-label': 'Grant type' } });
+    grantSelect.createEl('option', { text: 'Authorization code (sign in as yourself)', value: 'authorization_code' });
+    grantSelect.createEl('option', { text: 'Client credentials (machine-to-machine, no sign-in)', value: 'client_credentials' });
+
     el.createEl('label', { text: 'Scopes (optional, space-separated)', cls: 'ct-modal-label' });
     const scopesInput = el.createEl('input', {
       type: 'text',
@@ -1157,7 +1061,7 @@ export class McpServerModal extends Modal {
     });
 
     el.createEl('label', { text: 'Tool filter (optional)', cls: 'ct-modal-label' });
-    const filterModeSelect = el.createEl('select', { cls: 'ct-modal-input' });
+    const filterModeSelect = el.createEl('select', { cls: 'ct-modal-input', attr: { 'aria-label': 'Tool filter' } });
     filterModeSelect.createEl('option', { text: 'No filter', value: 'none' });
     filterModeSelect.createEl('option', { text: 'Allow only these', value: 'allow' });
     filterModeSelect.createEl('option', { text: 'Deny these', value: 'deny' });
@@ -1170,16 +1074,58 @@ export class McpServerModal extends Modal {
 
     const advanced = el.createEl('details');
     advanced.createEl('summary', { text: 'Advanced' });
-    advanced.createEl('label', { text: 'Client ID (skips Dynamic Client Registration)', cls: 'ct-modal-label' });
+    const clientIdLabel = advanced.createEl('label', { text: 'Client ID (skips Dynamic Client Registration)', cls: 'ct-modal-label' });
     const clientIdInput = advanced.createEl('input', { type: 'text', cls: 'ct-modal-input' });
+    const clientSecretLabel = advanced.createEl('label', { text: 'Client secret (only for confidential clients)', cls: 'ct-modal-label' });
+    // `type=password` so the value is masked and browsers/Obsidian don't offer to
+    // remember it. The typed literal is passed straight to registerServer(), which
+    // puts it in the OS keychain — it is deliberately NOT added to `entry` below,
+    // because mcpRegistrationSchema rejects literal secrets (the agent tool path
+    // must use a ${NAME} placeholder, since tool arguments are logged verbatim).
+    const clientSecretInput = advanced.createEl('input', { type: 'password', cls: 'ct-modal-input' });
+    clientSecretInput.autocomplete = 'off';
     advanced.createEl('label', { text: 'Authorization server URL (skips discovery)', cls: 'ct-modal-label' });
     const asUrlInput = advanced.createEl('input', { type: 'text', cls: 'ct-modal-input' });
-    advanced.createEl('label', { text: 'Redirect URI (optional — e.g. http://localhost:3118/callback for Slack)', cls: 'ct-modal-label' });
+    const audienceLabel = advanced.createEl('label', { text: 'Audience (optional — Auth0 API identifier)', cls: 'ct-modal-label' });
+    const audienceInput = advanced.createEl('input', {
+      type: 'text',
+      placeholder: 'bankrate-api',
+      cls: 'ct-modal-input',
+    });
+    const redirectUriLabel = advanced.createEl('label', { text: 'Redirect URI (optional — e.g. http://localhost:3118/callback for Slack)', cls: 'ct-modal-label' });
     const redirectUriInput = advanced.createEl('input', {
       type: 'text',
       placeholder: 'http://localhost:3118/callback',
       cls: 'ct-modal-input',
     });
+
+    /**
+     * Reshape the form for the selected grant. Redirect URI is hidden rather
+     * than merely ignored for client_credentials because the schema rejects it
+     * outright — leaving it visible would invite a value that fails validation
+     * with no indication of why. Client ID and secret stop being optional
+     * niceties and become the whole of the credentials, so Advanced is forced
+     * open: otherwise the two fields the grant cannot work without are behind a
+     * collapsed disclosure labelled "Advanced".
+     */
+    const applyGrantVisibility = () => {
+      const m2m = grantSelect.value === 'client_credentials';
+      introEl.textContent = m2m
+        ? 'The plugin authenticates as itself using a client ID and secret — no browser and no sign-in. '
+          + 'The secret is stored in the OS keychain, never in this plugin\'s data.json.'
+        : 'Connecting opens the provider\'s sign-in page in the Web Viewer. Tokens are stored '
+          + 'in the OS keychain, never in this plugin\'s data.json.';
+      redirectUriLabel.style.display = m2m ? 'none' : '';
+      redirectUriInput.style.display = m2m ? 'none' : '';
+      audienceLabel.textContent = m2m
+        ? 'Audience (required by some providers — e.g. an Auth0 API identifier)'
+        : 'Audience (optional — Auth0 API identifier)';
+      clientIdLabel.textContent = m2m ? 'Client ID (required)' : 'Client ID (skips Dynamic Client Registration)';
+      clientSecretLabel.textContent = m2m ? 'Client secret (required)' : 'Client secret (only for confidential clients)';
+      if (m2m) advanced.open = true;
+    };
+    grantSelect.addEventListener('change', applyGrantVisibility);
+    applyGrantVisibility();
 
     const errorEl = el.createEl('p', { cls: 'ct-modal-error' });
     errorEl.style.display = 'none';
@@ -1206,6 +1152,7 @@ export class McpServerModal extends Modal {
 
       const mode = filterModeSelect.value;
       const toolNames = toolsInput.value.split('\n').map(t => t.trim()).filter(Boolean);
+      const isClientCredentials = grantSelect.value === 'client_credentials';
       const entry = {
         name: nameInput.value.trim(),
         type: 'oauth' as const,
@@ -1214,11 +1161,23 @@ export class McpServerModal extends Modal {
         ...(mode !== 'none' && toolNames.length > 0 ? { tools: { [mode]: toolNames } } : {}),
         ...(clientIdInput.value.trim() ? { clientId: clientIdInput.value.trim() } : {}),
         ...(asUrlInput.value.trim() ? { authorizationServerUrl: asUrlInput.value.trim() } : {}),
-        ...(redirectUriInput.value.trim() ? { redirectUri: redirectUriInput.value.trim() } : {}),
+        // Suppressed for client_credentials, which the schema rejects it for. The
+        // field is hidden in that mode, but a value typed before switching grant
+        // would otherwise survive in the DOM and fail validation.
+        ...(!isClientCredentials && redirectUriInput.value.trim() ? { redirectUri: redirectUriInput.value.trim() } : {}),
+        ...(isClientCredentials ? { grantType: 'client_credentials' as const } : {}),
+        ...(audienceInput.value.trim() ? { audience: audienceInput.value.trim() } : {}),
       };
 
       if (!entry.name) { showError('Name is required.'); return; }
       if (!entry.url) { showError('URL is required.'); return; }
+      // The schema cannot check this: the typed secret is deliberately kept out of
+      // `entry` (see the input's declaration), so registerServer() owns the rule.
+      // Checking here too turns a round-trip failure into an inline message.
+      if (isClientCredentials && !clientSecretInput.value) {
+        showError('The client credentials grant requires a client secret.');
+        return;
+      }
 
       // Validate against the same schema the agent tool path uses, so the two
       // entry points cannot drift on what counts as a valid OAuth server.
@@ -1232,7 +1191,9 @@ export class McpServerModal extends Modal {
       saveBtn.setAttribute('disabled', 'true');
       cancelBtn.setAttribute('disabled', 'true');
       saveBtn.textContent = 'Connecting…';
-      statusEl.textContent = 'Waiting for you to finish signing in…';
+      statusEl.textContent = isClientCredentials
+        ? 'Requesting a token…'
+        : 'Waiting for you to finish signing in…';
       statusEl.style.display = '';
 
       let result: { success: boolean; message: string };
@@ -1243,8 +1204,12 @@ export class McpServerModal extends Modal {
           scopes: entry.scopes,
           tools: entry.tools,
           clientId: entry.clientId,
+          // Read here rather than from `entry` — see the input's declaration.
+          ...(clientSecretInput.value ? { clientSecret: clientSecretInput.value } : {}),
           authorizationServerUrl: entry.authorizationServerUrl,
           redirectUri: entry.redirectUri,
+          grantType: entry.grantType,
+          audience: entry.audience,
         });
       } catch (err) {
         result = { success: false, message: err instanceof Error ? err.message : String(err) };
@@ -1288,18 +1253,18 @@ export class McpServerModal extends Modal {
 // Settings tab
 // ───────────────────────────────────────────────────────────────────────────
 
-type SettingsTabId = 'general' | 'claude' | 'tools' | 'vault' | 'features' | 'scheduled' | 'remote' | 'skills' | 'mcp';
+type SettingsTabId = 'general' | 'claude' | 'tools' | 'vault' | 'features' | 'projects' | 'secrets' | 'scheduled' | 'remote' | 'skills' | 'mcp';
 
-const TABS: { id: SettingsTabId; label: string }[] = [
-  { id: 'general', label: 'General' },
-  { id: 'claude', label: 'Agent' },
-  { id: 'tools', label: 'Tools' },
-  { id: 'vault', label: 'Vault' },
-  { id: 'features', label: 'Features' },
-  { id: 'scheduled', label: 'Scheduled' },
-  { id: 'remote', label: 'Remote' },
-  { id: 'skills', label: 'Skills' },
-  { id: 'mcp', label: 'MCP' },
+const TAB_GROUPS: { label: string; tabs: { id: SettingsTabId; label: string }[] }[] = [
+  { label: 'Preferences', tabs: [
+    { id: 'general', label: 'General' }, { id: 'claude', label: 'Agent' },
+    { id: 'tools', label: 'Tools' }, { id: 'vault', label: 'Vault' }, { id: 'features', label: 'Features' },
+  ] },
+  { label: 'Workspace', tabs: [
+    { id: 'projects', label: 'Projects' }, { id: 'secrets', label: 'Secrets' }, { id: 'scheduled', label: 'Scheduled' },
+  ] },
+  { label: 'Extensions', tabs: [{ id: 'skills', label: 'Skills' }, { id: 'mcp', label: 'MCP' }] },
+  { label: 'Connectivity', tabs: [{ id: 'remote', label: 'Remote' }] },
 ];
 
 /** Fallback model list shown before any session has run and populated discoveredModels. */
@@ -1313,6 +1278,8 @@ const FALLBACK_MODELS: { value: string; displayName: string }[] = [
 export class ClaudeThreadsSettingTab extends PluginSettingTab {
   /** Survives re-renders (display() is called after toggles, modals, etc.). */
   private activeTab: SettingsTabId = 'general';
+  private selectedProjectId: string | null = null;
+  private selectedSecretName: string | null = null;
 
   constructor(
     app: App,
@@ -1353,8 +1320,8 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       dropdown.addOption('haiku', 'Haiku (latest)');
     }
     const discovered = this.plugin.discoveredModelsByHarness[harness];
-    // Codex intentionally has no guessed fallback: wait for model/list so we
-    // never offer a model unavailable to the signed-in Codex account.
+    // Codex and OpenCode intentionally have no guessed fallback: wait for their
+    // native model catalogs so we never offer a model the account cannot use.
     const pinned = harness === 'claude'
       ? (discovered.length > 0 ? discovered : FALLBACK_MODELS)
       : discovered;
@@ -1372,26 +1339,33 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       return;
     }
 
-    // Tab navigation
-    const nav = containerEl.createDiv({ cls: 'ct-settings-tabs' });
-    for (const tab of TABS) {
-      const btn = nav.createEl('button', {
-        text: tab.label,
-        cls: 'ct-settings-tab-btn' + (tab.id === this.activeTab ? ' is-active' : ''),
-      });
-      btn.addEventListener('click', () => {
-        this.activeTab = tab.id;
-        this.display();
-      });
+    const shell = containerEl.createDiv({ cls: 'ct-settings-shell' });
+    const compact = shell.createDiv({ cls: 'ct-settings-compact-nav' });
+    compact.createEl('strong', { text: 'Agent Threads' });
+    const selectLabel = compact.createEl('label');
+    selectLabel.createSpan({ text: 'Settings section' });
+    const select = selectLabel.createEl('select', { attr: { 'aria-label': 'Settings section' } });
+    for (const group of TAB_GROUPS) {
+      const options = select.createEl('optgroup', { attr: { label: group.label } });
+      for (const tab of group.tabs) options.createEl('option', { text: tab.label, value: tab.id });
     }
+    select.value = this.activeTab;
+    select.addEventListener('change', () => {
+      const retainFocus = select === select.ownerDocument.activeElement;
+      this.activeTab = select.value as SettingsTabId;
+      this.display();
+      if (retainFocus) containerEl.querySelector<HTMLSelectElement>('.ct-settings-compact-nav select')?.focus();
+    });
 
-    const body = containerEl.createDiv({ cls: 'ct-settings-tab-body' });
+    const body = shell.createDiv({ cls: 'ct-settings-tab-body' });
     switch (this.activeTab) {
       case 'general': this.renderGeneralTab(body); break;
       case 'claude': this.renderClaudeTab(body); break;
       case 'tools': this.renderToolsTab(body); break;
       case 'vault': this.renderVaultTab(body); break;
       case 'features': this.renderFeaturesTab(body); break;
+      case 'projects': this.renderProjectsTab(body); break;
+      case 'secrets': this.renderSecretsTab(body); break;
       case 'scheduled': this.renderScheduledTab(body); break;
       case 'remote': this.renderRemoteTab(body); break;
       case 'skills': this.renderSkillsTab(body); break;
@@ -1497,6 +1471,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName('Offer Chief of Staff on first run')
+      .setDesc('On a brand-new install, add the Chief of Staff skills and start a Chief of Staff thread. Off shows the static getting-started guide instead. Run "Set up Chief of Staff" from the command palette any time.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.offerChiefOfStaffOnFirstRun ?? true).onChange(async (value) => {
+          this.plugin.settings.offerChiefOfStaffOnFirstRun = value;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
       .setName('Keep computer awake')
       .setDesc('Prevent sleep while an agent is responding. Shows ☕ in the status bar when active.')
       .addToggle((toggle) =>
@@ -1551,9 +1535,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         dropdown
           .addOption('claude', 'Claude Code')
           .addOption('codex', 'OpenAI Codex')
+          .addOption('opencode', 'OpenCode')
           .setValue(this.plugin.settings.agentHarness ?? 'claude')
           .onChange(async (value) => {
-            this.plugin.settings.agentHarness = value as 'claude' | 'codex';
+            this.plugin.settings.agentHarness = isAgentHarness(value) ? value : 'claude';
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
             this.display();
@@ -1575,6 +1560,33 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName('OpenCode binary path')
+      .setDesc('Path to the opencode executable (desktop only). OpenCode threads run a local "opencode serve" per session and use the providers, API keys, and models configured in OpenCode. Model IDs use provider/model form, e.g. openai/gpt-5.')
+      .addText((text) =>
+        text
+          .setPlaceholder('opencode')
+          .setValue(this.plugin.settings.opencodeBinaryPath ?? 'opencode')
+          .onChange(async (value) => {
+            this.plugin.settings.opencodeBinaryPath = value || 'opencode';
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Codex computer use')
+      .setDesc('Allow Codex computer-use capabilities from your local Codex configuration. Off by default; shared Codex browser tools may also be disabled. Changes apply when a Codex session next starts or restarts; existing sessions keep their current access. Use “Reload plugin (safe)” after active work finishes to apply to all sessions.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.codexComputerUseEnabled === true)
+          .onChange(async (value) => {
+            this.plugin.settings.codexComputerUseEnabled = value;
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName('Worktree location')
       .setDesc(
         'Where enter_worktree creates worktrees. Leave empty to use ~/.geode/worktrees. '
@@ -1587,6 +1599,46 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.worktreeRoot ?? '')
           .onChange(async (value) => {
             this.plugin.settings.worktreeRoot = value.trim();
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Sandbox VM image')
+      .setClass('ct-sandbox-setting')
+      .setDesc(
+        'Container image enter_vm starts. Build it from sandbox/Dockerfile with '
+        + '`container build --tag claude-threads-coding:1 sandbox/`. Requires Apple\'s '
+        + 'container runtime (macOS 26+, Apple silicon): `brew install container` then '
+        + '`container system start`. Leave empty for claude-threads-coding:1.',
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('claude-threads-coding:1')
+          .setValue(this.plugin.settings.vmImage ?? '')
+          .onChange(async (value) => {
+            this.plugin.settings.vmImage = value.trim();
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Sandbox VM network')
+      .setClass('ct-sandbox-setting')
+      .setDesc(
+        'Network isolation enter_vm uses when a call does not pass one. '
+        + 'Full egress is the default so npm install, git remotes and web access work.',
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('default', 'Full egress (default)')
+          .addOption('internal', 'Internal — host only, no internet')
+          .addOption('none', 'None — no network at all')
+          .setValue(this.plugin.settings.vmDefaultNetwork ?? 'default')
+          .onChange(async (value) => {
+            this.plugin.settings.vmDefaultNetwork = value as PluginSettings['vmDefaultNetwork'];
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
           }),
@@ -1753,66 +1805,6 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
-    const secretsList = containerEl.createDiv({ cls: 'ct-secrets-list' });
-    const renderSecrets = () => {
-      secretsList.empty();
-      const keys = this.plugin.settings.secretEnvKeys ?? [];
-      if (keys.length === 0) {
-        secretsList.createEl('p', { text: 'No secrets configured yet.', cls: 'ct-settings-empty' });
-      } else {
-        for (const varName of keys) {
-          const existingVal = this.plugin.app.secretStorage.getSecret(secretStorageKey(varName));
-          const maskedVal = existingVal
-            ? (existingVal.length <= 8 ? '••••••••' : existingVal.slice(0, 4) + '••••' + existingVal.slice(-4))
-            : '(not set)';
-          new Setting(secretsList)
-            .setName(varName)
-            .setDesc(maskedVal)
-            .addButton((btn) =>
-              btn.setButtonText('Change').onClick(() => {
-                new SecretEnvModal(this.app, varName, (newVal) => {
-                  this.plugin.app.secretStorage.setSecret(secretStorageKey(varName), newVal);
-                  renderSecrets();
-                }).open();
-              }),
-            )
-            .addButton((btn) =>
-              btn.setButtonText('Remove').setWarning().onClick(async () => {
-                this.plugin.settings.secretEnvKeys =
-                  this.plugin.settings.secretEnvKeys.filter((k) => k !== varName);
-                this.plugin.app.secretStorage.setSecret(secretStorageKey(varName), '');
-                await this.plugin.saveSettings();
-                renderSecrets();
-              }),
-            );
-          this.renderSecretScopeRow(secretsList, varName, renderSecrets);
-        }
-      }
-    };
-
-    const secretsSetting = new Setting(containerEl)
-      .setName('Secret environment variables')
-      .addButton((btn) =>
-        btn.setButtonText('Add secret').setCta().onClick(() => {
-          new SecretEnvModal(this.app, '', async (val, varName) => {
-            if (!varName) return;
-            if (!this.plugin.settings.secretEnvKeys.includes(varName)) {
-              this.plugin.settings.secretEnvKeys.push(varName);
-              await this.plugin.saveSettings();
-            }
-            this.plugin.app.secretStorage.setSecret(secretStorageKey(varName), val);
-            renderSecrets();
-          }).open();
-        }),
-      );
-    applySecretStorageCopy(
-      this.app,
-      secretsSetting.descEl,
-      (storage) => `API keys and tokens injected into every Claude session, never into data.json. ${storage}`,
-    );
-    containerEl.appendChild(secretsList);
-    renderSecrets();
-
     // macOS privacy notice
     const macOSNote = containerEl.createDiv({ cls: 'ct-settings-notice' });
     macOSNote.createEl('strong', { text: 'macOS users: ' });
@@ -1907,6 +1899,63 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             });
         });
+    }
+
+    // Agent browser. Gated on the host reporting process diagnostics: without
+    // the file-descriptor probe there is no way to avoid launching a guest that
+    // dies on arrival, so the feature refuses to run rather than run blind.
+    {
+      const agentBrowserAvailable =
+        typeof (window as { geode?: { getFdPressure?: unknown } }).geode?.getFdPressure === 'function';
+      new Setting(containerEl)
+        .setName('Agent browser')
+        .setDesc(
+          agentBrowserAvailable
+            ? 'Let Claude drive an in-app browser built on the host\'s embedded web view, instead of launching an external browser. Sessions are capped and reclaimed automatically.'
+            : 'Requires a host that reports process diagnostics (Geode desktop). Claude will continue to use the external agent-browser CLI here.',
+        )
+        .addToggle((toggle) => {
+          toggle
+            .setValue(agentBrowserAvailable && (this.plugin.settings.enableAgentBrowser ?? false))
+            .setDisabled(!agentBrowserAvailable)
+            .onChange(async (value) => {
+              this.plugin.settings.enableAgentBrowser = value;
+              await this.plugin.saveSettings();
+              new Notice('Reload Obsidian to apply the agent browser change.');
+            });
+        });
+
+      if (agentBrowserAvailable && (this.plugin.settings.enableAgentBrowser ?? false)) {
+        new Setting(containerEl)
+          .setName('Maximum browser sessions')
+          .setDesc(
+            'Concurrent in-app browser sessions across all threads. Each one is a separate sandboxed process, so this is a real resource ceiling rather than a preference.',
+          )
+          .addSlider((slider) => {
+            slider
+              .setLimits(1, 4, 1)
+              .setValue(this.plugin.settings.agentBrowserMaxGuests ?? 2)
+              .setDynamicTooltip()
+              .onChange(async (value) => {
+                this.plugin.settings.agentBrowserMaxGuests = value;
+                await this.plugin.saveSettings();
+              });
+          });
+
+        new Setting(containerEl)
+          .setName('Allow private network access')
+          .setDesc(
+            'Let the agent browser reach private addresses such as 192.168.x.x and .local hosts. Cloud metadata endpoints stay blocked either way.',
+          )
+          .addToggle((toggle) => {
+            toggle
+              .setValue(this.plugin.settings.agentBrowserAllowPrivateNetwork ?? false)
+              .onChange(async (value) => {
+                this.plugin.settings.agentBrowserAllowPrivateNetwork = value;
+                await this.plugin.saveSettings();
+              });
+          });
+      }
     }
 
     new Setting(containerEl)
@@ -2041,175 +2090,237 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
-    // — Projects —
-    new Setting(containerEl)
-      .setName('Projects')
-      .setDesc('Projects group threads and focus their working context. They do not restrict vault access, tools, MCP servers, skills, or secrets.')
-      .setHeading();
+  }
 
-    const projectsListEl = containerEl.createDiv({ cls: 'ct-projects-list' });
-    const renderProjects = () => {
-      projectsListEl.empty();
-      const projects = this.plugin.manager.getProjects();
-      if (projects.length === 0) {
-        projectsListEl.createEl('p', { text: 'No projects yet.', cls: 'ct-settings-empty' });
-      } else {
-        for (const project of projects) {
-          this.renderProjectRow(projectsListEl, project, renderProjects);
-        }
+  private renderManagerHeader(container: HTMLElement, title: string, description: string, actionLabel: string, onAction: () => void): void {
+    const header = container.createDiv({ cls: 'ct-settings-page-header' });
+    const copy = header.createDiv();
+    copy.createEl('h1', { text: title });
+    copy.createEl('p', { text: description });
+    const action = header.createEl('button', { text: actionLabel, cls: 'mod-cta', attr: { type: 'button' } });
+    action.addEventListener('click', onAction);
+  }
+
+  private createManagerField(
+    container: HTMLElement,
+    label: string,
+    value: string,
+    options: { textarea?: boolean; placeholder?: string; disabled?: boolean; description?: string; type?: string } = {},
+  ): HTMLInputElement | HTMLTextAreaElement {
+    const field = container.createEl('label', { cls: 'ct-manager-field' });
+    field.createSpan({ text: label, cls: 'ct-manager-field-label' });
+    const input = options.textarea
+      ? field.createEl('textarea', { attr: { rows: '6', 'aria-label': label } })
+      : field.createEl('input', { type: options.type ?? 'text', attr: { 'aria-label': label } });
+    input.value = value;
+    if (options.placeholder) input.setAttribute('placeholder', options.placeholder);
+    if (options.disabled && input instanceof HTMLInputElement) input.disabled = true;
+    if (options.description) field.createEl('small', { text: options.description });
+    return input;
+  }
+
+  private renderProjectsTab(containerEl: HTMLElement): void {
+    this.renderManagerHeader(containerEl, 'Projects', 'Group threads and keep each agent focused on the right context.', 'New project', () => {
+      this.selectedProjectId = '';
+      this.display();
+      this.containerEl.querySelector<HTMLInputElement>('[aria-label="Project name"]')?.focus();
+    });
+
+    const projects = this.plugin.manager.getProjects();
+    if (this.selectedProjectId === null || (this.selectedProjectId && !projects.some(project => project.id === this.selectedProjectId))) {
+      this.selectedProjectId = projects[0]?.id ?? '';
+    }
+    const manager = containerEl.createDiv({ cls: 'ct-settings-manager' });
+    const list = manager.createEl('section', { cls: 'ct-manager-list', attr: { 'aria-label': 'Projects' } });
+    const search = list.createEl('input', { type: 'search', placeholder: 'Search projects', attr: { 'aria-label': 'Search projects' } });
+    const rows = list.createDiv({ cls: 'ct-manager-list-rows' });
+    const renderRows = () => {
+      rows.empty();
+      const query = search.value.trim().toLowerCase();
+      const matches = projects.filter(project => `${project.name} ${project.vaultFolder} ${this.plugin.manager.getProjectCwd(project)}`.toLowerCase().includes(query));
+      if (matches.length === 0) rows.createEl('p', { cls: 'ct-settings-empty', text: projects.length === 0 ? 'No projects yet.' : 'No matching projects.' });
+      for (const project of matches) {
+        const threadCount = this.plugin.manager.getThreadsByProject(project.id).length;
+        const row = rows.createEl('button', { cls: `ct-manager-list-item${project.id === this.selectedProjectId ? ' is-selected' : ''}`, attr: { type: 'button' } });
+        row.createEl('strong', { text: project.name });
+        row.createEl('small', { text: this.plugin.manager.getProjectCwd(project) });
+        row.createEl('span', { text: `${project.orchestratorThreadId ? 'Orchestrator active' : 'No orchestrator'} · ${threadCount} thread${threadCount === 1 ? '' : 's'}` });
+        row.addEventListener('click', () => { this.selectedProjectId = project.id; this.display(); });
       }
     };
-    renderProjects();
+    search.addEventListener('input', renderRows);
+    renderRows();
+    list.createEl('footer', { text: `${projects.length} project${projects.length === 1 ? '' : 's'}` });
 
-    let nameInput: HTMLInputElement | null = null;
-    let folderInput: HTMLInputElement | null = null;
-    let cwdInput: HTMLInputElement | null = null;
-    new Setting(containerEl)
-      .setName('New project')
-      .addText((text) => {
-        text.setPlaceholder('Project name');
-        nameInput = text.inputEl;
-      })
-      .addText((text) => {
-        text.setPlaceholder('Vault folder (e.g. Work/Acme)');
-        folderInput = text.inputEl;
-      })
-      .addText((text) => {
-        text.setPlaceholder('Filesystem cwd (optional)');
-        cwdInput = text.inputEl;
-      })
-      .addButton((btn) =>
-        btn.setButtonText('Add').setCta().onClick(async () => {
-          const name = nameInput?.value.trim() ?? '';
-          const folder = folderInput?.value.trim() ?? '';
-          if (!name || !folder) {
-            new Notice('Enter both a project name and vault folder.');
-            return;
-          }
-          const cwdOverride = cwdInput?.value.trim() || undefined;
-          this.plugin.manager.createProject(name, folder, undefined, cwdOverride);
-          await this.plugin.saveSettings();
-          if (nameInput) nameInput.value = '';
-          if (folderInput) folderInput.value = '';
-          if (cwdInput) cwdInput.value = '';
-          renderProjects();
-        }),
-      );
-  }
-
-  /**
-   * Renders the per-secret Project scope control below a secret's row in
-   * `renderSecrets()`. Absent or empty `secretEnvScopes[varName]` is Global —
-   * the default, matching pre-scoping behavior. Checking a project restricts
-   * that secret's value to threads/scheduled items whose projectId is
-   * checked here; a project-less thread never receives a scoped secret.
-   */
-  private renderSecretScopeRow(container: HTMLElement, varName: string, refresh: () => void): void {
-    const projects = this.plugin.settings.projects ?? [];
-    const scopedIds = this.plugin.settings.secretEnvScopes?.[varName] ?? [];
-    const scopeEl = container.createDiv({ cls: 'ct-secret-scope' });
-    scopeEl.createEl('div', {
-      cls: 'ct-settings-empty',
-      text: scopedIds.length === 0
-        ? 'Scope: Global (every project, and project-less threads)'
-        : `Scope: restricted to ${scopedIds.length} project${scopedIds.length === 1 ? '' : 's'}`,
-    });
-    if (projects.length === 0) return;
-    for (const project of projects) {
-      new Setting(scopeEl)
-        .setName(project.name)
-        .setClass('ct-secret-scope-project')
-        .addToggle((toggle) =>
-          toggle.setValue(scopedIds.includes(project.id)).onChange(async (checked) => {
-            const scopes = this.plugin.settings.secretEnvScopes ?? (this.plugin.settings.secretEnvScopes = {});
-            const nextIds = new Set(scopes[varName] ?? []);
-            if (checked) nextIds.add(project.id);
-            else nextIds.delete(project.id);
-            if (nextIds.size === 0) delete scopes[varName];
-            else scopes[varName] = [...nextIds];
-            await this.plugin.saveSettings();
-            refresh();
-          }),
-        );
+    const detail = manager.createEl('section', { cls: 'ct-manager-detail' });
+    const project = projects.find(candidate => candidate.id === this.selectedProjectId);
+    const isNew = this.selectedProjectId === '';
+    if (!project && !isNew) {
+      detail.createEl('div', { cls: 'ct-manager-empty', text: 'Create a project to group related threads and working context.' });
+      return;
     }
+    const heading = detail.createDiv({ cls: 'ct-manager-detail-header' });
+    heading.createEl('h2', { text: isNew ? 'New project' : project!.name });
+    if (project) {
+      const orchestrator = heading.createEl('button', { text: project.orchestratorThreadId ? 'Open orchestrator' : 'Create orchestrator', attr: { type: 'button' } });
+      orchestrator.addEventListener('click', async () => { await this.plugin.ensureProjectOrchestratorThread(project.id, true); this.display(); });
+    }
+    const form = detail.createDiv({ cls: 'ct-manager-form' });
+    const name = this.createManagerField(form, 'Project name', project?.name ?? '', { placeholder: 'Project name' }) as HTMLInputElement;
+    const folder = this.createManagerField(form, 'Vault folder', project?.vaultFolder ?? '', {
+      placeholder: 'Products/My Project', description: 'Changing this updates future context. Existing files are not moved.',
+    }) as HTMLInputElement;
+    const cwd = this.createManagerField(form, 'Filesystem working directory', project?.cwdOverride ?? '', {
+      placeholder: 'Optional absolute path', description: project ? `Effective cwd: ${this.plugin.manager.getProjectCwd(project)}` : 'Leave blank to derive it from the vault folder.',
+    }) as HTMLInputElement;
+    const description = this.createManagerField(form, 'Project context', project?.description ?? '', {
+      textarea: true, placeholder: 'Goals, conventions, and key files…', description: 'Injected into the agent system prompt for every thread in this project.',
+    }) as HTMLTextAreaElement;
+    const error = detail.createEl('p', { cls: 'ct-manager-error', attr: { role: 'alert' } });
+    error.style.display = 'none';
+    if (project) {
+      const danger = detail.createDiv({ cls: 'ct-manager-danger' });
+      const warning = danger.createDiv();
+      warning.createEl('strong', { text: 'Delete project' });
+      warning.createEl('small', { text: 'Threads are kept and detached. Schedules retain their current cwd.' });
+      const remove = danger.createEl('button', { text: 'Delete…', cls: 'mod-warning', attr: { type: 'button' } });
+      remove.addEventListener('click', async () => {
+        const threadCount = this.plugin.manager.getThreadsByProject(project.id).length;
+        const scheduleCount = (this.plugin.settings.scheduledItems ?? []).filter(item => item.projectId === project.id).length;
+        if (!window.confirm(`Delete ${project.name}? ${threadCount} thread(s) will be detached and ${scheduleCount} schedule(s) will keep their current effective cwd.`)) return;
+        await this.plugin.deleteProject(project.id);
+        this.selectedProjectId = null;
+        this.display();
+      });
+    }
+    const actions = detail.createEl('footer', { cls: 'ct-manager-actions' });
+    const state = actions.createEl('span', { text: isNew ? 'New project draft' : 'No unsaved changes' });
+    for (const input of [name, folder, cwd, description]) input.addEventListener('input', () => { state.textContent = 'Unsaved changes'; });
+    const cancel = actions.createEl('button', { text: 'Cancel', attr: { type: 'button' } });
+    cancel.addEventListener('click', () => { if (isNew) this.selectedProjectId = projects[0]?.id ?? null; this.display(); });
+    const save = actions.createEl('button', { text: isNew ? 'Create project' : 'Save changes', cls: 'mod-cta', attr: { type: 'button' } });
+    save.addEventListener('click', async () => {
+      const projectName = name.value.trim();
+      const vaultFolder = folder.value.trim();
+      if (!projectName || !vaultFolder) { error.textContent = 'Project name and vault folder are required.'; error.style.display = ''; return; }
+      if (project) this.plugin.manager.updateProject(project.id, { name: projectName, vaultFolder, cwdOverride: cwd.value.trim() || undefined, description: description.value });
+      else this.selectedProjectId = this.plugin.manager.createProject(projectName, vaultFolder, description.value, cwd.value.trim() || undefined).id;
+      await this.plugin.saveSettings();
+      this.display();
+    });
   }
 
-  private renderProjectRow(container: HTMLElement, project: Project, refresh: () => void): void {
-    const row = new Setting(container)
-      .setName(project.name)
-      .setDesc(`Vault folder: ${project.vaultFolder} · Effective cwd: ${this.plugin.manager.getProjectCwd(project)}`);
+  private renderSecretsTab(containerEl: HTMLElement): void {
+    this.renderManagerHeader(containerEl, 'Secrets', 'Securely provide API keys and tokens to agent sessions.', 'Add secret', () => {
+      this.selectedSecretName = '';
+      this.display();
+      this.containerEl.querySelector<HTMLInputElement>('[aria-label="Variable name"]')?.focus();
+    });
+    const notice = containerEl.createDiv({ cls: 'ct-settings-notice ct-secret-storage-notice' });
+    applySecretStorageCopy(this.app, notice, storage => `${storage} Values never appear in data.json. Only names and project access are saved with plugin settings.`);
 
-    row.addText((text) =>
-      text
-        .setValue(project.name)
-        .setPlaceholder('Project name')
-        .onChange(async (val) => {
-          if (val.trim()) {
-            this.plugin.manager.updateProject(project.id, { name: val.trim() });
-            await this.plugin.saveSettings();
-          }
-        }),
-    );
+    const keys = this.plugin.settings.secretEnvKeys ?? [];
+    if (this.selectedSecretName === null || (this.selectedSecretName && !keys.includes(this.selectedSecretName))) this.selectedSecretName = keys[0] ?? '';
+    const manager = containerEl.createDiv({ cls: 'ct-settings-manager' });
+    const list = manager.createEl('section', { cls: 'ct-manager-list', attr: { 'aria-label': 'Secrets' } });
+    const search = list.createEl('input', { type: 'search', placeholder: 'Search secrets', attr: { 'aria-label': 'Search secrets' } });
+    const rows = list.createDiv({ cls: 'ct-manager-list-rows' });
+    const mask = (value: string | null) => !value ? 'No value stored' : value.length <= 8 ? '••••••••' : `${value.slice(0, 4)}••••${value.slice(-4)}`;
+    const renderRows = () => {
+      rows.empty();
+      const query = search.value.trim().toLowerCase();
+      const matches = keys.filter(key => key.toLowerCase().includes(query));
+      if (matches.length === 0) rows.createEl('p', { cls: 'ct-settings-empty', text: keys.length === 0 ? 'No secrets configured yet.' : 'No matching secrets.' });
+      for (const key of matches) {
+        const value = this.plugin.app.secretStorage.getSecret(secretStorageKey(key));
+        const scoped = this.plugin.settings.secretEnvScopes?.[key] ?? [];
+        const row = rows.createEl('button', { cls: `ct-manager-list-item${key === this.selectedSecretName ? ' is-selected' : ''}`, attr: { type: 'button' } });
+        row.createEl('strong', { text: key });
+        row.createEl('small', { text: mask(value) });
+        row.createEl('span', { text: `${value ? 'Set' : 'Missing'} · ${scoped.length ? `${scoped.length} project${scoped.length === 1 ? '' : 's'}` : 'Global'}` });
+        row.addEventListener('click', () => { this.selectedSecretName = key; this.display(); });
+      }
+    };
+    search.addEventListener('input', renderRows);
+    renderRows();
 
-    row.addButton((btn) =>
-      btn
-        .setButtonText(project.orchestratorThreadId ? 'Open orchestrator' : 'Create orchestrator')
-        .onClick(async () => {
-          await this.plugin.ensureProjectOrchestratorThread(project.id, true);
-          refresh();
-        }),
-    );
-
-    row.addButton((btn) =>
-      btn
-        .setIcon('trash')
-        .setWarning()
-        .setTooltip('Delete project (threads are kept)')
-        .onClick(async () => {
-          const threadCount = this.plugin.manager.getThreadsByProject(project.id).length;
-          const scheduleCount = (this.plugin.settings.scheduledItems ?? []).filter(item => item.projectId === project.id).length;
-          const confirmed = window.confirm(`Delete ${project.name}? ${threadCount} thread(s) will be detached and ${scheduleCount} schedule(s) will keep their current effective cwd.`);
-          if (!confirmed) return;
-          await this.plugin.deleteProject(project.id);
-          refresh();
-        }),
-    );
-
-    new Setting(container)
-      .setName('Filesystem cwd override')
-      .setDesc(`Optional absolute path. Clear it to derive cwd from the vault folder. Effective cwd: ${this.plugin.manager.getProjectCwd(project)}`)
-      .setClass('ct-project-cwd-setting')
-      .addText((text) => {
-        text
-          .setPlaceholder('Derived from vault folder')
-          .setValue(project.cwdOverride ?? '');
-        text.inputEl.addClass('ct-settings-wide-input');
-        // Commit on blur so the effective-cwd description refreshes once the
-        // edit is complete without rebuilding the row on every keystroke.
-        text.inputEl.addEventListener('blur', async () => {
-          const cwdOverride = text.inputEl.value.trim() || undefined;
-          if (cwdOverride === project.cwdOverride) return;
-          this.plugin.manager.updateProject(project.id, { cwdOverride });
-          await this.plugin.saveSettings();
-          refresh();
-        });
+    const detail = manager.createEl('section', { cls: 'ct-manager-detail' });
+    const isNew = this.selectedSecretName === '';
+    const secretName = isNew ? '' : this.selectedSecretName!;
+    if (!isNew && !keys.includes(secretName)) { detail.createEl('div', { cls: 'ct-manager-empty', text: 'Add a secret to securely provide credentials to agent sessions.' }); return; }
+    detail.createEl('h2', { text: isNew ? 'New secret' : secretName });
+    const currentValue = isNew ? null : this.plugin.app.secretStorage.getSecret(secretStorageKey(secretName));
+    const form = detail.createDiv({ cls: 'ct-manager-form' });
+    const name = this.createManagerField(form, 'Variable name', secretName, {
+      placeholder: 'MY_API_KEY', disabled: !isNew, description: isNew ? 'Use an environment-variable identifier.' : 'Names cannot change because integrations may reference this identifier.',
+    }) as HTMLInputElement;
+    const replacement = this.createManagerField(form, isNew ? 'Value' : 'Replace value', '', {
+      type: 'password', placeholder: isNew ? 'Paste the secret value' : 'Leave blank to keep the current value', description: !isNew ? `Current value: ${mask(currentValue)}` : undefined,
+    }) as HTMLInputElement;
+    const scope = form.createEl('fieldset', { cls: 'ct-secret-scope-choice' });
+    scope.createEl('legend', { text: 'Project access' });
+    const existingScope = this.plugin.settings.secretEnvScopes?.[secretName] ?? [];
+    const globalLabel = scope.createEl('label');
+    const globalRadio = globalLabel.createEl('input', { type: 'radio', attr: { name: 'secret-scope', 'aria-label': 'Global' } });
+    globalRadio.checked = existingScope.length === 0;
+    globalLabel.createSpan({ text: 'Global — every project and project-less thread.' });
+    const selectedLabel = scope.createEl('label');
+    const selectedRadio = selectedLabel.createEl('input', { type: 'radio', attr: { name: 'secret-scope', 'aria-label': 'Selected projects' } });
+    selectedRadio.checked = existingScope.length > 0;
+    selectedLabel.createSpan({ text: 'Selected projects' });
+    const checklist = form.createDiv({ cls: 'ct-secret-projects' });
+    const projectSearch = checklist.createEl('input', { type: 'search', placeholder: 'Filter projects', attr: { 'aria-label': 'Filter projects' } });
+    const checks = checklist.createDiv();
+    const chosen = new Set(existingScope);
+    const renderChecks = () => {
+      checks.empty();
+      const query = projectSearch.value.trim().toLowerCase();
+      for (const project of this.plugin.manager.getProjects().filter(project => project.name.toLowerCase().includes(query))) {
+        const label = checks.createEl('label');
+        const checkbox = label.createEl('input', { type: 'checkbox', attr: { 'aria-label': project.name } });
+        checkbox.checked = chosen.has(project.id);
+        checkbox.addEventListener('change', () => checkbox.checked ? chosen.add(project.id) : chosen.delete(project.id));
+        label.createSpan({ text: project.name });
+      }
+    };
+    projectSearch.addEventListener('input', renderChecks);
+    renderChecks();
+    const updateScopeVisibility = () => checklist.toggleClass('is-hidden', !selectedRadio.checked);
+    globalRadio.addEventListener('change', updateScopeVisibility);
+    selectedRadio.addEventListener('change', updateScopeVisibility);
+    updateScopeVisibility();
+    const error = detail.createEl('p', { cls: 'ct-manager-error', attr: { role: 'alert' } });
+    error.style.display = 'none';
+    if (!isNew) {
+      const danger = detail.createDiv({ cls: 'ct-manager-danger' });
+      const warning = danger.createDiv(); warning.createEl('strong', { text: 'Remove secret' }); warning.createEl('small', { text: 'Clears the stored value and project access.' });
+      const remove = danger.createEl('button', { text: 'Remove…', cls: 'mod-warning', attr: { type: 'button' } });
+      remove.addEventListener('click', async () => {
+        if (!window.confirm(`Remove ${secretName}? Its stored value and project access will be cleared.`)) return;
+        this.plugin.app.secretStorage.setSecret(secretStorageKey(secretName), '');
+        this.plugin.settings.secretEnvKeys = keys.filter(key => key !== secretName);
+        if (this.plugin.settings.secretEnvScopes) delete this.plugin.settings.secretEnvScopes[secretName];
+        await this.plugin.saveSettings(); this.selectedSecretName = null; this.display();
       });
-
-    new Setting(container)
-      .setName('Project context')
-      .setDesc('Injected into Claude\'s system prompt for every message in this project.')
-      .setClass('ct-project-context-setting')
-      .addTextArea((area) => {
-        area
-          .setPlaceholder('Goals, conventions, key files — anything Claude should always know…')
-          .setValue(project.description ?? '')
-          .onChange(async (val) => {
-            this.plugin.manager.updateProject(project.id, { description: val });
-            await this.plugin.saveSettings();
-          });
-        area.inputEl.rows = 4;
-        area.inputEl.addClass('ct-settings-wide-input');
-      });
+    }
+    const actions = detail.createEl('footer', { cls: 'ct-manager-actions' });
+    const state = actions.createEl('span', { text: isNew ? 'New secret draft' : 'No unsaved changes' });
+    for (const input of [name, replacement, globalRadio, selectedRadio]) input.addEventListener('input', () => { state.textContent = 'Unsaved changes'; });
+    const cancel = actions.createEl('button', { text: 'Cancel', attr: { type: 'button' } });
+    cancel.addEventListener('click', () => { if (isNew) this.selectedSecretName = keys[0] ?? null; this.display(); });
+    const save = actions.createEl('button', { text: isNew ? 'Add secret' : 'Save changes', cls: 'mod-cta', attr: { type: 'button' } });
+    save.addEventListener('click', async () => {
+      const resolvedName = name.value.trim().toUpperCase();
+      if (!/^[A-Z_][A-Z0-9_]*$/.test(resolvedName)) { error.textContent = 'Use a valid environment-variable name (letters, numbers, and underscores).'; error.style.display = ''; return; }
+      if (isNew && keys.includes(resolvedName)) { error.textContent = 'A secret with this name already exists.'; error.style.display = ''; return; }
+      if (isNew && !replacement.value.trim()) { error.textContent = 'A value is required for a new secret.'; error.style.display = ''; return; }
+      if (selectedRadio.checked && chosen.size === 0) { error.textContent = 'Select at least one project, or choose Global.'; error.style.display = ''; return; }
+      if (replacement.value.trim()) this.plugin.app.secretStorage.setSecret(secretStorageKey(resolvedName), replacement.value.trim());
+      if (isNew) this.plugin.settings.secretEnvKeys = [...keys, resolvedName];
+      const scopes = this.plugin.settings.secretEnvScopes ?? (this.plugin.settings.secretEnvScopes = {});
+      if (selectedRadio.checked) scopes[resolvedName] = [...chosen]; else delete scopes[resolvedName];
+      await this.plugin.saveSettings(); this.selectedSecretName = resolvedName; this.display();
+    });
   }
 
   // ── Features ────────────────────────────────────────────────────────────
