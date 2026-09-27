@@ -9,7 +9,8 @@
  * Like CodexSession, payloads are kept structural rather than bundling the
  * generated `@opencode-ai/sdk` types: the server is the user's installed CLI,
  * so a vendored type snapshot would drift. Shapes were verified live against
- * `opencode-ai@1.18.32` (see docs/adr/0013-opencode-harness.md).
+ * `opencode-ai@1.18.32` (see ADR-0013 in Compass:
+ * https://compass.rbcodelabs.com/rbcodelabs/claude-threads/docs/d7b8c236-d8ac-48a4-a8e4-6524ff74e886).
  *
  * Node built-ins are required lazily so importing this module stays inert on
  * mobile, where HarnessFactory is never reached.
