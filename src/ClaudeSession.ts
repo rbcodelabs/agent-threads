@@ -74,6 +74,20 @@ export interface SessionCallbacks {
    * merely surfaces the CLI's observed rate-limit *window* status.
    */
   onRateLimitRetry?: (attempt: number, maxRetries: number, delayMs: number) => void;
+  /**
+   * Fired when `ThreadSession` detected an expired/failed Claude sign-in
+   * (see claudeAuthRecovery.ts) and is about to tear down its CLI process and
+   * silently replay the same turn — once per user turn. `error` is the raw
+   * CLI error text. Non-terminal: a `done` or `onAuthRequired` follows.
+   */
+  onAuthRetry?: (error: string) => void;
+  /**
+   * Terminal: the one silent retry also failed to authenticate. `message`
+   * starts with `CLAUDE_SIGN_IN_EXPIRED_MESSAGE`. The CLI process has been
+   * torn down, so the next send spawns a fresh one. When absent, the same
+   * message is delivered through `onError` instead (unattended callers).
+   */
+  onAuthRequired?: (message: string) => void;
   onPermissionRequest: (toolName: string, detail: string) => Promise<boolean>;
   onAskUserQuestion: (questions: AskQuestion[]) => Promise<Record<string, string>>;
   /** Provider resolved/canceled its pending question before the user answered. */
