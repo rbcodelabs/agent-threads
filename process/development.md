@@ -216,8 +216,30 @@ add a `build()` block in `test/harness/esbuild.mjs`. Current pages:
 | `skills.html` | `skills-bundle.js` | `SkillsManagerView` |
 | `settings.html` | `settings-bundle.js` | settings tabs |
 | `kanban.html` | `kanban-bundle.js` | `KanbanView` (status board + folder swimlanes) |
+| `agent-browser-preview.html` | `agent-browser-preview-bundle.js` | `AgentBrowserPreviewView` (login-handoff banner, ADR-0014) |
 
 Running/awaiting state isn't stored on `Thread` — it lives in the
 `ThreadManager`'s private `sessions` / `pendingPermissions` maps. The kanban
 harness seeds those directly (see `kanban-index.ts`) to populate the Working and
 Awaiting columns deterministically.
+
+### Faking Geode/Electron dependencies (login-handoff banner)
+
+`AgentBrowserPreviewView`'s login-handoff banner (ADR-0014) is driven by
+`window.geode.onAgentBrowserWindowOpen` and two Electron `ipcRenderer` channels
+(`agent-browser-window-close`/`-focus`) — both dependency-injected on purpose
+(see `AgentBrowserLoginBridge.ts`'s doc comment) so a harness page can fake
+them instead of needing a real Electron/Geode host:
+
+- `window.geode` is a plain object property — `agent-browser-preview-index.ts`
+  defines it before constructing the view, exactly like the vitest coverage
+  in `test/unit/agent-browser-preview.test.ts` already does for unit-level
+  assertions.
+- `ipcRenderer` resolves through the existing esbuild `electron` alias
+  (`./mocks/electron.ts`), which now exposes a controllable fake with an
+  `emit(channel, ...args)` method — the same module instance
+  `AgentBrowserLoginBridge`'s own `require('electron')` call resolves to
+  inside that bundle, so firing a channel from the harness reaches the
+  listeners the view's real `startLoginBridge()` registered.
+
+This exercises the real production wiring rather than re-implementing it.

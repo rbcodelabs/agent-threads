@@ -83,4 +83,10 @@ await build({
   outfile: resolve('./dist/kanban-bundle.js'),
 });
 
-console.log('[harness] bundles built → test/harness/dist/ (bundle.js, mobile-bundle.js, skills-bundle.js, settings-bundle.js, kanban-bundle.js)');
+await build({
+  ...sharedConfig,
+  entryPoints: [resolve('./agent-browser-preview-index.ts')],
+  outfile: resolve('./dist/agent-browser-preview-bundle.js'),
+});
+
+console.log('[harness] bundles built → test/harness/dist/ (bundle.js, mobile-bundle.js, skills-bundle.js, settings-bundle.js, kanban-bundle.js, agent-browser-preview-bundle.js)');

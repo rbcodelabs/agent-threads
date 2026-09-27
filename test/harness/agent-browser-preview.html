@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent Threads — Agent Browser Preview Harness</title>
+
+  <style>
+    :root {
+      /* ── Dark theme Obsidian CSS variables ─────────────────────────── */
+      --background-primary: #1e1e1e;
+      --background-primary-alt: #242424;
+      --background-secondary: #161616;
+      --background-secondary-alt: #252525;
+      --background-modifier-border: #404040;
+      --background-modifier-hover: rgba(255, 255, 255, 0.075);
+      --background-modifier-success: #3f6c3f;
+      --background-modifier-form-field: rgba(0, 0, 0, 0.3);
+      --background-modifier-error: rgba(200, 0, 0, 0.15);
+      --background-modifier-error-rgb: rgba(200, 0, 0, 0.1);
+      --text-normal: #dcddde;
+      --text-muted: #888;
+      --text-faint: #555;
+      --text-on-accent: #fff;
+      --interactive-accent: #7c3aed;
+      --interactive-accent-hover: #6d28d9;
+      --text-accent: #7c3aed;
+      --font-ui-small: 13px;
+      --font-ui-smaller: 11px;
+      --font-semibold: 600;
+      --font-monospace: 'SFMono-Regular', Consolas, monospace;
+      --color-red: #e06c75;
+      --color-orange: #d19a66;
+      --color-yellow: #e5c07b;
+      --color-green: #4caf50;
+      --code-background: #282c34;
+      --radius-s: 4px;
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background: #0d0d0d;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+
+    #app {
+      width: 400px;
+      height: 360px;
+      background: var(--background-primary);
+      border-radius: 10px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Make the plugin's containerEl fill the #app div */
+    #app > div {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* The view-content (children[1]) fills the container */
+    #app > div > div:last-child {
+      flex: 1;
+      overflow: hidden;
+    }
+  </style>
+
+  <link rel="stylesheet" href="./obsidian-base.css" />
+  <link rel="stylesheet" href="../../styles.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <script src="./dist/agent-browser-preview-bundle.js"></script>
+</body>
+</html>
