@@ -273,6 +273,13 @@ export class ItemView {
     el.addEventListener(type, handler);
     this.register(() => el.removeEventListener(type, handler));
   }
+  // Mirrors real Obsidian's Component.registerInterval: ties the interval's
+  // lifetime to the view so it stops on unload, and hands the id straight
+  // back (views such as AgentBrowserPreviewView keep their own copy of it).
+  registerInterval(id: number): number {
+    this.register(() => window.clearInterval(id));
+    return id;
+  }
 
   unload(): void {
     for (const cleanup of this.cleanupCallbacks.splice(0).reverse()) cleanup();
