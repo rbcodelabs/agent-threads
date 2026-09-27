@@ -408,7 +408,7 @@ async function makeGuest(
 }
 
 describe('AgentBrowserGuest', () => {
-  it('hardens the element and never grants popups or a preload', async () => {
+  it('hardens the element and never grants a preload', async () => {
     const { guest } = await makeGuest();
     const el = guest.element!;
     const prefs = el.getAttribute('webpreferences') ?? '';
@@ -422,8 +422,18 @@ describe('AgentBrowserGuest', () => {
     expect(prefs).toContain('backgroundThrottling=no');
     // A plugin-owned preload would be the one bridge from a hostile page to the host.
     expect(el.hasAttribute('preload')).toBe(false);
-    expect(el.hasAttribute('allowpopups')).toBe(false);
     expect(el.hasAttribute('nodeintegration')).toBe(false);
+  });
+
+  it('sets allowpopups to activate Geode’s popup deny-and-bridge path (ADR-0014)', async () => {
+    // Popups are still denied: setWindowOpenHandler still returns null to the
+    // page (see the AgentBrowserPool login-guest tests). What this attribute
+    // changes is that the denial becomes an observable
+    // agent-browser-window-open event instead of being swallowed by Chromium
+    // before Geode's handler ever runs.
+    const { guest } = await makeGuest();
+    const el = guest.element!;
+    expect(el.hasAttribute('allowpopups')).toBe(true);
   });
 
   it('is never parented inside a workspace leaf', async () => {

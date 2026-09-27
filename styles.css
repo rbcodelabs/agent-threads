@@ -8845,6 +8845,42 @@ button.ct-agent-crumb:focus-visible {
   text-align: center;
   align-self: center;
 }
+/* Focus ring while the frame is receiving forwarded input during a login
+   handoff (ADR-0014) — otherwise a focusable <img> gives no visual cue at all. */
+.ct-browser-preview-frame:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -2px;
+}
+
+/* ── Agent browser login handoff (ADR-0014) ────────────────────────────────
+   "This page wants you to sign in" banner, and the active "you have control"
+   state once the user accepts. See AgentBrowserLoginBridge.ts/
+   AgentBrowserPreviewView.ts. */
+.ct-browser-login-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-s);
+  background: var(--background-modifier-hover);
+  font-size: var(--font-ui-small);
+}
+.ct-browser-login-banner.is-handoff-active {
+  background: var(--background-modifier-success);
+  color: var(--text-on-accent);
+}
+.ct-browser-login-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+.ct-browser-login-banner-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.ct-browser-login-banner-action {
+  white-space: nowrap;
+}
 /* Peer content is rendered by the host in the transcript, never by peer DOM. */
 .ct-inline-content {
   border: 1px solid var(--background-modifier-border);

@@ -32,6 +32,7 @@ import {
   type UrlPolicyOptions,
 } from './agentBrowserPolicy';
 import { AgentBrowserError, REFS_INVALIDATED_HINT } from './agentBrowserErrors';
+import type { GuestInputEvent } from './agentBrowserInput';
 
 /**
  * The subset of Electron's `WebviewTag` this module uses.
@@ -51,6 +52,10 @@ export interface WebviewLike extends HTMLElement {
   capturePage(): Promise<NativeImageLike>;
   insertCSS(css: string): Promise<string>;
   getWebContentsId(): number;
+  /** Send a synthetic input event straight to the WebContents (mouse/keyboard). */
+  sendInputEvent(event: unknown): void;
+  /** Focus the guest's own WebContents. */
+  focus(): void;
 }
 
 export interface NativeImageLike {
@@ -75,7 +80,8 @@ export type GuestEndReason =
   | 'crash'
   | 'hang'
   | 'detach'
-  | 'cap';
+  | 'cap'
+  | 'login-complete';
 
 export interface GuestFacts {
   threadId: string;
@@ -108,18 +114,32 @@ export interface AgentBrowserGuestOptions {
 /**
  * Hardened webPreferences set directly on the tag.
  *
- * This is the *only* enforcement available from the renderer. Geode's
- * `will-attach-webview` forces safe preferences for `persist:webviewer` and the
- * artifact partitions, but any other partition — including ours — attaches with
- * whatever the element asks for. Gap G3 in the plan is to give this a host-side
- * floor rather than trusting the tag.
+ * This was, for a long time, the *only* enforcement available from the
+ * renderer: Geode's `will-attach-webview` forced safe preferences for
+ * `persist:webviewer` and the artifact partitions, but any other partition —
+ * including ours — attached with whatever the element asked for. That was Gap
+ * G3 in the original plan. Geode's ADR-0022 closes it: `will-attach-webview`
+ * now forces the same safe-preferences floor on `persist:agent-browser` too,
+ * independent of whatever this tag itself requests. This block is kept as the
+ * renderer-side declaration regardless — defense in depth, and the only layer
+ * that exists at all on a Geode build predating ADR-0022, or on plain Obsidian
+ * without Geode's `will-attach-webview` hook.
  *
  * `backgroundThrottling=no` is required, not optional: an off-screen guest is
  * occlusion-throttled and its timers stall, which looks exactly like a hung page.
  *
  * Deliberately absent, all defaulting to the safe value: `nodeintegration`,
- * `allowpopups`, `disablewebsecurity`, and above all `preload` — a plugin-owned
- * preload would be the one bridge between a hostile page and the host.
+ * `disablewebsecurity`, and above all `preload` — a plugin-owned preload would
+ * be the one bridge between a hostile page and the host.
+ *
+ * `allowpopups` is *not* part of this comma-list — it is a separate tag
+ * attribute set directly in `start()` (ADR-0014). Setting it does not relax
+ * what a guest page can do: Geode's `setWindowOpenHandler` still denies every
+ * `window.open()` exactly as before (the native result the page sees is still
+ * `null`). What it changes is that Chromium no longer blocks the popup before
+ * that handler runs, so the denial becomes an observable
+ * `agent-browser-window-open` IPC event instead of being swallowed silently —
+ * which is what lets the login-handoff UI exist at all.
  */
 const GUEST_WEBPREFERENCES = [
   'contextIsolation=yes',
@@ -272,6 +292,12 @@ export class AgentBrowserGuest {
     const el = this.doc.createElement('webview') as unknown as WebviewLike;
     el.setAttribute('partition', this.partition);
     el.setAttribute('webpreferences', GUEST_WEBPREFERENCES);
+    // Activates Geode's popup deny-and-bridge path (ADR-0014/ADR-0022). Without
+    // this, Chromium blocks a guest's window.open() before Geode's own
+    // setWindowOpenHandler ever runs, so none of the login-handoff primitives
+    // can fire. Every window.open() is still denied — this only makes the
+    // denial observable, it does not grant the page anything new.
+    el.setAttribute('allowpopups', '');
     el.setAttribute('src', BOOTSTRAP_URL);
     el.style.cssText = `width:${GUEST_WIDTH}px;height:${GUEST_HEIGHT}px;border:0;display:flex;`;
     this.el = el;
@@ -682,6 +708,42 @@ export class AgentBrowserGuest {
         this.captureSurface?.end();
       }
     });
+  }
+
+  /**
+   * Forward a synthetic input event straight to the guest's WebContents.
+   *
+   * Deliberately bypasses `enqueue()` — this exists for the login-handoff
+   * "take control" UI (ADR-0014), which forwards a human's clicks/keystrokes at
+   * interactive latency and never competes with an MCP tool call: MCP tools
+   * only ever address the *primary* guest, and this method is only ever called
+   * on a dedicated login guest. Best-effort by design: there is no caller
+   * awaiting a typed result, so a dead or detached guest simply drops the event
+   * rather than raising for a UI action that has nothing to retry.
+   */
+  sendInputEvent(event: GuestInputEvent): void {
+    if (!this.isAlive()) return;
+    try {
+      this.el?.sendInputEvent(event);
+    } catch {
+      /* best effort; the guest may have died between the check and the call */
+    }
+  }
+
+  /**
+   * Focus the guest's own WebContents.
+   *
+   * Called once when a login handoff begins, so the first forwarded keystroke
+   * lands in the page rather than nowhere. Best-effort for the same reason as
+   * `sendInputEvent`.
+   */
+  focus(): void {
+    if (!this.isAlive()) return;
+    try {
+      this.el?.focus();
+    } catch {
+      /* best effort */
+    }
   }
 
   /**
