@@ -31,6 +31,11 @@ import {
   rateLimitBackoffMs,
   MAX_RATE_LIMIT_AUTO_RETRIES,
 } from './rateLimitRecovery';
+import {
+  classifyClaudeAuthFailure,
+  formatSignInExpiredMessage,
+  shouldAutoRetryAuthError,
+} from './claudeAuthRecovery';
 import { mergeUsageSnapshot, normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
 
 /**
@@ -63,7 +68,7 @@ export function claudeContextUsage(
 /** @deprecated Use HarnessSessionOptions for harness-neutral callers. */
 export type ThreadSessionOptions = HarnessSessionOptions;
 
-export type RestartReason = 'cwd-change' | 'transport-error' | 'init-options-change' | 'rate-limit';
+export type RestartReason = 'cwd-change' | 'transport-error' | 'init-options-change' | 'rate-limit' | 'auth-error';
 
 /**
  * One `ThreadSession` per thread, not per turn — owns a single SDK `Query`
@@ -92,6 +97,18 @@ export class ThreadSession {
   private transportErrorRetryCount = 0;
   /** Auto-retry budget for rate-limit / overload errors, reset on every successful `result`. */
   private rateLimitRetryCount = 0;
+  /**
+   * Expired-sign-in retry budget for the current USER turn (see
+   * claudeAuthRecovery.ts). Reset only by a public send(), never by an
+   * internal replay, so one turn can trigger at most one silent retry.
+   */
+  private authRetryCount = 0;
+  /**
+   * Auth failure seen earlier in the current generation (an assistant
+   * API-error message or an auth_status error), acted on when the turn's
+   * `result` — or a thrown error — arrives.
+   */
+  private pendingAuthFailure: string | null = null;
   /**
    * The turn currently being attempted, captured on each `send()`. A
    * rate-limit auto-retry replays it verbatim after a backoff (the API
@@ -224,6 +241,7 @@ export class ThreadSession {
     this.lastKnownSessionId = options.resume;
     this.interrupted = false;
     this.recapEmitted = false;
+    this.pendingAuthFailure = null;
     this._turnInFlight = false;
     this._pendingInteractiveCallbacks = 0;
     this._lastActivityAt = Date.now();
@@ -409,6 +427,17 @@ export class ThreadSession {
    * generation already running.
    */
   send(text: string, images?: ImageAttachment[], userMessageUuid?: string): void {
+    if (!this.query) {
+      throw new Error('[ClaudeThreads] ThreadSession.send() called before start() (or after close())');
+    }
+    // A new user turn gets a fresh expired-sign-in retry budget. Internal
+    // replays go through sendInternal() so they never reset it.
+    this.authRetryCount = 0;
+    this.pendingAuthFailure = null;
+    this.sendInternal(text, images, userMessageUuid);
+  }
+
+  private sendInternal(text: string, images?: ImageAttachment[], userMessageUuid?: string): void {
     if (!this.query) {
       throw new Error('[ClaudeThreads] ThreadSession.send() called before start() (or after close())');
     }
@@ -599,6 +628,37 @@ export class ThreadSession {
   // check are deleted outright, per ADR-0002 §2 ("Deleted outright" list).
   // ------------------------------------------------------------------
 
+  /**
+   * Expired-sign-in recovery (claudeAuthRecovery.ts). First failure of a
+   * user turn: tear down this CLI process — the fresh spawn re-reads the
+   * keychain, picking up a token another process refreshed — and replay the
+   * same turn verbatim (same uuid, no new transcript message). Second
+   * failure: surface the terminal sign-in-expired state and let the pump's
+   * teardown close the process, so the next send spawns a fresh one.
+   * Returns true when a restart superseded the current generation.
+   */
+  private async recoverFromAuthFailure(detail: string, callbacks: SessionCallbacks): Promise<boolean> {
+    this.pendingAuthFailure = null;
+    const turn = this.lastUserTurn;
+    if (turn && !this.interrupted && shouldAutoRetryAuthError(this.authRetryCount)) {
+      this.authRetryCount++;
+      console.warn('[ClaudeThreads] Claude authentication failed — restarting the CLI process and retrying once:', detail);
+      callbacks.onAuthRetry?.(detail);
+      try {
+        await this.restart('auth-error');
+        this.sendInternal(turn.text, turn.images, turn.userMessageUuid);
+      } catch (retryErr) {
+        console.error('[ClaudeThreads] ThreadSession auth-error auto-retry failed:', retryErr);
+        callbacks.onError(retryErr instanceof Error ? retryErr : new Error(String(retryErr)));
+      }
+      return true;
+    }
+    const message = formatSignInExpiredMessage(detail);
+    if (callbacks.onAuthRequired) callbacks.onAuthRequired(message);
+    else callbacks.onError(new Error(message));
+    return false;
+  }
+
   private async pumpMessages(q: Query, callbacks: SessionCallbacks): Promise<void> {
     // Set when this generation is being superseded by an internal
     // transport-error auto-retry restart, so the `finally` block below
@@ -610,9 +670,12 @@ export class ThreadSession {
     const allToolCalls: ToolCallRecord[] = [];
     const toolCallsByUseId = new Map<string, ToolCallRecord>();
     const pendingTaskCreates = new Map<string, string>();
+    // Set when this turn failed to authenticate; handled after leaving the
+    // loop so restart() never closes the Query we are still iterating.
+    let authFailure: string | null = null;
 
     try {
-      for await (const msg of q) {
+      pump: for await (const msg of q) {
         debugLog('[ClaudeThreads] msg.type:', msg.type, (msg as Record<string, unknown>).subtype ?? '');
         if (callbacks.onRawEvent && msg.type !== 'stream_event') {
           callbacks.onRawEvent(msg as { type?: string } & Record<string, unknown>);
@@ -631,6 +694,17 @@ export class ThreadSession {
           }
 
           case 'assistant': {
+            // The CLI's synthetic API-error message for an expired sign-in.
+            // Never shown: the turn is either silently replayed or replaced
+            // by the sign-in-required state.
+            if (msg.parent_tool_use_id == null) {
+              const authError = classifyClaudeAuthFailure(msg);
+              if (authError) {
+                this.pendingAuthFailure = authError;
+                streamingText = '';
+                break;
+              }
+            }
             const parts: string[] = [];
             for (const block of msg.message.content) {
               if (block.type === 'text') {
@@ -687,6 +761,16 @@ export class ThreadSession {
           case 'result': {
             this.applyUsage(normalizeClaudeResult(msg as unknown as Record<string, any>));
             this._lastActivityAt = Date.now();
+            if (!this.interrupted && !this.internalCompactionResolve) {
+              const authError = msg.is_error
+                ? (classifyClaudeAuthFailure(msg) ?? this.pendingAuthFailure)
+                : null;
+              this.pendingAuthFailure = null;
+              if (authError) {
+                authFailure = authError;
+                break pump;
+              }
+            }
             if (msg.subtype === 'success') {
               this.lastKnownSessionId = msg.session_id;
               this.transportErrorRetryCount = 0;
@@ -983,6 +1067,8 @@ export class ThreadSession {
           case 'auth_status': {
             const as = msg as { isAuthenticating?: boolean; error?: string };
             debugLog('[ClaudeThreads] auth_status:', { isAuthenticating: as.isAuthenticating, error: as.error });
+            const authError = classifyClaudeAuthFailure(msg);
+            if (authError) this.pendingAuthFailure = authError;
             break;
           }
           case 'conversation_reset': {
@@ -991,6 +1077,9 @@ export class ThreadSession {
             break;
           }
         }
+      }
+      if (authFailure) {
+        supersededByRestart = await this.recoverFromAuthFailure(authFailure, callbacks);
       }
     } catch (err) {
       if (this.internalCompactionResolve) {
@@ -1002,6 +1091,12 @@ export class ThreadSession {
         callbacks.onInterrupted(this.lastKnownSessionId ?? '');
       } else {
         const e = err instanceof Error ? err : new Error(String(err));
+        // Expired sign-in: checked first — a CLI that failed to authenticate
+        // may also die with an unrelated-looking error after reporting it.
+        const authError = classifyClaudeAuthFailure(e) ?? this.pendingAuthFailure;
+        if (authError) {
+          supersededByRestart = await this.recoverFromAuthFailure(authError, callbacks);
+        }
         // Rate-limit / overload retry: checked before the transport-error case
         // because the two failure shapes are distinct and a rate-limit reject
         // is never a "stream closed". Unlike a transport error (which happens
@@ -1012,7 +1107,7 @@ export class ThreadSession {
         // message. Entirely internal to ThreadSession; the UI only learns of
         // it via onRateLimitRetry (a transient 'reconnecting'-style notice),
         // never a terminal onError, unless the backoff budget is exhausted.
-        if (isRateLimitError(e.message) && shouldAutoRetryRateLimitError(e.message, this.rateLimitRetryCount)) {
+        else if (isRateLimitError(e.message) && shouldAutoRetryRateLimitError(e.message, this.rateLimitRetryCount)) {
           this.rateLimitRetryCount++;
           const attempt = this.rateLimitRetryCount;
           const delayMs = rateLimitBackoffMs(attempt - 1);
@@ -1031,7 +1126,7 @@ export class ThreadSession {
               // close() was called during the backoff — nothing to restart.
             } else {
               await this.restart('rate-limit');
-              if (turn) this.send(turn.text, turn.images, turn.userMessageUuid);
+              if (turn) this.sendInternal(turn.text, turn.images, turn.userMessageUuid);
             }
           } catch (retryErr) {
             console.error('[ClaudeThreads] ThreadSession rate-limit auto-retry failed:', retryErr);
@@ -1057,7 +1152,7 @@ export class ThreadSession {
           callbacks.onReconnecting?.(e.message);
           try {
             await this.restart('transport-error');
-            this.send(TRANSPORT_ERROR_CONTINUATION_PROMPT);
+            this.sendInternal(TRANSPORT_ERROR_CONTINUATION_PROMPT);
           } catch (restartErr) {
             console.error('[ClaudeThreads] ThreadSession transport-error auto-retry failed:', restartErr);
             callbacks.onError(restartErr instanceof Error ? restartErr : new Error(String(restartErr)));

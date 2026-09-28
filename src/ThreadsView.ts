@@ -21,7 +21,10 @@ import { formatToolName, getToolIcon } from './ClaudeSession';
 import { isTrustedBuiltInTool } from './toolNameUtils';
 import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, ACTIVITY_LABELS, smoothToolGroups, pickCurrentTool, shouldWrapOuter, type ToolCallGroup } from './toolNameUtils';
 import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
-import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, splitErrorMessage } from './dashboardUtils';
+import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, execEnv, splitErrorMessage } from './dashboardUtils';
+import { isClaudeSignInExpiredError } from './claudeAuthRecovery';
+import { signInToClaude, type SpawnLike } from './claudeAuthCli';
+import { renderClaudeSignInBanner } from './claudeSignInBanner';
 import { getVaultBridgesAPI, mapToVaultPath, type BridgeInfo } from './bridgeUtils';
 import { resolveTagIcon, planFooter, derivePrUrl } from './statusLine';
 import { isWebViewerEnabled } from './SettingsTab';
@@ -3130,6 +3133,12 @@ export class ThreadsView extends ItemView {
       pendingQ.cardEl = cardEl;
     }
 
+    // Re-render the sign-in banner for a turn that failed to authenticate
+    // (live 'error' cards are not persisted, but this state is).
+    if (thread.authRequired && !this.manager.isRunning(this.activeThreadId)) {
+      this.renderClaudeSignInCard(this.activeThreadId, thread.authRequired.message);
+    }
+
     this.applyPendingMainScroll();
     this.setRunningState(this.manager.isRunning(this.activeThreadId));
   }
@@ -5422,6 +5431,24 @@ export class ThreadsView extends ItemView {
         break;
       }
 
+      case 'auth_retry': {
+        // Expired Claude sign-in: ThreadSession is restarting the CLI process
+        // (the fresh one re-reads the keychain) and replaying the turn once.
+        // Transient, like the reconnecting notices above.
+        if (this.streamingEl) {
+          this.streamingEl.remove();
+          this.streamingEl = null;
+          this.streamingContentEl = null;
+        }
+        const authNoticeEl = this.messagesEl.createDiv('ct-message ct-reconnecting');
+        authNoticeEl.createEl('div', {
+          text: 'Claude sign-in needs refreshing — restarting the session and retrying…',
+          cls: 'ct-reconnecting-text',
+        });
+        this.scrollToBottom();
+        break;
+      }
+
       case 'error': {
         this.clearStreamingState();
         this.taskPills.clear();
@@ -5436,6 +5463,11 @@ export class ThreadsView extends ItemView {
           this.streamingEl.remove();
           this.streamingEl = null;
           this.streamingContentEl = null;
+        }
+        if (isClaudeSignInExpiredError(event.error.message) && this.activeThreadId) {
+          this.renderClaudeSignInCard(this.activeThreadId, event.error.message);
+          this.setRunningState(false);
+          break;
         }
         const errEl = this.messagesEl.createDiv('ct-message ct-error');
         const { headline, stack } = splitErrorMessage(event.error.message);
@@ -5486,6 +5518,39 @@ export class ThreadsView extends ItemView {
         break;
       }
     }
+  }
+
+  /**
+   * "Sign in to Claude" card for a turn whose silent fresh-process retry
+   * still failed to authenticate (see claudeAuthRecovery.ts). Sign-in shells
+   * out to `claude auth login` using the same resolved binary the sessions
+   * use; desktop only.
+   */
+  private renderClaudeSignInCard(threadId: string, message: string): void {
+    this.messagesEl.querySelector('.ct-auth-required')?.remove();
+    renderClaudeSignInBanner(this.messagesEl, {
+      message,
+      canSignIn: Platform.isDesktopApp,
+      signIn: (onProgress, onUrl) => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { spawn } = require('child_process') as typeof import('child_process');
+        return signInToClaude(this.plugin.settings.claudeBinaryPath || 'claude', {
+          spawn: spawn as unknown as SpawnLike,
+          env: execEnv(),
+          onProgress,
+          onUrl,
+        });
+      },
+      retry: async () => {
+        try {
+          const retried = await this.manager.retryAfterSignIn(threadId);
+          if (!retried) new Notice('Nothing to retry — send your message again.');
+        } catch (err) {
+          new Notice(`Retry failed: ${(err as Error).message}`);
+        }
+      },
+    });
+    this.scrollToBottom();
   }
 
   // ── Status rail helpers ───────────────────────────────────────────────────

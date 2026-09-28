@@ -62,6 +62,8 @@ export type ThreadEvent =
   | { type: 'error'; error: Error }
   | { type: 'reconnecting'; error: string }
   | { type: 'rate_limit_retry'; attempt: number; maxRetries: number; delayMs: number }
+  /** Expired Claude sign-in: the CLI process is being restarted and the turn replayed once. */
+  | { type: 'auth_retry'; error: string }
   | { type: 'streaming_start' }
   | { type: 'escalated'; model: string }
   | { type: 'queued'; text: string; images?: ImageAttachment[] }
@@ -1612,7 +1614,31 @@ export class ThreadManager {
     return true;
   }
 
-  async sendMessage(threadId: string, userText: string, images?: ImageAttachment[]): Promise<void> {
+  /**
+   * Retries the turn that failed with an expired Claude sign-in (see
+   * `Thread.authRequired`), typically after the user signed in again.
+   * Tears down the thread's CLI session so the next spawn re-reads the
+   * keychain, then resends the trailing user message without adding it to
+   * the transcript a second time. Returns false when nothing is pending.
+   */
+  async retryAfterSignIn(threadId: string): Promise<boolean> {
+    const thread = this.threads.get(threadId);
+    if (!thread?.authRequired || this.isRunning(threadId)) return false;
+    const pending = thread.messages[thread.messages.length - 1];
+    if (pending?.role !== 'user') {
+      delete thread.authRequired;
+      return false;
+    }
+    const session = this.sessions.get(threadId);
+    if (session) {
+      session.close();
+      this.sessions.delete(threadId);
+    }
+    await this.sendMessage(threadId, pending.content, pending.images, true);
+    return true;
+  }
+
+  async sendMessage(threadId: string, userText: string, images?: ImageAttachment[], resend = false): Promise<void> {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error(`Thread not found: ${threadId}`);
 
@@ -1645,6 +1671,7 @@ export class ThreadManager {
     }
 
     thread.lastError = undefined;
+    delete thread.authRequired;
     thread.status = 'active';
     this.threadActivity.delete(threadId);
 
@@ -1656,19 +1683,25 @@ export class ThreadManager {
     const promptText = resolvedPrompt.promptText;
     const claimedHandoff = this.claimHarnessHandoff(threadId);
 
-    const userMsg: ChatMessage = {
+    // A resend (retryAfterSignIn) reuses the transcript's existing trailing
+    // user message instead of appending a duplicate.
+    const lastMessage = thread.messages[thread.messages.length - 1];
+    const resendMsg = resend && lastMessage?.role === 'user' ? lastMessage : undefined;
+    const userMsg: ChatMessage = resendMsg ?? {
       id: crypto.randomUUID(),
       role: 'user',
       content: userText,
       timestamp: Date.now(),
       images: images && images.length > 0 ? images : undefined,
     };
-    thread.messages.push(userMsg);
     thread.updatedAt = Date.now();
-    // Externalize pasted images to vault files so their base64 leaves data.json
-    // on the next save (keeps base64 in memory for render + relay). Desktop-only.
-    this.externalizeMessageImages(threadId, userMsg);
-    this.emit(threadId, { type: 'user_message_added', message: userMsg });
+    if (!resendMsg) {
+      thread.messages.push(userMsg);
+      // Externalize pasted images to vault files so their base64 leaves data.json
+      // on the next save (keeps base64 in memory for render + relay). Desktop-only.
+      this.externalizeMessageImages(threadId, userMsg);
+      this.emit(threadId, { type: 'user_message_added', message: userMsg });
+    }
 
     // Track this message as unresolved until the generation it lands in
     // settles (onDone/onInterrupted/onError) — see pendingUserMessageIds'
@@ -2052,7 +2085,7 @@ export class ThreadManager {
     const isCurrentGeneration = () =>
       this.threads.get(threadId) === thread
       && (thread.sessionGeneration ?? 0) === generationAtStart;
-    return {
+    const callbacks: SessionCallbacks = {
       onRawEvent: (event) => {
         if (!isCurrentGeneration()) return;
         if (!this.settings.saveRawLogs || !this.vaultRoot) return;
@@ -2345,6 +2378,23 @@ export class ThreadManager {
         thread.updatedAt = Date.now();
         this.emit(threadId, { type: 'rate_limit_retry', attempt, maxRetries, delayMs });
       },
+      onAuthRetry: (error) => {
+        if (!isCurrentGeneration()) return;
+        // Expired sign-in: ThreadSession is restarting its CLI process (the
+        // new one re-reads the keychain) and replaying the turn once. Same
+        // transient treatment as the other auto-recoveries above.
+        thread.status = 'reconnecting';
+        thread.updatedAt = Date.now();
+        this.emit(threadId, { type: 'auth_retry', error });
+      },
+      onAuthRequired: (message) => {
+        if (!isCurrentGeneration()) return;
+        // The silent retry failed too. Record the state that drives the
+        // in-thread "Sign in to Claude" banner, then settle exactly like any
+        // terminal error (the user message stays in the transcript, once).
+        thread.authRequired = { message, at: Date.now() };
+        callbacks.onError(new Error(message));
+      },
       onCompact: (trigger, preTokens) => {
         if (!isCurrentGeneration()) return;
         const compactMsg: ChatMessage = {
@@ -2540,6 +2590,7 @@ export class ThreadManager {
         this.emit(threadId, { type: 'tasks_updated', tasks: thread.tasks ?? [] });
       },
     };
+    return callbacks;
   }
 
   /**
