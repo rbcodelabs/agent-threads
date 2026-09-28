@@ -14,6 +14,8 @@ import { shot } from './helpers';
  *   mobile-thread-list      — thread list panel, no active thread  (iPhone 14, 390px)
  *   mobile-thread-list-se   — thread list at iPhone SE width (320px) — catches overflow regressions
  *   mobile-connected-ipad   — conversation panel at iPad width (820px)
+ *   mobile-message-overflow — long tokens, wide code block, wide table (390px); paired
+ *                             with a geometry assertion that nothing runs off the edge
  *
  * Element-level snapshots (clipped — catch small button/layout changes that are
  * invisible against a full 390×844 canvas):
@@ -33,6 +35,103 @@ const mobileHarnessUrl = (view: string, opts?: { width?: number; height?: number
   if (opts?.height) params.set('height', String(opts.height));
   return `${base}?${params.toString()}`;
 };
+
+/**
+ * Returns a description of every element inside `.ct-mobile-messages` whose
+ * content runs past the thread container's edge instead of wrapping (prose) or
+ * scrolling inside itself (code blocks, tables). Empty array = no overflow.
+ *
+ * `.ct-mobile-messages` clips horizontally, so its own scrollWidth can't be
+ * trusted — an element can be cut off at the right edge while the container
+ * reports no overflow. Check each element's geometry instead:
+ *   - its box must sit inside the container, and
+ *   - if it lets content spill (overflow-x: visible) or silently clips it
+ *     (hidden/clip without an ellipsis), its scrollWidth must fit its clientWidth.
+ * Descendants of an element that scrolls horizontally (overflow-x: auto/scroll)
+ * are skipped — that element is the intended scroller and is checked itself.
+ */
+async function findHorizontalOverflow(page: import('@playwright/test').Page): Promise<string[]> {
+  return page.locator('.ct-mobile-messages').evaluate((container) => {
+    const bounds = container.getBoundingClientRect();
+    const describe = (el: Element) =>
+      el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).join('.') : '');
+    const insideScroller = (el: Element) => {
+      for (let p = el.parentElement; p && p !== container; p = p.parentElement) {
+        const ox = getComputedStyle(p).overflowX;
+        if (ox === 'auto' || ox === 'scroll') return true;
+      }
+      return false;
+    };
+    const problems: string[] = [];
+    for (const el of Array.from(container.querySelectorAll('*'))) {
+      if (insideScroller(el)) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+      if (rect.right > bounds.right + 1 || rect.left < bounds.left - 1) {
+        problems.push(`${describe(el)} box [${Math.round(rect.left)}, ${Math.round(rect.right)}] outside container [${Math.round(bounds.left)}, ${Math.round(bounds.right)}]`);
+        continue;
+      }
+      const style = getComputedStyle(el);
+      const clipsOrSpills = style.overflowX === 'visible' || ((style.overflowX === 'hidden' || style.overflowX === 'clip') && style.textOverflow !== 'ellipsis');
+      const html = el as HTMLElement;
+      if (clipsOrSpills && html.clientWidth > 0 && html.scrollWidth > html.clientWidth + 1) {
+        problems.push(`${describe(el)} content ${html.scrollWidth}px wider than its ${html.clientWidth}px box (overflow-x: ${style.overflowX})`);
+      }
+    }
+    return problems;
+  });
+}
+
+test.describe('Mobile message horizontal overflow', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
+  });
+
+  for (const viewport of [
+    { width: 390, height: 844, label: 'iPhone 14' },
+    { width: 320, height: 568, label: 'iPhone SE' },
+  ]) {
+    test(`long tokens, wide code and wide tables stay inside the thread view (${viewport.label} — ${viewport.width}px)`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(mobileHarnessUrl('mobile-overflow', viewport));
+      await page.waitForSelector('.ct-mobile-messages table');
+      await page.waitForSelector('.ct-mobile-messages pre');
+      await page.waitForTimeout(300);
+
+      expect(await findHorizontalOverflow(page)).toEqual([]);
+
+      // The wide code block and table must still be reachable by scrolling
+      // inside themselves, not truncated.
+      for (const selector of ['.ct-mobile-messages pre', '.ct-mobile-messages table']) {
+        const scrollable = await page.locator(selector).first().evaluate((el) => {
+          for (let node: HTMLElement | null = el as HTMLElement; node; node = node.parentElement) {
+            const ox = getComputedStyle(node).overflowX;
+            if ((ox === 'auto' || ox === 'scroll') && node.scrollWidth > node.clientWidth) return true;
+            if (node.classList.contains('ct-mobile-messages')) return false;
+          }
+          return false;
+        });
+        expect(scrollable, `${selector} should scroll horizontally inside itself`).toBe(true);
+      }
+    });
+  }
+
+  test('seeded conversation has no horizontal overflow (iPhone 14 — 390px)', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(mobileHarnessUrl('mobile-connected'));
+    await page.waitForSelector('.ct-mobile-conv-panel');
+    await page.waitForTimeout(300);
+    expect(await findHorizontalOverflow(page)).toEqual([]);
+  });
+
+  test('overflow stress thread screenshot (iPhone 14 — 390px)', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(mobileHarnessUrl('mobile-overflow'));
+    await page.waitForSelector('.ct-mobile-messages table');
+    await page.waitForTimeout(300);
+    await shot(page, 'mobile-message-overflow.png', { fullPage: true });
+  });
+});
 
 test.describe('Mobile View', () => {
   // Pin Date.now()/new Date() to the fixture epoch (test/harness/fixtures.ts)

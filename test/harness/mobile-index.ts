@@ -5,6 +5,7 @@
  *   ?view=mobile-pairing      — no relay/store configured (shows pairing screen)
  *   ?view=mobile-connected    — mock relay + seeded MobileThreadStore, first thread active (conv panel)
  *   ?view=mobile-codex-tools  — Codex-native tool-record regression fixture active
+ *   ?view=mobile-overflow     — long tokens, wide code block and wide table (horizontal-overflow regression)
  *   ?view=mobile-thread-list  — seeded store, NO active thread (shows thread list panel)
  *   ?view=mobile-permission   — active thread with a pending permission request card
  *   ?view=mobile-question     — active thread with a pending AskUserQuestion card (single-select + multiSelect)
@@ -17,7 +18,7 @@ import './obsidian-mock';
 import { MobileView } from '../../src/MobileView';
 import { MobileThreadStore } from '../../src/MobileThreadStore';
 import { mockLeaf } from './obsidian-mock';
-import { fixtureThreads, inlineContentMessages } from './fixtures';
+import { fixtureThreads, inlineContentMessages, overflowStressMessages } from './fixtures';
 import type { RelayFrame } from '../../src/relay-protocol';
 
 // ── Minimal RelayClient mock ───────────────────────────────────────────────
@@ -84,7 +85,22 @@ function serializedFixtures(activeThreadId: string | null) {
 
 // ── View routing ───────────────────────────────────────────────────────────────
 
-if (view === 'mobile-inline-content') {
+if (view === 'mobile-overflow') {
+  // Horizontal-overflow stress thread: long unbroken tokens, a wide code block
+  // and a wide table. Nothing may run off the right edge of the thread view.
+  const store = new MobileThreadStore();
+  const relay = new MockRelayClient();
+  store.applyFrame({ type: 'snapshot', activeThreadId: 'overflow-thread', threads: [{
+    id: 'overflow-thread', title: 'Overflow stress', messages: overflowStressMessages,
+    createdAt: 1768471200000, updatedAt: 1768471212000,
+  }] });
+  const mobileView = new MobileView(mockLeaf as any, relay as any, store);
+  app.appendChild(mobileView.containerEl);
+  mobileView.onOpen();
+  (window as any).__mobileView = mobileView;
+  (window as any).__store = store;
+
+} else if (view === 'mobile-inline-content') {
   const store = new MobileThreadStore();
   const relay = new MockRelayClient();
   store.applyFrame({ type: 'snapshot', activeThreadId: 'inline-thread', threads: [{
