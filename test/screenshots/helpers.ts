@@ -22,6 +22,10 @@ import { expect, type Page, type Locator } from '@playwright/test';
  */
 export async function settleView(page: Page): Promise<void> {
   await page.evaluate(async () => {
+    // The bundled harness fonts (test/harness/fonts.css) load lazily per
+    // unicode-range subset, and a late swap reflows text. Wait for them
+    // before measuring scroll stability, not only after.
+    await (document as Document & { fonts?: FontFaceSet }).fonts?.ready;
     const scrollers = [
       document.scrollingElement,
       ...Array.from(document.querySelectorAll('*')),
@@ -82,6 +86,21 @@ export async function anchorFocusedComposerToBottom(
   await expect.poll(() => messages.evaluate(
     (element) => element.scrollHeight - element.clientHeight - element.scrollTop,
   )).toBeLessThanOrEqual(1);
+}
+
+/**
+ * Park the message list at its true bottom after chrome above the composer
+ * (e.g. the git diff bar) appears and shrinks the scroller. The view's own
+ * rAF-scheduled scrollToBottom can fire before that reflow and leave the list
+ * at a stale offset — a stable resting position settleView() cannot detect.
+ * On a slower CI runner this shifted every message line (~28k px diff).
+ */
+export async function pinMessagesToBottom(page: Page): Promise<void> {
+  const messages = page.locator('.ct-messages');
+  await expect.poll(() => messages.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    return element.scrollHeight - element.clientHeight - element.scrollTop;
+  })).toBeLessThanOrEqual(1);
 }
 
 /**

@@ -63,17 +63,18 @@ Also update the README version badge:
 
 ```bash
 cd <release-worktree>
-npm run test:screenshots:update
+npm run test:screenshots:remote:update
 ```
 
-This rebuilds the harness, runs Playwright with `--update-snapshots`, and copies PNGs to `docs/`.
+This syncs the worktree to dev-builder, rebuilds the harness and runs Playwright with `--update-snapshots` inside the pinned Playwright container (the same image CI uses), then copies the regenerated baselines and `docs/` PNGs back. Never regenerate baselines on a Mac — they will fail CI. See "Screenshot Tests" in `development.md`.
 
 ---
 
 ## Step 5 — Quality Gate, Commit, Push, PR
 
 ```bash
-npx tsc --noEmit && npm test && npm run test:screenshots
+npx tsc --noEmit && npm test
+npm run test:screenshots:remote   # or rely on the PR's Screenshot Tests CI job
 
 git add manifest.json package.json package-lock.json versions.json README.md docs/ test/screenshots/snapshots/
 git commit -m "chore: bump version to vX.Y.Z"

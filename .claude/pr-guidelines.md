@@ -6,8 +6,9 @@
 |---|---|
 | Type-check | `npx tsc --noEmit` |
 | Unit tests | `pnpm test` |
-| Screenshots (desktop) | `pnpm test:screenshots` |
-| Update screenshots | `pnpm test:screenshots:update` |
+| Screenshots, from a Mac (runs on dev-builder) | `npm run test:screenshots:remote` |
+| Update screenshots (runs on dev-builder) | `npm run test:screenshots:remote:update` |
+| Screenshots, already on Linux / in CI | `npm run test:screenshots` |
 | Build | `pnpm build` |
 
 ## Coverage Requirements
@@ -51,13 +52,13 @@ this silently.
 
 ## Screenshot Tooling
 
-Run `pnpm test:screenshots:update` after any desktop UI change to regenerate committed screenshots. Do NOT update screenshots for mobile-only CSS changes (the Playwright tests run against the desktop view).
+Baselines are platform-neutral Linux renders from the pinned Playwright container. **Never run or regenerate them on the Mac** — a Mac render never matches. Run `npm run test:screenshots:remote:update` (dev-builder) after any desktop UI change to regenerate committed screenshots. Do NOT update screenshots for mobile-only CSS changes (the Playwright tests run against the desktop view).
 
 ## Project-Specific Gates
 
 - `npx tsc --noEmit` must be clean (strict mode, no errors)
 - All Vitest unit tests must pass: `pnpm test`
-- Playwright screenshot tests must not regress: `pnpm test:screenshots`
+- Playwright screenshot tests must not regress: `npm run test:screenshots:remote` on dev-builder, or the PR's "Screenshot Tests" CI job. If dev-builder is unreachable, a local Mac run is advisory only — say so in the PR and rely on CI
 - For mobile-only changes: screenshot tests still run to confirm desktop is unaffected
 - Build must succeed: `pnpm build`
 
@@ -112,10 +113,10 @@ Present this as a completed checklist before opening any PR. Every item is manda
 
 - [ ] `npx tsc --noEmit` — no errors
 - [ ] `pnpm test` — all passing, new tests written for new logic
-- [ ] `pnpm test:screenshots` — no regressions
+- [ ] Screenshots — no regressions (`npm run test:screenshots:remote` on dev-builder, or the PR's Screenshot Tests CI job is green)
 - [ ] `pnpm build` — clean build
 - [ ] **README.md / docs/ updated** — any new user-facing behavior or UI change is documented; if you touched a feature, re-read the relevant README section and update it
 - [ ] **claude-threads-site docs updated** — if this PR changes user-facing plugin behavior, the corresponding page(s) in `claude-threads-site/src/content/docs/` are updated or created (or the PR description explicitly states no public doc page is affected)
-- [ ] Screenshots regenerated (`pnpm test:screenshots:update`) if desktop UI changed
+- [ ] Screenshots regenerated (`npm run test:screenshots:remote:update`) if desktop UI changed
 - [ ] PR includes self-contained QA outcomes and rendered, labeled screenshots for UI changes (or an explicit N/A reason)
 - [ ] PR title and description explain the *why*, not just the *what*
