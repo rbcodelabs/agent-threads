@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import path from 'path';
-import { anchorFocusedComposerToBottom, shot } from './helpers';
+import { anchorFocusedComposerToBottom, pinMessagesToBottom, shot } from './helpers';
 
 const harnessUrl = 'file://' + path.resolve('test/harness/index.html');
 
@@ -2716,6 +2716,7 @@ test.describe('Agent Threads UI', () => {
     await expect(page.locator('.ct-git-diff-stat-add')).toHaveText('+60');
     await expect(page.locator('.ct-git-diff-stat-del')).toHaveText('-4');
     await expect(page.locator('.ct-git-diff-create-btn')).toHaveText('Create PR');
+    await pinMessagesToBottom(page);
     await shot(page, 'git-diff-bar.png', { fullPage: true });
 
     // Open the split-button dropdown: 3 actions.
@@ -2755,6 +2756,7 @@ test.describe('Agent Threads UI', () => {
     // that already said so — either from the script's kind:'pr' tag or, once
     // that tag was removed, from the synthesized sticky-prUrl pill.)
     await expect(page.locator('.ct-footer-pill-pr')).toHaveCount(0);
+    await pinMessagesToBottom(page);
     await shot(page, 'git-diff-bar-view-pr.png', { fullPage: true });
 
     // Open the split-button dropdown: View PR is prepended above the other 3 actions.
