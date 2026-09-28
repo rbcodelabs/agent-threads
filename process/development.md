@@ -266,6 +266,10 @@ add a `build()` block in `test/harness/esbuild.mjs`. Current pages:
 | `kanban.html` | `kanban-bundle.js` | `KanbanView` (status board + folder swimlanes) |
 | `agent-browser-preview.html` | `agent-browser-preview-bundle.js` | `AgentBrowserPreviewView` (login-handoff banner, [ADR-0014](https://compass.rbcodelabs.com/rbcodelabs/claude-threads/docs/e9540afa-52a5-485e-865d-93114b8016a9)) |
 
+### Browser session card fixtures
+
+`test/screenshots/browser-session-card.spec.ts` drives the real `ThreadsView`, `BrowserSessionPresenter` and `LoginHandoffController`; only Geode's popup bridge and the login guest are faked (`test/harness/index.ts`, `window.__fireLoginOpen`/`__fireLoginClose`/`__handoffCalls`). Persisted sessions load onto the otherwise-empty `thread-new` via `window.__showBrowserFixture(kind, running)` (fixtures in `test/harness/browser-fixtures.ts`, opt-in so the shared thread list and its baselines stay untouched); live sessions are replayed with `__browserStep`/`__browserResult`/`__browserImage`. The mockup's SVG screenshots are embedded through esbuild's `text` loader.
+
 Running/awaiting state isn't stored on `Thread` — it lives in the
 `ThreadManager`'s private `sessions` / `pendingPermissions` maps. The kanban
 harness seeds those directly (see `kanban-index.ts`) to populate the Working and

@@ -180,11 +180,11 @@ export function renderBrowserSessionCard(
   const urlBar = chrome.createSpan({ cls: 'ct-bc-url', attr: { title: vm.url ?? '' } });
   icon(urlBar, 'lock');
   const urlText = urlBar.createSpan('ct-bc-url-text');
-  urlText.appendText(vm.host || 'browser');
+  urlText.append(vm.host || 'browser');
   if (vm.path) urlText.createEl('b', { text: vm.path });
   const status = chrome.createSpan('ct-bc-status');
   status.createEl('i').setAttribute('aria-hidden', 'true');
-  status.appendText(vm.statusLabel);
+  status.append(vm.statusLabel);
 
   card.createDiv('ct-bc-progress').setAttribute('aria-hidden', 'true');
 
@@ -235,7 +235,7 @@ export function renderBrowserSessionCard(
   if (vm.cue) {
     const cue = view.createSpan('ct-bc-cue');
     icon(cue, 'keyboard');
-    cue.appendText(vm.cue);
+    cue.append(vm.cue);
   }
   if (zoomable) {
     icon(view, 'maximize-2', 'ct-bc-zoom');
@@ -276,7 +276,7 @@ export function renderBrowserSessionCard(
     cls: 'ct-bc-toggle ct-bc-steps-toggle',
     attr: { type: 'button', 'aria-expanded': String(input.stepsOpen), 'aria-controls': stepsId },
   });
-  toggle.appendText(`${vm.steps.length} step${vm.steps.length === 1 ? '' : 's'}`);
+  toggle.append(`${vm.steps.length} step${vm.steps.length === 1 ? '' : 's'}`);
   icon(toggle, 'chevron-down');
   toggle.addEventListener('click', () => {
     const open = card.classList.toggle('steps-open');
@@ -293,20 +293,20 @@ export function renderBrowserSessionCard(
       .addEventListener('click', () => callbacks.notNow());
     const agent = actions.createSpan('ct-bc-agent');
     icon(agent, 'pause');
-    agent.appendText('Claude is waiting');
+    agent.append('Claude is waiting');
   } else if (vm.actions === 'control') {
     const actions = side.createDiv('ct-bc-actions');
     const agent = actions.createSpan('ct-bc-agent');
     icon(agent, 'pause');
-    agent.appendText('Claude is waiting');
+    agent.append('Claude is waiting');
     primary = actions.createEl('button', { cls: 'ct-bc-btn is-primary is-big', text: 'Return control', attr: { type: 'button' } });
     primary.addEventListener('click', () => callbacks.returnControl());
   } else if (vm.hint) {
     const actions = side.createDiv('ct-bc-actions');
     const hint = actions.createSpan('ct-bc-hint');
-    hint.appendText(vm.hint.lead);
+    hint.append(vm.hint.lead);
     hint.createEl('b', { text: vm.hint.strong });
-    hint.appendText(vm.hint.trail);
+    hint.append(vm.hint.trail);
   }
 
   const steps = side.createEl('ol', { cls: 'ct-bc-steps', attr: { id: stepsId, 'aria-label': 'Actions in this session' } });

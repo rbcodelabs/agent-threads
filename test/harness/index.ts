@@ -373,6 +373,38 @@ const mgrInternals = manager as unknown as {
   (manager as any).pendingToolResultImages.set(threadId, [...images]);
 };
 (window as any).__pricingImage = PRICING_IMAGE;
+/**
+ * Replay what a live browser call does in production: the tool_use event, the
+ * committed tool-only message carrying the SAME record, and (later) an in-place
+ * status mutation + tool_result_status. Drives the real row/refresh path.
+ */
+(window as any).__browserStep = (spec: { id: string; name: string; summary?: string }) => {
+  const thread = manager.getThread(HANDOFF_THREAD)!;
+  const record = { name: 'mcp__claude_threads__' + spec.name, summary: spec.summary ?? '', timestamp: Date.now(), toolUseId: spec.id, status: 'pending' };
+  const message = { id: 'live-' + spec.id, role: 'assistant' as const, content: '', timestamp: Date.now(), toolCalls: [record] };
+  thread.messages.push(message as any);
+  mgrInternals.emit(HANDOFF_THREAD, { type: 'tool_use', record } as any);
+  mgrInternals.emit(HANDOFF_THREAD, { type: 'message', message } as any);
+};
+(window as any).__browserResult = (id: string, status: 'success' | 'error', extra: { pageUrl?: string; error?: string; durationMs?: number } = {}) => {
+  const thread = manager.getThread(HANDOFF_THREAD)!;
+  for (const m of thread.messages) {
+    const record = m.toolCalls?.find((t: any) => t.toolUseId === id) as any;
+    if (!record) continue;
+    record.status = status;
+    record.durationMs = extra.durationMs ?? 400;
+    if (extra.pageUrl || extra.error) record.browser = { pageUrl: extra.pageUrl, error: extra.error };
+  }
+  mgrInternals.emit(HANDOFF_THREAD, { type: 'tool_result_status', toolUseId: id, status } as any);
+};
+(window as any).__browserImage = (image: { mediaType: string; data: string }) => {
+  (window as any).__setPendingToolImages(HANDOFF_THREAD, [...((manager as any).pendingToolResultImages.get(HANDOFF_THREAD) ?? []), image]);
+  mgrInternals.emit(HANDOFF_THREAD, { type: 'tool_result_images', images: [image] } as any);
+};
+(window as any).__endTurn = () => {
+  (window as any).__setThreadRunning(HANDOFF_THREAD, false);
+  mgrInternals.emit(HANDOFF_THREAD, { type: 'done' } as any);
+};
 (window as any).__addLiveUserMessage = (threadId: string, id: string, content: string) => {
   const thread = manager.getThread(threadId);
   if (!thread) throw new Error(`Thread not found: ${threadId}`);
