@@ -331,7 +331,8 @@ Claude reads that, hands back a ref, and acts on it. No coordinate guessing, no 
 |---|---|
 | `browser_navigate` | Open a URL and return a snapshot |
 | `browser_snapshot` | Re-read the current page |
-| `browser_read_text` | Visible page prose, for when the snapshot isn't enough |
+| `browser_read_text` | Visible page prose (up to ~20,000 characters), for when the snapshot isn't enough |
+| `browser_save_page` | Save the page's text or HTML to a temp file and return its path and size, for pages too large to read inline (e.g. raw JSON). Explore it with `jq`, `grep` or Read; files are deleted when the session or thread ends |
 | `browser_click` / `browser_type` | Act on a ref |
 | `browser_screenshot` | PNG of the current page |
 | `browser_status` | How many sessions are open, and the cap |

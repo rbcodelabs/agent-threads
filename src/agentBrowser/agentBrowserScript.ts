@@ -226,6 +226,53 @@ export function buildSnapshotScript(refTableKey: string): string {
 }
 
 /**
+ * Visible-text walker shared by the read-text and save-page scripts.
+ *
+ * Defines `ctCollectText(maxChars)`, which returns `{ text, truncated }` with
+ * `text.length <= maxChars`. A single text node larger than the space left is
+ * included as a partial slice rather than skipped: a raw JSON document is one
+ * enormous text node inside a <pre>, and skipping it made such pages come back
+ * empty even though they rendered fine.
+ */
+function textWalker(): string {
+  return `
+    function ctCollectText(maxChars) {
+      var root = document.body;
+      if (!root) return { text: '', truncated: false };
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode: function (node) {
+          var parent = node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+          var tag = parent.tagName;
+          if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE') {
+            return NodeFilter.FILTER_REJECT;
+          }
+          if (!ctVisible(parent)) return NodeFilter.FILTER_REJECT;
+          return node.nodeValue && node.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
+      });
+      var parts = [];
+      var total = 0;
+      var truncated = false;
+      var node;
+      while ((node = walker.nextNode())) {
+        var text = node.nodeValue.replace(/\\s+/g, ' ').trim();
+        if (!text) continue;
+        if (total + text.length > maxChars) {
+          var remaining = maxChars - total;
+          if (remaining > 0) parts.push(text.slice(0, remaining));
+          truncated = true;
+          break;
+        }
+        parts.push(text);
+        total += text.length + 1;
+      }
+      return { text: parts.join('\\n'), truncated: truncated };
+    }
+  `;
+}
+
+/**
  * Build the page-text script.
  *
  * Kept separate from the snapshot so an ordinary act loop never carries page
@@ -239,41 +286,114 @@ export function buildSnapshotScript(refTableKey: string): string {
 export function buildReadTextScript(): string {
   return `(function () {
     ${helpers()}
-    var MAX_CHARS = ${MAX_TEXT_CHARS};
-    var root = document.body;
-    if (!root) {
-      return { url: location.href, title: document.title || '', origin: location.origin, truncated: false, text: '' };
-    }
-    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode: function (node) {
-        var parent = node.parentElement;
-        if (!parent) return NodeFilter.FILTER_REJECT;
-        var tag = parent.tagName;
-        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE') {
-          return NodeFilter.FILTER_REJECT;
-        }
-        if (!ctVisible(parent)) return NodeFilter.FILTER_REJECT;
-        return node.nodeValue && node.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-      }
-    });
-    var parts = [];
-    var total = 0;
-    var truncated = false;
-    var node;
-    while ((node = walker.nextNode())) {
-      var text = node.nodeValue.replace(/\\s+/g, ' ').trim();
-      if (!text) continue;
-      if (total + text.length > MAX_CHARS) { truncated = true; break; }
-      parts.push(text);
-      total += text.length + 1;
-    }
+    ${textWalker()}
+    var collected = ctCollectText(${MAX_TEXT_CHARS});
     return {
       url: location.href,
       title: document.title || '',
       origin: location.origin,
-      truncated: truncated,
-      text: parts.join('\\n')
+      truncated: collected.truncated,
+      text: collected.text
     };
+  })()`;
+}
+
+/** Metadata returned by the stash script. The content itself stays in the guest. */
+export interface RawStashMeta {
+  url: string;
+  title: string;
+  origin: string;
+  contentType: string;
+  length: number;
+  truncated: boolean;
+}
+
+export type SaveFormat = 'text' | 'html';
+
+/**
+ * Per-save name for the guest-side stash.
+ *
+ * Randomised for the same reason as the ref table: a hostile page must not be
+ * able to pre-seed a known global and have its own string saved as the page.
+ */
+export function makeStashKey(random: () => number = Math.random): string {
+  const suffix = Math.floor(random() * 0xffffffff).toString(36);
+  return `__ctAgentBrowserSave_${suffix}`;
+}
+
+/**
+ * Build the stash script.
+ *
+ * Builds the page content inside the guest, keeps it under `window[key]`, and
+ * returns only metadata. The content then crosses the bridge in bounded chunks
+ * (see buildChunkScript) so no single structured clone is large enough to
+ * threaten the host renderer.
+ *
+ * `text` is the rendered visible text; for JSON and plain-text documents it is
+ * the raw document text instead, so a saved JSON page is still valid JSON.
+ * `html` is the serialised document element.
+ */
+export function buildStashScript(key: string, format: SaveFormat, maxChars: number): string {
+  return `(function () {
+    ${helpers()}
+    ${textWalker()}
+    var KEY = ${JSON.stringify(key)};
+    var FORMAT = ${JSON.stringify(format)};
+    var MAX = ${JSON.stringify(maxChars)};
+    var contentType = document.contentType || '';
+    var content = '';
+    var truncated = false;
+    if (FORMAT === 'html') {
+      content = document.documentElement ? document.documentElement.outerHTML : '';
+      if (content.length > MAX) { content = content.slice(0, MAX); truncated = true; }
+    } else if (/json|text\\/plain/i.test(contentType) && document.body) {
+      var pre = document.querySelector('body > pre');
+      content = (pre || document.body).textContent || '';
+      if (content.length > MAX) { content = content.slice(0, MAX); truncated = true; }
+    } else {
+      var collected = ctCollectText(MAX);
+      content = collected.text;
+      truncated = collected.truncated;
+    }
+    window[KEY] = content;
+    return {
+      url: location.href,
+      title: document.title || '',
+      origin: location.origin,
+      contentType: contentType,
+      length: content.length,
+      truncated: truncated
+    };
+  })()`;
+}
+
+/**
+ * Build a chunk-read script: returns one slice of the stash, or null if the
+ * stash is gone (the page navigated or reloaded).
+ *
+ * The slice never ends on a lone high surrogate, so a chunk boundary cannot
+ * split an astral character and corrupt it when the host encodes to UTF-8. The
+ * host advances by the length actually returned, not the size requested.
+ */
+export function buildChunkScript(key: string, offset: number, size: number): string {
+  return `(function () {
+    var content = window[${JSON.stringify(key)}];
+    if (typeof content !== 'string') return null;
+    var start = ${JSON.stringify(offset)};
+    var end = Math.min(start + ${JSON.stringify(size)}, content.length);
+    if (end < content.length && end - start > 1) {
+      var last = content.charCodeAt(end - 1);
+      if (last >= 0xD800 && last <= 0xDBFF) end -= 1;
+    }
+    return content.slice(start, end);
+  })()`;
+}
+
+/** Build the script that drops the stash. Idempotent. */
+export function buildReleaseScript(key: string): string {
+  return `(function () {
+    try { delete window[${JSON.stringify(key)}]; } catch (e) { window[${JSON.stringify(key)}] = undefined; }
+    return true;
   })()`;
 }
 

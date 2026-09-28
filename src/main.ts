@@ -1344,12 +1344,15 @@ export default class ClaudeThreadsPlugin extends Plugin {
       // onunload() is not awaited and already sits behind an up-to-10s
       // gracefulShutdown wait. A guest must not survive that long past unload.
       this.register(() => this.agentBrowser?.destroy());
+      // Pages saved by browser_save_page are scratch files in the OS temp dir.
+      this.register(() => this.saveSinkModule().removeAllSavedPagesSync());
 
       // A deleted thread's guest goes with it. emit() dispatches to listeners
       // synchronously, so this reclaims inside deleteThread's own call stack.
       this.register(this.manager.subscribe((threadId, event) => {
         if (event.type === 'thread_deleted') {
           this.agentBrowser?.destroyForThread(threadId, 'thread-delete');
+          void this.saveSinkModule().createFsSaveSink().removeDir(threadId).catch(() => undefined);
         }
       }));
 
@@ -3075,7 +3078,15 @@ export default class ClaudeThreadsPlugin extends Plugin {
       threadId,
       pool: this.agentBrowser,
       getSecrets: () => this.collectSecretValues(),
+      // Only reached when the pool is capable, i.e. desktop, where fs exists.
+      saveSink: this.saveSinkModule().createFsSaveSink(),
     });
+  }
+
+  /** Lazy, like ThreadBrowser: the sink module reaches for `fs`, which mobile lacks. */
+  private saveSinkModule(): typeof import('./agentBrowser/agentBrowserSaveSink') {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('./agentBrowser/agentBrowserSaveSink') as typeof import('./agentBrowser/agentBrowserSaveSink');
   }
 
   async activateAgentView(): Promise<void> {
