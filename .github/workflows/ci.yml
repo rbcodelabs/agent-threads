@@ -35,3 +35,36 @@ jobs:
       # deleted and re-cut; failing here is just a normal red check.
       - name: Verify versions.json is in sync
         run: npm run check-versions
+
+  screenshots:
+    name: Screenshot Tests
+    runs-on: ubuntu-latest
+    # The canonical renderer. Baselines are generated in this exact image
+    # (npm run test:screenshots:remote:update), so CI and the baseline host
+    # share one browser build and one font set. The tag MUST equal the
+    # exactly-pinned @playwright/test version in package.json — a mismatch
+    # fails fast with "Executable doesn't exist" rather than drifting.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
+      options: --ipc=host
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The image ships Node 24, matching the Unit Tests job.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run screenshot tests
+        run: npm run test:screenshots
+
+      - name: Upload Playwright report and diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-screenshots-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14

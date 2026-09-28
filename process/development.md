@@ -49,14 +49,16 @@ Branch naming conventions:
 
 ## Quality Gate (Before Every Push)
 
-Run all three checks before pushing. The PostToolUse hook will remind you if you forget.
+Run these checks before pushing. The PostToolUse hook will remind you if you forget.
 
 ```bash
 cd <worktree-path>
-npx tsc --noEmit          # type-check (esbuild strips types silently — TSC catches the real errors)
-npm test                  # unit tests via vitest
-npm run test:screenshots  # Playwright screenshot tests (2 intentional skips are normal)
+npx tsc --noEmit                 # type-check (esbuild strips types silently — TSC catches the real errors)
+npm test                         # unit tests via vitest
+npm run test:screenshots:remote  # screenshots on dev-builder (2 intentional skips are normal)
 ```
+
+Typecheck and unit tests can run locally or on dev-builder (`npm ci && npx tsc --noEmit && npm test`) when the Mac is loaded. **Do not run `npm run test:screenshots` on the Mac** — see [Screenshot Tests](#screenshot-tests). Skipping the remote run and trusting the PR's "Screenshot Tests" CI job is acceptable.
 
 Pass criteria: zero type errors, all unit tests green, screenshot count unchanged (or new tests added for new UI).
 
@@ -155,9 +157,55 @@ When adding a new MCP tool or modifying serialization logic, add a corresponding
 ## Screenshot Tests
 
 ```bash
-npm run test:screenshots          # verify snapshots unchanged
-npm run test:screenshots:update   # regenerate snapshots (run before a release)
+# From a Mac (the normal case) — runs on dev-builder in the CI container image
+npm run test:screenshots:remote          # verify snapshots unchanged
+npm run test:screenshots:remote:update   # regenerate snapshots, copied back into this checkout
+npm run test:screenshots:remote -- -g "main view"   # extra Playwright args pass through
+
+# Already on Linux inside the Playwright image (CI does this)
+npm run test:screenshots
+npm run test:screenshots:update
 ```
+
+### Canonical renderer: Linux, in the pinned Playwright container
+
+Baselines are **platform-neutral** (`snapshotPathTemplate` in `playwright.config.ts`
+drops the `{platform}` suffix: `main-view-chromium.png`, not
+`main-view-chromium-darwin.png`) and are rendered on Linux inside
+`mcr.microsoft.com/playwright:v<version>-noble`, where `<version>` is the
+exactly-pinned `@playwright/test` in `package.json`. The CI job "Screenshot
+Tests" (`.github/workflows/ci.yml`) runs in that same image, so dev-builder and
+CI share one browser build and one font set, and the tight `maxDiffPixels: 25`
+holds across them.
+
+**A Mac render will not match the baselines** — different rasteriser, hinting
+and antialiasing. That is expected, not a regression. So:
+
+- **Never run the suite on the Mac as a gate, and never commit baselines rendered on a Mac** — they fail CI.
+- `scripts/screenshots-remote.mts` rsyncs the worktree (uncommitted edits included)
+  to `dev-builder` (override with `SCREENSHOT_HOST`), runs the suite there under
+  `podman` in the pinned image, and copies back either the regenerated baselines
+  + `docs/*.png` (`:update`) or `playwright-report/` + `test-results/` on failure.
+- If dev-builder is unreachable (e.g. off the home LAN), a local
+  `npm run test:screenshots` is **advisory only**; say so in the PR and rely on
+  the PR's CI job, which uploads `playwright-screenshots-report` (report + diffs)
+  as an artifact on failure.
+- **Bumping `@playwright/test`:** keep it exact (no `^`), and change the image tag
+  in `ci.yml` in the same PR, then regenerate every baseline with
+  `test:screenshots:remote:update`. The remote script derives its tag from
+  `package.json` automatically.
+
+### Fonts
+
+`test/harness/fonts.css` bundles the fonts from exactly-pinned
+`@fontsource-variable/*` devDependencies (SIL OFL 1.1) so nothing falls back to a
+machine font: Inter for `--font-interface` / `--font-text` / `body` / form
+controls, JetBrains Mono for `--font-monospace`. Assistant prose is set in
+`ui-serif, Georgia, …` by the plugin's own `styles.css` (real design, not a
+harness fallback); the harness shadows `Georgia` with bundled Source Serif 4 so
+that prose renders identically too. Every harness HTML page links `fonts.css`
+first, before `obsidian-base.css` and `styles.css`. `settleView()` waits on
+`document.fonts.ready` before and after its scroll-stability loop.
 
 Located in `test/screenshots/`. Uses Playwright against a headless harness in `test/harness/`.
 Snapshots are committed to `test/screenshots/snapshots/` and copied to `docs/*.png` on update.

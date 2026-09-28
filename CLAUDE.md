@@ -16,7 +16,7 @@ Full step-by-step guides live in `process/` (also available as an Obsidian vault
 
 **Before any code change:** create a worktree — never edit the main checkout directly.
 
-**Before every push:** invoke the `pr-checklist` skill (`Skill: "pr-checklist"`). It runs `npx tsc --noEmit && npm test && npm run test:screenshots` and verifies the full definition-of-done before opening a PR or pushing to a branch under review.
+**Before every push:** invoke the `pr-checklist` skill (`Skill: "pr-checklist"`). Gate: `npx tsc --noEmit && npm test`, locally or on dev-builder when the Mac is loaded. **Do not run the screenshot suite on the Mac** — baselines are Linux renders and a Mac render never matches. Run screenshots on dev-builder with `npm run test:screenshots:remote` (`:remote:update` to regenerate), or trust the PR's "Screenshot Tests" CI job. If dev-builder is unreachable, a local Mac run is advisory only. See "Screenshot Tests" in `process/development.md`.
 
 **Before deploying a dev build to the live vault:** commit and push the branch first (draft PR is fine). The next BRAT release update overwrites the installed plugin — an uncommitted dev build is the only copy of the work and it silently evaporates. See "Dev Builds in the Live Vault" in `process/development.md`.
 
