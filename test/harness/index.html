@@ -24,9 +24,6 @@
       --interactive-accent-hover: #6d28d9;
       --font-ui-small: 13px;
       --font-ui-smaller: 11px;
-      /* Avoid a process-dependent fallback from the PostScript-only
-         SFMono-Regular name in headless Chromium screenshot runs. */
-      --font-monospace: ui-monospace, monospace;
       --color-red: #e06c75;
       --color-yellow: #e5c07b;
       --code-background: #282c34;
@@ -44,7 +41,6 @@
       align-items: center;
       justify-content: center;
       min-height: 100vh;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     }
 
     #app {
@@ -119,6 +115,7 @@
     }
   </style>
 
+  <link rel="stylesheet" href="./fonts.css" />
   <link rel="stylesheet" href="./obsidian-base.css" />
   <link rel="stylesheet" href="../../styles.css" />
 </head>

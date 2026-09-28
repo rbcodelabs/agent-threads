@@ -254,6 +254,27 @@ export const inlineContentMessages: ChatMessage[] = [
   },
 ];
 
+// Opt-in horizontal-overflow stress fixture (long unbroken token, wide code
+// block, wide table, long inline code); kept out of fixtureThreads so it does
+// not change unrelated thread-list screenshots. Used by the mobile overflow
+// regression test in mobile.spec.ts.
+export const overflowStressMessages: ChatMessage[] = [
+  {
+    id: 'overflow-user', role: 'user', timestamp: T3,
+    content: 'Why does https://example.com/api/v2/really/long/path/segments/that/never/break?query=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa fail?',
+  },
+  {
+    id: 'overflow-assistant', role: 'assistant', timestamp: T3 + 12000, cost: 0.0012,
+    content: [
+      'The request fails because the signed token is rejected: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjQyLCJyb2xlIjoiYWRtaW4ifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c is expired.',
+      'Check the path `src/middleware/authentication/verifyAuthorizationHeaderAndDecodeToken.ts` first.',
+      '```ts\nexport function verifyAuth(token: string): Payload { return jwt.verify(token, process.env.JWT_SECRET!, { algorithms: [\'HS256\'], clockTolerance: 30 }) as Payload; }\n```',
+      '| Endpoint | Method | Status | Latency p50 | Latency p99 | Error rate | Owner |\n|---|---|---|---|---|---|---|\n| /api/v2/users/authenticate | POST | 401 | 120ms | 940ms | 12.5% | platform-identity |\n| /api/v2/sessions/refresh | POST | 200 | 80ms | 310ms | 0.2% | platform-identity |',
+      'Rotate the secret and redeploy.',
+    ].join('\n\n'),
+  },
+];
+
 // ─── Thread: inline visualization ────────────────────────────────────────────
 // Used by ui.spec.ts's "inline visualization card" test. Codex's `visualize`
 // skill emits a canonical wrapped content reference on its own line where the

@@ -32,4 +32,12 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium' }],
   snapshotDir: './test/screenshots/snapshots',
+  // No {platform} segment: baselines are platform-neutral and Linux is the
+  // single canonical renderer (CI runs in the official Playwright container;
+  // see process/development.md → Screenshot Tests). A Mac render will not
+  // match these baselines — that is expected, not a regression.
+  snapshotPathTemplate: '{snapshotDir}/{testFileDir}/{testFileName}-snapshots/{arg}{-projectName}{ext}',
+  // Keep the HTML report (with expected/actual/diff images) for CI artifacts
+  // without auto-opening a browser on local failures.
+  reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
 });

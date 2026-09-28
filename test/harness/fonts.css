@@ -1,0 +1,61 @@
+/*
+ * Deterministic fonts for the screenshot harness.
+ *
+ * Without this file every harness page fell back to whatever the machine had
+ * installed (-apple-system on a Mac, DejaVu/Liberation on Linux), so the same
+ * baseline rendered differently on every OS and looked nothing like Obsidian.
+ * Every family below is bundled from an exactly-pinned @fontsource-variable
+ * devDependency (SIL OFL 1.1), loaded over file:// by relative path.
+ *
+ * Link this file FIRST in every harness page — before obsidian-base.css and
+ * styles.css — so the Obsidian font variables exist before anything reads them.
+ */
+
+@import url('../../node_modules/@fontsource-variable/inter/index.css');
+@import url('../../node_modules/@fontsource-variable/inter/wght-italic.css');
+@import url('../../node_modules/@fontsource-variable/jetbrains-mono/index.css');
+@import url('../../node_modules/@fontsource-variable/jetbrains-mono/wght-italic.css');
+
+/*
+ * styles.css hardcodes `ui-serif, Georgia, ...` for assistant prose — that is
+ * the plugin's real design, not a harness fallback, so the harness keeps it.
+ * `ui-serif` only resolves on macOS; on Linux (the canonical renderer) the
+ * stack falls through to Georgia, which is not installed there. Shadow the
+ * name with a bundled serif so the prose renders the same everywhere.
+ */
+@font-face {
+  font-family: 'Georgia';
+  font-style: normal;
+  font-weight: 200 900;
+  src: url('../../node_modules/@fontsource-variable/source-serif-4/files/source-serif-4-latin-wght-normal.woff2') format('woff2-variations');
+}
+
+@font-face {
+  font-family: 'Georgia';
+  font-style: italic;
+  font-weight: 200 900;
+  src: url('../../node_modules/@fontsource-variable/source-serif-4/files/source-serif-4-latin-wght-italic.woff2') format('woff2-variations');
+}
+
+:root {
+  /* The Obsidian font variables the plugin's styles.css reads. */
+  --font-default: 'Inter Variable', sans-serif;
+  --font-interface: 'Inter Variable', sans-serif;
+  --font-text: 'Inter Variable', sans-serif;
+  --font-monospace-default: 'JetBrains Mono Variable', monospace;
+  --font-monospace: 'JetBrains Mono Variable', monospace;
+}
+
+body {
+  font-family: var(--font-interface);
+}
+
+/* Chromium gives form controls the system UI font instead of inheriting it.
+   Obsidian's app.css resets these to inherit; do the same so no control
+   falls back to a machine font. */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}

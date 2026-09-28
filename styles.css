@@ -4770,11 +4770,19 @@
   font-size: var(--font-ui-small);
   line-height: 1.5;
   word-break: break-word;
-  /* min-width:0 prevents flexbox from blowing out max-width constraints.
+  overflow-wrap: anywhere; /* long unbroken tokens (URLs, hashes, paths) wrap */
+  /* .ct-mobile-message is a column flexbox with align-items: flex-start/end, so
+     this element is sized on the cross axis to fit-content — which is floored
+     at its min-content width, i.e. the longest unwrappable line of a <pre> or
+     a nowrap table. min-width:0 only relaxes the main (vertical) axis and does
+     nothing here. max-width:100% caps the content at the message width, so the
+     pre's own max-width:100% + overflow-x:auto (and .ct-mobile-table-scroll)
+     resolve against the real column width and scroll inside themselves.
      overflow is intentionally NOT set to hidden — doing so clips the scroll
-     region of .ct-mobile-table-scroll wrappers, making tables unscrollable.
-     Code blocks are self-contained via their own max-width:100% + overflow-x:auto. */
+     region of .ct-mobile-table-scroll wrappers, making tables unscrollable. */
   min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .ct-mobile-message-user .ct-mobile-message-content {
