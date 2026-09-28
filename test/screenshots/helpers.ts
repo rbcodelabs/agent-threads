@@ -22,6 +22,10 @@ import { expect, type Page, type Locator } from '@playwright/test';
  */
 export async function settleView(page: Page): Promise<void> {
   await page.evaluate(async () => {
+    // The bundled harness fonts (test/harness/fonts.css) load lazily per
+    // unicode-range subset, and a late swap reflows text. Wait for them
+    // before measuring scroll stability, not only after.
+    await (document as Document & { fonts?: FontFaceSet }).fonts?.ready;
     const scrollers = [
       document.scrollingElement,
       ...Array.from(document.querySelectorAll('*')),
