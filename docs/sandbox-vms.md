@@ -67,3 +67,55 @@ node scripts/smoke-sandbox-vm.mjs
 
 The smoke script uses disposable fixtures and exercises the real runtime. Unit
 tests mock the runtime; screenshot tests cover settings, not live VM execution.
+
+## Running the Claude harness inside the VM (ADR-0015)
+
+By default, using Agent Threads requires the `claude` CLI installed on the
+host. Per ADR-0015, the plugin can instead run a thread's Claude harness
+process **inside its sandbox container** — so a supported Mac only needs
+Apple's `container` runtime, not a host `claude` install. This is **Claude
+only** for now; Codex and OpenCode still spawn on the host regardless of this
+setting (OpenCode in particular has an unresolved MCP-loopback-bridge gap —
+see the ADR).
+
+Opt in by building a second, separate image:
+
+```sh
+container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/
+```
+
+This image is deliberately a different tag from `claude-threads-coding:1` — it
+adds the native Claude Code CLI (`curl -fsSL https://claude.ai/install.sh | bash`)
+on top of the same base. Building it is the entire opt-in step: **shipping
+this feature changes nothing for any existing user until they build this
+image**, because `harnessVmMode: 'auto'`'s capability check includes "does
+this image exist," which is false until you build it.
+
+Configure under Settings → Tools, next to the sandbox VM image/network
+controls:
+
+| Setting | Behavior |
+| --- | --- |
+| `harnessVmMode: 'auto'` (default) | Routes into the VM only when the platform supports it (macOS on Apple silicon), the container CLI probes successfully, and the harness image exists. Silently falls back to host-local spawn if any of those fail. |
+| `harnessVmMode: 'always'` | Forces VM routing. Surfaces a clear error — never a silent host fallback — if any prerequisite is missing. Useful for testing, or when you want the isolation guarantee enforced. |
+| `harnessVmMode: 'never'` | Exactly today's host-local spawn. The rollback lever. |
+| Harness VM image | The image tag to route into. Blank falls back to `claude-threads-harness:1`. |
+
+Settings shows a live readiness check next to these controls (CLI probe +
+image existence), so "why isn't this using the VM" is self-diagnosing.
+
+**One container per thread, shared.** A VM-routed thread's harness process and
+its `enter_vm`/`vm_exec`/`exit_vm` tools use the *same* container — the
+harness is just another thing `container exec` runs inside it. This means a
+`vm_exec` command now runs alongside a process holding live Anthropic
+credentials in its environment; those credentials are passed via `--env` flags
+scoped to the harness's own `container exec` invocation only, never to
+`container run`, so an ordinary `vm_exec ; env` does not print them — but be
+aware the boundary is narrower than an agent-only sandbox. `exit_vm` refuses to
+remove a container the harness is still attached to; it is torn down
+automatically when the thread is deleted or archived, not at ordinary session
+close (so a lingering or quickly-restarted session doesn't pay container-start
+latency every turn).
+
+A mode change or a freshly-built image takes effect on a thread's *next* fresh
+session start (harness switch, restart, or new thread) — never mid-session.

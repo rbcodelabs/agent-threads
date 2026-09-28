@@ -92,6 +92,13 @@ export interface ClaudeHarnessOptions {
     plugins?: import('@anthropic-ai/claude-agent-sdk').SdkPluginConfig[];
     agents?: Record<string, import('@anthropic-ai/claude-agent-sdk').AgentDefinition>;
   };
+  /**
+   * ADR-0015: inputs `ThreadSession.start()` uses to decide, once per session
+   * start, whether this thread's Claude CLI process runs inside its sandbox
+   * container instead of on the host. Absent or `mode: 'never'` means
+   * host-local spawn — today's behavior, unchanged.
+   */
+  vm?: import('./harnessVmRouting').ClaudeVmRoutingInputs;
 }
 
 /** Codex-specific transport settings; kept separate as its app-server grows. */

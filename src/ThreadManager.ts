@@ -20,6 +20,8 @@ import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
 import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
+import { containerNameForThread, SandboxVmManager, type VmCommandRunner } from './sandboxVm';
+import { DEFAULT_HARNESS_VM_IMAGE, type ClaudeVmRoutingInputs } from './harnessVmRouting';
 import type { App } from 'obsidian';
 import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun } from './types';
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
@@ -161,6 +163,20 @@ export class ThreadManager {
   private sessions: Map<string, HarnessSession> = new Map();
   /** Threads whose live session must be rebuilt at the next safe turn boundary (see requestSessionRestart). */
   private sessionRestartRequested = new Set<string>();
+  /**
+   * ADR-0015: one `SandboxVmManager` per thread, SHARED between this thread's
+   * `enter_vm`/`vm_exec`/`exit_vm` MCP tools and its Claude harness's own VM
+   * routing. Sharing the instance (rather than each side building its own
+   * against the same deterministic container name) is what lets `enter()`
+   * recognize "this container already exists because the harness started
+   * it" instead of reporting it as a stray leftover from an earlier session
+   * — see `SandboxVmManager.enter()`/`ensureHarnessContainer()`'s origin
+   * tracking. Entries persist for the thread's lifetime; torn down only at
+   * thread deletion/archive (`deleteThread()`), never at session `close()`.
+   */
+  private sandboxVmManagers: Map<string, SandboxVmManager> = new Map();
+  /** Test seam: overrides the real `container` CLI for every SandboxVmManager this instance creates. Production leaves this undefined (the real runner). */
+  vmCommandRunner: VmCommandRunner | undefined = undefined;
   /**
    * Initialization context cannot be mutated on a live Claude or Codex
    * adapter. Track the goal revision each adapter was built with and retire it
@@ -707,6 +723,24 @@ export class ThreadManager {
     if (session) {
       session.close();
       this.sessions.delete(id);
+    }
+    // ADR-0015 §3: a harness-hosted sandbox container is deliberately NOT torn
+    // down by session.close() above (a lingering session or quick restart
+    // shouldn't pay container-start latency every turn) — thread deletion is
+    // its actual lifecycle owner, mirroring docs/sandbox-vms.md's existing
+    // "call exit_vm before deleting the thread" guidance for agent-started
+    // containers. Neither case was wired before this change: deleteThread()
+    // had no sandbox VM teardown call at all (verified while implementing
+    // this ADR — see the PR description's Open Question #4 answer). Runs
+    // fire-and-forget: deleteThread() is synchronous and this is best-effort
+    // cleanup, never a correctness gate — a stray container is one
+    // `container rm -f` away regardless.
+    const vmManager = this.sandboxVmManagers.get(id);
+    if (vmManager) {
+      this.sandboxVmManagers.delete(id);
+      void vmManager.exit({ force: true, allowHarnessOwned: true }).catch((err) => {
+        console.error(`[ClaudeThreads] Failed to tear down sandbox VM for deleted thread ${id}:`, err);
+      });
     }
     this.cancelPendingGoalContext(id);
     this.pendingToolResultImages.delete(id);
@@ -1902,6 +1936,43 @@ export class ThreadManager {
   }
 
   /**
+   * Shared per-thread sandbox VM manager (ADR-0015 §3) — see the field's own
+   * doc comment for why sharing the instance matters. Created lazily on
+   * first access and reused for the thread's whole lifetime.
+   */
+  getSandboxVmManager(threadId: string): SandboxVmManager {
+    let manager = this.sandboxVmManagers.get(threadId);
+    if (!manager) {
+      manager = new SandboxVmManager({
+        containerName: () => containerNameForThread(threadId),
+        run: this.vmCommandRunner,
+      });
+      this.sandboxVmManagers.set(threadId, manager);
+    }
+    return manager;
+  }
+
+  /**
+   * ADR-0015 VM routing inputs for this thread's Claude harness, or undefined
+   * for host-local spawn (today's behavior, unchanged) — either because this
+   * thread isn't running the Claude harness, or `harnessVmMode` is `'never'`.
+   * The actual capability check (platform/probe/image-exists) and container
+   * start happen once, lazily, inside `ThreadSession.start()` — this only
+   * builds the inputs that decision needs.
+   */
+  private buildClaudeVmRoutingInputs(threadId: string, thread: Thread): ClaudeVmRoutingInputs | undefined {
+    const mode = this.settings.harnessVmMode ?? 'auto';
+    if (mode === 'never') return undefined;
+    if ((thread.agentHarness ?? 'claude') !== 'claude') return undefined;
+    return {
+      mode,
+      image: this.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE,
+      vmManager: this.getSandboxVmManager(threadId),
+      mountPath: thread.cwd,
+    };
+  }
+
+  /**
    * Builds the full options needed to open (or restart) a thread's
    * `ThreadSession`: cwd validation/repair, additional directories, the
    * per-thread system-prompt context, MCP servers, secret env, and the
@@ -1994,6 +2065,7 @@ export class ThreadManager {
         mcpServers: sessionMcpServers,
         disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
         sessionOptions: this.buildSessionOptions(thread, agentProfiles),
+        vm: this.buildClaudeVmRoutingInputs(threadId, thread),
       },
       codex: {
         computerUseEnabled: this.settings.codexComputerUseEnabled === true,

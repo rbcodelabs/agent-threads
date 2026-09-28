@@ -444,3 +444,39 @@ describe('sandbox VM tools — per-thread isolation', () => {
     expect(first.payload.error).not.toBe(second.payload.error);
   });
 });
+
+// ── ADR-0015: sharing a SandboxVmManager with the harness's own VM routing ──
+
+describe('sandbox VM tools — shared SandboxVmManager (ADR-0015 §3)', () => {
+  it('enter_vm attaches to a container the harness already started, instead of reporting a collision', async () => {
+    const runner = makeRunner(CLI_OK_NO_CONTAINER);
+    const { SandboxVmManager } = await import('../../src/sandboxVm');
+    const shared = new SandboxVmManager({ containerName: () => NAME, run: runner.run });
+    await shared.ensureHarnessContainer({ image: 'claude-threads-harness:1', mountPath: MOUNT, network: 'default' });
+
+    const { enter } = vmTools({ sandboxVmManager: shared });
+    const result = await call(enter, {});
+
+    expect(result.isError).toBe(false);
+    expect(result.payload.containerName).toBe(NAME);
+  });
+
+  it('exit_vm refuses to remove a container the harness owns', async () => {
+    const runner = makeRunner(CLI_OK_NO_CONTAINER);
+    const { SandboxVmManager } = await import('../../src/sandboxVm');
+    const shared = new SandboxVmManager({ containerName: () => NAME, run: runner.run });
+    await shared.ensureHarnessContainer({ image: 'claude-threads-harness:1', mountPath: MOUNT, network: 'default' });
+
+    const { exit } = vmTools({ sandboxVmManager: shared });
+    const result = await call(exit, {});
+
+    expect(result.isError).toBe(true);
+    expect(result.payload.error).toContain('hosting its harness process');
+  });
+
+  it('without a shared manager, each call still gets its own instance (existing behavior preserved)', async () => {
+    const { enter } = vmTools({ vmCommandRunner: makeRunner(CLI_OK_NO_CONTAINER).run });
+    const result = await call(enter, {});
+    expect(result.isError).toBe(false);
+  });
+});

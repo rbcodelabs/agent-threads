@@ -16,6 +16,8 @@ import type { McpServerEntry } from './mcpServerStore';
 // See test/unit/bundle-safety.test.ts.
 import { mcpRegistrationSchema } from './mcpServerStore';
 import { classifyScheduledItems, describeScheduledExecution, formatNextOccurrence } from './scheduledWorkView';
+import { SandboxVmManager } from './sandboxVm';
+import { checkHarnessVmCapability, DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
 
 // View-type string constants, mirrored as local literals (see main.ts) so referencing
 // them never triggers a static import of the desktop-only KanbanView/AgentDashboard
@@ -1643,6 +1645,65 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
+
+    new Setting(containerEl)
+      .setName('Run harness inside sandbox VM')
+      .setClass('ct-sandbox-setting')
+      .setDesc(
+        'Runs a thread\'s Claude CLI process inside its sandbox container instead of on the host (ADR-0015). '
+        + '"Auto" only routes into the VM when the container runtime, a probe, and the harness image are all '
+        + 'ready — everyone else sees no change until they build that image (see below). "Always" forces VM '
+        + 'routing and errors clearly instead of silently falling back if anything is missing. "Never" is '
+        + 'today\'s host-local spawn, unchanged.',
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('auto', 'Auto (default)')
+          .addOption('always', 'Always — error if unavailable')
+          .addOption('never', 'Never — host-local spawn only')
+          .setValue(this.plugin.settings.harnessVmMode ?? 'auto')
+          .onChange(async (value) => {
+            this.plugin.settings.harnessVmMode = value as PluginSettings['harnessVmMode'];
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+            this.display();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Harness VM image')
+      .setClass('ct-sandbox-setting')
+      .setDesc(
+        'Container image the harness routes into. Build it from sandbox/Dockerfile.harness with '
+        + '`container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/` — a separate '
+        + 'image tag from the sandbox VM image above, by design (ADR-0015 §7). Leave empty for claude-threads-harness:1.',
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('claude-threads-harness:1')
+          .setValue(this.plugin.settings.harnessVmImage ?? '')
+          .onChange(async (value) => {
+            this.plugin.settings.harnessVmImage = value.trim();
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    if ((this.plugin.settings.harnessVmMode ?? 'auto') !== 'never') {
+      const diagnosticSetting = new Setting(containerEl)
+        .setName('Harness VM readiness')
+        .setClass('ct-sandbox-setting')
+        .setDesc('Checking…');
+      const image = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
+      const vmManager = new SandboxVmManager({ containerName: () => 'claude-threads-settings-diagnostic' });
+      void checkHarnessVmCapability({ vmManager, image }).then((capability) => {
+        diagnosticSetting.setDesc(
+          capability.capable
+            ? `Ready — threads on this harness will route into ${image}.`
+            : `Not ready: ${capability.reason}`,
+        );
+      });
+    }
 
     new Setting(containerEl)
       .setName('Claude binary path')

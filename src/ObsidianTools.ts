@@ -285,9 +285,19 @@ export interface ObsidianMcpServerOptions {
   /**
    * Overrides how sandbox VM commands are executed. Tests inject a fake so
    * command construction and lifecycle transitions are exercised without a
-   * macOS 26 container runtime.
+   * macOS 26 container runtime. Ignored when `sandboxVmManager` is provided.
    */
   vmCommandRunner?: VmCommandRunner;
+  /**
+   * ADR-0015 §3: the SAME `SandboxVmManager` instance this thread's Claude
+   * harness uses for its own VM routing, so `enter_vm`/`vm_exec`/`exit_vm`
+   * see the container's real origin (agent-started vs. harness-owned)
+   * instead of each side tracking it separately against the same
+   * deterministic container name. Falls back to a freshly constructed
+   * manager when omitted (existing behavior, and what direct callers of
+   * `createClaudeThreadsMcpServers` in tests still get).
+   */
+  sandboxVmManager?: SandboxVmManager;
   /** Creates a persistent thread and queues its initial prompt. */
   createThread?: (params: {
     prompt: string;
@@ -1177,7 +1187,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   // container started before a plugin reload can still be found and cleaned up
   // afterwards without persisting anything on the Thread.
 
-  const vmManager = new SandboxVmManager({
+  const vmManager = options.sandboxVmManager ?? new SandboxVmManager({
     containerName: () => containerNameForThread(options.threadId ?? fallbackVmSessionId),
     run: options.vmCommandRunner,
   });

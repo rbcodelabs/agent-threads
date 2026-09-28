@@ -642,6 +642,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // needing a session restart.
           getVmImage: () => this.settings.vmImage,
           getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
+          // ADR-0015 §3: share the same per-thread SandboxVmManager this
+          // thread's Claude harness routes into, so enter_vm/vm_exec/exit_vm
+          // see the container's real origin instead of each side tracking it
+          // separately against the same deterministic container name.
+          sandboxVmManager: this.manager.getSandboxVmManager(threadId),
           onScheduleWakeup: async (delayMs: number, prompt: string, reason: string) => {
             // Durable one-shot Scheduler item instead of a bare window.setTimeout:
             // the old implementation tracked wake-ups only in an in-memory Map

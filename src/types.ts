@@ -14,6 +14,25 @@ export function isAgentHarness(value: unknown): value is AgentHarness {
   return typeof value === 'string' && (AGENT_HARNESSES as readonly string[]).includes(value);
 }
 
+/**
+ * ADR-0015: whether a thread's harness CLI process runs inside its sandbox
+ * container instead of being spawned on the host. Claude-only for now.
+ *
+ * - `'auto'` (default) — routes into the VM only when the platform supports
+ *   it, `SandboxVmManager.probe()` succeeds, and the harness image
+ *   (`harnessVmImage`) actually exists. Any current user for whom that image
+ *   doesn't exist yet sees no behavior change at all.
+ * - `'always'` — forces VM routing; surfaces a clear thrown error (no silent
+ *   host fallback) if any prerequisite is missing.
+ * - `'never'` — exactly today's host-local spawn behavior. The rollback lever.
+ */
+export type HarnessVmMode = 'auto' | 'always' | 'never';
+export const HARNESS_VM_MODES: readonly HarnessVmMode[] = ['auto', 'always', 'never'];
+
+export function isHarnessVmMode(value: unknown): value is HarnessVmMode {
+  return typeof value === 'string' && (HARNESS_VM_MODES as readonly string[]).includes(value);
+}
+
 /** Short user-facing name for a harness (undefined means a legacy Claude thread). */
 export function agentHarnessLabel(harness: AgentHarness | undefined): string {
   switch (harness) {
@@ -949,6 +968,22 @@ export interface PluginSettings {
    * `'internal'` (host-only) and `'none'` (no route) remain first-class.
    */
   vmDefaultNetwork: VmNetworkMode;
+  /**
+   * ADR-0015: whether a thread's Claude harness process runs inside its
+   * sandbox container instead of being spawned on the host. Defaults to
+   * `'auto'`, which is a no-op for any user who hasn't built
+   * `harnessVmImage` — see `HarnessVmMode`'s doc comment.
+   */
+  harnessVmMode: HarnessVmMode;
+  /**
+   * Container image the harness routes into. Built from
+   * `sandbox/Dockerfile.harness` (`container build --tag
+   * claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`) —
+   * deliberately a different tag than `vmImage`'s `claude-threads-coding:1`.
+   *
+   * Blank falls back to `claude-threads-harness:1`.
+   */
+  harnessVmImage: string;
   defaultCwd: string;
   saveThreadsToVault: boolean;
   /**
@@ -1214,6 +1249,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   worktreeRoot: '',
   vmImage: 'claude-threads-coding:1',
   vmDefaultNetwork: 'default',
+  harnessVmMode: 'auto',
+  harnessVmImage: 'claude-threads-harness:1',
   defaultCwd: '',
   saveThreadsToVault: true,
   saveRawLogs: true,

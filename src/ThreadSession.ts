@@ -21,6 +21,13 @@ export { formatToolName, getToolIcon };
 export type { SessionCallbacks, TaskTrackerEvent };
 import type { HarnessContextUsage, HarnessSessionOptions } from './HarnessSession';
 import {
+  buildHarnessSpawnArgs,
+  redactSecretsInArgv,
+  resolveClaudeVmRouting,
+  type ResolvedClaudeVmRouting,
+} from './harnessVmRouting';
+import { runnerEnv as hostRunnerEnv, VM_BINARY } from './sandboxVm';
+import {
   isTransportClosedError,
   shouldAutoRetryTransportError,
   TRANSPORT_ERROR_CONTINUATION_PROMPT,
@@ -320,8 +327,36 @@ export class ThreadSession {
       }
     };
 
+    // ADR-0015: resolve VM routing once, before opening the Query — never
+    // re-evaluated mid-session (a mode change or freshly-built image takes
+    // effect on this thread's NEXT fresh session start, not the running one).
+    // Absent `options.claude?.vm` or a resolved `{ routed: false }` both mean
+    // "spawn on the host", today's behavior, unchanged.
+    let vmRouting: ResolvedClaudeVmRouting | null = null;
+    if (options.claude?.vm && options.claude.vm.mode !== 'never') {
+      try {
+        const decision = await resolveClaudeVmRouting(options.claude.vm);
+        if (decision.routed) vmRouting = decision.routing;
+      } catch (vmErr) {
+        // 'always' mode's explicit no-silent-fallback contract: surface the
+        // error instead of quietly spawning on the host.
+        console.error('[ClaudeThreads] ThreadSession VM routing failed:', vmErr);
+        this.channelEnded = true;
+        callbacks.onError(vmErr instanceof Error ? vmErr : new Error(String(vmErr)));
+        return;
+      }
+    }
+
+    // Minimal, explicit env for the containerized case — deliberately NOT a
+    // `...process.env` spread (ADR-0015 §4's hard requirement: forwarding the
+    // full host environment into the container would leak unrelated host
+    // secrets to anything else that runs there, including a `vm_exec` call in
+    // this same shared container). The host-spawn path keeps process.env
+    // exactly as before.
+    const todoToolsEnv = { CLAUDE_CODE_ENABLE_TODO_TOOLS: '1', ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) };
+
     const sdkOptions: Options = {
-      pathToClaudeCodeExecutable: this.claudePath,
+      pathToClaudeCodeExecutable: vmRouting ? vmRouting.containerBinaryPath : this.claudePath,
       permissionMode: options.permissionMode,
       cwd: options.cwd,
       includePartialMessages: true,
@@ -331,8 +366,26 @@ export class ThreadSession {
       // and newer models unless opted back in. The plugin's dashboard depends on them.
       // Placed after process.env (so a stray inherited value can't disable a core
       // feature) but before extra/secret env (so explicit plugin config still wins).
-      env: { ...process.env, CLAUDE_CODE_ENABLE_TODO_TOOLS: '1', ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) },
+      env: vmRouting ? todoToolsEnv : { ...process.env, ...todoToolsEnv },
     };
+    if (vmRouting) {
+      const containerName = vmRouting.containerName;
+      sdkOptions.spawnClaudeCodeProcess = ({ command, args, env, signal }) => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { spawn } = require('child_process') as typeof import('child_process');
+        const execArgs = buildHarnessSpawnArgs({ containerName, command, args, env });
+        debugLog(
+          '[ClaudeThreads] spawning containerized Claude:',
+          JSON.stringify(redactSecretsInArgv([VM_BINARY, ...execArgs], Object.values(env))),
+        );
+        // `hostRunnerEnv()` is the HOST-side env for the `container` binary
+        // itself (PATH additions so a Homebrew install resolves) — distinct
+        // from `env`, which rides `--env` flags into the container process
+        // only (see buildHarnessSpawnArgs). Never conflate the two: the host
+        // spawn env must never carry the secrets meant for the container.
+        return spawn(VM_BINARY, execArgs, { env: hostRunnerEnv(), signal });
+      };
+    }
     if (options.resume) sdkOptions.resume = options.resume;
     if (options.additionalDirectories?.length) sdkOptions.additionalDirectories = options.additionalDirectories;
     if (options.model) sdkOptions.model = options.model;
