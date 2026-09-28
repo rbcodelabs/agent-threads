@@ -18,14 +18,9 @@
 import { ItemView, WorkspaceLeaf, setIcon, setTooltip, Notice } from 'obsidian';
 
 import type { AgentBrowserPool } from './AgentBrowserPool';
-import type { AgentBrowserGuest, GuestEndReason } from './AgentBrowserGuest';
+import type { AgentBrowserGuest } from './AgentBrowserGuest';
 import { pngDataUrl } from './agentBrowserImage';
-import {
-  AgentBrowserLoginBridge,
-  createGeodeLoginBridgeDeps,
-  type PendingLoginRequest,
-} from './AgentBrowserLoginBridge';
-import { buildMouseInputEvent, mapClientPointToViewport, mapKeyboardEvent } from './agentBrowserInput';
+import { HANDOFF_PREVIEW_WIDTH, LoginHandoffController, type LoginHandoffSnapshot } from './LoginHandoffController';
 
 export const AGENT_BROWSER_VIEW_TYPE = 'claude-threads:browser-preview';
 
@@ -42,22 +37,7 @@ const ACTIVE_TICKS = 1;
 const IDLE_TICKS = 5;
 
 /** Preview frames are scaled down; this pane is for orientation, not detail. */
-const PREVIEW_WIDTH = 640;
-
-/**
- * Frame cadence while a login handoff is active (ADR-0014 §4).
- *
- * A deliberate trade of guest capture budget for responsiveness during a
- * short, bounded, human-driven window — the normal 1s/5s active/idle cadence
- * would make typing into a login form feel broken.
- */
-const HANDOFF_CAPTURE_MS = 250;
-
-/** An accepted login handoff: which thread, and the login guest now being controlled. */
-interface ActiveHandoff {
-  threadId: string;
-  guest: AgentBrowserGuest;
-}
+const PREVIEW_WIDTH = HANDOFF_PREVIEW_WIDTH;
 
 export class AgentBrowserPreviewView extends ItemView {
   private readonly getPool: () => AgentBrowserPool | null;
@@ -75,20 +55,26 @@ export class AgentBrowserPreviewView extends ItemView {
   /** Guards against overlapping captures when one is slower than the interval. */
   private capturing = false;
 
-  /** The Geode popup bridge (ADR-0014). Owned for this view's lifetime; a no-op off Geode desktop. */
-  private loginBridge: AgentBrowserLoginBridge | null = null;
-  /** A denied window.open() the user hasn't acted on yet, scoped to one thread. */
-  private pendingRequest: PendingLoginRequest | null = null;
-  /** Set once `pendingRequest`'s 30s TTL elapses, so the banner explains rather than vanishes. */
-  private pendingExpired = false;
-  /** The in-progress "take control" session, if any. */
-  private handoff: ActiveHandoff | null = null;
-  private handoffCaptureTimerId: number | null = null;
+  /**
+   * The login-handoff controller (ADR-0014). Normally the plugin-wide shared
+   * one, so the chat's session card and this pane show the same state; when
+   * none is supplied (tests, a bare view) the view owns a private one.
+   */
+  private controller: LoginHandoffController | null = null;
+  private ownsController = false;
+  private readonly getSharedController: () => LoginHandoffController | null;
+  private readonly cleanups: Array<() => void> = [];
   private readonly now: () => number;
 
-  constructor(leaf: WorkspaceLeaf, getPool: () => AgentBrowserPool | null, now: () => number = Date.now) {
+  constructor(
+    leaf: WorkspaceLeaf,
+    getPool: () => AgentBrowserPool | null,
+    getSharedController: () => LoginHandoffController | null = () => null,
+    now: () => number = Date.now,
+  ) {
     super(leaf);
     this.getPool = getPool;
+    this.getSharedController = getSharedController;
     this.now = now;
   }
 
@@ -126,12 +112,12 @@ export class AgentBrowserPreviewView extends ItemView {
       cls: 'ct-browser-login-banner-action',
       text: 'Take control',
     });
-    this.takeControlButtonEl.addEventListener('click', () => void this.takeControl());
+    this.takeControlButtonEl.addEventListener('click', () => this.takeControl());
     this.returnControlButtonEl = bannerActions.createEl('button', {
       cls: 'ct-browser-login-banner-action',
       text: 'Return control',
     });
-    this.returnControlButtonEl.addEventListener('click', () => this.returnControl('login-complete'));
+    this.returnControlButtonEl.addEventListener('click', () => this.returnControl());
     this.bannerEl.style.display = 'none';
 
     const body = root.createDiv({ cls: 'ct-browser-preview-body' });
@@ -149,7 +135,7 @@ export class AgentBrowserPreviewView extends ItemView {
     // registerInterval ties the timer to the view's lifetime, so closing the
     // leaf stops the capture loop without any explicit teardown here.
     this.registerInterval(window.setInterval(() => void this.refresh(), 1000));
-    this.startLoginBridge();
+    this.attachController();
     this.render();
   }
 
@@ -159,9 +145,12 @@ export class AgentBrowserPreviewView extends ItemView {
     // that includes a login guest mid-handoff, which is left for the pool's
     // own idle/TTL reaper rather than torn down here (ADR-0014's Risks: an
     // abandoned handoff is reclaimed on the same schedule as anything else).
-    this.stopHandoffCaptureLoop();
-    this.loginBridge?.stop();
-    this.loginBridge = null;
+    for (const cleanup of this.cleanups.splice(0)) cleanup();
+    // Only a controller this view created is torn down with it; the shared
+    // one belongs to the plugin and outlives the pane.
+    if (this.ownsController) this.controller?.stop();
+    this.controller = null;
+    this.ownsController = false;
   }
 
   private stopActiveSession(): void {
@@ -173,112 +162,60 @@ export class AgentBrowserPreviewView extends ItemView {
   }
 
   // ── Login handoff (ADR-0014) ────────────────────────────────────────────────
+  // State, the capture loop and input forwarding live in LoginHandoffController;
+  // this view is one of its subscribers.
 
-  private startLoginBridge(): void {
-    const { geode, ipcRenderer } = createGeodeLoginBridgeDeps();
-    const bridge = new AgentBrowserLoginBridge({
-      geode,
-      ipcRenderer,
-      findPrimaryThreadByWebContentsId: (id) => this.getPool()?.findPrimaryByWebContentsId(id) ?? null,
-      findLoginThreadByWebContentsId: (id) => this.getPool()?.findLoginByWebContentsId(id) ?? null,
-      onPendingRequest: (request) => {
-        this.pendingRequest = request;
-        this.pendingExpired = false;
-        this.render();
-      },
-      onRequestExpired: (request) => {
-        if (this.pendingRequest?.threadId === request.threadId && this.pendingRequest.requestedAt === request.requestedAt) {
-          this.pendingExpired = true;
-          this.render();
-        }
-      },
-      onLoginClosed: (threadId) => {
-        // The login guest's own window.close() was relayed. If that is the
-        // handoff currently in progress, treat it exactly like the user
-        // clicking "Return control".
-        if (this.handoff?.threadId === threadId) this.returnControl('login-complete');
-      },
-      onLoginFocused: (threadId) => {
-        if (this.handoff?.threadId === threadId) this.app.workspace.revealLeaf(this.leaf);
-      },
-    });
-    bridge.start();
-    this.loginBridge = bridge;
-  }
-
-  private async takeControl(): Promise<void> {
-    const pool = this.getPool();
-    const request = this.pendingRequest;
-    if (!pool || !request || this.pendingExpired) return;
-
-    const { threadId, url } = request;
-    try {
-      const guest = await pool.acquireLoginGuest(threadId, url);
-      this.loginBridge?.clearPending(threadId);
-      this.pendingRequest = null;
-      this.pendingExpired = false;
-      this.handoff = { threadId, guest };
-      guest.focus();
-      this.startHandoffCaptureLoop();
-      this.render();
-    } catch (error) {
-      new Notice(`Could not start the sign-in session: ${error instanceof Error ? error.message : String(error)}`);
+  private attachController(): void {
+    let controller = this.getSharedController();
+    if (!controller) {
+      controller = new LoginHandoffController({
+        getPool: this.getPool,
+        now: this.now,
+        notify: (message) => { new Notice(message); },
+      });
+      controller.start();
+      this.ownsController = true;
     }
+    this.controller = controller;
+    this.cleanups.push(
+      controller.subscribe(() => this.render()),
+      controller.subscribeFrames((threadId, dataUrl) => this.showHandoffFrame(threadId, dataUrl)),
+      controller.subscribeFocus(() => this.app.workspace.revealLeaf(this.leaf)),
+      // Frames are only captured while this (or another) surface is looking.
+      controller.attachViewer(() => this.isVisible()),
+    );
+    // A handoff already in progress when the pane opens: paint what we have.
+    const active = controller.getActiveSnapshot();
+    if (active) this.showHandoffFrame(active.threadId, controller.getFrame(active.threadId));
   }
 
-  private returnControl(reason: GuestEndReason): void {
-    const handoff = this.handoff;
-    if (!handoff) return;
-    this.handoff = null;
-    this.stopHandoffCaptureLoop();
-    this.getPool()?.releaseLoginGuest(handoff.threadId, reason);
-    this.render();
+  private showHandoffFrame(threadId: string, dataUrl: string | null): void {
+    if (!dataUrl || this.controller?.getActiveSnapshot()?.threadId !== threadId) return;
+    this.imageEl.src = dataUrl;
+    this.imageEl.style.display = '';
   }
 
-  private startHandoffCaptureLoop(): void {
-    this.stopHandoffCaptureLoop();
-    const id = window.setInterval(() => void this.captureHandoffFrame(), HANDOFF_CAPTURE_MS);
-    this.handoffCaptureTimerId = id;
-    this.registerInterval(id);
+  private takeControl(): void {
+    const snapshot = this.bannerSnapshot(this.getPool()?.mostRecentlyUsed() ?? null);
+    if (!snapshot || snapshot.phase !== 'requested') return;
+    void this.controller?.takeControl(snapshot.threadId);
   }
 
-  private stopHandoffCaptureLoop(): void {
-    if (this.handoffCaptureTimerId === null) return;
-    window.clearInterval(this.handoffCaptureTimerId);
-    this.handoffCaptureTimerId = null;
+  private returnControl(): void {
+    const active = this.controller?.getActiveSnapshot();
+    if (active) this.controller?.returnControl(active.threadId, 'login-complete');
   }
 
-  private async captureHandoffFrame(): Promise<void> {
-    const handoff = this.handoff;
-    if (!handoff || !this.isVisible() || this.capturing) return;
-
-    this.capturing = true;
-    try {
-      const png = await handoff.guest.capture(PREVIEW_WIDTH);
-      this.imageEl.src = pngDataUrl(png);
-      this.imageEl.style.display = '';
-    } catch {
-      // The login guest died (crash, or the pool's own idle/TTL reaper
-      // reclaimed an abandoned handoff) — return control so the pane goes
-      // back to a coherent state instead of freezing on a stale frame.
-      this.returnControl('crash');
-    } finally {
-      this.capturing = false;
-    }
-  }
-
-  private forwardMouseEvent(type: 'mouseDown' | 'mouseUp', event: PointerEvent): void {
-    const handoff = this.handoff;
-    if (!handoff) return;
-    const rect = this.imageEl.getBoundingClientRect();
-    const point = mapClientPointToViewport(event.clientX, event.clientY, rect, handoff.guest.facts().viewport);
-    handoff.guest.sendInputEvent(buildMouseInputEvent(type, point));
+  private forwardMouseEvent(type: 'mouseDown' | 'mouseUp', event: { clientX: number; clientY: number }): void {
+    const active = this.controller?.getActiveSnapshot();
+    if (!active) return;
+    this.controller?.forwardPointer(active.threadId, type, event.clientX, event.clientY, this.imageEl.getBoundingClientRect());
   }
 
   private forwardKeyboardEvent(event: KeyboardEvent): void {
-    const handoff = this.handoff;
-    if (!handoff) return;
-    const mapped = mapKeyboardEvent({
+    const active = this.controller?.getActiveSnapshot();
+    if (!active) return;
+    const forwarded = this.controller?.forwardKey(active.threadId, {
       key: event.key,
       type: event.type as 'keydown' | 'keyup',
       shiftKey: event.shiftKey,
@@ -286,9 +223,7 @@ export class AgentBrowserPreviewView extends ItemView {
       altKey: event.altKey,
       metaKey: event.metaKey,
     });
-    if (!mapped) return;
-    event.preventDefault();
-    handoff.guest.sendInputEvent(mapped);
+    if (forwarded) event.preventDefault();
   }
 
   /**
@@ -302,10 +237,10 @@ export class AgentBrowserPreviewView extends ItemView {
   private async refresh(): Promise<void> {
     this.tick += 1;
 
-    if (this.handoff) {
-      // Frame capture during a handoff is owned by the faster dedicated loop
-      // (`startHandoffCaptureLoop`); this tick still drives the countdown text
-      // and keeps the header/detail rows current.
+    if (this.controller?.getActiveSnapshot()) {
+      // Frame capture during a handoff is owned by the controller's faster
+      // dedicated loop; this tick still drives the countdown text and keeps
+      // the header/detail rows current.
       this.render();
       return;
     }
@@ -352,7 +287,7 @@ export class AgentBrowserPreviewView extends ItemView {
     const status = pool.status();
     this.summaryEl.setText(`Browser ${status.inUse}/${status.max}`);
 
-    if (this.handoff) {
+    if (this.controller?.getActiveSnapshot()) {
       // The opener guest is never touched during a handoff, so the stop
       // control (which only ever targets the primary guest) stays hidden —
       // "Return control" in the banner is the only exit while one is active.
@@ -387,8 +322,25 @@ export class AgentBrowserPreviewView extends ItemView {
    * Render the login-handoff banner: a pending request for the currently
    * displayed thread, the active handoff itself, or nothing.
    */
+  /**
+   * The snapshot the banner should show: the active handoff, or a request /
+   * expiry scoped to the thread currently displayed (ADR-0014 §4 — a pending
+   * request for a different thread does not surface here).
+   */
+  private bannerSnapshot(guest: AgentBrowserGuest | null): LoginHandoffSnapshot | null {
+    const controller = this.controller;
+    if (!controller) return null;
+    const active = controller.getActiveSnapshot();
+    if (active) return active;
+    if (!guest) return null;
+    const snapshot = controller.getSnapshot(guest.threadId);
+    return snapshot && (snapshot.phase === 'requested' || snapshot.phase === 'expired') ? snapshot : null;
+  }
+
   private renderBanner(guest: AgentBrowserGuest | null): void {
-    if (this.handoff) {
+    const snapshot = this.bannerSnapshot(guest);
+
+    if (snapshot?.phase === 'active') {
       this.bannerEl.style.display = '';
       this.bannerEl.toggleClass('is-handoff-active', true);
       this.bannerTextEl.setText('You are signing in on a temporary browser page.');
@@ -400,27 +352,25 @@ export class AgentBrowserPreviewView extends ItemView {
     this.bannerEl.toggleClass('is-handoff-active', false);
     this.returnControlButtonEl.style.display = 'none';
 
-    const pending = this.pendingRequest;
-    // Scoped to the thread currently shown, per ADR-0014 §4 — a pending
-    // request for a different thread does not surface here.
-    if (!pending || !guest || pending.threadId !== guest.threadId) {
+    if (!snapshot) {
       this.bannerEl.style.display = 'none';
       return;
     }
 
     this.bannerEl.style.display = '';
-    this.takeControlButtonEl.style.display = this.pendingExpired ? 'none' : '';
+    const expired = snapshot.phase === 'expired';
+    this.takeControlButtonEl.style.display = expired ? 'none' : '';
 
-    if (this.pendingExpired) {
+    if (expired) {
       this.bannerTextEl.setText(
-        `The sign-in request for ${hostOf(pending.url)} expired. Click sign-in on the page again to retry.`,
+        `The sign-in request for ${snapshot.host} expired. Click sign-in on the page again to retry.`,
       );
       return;
     }
 
-    const remainingSeconds = Math.max(0, Math.ceil((pending.expiresAt - this.now()) / 1000));
+    const remainingSeconds = Math.max(0, Math.ceil(((snapshot.expiresAt ?? 0) - this.now()) / 1000));
     this.bannerTextEl.setText(
-      `This page wants you to sign in (${hostOf(pending.url)}) — ${remainingSeconds}s to take control.`,
+      `This page wants you to sign in (${snapshot.host}) — ${remainingSeconds}s to take control.`,
     );
   }
 

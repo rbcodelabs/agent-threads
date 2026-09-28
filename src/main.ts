@@ -285,6 +285,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
   orchestratorWakeup: import('./OrchestratorWakeup').OrchestratorWakeup | null = null;
   documentWatch: import('./DocumentWatchService').DocumentWatchService | null = null;
   agentBrowser: import('./agentBrowser/AgentBrowserPool').AgentBrowserPool | null = null;
+  /**
+   * Shared login-handoff state (ADR-0014) for the Agent Browser pane and the
+   * chat's browser session card. Null whenever the agent browser is off.
+   */
+  loginHandoff: import('./agentBrowser/LoginHandoffController').LoginHandoffController | null = null;
   contextPanel!: ContextPanelController;
   googleWorkspaceMcp?: import('./GoogleWorkspaceMcp').GoogleWorkspaceMcp;
   oauthMcpRegistry?: import('./OAuthMcpRegistry').OAuthMcpRegistry;
@@ -1321,6 +1326,19 @@ export default class ClaudeThreadsPlugin extends Plugin {
       });
       this.agentBrowser.start();
 
+      // Login-handoff controller: owns the Geode popup bridge subscription, the
+      // per-thread request/active/returned state, frame capture and input
+      // forwarding, so the preview pane and the chat card show one shared truth.
+      // A no-op on hosts without window.geode's popup bridge.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { LoginHandoffController } = require('./agentBrowser/LoginHandoffController') as typeof import('./agentBrowser/LoginHandoffController');
+      this.loginHandoff = new LoginHandoffController({
+        getPool: () => this.agentBrowser,
+        notify: (message) => { new Notice(message); },
+      });
+      this.loginHandoff.start();
+      this.register(() => { this.loginHandoff?.stop(); this.loginHandoff = null; });
+
       // Teardown goes through register() rather than onunload(): register
       // callbacks run synchronously inside Component.unload(), whereas
       // onunload() is not awaited and already sits behind an up-to-10s
@@ -1346,7 +1364,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       const { AgentBrowserPreviewView } = require('./agentBrowser/AgentBrowserPreviewView') as typeof import('./agentBrowser/AgentBrowserPreviewView');
       this.registerView(
         AGENT_BROWSER_VIEW_TYPE,
-        (leaf) => new AgentBrowserPreviewView(leaf, () => this.agentBrowser),
+        (leaf) => new AgentBrowserPreviewView(leaf, () => this.agentBrowser, () => this.loginHandoff),
       );
       this.addCommand({
         id: 'open-agent-browser-preview',

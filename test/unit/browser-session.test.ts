@@ -311,11 +311,25 @@ describe('buildBrowserSessionViewModel', () => {
       expect(vm.actions).toBeUndefined();
     });
 
-    it('expired: muted, with a retry hint and a failed step', () => {
-      const vm = buildBrowserSessionViewModel(base(), { live: true, hasScreenshot: true, handoff: handoff({ phase: 'expired' }) });
+    it('expired: muted, with a retry hint and a failed step from the handoff history', () => {
+      const tools = base();
+      const at = (tools[1].timestamp as number) + 5;
+      const vm = buildBrowserSessionViewModel(tools, {
+        live: true, hasScreenshot: true,
+        handoff: handoff({ phase: 'expired', history: [{ at, outcome: 'expired', host: 'accounts.acme.io' }] }),
+      });
       expect(vm.mode).toBe('expired');
       expect(vm.hint?.strong).toBe('Ask Claude to retry');
-      expect(vm.steps[vm.steps.length - 1]).toMatchObject({ outcome: 'bad', target: 'expired after 30s' });
+      expect(vm.steps.filter((s) => s.verb === 'sign in')).toEqual([expect.objectContaining({ outcome: 'bad', target: 'expired after 30s' })]);
+    });
+
+    it('a handoff that happened before this session started is not shown on it', () => {
+      const tools = base();
+      const vm = buildBrowserSessionViewModel(tools, {
+        live: true, hasScreenshot: false,
+        handoff: { phase: null, host: 'x', url: '', history: [{ at: 1, outcome: 'returned', host: 'old.example' }] },
+      });
+      expect(vm.steps.some((s) => s.verb === 'sign in')).toBe(false);
     });
 
     it('a finished session with a handoff stays expanded (never collapses away an action)', () => {

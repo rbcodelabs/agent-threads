@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" width="640" height="400">
+  <rect width="640" height="400" fill="#f7f8fa"/>
+  <rect width="640" height="44" fill="#ffffff"/>
+  <line x1="0" y1="44" x2="640" y2="44" stroke="#e4e6eb"/>
+  <rect x="24" y="14" width="18" height="18" rx="5" fill="#111827"/>
+  <text x="50" y="28" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#111827">acme</text>
+  <text x="380" y="28" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#6b7280">Product</text>
+  <text x="440" y="28" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#111827">Pricing</text>
+  <text x="494" y="28" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#6b7280">Docs</text>
+  <rect x="546" y="12" width="70" height="22" rx="11" fill="#111827"/>
+  <text x="562" y="27" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#fff">Sign up</text>
+  <text x="320" y="96" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="26" font-weight="700" fill="#111827">Simple, honest pricing</text>
+  <text x="320" y="120" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#6b7280">Start free. Upgrade when your team grows.</text>
+
+  <rect x="40" y="152" width="170" height="210" rx="12" fill="#fff" stroke="#e4e6eb"/>
+  <text x="58" y="182" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#111827">Free</text>
+  <text x="58" y="220" font-family="Helvetica, Arial, sans-serif" font-size="30" font-weight="700" fill="#111827">$0</text>
+  <rect x="58" y="248" width="110" height="6" rx="3" fill="#e4e6eb"/>
+  <rect x="58" y="266" width="90" height="6" rx="3" fill="#e4e6eb"/>
+  <rect x="58" y="284" width="100" height="6" rx="3" fill="#e4e6eb"/>
+
+  <rect x="235" y="140" width="170" height="234" rx="12" fill="#fff" stroke="#14b8a6" stroke-width="2"/>
+  <rect x="313" y="132" width="0" height="0"/>
+  <rect x="253" y="154" width="64" height="16" rx="8" fill="#ccfbf1"/>
+  <text x="285" y="166" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#0f766e">MOST POPULAR</text>
+  <text x="253" y="196" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#111827">Startup</text>
+  <text x="253" y="234" font-family="Helvetica, Arial, sans-serif" font-size="30" font-weight="700" fill="#111827">$29</text>
+  <text x="298" y="234" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#6b7280">/mo</text>
+  <rect x="253" y="262" width="110" height="6" rx="3" fill="#e4e6eb"/>
+  <rect x="253" y="280" width="94" height="6" rx="3" fill="#e4e6eb"/>
+  <rect x="253" y="298" width="104" height="6" rx="3" fill="#e4e6eb"/>
+  <rect x="253" y="330" width="134" height="26" rx="13" fill="#14b8a6"/>
+
+  <rect x="430" y="152" width="170" height="210" rx="12" fill="#fff" stroke="#e4e6eb"/>
+  <text x="448" y="182" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#111827">Business</text>
+  <text x="448" y="220" font-family="Helvetica, Arial, sans-serif" font-size="30" font-weight="700" fill="#111827">$99</text>
+  <rect x="448" y="248" width="110" height="6" rx="3" fill="#e4e6eb"/>
+  <rect x="448" y="266" width="90" height="6" rx="3" fill="#e4e6eb"/>
+  <rect x="448" y="284" width="100" height="6" rx="3" fill="#e4e6eb"/>
+</svg>

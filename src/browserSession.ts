@@ -318,8 +318,12 @@ export interface BuildBrowserSessionOptions {
 function withHistorySteps(
   tools: ToolCallRecord[],
   toolSteps: BrowserSessionStep[],
-  history: readonly HandoffHistoryEntry[],
+  allHistory: readonly HandoffHistoryEntry[],
 ): BrowserSessionStep[] {
+  let history = allHistory;
+  // A handoff only belongs on the session that was running when it happened.
+  const sessionStart = tools.length > 0 ? (tools[0].timestamp ?? 0) : 0;
+  history = history.filter((h) => h.at >= sessionStart);
   if (history.length === 0) return toolSteps;
   const out: Array<{ at: number; step: BrowserSessionStep }> = toolSteps.map((step, i) => ({
     at: tools[i].timestamp ?? Number.MAX_SAFE_INTEGER,
@@ -454,7 +458,7 @@ function applyHandoff(vm: BrowserSessionViewModel, handoff: BrowserHandoffInput)
       vm.target = 'request expired';
       vm.banner = { icon: 'clock', title: 'Sign-in request expired', subtitle: 'Ask Claude to try again', showRing: false };
       vm.hint = { lead: 'Nothing was sent. ', strong: 'Ask Claude to retry', trail: ' and click sign-in again.' };
-      vm.steps = [...vm.steps, { verb: 'sign in', target: `expired after ${HANDOFF_TTL_SECONDS}s`, outcome: 'bad', duration: `${HANDOFF_TTL_SECONDS}s` }];
+      // The failed "sign in" step comes from the handoff history (recorded at expiry).
       vm.announce = 'The sign-in request expired. Ask Claude to try again.';
       break;
   }
