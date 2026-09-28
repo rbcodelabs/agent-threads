@@ -65,14 +65,14 @@ const STATE_CLASS: Record<BrowserSessionViewModel['state'], string> = {
 
 function icon(parent: HTMLElement, name: string, cls?: string): HTMLElement {
   const span = parent.createSpan({ cls: cls ? `ct-bc-ico ${cls}` : 'ct-bc-ico' });
-  span.setAttr('aria-hidden', 'true');
+  span.setAttribute('aria-hidden', 'true');
   setIcon(span, name);
   return span;
 }
 
-function skeleton(parent: HTMLElement): void {
+function skeleton(parent: HTMLElement): HTMLElement {
   const skel = parent.createDiv('ct-bc-skel');
-  skel.setAttr('aria-hidden', 'true');
+  skel.setAttribute('aria-hidden', 'true');
   skel.createDiv('ct-bc-skel-b ct-bc-skel-w38');
   skel.createDiv('ct-bc-skel-b ct-bc-skel-w78');
   skel.createDiv('ct-bc-skel-b ct-bc-skel-w58');
@@ -80,6 +80,7 @@ function skeleton(parent: HTMLElement): void {
   row.createDiv('ct-bc-skel-c');
   row.createDiv('ct-bc-skel-c is-hot');
   row.createDiv('ct-bc-skel-c');
+  return skel;
 }
 
 function ringEl(remaining: number): HTMLElement {
@@ -112,7 +113,7 @@ function paintRing(ring: HTMLElement, remaining: number): void {
 
 function stepRow(list: HTMLElement, step: BrowserSessionStep): void {
   const li = list.createEl('li', { cls: `ct-bc-step is-${step.outcome}` });
-  li.createEl('i').setAttr('aria-hidden', 'true');
+  li.createEl('i').setAttribute('aria-hidden', 'true');
   li.createSpan({ cls: 'ct-bc-step-v', text: step.verb });
   li.createSpan({ cls: 'ct-bc-step-t', text: step.target });
   if (step.duration) li.createSpan({ cls: 'ct-bc-step-d', text: step.duration });
@@ -125,7 +126,8 @@ export function renderBrowserSessionCard(
 ): BrowserCardHandle {
   const { vm } = input;
   const collapsed = vm.collapsedByDefault && !input.expanded;
-  const stateCls = vm.mode ? `is-${vm.mode} has-mode` : STATE_CLASS[vm.state];
+  // The stylesheet's mode classes: is-request / is-control / is-returned / is-expired.
+  const stateCls = vm.mode ? `is-${vm.mode === 'requested' ? 'request' : vm.mode} has-mode` : STATE_CLASS[vm.state];
 
   const card = parent.createEl('article', {
     cls: `ct-bc ${stateCls}${collapsed ? ' is-collapsed' : ''}${input.stepsOpen ? ' steps-open' : ''}`,
@@ -171,7 +173,7 @@ export function renderBrowserSessionCard(
   // ── Browser chrome ──
   const chrome = card.createEl('header', { cls: 'ct-bc-chrome' });
   const dots = chrome.createSpan('ct-bc-dots');
-  dots.setAttr('aria-hidden', 'true');
+  dots.setAttribute('aria-hidden', 'true');
   dots.createEl('i');
   dots.createEl('i');
   dots.createEl('i');
@@ -181,10 +183,10 @@ export function renderBrowserSessionCard(
   urlText.appendText(vm.host || 'browser');
   if (vm.path) urlText.createEl('b', { text: vm.path });
   const status = chrome.createSpan('ct-bc-status');
-  status.createEl('i').setAttr('aria-hidden', 'true');
+  status.createEl('i').setAttribute('aria-hidden', 'true');
   status.appendText(vm.statusLabel);
 
-  card.createDiv('ct-bc-progress').setAttr('aria-hidden', 'true');
+  card.createDiv('ct-bc-progress').setAttribute('aria-hidden', 'true');
 
   // ── Viewport ──
   const showFrame = vm.viewport === 'frame';
@@ -202,14 +204,15 @@ export function renderBrowserSessionCard(
   const view = showFrame
     ? card.createDiv({ cls: 'ct-bc-view is-frame', attr: { tabindex: '0', role: 'group', 'aria-label': viewLabel } })
     : card.createEl('button', { cls: 'ct-bc-view', attr: { type: 'button', 'aria-label': viewLabel } });
-  if (!zoomable) view.setAttr('data-empty', 'true');
+  if (!zoomable) view.setAttribute('data-empty', 'true');
 
   let frameImg: HTMLImageElement | null = null;
+  let frameSkeleton: HTMLElement | null = null;
   if (viewSrc) {
     const img = view.createEl('img', { attr: { src: viewSrc, alt: showFrame ? 'Temporary sign-in page' : vm.url ? `Latest screenshot of ${vm.host}${vm.path}` : 'Latest screenshot' } });
     if (showFrame) frameImg = img;
   } else {
-    skeleton(view);
+    frameSkeleton = skeleton(view);
   }
   if (showFrame && !frameImg) {
     // No frame has arrived yet; keep an <img> ready so setFrame can fill it.
@@ -315,6 +318,9 @@ export function renderBrowserSessionCard(
       if (!frameImg || !dataUrl) return;
       frameImg.src = dataUrl;
       frameImg.removeClass('is-pending');
+      // The placeholder only stands in until the first real frame.
+      frameSkeleton?.remove();
+      frameSkeleton = null;
     },
     setCountdown(remaining) {
       const ring = card.querySelector<HTMLElement>('.ct-bc-ring');

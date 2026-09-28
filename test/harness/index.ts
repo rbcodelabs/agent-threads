@@ -3,6 +3,11 @@ import { ThreadsView } from '../../src/ThreadsView';
 import { ThreadManager } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS } from '../../src/types';
 import { fixtureThreads, inlineContentMessages } from './fixtures';
+import { browserFixtureMessages, PRICING_IMAGE, type BrowserFixtureKind } from './browser-fixtures';
+import { LoginHandoffController } from '../../src/agentBrowser/LoginHandoffController';
+import type { AgentBrowserPool } from '../../src/agentBrowser/AgentBrowserPool';
+import type { AgentBrowserGuest } from '../../src/agentBrowser/AgentBrowserGuest';
+import loginSvg from '../../docs/mockups/browser-session-card/assets/shot-login.svg';
 import { mockLeaf, mockWorkspace } from './obsidian-mock';
 import { Platform } from 'obsidian';
 import { enterDesignMode, assertDesignWriteAllowed } from './design-plugin/designArtifact';
@@ -89,6 +94,54 @@ const slashCommands = new SlashCommandRegistry({ reservedNames: () => [
 ] });
 artifactProviders.register(DESIGN_PROVIDER_OWNER, createDesignArtifactContribution());
 
+// ── Login handoff (ADR-0014): the REAL controller over a fake pool/bridge ────
+// The chat's browser session card subscribes to plugin.loginHandoff. Geode's
+// popup bridge and the login guest are faked exactly like the Agent Browser
+// preview harness does; everything between them (state machine, capture loop,
+// input forwarding, card rendering) is production code.
+const HANDOFF_THREAD = 'thread-new';
+const handoffCalls = { acquire: [] as Array<{ threadId: string; url: string }>, release: [] as Array<{ threadId: string; reason: string }>, input: [] as unknown[], focus: 0 };
+let handoffOpenCb: ((r: { url: string; guestId: number; disposition: string }) => void) | null = null;
+const handoffIpc = new Map<string, Array<(...a: unknown[]) => void>>();
+async function loginFrameBytes(): Promise<Uint8Array> {
+  const img = new Image();
+  img.src = 'data:image/svg+xml;base64,' + btoa(loginSvg);
+  await img.decode();
+  const canvas = document.createElement('canvas');
+  canvas.width = 640; canvas.height = 400;
+  canvas.getContext('2d')!.drawImage(img, 0, 0, 640, 400);
+  return Uint8Array.from(atob(canvas.toDataURL('image/png').split(',')[1]), (ch) => ch.charCodeAt(0));
+}
+const fakeLoginGuest = {
+  capture: loginFrameBytes,
+  focus: () => { handoffCalls.focus += 1; },
+  sendInputEvent: (event: unknown) => { handoffCalls.input.push(event); },
+  facts: () => ({ viewport: { width: 1280, height: 800 } }),
+} as unknown as AgentBrowserGuest;
+const fakeHandoffPool = {
+  findPrimaryByWebContentsId: (id: number) => (id === 42 ? HANDOFF_THREAD : null),
+  findLoginByWebContentsId: (id: number) => (id === 43 ? HANDOFF_THREAD : null),
+  acquireLoginGuest: async (threadId: string, url: string) => { handoffCalls.acquire.push({ threadId, url }); return fakeLoginGuest; },
+  releaseLoginGuest: (threadId: string, reason: string) => { handoffCalls.release.push({ threadId, reason }); },
+} as unknown as AgentBrowserPool;
+const loginHandoff = new LoginHandoffController({
+  getPool: () => fakeHandoffPool,
+  bridgeDeps: {
+    geode: { onAgentBrowserWindowOpen: (cb) => { handoffOpenCb = cb as typeof handoffOpenCb; return () => { handoffOpenCb = null; }; } },
+    ipcRenderer: {
+      on: (channel, listener) => { handoffIpc.set(channel, [...(handoffIpc.get(channel) ?? []), listener]); },
+      removeListener: (channel, listener) => { handoffIpc.set(channel, (handoffIpc.get(channel) ?? []).filter((l) => l !== listener)); },
+    },
+  },
+});
+loginHandoff.start();
+(window as any).__loginHandoff = loginHandoff;
+(window as any).__handoffCalls = handoffCalls;
+/** Geode reports a denied window.open() from the agent's page. */
+(window as any).__fireLoginOpen = (url: string) => handoffOpenCb?.({ url, guestId: 42, disposition: 'foreground-tab' });
+/** The login popup closes itself (window.close()). */
+(window as any).__fireLoginClose = () => (handoffIpc.get('agent-browser-window-close') ?? []).forEach((l) => l({}, 43));
+
 const mockPlugin = {
   app: (mockLeaf as any).app,
   settings,
@@ -98,6 +151,7 @@ const mockPlugin = {
   messageContentProviders,
   persistence: null,
   scheduler: mockScheduler,
+  loginHandoff,
   summarizer: { summarize: async () => ({ title: '', summary: '' }) },
   inProcessSummarizer: {
     summarize: async () => ({ title: '', summary: '' }),
@@ -300,6 +354,25 @@ const mgrInternals = manager as unknown as {
 (window as any).__emitEvent = (threadId: string, event: { type: string; [key: string]: unknown }) => {
   mgrInternals.emit(threadId, event);
 };
+/**
+ * Load one of the browser session card fixtures (browser-fixtures.ts) onto the
+ * otherwise-empty 'thread-new' thread, mirroring __showInlineContent, so the
+ * shared thread list stays untouched. `running` seeds a live turn.
+ */
+(window as any).__showBrowserFixture = async (kind: BrowserFixtureKind, running = false) => {
+  const thread = manager.getThread(HANDOFF_THREAD)!;
+  thread.title = 'Pricing research';
+  thread.messages = JSON.parse(JSON.stringify(browserFixtureMessages[kind]));
+  (window as any).__setThreadRunning(HANDOFF_THREAD, running);
+  await view.focusThread(HANDOFF_THREAD);
+  if (running) mgrInternals.emit(HANDOFF_THREAD, { type: 'streaming_start' });
+};
+/** Tool-result images that arrived but are not yet on a persisted message. */
+(manager as any).pendingToolResultImages = (manager as any).pendingToolResultImages ?? new Map();
+(window as any).__setPendingToolImages = (threadId: string, images: Array<{ mediaType: string; data: string }>) => {
+  (manager as any).pendingToolResultImages.set(threadId, [...images]);
+};
+(window as any).__pricingImage = PRICING_IMAGE;
 (window as any).__addLiveUserMessage = (threadId: string, id: string, content: string) => {
   const thread = manager.getThread(threadId);
   if (!thread) throw new Error(`Thread not found: ${threadId}`);

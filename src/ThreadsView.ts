@@ -868,7 +868,7 @@ export class ThreadsView extends ItemView {
     // Persistent chip shown while the human drives the agent's browser
     // (login handoff). Sits directly above the composer.
     this.controlChipEl = floatingPanel.createDiv('ct-bc-control-chip ct-hidden');
-    this.controlChipEl.createSpan('ct-bc-chip-dot').setAttr('aria-hidden', 'true');
+    this.controlChipEl.createSpan('ct-bc-chip-dot').setAttribute('aria-hidden', 'true');
     this.controlChipEl.createSpan({ cls: 'ct-bc-chip-text', text: "You're in control · Claude is waiting" });
     this.controlChipEl.createEl('button', { text: 'Return', attr: { type: 'button' } })
       .addEventListener('click', () => {
