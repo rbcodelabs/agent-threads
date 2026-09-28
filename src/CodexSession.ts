@@ -10,6 +10,7 @@ import { resolveCodexPermissions, resolveDynamicToolApproval, type HarnessContex
 import { mergeUsageSnapshot, normalizeCodexAccountUsage, normalizeCodexRateLimitResponse, normalizeCodexTokenUsage, type UsageSnapshot } from './Usage';
 import { renderCodexAgentProfiles } from './AgentProfiles';
 import { CodexRawLog } from './CodexRawLog';
+import { browserToolSummary } from './browserSession';
 
 type CodexTokenUsageBreakdown = {
   totalTokens: number;
@@ -1038,6 +1039,14 @@ export class CodexSession {
   }
 
   private toolSummary(item: any): string {
+    // In-app browser tools arrive as mcpToolCall `claude_threads:browser_*`; give the
+    // session card the same URL/ref summary Claude sessions produce. Codex results are
+    // not mirrored into ToolCallRecord.browser (its callbacks carry no record), so the
+    // card falls back to the navigate URL for its address bar.
+    if (item.type === 'mcpToolCall' && item.arguments && typeof item.arguments === 'object') {
+      const browserSummary = browserToolSummary(this.toolName(item), item.arguments as Record<string, unknown>);
+      if (browserSummary !== null) return browserSummary;
+    }
     return String(item.command ?? item.path ?? item.prompt ?? item.tool ?? item.server ?? item.query ?? item.type);
   }
 

@@ -6,7 +6,8 @@ import { mergeUsageSnapshot, normalizeClaudeRateLimit, normalizeClaudeResult, ti
 // Import from the mobile-safe utility module, then re-export so that desktop
 // callers that already import formatToolName/getToolIcon from ClaudeSession
 // continue to work without changes.
-import { formatToolName, getToolIcon } from './toolNameUtils';
+import { formatToolName, getToolIcon, isBrowserTool } from './toolNameUtils';
+import { browserToolSummary, parseBrowserToolResult } from './browserSession';
 export { formatToolName, getToolIcon };
 
 /**
@@ -826,6 +827,12 @@ export class ClaudeSession {
                     if (record.timestamp) {
                       record.durationMs = Date.now() - record.timestamp;
                     }
+                    // Browser tools: keep only the page url/title (and an error message)
+                    // from the result, for the chat's browser session card.
+                    if (isBrowserTool(record.name)) {
+                      const info = parseBrowserToolResult(b.content, b.is_error === true);
+                      if (info) record.browser = info;
+                    }
                     callbacks.onToolResult?.(toolUseId!, status, record.durationMs);
                   }
                 }
@@ -1001,6 +1008,10 @@ export class ClaudeSession {
 
 
 function formatToolSummary(name: string, input: Record<string, unknown>): string {
+  // In-app browser tools first: their prefixed names (mcp__claude_threads__browser_*)
+  // do not survive the single-word server regex below.
+  const browserSummary = browserToolSummary(name, input);
+  if (browserSummary !== null) return browserSummary;
   // Normalize MCP tool names so the switch cases below always match bare names
   const mcpMatch = name.match(/^mcp__[^_]+__(.+)$/);
   const bare = mcpMatch ? mcpMatch[1] : name;
