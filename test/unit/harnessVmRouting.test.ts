@@ -91,7 +91,9 @@ describe('resolveClaudeVmRouting', () => {
 
   it('auto mode: routes into the VM when capable, starting the container', async () => {
     const { manager, runner } = makeManager(CAPABLE_SCRIPT);
-    const result = await resolveClaudeVmRouting({ mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work' });
+    const result = await resolveClaudeVmRouting({
+      mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
+    });
     expect(result).toEqual({ routed: true, routing: { containerName: NAME, containerBinaryPath: CLAUDE_CONTAINER_BINARY_PATH } });
     expect(runner.ran('run', '--detach')).toBe(true);
   });
@@ -99,9 +101,20 @@ describe('resolveClaudeVmRouting', () => {
   it('auto mode: falls back to host spawn silently when incapable', async () => {
     const { manager } = makeManager({ '--version': { exitCode: 1 } });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const result = await resolveClaudeVmRouting({ mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work' });
+    const result = await resolveClaudeVmRouting({
+      mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
+    });
     expect(result).toEqual({ routed: false });
     warn.mockRestore();
+  });
+
+  it('auto mode: falls back to host spawn silently on an unsupported platform', async () => {
+    const { manager, runner } = makeManager(CAPABLE_SCRIPT);
+    const result = await resolveClaudeVmRouting({
+      mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'linux', arch: 'x64',
+    });
+    expect(result).toEqual({ routed: false });
+    expect(runner.calls).toHaveLength(0);
   });
 
   it('auto mode: falls back silently when the capability check passes but the container fails to start', async () => {
@@ -110,21 +123,26 @@ describe('resolveClaudeVmRouting', () => {
       'run --detach --name claude-threads-vm-test-thread --volume /work:/work --workdir /work claude-threads-harness:1 sleep infinity': { exitCode: 1, stderr: 'boom' },
     });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const result = await resolveClaudeVmRouting({ mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work' });
+    const result = await resolveClaudeVmRouting({
+      mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
+    });
     expect(result).toEqual({ routed: false });
     warn.mockRestore();
   });
 
   it('always mode: routes into the VM exactly like auto when capable', async () => {
     const { manager } = makeManager(CAPABLE_SCRIPT);
-    const result = await resolveClaudeVmRouting({ mode: 'always', image: IMAGE, vmManager: manager, mountPath: '/work' });
+    const result = await resolveClaudeVmRouting({
+      mode: 'always', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
+    });
     expect(result).toEqual({ routed: true, routing: { containerName: NAME, containerBinaryPath: CLAUDE_CONTAINER_BINARY_PATH } });
   });
 
   it('always mode: THROWS instead of silently falling back when incapable', async () => {
     const { manager } = makeManager({ '--version': { exitCode: 1 } });
-    await expect(resolveClaudeVmRouting({ mode: 'always', image: IMAGE, vmManager: manager, mountPath: '/work' }))
-      .rejects.toThrow(/harnessVmMode is "always"/);
+    await expect(resolveClaudeVmRouting({
+      mode: 'always', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
+    })).rejects.toThrow(/harnessVmMode is "always"/);
   });
 
   it('always mode: THROWS when capable but the container itself fails to start', async () => {
@@ -132,14 +150,16 @@ describe('resolveClaudeVmRouting', () => {
       ...CAPABLE_SCRIPT,
       'run --detach --name claude-threads-vm-test-thread --volume /work:/work --workdir /work claude-threads-harness:1 sleep infinity': { exitCode: 1, stderr: 'boom' },
     });
-    await expect(resolveClaudeVmRouting({ mode: 'always', image: IMAGE, vmManager: manager, mountPath: '/work' }))
-      .rejects.toThrow(/sandbox container could not be started/);
+    await expect(resolveClaudeVmRouting({
+      mode: 'always', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
+    })).rejects.toThrow(/sandbox container could not be started/);
   });
 
   it('respects a custom containerBinaryPath override', async () => {
     const { manager } = makeManager(CAPABLE_SCRIPT);
     const result = await resolveClaudeVmRouting({
       mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', containerBinaryPath: '/custom/claude',
+      platform: 'darwin', arch: 'arm64',
     });
     expect(result).toEqual({ routed: true, routing: { containerName: NAME, containerBinaryPath: '/custom/claude' } });
   });

@@ -71,6 +71,9 @@ export interface ClaudeVmRoutingInputs {
   /** Host directory to bind-mount at /work — normally the thread's own cwd. */
   mountPath: string;
   containerBinaryPath?: string;
+  /** Test-only overrides forwarded to checkHarnessVmCapability; production callers omit these and get the real process.platform/arch. */
+  platform?: string;
+  arch?: string;
 }
 
 export interface ResolvedClaudeVmRouting {
@@ -100,7 +103,12 @@ export async function resolveClaudeVmRouting(
 ): Promise<{ routed: true; routing: ResolvedClaudeVmRouting } | { routed: false }> {
   if (inputs.mode === 'never') return { routed: false };
 
-  const capability = await checkHarnessVmCapability({ vmManager: inputs.vmManager, image: inputs.image });
+  const capability = await checkHarnessVmCapability({
+    vmManager: inputs.vmManager,
+    image: inputs.image,
+    platform: inputs.platform,
+    arch: inputs.arch,
+  });
   if (!capability.capable) {
     if (inputs.mode === 'always') {
       throw new Error(`harnessVmMode is "always" but the sandbox VM is not ready: ${capability.reason}`);
