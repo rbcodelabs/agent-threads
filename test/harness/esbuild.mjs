@@ -23,6 +23,8 @@ const sharedConfig = {
   platform: 'browser',
   sourcemap: true,
   bundle: true,
+  // browser-fixtures.ts embeds the mockup's SVG screenshots as strings.
+  loader: { '.svg': 'text' },
   alias: {
     'obsidian':                         resolve('./obsidian-mock.ts'),
     'fs':                               resolve('./mocks/fs.ts'),

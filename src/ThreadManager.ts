@@ -513,6 +513,15 @@ export class ThreadManager {
     return this.threads.get(id);
   }
 
+  /**
+   * Tool-result images that have arrived but are not yet attached to a persisted
+   * message (they land on the NEXT assistant message). The chat's browser session
+   * card reads these to show a fresh screenshot before that message exists.
+   */
+  getPendingToolResultImages(id: string): ReadonlyArray<{ mediaType: string; data: string }> {
+    return this.pendingToolResultImages.get(id) ?? [];
+  }
+
   /** A single source of truth for whether a thread can safely change providers. */
   getHarnessSwitchBlockReason(id: string): string | undefined {
     const thread = this.threads.get(id);

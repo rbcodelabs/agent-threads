@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Browser session card — Claude Threads component spec</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main class="spec">
+
+  <header>
+    <p class="spec-eyebrow">Claude Threads &middot; Component spec</p>
+    <h1>Browser session card</h1>
+    <p class="spec-lede">When the agent drives the in-app browser, the chat shows one live card per session instead of a stack of generic tool pills. It updates in place, shows the real latest screenshot, and collapses to a compact chip once the session is over. When a page needs you to sign in, the same card switches to a distinct amber "you're in control" mode. Other directions live in <code>variations/</code>.</p>
+  </header>
+
+  <section aria-labelledby="h-thread">
+    <h2 id="h-thread">In the thread</h2>
+    <p class="sub">Step the session through its lifecycle. Finished and ended sessions start collapsed; click the chip to expand. Click the viewport to open the screenshot larger, or use the steps button to see every action taken.</p>
+    <div class="hero-grid">
+      <section class="app-shell" id="hero-shell" aria-label="Chat panel preview">
+        <div class="app-titlebar"><span class="dot" aria-hidden="true"></span><span class="title">Pricing research</span><span class="sub">Claude Threads</span></div>
+        <div class="thread-body">
+          <div class="msg msg-user">
+            <div class="avatar user">R</div>
+            <div class="msg-content"><span class="bubble">Check acme.io/pricing — is the Startup plan still there?</span></div>
+          </div>
+          <div class="msg msg-assistant">
+            <div class="avatar assistant">C</div>
+            <div class="msg-content">
+              <p class="text">Sure, pulling that up now.</p>
+              <div class="tools">
+                <div class="tool-pill">
+                  <span class="tool-pill-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></span>
+                  <span class="tool-pill-name">WebSearch</span>
+                  <span class="tool-pill-text">"acme.io pricing startup plan"</span>
+                </div>
+                <div class="bc-host" id="hero-mount"></div>
+              </div>
+              <p class="text" id="hero-answer" style="margin-top:8px;" hidden>Yes — the Startup plan is still listed, now at $29/mo (was $24).</p>
+            </div>
+          </div>
+        </div>
+        <div class="control-chip" id="control-chip"><i class="dot" aria-hidden="true"></i><span>You're in control · Claude is waiting</span><button type="button" data-act="return-chip">Return</button></div>
+        <div class="composer">
+          <input type="text" id="hero-input" placeholder="Reply to Claude…" disabled aria-label="Reply">
+          <button class="send" aria-label="Send" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg></button>
+        </div>
+      </section>
+
+      <div>
+        <p class="seg-label" id="seg-a">Agent driving</p>
+        <div class="seg" role="group" aria-labelledby="seg-a" id="hero-seg"></div>
+        <p class="seg-label" id="seg-h">Sign-in handoff (you drive)</p>
+        <div class="seg human" role="group" aria-labelledby="seg-h" id="hero-seg-h"></div>
+        <div class="sr-only" role="status" aria-live="polite" id="announcer"></div>
+        <ul class="notes">
+          <li><b>One card per session.</b> The first <code>browser_navigate</code> creates it; every later <code>browser_*</code> call updates the caption, URL and step list in place until <code>browser_close</code>.</li>
+          <li><b>Real screenshot.</b> The viewport shows the newest image from <code>toolResultImages</code>. Until one exists it shows the page-skeleton placeholder.</li>
+          <li><b>Steps keep the detail.</b> The step list carries the same information the individual pills show today (verb, target, outcome), so grouping loses nothing.</li>
+          <li><b>Collapse when done.</b> Finished and ended sessions become a one-line chip with a thumbnail, keeping long threads scannable. Errors stay expanded.</li>
+          <li><b>Accent.</b> Teal is reserved for the agent browsing; violet stays with generic tools; red for failure; <b>amber only ever means you are driving</b>.</li>
+          <li><b>Take control is its own mode.</b> When a page wants a sign-in, the card asks you in the chat (30s), then flips to a solid amber "You're in control" state, with a persistent chip by the composer, a privacy line, and one big Return control button. Try the amber row above.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-states">
+    <h2 id="h-states">State sheet</h2>
+    <p class="sub">All five states side by side. Finished is shown both expanded and collapsed (its default).</p>
+    <div class="sheet" id="sheet"></div>
+  </section>
+
+  <section aria-labelledby="h-modes">
+    <h2 id="h-modes">Two modes, one glance</h2>
+    <p class="sub">The same session card while the agent drives (teal) versus while you drive (amber). The difference must read instantly at docked width, in both themes, and without relying on color alone: the amber mode adds a solid banner, a hand icon, a text label and a framed viewport.</p>
+    <div class="modes">
+      <div class="frame narrow"><h3>Dark · docked 340px</h3>
+        <div class="stack">
+          <div class="tag"><i class="t"></i>Claude is driving</div><div class="bc-host" id="modes-d-a"></div>
+          <div class="tag"><i class="a"></i>You are driving</div><div class="bc-host" id="modes-d-h"></div>
+        </div>
+      </div>
+      <div class="frame narrow theme-light"><h3>Light · docked 340px</h3>
+        <div class="stack">
+          <div class="tag"><i class="t"></i>Claude is driving</div><div class="bc-host" id="modes-l-a"></div>
+          <div class="tag"><i class="a"></i>You are driving</div><div class="bc-host" id="modes-l-h"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-layouts">
+    <h2 id="h-layouts">Layouts</h2>
+    <p class="sub">The card is a container-query component: it stacks in a docked sidebar (~340px) and goes two-column in a wide pane (720px+), with the step list always visible.</p>
+    <div class="layouts">
+      <div class="frame narrow"><h3>Docked panel · 340px</h3><div class="bc-host" id="narrow-mount"></div></div>
+      <div class="frame"><h3>Wide pane · 720px</h3><div class="bc-host" id="wide-mount"></div><div class="bc-host" id="wide-mount-h"></div></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-light">
+    <h2 id="h-light">Light theme check</h2>
+    <p class="sub">Same component on Obsidian-style light neutrals. Teal is darkened for contrast on white.</p>
+    <div class="theme-light frame light">
+      <div class="light-row" id="light-row"></div>
+    </div>
+  </section>
+
+</main>
+
+<dialog class="lb" id="lightbox" aria-label="Screenshot preview">
+  <div class="lb-bar">
+    <span class="u" id="lb-url"></span>
+    <span class="k">Esc to close</span>
+    <button class="lb-close" id="lb-close" aria-label="Close preview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+  </div>
+  <img id="lb-img" alt="Screenshot of the page the agent is viewing">
+  <div class="lb-cap" id="lb-cap"></div>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

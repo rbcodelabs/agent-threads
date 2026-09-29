@@ -10,7 +10,8 @@ import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './current
 import type { ToolCallRecord, ImageAttachment } from './types';
 import { parseExtraEnv } from './types';
 import { debugLog } from './logger';
-import { formatToolName, getToolIcon } from './toolNameUtils';
+import { formatToolName, getToolIcon, isBrowserTool } from './toolNameUtils';
+import { browserToolSummary, parseBrowserToolResult } from './browserSession';
 // SessionCallbacks/TaskTrackerEvent are ClaudeSession.ts's contract, kept as the
 // single canonical definition while the two classes coexist during the Stage 2
 // migration (see ADR-0002 §2: "the callback contract ... preserved verbatim").
@@ -966,6 +967,12 @@ export class ThreadSession {
                     if (record.timestamp) {
                       record.durationMs = Date.now() - record.timestamp;
                     }
+                    // Browser tools: keep only the page url/title (and an error message)
+                    // from the result, for the chat's browser session card.
+                    if (isBrowserTool(record.name)) {
+                      const info = parseBrowserToolResult(b.content, b.is_error === true);
+                      if (info) record.browser = info;
+                    }
                     callbacks.onToolResult?.(toolUseId!, status, record.durationMs);
                   }
                 }
@@ -1199,6 +1206,10 @@ export class ThreadSession {
 }
 
 function formatToolSummary(name: string, input: Record<string, unknown>): string {
+  // In-app browser tools first: their prefixed names (mcp__claude_threads__browser_*)
+  // do not survive the single-word server regex below.
+  const browserSummary = browserToolSummary(name, input);
+  if (browserSummary !== null) return browserSummary;
   // Duplicated verbatim from ClaudeSession.ts (not exported there, and Stage
   // B leaves ClaudeSession.ts untouched — see the file-level comment above).
   // Normalize MCP tool names so the switch cases below always match bare names.

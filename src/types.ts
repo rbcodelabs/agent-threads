@@ -85,6 +85,13 @@ export interface ToolCallRecord {
   status?: 'pending' | 'success' | 'error';
   /** Wall-clock time between the tool_use and its tool_result, in milliseconds. */
   durationMs?: number;
+  /**
+   * Set only on in-app browser tool calls (browser_*), copied from the tool
+   * RESULT so the chat's browser session card can show where the agent is.
+   * Optional and additive: absent on every older persisted record. `pageUrl` is
+   * origin+path only (no query/fragment); no page content is ever stored here.
+   */
+  browser?: { pageUrl?: string; pageTitle?: string; error?: string };
 }
 
 export interface ChatMessage {

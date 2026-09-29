@@ -40,6 +40,31 @@ function normalizeToolName(raw: string): NormalizedToolName {
   return { key, display: key.replace(/_/g, ' ') };
 }
 
+/**
+ * Bare key of a tool name after MCP/Codex prefix stripping ("Bash", "browser_navigate").
+ * Exposed so sibling pure modules (browserSession.ts) reuse this ONE normalization
+ * instead of re-implementing prefix parsing.
+ */
+export function toolKey(raw: string): string {
+  return normalizeToolName(raw).key;
+}
+
+const BROWSER_TOOL_KEYS: ReadonlySet<string> = new Set([
+  'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
+  'browser_type', 'browser_screenshot', 'browser_status', 'browser_close',
+  'browser_resize',
+]);
+
+/**
+ * True for the in-app agent browser tools (agentBrowserTools.ts), under any
+ * host prefix (`mcp__claude_threads__browser_click`, Codex `claude_threads:browser_click`,
+ * bare `browser_click`). These render as one "browser session card" per session
+ * instead of generic tool pills (see groupToolCalls / browserSession.ts).
+ */
+export function isBrowserTool(raw: string): boolean {
+  return BROWSER_TOOL_KEYS.has(normalizeToolName(raw).key);
+}
+
 /** Strip `mcp__<server>__` or `<server>:` prefix and any leading server-name repetition.
  *  e.g. mcp__obsidian__obsidian_search_vault → "search vault"
  *       obsidian:obsidian_search_vault       → "search vault"
@@ -221,7 +246,14 @@ export function getActivityKind(raw: string): ActivityKind {
 /** One entry in the finalized-message tool-call rendering list. */
 export type ToolCallGroup =
   | { kind: 'single'; tool: import('./types').ToolCallRecord }
-  | { kind: 'group'; activityKind: ActivityKind; tools: import('./types').ToolCallRecord[] };
+  | { kind: 'group'; activityKind: ActivityKind; tools: import('./types').ToolCallRecord[] }
+  /**
+   * One in-app browser session: a run of consecutive `browser_*` calls that
+   * ends at `browser_close`. Always an entry of its own, even for a single
+   * call, and never folded into an activity group (see groupToolCalls and
+   * trySingleMerge) so a session is rendered exactly once, as a card.
+   */
+  | { kind: 'browser'; tools: import('./types').ToolCallRecord[] };
 
 /**
  * Chunks a flat list of tool calls into runs of consecutive same-activity-kind
@@ -234,9 +266,28 @@ export function groupToolCalls(tools: import('./types').ToolCallRecord[]): ToolC
   const result: ToolCallGroup[] = [];
   let i = 0;
   while (i < tools.length) {
+    // Browser sessions are carved out BEFORE activity-kind grouping so they are
+    // never folded into a "Researching" group. A session is a run of consecutive
+    // browser_* calls ending at (and including) browser_close.
+    //
+    // v1 limitation: a non-browser tool between two browser calls ends the run,
+    // so the later calls start a NEW card. A session spanning several messages
+    // is already handled upstream by mergeAdjacentToolOnlyMessages, which
+    // re-joins tool-only rows before this function sees them.
+    if (isBrowserTool(tools[i].name)) {
+      let j = i;
+      while (j < tools.length && isBrowserTool(tools[j].name)) {
+        const closes = toolKey(tools[j].name) === 'browser_close';
+        j++;
+        if (closes) break;
+      }
+      result.push({ kind: 'browser', tools: tools.slice(i, j) });
+      i = j;
+      continue;
+    }
     const kind = getActivityKind(tools[i].name);
     let j = i + 1;
-    while (j < tools.length && getActivityKind(tools[j].name) === kind) {
+    while (j < tools.length && !isBrowserTool(tools[j].name) && getActivityKind(tools[j].name) === kind) {
       j++;
     }
     const run = tools.slice(i, j);
@@ -269,6 +320,17 @@ export function groupToolCalls(tools: import('./types').ToolCallRecord[]): ToolC
 export function liveToolGroupKey(tools: import('./types').ToolCallRecord[]): string {
   const first = tools[0];
   return `${first.toolUseId ?? first.timestamp ?? ''}:${getActivityKind(first.name)}`;
+}
+
+/**
+ * Identity of a browser session across live re-renders AND finalization.
+ * Anchored on the FIRST call of the session, which never changes as the
+ * session grows (groupToolCalls only extends a run at its tail), so a single
+ * expand/collapse set serves both the live and the persisted render.
+ */
+export function browserSessionKey(tools: import('./types').ToolCallRecord[]): string {
+  const first = tools[0];
+  return `browser:${first.toolUseId ?? first.timestamp ?? ''}`;
 }
 
 /**
@@ -322,6 +384,8 @@ function trySingleMerge(entries: ToolCallGroup[]): ToolCallGroup[] | null {
     const right = entries[i + 1];
     if (left.kind !== 'group' || right.kind !== 'group') continue;
     if (left.activityKind !== right.activityKind) continue;
+    // A browser session card is never folded into an activity group.
+    if (mid.kind === 'browser') continue;
     const midTools = mid.kind === 'single' ? [mid.tool] : mid.tools;
     if (midTools.length > 2) continue;
     const mergedGroup: ToolCallGroup = {

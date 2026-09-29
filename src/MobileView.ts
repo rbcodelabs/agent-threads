@@ -858,6 +858,11 @@ export class MobileView extends ItemView {
       if (entry.kind === 'single') {
         this.renderToolPill(wrapper, entry.tool, active);
         index += 1;
+      } else if (entry.kind === 'browser') {
+        // The browser session card is a desktop-only affordance (the agent
+        // browser needs Geode); a synced browser run degrades to plain pills.
+        for (const tool of entry.tools) this.renderToolPill(wrapper, tool, active);
+        index += entry.tools.length;
       } else {
         this.renderToolGroup(wrapper, entry, active, index);
         index += entry.tools.length;

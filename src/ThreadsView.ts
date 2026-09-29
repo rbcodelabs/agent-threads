@@ -19,7 +19,8 @@ import type ClaudeThreadsPlugin from './main';
 import { isDefaultThreadTitle } from './thread-title-utils';
 import { formatToolName, getToolIcon } from './ClaudeSession';
 import { isTrustedBuiltInTool } from './toolNameUtils';
-import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, ACTIVITY_LABELS, smoothToolGroups, pickCurrentTool, shouldWrapOuter, type ToolCallGroup } from './toolNameUtils';
+import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, ACTIVITY_LABELS, smoothToolGroups, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
+import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
 import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
 import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, execEnv, splitErrorMessage } from './dashboardUtils';
 import { isClaudeSignInExpiredError } from './claudeAuthRecovery';
@@ -281,6 +282,17 @@ export class ThreadsView extends ItemView {
   // a stable-hash key would re-collapse it on every extension. Cleared
   // alongside liveExpandedToolGroups.
   private liveExpandedOuterToolWrap: Set<string> = new Set();
+  // Browser session cards (see BrowserSessionPresenter): resolves per-render
+  // context, draws cards, and reacts to the shared login-handoff controller.
+  private browser: BrowserSessionPresenter | null = null;
+  // Rows (by merged row id) currently carrying a browser card, so a change in
+  // session state (result arrived, turn ended, handoff phase) can rebuild them.
+  private browserRowEls: Map<string, HTMLElement> = new Map();
+  private browserRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  // True between a turn's start and its done/interrupt; drives "live" cards.
+  private turnRunning = false;
+  private controlChipEl: HTMLElement | null = null;
+  private browserLiveRegionEl: HTMLElement | null = null;
   // Tracks the most recently appended row (post-merge, see
   // mergeAdjacentToolOnlyMessages) in the live 'message' event handler, so a
   // subsequent tool-only step in the SAME run can extend that row's tools
@@ -412,6 +424,8 @@ export class ThreadsView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.buildUI();
+    this.browser = new BrowserSessionPresenter(this.browserPresenterHost());
+    this.browser.attach();
     this.messageContentManager = new MessageContentMountManager(this.plugin.messageContentProviders, { openView: state => this.openArtifactView(state) });
     this.createNativeHeaderActions();
     // Delegate within the view so host title refreshes cannot detach the handler.
@@ -729,6 +743,11 @@ export class ThreadsView extends ItemView {
     this.messageContentManager?.dispose();
     this.messageContentManager = null;
     this.unsubscribe?.();
+    this.browser?.detach();
+    this.browser = null;
+    if (this.browserRefreshTimer !== null) clearTimeout(this.browserRefreshTimer);
+    this.browserRefreshTimer = null;
+    this.browserRowEls.clear();
     this.stopWakeupCountdown();
     if (this.staleInterval) clearInterval(this.staleInterval);
     if (this.headerSyncFrame !== null) cancelAnimationFrame(this.headerSyncFrame);
@@ -845,6 +864,19 @@ export class ThreadsView extends ItemView {
     this.editedFilesEl = panelContext.createDiv('ct-edited-files ct-hidden');
 
     this.gitDiffBarEl = floatingPanel.createDiv('ct-git-diff-bar ct-hidden');
+
+    // Persistent chip shown while the human drives the agent's browser
+    // (login handoff). Sits directly above the composer.
+    this.controlChipEl = floatingPanel.createDiv('ct-bc-control-chip ct-hidden');
+    this.controlChipEl.createSpan('ct-bc-chip-dot').setAttribute('aria-hidden', 'true');
+    this.controlChipEl.createSpan({ cls: 'ct-bc-chip-text', text: "You're in control · Claude is waiting" });
+    this.controlChipEl.createEl('button', { text: 'Return', attr: { type: 'button' } })
+      .addEventListener('click', () => {
+        const id = this.activeThreadId;
+        if (id) this.plugin.loginHandoff?.returnControl(id, 'login-complete');
+      });
+    // Polite live region: announces mode changes, never countdown ticks.
+    this.browserLiveRegionEl = root.createDiv({ cls: 'ct-bc-live', attr: { role: 'status', 'aria-live': 'polite' } });
 
     this.inputRowEl = floatingPanel.createDiv('ct-input-row');
 
@@ -1208,6 +1240,7 @@ export class ThreadsView extends ItemView {
     this.liveExpandedToolGroups.clear();
     this.expandedOuterToolWrap.clear();
     this.liveExpandedOuterToolWrap.clear();
+    this.browser?.clearExpansion();
     if (!this.titleEl) return; // buildUI hasn't run yet; onOpen will call us again with the right id
     this.manager.notifyActiveThreadChanged(id);
     this.renderTitleBar();
@@ -2531,6 +2564,7 @@ export class ThreadsView extends ItemView {
     this.liveExpandedToolGroups.clear();
     this.expandedOuterToolWrap.clear();
     this.liveExpandedOuterToolWrap.clear();
+    this.browser?.clearExpansion();
     void this.renderMessages();
   }
 
@@ -3025,6 +3059,9 @@ export class ThreadsView extends ItemView {
     this.agentViewBodyEl = null;
     this.clearStreamingState();
     this.streamingEl = null;
+    // Every row (and any card in it) was just wiped.
+    this.browserRowEls.clear();
+    this.browser?.resetForRebuild();
 
     if (!this.activeThreadId) return;
     const thread = this.manager.getThread(this.activeThreadId);
@@ -3141,6 +3178,8 @@ export class ThreadsView extends ItemView {
 
     this.applyPendingMainScroll();
     this.setRunningState(this.manager.isRunning(this.activeThreadId));
+    this.browser?.syncStandalone(this.messagesEl);
+    this.browser?.syncChrome();
   }
 
   /**
@@ -3442,8 +3481,10 @@ export class ThreadsView extends ItemView {
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
     const base = `Message ${agentHarnessLabel(thread?.agentHarness)}`;
     // Kept short: a long placeholder wraps and clips in a narrow side panel.
+    const human = this.plugin.loginHandoff?.getSnapshot(this.activeThreadId ?? '')?.phase === 'active';
     this.dispatchInput.setPlaceholder(
-      this.currentAgentViewId() ? `${base} (main conversation)` : base,
+      human ? PLACEHOLDER_WHILE_SIGNING_IN
+        : this.currentAgentViewId() ? `${base} (main conversation)` : base,
     );
   }
 
@@ -3471,19 +3512,12 @@ export class ThreadsView extends ItemView {
 
     if (msg.toolCalls && msg.toolCalls.length > 0) {
       this.renderToolCalls(el, msg.toolCalls);
+      // Remember rows that carry a browser session so later state changes
+      // (a result arriving, the turn ending, a handoff) can rebuild them.
+      if (msg.toolCalls.some((t) => isBrowserTool(t.name))) this.browserRowEls.set(msg.id, el);
     }
 
-    if (msg.toolResultImages && msg.toolResultImages.length > 0) {
-      const imgWrap = el.createDiv('ct-tool-result-images');
-      for (const img of msg.toolResultImages) {
-        imgWrap.createEl('img', {
-          attr: {
-            src: this.imageSrc(img, img.data),
-            style: 'max-width:100%;border-radius:4px;margin-bottom:6px;display:block;',
-          },
-        });
-      }
-    }
+    this.renderRowToolImages(el, msg);
 
     const content = el.createDiv('ct-message-content');
     if (msg.role === 'assistant') {
@@ -3653,6 +3687,11 @@ export class ThreadsView extends ItemView {
       if (entry.kind === 'single') {
         const pill = this.renderToolPill(container, entry.tool);
         opts.onPillRendered?.(entry.tool, pill);
+      } else if (entry.kind === 'browser') {
+        // One card per browser session, in place of tool pills. Live and
+        // finalized rendering share this call, so they cannot drift.
+        if (this.browser) this.browser.renderEntry(container, entry);
+        else for (const tool of entry.tools) this.renderToolPill(container, tool);
       } else if (opts.live) {
         this.renderToolGroup(container, entry, {
           keyOverride: liveToolGroupKey(entry.tools),
@@ -3715,7 +3754,8 @@ export class ThreadsView extends ItemView {
 
     const expandedSet = opts.live ? this.liveExpandedOuterToolWrap : this.expandedOuterToolWrap;
     const key = opts.live ? this.outerLiveToolWrapKey(tools) : this.outerToolWrapKey(tools);
-    let expanded = hasError || expandedSet.has(key);
+    // A browser card waiting on the human (sign-in) must not hide behind a collapsed wrap.
+    let expanded = hasError || expandedSet.has(key) || (this.browser?.needsAttention(tools) ?? false);
     if (!expanded) fullContent.addClass('ct-hidden');
     setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
 
@@ -3761,15 +3801,44 @@ export class ThreadsView extends ItemView {
    * on every step). Passes `{ live: true }` so a group the user expanded
    * mid-run stays expanded as it grows (see renderToolCalls' doc comment).
    */
-  private rebuildRowToolsInPlace(rowEl: HTMLElement, toolCalls: ToolCallRecord[]): void {
+  private rebuildRowToolsInPlace(rowEl: HTMLElement, toolCalls: ToolCallRecord[], row?: ChatMessage): void {
     const existing = rowEl.querySelector(':scope > .ct-tools');
     existing?.remove();
+    if (row) rowEl.querySelectorAll(':scope > .ct-tool-result-images').forEach((n) => n.remove());
     if (!toolCalls || toolCalls.length === 0) return;
     const wrapper = this.renderToolCalls(rowEl, toolCalls, { live: true });
     // renderToolCalls appends via createDiv (last child) — move it to the
     // front so tools stay above the message content, matching the layout
     // appendMessage produces when a row is first created.
     rowEl.prepend(wrapper);
+    if (row?.toolResultImages && row.toolResultImages.length > 0) {
+      const images = this.renderRowToolImages(rowEl, row);
+      // appendMessage puts images right after the tools; keep that order.
+      if (images) wrapper.after(images);
+    }
+    if (row && toolCalls.some((t) => isBrowserTool(t.name))) this.browserRowEls.set(row.id, rowEl);
+  }
+
+  /**
+   * Loose tool-result images under a row's tool list. Images that a browser
+   * session card already shows (its screenshot) are skipped so a screenshot
+   * appears once, inside its card.
+   */
+  private renderRowToolImages(rowEl: HTMLElement, msg: ChatMessage): HTMLElement | null {
+    if (!msg.toolResultImages || msg.toolResultImages.length === 0) return null;
+    const claimed = this.browser?.claimedImageIndexes(msg.id);
+    const visible = msg.toolResultImages.filter((_, i) => !claimed?.has(i));
+    if (visible.length === 0) return null;
+    const imgWrap = rowEl.createDiv('ct-tool-result-images');
+    for (const img of visible) {
+      imgWrap.createEl('img', {
+        attr: {
+          src: this.imageSrc(img, img.data),
+          style: 'max-width:100%;border-radius:4px;margin-bottom:6px;display:block;',
+        },
+      });
+    }
+    return imgWrap;
   }
 
   /**
@@ -3899,6 +3968,70 @@ export class ThreadsView extends ItemView {
       this.renderLiveToolCalls(buf?.tools ?? []);
       this.scrollToBottom();
     }, 80);
+  }
+
+  /** Host seam for BrowserSessionPresenter: everything it needs from this view. */
+  private browserPresenterHost(): import('./BrowserSessionPresenter').BrowserPresenterHost {
+    return {
+      app: this.app,
+      activeThreadId: () => this.activeThreadId,
+      messages: (threadId) => this.manager.getThread(threadId)?.messages ?? null,
+      streamingTools: (threadId) => (this.streamingBuffers.get(threadId)?.tools ?? []).filter((t) => t.name !== 'Agent'),
+      pendingImages: (threadId) => this.manager.getPendingToolResultImages(threadId),
+      turnRunning: () => this.turnRunning,
+      imageSrc: (ref, data) => this.imageSrc(ref, data),
+      controller: () => this.plugin.loginHandoff,
+      refreshRows: () => this.refreshBrowserRows(),
+      setControlChip: (visible) => this.controlChipEl?.toggleClass('ct-hidden', !visible),
+      setComposerHuman: (human) => {
+        this.inputRowEl?.toggleClass('ct-composer-human', human);
+        this.applyComposerPlaceholder();
+      },
+      announce: (text) => {
+        if (!this.browserLiveRegionEl) return;
+        // Clear first so repeating the same text is still announced.
+        this.browserLiveRegionEl.textContent = '';
+        window.setTimeout(() => { if (this.browserLiveRegionEl) this.browserLiveRegionEl.textContent = text; }, 50);
+      },
+      isVisible: () => {
+        const el = this.containerEl as HTMLElement & { isShown?: () => boolean };
+        return typeof el.isShown === 'function' ? el.isShown() : true;
+      },
+    };
+  }
+
+  /** Coalesced rebuild of rows carrying a browser card (result arrived, turn ended, ...). */
+  private scheduleBrowserRefresh(): void {
+    if (!this.browser || this.browserRefreshTimer !== null) return;
+    this.browserRefreshTimer = setTimeout(() => {
+      this.browserRefreshTimer = null;
+      const browser = this.browser;
+      if (!browser) return;
+      browser.withFocusPreserved(() => this.refreshBrowserRows());
+      browser.syncChrome();
+    }, 30);
+  }
+
+  /**
+   * Rebuild every on-screen row that holds a browser session card, in place,
+   * from the current thread state. Cheap: only rows that carry browser calls.
+   */
+  private refreshBrowserRows(): void {
+    if (!this.browser || !this.activeThreadId) return;
+    const thread = this.manager.getThread(this.activeThreadId);
+    if (!thread) return;
+    this.browser.invalidate();
+    const rows = mergeAdjacentToolOnlyMessages(thread.messages);
+    for (const [rowId, el] of [...this.browserRowEls]) {
+      const row = el.isConnected ? rows.find((r) => r.id === rowId) : undefined;
+      if (!row) { this.browserRowEls.delete(rowId); continue; }
+      this.rebuildRowToolsInPlace(el, row.toolCalls ?? [], row);
+    }
+    const buf = this.streamingBuffers.get(this.activeThreadId);
+    if (this.streamingEl?.isConnected && buf && buf.tools.some((t) => isBrowserTool(t.name))) {
+      this.renderLiveToolCalls(buf.tools);
+    }
+    this.browser.syncStandalone(this.messagesEl);
   }
 
   /**
@@ -4656,6 +4789,9 @@ export class ThreadsView extends ItemView {
   }
 
   private handleEvent(event: ThreadEvent): void {
+    // Cards derive live/screenshot/handoff context from thread state; drop the
+    // cached context so the next render sees this event's changes.
+    this.browser?.invalidate();
     switch (event.type) {
       case 'wakeup_changed': {
         // A wake-up was registered, fired, or cancelled on the active thread.
@@ -4804,7 +4940,7 @@ export class ThreadsView extends ItemView {
           this.lastAppendedRowEl &&
           this.lastAppendedRowEl.isConnected
         ) {
-          this.rebuildRowToolsInPlace(this.lastAppendedRowEl, newRow.toolCalls ?? []);
+          this.rebuildRowToolsInPlace(this.lastAppendedRowEl, newRow.toolCalls ?? [], newRow);
           this.scrollToBottom();
         } else if (newRow) {
           this.appendMessage(newRow).then((el) => {
@@ -4828,6 +4964,9 @@ export class ThreadsView extends ItemView {
         } else {
           this.subagentWaiting = false;
         }
+        // The new message may finish a browser session's screenshot or change which
+        // session is live; rows already on screen need to notice.
+        this.scheduleBrowserRefresh();
         this.plugin.saveSettings();
         // Note: auto-summarize is handled in the outer event listener (above the
         // activeThreadId guard) so it fires for all threads, not just the active one.
@@ -5234,16 +5373,25 @@ export class ThreadsView extends ItemView {
 
       case 'tool_result_images': {
         // Render inline images returned by tool results (e.g. Read tool on a PNG).
-        const container = this.cardContainer();
-        const imgWrap = container.createDiv('ct-tool-result-images');
-        for (const img of event.images) {
-          imgWrap.createEl('img', {
-            attr: {
-              src: this.imageSrc(img, img.data),
-              style: 'max-width:100%;border-radius:4px;margin-top:6px;display:block;',
-            },
-          });
+        // Images a browser session card claims (a browser_screenshot result) are
+        // drawn inside the card instead of loose below it.
+        const claimed = this.browser?.claimedPendingIndexes() ?? new Set<number>();
+        const pendingTotal = this.activeThreadId ? this.manager.getPendingToolResultImages(this.activeThreadId).length : 0;
+        const firstNew = Math.max(0, pendingTotal - event.images.length);
+        const loose = event.images.filter((_, i) => !claimed.has(firstNew + i));
+        if (loose.length > 0) {
+          const container = this.cardContainer();
+          const imgWrap = container.createDiv('ct-tool-result-images');
+          for (const img of loose) {
+            imgWrap.createEl('img', {
+              attr: {
+                src: this.imageSrc(img, img.data),
+                style: 'max-width:100%;border-radius:4px;margin-top:6px;display:block;',
+              },
+            });
+          }
         }
+        if (loose.length < event.images.length) this.scheduleBrowserRefresh();
         this.scrollToBottom();
         break;
       }
@@ -5338,6 +5486,9 @@ export class ThreadsView extends ItemView {
         // debounced rebuild so the live pill/group picks it up — no manual
         // DOM class-swap needed.
         if (this.streamingEl) this.scheduleLiveToolsRender();
+        // Rows already committed to the transcript hold the SAME mutated
+        // records; a browser card must show the result (url, ok/failed).
+        this.scheduleBrowserRefresh();
         break;
       }
 
@@ -5707,6 +5858,11 @@ export class ThreadsView extends ItemView {
   }
 
   private setRunningState(running: boolean): void {
+    if (this.turnRunning !== running) {
+      this.turnRunning = running;
+      // A browser card is "live" only while its turn runs.
+      this.scheduleBrowserRefresh();
+    }
     this.dispatchInput?.setStreaming(
       running,
       !!this.activeThreadId && this.manager.hasPendingQuestion(this.activeThreadId),

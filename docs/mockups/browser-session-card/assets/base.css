@@ -1,0 +1,303 @@
+/* ============================================================
+   Shared base — Obsidian dark-theme tokens + chat scaffold.
+   Imported by every variation's styles.css and by the board.
+   ============================================================ */
+
+:root {
+  --bg-page:        #16161a;
+  --bg-panel:       #1e1e1e;
+  --bg-raised:      #262626;
+  --bg-pill:        #2a2a2a;
+  --bg-pill-hover:  #313131;
+  --border:         #363636;
+  --border-soft:    #2d2d2d;
+
+  --text-normal:    #dcddde;
+  --text-muted:     #9a9a9d;
+  --text-faint:     #6b6b6e;
+
+  --accent:         #7c6df2;   /* violet — generic "active" accent */
+  --accent-soft:    rgba(124, 109, 242, 0.16);
+  --accent-border:  rgba(124, 109, 242, 0.4);
+
+  --browser:        #35c6c1;   /* teal/cyan — reserved for browser activity */
+  --browser-soft:   rgba(53, 198, 193, 0.16);
+  --browser-border: rgba(53, 198, 193, 0.45);
+  --browser-glow:   rgba(53, 198, 193, 0.55);
+
+  --danger:         #e0555f;
+  --success:        #4caf7d;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Helvetica, Arial, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-page);
+  color: var(--text-normal);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- app shell : mimics the plugin's narrow docked panel ---- */
+
+.app-shell {
+  width: 380px;
+  max-width: 100%;
+  margin: 0 auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.45);
+}
+
+.app-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-raised);
+  flex-shrink: 0;
+}
+
+.app-titlebar .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(76,175,125,0.15);
+}
+
+.app-titlebar .title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.app-titlebar .sub {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-left: auto;
+}
+
+.thread-body {
+  padding: 14px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 360px;
+  position: relative;
+}
+
+/* ---- messages ---- */
+
+.msg { display: flex; gap: 8px; align-items: flex-start; }
+
+.avatar {
+  width: 22px; height: 22px; border-radius: 6px;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700;
+  margin-top: 1px;
+  position: relative;
+}
+.avatar.user { background: var(--bg-raised); color: var(--text-muted); }
+.avatar.assistant { background: linear-gradient(135deg, var(--accent), #5a4fd6); color: #fff; }
+
+.msg-content { flex: 1; min-width: 0; }
+
+.msg-user .bubble {
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius-md);
+  padding: 7px 11px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  display: inline-block;
+}
+
+.msg-assistant .text {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-normal);
+  margin: 0 0 6px;
+}
+
+/* ---- generic tool pill (baseline, non-browser tools) ---- */
+
+.tools { display: flex; flex-direction: column; gap: 4px; margin: 2px 0; }
+
+.tool-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  max-width: 100%;
+  background: var(--bg-pill);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 4px 10px 4px 6px;
+  font-size: 11px;
+}
+
+.tool-pill-icon {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--bg-raised);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.tool-pill-icon svg { width: 10px; height: 10px; stroke: var(--text-muted); }
+
+.tool-pill-name {
+  font-family: var(--font-mono);
+  color: var(--text-normal);
+  font-weight: 500;
+}
+
+.tool-pill-text {
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-pill.active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+.tool-pill.active .tool-pill-icon svg { stroke: var(--accent); }
+.tool-pill.active .tool-pill-name::after {
+  content: "";
+  display: inline-block;
+  width: 6px; height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse-dot 1.1s ease-in-out infinite;
+  vertical-align: middle;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
+/* ---- composer ---- */
+
+.composer {
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-raised);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.composer input {
+  flex: 1;
+  background: var(--bg-pill);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 12px;
+  color: var(--text-normal);
+}
+.composer input::placeholder { color: var(--text-faint); }
+
+.composer .send {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.composer .send svg { width: 12px; height: 12px; stroke: #fff; }
+
+/* ---- shared icon helper (inline svg via mask not needed — plain paths) ---- */
+
+svg { display: block; }
+
+/* ---- demo toggle control (dev-only affordance, not part of the product UI) ---- */
+
+.state-toggle {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 9px;
+  background: #101012;
+  border-top: 1px dashed #3a3a3a;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.state-toggle button {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-pill);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.state-toggle button.is-current {
+  background: var(--browser-soft);
+  border-color: var(--browser-border);
+  color: var(--browser);
+}
+
+/* ---- page frame around the mock app (full variation pages only) ---- */
+
+.stage {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 40px 16px;
+}
+
+.stage-back {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--text-faint);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 999px;
+}
+.stage-back:hover { color: var(--text-normal); border-color: var(--text-faint); }
+
+.stage-caption {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  max-width: 380px;
+  text-align: center;
+  line-height: 1.5;
+}
+.stage-caption b { color: var(--text-muted); }
+
+@media (max-width: 480px) {
+  .app-shell { width: 100%; border-radius: 0; }
+}

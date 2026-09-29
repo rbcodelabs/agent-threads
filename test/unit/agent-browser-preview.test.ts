@@ -319,8 +319,10 @@ describe('AgentBrowserPreviewView — login handoff (ADR-0014)', () => {
     // "Return control" in the banner is the only exit during a handoff.
     expect(view.containerEl.querySelector('.ct-browser-preview-stop')?.classList.contains('is-hidden')).toBe(true);
 
-    await (view as unknown as { captureHandoffFrame(): Promise<void> }).captureHandoffFrame();
+    // Frame capture now belongs to the (here: view-owned) LoginHandoffController.
+    await (view as unknown as { controller: { captureTick(): Promise<void> } }).controller.captureTick();
     expect(capture).toHaveBeenCalled();
+    await view.onClose(); // stops the view-owned controller's capture loop
   });
 
   it('"return control" releases the login guest and reverts to the primary view', async () => {
