@@ -346,6 +346,13 @@ export class ThreadSession {
         return;
       }
     }
+    // Report the actual decision — null for a host-local spawn — so the UI
+    // (the "Sign in to Claude" card) can pick the right sign-in flow from
+    // what's really running rather than re-deriving a possibly-stale
+    // capability check (ADR-0015 follow-up, see SessionCallbacks.onVmRouting).
+    callbacks.onVmRouting?.(
+      vmRouting ? { containerName: vmRouting.containerName, containerBinaryPath: vmRouting.containerBinaryPath } : null,
+    );
 
     // Minimal, explicit env for the containerized case — deliberately NOT a
     // `...process.env` spread (ADR-0015 §4's hard requirement: forwarding the
@@ -366,7 +373,13 @@ export class ThreadSession {
       // and newer models unless opted back in. The plugin's dashboard depends on them.
       // Placed after process.env (so a stray inherited value can't disable a core
       // feature) but before extra/secret env (so explicit plugin config still wins).
-      env: vmRouting ? todoToolsEnv : { ...process.env, ...todoToolsEnv },
+      // The container sign-in token rides ONLY the VM-routed env, and is
+      // spread LAST so it wins over any same-named user secret. A host
+      // session must never see it: an env CLAUDE_CODE_OAUTH_TOKEN overrides
+      // the host's keychain login (see HarnessSessionOptions.containerAuthToken).
+      env: vmRouting
+        ? { ...todoToolsEnv, ...(options.containerAuthToken ? { CLAUDE_CODE_OAUTH_TOKEN: options.containerAuthToken } : {}) }
+        : { ...process.env, ...todoToolsEnv },
     };
     if (vmRouting) {
       const containerName = vmRouting.containerName;

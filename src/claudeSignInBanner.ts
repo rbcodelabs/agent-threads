@@ -6,8 +6,18 @@ export interface ClaudeSignInBannerDeps {
   message: string;
   /** False where the CLI can't be launched (mobile) — hides the sign-in button. */
   canSignIn: boolean;
-  /** Runs `claude auth login` + `claude auth status`. */
-  signIn: (onProgress: (text: string) => void, onUrl: (url: string) => void) => Promise<SignInResult>;
+  /**
+   * Runs the resolved sign-in flow: `claude auth login` + `claude auth
+   * status` on the host, or (ADR-0015 container-routed threads) the
+   * container's own `claude setup-token` via `onCodePrompt`. Host-flow
+   * callers can ignore the third argument — it is only invoked by the
+   * container flow.
+   */
+  signIn: (
+    onProgress: (text: string) => void,
+    onUrl: (url: string) => void,
+    onCodePrompt: () => Promise<string | null>,
+  ) => Promise<SignInResult>;
   /** Resends the thread's pending message on a fresh CLI session. */
   retry: () => Promise<unknown> | void;
 }
@@ -51,6 +61,43 @@ export function renderClaudeSignInBanner(parent: HTMLElement, deps: ClaudeSignIn
     await deps.retry();
   };
 
+  // Owned by whichever onCodePrompt() call is currently in flight, so a
+  // terminal result (success, failure, or timeout) can always clean it up
+  // even if the user never explicitly submits or cancels it.
+  let codePromptEl: HTMLElement | null = null;
+  const removeCodePrompt = () => {
+    codePromptEl?.remove();
+    codePromptEl = null;
+  };
+
+  /**
+   * Shows an inline "paste the login code" field (ADR-0015 container sign-in
+   * flow) and resolves with the typed code, or `null` on Cancel/Enter-less
+   * abandonment. The host flow's `signIn` never calls this.
+   */
+  const onCodePrompt = (): Promise<string | null> => {
+    return new Promise((resolve) => {
+      removeCodePrompt();
+      const wrap = card.createDiv('ct-auth-code-prompt');
+      wrap.createEl('div', { cls: 'ct-auth-code-label', text: 'Paste the login code shown in your browser:' });
+      const row = wrap.createDiv('ct-auth-code-row');
+      const input = row.createEl('input', { cls: 'ct-auth-code-input', attr: { type: 'text', placeholder: 'Login code' } });
+      const submitBtn = row.createEl('button', { cls: 'ct-auth-btn ct-auth-code-submit mod-cta', text: 'Submit' });
+      const cancelBtn = row.createEl('button', { cls: 'ct-auth-btn ct-auth-code-cancel', text: 'Cancel' });
+      codePromptEl = wrap;
+      const finish = (value: string | null) => {
+        removeCodePrompt();
+        resolve(value);
+      };
+      submitBtn.addEventListener('click', () => finish(input.value.trim() || null));
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') finish(input.value.trim() || null);
+      });
+      cancelBtn.addEventListener('click', () => finish(null));
+      input.focus();
+    });
+  };
+
   if (deps.canSignIn) {
     const signInBtn = actions.createEl('button', { cls: 'ct-auth-btn ct-auth-signin-btn mod-cta', text: 'Sign in to Claude' });
     signInBtn.addEventListener('click', async () => {
@@ -58,17 +105,26 @@ export function renderClaudeSignInBanner(parent: HTMLElement, deps: ClaudeSignIn
       busy = true;
       signInBtn.disabled = true;
       card.querySelector('.ct-auth-link')?.remove();
-      const result = await deps.signIn(
-        (text) => setStatus(text),
-        (url) => {
-          card.createEl('a', {
-            cls: 'ct-auth-link',
-            text: 'Browser didn’t open? Open the sign-in page',
-            href: url,
-            attr: { target: '_blank', rel: 'noopener' },
-          });
-        },
-      );
+      let result: SignInResult;
+      try {
+        result = await deps.signIn(
+          (text) => setStatus(text),
+          (url) => {
+            card.createEl('a', {
+              cls: 'ct-auth-link',
+              text: 'Browser didn’t open? Open the sign-in page',
+              href: url,
+              attr: { target: '_blank', rel: 'noopener' },
+            });
+          },
+          onCodePrompt,
+        );
+      } catch (err) {
+        // Never strand the card on a spinner-style status if sign-in (or
+        // saving its result) throws.
+        result = { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+      removeCodePrompt();
       if (result.ok) {
         setStatus('Signed in — retrying…');
         await retryNow();

@@ -21,7 +21,7 @@ import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
 import { containerNameForThread, SandboxVmManager, type VmCommandRunner } from './sandboxVm';
-import { DEFAULT_HARNESS_VM_IMAGE, type ClaudeVmRoutingInputs } from './harnessVmRouting';
+import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs } from './harnessVmRouting';
 import type { App } from 'obsidian';
 import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun } from './types';
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
@@ -178,6 +178,13 @@ export class ThreadManager {
   /** Test seam: overrides the real `container` CLI for every SandboxVmManager this instance creates. Production leaves this undefined (the real runner). */
   vmCommandRunner: VmCommandRunner | undefined = undefined;
   /**
+   * ADR-0015 follow-up: the actual VM-routing decision the thread's last
+   * `ThreadSession.start()` made (`SessionCallbacks.onVmRouting`), not a
+   * re-derived capability check — see `getClaudeVmRouting()`. Populated once
+   * per session start; absent entirely until a Claude session has started.
+   */
+  private claudeVmRoutingByThread: Map<string, { containerName: string; containerBinaryPath: string } | null> = new Map();
+  /**
    * Initialization context cannot be mutated on a live Claude or Codex
    * adapter. Track the goal revision each adapter was built with and retire it
    * only at a safe boundary. A pending kickoff is revision-scoped, making
@@ -248,6 +255,12 @@ export class ThreadManager {
    * (e.g. onSetCwd) into the server without shared mutable state across concurrent threads.
    */
   mcpServerFactory: ((threadId: string, initialCwd: string) => Record<string, McpServerConfig>) | undefined = undefined;
+  /**
+   * Resolves the in-container Claude sign-in token (see `containerAuthToken`
+   * on `HarnessSessionOptions`). Read at session start, like `secretEnvResolver`,
+   * but kept separate: it must reach ONLY VM-routed sessions.
+   */
+  containerAuthTokenResolver: (() => string | undefined) | undefined = undefined;
   /** Human-readable plugin host injected into new session context. */
   hostName: 'Geode' | 'Obsidian' = 'Obsidian';
   /**
@@ -751,6 +764,7 @@ export class ThreadManager {
     this.threadActivity.delete(id);
     this.lastActivityAt.delete(id);
     this.selectedAgentRuns.delete(id);
+    this.claudeVmRoutingByThread.delete(id);
     this.threads.delete(id);
     this.emit(id, { type: 'thread_deleted' });
   }
@@ -1953,6 +1967,58 @@ export class ThreadManager {
   }
 
   /**
+   * The actual VM-routing decision this thread's last Claude session start
+   * made (populated by `SessionCallbacks.onVmRouting`) — NOT a re-derived
+   * capability check, so it reflects what's really running even if the
+   * capability check would answer differently right now (image rebuilt,
+   * container CLI restarted, etc.). Consulted by the "Sign in to Claude" card
+   * to decide between the host `claude auth login` flow and the container's
+   * own `claude setup-token` flow.
+   *
+   * - `undefined` — no Claude session has started for this thread yet (or it
+   *   was cleared by `deleteThread()`). The host flow is the safe default.
+   * - `null` — the last session start resolved to a host-local spawn.
+   * - the routing object — the last session start's `claude` process is
+   *   running inside this container.
+   */
+  getClaudeVmRouting(threadId: string): { containerName: string; containerBinaryPath: string } | null | undefined {
+    return this.claudeVmRoutingByThread.get(threadId);
+  }
+
+  /**
+   * Like `getClaudeVmRouting`, but never returns `undefined`: when no session
+   * has started yet (the sign-in card is rebuilt from PERSISTED `authRequired`
+   * state after a plugin reload, before any session start), it resolves the
+   * routing the same way a session start would — including starting the
+   * thread's container so `container exec` has something to attach to — and
+   * remembers the answer. Without this the card silently fell back to the host
+   * `claude auth login`, which can never authenticate a containerized session.
+   *
+   * A routing failure (`'always'` mode, container won't start) resolves to
+   * `null` (host flow) rather than throwing: the card must still render.
+   */
+  async resolveClaudeVmRoutingForSignIn(
+    threadId: string,
+  ): Promise<{ containerName: string; containerBinaryPath: string } | null> {
+    const known = this.claudeVmRoutingByThread.get(threadId);
+    if (known !== undefined) return known;
+    const thread = this.getThread(threadId);
+    const inputs = thread ? this.buildClaudeVmRoutingInputs(threadId, thread) : undefined;
+    if (!inputs) return null;
+    try {
+      const decision = await resolveClaudeVmRouting(inputs);
+      const routing = decision.routed
+        ? { containerName: decision.routing.containerName, containerBinaryPath: decision.routing.containerBinaryPath }
+        : null;
+      this.claudeVmRoutingByThread.set(threadId, routing);
+      return routing;
+    } catch (err) {
+      console.warn('[ClaudeThreads] could not resolve VM routing for sign-in; using host flow:', err);
+      return null;
+    }
+  }
+
+  /**
    * ADR-0015 VM routing inputs for this thread's Claude harness, or undefined
    * for host-local spawn (today's behavior, unchanged) — either because this
    * thread isn't running the Claude harness, or `harnessVmMode` is `'never'`.
@@ -2061,6 +2127,7 @@ export class ThreadManager {
           )
         : undefined,
       secretEnv: resolvedSecretEnv,
+      containerAuthToken: this.containerAuthTokenResolver?.(),
       claude: {
         mcpServers: sessionMcpServers,
         disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
@@ -2466,6 +2533,10 @@ export class ThreadManager {
         // terminal error (the user message stays in the transcript, once).
         thread.authRequired = { message, at: Date.now() };
         callbacks.onError(new Error(message));
+      },
+      onVmRouting: (routing) => {
+        if (!isCurrentGeneration()) return;
+        this.claudeVmRoutingByThread.set(threadId, routing);
       },
       onCompact: (trigger, preTokens) => {
         if (!isCurrentGeneration()) return;

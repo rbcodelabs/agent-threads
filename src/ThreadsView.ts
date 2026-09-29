@@ -24,6 +24,8 @@ import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
 import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, execEnv, splitErrorMessage } from './dashboardUtils';
 import { isClaudeSignInExpiredError } from './claudeAuthRecovery';
 import { signInToClaude, type SpawnLike } from './claudeAuthCli';
+import { signInToClaudeInContainer, type SpawnLike as ContainerSpawnLike } from './claudeContainerAuthCli';
+import { runnerEnv as hostRunnerEnv } from './sandboxVm';
 import { renderClaudeSignInBanner } from './claudeSignInBanner';
 import { getVaultBridgesAPI, mapToVaultPath, type BridgeInfo } from './bridgeUtils';
 import { resolveTagIcon, planFooter, derivePrUrl } from './statusLine';
@@ -5522,24 +5524,68 @@ export class ThreadsView extends ItemView {
 
   /**
    * "Sign in to Claude" card for a turn whose silent fresh-process retry
-   * still failed to authenticate (see claudeAuthRecovery.ts). Sign-in shells
-   * out to `claude auth login` using the same resolved binary the sessions
-   * use; desktop only.
+   * still failed to authenticate (see claudeAuthRecovery.ts). Desktop only.
+   *
+   * Two flows, chosen by `ThreadManager.getClaudeVmRouting()` — the ACTUAL
+   * routing decision this thread's last session start made, not a re-derived
+   * capability check (ADR-0015 follow-up):
+   * - Host-spawned (routing absent/null): `claude auth login` on the host,
+   *   same as before this ADR.
+   * - Container-routed: the container's own `claude setup-token`, since the
+   *   host's keychain sign-in never reaches a process running inside the
+   *   sandbox container. Runs through `/usr/bin/expect` over a plain
+   *   `child_process` pipe (no pty needed on this side — see
+   *   claudeContainerAuthCli.ts's doc comment for why `node-pty` was ruled
+   *   out: this plugin's release workflow never ships `node_modules/`, so a
+   *   native module's compiled binary could never reach a real install).
    */
   private renderClaudeSignInCard(threadId: string, message: string): void {
     this.messagesEl.querySelector('.ct-auth-required')?.remove();
     renderClaudeSignInBanner(this.messagesEl, {
       message,
       canSignIn: Platform.isDesktopApp,
-      signIn: (onProgress, onUrl) => {
+      // The flow is chosen when the button is CLICKED, not when the card is
+      // rendered: this card is also rebuilt from persisted `authRequired` state
+      // after a plugin reload, before any session has started, when the
+      // recorded routing is still empty. Rendering-time selection silently
+      // picked the host flow there — which can never authenticate a
+      // containerized session.
+      signIn: async (onProgress, onUrl, onCodePrompt) => {
+        const routing = await this.manager.resolveClaudeVmRoutingForSignIn(threadId);
+        if (!routing) {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { spawn } = require('child_process') as typeof import('child_process');
+          return signInToClaude(this.plugin.settings.claudeBinaryPath || 'claude', {
+            spawn: spawn as unknown as SpawnLike,
+            env: execEnv(),
+            onProgress,
+            onUrl,
+          });
+        }
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { spawn } = require('child_process') as typeof import('child_process');
-        return signInToClaude(this.plugin.settings.claudeBinaryPath || 'claude', {
-          spawn: spawn as unknown as SpawnLike,
-          env: execEnv(),
+        onProgress('Signing in inside the sandbox container…');
+        const result = await signInToClaudeInContainer({
+          spawn: spawn as unknown as ContainerSpawnLike,
+          hostEnv: hostRunnerEnv() as NodeJS.ProcessEnv,
+          containerName: routing.containerName,
+          containerBinaryPath: routing.containerBinaryPath,
           onProgress,
-          onUrl,
+          onUrl: (url) => {
+            onUrl(url);
+            // The CLI runs inside the container and cannot launch a host
+            // browser; the fallback link stays for a blocked pop-up.
+            try { window.open(url, '_blank'); } catch { /* link is the fallback */ }
+          },
+          onCodePrompt,
         });
+        if (!result.ok) return result;
+        try {
+          await this.plugin.persistContainerAuthToken(threadId, result.token);
+        } catch (err) {
+          return { ok: false as const, error: `Signed in, but saving the token failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+        return { ok: true as const };
       },
       retry: async () => {
         try {

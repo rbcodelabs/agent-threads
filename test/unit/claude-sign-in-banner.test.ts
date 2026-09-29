@@ -79,6 +79,21 @@ describe('renderClaudeSignInBanner', () => {
     expect(link.href).toBe('https://claude.ai/oauth/authorize?x=1');
   });
 
+  it('shows the error and re-enables the button when signIn REJECTS, instead of freezing on the last status', async () => {
+    const signIn = vi.fn(async (onProgress: (t: string) => void) => {
+      onProgress('Verifying code…');
+      throw new Error('secret storage unavailable');
+    });
+    const { el, deps, button, status } = mount({ signIn });
+    document.body.appendChild(el);
+    button('Sign in to Claude')!.click();
+    await flush();
+    expect(status()).toBe('secret storage unavailable');
+    expect(el.querySelector('.ct-auth-status')?.classList.contains('is-error')).toBe(true);
+    expect(button('Sign in to Claude')!.disabled).toBe(false);
+    expect(deps.retry).not.toHaveBeenCalled();
+  });
+
   it('Retry resends without signing in', async () => {
     const { deps, button } = mount();
     button('Retry')!.click();
@@ -92,5 +107,100 @@ describe('renderClaudeSignInBanner', () => {
     expect(button('Sign in to Claude')).toBeUndefined();
     expect(button('Retry')).toBeDefined();
     expect(el.textContent).toContain('claude auth login');
+  });
+
+  describe('container sign-in (ADR-0015 paste-code flow)', () => {
+    function findCodeInput(el: HTMLElement): HTMLInputElement {
+      return el.querySelector('.ct-auth-code-input') as HTMLInputElement;
+    }
+    function findCodeButton(el: HTMLElement, label: string): HTMLButtonElement | undefined {
+      return [...el.querySelectorAll('.ct-auth-code-row button')].find((b) => b.textContent === label) as HTMLButtonElement | undefined;
+    }
+
+    it('calls onCodePrompt, shows a paste-code field, and resolves with the typed code on Submit', async () => {
+      let capturedOnCodePrompt!: () => Promise<string | null>;
+      const signIn = vi.fn((onProgress: (t: string) => void, onUrl: (u: string) => void, onCodePrompt: () => Promise<string | null>) => {
+        capturedOnCodePrompt = onCodePrompt;
+        return new Promise<SignInResult>(() => {});
+      });
+      const { el, button } = mount({ signIn });
+      button('Sign in to Claude')!.click();
+      await flush();
+
+      const promptPromise = capturedOnCodePrompt();
+      expect(el.querySelector('.ct-auth-code-prompt')).toBeTruthy();
+      const input = findCodeInput(el);
+      input.value = 'ABCD-1234';
+      findCodeButton(el, 'Submit')!.click();
+
+      expect(await promptPromise).toBe('ABCD-1234');
+      expect(el.querySelector('.ct-auth-code-prompt')).toBeNull();
+    });
+
+    it('resolves with null and removes the field on Cancel', async () => {
+      let capturedOnCodePrompt!: () => Promise<string | null>;
+      const signIn = vi.fn((onProgress: (t: string) => void, onUrl: (u: string) => void, onCodePrompt: () => Promise<string | null>) => {
+        capturedOnCodePrompt = onCodePrompt;
+        return new Promise<SignInResult>(() => {});
+      });
+      const { el, button } = mount({ signIn });
+      button('Sign in to Claude')!.click();
+      await flush();
+
+      const promptPromise = capturedOnCodePrompt();
+      findCodeButton(el, 'Cancel')!.click();
+
+      expect(await promptPromise).toBeNull();
+      expect(el.querySelector('.ct-auth-code-prompt')).toBeNull();
+    });
+
+    it('submits on Enter without clicking Submit', async () => {
+      let capturedOnCodePrompt!: () => Promise<string | null>;
+      const signIn = vi.fn((onProgress: (t: string) => void, onUrl: (u: string) => void, onCodePrompt: () => Promise<string | null>) => {
+        capturedOnCodePrompt = onCodePrompt;
+        return new Promise<SignInResult>(() => {});
+      });
+      const { el, button } = mount({ signIn });
+      button('Sign in to Claude')!.click();
+      await flush();
+
+      const promptPromise = capturedOnCodePrompt();
+      const input = findCodeInput(el);
+      input.value = 'WXYZ-9999';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+
+      expect(await promptPromise).toBe('WXYZ-9999');
+    });
+
+    it('a leftover paste-code field is cleaned up once sign-in finishes, even if the user never resolved it', async () => {
+      let finish!: (r: SignInResult) => void;
+      const signIn = vi.fn((onProgress: (t: string) => void, onUrl: (u: string) => void, onCodePrompt: () => Promise<string | null>) => {
+        void onCodePrompt(); // container flow calls this itself; never resolved by the test
+        return new Promise<SignInResult>((r) => { finish = r; });
+      });
+      const { el, deps, button } = mount({ signIn });
+      button('Sign in to Claude')!.click();
+      await flush();
+      expect(el.querySelector('.ct-auth-code-prompt')).toBeTruthy();
+
+      finish({ ok: true });
+      await flush();
+      expect(deps.retry).toHaveBeenCalledTimes(1);
+      expect(el.querySelector('.ct-auth-code-prompt')).toBeNull();
+    });
+
+    it('the host flow never sees onCodePrompt invoked', async () => {
+      let capturedOnCodePrompt!: () => Promise<string | null>;
+      const signIn = vi.fn((onProgress: (t: string) => void, onUrl: (u: string) => void, onCodePrompt: () => Promise<string | null>) => {
+        capturedOnCodePrompt = onCodePrompt;
+        onProgress('Waiting for browser sign-in…');
+        return new Promise<SignInResult>(() => {});
+      });
+      const { el, button } = mount({ signIn });
+      button('Sign in to Claude')!.click();
+      await flush();
+      expect(capturedOnCodePrompt).toBeDefined();
+      expect(el.querySelector('.ct-auth-code-prompt')).toBeNull();
+    });
   });
 });

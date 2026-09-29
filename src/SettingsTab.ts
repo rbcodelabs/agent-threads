@@ -1699,7 +1699,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       void checkHarnessVmCapability({ vmManager, image }).then((capability) => {
         diagnosticSetting.setDesc(
           capability.capable
-            ? `Ready — threads on this harness will route into ${image}.`
+            ? `Ready — threads on this harness will route into ${image}. Claude sign-in still happens once, `
+              + 'inside the container: the first time a routed thread needs it, a "Sign in to Claude" card walks '
+              + 'through the container\'s own `claude setup-token` (open a URL, paste back a login code) — a host '
+              + '`claude auth login` never reaches a process running inside the sandbox.'
             : `Not ready: ${capability.reason}`,
         );
       });

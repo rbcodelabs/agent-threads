@@ -74,6 +74,16 @@ export interface HarnessSessionOptions {
   /** Canonical transcript replayed on the first turn only if native resume fails. */
   resumeFallbackHistory?: string;
   secretEnv?: Record<string, string>;
+  /**
+   * Long-lived Claude OAuth token minted by the in-container sign-in
+   * (`claudeContainerAuthCli.ts`). Deliberately NOT part of `secretEnv`:
+   * `secretEnv` reaches every session including host-spawned ones, and an
+   * env `CLAUDE_CODE_OAUTH_TOKEN` overrides the host keychain login — so a
+   * container-only credential there would break (or, if stale, poison) every
+   * host thread. `ThreadSession` injects this ONLY into a VM-routed session's
+   * container `--env`.
+   */
+  containerAuthToken?: string;
   claude?: ClaudeHarnessOptions;
   codex?: CodexHarnessOptions;
   opencode?: OpenCodeHarnessOptions;
