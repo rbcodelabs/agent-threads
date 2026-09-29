@@ -991,6 +991,12 @@ export interface PluginSettings {
    * Blank falls back to `claude-threads-harness:1`.
    */
   harnessVmImage: string;
+  /**
+   * True once the user chose "Don't ask again" on the in-thread "Run this thread in a
+   * sandbox?" card. Suppresses that offer for good; Settings → Claude → Set up
+   * sandbox still works.
+   */
+  sandboxSetupPromptDismissed: boolean;
   defaultCwd: string;
   saveThreadsToVault: boolean;
   /**
@@ -1258,6 +1264,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   vmDefaultNetwork: 'default',
   harnessVmMode: 'auto',
   harnessVmImage: 'claude-threads-harness:1',
+  sandboxSetupPromptDismissed: false,
   defaultCwd: '',
   saveThreadsToVault: true,
   saveRawLogs: true,

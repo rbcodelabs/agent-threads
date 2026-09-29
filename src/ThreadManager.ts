@@ -21,7 +21,9 @@ import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
 import { containerNameForThread, SandboxVmManager, type VmCommandRunner } from './sandboxVm';
-import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs } from './harnessVmRouting';
+import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
+import { isRuntimeSupported } from './sandboxRuntime';
+import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
 import type { App } from 'obsidian';
 import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun } from './types';
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
@@ -66,6 +68,8 @@ export type ThreadEvent =
   | { type: 'rate_limit_retry'; attempt: number; maxRetries: number; delayMs: number }
   /** Expired Claude sign-in: the CLI process is being restarted and the turn replayed once. */
   | { type: 'auth_retry'; error: string }
+  /** A Claude thread fell back to the host because the sandbox isn't set up: render the one-time "Run this thread in a sandbox?" card. */
+  | { type: 'sandbox_setup_offer'; reason: HarnessVmFallbackReason }
   | { type: 'streaming_start' }
   | { type: 'escalated'; model: string }
   | { type: 'queued'; text: string; images?: ImageAttachment[] }
@@ -184,6 +188,12 @@ export class ThreadManager {
    * per session start; absent entirely until a Claude session has started.
    */
   private claudeVmRoutingByThread: Map<string, { containerName: string; containerBinaryPath: string } | null> = new Map();
+  /** Threads whose "Run this thread in a sandbox?" card is currently pending (so a re-render of the thread can restore it). */
+  private sandboxSetupOffers: Map<string, HarnessVmFallbackReason> = new Map();
+  /** Threads that have been offered the card this app session — at most one card each, however many sessions start. */
+  private sandboxSetupOffered: Set<string> = new Set();
+  /** Test seam: whether sandbox setup can run on this machine. Production uses the real macOS/arch check. */
+  sandboxSetupSupported: () => boolean = () => isRuntimeSupported().supported;
   /**
    * Initialization context cannot be mutated on a live Claude or Codex
    * adapter. Track the goal revision each adapter was built with and retire it
@@ -774,6 +784,8 @@ export class ThreadManager {
     this.lastActivityAt.delete(id);
     this.selectedAgentRuns.delete(id);
     this.claudeVmRoutingByThread.delete(id);
+    this.sandboxSetupOffers.delete(id);
+    this.sandboxSetupOffered.delete(id);
     this.threads.delete(id);
     this.emit(id, { type: 'thread_deleted' });
   }
@@ -2028,6 +2040,34 @@ export class ThreadManager {
   }
 
   /**
+   * Decides whether a host fallback deserves the one-time sandbox-setup card
+   * and, if so, records + announces it. The thread keeps running on the host
+   * regardless; this only adds a card.
+   */
+  private maybeOfferSandboxSetup(threadId: string, reason: HarnessVmFallbackReason | undefined): void {
+    if (!shouldOfferSandboxSetup({
+      mode: this.settings.harnessVmMode ?? 'auto',
+      reason,
+      dismissedForever: this.settings.sandboxSetupPromptDismissed === true,
+      alreadyOffered: this.sandboxSetupOffered.has(threadId),
+      setupSupported: this.sandboxSetupSupported(),
+    })) return;
+    this.sandboxSetupOffered.add(threadId);
+    this.sandboxSetupOffers.set(threadId, reason!);
+    this.emit(threadId, { type: 'sandbox_setup_offer', reason: reason! });
+  }
+
+  /** The pending sandbox-setup offer for a thread, if its card should be (re)shown. */
+  getSandboxSetupOffer(threadId: string): HarnessVmFallbackReason | undefined {
+    return this.sandboxSetupOffers.get(threadId);
+  }
+
+  /** "Not now" / after setup: hide the card. It is not re-offered this app session. */
+  clearSandboxSetupOffer(threadId: string): void {
+    this.sandboxSetupOffers.delete(threadId);
+  }
+
+  /**
    * ADR-0015 VM routing inputs for this thread's Claude harness, or undefined
    * for host-local spawn (today's behavior, unchanged) — either because this
    * thread isn't running the Claude harness, or `harnessVmMode` is `'never'`.
@@ -2543,9 +2583,10 @@ export class ThreadManager {
         thread.authRequired = { message, at: Date.now() };
         callbacks.onError(new Error(message));
       },
-      onVmRouting: (routing) => {
+      onVmRouting: (routing, fallbackReason) => {
         if (!isCurrentGeneration()) return;
         this.claudeVmRoutingByThread.set(threadId, routing);
+        if (!routing) this.maybeOfferSandboxSetup(threadId, fallbackReason);
       },
       onCompact: (trigger, preTokens) => {
         if (!isCurrentGeneration()) return;

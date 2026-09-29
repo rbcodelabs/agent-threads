@@ -50,6 +50,7 @@ export class ConfirmModal extends Modal {
   private onResult: (confirmed: boolean) => void;
   private message: string;
   private confirmLabel: string;
+  private danger: boolean;
   /** Set by the confirm button before it closes; read once by `onClose`. */
   private result = false;
   /** Guards against a second `onClose` (Obsidian may call it more than once). */
@@ -60,8 +61,10 @@ export class ConfirmModal extends Modal {
     message: string,
     confirmLabel: string,
     onResult: (confirmed: boolean) => void,
+    danger = true,
   ) {
     super(app);
+    this.danger = danger;
     this.message = message;
     this.confirmLabel = confirmLabel;
     this.onResult = onResult;
@@ -73,7 +76,7 @@ export class ConfirmModal extends Modal {
     btns.createEl('button', { cls: 'ct-skills-btn', text: 'Cancel' }).addEventListener('click', () => {
       this.close();
     });
-    btns.createEl('button', { cls: 'ct-skills-btn ct-skills-btn--danger', text: this.confirmLabel }).addEventListener('click', () => {
+    btns.createEl('button', { cls: this.danger ? 'ct-skills-btn ct-skills-btn--danger' : 'ct-skills-btn mod-cta', text: this.confirmLabel }).addEventListener('click', () => {
       this.result = true;
       this.close();
     });
@@ -93,9 +96,9 @@ export class ConfirmModal extends Modal {
  */
 export function promptConfirm(
   app: App,
-  confirm: { message: string; confirmLabel: string },
+  confirm: { message: string; confirmLabel: string; /** Red destructive styling; defaults to true. */ danger?: boolean },
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    new ConfirmModal(app, confirm.message, confirm.confirmLabel, resolve).open();
+    new ConfirmModal(app, confirm.message, confirm.confirmLabel, resolve, confirm.danger ?? true).open();
   });
 }

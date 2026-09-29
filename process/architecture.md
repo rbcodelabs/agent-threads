@@ -63,7 +63,7 @@ The agent's `Read`/`Write`/`Edit`/`Bash` tools run on the host, so the sandbox c
 
 Backed by Apple's `container` CLI (macOS 26+, Apple silicon), where each container is its own VM with a separate kernel and no view of the host filesystem beyond that mount.
 
-**Setup:** `brew install container` → `container system start` → build the image:
+**Setup:** Settings → Claude → **Set up sandbox** (`sandboxSetup.ts` orchestrates `sandboxRuntime.ts` install/start and `sandboxImage.ts` pull/build; UI in `sandboxSetupPanel.ts`, pure text in `sandboxSetupView.ts`, in-thread offer gating in `sandboxSetupPrompt.ts`). Manual fallback: `brew install container` → `container system start` → build the image:
 
 ```sh
 container build --tag claude-threads-coding:1 sandbox/

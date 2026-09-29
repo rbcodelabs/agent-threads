@@ -37,7 +37,7 @@
  * degrades to a non-throwing `{ success: false, error }` when it is missing.
  */
 
-import { managedRuntimeBinDirIfPresent } from './sandboxRuntime';
+import { managedRuntimeBinDirIfPresent, parseSystemStatus } from './sandboxRuntime';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -78,8 +78,9 @@ export const VM_BINARY = 'container';
  */
 export const VM_UNAVAILABLE_HINT =
   `The \`${VM_BINARY}\` CLI is unavailable. Sandboxed VMs need Apple's container runtime `
-  + '(macOS 26+ on Apple silicon): install it with `brew install container`, then run '
-  + '`container system start`. Sandbox VM tools are desktop-only and are not available on mobile.';
+  + '(macOS 26+ on Apple silicon). Agent Threads can set it up for you: open Settings → Claude → '
+  + 'Set up sandbox. Manual fallback: `brew install container`, then `container system start`. '
+  + 'Sandbox VM tools are desktop-only and are not available on mobile.';
 
 // ── Command execution seam ───────────────────────────────────────────────────
 
@@ -462,6 +463,20 @@ export class SandboxVmManager {
   async imageExists(image: string): Promise<boolean> {
     const result = await this.exec(buildImageInspectArgs(image), 15_000);
     return result.exitCode === 0;
+  }
+
+  /**
+   * True when the runtime's system service is running (`container system
+   * status`). Distinguishes "service stopped" from "image missing" when
+   * `imageExists` is false, since `image inspect` fails in both cases.
+   */
+  async systemRunning(): Promise<boolean> {
+    try {
+      const result = await this.exec(['system', 'status'], 15_000);
+      return result.exitCode === 0 && parseSystemStatus(`${result.stdout}\n${result.stderr}`).running;
+    } catch {
+      return false;
+    }
   }
 
   /**

@@ -406,6 +406,8 @@ describe('SandboxVmManager — enter', () => {
     expect(result.success).toBe(false);
     expect((result as { error: string }).error).toContain('brew install container');
     expect((result as { error: string }).error).toContain('container system start');
+    // The managed setup is the primary path; the manual steps are the fallback.
+    expect((result as { error: string }).error).toContain('Set up sandbox');
   });
 
   it('reports a stopped container runtime rather than a bare non-zero exit', async () => {

@@ -252,3 +252,76 @@ describe('ThreadManager — containerAuthToken plumbing', () => {
     expect(fake.lastOptions?.containerAuthToken).toBeUndefined();
   });
 });
+
+describe('ThreadManager — in-thread "Run this thread in a sandbox?" offer', () => {
+  async function started(settings = DEFAULT_SETTINGS) {
+    const manager = new ThreadManager(settings);
+    manager.sandboxSetupSupported = () => true; // CI is Linux; the real check is exercised in sandboxRuntime tests
+    manager.loadThreads([thread({ agentHarness: 'claude' })]);
+    const events: Array<{ type: string; reason?: string }> = [];
+    manager.subscribe((_id, e) => events.push(e as never));
+    await manager.sendMessage('t1', 'hi');
+    return { manager, events, report: (reason?: string) => fake.lastOptions?.callbacks.onVmRouting?.(null, reason as never) };
+  }
+  const offers = (events: Array<{ type: string }>) => events.filter((e) => e.type === 'sandbox_setup_offer');
+
+  it.each(['runtime-missing', 'runtime-stopped', 'image-missing'])('offers setup when auto mode fell back because of %s', async (reason) => {
+    const { manager, events, report } = await started();
+    report(reason);
+    expect(offers(events)).toEqual([{ type: 'sandbox_setup_offer', reason }]);
+    expect(manager.getSandboxSetupOffer('t1')).toBe(reason);
+  });
+
+  it.each(['unsupported', 'never', 'start-failed', undefined])('does NOT offer setup for fallback reason %s', async (reason) => {
+    const { manager, events, report } = await started();
+    report(reason);
+    expect(offers(events)).toHaveLength(0);
+    expect(manager.getSandboxSetupOffer('t1')).toBeUndefined();
+  });
+
+  it('does not offer when the sandbox routed successfully', async () => {
+    const { events } = await started();
+    fake.lastOptions?.callbacks.onVmRouting?.({ containerName: 'c', containerBinaryPath: '/claude' });
+    expect(offers(events)).toHaveLength(0);
+  });
+
+  it('does not offer in "always" mode (that mode errors instead of falling back)', async () => {
+    const { events, report } = await started({ ...DEFAULT_SETTINGS, harnessVmMode: 'always' });
+    report('runtime-missing');
+    expect(offers(events)).toHaveLength(0);
+  });
+
+  it('does not offer once "Don\'t ask again" was persisted', async () => {
+    const { events, report } = await started({ ...DEFAULT_SETTINGS, sandboxSetupPromptDismissed: true });
+    report('runtime-missing');
+    expect(offers(events)).toHaveLength(0);
+  });
+
+  it('does not offer where setup cannot run on this machine', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.sandboxSetupSupported = () => false;
+    manager.loadThreads([thread({ agentHarness: 'claude' })]);
+    const events: Array<{ type: string }> = [];
+    manager.subscribe((_id, e) => events.push(e));
+    await manager.sendMessage('t1', 'hi');
+    fake.lastOptions?.callbacks.onVmRouting?.(null, 'runtime-missing');
+    expect(offers(events)).toHaveLength(0);
+  });
+
+  it('offers at most once per thread per app session, even after "Not now" and further session starts', async () => {
+    const { manager, events, report } = await started();
+    report('runtime-missing');
+    report('runtime-missing');
+    manager.clearSandboxSetupOffer('t1'); // "Not now"
+    report('image-missing');
+    expect(offers(events)).toHaveLength(1);
+    expect(manager.getSandboxSetupOffer('t1')).toBeUndefined();
+  });
+
+  it('forgets a deleted thread\'s offer state', async () => {
+    const { manager, report } = await started();
+    report('runtime-missing');
+    manager.deleteThread('t1');
+    expect(manager.getSandboxSetupOffer('t1')).toBeUndefined();
+  });
+});

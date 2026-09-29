@@ -36,6 +36,9 @@ import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openLocalFileViaHost, o
 import type { StatusTag } from './types';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { promptConfirm } from './confirmModal';
+import { renderSandboxOfferCard } from './sandboxSetupPanel';
+import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
+import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
 import { describeOrchestratorThread, isOrchestratorThread, orchestratorWarning, type OrchestratorContext } from './orchestratorThreads';
 import { partitionThreads } from './threadRowState';
 import { agentLabel, buildAgentBreadcrumbs, summarizeAgentTeam } from './agentRuns/agentTreeModel';
@@ -3178,6 +3181,12 @@ export class ThreadsView extends ItemView {
       this.renderClaudeSignInCard(this.activeThreadId, thread.authRequired.message);
     }
 
+    // Restore a still-pending "Run this thread in a sandbox?" offer (its
+    // state lives in the manager, so switching threads doesn't lose it).
+    if (this.manager.getSandboxSetupOffer(this.activeThreadId)) {
+      this.renderSandboxOfferCard(this.activeThreadId);
+    }
+
     this.applyPendingMainScroll();
     this.setRunningState(this.manager.isRunning(this.activeThreadId));
     this.browser?.syncStandalone(this.messagesEl);
@@ -5584,6 +5593,13 @@ export class ThreadsView extends ItemView {
         break;
       }
 
+      case 'sandbox_setup_offer': {
+        // The thread is running on the host because the sandbox isn't set up.
+        // Offer setup without interrupting it (the card is not modal).
+        if (this.activeThreadId) this.renderSandboxOfferCard(this.activeThreadId);
+        break;
+      }
+
       case 'auth_retry': {
         // Expired Claude sign-in: ThreadSession is restarting the CLI process
         // (the fresh one re-reads the keychain) and replaying the turn once.
@@ -5745,6 +5761,30 @@ export class ThreadsView extends ItemView {
         } catch (err) {
           new Notice(`Retry failed: ${(err as Error).message}`);
         }
+      },
+    });
+    this.scrollToBottom();
+  }
+
+  /**
+   * One-time "Run this thread in a sandbox?" card. Setup progress runs inside
+   * the card; a finished setup only affects the thread's NEXT fresh session
+   * start (the running session is deliberately left alone).
+   */
+  private renderSandboxOfferCard(threadId: string): void {
+    if (!Platform.isDesktopApp) return;
+    this.messagesEl.querySelector('.ct-sandbox-offer')?.remove();
+    const harnessImage = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
+    renderSandboxOfferCard(this.messagesEl, {
+      getStatus: () => getSandboxSetupStatus({ harnessImage }),
+      run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
+      confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
+      onNotNow: () => this.manager.clearSandboxSetupOffer(threadId),
+      onDontAskAgain: () => {
+        this.manager.clearSandboxSetupOffer(threadId);
+        this.plugin.settings.sandboxSetupPromptDismissed = true;
+        this.manager.updateSettings(this.plugin.settings);
+        void this.plugin.saveSettings();
       },
     });
     this.scrollToBottom();

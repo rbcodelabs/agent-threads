@@ -72,7 +72,7 @@ export const HARNESS_DOCKERFILE = `# Harness-hosting image (ADR-0015): adds the 
 # existing user until they explicitly build this image. That means shipping
 # this ADR's code changes nothing for anyone until they opt in.
 #
-# Build with:
+# Normally built for you by Settings → Claude → Set up sandbox. To build by hand:
 #   container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/
 #
 # Claude-only for now. Codex/OpenCode CLI installs are intentionally NOT added

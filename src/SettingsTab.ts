@@ -16,8 +16,10 @@ import type { McpServerEntry } from './mcpServerStore';
 // See test/unit/bundle-safety.test.ts.
 import { mcpRegistrationSchema } from './mcpServerStore';
 import { classifyScheduledItems, describeScheduledExecution, formatNextOccurrence } from './scheduledWorkView';
-import { SandboxVmManager } from './sandboxVm';
-import { checkHarnessVmCapability, DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
+import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
+import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
+import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
+import { promptConfirm } from './confirmModal';
 
 // View-type string constants, mirrored as local literals (see main.ts) so referencing
 // them never triggers a static import of the desktop-only KanbanView/AgentDashboard
@@ -1610,10 +1612,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       .setName('Sandbox VM image')
       .setClass('ct-sandbox-setting')
       .setDesc(
-        'Container image enter_vm starts. Build it from sandbox/Dockerfile with '
-        + '`container build --tag claude-threads-coding:1 sandbox/`. Requires Apple\'s '
-        + 'container runtime (macOS 26+, Apple silicon): `brew install container` then '
-        + '`container system start`. Leave empty for claude-threads-coding:1.',
+        'Container image enter_vm starts. Requires Apple\'s container runtime (macOS 26+, Apple silicon). '
+        + 'Use "Set up sandbox" below to install the runtime and fetch this image automatically. Advanced fallback: '
+        + 'build it yourself with `container build --tag claude-threads-coding:1 sandbox/`. '
+        + 'Leave empty for claude-threads-coding:1.',
       )
       .addText((text) =>
         text
@@ -1652,7 +1654,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       .setDesc(
         'Runs a thread\'s Claude CLI process inside its sandbox container instead of on the host (ADR-0015). '
         + '"Auto" only routes into the VM when the container runtime, a probe, and the harness image are all '
-        + 'ready — everyone else sees no change until they build that image (see below). "Always" forces VM '
+        + 'ready — until you run "Set up sandbox" (below), threads keep running on your Mac and offer to set it up. "Always" forces VM '
         + 'routing and errors clearly instead of silently falling back if anything is missing. "Never" is '
         + 'today\'s host-local spawn, unchanged.',
       )
@@ -1674,9 +1676,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       .setName('Harness VM image')
       .setClass('ct-sandbox-setting')
       .setDesc(
-        'Container image the harness routes into. Build it from sandbox/Dockerfile.harness with '
-        + '`container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/` — a separate '
-        + 'image tag from the sandbox VM image above, by design (ADR-0015 §7). Leave empty for claude-threads-harness:1.',
+        'Container image the harness routes into — a separate image tag from the sandbox VM image above, by design '
+        + '(ADR-0015 §7). "Set up sandbox" below builds it for you. Advanced fallback: '
+        + '`container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`. '
+        + 'Leave empty for claude-threads-harness:1.',
       )
       .addText((text) =>
         text
@@ -1690,21 +1693,15 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       );
 
     if ((this.plugin.settings.harnessVmMode ?? 'auto') !== 'never') {
-      const diagnosticSetting = new Setting(containerEl)
-        .setName('Harness VM readiness')
-        .setClass('ct-sandbox-setting')
-        .setDesc('Checking…');
-      const image = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
-      const vmManager = new SandboxVmManager({ containerName: () => 'claude-threads-settings-diagnostic' });
-      void checkHarnessVmCapability({ vmManager, image }).then((capability) => {
-        diagnosticSetting.setDesc(
-          capability.capable
-            ? `Ready — threads on this harness will route into ${image}. Claude sign-in still happens once, `
-              + 'inside the container: the first time a routed thread needs it, a "Sign in to Claude" card walks '
-              + 'through the container\'s own `claude setup-token` (open a URL, paste back a login code) — a host '
-              + '`claude auth login` never reaches a process running inside the sandbox.'
-            : `Not ready: ${capability.reason}`,
-        );
+      const sandboxSetting = new Setting(containerEl)
+        .setName('Sandbox setup')
+        .setClass('ct-sandbox-setting');
+      const harnessImage = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
+      renderSandboxSettingsPanel(sandboxSetting.descEl, {
+        isMobile: Platform.isMobile,
+        getStatus: () => getSandboxSetupStatus({ harnessImage }),
+        run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
+        confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       });
     }
 

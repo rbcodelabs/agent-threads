@@ -22,10 +22,36 @@ export const DEFAULT_HARNESS_VM_IMAGE = 'claude-threads-harness:1';
 /** Where the native installer puts `claude` for the non-root `node` user inside the harness image. */
 export const CLAUDE_CONTAINER_BINARY_PATH = '/home/node/.local/bin/claude';
 
+/**
+ * Machine-readable twin of {@link HarnessVmCapability.reason}, so callers can
+ * decide what to DO about a failure (offer to set the sandbox up) instead of
+ * pattern-matching free text.
+ *
+ * - `unsupported`     — not macOS on Apple silicon; nothing the user can set up.
+ * - `runtime-missing` — the `container` CLI cannot be run at all.
+ * - `runtime-stopped` — the CLI runs but its system service is not running.
+ * - `image-missing`   — runtime is up but the harness image does not exist.
+ */
+export type HarnessVmCapabilityCode = 'unsupported' | 'runtime-missing' | 'runtime-stopped' | 'image-missing';
+
+/**
+ * Why `resolveClaudeVmRouting` returned `{ routed: false }`: every capability
+ * code, plus `never` (mode is `'never'`) and `start-failed` (capable, but the
+ * container itself would not start — setting the sandbox up again won't help).
+ */
+export type HarnessVmFallbackReason = HarnessVmCapabilityCode | 'never' | 'start-failed';
+
+/** Fallbacks the user can fix by running the sandbox setup (drives the in-thread offer). */
+export const SANDBOX_SETUP_FIXABLE_REASONS: readonly HarnessVmFallbackReason[] = [
+  'runtime-missing', 'runtime-stopped', 'image-missing',
+];
+
 export interface HarnessVmCapability {
   capable: boolean;
   /** Populated when `capable` is false — surfaced in Settings so "why isn't this using the VM" is self-diagnosing (ADR-0015 §7). */
   reason?: string;
+  /** Structured form of `reason`; populated exactly when `capable` is false. */
+  code?: HarnessVmCapabilityCode;
 }
 
 /**
@@ -43,20 +69,31 @@ export async function checkHarnessVmCapability(params: {
   const platform = params.platform ?? process.platform;
   const arch = params.arch ?? process.arch;
   if (platform !== 'darwin' || arch !== 'arm64') {
-    return { capable: false, reason: `Requires macOS on Apple silicon (found ${platform}/${arch}).` };
+    return { capable: false, code: 'unsupported', reason: `Requires macOS on Apple silicon (found ${platform}/${arch}).` };
   }
 
   const probe = await params.vmManager.probe();
   if (!probe.available) {
-    return { capable: false, reason: probe.error ?? 'The container CLI is unavailable.' };
+    return { capable: false, code: 'runtime-missing', reason: probe.error ?? 'The container CLI is unavailable.' };
   }
 
   const hasImage = await params.vmManager.imageExists(params.image);
   if (!hasImage) {
+    // `image inspect` also fails while the system service is down, so tell the
+    // two apart — they need different fixes (start vs. pull/build).
+    if (!(await params.vmManager.systemRunning())) {
+      return {
+        capable: false,
+        code: 'runtime-stopped',
+        reason: 'The container runtime is installed but not running. Start it from Settings → Claude → '
+          + 'Set up sandbox, or run `container system start`.',
+      };
+    }
     return {
       capable: false,
-      reason: `Harness image "${params.image}" was not found. Build it with `
-        + `\`container build --tag ${params.image} -f sandbox/Dockerfile.harness sandbox/\`.`,
+      code: 'image-missing',
+      reason: `Harness image "${params.image}" was not found. Set it up from Settings → Claude → Set up sandbox, `
+        + `or build it manually with \`container build --tag ${params.image} -f sandbox/Dockerfile.harness sandbox/\`.`,
     };
   }
 
@@ -86,7 +123,7 @@ export interface ResolvedClaudeVmRouting {
  * (ADR-0015 §7's backward-compatibility rule: a running host process is left
  * alone; new routing takes effect on the thread's *next* fresh session start).
  *
- * Returns `{ routed: false }` for a silent host fallback (`'never'`, or
+ * Returns `{ routed: false, reason }` for a silent host fallback (`'never'`, or
  * `'auto'` with a failed capability check or container-start failure) and
  * THROWS only for `'always'` mode's explicit no-silent-fallback contract.
  *
@@ -100,8 +137,8 @@ export interface ResolvedClaudeVmRouting {
  */
 export async function resolveClaudeVmRouting(
   inputs: ClaudeVmRoutingInputs,
-): Promise<{ routed: true; routing: ResolvedClaudeVmRouting } | { routed: false }> {
-  if (inputs.mode === 'never') return { routed: false };
+): Promise<{ routed: true; routing: ResolvedClaudeVmRouting } | { routed: false; reason: HarnessVmFallbackReason }> {
+  if (inputs.mode === 'never') return { routed: false, reason: 'never' };
 
   const capability = await checkHarnessVmCapability({
     vmManager: inputs.vmManager,
@@ -113,7 +150,7 @@ export async function resolveClaudeVmRouting(
     if (inputs.mode === 'always') {
       throw new Error(`harnessVmMode is "always" but the sandbox VM is not ready: ${capability.reason}`);
     }
-    return { routed: false };
+    return { routed: false, reason: capability.code ?? 'runtime-missing' };
   }
 
   const entered = await inputs.vmManager.ensureHarnessContainer({
@@ -126,7 +163,7 @@ export async function resolveClaudeVmRouting(
       throw new Error(`harnessVmMode is "always" but the sandbox container could not be started: ${entered.error}`);
     }
     console.warn(`[ClaudeThreads] harnessVmMode "auto": falling back to host-local Claude spawn — ${entered.error}`);
-    return { routed: false };
+    return { routed: false, reason: 'start-failed' };
   }
 
   return {
