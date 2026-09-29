@@ -265,6 +265,8 @@ export class ThreadManager {
    * (e.g. onSetCwd) into the server without shared mutable state across concurrent threads.
    */
   mcpServerFactory: ((threadId: string, initialCwd: string) => Record<string, McpServerConfig>) | undefined = undefined;
+  /** Builds the host-owned SDK bridge overlay used only after Claude VM routing succeeds. */
+  vmMcpServerFactory: ((threadId: string, ordinaryServers: Record<string, McpServerConfig>) => Record<string, McpServerConfig>) | undefined = undefined;
   /**
    * Resolves the in-container Claude sign-in token (see `containerAuthToken`
    * on `HarnessSessionOptions`). Read at session start, like `secretEnvResolver`,
@@ -2131,6 +2133,10 @@ export class ThreadManager {
       .filter(Boolean)
       .join('\n\n');
     const sessionMcpServers = this.mcpServerFactory ? this.mcpServerFactory(threadId, thread.cwd) : this.mcpServers;
+    const claudeVm = this.buildClaudeVmRoutingInputs(threadId, thread);
+    const vmMcpServers = claudeVm && this.vmMcpServerFactory && sessionMcpServers
+      ? this.vmMcpServerFactory(threadId, sessionMcpServers)
+      : undefined;
     // The Agent Threads MCP server exposes the same canonical tool definitions to
     // Codex through its app-server dynamic-tool adapter and to OpenCode through a
     // loopback MCP bridge. Serializable external stdio/HTTP/SSE servers are
@@ -2179,9 +2185,10 @@ export class ThreadManager {
       containerAuthToken: this.containerAuthTokenResolver?.(),
       claude: {
         mcpServers: sessionMcpServers,
+        vmMcpServers,
         disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
         sessionOptions: this.buildSessionOptions(thread, agentProfiles),
-        vm: this.buildClaudeVmRoutingInputs(threadId, thread),
+        vm: claudeVm,
       },
       codex: {
         computerUseEnabled: this.settings.codexComputerUseEnabled === true,

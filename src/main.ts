@@ -35,7 +35,7 @@ import {
   type HandoffHost,
 } from './compassHandoff';
 import { isWatchableDocument, watchMenuLabel } from './documentWatch';
-import { mergeMcpServers } from './mcpServerMerge';
+import { mergeMcpServers, overlayMatchingMcpServers } from './mcpServerMerge';
 import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
@@ -939,6 +939,22 @@ export default class ClaudeThreadsPlugin extends Plugin {
         console.error('[ClaudeThreads] Failed to create built-in MCP servers:', err);
         return {} as Record<string, McpServerConfig>;
       }
+    };
+    // Host-loopback OAuth/Google brokers cannot be reached from Apple's VM.
+    // Overlay only those plugin-owned entries with in-process SDK bridges;
+    // built-ins, remote servers and stdio configs remain byte-for-byte the
+    // ordinary roster. ThreadSession chooses this view only after routing has
+    // actually succeeded, so automatic host fallback retains HTTP configs.
+    this.manager.vmMcpServerFactory = (threadId, ordinaryServers) => {
+      const googleHosts = this.googleWorkspaceMcp?.serversForThread(threadId) ?? {};
+      const oauthHosts = this.oauthMcpRegistry?.serversForThread(threadId) ?? {};
+      const googleMcps = this.googleWorkspaceMcp?.vmServersForThread(threadId) ?? {};
+      const oauthMcps = this.oauthMcpRegistry?.vmServersForThread(threadId) ?? {};
+      return overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(
+        overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(ordinaryServers, googleHosts, googleMcps),
+        oauthHosts,
+        oauthMcps,
+      );
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect

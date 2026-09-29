@@ -14,7 +14,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SessionCallbacks } from '../../src/ClaudeSession';
 
-const { queryCalls } = vi.hoisted(() => ({ queryCalls: [] as Array<{ options: { env?: Record<string, string | undefined> } }> }));
+const { queryCalls } = vi.hoisted(() => ({ queryCalls: [] as Array<{ options: { env?: Record<string, string | undefined>; mcpServers?: Record<string, unknown> } }> }));
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: (args: { options: { env?: Record<string, string | undefined> } }) => (queryCalls.push(args), {
@@ -126,6 +126,33 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
 
     expect(onVmRouting).toHaveBeenCalledWith(null);
     expect(resolveClaudeVmRouting).not.toHaveBeenCalled();
+  });
+
+  it('uses the host SDK bridge roster only after VM routing succeeds', async () => {
+    resolveClaudeVmRouting.mockResolvedValue({
+      routed: true,
+      routing: { containerName: 'c1', containerBinaryPath: '/home/node/.local/bin/claude' },
+    });
+    const host = { type: 'http', url: 'http://127.0.0.1:5555' };
+    const bridged = { type: 'sdk', name: 'oauth', instance: {} };
+    await new ThreadSession().start({
+      claudePath: '/fake/claude', cwd: '/tmp', permissionMode: 'default', extraEnvRaw: '', callbacks: callbacks(),
+      claude: { vm: vmInputs(), mcpServers: { oauth: host }, vmMcpServers: { oauth: bridged } },
+    } as never);
+
+    expect(queryCalls[0].options.mcpServers).toEqual({ oauth: bridged });
+  });
+
+  it('keeps the ordinary MCP roster when automatic VM routing falls back to the host', async () => {
+    resolveClaudeVmRouting.mockResolvedValue({ routed: false, reason: 'runtime-missing' });
+    const host = { type: 'http', url: 'http://127.0.0.1:5555' };
+    const bridged = { type: 'sdk', name: 'oauth', instance: {} };
+    await new ThreadSession().start({
+      claudePath: '/fake/claude', cwd: '/tmp', permissionMode: 'default', extraEnvRaw: '', callbacks: callbacks(),
+      claude: { vm: vmInputs(), mcpServers: { oauth: host }, vmMcpServers: { oauth: bridged } },
+    } as never);
+
+    expect(queryCalls[0].options.mcpServers).toEqual({ oauth: host });
   });
 
   describe('containerAuthToken (in-container Claude sign-in credential)', () => {

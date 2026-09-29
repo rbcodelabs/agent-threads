@@ -565,6 +565,18 @@ describe('OAuthMcpRegistry.serversForThread', () => {
 
     expect(second).toEqual(first);
   });
+
+  it('exposes a stable SDK bridge config for VM-routed Claude without changing the host config', async () => {
+    const { host } = makeHost();
+    const registry = new OAuthMcpRegistry(host);
+    await registry.registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/' });
+
+    const first = registry.vmServersForThread('thread-1');
+    const second = registry.vmServersForThread('thread-1');
+    expect(first.vercel).toMatchObject({ type: 'sdk', name: 'vercel', instance: expect.any(Object) });
+    expect(second.vercel).toBe(first.vercel);
+    expect(registry.serversForThread('thread-1').vercel).toMatchObject({ type: 'http', url: proxyUrl });
+  });
 });
 
 describe('OAuthMcpRegistry.retainThreads', () => {

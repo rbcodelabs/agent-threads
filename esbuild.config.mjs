@@ -2,8 +2,10 @@ import esbuild from 'esbuild';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const isWatch = process.argv.includes('--watch');
 const outdir = path.join(__dirname, 'dist');
 
@@ -12,6 +14,18 @@ if (!fs.existsSync(outdir)) fs.mkdirSync(outdir, { recursive: true });
 const ctx = await esbuild.context({
   entryPoints: ['src/main.ts'],
   bundle: true,
+  plugins: [{
+    name: 'claude-agent-sdk-core',
+    setup(build) {
+      // The root SDK bundle inlines its MCP implementation. This plugin already
+      // bundles @modelcontextprotocol/sdk for the host bridge, so resolve the
+      // exact root import to the documented peer-dependency-aware core entry
+      // and avoid shipping two copies. Subpaths such as /browser are untouched.
+      build.onResolve({ filter: /^@anthropic-ai\/claude-agent-sdk$/ }, () => ({
+        path: require.resolve('@anthropic-ai/claude-agent-sdk/core'),
+      }));
+    },
+  }],
   external: [
     'obsidian',
     'electron',

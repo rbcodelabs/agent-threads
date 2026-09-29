@@ -413,9 +413,10 @@ export class ThreadSession {
     if (options.model) sdkOptions.model = options.model;
     if (options.appendSystemPrompt) sdkOptions.extraArgs = { 'append-system-prompt': options.appendSystemPrompt };
     const claude = options.claude;
-    if (claude?.mcpServers && Object.keys(claude.mcpServers).length) {
-      sdkOptions.mcpServers = claude.mcpServers;
-      const mcpDebug = Object.entries(claude.mcpServers).map(([k, v]) => ({
+    const activeMcpServers = vmRouting ? (claude?.vmMcpServers ?? claude?.mcpServers) : claude?.mcpServers;
+    if (activeMcpServers && Object.keys(activeMcpServers).length) {
+      sdkOptions.mcpServers = activeMcpServers;
+      const mcpDebug = Object.entries(activeMcpServers).map(([k, v]) => ({
         serverName: k,
         type: (v as unknown as Record<string, unknown>).type,
         hasInstance: 'instance' in v,

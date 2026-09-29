@@ -92,6 +92,11 @@ export interface HarnessSessionOptions {
 /** Claude-only capabilities intentionally kept out of the shared contract. */
 export interface ClaudeHarnessOptions {
   mcpServers?: Record<string, McpServerConfig>;
+  /**
+   * Host-owned SDK MCP servers used only when the Claude process was actually
+   * routed into a sandbox VM. Host fallback must continue using `mcpServers`.
+   */
+  vmMcpServers?: Record<string, McpServerConfig>;
   disallowedTools?: string[];
   sessionOptions?: {
     thinking?: Options['thinking'];

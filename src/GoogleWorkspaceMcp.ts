@@ -2,6 +2,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createHash, randomBytes } from 'crypto';
 import { once } from 'events';
 import { request as httpsRequest } from 'https';
+import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
+import { HostMcpSdkBridge } from './HostMcpSdkBridge';
 
 export const GOOGLE_SERVICES = ['docs', 'drive', 'sheets', 'slides'] as const;
 type Service = typeof GOOGLE_SERVICES[number];
@@ -64,6 +66,7 @@ export class GoogleWorkspaceMcp {
   private closed = false;
   private tokenQueue: Promise<unknown> = Promise.resolve();
   private lastFailure = '';
+  private vmBridges = new Map<string, Map<string, HostMcpSdkBridge>>();
 
   constructor(private readonly getPlugin: () => unknown, private readonly upstream: Upstream = googleWorkspaceRequest, private readonly tokenTimeoutMs = 30_000,
     private readonly persistence: Persistence = { bindings: {}, save: async () => {} }) {}
@@ -146,6 +149,26 @@ export class GoogleWorkspaceMcp {
     }]));
   }
 
+  /** Host-side SDK bridges for Claude sessions that actually start inside a VM. */
+  vmServersForThread(threadId: string): Record<string, McpServerConfig> {
+    const hostServers = this.serversForThread(threadId);
+    let bridges = this.vmBridges.get(threadId);
+    if (!bridges) {
+      bridges = new Map();
+      this.vmBridges.set(threadId, bridges);
+    }
+    const result: Record<string, McpServerConfig> = {};
+    for (const [name, config] of Object.entries(hostServers)) {
+      let bridge = bridges.get(name);
+      if (!bridge) {
+        bridge = new HostMcpSdkBridge(name, new URL(config.url), config.headers);
+        bridges.set(name, bridge);
+      }
+      result[name] = bridge.config;
+    }
+    return result;
+  }
+
   private current(binding: Binding): boolean {
     if (binding.revoked) return false;
     if (this.connection() !== binding.plugin || binding.plugin.tokenStore.supportsConnectionGuard !== true
@@ -162,6 +185,11 @@ export class GoogleWorkspaceMcp {
   /** Archive/delete cleanup. Call with the manager's retained thread IDs. */
   retainThreads(ids: Set<string>): void {
     for (const [id, binding] of this.bindings) if (!ids.has(id)) { binding.revoked = true; this.bindings.delete(id); }
+    for (const [id, bridges] of this.vmBridges) {
+      if (ids.has(id)) continue;
+      this.vmBridges.delete(id);
+      for (const bridge of bridges.values()) void bridge.close();
+    }
     let changed = false;
     for (const id of Object.keys(this.persistence.bindings)) if (!ids.has(id)) { delete this.persistence.bindings[id]; changed = true; }
     if (changed) void this.persistence.save().catch(() => { this.lastFailure = 'Google connection cleanup could not be saved. Check vault storage.'; });
@@ -173,6 +201,8 @@ export class GoogleWorkspaceMcp {
     this.requests.clear();
     for (const binding of this.bindings.values()) binding.revoked = true;
     this.bindings.clear();
+    for (const bridges of this.vmBridges.values()) for (const bridge of bridges.values()) void bridge.close();
+    this.vmBridges.clear();
     this.server?.closeAllConnections();
     this.server?.close();
     this.origin = '';

@@ -48,6 +48,15 @@ describe('Google Workspace MCP connection', () => {
     expect(f.plugin.tokenStore.getValidAccessToken).toHaveBeenCalledTimes(2);
     expect(f.proxy.serversForThread('thread')['google-docs']).toEqual(config);
   });
+  it('exposes stable SDK bridge configs for VM-routed Claude while preserving host configs', async () => {
+    const f = setup(); await f.proxy.configure({ docs: true, drive: true });
+    const first = f.proxy.vmServersForThread('thread');
+    const second = f.proxy.vmServersForThread('thread');
+    expect(Object.keys(first)).toEqual(['google-docs', 'google-drive']);
+    expect(first['google-docs']).toMatchObject({ type: 'sdk', name: 'google-docs', instance: expect.any(Object) });
+    expect(second['google-docs']).toBe(first['google-docs']);
+    expect(f.proxy.serversForThread('thread')['google-docs']).toMatchObject({ type: 'http' });
+  });
   it('revokes old threads on reconnect and never silently rebinds them', async () => {
     const f = setup(); await f.proxy.configure({ docs: true });
     const config = f.proxy.serversForThread('thread')['google-docs'];

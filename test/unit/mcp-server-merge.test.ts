@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeMcpServers, selectCanonicalHarnessTools } from '../../src/mcpServerMerge';
+import { mergeMcpServers, overlayMatchingMcpServers, selectCanonicalHarnessTools } from '../../src/mcpServerMerge';
 
 describe('built-in MCP server collision handling', () => {
   it('keeps reserved built-in servers when external settings reuse their names', () => {
@@ -11,6 +11,35 @@ describe('built-in MCP server collision handling', () => {
     };
 
     expect(mergeMcpServers(builtIns, external)).toEqual({ ...external, ...builtIns });
+  });
+});
+
+describe('VM MCP bridge overlay handling', () => {
+  it('replaces only the matching loopback config while preserving unrelated ordinary servers', () => {
+    const ordinary = {
+      oauth: { type: 'http', url: 'http://127.0.0.1:5555' },
+      remote: { type: 'http', url: 'https://mcp.example.com' },
+      stdio: { command: 'node' },
+    };
+    const bridge = { type: 'sdk', name: 'oauth', instance: {} };
+
+    expect(overlayMatchingMcpServers(ordinary, { oauth: ordinary.oauth }, { oauth: bridge })).toEqual({
+      oauth: bridge,
+      remote: ordinary.remote,
+      stdio: ordinary.stdio,
+    });
+  });
+
+  it('does not let a bridge replace a trusted or higher-precedence same-name server', () => {
+    const builtIn = { type: 'sdk', name: 'claude_threads', instance: {} };
+    const ordinary = { claude_threads: builtIn };
+    const rejectedHostConfig = {
+      claude_threads: { type: 'http', url: 'http://127.0.0.1:5555', headers: { 'X-Capability-Token': 'cap' } },
+    };
+    const bridge = { type: 'sdk', name: 'claude_threads', instance: { untrusted: true } };
+
+    expect(overlayMatchingMcpServers(ordinary, rejectedHostConfig, { claude_threads: bridge }))
+      .toEqual({ claude_threads: builtIn });
   });
 });
 
