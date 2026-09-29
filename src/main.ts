@@ -67,6 +67,7 @@ import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
+import { CONTAINER_AUTH_TOKEN_SECRET } from './claudeContainerAuthCli';
 import { scheduleVaultThreadRecovery } from './vaultThreadRecovery';
 import { resolveProjectVaultRoot } from './projectPaths';
 import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, repairStaleProjectOrchestrators, resolveCoordinationRole } from './coordinationScope';
@@ -647,6 +648,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // needing a session restart.
           getVmImage: () => this.settings.vmImage,
           getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
+          // ADR-0015 §3: share the same per-thread SandboxVmManager this
+          // thread's Claude harness routes into, so enter_vm/vm_exec/exit_vm
+          // see the container's real origin instead of each side tracking it
+          // separately against the same deterministic container name.
+          sandboxVmManager: this.manager.getSandboxVmManager(threadId),
           onScheduleWakeup: async (delayMs: number, prompt: string, reason: string) => {
             // Durable one-shot Scheduler item instead of a bare window.setTimeout:
             // the old implementation tracked wake-ups only in an in-memory Map
@@ -959,6 +965,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }
       return result;
     };
+    // In-container Claude sign-in token — VM-routed sessions only (see persistContainerAuthToken).
+    this.manager.containerAuthTokenResolver = () =>
+      this.app.secretStorage.getSecret(secretStorageKey(CONTAINER_AUTH_TOKEN_SECRET)) || undefined;
     this.persistence = new VaultPersistence(this.app, this.settings.vaultFolder);
     this.inProcessSummarizer = new InProcessSummarizer();
 
@@ -2431,6 +2440,27 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const saved = await this.requestSecretFromUser(secretName, reason, force);
     if (saved) this.manager.requestSessionRestart(threadId);
     return saved;
+  }
+
+  /**
+   * ADR-0015 container sign-in: after `signInToClaudeInContainer()` succeeds,
+   * store the resulting long-lived OAuth token and restart the thread's
+   * session so it is picked up.
+   *
+   * Stored under its OWN secret key (`CONTAINER_AUTH_TOKEN_SECRET`), NOT as a
+   * `CLAUDE_CODE_OAUTH_TOKEN` entry in `secretEnvKeys`. `secretEnv` reaches
+   * every session including host-spawned ones, and an env
+   * `CLAUDE_CODE_OAUTH_TOKEN` overrides the host keychain login — so a
+   * container-only credential there would break (or, once stale, poison)
+   * every host thread. `ThreadSession` injects this token ONLY into a
+   * VM-routed session's container `--env` (see `containerAuthTokenResolver`).
+   * It is global rather than project-scoped: it is the user's own Claude
+   * login, so one sign-in serves every container-routed thread and survives
+   * containers being recreated.
+   */
+  async persistContainerAuthToken(threadId: string, token: string): Promise<void> {
+    this.app.secretStorage.setSecret(secretStorageKey(CONTAINER_AUTH_TOKEN_SECRET), token);
+    this.manager.requestSessionRestart(threadId);
   }
 
   getPluginSkillsRoot(): string {

@@ -4227,6 +4227,32 @@
   font-size: var(--font-ui-smaller);
 }
 
+/* Paste-code affordance for container-routed sign-in (ADR-0015 `claude setup-token`) */
+.ct-auth-code-prompt {
+  margin-top: 8px;
+}
+.ct-auth-code-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.ct-auth-code-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ct-auth-code-input {
+  flex: 1 1 160px;
+  min-width: 120px;
+  padding: 3px 8px;
+  font-size: var(--font-ui-smaller);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+}
+
 /* ── Context footer (status line) ────────────────────────────────────────── */
 
 .ct-context-footer {

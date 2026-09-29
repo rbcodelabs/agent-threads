@@ -1,0 +1,30 @@
+# Harness-hosting image (ADR-0015): adds the Claude Code CLI on top of the
+# existing sandboxed coding environment, so a thread's harness process can run
+# INSIDE the same container that already hosts its enter_vm/vm_exec commands,
+# instead of requiring `claude` installed on the host.
+#
+# Deliberately a SEPARATE, opt-in image tag from claude-threads-coding:1 rather
+# than an edit to sandbox/Dockerfile in place — see ADR-0015 §7 ("Why 'auto' is
+# safe to ship as the default"): harnessVmMode's capability check includes
+# "does an image with the harness CLI exist", which is false for every
+# existing user until they explicitly build this image. That means shipping
+# this ADR's code changes nothing for anyone until they opt in.
+#
+# Build with:
+#   container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/
+#
+# Claude-only for now. Codex/OpenCode CLI installs are intentionally NOT added
+# here — ADR-0015 sequences those after Claude (OpenCode in particular has an
+# unresolved MCP-loopback-bridge gap, §5), so adding their installers before
+# the adapters that route into this image would just grow build time and image
+# size for capability nothing yet uses.
+
+FROM claude-threads-coding:1
+
+# Claude Code — native installer, matches Anthropic's own recommended install
+# path (code.claude.com quickstart/setup docs, verified via Context7
+# 2026-09-26) and auto-selects the linux-arm64 build for this container's
+# platform. Installs to ~/.local/bin/claude for the non-root `node` user the
+# base image already switches to.
+RUN curl -fsSL https://claude.ai/install.sh | bash
+ENV PATH="/home/node/.local/bin:${PATH}"

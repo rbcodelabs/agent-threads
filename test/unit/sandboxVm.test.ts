@@ -21,6 +21,8 @@ import {
   VM_WORKDIR,
   VmUnavailableError,
   buildExecArgs,
+  buildHarnessExecArgs,
+  buildImageInspectArgs,
   buildInspectArgs,
   buildNetworkCreateArgs,
   buildNetworkListArgs,
@@ -591,6 +593,145 @@ describe('SandboxVmManager — exit', () => {
     const result = await manager.exit();
     expect(result.success).toBe(false);
     expect((result as { error: string }).error).toContain('brew install container');
+  });
+});
+
+describe('sandboxVm — buildHarnessExecArgs', () => {
+  it('threads --env flags for a harness process, scoped to this exec call only', () => {
+    expect(buildHarnessExecArgs({
+      containerName: 'c',
+      command: '/home/node/.local/bin/claude',
+      args: ['--foo', 'bar'],
+      env: { ANTHROPIC_API_KEY: 'sk-secret', UNSET: undefined },
+    })).toEqual([
+      'exec', '--interactive', '--workdir', VM_WORKDIR,
+      '--env', 'ANTHROPIC_API_KEY=sk-secret',
+      'c', '/home/node/.local/bin/claude', '--foo', 'bar',
+    ]);
+  });
+
+  it('never wraps command/args in a shell — no bash -lc, unlike buildExecArgs', () => {
+    const args = buildHarnessExecArgs({ containerName: 'c', command: 'claude', args: [], env: {} });
+    expect(args).not.toContain('bash');
+    expect(args).not.toContain('-lc');
+  });
+
+  it('drops undefined env values instead of emitting "KEY=undefined"', () => {
+    const args = buildHarnessExecArgs({ containerName: 'c', command: 'claude', args: [], env: { A: undefined } });
+    expect(args.join(' ')).not.toContain('undefined');
+  });
+});
+
+describe('sandboxVm — buildImageInspectArgs', () => {
+  it('inspects the image by tag', () => {
+    expect(buildImageInspectArgs('claude-threads-harness:1')).toEqual(['image', 'inspect', 'claude-threads-harness:1']);
+  });
+});
+
+describe('SandboxVmManager — imageExists', () => {
+  it('is true when inspect succeeds', async () => {
+    const { manager } = makeManager({ [buildImageInspectArgs('img:1').join(' ')]: { exitCode: 0 } });
+    expect(await manager.imageExists('img:1')).toBe(true);
+  });
+
+  it('is false when inspect fails', async () => {
+    const { manager } = makeManager({ [buildImageInspectArgs('img:1').join(' ')]: MISSING });
+    expect(await manager.imageExists('img:1')).toBe(false);
+  });
+});
+
+describe('SandboxVmManager — ensureHarnessContainer (ADR-0015 §3)', () => {
+  it('starts a fresh container and marks it harness-owned', async () => {
+    const { manager, runner } = makeManager(CLI_OK_NO_CONTAINER);
+    const result = await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    expect(result).toEqual({ success: true, containerName: NAME, image: 'img:1', mountedFrom: '/work', network: 'default' });
+    expect(runner.ran('run', '--detach')).toBe(true);
+  });
+
+  it('adopts a container left running from an earlier session/reload instead of failing', async () => {
+    const { manager, runner } = makeManager({
+      '--version': { stdout: 'container CLI version 1.3.1\n' },
+      [buildInspectArgs(NAME).join(' ')]: { exitCode: 0 },
+    });
+    const result = await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    expect(result.success).toBe(true);
+    expect(runner.ran('run', '--detach')).toBe(false);
+  });
+
+  it('is idempotent: calling it again for an already-tracked container is a no-op attach', async () => {
+    const { manager, runner } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    const before = runner.calls.length;
+    const second = await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    expect(second.success).toBe(true);
+    expect(runner.calls.length).toBe(before);
+  });
+
+  it('marks an agent-started container (via enter_vm) harness-owned once the harness also claims it', async () => {
+    const { manager } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.enter({ image: 'img:1', mountPath: '/work', network: 'default' });
+    const result = await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    expect(result.success).toBe(true);
+    // The container is now harness-owned — exit_vm (without the internal
+    // override) must refuse to remove it. Verified in the exit() suite below.
+    expect(await manager.exit()).toMatchObject({ success: false });
+  });
+});
+
+describe('SandboxVmManager — secret scoping (ADR-0015 §4 hard requirement)', () => {
+  it('ensureHarnessContainer (which drives `container run`) has no env parameter at all — structurally impossible to leak a secret there', async () => {
+    const { manager, runner } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    const secret = 'sk-ant-oat-super-secret-value';
+    // Every argv this manager ever sent to the CLI while starting the
+    // container — including `container run` — must not contain a secret,
+    // because ensureHarnessContainer()/buildRunArgs() take no env input to
+    // leak in the first place. Only buildHarnessExecArgs (a separate call,
+    // scoped to the harness's own `container exec`) accepts env.
+    for (const call of runner.calls) {
+      expect(call.args.join(' ')).not.toContain(secret);
+    }
+  });
+});
+
+describe('SandboxVmManager — origin tracking (ADR-0015 §3)', () => {
+  it('enter() attaches to a harness-owned container instead of reporting a collision', async () => {
+    const { manager, runner } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    const before = runner.calls.length;
+    const result = await manager.enter({ image: 'img:2', mountPath: '/other', network: 'none' });
+    expect(result).toEqual({ success: true, containerName: NAME, image: 'img:1', mountedFrom: '/work', network: 'default' });
+    // No new CLI calls — this was a pure in-memory attach, not a second `run`.
+    expect(runner.calls.length).toBe(before);
+  });
+
+  it('enter() still refuses a second agent-started container the way it always has', async () => {
+    const { manager } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.enter({ image: 'img:1', mountPath: '/a', network: 'default' });
+    const second = await manager.enter({ image: 'img:2', mountPath: '/b', network: 'none' });
+    expect(second).toEqual({ success: false, error: expect.stringContaining('already running') });
+  });
+
+  it('exit() refuses to remove a harness-owned container', async () => {
+    const { manager, runner } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    const result = await manager.exit();
+    expect(result).toEqual({ success: false, error: expect.stringContaining('hosting its harness process') });
+    expect(runner.ran('rm')).toBe(false);
+  });
+
+  it('exit({ allowHarnessOwned: true }) — the thread-delete teardown path — still removes it', async () => {
+    const { manager, runner } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    const result = await manager.exit({ force: true, allowHarnessOwned: true });
+    expect(result).toEqual({ success: true, removedContainer: NAME });
+    expect(runner.ran('rm')).toBe(true);
+  });
+
+  it('exit() removes a plain agent-started container exactly as before (no regression)', async () => {
+    const { manager } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.enter({ image: 'img:1', mountPath: '/a', network: 'default' });
+    expect(await manager.exit()).toEqual({ success: true, removedContainer: NAME });
   });
 });
 

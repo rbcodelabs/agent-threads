@@ -89,6 +89,17 @@ export interface SessionCallbacks {
    * message is delivered through `onError` instead (unattended callers).
    */
   onAuthRequired?: (message: string) => void;
+  /**
+   * ADR-0015 follow-up: fired once per `ThreadSession.start()` with the
+   * ACTUAL resolved VM-routing decision — `null` for a host-local spawn
+   * (mode `'never'`, or `'auto'` with a failed capability/container-start
+   * check), or the container this session's `claude` process is now running
+   * in. Lets the UI pick the right "Sign in to Claude" flow (host `claude
+   * auth login` vs. the container's own `claude setup-token`) from what
+   * actually happened, rather than a possibly-stale capability re-check.
+   * Only `ThreadSession` (Claude) ever calls this.
+   */
+  onVmRouting?: (routing: { containerName: string; containerBinaryPath: string } | null) => void;
   onPermissionRequest: (toolName: string, detail: string) => Promise<boolean>;
   onAskUserQuestion: (questions: AskQuestion[]) => Promise<Record<string, string>>;
   /** Provider resolved/canceled its pending question before the user answered. */

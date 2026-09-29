@@ -67,3 +67,108 @@ node scripts/smoke-sandbox-vm.mjs
 
 The smoke script uses disposable fixtures and exercises the real runtime. Unit
 tests mock the runtime; screenshot tests cover settings, not live VM execution.
+
+## Running the Claude harness inside the VM (ADR-0015)
+
+By default, using Agent Threads requires the `claude` CLI installed on the
+host. Per ADR-0015, the plugin can instead run a thread's Claude harness
+process **inside its sandbox container** — so a supported Mac only needs
+Apple's `container` runtime, not a host `claude` install. This is **Claude
+only** for now; Codex and OpenCode still spawn on the host regardless of this
+setting (OpenCode in particular has an unresolved MCP-loopback-bridge gap —
+see the ADR).
+
+Opt in by building a second, separate image:
+
+```sh
+container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/
+```
+
+This image is deliberately a different tag from `claude-threads-coding:1` — it
+adds the native Claude Code CLI (`curl -fsSL https://claude.ai/install.sh | bash`)
+on top of the same base. Building it is the entire opt-in step: **shipping
+this feature changes nothing for any existing user until they build this
+image**, because `harnessVmMode: 'auto'`'s capability check includes "does
+this image exist," which is false until you build it.
+
+Configure under Settings → Tools, next to the sandbox VM image/network
+controls:
+
+| Setting | Behavior |
+| --- | --- |
+| `harnessVmMode: 'auto'` (default) | Routes into the VM only when the platform supports it (macOS on Apple silicon), the container CLI probes successfully, and the harness image exists. Silently falls back to host-local spawn if any of those fail. |
+| `harnessVmMode: 'always'` | Forces VM routing. Surfaces a clear error — never a silent host fallback — if any prerequisite is missing. Useful for testing, or when you want the isolation guarantee enforced. |
+| `harnessVmMode: 'never'` | Exactly today's host-local spawn. The rollback lever. |
+| Harness VM image | The image tag to route into. Blank falls back to `claude-threads-harness:1`. |
+
+Settings shows a live readiness check next to these controls (CLI probe +
+image existence), so "why isn't this using the VM" is self-diagnosing.
+
+**One container per thread, shared.** A VM-routed thread's harness process and
+its `enter_vm`/`vm_exec`/`exit_vm` tools use the *same* container — the
+harness is just another thing `container exec` runs inside it. This means a
+`vm_exec` command now runs alongside a process holding live Anthropic
+credentials in its environment; those credentials are passed via `--env` flags
+scoped to the harness's own `container exec` invocation only, never to
+`container run`, so an ordinary `vm_exec ; env` does not print them — but be
+aware the boundary is narrower than an agent-only sandbox. `exit_vm` refuses to
+remove a container the harness is still attached to; it is torn down
+automatically when the thread is deleted or archived, not at ordinary session
+close (so a lingering or quickly-restarted session doesn't pay container-start
+latency every turn).
+
+A mode change or a freshly-built image takes effect on a thread's *next* fresh
+session start (harness switch, restart, or new thread) — never mid-session.
+
+### Signing in to Claude inside the container
+
+A VM-routed thread's `claude` process runs in an environment deliberately
+built WITHOUT the host's environment (see "Secret scoping" above) — so the
+host's own `claude auth login` keychain entry never reaches it, no matter how
+many times you sign in on the host. The point of this ADR is to not require a
+host `claude` install at all, so sign-in has to happen **inside the
+container** too.
+
+`claude setup-token` (run as `container exec -i -t <container> claude
+setup-token`) is the CLI's own answer for exactly this shape of environment —
+container, SSH, WSL2, anywhere a browser can't redirect back to a local
+callback port. It prints a URL to open in your own browser; after you
+authorize there, the browser shows a **login code** instead of redirecting
+anywhere, and that code has to be typed back into the CLI to finish. That
+interactive prompt renders nothing at all without a real pseudo-terminal on
+the CLI's own end. Rather than a native pty module — this plugin's release
+workflow only ships `dist/main.js`/`styles.css`/`manifest.json`/`versions.json`,
+never `node_modules/`, so a compiled native binary could never reach a real
+install — this flow shells out to `/usr/bin/expect`'s `spawn ...; interact`,
+which allocates the pty the container's CLI needs and relays its I/O back out
+through completely ordinary stdin/stdout pipes on the Node side. `expect`
+ships standard on every macOS install, which this whole feature already
+requires. See `src/claudeContainerAuthCli.ts` for the implementation.
+
+When a VM-routed thread's session hits an expired/missing sign-in, the
+in-thread "Sign in to Claude" card uses this container flow instead of the
+host `claude auth login` flow. The choice is made when you click the button
+(not when the card is drawn), from the thread's real routing — the card is
+rebuilt from saved state after a plugin reload, before any session has
+started, and picking the host flow there could never authenticate a container
+session. The card opens the printed URL for you, then shows a "paste the login
+code" field; submitting the code finishes the sign-in inside the container.
+
+The resulting long-lived token is kept in the plugin's secret storage as its
+**own credential**, not as a general `CLAUDE_CODE_OAUTH_TOKEN` secret. A
+general secret is injected into every session, including host-spawned ones, and
+an environment `CLAUDE_CODE_OAUTH_TOKEN` overrides the host keychain login —
+so a container-only token there would break every host thread the moment it
+expired. Instead it is passed via `--env` only to VM-routed sessions, and only
+on their own `container exec` (never `container run`, so a `vm_exec` call
+cannot read it from the container's environment). It is global rather than
+per-project — it is your own Claude login — so one sign-in covers every
+container-routed thread and survives containers being recreated.
+
+Two implementation details worth knowing, both learned the hard way from live
+runs: the CLI renders its prompt in a terminal whose size must be set on the
+wrapper's own pty (an `stty` run inside the container is reset to 0×0 by
+`container exec`, and at 80 columns the CLI wraps the ~108-character token
+across two lines), and a long code must be sent as text followed by a
+*separate* Enter (sent together, the terminal treats the burst as a paste and
+swallows the Enter).

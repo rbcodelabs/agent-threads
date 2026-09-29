@@ -115,7 +115,7 @@ export class VmUnavailableError extends Error {
  * and does not include Homebrew — exactly the reason a `container` that works
  * in Terminal appears missing to the plugin.
  */
-function runnerEnv(): Record<string, string | undefined> {
+export function runnerEnv(): Record<string, string | undefined> {
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
   const extraPath = ['/opt/homebrew/bin', '/usr/local/bin'];
   return { ...env, PATH: `${extraPath.join(':')}:${env.PATH ?? ''}` };
@@ -287,6 +287,43 @@ export function buildInspectArgs(containerName: string): string[] {
   return ['inspect', containerName];
 }
 
+/** `container image inspect <image>` — exit 0 iff an image with this tag exists locally. */
+export function buildImageInspectArgs(image: string): string[] {
+  return ['image', 'inspect', image];
+}
+
+/**
+ * `container exec` argv for a long-lived, interactive harness process — as
+ * opposed to {@link buildExecArgs}'s one-shot `bash -lc "<command>" under a
+ * `timeout` wrapper for `vm_exec`. No shell wrapper here: `command`/`args`
+ * are the harness binary's own argv, handed through verbatim (ADR-0015 §2 —
+ * the SDK's `spawnClaudeCodeProcess` already resolved what to run).
+ *
+ * `--env` flags are scoped to this ONE exec invocation, never to `container
+ * run` (ADR-0015 §4's hard requirement) — anything set at `run` scope would
+ * be inherited by every future `vm_exec` in the same shared container.
+ */
+export function buildHarnessExecArgs(opts: {
+  containerName: string;
+  command: string;
+  args: string[];
+  workdir?: string;
+  env: Record<string, string | undefined>;
+}): string[] {
+  const envFlags: string[] = [];
+  for (const [key, value] of Object.entries(opts.env)) {
+    if (value === undefined) continue;
+    envFlags.push('--env', `${key}=${value}`);
+  }
+  return [
+    'exec', '--interactive', '--workdir', opts.workdir ?? VM_WORKDIR,
+    ...envFlags,
+    opts.containerName,
+    opts.command,
+    ...opts.args,
+  ];
+}
+
 export function buildNetworkListArgs(): string[] {
   return ['network', 'list', '--quiet'];
 }
@@ -315,6 +352,14 @@ export interface SandboxVmState {
   image: string;
   mountedFrom: string;
   network: VmNetworkMode;
+  /**
+   * Which caller is responsible for this container (ADR-0015 §3): `'agent'`
+   * for one started by an explicit `enter_vm` tool call, `'harness'` for one
+   * this manager started (or adopted) to host a thread's Claude harness
+   * process. The distinction exists so `exit_vm` doesn't tear down a
+   * container the harness process is still attached to — see `exit()`.
+   */
+  origin: 'agent' | 'harness';
 }
 
 export type EnterVmResult =
@@ -372,6 +417,12 @@ export class SandboxVmManager {
   /** True when a container with this name exists (running or stopped). */
   private async containerExists(containerName: string): Promise<boolean> {
     const result = await this.exec(buildInspectArgs(containerName));
+    return result.exitCode === 0;
+  }
+
+  /** True when an image with this tag exists locally — the third leg of `harnessVmMode: 'auto'`'s capability check (ADR-0015 §7). */
+  async imageExists(image: string): Promise<boolean> {
+    const result = await this.exec(buildImageInspectArgs(image), 15_000);
     return result.exitCode === 0;
   }
 
@@ -435,6 +486,20 @@ export class SandboxVmManager {
       const containerName = this.deps.containerName();
 
       if (this.active) {
+        if (this.active.origin === 'harness') {
+          // The container already exists because this thread's harness
+          // process is running inside it (ADR-0015 §3: one container per
+          // thread, shared). Attach rather than error — the agent's vm_exec
+          // calls now land in the same environment the harness itself lives
+          // in, arguably a feature rather than a collision.
+          return {
+            success: true,
+            containerName: this.active.containerName,
+            image: this.active.image,
+            mountedFrom: this.active.mountedFrom,
+            network: this.active.network,
+          };
+        }
         return {
           success: false,
           error: `A sandbox VM is already running for this thread (${this.active.containerName}, mounted from ${this.active.mountedFrom}). Call exit_vm before starting another one.`,
@@ -474,8 +539,94 @@ export class SandboxVmManager {
         image: params.image,
         mountedFrom: params.mountPath,
         network: params.network,
+        origin: 'agent',
       };
-      return { success: true, ...this.active };
+      return {
+        success: true,
+        containerName: this.active.containerName,
+        image: this.active.image,
+        mountedFrom: this.active.mountedFrom,
+        network: this.active.network,
+      };
+    } catch (err) {
+      return { success: false, error: errorMessage(err) };
+    }
+  }
+
+  /**
+   * ADR-0015 §3: ensures a container exists for this thread BEFORE the
+   * harness's first spawn, and marks it harness-owned so `exit()` refuses to
+   * remove it out from under the running harness process. Idempotent and
+   * safe to call on every `HarnessSession.start()` — a container this manager
+   * (or an earlier `enter_vm`) already knows about is attached to, not
+   * recreated; one still running from a plugin reload is adopted the same
+   * way `execCommand()` already does for `vm_exec`.
+   */
+  async ensureHarnessContainer(params: {
+    image: string;
+    mountPath: string;
+    network: VmNetworkMode;
+  }): Promise<EnterVmResult> {
+    try {
+      const containerName = this.deps.containerName();
+
+      if (this.active) {
+        // Already tracked — whether from a prior ensureHarnessContainer call
+        // on this same manager, or an enter_vm the agent ran first. Either
+        // way the container is shared per thread; just mark it harness-owned
+        // going forward so exit_vm stops short of removing it.
+        this.active = { ...this.active, origin: 'harness' };
+        return {
+          success: true,
+          containerName: this.active.containerName,
+          image: this.active.image,
+          mountedFrom: this.active.mountedFrom,
+          network: this.active.network,
+        };
+      }
+
+      const probe = await this.probe();
+      if (!probe.available) return { success: false, error: probe.error ?? VM_UNAVAILABLE_HINT };
+
+      if (await this.containerExists(containerName)) {
+        // Still running from an earlier session/plugin reload — adopt it.
+        // The harness PROCESS inside it does not survive a reload the way
+        // the container does (its stdio pipes were held by the now-gone host
+        // process), so the caller re-execs; this call only needs the
+        // container itself, which is already there.
+        this.active = { containerName, image: params.image, mountedFrom: params.mountPath, network: params.network, origin: 'harness' };
+        return {
+          success: true,
+          containerName: this.active.containerName,
+          image: this.active.image,
+          mountedFrom: this.active.mountedFrom,
+          network: this.active.network,
+        };
+      }
+
+      if (params.network === 'internal') {
+        const networkError = await this.ensureInternalNetwork();
+        if (networkError) return { success: false, error: networkError };
+      }
+
+      const result = await this.exec(
+        buildRunArgs({ containerName, image: params.image, mountPath: params.mountPath, network: params.network }),
+      );
+      if (result.exitCode !== 0) {
+        return {
+          success: false,
+          error: `Failed to start sandbox VM: ${firstLine(result.stderr) || firstLine(result.stdout) || `exit code ${result.exitCode}`}`,
+        };
+      }
+
+      this.active = { containerName, image: params.image, mountedFrom: params.mountPath, network: params.network, origin: 'harness' };
+      return {
+        success: true,
+        containerName: this.active.containerName,
+        image: this.active.image,
+        mountedFrom: this.active.mountedFrom,
+        network: this.active.network,
+      };
     } catch (err) {
       return { success: false, error: errorMessage(err) };
     }
@@ -502,6 +653,13 @@ export class SandboxVmManager {
           image: 'unknown (adopted an existing container after a reload)',
           mountedFrom: 'unknown (adopted an existing container after a reload)',
           network: 'default',
+          // Origin is genuinely unknown here (session state was lost), but
+          // defaulting to 'agent' is the safe direction: worst case, exit_vm
+          // is allowed again after a reload rather than wrongly refused. A
+          // reloaded harness re-execs into this same container regardless
+          // (see ensureHarnessContainer's doc comment) and will re-mark it
+          // 'harness' on its own next start().
+          origin: 'agent',
         };
       }
 
@@ -520,9 +678,21 @@ export class SandboxVmManager {
     }
   }
 
-  async exit(params: { force?: boolean } = {}): Promise<ExitVmResult> {
+  async exit(params: { force?: boolean; allowHarnessOwned?: boolean } = {}): Promise<ExitVmResult> {
     try {
       const containerName = this.active?.containerName ?? this.deps.containerName();
+
+      // ADR-0015 §3: exit_vm must not tear down a container the thread's
+      // harness process is still attached to. `allowHarnessOwned` is set only
+      // by ThreadManager's own thread-delete/archive teardown (the container's
+      // actual lifecycle owner for a harness-hosted session) — never by the
+      // agent-facing exit_vm tool.
+      if (this.active?.origin === 'harness' && !params.allowHarnessOwned) {
+        return {
+          success: false,
+          error: `This thread's sandbox VM (${containerName}) is hosting its harness process and cannot be removed with exit_vm. It is torn down automatically when the thread is deleted or archived.`,
+        };
+      }
 
       if (!this.active) {
         const probe = await this.probe();
