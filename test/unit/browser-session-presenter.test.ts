@@ -250,7 +250,7 @@ describe('BrowserSessionPresenter — handoff wiring', () => {
     expect(frameImg.getAttribute('src')).toMatch(/^data:image\/png;base64,/);
     // ... and typing reaches the login guest ...
     for (const ch of 'hunter2') h.controller.forwardKey(THREAD, { key: ch, type: 'keydown', shiftKey: false, ctrlKey: false, altKey: false, metaKey: false });
-    expect(h.loginGuest.sendInputEvent).toHaveBeenCalledTimes(7);
+    expect(h.loginGuest.sendInputEvent).toHaveBeenCalledTimes(14); // keyDown + char per character;
 
     // ... but nothing the agent can read or that is persisted changed.
     const after = snapshot();

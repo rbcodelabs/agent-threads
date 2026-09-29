@@ -12,6 +12,8 @@
 export type AgentBrowserErrorCode =
   /** No `<webview>` support, or the host exposes no FD diagnostics. */
   | 'capability_unavailable'
+  /** A person is driving this browser (take over); the agent must wait for them to return control. */
+  | 'user_in_control'
   /** Refused because file-descriptor pressure makes a guest likely to die at launch. */
   | 'admission_denied_fd_pressure'
   /** Refused because the pool is at its guest ceiling. */

@@ -8915,6 +8915,11 @@ button.ct-agent-crumb:focus-visible {
   flex-shrink: 0;
 }
 .ct-browser-preview-stop.is-hidden { display: none; }
+.ct-browser-preview-takeover {
+  flex-shrink: 0;
+  font-size: var(--font-ui-small);
+}
+.ct-browser-preview-takeover.is-hidden { display: none; }
 .ct-browser-preview-body {
   flex: 1;
   min-height: 0;
@@ -8927,6 +8932,9 @@ button.ct-agent-crumb:focus-visible {
   background: var(--background-secondary);
 }
 .ct-browser-preview-frame {
+  -webkit-user-drag: none;
+  user-select: none;
+  width: 100%;
   max-width: 100%;
   height: auto;
   display: block;

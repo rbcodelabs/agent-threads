@@ -184,6 +184,14 @@ export class AgentBrowserGuest {
   private navCount = 0;
   private scriptCount = 0;
   private captureCount = 0;
+  /** True while a person is driving this guest (login handoff): exempt from reaping. */
+  handoffActive = false;
+  /**
+   * True while a person has taken over this (agent) guest. Every agent-facing
+   * operation is refused with `user_in_control` so the two never fight over the
+   * page, and the agent cannot read a sign-in screen through a screenshot.
+   */
+  userDriving = false;
   private width = GUEST_WIDTH;
   private height = GUEST_HEIGHT;
 
@@ -252,6 +260,9 @@ export class AgentBrowserGuest {
 
   /** True when a budget or nothing-left-to-give condition means recycle. */
   budgetExhausted(): boolean {
+    // A human-driven login handoff streams a frame every 250ms; the agent budgets
+    // do not apply while a person is signing in.
+    if (this.handoffActive) return false;
     return (
       this.navCount >= NAV_BUDGET ||
       this.scriptCount >= SCRIPT_BUDGET ||
@@ -516,7 +527,17 @@ export class AgentBrowserGuest {
    * interleave a navigation with a snapshot and produce refs describing a page
    * that is no longer loaded.
    */
-  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  private enqueue<T>(fn: () => Promise<T>, opts: { human?: boolean } = {}): Promise<T> {
+    if (this.userDriving && !opts.human) {
+      return Promise.reject(
+        new AgentBrowserError({
+          code: 'user_in_control',
+          message: 'A person has taken over this browser (for example to sign in). Wait for them to return control, then re-snapshot the page.',
+          retryable: true,
+          hint: REFS_INVALIDATED_HINT,
+        }),
+      );
+    }
     if (this.state === 'destroyed' || this.state === 'dead') {
       return Promise.reject(
         new AgentBrowserError({
@@ -682,7 +703,7 @@ export class AgentBrowserGuest {
    * (behind the app, inert) for the duration, given a moment to actually draw,
    * and parked again in a `finally` so a failure cannot strand it in view.
    */
-  capture(maxWidth = GUEST_WIDTH): Promise<Uint8Array> {
+  capture(maxWidth = GUEST_WIDTH, opts: { human?: boolean } = {}): Promise<Uint8Array> {
     return this.enqueue(async () => {
       const el = this.requireElement();
       this.captureCount += 1;
@@ -707,7 +728,7 @@ export class AgentBrowserGuest {
       } finally {
         this.captureSurface?.end();
       }
-    });
+    }, opts);
   }
 
   /**
