@@ -231,6 +231,15 @@ export const MAX_SNAPSHOT_CHARS = 40_000;
 export const MAX_TEXT_CHARS = 20_000;
 /** Characters of a single element's accessible name. */
 export const MAX_ELEMENT_NAME_CHARS = 120;
+/**
+ * Hard ceiling on the characters a save-page call will write to disk. Content
+ * beyond it is dropped in the guest and reported as `truncated`.
+ */
+export const MAX_SAVE_CHARS = 10_000_000;
+/** Characters moved across the bridge per chunk while saving a page. */
+export const SAVE_CHUNK_CHARS = 256_000;
+/** Saved pages kept per thread; the oldest are deleted beyond this. */
+export const MAX_SAVED_FILES_PER_THREAD = 20;
 
 // ── URL policy ───────────────────────────────────────────────────────────────
 

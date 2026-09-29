@@ -22,7 +22,11 @@ vi.mock('@anthropic-ai/claude-agent-sdk/browser', () => ({
 }));
 
 import { createObsidianMcpServer } from '../../src/ObsidianTools';
-import { AGENT_BROWSER_TOOL_NAMES } from '../../src/agentBrowser/agentBrowserTools';
+import {
+  AGENT_BROWSER_READ_ONLY_TOOL_NAMES,
+  AGENT_BROWSER_TOOL_NAMES,
+} from '../../src/agentBrowser/agentBrowserTools';
+import { isTrustedBuiltInTool } from '../../src/toolNameUtils';
 import { AgentBrowserError } from '../../src/agentBrowser/agentBrowserErrors';
 import type { ThreadBrowser } from '../../src/agentBrowser/ThreadBrowser';
 
@@ -57,6 +61,11 @@ function makeApp(): App {
 function fakeBrowser(overrides: Partial<ThreadBrowser> = {}): ThreadBrowser {
   return {
     threadId: 't1',
+    canSavePages: true,
+    savePage: vi.fn().mockResolvedValue({
+      path: '/tmp/geode-browser/t1/0001-page.json', bytes: 120, chars: 118, contentType: 'application/json',
+      url: 'https://example.com/data.json', truncated: false, note: 'untrusted',
+    }),
     navigate: vi.fn().mockResolvedValue({
       url: 'https://example.com/', title: 'Example', origin: 'https://example.com',
       epoch: 1, count: 1, truncated: false, snapshot: '- link "Home" [ref=e1]',
@@ -111,6 +120,26 @@ describe('agent browser tool registration', () => {
     const server = createObsidianMcpServer(makeApp(), { browser: fakeBrowser() }) as unknown as CapturedServer;
     const names = server.tools.map((t) => t._toolName);
     expect(new Set(names).size).toBe(names.length);
+  });
+});
+
+describe('browser_save_page registration', () => {
+  it('is a browser tool but is not read-only, because it writes a file', () => {
+    expect(AGENT_BROWSER_TOOL_NAMES).toContain('browser_save_page');
+    expect(AGENT_BROWSER_READ_ONLY_TOOL_NAMES).not.toContain('browser_save_page');
+  });
+
+  it('is not registered when the host supplies no file sink', () => {
+    const browser = fakeBrowser({ canSavePages: false } as Partial<ThreadBrowser>);
+    const server = createObsidianMcpServer(makeApp(), { browser }) as unknown as CapturedServer;
+    const names = server.tools.map((t) => t._toolName);
+    expect(names).not.toContain('browser_save_page');
+    // The rest of the browser set is unaffected.
+    expect(names).toContain('browser_read_text');
+  });
+
+  it('is a trusted built-in tool', () => {
+    expect(isTrustedBuiltInTool('mcp__claude_threads__browser_save_page')).toBe(true);
   });
 });
 
@@ -181,6 +210,32 @@ describe('agent browser tool behaviour', () => {
     expect(result.isError).toBe(true);
     expect(payload.error.code).toBe('unknown');
     expect(payload.error.retryable).toBe(false);
+  });
+
+  it('passes format and filename to savePage and returns the path and size', async () => {
+    const browser = fakeBrowser();
+    const server = createObsidianMcpServer(makeApp(), { browser }) as unknown as CapturedServer;
+    const result = await getTool(server, 'browser_save_page')._handler({ format: 'html', filename: 'listing' });
+    expect(browser.savePage).toHaveBeenCalledWith({ format: 'html', filename: 'listing' });
+    const payload = parse(result);
+    expect(payload.success).toBe(true);
+    expect(payload.path).toBe('/tmp/geode-browser/t1/0001-page.json');
+    expect(payload.bytes).toBe(120);
+    expect(payload.truncated).toBe(false);
+  });
+
+  it('reports a save failure as a value, never as a thrown exception', async () => {
+    const browser = fakeBrowser({
+      savePage: vi.fn().mockRejectedValue(
+        new AgentBrowserError({ code: 'stale_snapshot', message: 'The page changed while it was being saved.', retryable: true }),
+      ) as unknown as ThreadBrowser['savePage'],
+    });
+    const server = createObsidianMcpServer(makeApp(), { browser }) as unknown as CapturedServer;
+    const result = await getTool(server, 'browser_save_page')._handler({});
+    expect(result.isError).toBe(true);
+    const payload = parse(result) as { error: Record<string, unknown> };
+    expect(payload.error.code).toBe('stale_snapshot');
+    expect(payload.error.retryable).toBe(true);
   });
 
   it('closes the session on request', async () => {

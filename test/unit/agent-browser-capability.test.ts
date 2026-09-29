@@ -27,7 +27,7 @@ import {
   stripInvisible,
   truncate,
 } from '../../src/agentBrowser/agentBrowserSanitize';
-import { MAX_ELEMENT_NAME_CHARS } from '../../src/agentBrowser/agentBrowserPolicy';
+import { MAX_ELEMENT_NAME_CHARS, MAX_TEXT_CHARS } from '../../src/agentBrowser/agentBrowserPolicy';
 
 const PROBE_HTML = `
   <h1>Probe page</h1>
@@ -220,6 +220,29 @@ describe('read-text script', () => {
     expect(result.text).toContain('Visible prose.');
     expect(result.text).not.toContain('Hidden prose.');
     expect(result.text).not.toContain('var ignored');
+  });
+
+  it('includes a partial slice of a single text node larger than the cap', () => {
+    // A raw JSON document renders as one enormous text node inside a <pre>.
+    // Previously the walker skipped a node that would overflow the cap, so such
+    // pages came back empty even though they rendered fine.
+    document.body.innerHTML = '<pre>' + 'x'.repeat(100_000) + '</pre>';
+    const result = runScript<RawPageText>(buildReadTextScript());
+    expect(result.text.length).toBe(MAX_TEXT_CHARS);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('does not flag truncation when everything fits', () => {
+    const result = runScript<RawPageText>(buildReadTextScript());
+    expect(result.truncated).toBe(false);
+  });
+
+  it('keeps the total within the cap across several nodes', () => {
+    document.body.innerHTML = '<p>' + 'a'.repeat(15_000) + '</p><p>' + 'b'.repeat(15_000) + '</p>';
+    const result = runScript<RawPageText>(buildReadTextScript());
+    expect(result.text.length).toBeLessThanOrEqual(MAX_TEXT_CHARS);
+    expect(result.text.startsWith('a'.repeat(15_000) + '\n' + 'b')).toBe(true);
+    expect(result.truncated).toBe(true);
   });
 });
 

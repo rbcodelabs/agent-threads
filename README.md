@@ -331,12 +331,15 @@ Claude reads that, hands back a ref, and acts on it. No coordinate guessing, no 
 |---|---|
 | `browser_navigate` | Open a URL and return a snapshot |
 | `browser_snapshot` | Re-read the current page |
-| `browser_read_text` | Visible page prose, for when the snapshot isn't enough |
+| `browser_read_text` | Visible page prose (up to ~20,000 characters), for when the snapshot isn't enough |
+| `browser_save_page` | Save the page's text or HTML to a temp file and return its path and size, for pages too large to read inline (e.g. raw JSON). Explore it with `jq`, `grep` or Read; files are deleted when the session or thread ends |
 | `browser_click` / `browser_type` | Act on a ref |
 | `browser_screenshot` | PNG of the current page |
 | `browser_status` | How many sessions are open, and the cap |
 | `browser_close` | End this thread's session |
 | `browser_resize` | Resize the viewport (320-1920 wide, 240-1080 tall) and return a fresh snapshot |
+
+`browser_save_page` writes a file, so unlike the read-only tools above it goes through the normal permission prompt. Files live under the system temp folder (outside your vault), are capped at 10 million characters each, and only the 20 most recent per thread are kept.
 
 **Watching it work.** In the chat, each browser session is **one live card** instead of a stack of tool pills: a small browser bar with the current address and status, the latest screenshot (a placeholder until the agent takes one), and a caption naming the step in progress. A step list under it keeps every action's verb, target, outcome and duration. When the session ends the card folds into a one-line chip with a thumbnail (click to expand, click the picture to see the screenshot larger); a failure stays open and shows the error; `browser_close` mutes it. In a wide pane the card goes two-column. You can also run **Open Agent Browser** from the command palette for a sidebar pane showing live frames, the page, session age, and a stop button. It streams only while visible, and closing it never closes Claude's session.
 
