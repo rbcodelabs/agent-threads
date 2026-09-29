@@ -37,6 +37,8 @@
  * degrades to a non-throwing `{ success: false, error }` when it is missing.
  */
 
+import { managedRuntimeBinDirIfPresent } from './sandboxRuntime';
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /** Network isolation modes exposed by `enter_vm`. */
@@ -115,10 +117,14 @@ export class VmUnavailableError extends Error {
  * and does not include Homebrew — exactly the reason a `container` that works
  * in Terminal appears missing to the plugin.
  */
-export function runnerEnv(): Record<string, string | undefined> {
+export function runnerEnv(
+  managedBin: string | null = managedRuntimeBinDirIfPresent(),
+): Record<string, string | undefined> {
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
   const extraPath = ['/opt/homebrew/bin', '/usr/local/bin'];
-  return { ...env, PATH: `${extraPath.join(':')}:${env.PATH ?? ''}` };
+  // The managed runtime goes LAST so a system install (brew / Apple pkg) always wins.
+  const tail = managedBin ? `:${managedBin}` : '';
+  return { ...env, PATH: `${extraPath.join(':')}:${env.PATH ?? ''}${tail}` };
 }
 
 /**
