@@ -37,6 +37,8 @@
  * degrades to a non-throwing `{ success: false, error }` when it is missing.
  */
 
+import { managedRuntimeBinDirIfPresent, parseSystemStatus } from './sandboxRuntime';
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /** Network isolation modes exposed by `enter_vm`. */
@@ -76,8 +78,9 @@ export const VM_BINARY = 'container';
  */
 export const VM_UNAVAILABLE_HINT =
   `The \`${VM_BINARY}\` CLI is unavailable. Sandboxed VMs need Apple's container runtime `
-  + '(macOS 26+ on Apple silicon): install it with `brew install container`, then run '
-  + '`container system start`. Sandbox VM tools are desktop-only and are not available on mobile.';
+  + '(macOS 26+ on Apple silicon). Agent Threads can set it up for you: open Settings → Claude → '
+  + 'Set up sandbox. Manual fallback: `brew install container`, then `container system start`. '
+  + 'Sandbox VM tools are desktop-only and are not available on mobile.';
 
 // ── Command execution seam ───────────────────────────────────────────────────
 
@@ -97,8 +100,21 @@ export interface VmCommandResult {
  */
 export type VmCommandRunner = (
   args: string[],
-  opts: { timeoutMs: number },
+  opts: VmCommandRunOptions,
 ) => Promise<VmCommandResult>;
+
+/**
+ * Options for a single runner call. Everything but `timeoutMs` is optional and
+ * only used by long-running, chatty commands (image pull/build): `onOutput`
+ * receives stdout/stderr lines as they arrive, `maxBufferBytes` raises the
+ * captured-output cap, and `signal` kills the child when aborted.
+ */
+export interface VmCommandRunOptions {
+  timeoutMs: number;
+  onOutput?: (line: string) => void;
+  maxBufferBytes?: number;
+  signal?: AbortSignal;
+}
 
 /** Thrown by the default runner when the CLI binary cannot be spawned at all. */
 export class VmUnavailableError extends Error {
@@ -115,10 +131,14 @@ export class VmUnavailableError extends Error {
  * and does not include Homebrew — exactly the reason a `container` that works
  * in Terminal appears missing to the plugin.
  */
-export function runnerEnv(): Record<string, string | undefined> {
+export function runnerEnv(
+  managedBin: string | null = managedRuntimeBinDirIfPresent(),
+): Record<string, string | undefined> {
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
   const extraPath = ['/opt/homebrew/bin', '/usr/local/bin'];
-  return { ...env, PATH: `${extraPath.join(':')}:${env.PATH ?? ''}` };
+  // The managed runtime goes LAST so a system install (brew / Apple pkg) always wins.
+  const tail = managedBin ? `:${managedBin}` : '';
+  return { ...env, PATH: `${extraPath.join(':')}:${env.PATH ?? ''}${tail}` };
 }
 
 /**
@@ -142,14 +162,15 @@ export function createDefaultVmCommandRunner(binary: string = VM_BINARY): VmComm
         return;
       }
 
-      execFile(
+      const child = execFile(
         binary,
         args,
         {
           timeout: opts.timeoutMs,
           env: runnerEnv() as NodeJS.ProcessEnv,
-          maxBuffer: VM_OUTPUT_LIMIT_BYTES * 4,
+          maxBuffer: opts.maxBufferBytes ?? VM_OUTPUT_LIMIT_BYTES * 4,
           encoding: 'utf8',
+          ...(opts.signal ? { signal: opts.signal } : {}),
         },
         (error, stdout, stderr) => {
           if (!error) {
@@ -169,7 +190,25 @@ export function createDefaultVmCommandRunner(binary: string = VM_BINARY): VmComm
           resolve({ exitCode, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
         },
       );
+      if (opts.onOutput) forwardLines(child, opts.onOutput);
     });
+}
+
+/** Splits a child's stdout+stderr into lines (split on \n or \r, so progress bars update) for a callback. */
+function forwardLines(child: import('child_process').ChildProcess, onLine: (line: string) => void): void {
+  for (const stream of [child.stdout, child.stderr]) {
+    if (!stream) continue;
+    let pending = '';
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk: string) => {
+      const parts = (pending + chunk).split(/[\r\n]+/);
+      pending = parts.pop() ?? '';
+      for (const line of parts) if (line.trim()) onLine(line);
+    });
+    stream.on('end', () => {
+      if (pending.trim()) onLine(pending);
+    });
+  }
 }
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
@@ -424,6 +463,20 @@ export class SandboxVmManager {
   async imageExists(image: string): Promise<boolean> {
     const result = await this.exec(buildImageInspectArgs(image), 15_000);
     return result.exitCode === 0;
+  }
+
+  /**
+   * True when the runtime's system service is running (`container system
+   * status`). Distinguishes "service stopped" from "image missing" when
+   * `imageExists` is false, since `image inspect` fails in both cases.
+   */
+  async systemRunning(): Promise<boolean> {
+    try {
+      const result = await this.exec(['system', 'status'], 15_000);
+      return result.exitCode === 0 && parseSystemStatus(`${result.stdout}\n${result.stderr}`).running;
+    } catch {
+      return false;
+    }
   }
 
   /**

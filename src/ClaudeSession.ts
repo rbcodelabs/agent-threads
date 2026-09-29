@@ -98,8 +98,15 @@ export interface SessionCallbacks {
    * auth login` vs. the container's own `claude setup-token`) from what
    * actually happened, rather than a possibly-stale capability re-check.
    * Only `ThreadSession` (Claude) ever calls this.
+   *
+   * `fallbackReason` accompanies a `null` routing: why the host was used
+   * (`HarnessVmFallbackReason`). Undefined when VM routing was not configured
+   * for the session at all.
    */
-  onVmRouting?: (routing: { containerName: string; containerBinaryPath: string } | null) => void;
+  onVmRouting?: (
+    routing: { containerName: string; containerBinaryPath: string } | null,
+    fallbackReason?: import('./harnessVmRouting').HarnessVmFallbackReason,
+  ) => void;
   onPermissionRequest: (toolName: string, detail: string) => Promise<boolean>;
   onAskUserQuestion: (questions: AskQuestion[]) => Promise<Record<string, string>>;
   /** Provider resolved/canceled its pending question before the user answered. */

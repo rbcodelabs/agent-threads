@@ -81,7 +81,7 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
   });
 
   it('reports null for a host-local fallback', async () => {
-    resolveClaudeVmRouting.mockResolvedValue({ routed: false });
+    resolveClaudeVmRouting.mockResolvedValue({ routed: false, reason: 'runtime-missing' });
     const onVmRouting = vi.fn();
     const session = new ThreadSession();
     await session.start({
@@ -93,7 +93,24 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
       claude: { vm: vmInputs() },
     } as never);
 
-    expect(onVmRouting).toHaveBeenCalledWith(null);
+    // The structured reason rides along so the UI can offer sandbox setup.
+    expect(onVmRouting).toHaveBeenCalledWith(null, 'runtime-missing');
+  });
+
+  it('reports the "never" reason when the configured mode is never', async () => {
+    const onVmRouting = vi.fn();
+    const session = new ThreadSession();
+    await session.start({
+      claudePath: '/fake/claude',
+      cwd: '/tmp',
+      permissionMode: 'default',
+      extraEnvRaw: '',
+      callbacks: callbacks({ onVmRouting }),
+      claude: { vm: vmInputs('never') },
+    } as never);
+
+    expect(onVmRouting).toHaveBeenCalledWith(null, 'never');
+    expect(resolveClaudeVmRouting).not.toHaveBeenCalled();
   });
 
   it('reports null when no vm routing inputs are attached at all (harnessVmMode "never")', async () => {

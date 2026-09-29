@@ -25,6 +25,7 @@ import {
   buildHarnessSpawnArgs,
   redactSecretsInArgv,
   resolveClaudeVmRouting,
+  type HarnessVmFallbackReason,
   type ResolvedClaudeVmRouting,
 } from './harnessVmRouting';
 import { runnerEnv as hostRunnerEnv, VM_BINARY } from './sandboxVm';
@@ -334,10 +335,13 @@ export class ThreadSession {
     // Absent `options.claude?.vm` or a resolved `{ routed: false }` both mean
     // "spawn on the host", today's behavior, unchanged.
     let vmRouting: ResolvedClaudeVmRouting | null = null;
+    let vmFallbackReason: HarnessVmFallbackReason | undefined =
+      options.claude?.vm?.mode === 'never' ? 'never' : undefined;
     if (options.claude?.vm && options.claude.vm.mode !== 'never') {
       try {
         const decision = await resolveClaudeVmRouting(options.claude.vm);
         if (decision.routed) vmRouting = decision.routing;
+        else vmFallbackReason = decision.reason;
       } catch (vmErr) {
         // 'always' mode's explicit no-silent-fallback contract: surface the
         // error instead of quietly spawning on the host.
@@ -351,9 +355,13 @@ export class ThreadSession {
     // (the "Sign in to Claude" card) can pick the right sign-in flow from
     // what's really running rather than re-deriving a possibly-stale
     // capability check (ADR-0015 follow-up, see SessionCallbacks.onVmRouting).
-    callbacks.onVmRouting?.(
-      vmRouting ? { containerName: vmRouting.containerName, containerBinaryPath: vmRouting.containerBinaryPath } : null,
-    );
+    if (vmRouting) {
+      callbacks.onVmRouting?.({ containerName: vmRouting.containerName, containerBinaryPath: vmRouting.containerBinaryPath });
+    } else if (vmFallbackReason) {
+      callbacks.onVmRouting?.(null, vmFallbackReason);
+    } else {
+      callbacks.onVmRouting?.(null);
+    }
 
     // Minimal, explicit env for the containerized case — deliberately NOT a
     // `...process.env` spread (ADR-0015 §4's hard requirement: forwarding the

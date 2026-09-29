@@ -48,6 +48,10 @@ function makeManager(script: Record<string, Scripted> = {}) {
   return { manager, runner };
 }
 
+const SYSTEM_STATUS_KEY = 'system status';
+const RUNNING_STATUS: Scripted = { stdout: 'status    running\ninstallRoot /x\n' };
+const STOPPED_STATUS: Scripted = { exitCode: 1, stderr: 'apiserver not running' };
+
 describe('checkHarnessVmCapability', () => {
   it('is capable when platform, probe, and image all check out', async () => {
     const { manager } = makeManager(CAPABLE_SCRIPT);
@@ -60,6 +64,7 @@ describe('checkHarnessVmCapability', () => {
     const result = await checkHarnessVmCapability({ vmManager: manager, image: IMAGE, platform: 'linux', arch: 'x64' });
     expect(result.capable).toBe(false);
     expect(result.reason).toContain('Apple silicon');
+    expect(result.code).toBe('unsupported');
     expect(runner.calls).toHaveLength(0);
   });
 
@@ -68,16 +73,49 @@ describe('checkHarnessVmCapability', () => {
     const result = await checkHarnessVmCapability({ vmManager: manager, image: IMAGE, platform: 'darwin', arch: 'arm64' });
     expect(result.capable).toBe(false);
     expect(result.reason).toMatch(/container/i);
+    expect(result.code).toBe('runtime-missing');
   });
 
   it('reports a missing harness image with the exact build command', async () => {
     const { manager } = makeManager({
       '--version': { stdout: 'ok' },
       [buildImageInspectArgs(IMAGE).join(' ')]: { exitCode: 1 },
+      [SYSTEM_STATUS_KEY]: RUNNING_STATUS,
     });
     const result = await checkHarnessVmCapability({ vmManager: manager, image: IMAGE, platform: 'darwin', arch: 'arm64' });
     expect(result.capable).toBe(false);
+    expect(result.code).toBe('image-missing');
+    expect(result.reason).toContain('Set up sandbox');
     expect(result.reason).toContain(`container build --tag ${IMAGE} -f sandbox/Dockerfile.harness sandbox/`);
+  });
+});
+
+describe('checkHarnessVmCapability — runtime-stopped vs image-missing', () => {
+  it('reports runtime-stopped when the image is unreadable because the service is down', async () => {
+    const { manager } = makeManager({
+      '--version': { stdout: 'ok' },
+      [buildImageInspectArgs(IMAGE).join(' ')]: { exitCode: 1 },
+      [SYSTEM_STATUS_KEY]: STOPPED_STATUS,
+    });
+    const result = await checkHarnessVmCapability({ vmManager: manager, image: IMAGE, platform: 'darwin', arch: 'arm64' });
+    expect(result).toMatchObject({ capable: false, code: 'runtime-stopped' });
+    expect(result.reason).toContain('not running');
+  });
+
+  it('treats a status call that throws as stopped, never as an error', async () => {
+    const { manager } = makeManager({
+      '--version': { stdout: 'ok' },
+      [buildImageInspectArgs(IMAGE).join(' ')]: { exitCode: 1 },
+      [SYSTEM_STATUS_KEY]: new Error('ENOENT'),
+    });
+    const result = await checkHarnessVmCapability({ vmManager: manager, image: IMAGE, platform: 'darwin', arch: 'arm64' });
+    expect(result.code).toBe('runtime-stopped');
+  });
+
+  it('does not probe the service when the image exists (happy path costs no extra call)', async () => {
+    const { manager, runner } = makeManager(CAPABLE_SCRIPT);
+    await checkHarnessVmCapability({ vmManager: manager, image: IMAGE, platform: 'darwin', arch: 'arm64' });
+    expect(runner.ran('system', 'status')).toBe(false);
   });
 });
 
@@ -85,7 +123,7 @@ describe('resolveClaudeVmRouting', () => {
   it('never mode: does not touch the CLI at all', async () => {
     const { manager, runner } = makeManager(CAPABLE_SCRIPT);
     const result = await resolveClaudeVmRouting({ mode: 'never', image: IMAGE, vmManager: manager, mountPath: '/work' });
-    expect(result).toEqual({ routed: false });
+    expect(result).toEqual({ routed: false, reason: 'never' });
     expect(runner.calls).toHaveLength(0);
   });
 
@@ -104,8 +142,21 @@ describe('resolveClaudeVmRouting', () => {
     const result = await resolveClaudeVmRouting({
       mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
     });
-    expect(result).toEqual({ routed: false });
+    expect(result).toEqual({ routed: false, reason: 'runtime-missing' });
     warn.mockRestore();
+  });
+
+  it('auto mode: reports runtime-stopped / image-missing so the UI can offer setup', async () => {
+    const stopped = makeManager({
+      '--version': { stdout: 'ok' }, [buildImageInspectArgs(IMAGE).join(' ')]: { exitCode: 1 }, [SYSTEM_STATUS_KEY]: STOPPED_STATUS,
+    });
+    expect(await resolveClaudeVmRouting({ mode: 'auto', image: IMAGE, vmManager: stopped.manager, mountPath: '/work', platform: 'darwin', arch: 'arm64' }))
+      .toEqual({ routed: false, reason: 'runtime-stopped' });
+    const noImage = makeManager({
+      '--version': { stdout: 'ok' }, [buildImageInspectArgs(IMAGE).join(' ')]: { exitCode: 1 }, [SYSTEM_STATUS_KEY]: RUNNING_STATUS,
+    });
+    expect(await resolveClaudeVmRouting({ mode: 'auto', image: IMAGE, vmManager: noImage.manager, mountPath: '/work', platform: 'darwin', arch: 'arm64' }))
+      .toEqual({ routed: false, reason: 'image-missing' });
   });
 
   it('auto mode: falls back to host spawn silently on an unsupported platform', async () => {
@@ -113,7 +164,7 @@ describe('resolveClaudeVmRouting', () => {
     const result = await resolveClaudeVmRouting({
       mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'linux', arch: 'x64',
     });
-    expect(result).toEqual({ routed: false });
+    expect(result).toEqual({ routed: false, reason: 'unsupported' });
     expect(runner.calls).toHaveLength(0);
   });
 
@@ -126,7 +177,7 @@ describe('resolveClaudeVmRouting', () => {
     const result = await resolveClaudeVmRouting({
       mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
     });
-    expect(result).toEqual({ routed: false });
+    expect(result).toEqual({ routed: false, reason: 'start-failed' });
     warn.mockRestore();
   });
 

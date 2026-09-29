@@ -4,13 +4,29 @@
 on macOS 26 or later with Apple silicon. Both Claude and Codex can use these tools.
 They require Apple's `container` runtime; they are unavailable on mobile.
 
-Install and start the runtime, then build the coding image from this repository:
+## Setup (one click)
+
+Open **Settings → Claude → Sandbox setup** and press **Set up sandbox**. Agent Threads then:
+
+1. installs Apple's `container` runtime (a pinned, SHA-256-verified copy of the signed installer, unpacked without admin rights into `~/Library/Application Support/claude-threads/runtime` — outside the vault, and only used when no system copy exists);
+2. starts the runtime's service (the first start downloads a Linux kernel, about 29 MB);
+3. pulls the published base image and builds the local Claude layer.
+
+A confirmation states what will be downloaded before anything starts (the runtime installer is about 118 MB, the base image several hundred MB), progress is shown live, and **Cancel** stops it. Every step is skipped when already satisfied, so it is safe to run twice. The button reads **Set up sandbox**, **Finish setup** or **Update sandbox** depending on what is left. It is hidden on unsupported Macs (the reason is shown instead) and on mobile.
+
+When a Claude thread starts on the host because the sandbox is not set up, a one-time card in that thread offers the same setup (`Set up sandbox` / `Not now` / `Don't ask again`). The thread keeps running on your Mac meanwhile; a finished setup applies from its next fresh session start.
+
+### Manual fallback (advanced)
+
+If you prefer to manage the runtime yourself, or the automatic setup cannot run:
 
 ```sh
 brew install container
 container system start
 container build --tag claude-threads-coding:1 sandbox/
 ```
+
+A system copy of the runtime (Homebrew or Apple's installer) always takes precedence over the managed one.
 
 The image includes Node 22, npm, Git, ripgrep, jq, curl, Python, and native build
 tools. It runs as the non-root `node` user. Project dependencies are installed
@@ -78,7 +94,7 @@ only** for now; Codex and OpenCode still spawn on the host regardless of this
 setting (OpenCode in particular has an unresolved MCP-loopback-bridge gap —
 see the ADR).
 
-Opt in by building a second, separate image:
+**Set up sandbox** (above) builds the second, separate image for you. Manual fallback:
 
 ```sh
 container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/
@@ -86,10 +102,10 @@ container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness san
 
 This image is deliberately a different tag from `claude-threads-coding:1` — it
 adds the native Claude Code CLI (`curl -fsSL https://claude.ai/install.sh | bash`)
-on top of the same base. Building it is the entire opt-in step: **shipping
-this feature changes nothing for any existing user until they build this
-image**, because `harnessVmMode: 'auto'`'s capability check includes "does
-this image exist," which is false until you build it.
+on top of the same base. Having it is the entire opt-in step: **shipping
+this feature changes nothing for any existing user until the image exists**
+(via **Set up sandbox** or a manual build), because `harnessVmMode: 'auto'`'s
+capability check includes "does this image exist," which is false until then.
 
 Configure under Settings → Tools, next to the sandbox VM image/network
 controls:
@@ -101,8 +117,12 @@ controls:
 | `harnessVmMode: 'never'` | Exactly today's host-local spawn. The rollback lever. |
 | Harness VM image | The image tag to route into. Blank falls back to `claude-threads-harness:1`. |
 
-Settings shows a live readiness check next to these controls (CLI probe +
-image existence), so "why isn't this using the VM" is self-diagnosing.
+Settings shows a live status block next to these controls (runtime, service,
+image), so "why isn't this using the VM" is self-diagnosing. Internally a host
+fallback carries a machine-readable reason (`unsupported`, `runtime-missing`,
+`runtime-stopped`, `image-missing`, `start-failed`, `never`); only the three
+setup-fixable ones (`runtime-missing`, `runtime-stopped`, `image-missing`) in
+`auto` mode trigger the in-thread offer, at most once per thread per app session.
 
 **One container per thread, shared.** A VM-routed thread's harness process and
 its `enter_vm`/`vm_exec`/`exit_vm` tools use the *same* container — the

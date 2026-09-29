@@ -40,6 +40,8 @@
 | `sandbox/Dockerfile` | Image for the sandbox VM — `node:22-bookworm-slim` + git, ripgrep, jq, curl, wget, build-essential, python3, openssh-client. Non-root `node` (uid 1000), `WORKDIR /work`, no secrets baked in |
 | `src/harnessVmRouting.ts` | ADR-0015: decides whether a thread's Claude harness process routes into its sandbox container (`resolveClaudeVmRouting`, capability checks), builds the `container exec` argv for the containerized CLI process, and redacts secrets from any logged argv by content match |
 | `sandbox/Dockerfile.harness` | `FROM claude-threads-coding:1` + the native Claude Code installer. Separate, opt-in image tag (`claude-threads-harness:1`) so building the coding image alone never enables VM-hosted harnesses |
+| `src/sandboxImage.ts` | Image pipeline: `ensureSandboxImages` pulls the published base image (`ghcr.io/rbcodelabs/claude-threads-sandbox:<v>`), tags it `claude-threads-coding:1` (never clobbering an existing one), then builds the embedded harness Dockerfile locally (adds the Claude CLI, stamps the `com.rbcodelabs.claude-threads.image-version` label). `getSandboxImageStatus` reports `ok/missing/stale`. All commands go through `VmCommandRunner` |
+| `sandbox/IMAGE_VERSION` + `.github/workflows/publish-sandbox-image.yml` | Base-image version (integer, bumped only when `sandbox/Dockerfile` changes; must equal `SANDBOX_IMAGE_VERSION`) and the workflow that publishes it to ghcr on push to `main`. Published tags are immutable. The Claude CLI is deliberately NOT in the published image (no redistribution grant). **Owner step:** set the ghcr package to Public after the first publish |
 
 ---
 
@@ -61,7 +63,7 @@ The agent's `Read`/`Write`/`Edit`/`Bash` tools run on the host, so the sandbox c
 
 Backed by Apple's `container` CLI (macOS 26+, Apple silicon), where each container is its own VM with a separate kernel and no view of the host filesystem beyond that mount.
 
-**Setup:** `brew install container` → `container system start` → build the image:
+**Setup:** Settings → Claude → **Set up sandbox** (`sandboxSetup.ts` orchestrates `sandboxRuntime.ts` install/start and `sandboxImage.ts` pull/build; UI in `sandboxSetupPanel.ts`, pure text in `sandboxSetupView.ts`, in-thread offer gating in `sandboxSetupPrompt.ts`). Manual fallback: `brew install container` → `container system start` → build the image:
 
 ```sh
 container build --tag claude-threads-coding:1 sandbox/

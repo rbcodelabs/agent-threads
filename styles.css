@@ -9366,3 +9366,66 @@ button.ct-agent-crumb:focus-visible {
 .modal.ct-bc-lightbox { width: min(880px, calc(100vw - 32px)); max-width: none; }
 .ct-bc-lightbox-body img { display: block; width: 100%; height: auto; border-radius: 6px; }
 .ct-bc-lightbox-cap { padding-top: 10px; font-size: 12px; color: var(--text-muted); }
+
+/* ── Sandbox setup: Settings status block + in-thread offer card ──────────── */
+
+.ct-sandbox-setup-line {
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+}
+.ct-sandbox-setup-label { color: var(--text-muted); }
+.ct-sandbox-setup-note {
+  margin-top: 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+.ct-sandbox-setup-actions,
+.ct-sandbox-offer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.ct-sandbox-setup-actions:empty { display: none; }
+.ct-sandbox-setup-progress,
+.ct-sandbox-offer-progress {
+  margin-top: 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.ct-sandbox-setup-progress:empty,
+.ct-sandbox-offer-progress:empty,
+.ct-sandbox-setup-error:empty,
+.ct-sandbox-offer-error:empty { display: none; }
+.ct-sandbox-setup-error-title,
+.ct-sandbox-offer-error-title {
+  margin-top: 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--color-red);
+}
+.ct-sandbox-setup-error-tail,
+.ct-sandbox-offer-error-tail {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  max-height: 160px;
+  overflow: auto;
+  font-size: var(--font-ui-smaller);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--background-secondary);
+  border-radius: 4px;
+}
+.ct-sandbox-offer {
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+.ct-sandbox-offer-title { font-weight: var(--font-semibold); }
+.ct-sandbox-offer-body {
+  margin-top: 4px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
