@@ -99,8 +99,21 @@ export interface VmCommandResult {
  */
 export type VmCommandRunner = (
   args: string[],
-  opts: { timeoutMs: number },
+  opts: VmCommandRunOptions,
 ) => Promise<VmCommandResult>;
+
+/**
+ * Options for a single runner call. Everything but `timeoutMs` is optional and
+ * only used by long-running, chatty commands (image pull/build): `onOutput`
+ * receives stdout/stderr lines as they arrive, `maxBufferBytes` raises the
+ * captured-output cap, and `signal` kills the child when aborted.
+ */
+export interface VmCommandRunOptions {
+  timeoutMs: number;
+  onOutput?: (line: string) => void;
+  maxBufferBytes?: number;
+  signal?: AbortSignal;
+}
 
 /** Thrown by the default runner when the CLI binary cannot be spawned at all. */
 export class VmUnavailableError extends Error {
@@ -148,14 +161,15 @@ export function createDefaultVmCommandRunner(binary: string = VM_BINARY): VmComm
         return;
       }
 
-      execFile(
+      const child = execFile(
         binary,
         args,
         {
           timeout: opts.timeoutMs,
           env: runnerEnv() as NodeJS.ProcessEnv,
-          maxBuffer: VM_OUTPUT_LIMIT_BYTES * 4,
+          maxBuffer: opts.maxBufferBytes ?? VM_OUTPUT_LIMIT_BYTES * 4,
           encoding: 'utf8',
+          ...(opts.signal ? { signal: opts.signal } : {}),
         },
         (error, stdout, stderr) => {
           if (!error) {
@@ -175,7 +189,25 @@ export function createDefaultVmCommandRunner(binary: string = VM_BINARY): VmComm
           resolve({ exitCode, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
         },
       );
+      if (opts.onOutput) forwardLines(child, opts.onOutput);
     });
+}
+
+/** Splits a child's stdout+stderr into lines (split on \n or \r, so progress bars update) for a callback. */
+function forwardLines(child: import('child_process').ChildProcess, onLine: (line: string) => void): void {
+  for (const stream of [child.stdout, child.stderr]) {
+    if (!stream) continue;
+    let pending = '';
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk: string) => {
+      const parts = (pending + chunk).split(/[\r\n]+/);
+      pending = parts.pop() ?? '';
+      for (const line of parts) if (line.trim()) onLine(line);
+    });
+    stream.on('end', () => {
+      if (pending.trim()) onLine(pending);
+    });
+  }
 }
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
