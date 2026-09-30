@@ -39,7 +39,7 @@ export function getImportMenuState(opts: { canInstall: boolean; canClone: boolea
   const items: ImportMenuItem[] = [
     { id: 'import-folder', title: 'Folder…', icon: 'folder-plus', enabled: opts.canInstall, ...(opts.canInstall ? {} : { disabledReason: NO_INSTALL_ROOT_MESSAGE }) },
     { id: 'import-file', title: 'File (.skill)…', icon: 'file-up', enabled: opts.canInstall, ...(opts.canInstall ? {} : { disabledReason: NO_INSTALL_ROOT_MESSAGE }) },
-    { id: 'add-github-source', title: 'GitHub repo…', icon: 'github', enabled: opts.canClone, ...(opts.canClone ? {} : { disabledReason: NO_CLONE_BASE_MESSAGE }) },
+    { id: 'add-github-source', title: 'GitHub repo…', icon: 'git-branch', enabled: opts.canClone, ...(opts.canClone ? {} : { disabledReason: NO_CLONE_BASE_MESSAGE }) },
     { id: 'add-local-source', title: 'Local folder source…', icon: 'folder-symlink', enabled: true },
   ];
   return {
