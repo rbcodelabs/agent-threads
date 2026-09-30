@@ -1,8 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
+  activeModelLabel,
   aliasLabel,
   buildClaudeModelOptions,
+  formatModelId,
+  isReportedModelId,
   modelVersionFromId,
+  parseClaudeModelId,
 } from '../../src/modelOptions';
 
 describe('modelVersionFromId', () => {
@@ -66,5 +70,39 @@ describe('buildClaudeModelOptions', () => {
       { label: 'Claude Opus 4.7', value: 'claude-opus-4-7' },
       { label: 'Sonnet 5 (1M context)', value: 'sonnet[1m]' },
     ]);
+  });
+});
+
+describe('parseClaudeModelId', () => {
+  it('handles Bedrock and Vertex id forms', () => {
+    expect(parseClaudeModelId('us.anthropic.claude-opus-5-5')).toEqual({ family: 'Opus', version: '5.5' });
+    expect(parseClaudeModelId('anthropic.claude-sonnet-5-v1:0')).toEqual({ family: 'Sonnet', version: '5' });
+    expect(parseClaudeModelId('claude-opus-4-8@20260101')).toEqual({ family: 'Opus', version: '4.8' });
+  });
+
+  it('rejects non-Claude ids', () => {
+    expect(parseClaudeModelId('gpt-5.5')).toBeUndefined();
+    expect(parseClaudeModelId('')).toBeUndefined();
+  });
+});
+
+describe('formatModelId / activeModelLabel', () => {
+  it('names a parseable id and keeps the raw id visible', () => {
+    expect(formatModelId('us.anthropic.claude-opus-5-5')).toBe('Opus 5.5');
+    expect(activeModelLabel('us.anthropic.claude-opus-5-5')).toBe('Opus 5.5 (us.anthropic.claude-opus-5-5)');
+  });
+
+  it('falls back to the raw id when unparseable', () => {
+    expect(formatModelId('gpt-5.5')).toBe('gpt-5.5');
+    expect(activeModelLabel('gpt-5.5')).toBe('gpt-5.5');
+  });
+});
+
+describe('isReportedModelId', () => {
+  it('accepts real ids and rejects placeholders and empties', () => {
+    expect(isReportedModelId('claude-opus-4-8')).toBe(true);
+    expect(isReportedModelId('<synthetic>')).toBe(false);
+    expect(isReportedModelId('  ')).toBe(false);
+    expect(isReportedModelId(undefined)).toBe(false);
   });
 });

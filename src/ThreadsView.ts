@@ -5,7 +5,7 @@ import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
 import { effectiveExtraEnv } from './types';
 import { parseLoopArgs, formatLoopInterval } from './loopUtils';
-import { buildClaudeModelOptions, aliasLabel, type ModelOption } from './modelOptions';
+import { buildClaudeModelOptions, aliasLabel, activeModelLabel, formatModelId, type ModelOption } from './modelOptions';
 import { THREAD_BUILTIN_COMMANDS, THREAD_ARG_COMPLETIONS, MODEL_ALIASES, goalKickoffMessage, resolveCreatePrMessage, escalationCommand } from './slashCommands';
 import { isSetAsGoalEligible } from './goalContext';
 import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo } from './gitDiffUtils';
@@ -2441,14 +2441,24 @@ export class ThreadsView extends ItemView {
     return thread?.model ?? undefined;
   }
 
+  /**
+   * Label for the ⋯ menu Model row: the selected option, followed by the exact
+   * model the provider last reported, e.g. "Default · Opus 5.5".
+   */
   private currentModelLabel(): string {
-    const escalated = this.activeThreadId
-      ? this.escalatedTurnModels.get(this.activeThreadId)
-      : undefined;
-    if (escalated) return `${aliasLabel(escalated, this.plugin.discoveredModelsByHarness.claude)} (this turn)`;
-    const model = this.currentModel();
-    if (!model) return 'Default';
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
+    const selected = this.selectedModelLabel(thread);
+    const active = thread?.activeModel;
+    if (!active) return selected;
+    const running = formatModelId(active);
+    return selected.includes(running) ? selected : `${selected} · ${running}`;
+  }
+
+  private selectedModelLabel(thread: import('./types').Thread | null | undefined): string {
+    const escalated = thread ? this.escalatedTurnModels.get(thread.id) : undefined;
+    if (escalated) return `${aliasLabel(escalated, this.plugin.discoveredModelsByHarness.claude)} (this turn)`;
+    const model = thread?.model ?? undefined;
+    if (!model) return 'Default';
     const harness = thread?.agentHarness ?? 'claude';
     return this.modelOptionsFor(harness).find(option => option.value === model)?.label ?? model;
   }
@@ -2469,6 +2479,15 @@ export class ThreadsView extends ItemView {
     const thread = this.manager.getThread(this.activeThreadId);
     const harness = thread?.agentHarness ?? 'claude';
     const options = this.modelOptionsFor(harness);
+    if (thread?.activeModel) {
+      // Informational header: the exact provider model id of the last reply.
+      const running = thread.activeModel;
+      menu.addItem(item => item
+        .setTitle(`Running: ${activeModelLabel(running)}`)
+        .setIcon('cpu')
+        .setDisabled(true));
+      menu.addSeparator();
+    }
     for (const opt of options) {
       menu.addItem(item => {
         item
