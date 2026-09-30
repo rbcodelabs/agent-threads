@@ -67,10 +67,12 @@ describe('ThreadManager — ADR-0015 Claude VM routing inputs', () => {
 
   it('omits claude.vm for a non-Claude harness even when harnessVmMode is "always" — Claude-only for this ADR', async () => {
     const manager = new ThreadManager({ ...DEFAULT_SETTINGS, harnessVmMode: 'always' });
+    manager.vmMcpServerFactory = vi.fn(() => ({}));
     manager.loadThreads([thread({ agentHarness: 'codex' })]);
     await manager.sendMessage('t1', 'hi');
 
     expect(fake.lastOptions?.claude?.vm).toBeUndefined();
+    expect(manager.vmMcpServerFactory).not.toHaveBeenCalled();
   });
 
   it('honors a custom harnessVmImage setting', async () => {
@@ -79,6 +81,24 @@ describe('ThreadManager — ADR-0015 Claude VM routing inputs', () => {
     await manager.sendMessage('t1', 'hi');
 
     expect(fake.lastOptions?.claude?.vm?.image).toBe('my-custom-harness:2');
+  });
+
+  it('builds a VM-only MCP roster from the ordinary roster without changing Codex/OpenCode configs', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    const host = { loopback: { type: 'http' as const, url: 'http://127.0.0.1:5555' } };
+    const vm = { loopback: { type: 'sdk' as const, name: 'loopback', instance: {} as never } };
+    manager.mcpServerFactory = () => host;
+    manager.vmMcpServerFactory = (_threadId, ordinary) => {
+      expect(ordinary).toBe(host);
+      return vm;
+    };
+    manager.loadThreads([thread({ agentHarness: 'claude' })]);
+    await manager.sendMessage('t1', 'hi');
+
+    expect(fake.lastOptions?.claude?.mcpServers).toBe(host);
+    expect(fake.lastOptions?.claude?.vmMcpServers).toBe(vm);
+    expect(fake.lastOptions?.codex?.mcpServers).toEqual({ loopback: host.loopback });
+    expect(fake.lastOptions?.opencode?.mcpServers).toEqual({ loopback: host.loopback });
   });
 
   it('the vm inputs reference the SAME SandboxVmManager instance getSandboxVmManager(threadId) returns, so agent enter_vm/vm_exec calls see the same container state', async () => {

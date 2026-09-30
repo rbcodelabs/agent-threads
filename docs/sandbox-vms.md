@@ -140,6 +140,23 @@ latency every turn).
 A mode change or a freshly-built image takes effect on a thread's *next* fresh
 session start (harness switch, restart, or new thread) — never mid-session.
 
+### MCP servers in a VM-routed Claude session
+
+Agent Threads' OAuth MCP registrations and Google Workspace MCP services remain
+host-owned: their refresh tokens, access tokens, and per-thread capability
+credentials never enter the VM. When Claude is actually routed into a VM, the
+plugin relays these brokers through the Agent SDK's in-process MCP channel. An
+automatic fallback to host-local Claude keeps using their ordinary loopback HTTP
+endpoints.
+
+The relay exposes the brokers' tool surface only (including pagination, rich
+tool results, progress, cancellation, and tool-list changes). It does not claim
+prompt, resource, sampling, or elicitation capabilities. Other MCP servers are
+unchanged: built-in SDK servers stay in process, remote HTTP/SSE servers use the
+VM's network, and stdio servers run inside Linux with `/work` as the workspace.
+Consequently `network: none` still permits the host-owned SDK-relayed brokers but
+does not give the guest a general path to the host network.
+
 ### Signing in to Claude inside the container
 
 A VM-routed thread's `claude` process runs in an environment deliberately
