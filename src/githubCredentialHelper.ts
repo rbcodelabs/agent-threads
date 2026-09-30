@@ -188,3 +188,13 @@ export function buildHostGitEnv(opts: {
   out.PATH = opts.baseEnv.PATH ? `${opts.dir}/bin:${opts.baseEnv.PATH}` : `${opts.dir}/bin`;
   return out;
 }
+
+/** Removes the env additions {@link buildHostGitEnv} makes, for sessions that run inside the sandbox VM. */
+export function stripHostOnlyGitEnv(env: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (k === 'PATH' || k === 'GIT_CONFIG_COUNT' || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
