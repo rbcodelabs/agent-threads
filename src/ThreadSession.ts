@@ -34,6 +34,7 @@ import {
   shouldAutoRetryTransportError,
   TRANSPORT_ERROR_CONTINUATION_PROMPT,
 } from './transportErrorRecovery';
+import { appendStderrTail, isResumeFailure, withStderr } from './resumeFailureRecovery';
 import {
   isRateLimitError,
   shouldAutoRetryRateLimitError,
@@ -107,6 +108,10 @@ export class ThreadSession {
   private transportErrorRetryCount = 0;
   /** Auto-retry budget for rate-limit / overload errors, reset on every successful `result`. */
   private rateLimitRetryCount = 0;
+  /** Bounded tail of the CLI's stderr for the current Query, used to enrich exit-code errors. */
+  private stderrTail = '';
+  /** One-shot budget: retry a failed --resume as a fresh session. Reset on every successful `result`. */
+  private resumeFallbackUsed = false;
   /**
    * Expired-sign-in retry budget for the current USER turn (see
    * claudeAuthRecovery.ts). Reset only by a public send(), never by an
@@ -256,6 +261,7 @@ export class ThreadSession {
     this._pendingInteractiveCallbacks = 0;
     this._lastActivityAt = Date.now();
     this.openChannel();
+    this.stderrTail = '';
 
     const callbacks = options.callbacks;
 
@@ -383,6 +389,7 @@ export class ThreadSession {
       cwd: options.cwd,
       includePartialMessages: true,
       canUseTool,
+      stderr: (data: string) => { this.stderrTail = appendStderrTail(this.stderrTail, data); },
       // Keep task-tracking tools (TaskCreate/TaskUpdate/TaskList/TodoWrite) in the
       // default tool surface — SDK 0.3.233 drops them on Opus 4.8 / Sonnet 5 / Fable 5
       // and newer models unless opted back in. The plugin's dashboard depends on them.
@@ -746,6 +753,10 @@ export class ThreadSession {
     // transport-error auto-retry restart, so the `finally` block below
     // doesn't clobber the NEW Query that restart() already installed.
     let supersededByRestart = false;
+    // Whether this Query produced any output. A resume that dies before the
+    // first message is a failed --resume, not a mid-turn crash.
+    let sawMessage = false;
+    const startedWithResume = !!this.currentOptions?.resume;
 
     const pendingToolCalls: ToolCallRecord[] = [];
     let streamingText = '';
@@ -758,6 +769,7 @@ export class ThreadSession {
 
     try {
       pump: for await (const msg of q) {
+        sawMessage = true;
         debugLog('[ClaudeThreads] msg.type:', msg.type, (msg as Record<string, unknown>).subtype ?? '');
         if (callbacks.onRawEvent && msg.type !== 'stream_event') {
           callbacks.onRawEvent(msg as { type?: string } & Record<string, unknown>);
@@ -857,6 +869,7 @@ export class ThreadSession {
               this.lastKnownSessionId = msg.session_id;
               this.transportErrorRetryCount = 0;
               this.rateLimitRetryCount = 0;
+              this.resumeFallbackUsed = false;
               if (allToolCalls.length > 0 && !this.recapEmitted) {
                 const names = [...new Set(allToolCalls.map(t => formatToolName(t.name)))];
                 callbacks.onRecap(`Used ${names.join(', ')} (${allToolCalls.length} call${allToolCalls.length > 1 ? 's' : ''})`);
@@ -1195,6 +1208,25 @@ export class ThreadSession {
         // message. Entirely internal to ThreadSession; the UI only learns of
         // it via onRateLimitRetry (a transient 'reconnecting'-style notice),
         // never a terminal onError, unless the backoff budget is exhausted.
+        else if (!this.resumeFallbackUsed && this.lastUserTurn
+          && isResumeFailure(e.message, this.stderrTail, { resumed: startedWithResume, sawMessage })) {
+          // The persisted session can't be resumed (transcript missing after a
+          // restart, moved config dir, ...). Start a fresh session once and
+          // replay the turn instead of leaving the thread permanently broken.
+          this.resumeFallbackUsed = true;
+          supersededByRestart = true;
+          console.warn('[ClaudeThreads] resume failed; retrying as a fresh session:', withStderr(e.message, this.stderrTail));
+          callbacks.onReconnecting?.(withStderr(e.message, this.stderrTail));
+          const turn = this.lastUserTurn;
+          try {
+            // 'cwd-change' drops the resume id, so start() begins a new session.
+            await this.restart('cwd-change');
+            this.send(turn.text, turn.images, turn.userMessageUuid);
+          } catch (retryErr) {
+            console.error('[ClaudeThreads] ThreadSession resume-fallback failed:', retryErr);
+            callbacks.onError(retryErr instanceof Error ? retryErr : new Error(String(retryErr)));
+          }
+        }
         else if (isRateLimitError(e.message) && shouldAutoRetryRateLimitError(e.message, this.rateLimitRetryCount)) {
           this.rateLimitRetryCount++;
           const attempt = this.rateLimitRetryCount;
@@ -1248,7 +1280,7 @@ export class ThreadSession {
         } else {
           const zodIssues = (err as Record<string, unknown>).issues;
           console.error('[ClaudeThreads] ThreadSession pump error:', e, zodIssues ? JSON.stringify(zodIssues, null, 2) : '');
-          callbacks.onError(new Error(`${e.message}${zodIssues ? '\n\nZod issues: ' + JSON.stringify(zodIssues) : ''}\n\nStack: ${e.stack ?? 'none'}`));
+          callbacks.onError(new Error(`${withStderr(e.message, this.stderrTail)}${zodIssues ? '\n\nZod issues: ' + JSON.stringify(zodIssues) : ''}\n\nStack: ${e.stack ?? 'none'}`));
         }
       }
     } finally {
