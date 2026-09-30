@@ -105,8 +105,8 @@ describe('resolveInRoots', () => {
     await expect(resolveInRoots('link/new.txt', [root])).rejects.toThrow(/outside the allowed/);
   });
   it('blocks .obsidian and .git segments', async () => {
-    await expect(resolveInRoots('.obsidian/plugins/x/data.json', [root])).rejects.toThrow(/\.obsidian and \.git/);
-    await expect(resolveInRoots('sub/.git/config', [root])).rejects.toThrow(/\.obsidian and \.git/);
+    await expect(resolveInRoots('.obsidian/plugins/x/data.json', [root])).rejects.toThrow(/not allowed/);
+    await expect(resolveInRoots('sub/.git/config', [root])).rejects.toThrow(/not allowed/);
   });
   it('maps the VM guest /work alias onto the working directory', async () => {
     expect(await resolveInRoots('/work/out/file.bin', [root])).toBe(join(require('fs').realpathSync(root), 'out', 'file.bin'));
@@ -393,6 +393,13 @@ describe('/drive-files route on the loopback proxy', () => {
     expect((await rpc(files, {}, { body: 'not json' })).status).toBe(400);
     expect(f.plugin.tokenStore.getValidAccessToken).not.toHaveBeenCalled();
   });
+  it('answers an id-less tools/call notification with a single clean 202', async () => {
+    const f = setup(fakeDrive());
+    await f.proxy.configure({ drive: true });
+    const files = f.proxy.serversForThread('t')['google-drive-files'];
+    const res = await rpc(files, { jsonrpc: '2.0', method: 'tools/call', params: { name: 'upload_local_file', arguments: {} } });
+    expect(res.status).toBe(202);
+  });
   it('uploads and downloads files larger than the 10 MiB request cap end to end', async () => {
     const data = randomBytes(24 * MiB + 5);
     writeFileSync(join(root, 'large.bin'), data);
@@ -460,5 +467,141 @@ describe('/drive-files route on the loopback proxy', () => {
     const vm = f.proxy.vmServersForThread('t');
     expect(Object.keys(vm)).toEqual(['google-drive', 'google-drive-files']);
     expect(vm['google-drive-files']).toMatchObject({ type: 'sdk', name: 'google-drive-files' });
+  });
+});
+
+describe('hardening: denylist', () => {
+  it('blocks the sensitive segments case-insensitively', async () => {
+    for (const p of ['.GIT/hooks/x', 'a/.Obsidian/plugins/d.json', '.claude/settings.json', '.SSH/id_rsa', '.aws/credentials', '.gnupg/k', '.env', 'sub/.ENV.local', '.mcp.json']) {
+      await expect(resolveInRoots(p, [root]), p).rejects.toThrow(/not allowed/);
+    }
+    await expect(resolveInRoots('environment.txt', [root])).resolves.toBeTruthy();
+    await expect(resolveInRoots('.envrc-notes/x', [root])).resolves.toBeTruthy();
+  });
+  it('refuses to upload from a blocked location', async () => {
+    mkdirSync(join(root, '.ssh'));
+    writeFileSync(join(root, '.ssh', 'id'), 'k');
+    writeFileSync(join(root, '.env'), 'S=1');
+    const drive = fakeDrive();
+    await expect(uploadDriveFile(ctxFor(drive.http), { path: '.ssh/id' })).rejects.toThrow(/not allowed/);
+    await expect(uploadDriveFile(ctxFor(drive.http), { path: '.env' })).rejects.toThrow(/not allowed/);
+    expect(drive.requests).toHaveLength(0);
+  });
+  it('never writes a Drive-supplied blocked file name into a destination directory', async () => {
+    mkdirSync(join(root, 'dl'));
+    for (const bad of ['.git', '.GIT', '.obsidian', '.env', '.mcp.json']) {
+      const drive = fakeDrive({ files: { F: { name: bad, mimeType: 'text/plain', data: Buffer.from('evil') } } });
+      const result = await downloadDriveFile(ctxFor(drive.http), { fileId: 'F', destPath: 'dl', overwrite: true });
+      expect(result.path.split(/[\\/]/).pop()!.toLowerCase(), bad).not.toBe(bad.toLowerCase());
+      expect(readdirSync(join(root, 'dl')).map(n => n.toLowerCase())).not.toContain(bad.toLowerCase());
+    }
+  });
+  it('does not replace an existing .git file when a Drive file named .git is downloaded', async () => {
+    writeFileSync(join(root, '.git'), 'gitdir: /somewhere');
+    const drive = fakeDrive({ files: { F: { name: '.git', mimeType: 'text/plain', data: Buffer.from('evil') } } });
+    await downloadDriveFile(ctxFor(drive.http), { fileId: 'F', destPath: '.', overwrite: true }).catch(() => {});
+    expect(readFileSync(join(root, '.git'), 'utf8')).toBe('gitdir: /somewhere');
+  });
+});
+
+describe('hardening: paths', () => {
+  it('rejects dangling symlinks instead of treating them as absent', async () => {
+    symlinkSync(join(root, 'nowhere'), join(root, 'dangling'));
+    await expect(resolveInRoots('dangling', [root])).rejects.toThrow(/cannot be resolved/);
+    await expect(resolveInRoots('dangling/x.txt', [root])).rejects.toThrow(/cannot be resolved/);
+  });
+  it('truncates very long Drive names so the temp file fits filesystem limits', async () => {
+    const drive = fakeDrive({ files: { F: { name: 'a'.repeat(300) + '.bin', mimeType: 'application/octet-stream', data: Buffer.from('x') } } });
+    const result = await downloadDriveFile(ctxFor(drive.http), { fileId: 'F', destPath: 'out/' });
+    const base = result.path.split(/[\\/]/).pop()!;
+    expect(Buffer.byteLength(base)).toBeLessThanOrEqual(240);
+    expect(base.endsWith('.bin')).toBe(true);
+    expect(readFileSync(result.path, 'utf8')).toBe('x');
+  });
+  it('does not create parent directories when the download request fails', async () => {
+    const drive = fakeDrive();
+    await expect(downloadDriveFile(ctxFor(drive.http), { fileId: 'MISSING', destPath: 'made/up/x.bin' })).rejects.toThrow(/404/);
+    const http: DriveHttp = async url => url.includes('alt=media') ? json(500, { error: { message: 'boom' } })
+      : json(200, { id: 'F', name: 'n', mimeType: 'application/octet-stream', size: '1' });
+    await expect(downloadDriveFile(ctxFor(http), { fileId: 'F', destPath: 'made/up/x.bin' })).rejects.toThrow(/500/);
+    expect(readdirSync(root)).toEqual([]);
+  });
+  it('removes directories it created when the stream fails', async () => {
+    const http: DriveHttp = async url => url.includes('alt=media')
+      ? { status: 200, headers: { get: () => null }, body: (async function* () { yield Buffer.from('p'); throw new Error('reset'); })() }
+      : json(200, { id: 'F', name: 'n', mimeType: 'application/octet-stream', size: '100' });
+    await expect(downloadDriveFile(ctxFor(http), { fileId: 'F', destPath: 'made/up/x.bin' })).rejects.toThrow('reset');
+    expect(readdirSync(root)).toEqual([]);
+  });
+  it('only adds the 10 MB export hint for export size-limit errors', async () => {
+    const http = (status: number, reason: string): DriveHttp => async url => url.includes('/export')
+      ? json(status, { error: { message: 'msg', errors: [{ reason }] } })
+      : json(200, { id: 'D', name: 'Doc', mimeType: 'application/vnd.google-apps.document' });
+    for (const status of [401, 404]) {
+      const err = await downloadDriveFile(ctxFor(http(status, 'other')), { fileId: 'D', destPath: 'x.pdf' }).catch(e => e as Error);
+      expect((err as Error).message).toContain(String(status));
+      expect((err as Error).message).not.toMatch(/10 MB/);
+    }
+  });
+});
+
+describe('hardening: overwrite, source and upload loop', () => {
+  it('never replaces a file that appears after the pre-check when overwrite is false', async () => {
+    const http: DriveHttp = async url => {
+      if (url.includes('alt=media')) { writeFileSync(join(root, 'race.txt'), 'winner'); return reply(200, 'loser'); }
+      return json(200, { id: 'F', name: 'n', mimeType: 'text/plain', size: '5' });
+    };
+    await expect(downloadDriveFile(ctxFor(http), { fileId: 'F', destPath: 'race.txt' })).rejects.toThrow(/already exists/);
+    expect(readFileSync(join(root, 'race.txt'), 'utf8')).toBe('winner');
+    expect(readdirSync(root)).toEqual(['race.txt']);
+  });
+  it('fails when the source file grows during upload', async () => {
+    const path = join(root, 'grow.bin');
+    writeFileSync(path, randomBytes(9 * MiB));
+    const drive = fakeDrive({ fault: n => { if (n === 1) require('fs').appendFileSync(path, 'more'); return undefined; } });
+    await expect(uploadDriveFile(ctxFor(drive.http), { path: 'grow.bin' })).rejects.toThrow(/changed size/);
+  });
+  it('fails when the source file shrinks during upload', async () => {
+    const path = join(root, 'shrink.bin');
+    writeFileSync(path, randomBytes(9 * MiB));
+    const drive = fakeDrive({ fault: n => { if (n === 1) require('fs').truncateSync(path, 1000); return undefined; } });
+    await expect(uploadDriveFile(ctxFor(drive.http), { path: 'shrink.bin' })).rejects.toThrow(/changed size/);
+  });
+  it('gives up when 308 responses never advance the committed offset', async () => {
+    writeFileSync(join(root, 's.bin'), randomBytes(1024));
+    const drive = fakeDrive({ fault: () => reply(308, '', { range: 'bytes=0-99' }) });
+    await expect(uploadDriveFile(ctxFor(drive.http), { path: 's.bin' })).rejects.toThrow(/repeated retries|not making progress/);
+    expect(drive.chunkPuts()).toBeLessThan(20);
+  });
+  it('treats an idle-timeout error as retryable and resumes', async () => {
+    const data = randomBytes(9 * MiB);
+    writeFileSync(join(root, 't.bin'), data);
+    let stalled = false;
+    const drive = fakeDrive({ fault: n => { if (n === 2 && !stalled) { stalled = true; throw new Error('Google request timed out (no data for 120s).'); } return undefined; } });
+    const result = await uploadDriveFile(ctxFor(drive.http), { path: 't.bin' });
+    expect(sha(drive.uploaded())).toBe(sha(data));
+    expect(result.bytesUploaded).toBe(data.length);
+  });
+});
+
+describe('idle timeouts', () => {
+  it('driveHttp destroys a request whose server stops responding', async () => {
+    const { createServer } = await import('http');
+    const { request } = await import('http');
+    const { createDriveHttp } = await import('../../src/GoogleDriveFiles');
+    const server = createServer(() => { /* never respond */ });
+    await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+    const port = (server.address() as import('net').AddressInfo).port;
+    try {
+      const http = createDriveHttp(150, request as never);
+      await expect(http(`http://127.0.0.1:${port}/x`, { method: 'GET', headers: {} })).rejects.toThrow(/timed out/);
+    } finally { server.closeAllConnections(); server.close(); }
+  });
+  it('download fails when the body stalls mid-stream and cleans up', async () => {
+    const http: DriveHttp = async url => url.includes('alt=media')
+      ? { status: 200, headers: { get: () => null }, body: (async function* () { yield Buffer.from('a'); await new Promise(() => {}); })() }
+      : json(200, { id: 'F', name: 'n', mimeType: 'application/octet-stream', size: '100' });
+    await expect(downloadDriveFile(ctxFor(http, { idleTimeoutMs: 100 }), { fileId: 'F', destPath: 'stall.bin' })).rejects.toThrow(/timed out/);
+    expect(readdirSync(root)).toEqual([]);
   });
 });

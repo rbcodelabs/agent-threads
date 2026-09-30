@@ -10,14 +10,17 @@
  *  - `upload_local_file`     — resumable, chunked upload of a local file (any size).
  *  - `download_to_local_file` — streamed download (or export of a Google-native file) to disk.
  *
- * Only paths inside the thread's allowed roots (its working directory and the vault)
- * can be read or written; `.obsidian` and `.git` are always off limits.
+ * Trust model: these tools move files outside the agent's normal file-permission checks,
+ * so they are confined to the thread's allowed roots (its working directory and the vault),
+ * and credential/config locations (.obsidian, .git, .claude, .ssh, .aws, .gnupg, .env*,
+ * .mcp.json) are always off limits, for upload sources and download destinations alike.
  *
  * Desktop only: Node `fs`/`https` are imported statically, and this module is only ever
  * loaded lazily through GoogleWorkspaceMcp.
  */
-import { createWriteStream, promises as fsp } from 'fs';
+import { constants as fsConstants, createWriteStream, promises as fsp } from 'fs';
 import { request as httpsRequest } from 'https';
+import type { RequestOptions } from 'http';
 import { randomBytes } from 'crypto';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
@@ -28,7 +31,14 @@ const API = 'https://www.googleapis.com';
 const UPLOAD_CHUNK = 8 * 1024 * 1024; // must be a multiple of 256 KiB
 const MAX_RETRIES = 5;
 const VM_WORKDIR = '/work';
-const BLOCKED_SEGMENTS = new Set(['.obsidian', '.git']);
+const IDLE_TIMEOUT_MS = 120_000;
+const BLOCKED_SEGMENTS = new Set(['.obsidian', '.git', '.claude', '.ssh', '.aws', '.gnupg', '.mcp.json']);
+/** Case-insensitive: macOS and Windows filesystems fold case, so `.GIT` is `.git`. */
+function isBlockedSegment(segment: string): boolean {
+  const lower = segment.toLowerCase();
+  return BLOCKED_SEGMENTS.has(lower) || lower === '.env' || lower.startsWith('.env.');
+}
+const BLOCKED_MESSAGE = 'Paths inside .obsidian, .git, .claude, .ssh, .aws, .gnupg, and credential files (.env, .env.*, .mcp.json) are not allowed.';
 
 export interface DriveHttpResponse {
   status: number;
@@ -38,22 +48,30 @@ export interface DriveHttpResponse {
 export interface DriveHttpInit { method: string; headers: Record<string, string>; body?: Buffer; signal?: AbortSignal }
 export type DriveHttp = (url: string, init: DriveHttpInit) => Promise<DriveHttpResponse>;
 
-/** Node HTTPS (bypasses renderer CSP/CORS). Never follows redirects; 308 is a resumable-upload status, not a redirect. */
-export const driveHttp: DriveHttp = (url, init) => new Promise((resolvePromise, reject) => {
-  const request = httpsRequest(url, { method: init.method, headers: init.headers, signal: init.signal }, incoming => {
-    const status = incoming.statusCode ?? 502;
-    if ([301, 302, 303, 307].includes(status)) { incoming.destroy(); reject(new Error('Google returned an unexpected redirect.')); return; }
-    const headers = new Headers();
-    for (const [key, value] of Object.entries(incoming.headers)) {
-      if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
-    }
-    if ([204, 205, 304].includes(status)) { incoming.resume(); resolvePromise({ status, headers, body: null }); return; }
-    resolvePromise({ status, headers, body: incoming });
+/**
+ * Node HTTPS (bypasses renderer CSP/CORS). Never follows redirects; 308 is a resumable-upload
+ * status, not a redirect. A socket that goes quiet for `idleMs` (request or response body) is
+ * destroyed with an error, so a half-open connection cannot hang a transfer until the abort.
+ */
+export function createDriveHttp(idleMs = IDLE_TIMEOUT_MS, requestFn: (url: string, options: RequestOptions, callback: (response: import('http').IncomingMessage) => void) => import('http').ClientRequest = httpsRequest as never): DriveHttp {
+  return (url, init) => new Promise((resolvePromise, reject) => {
+    const request = requestFn(url, { method: init.method, headers: init.headers, signal: init.signal }, incoming => {
+      const status = incoming.statusCode ?? 502;
+      if ([301, 302, 303, 307].includes(status)) { incoming.destroy(); reject(new Error('Google returned an unexpected redirect.')); return; }
+      const headers = new Headers();
+      for (const [key, value] of Object.entries(incoming.headers)) {
+        if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+      }
+      if ([204, 205, 304].includes(status)) { incoming.resume(); resolvePromise({ status, headers, body: null }); return; }
+      resolvePromise({ status, headers, body: incoming });
+    });
+    request.setTimeout(idleMs, () => request.destroy(new Error(`Google request timed out (no data for ${Math.round(idleMs / 1000)}s).`)));
+    request.on('error', reject);
+    if (init.body) request.write(init.body);
+    request.end();
   });
-  request.on('error', reject);
-  if (init.body) request.write(init.body);
-  request.end();
-});
+}
+export const driveHttp: DriveHttp = createDriveHttp();
 
 export interface TransferContext {
   http: DriveHttp;
@@ -65,6 +83,8 @@ export interface TransferContext {
   /** Throws when the caller's authority has been revoked; polled between chunks. */
   check?(): void;
   sleep?(ms: number): Promise<void>;
+  /** Max silence on a download body before it is abandoned. Defaults to 120 s. */
+  idleTimeoutMs?: number;
 }
 
 // ── Local path sandbox ──────────────────────────────────────────────────────
@@ -94,18 +114,21 @@ export async function resolveInRoots(input: string, roots: string[]): Promise<st
   // Threads in a sandbox VM see their working directory mounted at /work.
   const guest = input === VM_WORKDIR || input.startsWith(VM_WORKDIR + '/');
   const absolute = resolve(roots[0], guest ? '.' + input.slice(VM_WORKDIR.length) : input);
+  // lstat (not stat) so a dangling symlink counts as present and is rejected below, never "absent".
   let existing = absolute;
-  while (!(await statOrNull(existing))) {
+  while (!(await statOrNull(existing, false))) {
     const parent = dirname(existing);
     if (parent === existing) break;
     existing = parent;
   }
-  const full = join(await fsp.realpath(existing), relative(existing, absolute));
+  let realExisting: string;
+  try { realExisting = await fsp.realpath(existing); } catch {
+    throw new Error(`${existing} is a symlink that cannot be resolved.`);
+  }
+  const full = join(realExisting, relative(existing, absolute));
   const root = realRoots.find(candidate => within(candidate, full));
   if (!root) throw new Error('Path is outside the allowed directories (the thread working directory and the vault).');
-  if (relative(root, full).split(sep).some(segment => BLOCKED_SEGMENTS.has(segment))) {
-    throw new Error('Paths inside .obsidian and .git are not allowed.');
-  }
+  if (relative(root, full).split(sep).some(isBlockedSegment)) throw new Error(BLOCKED_MESSAGE);
   return full;
 }
 
@@ -136,6 +159,24 @@ function googleMessage(status: number, text: string): string {
     if (reason && !detail.includes(reason)) detail += ` (${reason})`;
   } catch { detail = text.slice(0, 200); }
   return `Google Drive returned ${status}${detail ? `: ${detail}` : ''}`;
+}
+
+/** Yield from `source`, failing if no chunk arrives within `ms` (a stalled body never resolves on its own). */
+async function* withIdleTimeout(source: AsyncIterable<Uint8Array>, ms: number): AsyncGenerator<Uint8Array> {
+  const iterator = source[Symbol.asyncIterator]();
+  try {
+    while (true) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const stalled = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`Google download timed out (no data for ${Math.round(ms / 1000)}s).`)), ms); });
+      let next: IteratorResult<Uint8Array>;
+      try { next = await Promise.race([iterator.next(), stalled]); } finally { clearTimeout(timer); }
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    // Don't await: a stalled source's return() would never settle.
+    void Promise.resolve(iterator.return?.()).catch(() => {});
+  }
 }
 
 const retryable = (status: number) => status === 429 || status >= 500;
@@ -169,10 +210,23 @@ const EXTENSIONS: Record<string, string> = {
   'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
 };
 
+/** Drive names are attacker-controllable: neutralise separators, dot-names and denylisted names. */
 function safeFileName(name: string): string {
   const cleaned = name.replace(/[\\/\0]/g, '_').trim();
-  return !cleaned || /^\.+$/.test(cleaned) ? 'download' : cleaned;
+  if (!cleaned || /^\.+$/.test(cleaned)) return 'download';
+  return isBlockedSegment(cleaned) ? `_${cleaned}` : cleaned;
 }
+
+/** Keep `name` within `maxBytes` UTF-8 bytes (filesystems cap names at 255, and we add ".xxxxxxxx.part"), preserving the extension. */
+function fitName(name: string, maxBytes: number): string {
+  if (Buffer.byteLength(name) <= maxBytes) return name;
+  const ext = extname(name);
+  const keepExt = Buffer.byteLength(ext) <= 16 ? ext : '';
+  let stem = Array.from(name.slice(0, name.length - keepExt.length));
+  while (stem.length && Buffer.byteLength(stem.join('')) + Buffer.byteLength(keepExt) > maxBytes) stem.pop();
+  return (stem.join('') || 'download') + keepExt;
+}
+const MAX_DOWNLOAD_NAME_BYTES = 240;
 
 export interface DownloadArgs { fileId: string; destPath: string; exportMimeType?: string; overwrite?: boolean }
 export interface DownloadResult { path: string; bytes: number; name: string; mimeType: string; exportedAs?: string }
@@ -200,13 +254,12 @@ export async function downloadDriveFile(ctx: TransferContext, args: DownloadArgs
   let target = await resolveInRoots(args.destPath, ctx.roots);
   const existing = await statOrNull(target);
   if (wantsDir || existing?.isDirectory()) {
-    await fsp.mkdir(target, { recursive: true });
     let fileName = safeFileName(meta.name);
     const ext = exportMime ? EXTENSIONS[exportMime] : undefined;
     if (ext && !fileName.toLowerCase().endsWith(ext)) fileName += ext;
-    target = join(target, fileName);
-  } else {
-    await fsp.mkdir(dirname(target), { recursive: true });
+    target = join(target, fitName(fileName, MAX_DOWNLOAD_NAME_BYTES));
+    // The Drive-supplied name is untrusted: validate the final path, not just destPath.
+    await resolveInRoots(target, ctx.roots);
   }
   const current = await statOrNull(target, false);
   if (current && !args.overwrite) throw new Error(`${target} already exists. Pass overwrite: true to replace it.`);
@@ -218,12 +271,16 @@ export async function downloadDriveFile(ctx: TransferContext, args: DownloadArgs
   const response = await ctx.http(url, { method: 'GET', headers: await authed(ctx), signal: ctx.signal });
   if (response.status !== 200 || !response.body) {
     const text = await readText(response);
-    throw new Error(googleMessage(response.status, text) + (exportMime ? '. Google limits exports to 10 MB; download the original file type instead.' : ''));
+    const exportTooLarge = exportMime && (/exportSizeLimitExceeded/.test(text) || (response.status === 403 && /too large to be exported/i.test(text)));
+    throw new Error(googleMessage(response.status, text) + (exportTooLarge ? '. Google limits exports to 10 MB; download the original file type instead.' : ''));
   }
 
+  // Only now touch the filesystem, remembering which directories we created so a failure can undo them.
+  const directory = dirname(target);
+  const firstCreated = await fsp.mkdir(directory, { recursive: true });
   const temp = `${target}.${randomBytes(4).toString('hex')}.part`;
   let bytes = 0;
-  const body = response.body;
+  const body = withIdleTimeout(response.body, ctx.idleTimeoutMs ?? IDLE_TIMEOUT_MS);
   async function* counted(): AsyncGenerator<Uint8Array> {
     for await (const chunk of body) { aborted(ctx); bytes += chunk.length; yield chunk; }
   }
@@ -232,12 +289,39 @@ export async function downloadDriveFile(ctx: TransferContext, args: DownloadArgs
     if (!native && meta.size !== undefined && bytes !== Number(meta.size)) {
       throw new Error(`Download was incomplete (${bytes} of ${meta.size} bytes).`);
     }
-    await fsp.rename(temp, target);
+    await finalizeDownload(temp, target, args.overwrite === true);
   } catch (error) {
     await fsp.rm(temp, { force: true });
+    if (firstCreated) await removeCreatedDirs(directory, firstCreated);
     throw error;
   }
   return { path: target, bytes, name: meta.name, mimeType: meta.mimeType, ...(exportMime ? { exportedAs: exportMime } : {}) };
+}
+
+/** Move the finished temp file into place. Without overwrite this must be exclusive so a file that appeared mid-download is never replaced. */
+async function finalizeDownload(temp: string, target: string, overwrite: boolean): Promise<void> {
+  if (overwrite) { await fsp.rename(temp, target); return; }
+  const exists = () => new Error(`${target} already exists. Pass overwrite: true to replace it.`);
+  try {
+    await fsp.link(temp, target);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST') throw exists();
+    // Filesystems without hard links: fall back to an exclusive copy.
+    try { await fsp.copyFile(temp, target, fsConstants.COPYFILE_EXCL); } catch (copyError) {
+      if ((copyError as NodeJS.ErrnoException).code === 'EEXIST') throw exists();
+      throw copyError;
+    }
+  }
+  await fsp.rm(temp, { force: true });
+}
+
+/** Remove the directories `mkdir -p` created (deepest first, stopping at the first one), ignoring non-empty ones. */
+async function removeCreatedDirs(deepest: string, firstCreated: string): Promise<void> {
+  for (let dir = deepest; within(firstCreated, dir); dir = dirname(dir)) {
+    try { await fsp.rmdir(dir); } catch { return; }
+    if (dir === firstCreated) return;
+  }
 }
 
 // ── Upload ──────────────────────────────────────────────────────────────────
@@ -255,6 +339,8 @@ export interface UploadArgs { path: string; name?: string; parentId?: string; mi
 export interface UploadResult { id: string; name: string; mimeType: string; size?: string; webViewLink?: string; parents?: string[]; bytesUploaded: number }
 
 type Progress = { done: UploadResult } | { offset: number };
+/** A fully-read response, so a stall while reading the body is handled like any other retryable failure. */
+interface Buffered { status: number; range: string | null; text: string }
 
 function parseOffset(range: string | null): number {
   const match = /bytes=0-(\d+)/.exec(range ?? '');
@@ -265,10 +351,24 @@ export async function uploadDriveFile(ctx: TransferContext, args: UploadArgs): P
   if (!args.path?.trim()) throw new Error('path is required.');
   aborted(ctx);
   const source = await resolveInRoots(args.path, ctx.roots);
-  const stat = await statOrNull(source);
-  if (!stat) throw new Error(`${source} does not exist.`);
-  if (!stat.isFile()) throw new Error(`${source} is not a regular file.`);
-  const size = stat.size;
+  // Open first and size from the handle, so the file we measure is the file we read (no stat-then-reopen window).
+  let handle: import('fs/promises').FileHandle;
+  try { handle = await fsp.open(source, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)); } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') throw new Error(`${source} does not exist.`);
+    if (code === 'ELOOP') throw new Error(`${source} is a symbolic link and cannot be uploaded.`);
+    throw error;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error(`${source} is not a regular file.`);
+    return await uploadOpenFile(ctx, args, source, handle, stat.size);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function uploadOpenFile(ctx: TransferContext, args: UploadArgs, source: string, handle: import('fs/promises').FileHandle, size: number): Promise<UploadResult> {
   const name = args.name?.trim() || basename(source);
   const mimeType = args.mimeType?.trim() || MIME_BY_EXT[extname(name).toLowerCase()] || 'application/octet-stream';
 
@@ -295,77 +395,83 @@ export async function uploadDriveFile(ctx: TransferContext, args: UploadArgs): P
   // The session URI is a bearer capability: only ever talk to Google with it.
   if (!sessionUrl.startsWith(`${API}/`)) throw new Error('Google returned an unexpected upload location.');
 
-  const finish = async (response: DriveHttpResponse): Promise<UploadResult> => {
-    const created = JSON.parse(await readText(response)) as Omit<UploadResult, 'bytesUploaded'>;
+  const finish = (text: string): UploadResult => {
+    const created = JSON.parse(text) as Omit<UploadResult, 'bytesUploaded'>;
     return { ...created, bytesUploaded: size };
   };
-  const put = async (headers: Record<string, string>, body?: Buffer) => ctx.http(sessionUrl, {
-    method: 'PUT', signal: ctx.signal, headers: { ...headers, 'Content-Length': String(body?.length ?? 0) }, body,
-  });
+  const put = async (headers: Record<string, string>, body?: Buffer): Promise<Buffered> => {
+    const response = await ctx.http(sessionUrl, {
+      method: 'PUT', signal: ctx.signal, headers: { ...headers, 'Content-Length': String(body?.length ?? 0) }, body,
+    });
+    return { status: response.status, range: response.headers.get('range'), text: await readText(response) };
+  };
   const status = async (): Promise<Progress> => {
     const response = await put({ 'Content-Range': `bytes */${size}` });
-    if (response.status === 200 || response.status === 201) return { done: await finish(response) };
-    if (response.status === 308) { await drain(response); return { offset: parseOffset(response.headers.get('range')) }; }
-    const text = await readText(response);
-    throw new Error(googleMessage(response.status, text));
+    if (response.status === 200 || response.status === 201) return { done: finish(response.text) };
+    if (response.status === 308) return { offset: parseOffset(response.range) };
+    throw new Error(googleMessage(response.status, response.text));
+  };
+  const assertUnchanged = async () => {
+    const now = await handle.stat();
+    if (now.size !== size) throw new Error(`${source} changed size while uploading (${size} to ${now.size} bytes).`);
   };
 
   // 2. Empty files finish in a single request.
   if (size === 0) {
     const response = await put({ 'Content-Type': mimeType });
-    if (response.status !== 200 && response.status !== 201) throw new Error(googleMessage(response.status, await readText(response)));
-    return finish(response);
+    if (response.status !== 200 && response.status !== 201) throw new Error(googleMessage(response.status, response.text));
+    return finish(response.text);
   }
 
   // 3. Send chunks; resume from the server's committed offset after any failure.
-  const handle = await fsp.open(source, 'r');
-  try {
-    let offset = 0;
-    let attempt = 0;
-    while (true) {
-      aborted(ctx);
-      if (offset >= size) {
-        const progress = await status();
-        if ('done' in progress) return progress.done;
-        throw new Error('Google did not finalize the upload.');
-      }
-      const end = Math.min(offset + UPLOAD_CHUNK, size);
-      const chunk = Buffer.alloc(end - offset);
-      let read = 0;
-      while (read < chunk.length) {
-        const { bytesRead } = await handle.read(chunk, read, chunk.length - read, offset + read);
-        if (!bytesRead) throw new Error(`${source} changed size while uploading.`);
-        read += bytesRead;
-      }
-      let response: DriveHttpResponse | null = null;
-      try {
-        response = await put({ 'Content-Range': `bytes ${offset}-${end - 1}/${size}`, 'Content-Type': mimeType }, chunk);
-      } catch (error) {
-        aborted(ctx);
-        if ((error as Error).message === 'Google returned an unexpected redirect.') throw error;
-      }
-      if (response && (response.status === 200 || response.status === 201)) return finish(response);
-      if (response && response.status === 308) {
-        await drain(response);
-        offset = parseOffset(response.headers.get('range'));
-        attempt = 0;
-        continue;
-      }
-      if (response && !retryable(response.status)) throw new Error(googleMessage(response.status, await readText(response)));
-      if (response) await drain(response);
-      if (++attempt > MAX_RETRIES) throw new Error('Upload failed after repeated retries.');
-      await backoff(ctx, attempt);
-      try {
-        const progress = await status();
-        if ('done' in progress) return progress.done;
-        offset = progress.offset;
-      } catch (error) {
-        aborted(ctx);
-        if (/Google Drive returned 4\d\d/.test((error as Error).message) && !/returned 429/.test((error as Error).message)) throw error;
-      }
+  let offset = 0;
+  let committed = 0; // highest offset Google has confirmed
+  let attempt = 0;
+  while (true) {
+    aborted(ctx);
+    await assertUnchanged();
+    if (offset >= size) {
+      const progress = await status();
+      if ('done' in progress) return progress.done;
+      throw new Error('Google did not finalize the upload.');
     }
-  } finally {
-    await handle.close();
+    const end = Math.min(offset + UPLOAD_CHUNK, size);
+    const chunk = Buffer.alloc(end - offset);
+    let read = 0;
+    while (read < chunk.length) {
+      const { bytesRead } = await handle.read(chunk, read, chunk.length - read, offset + read);
+      if (!bytesRead) throw new Error(`${source} changed size while uploading.`);
+      read += bytesRead;
+    }
+    let response: Buffered | null = null;
+    try {
+      response = await put({ 'Content-Range': `bytes ${offset}-${end - 1}/${size}`, 'Content-Type': mimeType }, chunk);
+    } catch (error) {
+      aborted(ctx);
+      if ((error as Error).message === 'Google returned an unexpected redirect.') throw error;
+    }
+    if (response && (response.status === 200 || response.status === 201)) return finish(response.text);
+    if (response && response.status === 308) {
+      const next = parseOffset(response.range);
+      offset = next;
+      if (next > committed) { committed = next; attempt = 0; continue; }
+      // No forward progress: don't re-send the same bytes in a tight loop.
+      if (++attempt > MAX_RETRIES) throw new Error('Upload failed after repeated retries (Google is not making progress).');
+      await backoff(ctx, attempt);
+      continue;
+    }
+    if (response && !retryable(response.status)) throw new Error(googleMessage(response.status, response.text));
+    if (++attempt > MAX_RETRIES) throw new Error('Upload failed after repeated retries.');
+    await backoff(ctx, attempt);
+    try {
+      const progress = await status();
+      if ('done' in progress) return progress.done;
+      offset = progress.offset;
+      committed = Math.max(committed, offset);
+    } catch (error) {
+      aborted(ctx);
+      if (/Google Drive returned 4\d\d/.test((error as Error).message) && !/returned 429/.test((error as Error).message)) throw error;
+    }
   }
 }
 
@@ -377,7 +483,7 @@ type JsonRpcReply = { jsonrpc: '2.0'; id: string | number | null; result?: unkno
 export const DRIVE_FILES_TOOLS = [
   {
     name: 'upload_local_file',
-    description: 'Upload a file from the local disk to Google Drive without loading its contents into the conversation. Use this instead of the Drive create_file tool for anything binary or larger than about 1 MB; there is no practical size limit (resumable chunked upload). The file is stored as-is, with no conversion to Google Docs/Sheets/Slides. Only paths inside the thread working directory or the vault are readable. Creating files inside an existing Drive folder that this app did not create may be refused by Google.',
+    description: 'Upload a file from the local disk to Google Drive without loading its contents into the conversation. Use this instead of the Drive create_file tool for anything binary or larger than about 1 MB; there is no practical size limit (resumable chunked upload). The file is stored as-is, with no conversion to Google Docs/Sheets/Slides. Reads bypass the agent’s normal file-permission checks, so only paths inside the thread working directory or the vault are readable, and .obsidian, .git, .claude, .ssh, .aws, .gnupg, .env files and .mcp.json are always refused. Creating files inside an existing Drive folder that this app did not create may be refused by Google.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -391,7 +497,7 @@ export const DRIVE_FILES_TOOLS = [
   },
   {
     name: 'download_to_local_file',
-    description: 'Download a Google Drive file straight to the local disk without loading its contents into the conversation. Use this instead of the Drive download_file_content tool for anything binary or larger than about 1 MB; there is no practical size limit for regular files. Google-native files (Docs, Sheets, Slides) are exported instead (Google caps exports at 10 MB). Only paths inside the thread working directory or the vault are writable.',
+    description: 'Download a Google Drive file straight to the local disk without loading its contents into the conversation. Use this instead of the Drive download_file_content tool for anything binary or larger than about 1 MB; there is no practical size limit for regular files. Google-native files (Docs, Sheets, Slides) are exported instead (Google caps exports at 10 MB). Writes bypass the agent’s normal file-permission checks, so only paths inside the thread working directory or the vault are writable, and .obsidian, .git, .claude, .ssh, .aws, .gnupg, .env files and .mcp.json are always refused (a Drive file with such a name is saved with a leading underscore).',
     inputSchema: {
       type: 'object',
       properties: {
