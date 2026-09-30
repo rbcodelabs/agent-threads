@@ -595,8 +595,13 @@ local disk instead:
   are exported (Docs and Slides to PDF, Sheets to XLSX, Drawings to PNG, or pass
   `exportMimeType`); Google caps exports at 10 MB.
 
-Paths must be inside the thread's working directory or the vault (`.obsidian` and
-`.git` are always refused; symlinks cannot escape). In a sandbox VM, `/work`
+These tools read and write local files outside the agent's normal file-permission
+checks, so they are confined to the thread's working directory and the vault (symlinks
+cannot escape), and these locations are always refused, case-insensitively, for both
+upload sources and download destinations: `.obsidian`, `.git`, `.claude`, `.ssh`,
+`.aws`, `.gnupg`, `.env` / `.env.*` and `.mcp.json`. A Drive file with such a name is
+saved with a leading underscore. Stalled connections time out after 120 seconds and
+uploads resume from Google's committed offset. In a sandbox VM, `/work`
 refers to the working directory. Downloads refuse to replace an existing file
 unless `overwrite` is true. The tools share the Drive opt-in and revocation
 described below, and a fresh access token is requested for each Google request.

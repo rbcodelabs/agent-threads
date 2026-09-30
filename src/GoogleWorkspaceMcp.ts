@@ -279,7 +279,8 @@ export class GoogleWorkspaceMcp {
     };
     // A transfer can run for minutes. Answer tools/call as an event stream and send comment
     // keepalives so the client never sees an idle connection or a header timeout.
-    const streaming = messages.some(message => message?.method === 'tools/call');
+    // Only calls that will get a reply can stream; an id-less notification must answer with a plain 202.
+    const streaming = messages.some(message => message?.method === 'tools/call' && message.id !== undefined && message.id !== null);
     let keepalive: ReturnType<typeof setInterval> | undefined;
     if (streaming) {
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
