@@ -997,6 +997,13 @@ export interface PluginSettings {
    * sandbox still works.
    */
   sandboxSetupPromptDismissed: boolean;
+   * Use Geode's GitHub connection (Settings → GitHub) for git, gh and the GitHub
+   * API in threads and the sandbox VM. Only has an effect in Geode ≥ 0.25.0;
+   * manually configured credentials (GH_TOKEN, gh auth, git helpers) always win.
+   */
+  githubConnectionEnabled: boolean;
+  /** Commit email override. Blank = the connected account's GitHub noreply address. */
+  githubCommitEmail: string;
   defaultCwd: string;
   saveThreadsToVault: boolean;
   /**
@@ -1265,6 +1272,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   harnessVmMode: 'auto',
   harnessVmImage: 'claude-threads-harness:1',
   sandboxSetupPromptDismissed: false,
+  githubConnectionEnabled: true,
+  githubCommitEmail: '',
   defaultCwd: '',
   saveThreadsToVault: true,
   saveRawLogs: true,

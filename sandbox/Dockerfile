@@ -17,6 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # "works on host, fails in sandbox".
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
+        gh \
         ca-certificates \
         curl \
         wget \

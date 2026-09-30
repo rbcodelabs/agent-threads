@@ -114,6 +114,11 @@ export interface VmCommandRunOptions {
   onOutput?: (line: string) => void;
   maxBufferBytes?: number;
   signal?: AbortSignal;
+  /**
+   * Written to the child's stdin, then closed. Lets secrets (the GitHub token)
+   * reach the guest without appearing in argv, which other host processes can read.
+   */
+  input?: string;
 }
 
 /** Thrown by the default runner when the CLI binary cannot be spawned at all. */
@@ -191,6 +196,11 @@ export function createDefaultVmCommandRunner(binary: string = VM_BINARY): VmComm
         },
       );
       if (opts.onOutput) forwardLines(child, opts.onOutput);
+      if (opts.input !== undefined) {
+        // EPIPE if the child exits early is reported through the exit code, not here.
+        child.stdin?.on('error', () => undefined);
+        child.stdin?.end(opts.input);
+      }
     });
 }
 
@@ -314,6 +324,11 @@ export function buildExecArgs(opts: {
     'bash', '-lc', opts.command];
 }
 
+/** `exec` for a plain shell command, with stdin attached when `interactive` (input is piped). */
+export function buildShellExecArgs(opts: { containerName: string; command: string; interactive?: boolean }): string[] {
+  return ['exec', ...(opts.interactive ? ['--interactive'] : []), opts.containerName, 'bash', '-lc', opts.command];
+}
+
 export function buildStopArgs(containerName: string): string[] {
   return ['stop', containerName];
 }
@@ -401,12 +416,28 @@ export interface SandboxVmState {
   origin: 'agent' | 'harness';
 }
 
+/**
+ * Optional lifecycle hooks. They keep credential delivery (see
+ * githubVmDelivery.ts) out of the lifecycle code: a hook failure never fails a
+ * VM operation, it only adds `notes` the model and user can act on.
+ */
+export interface VmHookContext {
+  containerName: string;
+  exec(args: string[], opts?: { input?: string; timeoutMs?: number }): Promise<VmCommandResult>;
+}
+
+export interface VmHooks {
+  afterEnter?(ctx: VmHookContext): Promise<string[]>;
+  beforeExec?(ctx: VmHookContext): Promise<string[]>;
+  afterExit?(ctx: VmHookContext): Promise<void>;
+}
+
 export type EnterVmResult =
-  | { success: true; containerName: string; image: string; mountedFrom: string; network: VmNetworkMode }
+  | { success: true; containerName: string; image: string; mountedFrom: string; network: VmNetworkMode; notes?: string[] }
   | { success: false; error: string };
 
 export type VmExecResult =
-  | { success: true; exitCode: number; stdout: string; stderr: string }
+  | { success: true; exitCode: number; stdout: string; stderr: string; notes?: string[] }
   | { success: false; error: string };
 
 export type ExitVmResult =
@@ -418,6 +449,8 @@ export interface SandboxVmManagerDeps {
   containerName: () => string;
   /** Command seam. Defaults to the real CLI runner. */
   run?: VmCommandRunner;
+  /** Lifecycle hooks (GitHub credential delivery). */
+  hooks?: VmHooks;
 }
 
 /**
@@ -451,6 +484,23 @@ export class SandboxVmManager {
 
   private async exec(args: string[], timeoutMs = VM_LIFECYCLE_TIMEOUT_MS): Promise<VmCommandResult> {
     return this.runner(args, { timeoutMs });
+  }
+
+  private hookContext(containerName: string): VmHookContext {
+    return {
+      containerName,
+      exec: (args, opts) => this.runner(args, { timeoutMs: opts?.timeoutMs ?? VM_LIFECYCLE_TIMEOUT_MS, input: opts?.input }),
+    };
+  }
+
+  /** Runs a hook; a throwing hook becomes a note, never a failed VM operation. */
+  private async runHook(fn: ((ctx: VmHookContext) => Promise<string[]>) | undefined, containerName: string): Promise<string[]> {
+    if (!fn) return [];
+    try {
+      return await fn(this.hookContext(containerName));
+    } catch (err) {
+      return [`GitHub credential setup failed: ${errorMessage(err)}`];
+    }
   }
 
   /** True when a container with this name exists (running or stopped). */
@@ -680,6 +730,8 @@ export class SandboxVmManager {
         mountedFrom: this.active.mountedFrom,
         network: this.active.network,
       };
+      const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
+      return { success: true, ...this.active, ...(notes.length ? { notes } : {}) };
     } catch (err) {
       return { success: false, error: errorMessage(err) };
     }
@@ -716,6 +768,8 @@ export class SandboxVmManager {
         };
       }
 
+      // Refresh the GitHub token before the command starts (also re-installs on an adopted container).
+      const notes = await this.runHook(this.deps.hooks?.beforeExec, containerName);
       const result = await this.exec(
         buildExecArgs({ containerName, command: params.command, timeoutSeconds: params.timeoutSeconds }),
         (resolveExecTimeoutSeconds(params.timeoutSeconds) + 10) * 1000,
@@ -725,6 +779,7 @@ export class SandboxVmManager {
         exitCode: result.exitCode,
         stdout: truncateOutput(result.stdout),
         stderr: truncateOutput(result.stderr),
+        ...(notes.length ? { notes } : {}),
       };
     } catch (err) {
       return { success: false, error: errorMessage(err) };
@@ -754,6 +809,9 @@ export class SandboxVmManager {
           return { success: false, error: 'No sandbox VM is running for this thread.' };
         }
       }
+
+      // Delete the published GitHub token while the container can still be reached.
+      try { await this.deps.hooks?.afterExit?.(this.hookContext(containerName)); } catch { /* best effort */ }
 
       // Graceful stop first so an in-flight write inside the guest is not cut
       // mid-syscall against the host bind mount. `force` skips straight to the

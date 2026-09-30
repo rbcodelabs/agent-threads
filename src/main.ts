@@ -27,6 +27,9 @@ import type { WakeLockService } from './WakeLockService';
 import type { createClaudeThreadsMcpServers, CronCreateParams, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
 import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
+import { GithubCredentialBroker, resolveGithubBridge } from './githubCredentials';
+import { GithubHostDelivery } from './githubHostDelivery';
+import { createRequestUrlFetch } from './requestUrlFetch';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
 import {
   HandoffDebouncer,
@@ -293,6 +296,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
   loginHandoff: import('./agentBrowser/LoginHandoffController').LoginHandoffController | null = null;
   contextPanel!: ContextPanelController;
   googleWorkspaceMcp?: import('./GoogleWorkspaceMcp').GoogleWorkspaceMcp;
+  /** Geode GitHub connection (undefined bridge on Obsidian / Geode < 0.25). */
+  githubBroker?: import('./githubCredentials').GithubCredentialBroker;
+  githubHost?: import('./githubHostDelivery').GithubHostDelivery;
   oauthMcpRegistry?: import('./OAuthMcpRegistry').OAuthMcpRegistry;
   /**
    * Collapses a double-clicked Compass "Send to Agent" into one thread. Owned
@@ -653,6 +659,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // see the container's real origin instead of each side tracking it
           // separately against the same deterministic container name.
           sandboxVmManager: this.manager.getSandboxVmManager(threadId),
+          githubBroker: this.githubBroker,
+          isGithubConnectionEnabled: () => this.settings.githubConnectionEnabled !== false,
+          getGithubCommitEmail: () => this.settings.githubCommitEmail,
           onScheduleWakeup: async (delayMs: number, prompt: string, reason: string) => {
             // Durable one-shot Scheduler item instead of a bare window.setTimeout:
             // the old implementation tracked wake-ups only in an in-memory Map
@@ -984,6 +993,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // In-container Claude sign-in token — VM-routed sessions only (see persistContainerAuthToken).
     this.manager.containerAuthTokenResolver = () =>
       this.app.secretStorage.getSecret(secretStorageKey(CONTAINER_AUTH_TOKEN_SECRET)) || undefined;
+    this.setUpGithubConnection();
     this.persistence = new VaultPersistence(this.app, this.settings.vaultFolder);
     this.inProcessSummarizer = new InProcessSummarizer();
 
@@ -2567,7 +2577,45 @@ export default class ClaudeThreadsPlugin extends Plugin {
     debugLog(`[ClaudeThreads] Cancelled ${items.length} pending wake-up(s) for thread ${threadId}`);
   }
 
+  /**
+   * Geode's GitHub connection → threads. Inert on Obsidian, mobile, and Geode
+   * < 0.25.0 (no `window.geode.githubAuth`), where existing credentials keep
+   * working exactly as before. See githubCredentials.ts for the security model.
+   */
+  private setUpGithubConnection(): void {
+    const bridge = resolveGithubBridge(window as unknown as { geode?: { githubAuth?: unknown } });
+    const fetchFn = createRequestUrlFetch();
+    this.githubBroker = new GithubCredentialBroker({
+      bridge,
+      fetchProfile: async (token) => {
+        const res = await fetchFn('https://api.github.com/user', {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        });
+        if (!res.ok) throw new Error(`GitHub /user failed: HTTP ${res.status}`);
+        const body = await res.json() as { id?: unknown; login?: unknown; name?: unknown };
+        if (typeof body.id !== 'number' || typeof body.login !== 'string') throw new Error('GitHub /user returned an unexpected shape');
+        return { id: body.id, login: body.login, name: typeof body.name === 'string' ? body.name : null };
+      },
+    });
+    if (!bridge || !Platform.isDesktop) return;
+    this.githubHost = new GithubHostDelivery({
+      broker: this.githubBroker,
+      isEnabled: () => this.settings.githubConnectionEnabled !== false,
+      getEmailOverride: () => this.settings.githubCommitEmail,
+    });
+    this.manager.githubEnvResolver = (cwd, baseEnv) => this.githubHost?.resolveEnv(cwd, baseEnv) ?? {};
+    this.app.workspace.onLayoutReady(() => {
+      this.githubHost?.start().catch((err) => console.error('[ClaudeThreads] GitHub connection start failed:', err));
+    });
+  }
+
   async onunload(): Promise<void> {
+    // Delete the published GitHub token file immediately; never wait on the shutdown poll below.
+    void this.githubHost?.stop();
     // Revoke peer references before asynchronous shutdown begins. Obsidian does
     // not await plugin onunload hooks, so delaying this would leave a stale
     // generation callable while sessions are draining.

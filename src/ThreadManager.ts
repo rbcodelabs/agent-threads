@@ -9,7 +9,7 @@ import { AttachmentWriter } from './AttachmentWriter';
 // inside functions, so nothing Node-only runs at module-init scope.
 import { removeStorageRoot, type ArtifactStorageFs } from './artifactStorage';
 import { collectPendingImageExternalizations } from './imageExternalization';
-import { effectiveExtraEnv } from './types';
+import { effectiveExtraEnv, parseExtraEnv } from './types';
 import { derivePrUrl } from './statusLine';
 import { resolveGitProjectName } from './pathUtils';
 import { legacyWorktreeRoot, resolveWorktreeRoot } from './worktreePaths';
@@ -285,6 +285,13 @@ export class ThreadManager {
    * see `secretUtils.isSecretVisibleToProject`.
    */
   secretEnvResolver: ((projectId?: string) => Record<string, string>) | undefined = undefined;
+  /**
+   * Environment additions that wire host git/gh to Geode's GitHub connection
+   * (credential helper + gh wrapper + commit identity — never the token). Sync
+   * because it runs while building session options; `main.ts` backs it with a
+   * runtime dir that is kept fresh out of band. Additions sit UNDER user secrets.
+   */
+  githubEnvResolver: ((cwd: string, baseEnv: Record<string, string | undefined>) => Record<string, string>) | undefined = undefined;
   permissionHandler: (threadId: string, toolName: string, detail: string) => Promise<boolean> = async () => false;
   questionHandler: (threadId: string, questions: AskQuestion[]) => Promise<Record<string, string>> = async () => ({});
   openNewTabHandler: (title?: string, initialPrompt?: string) => Promise<{ threadId: string; title: string }> = async (title) => ({ threadId: '', title: title ?? 'New Thread' });
@@ -2143,7 +2150,10 @@ export class ThreadManager {
     // mirrored into both harnesses' per-session config.
     const codexDynamicTools = selectCanonicalHarnessTools<import('./HarnessSession').HarnessDynamicTool>(sessionMcpServers);
     const codexMcpServers = serializableMcpServers(sessionMcpServers);
-    const resolvedSecretEnv = this.secretEnvResolver ? this.secretEnvResolver(project?.id) : {};
+    const githubEnv = this.githubEnvResolver
+      ? this.githubEnvResolver(thread.cwd, { ...process.env, ...parseExtraEnv(effectiveExtraEnv(this.settings)) })
+      : {};
+    const resolvedSecretEnv = { ...githubEnv, ...(this.secretEnvResolver ? this.secretEnvResolver(project?.id) : {}) };
     const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
 
     return {
