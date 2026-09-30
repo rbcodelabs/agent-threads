@@ -29,6 +29,7 @@ import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { GithubCredentialBroker, resolveGithubBridge } from './githubCredentials';
 import { GithubHostDelivery } from './githubHostDelivery';
+import { createGithubVmHooks } from './githubVmDelivery';
 import { createRequestUrlFetch } from './requestUrlFetch';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
 import {
@@ -2600,6 +2601,13 @@ export default class ClaudeThreadsPlugin extends Plugin {
         if (typeof body.id !== 'number' || typeof body.login !== 'string') throw new Error('GitHub /user returned an unexpected shape');
         return { id: body.id, login: body.login, name: typeof body.name === 'string' ? body.name : null };
       },
+    });
+    // Harness threads create their container through ThreadManager's shared VM manager, not the
+    // enter_vm tool, so it needs the same credential/identity hooks (no-ops while unavailable).
+    this.manager.sandboxVmHooks = createGithubVmHooks({
+      broker: this.githubBroker,
+      isEnabled: () => this.settings.githubConnectionEnabled !== false,
+      getEmailOverride: () => this.settings.githubCommitEmail,
     });
     if (!bridge || !Platform.isDesktop) return;
     this.githubHost = new GithubHostDelivery({

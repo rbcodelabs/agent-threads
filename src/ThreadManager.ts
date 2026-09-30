@@ -20,7 +20,7 @@ import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
 import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
-import { containerNameForThread, SandboxVmManager, type VmCommandRunner } from './sandboxVm';
+import { containerNameForThread, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
 import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
 import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
@@ -291,6 +291,8 @@ export class ThreadManager {
    * because it runs while building session options; `main.ts` backs it with a
    * runtime dir that is kept fresh out of band. Additions sit UNDER user secrets.
    */
+  /** GitHub credential delivery hooks for the shared per-thread VM manager (harness threads create their container through it). */
+  sandboxVmHooks: VmHooks | undefined = undefined;
   githubEnvResolver: ((cwd: string, baseEnv: Record<string, string | undefined>) => Record<string, string>) | undefined = undefined;
   permissionHandler: (threadId: string, toolName: string, detail: string) => Promise<boolean> = async () => false;
   questionHandler: (threadId: string, questions: AskQuestion[]) => Promise<Record<string, string>> = async () => ({});
@@ -1990,6 +1992,7 @@ export class ThreadManager {
       manager = new SandboxVmManager({
         containerName: () => containerNameForThread(threadId),
         run: this.vmCommandRunner,
+        hooks: this.sandboxVmHooks,
       });
       this.sandboxVmManagers.set(threadId, manager);
     }
