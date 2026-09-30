@@ -425,7 +425,7 @@ describe('LoginHandoffController — privacy: the login page never reaches the a
       h.controller.forwardKey('thread-1', { key: ch, type: 'keydown', shiftKey: false, ctrlKey: false, altKey: false, metaKey: false });
     }
 
-    expect(h.loginGuest.sendInputEvent).toHaveBeenCalledTimes(7);
+    expect(h.loginGuest.sendInputEvent).toHaveBeenCalledTimes(14); // keyDown + char per character;
     // No subscriber is told about individual keys, and no state records them.
     expect(notified).toEqual([]);
     expect(JSON.stringify(h.controller.getSnapshot('thread-1'))).not.toContain('hunter2');
@@ -458,5 +458,55 @@ describe('LoginHandoffController — privacy: the login page never reaches the a
     ]);
     // No logging of anything, and no persistence hooks.
     expect(source).not.toMatch(/debugLog|console\.|RawLogWriter|saveSettings|toolResultImages|ChatMessage/);
+  });
+});
+
+describe('LoginHandoffController — take over the agent\'s own page', () => {
+  function takeoverHarness(alive = true) {
+    const guest = makeLoginGuest();
+    (guest.guest as unknown as Record<string, unknown>).isAlive = () => alive;
+    (guest.guest as unknown as Record<string, unknown>).facts = () => ({ url: 'https://www.reddit.com/login/', viewport: { width: 1280, height: 800 } });
+    const release = vi.fn();
+    const pool = { peek: (id: string) => (id === 'thread-1' ? guest.guest : null), releaseLoginGuest: release } as unknown as AgentBrowserPool;
+    const controller = new LoginHandoffController({ getPool: () => pool, bridgeDeps: { geode: null, ipcRenderer: null } });
+    return { controller, guest, release };
+  }
+
+  it('takes over without any popup request: active, takeover mode, agent locked out, capture as human', async () => {
+    const { controller, guest } = takeoverHarness();
+    controller.attachViewer(() => true);
+    expect(controller.takeOver('thread-1')).toEqual({ ok: true });
+
+    expect(controller.getSnapshot('thread-1')).toMatchObject({ phase: 'active', mode: 'takeover', host: 'www.reddit.com' });
+    const g = guest.guest as unknown as { userDriving: boolean; handoffActive: boolean };
+    expect(g.userDriving).toBe(true);
+    expect(g.handoffActive).toBe(true);
+    expect(guest.focus).toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(HANDOFF_CAPTURE_MS + 1);
+    expect(guest.capture).toHaveBeenCalledWith(expect.any(Number), { human: true });
+    controller.stop();
+  });
+
+  it('returning control unlocks the agent and does NOT retire the agent\'s own guest', () => {
+    const { controller, guest, release } = takeoverHarness();
+    controller.takeOver('thread-1');
+    controller.returnControl('thread-1');
+
+    const g = guest.guest as unknown as { userDriving: boolean; handoffActive: boolean };
+    expect(g.userDriving).toBe(false);
+    expect(g.handoffActive).toBe(false);
+    expect(release).not.toHaveBeenCalled();
+    expect(controller.getSnapshot('thread-1')?.phase).toBe('returned');
+    controller.stop();
+  });
+
+  it('refuses when there is no live page, or a handoff is already active', () => {
+    expect(takeoverHarness(false).controller.takeOver('thread-1').ok).toBe(false);
+    expect(takeoverHarness().controller.takeOver('nope').ok).toBe(false);
+    const { controller } = takeoverHarness();
+    controller.takeOver('thread-1');
+    expect(controller.takeOver('thread-1').ok).toBe(false);
+    controller.stop();
   });
 });
