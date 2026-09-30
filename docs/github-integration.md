@@ -12,7 +12,7 @@ connection, nothing changes and your own credentials keep working.
 2. Install the Geode GitHub App on the account/org and repositories you want
    threads to reach. Only repositories the App is installed on are accessible.
 3. (Sandbox VM) Rebuild the image once so it includes `gh`, and point the
-   setting at it: `container build --tag claude-threads-coding:2 sandbox/`.
+   setting at it: `container build --tag claude-threads-coding:1 sandbox/`.
    Existing installs keep their saved `claude-threads-coding:1` image: git over
    HTTPS still works there, and `enter_vm` tells you `gh` is missing.
 4. In Agent Threads settings, **Use Geode GitHub connection** is on by default
@@ -75,7 +75,7 @@ which does not exist yet (see Limitations).
 | `Geode cannot store GitHub tokens because no OS keychain…` | Geode refuses to store tokens without one |
 | `The Geode GitHub App cannot access owner/repo. Grant it at …` | Install the App on that repository (URL included) |
 | `…not available in this host (needs Geode ≥ 0.25.0)` | Obsidian / old Geode: use your own `GH_TOKEN` |
-| `The gh CLI is not installed in this VM image…` | Rebuild the image (`claude-threads-coding:2`) |
+| `The gh CLI is not installed in this VM image…` | Rebuild the image (`claude-threads-coding:1`) |
 
 ## Your own credentials still win
 
