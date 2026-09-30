@@ -34,7 +34,7 @@ describe('aliasLabel', () => {
   });
 
   it('falls back to built-in versions before any session has run', () => {
-    expect(aliasLabel('sonnet')).toBe('Sonnet 5 (latest)');
+    expect(aliasLabel('sonnet')).toBe('Sonnet 5.5 (latest)');
     expect(aliasLabel('haiku')).toBe('Haiku 4.5 (latest)');
   });
 
@@ -49,10 +49,10 @@ describe('buildClaudeModelOptions', () => {
     expect(options.map((o) => o.value)).toEqual([undefined, 'opus', 'sonnet', 'haiku', 'fable']);
     expect(options.map((o) => o.label)).toEqual([
       'Default',
-      'Opus 4.8 (latest)',
-      'Sonnet 5 (latest)',
+      'Opus 5.5 (latest)',
+      'Sonnet 5.5 (latest)',
       'Haiku 4.5 (latest)',
-      'Fable 5 (latest)',
+      'Fable 5.1 (latest)',
     ]);
   });
 
@@ -67,7 +67,7 @@ describe('buildClaudeModelOptions', () => {
     ];
     const options = buildClaudeModelOptions(catalog);
     expect(options.slice(5)).toEqual([
-      { label: 'Claude Opus 4.7', value: 'claude-opus-4-7' },
+      { label: 'Opus 4.7', value: 'claude-opus-4-7' },
       { label: 'Sonnet 5 (1M context)', value: 'sonnet[1m]' },
     ]);
   });
@@ -104,5 +104,35 @@ describe('isReportedModelId', () => {
     expect(isReportedModelId('<synthetic>')).toBe(false);
     expect(isReportedModelId('  ')).toBe(false);
     expect(isReportedModelId(undefined)).toBe(false);
+  });
+});
+
+describe('buildClaudeModelOptions with a Bedrock catalog', () => {
+  // Trimmed from supportedModels() under CLAUDE_CODE_USE_BEDROCK=1 (SDK 0.3.284).
+  const bedrock = [
+    { value: 'default', displayName: 'Default', resolvedModel: 'us.anthropic.claude-opus-5-5' },
+    { value: 'sonnet', displayName: 'Sonnet 5.5', resolvedModel: 'global.anthropic.claude-sonnet-5-5' },
+    { value: 'us.anthropic.claude-fable-5-1', displayName: 'Fable', resolvedModel: 'us.anthropic.claude-fable-5-1' },
+    { value: 'us.anthropic.claude-opus-4-1-20250805-v1:0', displayName: 'Opus 4.1', resolvedModel: 'us.anthropic.claude-opus-4-1-20250805-v1:0' },
+    { value: 'us.anthropic.claude-opus-5-5', displayName: 'Opus', resolvedModel: 'us.anthropic.claude-opus-5-5' },
+    { value: 'us.anthropic.claude-opus-5-5[1m]', displayName: 'Opus (1M context)', resolvedModel: 'us.anthropic.claude-opus-5-5[1m]' },
+    { value: 'us.anthropic.claude-opus-5', displayName: 'Opus 5', resolvedModel: 'us.anthropic.claude-opus-5' },
+    { value: 'us.anthropic.claude-opus-4-6-v1[1m]', displayName: 'Opus 4.6 (1M context)', resolvedModel: 'us.anthropic.claude-opus-4-6-v1[1m]' },
+    { value: 'global.anthropic.claude-sonnet-5-5', displayName: 'global.anthropic.claude-sonnet-5-5' },
+    { value: 'haiku', displayName: 'Haiku', resolvedModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0' },
+  ];
+
+  it('resolves aliases from the family-named rows and labels rows by version', () => {
+    expect(buildClaudeModelOptions(bedrock).map((o) => o.label)).toEqual([
+      'Default',
+      'Opus 5.5 (latest)',
+      'Sonnet 5.5 (latest)',
+      'Haiku 4.5 (latest)',
+      'Fable 5.1 (latest)',
+      'Opus 4.1',
+      'Opus 5.5 (1M context)',
+      'Opus 5',
+      'Opus 4.6 (1M context)',
+    ]);
   });
 });

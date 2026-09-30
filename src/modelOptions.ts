@@ -33,10 +33,10 @@ export const CLAUDE_FAMILY_ALIASES: ReadonlyArray<{ value: string; family: strin
  * Mirrors the FALLBACK_MODELS list in SettingsTab.
  */
 const FALLBACK_RESOLVED: Record<string, string> = {
-  opus: 'claude-opus-4-8',
-  sonnet: 'claude-sonnet-5',
+  opus: 'claude-opus-5-5',
+  sonnet: 'claude-sonnet-5-5',
   haiku: 'claude-haiku-4-5',
-  fable: 'claude-fable-5',
+  fable: 'claude-fable-5-1',
 };
 
 /**
@@ -80,8 +80,31 @@ export function activeModelLabel(modelId: string): string {
   return pretty === modelId ? modelId : `${pretty} (${modelId})`;
 }
 
+/**
+ * What a family alias points at. Uses the catalog alias entry when the SDK
+ * lists one; otherwise the catalog row the CLI names after the bare family
+ * ("Opus", "Fable"), which is how it marks the current release on Bedrock
+ * and Vertex, where the alias entry is omitted. Falls back to built-ins.
+ */
 function resolvedIdForAlias(alias: string, catalog: readonly ModelCatalogEntry[]): string | undefined {
-  return catalog.find((m) => m.value === alias)?.resolvedModel ?? FALLBACK_RESOLVED[alias];
+  const direct = catalog.find((m) => m.value === alias);
+  if (direct) return direct.resolvedModel ?? FALLBACK_RESOLVED[alias];
+  const family = CLAUDE_FAMILY_ALIASES.find((a) => a.value === alias)?.family;
+  const named = family ? catalog.find((m) => m.displayName === family) : undefined;
+  return named ? named.resolvedModel ?? named.value : FALLBACK_RESOLVED[alias];
+}
+
+/**
+ * Label for a catalog row. The SDK often omits the version from displayName
+ * (the current Opus is just "Opus"), so derive it from the id when possible:
+ * "Opus 5.5", "Opus 5.5 (1M context)". Falls back to displayName, then the id.
+ */
+export function catalogModelLabel(m: ModelCatalogEntry): string {
+  const id = m.resolvedModel ?? m.value;
+  const parsed = parseClaudeModelId(id);
+  if (!parsed) return m.displayName || m.value;
+  const base = `${parsed.family} ${parsed.version}`;
+  return /\[1m\]$/i.test(id) || /\[1m\]$/i.test(m.value) ? `${base} (1M context)` : base;
 }
 
 /** Label for a family alias: "Opus 4.8 (latest)", or plain "Opus" if the version is unknown. */
@@ -111,7 +134,7 @@ export function buildClaudeModelOptions(catalog: readonly ModelCatalogEntry[] = 
   for (const m of catalog) {
     if (m.value === 'default' || aliasValues.has(m.value) || aliasTargets.has(m.value) || seen.has(m.value)) continue;
     seen.add(m.value);
-    options.push({ label: m.displayName || m.value, value: m.value });
+    options.push({ label: catalogModelLabel(m), value: m.value });
   }
   return options;
 }
