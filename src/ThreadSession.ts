@@ -1202,7 +1202,7 @@ export class ThreadSession {
         // message. Entirely internal to ThreadSession; the UI only learns of
         // it via onRateLimitRetry (a transient 'reconnecting'-style notice),
         // never a terminal onError, unless the backoff budget is exhausted.
-        if (!this.resumeFallbackUsed && this.lastUserTurn
+        else if (!this.resumeFallbackUsed && this.lastUserTurn
           && isResumeFailure(e.message, this.stderrTail, { resumed: startedWithResume, sawMessage })) {
           // The persisted session can't be resumed (transcript missing after a
           // restart, moved config dir, ...). Start a fresh session once and
