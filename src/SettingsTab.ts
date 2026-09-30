@@ -1,4 +1,5 @@
 import { isAgentHarness } from './types';
+import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
@@ -1118,9 +1119,10 @@ const TAB_GROUPS: { label: string; tabs: { id: SettingsTabId; label: string }[] 
 
 /** Fallback model list shown before any session has run and populated discoveredModels. */
 const FALLBACK_MODELS: { value: string; displayName: string }[] = [
-  { value: 'claude-fable-5', displayName: 'Claude Fable 5' },
+  { value: 'claude-fable-5-1', displayName: 'Claude Fable 5.1' },
+  { value: 'claude-opus-5-5', displayName: 'Claude Opus 5.5' },
   { value: 'claude-opus-4-8', displayName: 'Claude Opus 4.8' },
-  { value: 'claude-sonnet-5', displayName: 'Claude Sonnet 5' },
+  { value: 'claude-sonnet-5-5', displayName: 'Claude Sonnet 5.5' },
   { value: 'claude-haiku-4-5', displayName: 'Claude Haiku 4.5' },
 ];
 
@@ -1161,20 +1163,19 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       dropdown.addOption('', 'CLI default');
     }
     const harness = this.plugin.settings.agentHarness ?? 'claude';
-    if (harness === 'claude') {
-      // Family aliases are Claude Code-specific and must not be sent to Codex.
-      dropdown.addOption('fable', 'Fable (latest)');
-      dropdown.addOption('opus', 'Opus (latest)');
-      dropdown.addOption('sonnet', 'Sonnet (latest)');
-      dropdown.addOption('haiku', 'Haiku (latest)');
-    }
     const discovered = this.plugin.discoveredModelsByHarness[harness];
+    if (harness === 'claude') {
+      // Family aliases (Claude Code-specific, never sent to Codex) labelled
+      // with the version they resolve to, then pinned models labelled from
+      // their ids. Same rows as the per-thread model menu.
+      for (const opt of buildClaudeModelOptions(discovered.length > 0 ? discovered : FALLBACK_MODELS)) {
+        if (opt.value) dropdown.addOption(opt.value, opt.label);
+      }
+      return;
+    }
     // Codex and OpenCode intentionally have no guessed fallback: wait for their
     // native model catalogs so we never offer a model the account cannot use.
-    const pinned = harness === 'claude'
-      ? (discovered.length > 0 ? discovered : FALLBACK_MODELS)
-      : discovered;
-    for (const m of pinned) {
+    for (const m of discovered) {
       dropdown.addOption(m.value, m.displayName);
     }
   }
