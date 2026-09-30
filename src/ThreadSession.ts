@@ -45,7 +45,8 @@ import {
   formatSignInExpiredMessage,
   shouldAutoRetryAuthError,
 } from './claudeAuthRecovery';
-import { mergeUsageSnapshot, normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
+import { stripHostOnlyGitEnv } from './githubCredentialHelper';
+import { mergeUsageSnapshot,normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
 
 /**
  * Everything needed to open a thread's long-lived `Query`, once, for the
@@ -369,7 +370,12 @@ export class ThreadSession {
     // secrets to anything else that runs there, including a `vm_exec` call in
     // this same shared container). The host-spawn path keeps process.env
     // exactly as before.
-    const todoToolsEnv = { CLAUDE_CODE_ENABLE_TODO_TOOLS: '1', ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) };
+    // The host GitHub wiring (GIT_CONFIG_* naming a host temp-dir credential helper, and a
+    // host `gh` wrapper dir prepended to PATH) is meaningless inside the VM and would make
+    // git point at a helper that does not exist there (breaking push). The VM hooks install
+    // their own in-container helper, so drop these from a routed session's env.
+    const secretEnv = vmRouting ? stripHostOnlyGitEnv(options.secretEnv ?? {}) : (options.secretEnv ?? {});
+    const todoToolsEnv = { CLAUDE_CODE_ENABLE_TODO_TOOLS: '1', ...parseExtraEnv(options.extraEnvRaw), ...secretEnv };
 
     const sdkOptions: Options = {
       pathToClaudeCodeExecutable: vmRouting ? vmRouting.containerBinaryPath : this.claudePath,

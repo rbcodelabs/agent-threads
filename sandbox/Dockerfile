@@ -3,7 +3,9 @@
 # Runs as its own lightweight Linux VM via Apple `container` on macOS 26+.
 #
 # Design rules:
-#   - NO secrets baked in or injected by the VM tools.
+#   - NO secrets baked in. The only credential the VM tools ever deliver is the
+#     Geode GitHub connection token, written at runtime to a private tmpfs file
+#     (see docs/github-integration.md) — never into this image.
 #   - Runs as a non-root user by default (defense in depth inside the VM).
 #   - Everything an agent needs to build/test should be present at image build
 #     time, so a task can run with egress disabled.
@@ -17,6 +19,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # "works on host, fails in sandbox".
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
+        gh \
         ca-certificates \
         curl \
         wget \

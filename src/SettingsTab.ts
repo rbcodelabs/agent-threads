@@ -1648,6 +1648,49 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
+    // GitHub connection (Geode >= 0.25 only; hidden elsewhere so Obsidian is unchanged).
+    if (this.plugin.githubBroker?.available) {
+      new Setting(containerEl)
+        .setName('Use Geode GitHub connection')
+        .setDesc(
+          'Let threads use the GitHub account connected in Geode (Settings → GitHub) for git over HTTPS, the gh CLI and '
+          + 'the GitHub API — on the host and in the sandbox VM — with no personal access token. The token is handed to a '
+          + 'credential helper via a short-lived private file, never put in prompts, logs or environment variables, and '
+          + 'it reaches every repository the Geode GitHub App is installed on. Your own GH_TOKEN, gh login and git '
+          + 'credential helpers always take priority.',
+        )
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.githubConnectionEnabled !== false)
+            .onChange(async (value) => {
+              this.plugin.settings.githubConnectionEnabled = value;
+              this.plugin.manager.updateSettings(this.plugin.settings);
+              await this.plugin.saveSettings();
+              // Apply to the host runtime dir now; VM hooks read the setting lazily.
+              if (value) void this.plugin.githubHost?.start();
+              else void this.plugin.githubHost?.stop();
+            }),
+        );
+
+      new Setting(containerEl)
+        .setName('GitHub commit email')
+        .setDesc(
+          'Email used for commits made with the Geode connection. Leave empty to use your GitHub noreply address '
+          + '(ID+login@users.noreply.github.com), which keeps your real email private. Only applied where a repository '
+          + 'has no user.email of its own.',
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder('ID+login@users.noreply.github.com')
+            .setValue(this.plugin.settings.githubCommitEmail ?? '')
+            .onChange(async (value) => {
+              this.plugin.settings.githubCommitEmail = value.trim();
+              this.plugin.manager.updateSettings(this.plugin.settings);
+              await this.plugin.saveSettings();
+            }),
+        );
+    }
+
     new Setting(containerEl)
       .setName('Run harness inside sandbox VM')
       .setClass('ct-sandbox-setting')
