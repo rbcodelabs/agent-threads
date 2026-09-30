@@ -8,7 +8,7 @@ Direct child-agent messaging and single-agent interruption are capability-gated.
 
 A native Obsidian and Geode plugin for running multiple Claude Code sessions in parallel — with streaming markdown responses, tab management, and deep vault integration.
 
-![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.53.1-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
+![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.54.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
 
 <p align="center">
   <img src="docs/screenshot-main.png" width="800" alt="Main view: conversation panel with tool calls and Agents List showing thread summaries" />
@@ -922,6 +922,9 @@ Control the current thread's session state.
 | `unwatch_document` | `path?`, `id?` | Removes a watch owned by the calling thread, by path or watch id (at least one required). Never affects another thread's watch on the same path. |
 | `list_watched_documents` | — | Returns the calling thread's own active watches: path, watch id, creation time, and last-alerted time. |
 
+| `github_list_access` | — | Lists the GitHub repositories the connected Geode GitHub App can access (names only, never credentials). Geode ≥ 0.25.0 with GitHub connected; see [GitHub via Geode](docs/github-integration.md). |
+| `github_check_repo` | `repo` | Checks whether the Geode GitHub App can access `owner/name`; when it cannot, returns the install URL to grant access. |
+
 See [Sandbox VMs](docs/sandbox-vms.md) for setup and a worktree workflow. Only
 `vm_exec` runs commands in the guest; host shell and file tools remain on the
 host. The selected directory is writable and guest edits persist after exit.
@@ -1050,6 +1053,8 @@ In **Secrets**, choose **Add secret** or select an existing entry. Save the valu
 | Sandbox VM network | Network isolation `enter_vm` applies when a call does not pass one. `Full egress` (default) lets `npm install`, git remotes, and web access work. `Internal` blocks the internet but leaves the host reachable; `None` removes the route entirely. |
 | Run harness inside sandbox VM | `Auto` (default), `Always`, or `Never`. Claude-only: routes a thread's own Claude CLI process into its sandbox container instead of the host, so a supported Mac only needs the `container` runtime — not a host `claude` install. `Auto` only activates once the sandbox is set up (Settings → Claude → **Set up sandbox**); until then threads keep running on your Mac, and the first such thread offers a one-time in-thread card — **Run this thread in a sandbox?** with `Set up sandbox`, `Not now` and `Don't ask again` — without interrupting it. A finished setup applies from a thread's next fresh session start. `Always` errors clearly instead of silently falling back if the container isn't ready. The first time a routed thread needs Claude sign-in, an in-thread card walks through the container's own `claude setup-token` (it opens a URL for you; paste back the login code) instead of a host `claude auth login`. The resulting token is a separate credential used only by container-routed threads, so it never affects host-spawned ones — see [Sandbox VMs](docs/sandbox-vms.md#running-the-claude-harness-inside-the-vm-adr-0015). |
 | Harness VM image | Container image the harness routes into (default: `claude-threads-harness:1`) — a separate image from the sandbox VM image above. **Set up sandbox** builds it for you. Advanced fallback: `container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`. |
+| Use Geode GitHub connection | Geode only. Lets threads use the GitHub account connected in Geode (Settings → GitHub) for `git` over HTTPS, `gh` and the GitHub API, on the host and in the sandbox VM, with no personal access token. The token is never put in prompts, logs or environment variables; your own `GH_TOKEN`, `gh auth login` and git credential helpers take priority. See [GitHub via Geode](docs/github-integration.md). |
+| GitHub commit email | Geode only. Email for commits made with the connection; empty uses your GitHub noreply address (`ID+login@users.noreply.github.com`). Applied only where a repository has no `user.email`. |
 | Save threads to vault | Auto-save readable Markdown notes plus versioned machine recovery snapshots |
 | Vault folder | Folder for saved thread notes (default: `Agent Threads/`) |
 | Extra environment variables | `KEY=VALUE` pairs injected into Claude's environment (useful for `AWS_PROFILE`, `AWS_REGION`) |

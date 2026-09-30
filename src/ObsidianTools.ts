@@ -20,6 +20,14 @@ import { listVault, vaultListSource } from './vaultList';
 import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
 import { resolveWorktreeRoot, worktreePathFor } from './worktreePaths';
 import { bindAgentTool } from './AgentToolContributions';
+import { createGithubVmHooks } from './githubVmDelivery';
+import {
+  GithubConnectionError,
+  redactGithubSecrets,
+  isValidRepoFullName,
+  summarizeAccess,
+  type GithubCredentialBroker,
+} from './githubCredentials';
 import {
   SandboxVmManager,
   VM_NETWORK_MODES,
@@ -298,6 +306,12 @@ export interface ObsidianMcpServerOptions {
    * `createClaudeThreadsMcpServers` in tests still get).
    */
   sandboxVmManager?: SandboxVmManager;
+  /** Geode GitHub connection broker; undefined on Obsidian / older Geode. */
+  githubBroker?: GithubCredentialBroker;
+  /** Read lazily: the "Use Geode GitHub connection" setting. */
+  isGithubConnectionEnabled?: () => boolean;
+  /** Read lazily: optional commit-email override. */
+  getGithubCommitEmail?: () => string | undefined;
   /** Creates a persistent thread and queues its initial prompt. */
   createThread?: (params: {
     prompt: string;
@@ -1190,6 +1204,13 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   const vmManager = options.sandboxVmManager ?? new SandboxVmManager({
     containerName: () => containerNameForThread(options.threadId ?? fallbackVmSessionId),
     run: options.vmCommandRunner,
+    hooks: options.githubBroker
+      ? createGithubVmHooks({
+          broker: options.githubBroker,
+          isEnabled: () => options.isGithubConnectionEnabled?.() ?? true,
+          getEmailOverride: options.getGithubCommitEmail,
+        })
+      : undefined,
   });
 
   const vmErrorResult = (error: string) => ({
@@ -1254,6 +1275,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
               mountedFrom: result.mountedFrom,
               network: result.network,
               containerWorkdir: VM_WORKDIR,
+              ...(result.notes?.length ? { notes: result.notes } : {}),
               message: `Sandbox VM running. ${result.mountedFrom} is mounted at ${VM_WORKDIR}. Run commands with vm_exec; keep editing files with the normal file tools on the host.`,
             }, null, 2),
           }],
@@ -1295,14 +1317,73 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
             text: JSON.stringify({
               success: true,
               exitCode: result.exitCode,
-              stdout: result.stdout,
-              stderr: result.stderr,
+              // Defense in depth: mask anything token-shaped a command echoed.
+              stdout: redactGithubSecrets(result.stdout),
+              stderr: redactGithubSecrets(result.stderr),
+              ...(result.notes?.length ? { notes: result.notes } : {}),
             }, null, 2),
           }],
         };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return vmErrorResult(msg);
+      }
+    },
+  );
+
+  // ── GitHub (Geode connection) ──────────────────────────────────────────────
+  // Discovery only: repo names, never tokens. Credentials reach git/gh through a
+  // helper (see githubCredentialHelper.ts), not through these tools.
+  const githubErrorResult = (err: unknown) => {
+    const e = err instanceof GithubConnectionError ? err : null;
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify({
+        success: false,
+        error: e ? e.message : (err instanceof Error ? err.message : String(err)),
+        ...(e ? { code: e.code } : {}),
+        ...(e?.installUrl ? { installUrl: e.installUrl } : {}),
+      }) }],
+      isError: true,
+    };
+  };
+
+  const boundGithubListAccess = tool(
+    'github_list_access',
+    [
+      'Lists the GitHub repositories the connected Geode GitHub App can access (grouped by account/installation).',
+      'Repository names only; no credentials are returned. Once a repo is listed, git over HTTPS and the gh CLI work against it',
+      '(in the sandbox VM and on the host) with no personal access token.',
+      'Fails with an actionable message if GitHub is not connected, authorization expired, or Geode is not the host.',
+    ].join(' '),
+    {},
+    async () => {
+      try {
+        if (!options.githubBroker) throw new GithubConnectionError('unavailable', 'The Geode GitHub connection needs Geode >= 0.25.0.');
+        if (options.isGithubConnectionEnabled?.() === false) throw new GithubConnectionError('unavailable', 'The Geode GitHub connection is turned off in Agent Threads settings.');
+        const installations = summarizeAccess(await options.githubBroker.listAccess());
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, installations }, null, 2) }] };
+      } catch (err) {
+        return githubErrorResult(err);
+      }
+    },
+  );
+
+  const boundGithubCheckRepo = tool(
+    'github_check_repo',
+    [
+      'Checks whether the connected Geode GitHub App can access owner/repo.',
+      'If not, returns the install URL where the user can grant access (the App must be installed on the repository before clone/push/PR will work).',
+    ].join(' '),
+    { repo: z.string().describe('Repository in owner/name form, e.g. "octocat/hello-world".') },
+    async (args) => {
+      try {
+        if (!isValidRepoFullName(args.repo)) throw new Error('repo must look like owner/name.');
+        if (!options.githubBroker) throw new GithubConnectionError('unavailable', 'The Geode GitHub connection needs Geode >= 0.25.0.');
+        if (options.isGithubConnectionEnabled?.() === false) throw new GithubConnectionError('unavailable', 'The Geode GitHub connection is turned off in Agent Threads settings.');
+        await options.githubBroker.requireRepo(args.repo);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, repo: args.repo, accessible: true }, null, 2) }] };
+      } catch (err) {
+        return githubErrorResult(err);
       }
     },
   );
@@ -2932,6 +3013,8 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundEnterVm,
       boundVmExec,
       boundExitVm,
+      boundGithubListAccess,
+      boundGithubCheckRepo,
       boundListCommands,
       boundExecuteCommand,
       ...(options.enableOpenUrl !== false ? [boundOpenUrl] : []),
@@ -3195,7 +3278,7 @@ export function toHarnessDynamicTools(
     'obsidian_list_projects', 'obsidian_get_thread_messages', 'obsidian_get_thread_log',
     'obsidian_list_vault_bridges', 'obsidian_get_file_history', 'CronList', 'vault_list',
     'skills_list_installed', 'skills_search', 'skills_get', 'skills_list_sources',
-    'skills_check_updates',
+    'skills_check_updates', 'github_list_access', 'github_check_repo',
   ];
   const readOnlyToolNames = new Set([
     ...legacyReadOnlyToolNames,

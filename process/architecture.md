@@ -39,6 +39,10 @@
 | `src/OpenCodeSession.ts` | OpenCode adapter over a per-session `opencode serve` (HTTP + SSE). Pure mapping helpers are exported for tests. See [ADR-0013](https://compass.rbcodelabs.com/rbcodelabs/claude-threads/docs/d7b8c236-d8ac-48a4-a8e4-6524ff74e886) |
 | `src/OpenCodeHostTools.ts` | Token-guarded loopback MCP endpoint that serves host tools to OpenCode |
 | `src/sandboxVm.ts` | Sandbox VM command construction + lifecycle (`SandboxVmManager`) behind Apple's `container` CLI. Pure helpers plus an injectable command seam; no top-level Node requires |
+| `src/githubCredentials.ts` | Geode GitHub connection broker: bridge over `window.geode.githubAuth`, actionable error codes, commit identity (noreply default), `GithubTokenPublisher` (refresh timer, clears the sink on failure/disconnect), redaction. Pure — no Obsidian/Node deps |
+| `src/githubCredentialHelper.ts` | Generated git credential helper + `gh` wrapper scripts, container install/write/clear shell commands, host `GIT_CONFIG_*` env. Pure string builders, tested by executing them |
+| `src/githubVmDelivery.ts` | `VmHooks` that install/refresh/remove the token file in a thread's sandbox VM (token over exec stdin only) |
+| `src/githubHostDelivery.ts` | Host-side runtime dir + 0600 token file + synchronous `resolveEnv(cwd)` for session env. See [docs/github-integration.md](../docs/github-integration.md) |
 | `sandbox/Dockerfile` | Image for the sandbox VM — `node:22-bookworm-slim` + git, ripgrep, jq, curl, wget, build-essential, python3, openssh-client. Non-root `node` (uid 1000), `WORKDIR /work`, no secrets baked in |
 | `src/harnessVmRouting.ts` | ADR-0015: decides whether a thread's Claude harness process routes into its sandbox container (`resolveClaudeVmRouting`, capability checks), builds the `container exec` argv for the containerized CLI process, and redacts secrets from any logged argv by content match |
 | `sandbox/Dockerfile.harness` | `FROM claude-threads-coding:1` + the native Claude Code installer. Separate, opt-in image tag (`claude-threads-harness:1`) so building the coding image alone never enables VM-hosted harnesses |
