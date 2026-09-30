@@ -40,14 +40,44 @@ const FALLBACK_RESOLVED: Record<string, string> = {
 };
 
 /**
- * Extracts a human version from a canonical model id:
- * `claude-opus-4-8` -> "4.8", `claude-sonnet-5` -> "5",
- * `claude-haiku-4-5-20251001` -> "4.5". Returns undefined when unparseable.
+ * Parses a Claude model id into family and version. Accepts first-party ids
+ * (`claude-opus-4-8`, `claude-haiku-4-5-20251001`, `claude-sonnet-5[1m]`) and
+ * cloud-provider forms (`us.anthropic.claude-opus-5-5`,
+ * `anthropic.claude-sonnet-5-v1:0`, `claude-opus-4-8@20260101`).
  */
-export function modelVersionFromId(modelId: string | undefined): string | undefined {
+export function parseClaudeModelId(modelId: string | undefined): { family: string; version: string } | undefined {
   if (!modelId) return undefined;
-  const match = modelId.match(/^claude-[a-z]+-(\d+(?:-\d{1,2}(?!\d))?)(?:-\d{8})?(?:\[[^\]]*\])?$/i);
-  return match ? match[1].replace('-', '.') : undefined;
+  const bare = modelId
+    .replace(/^(?:[a-z]{2,6}\.)?anthropic\./i, '')
+    .replace(/\[[^\]]*\]$/, '')
+    .replace(/@\d{8}$/, '')
+    .replace(/-v\d+(?::\d+)?$/i, '')
+    .replace(/-\d{8}$/, '');
+  const match = bare.match(/^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?$/i);
+  if (!match) return undefined;
+  const family = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+  return { family, version: match[3] ? `${match[2]}.${match[3]}` : match[2] };
+}
+
+/** Version of a model id: `claude-opus-4-8` -> "4.8". Undefined when unparseable. */
+export function modelVersionFromId(modelId: string | undefined): string | undefined {
+  return parseClaudeModelId(modelId)?.version;
+}
+
+/** Human name for an exact model id: "Opus 5.5"; the raw id when unparseable. */
+export function formatModelId(modelId: string): string {
+  const parsed = parseClaudeModelId(modelId);
+  return parsed ? `${parsed.family} ${parsed.version}` : modelId;
+}
+
+/**
+ * Menu/label text for the model a thread last actually ran on, e.g.
+ * "Opus 5.5 (us.anthropic.claude-opus-5-5)". The raw id is kept so the exact
+ * provider model is always visible.
+ */
+export function activeModelLabel(modelId: string): string {
+  const pretty = formatModelId(modelId);
+  return pretty === modelId ? modelId : `${pretty} (${modelId})`;
 }
 
 function resolvedIdForAlias(alias: string, catalog: readonly ModelCatalogEntry[]): string | undefined {
@@ -84,4 +114,12 @@ export function buildClaudeModelOptions(catalog: readonly ModelCatalogEntry[] = 
     options.push({ label: m.displayName || m.value, value: m.value });
   }
   return options;
+}
+
+/**
+ * True for a real provider model id. Rejects empty values and the CLI's
+ * placeholder ids such as `<synthetic>`, used on locally generated messages.
+ */
+export function isReportedModelId(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && !value.startsWith('<');
 }

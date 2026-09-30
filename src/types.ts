@@ -343,6 +343,13 @@ export interface Thread {
    */
   rateLimitRetryCount?: number;
   model?: string;
+  /**
+   * Exact model id the provider last reported for this thread (session `init`
+   * or the latest top-level assistant reply), e.g. `claude-opus-5-5`. Unlike
+   * `model` (the requested alias/override), this is what actually ran.
+   * Cleared when the override changes or the harness is switched.
+   */
+  activeModel?: string;
   projectId?: string;
   /** Stable producer identity for peer-plugin jobs; absent for user-authored threads. */
   origin?: string;

@@ -144,6 +144,12 @@ export interface SessionCallbacks {
   onRawEvent?: (event: { type?: string } & Record<string, unknown>) => void;
   /** Harness-neutral reroute callback retained for Codex model/rerouted events. */
   onModelFallback?: (trigger: string, fromModel: string, toModel: string) => void;
+  /**
+   * Fired with the exact model id the provider reports, from the session
+   * `init` message and from each top-level assistant reply. Covers
+   * escalation, `/model` changes, and silent fallbacks.
+   */
+  onActiveModel?: (model: string) => void;
   onModelRefusalFallback?: (refusal: ModelRefusalFallback) => void;
   onModelRefusalNoFallback?: (refusal: ModelRefusalNoFallback) => void;
   /** Fired when a running tool emits a progress heartbeat with elapsed time. */

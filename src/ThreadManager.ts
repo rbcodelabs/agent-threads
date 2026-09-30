@@ -87,6 +87,7 @@ export type ThreadEvent =
   | { type: 'permission_denied'; toolName: string; toolUseId: string; message: string; agentId?: string; decisionReasonType?: string }
   | { type: 'rate_limit'; limitStatus: 'allowed' | 'allowed_warning' | 'rejected'; resetsAt?: number }
   | { type: 'usage'; usage: import('./Usage').UsageSnapshot }
+  | { type: 'active_model'; model: string }
   | { type: 'interrupted' }
   | { type: 'cwd_changed'; cwd: string }
   | { type: 'project_changed' }
@@ -609,7 +610,7 @@ export class ThreadManager {
 
     const snapshot = {
       agentHarness: thread.agentHarness, sessionGeneration: thread.sessionGeneration,
-      sessionId: thread.sessionId, model: thread.model, usageSnapshot: thread.usageSnapshot,
+      sessionId: thread.sessionId, model: thread.model, activeModel: thread.activeModel, usageSnapshot: thread.usageSnapshot,
       tasks: thread.tasks, pendingBackgroundTasks: thread.pendingBackgroundTasks,
       recap: thread.recap, lastError: thread.lastError,
       updatedAt: thread.updatedAt,
@@ -631,6 +632,7 @@ export class ThreadManager {
       thread.agentHarness = targetHarness;
       delete thread.sessionId;
       delete thread.model;
+      delete thread.activeModel;
       delete thread.usageSnapshot;
       delete thread.tasks;
       delete thread.pendingBackgroundTasks;
@@ -653,6 +655,7 @@ export class ThreadManager {
         Object.assign(thread, snapshot);
         if (snapshot.sessionId === undefined) delete thread.sessionId;
         if (snapshot.model === undefined) delete thread.model;
+        if (snapshot.activeModel === undefined) delete thread.activeModel;
         if (snapshot.usageSnapshot === undefined) delete thread.usageSnapshot;
         if (snapshot.tasks === undefined) delete thread.tasks;
         if (snapshot.pendingBackgroundTasks === undefined) delete thread.pendingBackgroundTasks;
@@ -1031,6 +1034,9 @@ export class ThreadManager {
   setThreadModel(id: string, model: string | undefined): void {
     const thread = this.threads.get(id);
     if (thread) {
+      // The last reported model belongs to the previous override; the next
+      // init/reply reports the new one.
+      if (thread.model !== model) delete thread.activeModel;
       thread.model = model;
       thread.updatedAt = Date.now();
       // ADR-0002 §2: model changes become a direct control-request on the
@@ -2707,6 +2713,11 @@ export class ThreadManager {
         thread.usageSnapshot = usage;
         thread.updatedAt = Date.now();
         this.emit(threadId, { type: 'usage', usage });
+      },
+      onActiveModel: (model) => {
+        if (!isCurrentGeneration() || thread.activeModel === model) return;
+        thread.activeModel = model;
+        this.emit(threadId, { type: 'active_model', model });
       },
       onModelFallback: (trigger, fromModel, toModel) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'model_fallback', trigger, fromModel, toModel }); },
       onModelRefusalFallback: (refusal) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'model_refusal_fallback', ...refusal }); },
