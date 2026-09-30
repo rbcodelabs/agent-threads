@@ -644,12 +644,14 @@ export class SandboxVmManager {
         network: params.network,
         origin: 'agent',
       };
+      const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
       return {
         success: true,
         containerName: this.active.containerName,
         image: this.active.image,
         mountedFrom: this.active.mountedFrom,
         network: this.active.network,
+        ...(notes.length ? { notes } : {}),
       };
     } catch (err) {
       return { success: false, error: errorMessage(err) };
@@ -723,15 +725,15 @@ export class SandboxVmManager {
       }
 
       this.active = { containerName, image: params.image, mountedFrom: params.mountPath, network: params.network, origin: 'harness' };
+      const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
       return {
         success: true,
         containerName: this.active.containerName,
         image: this.active.image,
         mountedFrom: this.active.mountedFrom,
         network: this.active.network,
+        ...(notes.length ? { notes } : {}),
       };
-      const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
-      return { success: true, ...this.active, ...(notes.length ? { notes } : {}) };
     } catch (err) {
       return { success: false, error: errorMessage(err) };
     }

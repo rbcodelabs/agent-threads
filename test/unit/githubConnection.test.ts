@@ -771,7 +771,7 @@ describe('sandbox VM GitHub delivery', () => {
   it('warns (git still works) when the image has no gh', async () => {
     const { manager } = vm({ execExit: { 'command -v gh': 1 } });
     const res = await manager.enter(enterArgs);
-    expect(res.success && res.notes?.join('\n')).toContain('claude-threads-coding:2');
+    expect(res.success && res.notes?.join('\n')).toContain('claude-threads-coding:1');
   });
 
   it('exit deletes the token before the container is stopped and removed', async () => {

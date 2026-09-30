@@ -997,6 +997,7 @@ export interface PluginSettings {
    * sandbox still works.
    */
   sandboxSetupPromptDismissed: boolean;
+  /**
    * Use Geode's GitHub connection (Settings → GitHub) for git, gh and the GitHub
    * API in threads and the sandbox VM. Only has an effect in Geode ≥ 0.25.0;
    * manually configured credentials (GH_TOKEN, gh auth, git helpers) always win.
