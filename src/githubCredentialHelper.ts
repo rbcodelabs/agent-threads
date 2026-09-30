@@ -106,6 +106,7 @@ export function buildContainerInstallCommand(opts: {
   // and substitute the resolved $D.
   const helper = buildGitHelperScript('__CT_DIR__');
   const ghw = buildGhWrapperScript('__CT_DIR__', false);
+  // BSD and GNU sed disagree on -i, so substitute through a pipe instead.
   const lines = [
     'set -e',
     'umask 077',
@@ -113,21 +114,19 @@ export function buildContainerInstallCommand(opts: {
     `for c in ${first}; do if mkdir -p "$c/bin" 2>/dev/null; then D=$c; break; fi; done`,
     '[ -n "$D" ] || { echo "claude-threads: no writable runtime dir for GitHub credentials" >&2; exit 1; }',
     'chmod 700 "$D" "$D/bin"',
-    `cat > "$D/${GIT_HELPER_NAME}" <<'CT_HELPER_EOF'`,
+    `sed "s#__CT_DIR__#$D#g" > "$D/${GIT_HELPER_NAME}" <<'CT_HELPER_EOF'`,
     helper.replace(/\n$/, ''),
     'CT_HELPER_EOF',
-    `sed -i "s#__CT_DIR__#$D#g" "$D/${GIT_HELPER_NAME}"`,
-    'cat > "$D/bin/gh" <<\'CT_GH_EOF\'',
+    'sed "s#__CT_DIR__#$D#g" > "$D/bin/gh" <<\'CT_GH_EOF\'',
     ghw.replace(/\n$/, ''),
     'CT_GH_EOF',
-    'sed -i "s#__CT_DIR__#$D#g" "$D/bin/gh"',
     `chmod 700 "$D/${GIT_HELPER_NAME}" "$D/bin/gh"`,
     // Additive, container-local git config; drop any earlier claude-threads helper first.
     `git config --global --unset-all credential.https://github.com.helper 'claude-threads' 2>/dev/null || true`,
     `git config --global --add credential.https://github.com.helper "$D/${GIT_HELPER_NAME}"`,
     // Login shells (bash -lc) put the wrapper ahead of the real gh.
     'p=$HOME/.profile; [ -f "$HOME/.bash_profile" ] && p=$HOME/.bash_profile; [ -f "$HOME/.bash_login" ] && [ ! -f "$HOME/.bash_profile" ] && p=$HOME/.bash_login',
-    'sed -i "/# >>> claude-threads github >>>/,/# <<< claude-threads github <<</d" "$p" 2>/dev/null || true',
+    'if [ -f "$p" ]; then sed "/# >>> claude-threads github >>>/,/# <<< claude-threads github <<</d" "$p" > "$p.ct-tmp" && mv "$p.ct-tmp" "$p"; fi',
     'printf \'%s\\n\' "# >>> claude-threads github >>>" "export PATH=\\"$D/bin:\\$PATH\\"" "# <<< claude-threads github <<<" >> "$p"',
   ];
   if (opts.identity) {
@@ -185,6 +184,7 @@ export function buildHostGitEnv(opts: {
   if (opts.identity?.name) add('user.name', opts.identity.name);
   if (opts.identity?.email) add('user.email', opts.identity.email);
   out.GIT_CONFIG_COUNT = String(n);
-  out.PATH = `${opts.dir}/bin:${opts.baseEnv.PATH ?? ''}`;
+  // No trailing ':' when PATH is unset — an empty entry would put the cwd on PATH.
+  out.PATH = opts.baseEnv.PATH ? `${opts.dir}/bin:${opts.baseEnv.PATH}` : `${opts.dir}/bin`;
   return out;
 }
