@@ -8023,6 +8023,22 @@ body.ct-skills-resizing {
 
 /* Pills reuse .ct-skills-tab / .ct-skills-tab--active from the existing tab bar */
 
+.ct-skills-source-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+}
+
+.ct-skills-source-bar .ct-skills-meta-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Skill Sources — settings tab ──────────────────────────────────────── */
 
 .ct-skill-sources-list .setting-item-description {

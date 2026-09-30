@@ -970,3 +970,29 @@ describe('installSkillFromMarketplace', () => {
 
 // buildSkillPlugins lives in this module but is covered end-to-end (pure
 // enumeration plus the real ThreadManager wiring) in session-plugins.test.ts.
+
+describe('skill source removal helpers', () => {
+  it('withoutSkillSource drops only the matching id and does not mutate', async () => {
+    const { withoutSkillSource } = await import('../../src/skillManager');
+    const a = { id: 'a', name: 'A', type: 'local' } as SkillSource;
+    const b = { id: 'b', name: 'B', type: 'local' } as SkillSource;
+    const input = [a, b];
+    expect(withoutSkillSource(input, 'a')).toEqual([b]);
+    expect(input).toHaveLength(2);
+  });
+
+  it('deleteSkillSourceFiles removes a github clone but leaves a local folder alone', async () => {
+    const { deleteSkillSourceFiles } = await import('../../src/skillManager');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'src-rm-'));
+    const clone = path.join(tmp, 'clone');
+    const local = path.join(tmp, 'local');
+    fs.mkdirSync(clone); fs.mkdirSync(local);
+    deleteSkillSourceFiles({ id: 'g', name: 'G', type: 'github', clonePath: clone } as SkillSource);
+    deleteSkillSourceFiles({ id: 'l', name: 'L', type: 'local', skillsPath: local } as SkillSource);
+    expect(fs.existsSync(clone)).toBe(false);
+    expect(fs.existsSync(local)).toBe(true);
+    // missing clone must not throw
+    expect(() => deleteSkillSourceFiles({ id: 'g', name: 'G', type: 'github', clonePath: clone } as SkillSource)).not.toThrow();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+});

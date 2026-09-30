@@ -237,6 +237,8 @@ Open the **Skills Manager** from the ribbon (puzzle icon) or command palette to 
 
 **Installed tab** — shows everything installed as a collapsible source tree. The top-right corner of the tab bar has two icon buttons (Installed tab only): **Import** (+) opens a menu with **Folder…** and **File (.skill)…**, letting you install a skill directly from a local folder or a packaged `.skill`/`.zip` archive without going through GitHub; and **Check for updates** (↻, shown once you have at least one GitHub plugin source) re-fetches staleness for all GitHub plugin sources in parallel — its icon spins while running, and a toast reports the result when it finishes (including which sources failed to check, e.g. if you're offline). An indicator dot appears on the button afterward if any plugin has updates (hover either button for its full status/tooltip). GitHub plugin sources appear as top-level nodes with a badge (`•N`) when updates are available; clicking one expands it to reveal its skills and opens a detail panel with **Update** (git pull, highlighted when updates are available), **Reload** (re-scan from disk), **Reinstall** (delete and re-clone for broken installs), and **Remove Source**. Two more nodes sit at the bottom. **Vault** lists the skills this plugin installed into your vault — click one to view and edit it, with **Save**, **Reload**, **Reveal in Finder**, and **Uninstall**. **Claude Code** lists everything in `~/.claude/` (skills *and* agent profiles), marked `read-only`: the plugin shows them because the Claude CLI genuinely loads them into every session, but it never writes to that directory, so those panes offer only **Reload** and **Reveal in Finder**. Edit or remove them with the `claude` CLI, or by hand.
 
+> **Adding skill sources.** Skill sources are managed here, not in Settings. Click the **+** button in the Installed tab and choose **GitHub repo…** (clones the repo into the plugin folder) or **Local folder source…** (registers a folder you already have). Update, Reinstall and Remove live in the source's detail panel for GitHub sources, and **Remove source** in the Browse tab for local ones. **Settings → Skills** only shows how many sources are configured and a button that opens Skills Manager.
+
 > **Where installs go.** Everything the Skills Manager installs or imports lands in `<vault>/.obsidian/plugins/claude-threads/skills/`, beside the plugin's `skill-sources/` clones — never in `~/.claude/`. That folder shares the plugin folder's fate: community-plugin *updates* leave unknown subdirectories alone, but manually uninstalling and reinstalling the plugin will delete your installed skills along with it.
 
 Click a GitHub source's **chevron** to expand or collapse its skills while staying in the list. Click the rest of the source row to open its details. In narrow panes, this lets you browse the expanded skills without switching screens.
@@ -251,7 +253,7 @@ Authored skills are available in newly started Claude and Codex sessions as `/lo
 
 #### Declaring skill sources in config
 
-GitHub skill sources don't have to be added through the UI. A vault whose `data.json` is committed to a config repo can **declare** them, and the plugin materializes each one on load:
+GitHub skill sources don't have to be added through the Skills Manager UI. A vault whose `data.json` is committed to a config repo can **declare** them, and the plugin materializes each one on load:
 
 ```jsonc
 "skillSources": [
