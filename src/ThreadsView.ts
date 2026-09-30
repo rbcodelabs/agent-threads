@@ -5,6 +5,7 @@ import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
 import { effectiveExtraEnv } from './types';
 import { parseLoopArgs, formatLoopInterval } from './loopUtils';
+import { buildClaudeModelOptions, aliasLabel, type ModelOption } from './modelOptions';
 import { THREAD_BUILTIN_COMMANDS, THREAD_ARG_COMPLETIONS, MODEL_ALIASES, goalKickoffMessage, resolveCreatePrMessage, escalationCommand } from './slashCommands';
 import { isSetAsGoalEligible } from './goalContext';
 import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo } from './gitDiffUtils';
@@ -361,15 +362,19 @@ export class ThreadsView extends ItemView {
     { label: 'Auto-approve', value: 'auto' },
   ];
 
-  // Ordered list for the footer model switcher menu. `value: undefined` means
-  // "use the global default" (clears the per-thread override).
-  private static readonly CLAUDE_MODEL_OPTIONS: Array<{ label: string; value: string | undefined }> = [
-    { label: 'Default', value: undefined },
-    { label: 'Opus', value: 'opus' },
-    { label: 'Sonnet', value: 'sonnet' },
-    { label: 'Haiku', value: 'haiku' },
-    { label: 'Fable', value: 'fable' },
-  ];
+  /**
+   * Rows for the per-thread model switcher. Claude threads get family aliases
+   * labelled with the version they currently resolve to plus pinned catalog
+   * models; other harnesses list their own discovered catalog.
+   * `value: undefined` means "use the global default" (clears the override).
+   */
+  private modelOptionsFor(harness: AgentHarness): ModelOption[] {
+    if (harness === 'claude') return buildClaudeModelOptions(this.plugin.discoveredModelsByHarness.claude);
+    return [
+      { label: 'Default', value: undefined },
+      ...this.plugin.discoveredModelsByHarness[harness].map((m) => ({ label: m.displayName, value: m.value })),
+    ];
+  }
 
   constructor(leaf: WorkspaceLeaf, plugin: ClaudeThreadsPlugin) {
     super(leaf);
@@ -2440,15 +2445,12 @@ export class ThreadsView extends ItemView {
     const escalated = this.activeThreadId
       ? this.escalatedTurnModels.get(this.activeThreadId)
       : undefined;
-    if (escalated) return `${escalated} (this turn)`;
+    if (escalated) return `${aliasLabel(escalated, this.plugin.discoveredModelsByHarness.claude)} (this turn)`;
     const model = this.currentModel();
     if (!model) return 'Default';
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
     const harness = thread?.agentHarness ?? 'claude';
-    const options = harness !== 'claude'
-      ? this.plugin.discoveredModelsByHarness[harness].map((m) => ({ label: m.displayName, value: m.value }))
-      : ThreadsView.CLAUDE_MODEL_OPTIONS;
-    return options.find(option => option.value === model)?.label ?? model;
+    return this.modelOptionsFor(harness).find(option => option.value === model)?.label ?? model;
   }
 
   /**
@@ -2466,9 +2468,7 @@ export class ThreadsView extends ItemView {
     const menu = new Menu();
     const thread = this.manager.getThread(this.activeThreadId);
     const harness = thread?.agentHarness ?? 'claude';
-    const options = harness !== 'claude'
-      ? [{ label: 'Default', value: undefined }, ...this.plugin.discoveredModelsByHarness[harness].map((m) => ({ label: m.displayName, value: m.value }))]
-      : ThreadsView.CLAUDE_MODEL_OPTIONS;
+    const options = this.modelOptionsFor(harness);
     for (const opt of options) {
       menu.addItem(item => {
         item
