@@ -4,6 +4,11 @@ import { once } from 'events';
 import { request as httpsRequest } from 'https';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { HostMcpSdkBridge } from './HostMcpSdkBridge';
+import { DRIVE_FILES_SERVER, driveHttp, handleDriveFilesRpc, type DriveHttp } from './GoogleDriveFiles';
+
+const DRIVE_FILES_PATH = '/drive-files';
+/** Large transfers outlive the 5-minute limit applied to forwarded vendor MCP calls. */
+const TRANSFER_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 
 export const GOOGLE_SERVICES = ['docs', 'drive', 'sheets', 'slides'] as const;
 type Service = typeof GOOGLE_SERVICES[number];
@@ -69,7 +74,10 @@ export class GoogleWorkspaceMcp {
   private vmBridges = new Map<string, Map<string, HostMcpSdkBridge>>();
 
   constructor(private readonly getPlugin: () => unknown, private readonly upstream: Upstream = googleWorkspaceRequest, private readonly tokenTimeoutMs = 30_000,
-    private readonly persistence: Persistence = { bindings: {}, save: async () => {} }) {}
+    private readonly persistence: Persistence = { bindings: {}, save: async () => {} },
+    /** Local directories a thread may read from / write to with the large-file Drive tools (first = base for relative paths). */
+    private readonly rootsForThread: (threadId: string) => string[] = () => [],
+    private readonly transferHttp: DriveHttp = driveHttp) {}
 
   private connection(): DocsSync | undefined {
     const value = this.getPlugin() as Partial<DocsSync> | undefined;
@@ -144,9 +152,12 @@ export class GoogleWorkspaceMcp {
       this.bindings.set(threadId, binding);
       this.lastFailure = '';
     }
-    return Object.fromEntries(binding.services.map(service => [`google-${service}`, {
-      type: 'http', url: `${this.origin}/${service}`, headers: { Authorization: `Bearer ${binding.capability}` },
-    }]));
+    const headers = { Authorization: `Bearer ${binding.capability}` };
+    return Object.fromEntries(binding.services.flatMap((service): Array<[string, Config]> => [
+      [`google-${service}`, { type: 'http', url: `${this.origin}/${service}`, headers }],
+      // Same capability and revocation: local-disk transfers ride on the Drive opt-in.
+      ...(service === 'drive' ? [[DRIVE_FILES_SERVER, { type: 'http', url: `${this.origin}${DRIVE_FILES_PATH}`, headers }] as [string, Config]] : []),
+    ]));
   }
 
   /** Host-side SDK bridges for Claude sessions that actually start inside a VM. */
@@ -224,19 +235,85 @@ export class GoogleWorkspaceMcp {
     });
   }
 
+  /**
+   * Serialize our refresh calls. The peer guard prevents an in-flight refresh from
+   * overwriting a newer connection. Any refresh-token rotation revokes.
+   */
+  private accessToken(binding: Binding, signal: AbortSignal): Promise<string> {
+    const tokenJob = this.tokenQueue.catch(() => {}).then(async () => {
+      if (!this.current(binding) || signal.aborted) throw new Error('connection-changed');
+      const token = await new Promise<string>((resolve, reject) => {
+        const finish = (value?: string) => {
+          clearTimeout(timer);
+          signal.removeEventListener('abort', cancel);
+          if (value) resolve(value); else reject(new Error('token-unavailable'));
+        };
+        const cancel = () => finish();
+        const timer = setTimeout(cancel, this.tokenTimeoutMs);
+        signal.addEventListener('abort', cancel, { once: true });
+        binding.plugin.tokenStore.getValidAccessToken().then(finish, cancel);
+      });
+      if (!this.current(binding) || signal.aborted) throw new Error('connection-changed');
+      return token;
+    });
+    this.tokenQueue = tokenJob;
+    return this.abortable(tokenJob, signal);
+  }
+
+  /**
+   * Local MCP endpoint for large Drive transfers. Unlike the vendor endpoints this is not
+   * forwarded: the tools run here and move bytes between Drive and the local disk.
+   */
+  private async handleTransfer(body: Buffer, response: ServerResponse, binding: Binding, controller: AbortController): Promise<void> {
+    let parsed: unknown;
+    try { parsed = JSON.parse(body.toString('utf8')); } catch { this.reply(response, 400, 'Invalid JSON-RPC request.'); return; }
+    const messages = (Array.isArray(parsed) ? parsed : [parsed]) as Array<Parameters<typeof handleDriveFilesRpc>[0]>;
+    const threadId = [...this.bindings].find(([, value]) => value === binding)?.[0] ?? '';
+    const revoked = () => new Error('Google connection changed or is unavailable. Check Google Docs Sync, and start a new thread if you reconnected.');
+    const ctx = {
+      http: this.transferHttp,
+      roots: this.rootsForThread(threadId),
+      signal: controller.signal,
+      check: () => { if (!this.current(binding)) throw revoked(); },
+      getToken: () => this.accessToken(binding, controller.signal).catch(() => { throw revoked(); }),
+    };
+    // A transfer can run for minutes. Answer tools/call as an event stream and send comment
+    // keepalives so the client never sees an idle connection or a header timeout.
+    const streaming = messages.some(message => message?.method === 'tools/call');
+    let keepalive: ReturnType<typeof setInterval> | undefined;
+    if (streaming) {
+      response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      keepalive = setInterval(() => { if (!response.destroyed) response.write(': keepalive\n\n'); }, 15_000);
+    }
+    try {
+      const replies = [];
+      for (const message of messages) {
+        const reply = await handleDriveFilesRpc(message, ctx);
+        if (reply) replies.push(reply);
+      }
+      if (!replies.length) { response.writeHead(202); response.end(); return; }
+      const payload = JSON.stringify(Array.isArray(parsed) ? replies : replies[0]);
+      if (streaming) response.end(`event: message\ndata: ${payload}\n\n`);
+      else { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(payload); }
+    } finally {
+      if (keepalive) clearInterval(keepalive);
+    }
+  }
+
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (request.headers.host !== this.origin.slice('http://'.length) || (request.headers.origin && request.headers.origin !== this.origin)) {
       this.reply(response, 403, 'Local native MCP clients only.'); return;
     }
-    const service = GOOGLE_SERVICES.find(value => request.url === `/${value}`);
+    const transfer = request.url === DRIVE_FILES_PATH;
+    const service = transfer ? 'drive' : GOOGLE_SERVICES.find(value => request.url === `/${value}`);
     if (!service) { this.reply(response, 404, 'Unknown Google service.'); return; }
-    if (!['POST', 'GET', 'DELETE'].includes(request.method ?? '')) { this.reply(response, 405, 'Unsupported MCP method.'); return; }
+    if (!(transfer ? ['POST'] : ['POST', 'GET', 'DELETE']).includes(request.method ?? '')) { this.reply(response, 405, 'Unsupported MCP method.'); return; }
     const binding = [...this.bindings.values()].find(value => request.headers.authorization === `Bearer ${value.capability}`);
     if (!binding || !binding.services.includes(service)) { this.reply(response, 401, 'Invalid local MCP capability.'); return; }
     if (!this.current(binding)) { this.reply(response, 409, 'Google connection changed. Start a new thread.'); return; }
     const controller = new AbortController();
     this.requests.add(controller);
-    const timeout = setTimeout(() => controller.abort(), 300_000);
+    const timeout = setTimeout(() => controller.abort(), transfer ? TRANSFER_TIMEOUT_MS : 300_000);
     response.on('close', () => controller.abort());
     try {
       await this.abortable(binding.ready, controller.signal);
@@ -247,26 +324,8 @@ export class GoogleWorkspaceMcp {
         if (size > 10 * 1024 * 1024) { this.reply(response, 413, 'MCP request exceeds 10 MiB.'); return; }
         chunks.push(Buffer.from(chunk));
       }
-      // Serialize our refresh calls. The peer guard prevents an in-flight refresh
-      // from overwriting a newer connection. Any refresh-token rotation revokes.
-      const tokenJob = this.tokenQueue.catch(() => {}).then(async () => {
-        if (!this.current(binding) || controller.signal.aborted) throw new Error('connection-changed');
-        const token = await new Promise<string>((resolve, reject) => {
-          const finish = (value?: string) => {
-            clearTimeout(timer);
-            controller.signal.removeEventListener('abort', cancel);
-            if (value) resolve(value); else reject(new Error('token-unavailable'));
-          };
-          const cancel = () => finish();
-          const timer = setTimeout(cancel, this.tokenTimeoutMs);
-          controller.signal.addEventListener('abort', cancel, { once: true });
-          binding.plugin.tokenStore.getValidAccessToken().then(finish, cancel);
-        });
-        if (!this.current(binding) || controller.signal.aborted) throw new Error('connection-changed');
-        return token;
-      });
-      this.tokenQueue = tokenJob;
-      const token = await this.abortable(tokenJob, controller.signal);
+      if (transfer) { await this.handleTransfer(Buffer.concat(chunks), response, binding, controller); return; }
+      const token = await this.accessToken(binding, controller.signal);
       const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
       for (const name of requestHeaders) {
         const value = request.headers[name];
