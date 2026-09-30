@@ -28,8 +28,9 @@ container build --tag claude-threads-coding:1 sandbox/
 
 A system copy of the runtime (Homebrew or Apple's installer) always takes precedence over the managed one.
 
-The image includes Node 22, npm, Git, ripgrep, jq, curl, Python, and native build
-tools. It runs as the non-root `node` user. Project dependencies are installed
+The image includes Node 22, npm, Git, the GitHub CLI (`gh`, in images built from the current
+`sandbox/Dockerfile`), ripgrep, jq, curl, Python, and native build tools. It runs as the
+non-root `node` user. Project dependencies are installed
 per workspace; the image does not include every project's dependency cache.
 Custom images must provide Bash, GNU `timeout`, and `sleep infinity`.
 
@@ -46,7 +47,10 @@ changes persist after `exit_vm`. Do not put secrets in that directory. No host
 directories are mounted beyond the selected workspace. If the thread's working
 directory is your vault or home, that directory becomes the mount; select a
 disposable worktree first. The SSH agent and host credentials are not automatically
-forwarded, but files inside the mount are exposed.
+forwarded, but files inside the mount are exposed. The one exception is Geode's
+GitHub connection: when enabled, `git` (HTTPS) and `gh` inside the VM are
+authenticated through a short-lived private file that is never under `/work`
+(see [GitHub via Geode](github-integration.md)).
 A Git worktree's `.git` file can point outside the mount, so guest Git commands
 may fail; use host Git tools or a standalone checkout when guest Git is needed.
 Avoid sharing host `node_modules` with Linux; native dependencies differ.
