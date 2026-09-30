@@ -52,7 +52,8 @@ which does not exist yet (see Limitations).
   bind-mounted `/work` directory. `vm_exec` output is additionally scrubbed of
   anything token-shaped.
 - It is written to a mode-`0600` file in a mode-`0700` directory: container
-  tmpfs (`/dev/shm/claude-threads-github`, falling back to `/tmp`) or a
+  tmpfs (`/dev/shm/claude-threads-github`; when `/dev/shm` is mounted `noexec`, as in the default
+  sandbox image, scripts cannot run there, so it falls back to `/tmp/claude-threads-github`) or a
   per-process host temp dir. Inside the VM it travels over the `exec` stdin.
 - A small git credential helper (answers only `https://github.com`) and a `gh`
   wrapper read the file at the moment they are used. `gh` gets `GH_TOKEN` for that

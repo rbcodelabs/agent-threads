@@ -111,7 +111,9 @@ export function buildContainerInstallCommand(opts: {
     'set -e',
     'umask 077',
     'D=',
-    `for c in ${first}; do if mkdir -p "$c/bin" 2>/dev/null; then D=$c; break; fi; done`,
+    // A directory is usable only if a script in it can actually run: /dev/shm is often mounted
+    // noexec, where the helper would fail with "Permission denied". Try the next candidate then.
+    `for c in ${first}; do if mkdir -p "$c/bin" 2>/dev/null && printf '#!/bin/sh\\nexit 0\\n' > "$c/.probe" && chmod 700 "$c/.probe" && "$c/.probe" 2>/dev/null; then rm -f "$c/.probe"; D=$c; break; else rm -rf "$c" 2>/dev/null; fi; done`,
     '[ -n "$D" ] || { echo "claude-threads: no writable runtime dir for GitHub credentials" >&2; exit 1; }',
     'chmod 700 "$D" "$D/bin"',
     `sed "s#__CT_DIR__#$D#g" > "$D/${GIT_HELPER_NAME}" <<'CT_HELPER_EOF'`,
