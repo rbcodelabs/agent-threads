@@ -562,7 +562,7 @@ On desktop Geode and Obsidian, Settings → **MCP → Google Workspace** offers
 **Google Docs**, **Google Drive**, **Google Sheets**, and **Google Slides**.
 All four start disabled. Enable the services you want, then start a new thread.
 Google's servers supply their complete read and write toolsets and schemas; Claude
-Threads does not implement a separate set of Google tools. Interactive and newly
+Threads adds no replacement tools, only the local large-file transfer tools described below. Interactive and newly
 scheduled threads inherit the same selection on Claude and Codex, with their
 existing permission behavior.
 
@@ -583,6 +583,31 @@ Access tokens are refreshed inside Google Docs Sync. The harness receives only a
 ephemeral credential for a loopback transport; no Google token is written to MCP
 configuration. Missing or incompatible Google Docs Sync does not prevent a thread
 from starting; its Google services are omitted and Settings → MCP explains why.
+**Large Drive files.** Google's Drive tools move file contents inline as base64, so
+every byte passes through the model's context and the local proxy's 10 MiB request
+cap. Enabling **Google Drive** therefore also gives each thread a local
+`google-drive-files` server with two tools that move bytes between Drive and the
+local disk instead:
+
+- `upload_local_file` — resumable, chunked upload of a local file of any size.
+  Files are stored as-is (no conversion to Docs/Sheets/Slides). Google Docs Sync
+  grants the `drive.file` scope, so Google may refuse a `parentId` for a folder
+  this app did not create.
+- `download_to_local_file` — streams a Drive file to disk. Google-native files
+  are exported (Docs and Slides to PDF, Sheets to XLSX, Drawings to PNG, or pass
+  `exportMimeType`); Google caps exports at 10 MB.
+
+These tools read and write local files outside the agent's normal file-permission
+checks, so they are confined to the thread's working directory and the vault (symlinks
+cannot escape), and these locations are always refused, case-insensitively, for both
+upload sources and download destinations: `.obsidian`, `.git`, `.claude`, `.ssh`,
+`.aws`, `.gnupg`, `.env` / `.env.*` and `.mcp.json`. A Drive file with such a name is
+saved with a leading underscore. Stalled connections time out after 120 seconds and
+uploads resume from Google's committed offset. In a sandbox VM, `/work`
+refers to the working directory. Downloads refuse to replace an existing file
+unless `overwrite` is true. The tools share the Drive opt-in and revocation
+described below, and a fresh access token is requested for each Google request.
+
 Disabling a service revokes existing Google connections. Reconnecting accounts,
 changing auth hosts, or refresh-token rotation requires a new thread; ordinary
 access-token refresh remains automatic. Google may report missing scopes, service

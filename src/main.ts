@@ -504,7 +504,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.settings.googleWorkspaceBindings ??= {};
     this.googleWorkspaceMcp = new GoogleWorkspaceMcp(() =>
       (this.app as unknown as { plugins?: { getPlugin(id: string): unknown } }).plugins?.getPlugin('obsidian-gdocs-sync'), undefined, undefined,
-      { bindings: this.settings.googleWorkspaceBindings, save: () => this.saveSettings() });
+      { bindings: this.settings.googleWorkspaceBindings, save: () => this.saveSettings() },
+      // Large-file Drive tools may only touch the thread's working directory and the vault.
+      (threadId) => [this.manager.getThread(threadId)?.cwd, this.manager.vaultRoot].filter((root): root is string => !!root));
     await this.googleWorkspaceMcp.configure(this.settings.googleWorkspaceMcp ?? {});
     this.register(() => this.googleWorkspaceMcp?.close());
 
