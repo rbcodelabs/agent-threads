@@ -14,8 +14,9 @@ import type { McpServerEntry } from './mcpServerStore';
 // (pure JS, no Node built-ins), so this adds nothing to module-init that
 // Obsidian Mobile's require() interceptor would return null for.
 // See test/unit/bundle-safety.test.ts.
-import { mcpRegistrationSchema } from './mcpServerStore';
+import { mcpRegistrationSchema, listMcpServers, deleteMcpServer, findUnresolvedPlaceholders } from './mcpServerStore';
 import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
+import type { OAuthMcpPreset } from './oauthMcpPresets';
 import { classifyScheduledItems, describeScheduledExecution, formatNextOccurrence } from './scheduledWorkView';
 import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
 import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
@@ -41,6 +42,101 @@ const AGENT_VIEW_TYPE = 'claude-threads:agents';
 function formatOAuthDuration(ms: number): string {
   const totalMinutes = Math.max(0, Math.round(ms / 60_000));
   return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
+}
+
+/**
+ * The one place an OAuth MCP connection is attempted from the settings UI: the
+ * Add MCP server modal and the Quick connect rows both go through it, so they
+ * validate against the shared schema and call `OAuthMcpRegistry.registerServer()`
+ * identically. The typed secret is passed separately because
+ * `mcpRegistrationSchema` rejects literal secrets (it is for the agent tool
+ * path, whose arguments are logged); the registry puts it in the OS keychain.
+ */
+export async function connectOAuthMcpServer(
+  registry: NonNullable<ClaudeThreadsPlugin['oauthMcpRegistry']>,
+  entry: { name: string; url: string; scopes?: string; tools?: { allow?: string[]; deny?: string[] }; clientId?: string; authorizationServerUrl?: string; redirectUri?: string; grantType?: 'client_credentials'; audience?: string },
+  clientSecret?: string,
+): Promise<{ success: boolean; message: string }> {
+  const parsed = mcpRegistrationSchema.safeParse({ ...entry, type: 'oauth' });
+  if (!parsed.success) return { success: false, message: parsed.error.issues[0]?.message ?? 'Invalid OAuth MCP configuration.' };
+  try {
+    return await registry.registerServer({
+      name: entry.name,
+      url: entry.url,
+      scopes: entry.scopes,
+      tools: entry.tools,
+      clientId: entry.clientId,
+      ...(clientSecret ? { clientSecret } : {}),
+      authorizationServerUrl: entry.authorizationServerUrl,
+      redirectUri: entry.redirectUri,
+      grantType: entry.grantType,
+      audience: entry.audience,
+    });
+  } catch (err) {
+    return { success: false, message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Asks for the credentials a no-DCR preset cannot connect without, then hands
+ * them to `onConnect`. Stays open on failure so a typo does not cost the user
+ * the note and setup link.
+ */
+export class OAuthPresetCredentialsModal extends Modal {
+  constructor(
+    app: App,
+    private preset: OAuthMcpPreset,
+    private onConnect: (credentials: { clientId: string; clientSecret?: string }) => Promise<{ success: boolean; message: string }>,
+  ) { super(app); }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl('h2', { text: `Connect ${this.preset.label}` });
+    const note = contentEl.createEl('p', { cls: 'ct-modal-desc' });
+    if (this.preset.notes) note.createEl('span', { text: this.preset.notes + ' ' });
+    if (this.preset.setupUrl) note.createEl('a', { text: 'Create the app', href: this.preset.setupUrl });
+
+    contentEl.createEl('label', { text: 'Client ID (required)', cls: 'ct-modal-label' });
+    const clientIdInput = contentEl.createEl('input', { type: 'text', cls: 'ct-modal-input' });
+    let secretInput: HTMLInputElement | undefined;
+    if (this.preset.requiresClientSecret) {
+      contentEl.createEl('label', { text: 'Client secret (stored in the OS keychain)', cls: 'ct-modal-label' });
+      secretInput = contentEl.createEl('input', { type: 'password', cls: 'ct-modal-input' });
+      secretInput.autocomplete = 'off';
+    }
+    const errorEl = contentEl.createEl('p', { cls: 'ct-modal-error' });
+    errorEl.style.display = 'none';
+    const row = contentEl.createDiv('ct-modal-button-row');
+    const cancelBtn = row.createEl('button', { text: 'Cancel' });
+    cancelBtn.addEventListener('click', () => this.close());
+    const connectBtn = row.createEl('button', { text: 'Connect', cls: 'mod-cta' });
+
+    let connecting = false;
+    const submit = async () => {
+      if (connecting) return;
+      const clientId = clientIdInput.value.trim();
+      const clientSecret = secretInput?.value;
+      const fail = (msg: string) => { errorEl.textContent = msg; errorEl.style.display = ''; };
+      errorEl.style.display = 'none';
+      if (!clientId) { fail('Client ID is required.'); return; }
+      if (this.preset.requiresClientSecret && !clientSecret) { fail('Client secret is required.'); return; }
+      connecting = true;
+      connectBtn.setAttribute('disabled', 'true');
+      connectBtn.textContent = 'Connecting…';
+      const result = await this.onConnect({ clientId, ...(clientSecret ? { clientSecret } : {}) });
+      connecting = false;
+      connectBtn.removeAttribute('disabled');
+      connectBtn.textContent = 'Connect';
+      if (!result.success) { fail(result.message || 'Could not connect this OAuth MCP server.'); return; }
+      this.close();
+    };
+    connectBtn.addEventListener('click', () => { void submit(); });
+    clientIdInput.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Enter') void submit(); });
+    setTimeout(() => clientIdInput.focus(), 50);
+  }
+
+  onClose(): void { this.contentEl.empty(); }
 }
 
 /** Status dot color + human-readable label for one OAuth MCP server row. */
@@ -650,6 +746,7 @@ class AddSkillSourceModal extends Modal {
       cls: 'ct-modal-input',
     });
 
+
     const errorEl = el.createEl('p', { cls: 'ct-modal-error' });
     errorEl.style.display = 'none';
 
@@ -1043,11 +1140,6 @@ export class McpServerModal extends Modal {
         'in the OS keychain, never in this plugin\'s data.json.',
     });
 
-    // Populated further down, once the inputs a preset fills exist.
-    const presetRowEl = el.createDiv({ cls: 'ct-modal-type-row ct-modal-preset-row', attr: { role: 'group', 'aria-label': 'Presets' } });
-    const presetNoteEl = el.createEl('p', { cls: 'ct-modal-desc' });
-    presetNoteEl.style.display = 'none';
-
     el.createEl('label', { text: 'Name', cls: 'ct-modal-label' });
     const nameInput = el.createEl('input', { type: 'text', placeholder: 'vercel', cls: 'ct-modal-input' });
 
@@ -1136,49 +1228,6 @@ export class McpServerModal extends Modal {
     };
     grantSelect.addEventListener('change', applyGrantVisibility);
     applyGrantVisibility();
-
-    /**
-     * Prefill the form from a preset. This only fills inputs — it never submits;
-     * the user still clicks Connect, and the entry is validated like a typed one.
-     * Fields a preset does not define are reset so a previous preset's client
-     * credentials cannot leak into the next one. Presets are all
-     * authorization-code servers, so the grant is reset too.
-     */
-    const presetButtons = new Map<string, HTMLElement>();
-    for (const preset of OAUTH_MCP_PRESETS) {
-      const btn = presetRowEl.createEl('button', {
-        cls: 'ct-modal-type-btn',
-        text: preset.label,
-        attr: { 'aria-pressed': 'false' },
-      });
-      presetButtons.set(preset.id, btn);
-      btn.addEventListener('click', () => {
-        grantSelect.value = 'authorization_code';
-        applyGrantVisibility();
-        nameInput.value = preset.name;
-        urlInput.value = preset.url;
-        scopesInput.value = preset.scopes ?? '';
-        clientIdInput.value = preset.clientId ?? '';
-        clientSecretInput.value = '';
-        redirectUriInput.value = preset.redirectUri ?? '';
-        asUrlInput.value = '';
-        audienceInput.value = '';
-        if (preset.requiresClientId || preset.redirectUri) advanced.open = true;
-        for (const [id, other] of presetButtons) {
-          const active = id === preset.id;
-          other.toggleClass('ct-modal-type-btn--active', active);
-          other.setAttribute('aria-pressed', String(active));
-        }
-        presetNoteEl.empty();
-        if (preset.notes) presetNoteEl.createEl('span', { text: preset.notes + ' ' });
-        if (preset.setupUrl) {
-          presetNoteEl.createEl('a', { text: 'Create the app', href: preset.setupUrl });
-        }
-        presetNoteEl.style.display = preset.notes || preset.setupUrl ? '' : 'none';
-        if (preset.requiresClientId) clientIdInput.focus();
-      });
-    }
-
     const errorEl = el.createEl('p', { cls: 'ct-modal-error' });
     errorEl.style.display = 'none';
     const statusEl = el.createEl('p', { cls: 'ct-modal-desc' });
@@ -1248,24 +1297,8 @@ export class McpServerModal extends Modal {
         : 'Waiting for you to finish signing in…';
       statusEl.style.display = '';
 
-      let result: { success: boolean; message: string };
-      try {
-        result = await registry.registerServer({
-          name: entry.name,
-          url: entry.url,
-          scopes: entry.scopes,
-          tools: entry.tools,
-          clientId: entry.clientId,
-          // Read here rather than from `entry` — see the input's declaration.
-          ...(clientSecretInput.value ? { clientSecret: clientSecretInput.value } : {}),
-          authorizationServerUrl: entry.authorizationServerUrl,
-          redirectUri: entry.redirectUri,
-          grantType: entry.grantType,
-          audience: entry.audience,
-        });
-      } catch (err) {
-        result = { success: false, message: err instanceof Error ? err.message : String(err) };
-      }
+      // Read the secret here rather than from `entry` — see the input's declaration.
+      const result = await connectOAuthMcpServer(registry, entry, clientSecretInput.value || undefined);
 
       connecting = false;
       statusEl.style.display = 'none';
@@ -3100,10 +3133,6 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   // ── MCP ─────────────────────────────────────────────────────────────────
 
   private renderMcpTab(containerEl: HTMLElement): void {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { listMcpServers, deleteMcpServer, findUnresolvedPlaceholders } =
-      require('./mcpServerStore') as typeof import('./mcpServerStore');
-
     containerEl.createEl('h2', { text: 'MCP Servers' });
     containerEl.createEl('h3', { text: 'Google Workspace' });
     const googleStatus = containerEl.createEl('p', {
@@ -3124,6 +3153,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           googleStatus.setText(this.plugin.googleWorkspaceMcp?.status() ?? 'Google Workspace requires desktop Google Docs Sync with a connected account.');
         }));
     }
+    containerEl.createEl('h3', { text: 'Quick connect' });
+    containerEl.createEl('p', {
+      cls: 'setting-item-description',
+      text: 'One-click sign-in for well-known remote MCP servers. Each opens the provider\'s consent screen in the Web Viewer; tokens are kept in the OS keychain.',
+    });
+    const quickConnectEl = containerEl.createDiv({ cls: 'ct-oauth-mcp-presets-list' });
     containerEl.createEl('h3', { text: 'OAuth MCP servers' });
     containerEl.createEl('p', {
       cls: 'setting-item-description',
@@ -3155,12 +3190,65 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           btn.setButtonText('Disconnect').setWarning().onClick(async () => {
             await this.plugin.oauthMcpRegistry?.disconnect(name);
             new Notice(`Disconnected "${name}".`);
-            renderOAuthList();
+            refreshOAuth();
           }),
         );
       }
     };
-    renderOAuthList();
+    const runPresetConnect = async (preset: OAuthMcpPreset, credentials?: { clientId: string; clientSecret?: string }) => {
+      const registry = this.plugin.oauthMcpRegistry;
+      if (!registry) return { success: false, message: 'OAuth MCP registration is unavailable in this context.' };
+      const result = await connectOAuthMcpServer(registry, {
+        name: preset.name,
+        url: preset.url,
+        ...(preset.scopes ? { scopes: preset.scopes } : {}),
+        ...(preset.redirectUri ? { redirectUri: preset.redirectUri } : {}),
+        ...(credentials?.clientId ? { clientId: credentials.clientId } : preset.clientId ? { clientId: preset.clientId } : {}),
+      }, credentials?.clientSecret);
+      if (result.success) new Notice(`Connected OAuth MCP server "${preset.name}".`);
+      else new Notice(result.message || 'Could not connect this OAuth MCP server.');
+      return result;
+    };
+    const renderQuickConnect = () => {
+      quickConnectEl.empty();
+      for (const preset of OAUTH_MCP_PRESETS) {
+        const connected = (this.plugin.settings.oauthMcpServers ?? {})[preset.name] !== undefined;
+        const row = new Setting(quickConnectEl).setName(preset.label).setDesc(preset.url);
+        if (connected) {
+          const { label, tone } = describeOAuthMcpStatus(this.plugin.oauthMcpRegistry?.status(preset.name));
+          row.nameEl.createEl('span', { cls: `ct-oauth-status-dot ct-oauth-status-dot--${tone}` });
+          row.nameEl.createEl('span', { cls: 'ct-oauth-status-label', text: label });
+        } else if (preset.requiresClientId || preset.requiresClientSecret) {
+          row.descEl.createEl('br');
+          row.descEl.createEl('span', { text: 'Needs your own Client ID' + (preset.requiresClientSecret ? ' and secret.' : '.') });
+        }
+        row.addButton((btn) => {
+          if (connected) {
+            btn.setButtonText('Disconnect').setWarning().onClick(async () => {
+              await this.plugin.oauthMcpRegistry?.disconnect(preset.name);
+              new Notice(`Disconnected "${preset.name}".`);
+              refreshOAuth();
+            });
+            return;
+          }
+          btn.setButtonText('Connect').onClick(async () => {
+            if (preset.requiresClientId || preset.requiresClientSecret) {
+              new OAuthPresetCredentialsModal(this.app, preset, async (credentials) => {
+                const result = await runPresetConnect(preset, credentials);
+                if (result.success) refreshOAuth();
+                return result;
+              }).open();
+              return;
+            }
+            btn.setDisabled(true).setButtonText('Connecting…');
+            const result = await runPresetConnect(preset);
+            if (result.success) refreshOAuth(); else btn.setDisabled(false).setButtonText('Connect');
+          });
+        });
+      }
+    };
+    const refreshOAuth = () => { renderQuickConnect(); renderOAuthList(); };
+    refreshOAuth();
 
     containerEl.createEl('h3', { text: 'Custom MCP servers' });
     containerEl.createEl('p', {
