@@ -29,6 +29,7 @@ import {
   type ResolvedClaudeVmRouting,
 } from './harnessVmRouting';
 import { runnerEnv as hostRunnerEnv, VM_BINARY } from './sandboxVm';
+import { rewritePluginsForGuest } from './skillMounts';
 import {
   isTransportClosedError,
   shouldAutoRetryTransportError,
@@ -444,7 +445,19 @@ export class ThreadSession {
     if (claude?.sessionOptions?.agentProgressSummaries !== undefined) sdkOptions.agentProgressSummaries = claude.sessionOptions.agentProgressSummaries;
     if (claude?.sessionOptions?.betas?.length) sdkOptions.betas = claude.sessionOptions.betas;
     if (claude?.sessionOptions?.persistSession === false) sdkOptions.persistSession = false;
-    if (claude?.sessionOptions?.plugins?.length) sdkOptions.plugins = claude.sessionOptions.plugins;
+    if (claude?.sessionOptions?.plugins?.length) {
+      // A containerized CLI cannot see host paths, so VM-routed sessions get
+      // guest paths (and lose plugins that are not mounted). Host-local
+      // sessions keep the host paths untouched.
+      const plugins = vmRouting && claude.vm?.skillMountPlan
+        ? rewritePluginsForGuest(
+            claude.sessionOptions.plugins as Array<{ type: 'local'; path: string }>,
+            claude.vm.skillMountPlan,
+            vmRouting.mountedExtra,
+          )
+        : claude.sessionOptions.plugins;
+      if (plugins.length) sdkOptions.plugins = plugins;
+    }
     if (claude?.sessionOptions?.agents && Object.keys(claude.sessionOptions.agents).length > 0) {
       sdkOptions.agents = { ...sdkOptions.agents, ...claude.sessionOptions.agents };
     }

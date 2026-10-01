@@ -38,6 +38,7 @@
  */
 
 import { managedRuntimeBinDirIfPresent, parseSystemStatus } from './sandboxRuntime';
+import { mountSignature, parseMountSignature, type VmExtraMount } from './skillMounts';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -286,21 +287,49 @@ export function networkArgsFor(network: VmNetworkMode): string[] {
   return [];
 }
 
+/** Container labels recording how a harness container was built, so a later session can compare. */
+export const LABEL_HARNESS_ORIGIN = 'claude-threads.origin';
+export const LABEL_EXTRA_MOUNTS = 'claude-threads.mounts';
+
+/** `--volume host:guest:ro` flags for extra mounts: deduped by guest path, always read-only, validated. */
+function extraMountArgs(extraMounts: readonly VmExtraMount[] | undefined): string[] {
+  const seen = new Set<string>();
+  const args: string[] = [];
+  for (const m of extraMounts ?? []) {
+    if (m.hostPath.includes(':') || m.guestPath.includes(':')) {
+      throw new Error('Extra mount paths cannot contain a colon (the container volume delimiter).');
+    }
+    if (!m.hostPath.startsWith('/') || !m.guestPath.startsWith('/')) {
+      throw new Error('Extra mount paths must be absolute.');
+    }
+    if (seen.has(m.guestPath)) continue;
+    seen.add(m.guestPath);
+    args.push('--volume', `${m.hostPath}:${m.guestPath}:ro`);
+  }
+  return args;
+}
+
 export function buildRunArgs(opts: {
   containerName: string;
   image: string;
   mountPath: string;
   network: VmNetworkMode;
   workdir?: string;
+  /** Additional READ-ONLY bind mounts (e.g. skills). Fixed for the container's lifetime. */
+  extraMounts?: readonly VmExtraMount[];
+  labels?: Record<string, string>;
 }): string[] {
   if (opts.mountPath.includes(':')) throw new Error('mountPath cannot contain a colon (the container volume delimiter).');
   if (!opts.image.trim() || opts.image.startsWith('-')) throw new Error('Invalid container image reference.');
   const workdir = opts.workdir ?? VM_WORKDIR;
+  const labelArgs = Object.entries(opts.labels ?? {}).flatMap(([k, v]) => ['--label', `${k}=${v}`]);
   return [
     'run',
     '--detach',
     '--name', opts.containerName,
     '--volume', `${opts.mountPath}:${workdir}`,
+    ...extraMountArgs(opts.extraMounts),
+    ...labelArgs,
     '--workdir', workdir,
     ...networkArgsFor(opts.network),
     opts.image,
@@ -414,6 +443,22 @@ export interface SandboxVmState {
    * container the harness process is still attached to — see `exit()`.
    */
   origin: 'agent' | 'harness';
+  /** Extra read-only mounts this container was created with (harness containers only). */
+  extraMounts?: VmExtraMount[];
+}
+
+/** Labels from `container inspect` JSON, or null when the shape is not recognised. */
+export function parseContainerLabels(stdout: string): Record<string, string> | null {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    const entry = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | undefined;
+    const labels = (entry?.configuration as Record<string, unknown> | undefined)?.labels
+      ?? entry?.labels ?? (entry?.Config as Record<string, unknown> | undefined)?.Labels;
+    if (!labels || typeof labels !== 'object') return null;
+    return Object.fromEntries(Object.entries(labels).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -433,7 +478,11 @@ export interface VmHooks {
 }
 
 export type EnterVmResult =
-  | { success: true; containerName: string; image: string; mountedFrom: string; network: VmNetworkMode; notes?: string[] }
+  | {
+    success: true; containerName: string; image: string; mountedFrom: string; network: VmNetworkMode; notes?: string[];
+    /** Read-only extra mounts the container actually has (omitted when none/unknown). */
+    extraMounts?: VmExtraMount[];
+  }
   | { success: false; error: string };
 
 export type VmExecResult =
@@ -671,9 +720,34 @@ export class SandboxVmManager {
     image: string;
     mountPath: string;
     network: VmNetworkMode;
+    /**
+     * Read-only extra mounts (skills). Mounts are fixed at `container run`, so
+     * they only take effect when THIS call creates the container. Policy when
+     * a container already exists with a different mount set:
+     *   - tracked by this manager (a session may be live in it) -> keep it,
+     *     report the mounts it really has; callers must not assume the request
+     *     was honoured. Never disrupts a running session.
+     *   - untracked (fresh start / plugin reload, so no live harness process
+     *     of ours is inside it) AND labelled harness-owned -> remove and
+     *     recreate with the requested mounts. Nothing agent-authored lives
+     *     there except what a prior vm_exec wrote into the guest filesystem.
+     *   - untracked and NOT labelled harness-owned (legacy container, or one
+     *     an agent's enter_vm created) -> keep it, mounts unknown/unchanged.
+     */
+    extraMounts?: readonly VmExtraMount[];
   }): Promise<EnterVmResult> {
     try {
       const containerName = this.deps.containerName();
+      const wanted = [...(params.extraMounts ?? [])];
+      const wantedSignature = mountSignature(wanted);
+      const attached = (state: SandboxVmState): EnterVmResult => ({
+        success: true,
+        containerName: state.containerName,
+        image: state.image,
+        mountedFrom: state.mountedFrom,
+        network: state.network,
+        ...(state.extraMounts?.length ? { extraMounts: state.extraMounts } : {}),
+      });
 
       if (this.active) {
         // Already tracked — whether from a prior ensureHarnessContainer call
@@ -681,32 +755,44 @@ export class SandboxVmManager {
         // way the container is shared per thread; just mark it harness-owned
         // going forward so exit_vm stops short of removing it.
         this.active = { ...this.active, origin: 'harness' };
-        return {
-          success: true,
-          containerName: this.active.containerName,
-          image: this.active.image,
-          mountedFrom: this.active.mountedFrom,
-          network: this.active.network,
-        };
+        return attached(this.active);
       }
 
       const probe = await this.probe();
       if (!probe.available) return { success: false, error: probe.error ?? VM_UNAVAILABLE_HINT };
 
-      if (await this.containerExists(containerName)) {
-        // Still running from an earlier session/plugin reload — adopt it.
-        // The harness PROCESS inside it does not survive a reload the way
-        // the container does (its stdio pipes were held by the now-gone host
-        // process), so the caller re-execs; this call only needs the
-        // container itself, which is already there.
-        this.active = { containerName, image: params.image, mountedFrom: params.mountPath, network: params.network, origin: 'harness' };
-        return {
-          success: true,
-          containerName: this.active.containerName,
-          image: this.active.image,
-          mountedFrom: this.active.mountedFrom,
-          network: this.active.network,
-        };
+      const inspected = await this.exec(buildInspectArgs(containerName));
+      if (inspected.exitCode === 0) {
+        const labels = parseContainerLabels(inspected.stdout);
+        const existingSignature = labels?.[LABEL_EXTRA_MOUNTS] ?? '';
+        const harnessOwned = labels?.[LABEL_HARNESS_ORIGIN] === 'harness';
+        if (harnessOwned && existingSignature !== wantedSignature) {
+          // Stale mount set on a container only the harness uses: recreate.
+          if (this.deps.hooks?.afterExit) {
+            try { await this.deps.hooks.afterExit(this.hookContext(containerName)); } catch { /* best effort */ }
+          }
+          await this.exec(buildStopArgs(containerName));
+          const removed = await this.exec(buildRemoveArgs({ containerName, force: true }));
+          if (removed.exitCode !== 0) {
+            return {
+              success: false,
+              error: `Failed to replace ${containerName} to update its skill mounts: ${firstLine(removed.stderr) || `exit code ${removed.exitCode}`}`,
+            };
+          }
+          // fall through to a fresh `container run` below
+        } else {
+          // Still running from an earlier session/plugin reload — adopt it.
+          // The harness PROCESS inside it does not survive a reload the way
+          // the container does (its stdio pipes were held by the now-gone host
+          // process), so the caller re-execs; this call only needs the
+          // container itself, which is already there.
+          const mounted = labels ? (parseMountSignature(existingSignature) ?? []) : [];
+          this.active = {
+            containerName, image: params.image, mountedFrom: params.mountPath, network: params.network,
+            origin: 'harness', ...(mounted.length ? { extraMounts: mounted } : {}),
+          };
+          return attached(this.active);
+        }
       }
 
       if (params.network === 'internal') {
@@ -715,7 +801,17 @@ export class SandboxVmManager {
       }
 
       const result = await this.exec(
-        buildRunArgs({ containerName, image: params.image, mountPath: params.mountPath, network: params.network }),
+        buildRunArgs({
+          containerName,
+          image: params.image,
+          mountPath: params.mountPath,
+          network: params.network,
+          extraMounts: wanted,
+          labels: {
+            [LABEL_HARNESS_ORIGIN]: 'harness',
+            ...(wantedSignature ? { [LABEL_EXTRA_MOUNTS]: wantedSignature } : {}),
+          },
+        }),
       );
       if (result.exitCode !== 0) {
         return {
@@ -724,16 +820,12 @@ export class SandboxVmManager {
         };
       }
 
-      this.active = { containerName, image: params.image, mountedFrom: params.mountPath, network: params.network, origin: 'harness' };
-      const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
-      return {
-        success: true,
-        containerName: this.active.containerName,
-        image: this.active.image,
-        mountedFrom: this.active.mountedFrom,
-        network: this.active.network,
-        ...(notes.length ? { notes } : {}),
+      this.active = {
+        containerName, image: params.image, mountedFrom: params.mountPath, network: params.network,
+        origin: 'harness', ...(wanted.length ? { extraMounts: wanted } : {}),
       };
+      const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
+      return { ...attached(this.active), ...(notes.length ? { notes } : {}) };
     } catch (err) {
       return { success: false, error: errorMessage(err) };
     }
