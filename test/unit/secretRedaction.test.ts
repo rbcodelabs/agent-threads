@@ -116,3 +116,14 @@ describe('RawLogWriter integration', () => {
     }
   });
 });
+
+describe('PEM redaction performance', () => {
+  it('stays fast on many unterminated BEGIN headers and still masks a full key', () => {
+    const hostile = '-----BEGIN PRIVATE KEY-----'.repeat(20000);
+    const t = Date.now();
+    redactSecrets(hostile);
+    expect(Date.now() - t).toBeLessThan(1000);
+    const key = '-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy\n-----END RSA PRIVATE KEY-----';
+    expect(redactSecrets(`k=${key} after`)).not.toContain('MIIBOg');
+  });
+});

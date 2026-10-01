@@ -36,7 +36,7 @@ const SHAPE_PATTERNS: RegExp[] = [
   // JSON web tokens
   /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
   // PEM private key blocks
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[^-]*(?:-----END [A-Z ]*PRIVATE KEY-----)?/g,
 ];
 
 // `Authorization: Bearer xyz`, `Bearer xyz`, `Authorization: Basic xyz`
