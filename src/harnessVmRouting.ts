@@ -11,6 +11,7 @@
 import type { SandboxVmManager } from './sandboxVm';
 import { buildHarnessExecArgs, VM_WORKDIR } from './sandboxVm';
 import type { HarnessVmMode } from './types';
+import type { SkillMountPlan, VmExtraMount } from './skillMounts';
 
 /**
  * Image built from `sandbox/Dockerfile.harness`. Distinct from
@@ -108,6 +109,12 @@ export interface ClaudeVmRoutingInputs {
   /** Host directory to bind-mount at /work — normally the thread's own cwd. */
   mountPath: string;
   containerBinaryPath?: string;
+  /**
+   * Skill mounts to give the container at creation (read-only; see
+   * `planSkillMounts`). Both this and the sign-in path build the same inputs,
+   * so whichever starts the container first creates it with the right mounts.
+   */
+  skillMountPlan?: SkillMountPlan;
   /** Test-only overrides forwarded to checkHarnessVmCapability; production callers omit these and get the real process.platform/arch. */
   platform?: string;
   arch?: string;
@@ -116,6 +123,8 @@ export interface ClaudeVmRoutingInputs {
 export interface ResolvedClaudeVmRouting {
   containerName: string;
   containerBinaryPath: string;
+  /** Extra read-only mounts the container really has (may differ from the request when an older container was kept). */
+  mountedExtra: VmExtraMount[];
 }
 
 /**
@@ -157,6 +166,7 @@ export async function resolveClaudeVmRouting(
     image: inputs.image,
     mountPath: inputs.mountPath,
     network: 'default',
+    extraMounts: inputs.skillMountPlan?.mounts,
   });
   if (!entered.success) {
     if (inputs.mode === 'always') {
@@ -171,6 +181,7 @@ export async function resolveClaudeVmRouting(
     routing: {
       containerName: entered.containerName,
       containerBinaryPath: inputs.containerBinaryPath ?? CLAUDE_CONTAINER_BINARY_PATH,
+      mountedExtra: entered.extraMounts ?? [],
     },
   };
 }

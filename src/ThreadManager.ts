@@ -16,6 +16,7 @@ import { legacyWorktreeRoot, resolveWorktreeRoot } from './worktreePaths';
 import { debugLog } from './logger';
 import { codexSkillRoots, buildSkillPlugins } from './skillManager';
 import { pluginSkillsRootFrom } from './skillPaths';
+import { nodeMountFs, planSkillMounts, type SkillMountPlan } from './skillMounts';
 import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
 import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
@@ -2091,11 +2092,24 @@ export class ThreadManager {
     const mode = this.settings.harnessVmMode ?? 'auto';
     if (mode === 'never') return undefined;
     if ((thread.agentHarness ?? 'claude') !== 'claude') return undefined;
+    // Skills live at host paths the container cannot see; plan read-only
+    // mounts for them (and ~/.claude/skills|agents). Planning only reads the
+    // filesystem — failure must never block the session, so it degrades to
+    // "no skills in the VM" rather than throwing.
+    let skillMountPlan: SkillMountPlan | undefined;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const os = require('os') as typeof import('os');
+      skillMountPlan = planSkillMounts({ plugins: this.buildHostSkillPlugins(), homeDir: os.homedir(), fs: nodeMountFs() });
+    } catch (err) {
+      console.warn('[ClaudeThreads] Could not plan skill mounts for the sandbox VM:', err);
+    }
     return {
       mode,
       image: this.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE,
       vmManager: this.getSandboxVmManager(threadId),
       mountPath: thread.cwd,
+      skillMountPlan,
     };
   }
 
@@ -2859,6 +2873,24 @@ export class ThreadManager {
     thread.updatedAt = Date.now();
   }
 
+  /** Skill plugins as HOST paths. VM-routed sessions map these to guest mounts (see skillMounts.ts). */
+  private buildHostSkillPlugins(): Array<{ type: 'local'; path: string }> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require('path') as typeof import('path');
+    return buildSkillPlugins({
+      localSkillsRoot: this.localSkillsRoot(),
+      skillSources: this.settings.skillSources ?? [],
+      pluginSkillsRoot: pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
+      // Bundled thread-orchestrator skill — ships inside the plugin's own
+      // dist/ (copied there by esbuild.config.mjs from resources/skills/),
+      // so it is discoverable in every session. Registered unconditionally,
+      // not gated by any setting.
+      bundledSkillPath: this.pluginResourceDir
+        ? path.join(this.pluginResourceDir, 'resources', 'skills', 'thread-orchestrator')
+        : undefined,
+    });
+  }
+
   /** Build the sessionOptions object from plugin settings (and thread-level overrides). */
   private buildSessionOptions(
     thread: Thread,
@@ -2913,21 +2945,7 @@ export class ThreadManager {
     // directory rather than a plugin root. That is wrong: verified against the
     // real `claude` CLI, the root form registers fine and yields better names.)
     {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const path = require('path') as typeof import('path');
-      const plugins = buildSkillPlugins({
-        localSkillsRoot: this.localSkillsRoot(),
-        skillSources: s.skillSources ?? [],
-        pluginSkillsRoot: pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
-        // Bundled thread-orchestrator skill — ships inside the plugin's own
-        // dist/ (copied there by esbuild.config.mjs from resources/skills/),
-        // so it is discoverable in every session. Registered unconditionally,
-        // not gated by any setting.
-        bundledSkillPath: this.pluginResourceDir
-          ? path.join(this.pluginResourceDir, 'resources', 'skills', 'thread-orchestrator')
-          : undefined,
-      });
-
+      const plugins = this.buildHostSkillPlugins();
       if (plugins.length > 0) opts.plugins = plugins;
     }
 

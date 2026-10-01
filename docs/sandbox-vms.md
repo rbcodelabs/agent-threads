@@ -144,6 +144,44 @@ latency every turn).
 A mode change or a freshly-built image takes effect on a thread's *next* fresh
 session start (harness switch, restart, or new thread) — never mid-session.
 
+### Skills in a VM-routed Claude session
+
+Skill plugins are host directories, and the containerized CLI only sees the
+thread folder at `/work`. So when a session is VM-routed the plugin bind-mounts
+the skill directories into the container **read-only** and rewrites the
+session's plugin paths to the guest paths (`src/skillMounts.ts`; a host-local
+session is untouched):
+
+| Host | Guest |
+| --- | --- |
+| each skill plugin root (configured sources, vault skills, bundled skills) | `/skills/<name>-<hash of real path>` (deterministic, so a resumed session sees the same paths) |
+| `~/.claude/skills` | `/home/node/.claude/skills` (the CLI reads this from `$HOME`) |
+| `~/.claude/agents` | `/home/node/.claude/agents` |
+| symlink targets that point outside a mounted skills root (e.g. `~/.claude/skills/x -> ../../.agents/skills/x`) | where the link resolves inside the guest, limited to `/skills`, `/home/node` and the host home path |
+
+Paths are resolved with `realpath` before mounting, deduped, and skipped when
+missing or when they contain `:`. Mounts are `--volume host:guest:ro`; the
+plugin never writes into `~/.claude`. Because `vm_exec` shares the container,
+**the agent can read these mounts** (skills may contain instructions or
+scripts you consider private).
+
+Mounts are fixed when `container run` executes, so the container records its
+mount set in a label (`claude-threads.mounts`, plus `claude-threads.origin`).
+When a fresh session finds an existing container:
+
+- Mount set matches: reused.
+- Differs, container is harness-owned, and this plugin instance has no session
+  attached (fresh start or plugin reload): the container is **recreated** with
+  the new mounts. Files an agent wrote inside the guest filesystem (outside
+  `/work`) are lost; `/work` is a bind mount and unaffected.
+- Differs but this plugin instance already attached to it (a session may be
+  live), or the container is not labelled harness-owned (created by an older
+  version, or by `enter_vm`): it is **kept** — a running session is never
+  disrupted. Plugins whose guest path is not mounted are dropped from that
+  session instead of pointing at nothing. Skills added after the container
+  started therefore appear after the next plugin reload (or thread
+  delete/archive).
+
 ### MCP servers in a VM-routed Claude session
 
 Agent Threads' OAuth MCP registrations and Google Workspace MCP services remain

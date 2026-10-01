@@ -57,6 +57,17 @@ describe('ThreadManager — ADR-0015 Claude VM routing inputs', () => {
     expect(fake.lastOptions?.claude?.vm).toMatchObject({ mode: 'auto', image: 'claude-threads-harness:1' });
   });
 
+  it('attaches a skill mount plan to claude.vm, and every mount is a distinct guest path', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.loadThreads([thread({ agentHarness: 'claude' })]);
+    await manager.sendMessage('t1', 'hi');
+
+    const plan = fake.lastOptions?.claude?.vm?.skillMountPlan;
+    expect(plan).toBeDefined();
+    const guests = plan!.mounts.map((m) => m.guestPath);
+    expect(new Set(guests).size).toBe(guests.length);
+  });
+
   it('omits claude.vm entirely when harnessVmMode is "never" — zero behavior change', async () => {
     const manager = new ThreadManager({ ...DEFAULT_SETTINGS, harnessVmMode: 'never' });
     manager.loadThreads([thread({ agentHarness: 'claude' })]);
