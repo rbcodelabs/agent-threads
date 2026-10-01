@@ -98,7 +98,7 @@ describe('checked-in consumer declaration', () => {
   });
 
   it('still declares the mcp namespace that once drifted out of it', () => {
-    expect(declaredSurface().mcp).toEqual(['register', 'requestSecret']);
+    expect(declaredSurface().mcp).toEqual(['listPresets', 'register', 'registerPreset', 'requestSecret']);
     expect(declaredSurface().extensions).toEqual(['registerAgentTool', 'registerArtifactProvider', 'registerMessageContentProvider', 'registerSlashCommand']);
   });
 

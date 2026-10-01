@@ -2367,7 +2367,7 @@ test.describe('Agent Threads UI', () => {
     // The OAuth arm collects its own field set — no command/args/env or headers.
     await expect(page.getByPlaceholder('https://mcp.vercel.com/')).toBeVisible();
     await expect(page.getByPlaceholder('openid profile email')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
+    await expect(page.locator('.ct-modal-button-row').getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
     await shot(page, 'settings-mcp-add-oauth.png', { fullPage: true });
   });
 
