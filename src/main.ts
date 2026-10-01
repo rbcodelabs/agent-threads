@@ -580,6 +580,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.scheduleGithubSourceClonePass();
 
     this.manager = new ThreadManager(this.settings);
+    this.manager.startHarnessVmIdleReaper();
     this.manager.getExternalMounts = () => this.listExternalMountRoots();
     this.contextPanel = new ContextPanelController(this.app, () =>
       this.app.workspace.getLeavesOfType(VIEW_TYPE)[0] ?? null,

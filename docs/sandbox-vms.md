@@ -81,7 +81,12 @@ does not change an existing mount: exit and enter again to switch workspaces.
 
 An agent-owned VM that sees no `vm_exec` for 10 minutes is stopped (not removed) to
 reclaim guest memory; its filesystem and mount are kept, and the next `vm_exec`
-restarts it automatically. VMs that host a thread's harness are never idle-stopped.
+restarts it automatically. A VM that hosts a thread's harness is stopped after 15 minutes with no turn,
+pending prompt or background task: the idle session is closed first, then the
+container is stopped. The thread's next message restarts the container and
+resumes the conversation, with about a second of extra latency. Stopping a VM
+ends any processes still running in it (for example a dev server started with
+`vm_exec`); files are kept.
 
 ### Opening a server running in the VM from the host browser
 

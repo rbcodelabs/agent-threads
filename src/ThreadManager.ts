@@ -148,6 +148,10 @@ function payloadsEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+/** How long a harness VM may sit with no session activity before it is stopped to reclaim RAM. */
+export const HARNESS_VM_IDLE_STOP_MS = 15 * 60 * 1000;
+const HARNESS_VM_REAP_INTERVAL_MS = 60 * 1000;
+
 export class ThreadManager {
   private threads: Map<string, Thread> = new Map();
   private agentRuns = new AgentRunStore();
@@ -351,6 +355,9 @@ export class ThreadManager {
    * interval, which is inherently racy on a loaded machine.
    */
   artifactCleanupSettled: Promise<void> = Promise.resolve();
+
+  /** Interval handle for {@link reapIdleHarnessVms}; created lazily, cleared in destroy(). */
+  private harnessVmReapTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(settings: PluginSettings) {
     this.settings = settings;
@@ -1486,6 +1493,48 @@ export class ThreadManager {
       && !this.pendingQuestionResolvers.has(threadId)
       && !this.pendingPlanResolvers.has(threadId)
       && !this.hasActiveBackgroundTasks(threadId);
+  }
+
+  /**
+   * Starts the periodic sweep that frees guest RAM held by idle harness VMs.
+   * Safe to call more than once. Desktop-only callers (the plugin) opt in;
+   * tests drive {@link reapIdleHarnessVms} directly.
+   */
+  startHarnessVmIdleReaper(): void {
+    if (this.harnessVmReapTimer) return;
+    const timer = setInterval(() => { void this.reapIdleHarnessVms(); }, HARNESS_VM_REAP_INTERVAL_MS);
+    (timer as { unref?: () => void }).unref?.();
+    this.harnessVmReapTimer = timer;
+  }
+
+  /**
+   * For every thread whose harness container has been unused for `idleMs`:
+   * close its (idle, nothing-pending) session so no harness process is left
+   * inside, then stop — never remove — the container. The next send() lazily
+   * builds a new session (resuming the conversation), whose start() restarts
+   * the container via `ensureHarnessContainer`. A thread with a turn in
+   * flight, a pending permission/question/plan, or background tasks is skipped.
+   * Returns the thread IDs whose containers were stopped.
+   */
+  async reapIdleHarnessVms(idleMs: number = HARNESS_VM_IDLE_STOP_MS, now: number = Date.now()): Promise<string[]> {
+    if (idleMs <= 0) return [];
+    const stopped: string[] = [];
+    for (const [threadId, vmManager] of [...this.sandboxVmManagers]) {
+      const info = vmManager.getIdleInfo();
+      if (!info.running || !info.harnessOwned || info.busy) continue;
+      if (now - info.lastUsedAt < idleMs) continue;
+      const sinceActivity = this.msSinceActivity(threadId);
+      if (sinceActivity < idleMs) continue;
+      const session = this.sessions.get(threadId);
+      if (session && !this.isGoalContextRefreshSafe(threadId, session)) continue;
+      if (!session && this.hasActiveBackgroundTasks(threadId)) continue;
+      if (session) {
+        session.close();
+        this.sessions.delete(threadId);
+      }
+      if (await vmManager.stopHarnessForIdle()) stopped.push(threadId);
+    }
+    return stopped;
   }
 
   private scheduleGoalContextProcessing(threadId: string): void {
@@ -3146,6 +3195,8 @@ export class ThreadManager {
   }
 
   destroy(): void {
+    if (this.harnessVmReapTimer) clearInterval(this.harnessVmReapTimer);
+    this.harnessVmReapTimer = null;
     for (const threadId of this.goalContextStates.keys()) this.cancelPendingGoalContext(threadId);
     for (const session of this.sessions.values()) {
       session.close();

@@ -837,3 +837,79 @@ describe('SandboxVmManager — idle stop', () => {
     expect(r2.calls).toHaveLength(0);
   });
 });
+
+describe('SandboxVmManager — harness idle stop', () => {
+  const params = { image: 'img:1', mountPath: '/a', network: 'default' as const };
+  async function harness() {
+    const runner = makeRunner({ ...CLI_OK_NO_CONTAINER });
+    const manager = new SandboxVmManager({ containerName: () => NAME, run: runner.run });
+    await manager.ensureHarnessContainer(params);
+    return { manager, runner };
+  }
+
+  it('never idle-stops on its own timer, but stopHarnessForIdle stops (not removes) it', async () => {
+    const { manager, runner } = await harness();
+    expect(manager.getIdleInfo()).toMatchObject({ running: true, harnessOwned: true, busy: false });
+    expect(await manager.stopHarnessForIdle()).toBe(true);
+    expect(runner.ran('stop', NAME)).toBe(true);
+    expect(runner.ran('rm')).toBe(false);
+    expect(manager.getIdleInfo().running).toBe(false);
+  });
+
+  it('refuses to stop an agent-owned VM', async () => {
+    const runner = makeRunner({ ...CLI_OK_NO_CONTAINER });
+    const manager = new SandboxVmManager({ containerName: () => NAME, run: runner.run });
+    await manager.enter(params);
+    expect(await manager.stopHarnessForIdle()).toBe(false);
+    expect(runner.ran('stop')).toBe(false);
+  });
+
+  it('ensureHarnessContainer restarts a stopped container', async () => {
+    const { manager, runner } = await harness();
+    await manager.stopHarnessForIdle();
+    runner.calls.length = 0;
+    const result = await manager.ensureHarnessContainer(params);
+    expect(result.success).toBe(true);
+    expect(runner.argvs()).toContain(`start ${NAME}`);
+    expect(manager.getIdleInfo().running).toBe(true);
+  });
+
+  it('ensureHarnessContainer fails (no silent success) when the restart fails', async () => {
+    const runner = makeRunner({ ...CLI_OK_NO_CONTAINER, [buildStartArgs(NAME).join(' ')]: { exitCode: 1, stderr: 'boom' } });
+    const manager = new SandboxVmManager({ containerName: () => NAME, run: runner.run });
+    await manager.ensureHarnessContainer(params);
+    await manager.stopHarnessForIdle();
+    const result = await manager.ensureHarnessContainer(params);
+    expect(result.success).toBe(false);
+  });
+
+  it('a concurrent ensureHarnessContainer waits for an in-flight stop, then restarts', async () => {
+    let releaseStop: () => void = () => {};
+    const gate = new Promise<void>((r) => { releaseStop = r; });
+    const order: string[] = [];
+    const base = makeRunner({ ...CLI_OK_NO_CONTAINER });
+    const run: VmCommandRunner = async (args, opts) => {
+      if (args[0] === 'stop') { await gate; }
+      order.push(args[0]);
+      return base.run(args, opts);
+    };
+    const manager = new SandboxVmManager({ containerName: () => NAME, run });
+    await manager.ensureHarnessContainer(params);
+    order.length = 0;
+    const stopP = manager.stopHarnessForIdle();
+    const ensureP = manager.ensureHarnessContainer(params);
+    releaseStop();
+    await Promise.all([stopP, ensureP]);
+    expect(order.indexOf('stop')).toBeLessThan(order.indexOf('start'));
+    expect(manager.getIdleInfo().running).toBe(true);
+  });
+
+  it('adopting an existing container after a reload also tries to start it', async () => {
+    const { manager, runner } = makeManager({
+      '--version': { stdout: 'container CLI version 1.3.1\n' },
+      [buildInspectArgs(NAME).join(' ')]: { exitCode: 0 },
+    });
+    await manager.ensureHarnessContainer(params);
+    expect(runner.argvs()).toContain(`start ${NAME}`);
+  });
+});
