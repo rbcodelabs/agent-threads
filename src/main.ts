@@ -80,7 +80,8 @@ import {
   type PersistenceWriterToken,
 } from './PersistenceWriterFence';
 import { mergeDisallowedTools, withCreatorToolRestrictions } from './toolRestrictions';
-import { DIAGNOSTICS_FOLDER, mergePersistedSettings, selectWelcomeGuidePath } from './productIdentity';
+import { registerDispatchQuickSwitcher } from './quickSwitcherDispatch';
+import { DIAGNOSTICS_FOLDER,mergePersistedSettings, selectWelcomeGuidePath } from './productIdentity';
 import {
   CHIEF_OF_STAFF_COMMAND_ID,
   CHIEF_OF_STAFF_COMMAND_NAME,
@@ -454,6 +455,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }
     } else {
       await this.onloadDesktop();
+    }
+
+    // Geode's global quick switcher (Cmd+O) lets plugins add rows; real Obsidian
+    // has no such API, so this is a no-op there. Dispatch is desktop-only and
+    // mirrors the dispatch input: default project/cwd, then open the new thread.
+    if (!Platform.isMobile) {
+      registerDispatchQuickSwitcher(this, (text) => {
+        void this.dispatchNewThread(text)
+          .then((threadId) => this.openThreadInChatView(threadId))
+          .catch((err) => {
+            console.error('[ClaudeThreads] Quick switcher dispatch failed:', err);
+            new Notice('Could not start a new conversation. Check the developer console for details.');
+          });
+      });
     }
 
     // Diagnostics command (both platforms). Desktop-gated inside the handler so

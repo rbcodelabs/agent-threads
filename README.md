@@ -415,6 +415,10 @@ to see its next run and prompt, then use the row's **Stop** control. One-time
 their own **Cancel** controls; when both are present the pill summarizes the next
 item and adds a count (for example, `Resumes in 4m · +1`).
 
+### Dispatching from the quick switcher
+
+In Geode, type a prompt into the global quick switcher (Cmd+O) and choose **Dispatch new conversation: "<your text>"** to start a new thread from it (default project and working directory) and open it. This relies on Geode's plugin quick-switcher API; in Obsidian the row is simply not shown.
+
 ### Dispatching with commands
 
 `/model`, `/goal`, and `/loop` also work as prefixes in the Agents List and Agent Board dispatch boxes, applying to the newly created thread:
