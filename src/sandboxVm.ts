@@ -395,6 +395,8 @@ function extraMountArgs(extraMounts: readonly VmExtraMount[] | undefined): strin
   }
   return args;
 }
+/** How long an agent-owned sandbox VM may sit unused before it is stopped to reclaim guest RAM. 0 disables. */
+export const DEFAULT_VM_IDLE_STOP_MS = 10 * 60 * 1000;
 
 export function buildRunArgs(opts: {
   containerName: string;
@@ -405,6 +407,8 @@ export function buildRunArgs(opts: {
   /** Additional READ-ONLY bind mounts (e.g. skills). Fixed for the container's lifetime. */
   extraMounts?: readonly VmExtraMount[];
   labels?: Record<string, string>;
+  /** Guest memory cap, e.g. `2g`. Omitted → the runtime's default allocation. */
+  memory?: string;
 }): string[] {
   if (opts.mountPath.includes(':')) throw new Error('mountPath cannot contain a colon (the container volume delimiter).');
   if (!opts.image.trim() || opts.image.startsWith('-')) throw new Error('Invalid container image reference.');
@@ -419,6 +423,7 @@ export function buildRunArgs(opts: {
     ...labelArgs,
     '--workdir', workdir,
     ...networkArgsFor(opts.network),
+    ...(opts.memory ? ['--memory', opts.memory] : []),
     opts.image,
     // The container only has to stay alive so `container exec` has somewhere to
     // land; the image's own CMD (an interactive bash) would exit immediately
@@ -447,6 +452,10 @@ export function buildShellExecArgs(opts: { containerName: string; command: strin
 
 export function buildStopArgs(containerName: string): string[] {
   return ['stop', containerName];
+}
+
+export function buildStartArgs(containerName: string): string[] {
+  return ['start', containerName];
 }
 
 export function buildRemoveArgs(opts: { containerName: string; force?: boolean }): string[] {
@@ -589,6 +598,15 @@ export interface SandboxVmManagerDeps {
   hooks?: VmHooks;
   /** Starts a guest port relay (see vmPortForward.ts). Defaults to `container exec`; tests inject a fake. */
   spawnRelay?: (containerName: string, port: number) => RelayProcess;
+  /**
+   * Idle window before an agent-owned VM is stopped (not removed) to reclaim
+   * memory; the next `vm_exec` restarts it. Read lazily. 0 disables.
+   * Defaults to {@link DEFAULT_VM_IDLE_STOP_MS}. Harness-owned VMs are never
+   * idle-stopped: stopping one would kill the harness process inside it.
+   */
+  idleStopMs?: () => number;
+  /** Guest memory cap passed as `--memory` at container creation. Read lazily. */
+  memory?: () => string | undefined;
 }
 
 /**
@@ -610,6 +628,9 @@ export class SandboxVmManager {
   private readonly runner: VmCommandRunner;
   private active: SandboxVmState | null = null;
   private portForwarder: VmPortForwarder | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private stopped = false;
+  private busy = 0;
 
   constructor(deps: SandboxVmManagerDeps) {
     this.deps = deps;
@@ -668,6 +689,38 @@ export class SandboxVmManager {
   /** Currently tracked container for this session, if `enter_vm` has run. */
   getActive(): SandboxVmState | null {
     return this.active;
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  private scheduleIdleStop(): void {
+    this.clearIdleTimer();
+    const ms = this.deps.idleStopMs?.() ?? DEFAULT_VM_IDLE_STOP_MS;
+    if (!this.active || this.active.origin !== 'agent' || this.stopped || ms <= 0) return;
+    const timer = setTimeout(() => { void this.idleStop(); }, ms);
+    (timer as { unref?: () => void }).unref?.();
+    this.idleTimer = timer;
+  }
+
+  /** Stops (never removes) the VM if it is still agent-owned, idle and running. */
+  private async idleStop(): Promise<void> {
+    this.idleTimer = null;
+    const active = this.active;
+    if (!active || active.origin !== 'agent' || this.busy > 0 || this.stopped) return;
+    try {
+      const result = await this.exec(buildStopArgs(active.containerName));
+      if (result.exitCode === 0 && this.active === active && this.busy === 0) this.stopped = true;
+    } catch { /* best effort — an idle container left running is only a memory cost */ }
+  }
+
+  /** Starts a container stopped by idle-stop (or left stopped across a reload). */
+  private async ensureRunning(containerName: string): Promise<string | null> {
+    const started = await this.exec(buildStartArgs(containerName));
+    if (started.exitCode === 0) { this.stopped = false; return null; }
+    return `Failed to restart sandbox VM ${containerName}: ${firstLine(started.stderr) || firstLine(started.stdout) || `exit code ${started.exitCode}`}`;
   }
 
   private async exec(args: string[], timeoutMs = VM_LIFECYCLE_TIMEOUT_MS): Promise<VmCommandResult> {
@@ -841,6 +894,7 @@ export class SandboxVmManager {
           image: params.image,
           mountPath: params.mountPath,
           network: params.network,
+          memory: this.deps.memory?.(),
           extraMounts: wanted,
           ...(wantedSignature ? { labels: { [LABEL_EXTRA_MOUNTS]: wantedSignature } } : {}),
         }),
@@ -860,6 +914,7 @@ export class SandboxVmManager {
         origin: 'agent',
         ...(wanted.length ? { extraMounts: wanted } : {}),
       };
+      this.scheduleIdleStop();
       const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
       return {
         success: true,
@@ -923,6 +978,7 @@ export class SandboxVmManager {
         // way the container is shared per thread; just mark it harness-owned
         // going forward so exit_vm stops short of removing it.
         this.active = { ...this.active, origin: 'harness' };
+        this.clearIdleTimer();
         return attached(this.active);
       }
 
@@ -974,6 +1030,7 @@ export class SandboxVmManager {
           image: params.image,
           mountPath: params.mountPath,
           network: params.network,
+          memory: this.deps.memory?.(),
           extraMounts: wanted,
           labels: {
             [LABEL_HARNESS_ORIGIN]: 'harness',
@@ -1028,6 +1085,17 @@ export class SandboxVmManager {
           // 'harness' on its own next start().
           origin: 'agent',
         };
+        // The adopted container may have been idle-stopped before the reload.
+        // `start` on an already-running container may exit non-zero; the exec below reports any real failure.
+        await this.exec(buildStartArgs(containerName)).catch(() => undefined);
+      }
+
+      this.busy++;
+      this.clearIdleTimer();
+      try {
+      if (this.stopped) {
+        const startError = await this.ensureRunning(containerName);
+        if (startError) return { success: false, error: startError };
       }
 
       // Refresh the GitHub token before the command starts (also re-installs on an adopted container).
@@ -1043,6 +1111,10 @@ export class SandboxVmManager {
         stderr: truncateOutput(result.stderr),
         ...(notes.length ? { notes } : {}),
       };
+      } finally {
+        this.busy--;
+        this.scheduleIdleStop();
+      }
     } catch (err) {
       return { success: false, error: errorMessage(err) };
     }
@@ -1090,6 +1162,8 @@ export class SandboxVmManager {
         };
       }
 
+      this.clearIdleTimer();
+      this.stopped = false;
       this.active = null;
       this.closePortForwards();
       return { success: true, removedContainer: containerName };

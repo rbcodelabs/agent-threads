@@ -7,7 +7,7 @@
  * test is exactly the one that matters — which argv we hand the CLI, and how we
  * react to what it returns.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   DEFAULT_VM_EXEC_TIMEOUT_SECONDS,
   DEFAULT_VM_IMAGE,
@@ -28,6 +28,7 @@ import {
   buildNetworkListArgs,
   buildRemoveArgs,
   buildRunArgs,
+  buildStartArgs,
   buildStopArgs,
   containerNameForThread,
   isVmNetworkMode,
@@ -742,5 +743,97 @@ describe('SandboxVmManager — mobile safety', () => {
     // The default runner requires child_process inside its closure, so merely
     // building one — which every session does, on every platform — is inert.
     expect(() => new SandboxVmManager({ containerName: () => NAME })).not.toThrow();
+  });
+});
+
+describe('SandboxVmManager — idle stop', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  const IDLE = 60_000;
+  async function entered(origin: 'agent' | 'harness' = 'agent', extra: { memory?: string } = {}) {
+    vi.useFakeTimers();
+    const runner = makeRunner({ ...CLI_OK_NO_CONTAINER });
+    const manager = new SandboxVmManager({ containerName: () => NAME, run: runner.run, idleStopMs: () => IDLE, memory: () => extra.memory });
+    const params = { image: 'img:1', mountPath: '/a', network: 'default' as const };
+    if (origin === 'harness') await manager.ensureHarnessContainer(params);
+    else await manager.enter(params);
+    return { manager, runner };
+  }
+
+  it('builds start args and a --memory cap only when requested', () => {
+    expect(buildStartArgs(NAME)).toEqual(['start', NAME]);
+    const base = { containerName: NAME, image: 'img:1', mountPath: '/a', network: 'default' as const };
+    expect(buildRunArgs(base)).not.toContain('--memory');
+    const args = buildRunArgs({ ...base, memory: '2g' });
+    expect(args.slice(args.indexOf('--memory'), args.indexOf('--memory') + 2)).toEqual(['--memory', '2g']);
+    expect(args.indexOf('--memory')).toBeLessThan(args.indexOf('img:1'));
+  });
+
+  it('stops (never removes) an idle agent-owned VM', async () => {
+    const { runner } = await entered();
+    await vi.advanceTimersByTimeAsync(IDLE + 1);
+    expect(runner.ran('stop', NAME)).toBe(true);
+    expect(runner.ran('rm')).toBe(false);
+  });
+
+  it('restarts a stopped VM on the next exec', async () => {
+    const { manager, runner } = await entered();
+    await vi.advanceTimersByTimeAsync(IDLE + 1);
+    runner.calls.length = 0;
+    const result = await manager.execCommand({ command: 'ls', timeoutSeconds: 5 });
+    expect(result.success).toBe(true);
+    const argvs = runner.argvs();
+    expect(argvs[0]).toBe(`start ${NAME}`);
+    expect(argvs.some((a) => a.startsWith('exec '))).toBe(true);
+  });
+
+  it('reports a failed restart instead of running the command', async () => {
+    vi.useFakeTimers();
+    const runner = makeRunner({ ...CLI_OK_NO_CONTAINER, [buildStartArgs(NAME).join(' ')]: { exitCode: 1, stderr: 'boom' } });
+    const manager = new SandboxVmManager({ containerName: () => NAME, run: runner.run, idleStopMs: () => IDLE });
+    await manager.enter({ image: 'img:1', mountPath: '/a', network: 'default' });
+    await vi.advanceTimersByTimeAsync(IDLE + 1);
+    runner.calls.length = 0;
+    const result = await manager.execCommand({ command: 'ls', timeoutSeconds: 5 });
+    expect(result.success).toBe(false);
+    expect(runner.ran('exec')).toBe(false);
+  });
+
+  it('resets the idle window after each exec', async () => {
+    const { manager, runner } = await entered();
+    await vi.advanceTimersByTimeAsync(IDLE - 1000);
+    await manager.execCommand({ command: 'ls', timeoutSeconds: 5 });
+    await vi.advanceTimersByTimeAsync(IDLE - 1000);
+    expect(runner.ran('stop')).toBe(false);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(runner.ran('stop', NAME)).toBe(true);
+  });
+
+  it('never idle-stops a harness-owned VM', async () => {
+    const { runner } = await entered('harness');
+    await vi.advanceTimersByTimeAsync(IDLE * 5);
+    expect(runner.ran('stop')).toBe(false);
+  });
+
+  it('cancels the timer when an agent VM becomes harness-owned', async () => {
+    const { manager, runner } = await entered();
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/a', network: 'default' });
+    await vi.advanceTimersByTimeAsync(IDLE * 5);
+    expect(runner.ran('stop')).toBe(false);
+  });
+
+  it('is disabled by idleStopMs 0 and cleared by exit', async () => {
+    vi.useFakeTimers();
+    const runner = makeRunner({ ...CLI_OK_NO_CONTAINER });
+    const off = new SandboxVmManager({ containerName: () => NAME, run: runner.run, idleStopMs: () => 0 });
+    await off.enter({ image: 'img:1', mountPath: '/a', network: 'default' });
+    await vi.advanceTimersByTimeAsync(IDLE * 5);
+    expect(runner.ran('stop')).toBe(false);
+
+    const { manager, runner: r2 } = await entered();
+    await manager.exit();
+    r2.calls.length = 0;
+    await vi.advanceTimersByTimeAsync(IDLE * 5);
+    expect(r2.calls).toHaveLength(0);
   });
 });
