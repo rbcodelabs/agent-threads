@@ -496,7 +496,11 @@ describe('sandbox VM tools — localhost server guidance', () => {
 // ── External roots (Geode) ───────────────────────────────────────────────────
 
 describe('sandbox VM tools — external root mounts', () => {
-  const extDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-root-'));
+  // The /work mount must not contain the external root. On Linux os.tmpdir()
+  // is /tmp, which is MOUNT itself, so mounting MOUNT would swallow extDir
+  // (it is correctly dropped as "inside /work"). Use a sibling work dir.
+  const WORK = fs.realpathSync(fs.mkdtempSync(path.join(MOUNT, 'vm-work-')));
+  const extDir = fs.mkdtempSync(path.join(MOUNT, 'ext-root-'));
 
   it('mounts host-reported roots read-only and lists them as mountedExternal', async () => {
     const runner = makeRunner(CLI_OK_NO_CONTAINER);
@@ -508,7 +512,7 @@ describe('sandbox VM tools — external root mounts', () => {
         { rootId: 'r3', label: 'Gone', path: path.join(extDir, 'nope') },
       ],
     });
-    const { isError, payload } = await call(enter, { mountPath: MOUNT });
+    const { isError, payload } = await call(enter, { mountPath: WORK });
     expect(isError).toBe(false);
     expect(payload.mountedExternal).toEqual([
       { label: 'Notes', hostPath: extDir, guestPath: '/ext/Notes', readOnly: true },
