@@ -50,7 +50,7 @@ export interface RawPageText {
 
 /** Result of an act script. Failures are values, not thrown errors. */
 export type RawActResult =
-  | { ok: true; url: string; title: string }
+  | { ok: true; url: string; title: string; pointer?: { x: number; y: number } }
   | { ok: false; code: 'stale_snapshot' | 'ref_not_found' | 'not_actionable'; reason: string; origin?: string };
 
 export type ActKind = 'click' | 'type';
@@ -439,9 +439,19 @@ export function buildActScript(refTableKey: string, request: ActRequest): string
 
     try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {}
 
+    // Where the agent "pointed", for the visible cursor marker. Read after the
+    // scroll and before the action (a click may remove or move the element).
+    var pointer;
+    try {
+      var rect = el.getBoundingClientRect();
+      if (rect && isFinite(rect.left) && isFinite(rect.top)) {
+        pointer = { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+      }
+    } catch (e) {}
+
     if (KIND === 'click') {
       el.click();
-      return { ok: true, url: location.href, title: document.title || '' };
+      return { ok: true, url: location.href, title: document.title || '', pointer: pointer };
     }
 
     if (el.isContentEditable) {
@@ -470,6 +480,6 @@ export function buildActScript(refTableKey: string, request: ActRequest): string
       }
     }
 
-    return { ok: true, url: location.href, title: document.title || '' };
+    return { ok: true, url: location.href, title: document.title || '', pointer: pointer };
   })()`;
 }

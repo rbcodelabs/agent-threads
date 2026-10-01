@@ -33,8 +33,13 @@ export interface BrowserCardInput {
   vm: BrowserSessionViewModel;
   /** Latest real screenshot for this session, if the resolver found one. */
   screenshotSrc: string | null;
-  /** Latest frame of the sign-in page (control mode only). Memory/DOM only. */
+  /** Latest live frame (sign-in page in control mode; the agent's page when `live`). Memory/DOM only. */
   frameSrc: string | null;
+  /**
+   * This card is the active session and should mirror the agent's page with
+   * live frames, settling to its final screenshot when `live` is false.
+   */
+  live?: boolean;
   /** The user expanded a card that is collapsed by default. */
   expanded: boolean;
   stepsOpen: boolean;
@@ -42,7 +47,7 @@ export interface BrowserCardInput {
 
 export interface BrowserCardHandle {
   el: HTMLElement;
-  /** Paint a new sign-in frame without rebuilding the card. */
+  /** Paint a new frame (sign-in or live view) without rebuilding the card. */
   setFrame(dataUrl: string | null): void;
   /** Update the requested-state countdown in place. */
   setCountdown(remainingSeconds: number): void;
@@ -190,7 +195,13 @@ export function renderBrowserSessionCard(
 
   // ── Viewport ──
   const showFrame = vm.viewport === 'frame';
-  const viewSrc = showFrame ? input.frameSrc : vm.viewport === 'screenshot' ? input.screenshotSrc : null;
+  // A live session (no handoff layered on it) mirrors the agent's real screen:
+  // the freshest frame wins over the last step screenshot until the session ends.
+  const wantsLive = !!input.live && !showFrame && !vm.mode;
+  const viewSrc = showFrame
+    ? input.frameSrc
+    : wantsLive && input.frameSrc ? input.frameSrc
+    : vm.viewport === 'screenshot' ? input.screenshotSrc : null;
   const zoomable = !!viewSrc && !showFrame && !vm.overlay;
   const viewLabel = showFrame
     ? 'Temporary sign-in page. Your clicks and typing are sent here.'
@@ -209,14 +220,17 @@ export function renderBrowserSessionCard(
   let frameImg: HTMLImageElement | null = null;
   let frameSkeleton: HTMLElement | null = null;
   if (viewSrc) {
-    const img = view.createEl('img', { attr: { src: viewSrc, alt: showFrame ? 'Temporary sign-in page' : vm.url ? `Latest screenshot of ${vm.host}${vm.path}` : 'Latest screenshot' } });
-    if (showFrame) frameImg = img;
+    const alt = showFrame ? 'Temporary sign-in page'
+      : wantsLive && input.frameSrc ? `Live view of ${vm.host || 'the browser'}`
+      : vm.url ? `Latest screenshot of ${vm.host}${vm.path}` : 'Latest screenshot';
+    const img = view.createEl('img', { attr: { src: viewSrc, alt } });
+    if (showFrame || wantsLive) frameImg = img;
   } else {
     frameSkeleton = skeleton(view);
   }
-  if (showFrame && !frameImg) {
+  if ((showFrame || wantsLive) && !frameImg) {
     // No frame has arrived yet; keep an <img> ready so setFrame can fill it.
-    frameImg = view.createEl('img', { cls: 'is-pending', attr: { alt: 'Temporary sign-in page' } });
+    frameImg = view.createEl('img', { cls: 'is-pending', attr: { alt: showFrame ? 'Temporary sign-in page' : `Live view of ${vm.host || 'the browser'}` } });
   }
   if (vm.error) {
     const overlay = view.createDiv({ cls: 'ct-bc-overlay is-scrim', attr: { role: 'alert' } });

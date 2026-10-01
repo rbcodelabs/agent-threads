@@ -406,6 +406,8 @@ export class ThreadBrowser {
             : 'Take a fresh snapshot; the page has changed since these refs were produced.',
       });
     }
+    // Show the agent's "hand" in the next frames (best effort; presentation only).
+    if (raw.pointer) guest.markAgentPointer(raw.pointer.x, raw.pointer.y, request.kind === 'click');
     return { url: raw.url, title: stripInvisible(raw.title) };
   }
 
