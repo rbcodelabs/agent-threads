@@ -1,6 +1,7 @@
 import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
+import { parsePermissionDetail } from './permissionDetail';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
 import { effectiveExtraEnv } from './types';
@@ -4062,6 +4063,22 @@ export class ThreadsView extends ItemView {
     return this.streamingEl?.isConnected ? this.streamingEl : this.messagesEl;
   }
 
+  /** Readable summary line plus an expandable key/value breakdown for JSON tool input. */
+  private renderPermissionDetail(body: HTMLElement, detail: string): void {
+    const { summary, fields } = parsePermissionDetail(detail);
+    if (!summary) return;
+    body.createEl('p', { cls: 'ct-permission-detail', text: summary });
+    if (!fields || (fields.length === 1 && fields[0].value === summary)) return;
+    const details = body.createEl('details', { cls: 'ct-permission-fields' });
+    details.createEl('summary', { text: `Details (${fields.length})` });
+    const list = details.createDiv('ct-permission-fields-list');
+    for (const f of fields) {
+      const row = list.createDiv('ct-permission-field');
+      row.createSpan({ cls: 'ct-permission-field-key', text: f.key });
+      row.createEl('pre', { cls: 'ct-permission-field-value', text: f.value });
+    }
+  }
+
   private renderPermissionCard(toolName: string, detail: string, done: (allow: boolean) => void): HTMLElement {
     // Anchor inside the active streaming element so the card sits visually
     // inside the current response turn rather than floating as a sibling that
@@ -4076,9 +4093,7 @@ export class ThreadsView extends ItemView {
 
     const body = card.createDiv('ct-permission-body');
     body.createEl('code', { cls: 'ct-permission-tool', text: formatToolName(toolName) });
-    if (detail) {
-      body.createEl('p', { cls: 'ct-permission-detail', text: detail });
-    }
+    this.renderPermissionDetail(body, detail);
 
     const actions = card.createDiv('ct-permission-actions');
     actions.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' })

@@ -5,6 +5,7 @@ import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread } from './types';
 import { buildMessageWithAttachment, deriveDispatchTitle } from './attachmentUtils';
 import { formatToolName } from './ClaudeSession';
+import { summarizePermissionDetail } from './permissionDetail';
 import { relativeTime, buildCwdLabel, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, formatWakeupCountdown } from './dashboardUtils';
 import { DispatchInput } from './DispatchInput';
 import { seedDocumentChatDraft } from './documentChat';
@@ -688,7 +689,7 @@ export class AgentDashboard extends ItemView {
       const attentionLabel = hasPlan ? 'Plan ready — open to review' : hasQuestion ? 'Question ready — open to answer' : pendingInfo?.toolName ? formatToolName(pendingInfo.toolName) : 'Permission required';
       activityEl.createSpan({ cls: 'ct-agents-permission-tool', text: attentionLabel });
       if (pendingInfo?.detail) {
-        activityEl.createSpan({ cls: 'ct-agents-permission-detail', text: pendingInfo.detail });
+        activityEl.createSpan({ cls: 'ct-agents-permission-detail', text: summarizePermissionDetail(pendingInfo.detail) });
       }
 
       if (hasPermission) {
