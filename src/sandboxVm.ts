@@ -297,6 +297,83 @@ export function networkArgsFor(network: VmNetworkMode): string[] {
   return [];
 }
 
+/** Parent of the read-only bind mounts for connected Geode external roots. */
+export const VM_EXTERNAL_ROOT = '/ext';
+
+/** A Geode external root as reported by the host's `externalRoots.listMountRoots()`. */
+export interface ExternalMountRootInput {
+  rootId?: string;
+  label?: string;
+  path?: string;
+  projectId?: string;
+}
+
+/**
+ * Like {@link sanitizeContainerName} but keeps the label readable as a path
+ * segment: preserves case and `.`/`_`/`-`; everything else becomes `-`.
+ * Never returns '.', '..' or an empty string.
+ */
+export function sanitizeMountLabel(raw: string): string {
+  const cleaned = (raw ?? '')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 48);
+  return cleaned || 'root';
+}
+
+/**
+ * Turns host-reported external roots into vetted read-only mounts at
+ * `/ext/<label>`. The host is treated as untrusted-ish input: entries whose
+ * path is not absolute, contains ':', NUL or '..' segments, is not an existing
+ * directory, or equals/lies inside the /work mount are dropped, as are exact
+ * duplicate paths. Colliding labels get -2, -3 suffixes.
+ */
+export function resolveExternalMounts(
+  entries: readonly ExternalMountRootInput[] | null | undefined,
+  opts: { workPath: string; isDirectory: (hostPath: string) => boolean },
+): VmExtraMount[] {
+  if (!Array.isArray(entries)) return [];
+  const trim = (p: string) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
+  const work = trim(opts.workPath);
+  const usedNames = new Set<string>();
+  const usedPaths = new Set<string>();
+  const mounts: VmExtraMount[] = [];
+  for (const entry of entries) {
+    const raw = entry?.path;
+    if (typeof raw !== 'string' || !raw.startsWith('/')) continue;
+    if (raw.includes(':') || raw.includes('\0')) continue;
+    if (raw.split('/').includes('..')) continue;
+    const hostPath = trim(raw);
+    if (hostPath === work || hostPath.startsWith(work === '/' ? '/' : `${work}/`)) continue;
+    if (usedPaths.has(hostPath)) continue;
+    let isDir = false;
+    try { isDir = opts.isDirectory(hostPath); } catch { isDir = false; }
+    if (!isDir) continue;
+    const base = sanitizeMountLabel(typeof entry.label === 'string' ? entry.label : '');
+    let name = base;
+    for (let n = 2; usedNames.has(name.toLowerCase()); n++) name = `${base}-${n}`;
+    usedNames.add(name.toLowerCase());
+    usedPaths.add(hostPath);
+    mounts.push({ hostPath, guestPath: `${VM_EXTERNAL_ROOT}/${name}` });
+  }
+  return mounts;
+}
+
+/** Concatenates mount lists, first occurrence of a guest path wins. */
+export function mergeExtraMounts(...lists: Array<readonly VmExtraMount[] | undefined>): VmExtraMount[] {
+  const seen = new Set<string>();
+  const out: VmExtraMount[] = [];
+  for (const list of lists) {
+    for (const m of list ?? []) {
+      if (seen.has(m.guestPath)) continue;
+      seen.add(m.guestPath);
+      out.push(m);
+    }
+  }
+  return out;
+}
+
 /** Container labels recording how a harness container was built, so a later session can compare. */
 export const LABEL_HARNESS_ORIGIN = 'claude-threads.origin';
 export const LABEL_EXTRA_MOUNTS = 'claude-threads.mounts';
@@ -695,9 +772,13 @@ export class SandboxVmManager {
     image: string;
     mountPath: string;
     network: VmNetworkMode;
+    /** Read-only extra mounts (e.g. external roots). A leftover container with a different set is recreated. */
+    extraMounts?: readonly VmExtraMount[];
   }): Promise<EnterVmResult> {
     try {
       const containerName = this.deps.containerName();
+      const wanted = [...(params.extraMounts ?? [])];
+      const wantedSignature = mountSignature(wanted);
 
       if (this.active) {
         if (this.active.origin === 'harness') {
@@ -712,6 +793,7 @@ export class SandboxVmManager {
             image: this.active.image,
             mountedFrom: this.active.mountedFrom,
             network: this.active.network,
+            ...(this.active.extraMounts?.length ? { extraMounts: this.active.extraMounts } : {}),
           };
         }
         return {
@@ -726,11 +808,26 @@ export class SandboxVmManager {
       // An untracked container under this thread's name is a leftover from an
       // earlier session. Adopting it would silently ignore the image/network/
       // mount just requested, so report it and let exit_vm clear it instead.
-      if (await this.containerExists(containerName)) {
-        return {
-          success: false,
-          error: `A container named ${containerName} already exists from an earlier session. Call exit_vm to remove it, then enter_vm again.`,
-        };
+      // Exception: when the requested extra-mount set differs from the one the
+      // leftover was created with (label), it would silently lack or wrongly
+      // keep mounts, so recreate it.
+      const existing = await this.exec(buildInspectArgs(containerName));
+      if (existing.exitCode === 0) {
+        const existingSignature = parseContainerLabels(existing.stdout)?.[LABEL_EXTRA_MOUNTS] ?? '';
+        if (existingSignature === wantedSignature) {
+          return {
+            success: false,
+            error: `A container named ${containerName} already exists from an earlier session. Call exit_vm to remove it, then enter_vm again.`,
+          };
+        }
+        await this.exec(buildStopArgs(containerName));
+        const removedStale = await this.exec(buildRemoveArgs({ containerName, force: true }));
+        if (removedStale.exitCode !== 0) {
+          return {
+            success: false,
+            error: `Could not recreate ${containerName} with the updated mounts: ${firstLine(removedStale.stderr) || `exit code ${removedStale.exitCode}`}`,
+          };
+        }
       }
 
       if (params.network === 'internal') {
@@ -739,7 +836,14 @@ export class SandboxVmManager {
       }
 
       const result = await this.exec(
-        buildRunArgs({ containerName, image: params.image, mountPath: params.mountPath, network: params.network }),
+        buildRunArgs({
+          containerName,
+          image: params.image,
+          mountPath: params.mountPath,
+          network: params.network,
+          extraMounts: wanted,
+          ...(wantedSignature ? { labels: { [LABEL_EXTRA_MOUNTS]: wantedSignature } } : {}),
+        }),
       );
       if (result.exitCode !== 0) {
         return {
@@ -754,6 +858,7 @@ export class SandboxVmManager {
         mountedFrom: params.mountPath,
         network: params.network,
         origin: 'agent',
+        ...(wanted.length ? { extraMounts: wanted } : {}),
       };
       const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
       return {
@@ -762,6 +867,7 @@ export class SandboxVmManager {
         image: this.active.image,
         mountedFrom: this.active.mountedFrom,
         network: this.active.network,
+        ...(wanted.length ? { extraMounts: wanted } : {}),
         ...(notes.length ? { notes } : {}),
       };
     } catch (err) {

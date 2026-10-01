@@ -37,6 +37,9 @@ import {
   resolveExecTimeoutSeconds,
   resolveVmImage,
   resolveVmNetwork,
+  resolveExternalMounts,
+  VM_EXTERNAL_ROOT,
+  type ExternalMountRootInput,
   type VmCommandRunner,
 } from './sandboxVm';
 import { VmLoopbackError, type VmUrlResolution } from './vmPortForward';
@@ -297,6 +300,13 @@ export interface ObsidianMcpServerOptions {
    * (full egress). Read lazily for the same reason as {@link getWorktreeRoot}.
    */
   getVmDefaultNetwork?: () => string | undefined;
+  /**
+   * Returns the host's connected external roots (Geode's
+   * `externalRoots.listMountRoots()`), called at `enter_vm` time. They are
+   * bind-mounted read-only at `/ext/<label>`. Absent on Obsidian / old Geode;
+   * failures are swallowed (no extra mounts) rather than failing `enter_vm`.
+   */
+  getExternalMounts?: () => Promise<ExternalMountRootInput[] | null | undefined>;
   /**
    * Overrides how sandbox VM commands are executed. Tests inject a fake so
    * command construction and lifecycle transitions are exercised without a
@@ -1229,6 +1239,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     'enter_vm',
     [
       'Starts a sandboxed Linux VM for this thread and bind-mounts the current effective working directory into it at /work.',
+      'When the host (Geode) has connected external roots, each is also mounted READ-ONLY at /ext/<label>; the result lists them under mountedExternal (label, hostPath, guestPath, readOnly).',
       'File editing stays on the host — use vm_exec to run commands inside the VM, where the container has its own kernel and cannot see the rest of the host filesystem.',
       'Requires Apple\'s container runtime (macOS 26+ on Apple silicon); desktop only.',
       'Use exit_vm to stop and remove the VM.',
@@ -1266,12 +1277,36 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
           return vmErrorResult(`mountPath is not an existing directory: ${mountPath}`);
         }
 
+        // Connected Geode external roots, read-only at /ext/<label>. The host
+        // method is optional and untrusted-ish: any failure means "no extras".
+        let externalEntries: ExternalMountRootInput[] | null | undefined;
+        try {
+          externalEntries = await options.getExternalMounts?.();
+        } catch (e) {
+          console.error('claude-threads: listing external roots for enter_vm failed:', e);
+        }
+        const extraMounts = resolveExternalMounts(externalEntries, {
+          workPath: mountPath,
+          isDirectory: (p) => fs.existsSync(p) && fs.statSync(p).isDirectory(),
+        });
+
         const result = await vmManager.enter({
           image: resolveVmImage(args.image, options.getVmImage?.()),
           mountPath,
           network: resolveVmNetwork(args.network, options.getVmDefaultNetwork?.()),
+          extraMounts,
         });
         if (!result.success) return vmErrorResult(result.error);
+
+        // Only /ext mounts are external roots; skill mounts (harness) are not.
+        const mountedExternal = (result.extraMounts ?? [])
+          .filter((m) => m.guestPath.startsWith(`${VM_EXTERNAL_ROOT}/`))
+          .map((m) => ({
+            label: m.guestPath.slice(VM_EXTERNAL_ROOT.length + 1),
+            hostPath: m.hostPath,
+            guestPath: m.guestPath,
+            readOnly: true,
+          }));
 
         return {
           content: [{
@@ -1283,8 +1318,12 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
               mountedFrom: result.mountedFrom,
               network: result.network,
               containerWorkdir: VM_WORKDIR,
+              mountedExternal,
               ...(result.notes?.length ? { notes: result.notes } : {}),
-              message: `Sandbox VM running. ${result.mountedFrom} is mounted at ${VM_WORKDIR}. Run commands with vm_exec; keep editing files with the normal file tools on the host.`,
+              message: `Sandbox VM running. ${result.mountedFrom} is mounted at ${VM_WORKDIR}. Run commands with vm_exec; keep editing files with the normal file tools on the host.${
+                mountedExternal.length
+                  ? ` Connected external roots are mounted read-only: ${mountedExternal.map((m) => `${m.guestPath} (${m.hostPath})`).join(', ')}.`
+                  : ''}`,
             }, null, 2),
           }],
         };

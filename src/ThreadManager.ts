@@ -299,6 +299,8 @@ export class ThreadManager {
   questionHandler: (threadId: string, questions: AskQuestion[]) => Promise<Record<string, string>> = async () => ({});
   openNewTabHandler: (title?: string, initialPrompt?: string) => Promise<{ threadId: string; title: string }> = async (title) => ({ threadId: '', title: title ?? 'New Thread' });
   vaultRoot = '';
+  /** Geode-only, set from main.ts: connected external roots to mount read-only in the sandbox VM. */
+  getExternalMounts?: ClaudeVmRoutingInputs['getExternalMounts'];
 
   private localSkillsRoot(): string {
     if (!this.vaultRoot) return '';
@@ -2110,6 +2112,7 @@ export class ThreadManager {
       vmManager: this.getSandboxVmManager(threadId),
       mountPath: thread.cwd,
       skillMountPlan,
+      getExternalMounts: this.getExternalMounts,
     };
   }
 

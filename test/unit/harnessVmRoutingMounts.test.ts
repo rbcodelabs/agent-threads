@@ -54,3 +54,34 @@ describe('resolveClaudeVmRouting — skill mounts', () => {
     expect(result).toMatchObject({ routed: true, routing: { mountedExtra: [] } });
   });
 });
+
+describe('resolveClaudeVmRouting — external roots', () => {
+  const os = require('os') as typeof import('os');
+  const fs = require('fs') as typeof import('fs');
+  const path = require('path') as typeof import('path');
+  const extDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-harness-'));
+  const base = { mode: 'auto' as const, image: IMAGE, mountPath: '/work', platform: 'darwin', arch: 'arm64' };
+
+  it('merges /ext mounts with skill mounts in one container run', async () => {
+    const { manager, calls } = makeManager(CAPABLE);
+    const skill = { hostPath: '/h/skill', guestPath: '/skills/skill-abc' };
+    const result = await resolveClaudeVmRouting({
+      ...base, vmManager: manager,
+      skillMountPlan: { mounts: [skill], pluginGuestPaths: {} },
+      getExternalMounts: async () => [{ rootId: 'r', label: 'Notes', path: extDir }],
+    });
+    expect(result).toMatchObject({ routed: true, routing: { mountedExtra: [skill, { hostPath: extDir, guestPath: '/ext/Notes' }] } });
+    const run = calls.find((c) => c[0] === 'run')!;
+    expect(run).toContain('/h/skill:/skills/skill-abc:ro');
+    expect(run).toContain(`${extDir}:/ext/Notes:ro`);
+  });
+
+  it('adds no mounts when the host method throws or is absent', async () => {
+    for (const getExternalMounts of [undefined, async () => { throw new Error('boom'); }]) {
+      const { manager, calls } = makeManager(CAPABLE);
+      const result = await resolveClaudeVmRouting({ ...base, vmManager: manager, getExternalMounts });
+      expect(result).toMatchObject({ routed: true, routing: { mountedExtra: [] } });
+      expect(calls.find((c) => c[0] === 'run')!.join(' ')).not.toContain('/ext/');
+    }
+  });
+});
