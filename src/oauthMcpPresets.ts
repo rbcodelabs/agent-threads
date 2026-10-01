@@ -48,20 +48,6 @@ export const OAUTH_MCP_PRESETS: readonly OAuthMcpPreset[] = [
     source: 'https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/',
   },
   {
-    id: 'slack',
-    label: 'Slack',
-    name: 'slack',
-    url: 'https://mcp.slack.com/mcp',
-    redirectUri: 'http://localhost:3118/callback',
-    requiresClientId: true,
-    requiresClientSecret: true,
-    setupUrl: 'https://api.slack.com/apps',
-    notes:
-      'Slack does not support Dynamic Client Registration. Create a Slack app with MCP enabled, add ' +
-      'http://localhost:3118/callback as a redirect URL, then paste its Client ID and Client secret under Advanced.',
-    source: 'https://docs.slack.dev/ai/slack-mcp-server/',
-  },
-  {
     id: 'v0',
     label: 'v0',
     name: 'v0',

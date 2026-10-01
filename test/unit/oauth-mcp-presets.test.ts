@@ -72,18 +72,18 @@ describe('Add MCP server modal presets', () => {
     expect(registerServer).not.toHaveBeenCalled();
   });
 
-  it('opens Advanced, prefills the redirect URI and shows a note for Slack', () => {
+  it('opens Advanced, prefills the redirect URI and shows a note for Asana', () => {
     const { modal, button } = open();
-    button('Slack').click();
+    button('Asana').click();
     expect(modal.contentEl.querySelector('details')!.open).toBe(true);
     const inputs = [...modal.contentEl.querySelectorAll<HTMLInputElement>('input')];
     expect(inputs.some(i => i.value === 'http://localhost:3118/callback')).toBe(true);
-    expect(modal.contentEl.textContent).toContain('does not support Dynamic Client Registration');
+    expect(modal.contentEl.textContent).toContain('Dynamic Client Registration');
   });
 
   it('clears the previous preset\'s redirect URI when switching to one without', () => {
     const { modal, button } = open();
-    button('Slack').click();
+    button('Asana').click();
     button('Linear').click();
     const inputs = [...modal.contentEl.querySelectorAll<HTMLInputElement>('input')];
     expect(inputs.some(i => i.value === 'http://localhost:3118/callback')).toBe(false);
