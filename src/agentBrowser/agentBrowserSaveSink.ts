@@ -50,6 +50,11 @@ export function createFsSaveSink(): SaveSink {
       if (append) await fs.promises.appendFile(filePath, chunk, 'utf8');
       else await fs.promises.writeFile(filePath, chunk, 'utf8');
     },
+    async writeBytes(filePath, bytes) {
+      const { fs, path } = nodeModules();
+      await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.promises.writeFile(filePath, bytes);
+    },
     async list(threadId) {
       const { fs, path } = nodeModules();
       const dir = threadDir(threadId);
