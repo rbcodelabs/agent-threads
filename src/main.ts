@@ -632,6 +632,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // is checked here rather than inside the tools so an unsupported host
           // costs nothing per turn instead of advertising tools that only refuse.
           browser: this.agentBrowser?.capable ? this.createThreadBrowser(threadId) : undefined,
+          // Host-side browser tools run on the Mac; for a thread with a sandbox
+          // container, `localhost` must be forwarded into it (vmPortForward.ts).
+          resolveSandboxUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
           openContextualFile: async (file) => {
             if (!this.isConversationFirst()) return false;
             await this.contextPanel.openFile(file);
@@ -3198,6 +3201,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       threadId,
       pool: this.agentBrowser,
       getSecrets: () => this.collectSecretValues(),
+      resolveUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
       // Only reached when the pool is capable, i.e. desktop, where fs exists.
       saveSink: this.saveSinkModule().createFsSaveSink(),
     });

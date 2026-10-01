@@ -39,6 +39,16 @@
 
 import { managedRuntimeBinDirIfPresent, parseSystemStatus } from './sandboxRuntime';
 import { mountSignature, parseMountSignature, type VmExtraMount } from './skillMounts';
+import {
+  VmPortForwarder,
+  buildGuestRelayArgs,
+  interpretProbeExit,
+  parseLoopbackHttpUrl,
+  probeHostLoopbackPort,
+  type GuestProbeResult,
+  type RelayProcess,
+  type VmUrlResolution,
+} from './vmPortForward';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -500,6 +510,8 @@ export interface SandboxVmManagerDeps {
   run?: VmCommandRunner;
   /** Lifecycle hooks (GitHub credential delivery). */
   hooks?: VmHooks;
+  /** Starts a guest port relay (see vmPortForward.ts). Defaults to `container exec`; tests inject a fake. */
+  spawnRelay?: (containerName: string, port: number) => RelayProcess;
 }
 
 /**
@@ -520,10 +532,60 @@ export class SandboxVmManager {
   private readonly deps: SandboxVmManagerDeps;
   private readonly runner: VmCommandRunner;
   private active: SandboxVmState | null = null;
+  private portForwarder: VmPortForwarder | null = null;
 
   constructor(deps: SandboxVmManagerDeps) {
     this.deps = deps;
     this.runner = deps.run ?? createDefaultVmCommandRunner();
+  }
+
+  /**
+   * What a HOST-side tool (browser_navigate, host_open_url) should open for
+   * `url`. A server started in the container on 127.0.0.1:PORT is not at the
+   * host's 127.0.0.1:PORT, so for a thread that has a sandbox container a
+   * loopback URL is forwarded (see vmPortForward.ts) and rewritten. Anything
+   * else — non-loopback URLs, threads without a container, a missing runtime —
+   * is `passthrough`, i.e. completely unchanged host-local behavior.
+   * Throws `VmLoopbackError` when the port is not served anywhere.
+   */
+  async resolveLoopbackUrl(url: string): Promise<VmUrlResolution> {
+    if (!parseLoopbackHttpUrl(url)) return { kind: 'passthrough' };
+    if (!this.active) {
+      try {
+        if (!(await this.containerExists(this.deps.containerName()))) return { kind: 'passthrough' };
+      } catch {
+        return { kind: 'passthrough' };
+      }
+    }
+    return this.getPortForwarder().resolve(url);
+  }
+
+  /** Stops every host listener forwarding into this thread's container. */
+  closePortForwards(): void {
+    this.portForwarder?.close();
+    this.portForwarder = null;
+  }
+
+  private getPortForwarder(): VmPortForwarder {
+    if (!this.portForwarder) {
+      this.portForwarder = new VmPortForwarder({
+        containerName: () => this.active?.containerName ?? this.deps.containerName(),
+        probeGuestPort: (port) => this.probeGuestPort(port),
+        probeHostPort: (port) => probeHostLoopbackPort(port),
+        spawnRelay: this.deps.spawnRelay ?? spawnGuestRelay,
+      });
+    }
+    return this.portForwarder;
+  }
+
+  private async probeGuestPort(port: number): Promise<GuestProbeResult> {
+    try {
+      const name = this.active?.containerName ?? this.deps.containerName();
+      const result = await this.runner(buildGuestRelayArgs(name, port, { probe: true }), { timeoutMs: 15_000 });
+      return interpretProbeExit(result.exitCode);
+    } catch {
+      return 'error';
+    }
   }
 
   /** Currently tracked container for this session, if `enter_vm` has run. */
@@ -923,6 +985,7 @@ export class SandboxVmManager {
       }
 
       this.active = null;
+      this.closePortForwards();
       return { success: true, removedContainer: containerName };
     } catch (err) {
       return { success: false, error: errorMessage(err) };
@@ -931,6 +994,24 @@ export class SandboxVmManager {
 }
 
 // ── Local utilities ──────────────────────────────────────────────────────────
+
+/** Default relay: one `container exec --interactive … node <relay>` per proxied connection. */
+function spawnGuestRelay(containerName: string, port: number): RelayProcess {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { spawn } = require('child_process') as typeof import('child_process');
+  const child = spawn(VM_BINARY, buildGuestRelayArgs(containerName, port), {
+    env: runnerEnv() as NodeJS.ProcessEnv,
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  child.on('error', () => undefined);
+  return {
+    stdin: child.stdin!,
+    stdout: child.stdout!,
+    kill: () => { child.kill(); },
+    // 'close' (not 'exit') so stdout has been fully drained first.
+    onExit: (cb) => { child.on('close', (code) => cb(code)); },
+  };
+}
 
 function firstLine(text: string | undefined): string {
   return (text ?? '').trim().split('\n')[0]?.trim() ?? '';

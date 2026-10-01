@@ -32,6 +32,7 @@ import {
   type RawStashMeta,
   type SaveFormat,
 } from './agentBrowserScript';
+import { VmLoopbackError, type VmUrlResolution } from '../vmPortForward';
 import { frameUntrusted, matchesKnownSecret, stripInvisible } from './agentBrowserSanitize';
 import {
   MAX_SAVE_CHARS,
@@ -107,6 +108,12 @@ export interface ThreadBrowserOptions {
   saveSink?: SaveSink;
   /** Injected so saved filenames are deterministic in tests. */
   nowMs?: () => number;
+  /**
+   * Maps a URL the agent asked for to the one the HOST browser should load.
+   * Supplied for threads with a sandbox container, where `localhost` means the
+   * container, not the Mac (see vmPortForward.ts). Absent = no mapping.
+   */
+  resolveUrl?: (url: string) => Promise<VmUrlResolution>;
 }
 
 export class ThreadBrowser {
@@ -117,6 +124,7 @@ export class ThreadBrowser {
   private readonly nowMs: () => number;
   private readonly saveSink: SaveSink | undefined;
   private saveSeq = 0;
+  private readonly resolveUrl: ((url: string) => Promise<VmUrlResolution>) | undefined;
 
   /** The guest these refs belong to. A new guest invalidates everything. */
   private boundGuest: AgentBrowserGuest | null = null;
@@ -130,6 +138,7 @@ export class ThreadBrowser {
     this.nowIso = options.nowIso ?? (() => new Date().toISOString());
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.saveSink = options.saveSink;
+    this.resolveUrl = options.resolveUrl;
   }
 
   /** Whether browser_save_page can work: only when the host supplied a file sink. */
@@ -151,10 +160,32 @@ export class ThreadBrowser {
     return guest;
   }
 
-  async navigate(url: string): Promise<SnapshotResult> {
+  async navigate(url: string): Promise<SnapshotResult & { requestedUrl?: string; note?: string }> {
+    const resolution = await this.resolveForHost(url);
     const guest = await this.guest();
+    if (resolution.kind === 'forwarded') {
+      await guest.navigate(resolution.url);
+      return { ...(await this.snapshotWith(guest)), requestedUrl: resolution.requestedUrl, note: resolution.note };
+    }
     await guest.navigate(url);
     return this.snapshotWith(guest);
+  }
+
+  private async resolveForHost(url: string): Promise<VmUrlResolution> {
+    if (!this.resolveUrl) return { kind: 'passthrough' };
+    try {
+      return await this.resolveUrl(url);
+    } catch (error) {
+      if (error instanceof VmLoopbackError) {
+        throw new AgentBrowserError({
+          code: 'operation_failed',
+          message: error.message,
+          retryable: false,
+          hint: error.hint,
+        });
+      }
+      throw error;
+    }
   }
 
   /**
