@@ -52,7 +52,9 @@ export const OAUTH_MCP_PRESETS: readonly OAuthMcpPreset[] = [
     label: 'v0',
     name: 'v0',
     url: 'https://v0.app/api/mcp',
-    notes: 'Signs in with your v0 account; no API key is needed. If connecting fails on client registration, supply a Client ID under Advanced.',
+    scopes: 'mcp',
+    redirectUri: 'http://localhost:33419/callback',
+    notes: 'Signs in with your v0 account; no API key is needed. v0 requires the exact redirect URI http://localhost:33419/callback (verified working), so the callback listens on port 33419.',
     source: 'https://v0.app/docs/api/v1/adapters/mcp-server',
   },
   {
