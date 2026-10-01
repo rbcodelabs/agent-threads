@@ -406,6 +406,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
   /** How long to wait between background task poll attempts. */
   private static readonly BG_TASK_POLL_INTERVAL_MS = 30_000;
 
+  /** Geode-only: connected external roots. Undefined on Obsidian / older Geode -> no extras. */
+  private async listExternalMountRoots() {
+    const host = (this.app as unknown as {
+      host?: { externalRoots?: { listMountRoots?: () => Promise<Array<{ rootId: string; label: string; path: string; projectId?: string }>> } };
+    }).host;
+    return host?.externalRoots?.listMountRoots?.();
+  }
+
   async onload(): Promise<void> {
     // Claim persistence before any awaited startup work. Obsidian may construct
     // this generation before the prior instance's async onunload has finished.
@@ -557,6 +565,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.scheduleGithubSourceClonePass();
 
     this.manager = new ThreadManager(this.settings);
+    this.manager.getExternalMounts = () => this.listExternalMountRoots();
     this.contextPanel = new ContextPanelController(this.app, () =>
       this.app.workspace.getLeavesOfType(VIEW_TYPE)[0] ?? null,
       () => this.settings.conversationCompanionMarker,
@@ -660,6 +669,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // needing a session restart.
           getVmImage: () => this.settings.vmImage,
           getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
+          // Geode-only, optional: connected external roots to mount read-only
+          // at /ext/<label>. Undefined on Obsidian / older Geode -> no extras.
+          getExternalMounts: () => this.listExternalMountRoots(),
           // ADR-0015 §3: share the same per-thread SandboxVmManager this
           // thread's Claude harness routes into, so enter_vm/vm_exec/exit_vm
           // see the container's real origin instead of each side tracking it

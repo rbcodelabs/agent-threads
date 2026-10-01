@@ -492,3 +492,53 @@ describe('sandbox VM tools — localhost server guidance', () => {
     expect(enter.description).toMatch(/forwarded automatically/i);
   });
 });
+
+// ── External roots (Geode) ───────────────────────────────────────────────────
+
+describe('sandbox VM tools — external root mounts', () => {
+  const extDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-root-'));
+
+  it('mounts host-reported roots read-only and lists them as mountedExternal', async () => {
+    const runner = makeRunner(CLI_OK_NO_CONTAINER);
+    const { enter } = vmTools({
+      vmCommandRunner: runner.run,
+      getExternalMounts: async () => [
+        { rootId: 'r1', label: 'Notes', path: extDir },
+        { rootId: 'r2', label: 'Bad', path: 'relative' },
+        { rootId: 'r3', label: 'Gone', path: path.join(extDir, 'nope') },
+      ],
+    });
+    const { isError, payload } = await call(enter, { mountPath: MOUNT });
+    expect(isError).toBe(false);
+    expect(payload.mountedExternal).toEqual([
+      { label: 'Notes', hostPath: extDir, guestPath: '/ext/Notes', readOnly: true },
+    ]);
+    expect(payload.message).toContain('/ext/Notes');
+    expect(runner.argvs().find((a) => a.startsWith('run '))).toContain(`--volume ${extDir}:/ext/Notes:ro`);
+  });
+
+  it('does not mount a root that is the /work mount itself', async () => {
+    const runner = makeRunner(CLI_OK_NO_CONTAINER);
+    const { enter } = vmTools({
+      vmCommandRunner: runner.run,
+      getExternalMounts: async () => [{ rootId: 'r', label: 'Same', path: MOUNT }],
+    });
+    const { payload } = await call(enter, { mountPath: MOUNT });
+    expect(payload.mountedExternal).toEqual([]);
+  });
+
+  it('falls back to no extra mounts when the host lacks the method or it throws', async () => {
+    for (const getExternalMounts of [undefined, async () => { throw new Error('boom'); }]) {
+      const runner = makeRunner(CLI_OK_NO_CONTAINER);
+      const { enter } = vmTools({ vmCommandRunner: runner.run, getExternalMounts });
+      const { isError, payload } = await call(enter, {});
+      expect(isError).toBe(false);
+      expect(payload.mountedExternal).toEqual([]);
+      expect(runner.argvs().find((a) => a.startsWith('run '))).not.toContain('/ext/');
+    }
+  });
+
+  it('mentions the read-only external mounts in the tool description', () => {
+    expect(vmTools({}).enter.description).toContain('/ext/<label>');
+  });
+});
