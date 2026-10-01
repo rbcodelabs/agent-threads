@@ -4,6 +4,7 @@ import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread, TaskItem } from './types';
 import { formatToolName } from './ClaudeSession';
+import { summarizePermissionDetail } from './permissionDetail';
 import { relativeTime, buildCwdLabel, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, formatWakeupCountdown } from './dashboardUtils';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
 import { parsePrUrlRepo } from './gitDiffUtils';
@@ -950,7 +951,7 @@ export class KanbanView extends ItemView {
       const toolRow = permContent.createDiv('ct-kanban-card-perm-tool');
       toolRow.createSpan({ cls: 'ct-agents-permission-tool', text: pendingInfo?.toolName ? formatToolName(pendingInfo.toolName) : 'permission' });
       if (pendingInfo?.detail) {
-        toolRow.createSpan({ cls: 'ct-agents-permission-detail ct-kanban-perm-detail', text: pendingInfo.detail });
+        toolRow.createSpan({ cls: 'ct-agents-permission-detail ct-kanban-perm-detail', text: summarizePermissionDetail(pendingInfo.detail) });
       }
       const activityEl = permContent.createDiv('ct-kanban-card-activity');
       this.activityEls.set(thread.id, activityEl);

@@ -317,7 +317,7 @@ export class ThreadSession {
           await clearPlanMode();
           return { behavior: 'deny' as const, message: 'Plan approved — proceed with implementation.', interrupt: false };
         }
-        const detail = opts.description ?? opts.decisionReason ?? opts.blockedPath ?? JSON.stringify(input).slice(0, 120);
+        const detail = opts.description ?? opts.decisionReason ?? opts.blockedPath ?? JSON.stringify(input).slice(0, 4000);
         const title = opts.title ?? toolName;
         const allowed = await callbacks.onPermissionRequest(title, detail);
         // Never return `updatedPermissions` (e.g. `opts.suggestions`): the CLI
