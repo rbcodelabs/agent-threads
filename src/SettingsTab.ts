@@ -15,6 +15,7 @@ import type { McpServerEntry } from './mcpServerStore';
 // Obsidian Mobile's require() interceptor would return null for.
 // See test/unit/bundle-safety.test.ts.
 import { mcpRegistrationSchema } from './mcpServerStore';
+import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
 import { classifyScheduledItems, describeScheduledExecution, formatNextOccurrence } from './scheduledWorkView';
 import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
 import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
@@ -1042,6 +1043,11 @@ export class McpServerModal extends Modal {
         'in the OS keychain, never in this plugin\'s data.json.',
     });
 
+    // Populated further down, once the inputs a preset fills exist.
+    const presetRowEl = el.createDiv({ cls: 'ct-modal-type-row ct-modal-preset-row', attr: { role: 'group', 'aria-label': 'Presets' } });
+    const presetNoteEl = el.createEl('p', { cls: 'ct-modal-desc' });
+    presetNoteEl.style.display = 'none';
+
     el.createEl('label', { text: 'Name', cls: 'ct-modal-label' });
     const nameInput = el.createEl('input', { type: 'text', placeholder: 'vercel', cls: 'ct-modal-input' });
 
@@ -1130,6 +1136,48 @@ export class McpServerModal extends Modal {
     };
     grantSelect.addEventListener('change', applyGrantVisibility);
     applyGrantVisibility();
+
+    /**
+     * Prefill the form from a preset. This only fills inputs — it never submits;
+     * the user still clicks Connect, and the entry is validated like a typed one.
+     * Fields a preset does not define are reset so a previous preset's client
+     * credentials cannot leak into the next one. Presets are all
+     * authorization-code servers, so the grant is reset too.
+     */
+    const presetButtons = new Map<string, HTMLElement>();
+    for (const preset of OAUTH_MCP_PRESETS) {
+      const btn = presetRowEl.createEl('button', {
+        cls: 'ct-modal-type-btn',
+        text: preset.label,
+        attr: { 'aria-pressed': 'false' },
+      });
+      presetButtons.set(preset.id, btn);
+      btn.addEventListener('click', () => {
+        grantSelect.value = 'authorization_code';
+        applyGrantVisibility();
+        nameInput.value = preset.name;
+        urlInput.value = preset.url;
+        scopesInput.value = preset.scopes ?? '';
+        clientIdInput.value = preset.clientId ?? '';
+        clientSecretInput.value = '';
+        redirectUriInput.value = preset.redirectUri ?? '';
+        asUrlInput.value = '';
+        audienceInput.value = '';
+        if (preset.requiresClientId || preset.redirectUri) advanced.open = true;
+        for (const [id, other] of presetButtons) {
+          const active = id === preset.id;
+          other.toggleClass('ct-modal-type-btn--active', active);
+          other.setAttribute('aria-pressed', String(active));
+        }
+        presetNoteEl.empty();
+        if (preset.notes) presetNoteEl.createEl('span', { text: preset.notes + ' ' });
+        if (preset.setupUrl) {
+          presetNoteEl.createEl('a', { text: 'Create the app', href: preset.setupUrl });
+        }
+        presetNoteEl.style.display = preset.notes || preset.setupUrl ? '' : 'none';
+        if (preset.requiresClientId) clientIdInput.focus();
+      });
+    }
 
     const errorEl = el.createEl('p', { cls: 'ct-modal-error' });
     errorEl.style.display = 'none';

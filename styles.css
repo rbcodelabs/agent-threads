@@ -8067,6 +8067,10 @@ body.ct-skills-resizing {
   border-color: var(--interactive-accent);
 }
 
+.ct-modal-preset-row {
+  margin-bottom: 8px;
+}
+
 .ct-modal-desc {
   font-size: 12px;
   color: var(--text-muted);
