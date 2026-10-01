@@ -119,6 +119,8 @@ controls:
 | `harnessVmMode: 'auto'` (default) | Routes into the VM only when the platform supports it (macOS on Apple silicon), the container CLI probes successfully, and the harness image exists. Silently falls back to host-local spawn if any of those fail. |
 | `harnessVmMode: 'always'` | Forces VM routing. Surfaces a clear error — never a silent host fallback — if any prerequisite is missing. Useful for testing, or when you want the isolation guarantee enforced. |
 | `harnessVmMode: 'never'` | Exactly today's host-local spawn. The rollback lever. |
+
+**Per-thread override.** In a Claude thread, the chat's menu (Harness) has a **Run in** section: *Container* (`always`), *Host (no container)* (`never`), or *Default (follows settings)*. The choice is saved on the thread and applies from the next turn. Switching between container and host resets the native Claude session (it cannot be resumed across the two environments); the conversation continues from a summary and transcript references, like a harness switch. It is unavailable while a turn is running or other work is pending.
 | Harness VM image | The image tag to route into. Blank falls back to `claude-threads-harness:1`. |
 
 Settings shows a live status block next to these controls (runtime, service,

@@ -147,6 +147,7 @@ Key fields worth knowing:
 | `model?: string` | Per-thread model alias set via `/model` (fable, opus, sonnet, haiku). Falls back to the `defaultModel` setting, then the CLI default. |
 | `permissionMode?: string` | Per-session permission mode override. One of `'default'`, `'acceptEdits'`, `'bypassPermissions'`, `'plan'`, `'dontAsk'`, `'auto'`. Falls back to `settings.permissionMode`. Scheduler-created sessions automatically receive `'dontAsk'` so cron jobs never stall on a permission dialog. |
 | `goal?: string` | Persistent goal set via `/goal`. Injected into the appended system prompt every turn until cleared with `/goal clear`. |
+| `harnessVmMode?: HarnessVmMode` | Optional per-thread container-routing override (chat menu → Harness → Run in). Effective mode = `resolveEffectiveHarnessVmMode(thread.harnessVmMode, settings.harnessVmMode)`. Set via `ThreadManager.setThreadHarnessVmMode`, which closes the session and, on a host<->container flip, drops `sessionId` and queues a same-harness handoff. Exposed in `ThreadSnapshot`. |
 | `rawLogPath?: string` | Vault-relative path to the thread's raw JSONL conversation log (`<vaultFolder>/logs/<thread_id>.jsonl`), written by `RawLogWriter` when the `saveRawLogs` setting is on. Keyed by the stable thread UUID so it never orphans on rename. Read back via the `obsidian_get_thread_log` MCP tool. |
 
 ---

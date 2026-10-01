@@ -1,4 +1,4 @@
-import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
+import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import type { ViewStateResult } from 'obsidian';
@@ -2307,7 +2307,7 @@ export class ThreadsView extends ItemView {
       .onClick(() => this.togglePermissionModeMenu(event))
     );
     menu.addItem(item => item
-      .setTitle(`Harness: ${agentHarnessLabel(thread.agentHarness)}`)
+      .setTitle(`Harness: ${agentHarnessLabel(thread.agentHarness)}${(thread.agentHarness ?? 'claude') === 'claude' && thread.harnessVmMode ? ` · ${harnessVmModeLabel(thread.harnessVmMode)}` : ''}`)
       .setIcon('bot')
       .onClick(() => this.toggleHarnessMenu(event, thread.id))
     );
@@ -2532,7 +2532,51 @@ export class ThreadsView extends ItemView {
         }
       });
     }
+    if (current === 'claude') {
+      menu.addSeparator();
+      menu.addItem(item => item.setTitle('Run in').setDisabled(true));
+      const modes: Array<HarnessVmMode | undefined> = ['always', 'never', undefined];
+      for (const mode of modes) {
+        const selected = thread.harnessVmMode === mode;
+        menu.addItem(item => {
+          item.setTitle(!selected && blocked ? `${harnessVmModeLabel(mode)} — ${blocked}` : harnessVmModeLabel(mode))
+            .setChecked(selected)
+            .setDisabled(!selected && !!blocked);
+          if (!selected && !blocked) {
+            item.onClick(() => { void this.requestHarnessVmModeChange(threadId, mode); });
+          }
+        });
+      }
+    }
     menu.showAtMouseEvent(event);
+  }
+
+  private async requestHarnessVmModeChange(threadId: string, mode: HarnessVmMode | undefined): Promise<void> {
+    const thread = this.manager.getThread(threadId);
+    if (!thread) return;
+    const hadConversation = thread.messages.some(message => message.role === 'user' || message.role === 'assistant');
+    // A native Claude session cannot be resumed across host <-> container, so a
+    // containerized <-> host flip resets it (the conversation continues from a
+    // summary). Only confirm when that will actually happen.
+    const wasContainerized = resolveEffectiveHarnessVmMode(thread.harnessVmMode, this.plugin.settings.harnessVmMode) !== 'never';
+    const nowContainerized = resolveEffectiveHarnessVmMode(mode, this.plugin.settings.harnessVmMode) !== 'never';
+    if (hadConversation && thread.sessionId && wasContainerized !== nowContainerized) {
+      const confirmed = await promptConfirm(this.app, {
+        message: `Run this thread ${nowContainerized ? 'in a container' : 'on the host (no container)'}? The conversation stays here, but the native Claude session resets and continues from a summary and transcript references.`,
+        confirmLabel: 'Change',
+      });
+      if (!confirmed) return;
+    }
+    try {
+      await this.manager.setThreadHarnessVmMode(threadId, mode, () => this.plugin.saveSettings());
+      if (threadId === this.activeThreadId) {
+        this.renderThreadInfo();
+        this.setRunningState(false);
+      }
+      new Notice(`This thread will run in: ${harnessVmModeLabel(mode)}.`);
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : String(error));
+    }
   }
 
   private async requestHarnessSwitch(threadId: string, targetHarness: AgentHarness): Promise<void> {

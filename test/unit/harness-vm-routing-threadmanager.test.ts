@@ -345,3 +345,74 @@ describe('ThreadManager — in-thread "Run this thread in a sandbox?" offer', ()
     expect(manager.getSandboxSetupOffer('t1')).toBeUndefined();
   });
 });
+
+describe('per-thread harnessVmMode override', () => {
+  it('resolveEffectiveHarnessVmMode: thread override > settings > auto', async () => {
+    const { resolveEffectiveHarnessVmMode } = await import('../../src/types');
+    expect(resolveEffectiveHarnessVmMode(undefined, undefined)).toBe('auto');
+    expect(resolveEffectiveHarnessVmMode(undefined, 'never')).toBe('never');
+    expect(resolveEffectiveHarnessVmMode('always', 'never')).toBe('always');
+    expect(resolveEffectiveHarnessVmMode('never', 'always')).toBe('never');
+  });
+
+  it('thread override "never" wins over global "always" when building routing inputs', async () => {
+    const manager = new ThreadManager({ ...DEFAULT_SETTINGS, harnessVmMode: 'always' });
+    manager.loadThreads([thread({ agentHarness: 'claude', harnessVmMode: 'never' })]);
+    await manager.sendMessage('t1', 'hi');
+    expect(fake.lastOptions?.claude?.vm).toBeUndefined();
+  });
+
+  it('thread override "always" wins over global "never"', async () => {
+    const manager = new ThreadManager({ ...DEFAULT_SETTINGS, harnessVmMode: 'never' });
+    manager.loadThreads([thread({ agentHarness: 'claude', harnessVmMode: 'always' })]);
+    await manager.sendMessage('t1', 'hi');
+    expect(fake.lastOptions?.claude?.vm).toMatchObject({ mode: 'always' });
+  });
+
+  it('setThreadHarnessVmMode persists the override, resets the native session on a host<->container flip, and sets a handoff', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.loadThreads([thread({ sessionId: 'native-1', summary: 'Keep going.' })]);
+    const persist = vi.fn(async () => {});
+    await manager.setThreadHarnessVmMode('t1', 'never', persist);
+    const t = manager.getThread('t1')!;
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(t.harnessVmMode).toBe('never');
+    expect(t.sessionId).toBeUndefined();
+    expect(t.sessionGeneration).toBe(2);
+    expect(t.pendingHarnessHandoff).toMatchObject({ sourceHarness: 'claude', targetHarness: 'claude', summary: 'Keep going.' });
+
+    await manager.setThreadHarnessVmMode('t1', undefined, persist);
+    expect(manager.getThread('t1')!.harnessVmMode).toBeUndefined();
+  });
+
+  it('keeps the native session when both modes are containerized (auto -> always)', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.loadThreads([thread({ sessionId: 'native-1' })]);
+    await manager.setThreadHarnessVmMode('t1', 'always', async () => {});
+    const t = manager.getThread('t1')!;
+    expect(t.harnessVmMode).toBe('always');
+    expect(t.sessionId).toBe('native-1');
+    expect(t.pendingHarnessHandoff).toBeUndefined();
+  });
+
+  it('rolls back on persistence failure', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.loadThreads([thread({ sessionId: 'native-1' })]);
+    await expect(manager.setThreadHarnessVmMode('t1', 'never', async () => { throw new Error('disk'); })).rejects.toThrow('disk');
+    const t = manager.getThread('t1')!;
+    expect(t.harnessVmMode).toBeUndefined();
+    expect(t.sessionId).toBe('native-1');
+    expect(t.sessionGeneration).toBe(1);
+    expect(t.pendingHarnessHandoff).toBeUndefined();
+  });
+
+  it('is blocked while a lifecycle state blocks harness switching, and for non-Claude harnesses', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.loadThreads([thread({ pendingPlan: 'approve me' }), thread({ id: 't2', agentHarness: 'codex' })]);
+    const persist = vi.fn(async () => {});
+    await expect(manager.setThreadHarnessVmMode('t1', 'never', persist)).rejects.toThrow(/plan/i);
+    await expect(manager.setThreadHarnessVmMode('t2', 'never', persist)).rejects.toThrow(/Claude/);
+    expect(persist).not.toHaveBeenCalled();
+    expect(manager.getThread('t1')!.harnessVmMode).toBeUndefined();
+  });
+});
