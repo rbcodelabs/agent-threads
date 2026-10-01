@@ -480,3 +480,15 @@ describe('sandbox VM tools — shared SandboxVmManager (ADR-0015 §3)', () => {
     expect(result.isError).toBe(false);
   });
 });
+
+// ── Agent-facing guidance: localhost servers in the VM ───────────────────────
+
+describe('sandbox VM tools — localhost server guidance', () => {
+  it('vm_exec tells the agent to background servers and that localhost is forwarded to host browsers', () => {
+    const { exec, enter } = vmTools({});
+    expect(exec.description).toMatch(/background/i);
+    expect(exec.description).toMatch(/nohup/);
+    expect(exec.description).toMatch(/forward/i);
+    expect(enter.description).toMatch(/forwarded automatically/i);
+  });
+});

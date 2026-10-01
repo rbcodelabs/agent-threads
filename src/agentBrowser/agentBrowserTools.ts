@@ -89,7 +89,7 @@ export function createAgentBrowserTools(browser: ThreadBrowser): SdkMcpToolDefin
     [
       'Opens a URL in this thread\'s in-app browser and returns an accessibility snapshot of the page.',
       'The snapshot lists interactive elements as "role \\"name\\" [ref=eN]"; pass a ref and the returned epoch to browser_click or browser_type to act on one.',
-      'Only http: and https: URLs are allowed. The browser runs in its own session, separate from your signed-in Web Viewer tabs, so most sites will be logged out.',
+      'Only http: and https: URLs are allowed. This browser runs on the host Mac, not in the sandbox VM: if this thread has a sandbox VM, a localhost / 127.0.0.1 URL naming a server started inside the VM (via vm_exec) is forwarded automatically to a loopback port on the Mac, and the result includes requestedUrl and a note. The server must be running in the background inside the VM. The browser runs in its own session, separate from your signed-in Web Viewer tabs, so most sites will be logged out.',
       'It cannot drive Electron desktop apps, bypass bot detection, or run in a cloud browser — use the agent-browser CLI skill for those.',
     ].join(' '),
     {
