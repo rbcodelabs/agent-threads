@@ -51,6 +51,17 @@ export const HANDOFF_PREVIEW_WIDTH = 1024;
  */
 export const HANDOFF_CAPTURE_MS = 250;
 
+/**
+ * Passive ("live view") cadence: how often a surface that is merely WATCHING the
+ * agent's own page gets a frame. Same numbers the Agent Browser pane has always
+ * used, because they share one per-guest capture budget: a frame every second
+ * while the agent is driving the page, one every five while it sits idle.
+ */
+export const LIVE_BUSY_CAPTURE_MS = 1_000;
+export const LIVE_IDLE_CAPTURE_MS = 5_000;
+/** How often the passive loop wakes to decide whether a capture is due. */
+export const LIVE_TICK_MS = 1_000;
+
 /** How long the "Signed in · Claude resumed" confirmation stays before folding back. */
 export const HANDOFF_RETURNED_MS = 4_000;
 
@@ -150,6 +161,13 @@ export class LoginHandoffController {
   private captureTimer: unknown = null;
   private capturing = false;
 
+  /** Surfaces watching the agent's own page (not a handoff). */
+  private readonly liveViewers = new Set<Viewer>();
+  private liveTimer: unknown = null;
+  private liveCapturing = false;
+  /** Epoch ms of the last passive frame per thread, whoever captured it. */
+  private readonly lastLiveAt = new Map<string, number>();
+
   constructor(options: LoginHandoffControllerOptions) {
     this.getPool = options.getPool;
     this.now = options.now ?? Date.now;
@@ -191,12 +209,15 @@ export class LoginHandoffController {
   stop(): void {
     this.started = false;
     this.stopCaptureLoop();
+    this.stopLiveLoop();
     this.bridge?.stop();
     this.bridge = null;
     for (const state of this.threads.values()) if (state.returnedTimer) this.clearTimeoutFn(state.returnedTimer);
     this.threads.clear();
     this.latestFrame.clear();
+    this.lastLiveAt.clear();
     this.viewers.clear();
+    this.liveViewers.clear();
   }
 
   // ── Subscriptions ─────────────────────────────────────────────────────────
@@ -228,6 +249,35 @@ export class LoginHandoffController {
     const viewer: Viewer = { threadId, isVisible };
     this.viewers.add(viewer);
     return () => { this.viewers.delete(viewer); };
+  }
+
+  /**
+   * Declare that a surface shows LIVE frames of the agent's own page for
+   * `threadId` (the chat card of the active session). Frames are captured only
+   * while at least one live viewer for the thread reports visible, at the
+   * pane's cadence, and flow through `subscribeFrames` like handoff frames.
+   * The returned function detaches; the loop stops with the last viewer.
+   */
+  attachLiveViewer(isVisible: () => boolean, threadId: string): () => void {
+    const viewer: Viewer = { threadId, isVisible };
+    this.liveViewers.add(viewer);
+    this.ensureLiveLoop();
+    return () => {
+      this.liveViewers.delete(viewer);
+      if (this.liveViewers.size === 0) this.stopLiveLoop();
+    };
+  }
+
+  /**
+   * Hand the controller a frame some other surface already paid to capture (the
+   * Agent Browser pane), so the card shows the same picture without a second
+   * `capturePage()` against the same per-guest budget.
+   */
+  publishLiveFrame(threadId: string, dataUrl: string): void {
+    if (this.threads.get(threadId)?.active) return;
+    this.lastLiveAt.set(threadId, this.now());
+    this.latestFrame.set(threadId, dataUrl);
+    for (const l of this.frameListeners) l(threadId, dataUrl);
   }
 
   // ── Reads ─────────────────────────────────────────────────────────────────
@@ -461,6 +511,61 @@ export class LoginHandoffController {
       }
     } finally {
       this.capturing = false;
+    }
+  }
+
+  // ── Passive live view ─────────────────────────────────────────────────────
+
+  private ensureLiveLoop(): void {
+    if (this.liveTimer !== null) return;
+    this.liveTimer = this.setIntervalFn(() => { void this.liveTick(); }, LIVE_TICK_MS);
+  }
+
+  private stopLiveLoop(): void {
+    if (this.liveTimer === null) return;
+    this.clearIntervalFn(this.liveTimer);
+    this.liveTimer = null;
+  }
+
+  /**
+   * One pass of the passive loop: for each thread a visible live viewer is
+   * watching, capture the agent's page if a frame is due. Never touches a
+   * handoff (the dedicated loop owns those) and never captures for a thread
+   * nobody can see. Exposed for tests.
+   */
+  async liveTick(): Promise<void> {
+    if (this.liveCapturing) return;
+    this.liveCapturing = true;
+    try {
+      const watched = new Set<string>();
+      for (const viewer of this.liveViewers) if (viewer.threadId && viewer.isVisible()) watched.add(viewer.threadId);
+      for (const threadId of watched) {
+        if (this.threads.get(threadId)?.active) continue;
+        const guest = this.getPool()?.peek(threadId) ?? null;
+        if (!guest || !guest.isAlive()) {
+          // The session is gone: drop the stale frame so a card falls back to its screenshot.
+          this.lastLiveAt.delete(threadId);
+          if (this.latestFrame.delete(threadId)) for (const l of this.frameListeners) l(threadId, null);
+          continue;
+        }
+        const every = guest.currentState === 'busy' ? LIVE_BUSY_CAPTURE_MS : LIVE_IDLE_CAPTURE_MS;
+        const last = this.lastLiveAt.get(threadId);
+        if (last !== undefined && this.now() - last < every) continue;
+        // Claimed before the await so an overlapping publish/tick cannot double-capture.
+        this.lastLiveAt.set(threadId, this.now());
+        try {
+          const png = await guest.capture(HANDOFF_PREVIEW_WIDTH);
+          if (this.threads.get(threadId)?.active) continue;
+          const dataUrl = pngDataUrl(png);
+          this.latestFrame.set(threadId, dataUrl);
+          for (const l of this.frameListeners) l(threadId, dataUrl);
+        } catch {
+          // A capture can fail because the guest died or is busy; the next
+          // pass notices a dead guest. Nothing to report from a passive frame.
+        }
+      }
+    } finally {
+      this.liveCapturing = false;
     }
   }
 

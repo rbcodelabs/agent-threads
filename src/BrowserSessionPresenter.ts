@@ -12,10 +12,15 @@
  *  - subscribe to the shared LoginHandoffController for the ACTIVE thread only,
  *    push frames into the control card without rebuilding it, tick the 30s
  *    countdown in place, drive the composer chip / placeholder / aria-live
- *    announcement, and forward pointer + keyboard back to the controller.
+ *    announcement, and forward pointer + keyboard back to the controller;
+ *  - while a session is live (and no handoff is layered on it), attach a LIVE
+ *    viewer so the active card mirrors the agent's page with the same frames and
+ *    cadence as the Agent Browser pane. Frames are only captured while the card
+ *    can be seen; when the session ends the card settles to its final screenshot.
  *
  * PRIVACY. The sign-in page is shown here and only here: the frame goes from the
- * controller straight onto an <img>. Nothing in this file writes a frame,
+ * controller straight onto an <img>. Live frames of the agent's own page follow
+ * the same path: memory and DOM only. Nothing in this file writes a frame,
  * keystroke or typed text to a ChatMessage, to toolResultImages, to settings, to a
  * log or to an MCP result, and test/unit/browser-session-presenter.test.ts pins it.
  */
@@ -92,6 +97,11 @@ export class BrowserSessionPresenter {
 
   private unsubscribers: Array<() => void> = [];
   private detachViewer: (() => void) | null = null;
+  /** Live-view subscription for the active session's card (passive, agent's own page). */
+  private detachLiveViewer: (() => void) | null = null;
+  private liveViewerThread: string | null = null;
+  /** Keys of cards that mirror a live frame (control or live session); others never get one. */
+  private readonly frameCards = new Set<string>();
   private tickTimer: number | null = null;
   private lastPhase: string | null = null;
   private lastPhaseThread: string | null = null;
@@ -109,7 +119,9 @@ export class BrowserSessionPresenter {
       controller.subscribe((threadId) => { if (threadId === this.host.activeThreadId()) this.onHandoffChanged(); }),
       controller.subscribeFrames((threadId, dataUrl) => {
         if (threadId !== this.host.activeThreadId()) return;
-        for (const handle of this.cards.values()) if (handle.el.isConnected) handle.setFrame(dataUrl);
+        // Only cards that show a live picture take frames; a finished session
+        // keeps its final screenshot.
+        for (const [key, handle] of this.cards) if (this.frameCards.has(key) && handle.el.isConnected) handle.setFrame(dataUrl);
       }),
     );
     this.syncChrome();
@@ -119,8 +131,12 @@ export class BrowserSessionPresenter {
     for (const off of this.unsubscribers.splice(0)) off();
     this.detachViewer?.();
     this.detachViewer = null;
+    this.detachLiveViewer?.();
+    this.detachLiveViewer = null;
+    this.liveViewerThread = null;
     this.stopTick();
     this.cards.clear();
+    this.frameCards.clear();
     this.ctx = null;
     this.standaloneEl = null;
   }
@@ -129,6 +145,7 @@ export class BrowserSessionPresenter {
   resetForRebuild(): void {
     this.ctx = null;
     this.cards.clear();
+    this.frameCards.clear();
     this.standaloneEl = null;
   }
 
@@ -279,12 +296,16 @@ export class BrowserSessionPresenter {
     const threadId = this.host.activeThreadId();
     const controller = this.host.controller();
     const hostEl = container.createDiv('ct-bc-host');
+    // A running session with no handoff layered on it mirrors the agent's page.
+    const live = !!controller && !!threadId && !vm.mode && (vm.state === 'live' || vm.state === 'navigating');
+    const showsFrames = live || vm.mode === 'control';
     const handle = renderBrowserSessionCard(
       hostEl,
       {
         vm,
         screenshotSrc: screenshot,
-        frameSrc: vm.mode === 'control' && threadId ? controller?.getFrame(threadId) ?? null : null,
+        frameSrc: showsFrames && threadId ? controller?.getFrame(threadId) ?? null : null,
+        live,
         expanded: this.expanded.has(vm.key),
         stepsOpen: this.stepsOpen.has(vm.key),
       },
@@ -313,6 +334,7 @@ export class BrowserSessionPresenter {
       },
     );
     this.cards.set(vm.key, handle);
+    if (showsFrames) this.frameCards.add(vm.key); else this.frameCards.delete(vm.key);
     return handle;
   }
 
@@ -376,12 +398,47 @@ export class BrowserSessionPresenter {
       this.detachViewer();
       this.detachViewer = null;
     }
+
+    // Live view of the agent's own page: wanted while a live (non-handoff)
+    // card is on screen for this thread; released the moment none is, which is
+    // also how a finished session settles to its final screenshot.
+    const wantLive = !inControl && !!threadId && !!controller && this.hasLiveCard();
+    if (this.detachLiveViewer && (!wantLive || this.liveViewerThread !== threadId)) {
+      this.detachLiveViewer();
+      this.detachLiveViewer = null;
+      this.liveViewerThread = null;
+    }
+    if (wantLive && threadId && controller && !this.detachLiveViewer) {
+      this.detachLiveViewer = controller.attachLiveViewer(() => this.liveFrameVisible(), threadId);
+      this.liveViewerThread = threadId;
+    }
   }
 
   private frameVisible(): boolean {
     if (!this.host.isVisible()) return false;
     for (const handle of this.cards.values()) if (handle.el.isConnected) return true;
     return false;
+  }
+
+  /** A card that mirrors the agent's page (not a handoff) is part of the current render. */
+  private hasLiveCard(): boolean {
+    const ctx = this.context();
+    if (!ctx || ctx.liveKey === null || ctx.handoff?.phase) return false;
+    return this.frameCards.has(ctx.liveKey);
+  }
+
+  /**
+   * Capturing costs the guest's per-session budget, so only while a person can
+   * actually see the card: pane visible, card attached, not collapsed, and not
+   * hidden by a collapsed ancestor.
+   */
+  private liveFrameVisible(): boolean {
+    if (!this.host.isVisible()) return false;
+    const key = this.context()?.liveKey;
+    const handle = key ? this.cards.get(key) : undefined;
+    if (!handle || !handle.el.isConnected || handle.el.classList.contains('is-collapsed')) return false;
+    const el = handle.el as HTMLElement & { checkVisibility?: () => boolean };
+    return typeof el.checkVisibility === 'function' ? el.checkVisibility() : true;
   }
 
   private startTick(): void {

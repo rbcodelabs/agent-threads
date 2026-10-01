@@ -174,6 +174,28 @@ describe('agent browser tool behaviour', () => {
     expect(result.content[0].data).toBe('iVBORw==');
   });
 
+  it('save: returns the inline image AND the saved path/size, passing maxWidth and filename through', async () => {
+    const screenshotAndSave = vi.fn().mockResolvedValue({ png: new Uint8Array([137, 80, 78, 71]), path: '/tmp/geode-browser/t1/1-shot.png', bytes: 4 });
+    const screenshot = vi.fn();
+    const server = createObsidianMcpServer(makeApp(), { browser: fakeBrowser({ screenshotAndSave, screenshot } as never) }) as unknown as CapturedServer;
+    const result = await getTool(server, 'browser_screenshot')._handler({ save: true, maxWidth: 640, filename: 'x' });
+    expect(screenshotAndSave).toHaveBeenCalledWith({ maxWidth: 640, filename: 'x' });
+    expect(screenshot).not.toHaveBeenCalled();
+    expect(result.content[0].type).toBe('image');
+    expect(result.content[0].data).toBe('iVBORw==');
+    expect(JSON.parse(result.content[1].text ?? '{}')).toEqual({ success: true, path: '/tmp/geode-browser/t1/1-shot.png', bytes: 4 });
+  });
+
+  it('save: a failure is a value (isError), with no image', async () => {
+    const screenshotAndSave = vi.fn().mockRejectedValue(
+      new AgentBrowserError({ code: 'capability_unavailable', message: 'nope', retryable: false }),
+    );
+    const server = createObsidianMcpServer(makeApp(), { browser: fakeBrowser({ screenshotAndSave } as never) }) as unknown as CapturedServer;
+    const result = await getTool(server, 'browser_screenshot')._handler({ save: true });
+    expect(result.isError).toBe(true);
+    expect(result.content.some((c) => c.type === 'image')).toBe(false);
+  });
+
   it('reports a failure as a value, never as a thrown exception', async () => {
     // The MCP surface contract: handlers return isError, they do not throw.
     const browser = fakeBrowser({

@@ -289,8 +289,12 @@ export class AgentBrowserPreviewView extends ItemView {
     this.capturing = true;
     try {
       const png = await guest.capture(PREVIEW_WIDTH);
-      this.imageEl.src = pngDataUrl(png);
+      const dataUrl = pngDataUrl(png);
+      this.imageEl.src = dataUrl;
       this.imageEl.style.display = '';
+      // Share the frame with the chat card so it shows the same picture without
+      // a second capture against this guest's budget.
+      this.controller?.publishLiveFrame(guest.threadId, dataUrl);
     } catch {
       // A capture can fail because the guest died between render and capture.
       // The next render reflects that; there is nothing to report here.

@@ -51,6 +51,8 @@ export interface SaveSink {
   resolvePath(threadId: string, name: string): string;
   /** Write a chunk, creating the file (and its directory) unless `append`. */
   write(path: string, chunk: string, append: boolean): Promise<void>;
+  /** Write binary data (a screenshot), creating the file and directory. Absent = binary saves unavailable. */
+  writeBytes?(path: string, bytes: Uint8Array): Promise<void>;
   /** Paths of the thread's saved files, oldest first. */
   list(threadId: string): Promise<string[]>;
   /** Delete one saved file. Missing files are not an error. */
@@ -144,6 +146,40 @@ export class ThreadBrowser {
   /** Whether browser_save_page can work: only when the host supplied a file sink. */
   get canSavePages(): boolean {
     return this.saveSink !== undefined;
+  }
+
+  /** Whether browser_screenshot can save to disk: needs a sink that can write binary. */
+  get canSaveScreenshots(): boolean {
+    return typeof this.saveSink?.writeBytes === 'function';
+  }
+
+  /**
+   * Capture a screenshot (overlay included, `maxWidth` honoured) and also write
+   * the PNG to this thread's scratch directory, using the same filename
+   * sanitising, unique prefix and retention as saved pages. The capture goes
+   * through the guest like any screenshot, so it is refused while a person has
+   * taken over, and nothing is written if it fails.
+   */
+  async screenshotAndSave(options: { maxWidth?: number; filename?: string } = {}): Promise<{ png: Uint8Array; path: string; bytes: number }> {
+    const sink = this.saveSink;
+    if (!sink || typeof sink.writeBytes !== 'function') {
+      throw new AgentBrowserError({
+        code: 'capability_unavailable',
+        message: 'Saving screenshots to disk is not available in this environment.',
+        retryable: false,
+      });
+    }
+    const png = await this.screenshot(options.maxWidth);
+    const base = sanitizeSaveFilename(options.filename, 'screenshot').replace(/\.[^.]*$/, '') || 'screenshot';
+    const path = sink.resolvePath(this.threadId, this.uniqueSaveName(`${base}.png`));
+    try {
+      await sink.writeBytes(path, png);
+    } catch (error) {
+      await sink.remove(path).catch(() => undefined);
+      throw error;
+    }
+    await this.pruneSavedFiles(sink);
+    return { png, path, bytes: png.length };
   }
 
   /**
@@ -339,9 +375,11 @@ export class ThreadBrowser {
   private saveFileName(requested: string | undefined, format: SaveFormat, contentType: string): string {
     const base = sanitizeSaveFilename(requested, 'page');
     const ext = format === 'html' ? 'html' : /json/i.test(contentType ?? '') ? 'json' : 'txt';
-    const named = base.includes('.') ? base : `${base}.${ext}`;
-    // Fixed-width timestamp then a counter, so names sort oldest-first and
-    // repeated saves never collide.
+    return this.uniqueSaveName(base.includes('.') ? base : `${base}.${ext}`);
+  }
+
+  /** Fixed-width timestamp then a counter, so names sort oldest-first and repeated saves never collide. */
+  private uniqueSaveName(named: string): string {
     this.saveSeq += 1;
     const stamp = String(this.nowMs()).padStart(14, '0');
     return `${stamp}-${String(this.saveSeq).padStart(3, '0')}-${named}`;
@@ -406,6 +444,8 @@ export class ThreadBrowser {
             : 'Take a fresh snapshot; the page has changed since these refs were produced.',
       });
     }
+    // Show the agent's "hand" in the next frames (best effort; presentation only).
+    if (raw.pointer) guest.markAgentPointer(raw.pointer.x, raw.pointer.y, request.kind === 'click');
     return { url: raw.url, title: stripInvisible(raw.title) };
   }
 
