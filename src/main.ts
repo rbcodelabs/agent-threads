@@ -69,6 +69,7 @@ import { RelayClient } from './RelayClient';
 import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
+import { setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
 import { CONTAINER_AUTH_TOKEN_SECRET } from './claudeContainerAuthCli';
@@ -579,6 +580,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.migrateGithubSourcesIntoVault();
     this.scheduleGithubSourceClonePass();
 
+    // Mask stored secret values in every log sink (console, ring, raw JSONL).
+    setKnownSecretsProvider(() => this.collectSecretValues());
+    this.register(() => setKnownSecretsProvider(null));
     this.manager = new ThreadManager(this.settings);
     this.manager.getExternalMounts = () => this.listExternalMountRoots();
     this.contextPanel = new ContextPanelController(this.app, () =>

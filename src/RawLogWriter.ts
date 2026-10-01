@@ -1,4 +1,5 @@
 import { debugLog } from './logger';
+import { redactDeep } from './secretRedaction';
 
 /**
  * One line in a raw JSONL conversation log. Wraps the verbatim SDK event with a
@@ -8,7 +9,8 @@ import { debugLog } from './logger';
  *
  * `type` mirrors the SDK message type (assistant, user, result, system,
  * rate_limit_event, tool_use_summary) or a synthetic marker kind
- * (session_start). `event` is the raw payload, untouched.
+ * (session_start). `event` is the raw payload with secrets masked (see
+ * secretRedaction.ts); everything else is verbatim.
  */
 export interface RawLogEnvelope {
   /** ISO-8601 timestamp when the line was written. */
@@ -103,7 +105,9 @@ export class RawLogWriter {
       threadId,
       sessionId,
       type,
-      event,
+      // Mask credentials before they reach disk: the log lives in the vault,
+      // which is synced and often shared.
+      event: redactDeep(event),
     };
     let line: string;
     try {
