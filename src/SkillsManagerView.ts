@@ -16,12 +16,16 @@ import {
   cloneGithubSource,
   pullGithubSourceUpdates,
   listGithubSourceSkills,
+  deleteSkillSourceFiles,
+  withoutSkillSource,
   installSkillFromMarketplace,
   type InstalledSkillInfo,
   type MarketplaceSkill,
 } from './skillManager';
 import { canEditSkill } from './skillPaths';
 import { ConfirmModal } from './confirmModal';
+import { AddSkillSourceModal, type AddSkillSourceType } from './AddSkillSourceModal';
+import { getImportMenuState, NO_INSTALL_ROOT_MESSAGE } from './skillSourceMenu';
 
 // ConfirmModal used to be declared in this file. It moved to confirmModal.ts so
 // leaf modules (the archive context menu) can use it without importing the
@@ -171,8 +175,7 @@ export class SkillsManagerView extends ItemView {
   }
 
   /** Shown wherever an install/import is attempted without a resolvable vault skills folder. */
-  private static readonly NO_INSTALL_ROOT_MESSAGE =
-    'Cannot resolve the vault skills folder, so there is nowhere to install to. Skill installs need a desktop vault on a real filesystem.';
+  private static readonly NO_INSTALL_ROOT_MESSAGE = NO_INSTALL_ROOT_MESSAGE;
 
   /** Tree group key: skills this plugin installed into the vault. Editable. */
   private static readonly VAULT_GROUP = '__vault__';
@@ -205,8 +208,8 @@ export class SkillsManagerView extends ItemView {
     void this.checkAllSourceStaleness();
   }
 
-  /** Re-load installed skills and agents, then re-render the list/detail panes. Called by
-   *  SettingsTab when a new GitHub source is added so the view stays in sync. */
+  /** Re-load installed skills and agents, then re-render the list/detail panes. Called after a
+   *  skill source is added or removed so the view stays in sync. */
   async refresh(): Promise<void> {
     await Promise.all([this.loadInstalledSkills(), this.loadInstalledAgents()]);
     this.renderList();
@@ -215,6 +218,31 @@ export class SkillsManagerView extends ItemView {
   }
 
   /** Shared "All up to date" / "N plugins have updates" phrasing for the check-for-updates tooltip and toast. */
+  private openAddSourceModal(type: AddSkillSourceType): void {
+    new AddSkillSourceModal(this.app, this.plugin, (source) => void this.onSourceAdded(source), type).open();
+  }
+
+  /** Reveal a just-added source: show it in the Installed tab, expanded, with its skills loading. */
+  private async onSourceAdded(source: import('./types').SkillSource): Promise<void> {
+    this.expandedSources.add(source.id);
+    if (source.type === 'github') {
+      this.activeTab = 'installed';
+      this.buildTabs();
+      await this.refresh();
+      void this.loadGithubSourceSkillsForInstalled(source);
+    } else {
+      // Local sources are browsed from the Browse tab's source switcher.
+      this.activeTab = 'browse';
+      this.browseSource = source.id;
+      this.selectedLocalSkill = null;
+      this.localSkills = [];
+      this.buildTabs();
+      await this.refresh();
+      void this.loadLocalSkills(source.id);
+    }
+    new Notice(`Added skill source "${source.name}"`);
+  }
+
   private describeUpdateStatus(totalBehind: number, sources: import('./types').SkillSource[]): string {
     if (totalBehind === 0) return 'All up to date';
     const n = sources.filter((s) => (s.behindCount ?? 0) > 0).length;
@@ -454,29 +482,37 @@ export class SkillsManagerView extends ItemView {
     this.tabActionsEl.empty();
     if (this.activeTab !== 'installed') return;
 
-    const canInstall = !!this.plugin.getPluginSkillsRoot();
+    const menuState = getImportMenuState({
+      canInstall: !!this.plugin.getPluginSkillsRoot(),
+      canClone: !!this.plugin.getSkillSourceCloneBase(),
+    });
     const newBtn = this.tabActionsEl.createEl('button', { text: 'New skill', cls: 'ct-skills-btn ct-skills-author-btn' });
     newBtn.disabled = !this.plugin.getLocalSkillsRoot?.();
     newBtn.addEventListener('click', () => this.startNewSkill());
     const importBtn = this.tabActionsEl.createEl('button', { cls: 'clickable-icon ct-skills-tab-action' });
     setIcon(importBtn, 'plus');
-    importBtn.disabled = !canInstall;
-    setTooltip(importBtn, canInstall ? 'Import skill' : SkillsManagerView.NO_INSTALL_ROOT_MESSAGE);
+    importBtn.disabled = !menuState.enabled;
+    setTooltip(importBtn, menuState.tooltip);
     importBtn.addEventListener('click', (e) => {
-      if (!canInstall) return;
+      if (!menuState.enabled) return;
       const menu = new Menu();
-      menu.addItem(item =>
-        item
-          .setTitle('Folder…')
-          .setIcon('folder-plus')
-          .onClick(() => this.importFolderInputEl.click())
-      );
-      menu.addItem(item =>
-        item
-          .setTitle('File (.skill)…')
-          .setIcon('file-up')
-          .onClick(() => this.importFileInputEl.click())
-      );
+      const addItem = (id: string, onClick: () => void, separatorBefore = false) => {
+        const entry = menuState.items.find((i) => i.id === id);
+        if (!entry) return;
+        if (separatorBefore) menu.addSeparator();
+        menu.addItem(item => {
+          item.setTitle(entry.title).setIcon(entry.icon).setDisabled(!entry.enabled);
+          if (entry.disabledReason) item.setTitle(`${entry.title} (unavailable)`);
+          item.onClick(() => {
+            if (!entry.enabled) { new Notice(entry.disabledReason ?? 'Unavailable'); return; }
+            onClick();
+          });
+        });
+      };
+      addItem('import-folder', () => this.importFolderInputEl.click());
+      addItem('import-file', () => this.importFileInputEl.click());
+      addItem('add-github-source', () => this.openAddSourceModal('github'), true);
+      addItem('add-local-source', () => this.openAddSourceModal('local'));
       menu.showAtMouseEvent(e);
     });
 
@@ -932,6 +968,20 @@ export class SkillsManagerView extends ItemView {
   }
 
   private renderLocalBrowseList(): void {
+    const activeSource = (this.plugin.settings.skillSources ?? []).find((s) => s.id === this.browseSource);
+    if (activeSource) {
+      const bar = this.listEl.createEl('div', { cls: 'ct-skills-source-bar' });
+      bar.createEl('span', { cls: 'ct-skills-meta-line', text: activeSource.skillsPath ?? '' });
+      const removeSourceBtn = bar.createEl('button', { cls: 'ct-skills-btn ct-skills-btn--danger', text: 'Remove source' });
+      removeSourceBtn.addEventListener('click', () => {
+        new ConfirmModal(
+          this.app,
+          `Remove "${activeSource.name}"? Your skills folder is not deleted; it is only unregistered.`,
+          'Remove',
+          (confirmed) => { if (confirmed) void this.doRemoveLocalSource(activeSource); },
+        ).open();
+      });
+    }
     const inner = this.listEl.createEl('div', { cls: 'ct-skills-list-inner' });
 
     if (this.isLocalSkillsLoading) {
@@ -1406,14 +1456,8 @@ export class SkillsManagerView extends ItemView {
   }
 
   private async doRemoveGithubSource(source: import('./types').SkillSource): Promise<void> {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fs = require('fs') as typeof import('fs');
-
-    if (source.clonePath) {
-      try { fs.rmSync(source.clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
-    }
-
-    this.plugin.settings.skillSources = this.plugin.settings.skillSources.filter(s => s.id !== source.id);
+    deleteSkillSourceFiles(source);
+    this.plugin.settings.skillSources = withoutSkillSource(this.plugin.settings.skillSources, source.id);
     await this.plugin.saveSettings();
     this.selectedGithubSource = null;
     this.selectedGithubSourceSkill = null;
@@ -1423,6 +1467,17 @@ export class SkillsManagerView extends ItemView {
     await this.loadInstalledSkills();
     this.renderList();
     this.renderDetail();
+  }
+
+  private async doRemoveLocalSource(source: import('./types').SkillSource): Promise<void> {
+    deleteSkillSourceFiles(source);
+    this.plugin.settings.skillSources = withoutSkillSource(this.plugin.settings.skillSources, source.id);
+    await this.plugin.saveSettings();
+    this.browseSource = 'registry';
+    this.selectedLocalSkill = null;
+    this.localSkills = [];
+    new Notice(`Removed ${source.name}`);
+    await this.refresh();
   }
 
   private renderBrowseDetail(): void {

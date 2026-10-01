@@ -80,7 +80,8 @@ import {
   type PersistenceWriterToken,
 } from './PersistenceWriterFence';
 import { mergeDisallowedTools, withCreatorToolRestrictions } from './toolRestrictions';
-import { DIAGNOSTICS_FOLDER, mergePersistedSettings, selectWelcomeGuidePath } from './productIdentity';
+import { registerDispatchQuickSwitcher } from './quickSwitcherDispatch';
+import { DIAGNOSTICS_FOLDER,mergePersistedSettings, selectWelcomeGuidePath } from './productIdentity';
 import {
   CHIEF_OF_STAFF_COMMAND_ID,
   CHIEF_OF_STAFF_COMMAND_NAME,
@@ -406,6 +407,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
   /** How long to wait between background task poll attempts. */
   private static readonly BG_TASK_POLL_INTERVAL_MS = 30_000;
 
+  /** Geode-only: connected external roots. Undefined on Obsidian / older Geode -> no extras. */
+  private async listExternalMountRoots() {
+    const host = (this.app as unknown as {
+      host?: { externalRoots?: { listMountRoots?: () => Promise<Array<{ rootId: string; label: string; path: string; projectId?: string }>> } };
+    }).host;
+    return host?.externalRoots?.listMountRoots?.();
+  }
+
   async onload(): Promise<void> {
     // Claim persistence before any awaited startup work. Obsidian may construct
     // this generation before the prior instance's async onunload has finished.
@@ -446,6 +455,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }
     } else {
       await this.onloadDesktop();
+    }
+
+    // Geode's global quick switcher (Cmd+O) lets plugins add rows; real Obsidian
+    // has no such API, so this is a no-op there. Dispatch is desktop-only and
+    // mirrors the dispatch input: default project/cwd, then open the new thread.
+    if (!Platform.isMobile) {
+      registerDispatchQuickSwitcher(this, (text) => {
+        void this.dispatchNewThread(text)
+          .then((threadId) => this.openThreadInChatView(threadId))
+          .catch((err) => {
+            console.error('[ClaudeThreads] Quick switcher dispatch failed:', err);
+            new Notice('Could not start a new conversation. Check the developer console for details.');
+          });
+      });
     }
 
     // Diagnostics command (both platforms). Desktop-gated inside the handler so
@@ -504,7 +527,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.settings.googleWorkspaceBindings ??= {};
     this.googleWorkspaceMcp = new GoogleWorkspaceMcp(() =>
       (this.app as unknown as { plugins?: { getPlugin(id: string): unknown } }).plugins?.getPlugin('obsidian-gdocs-sync'), undefined, undefined,
-      { bindings: this.settings.googleWorkspaceBindings, save: () => this.saveSettings() });
+      { bindings: this.settings.googleWorkspaceBindings, save: () => this.saveSettings() },
+      // Large-file Drive tools may only touch the thread's working directory and the vault.
+      (threadId) => [this.manager.getThread(threadId)?.cwd, this.manager.vaultRoot].filter((root): root is string => !!root));
     await this.googleWorkspaceMcp.configure(this.settings.googleWorkspaceMcp ?? {});
     this.register(() => this.googleWorkspaceMcp?.close());
 
@@ -555,6 +580,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.scheduleGithubSourceClonePass();
 
     this.manager = new ThreadManager(this.settings);
+    this.manager.getExternalMounts = () => this.listExternalMountRoots();
     this.contextPanel = new ContextPanelController(this.app, () =>
       this.app.workspace.getLeavesOfType(VIEW_TYPE)[0] ?? null,
       () => this.settings.conversationCompanionMarker,
@@ -630,6 +656,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // is checked here rather than inside the tools so an unsupported host
           // costs nothing per turn instead of advertising tools that only refuse.
           browser: this.agentBrowser?.capable ? this.createThreadBrowser(threadId) : undefined,
+          // Host-side browser tools run on the Mac; for a thread with a sandbox
+          // container, `localhost` must be forwarded into it (vmPortForward.ts).
+          resolveSandboxUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
           openContextualFile: async (file) => {
             if (!this.isConversationFirst()) return false;
             await this.contextPanel.openFile(file);
@@ -655,6 +684,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // needing a session restart.
           getVmImage: () => this.settings.vmImage,
           getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
+          // Geode-only, optional: connected external roots to mount read-only
+          // at /ext/<label>. Undefined on Obsidian / older Geode -> no extras.
+          getExternalMounts: () => this.listExternalMountRoots(),
           // ADR-0015 §3: share the same per-thread SandboxVmManager this
           // thread's Claude harness routes into, so enter_vm/vm_exec/exit_vm
           // see the container's real origin instead of each side tracking it
@@ -1373,6 +1405,22 @@ export default class ClaudeThreadsPlugin extends Plugin {
         notify: (message) => { new Notice(message); },
       });
       this.loginHandoff.start();
+      // Signing in needs real room: the moment a handoff turns active, put the
+      // browser in the main area (not the cramped sidebar) so it can be driven.
+      const handoffActiveThreads = new Set<string>();
+      const unsubscribeHandoff = this.loginHandoff.subscribe((threadId) => {
+        const isActive = this.loginHandoff?.getSnapshot(threadId)?.phase === 'active';
+        if (isActive && !handoffActiveThreads.has(threadId)) {
+          handoffActiveThreads.add(threadId);
+          void this.activateAgentBrowserView().then(() => {
+            // Opening/revealing the tab moves focus into the pane; hand it to the login page.
+            window.setTimeout(() => this.loginHandoff?.focusActiveGuest(threadId), 250);
+          });
+        } else if (!isActive) {
+          handoffActiveThreads.delete(threadId);
+        }
+      });
+      this.register(unsubscribeHandoff);
       this.register(() => { this.loginHandoff?.stop(); this.loginHandoff = null; });
 
       // Teardown goes through register() rather than onunload(): register
@@ -3180,6 +3228,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       threadId,
       pool: this.agentBrowser,
       getSecrets: () => this.collectSecretValues(),
+      resolveUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
       // Only reached when the pool is capable, i.e. desktop, where fs exists.
       saveSink: this.saveSinkModule().createFsSaveSink(),
     });
@@ -3226,17 +3275,21 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   /**
-   * Show the agent browser preview, in the right sidebar.
+   * Show the agent browser preview as a main-area tab.
    *
-   * Always a sidebar leaf rather than a main-area tab: this is something you
-   * glance at while the agent works, and putting it in the main area would mean
-   * it competes with the conversation for the space you are actually reading.
+   * It used to live in the right sidebar, which is far too small to sign in
+   * through (login handoff needs to click and type into a real page). A pane
+   * still sitting in a sidebar from an earlier version is moved out.
    */
   async activateAgentBrowserView(): Promise<void> {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(AGENT_BROWSER_VIEW_TYPE)[0];
+    if (leaf && leaf.getRoot() !== workspace.rootSplit) {
+      leaf.detach();
+      leaf = undefined as unknown as WorkspaceLeaf;
+    }
     if (!leaf) {
-      leaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+      leaf = workspace.getLeaf('tab');
       await leaf.setViewState({ type: AGENT_BROWSER_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);

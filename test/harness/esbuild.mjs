@@ -40,6 +40,8 @@ const sharedConfig = {
     // http is required lazily by OpenCodeSession / OpenCodeHostTools, which
     // HarnessFactory pulls in; the harness never starts an OpenCode session.
     'http':                             resolve('./mocks/http.ts'),
+    // net is required lazily by vmPortForward (sandbox VM loopback forwarding).
+    'net':                              resolve('./mocks/net.ts'),
     // electron is used in dynamic require() calls inside click handlers;
     // inject a no-op so those code paths don't crash when reached in tests.
     'electron':                         resolve('./mocks/electron.ts'),

@@ -585,6 +585,8 @@ export class AgentBrowserPool {
         continue;
       }
       if (guest.currentState === 'busy') continue;
+      // A person is mid-sign-in: never reap, expire or budget-retire under them.
+      if (guest.handoffActive) continue;
       if (guest.idleMs >= IDLE_REAP_MS) {
         retireFn(threadId, 'reap');
       } else if (guest.ageMs >= HARD_TTL_MS) {

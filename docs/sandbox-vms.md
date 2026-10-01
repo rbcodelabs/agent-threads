@@ -79,6 +79,36 @@ thread can reconnect with `vm_exec` or remove its VM with `exit_vm`. Cleanup is
 explicit, so call `exit_vm` before deleting the thread. Changing working directory
 does not change an existing mount: exit and enter again to switch workspaces.
 
+### Opening a server running in the VM from the host browser
+
+The browser tools (`browser_navigate`, `host_open_url` / `obsidian_open_url`)
+run on your Mac, so `http://localhost:8000/` there is the Mac — not the VM where
+the agent just started `python3 -m http.server 8000`. For a thread that has a
+sandbox container, those tools therefore **forward the port automatically**:
+
+1. A loopback URL (`localhost`, `127.x.x.x`, `[::1]`, `0.0.0.0`, `*.localhost`) is
+   checked against the thread's container (`container exec … node` connect probe).
+2. If something listens on that port inside the VM, a listener is opened on an
+   **ephemeral port of the Mac's 127.0.0.1 only** (never other interfaces), and
+   each connection is relayed through one `container exec --interactive` running
+   a tiny Node relay in the guest. The tool opens the rewritten URL
+   (`http://127.0.0.1:<port>/…`) and reports `requestedUrl` and a `note`.
+3. If nothing listens in the VM but the Mac itself has a server on that port, the
+   URL is opened unchanged (host server intended).
+4. If neither side listens, the tool fails with an actionable error instead of a
+   browser `ERR_CONNECTION_REFUSED`: start the server first, and run it in the
+   background (`nohup … &`) because `vm_exec` returns when its command ends.
+
+Works for servers bound to `127.0.0.1`, `0.0.0.0`, or `::1` in the guest. (The
+VM's own IP, shown by `container ls`, only reaches `0.0.0.0` binds, and
+`container run --publish` is fixed at creation and has the same limit, which is
+why a relay is used.) Threads without a sandbox container, and non-loopback URLs,
+are untouched. Listeners are closed when the VM is removed or the thread is
+deleted. Limits: the page's origin is the forwarded port, so absolute links that
+name the original port will not resolve (use relative links); the relay needs
+`node` in the image (both bundled images have it); it is a plain TCP relay (WebSockets and
+HTTPS are not specially handled and were not exercised in testing).
+
 For an opt-in live check on a supported Mac, build the image, then run:
 
 ```sh
@@ -143,6 +173,44 @@ latency every turn).
 
 A mode change or a freshly-built image takes effect on a thread's *next* fresh
 session start (harness switch, restart, or new thread) — never mid-session.
+
+### Skills in a VM-routed Claude session
+
+Skill plugins are host directories, and the containerized CLI only sees the
+thread folder at `/work`. So when a session is VM-routed the plugin bind-mounts
+the skill directories into the container **read-only** and rewrites the
+session's plugin paths to the guest paths (`src/skillMounts.ts`; a host-local
+session is untouched):
+
+| Host | Guest |
+| --- | --- |
+| each skill plugin root (configured sources, vault skills, bundled skills) | `/skills/<name>-<hash of real path>` (deterministic, so a resumed session sees the same paths) |
+| `~/.claude/skills` | `/home/node/.claude/skills` (the CLI reads this from `$HOME`) |
+| `~/.claude/agents` | `/home/node/.claude/agents` |
+| symlink targets that point outside a mounted skills root (e.g. `~/.claude/skills/x -> ../../.agents/skills/x`) | where the link resolves inside the guest, limited to `/skills`, `/home/node` and the host home path |
+
+Paths are resolved with `realpath` before mounting, deduped, and skipped when
+missing or when they contain `:`. Mounts are `--volume host:guest:ro`; the
+plugin never writes into `~/.claude`. Because `vm_exec` shares the container,
+**the agent can read these mounts** (skills may contain instructions or
+scripts you consider private).
+
+Mounts are fixed when `container run` executes, so the container records its
+mount set in a label (`claude-threads.mounts`, plus `claude-threads.origin`).
+When a fresh session finds an existing container:
+
+- Mount set matches: reused.
+- Differs, container is harness-owned, and this plugin instance has no session
+  attached (fresh start or plugin reload): the container is **recreated** with
+  the new mounts. Files an agent wrote inside the guest filesystem (outside
+  `/work`) are lost; `/work` is a bind mount and unaffected.
+- Differs but this plugin instance already attached to it (a session may be
+  live), or the container is not labelled harness-owned (created by an older
+  version, or by `enter_vm`): it is **kept** — a running session is never
+  disrupted. Plugins whose guest path is not mounted are dropped from that
+  session instead of pointing at nothing. Skills added after the container
+  started therefore appear after the next plugin reload (or thread
+  delete/archive).
 
 ### MCP servers in a VM-routed Claude session
 

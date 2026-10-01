@@ -17,6 +17,8 @@ const mockPlugin = {
   saveSettings: async () => {},
   getPluginSkillsRoot: () => VAULT_SKILLS_DIR,
   getLocalSkillsRoot: () => '/Users/mock/vault/Skills',
+  // renderTabActions calls this unguarded; non-null enables the Import menu's GitHub-clone entry.
+  getSkillSourceCloneBase: () => `/Users/mock/vault/${MANIFEST_DIR}/skill-sources`,
   createLocalSkill: async (params: { skillId: string; skillMd: string }) => {
     seedAuthoredSkill(params.skillId, params.skillMd);
     return { skillId: params.skillId, path: `/Users/mock/vault/Skills/${params.skillId}`, availability: 'next-session' };

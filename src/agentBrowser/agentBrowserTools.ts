@@ -89,7 +89,7 @@ export function createAgentBrowserTools(browser: ThreadBrowser): SdkMcpToolDefin
     [
       'Opens a URL in this thread\'s in-app browser and returns an accessibility snapshot of the page.',
       'The snapshot lists interactive elements as "role \\"name\\" [ref=eN]"; pass a ref and the returned epoch to browser_click or browser_type to act on one.',
-      'Only http: and https: URLs are allowed. The browser runs in its own session, separate from your signed-in Web Viewer tabs, so most sites will be logged out.',
+      'Only http: and https: URLs are allowed. This browser runs on the host Mac, not in the sandbox VM: if this thread has a sandbox VM, a localhost / 127.0.0.1 URL naming a server started inside the VM (via vm_exec) is forwarded automatically to a loopback port on the Mac, and the result includes requestedUrl and a note. The server must be running in the background inside the VM. The browser runs in its own session, separate from your signed-in Web Viewer tabs, so most sites will be logged out.',
       'It cannot drive Electron desktop apps, bypass bot detection, or run in a cloud browser — use the agent-browser CLI skill for those.',
     ].join(' '),
     {
@@ -209,22 +209,34 @@ export function createAgentBrowserTools(browser: ThreadBrowser): SdkMcpToolDefin
     [
       'Captures what this thread\'s in-app browser is currently showing, as a PNG image.',
       'Use it when layout or visual state matters; prefer browser_snapshot for finding elements, since it is much cheaper.',
+      'The agent\'s own cursor and focus ring are drawn into the image.',
+      'Set save to also write the PNG to a scratch file: the result then carries the file\'s path and size in a text block in addition to the inline image. Files are deleted when the browser session or thread ends, and only the most recent ' + MAX_SAVED_FILES_PER_THREAD + ' saved files (pages and screenshots together) per thread are kept.',
     ].join(' '),
     {
-      maxWidth: z.number().optional().describe('Scale the image down to this width in pixels (default: full size)'),
+      maxWidth: z.number().optional().describe('Scale the image down to this width in pixels (default: full size). Applies to the saved file too.'),
+      save: z.boolean().optional().describe('Also save the PNG to a file and return its path and size (default: false)'),
+      filename: z
+        .string()
+        .optional()
+        .describe('Only with save. Optional file name; anything outside letters, digits, ".", "_" and "-" is replaced and the extension is always .png. A unique prefix is always added.'),
     },
     async (args) => {
       try {
-        const png = await browser.screenshot(args.maxWidth);
-        return {
-          content: [
-            {
-              type: 'image' as const,
-              data: base64FromBytes(png),
-              mimeType: 'image/png' as const,
-            },
-          ],
-        };
+        const image = (png: Uint8Array) => ({
+          type: 'image' as const,
+          data: base64FromBytes(png),
+          mimeType: 'image/png' as const,
+        });
+        if (args.save) {
+          const saved = await browser.screenshotAndSave({ maxWidth: args.maxWidth, filename: args.filename });
+          return {
+            content: [
+              image(saved.png),
+              { type: 'text' as const, text: JSON.stringify({ success: true, path: saved.path, bytes: saved.bytes }, null, 2) },
+            ],
+          };
+        }
+        return { content: [image(await browser.screenshot(args.maxWidth))] };
       } catch (error) {
         return fail(error);
       }

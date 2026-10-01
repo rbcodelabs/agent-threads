@@ -9,8 +9,10 @@
  * testable without a live `container` runtime or a mocked Agent SDK.
  */
 import type { SandboxVmManager } from './sandboxVm';
-import { buildHarnessExecArgs, VM_WORKDIR } from './sandboxVm';
+import * as fs from 'fs';
+import { buildHarnessExecArgs, mergeExtraMounts, resolveExternalMounts, VM_WORKDIR, type ExternalMountRootInput } from './sandboxVm';
 import type { HarnessVmMode } from './types';
+import type { SkillMountPlan, VmExtraMount } from './skillMounts';
 
 /**
  * Image built from `sandbox/Dockerfile.harness`. Distinct from
@@ -108,6 +110,14 @@ export interface ClaudeVmRoutingInputs {
   /** Host directory to bind-mount at /work — normally the thread's own cwd. */
   mountPath: string;
   containerBinaryPath?: string;
+  /**
+   * Skill mounts to give the container at creation (read-only; see
+   * `planSkillMounts`). Both this and the sign-in path build the same inputs,
+   * so whichever starts the container first creates it with the right mounts.
+   */
+  skillMountPlan?: SkillMountPlan;
+  /** Geode-only, optional: connected external roots to mount read-only at /ext/<label>. Any failure means no extras. */
+  getExternalMounts?: () => Promise<ExternalMountRootInput[] | null | undefined>;
   /** Test-only overrides forwarded to checkHarnessVmCapability; production callers omit these and get the real process.platform/arch. */
   platform?: string;
   arch?: string;
@@ -116,6 +126,8 @@ export interface ClaudeVmRoutingInputs {
 export interface ResolvedClaudeVmRouting {
   containerName: string;
   containerBinaryPath: string;
+  /** Extra read-only mounts the container really has (may differ from the request when an older container was kept). */
+  mountedExtra: VmExtraMount[];
 }
 
 /**
@@ -153,10 +165,23 @@ export async function resolveClaudeVmRouting(
     return { routed: false, reason: capability.code ?? 'runtime-missing' };
   }
 
+  let externalEntries: ExternalMountRootInput[] | null | undefined;
+  try {
+    externalEntries = await inputs.getExternalMounts?.();
+  } catch (e) {
+    console.error('[ClaudeThreads] listing external roots for harness VM failed:', e);
+  }
+  const externalMounts = resolveExternalMounts(externalEntries, {
+    workPath: inputs.mountPath,
+    isDirectory: (p) => fs.existsSync(p) && fs.statSync(p).isDirectory(),
+  });
+
   const entered = await inputs.vmManager.ensureHarnessContainer({
     image: inputs.image,
     mountPath: inputs.mountPath,
     network: 'default',
+    // Skill mounts win on a guest-path collision (none today: /skills, /home/node vs /ext).
+    extraMounts: mergeExtraMounts(inputs.skillMountPlan?.mounts, externalMounts),
   });
   if (!entered.success) {
     if (inputs.mode === 'always') {
@@ -171,6 +196,7 @@ export async function resolveClaudeVmRouting(
     routing: {
       containerName: entered.containerName,
       containerBinaryPath: inputs.containerBinaryPath ?? CLAUDE_CONTAINER_BINARY_PATH,
+      mountedExtra: entered.extraMounts ?? [],
     },
   };
 }

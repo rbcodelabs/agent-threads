@@ -8,7 +8,7 @@ Direct child-agent messaging and single-agent interruption are capability-gated.
 
 A native Obsidian and Geode plugin for running multiple Claude Code sessions in parallel — with streaming markdown responses, tab management, and deep vault integration.
 
-![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.53.1-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
+![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.57.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
 
 <p align="center">
   <img src="docs/screenshot-main.png" width="800" alt="Main view: conversation panel with tool calls and Agents List showing thread summaries" />
@@ -49,7 +49,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 - **Native document header** — when the conversation is in a main document pane, its title and thread controls use the host's native header instead of adding a second title bar. The compact custom title bar remains available in sidebars, and the view adapts automatically when you drag it between the two
 - **Slash commands** — built-in context commands plus every skill the session can see (`~/.claude/skills/`, vault-installed, and plugin sources), browseable with `/`
 - **Model switching** — set a persistent model per thread with `/model fable|opus|sonnet|haiku`, or a global default in settings
-- **Agent browser** — Claude drives a browser inside Geode using the embedded web view, reading pages as accessibility snapshots and acting on element refs, with no second Chrome process. Sessions are capped, reclaimed when idle, and closed with their thread; a sidebar pane lets you watch one work and stop it. Geode desktop only, off by default
+- **Agent browser** — Claude drives a browser inside Geode using the embedded web view, reading pages as accessibility snapshots and acting on element refs, with no second Chrome process. Sessions are capped, reclaimed when idle, and closed with their thread; a pane lets you watch one work, stop it, or take over and drive it yourself. Geode desktop only, off by default
 - **Claude or Bedrock** — authenticate with your Claude account or route every session through Amazon Bedrock (one dropdown in settings)
 - **Goals and loops** — pin a persistent goal on a thread with `/goal`, or re-run a prompt on an interval with `/loop 10m <prompt>`
 - **Task list pill** — Claude Code's task checklist (TodoWrite / TaskCreate) and Codex's `update_plan` checklist show as a small "3/5 tasks" pill in the composer footer, next to the schedule and sub-agent pills, so the checklist never takes over the conversation. Click it to open the live list in a popover (completed tasks struck through, the in-progress one highlighted); Escape or an outside click closes it
@@ -237,6 +237,8 @@ Open the **Skills Manager** from the ribbon (puzzle icon) or command palette to 
 
 **Installed tab** — shows everything installed as a collapsible source tree. The top-right corner of the tab bar has two icon buttons (Installed tab only): **Import** (+) opens a menu with **Folder…** and **File (.skill)…**, letting you install a skill directly from a local folder or a packaged `.skill`/`.zip` archive without going through GitHub; and **Check for updates** (↻, shown once you have at least one GitHub plugin source) re-fetches staleness for all GitHub plugin sources in parallel — its icon spins while running, and a toast reports the result when it finishes (including which sources failed to check, e.g. if you're offline). An indicator dot appears on the button afterward if any plugin has updates (hover either button for its full status/tooltip). GitHub plugin sources appear as top-level nodes with a badge (`•N`) when updates are available; clicking one expands it to reveal its skills and opens a detail panel with **Update** (git pull, highlighted when updates are available), **Reload** (re-scan from disk), **Reinstall** (delete and re-clone for broken installs), and **Remove Source**. Two more nodes sit at the bottom. **Vault** lists the skills this plugin installed into your vault — click one to view and edit it, with **Save**, **Reload**, **Reveal in Finder**, and **Uninstall**. **Claude Code** lists everything in `~/.claude/` (skills *and* agent profiles), marked `read-only`: the plugin shows them because the Claude CLI genuinely loads them into every session, but it never writes to that directory, so those panes offer only **Reload** and **Reveal in Finder**. Edit or remove them with the `claude` CLI, or by hand.
 
+> **Adding skill sources.** Skill sources are managed here, not in Settings. Click the **+** button in the Installed tab and choose **GitHub repo…** (clones the repo into the plugin folder) or **Local folder source…** (registers a folder you already have). Update, Reinstall and Remove live in the source's detail panel for GitHub sources, and **Remove source** in the Browse tab for local ones. **Settings → Skills** only shows how many sources are configured and a button that opens Skills Manager.
+
 > **Where installs go.** Everything the Skills Manager installs or imports lands in `<vault>/.obsidian/plugins/claude-threads/skills/`, beside the plugin's `skill-sources/` clones — never in `~/.claude/`. That folder shares the plugin folder's fate: community-plugin *updates* leave unknown subdirectories alone, but manually uninstalling and reinstalling the plugin will delete your installed skills along with it.
 
 Click a GitHub source's **chevron** to expand or collapse its skills while staying in the list. Click the rest of the source row to open its details. In narrow panes, this lets you browse the expanded skills without switching screens.
@@ -251,7 +253,7 @@ Authored skills are available in newly started Claude and Codex sessions as `/lo
 
 #### Declaring skill sources in config
 
-GitHub skill sources don't have to be added through the UI. A vault whose `data.json` is committed to a config repo can **declare** them, and the plugin materializes each one on load:
+GitHub skill sources don't have to be added through the Skills Manager UI. A vault whose `data.json` is committed to a config repo can **declare** them, and the plugin materializes each one on load:
 
 ```jsonc
 "skillSources": [
@@ -334,16 +336,16 @@ Claude reads that, hands back a ref, and acts on it. No coordinate guessing, no 
 | `browser_read_text` | Visible page prose (up to ~20,000 characters), for when the snapshot isn't enough |
 | `browser_save_page` | Save the page's text or HTML to a temp file and return its path and size, for pages too large to read inline (e.g. raw JSON). Explore it with `jq`, `grep` or Read; files are deleted when the session or thread ends |
 | `browser_click` / `browser_type` | Act on a ref |
-| `browser_screenshot` | PNG of the current page |
+| `browser_screenshot` | PNG of the current page (with Claude's cursor and focus ring drawn in). Optional `maxWidth`; set `save` (and optionally `filename`) to also write the PNG to a temp file and get its path and size back alongside the inline image |
 | `browser_status` | How many sessions are open, and the cap |
 | `browser_close` | End this thread's session |
 | `browser_resize` | Resize the viewport (320-1920 wide, 240-1080 tall) and return a fresh snapshot |
 
-`browser_save_page` writes a file, so unlike the read-only tools above it goes through the normal permission prompt. Files live under the system temp folder (outside your vault), are capped at 10 million characters each, and only the 20 most recent per thread are kept.
+`browser_save_page` writes a file, so unlike the read-only tools above it goes through the normal permission prompt. Files live under the system temp folder (outside your vault), are capped at 10 million characters each, and only the 20 most recent per thread are kept. `browser_screenshot` with `save` writes into the same folder under the same limits (pages and screenshots count together); the tool stays in the read-only group, so saving a screenshot does not raise a separate prompt on hosts that gate by tool name.
 
-**Watching it work.** In the chat, each browser session is **one live card** instead of a stack of tool pills: a small browser bar with the current address and status, the latest screenshot (a placeholder until the agent takes one), and a caption naming the step in progress. A step list under it keeps every action's verb, target, outcome and duration. When the session ends the card folds into a one-line chip with a thumbnail (click to expand, click the picture to see the screenshot larger); a failure stays open and shows the error; `browser_close` mutes it. In a wide pane the card goes two-column. You can also run **Open Agent Browser** from the command palette for a sidebar pane showing live frames, the page, session age, and a stop button. It streams only while visible, and closing it never closes Claude's session.
+**Watching it work.** In the chat, each browser session is **one live card** instead of a stack of tool pills: a small browser bar with the current address and status, and a live view of the page that mirrors the Agent Browser pane (a frame about once a second while Claude is acting, every few seconds when idle, and only while the card is actually on screen), and a caption naming the step in progress. Frames carry a visible **agent cursor** where Claude last clicked or typed (with a brief ripple on a click) and a **focus ring** around the field it is typing into, so you can follow what it is doing; these marks are drawn into the page the agent is browsing but are invisible to its snapshots and never change the page's layout. When the session ends the card settles to the final screenshot. A step list under it keeps every action's verb, target, outcome and duration. When the session ends the card folds into a one-line chip with a thumbnail (click to expand, click the picture to see the screenshot larger); a failure stays open and shows the error; `browser_close` mutes it. In a wide pane the card goes two-column. You can also run **Open Agent Browser** from the command palette for a pane (opened as a main-area tab, so there's room to work in it) showing live frames, the page, session age, a stop button and **Take over**. It streams only while visible, and closing it never closes Claude's session.
 
-**Signing in.** Some sites open a separate popup for login (Google, GitHub, SSO) — the kind of flow Claude can't complete on its own, since it never sees or drives popups. When a page tries to open one, the same chat card turns amber with **"Sign-in needed"**, a 30-second countdown, and **Take control** / **Not now** (the Agent Browser pane shows the same request as a banner). Accepting opens a second, temporary browser page: the card becomes a solid amber **"You're in control"** with the sign-in page streamed live in an amber frame, a persistent *"You're in control · Claude is waiting"* chip above the composer, and a big **Return control** button. Typing and clicking there go to that page, not to Claude's session, which is left completely untouched — and **Claude can't see that page or what you type**: the frames and keystrokes are never added to the conversation, images, saved data, logs or tool results. Click **Return control** (or just close the temporary page) when you're done; the card confirms *"Signed in · Claude resumed"*, folds back to normal and keeps a "sign in · you" step, and Claude picks up wherever the sign-in left things — reading whatever the identity provider left on the page, the same as any other page state. If the countdown lapses before you click, the card says the request expired; ask Claude to try again. Mode changes are announced to screen readers, and everything is reachable by keyboard. This is mouse clicks and typing only — no drag, hover, or right-click — and keyboard support covers printable characters plus the common editing/navigation keys, which is what a login or MFA form needs.
+**Signing in.** Some sites open a separate popup for login (Google, GitHub, SSO) — the kind of flow Claude can't complete on its own, since it never sees or drives popups. When a page tries to open one, the same chat card turns amber with **"Sign-in needed"**, a 30-second countdown, and **Take control** / **Not now** (the Agent Browser pane shows the same request as a banner). Accepting opens a second, temporary browser page: the card becomes a solid amber **"You're in control"** with the sign-in page streamed live in an amber frame, a persistent *"You're in control · Claude is waiting"* chip above the composer, and a big **Return control** button. Typing and clicking there go to that page, not to Claude's session, which is left completely untouched — and **Claude can't see that page or what you type**: the frames and keystrokes are never added to the conversation, images, saved data, logs or tool results. Click **Return control** (or just close the temporary page) when you're done; the card confirms *"Signed in · Claude resumed"*, folds back to normal and keeps a "sign in · you" step, and Claude picks up wherever the sign-in left things — reading whatever the identity provider left on the page, the same as any other page state. If the countdown lapses before you click, the card says the request expired; ask Claude to try again. Mode changes are announced to screen readers, and everything is reachable by keyboard. **Take over any page.** Not every login is a popup — Reddit's is an ordinary form. The Agent Browser pane has a **Take over** button whenever Claude has a browser open: it opens the pane in the main area and lets you click and type straight into Claude's own page (its cookies stay, so the login carries over). While you're driving, Claude is paused — any browser action it tries returns "a person has taken over" and it can't screenshot or read the page — and the page is exempt from the usual idle/age recycling. **Return control** hands the page back exactly as you left it (Claude re-reads it before continuing). Popup sign-ins also open the pane in the main area automatically. This is mouse clicks and typing only — no drag, hover, or right-click — and keyboard support covers printable characters plus the common editing/navigation keys, which is what a login or MFA form needs.
 
 **Resource limits.** Each session is a real browser process, so they're capped (2 by default, 4 maximum), reclaimed after 5 minutes idle, recycled after 30 minutes, and closed automatically when their thread is deleted or the plugin unloads. Geode measures file-descriptor pressure, and the browser refuses to start a session when the app is running low — the specific condition under which a sandboxed page process dies on arrival.
 
@@ -412,6 +414,10 @@ to see its next run and prompt, then use the row's **Stop** control. One-time
 `ScheduleWakeup` entries appear in the same popover as distinct wakeup rows with
 their own **Cancel** controls; when both are present the pill summarizes the next
 item and adds a count (for example, `Resumes in 4m · +1`).
+
+### Dispatching from the quick switcher
+
+In Geode, type a prompt into the global quick switcher (Cmd+O) and choose **Dispatch new conversation: "<your text>"** to start a new thread from it (default project and working directory) and open it. This relies on Geode's plugin quick-switcher API; in Obsidian the row is simply not shown.
 
 ### Dispatching with commands
 
@@ -560,7 +566,7 @@ On desktop Geode and Obsidian, Settings → **MCP → Google Workspace** offers
 **Google Docs**, **Google Drive**, **Google Sheets**, and **Google Slides**.
 All four start disabled. Enable the services you want, then start a new thread.
 Google's servers supply their complete read and write toolsets and schemas; Claude
-Threads does not implement a separate set of Google tools. Interactive and newly
+Threads adds no replacement tools, only the local large-file transfer tools described below. Interactive and newly
 scheduled threads inherit the same selection on Claude and Codex, with their
 existing permission behavior.
 
@@ -581,6 +587,31 @@ Access tokens are refreshed inside Google Docs Sync. The harness receives only a
 ephemeral credential for a loopback transport; no Google token is written to MCP
 configuration. Missing or incompatible Google Docs Sync does not prevent a thread
 from starting; its Google services are omitted and Settings → MCP explains why.
+**Large Drive files.** Google's Drive tools move file contents inline as base64, so
+every byte passes through the model's context and the local proxy's 10 MiB request
+cap. Enabling **Google Drive** therefore also gives each thread a local
+`google-drive-files` server with two tools that move bytes between Drive and the
+local disk instead:
+
+- `upload_local_file` — resumable, chunked upload of a local file of any size.
+  Files are stored as-is (no conversion to Docs/Sheets/Slides). Google Docs Sync
+  grants the `drive.file` scope, so Google may refuse a `parentId` for a folder
+  this app did not create.
+- `download_to_local_file` — streams a Drive file to disk. Google-native files
+  are exported (Docs and Slides to PDF, Sheets to XLSX, Drawings to PNG, or pass
+  `exportMimeType`); Google caps exports at 10 MB.
+
+These tools read and write local files outside the agent's normal file-permission
+checks, so they are confined to the thread's working directory and the vault (symlinks
+cannot escape), and these locations are always refused, case-insensitively, for both
+upload sources and download destinations: `.obsidian`, `.git`, `.claude`, `.ssh`,
+`.aws`, `.gnupg`, `.env` / `.env.*` and `.mcp.json`. A Drive file with such a name is
+saved with a leading underscore. Stalled connections time out after 120 seconds and
+uploads resume from Google's committed offset. In a sandbox VM, `/work`
+refers to the working directory. Downloads refuse to replace an existing file
+unless `overwrite` is true. The tools share the Drive opt-in and revocation
+described below, and a fresh access token is requested for each Google request.
+
 Disabling a service revokes existing Google connections. Reconnecting accounts,
 changing auth hosts, or refresh-token rotation requires a new thread; ordinary
 access-token refresh remains automatic. Google may report missing scopes, service

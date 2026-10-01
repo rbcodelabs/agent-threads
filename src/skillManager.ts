@@ -1298,3 +1298,21 @@ export async function importSkillFromPath(
 
   return { id, name, targetDir };
 }
+
+// ── Removing sources ──────────────────────────────────────────────────────────
+
+/**
+ * Deletes what a source owns on disk. GitHub sources own their clone directory;
+ * local sources only point at a folder the user keeps, so nothing is deleted.
+ * Never throws: a clone that is already gone is fine.
+ */
+export function deleteSkillSourceFiles(source: SkillSource): void {
+  if (source.type === 'github' && source.clonePath) {
+    try { fs.rmSync(source.clonePath, { recursive: true, force: true }); } catch { /* already gone */ }
+  }
+}
+
+/** The source list without `id`. Does not mutate the input. */
+export function withoutSkillSource(sources: SkillSource[], id: string): SkillSource[] {
+  return sources.filter((s) => s.id !== id);
+}

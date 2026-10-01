@@ -37,8 +37,12 @@ import {
   resolveExecTimeoutSeconds,
   resolveVmImage,
   resolveVmNetwork,
+  resolveExternalMounts,
+  VM_EXTERNAL_ROOT,
+  type ExternalMountRootInput,
   type VmCommandRunner,
 } from './sandboxVm';
+import { VmLoopbackError, type VmUrlResolution } from './vmPortForward';
 import type {
   InstalledSkillInfo,
   MarketplaceSkill,
@@ -249,6 +253,12 @@ export interface ObsidianMcpServerOptions {
   /** Route agent-triggered Web Viewer navigation through the contextual panel policy. */
   openContextualUrl?: (url: string, newTab: boolean) => Promise<false | { reusedTab: boolean }>;
   /**
+   * Maps a loopback URL to one the HOST can reach when this thread runs in a
+   * sandbox container (see vmPortForward.ts). Omitted = no mapping, i.e. exactly
+   * the host-local behavior.
+   */
+  resolveSandboxUrl?: (url: string) => Promise<VmUrlResolution>;
+  /**
    * Called when the agent requests a working-directory change. Receives the
    * resolved absolute path.
    *
@@ -290,6 +300,13 @@ export interface ObsidianMcpServerOptions {
    * (full egress). Read lazily for the same reason as {@link getWorktreeRoot}.
    */
   getVmDefaultNetwork?: () => string | undefined;
+  /**
+   * Returns the host's connected external roots (Geode's
+   * `externalRoots.listMountRoots()`), called at `enter_vm` time. They are
+   * bind-mounted read-only at `/ext/<label>`. Absent on Obsidian / old Geode;
+   * failures are swallowed (no extra mounts) rather than failing `enter_vm`.
+   */
+  getExternalMounts?: () => Promise<ExternalMountRootInput[] | null | undefined>;
   /**
    * Overrides how sandbox VM commands are executed. Tests inject a fake so
    * command construction and lifecycle transitions are exercised without a
@@ -1222,9 +1239,11 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     'enter_vm',
     [
       'Starts a sandboxed Linux VM for this thread and bind-mounts the current effective working directory into it at /work.',
+      'When the host (Geode) has connected external roots, each is also mounted READ-ONLY at /ext/<label>; the result lists them under mountedExternal (label, hostPath, guestPath, readOnly).',
       'File editing stays on the host — use vm_exec to run commands inside the VM, where the container has its own kernel and cannot see the rest of the host filesystem.',
       'Requires Apple\'s container runtime (macOS 26+ on Apple silicon); desktop only.',
       'Use exit_vm to stop and remove the VM.',
+      'Servers you start in the VM are reachable from the host-side browser tools via their localhost URL (forwarded automatically); do not use the VM\'s IP address.',
     ].join(' '),
     {
       image: z.string().optional().describe(
@@ -1258,12 +1277,36 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
           return vmErrorResult(`mountPath is not an existing directory: ${mountPath}`);
         }
 
+        // Connected Geode external roots, read-only at /ext/<label>. The host
+        // method is optional and untrusted-ish: any failure means "no extras".
+        let externalEntries: ExternalMountRootInput[] | null | undefined;
+        try {
+          externalEntries = await options.getExternalMounts?.();
+        } catch (e) {
+          console.error('claude-threads: listing external roots for enter_vm failed:', e);
+        }
+        const extraMounts = resolveExternalMounts(externalEntries, {
+          workPath: mountPath,
+          isDirectory: (p) => fs.existsSync(p) && fs.statSync(p).isDirectory(),
+        });
+
         const result = await vmManager.enter({
           image: resolveVmImage(args.image, options.getVmImage?.()),
           mountPath,
           network: resolveVmNetwork(args.network, options.getVmDefaultNetwork?.()),
+          extraMounts,
         });
         if (!result.success) return vmErrorResult(result.error);
+
+        // Only /ext mounts are external roots; skill mounts (harness) are not.
+        const mountedExternal = (result.extraMounts ?? [])
+          .filter((m) => m.guestPath.startsWith(`${VM_EXTERNAL_ROOT}/`))
+          .map((m) => ({
+            label: m.guestPath.slice(VM_EXTERNAL_ROOT.length + 1),
+            hostPath: m.hostPath,
+            guestPath: m.guestPath,
+            readOnly: true,
+          }));
 
         return {
           content: [{
@@ -1275,8 +1318,12 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
               mountedFrom: result.mountedFrom,
               network: result.network,
               containerWorkdir: VM_WORKDIR,
+              mountedExternal,
               ...(result.notes?.length ? { notes: result.notes } : {}),
-              message: `Sandbox VM running. ${result.mountedFrom} is mounted at ${VM_WORKDIR}. Run commands with vm_exec; keep editing files with the normal file tools on the host.`,
+              message: `Sandbox VM running. ${result.mountedFrom} is mounted at ${VM_WORKDIR}. Run commands with vm_exec; keep editing files with the normal file tools on the host.${
+                mountedExternal.length
+                  ? ` Connected external roots are mounted read-only: ${mountedExternal.map((m) => `${m.guestPath} (${m.hostPath})`).join(', ')}.`
+                  : ''}`,
             }, null, 2),
           }],
         };
@@ -1294,6 +1341,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       'Call enter_vm first.',
       'Returns the exit code plus stdout and stderr; a non-zero exit code is reported as a normal result, not an error.',
       'Very long output is truncated with an explicit marker.',
+      'To serve something for the browser tools (browser_navigate, host_open_url), start the server in the background so the command returns — e.g. `nohup python3 -m http.server 8000 >/tmp/server.log 2>&1 &` — then open http://localhost:8000/ with the browser tools: the host browser cannot see the VM\'s localhost directly, so the plugin forwards that loopback port to the host automatically (loopback only), whether the server binds 127.0.0.1 or 0.0.0.0.',
     ].join(' '),
     {
       command: z.string().min(1).describe(
@@ -1502,6 +1550,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       'Opens a URL in the Obsidian Web Viewer panel.',
       'Reuses an existing webviewer tab if one is open; otherwise opens the URL in a new tab.',
       'Use this to open local dev servers (e.g. http://localhost:8765/), web pages, or HTML files served over HTTP.',
+      'If this thread runs in a sandbox VM, a localhost / 127.0.0.1 URL that names a server started inside the VM is forwarded automatically to a loopback port on this Mac and the returned url shows the rewritten address; if nothing is listening there you get an error with a hint.',
       'Falls back to the system browser if the Web Viewer core plugin is not available.',
     ].join(' '),
     {
@@ -1510,14 +1559,22 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     },
     async (args, _extra) => {
       try {
-        const { url, newTab = false } = args;
+        const { url: requestedUrl, newTab = false } = args;
+
+        // A thread running in a sandbox container: `localhost` in the URL means
+        // the container, but this viewer runs on the host. Forward + rewrite.
+        const resolution = await options.resolveSandboxUrl?.(requestedUrl) ?? { kind: 'passthrough' as const };
+        const url = resolution.kind === 'forwarded' ? resolution.url : requestedUrl;
+        const forwardedInfo = resolution.kind === 'forwarded'
+          ? { requestedUrl, note: resolution.note }
+          : {};
 
         const contextualResult = await options.openContextualUrl?.(url, newTab) ?? false;
         if (contextualResult) {
           return {
             content: [{
               type: 'text' as const,
-              text: JSON.stringify({ success: true, url, reusedTab: contextualResult.reusedTab }, null, 2),
+              text: JSON.stringify({ success: true, url, ...forwardedInfo, reusedTab: contextualResult.reusedTab }, null, 2),
             }],
           };
         }
@@ -1544,13 +1601,17 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ success: true, url, reusedTab: !newTab && existing.length > 0 }, null, 2),
+            text: JSON.stringify({ success: true, url, ...forwardedInfo, reusedTab: !newTab && existing.length > 0 }, null, 2),
           }],
         };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: msg }, null, 2) }],
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            success: false,
+            error: msg,
+            ...(err instanceof VmLoopbackError ? { hint: err.hint } : {}),
+          }, null, 2) }],
           isError: true,
         };
       }
@@ -3176,7 +3237,7 @@ const CANONICAL_DESCRIPTION_OVERRIDES: Readonly<Record<string, string>> = Object
   workspace_insert_at_cursor: 'Inserts text at the cursor in the active editor, replacing the current selection.',
   host_list_commands: 'Returns registered host commands with their ID and name, sorted by ID. Optionally filters by query. Use this before host_execute_command.',
   host_execute_command: 'Executes a host command by ID. Use host_list_commands to discover available IDs. Third-party command IDs remain unchanged.',
-  host_open_url: 'Opens a URL in the host Web Viewer, reusing an existing tab by default and falling back to the system browser when unavailable.',
+  host_open_url: 'Opens a URL in the host Web Viewer, reusing an existing tab by default and falling back to the system browser when unavailable. In a sandbox-VM thread, localhost URLs for servers started inside the VM are forwarded to a loopback port on the Mac automatically.',
 });
 
 function toCanonicalToolDefinition(definition: SdkMcpToolDefinition<any>): SdkMcpToolDefinition<any> {

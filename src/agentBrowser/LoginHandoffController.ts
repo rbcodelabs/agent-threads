@@ -43,13 +43,24 @@ import {
 } from './agentBrowserInput';
 
 /** Frame width; the preview is for orientation, not detail. */
-export const HANDOFF_PREVIEW_WIDTH = 640;
+export const HANDOFF_PREVIEW_WIDTH = 1024;
 
 /**
  * Frame cadence while a handoff is active (ADR-0014 §4): a deliberate trade of
  * guest capture budget for responsiveness during a short, human-driven window.
  */
 export const HANDOFF_CAPTURE_MS = 250;
+
+/**
+ * Passive ("live view") cadence: how often a surface that is merely WATCHING the
+ * agent's own page gets a frame. Same numbers the Agent Browser pane has always
+ * used, because they share one per-guest capture budget: a frame every second
+ * while the agent is driving the page, one every five while it sits idle.
+ */
+export const LIVE_BUSY_CAPTURE_MS = 1_000;
+export const LIVE_IDLE_CAPTURE_MS = 5_000;
+/** How often the passive loop wakes to decide whether a capture is due. */
+export const LIVE_TICK_MS = 1_000;
 
 /** How long the "Signed in · Claude resumed" confirmation stays before folding back. */
 export const HANDOFF_RETURNED_MS = 4_000;
@@ -77,6 +88,8 @@ export interface LoginHandoffSnapshot {
   expiresAt?: number;
   /** active: epoch ms control was taken. */
   startedAt?: number;
+  /** active: 'popup' = a separate sign-in page; 'takeover' = the agent's own page, driven by a person. */
+  mode?: 'popup' | 'takeover';
   /** expired: epoch ms it expired. */
   expiredAt?: number;
   history: readonly LoginHandoffHistoryEntry[];
@@ -106,7 +119,7 @@ interface ThreadState {
   pending: PendingLoginRequest | null;
   pendingExpired: boolean;
   expiredAt?: number;
-  active: { guest: AgentBrowserGuest; url: string; startedAt: number } | null;
+  active: { guest: AgentBrowserGuest; url: string; startedAt: number; takeover?: boolean } | null;
   returned: { at: number; host: string; url: string } | null;
   returnedTimer: unknown;
   history: LoginHandoffHistoryEntry[];
@@ -147,6 +160,13 @@ export class LoginHandoffController {
   private readonly latestFrame = new Map<string, string>();
   private captureTimer: unknown = null;
   private capturing = false;
+
+  /** Surfaces watching the agent's own page (not a handoff). */
+  private readonly liveViewers = new Set<Viewer>();
+  private liveTimer: unknown = null;
+  private liveCapturing = false;
+  /** Epoch ms of the last passive frame per thread, whoever captured it. */
+  private readonly lastLiveAt = new Map<string, number>();
 
   constructor(options: LoginHandoffControllerOptions) {
     this.getPool = options.getPool;
@@ -189,12 +209,15 @@ export class LoginHandoffController {
   stop(): void {
     this.started = false;
     this.stopCaptureLoop();
+    this.stopLiveLoop();
     this.bridge?.stop();
     this.bridge = null;
     for (const state of this.threads.values()) if (state.returnedTimer) this.clearTimeoutFn(state.returnedTimer);
     this.threads.clear();
     this.latestFrame.clear();
+    this.lastLiveAt.clear();
     this.viewers.clear();
+    this.liveViewers.clear();
   }
 
   // ── Subscriptions ─────────────────────────────────────────────────────────
@@ -226,6 +249,35 @@ export class LoginHandoffController {
     const viewer: Viewer = { threadId, isVisible };
     this.viewers.add(viewer);
     return () => { this.viewers.delete(viewer); };
+  }
+
+  /**
+   * Declare that a surface shows LIVE frames of the agent's own page for
+   * `threadId` (the chat card of the active session). Frames are captured only
+   * while at least one live viewer for the thread reports visible, at the
+   * pane's cadence, and flow through `subscribeFrames` like handoff frames.
+   * The returned function detaches; the loop stops with the last viewer.
+   */
+  attachLiveViewer(isVisible: () => boolean, threadId: string): () => void {
+    const viewer: Viewer = { threadId, isVisible };
+    this.liveViewers.add(viewer);
+    this.ensureLiveLoop();
+    return () => {
+      this.liveViewers.delete(viewer);
+      if (this.liveViewers.size === 0) this.stopLiveLoop();
+    };
+  }
+
+  /**
+   * Hand the controller a frame some other surface already paid to capture (the
+   * Agent Browser pane), so the card shows the same picture without a second
+   * `capturePage()` against the same per-guest budget.
+   */
+  publishLiveFrame(threadId: string, dataUrl: string): void {
+    if (this.threads.get(threadId)?.active) return;
+    this.lastLiveAt.set(threadId, this.now());
+    this.latestFrame.set(threadId, dataUrl);
+    for (const l of this.frameListeners) l(threadId, dataUrl);
   }
 
   // ── Reads ─────────────────────────────────────────────────────────────────
@@ -271,6 +323,7 @@ export class LoginHandoffController {
       state.returned = null;
       if (state.returnedTimer) { this.clearTimeoutFn(state.returnedTimer); state.returnedTimer = null; }
       state.active = { guest, url: request.url, startedAt: this.now() };
+      guest.handoffActive = true;
       guest.focus();
       this.ensureCaptureLoop();
       this.emit(threadId);
@@ -282,16 +335,45 @@ export class LoginHandoffController {
     }
   }
 
+  /**
+   * Take over the agent's OWN page (no popup involved): a person can sign in to
+   * any page, e.g. a login form that is not a popup. The guest is locked against
+   * agent operations until control is returned, and is never retired on return.
+   */
+  takeOver(threadId: string): TakeControlResult {
+    const pool = this.getPool();
+    const guest = pool?.peek(threadId) ?? null;
+    if (!pool || !guest || !guest.isAlive()) return { ok: false, message: 'There is no browser page to take over.' };
+    if (this.hasActive()) return { ok: false, message: 'You already have control of a browser page.' };
+    const state = this.stateFor(threadId);
+    const url = guest.facts().url ?? '';
+    state.pending = null;
+    state.pendingExpired = false;
+    state.returned = null;
+    if (state.returnedTimer) { this.clearTimeoutFn(state.returnedTimer); state.returnedTimer = null; }
+    state.active = { guest, url, startedAt: this.now(), takeover: true };
+    guest.userDriving = true;
+    guest.handoffActive = true;
+    guest.focus();
+    this.ensureCaptureLoop();
+    this.emit(threadId);
+    return { ok: true };
+  }
+
   /** Give control back to the agent. Safe when no handoff is active. */
   returnControl(threadId: string, reason: GuestEndReason = 'login-complete'): void {
     const state = this.threads.get(threadId);
     const active = state?.active;
     if (!state || !active) return;
     state.active = null;
+    active.guest.handoffActive = false;
+    active.guest.userDriving = false;
     this.latestFrame.delete(threadId);
     for (const l of this.frameListeners) l(threadId, null);
     if (!this.hasActive()) this.stopCaptureLoop();
-    this.getPool()?.releaseLoginGuest(threadId, reason);
+    // A popup sign-in page is a temporary guest and is reclaimed; a taken-over
+    // agent page is the agent's own session and must survive being handed back.
+    if (!active.takeover) this.getPool()?.releaseLoginGuest(threadId, reason);
 
     const at = this.now();
     const host = hostOf(active.url);
@@ -319,11 +401,19 @@ export class LoginHandoffController {
 
   // ── Input forwarding (only ever to the ACTIVE login guest) ───────────────
 
-  forwardPointer(threadId: string, type: 'mouseDown' | 'mouseUp', clientX: number, clientY: number, rect: ClientRect): void {
+  forwardPointer(threadId: string, type: 'mouseDown' | 'mouseUp' | 'mouseMove', clientX: number, clientY: number, rect: ClientRect): void {
     const guest = this.activeGuest(threadId);
     if (!guest) return;
     const point = mapClientPointToViewport(clientX, clientY, rect, guest.facts().viewport);
     guest.sendInputEvent(buildMouseInputEvent(type, point));
+    // Typing goes straight to the guest (no key forwarding while it holds native
+    // focus), so every press must leave the guest, not the pane, owning the keyboard.
+    if (type === 'mouseDown') guest.focus();
+  }
+
+  /** Give the active login guest keyboard focus (e.g. right after its pane opens). */
+  focusActiveGuest(threadId: string): void {
+    this.activeGuest(threadId)?.focus();
   }
 
   /** Returns true when the key was forwarded (so the caller should preventDefault). */
@@ -333,6 +423,11 @@ export class LoginHandoffController {
     const mapped = mapKeyboardEvent(event);
     if (!mapped) return false;
     guest.sendInputEvent(mapped);
+    // Text entry needs a `char` event between keyDown and keyUp; without it the
+    // page sees key presses but no characters land in the field.
+    if (mapped.type === 'keyDown' && event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
+      guest.sendInputEvent({ type: 'char', keyCode: event.key, modifiers: mapped.modifiers });
+    }
     return true;
   }
 
@@ -401,7 +496,7 @@ export class LoginHandoffController {
         const active = state.active;
         if (!active || !this.isWatched(threadId)) continue;
         try {
-          const png = await active.guest.capture(HANDOFF_PREVIEW_WIDTH);
+          const png = await active.guest.capture(HANDOFF_PREVIEW_WIDTH, { human: true });
           // Control may have been returned while the capture was in flight.
           if (this.threads.get(threadId)?.active !== active) continue;
           const dataUrl = pngDataUrl(png);
@@ -419,12 +514,67 @@ export class LoginHandoffController {
     }
   }
 
+  // ── Passive live view ─────────────────────────────────────────────────────
+
+  private ensureLiveLoop(): void {
+    if (this.liveTimer !== null) return;
+    this.liveTimer = this.setIntervalFn(() => { void this.liveTick(); }, LIVE_TICK_MS);
+  }
+
+  private stopLiveLoop(): void {
+    if (this.liveTimer === null) return;
+    this.clearIntervalFn(this.liveTimer);
+    this.liveTimer = null;
+  }
+
+  /**
+   * One pass of the passive loop: for each thread a visible live viewer is
+   * watching, capture the agent's page if a frame is due. Never touches a
+   * handoff (the dedicated loop owns those) and never captures for a thread
+   * nobody can see. Exposed for tests.
+   */
+  async liveTick(): Promise<void> {
+    if (this.liveCapturing) return;
+    this.liveCapturing = true;
+    try {
+      const watched = new Set<string>();
+      for (const viewer of this.liveViewers) if (viewer.threadId && viewer.isVisible()) watched.add(viewer.threadId);
+      for (const threadId of watched) {
+        if (this.threads.get(threadId)?.active) continue;
+        const guest = this.getPool()?.peek(threadId) ?? null;
+        if (!guest || !guest.isAlive()) {
+          // The session is gone: drop the stale frame so a card falls back to its screenshot.
+          this.lastLiveAt.delete(threadId);
+          if (this.latestFrame.delete(threadId)) for (const l of this.frameListeners) l(threadId, null);
+          continue;
+        }
+        const every = guest.currentState === 'busy' ? LIVE_BUSY_CAPTURE_MS : LIVE_IDLE_CAPTURE_MS;
+        const last = this.lastLiveAt.get(threadId);
+        if (last !== undefined && this.now() - last < every) continue;
+        // Claimed before the await so an overlapping publish/tick cannot double-capture.
+        this.lastLiveAt.set(threadId, this.now());
+        try {
+          const png = await guest.capture(HANDOFF_PREVIEW_WIDTH);
+          if (this.threads.get(threadId)?.active) continue;
+          const dataUrl = pngDataUrl(png);
+          this.latestFrame.set(threadId, dataUrl);
+          for (const l of this.frameListeners) l(threadId, dataUrl);
+        } catch {
+          // A capture can fail because the guest died or is busy; the next
+          // pass notices a dead guest. Nothing to report from a passive frame.
+        }
+      }
+    } finally {
+      this.liveCapturing = false;
+    }
+  }
+
   // ── Snapshot ──────────────────────────────────────────────────────────────
 
   private toSnapshot(threadId: string, state: ThreadState): LoginHandoffSnapshot | null {
     const history = [...state.history];
     if (state.active) {
-      return { threadId, phase: 'active', url: state.active.url, host: hostOf(state.active.url), startedAt: state.active.startedAt, history };
+      return { threadId, phase: 'active', url: state.active.url, host: hostOf(state.active.url), startedAt: state.active.startedAt, mode: state.active.takeover ? 'takeover' : 'popup', history };
     }
     if (state.pending) {
       const { url } = state.pending;

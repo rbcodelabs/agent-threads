@@ -2425,6 +2425,11 @@ test.describe('Agent Threads UI', () => {
     await expect(modal.getByText('Client ID (required)', { exact: true })).toBeVisible();
     await expect(modal.getByText('Client secret (required)', { exact: true })).toBeVisible();
     await expect(modal.getByText('no browser and no sign-in', { exact: false })).toBeVisible();
+    // Pin the focus state. The modal moves focus to the Name field on open and
+    // re-renders when the grant type changes; whether that focus ring is
+    // present at capture time was a race, so the screenshot flaked on it.
+    await modal.locator('input').first().focus();
+    await expect(modal.locator('input').first()).toBeFocused();
     await shot(page, 'settings-mcp-add-oauth-client-credentials.png', { fullPage: true });
   });
 

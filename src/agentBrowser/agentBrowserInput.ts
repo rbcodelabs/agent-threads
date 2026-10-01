@@ -42,7 +42,7 @@ export interface GuestPoint {
  * without a DOM.
  */
 export interface MouseInputEvent {
-  type: 'mouseDown' | 'mouseUp';
+  type: 'mouseDown' | 'mouseUp' | 'mouseMove';
   x: number;
   y: number;
   button: 'left';
@@ -52,7 +52,7 @@ export interface MouseInputEvent {
 export type KeyboardModifier = 'shift' | 'control' | 'alt' | 'meta';
 
 export interface KeyboardInputEvent {
-  type: 'keyDown' | 'keyUp';
+  type: 'keyDown' | 'keyUp' | 'char';
   keyCode: string;
   modifiers: KeyboardModifier[];
 }
@@ -88,7 +88,7 @@ export function mapClientPointToViewport(
 }
 
 /** Build a synthetic left-click mouse event at a guest-viewport-space point. */
-export function buildMouseInputEvent(type: 'mouseDown' | 'mouseUp', point: GuestPoint): MouseInputEvent {
+export function buildMouseInputEvent(type: 'mouseDown' | 'mouseUp' | 'mouseMove', point: GuestPoint): MouseInputEvent {
   return { type, x: point.x, y: point.y, button: 'left', clickCount: 1 };
 }
 

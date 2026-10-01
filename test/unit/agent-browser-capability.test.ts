@@ -162,6 +162,17 @@ describe('act script', () => {
     expect(document.getElementById('result')!.textContent).toBe('clicked:buy milk');
   });
 
+  it('reports where it acted (element centre) so the overlay can draw a cursor there', () => {
+    const go = document.getElementById('go')!;
+    go.getBoundingClientRect = () =>
+      ({ left: 100, top: 40, width: 60, height: 20, right: 160, bottom: 60, x: 100, y: 40, toJSON: () => ({}) }) as DOMRect;
+    const snap = snapshot();
+    const clicked = runScript<RawActResult>(
+      buildActScript(REF_KEY, { kind: 'click', ref: 'e2', epoch: snap.epoch }),
+    );
+    expect(clicked.ok && clicked.pointer).toEqual({ x: 130, y: 50 });
+  });
+
   it('refuses to act on a ref from a superseded snapshot', () => {
     // The "snapshot site A, page changes, act on site B" case.
     const stale = snapshot();
