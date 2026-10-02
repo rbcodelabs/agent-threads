@@ -1234,7 +1234,7 @@ export class ThreadSession {
         // message. Entirely internal to ThreadSession; the UI only learns of
         // it via onRateLimitRetry (a transient 'reconnecting'-style notice),
         // never a terminal onError, unless the backoff budget is exhausted.
-        else if (!this.resumeFallbackUsed && this.lastUserTurn
+        else if (!this.resumeFallbackUsed && this._turnInFlight && this.lastUserTurn
           && isResumeFailure(e.message, this.stderrTail, { resumed: startedWithResume, sawMessage })) {
           // The persisted session can't be resumed (transcript missing after a
           // restart, moved config dir, ...). Start a fresh session once and
@@ -1247,7 +1247,9 @@ export class ThreadSession {
           try {
             // 'cwd-change' drops the resume id, so start() begins a new session.
             await this.restart('cwd-change');
-            this.sendInternal(`${fallbackHistory ?? ''}${turn.text}`, turn.images, turn.userMessageUuid);
+            // start() reports synchronous query initialization errors itself.
+            // A closed channel here must not produce a second terminal error.
+            if (this.query) this.sendInternal(`${fallbackHistory ?? ''}${turn.text}`, turn.images, turn.userMessageUuid);
           } catch (retryErr) {
             console.error('[ClaudeThreads] ThreadSession resume-fallback failed:', retryErr);
             callbacks.onError(retryErr instanceof Error ? retryErr : new Error(String(retryErr)));

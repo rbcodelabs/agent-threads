@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SessionCallbacks } from '../../src/ClaudeSession';
 
-const sdk = vi.hoisted(() => ({ outputs: [] as AsyncIterable<unknown>[], calls: [] as any[] }));
+const sdk = vi.hoisted(() => ({ outputs: [] as AsyncIterable<unknown>[], calls: [] as any[], failCall: -1 }));
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: (args: any) => {
     sdk.calls.push(args);
+    if (sdk.calls.length === sdk.failCall) throw new Error('CLI initialization failed');
     const output = sdk.outputs.shift()!;
     return { [Symbol.asyncIterator]: () => output[Symbol.asyncIterator](), close: vi.fn(),
       supportedModels: async () => [], supportedAgents: async () => [] };
@@ -26,7 +27,27 @@ function callbacks(): SessionCallbacks {
     onOpenNewTab: async () => ({ threadId: '', title: '' }) };
 }
 describe('Claude missing-session recovery', () => {
-  beforeEach(() => { sdk.calls = []; sdk.outputs = []; });
+  beforeEach(() => { sdk.calls = []; sdk.outputs = []; sdk.failCall = -1; });
+  it('reports the original initialization failure once if fresh fallback cannot start', async () => {
+    sdk.outputs = [failing([])]; sdk.failCall = 2;
+    const cb = callbacks(); const session = new ThreadSession('/fake/claude');
+    await session.start({ cwd: '/tmp', permissionMode: 'default', extraEnvRaw: '', resume: 'gone', callbacks: cb });
+    session.send('continue'); await flush();
+    expect(cb.onError).toHaveBeenCalledTimes(1);
+    expect(cb.onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'CLI initialization failed' }));
+    session.close();
+  });
+  it('does not replay a stale user turn when a restarted session fails before another send', async () => {
+    sdk.outputs = [waiting(), failing([]), waiting()];
+    const cb = callbacks(); const session = new ThreadSession('/fake/claude');
+    await session.start({ cwd: '/tmp', permissionMode: 'default', extraEnvRaw: '', resume: 'gone', callbacks: cb });
+    session.send('old action');
+    await session.restart('transport-error'); await flush();
+    expect(sdk.calls).toHaveLength(2);
+    expect(cb.onError).toHaveBeenCalledTimes(1);
+    expect(cb.onReconnecting).not.toHaveBeenCalled();
+    session.close();
+  });
   it('recovers after init and an error result, preserving history, images and message UUID', async () => {
     sdk.outputs = [failing([{ type: 'system', subtype: 'init', session_id: 'gone' },
       { type: 'result', subtype: 'error_during_execution', is_error: true, errors: [missing] }]), waiting()];
