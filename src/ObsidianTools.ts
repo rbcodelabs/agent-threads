@@ -40,7 +40,10 @@ import {
   resolveVmMemory,
   resolveVmCpus,
   resolveExternalMounts,
+  resolveVaultMount,
+  mergeExtraMounts,
   VM_EXTERNAL_ROOT,
+  VM_VAULT_MOUNT,
   type ExternalMountRootInput,
   type VmCommandRunner,
 } from './sandboxVm';
@@ -312,6 +315,8 @@ export interface ObsidianMcpServerOptions {
    * failures are swallowed (no extra mounts) rather than failing `enter_vm`.
    */
   getExternalMounts?: () => Promise<ExternalMountRootInput[] | null | undefined>;
+  /** Host path of the vault, mounted read-write at /vault in every VM. Empty/undefined skips it. */
+  getVaultPath?: () => string | null | undefined;
   /**
    * Overrides how sandbox VM commands are executed. Tests inject a fake so
    * command construction and lifecycle transitions are exercised without a
@@ -1290,10 +1295,11 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         } catch (e) {
           console.error('claude-threads: listing external roots for enter_vm failed:', e);
         }
-        const extraMounts = resolveExternalMounts(externalEntries, {
-          workPath: mountPath,
-          isDirectory: (p) => fs.existsSync(p) && fs.statSync(p).isDirectory(),
-        });
+        const isDir = (p: string) => fs.existsSync(p) && fs.statSync(p).isDirectory();
+        const extraMounts = mergeExtraMounts(
+          resolveExternalMounts(externalEntries, { workPath: mountPath, isDirectory: isDir }),
+          resolveVaultMount(options.getVaultPath?.(), isDir),
+        );
 
         const result = await vmManager.enter({
           image: resolveVmImage(args.image, options.getVmImage?.()),
@@ -1306,6 +1312,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         if (!result.success) return vmErrorResult(result.error);
 
         // Only /ext mounts are external roots; skill mounts (harness) are not.
+        const vaultMounted = (result.extraMounts ?? []).some((m) => m.guestPath === VM_VAULT_MOUNT && m.readWrite);
         const mountedExternal = (result.extraMounts ?? [])
           .filter((m) => m.guestPath.startsWith(`${VM_EXTERNAL_ROOT}/`))
           .map((m) => ({
@@ -1326,11 +1333,12 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
               network: result.network,
               containerWorkdir: VM_WORKDIR,
               mountedExternal,
+              ...(vaultMounted ? { vaultMount: { guestPath: VM_VAULT_MOUNT, readOnly: false } } : {}),
               ...(result.notes?.length ? { notes: result.notes } : {}),
               message: `Sandbox VM running. ${result.mountedFrom} is mounted at ${VM_WORKDIR}. Run commands with vm_exec; keep editing files with the normal file tools on the host.${
                 mountedExternal.length
                   ? ` Connected external roots are mounted read-only: ${mountedExternal.map((m) => `${m.guestPath} (${m.hostPath})`).join(', ')}.`
-                  : ''}`,
+                  : ''}${vaultMounted ? ` The vault is mounted READ-WRITE at ${VM_VAULT_MOUNT}.` : ''}`,
             }, null, 2),
           }],
         };

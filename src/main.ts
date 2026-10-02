@@ -693,6 +693,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // Geode-only, optional: connected external roots to mount read-only
           // at /ext/<label>. Undefined on Obsidian / older Geode -> no extras.
           getExternalMounts: () => this.listExternalMountRoots(),
+          getVaultPath: () => this.manager.vaultRoot,
           // ADR-0015 §3: share the same per-thread SandboxVmManager this
           // thread's Claude harness routes into, so enter_vm/vm_exec/exit_vm
           // see the container's real origin instead of each side tracking it

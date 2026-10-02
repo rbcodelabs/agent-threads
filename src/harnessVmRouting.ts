@@ -10,7 +10,7 @@
  */
 import type { SandboxVmManager } from './sandboxVm';
 import * as fs from 'fs';
-import { buildHarnessExecArgs, mergeExtraMounts, resolveExternalMounts, VM_WORKDIR, type ExternalMountRootInput } from './sandboxVm';
+import { buildHarnessExecArgs, mergeExtraMounts, resolveExternalMounts, resolveVaultMount, VM_WORKDIR, type ExternalMountRootInput } from './sandboxVm';
 import type { HarnessVmMode } from './types';
 import type { SkillMountPlan, VmExtraMount } from './skillMounts';
 
@@ -118,6 +118,8 @@ export interface ClaudeVmRoutingInputs {
   skillMountPlan?: SkillMountPlan;
   /** Geode-only, optional: connected external roots to mount read-only at /ext/<label>. Any failure means no extras. */
   getExternalMounts?: () => Promise<ExternalMountRootInput[] | null | undefined>;
+  /** Host path of the vault, mounted read-write at /vault. Empty/undefined (mobile) skips the mount. */
+  getVaultPath?: () => string | null | undefined;
   /** Test-only overrides forwarded to checkHarnessVmCapability; production callers omit these and get the real process.platform/arch. */
   platform?: string;
   arch?: string;
@@ -179,6 +181,8 @@ export async function resolveClaudeVmRouting(
     isDirectory: (p) => fs.existsSync(p) && fs.statSync(p).isDirectory(),
   });
 
+  const vaultMount = resolveVaultMount(inputs.getVaultPath?.(), (p) => fs.existsSync(p) && fs.statSync(p).isDirectory());
+
   const entered = await inputs.vmManager.ensureHarnessContainer({
     image: inputs.image,
     mountPath: inputs.mountPath,
@@ -186,7 +190,7 @@ export async function resolveClaudeVmRouting(
     memory: inputs.memory,
     cpus: inputs.cpus,
     // Skill mounts win on a guest-path collision (none today: /skills, /home/node vs /ext).
-    extraMounts: mergeExtraMounts(inputs.skillMountPlan?.mounts, externalMounts),
+    extraMounts: mergeExtraMounts(inputs.skillMountPlan?.mounts, externalMounts, vaultMount),
   });
   if (!entered.success) {
     if (inputs.mode === 'always') {
