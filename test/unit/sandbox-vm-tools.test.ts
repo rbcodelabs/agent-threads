@@ -222,6 +222,17 @@ describe('enter_vm', () => {
     expect(runner.argvs().at(-1)).toContain('--network none');
   });
 
+  it('plumbs the configured memory/cpus into the container run', async () => {
+    const runner = makeRunner(CLI_OK_NO_CONTAINER);
+    const { enter } = vmTools({
+      vmCommandRunner: runner.run,
+      getVmMemory: () => '8G',
+      getVmCpus: () => 2,
+    });
+    await call(enter, {});
+    expect(runner.argvs().at(-1)).toContain('--memory 8G --cpus 2');
+  });
+
   it('honours an explicit mountPath override', async () => {
     const runner = makeRunner(CLI_OK_NO_CONTAINER);
     const other = fs.realpathSync(fs.mkdtempSync(path.join(MOUNT, 'vm-mount-')));
