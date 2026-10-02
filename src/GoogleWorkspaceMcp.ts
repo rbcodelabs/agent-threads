@@ -10,7 +10,7 @@ const DRIVE_FILES_PATH = '/drive-files';
 /** Large transfers outlive the 5-minute limit applied to forwarded vendor MCP calls. */
 const TRANSFER_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 
-export const GOOGLE_SERVICES = ['docs', 'drive', 'sheets', 'slides'] as const;
+export const GOOGLE_SERVICES = ['docs', 'drive', 'sheets', 'slides', 'gmail', 'calendar'] as const;
 type Service = typeof GOOGLE_SERVICES[number];
 export type GoogleWorkspaceSelection = Partial<Record<Service, boolean>>;
 interface DocsSync {
@@ -94,7 +94,9 @@ export class GoogleWorkspaceMcp {
     if (!plugin) return 'Enable Google Docs Sync, then connect your Google account in its settings.';
     if (plugin.tokenStore.supportsConnectionGuard !== true) return 'Update Google Docs Sync to a release with guarded connection refresh support, then restart this plugin.';
     if (!plugin.tokenStore.get()?.refreshToken) return 'Connect your Google account in Google Docs Sync settings.';
-    return this.lastFailure || 'Connected through Google Docs Sync. Google validates service access when a thread connects.';
+    const scopeHint = (['gmail', 'calendar'] as const).some(service => this.enabled[service])
+      ? ' Gmail and Calendar need extra permissions: if their tools fail with a 403 or insufficient-scope error, disconnect and reconnect your account in Google Docs Sync.' : '';
+    return this.lastFailure || 'Connected through Google Docs Sync. Google validates service access when a thread connects.' + scopeHint;
   }
 
   async configure(selection: GoogleWorkspaceSelection): Promise<void> {

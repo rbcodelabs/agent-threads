@@ -2836,6 +2836,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   // ── MCP ─────────────────────────────────────────────────────────────────
 
   private renderMcpTab(containerEl: HTMLElement): void {
+    const MAIL_CALENDAR_DESC = {
+      gmail: 'Agents can read, send, and delete mail. Requires reconnecting your account in Google Docs Sync to grant the Gmail scopes.',
+      calendar: 'Agents can read, create, change, and delete events. Requires reconnecting your account in Google Docs Sync to grant the Calendar scopes.',
+    } as const;
     containerEl.createEl('h2', { text: 'MCP Servers' });
     containerEl.createEl('h3', { text: 'Google Workspace' });
     const googleStatus = containerEl.createEl('p', {
@@ -2846,8 +2850,11 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       cls: 'setting-item-description',
       text: 'Enable Google-provided read and write tools using your Google Docs Sync connection. Selected services apply to new threads, including scheduled threads. Disabling a service revokes existing Google connections. After reconnecting, changing auth hosts, or token rotation, start a new thread. Google Workspace Developer Preview enrollment and service APIs are required.',
     });
-    for (const [service, label] of [['docs', 'Google Docs'], ['drive', 'Google Drive'], ['sheets', 'Google Sheets'], ['slides', 'Google Slides']] as const) {
-      new Setting(containerEl).setName(label).addToggle(toggle => toggle
+    for (const [service, label] of [['docs', 'Google Docs'], ['drive', 'Google Drive'], ['sheets', 'Google Sheets'], ['slides', 'Google Slides'], ['gmail', 'Gmail'], ['calendar', 'Google Calendar']] as const) {
+      const setting = new Setting(containerEl).setName(label);
+      if (service === 'gmail') setting.setDesc(MAIL_CALENDAR_DESC.gmail);
+      if (service === 'calendar') setting.setDesc(MAIL_CALENDAR_DESC.calendar);
+      setting.addToggle(toggle => toggle
         .setValue(this.plugin.settings.googleWorkspaceMcp?.[service] === true)
         .onChange(async enabled => {
           this.plugin.settings.googleWorkspaceMcp = { ...this.plugin.settings.googleWorkspaceMcp, [service]: enabled };

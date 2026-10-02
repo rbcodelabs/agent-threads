@@ -21,6 +21,20 @@ async function call(config: { url: string; headers: Record<string, string> }, ex
   return fetch(config.url, { method: 'POST', headers: { ...config.headers, 'Content-Type': 'application/json', 'MCP-Protocol-Version': '2025-03-26' }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}', ...extra });
 }
 describe('Google Workspace MCP connection', () => {
+  it('routes Gmail and Calendar to their vendor hosts and explains scope failures', async () => {
+    const f = setup(); await f.proxy.configure({ gmail: true, calendar: true });
+    const servers = f.proxy.serversForThread('thread');
+    expect(Object.keys(servers)).toEqual(['google-gmail', 'google-calendar']);
+    expect((await call(servers['google-gmail'])).status).toBe(200);
+    expect(f.fetchUpstream).toHaveBeenLastCalledWith('https://gmailmcp.googleapis.com/mcp/v1', expect.anything());
+    expect((await call(servers['google-calendar'])).status).toBe(200);
+    expect(f.fetchUpstream).toHaveBeenLastCalledWith('https://calendarmcp.googleapis.com/mcp/v1', expect.anything());
+    expect(f.proxy.status()).toContain('reconnect your account in Google Docs Sync');
+  });
+  it('omits the scope hint when only the original services are enabled', async () => {
+    const f = setup(); await f.proxy.configure({ docs: true });
+    expect(f.proxy.status()).not.toContain('Gmail');
+  });
   it('exposes all selected vendor servers with opaque local credentials and untouched payloads', async () => {
     const f = setup(); await f.proxy.configure({ docs: true, drive: true, sheets: true, slides: true });
     const servers = f.proxy.serversForThread('thread');
