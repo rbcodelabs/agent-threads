@@ -48,6 +48,7 @@ import {
   shouldAutoRetryAuthError,
 } from './claudeAuthRecovery';
 import { stripHostOnlyGitEnv } from './githubCredentialHelper';
+import { isReportedModelId } from './modelOptions';
 import { mergeUsageSnapshot,normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
 
 /**
@@ -820,6 +821,8 @@ export class ThreadSession {
                 streamingText = '';
                 break;
               }
+              const replyModel = (msg.message as { model?: unknown }).model;
+              if (isReportedModelId(replyModel)) callbacks.onActiveModel?.(replyModel);
             }
             const parts: string[] = [];
             for (const block of msg.message.content) {
@@ -937,6 +940,9 @@ export class ThreadSession {
           case 'system': {
             const sys = msg as Record<string, unknown>;
             switch (sys.subtype) {
+              case 'init':
+                if (isReportedModelId(sys.model)) callbacks.onActiveModel?.(sys.model);
+                break;
               case 'status':
                 callbacks.onStatus?.(sys.status as 'compacting' | 'requesting' | null);
                 break;

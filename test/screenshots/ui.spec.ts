@@ -1309,12 +1309,12 @@ test.describe('Agent Threads UI', () => {
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
     await page.getByText('Model: Default').click();
-    await page.getByText('Sonnet', { exact: true }).click();
+    await page.getByText(/^Sonnet \d+(\.\d+)? \(latest\)$/).click();
     await expect.poll(() => page.evaluate(() => (window as any).__manager.getThread('thread-fix-auth').model)).toBe('sonnet');
 
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await expect(page.locator('.menu')).toContainText('Model: Sonnet');
+    await expect(page.locator('.menu')).toContainText(/Model: Sonnet \d+(\.\d+)? \(latest\)/);
     await page.getByText('Permissions: Global default').click();
     await page.getByText('Plan only (read & propose, no execute)', { exact: true }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__manager.getThread('thread-fix-auth').permissionMode)).toBe('plan');
@@ -1326,7 +1326,7 @@ test.describe('Agent Threads UI', () => {
     await page.evaluate(() => (window as any).__view['escalatedTurnModels'].set('thread-fix-auth', 'opus'));
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await expect(page.locator('.menu')).toContainText('Model: opus (this turn)');
+    await expect(page.locator('.menu')).toContainText(/Model: Opus \d+(\.\d+)? \(latest\) \(this turn\)/);
   });
 
   test('unified context truncates without overlapping footer actions', async ({ page }) => {
@@ -3629,7 +3629,7 @@ test.describe('Agent Threads UI', () => {
     });
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await expect(page.locator('.menu')).toContainText('Model: opus (this turn)');
+    await expect(page.locator('.menu')).toContainText(/Model: Opus \d+(\.\d+)? \(latest\) \(this turn\)/);
     await page.waitForTimeout(100);
     await shot(page, 'model-escalation-turn-button.png', { fullPage: true });
     await page.mouse.click(0, 0);

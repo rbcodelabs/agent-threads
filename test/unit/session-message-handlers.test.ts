@@ -155,6 +155,36 @@ describe('model_fallback → onModelFallback', () => {
   });
 });
 
+// ─── active model ─────────────────────────────────────────────────────────────
+
+describe('onActiveModel → thread.activeModel', () => {
+  it('records the reported model once and emits active_model only on change', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T');
+    const events: ThreadEvent[] = [];
+    manager.subscribe((_, e) => events.push(e));
+
+    await manager.sendMessage(thread.id, 'hi');
+    mock.callbacks!.onActiveModel!('us.anthropic.claude-opus-5-5');
+    mock.callbacks!.onActiveModel!('us.anthropic.claude-opus-5-5');
+    driveResponse();
+
+    expect(manager.getThread(thread.id)?.activeModel).toBe('us.anthropic.claude-opus-5-5');
+    expect(events.filter(e => e.type === 'active_model')).toHaveLength(1);
+  });
+
+  it('clears activeModel when the thread model selection changes', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T');
+    await manager.sendMessage(thread.id, 'hi');
+    mock.callbacks!.onActiveModel!('claude-opus-4-8');
+    driveResponse();
+
+    manager.setThreadModel(thread.id, 'opus');
+    expect(manager.getThread(thread.id)?.activeModel).toBeUndefined();
+  });
+});
+
 describe('Claude refusal events', () => {
   it('emits distinct typed fallback and no-fallback events without replacing Codex fallback', async () => {
     const manager = makeManager();
