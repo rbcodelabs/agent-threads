@@ -28,6 +28,8 @@ import {
   buildNetworkListArgs,
   buildRemoveArgs,
   buildRunArgs,
+  DEFAULT_VM_MEMORY,
+  DEFAULT_VM_CPUS,
   buildStopArgs,
   containerNameForThread,
   isVmNetworkMode,
@@ -234,6 +236,8 @@ describe('sandboxVm — argument construction', () => {
         '--name', 'c',
         '--volume', `/host/work:${VM_WORKDIR}`,
         '--workdir', VM_WORKDIR,
+        '--memory', DEFAULT_VM_MEMORY,
+        '--cpus', String(DEFAULT_VM_CPUS),
         'img:1',
         'sleep', 'infinity',
       ]);

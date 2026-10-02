@@ -45,7 +45,7 @@ describe('buildRunArgs — extra read-only mounts and labels', () => {
 
   it('is unchanged when there are no extra mounts or labels', () => {
     expect(buildRunArgs(base)).toEqual([
-      'run', '--detach', '--name', 'c', '--volume', '/tmp/work:/work', '--workdir', '/work', 'img:1', 'sleep', 'infinity',
+      'run', '--detach', '--name', 'c', '--volume', '/tmp/work:/work', '--workdir', '/work', '--memory', '4G', '--cpus', '4', 'img:1', 'sleep', 'infinity',
     ]);
   });
 

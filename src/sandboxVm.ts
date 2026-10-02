@@ -59,6 +59,12 @@ export const VM_NETWORK_MODES: readonly VmNetworkMode[] = ['default', 'internal'
 
 /** Image built from `sandbox/Dockerfile`. Overridable per call and in settings. */
 export const DEFAULT_VM_IMAGE = 'claude-threads-coding:1';
+/**
+ * Apple's `container` CLI defaults to 1 GiB per VM, which OOM-kills pnpm/tsc/tests
+ * once the harness is resident. Cap is a ceiling, not a reservation.
+ */
+export const DEFAULT_VM_MEMORY = '4G';
+export const DEFAULT_VM_CPUS = 4;
 
 /** Where the thread's working directory is bind-mounted, and the guest cwd. */
 export const VM_WORKDIR = '/work';
@@ -405,6 +411,8 @@ export function buildRunArgs(opts: {
   /** Additional READ-ONLY bind mounts (e.g. skills). Fixed for the container's lifetime. */
   extraMounts?: readonly VmExtraMount[];
   labels?: Record<string, string>;
+  memory?: string;
+  cpus?: number;
 }): string[] {
   if (opts.mountPath.includes(':')) throw new Error('mountPath cannot contain a colon (the container volume delimiter).');
   if (!opts.image.trim() || opts.image.startsWith('-')) throw new Error('Invalid container image reference.');
@@ -418,6 +426,8 @@ export function buildRunArgs(opts: {
     ...extraMountArgs(opts.extraMounts),
     ...labelArgs,
     '--workdir', workdir,
+    '--memory', opts.memory?.trim() || DEFAULT_VM_MEMORY,
+    '--cpus', String(opts.cpus ?? DEFAULT_VM_CPUS),
     ...networkArgsFor(opts.network),
     opts.image,
     // The container only has to stay alive so `container exec` has somewhere to

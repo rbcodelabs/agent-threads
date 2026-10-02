@@ -171,7 +171,7 @@ describe('resolveClaudeVmRouting', () => {
   it('auto mode: falls back silently when the capability check passes but the container fails to start', async () => {
     const { manager } = makeManager({
       ...CAPABLE_SCRIPT,
-      'run --detach --name claude-threads-vm-test-thread --volume /work:/work --label claude-threads.origin=harness --workdir /work claude-threads-harness:1 sleep infinity': { exitCode: 1, stderr: 'boom' },
+      'run --detach --name claude-threads-vm-test-thread --volume /work:/work --label claude-threads.origin=harness --workdir /work --memory 4G --cpus 4 claude-threads-harness:1 sleep infinity': { exitCode: 1, stderr: 'boom' },
     });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const result = await resolveClaudeVmRouting({
@@ -199,7 +199,7 @@ describe('resolveClaudeVmRouting', () => {
   it('always mode: THROWS when capable but the container itself fails to start', async () => {
     const { manager } = makeManager({
       ...CAPABLE_SCRIPT,
-      'run --detach --name claude-threads-vm-test-thread --volume /work:/work --label claude-threads.origin=harness --workdir /work claude-threads-harness:1 sleep infinity': { exitCode: 1, stderr: 'boom' },
+      'run --detach --name claude-threads-vm-test-thread --volume /work:/work --label claude-threads.origin=harness --workdir /work --memory 4G --cpus 4 claude-threads-harness:1 sleep infinity': { exitCode: 1, stderr: 'boom' },
     });
     await expect(resolveClaudeVmRouting({
       mode: 'always', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
