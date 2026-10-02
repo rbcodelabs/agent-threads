@@ -75,6 +75,7 @@ import { setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
 import { CONTAINER_AUTH_TOKEN_SECRET } from './claudeContainerAuthCli';
+import { drainVmIdleStops } from './sandboxVm';
 import { scheduleVaultThreadRecovery } from './vaultThreadRecovery';
 import { resolveProjectVaultRoot } from './projectPaths';
 import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, repairStaleProjectOrchestrators, resolveCoordinationRole } from './coordinationScope';
@@ -425,6 +426,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const fence = sharedPersistenceWriterFence();
     this.persistenceWriterToken = fence.claim();
     await fence.drain();
+    // Hosts do not await onunload: drain old VM stops before any new manager can adopt their containers.
+    await drainVmIdleStops();
     // Built-in Lucide icon names need no registration. Never register a raw
     // 24×24 Lucide fragment via addIcon(): it wraps content in a 100×100
     // viewBox, so the glyph renders as a tiny dot in the top-left corner, and a
@@ -587,6 +590,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     setKnownSecretsProvider(() => this.collectSecretValues());
     this.register(() => setKnownSecretsProvider(null));
     this.manager = new ThreadManager(this.settings);
+    this.manager.startHarnessVmIdleReaper();
     this.manager.getExternalMounts = () => this.listExternalMountRoots();
     this.contextPanel = new ContextPanelController(this.app, () =>
       this.app.workspace.getLeavesOfType(VIEW_TYPE)[0] ?? null,
@@ -2729,6 +2733,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   async onunload(): Promise<void> {
+    // Cancel VM timers before the first await. Register pending stops in the
+    // host-shared barrier that the replacement onload drains above.
+    void this.manager?.stopVmIdleLifecycle();
     // Delete the published GitHub token file immediately; never wait on the shutdown poll below.
     void this.githubHost?.stop();
     // Revoke peer references before asynchronous shutdown begins. Obsidian does
@@ -2785,7 +2792,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.gitDiff?.stop();
     this.documentWatch?.stop();
     telemetry.dispose();
-    this.manager?.destroy();
+    await this.manager?.destroy();
 
     // Note: pending ScheduleWakeup entries are now durable Scheduler items
     // (schedule.type 'once', origin 'wakeup') persisted to disk — they must

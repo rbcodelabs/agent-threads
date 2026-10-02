@@ -441,6 +441,8 @@ function extraMountArgs(extraMounts: readonly VmExtraMount[] | undefined): strin
   }
   return args;
 }
+/** How long an agent-owned sandbox VM may sit unused before it is stopped to reclaim guest RAM. 0 disables. */
+export const DEFAULT_VM_IDLE_STOP_MS = 10 * 60 * 1000;
 
 export function buildRunArgs(opts: {
   containerName: string;
@@ -662,6 +664,25 @@ export interface SandboxVmManagerDeps {
   hooks?: VmHooks;
   /** Starts a guest port relay (see vmPortForward.ts). Defaults to `container exec`; tests inject a fake. */
   spawnRelay?: (containerName: string, port: number) => RelayProcess;
+  /**
+   * Idle window before an agent-owned VM is stopped (not removed) to reclaim
+   * memory; the next `vm_exec` restarts it. Read lazily. 0 disables.
+   * Defaults to {@link DEFAULT_VM_IDLE_STOP_MS}. Harness-owned VMs are never
+   * idle-stopped: stopping one would kill the harness process inside it.
+   */
+  idleStopMs?: () => number;
+}
+
+const VM_IDLE_STOPS_KEY = Symbol.for('claude-threads.vm-idle-stops');
+type VmIdleStopsGlobal = typeof globalThis & { [VM_IDLE_STOPS_KEY]?: Set<Promise<void>> };
+function sharedVmIdleStops(): Set<Promise<void>> {
+  return (globalThis as VmIdleStopsGlobal)[VM_IDLE_STOPS_KEY] ??= new Set();
+}
+
+/** Replacement plugin generations wait before adopting containers the prior instance is still stopping. */
+export async function drainVmIdleStops(): Promise<void> {
+  const stops = sharedVmIdleStops();
+  while (stops.size > 0) await Promise.all([...stops]);
 }
 
 /**
@@ -683,6 +704,12 @@ export class SandboxVmManager {
   private readonly runner: VmCommandRunner;
   private active: SandboxVmState | null = null;
   private portForwarder: VmPortForwarder | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private stopped = false;
+  private lastUsedAt = Date.now();
+  private stopping: Promise<void> | null = null;
+  private disposed = false;
+  private busy = 0;
 
   constructor(deps: SandboxVmManagerDeps) {
     this.deps = deps;
@@ -741,6 +768,87 @@ export class SandboxVmManager {
   /** Currently tracked container for this session, if `enter_vm` has run. */
   getActive(): SandboxVmState | null {
     return this.active;
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  /** Cancel old lifecycle timers and drain a stop before a replacement manager adopts the container. */
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.clearIdleTimer();
+    this.closePortForwards();
+    if (this.stopping) {
+      const stopping = this.stopping;
+      const stops = sharedVmIdleStops();
+      stops.add(stopping);
+      try { await stopping; } finally { stops.delete(stopping); }
+    }
+  }
+
+  private scheduleIdleStop(): void {
+    this.clearIdleTimer();
+    const ms = this.deps.idleStopMs?.() ?? DEFAULT_VM_IDLE_STOP_MS;
+    if (this.disposed || !this.active || this.active.origin !== 'agent' || this.stopped || ms <= 0) return;
+    const timer = setTimeout(() => { void this.idleStop(); }, ms);
+    (timer as { unref?: () => void }).unref?.();
+    this.idleTimer = timer;
+  }
+
+  /** Stops (never removes) the VM if it is still agent-owned, idle and running. */
+  private async idleStop(): Promise<void> {
+    this.idleTimer = null;
+    const active = this.active;
+    if (this.disposed || !active || active.origin !== 'agent' || this.busy > 0 || this.stopped || this.stopping) return;
+    const run = (async () => {
+      try {
+        const result = await this.exec(buildStopArgs(active.containerName));
+        if (result.exitCode === 0 && this.active === active) this.stopped = true;
+      } catch { /* best effort — an idle container left running is only a memory cost */ }
+    })();
+    this.stopping = run;
+    try { await run; } finally { if (this.stopping === run) this.stopping = null; }
+  }
+
+  /** Starts a container stopped by idle-stop (or left stopped across a reload). */
+  private async ensureRunning(containerName: string): Promise<string | null> {
+    const started = await this.exec(buildStartArgs(containerName));
+    if (started.exitCode === 0) { this.stopped = false; return null; }
+    return `Failed to restart sandbox VM ${containerName}: ${firstLine(started.stderr) || firstLine(started.stdout) || `exit code ${started.exitCode}`}`;
+  }
+
+  /** Snapshot for a caller deciding whether to stop this VM for idleness. */
+  getIdleInfo(): { running: boolean; harnessOwned: boolean; busy: boolean; lastUsedAt: number } {
+    return {
+      running: !!this.active && !this.stopped,
+      harnessOwned: this.active?.origin === 'harness',
+      busy: this.busy > 0,
+      lastUsedAt: this.lastUsedAt,
+    };
+  }
+
+  /**
+   * Stops (never removes) a running harness-owned container whose harness
+   * process is already gone. The CALLER must have closed the thread's session
+   * first — stopping the container kills anything inside it. A concurrent
+   * `ensureHarnessContainer` waits for this to finish, then restarts it.
+   */
+  async stopHarnessForIdle(): Promise<boolean> {
+    const active = this.active;
+    if (this.disposed || !active || active.origin !== 'harness' || this.stopped || this.busy > 0 || this.stopping) return false;
+    this.closePortForwards();
+    let stoppedNow = false;
+    const run = (async () => {
+      try {
+        const result = await this.exec(buildStopArgs(active.containerName));
+        if (result.exitCode === 0 && this.active === active) { this.stopped = true; stoppedNow = true; }
+      } catch { /* best effort — a running idle container is only a memory cost */ }
+    })();
+    this.stopping = run;
+    try { await run; } finally { if (this.stopping === run) this.stopping = null; }
+    return stoppedNow;
   }
 
   private async exec(args: string[], timeoutMs = VM_LIFECYCLE_TIMEOUT_MS): Promise<VmCommandResult> {
@@ -852,6 +960,7 @@ export class SandboxVmManager {
     cpus?: number;
   }): Promise<EnterVmResult> {
     try {
+      if (this.stopping) await this.stopping;
       const containerName = this.deps.containerName();
       const wanted = [...(params.extraMounts ?? [])];
       const wantedSignature = mountSignature(wanted);
@@ -938,6 +1047,7 @@ export class SandboxVmManager {
         origin: 'agent',
         ...(wanted.length ? { extraMounts: wanted } : {}),
       };
+      this.scheduleIdleStop();
       const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
       return {
         success: true,
@@ -983,6 +1093,8 @@ export class SandboxVmManager {
     cpus?: number;
   }): Promise<EnterVmResult> {
     try {
+      if (this.stopping) await this.stopping;
+
       const containerName = this.deps.containerName();
       const wanted = [...(params.extraMounts ?? [])];
       const wantedSignature = mountSignature(wanted);
@@ -1001,6 +1113,12 @@ export class SandboxVmManager {
         // way the container is shared per thread; just mark it harness-owned
         // going forward so exit_vm stops short of removing it.
         this.active = { ...this.active, origin: 'harness' };
+        this.clearIdleTimer();
+        this.lastUsedAt = Date.now();
+        if (this.stopped) {
+          const startError = await this.ensureRunning(this.active.containerName);
+          if (startError) return { success: false, error: startError };
+        }
         return attached(this.active);
       }
 
@@ -1026,6 +1144,7 @@ export class SandboxVmManager {
         // the saved session id. Report actual mounts so unavailable plugins
         // are omitted rather than pointing at paths the guest cannot see.
         const mounted = labels ? (parseMountSignature(existingSignature) ?? []) : [];
+        this.lastUsedAt = Date.now();
         this.active = {
           containerName, image: params.image, mountedFrom: params.mountPath, network: params.network,
           origin: 'harness', ...(mounted.length ? { extraMounts: mounted } : {}),
@@ -1073,6 +1192,7 @@ export class SandboxVmManager {
 
   async execCommand(params: { command: string; timeoutSeconds: number }): Promise<VmExecResult> {
     try {
+      if (this.stopping) await this.stopping;
       const containerName = this.active?.containerName ?? this.deps.containerName();
 
       if (!this.active) {
@@ -1100,6 +1220,17 @@ export class SandboxVmManager {
           // 'harness' on its own next start().
           origin: 'agent',
         };
+        // The adopted container may have been idle-stopped before the reload.
+        // `start` on an already-running container may exit non-zero; the exec below reports any real failure.
+        await this.exec(buildStartArgs(containerName)).catch(() => undefined);
+      }
+
+      this.busy++;
+      this.clearIdleTimer();
+      try {
+      if (this.stopped) {
+        const startError = await this.ensureRunning(containerName);
+        if (startError) return { success: false, error: startError };
       }
 
       // Refresh the GitHub token before the command starts (also re-installs on an adopted container).
@@ -1115,6 +1246,11 @@ export class SandboxVmManager {
         stderr: truncateOutput(result.stderr),
         ...(notes.length ? { notes } : {}),
       };
+      } finally {
+        this.busy--;
+        this.lastUsedAt = Date.now();
+        this.scheduleIdleStop();
+      }
     } catch (err) {
       return { success: false, error: errorMessage(err) };
     }
@@ -1162,6 +1298,8 @@ export class SandboxVmManager {
         };
       }
 
+      this.clearIdleTimer();
+      this.stopped = false;
       this.active = null;
       this.closePortForwards();
       return { success: true, removedContainer: containerName };

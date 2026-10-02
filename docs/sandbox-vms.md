@@ -105,6 +105,15 @@ thread can reconnect with `vm_exec` or remove its VM with `exit_vm`. Cleanup is
 explicit, so call `exit_vm` before deleting the thread. Changing working directory
 does not change an existing mount: exit and enter again to switch workspaces.
 
+An agent-owned VM that sees no `vm_exec` for 10 minutes is stopped (not removed) to
+reclaim guest memory; its filesystem and mount are kept, and the next `vm_exec`
+restarts it automatically. A VM that hosts a thread's harness is stopped after 15 minutes with no turn,
+pending prompt or background task: the idle session is closed first, then the
+container is stopped. The thread's next message restarts the container and
+resumes the conversation and adds container-start latency. Stopping a VM
+ends any processes still running in it (for example a dev server started with
+`vm_exec`); files are kept.
+
 ### Opening a server running in the VM from the host browser
 
 The browser tools (`browser_navigate`, `host_open_url` / `obsidian_open_url`)
