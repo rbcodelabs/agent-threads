@@ -122,7 +122,7 @@ describe('SandboxVmManager.enter — extra mounts', () => {
     expect(calls.find((c) => c[0] === 'run')).not.toContain('--label');
   });
 
-  it('recreates a leftover container whose mount set changed', async () => {
+  it('preserves a leftover container and reports its old mounts when the requested set changes', async () => {
     const stale = ro('/old', 'old');
     const { manager, calls } = makeManager((argv) => (argv[0] === 'inspect'
       ? { stdout: JSON.stringify([{ configuration: { labels: { 'claude-threads.mounts': mountSignature([stale]) } } }]) }
@@ -182,9 +182,10 @@ describe('SandboxVmManager.ensureHarnessContainer — extra mounts', () => {
       ? { stdout: JSON.stringify([{ configuration: { labels: { 'claude-threads.origin': 'harness', 'claude-threads.mounts': mountSignature([ro('/old', 'old')]) } } }]) }
       : undefined));
     const result = await manager.ensureHarnessContainer({ image: 'i', mountPath: '/w', network: 'default', extraMounts: [ro('/new', 'new')] });
-    expect(result.success).toBe(true);
+    expect(result).toMatchObject({ success: true, extraMounts: [ro('/old', 'old')] });
     const verbs = calls.map((c) => c[0]);
-    expect(verbs.indexOf('rm')).toBeLessThan(verbs.indexOf('run'));
+    expect(verbs).not.toContain('rm');
+    expect(verbs).not.toContain('run');
   });
 
   it('adopts a leftover container whose mount set is unchanged', async () => {

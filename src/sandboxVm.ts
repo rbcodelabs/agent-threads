@@ -611,7 +611,9 @@ export function isContainerStopped(stdout: string): boolean {
   try {
     const parsed: unknown = JSON.parse(stdout);
     const entry = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | undefined;
-    const raw = entry?.status ?? entry?.state
+    const status = entry?.status;
+    const raw = (typeof status === 'object' && status !== null
+      ? (status as Record<string, unknown>).state : status) ?? entry?.state
       ?? (entry?.State as Record<string, unknown> | undefined)?.Status;
     return typeof raw === 'string' && raw.length > 0 && raw.toLowerCase() !== 'running';
   } catch {
@@ -971,12 +973,9 @@ export class SandboxVmManager {
      *   - tracked by this manager (a session may be live in it) -> keep it,
      *     report the mounts it really has; callers must not assume the request
      *     was honoured. Never disrupts a running session.
-     *   - untracked (fresh start / plugin reload, so no live harness process
-     *     of ours is inside it) AND labelled harness-owned -> remove and
-     *     recreate with the requested mounts. Nothing agent-authored lives
-     *     there except what a prior vm_exec wrote into the guest filesystem.
-     *   - untracked and NOT labelled harness-owned (legacy container, or one
-     *     an agent's enter_vm created) -> keep it, mounts unknown/unchanged.
+     *   - untracked (fresh start / plugin reload) -> keep it and report the
+     *     existing mounts. Claude's native conversation files also live in
+     *     the guest filesystem; recreating it would make resume impossible.
      */
     extraMounts?: readonly VmExtraMount[];
     /** Resource limits for a newly created container; validated in buildRunArgs. */
@@ -1012,44 +1011,26 @@ export class SandboxVmManager {
       if (inspected.exitCode === 0) {
         const labels = parseContainerLabels(inspected.stdout);
         const existingSignature = labels?.[LABEL_EXTRA_MOUNTS] ?? '';
-        const harnessOwned = labels?.[LABEL_HARNESS_ORIGIN] === 'harness';
-        if (harnessOwned && existingSignature !== wantedSignature) {
-          // Stale mount set on a container only the harness uses: recreate.
-          if (this.deps.hooks?.afterExit) {
-            try { await this.deps.hooks.afterExit(this.hookContext(containerName)); } catch { /* best effort */ }
-          }
-          await this.exec(buildStopArgs(containerName));
-          const removed = await this.exec(buildRemoveArgs({ containerName, force: true }));
-          if (removed.exitCode !== 0) {
+        // Restart a stopped container without replacing its filesystem.
+        if (isContainerStopped(inspected.stdout)) {
+          const started = await this.exec(buildStartArgs(containerName));
+          if (started.exitCode !== 0) {
             return {
               success: false,
-              error: `Failed to replace ${containerName} to update its skill mounts: ${firstLine(removed.stderr) || `exit code ${removed.exitCode}`}`,
+              error: `Failed to start stopped container ${containerName}: ${firstLine(started.stderr) || `exit code ${started.exitCode}`}`,
             };
           }
-          // fall through to a fresh `container run` below
-        } else {
-          // After a host reboot the container exists but is stopped: start it.
-          if (isContainerStopped(inspected.stdout)) {
-            const started = await this.exec(buildStartArgs(containerName));
-            if (started.exitCode !== 0) {
-              return {
-                success: false,
-                error: `Failed to start stopped container ${containerName}: ${firstLine(started.stderr) || `exit code ${started.exitCode}`}`,
-              };
-            }
-          }
-          // Running from an earlier session/plugin reload (or just restarted) — adopt it.
-          // The harness PROCESS inside it does not survive a reload the way
-          // the container does (its stdio pipes were held by the now-gone host
-          // process), so the caller re-execs; this call only needs the
-          // container itself, which is already there.
-          const mounted = labels ? (parseMountSignature(existingSignature) ?? []) : [];
-          this.active = {
-            containerName, image: params.image, mountedFrom: params.mountPath, network: params.network,
-            origin: 'harness', ...(mounted.length ? { extraMounts: mounted } : {}),
-          };
-          return attached(this.active);
         }
+        // Re-exec the harness in its existing container, even when skills
+        // changed. Removing it would discard ~/.claude/projects and break
+        // the saved session id. Report actual mounts so unavailable plugins
+        // are omitted rather than pointing at paths the guest cannot see.
+        const mounted = labels ? (parseMountSignature(existingSignature) ?? []) : [];
+        this.active = {
+          containerName, image: params.image, mountedFrom: params.mountPath, network: params.network,
+          origin: 'harness', ...(mounted.length ? { extraMounts: mounted } : {}),
+        };
+        return attached(this.active);
       }
 
       if (params.network === 'internal') {
