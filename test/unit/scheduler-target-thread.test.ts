@@ -77,6 +77,39 @@ describe('Scheduler targetThreadId (loops)', () => {
     scheduler.destroy();
   });
 
+  it('retargets the loop onto ONE replacement thread so later ticks reuse it (no thread-per-tick)', async () => {
+    const live = new Set<string>();
+    const { options, sendMessage, createThread } = makeOptions({
+      threadExists: (id) => live.has(id),
+    });
+    createThread.mockImplementation(() => {
+      live.add('replacement');
+      return { id: 'replacement' };
+    });
+    const scheduler = new Scheduler(options);
+    scheduler.start([]);
+
+    const item = await scheduler.createItem({
+      name: 'Loop: check build',
+      prompt: 'check the build',
+      schedule: { type: 'interval', intervalSeconds: 60 },
+      enabled: true,
+      targetThreadId: 'closed-thread',
+    });
+
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(createThread).toHaveBeenCalledTimes(1);
+    expect(scheduler.getItem(item.id)?.targetThreadId).toBe('replacement');
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(createThread).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledTimes(3);
+    expect(sendMessage.mock.calls.every(([id]) => id === 'replacement')).toBe(true);
+    scheduler.destroy();
+  });
+
   it('creates a new thread when threadExists is not provided (backwards compat)', async () => {
     const { options, sendMessage, createThread } = makeOptions();
     const scheduler = new Scheduler(options);
