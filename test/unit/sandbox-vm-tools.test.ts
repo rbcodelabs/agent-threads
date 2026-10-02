@@ -91,7 +91,10 @@ async function call(definition: ToolDef, args: Record<string, unknown>) {
 
 describe('sandbox VM tools — registration', () => {
   it('omits lifecycle tools from both VM-routed surfaces and describes the existing container', () => {
-    const servers = createClaudeThreadsMcpServers(app, { harnessInVm: true });
+    const servers = createClaudeThreadsMcpServers(app, {
+      harnessInVm: true,
+      hostExec: { isInteractive: () => true, requestApproval: async () => true, redact: value => value },
+    });
     for (const key of ['claude_threads', 'obsidian'] as const) {
       const tools = (servers[key] as unknown as { tools: ToolDef[] }).tools;
       expect(tools.map(t => t.name)).not.toContain('enter_vm');
@@ -100,6 +103,7 @@ describe('sandbox VM tools — registration', () => {
       expect(exec.description).toContain('already running inside');
       expect(exec.description).not.toContain('Call enter_vm first');
       expect(exec.description).not.toContain('editing stays on the host');
+      expect(tools.some(t => t.name === 'host_exec')).toBe(key === 'claude_threads');
     }
   });
   it('registers all three tools on both the canonical and compatibility servers', () => {
