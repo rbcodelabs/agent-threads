@@ -145,6 +145,7 @@ loginHandoff.start();
 const mockPlugin = {
   app: (mockLeaf as any).app,
   settings,
+  discoveredModelsByHarness: { claude: [], codex: [], opencode: [] },
   manager,
   artifactProviders,
   slashCommands,
