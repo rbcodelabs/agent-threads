@@ -243,6 +243,8 @@ const addVaultBridgeSchema = {
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 export interface ObsidianMcpServerOptions {
+  /** Build a roster for a harness already running inside its thread's VM. */
+  harnessInVm?: boolean;
   /**
    * Agent tools contributed by peers through `extensions.registerAgentTool`,
    * already bound to this thread by the host (ADR-0008).
@@ -1353,7 +1355,9 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     'vm_exec',
     [
       'Runs a shell command inside this thread\'s sandboxed VM, with the working directory set to /work (the bind-mounted host directory).',
-      'Call enter_vm first.',
+      options.harnessInVm
+        ? 'Your harness is already running inside this container; native shell and file tools use the same guest filesystem. No VM lifecycle action is needed.'
+        : 'Call enter_vm first.',
       'Returns the exit code plus stdout and stderr; a non-zero exit code is reported as a normal result, not an error.',
       'Very long output is truncated with an explicit marker.',
       'To serve something for the browser tools (browser_navigate, host_open_url), start the server in the background so the command returns — e.g. `nohup python3 -m http.server 8000 >/tmp/server.log 2>&1 &` — then open http://localhost:8000/ with the browser tools: the host browser cannot see the VM\'s localhost directly, so the plugin forwards that loopback port to the host automatically (loopback only), whether the server binds 127.0.0.1 or 0.0.0.0.',
@@ -3166,13 +3170,16 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     .filter(binding => !builtInNames.has(binding.name) && !binding.requiresApproval)
     .map(binding => binding.name);
 
-  const legacyTools = tools.map(toDeprecatedLegacyToolDefinition);
+  const exposedTools = options.harnessInVm
+    ? tools.filter(definition => definition.name !== 'enter_vm' && definition.name !== 'exit_vm')
+    : tools;
+  const legacyTools = exposedTools.map(toDeprecatedLegacyToolDefinition);
   const legacyServer = createSdkMcpServer({
     name: 'obsidian',
     tools: legacyTools,
     alwaysLoad: true,
   });
-  const canonicalTools = tools.map(toCanonicalToolDefinition);
+  const canonicalTools = exposedTools.map(toCanonicalToolDefinition);
   const canonicalServer = createSdkMcpServer({
     name: LEGACY_MCP_SERVER_NAME,
     tools: canonicalTools,

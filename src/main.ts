@@ -24,7 +24,7 @@ import type { ThreadManager } from './ThreadManager';
 import type { VaultPersistence } from './VaultPersistence';
 import type { InProcessSummarizer } from './InProcessSummarizer';
 import type { WakeLockService } from './WakeLockService';
-import type { createClaudeThreadsMcpServers, CronCreateParams, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
+import type { createClaudeThreadsMcpServers, ObsidianMcpServerOptions, CronCreateParams, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
 import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { GithubCredentialBroker, resolveGithubBridge } from './githubCredentials';
@@ -633,9 +633,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
         catch (error) { this.mcpRegistrationModals.delete(modal); reject(error); }
       }),
     });
+    const vmBuiltInServers = new WeakMap<object, ReturnType<typeof createClaudeThreadsMcpServers>>();
     this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
       try {
-        const mcpServers = createClaudeThreadsMcpServers(this.app, {
+        const builtInOptions: ObsidianMcpServerOptions = {
           // Contributed agent tools, bound to this thread here — the host does
           // the binding so a peer never reaches the factory (ADR-0008). Built-in
           // Design arrives through this list like any other contribution; there
@@ -947,7 +948,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
           },
           onRequestSecret: (secretName: string, reason: string, force?: boolean) =>
             this.requestSecretForThread(threadId, secretName, reason, force),
-        });
+        };
+        const mcpServers = createClaudeThreadsMcpServers(this.app, builtInOptions);
+        vmBuiltInServers.set(mcpServers.claude_threads, createClaudeThreadsMcpServers(this.app, {
+          ...builtInOptions,
+          harnessInVm: true,
+        }));
         const mcpDebug = Object.fromEntries(Object.entries(mcpServers).map(([key, server]) => [key, {
           type: (server as unknown as Record<string, unknown>).type,
           name: (server as unknown as Record<string, unknown>).name,
@@ -991,16 +997,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
     };
     // Host-loopback OAuth/Google brokers cannot be reached from Apple's VM.
     // Overlay only those plugin-owned entries with in-process SDK bridges;
-    // built-ins, remote servers and stdio configs remain byte-for-byte the
-    // ordinary roster. ThreadSession chooses this view only after routing has
+    // Built-ins use the container-specific lifecycle surface; remote servers
+    // and stdio configs retain the ordinary roster. ThreadSession chooses this view only after routing has
     // actually succeeded, so automatic host fallback retains HTTP configs.
     this.manager.vmMcpServerFactory = (threadId, ordinaryServers) => {
+      const vmBuiltIns = ordinaryServers.claude_threads
+        ? vmBuiltInServers.get(ordinaryServers.claude_threads)
+        : undefined;
+      const servers = vmBuiltIns ? { ...ordinaryServers, ...vmBuiltIns } : ordinaryServers;
       const googleHosts = this.googleWorkspaceMcp?.serversForThread(threadId) ?? {};
       const oauthHosts = this.oauthMcpRegistry?.serversForThread(threadId) ?? {};
       const googleMcps = this.googleWorkspaceMcp?.vmServersForThread(threadId) ?? {};
       const oauthMcps = this.oauthMcpRegistry?.vmServersForThread(threadId) ?? {};
       return overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(
-        overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(ordinaryServers, googleHosts, googleMcps),
+        overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(servers, googleHosts, googleMcps),
         oauthHosts,
         oauthMcps,
       );
