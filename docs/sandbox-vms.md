@@ -174,6 +174,8 @@ remove a container the harness is still attached to; it is torn down
 automatically when the thread is deleted or archived, not at ordinary session
 close (so a lingering or quickly-restarted session doesn't pay container-start
 latency every turn).
+If the container is found stopped (for example after a Mac reboot), it is
+started again rather than recreated.
 
 A mode change or a freshly-built image takes effect on a thread's *next* fresh
 session start (harness switch, restart, or new thread) — never mid-session.
