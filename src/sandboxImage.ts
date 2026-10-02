@@ -33,7 +33,7 @@ import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
  * decoupled from plugin releases so an image always exists before any plugin
  * that references it.
  */
-export const SANDBOX_IMAGE_VERSION = '1';
+export const SANDBOX_IMAGE_VERSION = '2';
 
 export const SANDBOX_IMAGE_REPOSITORY = 'ghcr.io/rbcodelabs/claude-threads-sandbox';
 export const SANDBOX_BASE_IMAGE_REF = `${SANDBOX_IMAGE_REPOSITORY}:${SANDBOX_IMAGE_VERSION}`;
@@ -92,7 +92,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="/home/node/.local/bin:\${PATH}"
 `;
 
-export type SandboxImageStep = 'inspect' | 'pull' | 'tag' | 'write' | 'build';
+export type SandboxImageStep = 'inspect' | 'pull' | 'tag' | 'write' | 'build' | 'remove';
 
 /** A failed pipeline step; the message names the step and carries the stderr tail. */
 export class SandboxImageError extends Error {
@@ -110,7 +110,12 @@ export class SandboxImageAbortedError extends Error {
 }
 
 export interface SandboxImageStatus {
-  base: 'ok' | 'missing';
+  /**
+   * 'stale' = a published base image carrying an older version label (e.g. the
+   * v1 image that predates `gh`). An unlabelled local image is the user's own
+   * build and is always 'ok'.
+   */
+  base: 'ok' | 'missing' | 'stale';
   harness: 'ok' | 'missing' | 'stale';
 }
 
@@ -174,7 +179,58 @@ export async function getSandboxImageStatus(
   let harness: SandboxImageStatus['harness'];
   if (harnessResult.exitCode !== 0) harness = 'missing';
   else harness = parseImageVersionLabel(harnessResult.stdout) === SANDBOX_IMAGE_VERSION ? 'ok' : 'stale';
-  return { base: base.exitCode === 0 ? 'ok' : 'missing', harness };
+  let baseState: SandboxImageStatus['base'];
+  if (base.exitCode !== 0) baseState = 'missing';
+  else {
+    const label = parseImageVersionLabel(base.stdout);
+    baseState = label !== null && label !== SANDBOX_IMAGE_VERSION ? 'stale' : 'ok';
+  }
+  return { base: baseState, harness };
+}
+
+// ── Reset ────────────────────────────────────────────────────────────────────
+
+export function buildImageRemoveArgs(image: string): string[] {
+  return ['image', 'rm', image];
+}
+
+export interface RemoveSandboxImagesOptions {
+  runner: VmCommandRunner;
+  harnessImage?: string;
+  signal?: AbortSignal;
+}
+
+/**
+ * Removes the local harness and coding images so the next
+ * {@link ensureSandboxImages} re-pulls and rebuilds them from scratch.
+ * Tolerant of images that are already absent. Both removals are always
+ * attempted (harness first, as it is built on the coding image); if any fails
+ * — typically because a running sandbox VM still uses it — one error names
+ * every image that could not be removed. Returns the images actually removed.
+ */
+export async function removeSandboxImages(opts: RemoveSandboxImagesOptions): Promise<string[]> {
+  const { runner, signal } = opts;
+  const harnessImage = opts.harnessImage ?? SANDBOX_HARNESS_IMAGE;
+  const targets = harnessImage === SANDBOX_CODING_IMAGE ? [harnessImage] : [harnessImage, SANDBOX_CODING_IMAGE];
+  const removed: string[] = [];
+  const problems: string[] = [];
+  for (const image of targets) {
+    throwIfAborted(signal);
+    const present = await runner(buildImageInspectArgs(image), { timeoutMs: INSPECT_TIMEOUT_MS, signal });
+    if (present.exitCode !== 0) continue;
+    const rm = await runner(buildImageRemoveArgs(image), { timeoutMs: VM_LIFECYCLE_TIMEOUT_MS, signal });
+    throwIfAborted(signal);
+    if (rm.exitCode === 0) removed.push(image);
+    else problems.push(`${image}: ${stderrTail(rm)}`);
+  }
+  if (problems.length > 0) {
+    throw new SandboxImageError(
+      'remove',
+      `Could not remove ${problems.length === 1 ? 'an image' : 'images'}. If a sandbox VM is still running, `
+      + `stop it (end the thread's VM or quit the threads using it) and try again.\n${problems.join('\n')}`,
+    );
+  }
+  return removed;
 }
 
 // ── Ensure ───────────────────────────────────────────────────────────────────
@@ -214,9 +270,10 @@ async function runEnsure(opts: EnsureSandboxImagesOptions, harnessImage: string)
   throwIfAborted(signal);
   const status = await getSandboxImageStatus(runner, harnessImage);
 
-  // (a) Base image. A locally present claude-threads-coding:1 is always kept —
-  // it may be the user's own build.
-  if (status.base === 'missing') {
+  // (a) Base image. A present claude-threads-coding:1 is kept — it may be the
+  // user's own build — unless it carries an older published version label
+  // ('stale'), in which case the current published image is pulled over it.
+  if (status.base !== 'ok') {
     onProgress?.(`Pulling ${SANDBOX_BASE_IMAGE_REF}…`);
     const pull = await runner(buildImagePullArgs(SANDBOX_BASE_IMAGE_REF), { timeoutMs: SANDBOX_PULL_TIMEOUT_MS, ...longRun });
     throwIfAborted(signal);
@@ -232,7 +289,8 @@ async function runEnsure(opts: EnsureSandboxImagesOptions, harnessImage: string)
   }
 
   // (b) Harness layer, only when missing or built for another image version.
-  if (status.harness === 'ok') return result;
+  // A refreshed base invalidates the harness layer built on top of the old one.
+  if (status.harness === 'ok' && !result.pulledBase) return result;
 
   onProgress?.(`Building ${harnessImage} (installs the Claude CLI)…`);
   // eslint-disable-next-line @typescript-eslint/no-require-imports
