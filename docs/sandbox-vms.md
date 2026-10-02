@@ -185,13 +185,17 @@ setup-fixable ones (`runtime-missing`, `runtime-stopped`, `image-missing`) in
 `auto` mode trigger the in-thread offer, at most once per thread per app session.
 
 **One container per thread, shared.** A VM-routed thread's harness process and
-its `enter_vm`/`vm_exec`/`exit_vm` tools use the *same* container — the
+its `vm_exec` tool use the *same* container — the
 harness is just another thing `container exec` runs inside it. This means a
 `vm_exec` command now runs alongside a process holding live Anthropic
 credentials in its environment; those credentials are passed via `--env` flags
 scoped to the harness's own `container exec` invocation only, never to
 `container run`, so an ordinary `vm_exec ; env` does not print them — but be
-aware the boundary is narrower than an agent-only sandbox. `exit_vm` refuses to
+aware the boundary is narrower than an agent-only sandbox. VM-routed sessions
+omit `enter_vm` and `exit_vm` from both MCP surfaces and their tool aliases:
+the harness already runs inside the container, and its native shell and file
+tools use the guest filesystem. Host-local sessions, including automatic
+fallbacks, retain all three tools. The underlying lifecycle guard still refuses to
 remove a container the harness is still attached to; it is torn down
 automatically when the thread is deleted or archived, not at ordinary session
 close (so a lingering or quickly-restarted session doesn't pay container-start

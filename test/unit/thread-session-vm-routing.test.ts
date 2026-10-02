@@ -13,6 +13,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SessionCallbacks } from '../../src/ClaudeSession';
+import type { App } from 'obsidian';
+
+vi.mock('@anthropic-ai/claude-agent-sdk/browser', () => ({
+  tool: (name: string, description: string, inputSchema: unknown, handler: unknown) => ({ name, description, inputSchema, handler }),
+  createSdkMcpServer: ({ name, tools }: { name: string; tools: unknown[] }) => ({ name, tools }),
+}));
 
 const { queryCalls } = vi.hoisted(() => ({ queryCalls: [] as Array<{ options: { env?: Record<string, string | undefined>; mcpServers?: Record<string, unknown> } }> }));
 
@@ -35,6 +41,7 @@ vi.mock('../../src/harnessVmRouting', async () => {
 });
 
 const { ThreadSession } = await import('../../src/ThreadSession');
+const { createClaudeThreadsMcpServers } = await import('../../src/ObsidianTools');
 
 function callbacks(overrides: Partial<SessionCallbacks> = {}): SessionCallbacks {
   return {
@@ -59,6 +66,25 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
   beforeEach(() => {
     resolveClaudeVmRouting.mockReset();
     queryCalls.length = 0;
+  });
+
+  it.each(['routed', 'fallback', 'never'] as const)('exposes the appropriate built-in surface after %s routing', async kind => {
+    const app = {} as App;
+    const ordinary = createClaudeThreadsMcpServers(app);
+    const routed = createClaudeThreadsMcpServers(app, { harnessInVm: true });
+    resolveClaudeVmRouting.mockResolvedValue(kind === 'routed'
+      ? { routed: true, routing: { containerName: 'c1', containerBinaryPath: '/home/node/.local/bin/claude' } }
+      : { routed: false, reason: 'runtime-missing' });
+    await new ThreadSession().start({
+      claudePath: '/fake/claude', cwd: '/tmp', permissionMode: 'default', extraEnvRaw: '', callbacks: callbacks(),
+      claude: { vm: vmInputs(kind === 'never' ? 'never' : 'auto'), mcpServers: ordinary, vmMcpServers: routed },
+    } as never);
+    for (const key of ['claude_threads', 'obsidian']) {
+      const tools = (queryCalls[0].options.mcpServers![key] as { tools: Array<{ name: string }> }).tools;
+      expect(tools.some(t => t.name === 'enter_vm')).toBe(kind !== 'routed');
+      expect(tools.some(t => t.name === 'exit_vm')).toBe(kind !== 'routed');
+      expect(tools.some(t => t.name === 'vm_exec')).toBe(true);
+    }
   });
 
   it('reports the resolved container routing and points pathToClaudeCodeExecutable at the container binary', async () => {
@@ -111,6 +137,11 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
 
     expect(onVmRouting).toHaveBeenCalledWith(null, 'never');
     expect(resolveClaudeVmRouting).not.toHaveBeenCalled();
+    expect((queryCalls[0].options as unknown as { toolAliases: Record<string, string> }).toolAliases).toMatchObject({
+      EnterVm: 'mcp__claude_threads__enter_vm',
+      VmExec: 'mcp__claude_threads__vm_exec',
+      ExitVm: 'mcp__claude_threads__exit_vm',
+    });
   });
 
   it('reports null when no vm routing inputs are attached at all (harnessVmMode "never")', async () => {
@@ -141,6 +172,10 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
     } as never);
 
     expect(queryCalls[0].options.mcpServers).toEqual({ oauth: bridged });
+    const aliases = (queryCalls[0].options as unknown as { toolAliases: Record<string, string> }).toolAliases;
+    expect(aliases.EnterVm).toBeUndefined();
+    expect(aliases.ExitVm).toBeUndefined();
+    expect(aliases.VmExec).toBe('mcp__claude_threads__vm_exec');
   });
 
   it('keeps the ordinary MCP roster when automatic VM routing falls back to the host', async () => {
@@ -153,6 +188,7 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
     } as never);
 
     expect(queryCalls[0].options.mcpServers).toEqual({ oauth: host });
+    expect((queryCalls[0].options as unknown as { toolAliases: Record<string, string> }).toolAliases.EnterVm).toBe('mcp__claude_threads__enter_vm');
   });
 
   describe('containerAuthToken (in-container Claude sign-in credential)', () => {

@@ -637,11 +637,13 @@ export default class ClaudeThreadsPlugin extends Plugin {
         catch (error) { this.mcpRegistrationModals.delete(modal); reject(error); }
       }),
     });
+    const vmBuiltInServers = new WeakMap<object, ReturnType<typeof createClaudeThreadsMcpServers>>();
     // Shared by the ordinary roster and the VM-routed overlay below; `hostExec`
     // is passed only by the overlay, so host_exec exists only after routing
     // into the sandbox container has actually succeeded.
-    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks) =>
+    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks, harnessInVm = false) =>
         createClaudeThreadsMcpServers(this.app, {
+          harnessInVm,
           ...(hostExec ? { hostExec } : {}),
           // Contributed agent tools, bound to this thread here — the host does
           // the binding so a peer never reaches the factory (ADR-0008). Built-in
@@ -958,6 +960,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
       try {
         const mcpServers = buildBuiltInMcpServers(threadId, initialCwd);
+        vmBuiltInServers.set(mcpServers.claude_threads, buildBuiltInMcpServers(threadId, initialCwd, undefined, true));
         const mcpDebug = Object.fromEntries(Object.entries(mcpServers).map(([key, server]) => [key, {
           type: (server as unknown as Record<string, unknown>).type,
           name: (server as unknown as Record<string, unknown>).name,
@@ -1000,21 +1003,25 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }
     };
     // Host-loopback OAuth/Google brokers cannot be reached from Apple's VM.
-    // Overlay only those plugin-owned entries with in-process SDK bridges;
-    // built-ins, remote servers and stdio configs remain byte-for-byte the
-    // ordinary roster. ThreadSession chooses this view only after routing has
-    // actually succeeded, so automatic host fallback retains HTTP configs.
+    // Overlay plugin-owned brokers with in-process SDK bridges. Built-ins use
+    // the container-specific lifecycle surface; remote servers and stdio configs
+    // retain the ordinary roster. ThreadSession chooses this view only after
+    // routing succeeds, so automatic host fallback retains HTTP configs.
     this.manager.vmMcpServerFactory = (threadId, ordinaryServers) => {
+      const vmBuiltIns = ordinaryServers.claude_threads
+        ? vmBuiltInServers.get(ordinaryServers.claude_threads)
+        : undefined;
+      const servers = vmBuiltIns ? { ...ordinaryServers, ...vmBuiltIns } : ordinaryServers;
       const googleHosts = this.googleWorkspaceMcp?.serversForThread(threadId) ?? {};
       const oauthHosts = this.oauthMcpRegistry?.serversForThread(threadId) ?? {};
       const googleMcps = this.googleWorkspaceMcp?.vmServersForThread(threadId) ?? {};
       const oauthMcps = this.oauthMcpRegistry?.vmServersForThread(threadId) ?? {};
       const overlaid = overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(
-        overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(ordinaryServers, googleHosts, googleMcps),
+        overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(servers, googleHosts, googleMcps),
         oauthHosts,
         oauthMcps,
       );
-      return this.withHostExec(threadId, overlaid, buildBuiltInMcpServers);
+      return this.withHostExec(threadId, overlaid, (id, cwd, hostExec) => buildBuiltInMcpServers(id, cwd, hostExec, true));
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect
