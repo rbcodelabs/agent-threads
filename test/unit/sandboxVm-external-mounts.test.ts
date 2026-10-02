@@ -43,6 +43,7 @@ describe('buildRunArgs — external mounts (main extraMountArgs + labels)', () =
       '--volume', '/data/notes:/ext/notes:ro',
       '--label', `claude-threads.mounts=${mountSignature(mounts)}`,
       '--workdir', VM_WORKDIR,
+      '--memory', '4G', '--cpus', '4',
       'img:1', 'sleep', 'infinity',
     ]);
   });
