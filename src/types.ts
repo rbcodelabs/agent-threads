@@ -1270,6 +1270,8 @@ export interface PluginSettings {
   skillSources: SkillSource[];
   /** Vault-relative folder for authored packages; installs retain their own root. */
   localSkillsFolder?: string;
+  /** Fast-forward GitHub skill sources in the background on launch and every 6 hours. Default on. */
+  autoUpdateSkillSources?: boolean;
   /** Durable peer-API correlations and bounded run results. Internal format; consumers use api.v1. */
   publicApiState?: import('./PublicApi').PublicApiPersistedState;
   /** Width in px of the Skills Manager's left list panel, set by dragging the divider. */
@@ -1355,6 +1357,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   stackScheduledThreads: true,
   skillSources: [],
   localSkillsFolder: 'Skills',
+  autoUpdateSkillSources: true,
   skillsListWidth: 200,
 };
 

@@ -996,6 +996,51 @@ export async function pullGithubSourceUpdates(source: SkillSource): Promise<{ be
   return { behindCount: 0, lastFetched: Date.now() };
 }
 
+export interface AutoUpdateResult {
+  /** Sources that were behind and fast-forwarded. */
+  updated: { id: string; name: string; behindCount: number }[];
+  /** Sources that were checked and already current. */
+  current: string[];
+  failed: { id: string; name: string; error: string }[];
+  /** True when any source's behindCount/lastFetched changed (settings need saving). */
+  changed: boolean;
+}
+
+/**
+ * Fetches every GitHub source and fast-forwards those that are behind.
+ * Uses `pull --ff-only` so a diverged or locally-modified clone is reported as a
+ * failure instead of being merged or clobbered. Never throws; per-source failures
+ * land in `failed`. Pinned (`ref`) sources are skipped — they move only when the ref does.
+ */
+export async function autoUpdateGithubSources(skillSources: SkillSource[] | undefined): Promise<AutoUpdateResult> {
+  const result: AutoUpdateResult = { updated: [], current: [], failed: [], changed: false };
+  for (const source of skillSources ?? []) {
+    if (source.type !== 'github' || !source.clonePath || source.ref) continue;
+    const label = source.name || source.id;
+    if (!isGitWorkingCopy(source.clonePath)) continue;
+    const check = await checkSourceForUpdates(source);
+    if (check.error) {
+      result.failed.push({ id: source.id, name: label, error: check.error });
+      continue;
+    }
+    source.lastFetched = check.lastFetched;
+    source.behindCount = check.behindCount;
+    result.changed = true;
+    if (!check.behindCount) {
+      result.current.push(source.id);
+      continue;
+    }
+    try {
+      execSync(`git -C "${source.clonePath}" pull --ff-only --quiet`, { stdio: 'pipe', timeout: 60_000 });
+      result.updated.push({ id: source.id, name: label, behindCount: check.behindCount });
+      source.behindCount = 0;
+    } catch (err) {
+      result.failed.push({ id: source.id, name: label, error: execErrorMessage(err) });
+    }
+  }
+  return result;
+}
+
 /** Scans a GitHub source's configured skills directory for the skills it provides (used by the Installed-tab source tree). */
 export interface SourceSkillInfo {
   id: string;

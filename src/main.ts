@@ -582,6 +582,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.detectOpenCodeBinary();
     this.migrateGithubSourcesIntoVault();
     this.scheduleGithubSourceClonePass();
+    this.registerInterval(window.setInterval(() => { void this.runSkillSourceAutoUpdate(); }, 6 * 60 * 60 * 1000));
 
     // Mask stored secret values in every log sink (console, ring, raw JSONL).
     setKnownSecretsProvider(() => this.collectSecretValues());
@@ -2396,6 +2397,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
             );
           }
           if (result.changed) await this.saveSettings();
+          await this.runSkillSourceAutoUpdate();
         } catch (err) {
           // Defensive: ensureGithubSourcesCloned isolates per-source failures
           // itself, so reaching here means something unexpected. Still swallowed —
@@ -2404,6 +2406,29 @@ export default class ClaudeThreadsPlugin extends Plugin {
         }
       })();
     });
+  }
+
+  /**
+   * Fast-forwards GitHub skill sources in the background. No-op when the
+   * \`autoUpdateSkillSources\` setting is off. Skills are rebuilt per session, so
+   * updated skills show up in the next thread; failures only warn to the console.
+   */
+  async runSkillSourceAutoUpdate(): Promise<void> {
+    if (this.settings.autoUpdateSkillSources === false) return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { autoUpdateGithubSources } = require('./skillManager') as typeof import('./skillManager');
+      const result = await autoUpdateGithubSources(this.settings.skillSources);
+      for (const f of result.failed) {
+        console.warn(`[ClaudeThreads] skill source "${f.name}" auto-update failed: ${f.error}`);
+      }
+      if (result.changed) await this.saveSettings();
+      if (result.updated.length > 0) {
+        new Notice(`Updated skill source${result.updated.length === 1 ? '' : 's'}: ${result.updated.map(u => u.name).join(', ')}. New threads will use the latest skills.`, 8000);
+      }
+    } catch (err) {
+      console.error('[ClaudeThreads] skill-source auto-update failed', err);
+    }
   }
 
   getEffectiveCwd(): string {

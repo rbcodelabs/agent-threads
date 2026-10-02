@@ -2823,6 +2823,15 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         } catch (error) { new Notice(String(error)); }
       }));
     containerEl.createEl('h2', { text: 'Skill Sources' });
+    new Setting(containerEl)
+      .setName('Auto-update GitHub skill sources')
+      .setDesc('Fetch and fast-forward GitHub skill sources in the background on launch and every 6 hours. Updated skills apply to new threads. Skills are instructions your agents follow, so only enable this for repos you trust.')
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoUpdateSkillSources !== false).onChange(async (v) => {
+          this.plugin.settings.autoUpdateSkillSources = v;
+          await this.plugin.saveSettings();
+        }),
+      );
     const sourceCount = (this.plugin.settings.skillSources ?? []).length;
     new Setting(containerEl)
       .setName('Skill sources')
