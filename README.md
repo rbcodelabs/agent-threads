@@ -563,8 +563,9 @@ Without elicitation support the session would stall indefinitely with no visible
 #### Google Workspace
 
 On desktop Geode and Obsidian, Settings → **MCP → Google Workspace** offers
-**Google Docs**, **Google Drive**, **Google Sheets**, and **Google Slides**.
-All four start disabled. Enable the services you want, then start a new thread.
+**Google Docs**, **Google Drive**, **Google Sheets**, **Google Slides**, **Gmail**, and
+**Google Calendar**. All six start disabled. Gmail and Calendar tools can send and delete
+mail and modify events, so enable them deliberately. Enable the services you want, then start a new thread.
 Google's servers supply their complete read and write toolsets and schemas; Claude
 Threads adds no replacement tools, only the local large-file transfer tools described below. Interactive and newly
 scheduled threads inherit the same selection on Claude and Codex, with their
@@ -573,8 +574,9 @@ existing permission behavior.
 Install and connect **Google Docs Sync v0.7.1 or later** first. This integration requires its guarded
 connection refresh support (`tokenStore.supportsConnectionGuard`); older builds
 show an update instruction. The auth service must request the Docs, Drive, Sheets,
-and Slides scopes. After updating the auth service, disconnect and reconnect
-Google Docs Sync to grant the additional scopes. A corporate auth host can be
+Slides, Gmail, and Calendar scopes. After updating the auth service, disconnect and reconnect
+Google Docs Sync to grant the additional scopes; Gmail and Calendar calls fail with a
+403 until you do. A corporate auth host can be
 selected through Google Docs Sync's **Auth proxy URL** setting; disconnect the
 old account before changing it.
 

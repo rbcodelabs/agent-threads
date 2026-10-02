@@ -1157,7 +1157,7 @@ export interface PluginSettings {
   /** Runtime connection status for each `oauthMcpServers` entry, keyed the same way. */
   oauthMcpState: Record<string, OAuthMcpState>;
   /** Opt-in Google-provided MCP toolsets, authenticated by Google Docs Sync. */
-  googleWorkspaceMcp?: Partial<Record<'docs' | 'drive' | 'sheets' | 'slides', boolean>>;
+  googleWorkspaceMcp?: Partial<Record<'docs' | 'drive' | 'sheets' | 'slides' | 'gmail' | 'calendar', boolean>>;
   /** Nonsecret identity/service pinning; local bearer capabilities are never persisted. */
   googleWorkspaceBindings?: Record<string, import('./GoogleWorkspaceMcp').GoogleWorkspaceBinding>;
   /**
