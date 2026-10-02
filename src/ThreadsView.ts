@@ -2564,6 +2564,7 @@ export class ThreadsView extends ItemView {
       const confirmed = await promptConfirm(this.app, {
         message: `Run this thread ${nowContainerized ? 'in a container' : 'on the host (no container)'}? The conversation stays here, but the native Claude session resets and continues from a summary and transcript references.`,
         confirmLabel: 'Change',
+        danger: false,
       });
       if (!confirmed) return;
     }
