@@ -459,6 +459,11 @@ export function buildStopArgs(containerName: string): string[] {
   return ['stop', containerName];
 }
 
+/** `container start <name>` — restarts a stopped container (e.g. after a host reboot). */
+export function buildStartArgs(containerName: string): string[] {
+  return ['start', containerName];
+}
+
 export function buildRemoveArgs(opts: { containerName: string; force?: boolean }): string[] {
   return ['rm', ...(opts.force ? ['--force'] : []), opts.containerName];
 }
@@ -555,6 +560,22 @@ export function parseContainerLabels(stdout: string): Record<string, string> | n
     return Object.fromEntries(Object.entries(labels).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
   } catch {
     return null;
+  }
+}
+
+/**
+ * True only when `container inspect` JSON positively reports a non-running
+ * state. An unrecognised shape returns false so we never issue a spurious start.
+ */
+export function isContainerStopped(stdout: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    const entry = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | undefined;
+    const raw = entry?.status ?? entry?.state
+      ?? (entry?.State as Record<string, unknown> | undefined)?.Status;
+    return typeof raw === 'string' && raw.length > 0 && raw.toLowerCase() !== 'running';
+  } catch {
+    return false;
   }
 }
 
@@ -959,7 +980,17 @@ export class SandboxVmManager {
           }
           // fall through to a fresh `container run` below
         } else {
-          // Still running from an earlier session/plugin reload — adopt it.
+          // After a host reboot the container exists but is stopped: start it.
+          if (isContainerStopped(inspected.stdout)) {
+            const started = await this.exec(buildStartArgs(containerName));
+            if (started.exitCode !== 0) {
+              return {
+                success: false,
+                error: `Failed to start stopped container ${containerName}: ${firstLine(started.stderr) || `exit code ${started.exitCode}`}`,
+              };
+            }
+          }
+          // Running from an earlier session/plugin reload (or just restarted) — adopt it.
           // The harness PROCESS inside it does not survive a reload the way
           // the container does (its stdio pipes were held by the now-gone host
           // process), so the caller re-execs; this call only needs the

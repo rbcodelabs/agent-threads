@@ -664,6 +664,34 @@ describe('SandboxVmManager — ensureHarnessContainer (ADR-0015 §3)', () => {
     expect(runner.ran('run', '--detach')).toBe(false);
   });
 
+  // A Mac reboot leaves the container present but STOPPED. Inspect JSON shape
+  // for state is a guess (Apple CLI not available in CI).
+  it('starts a container that exists but is stopped (e.g. after host reboot)', async () => {
+    const { manager, runner } = makeManager({
+      '--version': { stdout: 'container CLI version 1.3.1\n' },
+      [buildInspectArgs(NAME).join(' ')]: {
+        exitCode: 0,
+        stdout: JSON.stringify([{ status: 'stopped', configuration: { labels: {} } }]),
+      },
+    });
+    const result = await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    expect(result.success).toBe(true);
+    expect(runner.ran('start', NAME)).toBe(true);
+    expect(runner.ran('run', '--detach')).toBe(false);
+  });
+
+  it('does not start a container that inspect reports as running', async () => {
+    const { manager, runner } = makeManager({
+      '--version': { stdout: 'container CLI version 1.3.1\n' },
+      [buildInspectArgs(NAME).join(' ')]: {
+        exitCode: 0,
+        stdout: JSON.stringify([{ status: 'running', configuration: { labels: {} } }]),
+      },
+    });
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    expect(runner.ran('start')).toBe(false);
+  });
+
   it('is idempotent: calling it again for an already-tracked container is a no-op attach', async () => {
     const { manager, runner } = makeManager(CLI_OK_NO_CONTAINER);
     await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
