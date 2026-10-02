@@ -983,6 +983,14 @@ export interface PluginSettings {
    */
   harnessVmMode: HarnessVmMode;
   /**
+   * Memory ceiling for newly created sandbox containers, `<digits>M|G`
+   * (default `'4G'`). Invalid values fall back to the default. Applies only at
+   * `container run`; existing containers keep their old limit.
+   */
+  sandboxVmMemory: string;
+  /** CPU count for newly created sandbox containers (positive integer, default 4, max 64). */
+  sandboxVmCpus: number;
+  /**
    * Container image the harness routes into. Built from
    * `sandbox/Dockerfile.harness` (`container build --tag
    * claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`) —
@@ -1271,6 +1279,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   vmImage: 'claude-threads-coding:1',
   vmDefaultNetwork: 'default',
   harnessVmMode: 'auto',
+  sandboxVmMemory: '4G',
+  sandboxVmCpus: 4,
   harnessVmImage: 'claude-threads-harness:1',
   sandboxSetupPromptDismissed: false,
   githubConnectionEnabled: true,

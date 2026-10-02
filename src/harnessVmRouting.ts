@@ -121,6 +121,9 @@ export interface ClaudeVmRoutingInputs {
   /** Test-only overrides forwarded to checkHarnessVmCapability; production callers omit these and get the real process.platform/arch. */
   platform?: string;
   arch?: string;
+  /** Resource limits for a newly created container (settings sandboxVmMemory/sandboxVmCpus); validated downstream. */
+  memory?: string;
+  cpus?: number;
 }
 
 export interface ResolvedClaudeVmRouting {
@@ -180,6 +183,8 @@ export async function resolveClaudeVmRouting(
     image: inputs.image,
     mountPath: inputs.mountPath,
     network: 'default',
+    memory: inputs.memory,
+    cpus: inputs.cpus,
     // Skill mounts win on a guest-path collision (none today: /skills, /home/node vs /ext).
     extraMounts: mergeExtraMounts(inputs.skillMountPlan?.mounts, externalMounts),
   });

@@ -95,6 +95,13 @@ describe('SandboxVmManager — ensureHarnessContainer with extra mounts', () => 
     expect(run).toContain('claude-threads.origin=harness');
   });
 
+  it('passes validated memory/cpus to the harness container run', async () => {
+    const { manager, calls } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default', memory: '6g', cpus: 3 });
+    const run = calls.find((c) => c[0] === 'run')!;
+    expect(run.slice(run.indexOf('--memory'), run.indexOf('--memory') + 4)).toEqual(['--memory', '6G', '--cpus', '3']);
+  });
+
   it('adopts a harness container whose mount signature matches (no recreate)', async () => {
     const { manager, ran } = makeManager({
       '--version': { stdout: 'v\n' },

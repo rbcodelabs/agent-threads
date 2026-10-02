@@ -65,6 +65,26 @@ export const DEFAULT_VM_IMAGE = 'claude-threads-coding:1';
  */
 export const DEFAULT_VM_MEMORY = '4G';
 export const DEFAULT_VM_CPUS = 4;
+export const MAX_VM_CPUS = 64;
+
+const VM_MEMORY_PATTERN = /^\d+[MG]$/i;
+
+/**
+ * Validates a memory limit before it reaches the `container run` argv.
+ * Accepts `<digits>M|G` (e.g. `4G`, `512M`) with a non-zero amount; anything else
+ * falls back to the default. Returned normalised (trimmed, upper-case suffix).
+ */
+export function resolveVmMemory(value?: string | null): string {
+  const v = typeof value === 'string' ? value.trim() : '';
+  if (!VM_MEMORY_PATTERN.test(v) || Number.parseInt(v, 10) <= 0) return DEFAULT_VM_MEMORY;
+  return v.toUpperCase();
+}
+
+/** Positive integer in [1, MAX_VM_CPUS]; non-integers/invalid fall back to the default, large values clamp. */
+export function resolveVmCpus(value?: number | null): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) return DEFAULT_VM_CPUS;
+  return Math.min(value, MAX_VM_CPUS);
+}
 
 /** Where the thread's working directory is bind-mounted, and the guest cwd. */
 export const VM_WORKDIR = '/work';
@@ -426,8 +446,8 @@ export function buildRunArgs(opts: {
     ...extraMountArgs(opts.extraMounts),
     ...labelArgs,
     '--workdir', workdir,
-    '--memory', opts.memory?.trim() || DEFAULT_VM_MEMORY,
-    '--cpus', String(opts.cpus ?? DEFAULT_VM_CPUS),
+    '--memory', resolveVmMemory(opts.memory),
+    '--cpus', String(resolveVmCpus(opts.cpus)),
     ...networkArgsFor(opts.network),
     opts.image,
     // The container only has to stay alive so `container exec` has somewhere to
@@ -784,6 +804,9 @@ export class SandboxVmManager {
     network: VmNetworkMode;
     /** Read-only extra mounts (e.g. external roots). A leftover container with a different set is recreated. */
     extraMounts?: readonly VmExtraMount[];
+    /** Resource limits for a newly created container; validated in buildRunArgs. */
+    memory?: string;
+    cpus?: number;
   }): Promise<EnterVmResult> {
     try {
       const containerName = this.deps.containerName();
@@ -852,6 +875,8 @@ export class SandboxVmManager {
           mountPath: params.mountPath,
           network: params.network,
           extraMounts: wanted,
+          memory: params.memory,
+          cpus: params.cpus,
           ...(wantedSignature ? { labels: { [LABEL_EXTRA_MOUNTS]: wantedSignature } } : {}),
         }),
       );
@@ -913,6 +938,9 @@ export class SandboxVmManager {
      *     an agent's enter_vm created) -> keep it, mounts unknown/unchanged.
      */
     extraMounts?: readonly VmExtraMount[];
+    /** Resource limits for a newly created container; validated in buildRunArgs. */
+    memory?: string;
+    cpus?: number;
   }): Promise<EnterVmResult> {
     try {
       const containerName = this.deps.containerName();
@@ -985,6 +1013,8 @@ export class SandboxVmManager {
           mountPath: params.mountPath,
           network: params.network,
           extraMounts: wanted,
+          memory: params.memory,
+          cpus: params.cpus,
           labels: {
             [LABEL_HARNESS_ORIGIN]: 'harness',
             ...(wantedSignature ? { [LABEL_EXTRA_MOUNTS]: wantedSignature } : {}),

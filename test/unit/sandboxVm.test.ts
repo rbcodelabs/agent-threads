@@ -30,6 +30,9 @@ import {
   buildRunArgs,
   DEFAULT_VM_MEMORY,
   DEFAULT_VM_CPUS,
+  MAX_VM_CPUS,
+  resolveVmMemory,
+  resolveVmCpus,
   buildStopArgs,
   containerNameForThread,
   isVmNetworkMode,
@@ -241,6 +244,32 @@ describe('sandboxVm — argument construction', () => {
         'img:1',
         'sleep', 'infinity',
       ]);
+  });
+
+  it('validates memory and falls back to the default for unsafe input', () => {
+    expect(resolveVmMemory('8G')).toBe('8G');
+    expect(resolveVmMemory(' 2048m ')).toBe('2048M');
+    for (const bad of ['', 'abc', '4', '4GB', '-4G', '0G', '4G --privileged', '4.5G', undefined, null]) {
+      expect(resolveVmMemory(bad as string | undefined)).toBe(DEFAULT_VM_MEMORY);
+    }
+  });
+
+  it('validates cpus: positive integers, clamped, else default', () => {
+    expect(resolveVmCpus(2)).toBe(2);
+    expect(resolveVmCpus(MAX_VM_CPUS + 100)).toBe(MAX_VM_CPUS);
+    for (const bad of [0, -1, 1.5, NaN, undefined, null]) {
+      expect(resolveVmCpus(bad as number | undefined)).toBe(DEFAULT_VM_CPUS);
+    }
+  });
+
+  it('passes configured memory/cpus to run and never an unvalidated value', () => {
+    const base = { containerName: 'c', image: 'img:1', mountPath: '/m', network: 'default' as const };
+    const ok = buildRunArgs({ ...base, memory: '8g', cpus: 2 });
+    expect(ok.slice(ok.indexOf('--memory'), ok.indexOf('--memory') + 4)).toEqual(['--memory', '8G', '--cpus', '2']);
+    const bad = buildRunArgs({ ...base, memory: '4G --privileged', cpus: -3 });
+    expect(bad).toContain(DEFAULT_VM_MEMORY);
+    expect(bad).not.toContain('4G --privileged');
+    expect(bad[bad.indexOf('--cpus') + 1]).toBe(String(DEFAULT_VM_CPUS));
   });
 
   it('puts the image before the container command, as the CLI requires', () => {

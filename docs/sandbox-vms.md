@@ -71,6 +71,15 @@ The internal network's runtime configuration is verified before use. An existing
 network with the same name but a different mode is rejected. Network restrictions
 apply to guest traffic, not host tools or runtime image pulls.
 
+### Memory and CPUs
+
+Each container gets a 4G memory ceiling and 4 CPUs by default (Apple's 1 GiB
+default OOM-kills `pnpm`/`tsc`/tests). Change them under Settings → Agent →
+**Sandbox VM memory** (`<digits>M|G`, e.g. `8G`) and **Sandbox VM CPUs**
+(whole number, 1–64). Invalid values fall back to the defaults. They apply only
+to newly created containers: remove an existing one to pick up a change with
+`container rm --force claude-threads-vm-<thread-id>`; it is recreated on next use.
+
 `vm_exec` returns the command exit code and bounded stdout/stderr. A nonzero exit
 is a normal tool result. The default deadline is 300 seconds (1–3600 accepted);
 GNU `timeout` sends TERM inside the guest, then KILL after five seconds. A timeout
