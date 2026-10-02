@@ -49,6 +49,7 @@ const mock = vi.hoisted(() => ({
   interruptCalls: 0,
   closeCalls: 0,
   sentPrompts: [] as string[],
+  startOptions: null as ThreadSessionOptions | null,
 }));
 
 // NOTE: callbacks/lastKnownSessionId are tracked BOTH per-instance (`this.*`,
@@ -65,6 +66,7 @@ vi.mock('../../src/ThreadSession', () => ({
     constructor(_claudePath: string) { mock.constructCount += 1; }
     get turnInFlight(): boolean { return this._turnInFlight; }
     async start(options: ThreadSessionOptions): Promise<void> {
+      mock.startOptions = options;
       mock.startCallCount += 1;
       this.ownLastKnownSessionId = options.resume;
       mock.lastKnownSessionId = options.resume;
@@ -124,6 +126,15 @@ beforeEach(() => {
 });
 
 describe('ThreadManager — single-session-per-thread model (no lingering-session map)', () => {
+  it('supplies Claude with canonical prior history when resuming, excluding the current send', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', process.cwd());
+    thread.sessionId = 'missing-native-session';
+    thread.messages.push({ id: 'prior', role: 'user', content: 'Earlier canonical request', timestamp: Date.now() });
+    await manager.sendMessage(thread.id, 'Current request');
+    expect(mock.startOptions?.resumeFallbackHistory).toContain('Earlier canonical request');
+    expect(mock.startOptions?.resumeFallbackHistory).not.toContain('Current request');
+  });
   it('there is no separate lingeringSessions map anymore — only one `sessions` map', () => {
     const manager = makeManager();
     expect((manager as unknown as { lingeringSessions?: unknown }).lingeringSessions).toBeUndefined();

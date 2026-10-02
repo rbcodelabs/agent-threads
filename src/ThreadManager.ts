@@ -2208,7 +2208,7 @@ export class ThreadManager {
         ? (modelOverride ?? thread.model ?? undefined)
         : modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
       appendSystemPrompt,
-      resumeFallbackHistory: (thread.agentHarness === 'codex' || thread.agentHarness === 'opencode') && thread.sessionId
+      resumeFallbackHistory: thread.sessionId
         ? buildHistoryPreamble(
             latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
             thread.cwd,
