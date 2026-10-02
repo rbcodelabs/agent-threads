@@ -63,7 +63,7 @@ describe('resolveVaultMount', () => {
 });
 
 describe('ensureHarnessContainer — stale label without /vault', () => {
-  it('recreates a harness-owned container and mounts /vault rw', async () => {
+  it('preserves native history in an existing container without adding a new /vault mount', async () => {
     const calls: string[][] = [];
     const oldLabels = JSON.stringify([{ configuration: { labels: {
       'claude-threads.origin': 'harness', 'claude-threads.mounts': mountSignature([roMount]),
@@ -78,8 +78,9 @@ describe('ensureHarnessContainer — stale label without /vault', () => {
       image: 'img', mountPath: '/w', network: 'default', extraMounts: [roMount, vault],
     });
     expect(res.success).toBe(true);
-    expect(calls.some((c) => c[0] === 'rm')).toBe(true);
-    expect(calls.find((c) => c[0] === 'run')).toContain('/v:/vault');
+    expect(res).toMatchObject({ extraMounts: [roMount] });
+    expect(calls.some((c) => c[0] === 'rm')).toBe(false);
+    expect(calls.some((c) => c[0] === 'run')).toBe(false);
   });
 });
 

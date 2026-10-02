@@ -140,6 +140,20 @@ describe('SandboxVmManager — ensureHarnessContainer with extra mounts', () => 
     expect(ran('run')).toBe(false);
   });
 
+  it('starts a stopped container with changed mounts without discarding native history', async () => {
+    const { manager, ran } = makeManager({
+      '--version': { stdout: 'v\n' },
+      [inspectKey]: { stdout: JSON.stringify([{
+        configuration: { labels: { 'claude-threads.origin': 'harness', 'claude-threads.mounts': '' } },
+        status: { state: 'stopped' },
+      }]) },
+    });
+    expect((await ensure(manager)).success).toBe(true);
+    expect(ran('start', NAME)).toBe(true);
+    expect(ran('rm')).toBe(false);
+    expect(ran('run')).toBe(false);
+  });
+
   it('never recreates a container not labelled harness-owned (could hold agent state)', async () => {
     const { manager, ran } = makeManager({
       '--version': { stdout: 'v\n' },

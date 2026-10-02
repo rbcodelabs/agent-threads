@@ -611,7 +611,9 @@ export function isContainerStopped(stdout: string): boolean {
   try {
     const parsed: unknown = JSON.parse(stdout);
     const entry = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | undefined;
-    const raw = entry?.status ?? entry?.state
+    const status = entry?.status;
+    const raw = (typeof status === 'object' && status !== null
+      ? (status as Record<string, unknown>).state : status) ?? entry?.state
       ?? (entry?.State as Record<string, unknown> | undefined)?.Status;
     return typeof raw === 'string' && raw.length > 0 && raw.toLowerCase() !== 'running';
   } catch {
