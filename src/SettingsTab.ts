@@ -20,7 +20,7 @@ import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
 import type { OAuthMcpPreset } from './oauthMcpPresets';
 import { classifyScheduledItems, describeScheduledExecution, formatNextOccurrence } from './scheduledWorkView';
 import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
-import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
+import { describeReset, getSandboxSetupStatus, resetSandbox, runSandboxSetup } from './sandboxSetup';
 import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
 import { promptConfirm } from './confirmModal';
 
@@ -1588,6 +1588,8 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         isMobile: Platform.isMobile,
         getStatus: () => getSandboxSetupStatus({ harnessImage }),
         run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
+        reset: ({ onProgress, signal }) => resetSandbox({ harnessImage, onProgress, signal }),
+        resetMessage: describeReset(harnessImage),
         confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       });
     }

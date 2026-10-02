@@ -184,6 +184,62 @@ describe('renderSandboxSettingsPanel', () => {
   });
 });
 
+describe('Reset sandbox button', () => {
+  async function mount(status: SandboxSetupStatus, withReset = true, isMobile = false) {
+    const parent = document.createElement('div');
+    const { deps } = flowDeps({ getStatus: vi.fn(async () => status) });
+    const reset = vi.fn(async ({ onProgress }: Parameters<SandboxSetupFlowDeps['run']>[0]) => { onProgress(PROGRESS); return RESULT; });
+    const panel = renderSandboxSettingsPanel(parent, {
+      ...deps, isMobile, ...(withReset ? { reset, resetMessage: 'RESET MSG' } : {}),
+    });
+    await flush();
+    return { root: panel.el, deps, reset };
+  }
+
+  it('is offered when the runtime is installed, even when the sandbox looks ready', async () => {
+    const { root } = await mount(READY);
+    expect(btn(root, 'Reset sandbox')).toBeDefined();
+    expect(root.querySelector('.ct-sandbox-setup-btn')).toBeNull();
+  });
+
+  it('is not offered without a runtime, on mobile, or without a reset dep', async () => {
+    expect(btn((await mount(FRESH)).root, 'Reset sandbox')).toBeUndefined();
+    expect(btn((await mount(READY, true, true)).root, 'Reset sandbox')).toBeUndefined();
+    expect(btn((await mount(READY, false)).root, 'Reset sandbox')).toBeUndefined();
+  });
+
+  it('confirms with the reset message, then runs reset (not setup) with progress', async () => {
+    const { root, deps, reset } = await mount(READY);
+    btn(root, 'Reset sandbox')!.click();
+    await flush();
+    expect(deps.confirm).toHaveBeenCalledWith('RESET MSG');
+    expect(reset).toHaveBeenCalledTimes(1);
+    expect(deps.run).not.toHaveBeenCalled();
+    expect(text(root, '.ct-sandbox-setup-progress')).toContain('Sandbox ready');
+  });
+
+  it('declining the confirm runs nothing and re-enables the button', async () => {
+    const { root, deps, reset } = await mount(READY);
+    (deps.confirm as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+    const b = btn(root, 'Reset sandbox')!;
+    b.click();
+    await flush();
+    expect(reset).not.toHaveBeenCalled();
+    expect(b.disabled).toBe(false);
+  });
+
+  it('a reset failure shows the step and error tail and re-enables the button', async () => {
+    const { root, reset } = await mount(READY);
+    reset.mockRejectedValue(new SandboxSetupError('images', 'Could not remove an image'));
+    const b = btn(root, 'Reset sandbox')!;
+    b.click();
+    await flush();
+    expect(text(root, '.ct-sandbox-setup-error-title')).toContain('failed');
+    expect(text(root, '.ct-sandbox-setup-error-tail')).toContain('Could not remove an image');
+    expect(b.disabled).toBe(false);
+  });
+});
+
 describe('renderSandboxOfferCard', () => {
   function mount(over: Partial<SandboxSetupFlowDeps> = {}) {
     const parent = document.createElement('div');
