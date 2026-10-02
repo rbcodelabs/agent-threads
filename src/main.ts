@@ -996,10 +996,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }
     };
     // Host-loopback OAuth/Google brokers cannot be reached from Apple's VM.
-    // Overlay only those plugin-owned entries with in-process SDK bridges;
-    // Built-ins use the container-specific lifecycle surface; remote servers
-    // and stdio configs retain the ordinary roster. ThreadSession chooses this view only after routing has
-    // actually succeeded, so automatic host fallback retains HTTP configs.
+    // Overlay plugin-owned brokers with in-process SDK bridges. Built-ins use
+    // the container-specific lifecycle surface; remote servers and stdio configs
+    // retain the ordinary roster. ThreadSession chooses this view only after
+    // routing succeeds, so automatic host fallback retains HTTP configs.
     this.manager.vmMcpServerFactory = (threadId, ordinaryServers) => {
       const vmBuiltIns = ordinaryServers.claude_threads
         ? vmBuiltInServers.get(ordinaryServers.claude_threads)

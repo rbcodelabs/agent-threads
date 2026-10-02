@@ -937,8 +937,12 @@ Control the current thread's session state.
 | `github_check_repo` | `repo` | Checks whether the Geode GitHub App can access `owner/name`; when it cannot, returns the install URL to grant access. |
 
 See [Sandbox VMs](docs/sandbox-vms.md) for setup and a worktree workflow. Only
-`vm_exec` runs commands in the guest; host shell and file tools remain on the
-host. The selected directory is writable and guest edits persist after exit.
+`vm_exec` runs commands in the guest for host-local harnesses; their shell and
+file tools remain on the host. When Claude itself runs inside the container,
+native shell and file tools use the guest filesystem, `vm_exec` remains available,
+and `enter_vm`/`exit_vm` and their aliases are omitted from both MCP surfaces.
+Host-local sessions, including automatic VM-routing fallbacks, retain all three
+tools. The selected directory is writable and guest edits persist after exit.
 
 ### Thread coordination tools
 
