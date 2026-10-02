@@ -224,17 +224,12 @@ mount set in a label (`claude-threads.mounts`, plus `claude-threads.origin`).
 When a fresh session finds an existing container:
 
 - Mount set matches: reused.
-- Differs, container is harness-owned, and this plugin instance has no session
-  attached (fresh start or plugin reload): the container is **recreated** with
-  the new mounts. Files an agent wrote inside the guest filesystem (outside
-  `/work`) are lost; `/work` is a bind mount and unaffected.
-- Differs but this plugin instance already attached to it (a session may be
-  live), or the container is not labelled harness-owned (created by an older
-  version, or by `enter_vm`): it is **kept** — a running session is never
-  disrupted. Plugins whose guest path is not mounted are dropped from that
-  session instead of pointing at nothing. Skills added after the container
-  started therefore appear after the next plugin reload (or thread
-  delete/archive).
+- Mount set differs: the container is **kept**, including after a plugin
+  reload. Claude stores its native conversation history inside the guest;
+  recreating the container would discard that history and break session resume.
+  Plugins whose guest path is not mounted are dropped from that session instead
+  of pointing at nothing. Newly added mount paths are available in new thread
+  containers; a plugin reload preserves existing containers and their history.
 
 ### MCP servers in a VM-routed Claude session
 

@@ -113,15 +113,31 @@ describe('SandboxVmManager — ensureHarnessContainer with extra mounts', () => 
     expect(ran('rm')).toBe(false);
   });
 
-  it('recreates an untracked harness-only container whose mount signature differs', async () => {
-    const { manager, calls, ran } = makeManager({
+  it('preserves an untracked harness container and its native sessions when mounts change', async () => {
+    const { manager, ran } = makeManager({
       '--version': { stdout: 'v\n' },
       [inspectKey]: inspectWith({ 'claude-threads.origin': 'harness', 'claude-threads.mounts': '' }),
     });
     const result = await ensure(manager);
-    expect(result).toMatchObject({ success: true, extraMounts: MOUNTS });
-    expect(ran('rm', '--force', NAME)).toBe(true);
-    expect(calls.findIndex((c) => c[0] === 'rm')).toBeLessThan(calls.findIndex((c) => c[0] === 'run'));
+    expect(result.success).toBe(true);
+    expect(result).not.toHaveProperty('extraMounts');
+    expect(ran('stop')).toBe(false);
+    expect(ran('rm')).toBe(false);
+    expect(ran('run')).toBe(false);
+  });
+
+  it('reports the old mounts when a reload requests a different skill set', async () => {
+    const oldMounts = [{ hostPath: '/h/old', guestPath: '/skills/old' }];
+    const { manager, ran } = makeManager({
+      '--version': { stdout: 'v\n' },
+      [inspectKey]: inspectWith({
+        'claude-threads.origin': 'harness',
+        'claude-threads.mounts': JSON.stringify([['/h/old', '/skills/old']]),
+      }),
+    });
+    expect(await ensure(manager)).toMatchObject({ success: true, extraMounts: oldMounts });
+    expect(ran('rm')).toBe(false);
+    expect(ran('run')).toBe(false);
   });
 
   it('never recreates a container not labelled harness-owned (could hold agent state)', async () => {
