@@ -57,7 +57,8 @@ protecting the vault; keep vault backups or sync history. If the thread's
 working directory is the vault itself, it is mounted twice (`/work` and
 `/vault`). The mount is skipped silently when the host exposes no vault
 filesystem path. A harness-owned container created before this mount existed is
-recreated to add it; for `enter_vm`, call `exit_vm` and enter again. If the
+preserved to keep its native conversation history; new thread containers include
+the mount. For an agent-owned `enter_vm`, call `exit_vm` and enter again. If the
 working directory is your home, that directory becomes the `/work` mount; select
 a disposable worktree first. The SSH agent and host credentials are not automatically
 forwarded, but files inside the mount are exposed. The one exception is Geode's
@@ -88,6 +89,9 @@ default OOM-kills `pnpm`/`tsc`/tests). Change them under Settings → Agent →
 (whole number, 1–64). Invalid values fall back to the defaults. They apply only
 to newly created containers: remove an existing one to pick up a change with
 `container rm --force claude-threads-vm-<thread-id>`; it is recreated on next use.
+Removing a harness container also discards its native Claude history. If that
+history is missing, the thread can recover with a fresh session and recent saved
+conversation context; this does not recreate the complete native transcript.
 
 `vm_exec` returns the command exit code and bounded stdout/stderr. A nonzero exit
 is a normal tool result. The default deadline is 300 seconds (1–3600 accepted);
