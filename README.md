@@ -251,6 +251,8 @@ Agents can use `skills_create_local({ skillId, skillMd, files? })` and `skills_u
 
 Authored skills are available in newly started Claude and Codex sessions as `/local:<identifier>`. Active sessions are not restarted. Installed Claude skills retain `/vault:<name>`. Use qualified identifiers from `skills_list_installed`, such as `local:meeting-notes`, with `skills_get` and `skills_uninstall` to distinguish same-named packages. Ambiguous removal involving an authored skill is rejected. `skills_update` continues to pull configured GitHub sources.
 
+**Auto-update.** GitHub skill sources are fetched and fast-forwarded in the background on launch and every 6 hours (**Settings → Skills → Auto-update GitHub skill sources**, on by default). Updates use `git pull --ff-only`, so a clone with local commits is left alone and a warning is logged; pinned (`ref`) sources are skipped. Updated skills apply to new threads, and a notice tells you which sources changed. Skills are instructions your agents follow, so turn this off if you source skills from repos you don't trust.
+
 #### Declaring skill sources in config
 
 GitHub skill sources don't have to be added through the Skills Manager UI. A vault whose `data.json` is committed to a config repo can **declare** them, and the plugin materializes each one on load:
