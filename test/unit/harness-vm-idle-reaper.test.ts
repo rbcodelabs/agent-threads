@@ -38,6 +38,14 @@ async function setup(session: Partial<{ turnInFlight: boolean; hasPendingPermiss
 const later = () => Date.now() + IDLE * 2;
 
 describe('ThreadManager — reapIdleHarnessVms', () => {
+  it('stops VM lifecycle timers before graceful shutdown without closing an active session', async () => {
+    const { manager, vm, close } = await setup({ turnInFlight: true });
+    const dispose = vi.fn(async () => {});
+    Object.assign(vm, { dispose });
+    await (manager as unknown as { stopVmIdleLifecycle(): Promise<void> }).stopVmIdleLifecycle();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+  });
   it('destroy disposes every VM manager so old idle timers cannot stop replacement sessions', async () => {
     const { manager, vm, calls } = await setup(null);
     const dispose = vi.fn(async () => {});

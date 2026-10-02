@@ -46,6 +46,7 @@ import {
   type VmCommandResult,
   type VmCommandRunner,
 } from '../../src/sandboxVm';
+import * as sandboxVm from '../../src/sandboxVm';
 
 // ── Mock CLI ─────────────────────────────────────────────────────────────────
 
@@ -831,10 +832,14 @@ describe('SandboxVmManager — idle stop', () => {
     const stopping = manager.stopHarnessForIdle();
     let disposed = false;
     const disposal = (manager as unknown as { dispose(): Promise<void> }).dispose().then(() => { disposed = true; });
+    let replacementReady = false;
+    const replacementDrain = (sandboxVm as unknown as { drainVmIdleStops(): Promise<void> }).drainVmIdleStops().then(() => { replacementReady = true; });
     await Promise.resolve();
     expect(disposed).toBe(false);
-    releaseStop(); await Promise.all([stopping, disposal]);
+    expect(replacementReady).toBe(false);
+    releaseStop(); await Promise.all([stopping, disposal, replacementDrain]);
     expect(disposed).toBe(true);
+    expect(replacementReady).toBe(true);
     expect(await manager.stopHarnessForIdle()).toBe(false);
   });
   async function entered(origin: 'agent' | 'harness' = 'agent', extra: { memory?: string } = {}) {

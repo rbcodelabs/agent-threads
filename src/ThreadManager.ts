@@ -3203,16 +3203,22 @@ export class ThreadManager {
     return { timedOut };
   }
 
-  async destroy(): Promise<void> {
+  /** Cancel timers synchronously before graceful shutdown; do not close active sessions here. */
+  stopVmIdleLifecycle(): Promise<void> {
     if (this.harnessVmReapTimer) clearInterval(this.harnessVmReapTimer);
     this.harnessVmReapTimer = null;
+    return Promise.all([...this.sandboxVmManagers.values()].map(manager => manager.dispose())).then(() => undefined);
+  }
+
+  async destroy(): Promise<void> {
+    const vmStops = this.stopVmIdleLifecycle();
     for (const threadId of this.goalContextStates.keys()) this.cancelPendingGoalContext(threadId);
     for (const session of this.sessions.values()) {
       session.close();
     }
     this.sessions.clear();
     this.releasingPlanFeedback.clear();
-    await Promise.all([...this.sandboxVmManagers.values()].map(manager => manager.dispose()));
+    await vmStops;
   }
 }
 

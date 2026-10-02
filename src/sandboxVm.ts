@@ -673,6 +673,18 @@ export interface SandboxVmManagerDeps {
   idleStopMs?: () => number;
 }
 
+const VM_IDLE_STOPS_KEY = Symbol.for('claude-threads.vm-idle-stops');
+type VmIdleStopsGlobal = typeof globalThis & { [VM_IDLE_STOPS_KEY]?: Set<Promise<void>> };
+function sharedVmIdleStops(): Set<Promise<void>> {
+  return (globalThis as VmIdleStopsGlobal)[VM_IDLE_STOPS_KEY] ??= new Set();
+}
+
+/** Replacement plugin generations wait before adopting containers the prior instance is still stopping. */
+export async function drainVmIdleStops(): Promise<void> {
+  const stops = sharedVmIdleStops();
+  while (stops.size > 0) await Promise.all([...stops]);
+}
+
 /**
  * Per-session lifecycle for one thread's sandbox VM.
  *
@@ -768,7 +780,12 @@ export class SandboxVmManager {
     this.disposed = true;
     this.clearIdleTimer();
     this.closePortForwards();
-    if (this.stopping) await this.stopping;
+    if (this.stopping) {
+      const stopping = this.stopping;
+      const stops = sharedVmIdleStops();
+      stops.add(stopping);
+      try { await stopping; } finally { stops.delete(stopping); }
+    }
   }
 
   private scheduleIdleStop(): void {
