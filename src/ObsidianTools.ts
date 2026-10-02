@@ -57,6 +57,7 @@ import type {
   InstallSkillParams,
 } from './skillManager';
 import { LEGACY_MCP_SERVER_NAME } from './productIdentity';
+import { createHostExecHandler, type HostExecHooks } from './hostExec';
 
 // Reusable Zod schemas for tools that take a file path
 const pathSchema = { path: z.string().describe('Vault-relative path of the file') };
@@ -253,6 +254,12 @@ export interface ObsidianMcpServerOptions {
    */
   contributedTools?: readonly import('./AgentToolContributions').BoundAgentTool[];
   onRegisterMcpServer?: (input: unknown) => Promise<McpRegistrationResult>;
+  /**
+   * Enables the `host_exec` tool. Supplied ONLY for a thread whose Claude
+   * harness is actually VM-routed (ADR-0015) on desktop; omitted everywhere
+   * else, in which case the tool is not registered at all.
+   */
+  hostExec?: HostExecHooks;
   /** Route agent-triggered file navigation through the host's contextual panel policy. */
   openContextualFile?: (file: TFile, newLeaf: boolean) => Promise<boolean>;
   /** Route agent-triggered Web Viewer navigation through the contextual panel policy. */
@@ -3010,6 +3017,30 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     { alwaysLoad: true },
   );
 
+  const boundHostExec = options.hostExec ? tool(
+    'host_exec',
+    [
+      'Runs ONE shell command on the real host machine (outside this sandbox VM), only after the user explicitly approves it.',
+      'Every call shows the user the exact command, working directory and your reason, and they choose Allow once or Deny; this prompt cannot be skipped by any permission mode.',
+      'Use only when the task truly needs the host (host-only tools, files outside the mounted workspace); prefer vm_exec for everything else.',
+      'Scheduled or non-interactive threads cannot prompt, so the call is denied.',
+      'Runs via /bin/sh -c with a minimal environment (no credentials or API tokens). Returns exit code, stdout and stderr; a non-zero exit is a normal result. Long output is truncated with an explicit marker.',
+    ].join(' '),
+    {
+      command: z.string().min(1).describe('Shell command to run on the host via /bin/sh -c.'),
+      cwd: z.string().optional().describe('Absolute host directory to run in. Defaults to the thread\'s current working directory. Must already exist.'),
+      reason: z.string().min(1).describe('Why this must run on the host. Shown to the user in the approval prompt.'),
+      timeoutSeconds: z.number().optional().describe('Deadline in seconds (SIGTERM, then SIGKILL after a short grace). Defaults to 300, capped at 3600.'),
+    },
+    async (args) => {
+      const result = await createHostExecHandler(options.hostExec!, () => effectiveCwd || undefined)(args);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        ...(!result.success ? { isError: true } : {}),
+      };
+    },
+  ) : undefined;
+
   const boundRequestSecret = tool(
     'request_secret',
     [
@@ -3089,6 +3120,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundEnterVm,
       boundVmExec,
       boundExitVm,
+      ...(boundHostExec ? [boundHostExec] : []),
       boundGithubListAccess,
       boundGithubCheckRepo,
       boundListCommands,
@@ -3166,7 +3198,12 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     .filter(binding => !builtInNames.has(binding.name) && !binding.requiresApproval)
     .map(binding => binding.name);
 
-  const legacyTools = tools.map(toDeprecatedLegacyToolDefinition);
+  // host_exec is newer than the deprecated `obsidian` alias server, which is
+  // frozen at its legacy roster: exposing a host-command tool under two names
+  // would only double the approval surface.
+  const legacyTools = tools
+    .filter(definition => definition.name !== 'host_exec')
+    .map(toDeprecatedLegacyToolDefinition);
   const legacyServer = createSdkMcpServer({
     name: 'obsidian',
     tools: legacyTools,

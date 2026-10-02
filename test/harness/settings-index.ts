@@ -2,7 +2,7 @@ import './obsidian-mock'; // must be first — sets up HTMLElement.prototype
 import { ClaudeThreadsSettingTab, RequestSecretModal } from '../../src/SettingsTab';
 import { DEFAULT_SETTINGS, type PluginSettings, type Project, type ScheduledItem, type WatchedDocument } from '../../src/types';
 import { mockApp } from './obsidian-mock';
-import { McpRegistrationModal } from '../../src/confirmModal';
+import { HostExecModal, McpRegistrationModal } from '../../src/confirmModal';
 import { secretStorageKey } from '../../src/secretUtils';
 
 (window as any).__openMcpRegistration = (type: 'stdio' | 'http' = 'stdio') => {
@@ -11,6 +11,15 @@ import { secretStorageKey } from '../../src/secretUtils';
     ? { name: 'example-tools', type, command: 'npx', args: ['-y', '@example/mcp-server'], env: { API_TOKEN: '${EXAMPLE_TOKEN}' } }
     : { name: 'example-tools', type, url: 'https://mcp.example.com/agent/tools', headers: { Authorization: 'Bearer ${EXAMPLE_TOKEN}' } };
   new McpRegistrationModal(mockApp as any, entry, result => { (window as any).__mcpRegistrationResult = result; }).open();
+};
+(window as any).__openHostExecApproval = () => {
+  (window as any).__hostExecApprovalResult = undefined;
+  new HostExecModal(mockApp as any, {
+    command: 'pnpm test -- --run test/unit/hostExec.test.ts',
+    cwd: '/Users/example/projects/agent-threads',
+    reason: 'Verify the host execution safety checks before opening a pull request.',
+    timeoutSeconds: 120,
+  }, result => { (window as any).__hostExecApprovalResult = result; }).open();
 };
 (window as any).__getSettingsSecret = (name: string) => mockApp.secretStorage.getSecret(secretStorageKey(name));
 
