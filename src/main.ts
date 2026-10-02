@@ -41,7 +41,9 @@ import {
 import { isWatchableDocument, watchMenuLabel } from './documentWatch';
 import { mergeMcpServers, overlayMatchingMcpServers } from './mcpServerMerge';
 import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
-import { McpRegistrationModal } from './confirmModal';
+import { McpRegistrationModal, HostExecModal } from './confirmModal';
+import type { HostExecHooks } from './hostExec';
+import { redactGithubSecrets } from './githubCredentials';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
@@ -318,6 +320,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
    */
   private mcpRegistrationModals = new Set<McpRegistrationModal>();
   private mcpRegistrationAvailable = true;
+  private hostExecModals = new Set<HostExecModal>();
   private registerMcpServerFn?: ReturnType<typeof createMcpRegistration>;
 
   /**
@@ -618,6 +621,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.register(() => {
       this.mcpRegistrationAvailable = false;
       for (const modal of this.mcpRegistrationModals) modal.close();
+      for (const modal of this.hostExecModals) modal.close();
     });
     this.registerMcpServerFn = createMcpRegistration({
       getSettings: () => this.settings,
@@ -633,9 +637,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
         catch (error) { this.mcpRegistrationModals.delete(modal); reject(error); }
       }),
     });
-    this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
-      try {
-        const mcpServers = createClaudeThreadsMcpServers(this.app, {
+    // Shared by the ordinary roster and the VM-routed overlay below; `hostExec`
+    // is passed only by the overlay, so host_exec exists only after routing
+    // into the sandbox container has actually succeeded.
+    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks) =>
+        createClaudeThreadsMcpServers(this.app, {
+          ...(hostExec ? { hostExec } : {}),
           // Contributed agent tools, bound to this thread here — the host does
           // the binding so a peer never reaches the factory (ADR-0008). Built-in
           // Design arrives through this list like any other contribution; there
@@ -945,6 +952,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
           onRequestSecret: (secretName: string, reason: string, force?: boolean) =>
             this.requestSecretForThread(threadId, secretName, reason, force),
         });
+    this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
+      try {
+        const mcpServers = buildBuiltInMcpServers(threadId, initialCwd);
         const mcpDebug = Object.fromEntries(Object.entries(mcpServers).map(([key, server]) => [key, {
           type: (server as unknown as Record<string, unknown>).type,
           name: (server as unknown as Record<string, unknown>).name,
@@ -996,11 +1006,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
       const oauthHosts = this.oauthMcpRegistry?.serversForThread(threadId) ?? {};
       const googleMcps = this.googleWorkspaceMcp?.vmServersForThread(threadId) ?? {};
       const oauthMcps = this.oauthMcpRegistry?.vmServersForThread(threadId) ?? {};
-      return overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(
+      const overlaid = overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(
         overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(ordinaryServers, googleHosts, googleMcps),
         oauthHosts,
         oauthMcps,
       );
+      return this.withHostExec(threadId, overlaid, buildBuiltInMcpServers);
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect
@@ -2421,6 +2432,40 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.reportedMcpWarnings.add(warning);
       new Notice(warning, 10000);
     }
+  }
+
+  /**
+   * Adds `host_exec` to a VM-routed session's roster by swapping in a built-in
+   * `claude_threads` server that includes it. Called only from the VM overlay
+   * (i.e. after routing succeeded), never on desktop-less hosts.
+   *
+   * The approval prompt is a host-owned modal, not the harness permission
+   * path, so bypassPermissions / dontAsk / auto-approve cannot skip it.
+   */
+  private withHostExec<T>(
+    threadId: string,
+    servers: Record<string, T>,
+    build: (threadId: string, cwd: string, hostExec: HostExecHooks) => Record<string, T>,
+  ): Record<string, T> {
+    if (Platform.isMobile || !servers.claude_threads) return servers;
+    const thread = this.manager.getThread(threadId);
+    if (!thread) return servers;
+    const hostExec: HostExecHooks = {
+      isInteractive: () => this.mcpRegistrationAvailable && !this.manager.getThread(threadId)?.scheduledItemId,
+      requestApproval: request => new Promise<boolean>((resolve, reject) => {
+        if (!this.mcpRegistrationAvailable) { reject(new Error('Host unavailable')); return; }
+        const modal = new HostExecModal(this.app, request, allowed => {
+          this.hostExecModals.delete(modal);
+          resolve(allowed);
+        });
+        this.hostExecModals.add(modal);
+        try { modal.open(); }
+        catch (error) { this.hostExecModals.delete(modal); reject(error); }
+      }),
+      redact: redactGithubSecrets,
+    };
+    const rebuilt = build(threadId, thread.cwd, hostExec);
+    return rebuilt.claude_threads ? { ...servers, claude_threads: rebuilt.claude_threads } : servers;
   }
 
   /**

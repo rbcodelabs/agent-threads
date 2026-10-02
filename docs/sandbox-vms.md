@@ -281,3 +281,34 @@ wrapper's own pty (an `stty` run inside the container is reset to 0×0 by
 across two lines), and a long code must be sent as text followed by a
 *separate* Enter (sent together, the terminal treats the burst as a paste and
 swallows the Enter).
+
+## Host commands from a sandboxed thread (`host_exec`)
+
+A thread whose Claude harness runs inside the container (ADR-0015) cannot touch
+anything outside `/work`. When a task genuinely needs the real machine (a
+host-only tool, a file outside the mounted workspace), the agent can call
+`host_exec({ command, cwd?, reason, timeoutSeconds? })` to run **one** command
+on the host.
+
+- **Exposure.** The tool is registered only on a desktop session that is
+  actually VM-routed. Host-spawned threads (including a thread that fell back
+  to a host spawn), Codex/OpenCode threads and mobile never see it.
+- **Approval, every time.** Each call opens a host-owned dialog showing the
+  exact command, directory and the agent's stated reason, with **Allow once**
+  and **Deny** (Esc counts as Deny). This gate is separate from the harness
+  permission path, so `bypassPermissions`, `dontAsk` and auto-approve do not
+  skip it, the same as `mcp_register_server`. There is no "always allow" and no
+  allowlist. Scheduled or otherwise non-interactive threads cannot prompt, so
+  the call is denied with an explanatory result and nothing runs.
+- **Execution.** `/bin/sh -c <command>` on the host, in `cwd` (an existing
+  absolute directory; defaults to the thread's current directory). The
+  environment is an allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
+  `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`, `TMPDIR`): harness credentials and
+  Anthropic tokens are never passed. Each of stdout and stderr is truncated at
+  64 KiB with an explicit marker. The default deadline is 300s (max 3600s):
+  SIGTERM, then SIGKILL after five seconds. A non-zero exit is a normal result.
+- **Transcript.** The call and its result (including `decision`, exit code and
+  output, or the denial) appear as an ordinary tool call in the thread.
+
+The command runs with your account's permissions, so read the card before
+allowing it.
