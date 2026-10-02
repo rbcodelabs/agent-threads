@@ -59,6 +59,32 @@ export const VM_NETWORK_MODES: readonly VmNetworkMode[] = ['default', 'internal'
 
 /** Image built from `sandbox/Dockerfile`. Overridable per call and in settings. */
 export const DEFAULT_VM_IMAGE = 'claude-threads-coding:1';
+/**
+ * Apple's `container` CLI defaults to 1 GiB per VM, which OOM-kills pnpm/tsc/tests
+ * once the harness is resident. Cap is a ceiling, not a reservation.
+ */
+export const DEFAULT_VM_MEMORY = '4G';
+export const DEFAULT_VM_CPUS = 4;
+export const MAX_VM_CPUS = 64;
+
+const VM_MEMORY_PATTERN = /^\d+[MG]$/i;
+
+/**
+ * Validates a memory limit before it reaches the `container run` argv.
+ * Accepts `<digits>M|G` (e.g. `4G`, `512M`) with a non-zero amount; anything else
+ * falls back to the default. Returned normalised (trimmed, upper-case suffix).
+ */
+export function resolveVmMemory(value?: string | null): string {
+  const v = typeof value === 'string' ? value.trim() : '';
+  if (!VM_MEMORY_PATTERN.test(v) || Number.parseInt(v, 10) <= 0) return DEFAULT_VM_MEMORY;
+  return v.toUpperCase();
+}
+
+/** Positive integer in [1, MAX_VM_CPUS]; non-integers/invalid fall back to the default, large values clamp. */
+export function resolveVmCpus(value?: number | null): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) return DEFAULT_VM_CPUS;
+  return Math.min(value, MAX_VM_CPUS);
+}
 
 /** Where the thread's working directory is bind-mounted, and the guest cwd. */
 export const VM_WORKDIR = '/work';
@@ -405,6 +431,8 @@ export function buildRunArgs(opts: {
   /** Additional READ-ONLY bind mounts (e.g. skills). Fixed for the container's lifetime. */
   extraMounts?: readonly VmExtraMount[];
   labels?: Record<string, string>;
+  memory?: string;
+  cpus?: number;
 }): string[] {
   if (opts.mountPath.includes(':')) throw new Error('mountPath cannot contain a colon (the container volume delimiter).');
   if (!opts.image.trim() || opts.image.startsWith('-')) throw new Error('Invalid container image reference.');
@@ -418,6 +446,8 @@ export function buildRunArgs(opts: {
     ...extraMountArgs(opts.extraMounts),
     ...labelArgs,
     '--workdir', workdir,
+    '--memory', resolveVmMemory(opts.memory),
+    '--cpus', String(resolveVmCpus(opts.cpus)),
     ...networkArgsFor(opts.network),
     opts.image,
     // The container only has to stay alive so `container exec` has somewhere to
@@ -447,6 +477,11 @@ export function buildShellExecArgs(opts: { containerName: string; command: strin
 
 export function buildStopArgs(containerName: string): string[] {
   return ['stop', containerName];
+}
+
+/** `container start <name>` — restarts a stopped container (e.g. after a host reboot). */
+export function buildStartArgs(containerName: string): string[] {
+  return ['start', containerName];
 }
 
 export function buildRemoveArgs(opts: { containerName: string; force?: boolean }): string[] {
@@ -545,6 +580,22 @@ export function parseContainerLabels(stdout: string): Record<string, string> | n
     return Object.fromEntries(Object.entries(labels).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
   } catch {
     return null;
+  }
+}
+
+/**
+ * True only when `container inspect` JSON positively reports a non-running
+ * state. An unrecognised shape returns false so we never issue a spurious start.
+ */
+export function isContainerStopped(stdout: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    const entry = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | undefined;
+    const raw = entry?.status ?? entry?.state
+      ?? (entry?.State as Record<string, unknown> | undefined)?.Status;
+    return typeof raw === 'string' && raw.length > 0 && raw.toLowerCase() !== 'running';
+  } catch {
+    return false;
   }
 }
 
@@ -774,6 +825,9 @@ export class SandboxVmManager {
     network: VmNetworkMode;
     /** Read-only extra mounts (e.g. external roots). A leftover container with a different set is recreated. */
     extraMounts?: readonly VmExtraMount[];
+    /** Resource limits for a newly created container; validated in buildRunArgs. */
+    memory?: string;
+    cpus?: number;
   }): Promise<EnterVmResult> {
     try {
       const containerName = this.deps.containerName();
@@ -842,6 +896,8 @@ export class SandboxVmManager {
           mountPath: params.mountPath,
           network: params.network,
           extraMounts: wanted,
+          memory: params.memory,
+          cpus: params.cpus,
           ...(wantedSignature ? { labels: { [LABEL_EXTRA_MOUNTS]: wantedSignature } } : {}),
         }),
       );
@@ -903,6 +959,9 @@ export class SandboxVmManager {
      *     an agent's enter_vm created) -> keep it, mounts unknown/unchanged.
      */
     extraMounts?: readonly VmExtraMount[];
+    /** Resource limits for a newly created container; validated in buildRunArgs. */
+    memory?: string;
+    cpus?: number;
   }): Promise<EnterVmResult> {
     try {
       const containerName = this.deps.containerName();
@@ -949,7 +1008,17 @@ export class SandboxVmManager {
           }
           // fall through to a fresh `container run` below
         } else {
-          // Still running from an earlier session/plugin reload — adopt it.
+          // After a host reboot the container exists but is stopped: start it.
+          if (isContainerStopped(inspected.stdout)) {
+            const started = await this.exec(buildStartArgs(containerName));
+            if (started.exitCode !== 0) {
+              return {
+                success: false,
+                error: `Failed to start stopped container ${containerName}: ${firstLine(started.stderr) || `exit code ${started.exitCode}`}`,
+              };
+            }
+          }
+          // Running from an earlier session/plugin reload (or just restarted) — adopt it.
           // The harness PROCESS inside it does not survive a reload the way
           // the container does (its stdio pipes were held by the now-gone host
           // process), so the caller re-execs; this call only needs the
@@ -975,6 +1044,8 @@ export class SandboxVmManager {
           mountPath: params.mountPath,
           network: params.network,
           extraMounts: wanted,
+          memory: params.memory,
+          cpus: params.cpus,
           labels: {
             [LABEL_HARNESS_ORIGIN]: 'harness',
             ...(wantedSignature ? { [LABEL_EXTRA_MOUNTS]: wantedSignature } : {}),

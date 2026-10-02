@@ -45,7 +45,7 @@ describe('buildRunArgs — extra read-only mounts and labels', () => {
 
   it('is unchanged when there are no extra mounts or labels', () => {
     expect(buildRunArgs(base)).toEqual([
-      'run', '--detach', '--name', 'c', '--volume', '/tmp/work:/work', '--workdir', '/work', 'img:1', 'sleep', 'infinity',
+      'run', '--detach', '--name', 'c', '--volume', '/tmp/work:/work', '--workdir', '/work', '--memory', '4G', '--cpus', '4', 'img:1', 'sleep', 'infinity',
     ]);
   });
 
@@ -93,6 +93,13 @@ describe('SandboxVmManager — ensureHarnessContainer with extra mounts', () => 
     expect(run).toContain('/h/a:/skills/a:ro');
     expect(run).toContain(`claude-threads.mounts=${SIG}`);
     expect(run).toContain('claude-threads.origin=harness');
+  });
+
+  it('passes validated memory/cpus to the harness container run', async () => {
+    const { manager, calls } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default', memory: '6g', cpus: 3 });
+    const run = calls.find((c) => c[0] === 'run')!;
+    expect(run.slice(run.indexOf('--memory'), run.indexOf('--memory') + 4)).toEqual(['--memory', '6G', '--cpus', '3']);
   });
 
   it('adopts a harness container whose mount signature matches (no recreate)', async () => {

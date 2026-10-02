@@ -30,6 +30,11 @@ describe('buildSandboxSetupView', () => {
     })).buttonLabel).toBe('Finish setup');
   });
 
+  it('running with a stale base image: "Update sandbox" / "Update available"', () => {
+    const v = buildSandboxSetupView(st({ runtime: 'installed', runtimeSource: 'system', running: true, images: { base: 'stale', harness: 'ok' } }));
+    expect(v).toMatchObject({ imageLine: 'Update available', buttonLabel: 'Update sandbox', ready: false });
+  });
+
   it('running with only a stale harness layer: "Update sandbox" / "Update available"', () => {
     const v = buildSandboxSetupView(st({ runtime: 'installed', runtimeSource: 'system', running: true, images: { base: 'ok', harness: 'stale' } }));
     expect(v).toMatchObject({ imageLine: 'Update available', buttonLabel: 'Update sandbox' });

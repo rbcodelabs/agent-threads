@@ -28,6 +28,11 @@ import {
   buildNetworkListArgs,
   buildRemoveArgs,
   buildRunArgs,
+  DEFAULT_VM_MEMORY,
+  DEFAULT_VM_CPUS,
+  MAX_VM_CPUS,
+  resolveVmMemory,
+  resolveVmCpus,
   buildStopArgs,
   containerNameForThread,
   isVmNetworkMode,
@@ -234,9 +239,37 @@ describe('sandboxVm — argument construction', () => {
         '--name', 'c',
         '--volume', `/host/work:${VM_WORKDIR}`,
         '--workdir', VM_WORKDIR,
+        '--memory', DEFAULT_VM_MEMORY,
+        '--cpus', String(DEFAULT_VM_CPUS),
         'img:1',
         'sleep', 'infinity',
       ]);
+  });
+
+  it('validates memory and falls back to the default for unsafe input', () => {
+    expect(resolveVmMemory('8G')).toBe('8G');
+    expect(resolveVmMemory(' 2048m ')).toBe('2048M');
+    for (const bad of ['', 'abc', '4', '4GB', '-4G', '0G', '4G --privileged', '4.5G', undefined, null]) {
+      expect(resolveVmMemory(bad as string | undefined)).toBe(DEFAULT_VM_MEMORY);
+    }
+  });
+
+  it('validates cpus: positive integers, clamped, else default', () => {
+    expect(resolveVmCpus(2)).toBe(2);
+    expect(resolveVmCpus(MAX_VM_CPUS + 100)).toBe(MAX_VM_CPUS);
+    for (const bad of [0, -1, 1.5, NaN, undefined, null]) {
+      expect(resolveVmCpus(bad as number | undefined)).toBe(DEFAULT_VM_CPUS);
+    }
+  });
+
+  it('passes configured memory/cpus to run and never an unvalidated value', () => {
+    const base = { containerName: 'c', image: 'img:1', mountPath: '/m', network: 'default' as const };
+    const ok = buildRunArgs({ ...base, memory: '8g', cpus: 2 });
+    expect(ok.slice(ok.indexOf('--memory'), ok.indexOf('--memory') + 4)).toEqual(['--memory', '8G', '--cpus', '2']);
+    const bad = buildRunArgs({ ...base, memory: '4G --privileged', cpus: -3 });
+    expect(bad).toContain(DEFAULT_VM_MEMORY);
+    expect(bad).not.toContain('4G --privileged');
+    expect(bad[bad.indexOf('--cpus') + 1]).toBe(String(DEFAULT_VM_CPUS));
   });
 
   it('puts the image before the container command, as the CLI requires', () => {
@@ -658,6 +691,34 @@ describe('SandboxVmManager — ensureHarnessContainer (ADR-0015 §3)', () => {
     const result = await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
     expect(result.success).toBe(true);
     expect(runner.ran('run', '--detach')).toBe(false);
+  });
+
+  // A Mac reboot leaves the container present but STOPPED. Inspect JSON shape
+  // for state is a guess (Apple CLI not available in CI).
+  it('starts a container that exists but is stopped (e.g. after host reboot)', async () => {
+    const { manager, runner } = makeManager({
+      '--version': { stdout: 'container CLI version 1.3.1\n' },
+      [buildInspectArgs(NAME).join(' ')]: {
+        exitCode: 0,
+        stdout: JSON.stringify([{ status: 'stopped', configuration: { labels: {} } }]),
+      },
+    });
+    const result = await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    expect(result.success).toBe(true);
+    expect(runner.ran('start', NAME)).toBe(true);
+    expect(runner.ran('run', '--detach')).toBe(false);
+  });
+
+  it('does not start a container that inspect reports as running', async () => {
+    const { manager, runner } = makeManager({
+      '--version': { stdout: 'container CLI version 1.3.1\n' },
+      [buildInspectArgs(NAME).join(' ')]: {
+        exitCode: 0,
+        stdout: JSON.stringify([{ status: 'running', configuration: { labels: {} } }]),
+      },
+    });
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
+    expect(runner.ran('start')).toBe(false);
   });
 
   it('is idempotent: calling it again for an already-tracked container is a no-op attach', async () => {

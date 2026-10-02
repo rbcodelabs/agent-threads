@@ -695,6 +695,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // needing a session restart.
           getVmImage: () => this.settings.vmImage,
           getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
+          getVmMemory: () => this.settings.sandboxVmMemory,
+          getVmCpus: () => this.settings.sandboxVmCpus,
           // Geode-only, optional: connected external roots to mount read-only
           // at /ext/<label>. Undefined on Obsidian / older Geode -> no extras.
           getExternalMounts: () => this.listExternalMountRoots(),

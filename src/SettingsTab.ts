@@ -20,7 +20,8 @@ import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
 import type { OAuthMcpPreset } from './oauthMcpPresets';
 import { classifyScheduledItems, describeScheduledExecution, formatNextOccurrence } from './scheduledWorkView';
 import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
-import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
+import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY, MAX_VM_CPUS, resolveVmCpus, resolveVmMemory } from './sandboxVm';
+import { describeReset, getSandboxSetupStatus, resetSandbox, runSandboxSetup } from './sandboxSetup';
 import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
 import { promptConfirm } from './confirmModal';
 
@@ -1492,6 +1493,38 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
+    const resourceHelp = 'Applies only to newly created containers. To pick up a change for an existing one, remove it '
+      + '(`container rm --force claude-threads-vm-<thread-id>`); it is recreated on next use.';
+    new Setting(containerEl)
+      .setName('Sandbox VM memory')
+      .setClass('ct-sandbox-setting')
+      .setDesc(`Memory limit per sandbox container, e.g. 4G or 2048M (default 4G). Invalid values fall back to 4G. ${resourceHelp}`)
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_VM_MEMORY)
+          .setValue(this.plugin.settings.sandboxVmMemory ?? DEFAULT_VM_MEMORY)
+          .onChange(async (value) => {
+            this.plugin.settings.sandboxVmMemory = resolveVmMemory(value);
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Sandbox VM CPUs')
+      .setClass('ct-sandbox-setting')
+      .setDesc(`CPU count per sandbox container, a whole number from 1 to ${MAX_VM_CPUS} (default ${DEFAULT_VM_CPUS}). ${resourceHelp}`)
+      .addText((text) =>
+        text
+          .setPlaceholder(String(DEFAULT_VM_CPUS))
+          .setValue(String(this.plugin.settings.sandboxVmCpus ?? DEFAULT_VM_CPUS))
+          .onChange(async (value) => {
+            this.plugin.settings.sandboxVmCpus = resolveVmCpus(/^\s*\d+\s*$/.test(value) ? Number(value) : undefined);
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
     // GitHub connection (Geode >= 0.25 only; hidden elsewhere so Obsidian is unchanged).
     if (this.plugin.githubBroker?.available) {
       new Setting(containerEl)
@@ -1588,6 +1621,8 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         isMobile: Platform.isMobile,
         getStatus: () => getSandboxSetupStatus({ harnessImage }),
         run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
+        reset: ({ onProgress, signal }) => resetSandbox({ harnessImage, onProgress, signal }),
+        resetMessage: describeReset(harnessImage),
         confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       });
     }

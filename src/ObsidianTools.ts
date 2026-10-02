@@ -37,6 +37,8 @@ import {
   resolveExecTimeoutSeconds,
   resolveVmImage,
   resolveVmNetwork,
+  resolveVmMemory,
+  resolveVmCpus,
   resolveExternalMounts,
   VM_EXTERNAL_ROOT,
   type ExternalMountRootInput,
@@ -307,6 +309,9 @@ export interface ObsidianMcpServerOptions {
    * (full egress). Read lazily for the same reason as {@link getWorktreeRoot}.
    */
   getVmDefaultNetwork?: () => string | undefined;
+  /** Resource limits for newly created containers (settings sandboxVmMemory/sandboxVmCpus). */
+  getVmMemory?: () => string | undefined;
+  getVmCpus?: () => number | undefined;
   /**
    * Returns the host's connected external roots (Geode's
    * `externalRoots.listMountRoots()`), called at `enter_vm` time. They are
@@ -1302,6 +1307,8 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
           mountPath,
           network: resolveVmNetwork(args.network, options.getVmDefaultNetwork?.()),
           extraMounts,
+          memory: resolveVmMemory(options.getVmMemory?.()),
+          cpus: resolveVmCpus(options.getVmCpus?.()),
         });
         if (!result.success) return vmErrorResult(result.error);
 

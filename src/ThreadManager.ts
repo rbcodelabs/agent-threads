@@ -21,7 +21,7 @@ import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
 import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
-import { containerNameForThread, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
+import { containerNameForThread, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
 import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
 import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
@@ -2113,6 +2113,8 @@ export class ThreadManager {
       mountPath: thread.cwd,
       skillMountPlan,
       getExternalMounts: this.getExternalMounts,
+      memory: resolveVmMemory(this.settings.sandboxVmMemory),
+      cpus: resolveVmCpus(this.settings.sandboxVmCpus),
     };
   }
 

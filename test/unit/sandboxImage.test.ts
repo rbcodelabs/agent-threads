@@ -10,8 +10,10 @@ import {
   SANDBOX_IMAGE_VERSION_LABEL,
   SandboxImageAbortedError,
   SandboxImageError,
+  buildImageRemoveArgs,
   ensureSandboxImages,
   getSandboxImageStatus,
+  removeSandboxImages,
   parseImageVersionLabel,
 } from '../../src/sandboxImage';
 import type { VmCommandResult, VmCommandRunner } from '../../src/sandboxVm';
@@ -29,6 +31,7 @@ interface FakeState {
   pullResult?: VmCommandResult;
   tagResult?: VmCommandResult;
   buildResult?: VmCommandResult;
+  rmResults?: Record<string, VmCommandResult>;
   onBuild?: (args: string[]) => void | Promise<void>;
 }
 
@@ -51,6 +54,11 @@ function fakeRunner(state: FakeState) {
       if (state.tagResult) return state.tagResult;
       state.images[args[3]] = null;
       return ok();
+    }
+    if (a === 'image' && b === 'rm') {
+      const res = state.rmResults?.[args[2]] ?? ok();
+      if (res.exitCode === 0) delete state.images[args[2]];
+      return res;
     }
     if (a === 'build') {
       await state.onBuild?.(args);
@@ -98,6 +106,8 @@ describe('getSandboxImageStatus', () => {
     ['nothing', {}, { base: 'missing', harness: 'missing' }],
     ['base only', { [SANDBOX_CODING_IMAGE]: null }, { base: 'ok', harness: 'missing' }],
     ['current harness', { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION }, { base: 'ok', harness: 'ok' }],
+    ['stale published base', { [SANDBOX_CODING_IMAGE]: '1', [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION }, { base: 'stale', harness: 'ok' }],
+    ['current-labelled base', { [SANDBOX_CODING_IMAGE]: SANDBOX_IMAGE_VERSION, [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION }, { base: 'ok', harness: 'ok' }],
     ['stale label', { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: '0' }, { base: 'ok', harness: 'stale' }],
     ['unlabelled harness (hand-built)', { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: null }, { base: 'ok', harness: 'stale' }],
     ['harness without base', { [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION }, { base: 'missing', harness: 'ok' }],
@@ -245,5 +255,62 @@ describe('ensureSandboxImages', () => {
     await expect(ensureSandboxImages({ runner })).rejects.toBeInstanceOf(SandboxImageError);
     state.pullResult = undefined;
     expect(await ensureSandboxImages({ runner })).toEqual({ pulledBase: true, builtHarness: true });
+  });
+});
+
+describe('ensureSandboxImages with a stale base', () => {
+  it('re-pulls over an older labelled base and rebuilds the harness even if its label is current', async () => {
+    const { runner, calls } = fakeRunner({ images: { [SANDBOX_CODING_IMAGE]: '1', [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION } });
+    expect(await ensureSandboxImages({ runner })).toEqual({ pulledBase: true, builtHarness: true });
+    const c = stripCalls(calls);
+    expect(c.map((x) => x[0] === 'build' ? 'build' : x[1])).toEqual(['pull', 'tag', 'build']);
+    expect(c[1]).toEqual(['image', 'tag', SANDBOX_BASE_IMAGE_REF, SANDBOX_CODING_IMAGE]);
+  });
+});
+
+describe('removeSandboxImages', () => {
+  it('builds `image rm` args', () => {
+    expect(buildImageRemoveArgs('x:1')).toEqual(['image', 'rm', 'x:1']);
+  });
+
+  it('removes harness then coding image', async () => {
+    const { runner, calls } = fakeRunner({ images: { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION } });
+    expect(await removeSandboxImages({ runner })).toEqual([SANDBOX_HARNESS_IMAGE, SANDBOX_CODING_IMAGE]);
+    expect(calls.filter((c) => c[1] === 'rm')).toEqual([
+      ['image', 'rm', SANDBOX_HARNESS_IMAGE],
+      ['image', 'rm', SANDBOX_CODING_IMAGE],
+    ]);
+  });
+
+  it('tolerates missing images (no rm call, no error)', async () => {
+    const { runner, calls } = fakeRunner({ images: {} });
+    expect(await removeSandboxImages({ runner })).toEqual([]);
+    expect(calls.some((c) => c[1] === 'rm')).toBe(false);
+  });
+
+  it('honours a custom harness image name', async () => {
+    const { runner, calls } = fakeRunner({ images: { 'my-harness:9': '2' } });
+    expect(await removeSandboxImages({ runner, harnessImage: 'my-harness:9' })).toEqual(['my-harness:9']);
+    expect(calls.filter((c) => c[1] === 'rm')).toEqual([['image', 'rm', 'my-harness:9']]);
+  });
+
+  it('attempts both removals and reports an in-use image with a clear message', async () => {
+    const { runner, calls } = fakeRunner({
+      images: { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION },
+      rmResults: { [SANDBOX_HARNESS_IMAGE]: fail('image in use by container abc') },
+    });
+    const err = await removeSandboxImages({ runner }).catch((e) => e);
+    expect(err).toBeInstanceOf(SandboxImageError);
+    expect(err.step).toBe('remove');
+    expect(err.message).toContain('stop it');
+    expect(err.message).toContain('image in use by container abc');
+    expect(calls.filter((c) => c[1] === 'rm')).toHaveLength(2);
+  });
+
+  it('stops when aborted', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const { runner } = fakeRunner({ images: { [SANDBOX_CODING_IMAGE]: null } });
+    await expect(removeSandboxImages({ runner, signal: ac.signal })).rejects.toBeInstanceOf(SandboxImageAbortedError);
   });
 });

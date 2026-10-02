@@ -33,7 +33,7 @@ export function describeService(status: SandboxSetupStatus): string {
 export function describeImage(status: SandboxSetupStatus): 'Ready' | 'Needs setup' | 'Update available' {
   const { base, harness } = status.images;
   if (base === 'ok' && harness === 'ok') return 'Ready';
-  if (base === 'ok' && harness === 'stale') return 'Update available';
+  if (base === 'stale' || (base === 'ok' && harness === 'stale')) return 'Update available';
   return 'Needs setup';
 }
 

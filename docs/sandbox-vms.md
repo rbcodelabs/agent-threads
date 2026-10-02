@@ -14,6 +14,10 @@ Open **Settings → Claude → Sandbox setup** and press **Set up sandbox**. Age
 
 A confirmation states what will be downloaded before anything starts (the runtime installer is about 118 MB, the base image several hundred MB), progress is shown live, and **Cancel** stops it. Every step is skipped when already satisfied, so it is safe to run twice. The button reads **Set up sandbox**, **Finish setup** or **Update sandbox** depending on what is left. It is hidden on unsupported Macs (the reason is shown instead) and on mobile.
 
+**Updating the image.** The published base image carries a version label (`sandbox/IMAGE_VERSION`, currently 2). If your local `claude-threads-coding:1` was pulled from an older published version (for example version 1, which predates the GitHub CLI `gh`), the image line reads **Update available** and **Update sandbox** pulls the current base over it and rebuilds the Claude layer. A `claude-threads-coding:1` you built yourself carries no label and is never replaced automatically.
+
+**Reset sandbox.** Once the runtime is installed, **Reset sandbox** sits next to the setup button. After a confirmation it removes the local base and harness images (the harness tag from Settings → Tools) and runs setup again, so both are pulled and rebuilt from scratch. Stop running sandbox VMs first: an image in use cannot be removed, and the reset then stops with a message naming the image instead of rebuilding on a half-removed state. A reset also discards a hand-built `claude-threads-coding:1`.
+
 When a Claude thread starts on the host because the sandbox is not set up, a one-time card in that thread offers the same setup (`Set up sandbox` / `Not now` / `Don't ask again`). The thread keeps running on your Mac meanwhile; a finished setup applies from its next fresh session start.
 
 ### Manual fallback (advanced)
@@ -66,6 +70,15 @@ Choose networking on each `enter_vm` call or under Settings → Agent:
 The internal network's runtime configuration is verified before use. An existing
 network with the same name but a different mode is rejected. Network restrictions
 apply to guest traffic, not host tools or runtime image pulls.
+
+### Memory and CPUs
+
+Each container gets a 4G memory ceiling and 4 CPUs by default (Apple's 1 GiB
+default OOM-kills `pnpm`/`tsc`/tests). Change them under Settings → Agent →
+**Sandbox VM memory** (`<digits>M|G`, e.g. `8G`) and **Sandbox VM CPUs**
+(whole number, 1–64). Invalid values fall back to the defaults. They apply only
+to newly created containers: remove an existing one to pick up a change with
+`container rm --force claude-threads-vm-<thread-id>`; it is recreated on next use.
 
 `vm_exec` returns the command exit code and bounded stdout/stderr. A nonzero exit
 is a normal tool result. The default deadline is 300 seconds (1–3600 accepted);
@@ -170,6 +183,8 @@ remove a container the harness is still attached to; it is torn down
 automatically when the thread is deleted or archived, not at ordinary session
 close (so a lingering or quickly-restarted session doesn't pay container-start
 latency every turn).
+If the container is found stopped (for example after a Mac reboot), it is
+started again rather than recreated.
 
 A mode change or a freshly-built image takes effect on a thread's *next* fresh
 session start (harness switch, restart, or new thread) — never mid-session.
