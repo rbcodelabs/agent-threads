@@ -21,7 +21,7 @@ import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
 import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
-import { containerNameForThread, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
+import { containerNameForThread, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
 import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
 import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
@@ -1525,6 +1525,12 @@ export class ThreadManager {
       if (now - info.lastUsedAt < idleMs) continue;
       const sinceActivity = this.msSinceActivity(threadId);
       if (sinceActivity < idleMs) continue;
+      if (this.pendingPermissions.has(threadId)
+        || this.hasPendingQuestion(threadId)
+        || this.pendingPlanResolvers.has(threadId)
+        || this.threads.get(threadId)?.pendingPlan
+        || (this.pendingUserMessageIds.get(threadId)?.length ?? 0) > 0
+        || (this.queuedMessages.get(threadId)?.length ?? 0) > 0) continue;
       const session = this.sessions.get(threadId);
       if (session && !this.isGoalContextRefreshSafe(threadId, session)) continue;
       if (!session && this.hasActiveBackgroundTasks(threadId)) continue;
@@ -2162,6 +2168,9 @@ export class ThreadManager {
       mountPath: thread.cwd,
       skillMountPlan,
       getExternalMounts: this.getExternalMounts,
+      memory: resolveVmMemory(this.settings.sandboxVmMemory),
+      cpus: resolveVmCpus(this.settings.sandboxVmCpus),
+      getVaultPath: () => this.vaultRoot,
     };
   }
 
@@ -2254,7 +2263,7 @@ export class ThreadManager {
         ? (modelOverride ?? thread.model ?? undefined)
         : modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
       appendSystemPrompt,
-      resumeFallbackHistory: (thread.agentHarness === 'codex' || thread.agentHarness === 'opencode') && thread.sessionId
+      resumeFallbackHistory: thread.sessionId
         ? buildHistoryPreamble(
             latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
             thread.cwd,
@@ -3278,7 +3287,7 @@ function buildHistoryPreamble(priorMessages: ChatMessage[], newCwd: string): str
 
   const omitted = priorMessages.length - messages.length;
   const lines: string[] = [
-    `[Note: the working directory was changed to ${newCwd} and the Claude Code session could not be resumed. The prior conversation is summarised below to restore context.]`,
+    `[Note: the native session could not be resumed. The current working directory is ${newCwd}. The prior conversation is summarised below to restore context.]`,
     '',
   ];
 

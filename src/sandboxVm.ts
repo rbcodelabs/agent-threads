@@ -59,6 +59,32 @@ export const VM_NETWORK_MODES: readonly VmNetworkMode[] = ['default', 'internal'
 
 /** Image built from `sandbox/Dockerfile`. Overridable per call and in settings. */
 export const DEFAULT_VM_IMAGE = 'claude-threads-coding:1';
+/**
+ * Apple's `container` CLI defaults to 1 GiB per VM, which OOM-kills pnpm/tsc/tests
+ * once the harness is resident. Cap is a ceiling, not a reservation.
+ */
+export const DEFAULT_VM_MEMORY = '4G';
+export const DEFAULT_VM_CPUS = 4;
+export const MAX_VM_CPUS = 64;
+
+const VM_MEMORY_PATTERN = /^\d+[MG]$/i;
+
+/**
+ * Validates a memory limit before it reaches the `container run` argv.
+ * Accepts `<digits>M|G` (e.g. `4G`, `512M`) with a non-zero amount; anything else
+ * falls back to the default. Returned normalised (trimmed, upper-case suffix).
+ */
+export function resolveVmMemory(value?: string | null): string {
+  const v = typeof value === 'string' ? value.trim() : '';
+  if (!VM_MEMORY_PATTERN.test(v) || Number.parseInt(v, 10) <= 0) return DEFAULT_VM_MEMORY;
+  return v.toUpperCase();
+}
+
+/** Positive integer in [1, MAX_VM_CPUS]; non-integers/invalid fall back to the default, large values clamp. */
+export function resolveVmCpus(value?: number | null): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) return DEFAULT_VM_CPUS;
+  return Math.min(value, MAX_VM_CPUS);
+}
 
 /** Where the thread's working directory is bind-mounted, and the guest cwd. */
 export const VM_WORKDIR = '/work';
@@ -299,6 +325,26 @@ export function networkArgsFor(network: VmNetworkMode): string[] {
 
 /** Parent of the read-only bind mounts for connected Geode external roots. */
 export const VM_EXTERNAL_ROOT = '/ext';
+/** Fixed guest path of the vault, always mounted READ-WRITE regardless of the thread cwd (/work). */
+export const VM_VAULT_MOUNT = '/vault';
+
+/**
+ * The vault as a read-write mount at {@link VM_VAULT_MOUNT}. Returns [] when the
+ * host path is unavailable (mobile / non-filesystem adapter) or fails vetting
+ * (not absolute, contains ':', NUL or '..', not a directory). A cwd equal to
+ * the vault root still gets /vault: the same directory is simply mounted twice.
+ */
+export function resolveVaultMount(
+  vaultPath: string | null | undefined,
+  isDirectory: (hostPath: string) => boolean,
+): VmExtraMount[] {
+  if (typeof vaultPath !== 'string' || !vaultPath.startsWith('/')) return [];
+  if (vaultPath.includes(':') || vaultPath.includes('\0') || vaultPath.split('/').includes('..')) return [];
+  const hostPath = vaultPath.length > 1 ? vaultPath.replace(/\/+$/, '') : vaultPath;
+  let isDir = false;
+  try { isDir = isDirectory(hostPath); } catch { isDir = false; }
+  return isDir ? [{ hostPath, guestPath: VM_VAULT_MOUNT, readWrite: true }] : [];
+}
 
 /** A Geode external root as reported by the host's `externalRoots.listMountRoots()`. */
 export interface ExternalMountRootInput {
@@ -378,7 +424,7 @@ export function mergeExtraMounts(...lists: Array<readonly VmExtraMount[] | undef
 export const LABEL_HARNESS_ORIGIN = 'claude-threads.origin';
 export const LABEL_EXTRA_MOUNTS = 'claude-threads.mounts';
 
-/** `--volume host:guest:ro` flags for extra mounts: deduped by guest path, always read-only, validated. */
+/** `--volume host:guest[:ro]` flags for extra mounts: deduped by guest path, read-only unless `readWrite`, validated. */
 function extraMountArgs(extraMounts: readonly VmExtraMount[] | undefined): string[] {
   const seen = new Set<string>();
   const args: string[] = [];
@@ -391,7 +437,7 @@ function extraMountArgs(extraMounts: readonly VmExtraMount[] | undefined): strin
     }
     if (seen.has(m.guestPath)) continue;
     seen.add(m.guestPath);
-    args.push('--volume', `${m.hostPath}:${m.guestPath}:ro`);
+    args.push('--volume', `${m.hostPath}:${m.guestPath}${m.readWrite ? '' : ':ro'}`);
   }
   return args;
 }
@@ -404,11 +450,11 @@ export function buildRunArgs(opts: {
   mountPath: string;
   network: VmNetworkMode;
   workdir?: string;
-  /** Additional READ-ONLY bind mounts (e.g. skills). Fixed for the container's lifetime. */
+  /** Additional bind mounts (read-only unless `readWrite`, e.g. the vault). Fixed for the container's lifetime. */
   extraMounts?: readonly VmExtraMount[];
   labels?: Record<string, string>;
-  /** Guest memory cap, e.g. `2g`. Omitted → the runtime's default allocation. */
   memory?: string;
+  cpus?: number;
 }): string[] {
   if (opts.mountPath.includes(':')) throw new Error('mountPath cannot contain a colon (the container volume delimiter).');
   if (!opts.image.trim() || opts.image.startsWith('-')) throw new Error('Invalid container image reference.');
@@ -422,8 +468,9 @@ export function buildRunArgs(opts: {
     ...extraMountArgs(opts.extraMounts),
     ...labelArgs,
     '--workdir', workdir,
+    '--memory', resolveVmMemory(opts.memory),
+    '--cpus', String(resolveVmCpus(opts.cpus)),
     ...networkArgsFor(opts.network),
-    ...(opts.memory ? ['--memory', opts.memory] : []),
     opts.image,
     // The container only has to stay alive so `container exec` has somewhere to
     // land; the image's own CMD (an interactive bash) would exit immediately
@@ -454,6 +501,7 @@ export function buildStopArgs(containerName: string): string[] {
   return ['stop', containerName];
 }
 
+/** `container start <name>` — restarts a stopped container (e.g. after a host reboot). */
 export function buildStartArgs(containerName: string): string[] {
   return ['start', containerName];
 }
@@ -558,6 +606,24 @@ export function parseContainerLabels(stdout: string): Record<string, string> | n
 }
 
 /**
+ * True only when `container inspect` JSON positively reports a non-running
+ * state. An unrecognised shape returns false so we never issue a spurious start.
+ */
+export function isContainerStopped(stdout: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    const entry = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | undefined;
+    const status = entry?.status;
+    const raw = (typeof status === 'object' && status !== null
+      ? (status as Record<string, unknown>).state : status) ?? entry?.state
+      ?? (entry?.State as Record<string, unknown> | undefined)?.Status;
+    return typeof raw === 'string' && raw.length > 0 && raw.toLowerCase() !== 'running';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Optional lifecycle hooks. They keep credential delivery (see
  * githubVmDelivery.ts) out of the lifecycle code: a hook failure never fails a
  * VM operation, it only adds `notes` the model and user can act on.
@@ -605,8 +671,6 @@ export interface SandboxVmManagerDeps {
    * idle-stopped: stopping one would kill the harness process inside it.
    */
   idleStopMs?: () => number;
-  /** Guest memory cap passed as `--memory` at container creation. Read lazily. */
-  memory?: () => string | undefined;
 }
 
 /**
@@ -711,11 +775,15 @@ export class SandboxVmManager {
   private async idleStop(): Promise<void> {
     this.idleTimer = null;
     const active = this.active;
-    if (!active || active.origin !== 'agent' || this.busy > 0 || this.stopped) return;
-    try {
-      const result = await this.exec(buildStopArgs(active.containerName));
-      if (result.exitCode === 0 && this.active === active && this.busy === 0) this.stopped = true;
-    } catch { /* best effort — an idle container left running is only a memory cost */ }
+    if (!active || active.origin !== 'agent' || this.busy > 0 || this.stopped || this.stopping) return;
+    const run = (async () => {
+      try {
+        const result = await this.exec(buildStopArgs(active.containerName));
+        if (result.exitCode === 0 && this.active === active) this.stopped = true;
+      } catch { /* best effort — an idle container left running is only a memory cost */ }
+    })();
+    this.stopping = run;
+    try { await run; } finally { if (this.stopping === run) this.stopping = null; }
   }
 
   /** Starts a container stopped by idle-stop (or left stopped across a reload). */
@@ -861,6 +929,9 @@ export class SandboxVmManager {
     network: VmNetworkMode;
     /** Read-only extra mounts (e.g. external roots). A leftover container with a different set is recreated. */
     extraMounts?: readonly VmExtraMount[];
+    /** Resource limits for a newly created container; validated in buildRunArgs. */
+    memory?: string;
+    cpus?: number;
   }): Promise<EnterVmResult> {
     try {
       if (this.stopping) await this.stopping;
@@ -929,8 +1000,9 @@ export class SandboxVmManager {
           image: params.image,
           mountPath: params.mountPath,
           network: params.network,
-          memory: this.deps.memory?.(),
           extraMounts: wanted,
+          memory: params.memory,
+          cpus: params.cpus,
           ...(wantedSignature ? { labels: { [LABEL_EXTRA_MOUNTS]: wantedSignature } } : {}),
         }),
       );
@@ -985,14 +1057,14 @@ export class SandboxVmManager {
      *   - tracked by this manager (a session may be live in it) -> keep it,
      *     report the mounts it really has; callers must not assume the request
      *     was honoured. Never disrupts a running session.
-     *   - untracked (fresh start / plugin reload, so no live harness process
-     *     of ours is inside it) AND labelled harness-owned -> remove and
-     *     recreate with the requested mounts. Nothing agent-authored lives
-     *     there except what a prior vm_exec wrote into the guest filesystem.
-     *   - untracked and NOT labelled harness-owned (legacy container, or one
-     *     an agent's enter_vm created) -> keep it, mounts unknown/unchanged.
+     *   - untracked (fresh start / plugin reload) -> keep it and report the
+     *     existing mounts. Claude's native conversation files also live in
+     *     the guest filesystem; recreating it would make resume impossible.
      */
     extraMounts?: readonly VmExtraMount[];
+    /** Resource limits for a newly created container; validated in buildRunArgs. */
+    memory?: string;
+    cpus?: number;
   }): Promise<EnterVmResult> {
     try {
       if (this.stopping) await this.stopping;
@@ -1031,37 +1103,27 @@ export class SandboxVmManager {
       if (inspected.exitCode === 0) {
         const labels = parseContainerLabels(inspected.stdout);
         const existingSignature = labels?.[LABEL_EXTRA_MOUNTS] ?? '';
-        const harnessOwned = labels?.[LABEL_HARNESS_ORIGIN] === 'harness';
-        if (harnessOwned && existingSignature !== wantedSignature) {
-          // Stale mount set on a container only the harness uses: recreate.
-          if (this.deps.hooks?.afterExit) {
-            try { await this.deps.hooks.afterExit(this.hookContext(containerName)); } catch { /* best effort */ }
-          }
-          await this.exec(buildStopArgs(containerName));
-          const removed = await this.exec(buildRemoveArgs({ containerName, force: true }));
-          if (removed.exitCode !== 0) {
+        // Restart a stopped container without replacing its filesystem.
+        if (isContainerStopped(inspected.stdout)) {
+          const started = await this.exec(buildStartArgs(containerName));
+          if (started.exitCode !== 0) {
             return {
               success: false,
-              error: `Failed to replace ${containerName} to update its skill mounts: ${firstLine(removed.stderr) || `exit code ${removed.exitCode}`}`,
+              error: `Failed to start stopped container ${containerName}: ${firstLine(started.stderr) || `exit code ${started.exitCode}`}`,
             };
           }
-          // fall through to a fresh `container run` below
-        } else {
-          // Still running from an earlier session/plugin reload — adopt it.
-          // The harness PROCESS inside it does not survive a reload the way
-          // the container does (its stdio pipes were held by the now-gone host
-          // process), so the caller re-execs; this call only needs the
-          // container itself, which is already there.
-          const mounted = labels ? (parseMountSignature(existingSignature) ?? []) : [];
-          // It may have been idle-stopped before a reload; `start` on a running container may exit non-zero.
-          await this.exec(buildStartArgs(containerName)).catch(() => undefined);
-          this.lastUsedAt = Date.now();
-          this.active = {
-            containerName, image: params.image, mountedFrom: params.mountPath, network: params.network,
-            origin: 'harness', ...(mounted.length ? { extraMounts: mounted } : {}),
-          };
-          return attached(this.active);
         }
+        // Re-exec the harness in its existing container, even when skills
+        // changed. Removing it would discard ~/.claude/projects and break
+        // the saved session id. Report actual mounts so unavailable plugins
+        // are omitted rather than pointing at paths the guest cannot see.
+        const mounted = labels ? (parseMountSignature(existingSignature) ?? []) : [];
+        this.lastUsedAt = Date.now();
+        this.active = {
+          containerName, image: params.image, mountedFrom: params.mountPath, network: params.network,
+          origin: 'harness', ...(mounted.length ? { extraMounts: mounted } : {}),
+        };
+        return attached(this.active);
       }
 
       if (params.network === 'internal') {
@@ -1075,8 +1137,9 @@ export class SandboxVmManager {
           image: params.image,
           mountPath: params.mountPath,
           network: params.network,
-          memory: this.deps.memory?.(),
           extraMounts: wanted,
+          memory: params.memory,
+          cpus: params.cpus,
           labels: {
             [LABEL_HARNESS_ORIGIN]: 'harness',
             ...(wantedSignature ? { [LABEL_EXTRA_MOUNTS]: wantedSignature } : {}),

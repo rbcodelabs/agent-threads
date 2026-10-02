@@ -45,7 +45,7 @@ describe('buildRunArgs — extra read-only mounts and labels', () => {
 
   it('is unchanged when there are no extra mounts or labels', () => {
     expect(buildRunArgs(base)).toEqual([
-      'run', '--detach', '--name', 'c', '--volume', '/tmp/work:/work', '--workdir', '/work', 'img:1', 'sleep', 'infinity',
+      'run', '--detach', '--name', 'c', '--volume', '/tmp/work:/work', '--workdir', '/work', '--memory', '4G', '--cpus', '4', 'img:1', 'sleep', 'infinity',
     ]);
   });
 
@@ -95,6 +95,13 @@ describe('SandboxVmManager — ensureHarnessContainer with extra mounts', () => 
     expect(run).toContain('claude-threads.origin=harness');
   });
 
+  it('passes validated memory/cpus to the harness container run', async () => {
+    const { manager, calls } = makeManager(CLI_OK_NO_CONTAINER);
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default', memory: '6g', cpus: 3 });
+    const run = calls.find((c) => c[0] === 'run')!;
+    expect(run.slice(run.indexOf('--memory'), run.indexOf('--memory') + 4)).toEqual(['--memory', '6G', '--cpus', '3']);
+  });
+
   it('adopts a harness container whose mount signature matches (no recreate)', async () => {
     const { manager, ran } = makeManager({
       '--version': { stdout: 'v\n' },
@@ -106,15 +113,45 @@ describe('SandboxVmManager — ensureHarnessContainer with extra mounts', () => 
     expect(ran('rm')).toBe(false);
   });
 
-  it('recreates an untracked harness-only container whose mount signature differs', async () => {
-    const { manager, calls, ran } = makeManager({
+  it('preserves an untracked harness container and its native sessions when mounts change', async () => {
+    const { manager, ran } = makeManager({
       '--version': { stdout: 'v\n' },
       [inspectKey]: inspectWith({ 'claude-threads.origin': 'harness', 'claude-threads.mounts': '' }),
     });
     const result = await ensure(manager);
-    expect(result).toMatchObject({ success: true, extraMounts: MOUNTS });
-    expect(ran('rm', '--force', NAME)).toBe(true);
-    expect(calls.findIndex((c) => c[0] === 'rm')).toBeLessThan(calls.findIndex((c) => c[0] === 'run'));
+    expect(result.success).toBe(true);
+    expect(result).not.toHaveProperty('extraMounts');
+    expect(ran('stop')).toBe(false);
+    expect(ran('rm')).toBe(false);
+    expect(ran('run')).toBe(false);
+  });
+
+  it('reports the old mounts when a reload requests a different skill set', async () => {
+    const oldMounts = [{ hostPath: '/h/old', guestPath: '/skills/old' }];
+    const { manager, ran } = makeManager({
+      '--version': { stdout: 'v\n' },
+      [inspectKey]: inspectWith({
+        'claude-threads.origin': 'harness',
+        'claude-threads.mounts': JSON.stringify([['/h/old', '/skills/old']]),
+      }),
+    });
+    expect(await ensure(manager)).toMatchObject({ success: true, extraMounts: oldMounts });
+    expect(ran('rm')).toBe(false);
+    expect(ran('run')).toBe(false);
+  });
+
+  it('starts a stopped container with changed mounts without discarding native history', async () => {
+    const { manager, ran } = makeManager({
+      '--version': { stdout: 'v\n' },
+      [inspectKey]: { stdout: JSON.stringify([{
+        configuration: { labels: { 'claude-threads.origin': 'harness', 'claude-threads.mounts': '' } },
+        status: { state: 'stopped' },
+      }]) },
+    });
+    expect((await ensure(manager)).success).toBe(true);
+    expect(ran('start', NAME)).toBe(true);
+    expect(ran('rm')).toBe(false);
+    expect(ran('run')).toBe(false);
   });
 
   it('never recreates a container not labelled harness-owned (could hold agent state)', async () => {

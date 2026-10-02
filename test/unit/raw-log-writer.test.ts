@@ -116,7 +116,7 @@ describe('RawLogWriter.append', () => {
     expect(fs.existsSync(path.join(tmpRoot, 'Claude'))).toBe(false);
   });
 
-  it('degrades gracefully on a non-serializable payload', async () => {
+  it('keeps a circular payload, marking the back-reference (redaction walks the event first)', async () => {
     const w = makeWriter();
     const circular: Record<string, unknown> = { type: 'assistant' };
     circular.self = circular;
@@ -124,6 +124,17 @@ describe('RawLogWriter.append', () => {
     await settle(w);
 
     const lines = logLines('t4');
+    expect(lines).toHaveLength(1);
+    expect(lines[0].event).toEqual({ type: 'assistant', self: '[Circular]' });
+    expect(lines[0].type).toBe('assistant');
+  });
+
+  it('degrades gracefully on a non-serializable payload', async () => {
+    const w = makeWriter();
+    w.append('t4b', undefined, 'assistant', { n: BigInt(1) });
+    await settle(w);
+
+    const lines = logLines('t4b');
     expect(lines).toHaveLength(1);
     expect(lines[0].event).toBe('[unserializable]');
     expect(lines[0].type).toBe('assistant');

@@ -3526,6 +3526,48 @@
   overflow-y: auto;
 }
 
+.ct-permission-fields {
+  margin-top: 4px;
+  font-size: var(--font-ui-smaller);
+}
+
+.ct-permission-fields > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.ct-permission-fields-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.ct-permission-field {
+  display: grid;
+  grid-template-columns: minmax(60px, max-content) 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.ct-permission-field-key {
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+}
+
+.ct-permission-field-value {
+  margin: 0;
+  padding: 0;
+  background: none;
+  font-family: var(--font-monospace);
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .ct-permission-actions {
   display: flex;
   gap: 6px;

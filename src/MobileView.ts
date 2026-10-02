@@ -19,6 +19,7 @@ import { formatToolName, getToolIcon, groupToolCalls, smoothToolGroups, ACTIVITY
 import { splitErrorMessage } from './dashboardUtils';
 import { extractMessageContent } from './MessageContent';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from './linkUtils';
+import { summarizePermissionDetail } from './permissionDetail';
 import {
   VISUALIZE_SLOT_ATTR,
   VISUALIZE_SLOT_CLASS,
@@ -1040,7 +1041,7 @@ export class MobileView extends ItemView {
     const body = card.createDiv('ct-mobile-permission-body');
     body.createEl('code', { cls: 'ct-mobile-permission-tool', text: formatToolName(permission.toolName) });
     if (permission.detail) {
-      body.createEl('p', { cls: 'ct-mobile-permission-detail', text: permission.detail });
+      body.createEl('p', { cls: 'ct-mobile-permission-detail', text: summarizePermissionDetail(permission.detail) });
     }
 
     const actions = card.createDiv('ct-mobile-permission-actions');

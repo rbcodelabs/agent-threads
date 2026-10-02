@@ -90,6 +90,22 @@ async function call(definition: ToolDef, args: Record<string, unknown>) {
 // ── Registration ─────────────────────────────────────────────────────────────
 
 describe('sandbox VM tools — registration', () => {
+  it('omits lifecycle tools from both VM-routed surfaces and describes the existing container', () => {
+    const servers = createClaudeThreadsMcpServers(app, {
+      harnessInVm: true,
+      hostExec: { isInteractive: () => true, requestApproval: async () => true, redact: value => value },
+    });
+    for (const key of ['claude_threads', 'obsidian'] as const) {
+      const tools = (servers[key] as unknown as { tools: ToolDef[] }).tools;
+      expect(tools.map(t => t.name)).not.toContain('enter_vm');
+      expect(tools.map(t => t.name)).not.toContain('exit_vm');
+      const exec = tools.find(t => t.name === 'vm_exec')!;
+      expect(exec.description).toContain('already running inside');
+      expect(exec.description).not.toContain('Call enter_vm first');
+      expect(exec.description).not.toContain('editing stays on the host');
+      expect(tools.some(t => t.name === 'host_exec')).toBe(key === 'claude_threads');
+    }
+  });
   it('registers all three tools on both the canonical and compatibility servers', () => {
     const servers = createClaudeThreadsMcpServers(app);
     const names = (key: 'claude_threads' | 'obsidian') =>
@@ -220,6 +236,17 @@ describe('enter_vm', () => {
 
     expect(payload).toMatchObject({ image: 'explicit:9', network: 'none' });
     expect(runner.argvs().at(-1)).toContain('--network none');
+  });
+
+  it('plumbs the configured memory/cpus into the container run', async () => {
+    const runner = makeRunner(CLI_OK_NO_CONTAINER);
+    const { enter } = vmTools({
+      vmCommandRunner: runner.run,
+      getVmMemory: () => '8G',
+      getVmCpus: () => 2,
+    });
+    await call(enter, {});
+    expect(runner.argvs().at(-1)).toContain('--memory 8G --cpus 2');
   });
 
   it('honours an explicit mountPath override', async () => {

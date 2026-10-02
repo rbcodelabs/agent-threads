@@ -128,6 +128,7 @@ export function getToolIcon(raw: string): string {
     case 'exit_worktree':        return 'git-branch';
     case 'enter_vm':             return 'box';
     case 'vm_exec':              return 'terminal';
+    case 'host_exec':            return 'square-terminal';
     case 'exit_vm':              return 'square-x';
     case 'get_open_tabs':        return 'layout-panel-top';
     case 'ScheduleWakeup':       return 'alarm-clock';

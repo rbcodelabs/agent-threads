@@ -24,10 +24,15 @@ export const SKILLS_GUEST_ROOT = '/skills';
 /** Home of the non-root `node` user in the harness image (sandbox/Dockerfile.harness). */
 export const GUEST_HOME = '/home/node';
 
-/** One read-only bind mount. Always read-only: nothing here may write into the host. */
+/**
+ * One bind mount. Read-only unless `readWrite` is set; the only read-write
+ * mount today is the vault at /vault (see `resolveVaultMount`).
+ */
 export interface VmExtraMount {
   hostPath: string;
   guestPath: string;
+  /** Mount writable. Omitted/false means `:ro`. */
+  readWrite?: boolean;
 }
 
 export interface SkillMountPlan {
@@ -165,7 +170,9 @@ export function planSkillMounts(input: {
 export function mountSignature(mounts: readonly VmExtraMount[]): string {
   if (mounts.length === 0) return '';
   const sorted = [...mounts].sort((a, b) => (a.guestPath < b.guestPath ? -1 : a.guestPath > b.guestPath ? 1 : 0));
-  return JSON.stringify(sorted.map((m) => [m.hostPath, m.guestPath]));
+  // Read-only entries keep the original 2-tuple so labels written before
+  // readWrite existed still compare equal; rw adds a third 'rw' element.
+  return JSON.stringify(sorted.map((m) => (m.readWrite ? [m.hostPath, m.guestPath, 'rw'] : [m.hostPath, m.guestPath])));
 }
 
 /** Inverse of {@link mountSignature}; null when the value is not a signature this module produced. */
@@ -177,7 +184,7 @@ export function parseMountSignature(signature: string): VmExtraMount[] | null {
     const out: VmExtraMount[] = [];
     for (const entry of parsed) {
       if (!Array.isArray(entry) || typeof entry[0] !== 'string' || typeof entry[1] !== 'string') return null;
-      out.push({ hostPath: entry[0], guestPath: entry[1] });
+      out.push({ hostPath: entry[0], guestPath: entry[1], ...(entry[2] === 'rw' ? { readWrite: true } : {}) });
     }
     return out;
   } catch {

@@ -3,7 +3,8 @@
  *
  * When the persisted session id can't be resumed (transcript missing after a
  * restart, moved config dir/HOME, changed project dir), the CLI exits with
- * code 1 before emitting a single message. The SDK surfaces that as a generic
+ * code 1 before doing assistant/tool work (init and error events may precede
+ * the failure). The SDK surfaces that as a generic
  * "Claude Code process exited with code 1" and drops stderr, so the user just
  * sees an opaque crash every time they reopen the thread.
  */
@@ -20,7 +21,8 @@ export function appendStderrTail(tail: string, chunk: string): string {
 /**
  * True when an error looks like a failed resume: the process died with exit
  * code 1 (or explicitly reported a missing conversation) before producing any
- * output, on a session that was launched with a resume id.
+ * assistant/tool output, on a session that was launched with a resume id.
+ * `sawMessage` means meaningful work, excluding init/status/error events.
  */
 export function isResumeFailure(
   errorMessage: string,

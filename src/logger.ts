@@ -20,7 +20,9 @@
  * to enable verbose output.
  */
 
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+import { redactDeep } from './secretRedaction';
+
+export type LogLevel ='debug' | 'info' | 'warn' | 'error';
 
 export interface LogEntry {
   /** Epoch milliseconds when the entry was recorded. */
@@ -69,9 +71,13 @@ function pushRing(entry: LogEntry): void {
 export function log(level: LogLevel, category: string | undefined, ...args: unknown[]): void {
   if (level === 'debug' && !_debugEnabled) return;
 
-  pushRing({ ts: Date.now(), level, category, msg: formatArgs(args) });
+  // Mask secrets once, up front, so neither the console nor the ring (which
+  // feeds the diagnostics export) can ever see a raw credential.
+  const safeArgs = args.map((a) => redactDeep(a));
 
-  const prefixed = category ? [`[${category}]`, ...args] : args;
+  pushRing({ ts: Date.now(), level, category, msg: formatArgs(safeArgs) });
+
+  const prefixed = category ? [`[${category}]`, ...safeArgs] : safeArgs;
   switch (level) {
     case 'debug':
     case 'info':

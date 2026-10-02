@@ -38,6 +38,22 @@ async function setup(session: Partial<{ turnInFlight: boolean; hasPendingPermiss
 const later = () => Date.now() + IDLE * 2;
 
 describe('ThreadManager — reapIdleHarnessVms', () => {
+  it.each(['pendingPlan', 'pendingQuestions', 'pendingBackgroundTasks'])(
+    'skips persisted %s after a reload even without a session', async (key) => {
+      const { manager, calls } = await setup(null);
+      const existing = (manager as unknown as { threads: Map<string, Record<string, unknown>> }).threads.get('t1')!;
+      existing[key] = key === 'pendingPlan' ? 'Approve this plan' : [{}];
+      expect(await manager.reapIdleHarnessVms(IDLE, later())).toEqual([]);
+      expect(calls).toEqual([]);
+    });
+  it.each(['pendingPermissions', 'pendingQuestionResolvers', 'pendingPlanResolvers', 'pendingUserMessageIds', 'queuedMessages'])(
+    'skips %s even if the session is absent', async (key) => {
+      const { manager, calls } = await setup(null);
+      const map = (manager as unknown as Record<string, Map<string, unknown>>)[key];
+      map.set('t1', key === 'queuedMessages' || key === 'pendingUserMessageIds' ? ['pending'] : {});
+      expect(await manager.reapIdleHarnessVms(IDLE, later())).toEqual([]);
+      expect(calls).toEqual([]);
+    });
   it('closes the idle session and stops the container', async () => {
     const { manager, calls, close } = await setup({});
     expect(await manager.reapIdleHarnessVms(IDLE, later())).toEqual(['t1']);

@@ -9,6 +9,7 @@ import type { McpRegistrationResult } from './mcpServerStore';
 import type { ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactProviderRegistry, ArtifactRegistrationResult, ArtifactStoreHost, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
 import { HOST_OWNED_ARTIFACT_FIELDS, PROVIDER_ID_PATTERN, toArtifactRef } from './ArtifactContributions';
 import { formatMessageContentReference } from './MessageContent';
+import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
 import type { MessageContentContribution, MessageContentProviderRegistry, MessageContentRef, MessageContentRegistrationResult } from './MessageContent';
 export type { MessageContentJson, MessageContentRef, MessageContentContext, MessageContentPresentation, MessageContentActionHost, MessageContentContribution, MessageContentRegistrationResult } from './MessageContent';
 
@@ -92,6 +93,27 @@ export interface McpRegisterInput {
   /** `audience` parameter on the token request. Nonsecret — pass the literal value. */
   readonly audience?: string;
 }
+/** A built-in OAuth MCP preset, as listed to peers. Same data the Add MCP server modal's chips use. */
+export interface McpPresetDescriptor {
+  readonly id: string;
+  readonly label: string;
+  /** Default server name; override with `registerPreset(id, { name })`. */
+  readonly name: string;
+  readonly url: string;
+  readonly scopes?: string;
+  readonly redirectUri?: string;
+  /** No Dynamic Client Registration: `registerPreset` needs a `clientId` override. */
+  readonly requiresClientId: boolean;
+  /** The provider also needs a client secret, passed as a `${NAME}` placeholder in `clientSecret`. */
+  readonly requiresClientSecret: boolean;
+  readonly notes?: string;
+  readonly setupUrl?: string;
+  /** Provider documentation the preset was verified against. */
+  readonly source: string;
+}
+/** Fields a caller may override on a preset. `url`, `type` and `grantType` are the preset's identity and cannot be changed. */
+export type McpPresetOverrides = Partial<Pick<McpRegisterInput, 'name' | 'scopes' | 'tools' | 'clientId' | 'clientSecret' | 'authorizationServerUrl' | 'redirectUri' | 'audience'>>;
+const MCP_PRESET_OVERRIDE_KEYS: readonly (keyof McpPresetOverrides)[] = ['name', 'scopes', 'tools', 'clientId', 'clientSecret', 'authorizationServerUrl', 'redirectUri', 'audience'];
 export interface RequestSecretInput { readonly secretName: string; readonly reason: string; readonly force?: boolean }
 export interface ArchiveThreadResult { readonly status: 'archived' | 'cancelled'; readonly threadId: string }
 export interface MarkReviewedResult { readonly threadId: string; readonly reviewed: true; readonly changed: boolean }
@@ -120,6 +142,15 @@ export interface ClaudeThreadsApiV1 {
   readonly agentTools: { createBundle(profile: 'voice-orchestration'): AgentToolBundle };
   readonly mcp: {
     register(input: McpRegisterInput): Promise<McpRegistrationResult>;
+    /** Built-in OAuth MCP presets (frozen copies). Feature-detect with the `mcp.listPresets` capability. */
+    listPresets(): readonly McpPresetDescriptor[];
+    /**
+     * Registers a preset through the same path, validation and consent dialog as
+     * `register`. Throws `INVALID_ARGUMENT` for an unknown id, a non-overridable
+     * field, or a preset that `requiresClientId` without a `clientId` override.
+     * Feature-detect with the `mcp.registerPreset` capability.
+     */
+    registerPreset(id: string, overrides?: McpPresetOverrides): Promise<McpRegistrationResult>;
     requestSecret(input: RequestSecretInput): Promise<RequestSecretResult>;
   };
   /**
@@ -230,7 +261,8 @@ function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   if (deps.getTraceMetadata && deps.readTraceChunk) capabilities.push('traces.listSources', 'traces.readChunk', 'traces.subscribe');
   if (deps.runConstrainedQuery) capabilities.push('constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel');
   capabilities.push('orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration');
-  if (deps.registerMcpServer) capabilities.push('mcp.register');
+  capabilities.push('mcp.listPresets');
+  if (deps.registerMcpServer) capabilities.push('mcp.register', 'mcp.registerPreset');
   if (deps.requestSecret) capabilities.push('mcp.requestSecret');
   if (deps.artifactProviders) capabilities.push('extensions.registerArtifactProvider');
   capabilities.push('messageContent.formatReference');
@@ -662,6 +694,44 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     }
     return freeze(await deps.registerMcpServer(input));
   };
+  const listMcpPresets = (): readonly McpPresetDescriptor[] => {
+    guard();
+    return freeze(OAUTH_MCP_PRESETS.map((p): McpPresetDescriptor => ({
+      id: p.id, label: p.label, name: p.name, url: p.url,
+      ...(p.scopes ? { scopes: p.scopes } : {}),
+      ...(p.redirectUri ? { redirectUri: p.redirectUri } : {}),
+      requiresClientId: p.requiresClientId === true,
+      requiresClientSecret: p.requiresClientSecret === true,
+      ...(p.notes ? { notes: p.notes } : {}),
+      ...(p.setupUrl ? { setupUrl: p.setupUrl } : {}),
+      source: p.source,
+    })));
+  };
+  const registerMcpPreset = async (id: string, overrides: McpPresetOverrides = {}): Promise<McpRegistrationResult> => {
+    guard();
+    const presetId = boundedString(id, 'id', 100, true)!;
+    const preset = OAUTH_MCP_PRESETS.find(p => p.id === presetId);
+    if (!preset) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown MCP preset "${presetId}". Use mcp.listPresets() for the available ids.`);
+    if (!overrides || typeof overrides !== 'object') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'overrides must be an object.');
+    const unsupported = Object.keys(overrides).filter(key => !(MCP_PRESET_OVERRIDE_KEYS as readonly string[]).includes(key));
+    if (unsupported.length > 0) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `MCP preset "${presetId}" cannot override: ${unsupported.join(', ')}. Use mcp.register for a custom server.`);
+    const defined = Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined)) as McpPresetOverrides;
+    if (preset.requiresClientId && !preset.clientId && !defined.clientId?.trim()) {
+      throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `MCP preset "${presetId}" has no Dynamic Client Registration: pass your own clientId${preset.setupUrl ? ` (create the app at ${preset.setupUrl})` : ''}.`);
+    }
+    const input: McpRegisterInput = {
+      type: 'oauth',
+      name: preset.name,
+      url: preset.url,
+      ...(preset.scopes ? { scopes: preset.scopes } : {}),
+      ...(preset.redirectUri ? { redirectUri: preset.redirectUri } : {}),
+      ...(preset.clientId ? { clientId: preset.clientId } : {}),
+      ...defined,
+    };
+    // Same entry point as mcp.register, so validation, consent and the
+    // unavailable/idempotent results cannot drift between the two.
+    return registerMcp(input);
+  };
   const requestSecretMcp = async (input: RequestSecretInput): Promise<RequestSecretResult> => {
     guard();
     const secretName = boundedString(input.secretName, 'secretName', MAX_SECRET_NAME_LENGTH, true)!;
@@ -993,7 +1063,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       if (deps.markThreadReviewed) tools.push(tool('ct_mark_reviewed', 'Mark one idle thread reviewed when the user requests it, without opening it. Use its exact thread_id from ct_list_threads; clarify ambiguous names. Running threads must finish first.', { thread_id: stringProp() }, ['thread_id']));
       return freeze({ tools, execute: executeTool });
     } },
-    mcp: { register: registerMcp, requestSecret: requestSecretMcp },
+    mcp: { register: registerMcp, listPresets: listMcpPresets, registerPreset: registerMcpPreset, requestSecret: requestSecretMcp },
     extensions: { registerArtifactProvider, registerAgentTool, registerSlashCommand, registerMessageContentProvider },
     messageContent: { formatReference: (ref: MessageContentRef) => { guard(); try { return formatMessageContentReference(ref); } catch { throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'Invalid message content reference.'); } } },
     artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction, allocateStorage: allocateArtifactStorage },
