@@ -696,6 +696,7 @@ export class SandboxVmManager {
   private stopped = false;
   private lastUsedAt = Date.now();
   private stopping: Promise<void> | null = null;
+  private disposed = false;
   private busy = 0;
 
   constructor(deps: SandboxVmManagerDeps) {
@@ -762,10 +763,18 @@ export class SandboxVmManager {
     this.idleTimer = null;
   }
 
+  /** Cancel old lifecycle timers and drain a stop before a replacement manager adopts the container. */
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.clearIdleTimer();
+    this.closePortForwards();
+    if (this.stopping) await this.stopping;
+  }
+
   private scheduleIdleStop(): void {
     this.clearIdleTimer();
     const ms = this.deps.idleStopMs?.() ?? DEFAULT_VM_IDLE_STOP_MS;
-    if (!this.active || this.active.origin !== 'agent' || this.stopped || ms <= 0) return;
+    if (this.disposed || !this.active || this.active.origin !== 'agent' || this.stopped || ms <= 0) return;
     const timer = setTimeout(() => { void this.idleStop(); }, ms);
     (timer as { unref?: () => void }).unref?.();
     this.idleTimer = timer;
@@ -775,7 +784,7 @@ export class SandboxVmManager {
   private async idleStop(): Promise<void> {
     this.idleTimer = null;
     const active = this.active;
-    if (!active || active.origin !== 'agent' || this.busy > 0 || this.stopped || this.stopping) return;
+    if (this.disposed || !active || active.origin !== 'agent' || this.busy > 0 || this.stopped || this.stopping) return;
     const run = (async () => {
       try {
         const result = await this.exec(buildStopArgs(active.containerName));
@@ -811,7 +820,7 @@ export class SandboxVmManager {
    */
   async stopHarnessForIdle(): Promise<boolean> {
     const active = this.active;
-    if (!active || active.origin !== 'harness' || this.stopped || this.busy > 0 || this.stopping) return false;
+    if (this.disposed || !active || active.origin !== 'harness' || this.stopped || this.busy > 0 || this.stopping) return false;
     this.closePortForwards();
     let stoppedNow = false;
     const run = (async () => {

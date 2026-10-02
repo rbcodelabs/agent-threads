@@ -811,6 +811,32 @@ describe('SandboxVmManager — idle stop', () => {
   afterEach(() => { vi.useRealTimers(); });
 
   const IDLE = 60_000;
+  it('disposal cancels idle timers without stopping or removing the container', async () => {
+    const { manager, runner } = await entered();
+    await (manager as unknown as { dispose(): Promise<void> }).dispose();
+    runner.calls.length = 0;
+    await vi.advanceTimersByTimeAsync(IDLE * 2);
+    expect(runner.calls).toHaveLength(0);
+  });
+  it('disposal waits for a stop already in flight', async () => {
+    let releaseStop!: () => void;
+    const gate = new Promise<void>(resolve => { releaseStop = resolve; });
+    const base = makeRunner({ ...CLI_OK_NO_CONTAINER });
+    const run: VmCommandRunner = async (args, opts) => {
+      if (args[0] === 'stop') await gate;
+      return base.run(args, opts);
+    };
+    const manager = new SandboxVmManager({ containerName: () => NAME, run });
+    await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/a', network: 'default' });
+    const stopping = manager.stopHarnessForIdle();
+    let disposed = false;
+    const disposal = (manager as unknown as { dispose(): Promise<void> }).dispose().then(() => { disposed = true; });
+    await Promise.resolve();
+    expect(disposed).toBe(false);
+    releaseStop(); await Promise.all([stopping, disposal]);
+    expect(disposed).toBe(true);
+    expect(await manager.stopHarnessForIdle()).toBe(false);
+  });
   async function entered(origin: 'agent' | 'harness' = 'agent', extra: { memory?: string } = {}) {
     vi.useFakeTimers();
     const runner = makeRunner({ ...CLI_OK_NO_CONTAINER });

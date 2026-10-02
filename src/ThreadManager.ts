@@ -3203,7 +3203,7 @@ export class ThreadManager {
     return { timedOut };
   }
 
-  destroy(): void {
+  async destroy(): Promise<void> {
     if (this.harnessVmReapTimer) clearInterval(this.harnessVmReapTimer);
     this.harnessVmReapTimer = null;
     for (const threadId of this.goalContextStates.keys()) this.cancelPendingGoalContext(threadId);
@@ -3212,6 +3212,7 @@ export class ThreadManager {
     }
     this.sessions.clear();
     this.releasingPlanFeedback.clear();
+    await Promise.all([...this.sandboxVmManagers.values()].map(manager => manager.dispose()));
   }
 }
 

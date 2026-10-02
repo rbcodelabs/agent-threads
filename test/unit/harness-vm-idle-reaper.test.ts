@@ -38,6 +38,14 @@ async function setup(session: Partial<{ turnInFlight: boolean; hasPendingPermiss
 const later = () => Date.now() + IDLE * 2;
 
 describe('ThreadManager — reapIdleHarnessVms', () => {
+  it('destroy disposes every VM manager so old idle timers cannot stop replacement sessions', async () => {
+    const { manager, vm, calls } = await setup(null);
+    const dispose = vi.fn(async () => {});
+    Object.assign(vm, { dispose });
+    await manager.destroy();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(calls).toEqual([]);
+  });
   it.each(['pendingPlan', 'pendingQuestions', 'pendingBackgroundTasks'])(
     'skips persisted %s after a reload even without a session', async (key) => {
       const { manager, calls } = await setup(null);

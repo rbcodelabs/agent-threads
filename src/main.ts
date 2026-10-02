@@ -2786,7 +2786,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.gitDiff?.stop();
     this.documentWatch?.stop();
     telemetry.dispose();
-    this.manager?.destroy();
+    await this.manager?.destroy();
 
     // Note: pending ScheduleWakeup entries are now durable Scheduler items
     // (schedule.type 'once', origin 'wakeup') persisted to disk — they must
