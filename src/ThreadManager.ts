@@ -2115,6 +2115,7 @@ export class ThreadManager {
       getExternalMounts: this.getExternalMounts,
       memory: resolveVmMemory(this.settings.sandboxVmMemory),
       cpus: resolveVmCpus(this.settings.sandboxVmCpus),
+      getVaultPath: () => this.vaultRoot,
     };
   }
 

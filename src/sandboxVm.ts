@@ -325,6 +325,26 @@ export function networkArgsFor(network: VmNetworkMode): string[] {
 
 /** Parent of the read-only bind mounts for connected Geode external roots. */
 export const VM_EXTERNAL_ROOT = '/ext';
+/** Fixed guest path of the vault, always mounted READ-WRITE regardless of the thread cwd (/work). */
+export const VM_VAULT_MOUNT = '/vault';
+
+/**
+ * The vault as a read-write mount at {@link VM_VAULT_MOUNT}. Returns [] when the
+ * host path is unavailable (mobile / non-filesystem adapter) or fails vetting
+ * (not absolute, contains ':', NUL or '..', not a directory). A cwd equal to
+ * the vault root still gets /vault: the same directory is simply mounted twice.
+ */
+export function resolveVaultMount(
+  vaultPath: string | null | undefined,
+  isDirectory: (hostPath: string) => boolean,
+): VmExtraMount[] {
+  if (typeof vaultPath !== 'string' || !vaultPath.startsWith('/')) return [];
+  if (vaultPath.includes(':') || vaultPath.includes('\0') || vaultPath.split('/').includes('..')) return [];
+  const hostPath = vaultPath.length > 1 ? vaultPath.replace(/\/+$/, '') : vaultPath;
+  let isDir = false;
+  try { isDir = isDirectory(hostPath); } catch { isDir = false; }
+  return isDir ? [{ hostPath, guestPath: VM_VAULT_MOUNT, readWrite: true }] : [];
+}
 
 /** A Geode external root as reported by the host's `externalRoots.listMountRoots()`. */
 export interface ExternalMountRootInput {
@@ -404,7 +424,7 @@ export function mergeExtraMounts(...lists: Array<readonly VmExtraMount[] | undef
 export const LABEL_HARNESS_ORIGIN = 'claude-threads.origin';
 export const LABEL_EXTRA_MOUNTS = 'claude-threads.mounts';
 
-/** `--volume host:guest:ro` flags for extra mounts: deduped by guest path, always read-only, validated. */
+/** `--volume host:guest[:ro]` flags for extra mounts: deduped by guest path, read-only unless `readWrite`, validated. */
 function extraMountArgs(extraMounts: readonly VmExtraMount[] | undefined): string[] {
   const seen = new Set<string>();
   const args: string[] = [];
@@ -417,7 +437,7 @@ function extraMountArgs(extraMounts: readonly VmExtraMount[] | undefined): strin
     }
     if (seen.has(m.guestPath)) continue;
     seen.add(m.guestPath);
-    args.push('--volume', `${m.hostPath}:${m.guestPath}:ro`);
+    args.push('--volume', `${m.hostPath}:${m.guestPath}${m.readWrite ? '' : ':ro'}`);
   }
   return args;
 }
@@ -428,7 +448,7 @@ export function buildRunArgs(opts: {
   mountPath: string;
   network: VmNetworkMode;
   workdir?: string;
-  /** Additional READ-ONLY bind mounts (e.g. skills). Fixed for the container's lifetime. */
+  /** Additional bind mounts (read-only unless `readWrite`, e.g. the vault). Fixed for the container's lifetime. */
   extraMounts?: readonly VmExtraMount[];
   labels?: Record<string, string>;
   memory?: string;

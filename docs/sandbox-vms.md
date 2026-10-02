@@ -47,10 +47,19 @@ delimiters. Mount only the directory intended for the task.
 The tools do not move the agent itself into the VM. Normal file tools and shell
 tools still run on the host. Only commands sent through `vm_exec` run in Linux.
 Guest commands can modify or delete files in the mounted directory, and those
-changes persist after `exit_vm`. Do not put secrets in that directory. No host
-directories are mounted beyond the selected workspace. If the thread's working
-directory is your vault or home, that directory becomes the mount; select a
-disposable worktree first. The SSH agent and host credentials are not automatically
+changes persist after `exit_vm`. Do not put secrets in that directory. Besides
+the selected workspace, the **vault is always mounted read-write at `/vault`**
+(fixed guest path, regardless of the thread's working directory), so guest
+commands, and anything running in the harness container, can read, modify, and
+delete any note in your vault. This is intentional, so agents working in a
+disposable worktree can still edit notes, but it means a VM is not a boundary
+protecting the vault; keep vault backups or sync history. If the thread's
+working directory is the vault itself, it is mounted twice (`/work` and
+`/vault`). The mount is skipped silently when the host exposes no vault
+filesystem path. A harness-owned container created before this mount existed is
+recreated to add it; for `enter_vm`, call `exit_vm` and enter again. If the
+working directory is your home, that directory becomes the `/work` mount; select
+a disposable worktree first. The SSH agent and host credentials are not automatically
 forwarded, but files inside the mount are exposed. The one exception is Geode's
 GitHub connection: when enabled, `git` (HTTPS) and `gh` inside the VM are
 authenticated through a short-lived private file that is never under `/work`
