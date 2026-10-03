@@ -486,7 +486,7 @@ describe('SandboxVmManager — execCommand', () => {
     }
   });
 
-  it('tells the caller to run enter_vm first when no container exists', async () => {
+  it('tells the caller to start the sandbox VM first when no container exists', async () => {
     const { manager, runner } = makeManager(CLI_OK_NO_CONTAINER);
 
     const result = await manager.execCommand({ command: 'ls', timeoutSeconds: 5 });

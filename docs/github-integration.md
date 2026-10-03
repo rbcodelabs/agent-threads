@@ -11,10 +11,10 @@ connection, nothing changes and your own credentials keep working.
 1. In Geode, open **Settings → GitHub** and choose **Connect** (device flow).
 2. Install the Geode GitHub App on the account/org and repositories you want
    threads to reach. Only repositories the App is installed on are accessible.
-3. (Sandbox VM) Rebuild the image once so it includes `gh`, and point the
-   setting at it: `container build --tag claude-threads-coding:1 sandbox/`.
+3. (Container run mode) Rebuild the image once so it includes `gh`
+   (**Update sandbox** in Settings, or `container build --tag claude-threads-coding:1 sandbox/`).
    Existing installs keep their saved `claude-threads-coding:1` image: git over
-   HTTPS still works there, and `enter_vm` tells you `gh` is missing.
+   HTTPS still works there, and the thread is told `gh` is missing.
 4. In Agent Threads settings, **Use Geode GitHub connection** is on by default
    (shown only in Geode).
 
@@ -26,7 +26,7 @@ is not installed there).
 
 | Where | git (HTTPS, github.com) | `gh` | Commit identity |
 | --- | --- | --- | --- |
-| Sandbox VM (`vm_exec`) | credential helper | wrapper on `PATH` | container-local `~/.gitconfig` if unset |
+| Container run mode (harness in the sandbox container) | credential helper | wrapper on `PATH` | container-local `~/.gitconfig` if unset |
 | Host sessions and their Bash tool | credential helper, added after your existing helpers | wrapper on `PATH`; yields to `GH_TOKEN`/`GITHUB_TOKEN` and to `gh auth login` | env config, only for fields the repo has not set |
 
 Commit identity is separate from authentication. The name is your GitHub display
@@ -49,7 +49,7 @@ which does not exist yet (see Limitations).
 
 - **Never** placed in prompts, tool results, logs, vault files, git config,
   container images, environment variables, command-line arguments, or the
-  bind-mounted `/work` directory. `vm_exec` output is additionally scrubbed of
+  bind-mounted `/work` directory. Command output in the container is additionally scrubbed of
   anything token-shaped.
 - It is written to a mode-`0600` file in a mode-`0700` directory: container
   tmpfs (`/dev/shm/claude-threads-github`; when `/dev/shm` is mounted `noexec`, as in the default
@@ -59,12 +59,12 @@ which does not exist yet (see Limitations).
   wrapper read the file at the moment they are used. `gh` gets `GH_TOKEN` for that
   one process only.
 - **Refresh:** Geode refreshes the token when under five minutes remain. Agent
-  Threads re-reads it every four minutes (and before each `vm_exec`), so long
+  Threads re-reads it every four minutes (and before each container command), so long
   threads and long commands keep working across the 8-hour expiry.
-- **Lifetime/cleanup:** the file is deleted on `exit_vm`, on plugin unload, when
+- **Lifetime/cleanup:** the file is deleted when the container is removed, on plugin unload, when
   the setting is turned off, and whenever a token cannot be obtained.
 - **Disconnect / expiry:** on the next refresh the file is removed. Git then prints
-  `no GitHub token available. Connect GitHub in Geode…` and the next `vm_exec`
+  `no GitHub token available. Connect GitHub in Geode…` and the next container command
   returns a note with the same instruction. Reconnecting recovers automatically.
 
 ## Errors you may see
@@ -92,7 +92,7 @@ on the host.
 - The App has no permission to read private emails, so the default commit email
   is the noreply address (set an override if you want another).
 - Terminal sessions outside Agent Threads are not covered.
-- A VM that outlives the plugin (reload/quit without `exit_vm`) keeps its last
+- A VM that outlives the plugin (reload/quit before it is removed) keeps its last
   token until it expires (≤ 8h); it is no longer refreshed.
 - On the host the token file is plaintext (0600) in the OS temp dir while the
   plugin runs, unlike Geode's encrypted keychain store. It is removed on unload.
@@ -102,8 +102,7 @@ on the host.
 ## Verifying by hand
 
 ```sh
-# in a thread, after connecting GitHub in Geode
-enter_vm
-vm_exec  gh auth status   # (uses GH_TOKEN from the wrapper)
-vm_exec  git clone https://github.com/<owner>/<repo>.git && cd <repo> && git log -1 --format='%an <%ae>'
+# in a thread running in container mode, after connecting GitHub in Geode
+gh auth status   # (uses GH_TOKEN from the wrapper)
+git clone https://github.com/<owner>/<repo>.git && cd <repo> && git log -1 --format='%an <%ae>'
 ```
