@@ -121,6 +121,18 @@ describe('autoUpdateGithubSources', () => {
       expect(fs.existsSync(path.join(jsClone, 'a'))).toBe(false);
     });
 
+    it('treats a clone rolled back by hand as behind, and brings it forward', async () => {
+      commit('b');
+      await autoUpdateGithubSources([mk({ clonePath: jsClone })]); // now at b
+      git(jsClone, `fetch -q --depth=2 "${origin}" main`);
+      git(jsClone, 'reset -q --hard HEAD~1');
+      expect(fs.existsSync(path.join(jsClone, 'b'))).toBe(false);
+      const r = await autoUpdateGithubSources([mk({ clonePath: jsClone })]);
+      expect(r.failed).toEqual([]);
+      expect(r.updated).toHaveLength(1);
+      expect(fs.existsSync(path.join(jsClone, 'b'))).toBe(true);
+    });
+
     it('refuses to discard a local commit', async () => {
       fs.writeFileSync(path.join(jsClone, 'local'), 'x');
       git(jsClone, 'add -A');

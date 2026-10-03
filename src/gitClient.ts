@@ -47,6 +47,11 @@ function authCallback(): { onAuth?: (url: string) => { username: string; passwor
   return authProvider ? { onAuth: authProvider } : {};
 }
 
+/** True when `ancestor` is reachable from `oid`. Shallow history it cannot walk counts as "no". */
+function isAncestor(git: IsoGit, dir: string, ancestor: string, oid: string): Promise<boolean> {
+  return git.isDescendent({ fs, dir, oid, ancestor, depth: -1 }).catch(() => false);
+}
+
 /** Shallow-clones `url` into `dir` (default branch, or pinned to a tag/branch `ref`, detached). */
 export async function gitClone(url: string, dir: string, options: { ref?: string } = {}): Promise<void> {
   const git = iso();
@@ -100,15 +105,15 @@ export async function gitSync(dir: string, options: { apply: boolean }): Promise
   let syncedOid: string | undefined;
   try { syncedOid = await git.resolveRef({ fs, dir, ref: SYNCED_REF }); } catch { /* clone predates the marker */ }
   if (syncedOid) {
-    if (syncedOid !== localOid) throw new Error(LOCAL_COMMITS);
+    // HEAD behind the marker (e.g. rolled back by hand) is just "behind"; anything else is local work.
+    if (syncedOid !== localOid && !(await isAncestor(git, dir, localOid, syncedOid))) throw new Error(LOCAL_COMMITS);
   } else {
     // Legacy clone (made by the git CLI): HEAD must match the last-fetched
     // origin tip, or be an ancestor of it (an old check fetched without pulling).
     let tracked: string | undefined;
     try { tracked = await git.resolveRef({ fs, dir, ref: `refs/remotes/origin/${branch}` }); } catch { /* none recorded */ }
     if (tracked && tracked !== localOid) {
-      const ancestor = await git.isDescendent({ fs, dir, oid: tracked, ancestor: localOid, depth: -1 }).catch(() => false);
-      if (!ancestor) throw new Error(LOCAL_COMMITS);
+      if (!(await isAncestor(git, dir, localOid, tracked))) throw new Error(LOCAL_COMMITS);
     }
   }
   // HEAD is verified clean of local commits: record it, so later runs need no ancestry walk.
