@@ -2112,13 +2112,18 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   /** Adds a "Browse…" button beside a path input that opens the native folder picker (desktop only). */
   private addDirectoryBrowse(input: HTMLInputElement, defaultPath?: string): void {
     if (Platform.isMobile) return;
-    const row = createDiv({ cls: 'ct-manager-path-row' });
+    const row = document.createElement('div');
+    row.className = 'ct-manager-path-row';
     row.style.display = 'flex';
     row.style.gap = '8px';
     input.parentElement?.insertBefore(row, input);
     row.appendChild(input);
     input.style.flex = '1';
-    const browse = row.createEl('button', { text: 'Browse…', attr: { type: 'button', 'aria-label': 'Browse for working directory' } });
+    const browse = document.createElement('button');
+    browse.type = 'button';
+    browse.textContent = 'Browse…';
+    browse.setAttribute('aria-label', 'Browse for working directory');
+    row.appendChild(browse);
     browse.addEventListener('click', async (event) => {
       event.preventDefault();
       try {
