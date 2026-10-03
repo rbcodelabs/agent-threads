@@ -38,7 +38,7 @@ export interface ThreadArtifactRef {
    * deliberately non-opaque field: the host needs it to garbage-collect
    * storage when the owning thread is deleted (ADR-0010). Validated against
    * an allowlisted artifact root (hidden `.geode/artifacts` or visible
-   * `Designs`) on the way in — see `src/artifactStorage.ts`.
+   * `<root>/<namespace>`) on the way in — see `src/artifactStorage.ts`.
    */
   readonly storageRoot?: string;
 }
@@ -147,7 +147,7 @@ export interface ArtifactStoreHost {
   /**
    * Creates and returns the host-owned storage root for `artifactId`.
    * Idempotent: an existing root comes back untouched, with `existed: true`.
-   * `options.location: 'visible'` allocates under `<vault>/Designs`; see
+   * `options.location: 'visible'` allocates under `<vault>/<root>/<namespace>` (`options.owner` required); see
    * `allocateStorageRoot` in `src/artifactStorage.ts`.
    */
   allocateStorageRoot(artifactId: unknown, options?: AllocateStorageRootOptions): Promise<StorageRootResolution & { existed?: boolean }>;

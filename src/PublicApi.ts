@@ -205,9 +205,14 @@ export interface ClaudeThreadsApiV1 {
      * under a provider id is still owner-checked.
      *
      * `options.location: 'visible'` (capability `artifacts.visibleStorage`)
-     * allocates `<vault>/Designs/<sanitized folderName>` instead of the hidden
-     * default, de-duplicating with `-2`, `-3`… when the folder belongs to
-     * someone else. Idempotent per thread and `artifactId`. Older hosts ignore
+     * allocates `<vault>/<root>/<namespace>/<sanitized folderName>` instead of
+     * the hidden default, de-duplicating with `-2`, `-3`… when the folder
+     * belongs to someone else. `<root>` is the host's `visibleArtifactRoot`
+     * setting (default `Artifacts`); `<namespace>` is `options.owner.pluginId`,
+     * which is required for visible allocation. `owner` is self-declared, like
+     * `attach`'s: advisory, not authenticated; per-plugin API handles would be
+     * the enforcement path. Idempotent per thread and `artifactId`, returning
+     * the same path whatever `owner` is passed later. Older hosts ignore
      * `options` and allocate hidden, so feature-detect before relying on it.
      */
     allocateStorage(threadId: string, artifactId: string, options?: StorageAllocationOptions): Promise<StorageAllocationResult>;
@@ -1059,7 +1064,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     // so a visible re-allocation returns it instead of colliding with itself.
     const ownedRoot = allocatedRootByArtifact.get(key) ?? store.list(threadId)?.find(record => record.id === id)?.storageRoot;
     const resolved = await store.allocateStorageRoot(id, {
-      location: options?.location, folderName: options?.folderName, ownedRoot,
+      location: options?.location, folderName: options?.folderName, owner: options?.owner, ownedRoot,
     });
     if (resolved.status !== 'ok') return artifactFailure(id, 'invalid', resolved.message);
     allocatedRootByArtifact.set(key, resolved.path);

@@ -54,8 +54,14 @@ export type ArtifactAttachResult = { readonly success: true; readonly status: 'a
 export type ArtifactMutationResult = { readonly success: true; readonly status: 'updated' | 'detached'; readonly artifactId: string } | { readonly success: false; readonly status: 'invalid' | 'conflict' | 'unknown-provider' | 'thread-not-found' | 'artifact-not-found' | 'unavailable'; readonly artifactId: string; readonly message: string };
 export interface ArtifactPatch { readonly title?: string; readonly data?: unknown; readonly storageRoot?: string }
 export interface ThreadPermissionSnapshot { readonly threadId: string; readonly effectivePermissionMode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'; readonly overridden: boolean; readonly planApprovalPending: boolean; readonly questionPending: boolean }
-/** Options for artifacts.allocateStorage. Needs capability 'artifacts.visibleStorage'; older hosts ignore them and allocate hidden. */
-export interface StorageAllocationOptions { readonly location?: 'hidden' | 'visible'; readonly folderName?: string }
+/**
+ * Options for artifacts.allocateStorage. Needs capability 'artifacts.visibleStorage'; older hosts ignore them and allocate hidden.
+ * 'visible' allocates <vault>/<root>/<namespace>/<folderName>: <root> is the host's configurable "Visible artifact folder" setting
+ * (default "Artifacts"), <namespace> is owner.pluginId. owner is REQUIRED for 'visible' and ignored for 'hidden'. It is self-declared
+ * (advisory, the same trust level as the owner on attach/update): the shared API object cannot tell which plugin is calling, and
+ * per-plugin API handles are the future enforcement path. Agent tools get their registered owner injected by the host instead.
+ */
+export interface StorageAllocationOptions { readonly location?: 'hidden' | 'visible'; readonly folderName?: string; readonly owner?: PeerIdentity }
 export type StorageAllocationResult = { readonly success: true; readonly status: 'allocated' | 'existing'; readonly artifactId: string; readonly path: string } | { readonly success: false; readonly status: 'invalid' | 'conflict' | 'unknown-provider' | 'thread-not-found' | 'unavailable'; readonly artifactId: string; readonly message: string };
 export interface AgentToolResult { readonly content: readonly { readonly type: 'text'; readonly text: string }[]; readonly isError?: boolean }
 export interface AgentToolHost { permissions(): Promise<ThreadPermissionSnapshot | null>; allocateStorage(artifactId: string, options?: StorageAllocationOptions): Promise<StorageAllocationResult> }

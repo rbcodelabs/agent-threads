@@ -11,11 +11,13 @@
  * buggy or malicious peer must never be able to steer that delete at an
  * arbitrary directory. Every root is therefore resolved (through `..` and,
  * where the host can, through symlinks) and checked to lie strictly inside
- * one of an explicit allowlist — the hidden `<vault>/.geode/artifacts/` or a
- * visible root from `VISIBLE_ARTIFACT_ROOTS` (`<vault>/Designs/`) — once
- * before it is ever persisted, and again immediately before anything is
- * removed. The allowlist roots themselves, and the vault root, are never
- * valid roots. Both checks matter: the first stops
+ * one of an explicit allowlist — the hidden `<vault>/.geode/artifacts/` or the
+ * host-owned visible root `<vault>/<root>/<namespace>/` — once before it is
+ * ever persisted, and again immediately before anything is removed. `<root>`
+ * is the `visibleArtifactRoot` host setting (default `Artifacts`) and
+ * `<namespace>` is the sanitized calling plugin id. The allowlist roots
+ * themselves, a bare visible root, a bare namespace folder, and the vault root
+ * are never valid roots. Both checks matter: the first stops
  * a bad root getting in, the second stops one that got in some other way
  * (hand-edited data.json, a future migration) from being acted on.
  *
@@ -29,11 +31,12 @@ export const ARTIFACT_STORAGE_DIR = '.geode';
 export const ARTIFACT_STORAGE_SUBDIR = 'artifacts';
 
 /**
- * Vault-relative folders, besides the hidden `.geode/artifacts`, in which an
- * artifact's storage may live so the user can see and browse it. This is the
- * whole allowlist: adding a name here widens what a recursive delete may touch.
+ * Default name of the single host-owned, user-visible artifact folder. The host
+ * setting `visibleArtifactRoot` may rename it. Always trusted in addition to
+ * the configured name, so renaming the setting never strands (or silently
+ * un-garbage-collects) artifacts allocated under the default.
  */
-export const VISIBLE_ARTIFACT_ROOTS: readonly string[] = Object.freeze(['Designs']);
+export const DEFAULT_VISIBLE_ARTIFACT_ROOT = 'Artifacts';
 
 /** Upper bound on a sanitized visible folder name. */
 const MAX_FOLDER_NAME_LENGTH = 80;
@@ -75,6 +78,8 @@ interface PathModule {
 }
 
 export interface AllocateStorageRootOptions extends StorageAllocationOptions {
+  /** Configured visible root name (the `visibleArtifactRoot` setting). Sanitized here; invalid or empty falls back to the default. */
+  readonly visibleRoot?: string;
   /**
    * A root this same artifact already owns (from its persisted record or an
    * earlier allocation). Honored only if it still validates against the
@@ -113,16 +118,51 @@ export function artifactStorageRoot(vaultRoot: string): string {
   return pathModule.join(vaultRoot, ARTIFACT_STORAGE_DIR, ARTIFACT_STORAGE_SUBDIR);
 }
 
-/** `<vault>/<name>` for one entry of `VISIBLE_ARTIFACT_ROOTS`. */
+/** `<vault>/<name>` for a visible root name. */
 export function visibleArtifactRoot(vaultRoot: string, name: string): string {
   const pathModule = nodePath();
   if (!pathModule) return `${vaultRoot}/${name}`;
   return pathModule.join(vaultRoot, name);
 }
 
-/** Every directory an artifact root may sit strictly inside. */
-function allowedStorageParents(vaultRoot: string): string[] {
-  return [artifactStorageRoot(vaultRoot), ...VISIBLE_ARTIFACT_ROOTS.map(name => visibleArtifactRoot(vaultRoot, name))];
+/**
+ * Turns the `visibleArtifactRoot` setting into one safe path segment, using the
+ * same sanitizer as folder names, and falls back to `Artifacts` when nothing
+ * usable is left. A single segment means the root is always a direct child of
+ * the vault: no separators, no `..`, no leading dot (so never `.geode`).
+ */
+export function sanitizeVisibleRootName(value: unknown): string {
+  return sanitizeFolderName(value, DEFAULT_VISIBLE_ARTIFACT_ROOT);
+}
+
+/**
+ * Visible root names whose contents are trusted: the configured one and the
+ * default. A root previously configured under some third name is NOT trusted
+ * after the setting changes — its artifacts are left on disk, never deleted by
+ * the host, which fails safe. Keeping an unbounded history of names would widen
+ * what a recursive delete may touch for no real benefit.
+ */
+export function trustedVisibleRootNames(configured?: string): string[] {
+  return [...new Set([sanitizeVisibleRootName(configured), DEFAULT_VISIBLE_ARTIFACT_ROOT])];
+}
+
+const MAX_NAMESPACE_LENGTH = 80;
+
+/**
+ * The visible namespace for a calling plugin: its id, validated as one safe
+ * path segment. An unsafe id is rejected rather than "cleaned", because
+ * cleaning can map two different plugins onto one namespace. The id is
+ * self-declared by the caller (see `PeerIdentity`), so this prevents path
+ * tricks and accidental collisions, not impersonation.
+ */
+export function visibleNamespace(owner: unknown): { readonly ok: true; readonly namespace: string } | { readonly ok: false; readonly message: string } {
+  const raw = owner && typeof owner === 'object' ? (owner as { pluginId?: unknown }).pluginId : undefined;
+  const id = typeof raw === 'string' ? raw.trim() : '';
+  if (!id) return { ok: false, message: "options.owner.pluginId is required when location is 'visible'." };
+  if (id.length > MAX_NAMESPACE_LENGTH || !ARTIFACT_ID_SEGMENT_PATTERN.test(id) || id.includes('..')) {
+    return { ok: false, message: `options.owner.pluginId must be a single safe path segment matching [A-Za-z0-9][A-Za-z0-9._-]* (max ${MAX_NAMESPACE_LENGTH} characters).` };
+  }
+  return { ok: true, namespace: id };
 }
 
 /**
@@ -157,14 +197,19 @@ function invalid(message: string): StorageRootResolution {
 
 /**
  * Accepts `candidate` only when it resolves to a directory strictly inside the
- * hidden artifact root or a visible allowlist root. The allowlist roots
- * themselves and the vault root are rejected: deleting any of them would take
- * every artifact (or the whole vault) with it.
+ * hidden artifact root (`<vault>/.geode/artifacts/<x>`) or strictly inside a
+ * namespace of a visible root (`<vault>/<root>/<namespace>/<x>`). The hidden
+ * root, a bare visible root, a bare namespace folder and the vault root are
+ * rejected: deleting any of them would take every artifact (or the whole
+ * vault, or a whole plugin's artifacts) with it.
+ *
+ * `visibleRoot` is the configured root name; the default is always trusted too.
  */
 export function resolveStorageRoot(
   vaultRoot: string,
   candidate: unknown,
   storageFs: ArtifactStorageFs = nodeStorageFs(),
+  visibleRoot?: string,
 ): StorageRootResolution {
   if (typeof candidate !== 'string' || !candidate.trim()) {
     return invalid('storageRoot must be a non-empty string.');
@@ -194,18 +239,25 @@ export function resolveStorageRoot(
     return invalid('storageRoot must not be the vault root.');
   }
 
-  const parents = allowedStorageParents(vaultRoot).map(parent => resolveDeep(pathModule, storageFs, parent));
-  if (parents.includes(resolved)) {
+  // An allowlist root that resolves outside the vault (e.g. the visible root
+  // replaced by a symlink) is not trusted: containment inside it would then be
+  // containment inside an arbitrary directory.
+  const inVault = (parent: string) => parent.startsWith(vault + pathModule.sep);
+  const hidden = resolveDeep(pathModule, storageFs, artifactStorageRoot(vaultRoot));
+  const visible = trustedVisibleRootNames(visibleRoot).map(name => resolveDeep(pathModule, storageFs, visibleArtifactRoot(vaultRoot, name)));
+  const depthBelow = (parent: string): number =>
+    resolved.startsWith(parent + pathModule.sep) ? resolved.slice(parent.length + 1).split(pathModule.sep).filter(Boolean).length : 0;
+
+  if (inVault(hidden) && depthBelow(hidden) >= 1) return { status: 'ok', path: resolved };
+  for (const parent of visible.filter(inVault)) {
+    const depth = depthBelow(parent);
+    if (depth >= 2) return { status: 'ok', path: resolved };
+    if (depth === 1) return invalid('storageRoot must be inside <root>/<namespace>/, not a bare namespace folder.');
+  }
+  if ([hidden, ...visible].includes(resolved)) {
     return invalid('storageRoot must be a directory inside an artifact root, not an artifact root itself.');
   }
-  // An allowlist root that resolves outside the vault (e.g. `Designs` replaced
-  // by a symlink) is not trusted: containment inside it would then be
-  // containment inside an arbitrary directory.
-  const trusted = parents.filter(parent => parent.startsWith(vault + pathModule.sep));
-  if (!trusted.some(parent => resolved.startsWith(parent + pathModule.sep))) {
-    return invalid(`storageRoot must resolve inside ${parents.join(' or ')}.`);
-  }
-  return { status: 'ok', path: resolved };
+  return invalid(`storageRoot must resolve inside ${[hidden, ...visible.map(root => `${root}/<namespace>`)].join(' or ')}.`);
 }
 
 /**
@@ -254,9 +306,12 @@ function pathExists(storageFs: ArtifactStorageFs, target: string): boolean {
  * `designArtifactRoot`.
  *
  * `location: 'hidden'` (the default) is `<vault>/.geode/artifacts/<artifactId>`.
- * `location: 'visible'` is `<vault>/Designs/<sanitized folderName>`, falling
- * back to the artifact id, with `-2`, `-3`… appended when the directory exists
- * and is not `options.ownedRoot`. Hidden ignores `folderName`.
+ * `location: 'visible'` is `<vault>/<root>/<namespace>/<sanitized folderName>`,
+ * where `<root>` is `options.visibleRoot` (default `Artifacts`) and
+ * `<namespace>` is the validated `options.owner.pluginId`, which is required.
+ * The folder name falls back to the artifact id, with `-2`, `-3`… appended when
+ * the directory exists and is not `options.ownedRoot`. Hidden ignores
+ * `folderName` and `owner`.
  *
  * Containment is decided by `resolveStorageRoot` — the same validation
  * `attach` and `removeStorageRoot` use, deliberately reused rather than
@@ -295,20 +350,28 @@ export async function allocateStorageRoot(
 
   let resolved: StorageRootResolution;
   if (location === 'hidden') {
-    resolved = resolveStorageRoot(vaultRoot, pathModule.join(artifactStorageRoot(vaultRoot), id), storageFs);
+    resolved = resolveStorageRoot(vaultRoot, pathModule.join(artifactStorageRoot(vaultRoot), id), storageFs, options.visibleRoot);
   } else {
-    const parent = visibleArtifactRoot(vaultRoot, VISIBLE_ARTIFACT_ROOTS[0]);
+    // Required even when an owned root exists, so a visible call is always
+    // attributable; the owner does not change where an existing root lives.
+    const ns = visibleNamespace(options.owner);
+    if (!ns.ok) return invalid(ns.message);
+    const rootName = sanitizeVisibleRootName(options.visibleRoot);
+    const parent = pathModule.join(visibleArtifactRoot(vaultRoot, rootName), ns.namespace);
     // An already-owned root wins over re-deriving a name: re-allocation must
-    // return the same directory even if the requested folderName has changed.
-    const owned = options.ownedRoot !== undefined ? resolveStorageRoot(vaultRoot, options.ownedRoot, storageFs) : undefined;
-    if (owned?.status === 'ok' && owned.path.startsWith(resolveDeep(pathModule, storageFs, parent) + pathModule.sep)) {
+    // return the same directory even if the requested folderName or owner has
+    // changed. It must still validate, and sit under a trusted visible root.
+    const owned = options.ownedRoot !== undefined ? resolveStorageRoot(vaultRoot, options.ownedRoot, storageFs, options.visibleRoot) : undefined;
+    const trustedVisible = trustedVisibleRootNames(options.visibleRoot)
+      .map(name => resolveDeep(pathModule, storageFs, visibleArtifactRoot(vaultRoot, name)) + pathModule.sep);
+    if (owned?.status === 'ok' && trustedVisible.some(root => owned.path.startsWith(root))) {
       resolved = owned;
     } else {
       const base = sanitizeFolderName(options.folderName, id);
       resolved = invalid('No free folder name.');
       for (let attempt = 1; attempt <= MAX_COLLISION_SUFFIX; attempt += 1) {
         const name = attempt === 1 ? base : `${base}-${attempt}`;
-        const candidate = resolveStorageRoot(vaultRoot, pathModule.join(parent, name), storageFs);
+        const candidate = resolveStorageRoot(vaultRoot, pathModule.join(parent, name), storageFs, options.visibleRoot);
         // A validation failure is not a collision: suffixing cannot fix it.
         if (candidate.status !== 'ok') { resolved = candidate; break; }
         if (!pathExists(storageFs, candidate.path)) { resolved = candidate; break; }
@@ -336,8 +399,9 @@ export async function removeStorageRoot(
   vaultRoot: string,
   candidate: unknown,
   storageFs: ArtifactStorageFs = nodeStorageFs(),
+  visibleRoot?: string,
 ): Promise<boolean> {
-  const resolved = resolveStorageRoot(vaultRoot, candidate, storageFs);
+  const resolved = resolveStorageRoot(vaultRoot, candidate, storageFs, visibleRoot);
   if (resolved.status !== 'ok' || !storageFs.rm) return false;
   try {
     await storageFs.rm(resolved.path, { recursive: true, force: true });

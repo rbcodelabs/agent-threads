@@ -2887,6 +2887,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         vaultRoot: () => this.manager.vaultRoot,
         getThread: (id) => this.manager.getThread(id),
         saveSettings: () => this.saveSettings(),
+        visibleRoot: () => this.settings.visibleArtifactRoot,
         // Delegating to the view is what keeps a peer's invokeAction and a
         // user's card click on one code path. Absent view ⇒ error result.
         invokeAction: (threadId, artifactId, actionId) => this.getView()?.invokeArtifactAction(threadId, artifactId, actionId),
