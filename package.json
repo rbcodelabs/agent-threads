@@ -1,6 +1,6 @@
 {
   "name": "obsidian-claude-threads",
-  "version": "0.58.3",
+  "version": "0.58.4",
   "description": "Multi-threaded Claude Code sessions in Obsidian and Geode",
   "main": "dist/main.js",
   "scripts": {
