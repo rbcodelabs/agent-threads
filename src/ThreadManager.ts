@@ -246,6 +246,13 @@ export class ThreadManager {
   private pendingPermissions: Map<string, { toolName: string; detail: string }> = new Map();
   private permissionResolvers: Map<string, (allow: boolean) => void> = new Map();
   /**
+   * Tail of each thread's permission-prompt chain. `pendingPermissions` and
+   * `permissionResolvers` are single-slot per thread, so parallel tool calls
+   * (e.g. two `Read`s) must be prompted one at a time — otherwise the second
+   * request overwrites the first's slot and orphans its resolver/UI card.
+   */
+  private permissionQueue: Map<string, Promise<unknown>> = new Map();
+  /**
    * In-memory store for pending AskUserQuestion answer resolvers, keyed by
    * thread ID. Mirrors `permissionResolvers` — the *state* (the questions
    * themselves) is persisted on `thread.pendingQuestions` like `pendingPlan`,
@@ -2610,17 +2617,30 @@ export class ThreadManager {
         this.emit(threadId, { type: 'error', error: err });
         this.emitRunStateSettledWhenIdle(threadId);
       },
-      onPermissionRequest: async (toolName, detail) => {
-        if (!isCurrentGeneration()) return false;
-        this.pendingPermissions.set(threadId, { toolName, detail });
-        this.emit(threadId, { type: 'permission_request', toolName, detail });
-        try {
-          return await this.permissionHandler(threadId, toolName, detail);
-        } finally {
-          this.pendingPermissions.delete(threadId);
-          this.permissionResolvers.delete(threadId);
-          this.emit(threadId, { type: 'permission_resolved' });
-        }
+      onPermissionRequest: (toolName, detail) => {
+        if (!isCurrentGeneration()) return Promise.resolve(false);
+        const prompt = async (): Promise<boolean> => {
+          // Re-check: the session may have been replaced while we were queued.
+          if (!isCurrentGeneration()) return false;
+          this.pendingPermissions.set(threadId, { toolName, detail });
+          this.emit(threadId, { type: 'permission_request', toolName, detail });
+          try {
+            return await this.permissionHandler(threadId, toolName, detail);
+          } finally {
+            this.pendingPermissions.delete(threadId);
+            this.permissionResolvers.delete(threadId);
+            this.emit(threadId, { type: 'permission_resolved' });
+          }
+        };
+        // Run after the previous prompt settles, whether it allowed, denied or threw.
+        const previous = this.permissionQueue.get(threadId) ?? Promise.resolve();
+        const result = previous.then(prompt, prompt);
+        const tail = result.catch(() => undefined);
+        this.permissionQueue.set(threadId, tail);
+        void tail.then(() => {
+          if (this.permissionQueue.get(threadId) === tail) this.permissionQueue.delete(threadId);
+        });
+        return result;
       },
       onAskUserQuestion: async (questions) => {
         if (!isCurrentGeneration()) return {};

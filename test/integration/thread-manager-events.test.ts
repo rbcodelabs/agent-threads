@@ -402,6 +402,90 @@ describe('permission handler', () => {
 
     expect(result).toBe(false);
   });
+
+  describe('concurrent requests on one thread', () => {
+    const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+
+    it('serializes: only the first is pending; resolving it surfaces the second', async () => {
+      const manager = makeManager();
+      const thread = manager.createThread('T', os.tmpdir());
+      const asked: string[] = [];
+      const responders: Array<(allow: boolean) => void> = [];
+      manager.permissionHandler = (_id, _tool, detail) => new Promise<boolean>((resolve) => {
+        asked.push(detail);
+        responders.push(resolve);
+      });
+      const events: ThreadEvent[] = [];
+      manager.subscribe((_, e) => events.push(e));
+
+      await manager.sendMessage(thread.id, 'Hi');
+      const first = mock.callbacks!.onPermissionRequest('Read', 'a.md');
+      const second = mock.callbacks!.onPermissionRequest('Read', 'b.md');
+      await flush();
+
+      expect(asked).toEqual(['a.md']);
+      expect(manager.getPendingPermission(thread.id)).toEqual({ toolName: 'Read', detail: 'a.md' });
+      expect(events.filter(e => e.type === 'permission_request')).toHaveLength(1);
+
+      responders[0](true);
+      await expect(first).resolves.toBe(true);
+      await flush();
+
+      expect(asked).toEqual(['a.md', 'b.md']);
+      expect(manager.getPendingPermission(thread.id)).toEqual({ toolName: 'Read', detail: 'b.md' });
+
+      responders[1](false);
+      await expect(second).resolves.toBe(false);
+      expect(manager.hasPendingPermission(thread.id)).toBe(false);
+      expect(events.filter(e => e.type === 'permission_request')).toHaveLength(2);
+      expect(events.filter(e => e.type === 'permission_resolved')).toHaveLength(2);
+      driveResponse('Done');
+    });
+
+    it('a rejected earlier request does not block the next one', async () => {
+      const manager = makeManager();
+      const thread = manager.createThread('T', os.tmpdir());
+      let call = 0;
+      manager.permissionHandler = async () => {
+        call += 1;
+        if (call === 1) throw new Error('boom');
+        return true;
+      };
+
+      await manager.sendMessage(thread.id, 'Hi');
+      const first = mock.callbacks!.onPermissionRequest('Read', 'a.md');
+      const second = mock.callbacks!.onPermissionRequest('Read', 'b.md');
+
+      await expect(first).rejects.toThrow('boom');
+      await expect(second).resolves.toBe(true);
+      expect(manager.hasPendingPermission(thread.id)).toBe(false);
+      driveResponse('Done');
+    });
+
+    it('denies a queued request whose session generation went stale while waiting', async () => {
+      const manager = makeManager();
+      const thread = manager.createThread('T', os.tmpdir());
+      const asked: string[] = [];
+      let respondFirst!: (allow: boolean) => void;
+      manager.permissionHandler = (_id, _tool, detail) => new Promise<boolean>((resolve) => {
+        asked.push(detail);
+        if (asked.length === 1) respondFirst = resolve;
+      });
+
+      await manager.sendMessage(thread.id, 'Hi');
+      const first = mock.callbacks!.onPermissionRequest('Read', 'a.md');
+      const second = mock.callbacks!.onPermissionRequest('Read', 'b.md');
+      await flush();
+
+      thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
+      respondFirst(true);
+      await first;
+
+      await expect(second).resolves.toBe(false);
+      expect(asked).toEqual(['a.md']);
+      expect(manager.hasPendingPermission(thread.id)).toBe(false);
+    });
+  });
 });
 
 describe('tool use events', () => {
