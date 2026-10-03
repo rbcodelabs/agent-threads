@@ -2881,7 +2881,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
 
   const boundSkillsCheckUpdates = tool(
     'skills_check_updates',
-    'Checks every configured GitHub-type skill source for upstream commits it is behind (runs `git fetch` + counts). Returns each source\'s id, name, and either its new behindCount/lastFetched or an error if the check failed.',
+    'Checks every configured GitHub-type skill source for upstream commits it is behind (fetches each source; behindCount is 1 when upstream has moved). Returns each source\'s id, name, and either its new behindCount/lastFetched or an error if the check failed.',
     {},
     async (_args, _extra) => {
       try {
@@ -2979,7 +2979,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
 
   const boundSkillsUpdate = tool(
     'skills_update',
-    'Pulls the latest commits for a configured GitHub-type skill source (`git pull` on its local clone), refreshing every skill it provides. Pass the source id from skills_list_sources — not "registry" (skills.sh has no single-source update; reinstall individual skills instead).',
+    'Pulls the latest commits for a configured GitHub-type skill source (fast-forwards its local clone), refreshing every skill it provides. Pass the source id from skills_list_sources — not "registry" (skills.sh has no single-source update; reinstall individual skills instead).',
     {
       sourceId: z.string().describe('id of the GitHub-type skill source to update, from skills_list_sources'),
     },

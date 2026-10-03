@@ -144,7 +144,9 @@ describe('dist/main.js bundle safety', () => {
     // Keep a tight regression guard while allowing the settings managers and
     // their inline source-map payload. A dependency-inlining accident adds
     // megabytes, not the few kilobytes covered by this headroom.
-    expect(sizeKB).toBeLessThan(20.25 * 1024);
+    // Raised 20.25 → 23.25 MB when skill sources moved from the git CLI to
+    // isomorphic-git (~760 KB of code, ~2.5 MB with its inline source map).
+    expect(sizeKB).toBeLessThan(23.25 * 1024);
     console.log(`Bundle size: ${sizeKB.toFixed(0)} KB`);
   });
 });

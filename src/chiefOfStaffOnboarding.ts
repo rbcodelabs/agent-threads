@@ -117,8 +117,6 @@ export function withChiefOfStaffPointer(guide: string, failureReason?: string): 
 
 export interface ChiefOfStaffDeps {
   getSkillSources(): readonly SkillSource[];
-  /** Checked before any clone, so a missing git falls back without a clone attempt. */
-  isGitAvailable(): Promise<boolean>;
   /** Clone (pinned to `ref`) + add the source and persist it. Throws on failure. */
   addGithubSkillSource(repoUrl: string, ref: string): Promise<void>;
   /** A skill-capable harness to run the thread on, or undefined when none resolves. */
@@ -139,10 +137,10 @@ export interface ChiefOfStaffDeps {
   saveSettings(): Promise<void>;
 }
 
-export type ChiefOfStaffFailureReason = 'git-unavailable' | 'clone-failed' | 'harness-unavailable' | 'thread-failed';
+export type ChiefOfStaffFailureReason = 'clone-failed' | 'harness-unavailable' | 'thread-failed';
 
-const NETWORK_ERROR = /could not resolve host|unable to access|failed to connect|timed out|timeout|connection (?:reset|refused|closed)|network is unreachable|could not read from remote|ssl|tls|early eof|rpc failed/i;
-const MISSING_REMOTE = /repository not found|remote branch .* not found|could not find remote branch|couldn't find remote ref|not found in upstream/i;
+const NETWORK_ERROR = /could not resolve host|unable to access|failed to connect|timed out|timeout|connection (?:reset|refused|closed)|network is unreachable|could not read from remote|ssl|tls|early eof|rpc failed|enotfound|getaddrinfo|econn(?:reset|refused)|etimedout|http error: 5\d\d/i;
+const MISSING_REMOTE = /repository not found|remote branch .* not found|could not find remote branch|couldn't find remote ref|not found in upstream|http error: (?:401|403|404)|was not found in/i;
 
 /**
  * A short, human reason for a failed setup, safe to show in a Notice or the
@@ -151,8 +149,6 @@ const MISSING_REMOTE = /repository not found|remote branch .* not found|could no
  */
 export function describeChiefOfStaffFailure(reason: ChiefOfStaffFailureReason | 'unexpected', error: string): string {
   switch (reason) {
-    case 'git-unavailable':
-      return 'git isn\u2019t installed';
     case 'harness-unavailable':
       return 'no Claude Code or Codex found';
     case 'thread-failed':
@@ -189,17 +185,12 @@ export async function setUpChiefOfStaff(deps: ChiefOfStaffDeps): Promise<ChiefOf
   let sourceError: string | undefined;
   let sourceFailure: ChiefOfStaffFailureReason | undefined;
   if (!hasSkillSourceForRepo(deps.getSkillSources(), CHIEF_OF_STAFF_REPO_URL)) {
-    if (!(await deps.isGitAvailable())) {
-      sourceFailure = 'git-unavailable';
-      sourceError = 'git is not installed, so the Chief of Staff skills cannot be downloaded.';
-    } else {
-      try {
-        await deps.addGithubSkillSource(CHIEF_OF_STAFF_REPO_URL, CHIEF_OF_STAFF_REF);
-        sourceAdded = true;
-      } catch (err) {
-        sourceFailure = 'clone-failed';
-        sourceError = message(err);
-      }
+    try {
+      await deps.addGithubSkillSource(CHIEF_OF_STAFF_REPO_URL, CHIEF_OF_STAFF_REF);
+      sourceAdded = true;
+    } catch (err) {
+      sourceFailure = 'clone-failed';
+      sourceError = message(err);
     }
   }
 

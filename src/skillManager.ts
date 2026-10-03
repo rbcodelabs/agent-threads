@@ -18,7 +18,7 @@ import fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { execFile, execSync } from 'child_process';
+import { gitCheckoutRef, gitClone, gitSync } from './gitClient';
 import { createHash } from 'crypto';
 import type { SkillSource } from './types';
 import { getSkillsDirForSource, readPluginManifest } from './claudeSettings';
@@ -608,14 +608,24 @@ export function listSkillSources(skillSources: SkillSource[] = []): SkillSourceL
 
 // ── Cloning GitHub sources ────────────────────────────────────────────────────
 
-/** Wall-clock ceiling for a single `git clone`, after which the child is killed. */
+/** Wall-clock ceiling for a single clone/fetch, after which it is abandoned. */
 export const SKILL_SOURCE_CLONE_TIMEOUT_MS = 60_000;
 
-/** Best-effort human-readable message from a failed child_process call (git writes the useful part to stderr). */
-function execErrorMessage(err: unknown): string {
-  const stderr = (err as { stderr?: Buffer | string } | undefined)?.stderr;
-  if (stderr && String(stderr).trim()) return String(stderr).trim();
+/** Best-effort human-readable message from a failed git operation. */
+function gitErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Rejects if `work` has not settled within `timeoutMs`. isomorphic-git cannot be
+ * aborted, so on timeout the operation is abandoned rather than killed.
+ */
+async function withTimeout<T>(work: Promise<T>, timeoutMs: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+  });
+  try { return await Promise.race([work, timeout]); } finally { clearTimeout(timer); }
 }
 
 /**
@@ -672,16 +682,9 @@ export function isGitWorkingCopy(dirPath: string): boolean {
  * this — `SettingsTab` (add-source) and `SkillsManagerView` (reinstall) both
  * call here, as does the startup reconciliation pass below.
  *
- * Three deliberate choices:
- * - **`execFile`, not `execSync`.** The startup pass must never block Obsidian's
- *   main thread; a synchronous clone would freeze the UI for up to the timeout.
- *   Both interactive callers are already `async`, so they just `await`.
- * - **Argument array, not a shell string.** `repoUrl` can come from a config
- *   file, so it never reaches a shell for interpolation. `--` terminates options.
- * - **Non-interactive git.** `GIT_TERMINAL_PROMPT=0` + `GIT_ASKPASS=echo` make a
- *   private or nonexistent repo fail immediately instead of blocking on a
- *   credential prompt until the timeout. Configured credential helpers (macOS
- *   keychain, gh) still work, so private repos the user can already clone do.
+ * Uses isomorphic-git, so no `git` binary is needed. It never blocks Obsidian's
+ * main thread, and `repoUrl` never reaches a shell. Public repos work anonymously;
+ * private ones need credentials from `setGitAuthProvider` (see gitClient.ts).
  *
  * Removes a partial clone before rethrowing, so a failure never leaves a
  * half-populated directory that later looks "already cloned".
@@ -693,22 +696,11 @@ export async function cloneGithubSource(
 ): Promise<void> {
   await fsp.mkdir(path.dirname(clonePath), { recursive: true });
   try {
-    await new Promise<void>((resolve, reject) => {
-      execFile(
-        'git',
-        ['clone', '--depth', '1', ...(options.ref ? ['--branch', options.ref] : []), '--', githubCloneUrl(repoUrl), clonePath],
-        {
-          timeout: options.timeoutMs ?? SKILL_SOURCE_CLONE_TIMEOUT_MS,
-          windowsHide: true,
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo' },
-        },
-        (err, _stdout, stderr) => {
-          if (!err) return resolve();
-          const detail = stderr ? String(stderr).trim() : '';
-          reject(new Error(detail || err.message));
-        },
-      );
-    });
+    await withTimeout(
+      gitClone(githubCloneUrl(repoUrl), clonePath, { ref: options.ref }),
+      options.timeoutMs ?? SKILL_SOURCE_CLONE_TIMEOUT_MS,
+      'Clone',
+    );
   } catch (err) {
     try { fs.rmSync(clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
     throw err instanceof Error ? err : new Error(String(err));
@@ -726,30 +718,13 @@ export function parseGithubRepoUrl(raw: string): string | null {
   return match ? match[1] : null;
 }
 
-/** Runs git with an argument array (never a shell), non-interactively. */
-function runGit(args: string[], timeoutMs: number): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    execFile(
-      'git',
-      args,
-      { timeout: timeoutMs, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo' } },
-      (err, _stdout, stderr) => {
-        if (!err) return resolve();
-        const detail = stderr ? String(stderr).trim() : '';
-        reject(new Error(detail || err.message));
-      },
-    );
-  });
-}
-
 /**
  * Moves an existing working copy to `ref` (tag or branch): a shallow fetch of
  * that ref from origin, then a detached checkout of what was fetched. Throws on
  * failure and never deletes anything.
  */
 export async function checkoutGithubSourceRef(clonePath: string, ref: string, timeoutMs = SKILL_SOURCE_CLONE_TIMEOUT_MS): Promise<void> {
-  await runGit(['-C', clonePath, 'fetch', '--depth', '1', '--', 'origin', ref], timeoutMs);
-  await runGit(['-C', clonePath, 'checkout', '--quiet', '--detach', 'FETCH_HEAD'], timeoutMs);
+  await withTimeout(gitCheckoutRef(clonePath, ref), timeoutMs, 'Checkout');
 }
 
 /**
@@ -799,46 +774,6 @@ export async function addGithubSkillSource(opts: {
   return source;
 }
 
-/**
- * Whether git can be run, checked before a clone so a missing git becomes a
- * clean fallback rather than a failed clone.
- *
- * On macOS, `/usr/bin/git` is a stub that pops the "install developer tools"
- * dialog when the Command Line Tools are missing. So on darwin this asks
- * `xcode-select -p` first and only runs `git --version` when the tools exist;
- * otherwise it accepts a non-stub git found elsewhere on PATH (e.g. Homebrew)
- * and never touches the stub. Accepted limitation: the clone itself still runs
- * `git` by name, so a PATH that lists /usr/bin before Homebrew on a machine
- * without the tools would still reach the stub.
- */
-export async function checkGitAvailable(env: {
-  platform: string;
-  pathEnv: string | undefined;
-  exists: (p: string) => boolean;
-  run: (cmd: string, args: string[], timeoutMs: number) => Promise<void>;
-  timeoutMs?: number;
-}): Promise<boolean> {
-  const timeoutMs = env.timeoutMs ?? 5_000;
-  const ok = async (cmd: string, args: string[]) => {
-    try { await env.run(cmd, args, timeoutMs); return true; } catch { return false; }
-  };
-  if (env.platform !== 'darwin') return ok('git', ['--version']);
-  if (await ok('xcode-select', ['-p'])) return ok('git', ['--version']);
-  const nonStub = (env.pathEnv ?? '')
-    .split(':')
-    .filter(dir => dir && stripTrailingSlashes(dir) !== '/usr/bin')
-    .map(dir => `${stripTrailingSlashes(dir)}/git`)
-    .find(candidate => env.exists(candidate));
-  return nonStub ? ok(nonStub, ['--version']) : false;
-}
-
-/** Runs a command with a timeout and no shell; rejects on non-zero exit. */
-export function runCommandQuietly(cmd: string, args: string[], timeoutMs: number): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    execFile(cmd, args, { timeout: timeoutMs, windowsHide: true }, err => (err ? reject(err) : resolve()));
-  });
-}
-
 export interface EnsureGithubSourcesResult {
   /** True when any source object was mutated and the caller must persist settings. */
   changed: boolean;
@@ -866,7 +801,7 @@ export interface EnsureGithubSourcesResult {
  * (`checkAllSourcesForUpdates` / `pullGithubSourceUpdates`).
  *
  * **Never throws.** Every source is attempted inside its own try/catch, so an
- * unreachable host, a private repo, a rate limit, a missing `git` binary or a
+ * unreachable host, a private repo, a rate limit, or a
  * timeout is recorded in `failed` and the remaining sources still run. Callers
  * are expected to log `failed` and carry on.
  *
@@ -944,7 +879,11 @@ export interface SourceUpdateCheckResult {
   error?: string;
 }
 
-/** Runs `git fetch` + counts commits behind origin/HEAD for one GitHub-type source. Returns `error` instead of throwing on failure. */
+/**
+ * Fetches a GitHub-type source's branch and reports whether upstream has moved.
+ * `behindCount` is 1 when it has, else 0: clones are shallow, so the true commit
+ * count is unknowable. Returns `error` instead of throwing on failure.
+ */
 export async function checkSourceForUpdates(source: SkillSource): Promise<SourceUpdateCheckResult> {
   if (!source.clonePath) {
     return { id: source.id, name: source.name, error: 'No clone path configured for this source' };
@@ -952,27 +891,10 @@ export async function checkSourceForUpdates(source: SkillSource): Promise<Source
   // A pinned source is current by definition; it moves only when the ref does.
   if (source.ref) return { id: source.id, name: source.name, behindCount: 0, lastFetched: Date.now() };
   try {
-    // Note: `git fetch` has no `--timeout` flag (that was a pre-existing bug —
-    // this call always failed with "unknown option" on real git). The
-    // `timeout: 20_000` execSync option below already enforces a wall-clock
-    // timeout by killing the process, so no git-side flag is needed.
-    execSync(`git -C "${source.clonePath}" fetch --quiet`, {
-      stdio: 'pipe',
-      timeout: 20_000,
-    });
-    const countOutput = execSync(
-      `git -C "${source.clonePath}" rev-list HEAD..origin/HEAD --count`,
-      { stdio: 'pipe', timeout: 5_000 },
-    );
-    const count = parseInt(countOutput.toString().trim(), 10);
-    return {
-      id: source.id,
-      name: source.name,
-      behindCount: isNaN(count) ? 0 : count,
-      lastFetched: Date.now(),
-    };
+    const { behind } = await withTimeout(gitSync(source.clonePath, { apply: false }), 20_000, 'Fetch');
+    return { id: source.id, name: source.name, behindCount: behind ? 1 : 0, lastFetched: Date.now() };
   } catch (err) {
-    return { id: source.id, name: source.name, error: execErrorMessage(err) };
+    return { id: source.id, name: source.name, error: gitErrorMessage(err) };
   }
 }
 
@@ -988,12 +910,48 @@ export async function pullGithubSourceUpdates(source: SkillSource): Promise<{ be
     throw new Error(`Source "${source.name}" has no clone path configured`);
   }
   if (source.ref) {
-    // Detached at a tag/branch: re-sync to the pinned ref instead of `git pull`.
+    // Detached at a tag/branch: re-sync to the pinned ref instead of pulling.
     await checkoutGithubSourceRef(source.clonePath, source.ref, 60_000);
     return { behindCount: 0, lastFetched: Date.now() };
   }
-  execSync(`git -C "${source.clonePath}" pull`, { stdio: 'pipe', timeout: 60_000 });
+  await withTimeout(gitSync(source.clonePath, { apply: true }), 60_000, 'Update');
   return { behindCount: 0, lastFetched: Date.now() };
+}
+
+export interface AutoUpdateResult {
+  /** Sources that were behind and fast-forwarded. */
+  updated: { id: string; name: string; behindCount: number }[];
+  /** Sources that were checked and already current. */
+  current: string[];
+  failed: { id: string; name: string; error: string }[];
+  /** True when any source's behindCount/lastFetched changed (settings need saving). */
+  changed: boolean;
+}
+
+/**
+ * Fetches every GitHub source and fast-forwards those that are behind.
+ * Fast-forwards only, so a diverged or locally-modified clone is reported as a
+ * failure instead of being merged or clobbered. Never throws; per-source failures
+ * land in `failed`. Pinned (`ref`) sources are skipped — they move only when the ref does.
+ */
+export async function autoUpdateGithubSources(skillSources: SkillSource[] | undefined): Promise<AutoUpdateResult> {
+  const result: AutoUpdateResult = { updated: [], current: [], failed: [], changed: false };
+  for (const source of skillSources ?? []) {
+    if (source.type !== 'github' || !source.clonePath || source.ref) continue;
+    const label = source.name || source.id;
+    if (!isGitWorkingCopy(source.clonePath)) continue;
+    try {
+      const sync = await withTimeout(gitSync(source.clonePath, { apply: true }), 60_000, 'Update');
+      source.lastFetched = Date.now();
+      source.behindCount = 0;
+      result.changed = true;
+      if (sync.updated) result.updated.push({ id: source.id, name: label, behindCount: 1 });
+      else result.current.push(source.id);
+    } catch (err) {
+      result.failed.push({ id: source.id, name: label, error: gitErrorMessage(err) });
+    }
+  }
+  return result;
 }
 
 /** Scans a GitHub source's configured skills directory for the skills it provides (used by the Installed-tab source tree). */
@@ -1101,10 +1059,7 @@ export async function installSkillFromMarketplace(
     }
 
     onProgress?.(`Cloning ${params.source}…`);
-    execSync(
-      `git clone --depth 1 "https://github.com/${params.source}.git" "${tmpDir}"`,
-      { stdio: 'pipe', timeout: 60_000 },
-    );
+    await withTimeout(gitClone(`https://github.com/${params.source}.git`, tmpDir), SKILL_SOURCE_CLONE_TIMEOUT_MS, 'Clone');
 
     onProgress?.('Locating skill files…');
     const skillSrcDir = await findSkillDir(tmpDir, params.skillId, params.name, fs, path);

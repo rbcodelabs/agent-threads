@@ -34,7 +34,6 @@ function makeDeps(overrides: Partial<ChiefOfStaffDeps> & { threads?: { id: strin
   let counter = 0;
   const deps: ChiefOfStaffDeps = {
     getSkillSources: () => sources,
-    isGitAvailable: vi.fn(async () => true),
     addGithubSkillSource: vi.fn(async (repoUrl: string, ref: string) => {
       sources.push({ id: 'gh-x', name: 'Chief of Staff', type: 'github', repoUrl, ref, clonePath: '/tmp/x' });
     }),
@@ -209,7 +208,6 @@ describe('describeChiefOfStaffFailure', () => {
   });
 
   it('maps the other reasons', () => {
-    expect(describeChiefOfStaffFailure('git-unavailable', '')).toBe('git isn\u2019t installed');
     expect(describeChiefOfStaffFailure('harness-unavailable', 'x')).toBe('no Claude Code or Codex found');
     expect(describeChiefOfStaffFailure('thread-failed', 'Error: boom\n    at foo (/x/y.js:1:2)')).toBe('couldn\u2019t start the thread');
     expect(describeChiefOfStaffFailure('unexpected', 'TypeError: x')).toBe('something went wrong during setup');
@@ -217,7 +215,7 @@ describe('describeChiefOfStaffFailure', () => {
 
   it('never leaks the raw error, URLs or stack frames', () => {
     const raw = 'fatal: unable to access \'https://github.com/rbcodelabs/chief-of-staff.git/\': Could not resolve host\n    at run (/Users/x/main.js:1:1)';
-    for (const reason of ['git-unavailable', 'clone-failed', 'harness-unavailable', 'thread-failed', 'unexpected'] as const) {
+    for (const reason of ['clone-failed', 'harness-unavailable', 'thread-failed', 'unexpected'] as const) {
       const text = describeChiefOfStaffFailure(reason, raw);
       expect(text).not.toMatch(/https?:|\/Users\/|\bat \w+ \(|fatal/);
     }
@@ -250,7 +248,6 @@ describe('setUpChiefOfStaff', () => {
     const result = await setUpChiefOfStaff(deps);
 
     expect(result).toEqual({ status: 'created', threadId: 't1', sourceAdded: true, harness: 'claude' });
-    expect(deps.isGitAvailable).toHaveBeenCalled();
     expect(deps.addGithubSkillSource).toHaveBeenCalledWith(CHIEF_OF_STAFF_REPO_URL, CHIEF_OF_STAFF_REF);
     expect(sources[0]!.ref).toBe('v0.1.5');
     expect(deps.createThread).toHaveBeenCalledWith(CHIEF_OF_STAFF_THREAD_TITLE, 'claude');
@@ -260,12 +257,11 @@ describe('setUpChiefOfStaff', () => {
     expect(deps.openThread).toHaveBeenCalledWith('t1');
   });
 
-  it('skips the git check and the clone when the source is already configured', async () => {
+  it('skips the clone when the source is already configured', async () => {
     const { deps } = makeDeps({ sources: [{ id: 's', name: 'CoS', type: 'github', repoUrl: 'https://github.com/rbcodelabs/chief-of-staff.git' }] });
     const result = await setUpChiefOfStaff(deps);
     expect(result).toEqual({ status: 'created', threadId: 't1', sourceAdded: false, harness: 'claude' });
     expect(deps.addGithubSkillSource).not.toHaveBeenCalled();
-    expect(deps.isGitAvailable).not.toHaveBeenCalled();
   });
 
   it('persists the thread id before sending the prompt (a crash mid-turn still finds the home thread)', async () => {
@@ -276,14 +272,6 @@ describe('setUpChiefOfStaff', () => {
     });
     await setUpChiefOfStaff(deps);
     expect(order.indexOf('save')).toBeLessThan(order.indexOf('send'));
-  });
-
-  it('reports git-unavailable without attempting a clone when git is missing', async () => {
-    const { deps, threads } = makeDeps({ isGitAvailable: vi.fn(async () => false) });
-    const result = await setUpChiefOfStaff(deps);
-    expect(result.status === 'failed' && result.reason).toBe('git-unavailable');
-    expect(deps.addGithubSkillSource).not.toHaveBeenCalled();
-    expect(threads).toHaveLength(0);
   });
 
   it('reports clone-failed and creates no thread when the clone fails (e.g. offline)', async () => {

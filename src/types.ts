@@ -830,7 +830,7 @@ export interface SkillSource {
    */
   clonePath?: string;
   /**
-   * Tag or branch the clone is pinned to (`git clone --branch <ref> --depth 1`),
+   * Tag or branch the clone is pinned to (a shallow clone of that tag/branch),
    * e.g. the Chief of Staff pack at `CHIEF_OF_STAFF_REF`. Omitted = default
    * branch. A pinned source is detached at that ref: update checks report it as
    * current and "Pull updates" re-syncs it to the same ref rather than moving to
@@ -1291,6 +1291,8 @@ export interface PluginSettings {
   skillSources: SkillSource[];
   /** Vault-relative folder for authored packages; installs retain their own root. */
   localSkillsFolder?: string;
+  /** Fast-forward GitHub skill sources in the background on launch and every 6 hours. Default on. */
+  autoUpdateSkillSources?: boolean;
   /** Durable peer-API correlations and bounded run results. Internal format; consumers use api.v1. */
   publicApiState?: import('./PublicApi').PublicApiPersistedState;
   /** Width in px of the Skills Manager's left list panel, set by dragging the divider. */
@@ -1376,6 +1378,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   stackScheduledThreads: true,
   skillSources: [],
   localSkillsFolder: 'Skills',
+  autoUpdateSkillSources: true,
   skillsListWidth: 200,
 };
 
