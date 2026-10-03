@@ -43,8 +43,9 @@ import {
 import { isWatchableDocument, watchMenuLabel } from './documentWatch';
 import { mergeMcpServers, overlayMatchingMcpServers } from './mcpServerMerge';
 import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
-import { McpRegistrationModal, HostExecModal } from './confirmModal';
+import { McpRegistrationModal } from './confirmModal';
 import type { HostExecHooks } from './hostExec';
+import { canAlwaysAllow } from './permissionDetail';
 import { redactGithubSecrets } from './githubCredentials';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
@@ -323,7 +324,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
    */
   private mcpRegistrationModals = new Set<McpRegistrationModal>();
   private mcpRegistrationAvailable = true;
-  private hostExecModals = new Set<HostExecModal>();
   private registerMcpServerFn?: ReturnType<typeof createMcpRegistration>;
 
   /**
@@ -626,7 +626,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.register(() => {
       this.mcpRegistrationAvailable = false;
       for (const modal of this.mcpRegistrationModals) modal.close();
-      for (const modal of this.hostExecModals) modal.close();
     });
     this.registerMcpServerFn = createMcpRegistration({
       getSettings: () => this.settings,
@@ -2239,7 +2238,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
     // 3.11 — When mobile sends Always Allow, persist the tool name to settings.
     this.relayClient.onAlwaysAllowTool = (toolName: string) => {
-      if (!this.settings.alwaysAllowedTools.includes(toolName)) {
+      // Defence in depth: a forged resolve_permission must not persist host_exec.
+      if (canAlwaysAllow(toolName) && !this.settings.alwaysAllowedTools.includes(toolName)) {
         this.settings.alwaysAllowedTools.push(toolName);
         this.saveSettings().catch(console.error);
       }
@@ -2465,8 +2465,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * `claude_threads` server that includes it. Called only from the VM overlay
    * (i.e. after routing succeeded), never on desktop-less hosts.
    *
-   * The approval prompt is a host-owned modal, not the harness permission
-   * path, so bypassPermissions / dontAsk / auto-approve cannot skip it.
+   * The approval prompt is the thread's in-chat permission card, requested
+   * directly by the tool (not through the harness permission path), so
+   * bypassPermissions / dontAsk / auto-approve / always-allow cannot skip it.
    */
   private withHostExec<T>(
     threadId: string,
@@ -2478,16 +2479,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     if (!thread) return servers;
     const hostExec: HostExecHooks = {
       isInteractive: () => this.mcpRegistrationAvailable && !this.manager.getThread(threadId)?.scheduledItemId,
-      requestApproval: request => new Promise<boolean>((resolve, reject) => {
-        if (!this.mcpRegistrationAvailable) { reject(new Error('Host unavailable')); return; }
-        const modal = new HostExecModal(this.app, request, allowed => {
-          this.hostExecModals.delete(modal);
-          resolve(allowed);
-        });
-        this.hostExecModals.add(modal);
-        try { modal.open(); }
-        catch (error) { this.hostExecModals.delete(modal); reject(error); }
-      }),
+      requestApproval: async request => {
+        if (!this.mcpRegistrationAvailable) throw new Error('Host unavailable');
+        return this.manager.requestHostExecApproval(threadId, request);
+      },
       redact: redactGithubSecrets,
     };
     const rebuilt = build(threadId, thread.cwd, hostExec);

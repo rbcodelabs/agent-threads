@@ -19,7 +19,7 @@ import { formatToolName, getToolIcon, groupToolCalls, smoothToolGroups, ACTIVITY
 import { splitErrorMessage } from './dashboardUtils';
 import { extractMessageContent } from './MessageContent';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from './linkUtils';
-import { summarizePermissionDetail } from './permissionDetail';
+import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
 import {
   VISUALIZE_SLOT_ATTR,
   VISUALIZE_SLOT_CLASS,
@@ -1072,20 +1072,22 @@ export class MobileView extends ItemView {
       });
     });
 
-    // 3.11 — Always Allow button
-    const alwaysBtn = actions.createEl('button', {
-      cls: 'ct-mobile-permission-btn ct-mobile-permission-always',
-      text: 'Always Allow',
-    });
-    alwaysBtn.addEventListener('click', () => {
-      this.relayClient!.sendCommand({
-        type: 'resolve_permission',
-        threadId: permission.threadId,
-        requestId: permission.requestId,
-        allow: true,
-        alwaysAllow: true,
+    // 3.11 — Always Allow button (never offered for per-call approvals like host_exec)
+    if (canAlwaysAllow(permission.toolName)) {
+      const alwaysBtn = actions.createEl('button', {
+        cls: 'ct-mobile-permission-btn ct-mobile-permission-always',
+        text: 'Always Allow',
       });
-    });
+      alwaysBtn.addEventListener('click', () => {
+        this.relayClient!.sendCommand({
+          type: 'resolve_permission',
+          threadId: permission.threadId,
+          requestId: permission.requestId,
+          allow: true,
+          alwaysAllow: true,
+        });
+      });
+    }
   }
 
   private updateConnectionBanner(state: string): void {

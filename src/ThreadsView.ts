@@ -1,7 +1,7 @@
 import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
-import { parsePermissionDetail } from './permissionDetail';
+import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
 import { effectiveExtraEnv } from './types';
@@ -20,7 +20,7 @@ import * as fsp from 'fs/promises';
 import type ClaudeThreadsPlugin from './main';
 import { isDefaultThreadTitle } from './thread-title-utils';
 import { formatToolName, getToolIcon } from './ClaudeSession';
-import { isTrustedBuiltInTool } from './toolNameUtils';
+import { isPermissionPreApproved } from './toolNameUtils';
 import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, ACTIVITY_LABELS, smoothToolGroups, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
 import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
@@ -461,8 +461,9 @@ export class ThreadsView extends ItemView {
     this.manager.permissionHandler = (threadId, toolName, detail) => {
       // First-party host tools are always trusted; classification is an explicit
       // capability allowlist, not a forgeable naming-prefix convention.
-      if (isTrustedBuiltInTool(toolName)) return Promise.resolve(true);
-      if (this.plugin.settings.alwaysAllowedTools.includes(toolName)) return Promise.resolve(true);
+      // Requests that cannot be always-allowed (host_exec) skip both shortcuts
+      // and are decided on the card every time.
+      if (isPermissionPreApproved(toolName, this.plugin.settings.alwaysAllowedTools)) return Promise.resolve(true);
 
       return new Promise((resolve) => {
         let resolved = false;
@@ -4164,12 +4165,14 @@ export class ThreadsView extends ItemView {
       .addEventListener('click', () => done(false));
     actions.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
       .addEventListener('click', () => done(true));
-    actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
-      .addEventListener('click', async () => {
-        this.plugin.settings.alwaysAllowedTools.push(toolName);
-        await this.plugin.saveSettings();
-        done(true);
-      });
+    if (canAlwaysAllow(toolName)) {
+      actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
+        .addEventListener('click', async () => {
+          this.plugin.settings.alwaysAllowedTools.push(toolName);
+          await this.plugin.saveSettings();
+          done(true);
+        });
+    }
 
     return card;
   }

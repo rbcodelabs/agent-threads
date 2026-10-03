@@ -188,6 +188,28 @@ export function isTrustedBuiltInTool(raw: string): boolean {
 }
 
 /**
+ * Tool name `host_exec` uses on the permission card. Cards for this name are
+ * always shown (permission mode, auto-approve, trusted-tool and persisted
+ * "Always Allow" shortcuts are all ignored) and offer Allow once / Deny only.
+ */
+export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
+
+/** False for requests that must be decided afresh every time. */
+export function canAlwaysAllow(toolName: string): boolean {
+  return toolName !== HOST_EXEC_PERMISSION_TOOL;
+}
+
+/**
+ * True when a permission request may be resolved without showing a card:
+ * first-party tools or a persisted "Always Allow". Requests that cannot be
+ * always-allowed (host_exec) are never pre-approved, whatever the lists say.
+ */
+export function isPermissionPreApproved(toolName: string, alwaysAllowedTools: readonly string[]): boolean {
+  if (!canAlwaysAllow(toolName)) return false;
+  return isTrustedBuiltInTool(toolName) || alwaysAllowedTools.includes(toolName);
+}
+
+/**
  * Buckets a tool name into a coarse "activity" category so consecutive
  * same-kind tool calls can be visually grouped in the finalized message view
  * (see groupToolCalls below). Reuses the same MCP-prefix-stripping logic as

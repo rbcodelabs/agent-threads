@@ -4,9 +4,11 @@ import ClaudeThreadsPlugin from '../../src/main';
 import type { HostExecHooks } from '../../src/hostExec';
 
 type HostExecInternals = {
-  manager: { getThread: (threadId: string) => { cwd: string; scheduledItemId?: string } | undefined };
+  manager: {
+    getThread: (threadId: string) => { cwd: string; scheduledItemId?: string } | undefined;
+    requestHostExecApproval: (threadId: string, request: unknown) => Promise<boolean>;
+  };
   mcpRegistrationAvailable: boolean;
-  hostExecModals: Set<unknown>;
   withHostExec<T>(
     threadId: string,
     servers: Record<string, T>,
@@ -20,9 +22,8 @@ afterEach(() => { Platform.isMobile = originalMobile; });
 function fixture(thread: { cwd: string; scheduledItemId?: string } | null = { cwd: '/host/project' }) {
   const plugin = Object.assign(Object.create(ClaudeThreadsPlugin.prototype), {
     app: {},
-    manager: { getThread: vi.fn(() => thread ?? undefined) },
+    manager: { getThread: vi.fn(() => thread ?? undefined), requestHostExecApproval: vi.fn(async () => true) },
     mcpRegistrationAvailable: true,
-    hostExecModals: new Set(),
   }) as unknown as HostExecInternals;
   return plugin;
 }
@@ -56,6 +57,32 @@ describe('ClaudeThreadsPlugin host_exec wiring', () => {
 
     expect(plugin.withHostExec('thread-1', servers, build)).toBe(servers);
     expect(build).not.toHaveBeenCalled();
+  });
+
+  it('requests approval on the thread permission card, not a modal', async () => {
+    Platform.isMobile = false;
+    const plugin = fixture();
+    let hooks: HostExecHooks | undefined;
+    plugin.withHostExec('thread-1', { claude_threads: 'ordinary' }, (_t, _c, supplied) => {
+      hooks = supplied;
+      return { claude_threads: 'host-enabled' };
+    });
+    const request = { command: 'ls', cwd: '/host/project', reason: 'r', timeoutSeconds: 5 };
+    await expect(hooks!.requestApproval(request)).resolves.toBe(true);
+    expect(plugin.manager.requestHostExecApproval).toHaveBeenCalledWith('thread-1', request);
+  });
+
+  it('rejects approval when the host is unloading', async () => {
+    Platform.isMobile = false;
+    const plugin = fixture();
+    plugin.mcpRegistrationAvailable = false;
+    let hooks: HostExecHooks | undefined;
+    plugin.withHostExec('thread-1', { claude_threads: 'ordinary' }, (_t, _c, supplied) => {
+      hooks = supplied;
+      return { claude_threads: 'host-enabled' };
+    });
+    await expect(hooks!.requestApproval({ command: 'ls', cwd: '/', reason: 'r', timeoutSeconds: 5 })).rejects.toThrow();
+    expect(plugin.manager.requestHostExecApproval).not.toHaveBeenCalled();
   });
 
   it('marks scheduled and unloading hosts non-interactive', () => {
