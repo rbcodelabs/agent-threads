@@ -1980,20 +1980,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return source;
   }
 
-  /** Whether git can run, without triggering the macOS developer-tools install dialog. */
-  private async isGitAvailable(): Promise<boolean> {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fs = require('fs') as typeof import('fs');
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { checkGitAvailable, runCommandQuietly } = require('./skillManager') as typeof import('./skillManager');
-    return checkGitAvailable({
-      platform: process.platform,
-      pathEnv: process.env.PATH,
-      exists: p => { try { return fs.existsSync(p); } catch { return false; } },
-      run: runCommandQuietly,
-    });
-  }
-
   /** Whether `harness`'s configured binary can be found, so a first turn can start. */
   private isHarnessResolvable(harness: AgentHarness): boolean {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -2039,7 +2025,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private runChiefOfStaffSetup(): Promise<ChiefOfStaffResult> {
     return setUpChiefOfStaff({
       getSkillSources: () => this.settings.skillSources ?? [],
-      isGitAvailable: () => this.isGitAvailable(),
       addGithubSkillSource: async (repoUrl, ref) => { await this.addManagedGithubSkillSource(repoUrl, ref); },
       resolveHarness: () => chooseChiefOfStaffHarness(this.settings.agentHarness ?? 'claude', h => this.isHarnessResolvable(h)),
       reloadThreadSkills: (id) => this.manager.requestSessionRestart(id),

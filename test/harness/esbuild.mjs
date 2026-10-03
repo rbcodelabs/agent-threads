@@ -40,6 +40,9 @@ const sharedConfig = {
     // http is required lazily by OpenCodeSession / OpenCodeHostTools, which
     // HarnessFactory pulls in; the harness never starts an OpenCode session.
     'http':                             resolve('./mocks/http.ts'),
+    // isomorphic-git's Node HTTP transport is required lazily by gitClient (skill
+    // sources); its deps (https, url, querystring) don't resolve for the browser target.
+    'isomorphic-git/http/node':         resolve('./mocks/isomorphic-git-http.ts'),
     // net is required lazily by vmPortForward (sandbox VM loopback forwarding).
     'net':                              resolve('./mocks/net.ts'),
     // electron is used in dynamic require() calls inside click handlers;

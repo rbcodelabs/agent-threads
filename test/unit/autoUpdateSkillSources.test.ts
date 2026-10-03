@@ -1,13 +1,18 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import type { SkillSource } from '../../src/types';
+import { setGitHttpClient } from '../../src/gitClient';
+import { localGitHttp, localGitUrl } from '../helpers/localGitHttp';
 
 vi.mock('obsidian', () => ({ requestUrl: vi.fn() }));
 
-import { autoUpdateGithubSources } from '../../src/skillManager';
+import { autoUpdateGithubSources, cloneGithubSource } from '../../src/skillManager';
+
+beforeAll(() => setGitHttpClient(localGitHttp));
+afterAll(() => setGitHttpClient(undefined));
 
 const git = (cwd: string, cmd: string) =>
   execSync(`git -C "${cwd}" -c user.email=t@t -c user.name=t ${cmd}`, { stdio: 'pipe' }).toString();
@@ -33,6 +38,7 @@ describe('autoUpdateGithubSources', () => {
     git(origin, 'init -q -b main');
     commit('a');
     execSync(`git clone -q "${origin}" "${clone}"`);
+    git(clone, `remote set-url origin ${localGitUrl(origin)}`);
   });
   afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
@@ -78,5 +84,60 @@ describe('autoUpdateGithubSources', () => {
     fs.rmSync(origin, { recursive: true, force: true });
     const r = await autoUpdateGithubSources([mk()]);
     expect(r.failed).toHaveLength(1);
+  });
+
+  it('does not overwrite a locally modified file that upstream also changed, and leaves the clone untouched', async () => {
+    fs.writeFileSync(path.join(origin, 'a'), 'upstream change');
+    git(origin, 'add -A');
+    git(origin, 'commit -q -m a2');
+    fs.writeFileSync(path.join(clone, 'a'), 'my edit');
+    const r = await autoUpdateGithubSources([mk()]);
+    expect(r.updated).toEqual([]);
+    expect(r.failed).toHaveLength(1);
+    expect(fs.readFileSync(path.join(clone, 'a'), 'utf-8')).toBe('my edit');
+    // The branch was put back, so there is no half-applied update.
+    expect(git(clone, 'log --oneline').trim().split('\n')).toHaveLength(1);
+  });
+
+  describe('a clone made by the pure-JS client (no git binary involved in cloning)', () => {
+    let jsClone: string;
+    beforeEach(async () => {
+      jsClone = path.join(tmp, 'jsclone');
+      await cloneGithubSource(localGitUrl(origin), jsClone);
+    });
+
+    it('clones the default branch at depth 1', () => {
+      expect(fs.existsSync(path.join(jsClone, 'a'))).toBe(true);
+      expect(git(jsClone, 'rev-list --count HEAD').trim()).toBe('1');
+    });
+
+    it('fast-forwards, and removes files deleted upstream', async () => {
+      commit('b');
+      git(origin, 'rm -q a');
+      git(origin, 'commit -q -m rm-a');
+      const r = await autoUpdateGithubSources([mk({ clonePath: jsClone })]);
+      expect(r.updated).toHaveLength(1);
+      expect(fs.existsSync(path.join(jsClone, 'b'))).toBe(true);
+      expect(fs.existsSync(path.join(jsClone, 'a'))).toBe(false);
+    });
+
+    it('refuses to discard a local commit', async () => {
+      fs.writeFileSync(path.join(jsClone, 'local'), 'x');
+      git(jsClone, 'add -A');
+      git(jsClone, 'commit -q -m local');
+      commit('b');
+      const r = await autoUpdateGithubSources([mk({ clonePath: jsClone })]);
+      expect(r.updated).toEqual([]);
+      expect(r.failed[0]?.error).toMatch(/local commits/);
+      expect(fs.existsSync(path.join(jsClone, 'local'))).toBe(true);
+      expect(fs.existsSync(path.join(jsClone, 'b'))).toBe(false);
+    });
+  });
+});
+
+describe('no git binary dependency', () => {
+  it.each(['skillManager.ts', 'gitClient.ts', 'chiefOfStaffOnboarding.ts'])('%s does not shell out', (file) => {
+    const src = fs.readFileSync(path.join(__dirname, '../../src', file), 'utf-8');
+    expect(src).not.toMatch(/child_process|execSync|execFile/);
   });
 });
