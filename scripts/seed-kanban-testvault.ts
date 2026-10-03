@@ -18,7 +18,7 @@ const vaultPath =
   process.argv[2] ??
   path.join(os.homedir(), '.claude', 'test-vaults', 'ct-feat-kanban-folder-swimlanes');
 
-const pluginDir = path.join(vaultPath, '.obsidian', 'plugins', 'claude-threads');
+const pluginDir = path.join(vaultPath, '.geode', 'plugins', 'claude-threads');
 const dataPath = path.join(pluginDir, 'data.json');
 
 if (!fs.existsSync(pluginDir)) {

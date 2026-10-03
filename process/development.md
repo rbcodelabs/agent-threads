@@ -66,24 +66,23 @@ Pass criteria: zero type errors, all unit tests green, screenshot count unchange
 
 ## Test Vaults
 
-For live integration testing, spin up an isolated Obsidian vault with the current plugin build:
+For live integration testing, spin up an isolated Geode vault with the current plugin build:
 
 ```bash
 npm run vault           # build + create test vault (first time)
 npm run vault:update    # rebuild + re-copy dist into existing vault
-npm run vault:open      # build + create + open in Obsidian
+npm run vault:open      # build + create + open in Geode
 ```
 
 Each worktree branch gets its own vault at `~/.claude/test-vaults/ct-<branch-name>/`.
 Vaults are pre-seeded with `Testing Notes.md` and `Branch Changes.md`.
-Multiple test vaults can be open in separate Obsidian windows simultaneously.
-
-**First open:** Obsidian will prompt to enable community plugins once per vault. Click "Turn off Restricted Mode."
+Multiple test vaults can be open in separate Geode windows simultaneously.
+The plugin is installed at `<vault>/.geode/plugins/claude-threads/` and enabled via `<vault>/.geode/plugins.json`; the vault is also added to `recentVaults` in `~/Library/Application Support/geode/geode.json`.
 
 **Iteration workflow:**
 1. Make code changes in the worktree
 2. Run `npm run vault:update` to rebuild and re-copy
-3. In Obsidian, run **Reload app without saving** (Cmd+R) to pick up the new build
+3. In Geode, run **Reload plugin (safe)** from the command palette to pick up the new build
 
 ---
 
