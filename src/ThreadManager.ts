@@ -30,6 +30,8 @@ import type { App } from 'obsidian';
 import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun } from './types';
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
+import { formatHostExecPermissionDetail, type HostExecRequest } from './hostExec';
+import { HOST_EXEC_PERMISSION_TOOL } from './permissionDetail';
 
 type ThreadStateListener = (threadId: string, event: ThreadEvent) => void;
 
@@ -1298,6 +1300,59 @@ export class ThreadManager {
    */
   getRunningThreads(): Thread[] {
     return this.getThreads().filter((t) => this.sessions.has(t.id));
+  }
+
+  /** Shared by harness permission requests and {@link requestHostExecApproval}. */
+  private async promptPermission(threadId: string, toolName: string, detail: string): Promise<boolean> {
+    this.pendingPermissions.set(threadId, { toolName, detail });
+    this.emit(threadId, { type: 'permission_request', toolName, detail });
+    try {
+      return await this.permissionHandler(threadId, toolName, detail);
+    } finally {
+      this.pendingPermissions.delete(threadId);
+      this.permissionResolvers.delete(threadId);
+      this.emit(threadId, { type: 'permission_resolved' });
+    }
+  }
+
+  /**
+   * Per-call approval for `host_exec`, shown as the thread's in-chat permission
+   * card. Called directly by the tool handler rather than through a session's
+   * `onPermissionRequest`, so no harness permission mode (bypassPermissions,
+   * dontAsk, auto-approve) can resolve it. The `host_exec` tool name makes the
+   * permission handler ignore `alwaysAllowedTools` and hide Always Allow
+   * (see `canAlwaysAllow`).
+   */
+  requestHostExecApproval(threadId: string, request: HostExecRequest): Promise<boolean> {
+    return this.enqueuePermissionPrompt(threadId, HOST_EXEC_PERMISSION_TOOL, formatHostExecPermissionDetail(request));
+  }
+
+  /**
+   * Queues a permission prompt behind any already pending for the thread so
+   * `pendingPermissions` and the card never hold two prompts at once. Runs after
+   * the previous prompt settles (allowed, denied or threw); starts synchronously
+   * when nothing is queued so state is visible to callers right away.
+   * `isCurrent` re-checks session generation once the prompt reaches the front.
+   */
+  private enqueuePermissionPrompt(
+    threadId: string,
+    toolName: string,
+    detail: string,
+    isCurrent: () => boolean = () => true,
+  ): Promise<boolean> {
+    const prompt = async (): Promise<boolean> => {
+      // Re-check: the session may have been replaced while we were queued.
+      if (!isCurrent()) return false;
+      return this.promptPermission(threadId, toolName, detail);
+    };
+    const previous = this.permissionQueue.get(threadId);
+    const result = previous ? previous.then(prompt, prompt) : prompt();
+    const tail = result.catch(() => undefined);
+    this.permissionQueue.set(threadId, tail);
+    void tail.then(() => {
+      if (this.permissionQueue.get(threadId) === tail) this.permissionQueue.delete(threadId);
+    });
+    return result;
   }
 
   hasPendingPermission(threadId: string): boolean {
@@ -2640,30 +2695,7 @@ export class ThreadManager {
       },
       onPermissionRequest: (toolName, detail) => {
         if (!isCurrentGeneration()) return Promise.resolve(false);
-        const prompt = async (): Promise<boolean> => {
-          // Re-check: the session may have been replaced while we were queued.
-          if (!isCurrentGeneration()) return false;
-          this.pendingPermissions.set(threadId, { toolName, detail });
-          this.emit(threadId, { type: 'permission_request', toolName, detail });
-          try {
-            return await this.permissionHandler(threadId, toolName, detail);
-          } finally {
-            this.pendingPermissions.delete(threadId);
-            this.permissionResolvers.delete(threadId);
-            this.emit(threadId, { type: 'permission_resolved' });
-          }
-        };
-        // Run after the previous prompt settles, whether it allowed, denied or threw.
-        // Start immediately (synchronously) when nothing is queued so state is
-        // visible to callers right away; otherwise wait for the predecessor.
-        const previous = this.permissionQueue.get(threadId);
-        const result = previous ? previous.then(prompt, prompt) : prompt();
-        const tail = result.catch(() => undefined);
-        this.permissionQueue.set(threadId, tail);
-        void tail.then(() => {
-          if (this.permissionQueue.get(threadId) === tail) this.permissionQueue.delete(threadId);
-        });
-        return result;
+        return this.enqueuePermissionPrompt(threadId, toolName, detail, isCurrentGeneration);
       },
       onAskUserQuestion: (questions) => {
         if (!isCurrentGeneration()) return Promise.resolve({});

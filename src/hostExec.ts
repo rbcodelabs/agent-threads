@@ -9,7 +9,10 @@
  *
  * The approval gate itself lives in `createHostExecHandler`, deliberately NOT
  * in the harness permission path: bypassPermissions / dontAsk / auto-approve
- * never reach it, so no permission mode can skip the prompt.
+ * never reach it, so no permission mode can skip the prompt. The prompt is the
+ * thread's ordinary in-chat permission card, requested through
+ * `ThreadManager.requestHostExecApproval`, which forces the card regardless of
+ * `alwaysAllowedTools` and offers Allow once / Deny only.
  */
 import fs from 'fs';
 import path from 'path';
@@ -91,6 +94,16 @@ export function validateHostExecInput(
       timeoutSeconds: resolveHostExecTimeoutSeconds(timeout),
     },
   };
+}
+
+/** The `detail` string for the permission card: command is the headline, the rest expand under Details. */
+export function formatHostExecPermissionDetail(request: HostExecRequest): string {
+  return JSON.stringify({
+    command: request.command,
+    cwd: request.cwd,
+    reason: request.reason,
+    timeoutSeconds: request.timeoutSeconds,
+  });
 }
 
 export interface HostExecResult {

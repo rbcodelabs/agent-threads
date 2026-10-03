@@ -1,6 +1,5 @@
 import { App, Modal } from 'obsidian';
 import type { McpServerEntry } from './mcpServerStore';
-import type { HostExecRequest } from './hostExec';
 
 /** Host-owned approval, independent of either harness's tool permission mode. */
 export class McpRegistrationModal extends Modal {
@@ -30,40 +29,6 @@ export class McpRegistrationModal extends Modal {
     if (this.resolved) return;
     this.resolved = true;
     this.onResult(this.confirmed);
-  }
-}
-
-/**
- * Per-call approval for `host_exec`. Host-owned and independent of any
- * permission mode. Dismissing (Esc, click outside) is a denial; there is no
- * "always allow".
- */
-export class HostExecModal extends Modal {
-  private allowed = false;
-  private resolved = false;
-  constructor(app: App, private request: HostExecRequest, private onResult: (allowed: boolean) => void) {
-    super(app);
-  }
-  onOpen(): void {
-    this.contentEl.addClass('ct-mcp-registration');
-    this.contentEl.createEl('h2', { text: 'Run command on your computer?' });
-    this.contentEl.createEl('p', { text: 'A sandboxed thread is asking to run this command OUTSIDE the sandbox, with your account permissions.' });
-    this.contentEl.createEl('p', { text: `Reason: ${this.request.reason}` });
-    this.contentEl.createEl('p', { text: `Directory: ${this.request.cwd}` });
-    this.contentEl.createEl('pre', { text: this.request.command, cls: 'ct-mcp-registration-config' });
-    this.contentEl.createEl('p', { text: `Times out after ${this.request.timeoutSeconds}s. This approval covers this one call only.` });
-    const buttons = this.contentEl.createDiv({ cls: 'ct-mcp-registration-buttons' });
-    buttons.createEl('button', { text: 'Deny' }).addEventListener('click', () => this.close());
-    buttons.createEl('button', { text: 'Allow once', cls: 'mod-warning' }).addEventListener('click', () => {
-      this.allowed = true;
-      this.close();
-    });
-  }
-  onClose(): void {
-    this.contentEl.empty();
-    if (this.resolved) return;
-    this.resolved = true;
-    this.onResult(this.allowed);
   }
 }
 
