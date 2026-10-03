@@ -322,10 +322,12 @@ on the host.
 - **Exposure.** The tool is registered only on a desktop session that is
   actually VM-routed. Host-spawned threads (including a thread that fell back
   to a host spawn), Codex/OpenCode threads and mobile never see it.
-- **Approval, every time.** Each call opens a host-owned dialog showing the
-  exact command, directory and the agent's stated reason, with **Allow once**
-  and **Deny** (Esc counts as Deny). This gate is separate from the harness
-  permission path, so `bypassPermissions`, `dontAsk` and auto-approve do not
+- **Approval, every time.** Each call shows the standard inline permission card in the
+  thread (desktop and mobile) with the command as the headline and the
+  directory, reason and timeout under Details, with **Allow once** and
+  **Deny**. There is no pop-up dialog. The card never offers "Always allow", and a
+  previously saved always-allow entry for `host_exec` is ignored. This gate is
+  separate from the harness permission path, so `bypassPermissions`, `dontAsk` and auto-approve do not
   skip it, the same as `mcp_register_server`. There is no "always allow" and no
   allowlist. Scheduled or otherwise non-interactive threads cannot prompt, so
   the call is denied with an explanatory result and nothing runs.
