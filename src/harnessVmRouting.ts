@@ -126,6 +126,14 @@ export interface ClaudeVmRoutingInputs {
   /** Resource limits for a newly created container (settings sandboxVmMemory/sandboxVmCpus); validated downstream. */
   memory?: string;
   cpus?: number;
+  /**
+   * Optional image health check (version label + gh/git/claude present). Returns a
+   * user-facing warning when the image is out of date, else null. Never blocks
+   * routing: a stale image still works for most tasks, the user is just told.
+   */
+  checkImageHealth?: (image: string) => Promise<string | null>;
+  /** Receives the warning from {@link checkImageHealth}. */
+  onImageWarning?: (message: string) => void;
 }
 
 export interface ResolvedClaudeVmRouting {
@@ -168,6 +176,15 @@ export async function resolveClaudeVmRouting(
       throw new Error(`harnessVmMode is "always" but the sandbox VM is not ready: ${capability.reason}`);
     }
     return { routed: false, reason: capability.code ?? 'runtime-missing' };
+  }
+
+  if (inputs.checkImageHealth && inputs.onImageWarning) {
+    try {
+      const warning = await inputs.checkImageHealth(inputs.image);
+      if (warning) inputs.onImageWarning(warning);
+    } catch (e) {
+      console.warn('[ClaudeThreads] sandbox image health check failed:', e);
+    }
   }
 
   let externalEntries: ExternalMountRootInput[] | null | undefined;

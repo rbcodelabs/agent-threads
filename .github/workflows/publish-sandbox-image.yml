@@ -95,6 +95,26 @@ jobs:
             exit 1
           fi
 
+      # Published tags are immutable, so prove the image is usable BEFORE pushing.
+      # The plugin's GitHub shim execs the real `gh`; v1 shipped without it.
+      - name: Build locally and smoke-test
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: sandbox
+          file: sandbox/Dockerfile
+          platforms: linux/arm64
+          load: true
+          provenance: false
+          sbom: false
+          tags: sandbox-smoke:test
+          cache-to: type=gha,mode=max
+          cache-from: type=gha
+
+      - name: Verify gh and git are present in the image
+        run: |
+          docker run --rm sandbox-smoke:test gh --version
+          docker run --rm sandbox-smoke:test git --version
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -110,6 +130,7 @@ jobs:
           # single-platform image. Revisit once a real pull has been verified.
           provenance: false
           sbom: false
+          cache-from: type=gha
           tags: |
             ${{ env.IMAGE }}:${{ steps.version.outputs.value }}
             ${{ env.IMAGE }}:sha-${{ github.sha }}

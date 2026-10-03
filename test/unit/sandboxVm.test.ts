@@ -805,3 +805,19 @@ describe('SandboxVmManager — mobile safety', () => {
     expect(() => new SandboxVmManager({ containerName: () => NAME })).not.toThrow();
   });
 });
+
+describe('SandboxVmManager.enter image health note', () => {
+  const mk = (check: (image: string) => Promise<string | null>) => {
+    const run: VmCommandRunner = async (args) => ({ exitCode: args[0] === 'inspect' ? 1 : 0, stdout: '', stderr: '' });
+    return new SandboxVmManager({ containerName: () => 'claude-threads-vm-t', run, checkImageHealth: check });
+  };
+  it('adds the warning to notes and still succeeds', async () => {
+    const r = await mk(async () => 'stale image').enter({ image: 'img:1', mountPath: '/w', network: 'default' });
+    expect(r).toMatchObject({ success: true, notes: ['stale image'] });
+  });
+  it('ignores a throwing health check', async () => {
+    const r = await mk(async () => { throw new Error('x'); }).enter({ image: 'img:1', mountPath: '/w', network: 'default' });
+    expect(r.success).toBe(true);
+    expect((r as { notes?: string[] }).notes).toBeUndefined();
+  });
+});

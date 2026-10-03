@@ -21,7 +21,8 @@ import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
 import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
-import { containerNameForThread, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
+import { checkImageHealth } from './sandboxImage';
+import { containerNameForThread, createDefaultVmCommandRunner, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
 import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
 import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
@@ -193,6 +194,7 @@ export class ThreadManager {
   private claudeVmRoutingByThread: Map<string, { containerName: string; containerBinaryPath: string } | null> = new Map();
   /** Threads whose "Run this thread in a sandbox?" card is currently pending (so a re-render of the thread can restore it). */
   private sandboxSetupOffers: Map<string, HarnessVmFallbackReason> = new Map();
+  private staleImageWarned = new Set<string>();
   /** Threads that have been offered the card this app session — at most one card each, however many sessions start. */
   private sandboxSetupOffered: Set<string> = new Set();
   /** Test seam: whether sandbox setup can run on this machine. Production uses the real macOS/arch check. */
@@ -2086,6 +2088,7 @@ export class ThreadManager {
         containerName: () => containerNameForThread(threadId),
         run: this.vmCommandRunner,
         hooks: this.sandboxVmHooks,
+        checkImageHealth: (image) => checkImageHealth(this.vmCommandRunner ?? createDefaultVmCommandRunner(), image, 'base'),
       });
       this.sandboxVmManagers.set(threadId, manager);
     }
@@ -2206,7 +2209,17 @@ export class ThreadManager {
       memory: resolveVmMemory(this.settings.sandboxVmMemory),
       cpus: resolveVmCpus(this.settings.sandboxVmCpus),
       getVaultPath: () => this.vaultRoot,
+      checkImageHealth: (image) => checkImageHealth(this.vmCommandRunner ?? createDefaultVmCommandRunner(), image, 'harness'),
+      onImageWarning: (message) => this.warnStaleSandboxImage(threadId, message),
     };
+  }
+
+  /** Tells the user (once per thread per message) that its sandbox image is stale; the session still starts. */
+  private warnStaleSandboxImage(threadId: string, message: string): void {
+    const key = `${threadId}|${message}`;
+    if (this.staleImageWarned.has(key)) return;
+    this.staleImageWarned.add(key);
+    this.addNoticeMessage(threadId, 'failed', message);
   }
 
   /**
