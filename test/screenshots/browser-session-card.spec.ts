@@ -354,10 +354,15 @@ test.describe('Browser session card — sign-in handoff (amber "you are in contr
   test('requested card is reachable by keyboard', async ({ page }) => {
     await page.evaluate(() => (window as Win).__fireLoginOpen('https://accounts.acme.io/login'));
     const take = page.getByRole('button', { name: 'Take control' });
-    await take.focus();
-    await expect(take).toBeFocused();
-    await page.keyboard.press('Tab');
-    await expect(page.getByRole('button', { name: 'Not now' })).toBeFocused();
+    await expect(take).toBeVisible();
+    // The card can re-render right after it appears, dropping focus mid-sequence;
+    // retry focus + Tab as a unit until the whole move lands.
+    await expect(async () => {
+      await take.focus();
+      await expect(take).toBeFocused({ timeout: 500 });
+      await page.keyboard.press('Tab');
+      await expect(page.getByRole('button', { name: 'Not now' })).toBeFocused({ timeout: 500 });
+    }).toPass();
     await page.keyboard.press('Shift+Tab');
     await page.keyboard.press('Enter');
     await expect(page.locator('.ct-bc.is-control')).toBeVisible();
