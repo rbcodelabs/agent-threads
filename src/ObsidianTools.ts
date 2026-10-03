@@ -1652,6 +1652,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       'Creates a new persistent thread and immediately queues its initial prompt.',
       'The new thread inherits the current thread\'s working directory and project when those fields are omitted.',
       'Pass projectId: null to create the thread without a project.',
+      'Targeting a different project or working directory than the current thread requires user approval and errors if denied.',
       'Returns as soon as the prompt is queued; use threads_wait to wait for its response.',
     ].join(' '),
     {

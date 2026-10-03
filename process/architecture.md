@@ -155,6 +155,12 @@ Key fields worth knowing:
 
 ---
 
+## Cross-project `threads_create` Approval
+
+`createAgentThreadCallback` (`src/main.ts`) runs the existing `authorizeProject` coordination check first, then, when the spawn targets a different `projectId` or an explicit `cwd` that differs from the caller's, awaits a human decision before creating anything. The gate calls `ThreadManager.requestToolApproval(threadId, 'threads_create:cross-project', detail)`, which shares the pending-permission bookkeeping and `permission_request`/`permission_resolved` events with SDK tool permissions, so the normal permission card (Allow / Always allow / Deny) renders. The pseudo tool name is not a trusted built-in, so the card shows; "Always allow" persists it in `alwaysAllowedTools` and later cross-project spawns pass silently. Denial throws `Cross-project spawn was denied by the user.`; with no `requestApproval` dep the callback fails closed. In-project spawns stay automatic.
+
+---
+
 ## MCP Tool Serialization
 
 `ThreadSnapshot` in `src/ObsidianTools.ts` defines the JSON shape returned by `obsidian_list_threads` and `obsidian_get_current_thread`.

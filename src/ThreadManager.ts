@@ -317,6 +317,16 @@ export class ThreadManager {
   sandboxVmHooks: VmHooks | undefined = undefined;
   githubEnvResolver: ((cwd: string, baseEnv: Record<string, string | undefined>) => Record<string, string>) | undefined = undefined;
   permissionHandler: (threadId: string, toolName: string, detail: string) => Promise<boolean> = async () => false;
+
+  /**
+   * Raises a permission card for a thread through the same bookkeeping and UI
+   * path as SDK tool-permission requests (pending state, permission_request /
+   * permission_resolved events, resolver cleanup). Used by host-side gates such
+   * as cross-project threads_create that need a human decision on behalf of a thread.
+   */
+  requestToolApproval(threadId: string, toolName: string, detail: string): Promise<boolean> {
+    return this.enqueuePermissionPrompt(threadId, toolName, detail);
+  }
   questionHandler: (threadId: string, questions: AskQuestion[]) => Promise<Record<string, string>> = async () => ({});
   openNewTabHandler: (title?: string, initialPrompt?: string) => Promise<{ threadId: string; title: string }> = async (title) => ({ threadId: '', title: title ?? 'New Thread' });
   vaultRoot = '';
