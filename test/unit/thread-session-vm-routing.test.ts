@@ -71,7 +71,7 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
   it.each(['routed', 'fallback', 'never'] as const)('exposes the appropriate built-in surface after %s routing', async kind => {
     const app = {} as App;
     const ordinary = createClaudeThreadsMcpServers(app);
-    const routed = createClaudeThreadsMcpServers(app, { harnessInVm: true });
+    const routed = createClaudeThreadsMcpServers(app);
     resolveClaudeVmRouting.mockResolvedValue(kind === 'routed'
       ? { routed: true, routing: { containerName: 'c1', containerBinaryPath: '/home/node/.local/bin/claude' } }
       : { routed: false, reason: 'runtime-missing' });
@@ -81,9 +81,9 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
     } as never);
     for (const key of ['claude_threads', 'obsidian']) {
       const tools = (queryCalls[0].options.mcpServers![key] as { tools: Array<{ name: string }> }).tools;
-      expect(tools.some(t => t.name === 'enter_vm')).toBe(kind !== 'routed');
-      expect(tools.some(t => t.name === 'exit_vm')).toBe(kind !== 'routed');
-      expect(tools.some(t => t.name === 'vm_exec')).toBe(true);
+      for (const removed of ['enter_vm', 'exit_vm', 'vm_exec']) {
+        expect(tools.some(t => t.name === removed), removed).toBe(false);
+      }
     }
   });
 
@@ -137,11 +137,9 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
 
     expect(onVmRouting).toHaveBeenCalledWith(null, 'never');
     expect(resolveClaudeVmRouting).not.toHaveBeenCalled();
-    expect((queryCalls[0].options as unknown as { toolAliases: Record<string, string> }).toolAliases).toMatchObject({
-      EnterVm: 'mcp__claude_threads__enter_vm',
-      VmExec: 'mcp__claude_threads__vm_exec',
-      ExitVm: 'mcp__claude_threads__exit_vm',
-    });
+    const aliases = (queryCalls[0].options as unknown as { toolAliases: Record<string, string> }).toolAliases;
+    expect(aliases).toMatchObject({ EnterWorktree: 'mcp__claude_threads__enter_worktree' });
+    for (const removed of ['EnterVm', 'VmExec', 'ExitVm']) expect(aliases[removed]).toBeUndefined();
   });
 
   it('reports null when no vm routing inputs are attached at all (harnessVmMode "never")', async () => {
@@ -173,9 +171,7 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
 
     expect(queryCalls[0].options.mcpServers).toEqual({ oauth: bridged });
     const aliases = (queryCalls[0].options as unknown as { toolAliases: Record<string, string> }).toolAliases;
-    expect(aliases.EnterVm).toBeUndefined();
-    expect(aliases.ExitVm).toBeUndefined();
-    expect(aliases.VmExec).toBe('mcp__claude_threads__vm_exec');
+    for (const removed of ['EnterVm', 'VmExec', 'ExitVm']) expect(aliases[removed]).toBeUndefined();
   });
 
   it('keeps the ordinary MCP roster when automatic VM routing falls back to the host', async () => {
@@ -188,7 +184,7 @@ describe('ThreadSession.start() — ADR-0015 onVmRouting reporting', () => {
     } as never);
 
     expect(queryCalls[0].options.mcpServers).toEqual({ oauth: host });
-    expect((queryCalls[0].options as unknown as { toolAliases: Record<string, string> }).toolAliases.EnterVm).toBe('mcp__claude_threads__enter_vm');
+    expect((queryCalls[0].options as unknown as { toolAliases: Record<string, string> }).toolAliases.EnterVm).toBeUndefined();
   });
 
   describe('containerAuthToken (in-container Claude sign-in credential)', () => {

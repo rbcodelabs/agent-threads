@@ -112,7 +112,7 @@ describe('ThreadManager — ADR-0015 Claude VM routing inputs', () => {
     expect(fake.lastOptions?.opencode?.mcpServers).toEqual({ loopback: host.loopback });
   });
 
-  it('the vm inputs reference the SAME SandboxVmManager instance getSandboxVmManager(threadId) returns, so agent enter_vm/vm_exec calls see the same container state', async () => {
+  it('the vm inputs reference the SAME SandboxVmManager instance getSandboxVmManager(threadId) returns, so routing and teardown see the same container state', async () => {
     const manager = new ThreadManager(DEFAULT_SETTINGS);
     manager.loadThreads([thread({ agentHarness: 'claude' })]);
     await manager.sendMessage('t1', 'hi');

@@ -1,8 +1,11 @@
 # Sandbox VMs
 
-`enter_vm`, `vm_exec`, and `exit_vm` give a thread a disposable Linux environment
-on macOS 26 or later with Apple silicon. Both Claude and Codex can use these tools.
-They require Apple's `container` runtime; they are unavailable on mobile.
+A thread can run its Claude harness inside a disposable Linux container on macOS 26
+or later with Apple silicon (the per-thread **Run in** container/host mode, see
+[below](#running-the-claude-harness-inside-the-vm-adr-0015)). This needs Apple's
+`container` runtime; it is unavailable on mobile. There are no separate VM tools
+for the agent to call: when a thread runs in a container, its normal shell and file
+tools operate on the guest filesystem.
 
 ## Setup (one click)
 
@@ -38,19 +41,15 @@ non-root `node` user. Project dependencies are installed
 per workspace; the image does not include every project's dependency cache.
 Custom images must provide Bash, GNU `timeout`, and `sleep infinity`.
 
-Create a disposable Git worktree, call `enter_vm`, then use `vm_exec` for installs,
-tests, and builds. The effective working directory is mounted read-write at
-`/work`. An explicit absolute `mountPath` can select another existing directory;
-paths containing colons are rejected because the runtime treats them as volume
-delimiters. Mount only the directory intended for the task.
-
-The tools do not move the agent itself into the VM. Normal file tools and shell
-tools still run on the host. Only commands sent through `vm_exec` run in Linux.
-Guest commands can modify or delete files in the mounted directory, and those
-changes persist after `exit_vm`. Do not put secrets in that directory. Besides
+The thread's effective working directory is mounted read-write at `/work`
+(use a disposable Git worktree for risky tasks, and mount only the directory
+intended for the task; paths containing colons are rejected because the runtime
+treats them as volume delimiters). Guest commands can modify or delete files in
+the mounted directory, and those changes persist after the container is removed.
+Do not put secrets in that directory. Besides
 the selected workspace, the **vault is always mounted read-write at `/vault`**
-(fixed guest path, regardless of the thread's working directory), so guest
-commands, and anything running in the harness container, can read, modify, and
+(fixed guest path, regardless of the thread's working directory), so anything
+running in the harness container can read, modify, and
 delete any note in your vault. This is intentional, so agents working in a
 disposable worktree can still edit notes, but it means a VM is not a boundary
 protecting the vault; keep vault backups or sync history. If the thread's
@@ -58,28 +57,21 @@ working directory is the vault itself, it is mounted twice (`/work` and
 `/vault`). The mount is skipped silently when the host exposes no vault
 filesystem path. A harness-owned container created before this mount existed is
 preserved to keep its native conversation history; new thread containers include
-the mount. For an agent-owned `enter_vm`, call `exit_vm` and enter again. If the
-working directory is your home, that directory becomes the `/work` mount; select
-a disposable worktree first. The SSH agent and host credentials are not automatically
-forwarded, but files inside the mount are exposed. The one exception is Geode's
-GitHub connection: when enabled, `git` (HTTPS) and `gh` inside the VM are
+the mount. If the working directory is your home, that directory becomes the
+`/work` mount; select a disposable worktree first. The SSH agent and host
+credentials are not automatically forwarded, but files inside the mount are
+exposed. The one exception is Geode's
+GitHub connection: when enabled, `git` (HTTPS) and `gh` inside the container are
 authenticated through a short-lived private file that is never under `/work`
 (see [GitHub via Geode](github-integration.md)).
 A Git worktree's `.git` file can point outside the mount, so guest Git commands
 may fail; use host Git tools or a standalone checkout when guest Git is needed.
 Avoid sharing host `node_modules` with Linux; native dependencies differ.
 
-Choose networking on each `enter_vm` call or under Settings → Agent:
-
-| Mode | Access |
-| --- | --- |
-| `default` | Full internet and host-network access; the default for dependency installs. |
-| `internal` | No internet routing; the host gateway and peers on the shared internal network remain reachable. |
-| `none` | No network attachment. Preinstall dependencies before using this mode. |
-
-The internal network's runtime configuration is verified before use. An existing
-network with the same name but a different mode is rejected. Network restrictions
-apply to guest traffic, not host tools or runtime image pulls.
+Containers started for harness routing always use full egress (`default`
+networking) so the containerized `claude` can reach Anthropic's API and so
+dependency installs and git remotes work. (`internal` and `none` network modes
+exist in the runtime layer, but no setting or tool selects them for a thread.)
 
 ### Memory and CPUs
 
@@ -93,17 +85,10 @@ Removing a harness container also discards its native Claude history. If that
 history is missing, the thread can recover with a fresh session and recent saved
 conversation context; this does not recreate the complete native transcript.
 
-`vm_exec` returns the command exit code and bounded stdout/stderr. A nonzero exit
-is a normal tool result. The default deadline is 300 seconds (1–3600 accepted);
-GNU `timeout` sends TERM inside the guest, then KILL after five seconds. A timeout
-normally returns 124, or 137 when escalation is necessary. This is a command
-deadline, not a security boundary against deliberately detached processes.
-
-Call `exit_vm` when finished. It removes the VM's ephemeral filesystem and leaves
-the mounted host files intact. Detached VMs survive plugin reloads; the same
-thread can reconnect with `vm_exec` or remove its VM with `exit_vm`. Cleanup is
-explicit, so call `exit_vm` before deleting the thread. Changing working directory
-does not change an existing mount: exit and enter again to switch workspaces.
+Detached containers survive plugin reloads. A harness container is torn down
+automatically when its thread is deleted or archived. Changing the working
+directory does not change an existing mount: the container keeps its original
+`/work` mount.
 
 ### Opening a server running in the VM from the host browser
 
@@ -123,7 +108,7 @@ sandbox container, those tools therefore **forward the port automatically**:
    URL is opened unchanged (host server intended).
 4. If neither side listens, the tool fails with an actionable error instead of a
    browser `ERR_CONNECTION_REFUSED`: start the server first, and run it in the
-   background (`nohup … &`) because `vm_exec` returns when its command ends.
+   background (`nohup … &`) because a shell command returns when it ends.
 
 Works for servers bound to `127.0.0.1`, `0.0.0.0`, or `::1` in the guest. (The
 VM's own IP, shown by `container ls`, only reaches `0.0.0.0` binds, and
@@ -167,8 +152,7 @@ this feature changes nothing for any existing user until the image exists**
 (via **Set up sandbox** or a manual build), because `harnessVmMode: 'auto'`'s
 capability check includes "does this image exist," which is false until then.
 
-Configure under Settings → Tools, next to the sandbox VM image/network
-controls:
+Configure under Settings → Tools, next to the sandbox setup controls:
 
 | Setting | Behavior |
 | --- | --- |
@@ -187,18 +171,15 @@ setup-fixable ones (`runtime-missing`, `runtime-stopped`, `image-missing`) in
 `auto` mode trigger the in-thread offer, at most once per thread per app session.
 
 **One container per thread, shared.** A VM-routed thread's harness process and
-its `vm_exec` tool use the *same* container — the
+its other commands use the *same* container — the
 harness is just another thing `container exec` runs inside it. This means a
-`vm_exec` command now runs alongside a process holding live Anthropic
+command now runs alongside a process holding live Anthropic
 credentials in its environment; those credentials are passed via `--env` flags
 scoped to the harness's own `container exec` invocation only, never to
-`container run`, so an ordinary `vm_exec ; env` does not print them — but be
-aware the boundary is narrower than an agent-only sandbox. VM-routed sessions
-omit `enter_vm` and `exit_vm` from both MCP surfaces and their tool aliases:
-the harness already runs inside the container, and its native shell and file
-tools use the guest filesystem. Host-local sessions, including automatic
-fallbacks, retain all three tools. The underlying lifecycle guard still refuses to
-remove a container the harness is still attached to; it is torn down
+`container run`, so an ordinary `env` in the thread's shell does not print them — but be
+aware the boundary is narrower than an agent-only sandbox. The harness's native
+shell and file tools use the guest filesystem; host-local sessions (including
+automatic fallbacks) run on the Mac as usual. A container hosting a harness is torn down
 automatically when the thread is deleted or archived, not at ordinary session
 close (so a lingering or quickly-restarted session doesn't pay container-start
 latency every turn).
@@ -225,7 +206,7 @@ session is untouched):
 
 Paths are resolved with `realpath` before mounting, deduped, and skipped when
 missing or when they contain `:`. Mounts are `--volume host:guest:ro`; the
-plugin never writes into `~/.claude`. Because `vm_exec` shares the container,
+plugin never writes into `~/.claude`. Because the agent shares the container,
 **the agent can read these mounts** (skills may contain instructions or
 scripts you consider private).
 
@@ -298,8 +279,8 @@ general secret is injected into every session, including host-spawned ones, and
 an environment `CLAUDE_CODE_OAUTH_TOKEN` overrides the host keychain login —
 so a container-only token there would break every host thread the moment it
 expired. Instead it is passed via `--env` only to VM-routed sessions, and only
-on their own `container exec` (never `container run`, so a `vm_exec` call
-cannot read it from the container's environment). It is global rather than
+on their own `container exec` (never `container run`, so another process
+in the container cannot read it from the container's environment). It is global rather than
 per-project — it is your own Claude login — so one sign-in covers every
 container-routed thread and survives containers being recreated.
 

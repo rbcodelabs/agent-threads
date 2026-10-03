@@ -3,8 +3,7 @@
  * inside the thread's sandbox container instead of spawning it on the host.
  *
  * Kept separate from `sandboxVm.ts` (which owns the container runtime
- * primitives shared with the agent-facing `enter_vm`/`vm_exec`/`exit_vm`
- * tools) and from `ThreadSession.ts` (which only needs the resolved routing
+ * primitives) and from `ThreadSession.ts` (which only needs the resolved routing
  * decision, not how it was reached) so each piece stays independently
  * testable without a live `container` runtime or a mocked Agent SDK.
  */
@@ -105,7 +104,7 @@ export async function checkHarnessVmCapability(params: {
 export interface ClaudeVmRoutingInputs {
   mode: HarnessVmMode;
   image: string;
-  /** Per-thread manager, shared with this thread's enter_vm/vm_exec/exit_vm tools (ADR-0015 §3: one container per thread). */
+  /** Per-thread manager (ADR-0015 §3: one container per thread). */
   vmManager: SandboxVmManager;
   /** Host directory to bind-mount at /work — normally the thread's own cwd. */
   mountPath: string;
@@ -156,9 +155,7 @@ export interface ResolvedClaudeVmRouting {
  * starts, regardless of `vmDefaultNetwork` — the containerized `claude`
  * process needs to reach Anthropic's API to do anything at all, so an
  * `'internal'`/`'none'` sandbox default would silently break every VM-routed
- * thread. If the agent later calls `enter_vm` for the same thread, it attaches
- * to this same shared container (ADR-0015 §3) rather than renegotiating the
- * network mode.
+ * thread. The container is shared per thread (ADR-0015 §3).
  */
 export async function resolveClaudeVmRouting(
   inputs: ClaudeVmRoutingInputs,
@@ -231,8 +228,8 @@ export async function resolveClaudeVmRouting(
  * Builds the host-side `container exec` argv for the containerized Claude CLI
  * process, given the SDK's own `SpawnOptions`. Secrets ride `--env` flags
  * scoped to this ONE exec invocation only — never the host spawn's own `env:`
- * object, and never `container run` (ADR-0015 §4's hard requirement: a
- * `vm_exec` call in the same shared container must never see these values).
+ * object, and never `container run` (ADR-0015 §4's hard requirement: any
+ * other process in the same shared container must never see these values).
  */
 export function buildHarnessSpawnArgs(params: {
   containerName: string;

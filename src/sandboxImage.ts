@@ -62,7 +62,7 @@ const STDERR_TAIL_LINES = 15;
  */
 export const HARNESS_DOCKERFILE = `# Harness-hosting image (ADR-0015): adds the Claude Code CLI on top of the
 # existing sandboxed coding environment, so a thread's harness process can run
-# INSIDE the same container that already hosts its enter_vm/vm_exec commands,
+# INSIDE the thread's sandbox container,
 # instead of requiring \`claude\` installed on the host.
 #
 # Deliberately a SEPARATE, opt-in image tag from claude-threads-coding:1 rather

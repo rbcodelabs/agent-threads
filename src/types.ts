@@ -989,21 +989,6 @@ export interface PluginSettings {
    */
   worktreeRoot: string;
   /**
-   * Container image `enter_vm` starts. Built from `sandbox/Dockerfile`
-   * (`container build --tag claude-threads-coding:1 sandbox/`).
-   *
-   * Blank falls back to `claude-threads-coding:1`.
-   */
-  vmImage: string;
-  /**
-   * Network isolation `enter_vm` uses when the call does not specify one.
-   *
-   * Defaults to `'default'` — FULL EGRESS — by explicit product decision: a
-   * sandbox where `npm install` and git remotes fail is one nobody uses.
-   * `'internal'` (host-only) and `'none'` (no route) remain first-class.
-   */
-  vmDefaultNetwork: VmNetworkMode;
-  /**
    * ADR-0015: whether a thread's Claude harness process runs inside its
    * sandbox container instead of being spawned on the host. Defaults to
    * `'auto'`, which is a no-op for any user who hasn't built
@@ -1306,8 +1291,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   opencodeBinaryPath: 'opencode',
   codexComputerUseEnabled: false,
   worktreeRoot: '',
-  vmImage: 'claude-threads-coding:1',
-  vmDefaultNetwork: 'default',
   harnessVmMode: 'auto',
   sandboxVmMemory: '4G',
   sandboxVmCpus: 4,

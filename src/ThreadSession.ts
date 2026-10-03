@@ -375,7 +375,7 @@ export class ThreadSession {
     // Minimal, explicit env for the containerized case — deliberately NOT a
     // `...process.env` spread (ADR-0015 §4's hard requirement: forwarding the
     // full host environment into the container would leak unrelated host
-    // secrets to anything else that runs there, including a `vm_exec` call in
+    // secrets to anything else that runs there, including another command in
     // this same shared container). The host-spawn path keeps process.env
     // exactly as before.
     // The host GitHub wiring (GIT_CONFIG_* naming a host temp-dir credential helper, and a
@@ -468,11 +468,6 @@ export class ThreadSession {
     sdkOptions.toolAliases = {
       EnterWorktree: 'mcp__claude_threads__enter_worktree',
       ExitWorktree: 'mcp__claude_threads__exit_worktree',
-      VmExec: 'mcp__claude_threads__vm_exec',
-      ...(!vmRouting ? {
-        EnterVm: 'mcp__claude_threads__enter_vm',
-        ExitVm: 'mcp__claude_threads__exit_vm',
-      } : {}),
     };
 
     debugLog('[ClaudeThreads] opening thread session', {

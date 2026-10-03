@@ -37,9 +37,7 @@ const CANONICAL_TOOLS = [
   'CronList',
   'CronUpdate',
   'ScheduleWakeup',
-  'enter_vm',
   'enter_worktree',
-  'exit_vm',
   'exit_worktree',
   'github_check_repo',
   'github_list_access',
@@ -86,7 +84,6 @@ const CANONICAL_TOOLS = [
   'vault_list_bridges',
   'vault_restore_file_version',
   'vault_search',
-  'vm_exec',
   'watch_document',
   'workspace_get_active_file',
   'workspace_get_open_tabs',
@@ -101,9 +98,7 @@ const LEGACY_TOOLS = [
   'CronList',
   'CronUpdate',
   'ScheduleWakeup',
-  'enter_vm',
   'enter_worktree',
-  'exit_vm',
   'exit_worktree',
   'github_check_repo',
   'github_list_access',
@@ -154,7 +149,6 @@ const LEGACY_TOOLS = [
   'threads_create',
   'unwatch_document',
   'vault_list',
-  'vm_exec',
   'watch_document',
 ];
 
@@ -165,9 +159,7 @@ const HARNESS_TOOLS = [
   'CronList',
   'CronUpdate',
   'ScheduleWakeup',
-  'enter_vm',
   'enter_worktree',
-  'exit_vm',
   'exit_worktree',
   'github_check_repo',
   'github_list_access',
@@ -214,7 +206,6 @@ const HARNESS_TOOLS = [
   'vault_list_bridges',
   'vault_restore_file_version',
   'vault_search',
-  'vm_exec',
   'watch_document',
   'workspace_get_active_file',
   'workspace_get_open_tabs',
@@ -283,6 +274,14 @@ describe('MCP tool surface is pinned on all three paths', () => {
       .sort();
     expect(readOnly).toEqual(HARNESS_READ_ONLY_TOOLS);
     expect(readOnly).not.toContain('EnterDesignMode');
+  });
+
+  it('does not register the removed sandbox VM tools or their aliases on any path', () => {
+    const { claude_threads: canonical, obsidian: legacy } = surfaces();
+    const removed = ['enter_vm', 'vm_exec', 'exit_vm', 'EnterVm', 'VmExec', 'ExitVm', 'obsidian_enter_vm', 'obsidian_vm_exec', 'obsidian_exit_vm'];
+    for (const names of [canonical.tools.map(t => t.name), legacy.tools.map(t => t.name), canonical.harnessTools.map(t => t.name)]) {
+      for (const name of removed) expect(names).not.toContain(name);
+    }
   });
 
   it('keeps every path the same size and free of duplicates', () => {

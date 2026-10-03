@@ -62,13 +62,11 @@
 - Host tools: `OpenCodeHostToolsBridge` registers as remote MCP server `agent-threads` (tools appear as `agent-threads_<tool>`; OpenCode is told to allow them and the bridge applies `resolveDynamicToolApproval`).
 - The screenshot harness aliases `http` to a throwing stub (`test/harness/mocks/http.ts`) because ThreadManager pulls the adapter into the bundle.
 
-## Sandbox VM Tools (`enter_vm` / `vm_exec` / `exit_vm`)
+## Sandbox VM Runtime (container run mode)
 
-Runs a thread's **commands** inside a lightweight Linux VM while file editing stays on the host.
+The shared runtime behind per-thread container run mode. There are **no model-facing VM tools**: a thread's Claude harness either runs inside its container (native shell and file tools use the guest filesystem) or on the host, selected per thread via **Run in** (see Harness-in-VM Routing below).
 
-The agent's `Read`/`Write`/`Edit`/`Bash` tools run on the host, so the sandbox cannot own the filesystem. Instead `enter_vm` bind-mounts the thread's effective cwd into the guest at `/work` and `vm_exec` runs commands there. Host edits are visible inside the VM immediately — no sync step, no divergence.
-
-Backed by Apple's `container` CLI (macOS 26+, Apple silicon), where each container is its own VM with a separate kernel and no view of the host filesystem beyond that mount.
+Backed by Apple's `container` CLI (macOS 26+, Apple silicon), where each container is its own VM with a separate kernel and no view of the host filesystem beyond its mounts (the thread cwd at `/work`, the vault at `/vault`, read-only external roots and skills).
 
 **Setup:** Settings → Claude → **Set up sandbox** (`sandboxSetup.ts` orchestrates `sandboxRuntime.ts` install/start and `sandboxImage.ts` pull/build; UI in `sandboxSetupPanel.ts`, pure text in `sandboxSetupView.ts`, in-thread offer gating in `sandboxSetupPrompt.ts`). Manual fallback: `brew install container` → `container system start` → build the image:
 
@@ -76,19 +74,15 @@ Backed by Apple's `container` CLI (macOS 26+, Apple silicon), where each contain
 container build --tag claude-threads-coding:1 sandbox/
 ```
 
-**Networking.** `default` is **full egress** by explicit product decision — `npm install`, git remotes and web access have to work out of the box. `internal` attaches a shared `--internal` network (host reachable, no internet), created on demand; `none` passes `--network none`.
+**Networking.** Harness containers use full egress (`default`) — `npm install`, git remotes and Anthropic API access have to work. The runtime layer (`sandboxVm.ts`) still implements `internal` (shared `--internal` network, created on demand) and `none`, but no setting selects them.
 
-**Settings.** `vmImage` and `vmDefaultNetwork`, read lazily through `getVmImage` / `getVmDefaultNetwork` so a change applies on the next call rather than needing a session restart.
+**Settings.** `sandboxVmMemory` / `sandboxVmCpus` (resource limits for new containers), `harnessVmImage`, `harnessVmMode`.
 
-**Execution boundaries.** The mount is read-write and edits persist. Host shell/file
-tools are not redirected. Internal-network reuse verifies `configuration.mode`
-is `hostOnly`. Commands use guest GNU `timeout` with a five-second kill grace;
-the host CLI deadline includes ten seconds of transport grace. See
-[`docs/sandbox-vms.md`](../docs/sandbox-vms.md) for setup and limitations.
+See [`docs/sandbox-vms.md`](../docs/sandbox-vms.md) for setup and limitations.
 
-**No `Thread` field.** The container name is derived deterministically from the thread ID (`claude-threads-vm-<sanitized-id>`), so a container started before a plugin reload is still findable, adoptable by `vm_exec`, and removable by `exit_vm` afterwards. That gets persistence across reloads without persisting ephemeral OS state on the thread.
+**No `Thread` field for the container.** The container name is derived deterministically from the thread ID (`claude-threads-vm-<sanitized-id>`), so a container started before a plugin reload is still findable and adoptable afterwards, and removable at thread deletion. That gets persistence across reloads without persisting ephemeral OS state on the thread.
 
-**Mobile.** `sandboxVm.ts` requires `child_process` inside the runner closure only, so importing it is inert. Every tool returns a clean `{ success: false, error }` with a `brew install container` hint when the CLI is unavailable — it never throws and never affects plugin load.
+**Mobile.** `sandboxVm.ts` requires `child_process` inside the runner closure only, so importing it is inert. Runtime probes return a clean unavailable result with a `brew install container` hint when the CLI is missing — they never throw and never affect plugin load.
 
 ## Harness-in-VM Routing (ADR-0015)
 
@@ -108,9 +102,9 @@ disposed by the existing retained-thread sweep and plugin unload. Only tools are
 advertised and forwarded; unsupported MCP capabilities fail closed. A failed
 `tools/call` is never retried because its side effects may already have occurred.
 
-**Secret scoping is a hard requirement, not a convention.** `sdkOptions.env` for the VM-routed case is built WITHOUT the `...process.env` spread the host path uses — just `CLAUDE_CODE_ENABLE_TODO_TOOLS` + `parseExtraEnv(extraEnvRaw)` + `secretEnv` — and those ride `--env` flags scoped to the harness's own `container exec` invocation only, never `container run`. Forwarding the full host environment, or setting secrets at `run` scope, would leak them to any `vm_exec` command sharing the same container. Any logged exec argv is redacted by **content match** (`redactSecretsInArgv()`), never by array index — a positional slice was the exact bug an early spike hit (see the ADR's "Spike Results").
+**Secret scoping is a hard requirement, not a convention.** `sdkOptions.env` for the VM-routed case is built WITHOUT the `...process.env` spread the host path uses — just `CLAUDE_CODE_ENABLE_TODO_TOOLS` + `parseExtraEnv(extraEnvRaw)` + `secretEnv` — and those ride `--env` flags scoped to the harness's own `container exec` invocation only, never `container run`. Forwarding the full host environment, or setting secrets at `run` scope, would leak them to any other process sharing the same container. Any logged exec argv is redacted by **content match** (`redactSecretsInArgv()`), never by array index — a positional slice was the exact bug an early spike hit (see the ADR's "Spike Results").
 
-**One container per thread, shared with `enter_vm`/`vm_exec`/`exit_vm`.** `main.ts` passes `ThreadManager.getSandboxVmManager(threadId)` into `createClaudeThreadsMcpServers`'s options as `sandboxVmManager`, and `ThreadManager` passes the same instance into `ClaudeVmRoutingInputs.vmManager` — the SAME `SandboxVmManager` object backs both, so container ownership is tracked consistently rather than split across two objects that can't see each other's state. `SandboxVmState.origin` (`'agent' | 'harness'`) records who is responsible: `ensureHarnessContainer()` (called from `resolveClaudeVmRouting`) creates-or-adopts the container and marks it `'harness'`; `enter()` attaches to an already-harness-owned container instead of reporting a collision; `exit()` refuses to remove a harness-owned container unless called with `{ allowHarnessOwned: true }` — reserved for `ThreadManager.deleteThread()`'s own teardown, never the agent-facing `exit_vm` tool. `HarnessSession.close()` deliberately does NOT tear the container down (a lingering session or quick restart shouldn't pay container-start latency every turn); only thread deletion/archive does. (Before this ADR, `deleteThread()` had no sandbox VM teardown call at all, for either agent-started or harness-owned containers — confirmed while implementing this, not merely assumed.)
+**One container per thread.** `ThreadManager.getSandboxVmManager(threadId)` owns the per-thread `SandboxVmManager`; the same instance backs `ClaudeVmRoutingInputs.vmManager`, thread-deletion teardown and host-browser loopback forwarding (`resolveSandboxUrl` in `main.ts`), so container ownership is tracked in one place. `SandboxVmState.origin` (`'agent' | 'harness'`) records who is responsible: `ensureHarnessContainer()` (called from `resolveClaudeVmRouting`) creates-or-adopts the container and marks it `'harness'`; `exit()` refuses to remove a harness-owned container unless called with `{ allowHarnessOwned: true }` — reserved for `ThreadManager.deleteThread()`'s own teardown. `HarnessSession.close()` deliberately does NOT tear the container down (a lingering session or quick restart shouldn't pay container-start latency every turn); only thread deletion/archive does. (Before this ADR, `deleteThread()` had no sandbox VM teardown call at all, for either agent-started or harness-owned containers — confirmed while implementing this, not merely assumed.)
 
 ---
 

@@ -1,7 +1,6 @@
 /**
- * MCP-surface tests for the Geode GitHub connection: discovery tools, the
- * enter_vm/vm_exec envelope (notes + redaction), and that a host without the
- * connection (Obsidian) is unaffected.
+ * MCP-surface tests for the Geode GitHub connection: discovery tools, and
+ * that a host without the connection (Obsidian) is unaffected.
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { App } from 'obsidian';
@@ -14,7 +13,6 @@ vi.mock('@anthropic-ai/claude-agent-sdk/browser', () => ({
 }));
 
 import { createClaudeThreadsMcpServers, type ObsidianMcpServerOptions } from '../../src/ObsidianTools';
-import { containerNameForThread, type VmCommandRunner } from '../../src/sandboxVm';
 import { GithubCredentialBroker, type GithubAuthBridge } from '../../src/githubCredentials';
 
 const app = {
@@ -26,7 +24,6 @@ const app = {
 
 const TOKEN = 'ghu_' + 'z'.repeat(36);
 const THREAD = 't-gh-1';
-const NAME = containerNameForThread(THREAD);
 const MOUNT = fs.realpathSync(os.tmpdir());
 
 type ToolDef = { name: string; handler: (a: unknown, e: unknown) => Promise<{ content: Array<{ text: string }>; isError?: boolean }> };
@@ -46,11 +43,10 @@ function bridge(over: Partial<GithubAuthBridge> = {}): GithubAuthBridge {
   };
 }
 
-function tools(opts: { bridge?: GithubAuthBridge; enabled?: boolean; run?: VmCommandRunner } = {}) {
+function tools(opts: { bridge?: GithubAuthBridge; enabled?: boolean } = {}) {
   const options: ObsidianMcpServerOptions = {
     threadId: THREAD,
     initialCwd: MOUNT,
-    vmCommandRunner: opts.run,
     githubBroker: new GithubCredentialBroker({ bridge: opts.bridge, fetchProfile: async () => ({ id: 1, login: 'octo-user', name: 'Octo' }) }),
     isGithubConnectionEnabled: () => opts.enabled ?? true,
   };
@@ -116,51 +112,5 @@ describe('github_list_access / github_check_repo', () => {
     }
     const both = createClaudeThreadsMcpServers(app) as unknown as Record<string, { tools: Array<{ name: string }> }>;
     expect(both.obsidian!.tools.map((t) => t.name)).toContain('github_list_access');
-  });
-});
-
-describe('enter_vm / vm_exec envelope', () => {
-  function runner() {
-    const calls: Array<{ args: string[]; input?: string }> = [];
-    const run: VmCommandRunner = async (args, opts) => {
-      calls.push({ args: [...args], input: opts.input });
-      const j = args.join(' ');
-      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'nf' };
-      if (j.includes('git remote -v')) return { exitCode: 0, stdout: `origin https://x-access-token:${TOKEN}@github.com/a/b.git`, stderr: `warn ${TOKEN}` };
-      if (args[0] === '--version') return { exitCode: 0, stdout: 'container 1', stderr: '' };
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
-    return { run, calls };
-  }
-
-  it('enter_vm reports the GitHub status note; the token is only ever sent over stdin', async () => {
-    const { run, calls } = runner();
-    const { get } = tools({ bridge: bridge(), run });
-    const { payload } = await call(get('enter_vm'));
-    expect(payload.success).toBe(true);
-    expect(payload.notes.join('\n')).toContain('GitHub');
-    expect(calls.filter((c) => c.input === TOKEN)).toHaveLength(1);
-    expect(JSON.stringify(calls.map((c) => c.args))).not.toContain(TOKEN);
-    expect(JSON.stringify(payload)).not.toContain(TOKEN);
-    void NAME;
-  });
-
-  it('vm_exec masks a token that a command echoes back', async () => {
-    const { run } = runner();
-    const { get } = tools({ bridge: bridge(), run });
-    await call(get('enter_vm'));
-    const { payload } = await call(get('vm_exec'), { command: 'git remote -v' });
-    expect(JSON.stringify(payload)).not.toContain(TOKEN);
-    expect(payload.stdout).toContain('[REDACTED]');
-  });
-
-  it('without a Geode bridge, enter_vm/vm_exec behave as before (no notes, no credential traffic)', async () => {
-    const { run, calls } = runner();
-    const { get } = tools({ bridge: undefined, run });
-    const entered = await call(get('enter_vm'));
-    expect(entered.payload.notes).toBeUndefined();
-    const exec = await call(get('vm_exec'), { command: 'echo hi' });
-    expect(exec.payload.notes).toBeUndefined();
-    expect(calls.every((c) => c.input === undefined)).toBe(true);
   });
 });
