@@ -543,6 +543,10 @@ export class Scheduler {
       // outcome — a gate skip is not a fire but still a completed cycle.
       let gateSkip = false;
       let claimToken: string | undefined;
+      // Set when a loop's target thread was closed and we spun up a replacement:
+      // the item adopts it so later ticks reuse ONE thread instead of spawning
+      // a new one per cycle.
+      let retargetThreadId: string | undefined;
       try {
         // Loop items target an existing thread; fall back to a new thread if it's gone.
         const reuseTarget =
@@ -776,6 +780,7 @@ export class Scheduler {
             const thread = this.options.createThread(current.name, effectiveCwd, current.projectId, current.id);
             await this.options.sendMessage(thread.id, promptToSend);
             current.lastThreadId = thread.id;
+            if (current.targetThreadId && current.origin !== 'wakeup') retargetThreadId = thread.id;
           }
           // A cycle that actually dispatched clears any stale skip reason left
           // by a previous cycle ('gate', 'active-hours' or 'busy'), so CronList
@@ -820,6 +825,7 @@ export class Scheduler {
           completedAt,
           event,
           lastThreadId: current.lastThreadId,
+          targetThreadId: retargetThreadId,
           lastSkipReason: current.lastSkipReason,
           lastGateExitCode: current.lastGateExitCode,
           lastGateError: current.lastGateError,

@@ -10,6 +10,8 @@ export interface ScheduleCompletion {
   completedAt: number;
   event: RunEvent;
   lastThreadId?: string;
+  /** Loop whose target thread was gone: adopt the replacement thread as the new target. */
+  targetThreadId?: string;
   lastSkipReason?: ScheduledItem['lastSkipReason'];
   lastGateExitCode?: number;
   lastGateError?: string;
@@ -228,6 +230,7 @@ export class ScheduleCoordinator {
         ...current,
         lastRun: completion.completedAt,
         lastThreadId: completion.lastThreadId,
+        ...(completion.targetThreadId ? { targetThreadId: completion.targetThreadId } : {}),
         lastSkipReason: completion.lastSkipReason,
         lastGateExitCode: completion.lastGateExitCode,
         lastGateError: completion.lastGateError,
