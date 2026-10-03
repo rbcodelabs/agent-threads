@@ -15,8 +15,8 @@
 Use squash merges. Order: smallest / most isolated first, largest / most risky last.
 
 ```bash
-gh pr merge <number> --repo rbcodelabs/obsidian-claude-threads --squash --delete-branch
-git -C ~/projects/obsidian-claude-threads pull origin main
+gh pr merge <number> --repo rbcodelabs/agent-threads --squash --delete-branch
+git -C ~/projects/agent-threads pull origin main
 ```
 
 ---
@@ -24,8 +24,8 @@ git -C ~/projects/obsidian-claude-threads pull origin main
 ## Step 2 — Create Release Worktree
 
 ```bash
-git -C ~/projects/obsidian-claude-threads pull origin main
-git -C ~/projects/obsidian-claude-threads worktree add ~/.geode/worktrees/obsidian-claude-threads/chore/vX.Y.Z-release -b chore/vX.Y.Z-release
+git -C ~/projects/agent-threads pull origin main
+git -C ~/projects/agent-threads worktree add ~/.geode/worktrees/agent-threads/chore/vX.Y.Z-release -b chore/vX.Y.Z-release
 ```
 
 ---
@@ -89,10 +89,10 @@ gh pr create --title "chore: bump version to vX.Y.Z" ...
 
 ```bash
 gh pr merge <number> --squash --delete-branch
-git -C ~/projects/obsidian-claude-threads pull origin main
+git -C ~/projects/agent-threads pull origin main
 
-git -C ~/projects/obsidian-claude-threads tag "vX.Y.Z"
-git -C ~/projects/obsidian-claude-threads push origin "vX.Y.Z"
+git -C ~/projects/agent-threads tag "vX.Y.Z"
+git -C ~/projects/agent-threads push origin "vX.Y.Z"
 ```
 
 ---
@@ -107,7 +107,7 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
 
 Verify it appeared:
 ```bash
-gh release view "vX.Y.Z" --repo rbcodelabs/obsidian-claude-threads
+gh release view "vX.Y.Z" --repo rbcodelabs/agent-threads
 ```
 
 ---
@@ -117,7 +117,7 @@ gh release view "vX.Y.Z" --repo rbcodelabs/obsidian-claude-threads
 The auto-generated notes just say "Auto-generated release assets." Replace them:
 
 ```bash
-gh release edit "vX.Y.Z" --repo rbcodelabs/obsidian-claude-threads --notes "..."
+gh release edit "vX.Y.Z" --repo rbcodelabs/agent-threads --notes "..."
 ```
 
 ---
@@ -127,8 +127,8 @@ gh release edit "vX.Y.Z" --repo rbcodelabs/obsidian-claude-threads --notes "..."
 Post a "Shipped in" comment on every feature/fix PR included in the release:
 
 ```bash
-gh pr comment <number> --repo rbcodelabs/obsidian-claude-threads \
-  --body "Shipped in [vX.Y.Z](https://github.com/rbcodelabs/obsidian-claude-threads/releases/tag/vX.Y.Z)."
+gh pr comment <number> --repo rbcodelabs/agent-threads \
+  --body "Shipped in [vX.Y.Z](https://github.com/rbcodelabs/agent-threads/releases/tag/vX.Y.Z)."
 ```
 
 Skip version-bump PRs (`chore: bump version`) and release PRs (`release: vX.Y.Z`).
