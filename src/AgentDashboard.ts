@@ -336,6 +336,11 @@ export class AgentDashboard extends ItemView {
         .setChecked(this.selectedProjectId === project.id)
         .onClick(() => this.selectProject(project.id)));
     }
+    menu.addSeparator();
+    menu.addItem(item => item
+      .setTitle('New Project…')
+      .setIcon('folder-plus')
+      .onClick(() => this.plugin.openNewProjectSettings()));
     menu.showAtMouseEvent(event);
   }
 

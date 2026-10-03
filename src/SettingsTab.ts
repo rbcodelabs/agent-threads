@@ -1132,6 +1132,11 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   private selectedProjectId: string | null = null;
   private selectedSecretName: string | null = null;
 
+  showNewProject(): void {
+    this.activeTab = 'projects';
+    this.selectedProjectId = '';
+  }
+
   constructor(
     app: App,
     private plugin: ClaudeThreadsPlugin,
@@ -1769,7 +1774,8 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.defaultCwd = value;
             await this.plugin.saveSettings();
-          }),
+          })
+          .then((component) => this.addDirectoryBrowse(component.inputEl, this.plugin.settings.defaultCwd || undefined)),
       );
 
     // — Environment —
@@ -2103,6 +2109,37 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     return input;
   }
 
+  /** Adds a "Browse…" button beside a path input that opens the native folder picker (desktop only). */
+  private addDirectoryBrowse(input: HTMLInputElement, defaultPath?: string): void {
+    if (Platform.isMobile) return;
+    const row = createDiv({ cls: 'ct-manager-path-row' });
+    row.style.display = 'flex';
+    row.style.gap = '8px';
+    input.parentElement?.insertBefore(row, input);
+    row.appendChild(input);
+    input.style.flex = '1';
+    const browse = row.createEl('button', { text: 'Browse…', attr: { type: 'button', 'aria-label': 'Browse for working directory' } });
+    browse.addEventListener('click', async (event) => {
+      event.preventDefault();
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const electron = require('electron') as any;
+        const dialog = electron.remote?.dialog ?? (require('@electron/remote') as any).dialog;
+        const result = await dialog.showOpenDialog({
+          title: 'Choose working directory',
+          defaultPath: input.value.trim() || defaultPath,
+          properties: ['openDirectory', 'createDirectory'],
+        });
+        if (result.canceled || !result.filePaths?.[0]) return;
+        input.value = result.filePaths[0];
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      } catch (err) {
+        new Notice('Folder picker is unavailable in this environment. Type the path instead.');
+        console.error('[ClaudeThreads] directory picker failed', err);
+      }
+    });
+  }
+
   private renderProjectsTab(containerEl: HTMLElement): void {
     this.renderManagerHeader(containerEl, 'Projects', 'Group threads and keep each agent focused on the right context.', 'New project', () => {
       this.selectedProjectId = '';
@@ -2157,6 +2194,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const cwd = this.createManagerField(form, 'Filesystem working directory', project?.cwdOverride ?? '', {
       placeholder: 'Optional absolute path', description: project ? `Effective cwd: ${this.plugin.manager.getProjectCwd(project)}` : 'Leave blank to derive it from the vault folder.',
     }) as HTMLInputElement;
+    this.addDirectoryBrowse(cwd, project?.cwdOverride || undefined);
     const description = this.createManagerField(form, 'Project context', project?.description ?? '', {
       textarea: true, placeholder: 'Goals, conventions, and key files…', description: 'Injected into the agent system prompt for every thread in this project.',
     }) as HTMLTextAreaElement;
