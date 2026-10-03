@@ -12,7 +12,7 @@
 
 import type { ArtifactActionResult, ArtifactStoreHost } from './ArtifactContributions';
 import type { ThreadArtifactRecord } from './types';
-import { allocateStorageRoot, removeStorageRoot, resolveStorageRoot, type ArtifactStorageFs, type StorageRootResolution } from './artifactStorage';
+import { allocateStorageRoot, removeStorageRoot, resolveStorageRoot, type AllocateStorageRootOptions, type ArtifactStorageFs, type StorageRootResolution } from './artifactStorage';
 
 export interface ArtifactStoreDeps {
   /** Absolute vault path, or '' where the host has no local filesystem. */
@@ -49,8 +49,8 @@ export function createArtifactStore(deps: ArtifactStoreDeps): ArtifactStoreHost 
       return resolveStorageRoot(deps.vaultRoot(), candidate, deps.storageFs);
     },
 
-    allocateStorageRoot(artifactId: unknown): Promise<StorageRootResolution & { existed?: boolean }> {
-      return allocateStorageRoot(deps.vaultRoot(), artifactId, deps.storageFs);
+    allocateStorageRoot(artifactId: unknown, options?: AllocateStorageRootOptions): Promise<StorageRootResolution & { existed?: boolean }> {
+      return allocateStorageRoot(deps.vaultRoot(), artifactId, deps.storageFs, options);
     },
 
     releaseStorageRoot(candidate: unknown): Promise<boolean> {

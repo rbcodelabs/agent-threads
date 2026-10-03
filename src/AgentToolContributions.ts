@@ -26,7 +26,7 @@
 
 import { z } from 'zod';
 import type { PeerIdentity } from './ArtifactContributions';
-import type { StorageAllocationResult, ThreadPermissionSnapshot } from './types';
+import type { StorageAllocationOptions, StorageAllocationResult, ThreadPermissionSnapshot } from './types';
 
 /** A tool result, in the same shape the built-in MCP handlers already return. */
 export interface AgentToolResult {
@@ -46,8 +46,8 @@ export interface AgentToolResult {
 export interface AgentToolHost {
   /** Effective permission mode and pending-plan state for the calling thread. */
   permissions(): Promise<ThreadPermissionSnapshot | null>;
-  /** Creates and returns the host-owned storage root for `artifactId`. */
-  allocateStorage(artifactId: string): Promise<StorageAllocationResult>;
+  /** Creates and returns the host-owned storage root for `artifactId`. See `artifacts.allocateStorage` for `options`. */
+  allocateStorage(artifactId: string, options?: StorageAllocationOptions): Promise<StorageAllocationResult>;
 }
 
 export interface AgentToolContribution {

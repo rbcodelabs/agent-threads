@@ -14,7 +14,7 @@
  */
 
 import type { ThreadArtifactRecord } from './types';
-import type { StorageRootResolution } from './artifactStorage';
+import type { AllocateStorageRootOptions, StorageRootResolution } from './artifactStorage';
 
 /** Namespaced owner identity supplied by the registering plugin. */
 export interface PeerIdentity {
@@ -37,7 +37,8 @@ export interface ThreadArtifactRef {
    * Absolute directory this artifact's files live in, if it has any. The one
    * deliberately non-opaque field: the host needs it to garbage-collect
    * storage when the owning thread is deleted (ADR-0010). Validated against
-   * the vault artifact root on the way in — see `src/artifactStorage.ts`.
+   * an allowlisted artifact root (hidden `.geode/artifacts` or visible
+   * `Designs`) on the way in — see `src/artifactStorage.ts`.
    */
   readonly storageRoot?: string;
 }
@@ -141,13 +142,15 @@ export interface ArtifactPatch {
 export interface ArtifactStoreHost {
   /** Records for a thread, or `null` when no such thread exists. */
   list(threadId: string): readonly ThreadArtifactRecord[] | null;
-  /** Validates a peer-supplied storage root against the vault artifact root. */
+  /** Validates a peer-supplied storage root against the artifact-root allowlist. */
   resolveStorageRoot(candidate: unknown): StorageRootResolution;
   /**
    * Creates and returns the host-owned storage root for `artifactId`.
    * Idempotent: an existing root comes back untouched, with `existed: true`.
+   * `options.location: 'visible'` allocates under `<vault>/Designs`; see
+   * `allocateStorageRoot` in `src/artifactStorage.ts`.
    */
-  allocateStorageRoot(artifactId: unknown): Promise<StorageRootResolution & { existed?: boolean }>;
+  allocateStorageRoot(artifactId: unknown, options?: AllocateStorageRootOptions): Promise<StorageRootResolution & { existed?: boolean }>;
   /** Removes an allocated root after a provisional operation rolls back. */
   releaseStorageRoot(candidate: unknown): Promise<boolean>;
   /** Inserts, or updates in place when an artifact with the same id exists. */

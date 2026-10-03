@@ -511,6 +511,19 @@ export interface ThreadPermissionSnapshot {
 }
 
 /**
+ * Options for `artifacts.allocateStorage`. Omitting them (or `location:
+ * 'hidden'`) keeps the original behavior: `<vault>/.geode/artifacts/<artifactId>`.
+ * `'visible'` allocates `<vault>/Designs/<folderName>` instead (ADR-0010
+ * addendum). Hosts without the `artifacts.visibleStorage` capability ignore
+ * these options and allocate hidden.
+ */
+export interface StorageAllocationOptions {
+  readonly location?: 'hidden' | 'visible';
+  /** Visible only. Sanitized and de-duplicated by the host; defaults to the artifact id. */
+  readonly folderName?: string;
+}
+
+/**
  * Outcome of `artifacts.allocateStorage`. The host creates the directory and
  * returns it, so an artifact root is a contract rather than a convention a
  * peer has to reproduce from an undisclosed vault layout.

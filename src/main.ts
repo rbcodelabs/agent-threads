@@ -1,4 +1,4 @@
-import type { AgentHarness } from './types';
+import type { AgentHarness, StorageAllocationOptions } from './types';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createPublicThreadLifecycle } from './publicThreadLifecycle';
@@ -3531,12 +3531,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private agentToolHost(threadId: string): AgentToolHost {
     return {
       permissions: async () => (await this.api?.v1.threads.permissions(threadId)) ?? null,
-      allocateStorage: async (artifactId: string) => {
+      allocateStorage: async (artifactId: string, options?: StorageAllocationOptions) => {
         const api = this.api?.v1;
         if (!api) {
           return { success: false, status: 'unavailable', artifactId, message: 'Agent Threads public API is unavailable.' };
         }
-        return api.artifacts.allocateStorage(threadId, artifactId);
+        return api.artifacts.allocateStorage(threadId, artifactId, options);
       },
     };
   }
