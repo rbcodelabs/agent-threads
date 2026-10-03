@@ -92,6 +92,21 @@ interface GrantConfig {
   audience?: string;
 }
 
+/**
+ * Appends `offline_access` when the authorization server advertises it and the
+ * request does not already carry it. Without it, servers such as Vercel issue
+ * a ~1h access token and no refresh token, so every thread loses the server
+ * the moment the token expires. Servers that do not advertise the scope are
+ * left alone: asking an AS for a scope it does not know can fail the request.
+ */
+export function withOfflineAccess(scopes: string | undefined, asMetadata: OAuthASMetadata): string | undefined {
+  const supported = asMetadata.authorizationServerMetadata?.scopes_supported;
+  if (!Array.isArray(supported) || !supported.includes('offline_access')) return scopes;
+  const parts = (scopes ?? '').split(/\s+/).filter(Boolean);
+  if (parts.includes('offline_access')) return scopes;
+  return [...parts, 'offline_access'].join(' ');
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -409,8 +424,10 @@ export class OAuthMcpRegistry {
     // lists 22, spanning Jira, Confluence and Compass). Pass `scopes`
     // explicitly to request least privilege — an explicit value always wins.
     const advertisedScopes = asMetadata.resourceMetadata?.scopes_supported;
-    const effectiveScopes = entry.scopes
+    const baseScopes = entry.scopes
       ?? (Array.isArray(advertisedScopes) && advertisedScopes.length > 0 ? advertisedScopes.join(' ') : undefined);
+    // Default to a renewable grant: see withOfflineAccess().
+    const effectiveScopes = withOfflineAccess(baseScopes, asMetadata);
     if (!entry.scopes && effectiveScopes) {
       console.log(`[OAuthMcpRegistry] No scopes given for "${entry.name}"; requesting the ${advertisedScopes?.length} advertised by the resource: ${effectiveScopes}`);
     }

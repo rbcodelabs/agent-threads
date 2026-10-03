@@ -52,7 +52,7 @@ vi.mock('../../src/OAuthMcpProxy', () => ({
 
 // vi.mock calls above are hoisted above these imports by Vitest, so
 // OAuthMcpRegistry picks up the mocked OAuthMcpFlow/OAuthMcpProxy modules.
-import { OAuthMcpRegistry } from '../../src/OAuthMcpRegistry';
+import { OAuthMcpRegistry, withOfflineAccess } from '../../src/OAuthMcpRegistry';
 import { OAuthTokenStore } from '../../src/OAuthTokenStore';
 
 function fakeSecretStorage() {
@@ -70,13 +70,13 @@ function fakeSecretStorage() {
  * deliberately carries `scopes_supported: null`, matching Atlassian — which is
  * why the resource half is the only usable source of scope names.
  */
-function fakeAsMetadata(opts: { withoutRegistrationEndpoint?: boolean; scopesSupported?: string[] | null } = {}) {
+function fakeAsMetadata(opts: { withoutRegistrationEndpoint?: boolean; scopesSupported?: string[] | null; asScopesSupported?: string[] } = {}) {
   const authorizationServerMetadata: Record<string, unknown> = {
     issuer: 'https://as.example.com',
     authorization_endpoint: 'https://as.example.com/authorize',
     token_endpoint: 'https://as.example.com/token',
     response_types_supported: ['code'],
-    scopes_supported: null,
+    scopes_supported: opts.asScopesSupported ?? null,
     revocation_endpoint: 'https://as.example.com/revoke',
   };
   if (!opts.withoutRegistrationEndpoint) authorizationServerMetadata.registration_endpoint = 'https://as.example.com/register';
@@ -517,6 +517,23 @@ describe('OAuthMcpRegistry.registerServer', () => {
       expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ scopes: undefined }));
       expect(settings.oauthMcpServers.vercel.scopes).toBeUndefined();
     }
+  });
+
+  it('adds offline_access when the authorization server advertises it, even if the caller asked for openid only', async () => {
+    discoverASMock.mockResolvedValue(fakeAsMetadata({ scopesSupported: ['openid'], asScopesSupported: ['openid', 'offline_access'] }));
+    const { host, settings } = makeHost();
+
+    const result = await new OAuthMcpRegistry(host).registerServer({ name: 'vercel', url: 'https://mcp.vercel.com/', scopes: 'openid' });
+
+    expect(result.success).toBe(true);
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ scopes: 'openid offline_access' }));
+    expect(settings.oauthMcpServers.vercel.scopes).toBe('openid offline_access');
+  });
+
+  it('does not add offline_access when the authorization server does not advertise it', () => {
+    expect(withOfflineAccess('openid', fakeAsMetadata({ asScopesSupported: ['openid'] }) as never)).toBe('openid');
+    expect(withOfflineAccess('openid offline_access', fakeAsMetadata({ asScopesSupported: ['offline_access'] }) as never)).toBe('openid offline_access');
+    expect(withOfflineAccess(undefined, fakeAsMetadata({ asScopesSupported: ['offline_access'] }) as never)).toBe('offline_access');
   });
 
   it('fails cleanly when DCR is required but unsupported by the authorization server', async () => {

@@ -108,12 +108,12 @@ describe('OAuthMcpProxy — capability tokens', () => {
     expect(fresh.status).toBe(200);
   });
 
-  it('returns 401 with a structured MCP error when no access token is available', async () => {
+  it('returns 503 (not 401, which would trigger SDK-side OAuth) with a structured MCP error when no access token is available', async () => {
     const { proxy } = setup({ accessToken: null });
     await proxy.start();
     const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': token }, body: '{}' });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ jsonrpc: '2.0', error: { code: -32001 } });
   });
 });
@@ -220,7 +220,7 @@ describe('OAuthMcpProxy — 401 refresh-and-retry', () => {
     await proxy.start();
     const token = proxy.capabilityTokenFor('thread-1');
     const res = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': token }, body: '{}' });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(503);
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(upstream).toHaveBeenCalledTimes(2);
   });
