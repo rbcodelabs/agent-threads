@@ -78,6 +78,8 @@ const PROJECT_SECTION_MAP: Record<ThreadRowState, { label: string; state: RowSta
   empty:           { label: 'Ready', state: 'empty' },
 };
 
+const NEW_PROJECT_VALUE = '__new_project__';
+
 export class KanbanView extends ItemView {
   private plugin: ClaudeThreadsPlugin;
   private manager: ThreadManager;
@@ -362,7 +364,14 @@ export class KanbanView extends ItemView {
     const label = container.createEl('label', { cls: 'ct-dispatch-project' });
     label.createSpan({ text: 'Project', cls: 'ct-dispatch-project-label' });
     this.projectSelectEl = label.createEl('select', { attr: { 'aria-label': 'Dispatch Project' } });
-    this.projectSelectEl.addEventListener('change', () => { this.selectedProjectId = this.projectSelectEl.value; });
+    this.projectSelectEl.addEventListener('change', () => {
+      if (this.projectSelectEl.value === NEW_PROJECT_VALUE) {
+        this.projectSelectEl.value = this.selectedProjectId;
+        this.plugin.openNewProjectSettings();
+        return;
+      }
+      this.selectedProjectId = this.projectSelectEl.value;
+    });
     this.refreshProjectSelector();
   }
 
@@ -373,6 +382,7 @@ export class KanbanView extends ItemView {
     for (const project of this.manager.getProjects()) {
       select.createEl('option', { text: project.name, attr: { value: project.id } });
     }
+    select.createEl('option', { text: 'New Project…', attr: { value: NEW_PROJECT_VALUE } });
     const selectionStillExists = !this.selectedProjectId || this.manager.getProject(this.selectedProjectId);
     if (!selectionStillExists) this.selectedProjectId = '';
     select.value = this.selectedProjectId;
