@@ -488,6 +488,81 @@ describe('permission handler', () => {
   });
 });
 
+describe('AskUserQuestion handler', () => {
+  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  const q = (text: string) => [{ question: text, header: 'h', options: [{ label: 'a', description: '' }], multiSelect: false }] as any;
+
+  it('serializes concurrent questions on one thread', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    const asked: string[] = [];
+    const responders: Array<(a: Record<string, string>) => void> = [];
+    manager.questionHandler = (_id, questions) => new Promise((resolve) => {
+      asked.push(questions[0].question);
+      responders.push(resolve);
+    });
+
+    await manager.sendMessage(thread.id, 'Hi');
+    const first = mock.callbacks!.onAskUserQuestion(q('one'));
+    const second = mock.callbacks!.onAskUserQuestion(q('two'));
+    await flush();
+
+    expect(asked).toEqual(['one']);
+    expect(thread.pendingQuestions?.[0].question).toBe('one');
+
+    responders[0]({ one: 'a' });
+    await expect(first).resolves.toEqual({ one: 'a' });
+    await flush();
+
+    expect(asked).toEqual(['one', 'two']);
+    expect(thread.pendingQuestions?.[0].question).toBe('two');
+
+    responders[1]({ two: 'b' });
+    await expect(second).resolves.toEqual({ two: 'b' });
+    expect(thread.pendingQuestions).toBeUndefined();
+    driveResponse('Done');
+  });
+
+  it('a rejected earlier question does not block the next one', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    let call = 0;
+    manager.questionHandler = async () => {
+      call += 1;
+      if (call === 1) throw new Error('boom');
+      return { ok: 'yes' };
+    };
+
+    await manager.sendMessage(thread.id, 'Hi');
+    const first = mock.callbacks!.onAskUserQuestion(q('one'));
+    const second = mock.callbacks!.onAskUserQuestion(q('two'));
+    await expect(first).rejects.toThrow('boom');
+    await expect(second).resolves.toEqual({ ok: 'yes' });
+    driveResponse('Done');
+  });
+
+  it('interrupt releases the active question and drops queued ones without prompting', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    const asked: string[] = [];
+    manager.questionHandler = (id, questions) => new Promise((resolve) => {
+      asked.push(questions[0].question);
+      manager.registerQuestionResolver(id, resolve);
+    });
+
+    await manager.sendMessage(thread.id, 'Hi');
+    const first = mock.callbacks!.onAskUserQuestion(q('one'));
+    const second = mock.callbacks!.onAskUserQuestion(q('two'));
+    await flush();
+
+    await manager.interrupt(thread.id);
+    await expect(first).resolves.toEqual({});
+    await expect(second).resolves.toEqual({});
+    expect(asked).toEqual(['one']);
+    expect(thread.pendingQuestions).toBeUndefined();
+  });
+});
+
 describe('tool use events', () => {
   it('emits tool_use event and stores tool calls on message', async () => {
     const manager = makeManager();

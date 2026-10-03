@@ -253,6 +253,14 @@ export class ThreadManager {
    */
   private permissionQueue: Map<string, Promise<unknown>> = new Map();
   /**
+   * Same single-slot problem for AskUserQuestion (`pendingQuestionResolvers`
+   * and `thread.pendingQuestions` are per-thread): chain parallel questions.
+   * `questionInterruptEpoch` lets interrupt() drop queued questions instead of
+   * having each one pop up after the user pressed stop.
+   */
+  private questionQueue: Map<string, Promise<unknown>> = new Map();
+  private questionInterruptEpoch: Map<string, number> = new Map();
+  /**
    * In-memory store for pending AskUserQuestion answer resolvers, keyed by
    * thread ID. Mirrors `permissionResolvers` — the *state* (the questions
    * themselves) is persisted on `thread.pendingQuestions` like `pendingPlan`,
@@ -2633,8 +2641,10 @@ export class ThreadManager {
           }
         };
         // Run after the previous prompt settles, whether it allowed, denied or threw.
-        const previous = this.permissionQueue.get(threadId) ?? Promise.resolve();
-        const result = previous.then(prompt, prompt);
+        // Start immediately (synchronously) when nothing is queued so state is
+        // visible to callers right away; otherwise wait for the predecessor.
+        const previous = this.permissionQueue.get(threadId);
+        const result = previous ? previous.then(prompt, prompt) : prompt();
         const tail = result.catch(() => undefined);
         this.permissionQueue.set(threadId, tail);
         void tail.then(() => {
@@ -2642,23 +2652,39 @@ export class ThreadManager {
         });
         return result;
       },
-      onAskUserQuestion: async (questions) => {
-        if (!isCurrentGeneration()) return {};
-        // Persist the question set so the card can be restored after a
-        // reload/crash OR after the user switches threads mid-session,
-        // mirroring the pendingPlan pattern.
-        thread.pendingQuestions = questions;
-        thread.updatedAt = Date.now();
-        this.emit(threadId, { type: 'pending_question_changed', questions });
-        this.emit(threadId, { type: 'question_ready', questions });
-        try {
-          return await this.questionHandler(threadId, questions);
-        } finally {
-          delete thread.pendingQuestions;
+      onAskUserQuestion: (questions) => {
+        if (!isCurrentGeneration()) return Promise.resolve({});
+        const epochAtEnqueue = this.questionInterruptEpoch.get(threadId) ?? 0;
+        const prompt = async (): Promise<Record<string, string>> => {
+          // Re-check: the session may have been replaced or interrupted while queued.
+          if (!isCurrentGeneration()) return {};
+          if ((this.questionInterruptEpoch.get(threadId) ?? 0) !== epochAtEnqueue) return {};
+          // Persist the question set so the card can be restored after a
+          // reload/crash OR after the user switches threads mid-session,
+          // mirroring the pendingPlan pattern.
+          thread.pendingQuestions = questions;
           thread.updatedAt = Date.now();
-          this.pendingQuestionResolvers.delete(threadId);
-          this.emit(threadId, { type: 'pending_question_changed', questions: undefined });
-        }
+          this.emit(threadId, { type: 'pending_question_changed', questions });
+          this.emit(threadId, { type: 'question_ready', questions });
+          try {
+            return await this.questionHandler(threadId, questions);
+          } finally {
+            delete thread.pendingQuestions;
+            thread.updatedAt = Date.now();
+            this.pendingQuestionResolvers.delete(threadId);
+            this.emit(threadId, { type: 'pending_question_changed', questions: undefined });
+          }
+        };
+        // Start immediately (synchronously) when nothing is queued so state is
+        // visible to callers right away; otherwise wait for the predecessor.
+        const previous = this.questionQueue.get(threadId);
+        const result = previous ? previous.then(prompt, prompt) : prompt();
+        const tail = result.catch(() => undefined);
+        this.questionQueue.set(threadId, tail);
+        void tail.then(() => {
+          if (this.questionQueue.get(threadId) === tail) this.questionQueue.delete(threadId);
+        });
+        return result;
       },
       onAskUserQuestionCanceled: () => {
         if (!isCurrentGeneration()) return;
@@ -3092,6 +3118,7 @@ export class ThreadManager {
       // AskUserQuestion blocks inside canUseTool until its answer promise
       // resolves. Release that promise before interrupting the query so the
       // question card and resolver cannot survive into later turns.
+      this.questionInterruptEpoch.set(threadId, (this.questionInterruptEpoch.get(threadId) ?? 0) + 1);
       this.pendingQuestionResolvers.get(threadId)?.({});
       await session.interrupt();
     }
