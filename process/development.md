@@ -64,47 +64,17 @@ Pass criteria: zero type errors, all unit tests green, screenshot count unchange
 
 ---
 
-## Test Vaults
-
-For live integration testing, spin up an isolated Obsidian vault with the current plugin build:
-
-```bash
-npm run vault           # build + create test vault (first time)
-npm run vault:update    # rebuild + re-copy dist into existing vault
-npm run vault:open      # build + create + open in Obsidian
-```
-
-Each worktree branch gets its own vault at `~/.claude/test-vaults/ct-<branch-name>/`.
-Vaults are pre-seeded with `Testing Notes.md` and `Branch Changes.md`.
-Multiple test vaults can be open in separate Obsidian windows simultaneously.
-
-**First open:** Obsidian will prompt to enable community plugins once per vault. Click "Turn off Restricted Mode."
-
-**Iteration workflow:**
-1. Make code changes in the worktree
-2. Run `npm run vault:update` to rebuild and re-copy
-3. In Obsidian, run **Reload app without saving** (Cmd+R) to pick up the new build
-
----
-
 ## Dev Builds in the Live Vault
 
-Sometimes a feature needs to be tested in the real vault rather than a test vault.
+Sometimes a feature needs to be tested in the real vault. We run Geode, not Obsidian.
 
-**Get the target directory right — it is host-specific, and the wrong one fails silently.** The plugin appears to deploy, the app is restarted, and the feature simply is not there:
-
-| Host | Plugin directory |
-|---|---|
-| **Geode** | `<vault>/.geode/plugins/claude-threads/` |
-| Obsidian | `<vault>/.obsidian/plugins/claude-threads/` |
-
-Both directories usually exist in the same vault, and both can contain a `claude-threads` install, so the presence of one proves nothing about which the running app loads. Confirm before copying:
+**Get the target directory right — the wrong one fails silently.** The plugin appears to deploy, the app is restarted, and the feature simply is not there. Geode loads `<vault>/.geode/plugins/claude-threads/`. A leftover `<vault>/.obsidian/plugins/claude-threads/` install is not loaded; ignore it. Confirm before copying:
 
 ```bash
 # Which vault is Geode actually in?
 cat ~/Library/Application\ Support/geode/geode.json   # → lastVault
-# Which install is live? Compare mtimes; the running host writes data.json constantly.
-ls -la "<vault>/.geode/plugins/claude-threads" "<vault>/.obsidian/plugins/claude-threads"
+# The running app writes data.json constantly; check its mtime.
+ls -la "<vault>/.geode/plugins/claude-threads"
 ```
 
 Also resolve `<vault>` against the real vault root. On the primary machine that is the iCloud path (`~/Library/Mobile Documents/com~apple~CloudDocs/Documents/Personal`); `~/Documents/Personal` is a *different* directory that shadows it, so writes there land somewhere nothing reads.
