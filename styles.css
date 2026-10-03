@@ -7622,12 +7622,13 @@ body.ct-skills-resizing {
     max-width: none;
   }
 
-  .ct-skills-list .ct-skills-tree-source--github {
+  .ct-skills-list .ct-skills-tree-source {
     min-height: 44px;
     padding-block: 0;
   }
 
-  .ct-skills-tree-source .ct-skills-tree-toggle--button {
+  .ct-skills-tree-source .ct-skills-tree-toggle {
+    justify-content: center;
     width: 44px;
     height: 44px;
     margin-left: -10px;
