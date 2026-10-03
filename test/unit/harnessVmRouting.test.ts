@@ -136,6 +136,32 @@ describe('resolveClaudeVmRouting', () => {
     expect(runner.ran('run', '--detach')).toBe(true);
   });
 
+  it('warns about a stale image but still routes into the VM', async () => {
+    const { manager } = makeManager(CAPABLE_SCRIPT);
+    const onImageWarning = vi.fn();
+    const result = await resolveClaudeVmRouting({
+      mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
+      checkImageHealth: async () => 'image is out of date', onImageWarning,
+    });
+    expect(result.routed).toBe(true);
+    expect(onImageWarning).toHaveBeenCalledWith('image is out of date');
+  });
+
+  it('a throwing or clean health check neither warns nor blocks routing', async () => {
+    const onImageWarning = vi.fn();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (const check of [async () => null, async () => { throw new Error('boom'); }]) {
+      const { manager } = makeManager(CAPABLE_SCRIPT);
+      const result = await resolveClaudeVmRouting({
+        mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
+        checkImageHealth: check, onImageWarning,
+      });
+      expect(result.routed).toBe(true);
+    }
+    expect(onImageWarning).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('auto mode: falls back to host spawn silently when incapable', async () => {
     const { manager } = makeManager({ '--version': { exitCode: 1 } });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

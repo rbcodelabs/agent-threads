@@ -73,6 +73,8 @@ export interface SandboxSetupStatus {
   images: {
     base: SandboxImageState<SandboxImageStatus['base']>;
     harness: SandboxImageState<SandboxImageStatus['harness']>;
+    /** Installed versions / missing tools, when the images could be inspected. */
+    detail?: SandboxImageStatus['detail'];
   };
 }
 

@@ -660,6 +660,11 @@ export interface SandboxVmManagerDeps {
   run?: VmCommandRunner;
   /** Lifecycle hooks (GitHub credential delivery). */
   hooks?: VmHooks;
+  /**
+   * Optional image health check for `enter_vm`: a returned warning is added to the
+   * result's `notes` (the VM still starts). See sandboxImage.checkImageHealth.
+   */
+  checkImageHealth?: (image: string) => Promise<string | null>;
   /** Starts a guest port relay (see vmPortForward.ts). Defaults to `container exec`; tests inject a fake. */
   spawnRelay?: (containerName: string, port: number) => RelayProcess;
 }
@@ -939,6 +944,10 @@ export class SandboxVmManager {
         ...(wanted.length ? { extraMounts: wanted } : {}),
       };
       const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
+      try {
+        const warning = await this.deps.checkImageHealth?.(params.image);
+        if (warning) notes.push(warning);
+      } catch { /* a failed health check must never fail enter_vm */ }
       return {
         success: true,
         containerName: this.active.containerName,

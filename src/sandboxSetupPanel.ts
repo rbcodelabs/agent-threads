@@ -126,6 +126,7 @@ export function renderSandboxSettingsPanel(parent: HTMLElement, deps: SandboxSet
     if (!status.supported) return;
     line('Service', view.serviceLine);
     line('Sandbox image', view.imageLine);
+    if (view.imageDetailLine) line('Image version', view.imageDetailLine);
     const buttons: HTMLButtonElement[] = [];
     if (view.buttonLabel) {
       const button = actionsEl.createEl('button', { cls: 'mod-cta ct-sandbox-setup-btn', text: view.buttonLabel });
