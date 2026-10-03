@@ -29,6 +29,8 @@ import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { GithubCredentialBroker, resolveGithubBridge } from './githubCredentials';
 import { GithubHostDelivery } from './githubHostDelivery';
+import { setGitAuthProvider } from './gitClient';
+import { createGithubGitAuth } from './skillSourceGithubAuth';
 import { createGithubVmHooks } from './githubVmDelivery';
 import { createRequestUrlFetch } from './requestUrlFetch';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
@@ -2723,6 +2725,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
         return { id: body.id, login: body.login, name: typeof body.name === 'string' ? body.name : null };
       },
     });
+    // Private skill-source repos: isomorphic-git asks for credentials only after a 401, and the
+    // provider only answers for github.com, so public sources and other hosts never see a token.
+    setGitAuthProvider(createGithubGitAuth({
+      broker: this.githubBroker,
+      isEnabled: () => this.settings.githubConnectionEnabled !== false,
+    }));
     // Harness threads create their container through ThreadManager's shared VM manager, not the
     // enter_vm tool, so it needs the same credential/identity hooks (no-ops while unavailable).
     this.manager.sandboxVmHooks = createGithubVmHooks({
@@ -2743,6 +2751,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   async onunload(): Promise<void> {
+    setGitAuthProvider(undefined);
     // Delete the published GitHub token file immediately; never wait on the shutdown poll below.
     void this.githubHost?.stop();
     // Revoke peer references before asynchronous shutdown begins. Obsidian does

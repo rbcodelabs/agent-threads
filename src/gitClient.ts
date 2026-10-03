@@ -6,8 +6,8 @@
  * isomorphic-git is `require`d lazily so it stays out of the startup path and
  * out of the mobile/harness bundles until a skill-source operation runs.
  *
- * Auth: none by default (public repos). `setGitAuthProvider` lets a caller
- * supply a token for private repos.
+ * Auth: anonymous by default. isomorphic-git only asks for credentials after the
+ * server answers 401, so public repos never reach `setGitAuthProvider`'s callbacks.
  */
 import * as fs from 'fs';
 
@@ -20,15 +20,24 @@ const SYNCED_REF = 'refs/skill-sources/synced';
 const LOCAL_COMMITS = 'Clone has local commits; not updating it (fast-forward only)';
 
 let httpOverride: HttpClient | undefined;
-let authProvider: ((url: string) => { username: string; password: string } | undefined) | undefined;
+export interface GitCredentials { username: string; password: string }
+
+export interface GitAuthProvider {
+  /** Called after a 401 with the remote URL. Return credentials, or undefined to stay anonymous. May throw an actionable error. */
+  onAuth(url: string): Promise<GitCredentials | undefined>;
+  /** Called when credentials were sent and still rejected. Throw to replace the generic HTTP error. */
+  onAuthFailure?(url: string): Promise<void>;
+}
+
+let authProvider: GitAuthProvider | undefined;
 
 /** Test seam: replace the HTTP transport (e.g. to serve a local repo without a network). */
 export function setGitHttpClient(client: HttpClient | undefined): void {
   httpOverride = client;
 }
 
-/** Supplies credentials for private repos, called with the remote URL. Return undefined for anonymous. */
-export function setGitAuthProvider(provider: typeof authProvider): void {
+/** Supplies credentials for private repos. Pass undefined to go back to anonymous. */
+export function setGitAuthProvider(provider: GitAuthProvider | undefined): void {
   authProvider = provider;
 }
 
@@ -43,8 +52,13 @@ function http(): HttpClient {
   return require('isomorphic-git/http/node') as HttpClient;
 }
 
-function authCallback(): { onAuth?: (url: string) => { username: string; password: string } | undefined } {
-  return authProvider ? { onAuth: authProvider } : {};
+function authCallback(): { onAuth?: (url: string) => Promise<GitCredentials | undefined>; onAuthFailure?: (url: string) => Promise<undefined> } {
+  const provider = authProvider;
+  if (!provider) return {};
+  return {
+    onAuth: url => provider.onAuth(url),
+    onAuthFailure: async url => { await provider.onAuthFailure?.(url); return undefined; },
+  };
 }
 
 /** True when `ancestor` is reachable from `oid`. Shallow history it cannot walk counts as "no". */
