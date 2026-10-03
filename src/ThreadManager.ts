@@ -1,4 +1,4 @@
-import { agentHarnessLabel, type AgentHarness } from './types';
+import { agentHarnessLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
 import { mergeDisallowedTools } from './toolRestrictions';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
@@ -132,7 +132,8 @@ export type ThreadEvent =
   | { type: 'capabilities_discovered'; models: import('@anthropic-ai/claude-agent-sdk').ModelInfo[]; agents: import('@anthropic-ai/claude-agent-sdk').AgentInfo[] }
   | { type: 'elicitation_request'; request: import('@anthropic-ai/claude-agent-sdk').ElicitationRequest; signal: AbortSignal; respond: (result: import('@anthropic-ai/claude-agent-sdk').ElicitationResult) => void }
   | { type: 'harness_switching'; targetHarness: AgentHarness }
-  | { type: 'harness_changed'; sourceHarness: AgentHarness; targetHarness: AgentHarness };
+  | { type: 'harness_changed'; sourceHarness: AgentHarness; targetHarness: AgentHarness }
+  | { type: 'harness_vm_mode_changed'; mode: HarnessVmMode | undefined };
 
 /**
  * Structural equality for the small, plain-data poll payloads (StatusTag[] /
@@ -674,6 +675,74 @@ export class ThreadManager {
           combined.errors = [error, compensationError];
           throw combined;
         }
+      }
+      throw error;
+    } finally {
+      this.harnessSwitches.delete(id);
+      if (this.threads.has(id)) await this.flushQueuedMessages(id);
+    }
+  }
+
+  /**
+   * Sets (or, with `undefined`, clears) the thread's container-routing override.
+   *
+   * Takes effect on the next session start, so a live session is closed. The
+   * container has its own ~/.claude, so a native session ID cannot be resumed
+   * across host <-> container: when the change flips containerized vs host
+   * execution and a native session exists, the ID is dropped and a same-harness
+   * handoff (summary + transcript references) carries the conversation instead.
+   * 'auto' <-> 'always' keeps the session (both route to the container when it
+   * is available). Same transactional shape as `switchHarness`.
+   */
+  async setThreadHarnessVmMode(
+    id: string,
+    mode: HarnessVmMode | undefined,
+    persist: () => Promise<void>,
+  ): Promise<void> {
+    const thread = this.threads.get(id);
+    if (!thread) throw new Error(`Thread not found: ${id}`);
+    if ((thread.agentHarness ?? 'claude') !== 'claude') {
+      throw new Error('Container execution is only available for the Claude harness.');
+    }
+    if (thread.harnessVmMode === mode) return;
+    const blocked = this.getHarnessSwitchBlockReason(id);
+    if (blocked) throw new Error(blocked);
+
+    const wasContainerized = resolveEffectiveHarnessVmMode(thread.harnessVmMode, this.settings.harnessVmMode) !== 'never';
+    const nowContainerized = resolveEffectiveHarnessVmMode(mode, this.settings.harnessVmMode) !== 'never';
+    const resetNativeSession = wasContainerized !== nowContainerized && !!thread.sessionId;
+
+    const snapshot = {
+      harnessVmMode: thread.harnessVmMode, sessionGeneration: thread.sessionGeneration,
+      sessionId: thread.sessionId, pendingHarnessHandoff: thread.pendingHarnessHandoff,
+      updatedAt: thread.updatedAt,
+    };
+    this.harnessSwitches.add(id);
+    try {
+      if (mode === undefined) delete thread.harnessVmMode; else thread.harnessVmMode = mode;
+      if (resetNativeSession) {
+        thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
+        delete thread.sessionId;
+        thread.pendingHarnessHandoff = createHarnessHandoff(thread, 'claude', 'claude');
+      }
+      thread.updatedAt = Date.now();
+      await persist();
+      if (this.threads.get(id) !== thread) {
+        throw new Error('Thread was deleted while the execution mode was being saved.');
+      }
+      // Always recycle: even without a session reset, the next start() must
+      // re-run VM routing under the new mode.
+      const oldSession = this.sessions.get(id);
+      if (oldSession) oldSession.close();
+      this.sessions.delete(id);
+      this.claudeVmRoutingByThread.delete(id);
+      this.emit(id, { type: 'harness_vm_mode_changed', mode });
+    } catch (error) {
+      if (this.threads.get(id) === thread) {
+        Object.assign(thread, snapshot);
+        if (snapshot.harnessVmMode === undefined) delete thread.harnessVmMode;
+        if (snapshot.sessionId === undefined) delete thread.sessionId;
+        if (snapshot.pendingHarnessHandoff === undefined) delete thread.pendingHarnessHandoff;
       }
       throw error;
     } finally {
@@ -2067,7 +2136,7 @@ export class ThreadManager {
    */
   private maybeOfferSandboxSetup(threadId: string, reason: HarnessVmFallbackReason | undefined): void {
     if (!shouldOfferSandboxSetup({
-      mode: this.settings.harnessVmMode ?? 'auto',
+      mode: resolveEffectiveHarnessVmMode(this.threads.get(threadId)?.harnessVmMode, this.settings.harnessVmMode),
       reason,
       dismissedForever: this.settings.sandboxSetupPromptDismissed === true,
       alreadyOffered: this.sandboxSetupOffered.has(threadId),
@@ -2097,7 +2166,7 @@ export class ThreadManager {
    * builds the inputs that decision needs.
    */
   private buildClaudeVmRoutingInputs(threadId: string, thread: Thread): ClaudeVmRoutingInputs | undefined {
-    const mode = this.settings.harnessVmMode ?? 'auto';
+    const mode = resolveEffectiveHarnessVmMode(thread.harnessVmMode, this.settings.harnessVmMode);
     if (mode === 'never') return undefined;
     if ((thread.agentHarness ?? 'claude') !== 'claude') return undefined;
     // Skills live at host paths the container cannot see; plan read-only

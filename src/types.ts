@@ -33,6 +33,25 @@ export function isHarnessVmMode(value: unknown): value is HarnessVmMode {
   return typeof value === 'string' && (HARNESS_VM_MODES as readonly string[]).includes(value);
 }
 
+/**
+ * Effective container-routing mode for a thread: the per-thread override (set
+ * from the chat's harness menu) wins over the global setting, which defaults
+ * to 'auto'.
+ */
+export function resolveEffectiveHarnessVmMode(
+  threadMode: HarnessVmMode | undefined,
+  settingsMode: HarnessVmMode | undefined,
+): HarnessVmMode {
+  return threadMode ?? settingsMode ?? 'auto';
+}
+
+/** Menu/info label for a per-thread execution override (undefined = follows settings). */
+export function harnessVmModeLabel(mode: HarnessVmMode | undefined): string {
+  if (mode === 'always') return 'Container';
+  if (mode === 'never') return 'Host (no container)';
+  return 'Default (follows settings)';
+}
+
 /** Short user-facing name for a harness (undefined means a legacy Claude thread). */
 export function agentHarnessLabel(harness: AgentHarness | undefined): string {
   switch (harness) {
@@ -264,6 +283,8 @@ export interface Thread {
   agentHarness?: AgentHarness;
   /** Monotonic fence for callbacks from retired harness adapters. */
   sessionGeneration?: number;
+  /** Per-thread container-routing override; absent means follow `settings.harnessVmMode`. Claude harness only. */
+  harnessVmMode?: HarnessVmMode;
   /** One-time context bridge consumed only by the first successful target turn. */
   pendingHarnessHandoff?: {
     sourceHarness: AgentHarness;

@@ -174,6 +174,8 @@ export interface ThreadSnapshot {
   /** Name of the scheduled item at the time this thread was created, if any. */
   scheduledItemName?: string;
   updatedAt: number;
+  /** Per-thread container-execution override ('auto' | 'always' | 'never'); absent means the global setting applies. */
+  harnessVmMode?: string;
   /** Number of non-compact messages */
   messageCount: number;
   /** Vault-relative path to the thread's raw JSONL conversation log, if raw logging is enabled. Read it with obsidian_get_thread_log. */
