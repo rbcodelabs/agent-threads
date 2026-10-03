@@ -34,20 +34,42 @@ function respond(url: string, method: string, statusCode: number, contentType: s
   };
 }
 
-export const localGitHttp: GitHttpClient = {
-  async request({ url, method = 'GET', body }) {
-    const { pathname } = new URL(url);
-    // `githubCloneUrl` appends `.git`, and fixture dirs may or may not carry it — accept either.
-    const base = pathname.replace(/\/(info\/refs|git-upload-pack)$/, '');
-    const repoDir = [base, base.replace(/\.git$/, ''), `${base}.git`].find(d => fs.existsSync(d)) ?? base;
-    if (method === 'GET') {
-      const r = spawnSync('git', ['upload-pack', '--stateless-rpc', '--advertise-refs', repoDir]);
+export interface LocalGitHttpOptions {
+  /** Maps a request pathname to a repo dir (default: the pathname is the dir). Lets tests serve `https://github.com/o/r`. */
+  mapPath?: (pathname: string) => string | undefined;
+  /** When set, requests without `Authorization: Basic x-access-token:<token>` get a 401, like a private repo. */
+  requireToken?: string;
+  /** Called with every request URL + whether it carried credentials. */
+  onRequest?: (info: { url: string; authed: boolean }) => void;
+}
+
+export function createLocalGitHttp(options: LocalGitHttpOptions = {}): GitHttpClient {
+  return {
+    async request({ url, method = 'GET', body, headers = {} }) {
+      const { pathname } = new URL(url);
+      const authorization = Object.entries(headers).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
+      options.onRequest?.({ url, authed: Boolean(authorization) });
+      if (options.requireToken !== undefined) {
+        const expected = `Basic ${Buffer.from(`x-access-token:${options.requireToken}`).toString('base64')}`;
+        if (authorization !== expected) {
+          return { ...respond(url, method, 401, 'text/plain', Buffer.from('auth required')), statusMessage: 'Unauthorized' };
+        }
+      }
+      // `githubCloneUrl` appends `.git`, and fixture dirs may or may not carry it — accept either.
+      const requested = pathname.replace(/\/(info\/refs|git-upload-pack)$/, '');
+      const base = options.mapPath ? (options.mapPath(requested.replace(/\.git$/, '')) ?? requested) : requested;
+      const repoDir = [base, base.replace(/\.git$/, ''), `${base}.git`].find(d => fs.existsSync(d)) ?? base;
+      if (method === 'GET') {
+        const r = spawnSync('git', ['upload-pack', '--stateless-rpc', '--advertise-refs', repoDir]);
+        if (r.status !== 0) return respond(url, method, 404, 'text/plain', Buffer.from(String(r.stderr)));
+        const head = Buffer.from('001e# service=git-upload-pack\n0000');
+        return respond(url, method, 200, 'application/x-git-upload-pack-advertisement', Buffer.concat([head, r.stdout]));
+      }
+      const r = spawnSync('git', ['upload-pack', '--stateless-rpc', repoDir], { input: await collect(body), maxBuffer: 256 * 1024 * 1024 });
       if (r.status !== 0) return respond(url, method, 404, 'text/plain', Buffer.from(String(r.stderr)));
-      const head = Buffer.from('001e# service=git-upload-pack\n0000');
-      return respond(url, method, 200, 'application/x-git-upload-pack-advertisement', Buffer.concat([head, r.stdout]));
-    }
-    const r = spawnSync('git', ['upload-pack', '--stateless-rpc', repoDir], { input: await collect(body), maxBuffer: 256 * 1024 * 1024 });
-    if (r.status !== 0) return respond(url, method, 404, 'text/plain', Buffer.from(String(r.stderr)));
-    return respond(url, method, 200, 'application/x-git-upload-pack-result', r.stdout);
-  },
-};
+      return respond(url, method, 200, 'application/x-git-upload-pack-result', r.stdout);
+    },
+  };
+}
+
+export const localGitHttp: GitHttpClient = createLocalGitHttp();

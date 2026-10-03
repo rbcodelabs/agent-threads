@@ -613,7 +613,20 @@ export const SKILL_SOURCE_CLONE_TIMEOUT_MS = 60_000;
 
 /** Best-effort human-readable message from a failed git operation. */
 function gitErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  const message = err instanceof Error ? err.message : String(err);
+  // GitHub answers 401/404 for private repos you cannot see, so the bare HTTP
+  // error is a dead end. (Errors from the GitHub connection already say what to do.)
+  if (/HTTP Error: (?:401|403|404)/i.test(message)) {
+    return `${message} — if this repository is private, connect GitHub (Geode → Settings → GitHub) and install the Geode GitHub App on it.`;
+  }
+  return message;
+}
+
+/** The same error, or a plain Error with the private-repo hint added when that helps. Preserves typed errors otherwise. */
+function friendlyGitError(err: unknown): Error {
+  const message = gitErrorMessage(err);
+  if (err instanceof Error && message === err.message) return err;
+  return new Error(message);
 }
 
 /**
@@ -703,7 +716,7 @@ export async function cloneGithubSource(
     );
   } catch (err) {
     try { fs.rmSync(clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
-    throw err instanceof Error ? err : new Error(String(err));
+    throw friendlyGitError(err);
   }
 }
 
@@ -914,7 +927,7 @@ export async function pullGithubSourceUpdates(source: SkillSource): Promise<{ be
     await checkoutGithubSourceRef(source.clonePath, source.ref, 60_000);
     return { behindCount: 0, lastFetched: Date.now() };
   }
-  await withTimeout(gitSync(source.clonePath, { apply: true }), 60_000, 'Update');
+  await withTimeout(gitSync(source.clonePath, { apply: true }), 60_000, 'Update').catch((err) => { throw friendlyGitError(err); });
   return { behindCount: 0, lastFetched: Date.now() };
 }
 
