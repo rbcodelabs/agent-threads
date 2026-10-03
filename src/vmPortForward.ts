@@ -4,7 +4,7 @@
  *
  * ## The problem
  *
- * A VM-routed thread runs `vm_exec` commands (and, under ADR-0015, the whole
+ * A VM-routed thread runs its shell commands (and, under ADR-0015, the whole
  * harness) in a Linux container. The browser tools (`browser_navigate`,
  * `obsidian_open_url` / `host_open_url`) run on the host. So when the agent
  * starts `python3 -m http.server` in the container and opens
@@ -182,8 +182,8 @@ interface Listener {
 }
 
 const NOT_LISTENING_HINT =
-  'Start the server first and keep it running: vm_exec returns when its command ends, so run it in the background ' +
-  '(e.g. `nohup python3 -m http.server 8000 >/tmp/server.log 2>&1 &`), then confirm with `curl -s localhost:8000` inside vm_exec.';
+  'Start the server first and keep it running: a shell command returns when it ends, so run it in the background ' +
+  '(e.g. `nohup python3 -m http.server 8000 >/tmp/server.log 2>&1 &`), then confirm with `curl -s localhost:8000` inside the container.';
 
 /**
  * Per-thread forwarder. One host listener per guest port, created on demand and

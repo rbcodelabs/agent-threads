@@ -174,9 +174,8 @@ export class ThreadManager {
   /** Threads whose live session must be rebuilt at the next safe turn boundary (see requestSessionRestart). */
   private sessionRestartRequested = new Set<string>();
   /**
-   * ADR-0015: one `SandboxVmManager` per thread, SHARED between this thread's
-   * `enter_vm`/`vm_exec`/`exit_vm` MCP tools and its Claude harness's own VM
-   * routing. Sharing the instance (rather than each side building its own
+   * ADR-0015: one `SandboxVmManager` per thread, used by this thread's Claude harness's VM routing
+   * and the browser-URL forwarding. Sharing the instance (rather than each side building its own
    * against the same deterministic container name) is what lets `enter()`
    * recognize "this container already exists because the harness started
    * it" instead of reporting it as a stray leftover from an earlier session
@@ -865,8 +864,7 @@ export class ThreadManager {
     // down by session.close() above (a lingering session or quick restart
     // shouldn't pay container-start latency every turn) — thread deletion is
     // its actual lifecycle owner, mirroring docs/sandbox-vms.md's existing
-    // "call exit_vm before deleting the thread" guidance for agent-started
-    // containers. Neither case was wired before this change: deleteThread()
+    // guidance for agent-started containers. Neither case was wired before this change: deleteThread()
     // had no sandbox VM teardown call at all (verified while implementing
     // this ADR — see the PR description's Open Question #4 answer). Runs
     // fire-and-forget: deleteThread() is synchronous and this is best-effort

@@ -645,9 +645,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Shared by the ordinary roster and the VM-routed overlay below; `hostExec`
     // is passed only by the overlay, so host_exec exists only after routing
     // into the sandbox container has actually succeeded.
-    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks, harnessInVm = false) =>
+    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks) =>
         createClaudeThreadsMcpServers(this.app, {
-          harnessInVm,
           ...(hostExec ? { hostExec } : {}),
           // Contributed agent tools, bound to this thread here — the host does
           // the binding so a peer never reaches the factory (ADR-0008). Built-in
@@ -696,22 +695,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // Read lazily so changing the setting takes effect on the next
           // enter_worktree call rather than requiring a session restart.
           getWorktreeRoot: () => this.settings.worktreeRoot,
-          // Same lazy-read rationale as getWorktreeRoot: changing the image or
-          // network setting takes effect on the next enter_vm call rather than
-          // needing a session restart.
-          getVmImage: () => this.settings.vmImage,
-          getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
-          getVmMemory: () => this.settings.sandboxVmMemory,
-          getVmCpus: () => this.settings.sandboxVmCpus,
-          // Geode-only, optional: connected external roots to mount read-only
-          // at /ext/<label>. Undefined on Obsidian / older Geode -> no extras.
-          getExternalMounts: () => this.listExternalMountRoots(),
-          getVaultPath: () => this.manager.vaultRoot,
-          // ADR-0015 §3: share the same per-thread SandboxVmManager this
-          // thread's Claude harness routes into, so enter_vm/vm_exec/exit_vm
-          // see the container's real origin instead of each side tracking it
-          // separately against the same deterministic container name.
-          sandboxVmManager: this.manager.getSandboxVmManager(threadId),
           githubBroker: this.githubBroker,
           isGithubConnectionEnabled: () => this.settings.githubConnectionEnabled !== false,
           getGithubCommitEmail: () => this.settings.githubCommitEmail,
@@ -966,7 +949,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
       try {
         const mcpServers = buildBuiltInMcpServers(threadId, initialCwd);
-        vmBuiltInServers.set(mcpServers.claude_threads, buildBuiltInMcpServers(threadId, initialCwd, undefined, true));
+        vmBuiltInServers.set(mcpServers.claude_threads, buildBuiltInMcpServers(threadId, initialCwd));
         const mcpDebug = Object.fromEntries(Object.entries(mcpServers).map(([key, server]) => [key, {
           type: (server as unknown as Record<string, unknown>).type,
           name: (server as unknown as Record<string, unknown>).name,
@@ -1027,7 +1010,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         oauthHosts,
         oauthMcps,
       );
-      return this.withHostExec(threadId, overlaid, (id, cwd, hostExec) => buildBuiltInMcpServers(id, cwd, hostExec, true));
+      return this.withHostExec(threadId, overlaid, (id, cwd, hostExec) => buildBuiltInMcpServers(id, cwd, hostExec));
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect
@@ -2726,8 +2709,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       broker: this.githubBroker,
       isEnabled: () => this.settings.githubConnectionEnabled !== false,
     }));
-    // Harness threads create their container through ThreadManager's shared VM manager, not the
-    // enter_vm tool, so it needs the same credential/identity hooks (no-ops while unavailable).
+    // Harness threads create their container through ThreadManager's shared VM manager, so it needs the same credential/identity hooks (no-ops while unavailable).
     this.manager.sandboxVmHooks = createGithubVmHooks({
       broker: this.githubBroker,
       isEnabled: () => this.settings.githubConnectionEnabled !== false,

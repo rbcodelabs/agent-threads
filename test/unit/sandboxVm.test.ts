@@ -38,8 +38,6 @@ import {
   isVmNetworkMode,
   networkArgsFor,
   resolveExecTimeoutSeconds,
-  resolveVmImage,
-  resolveVmNetwork,
   sanitizeContainerName,
   truncateOutput,
   type VmCommandResult,
@@ -152,47 +150,11 @@ describe('sandboxVm — containerNameForThread', () => {
   });
 });
 
-describe('sandboxVm — network mode resolution', () => {
+describe('sandboxVm — network modes', () => {
   it('recognises exactly the three supported modes', () => {
     expect([...VM_NETWORK_MODES]).toEqual(['default', 'internal', 'none']);
     for (const mode of VM_NETWORK_MODES) expect(isVmNetworkMode(mode)).toBe(true);
     for (const bad of ['bridge', '', null, undefined, 7]) expect(isVmNetworkMode(bad)).toBe(false);
-  });
-
-  it('prefers the explicit argument over the configured default', () => {
-    expect(resolveVmNetwork('none', 'internal')).toBe('none');
-  });
-
-  it('falls back to the configured default when no argument is given', () => {
-    expect(resolveVmNetwork(undefined, 'internal')).toBe('internal');
-    expect(resolveVmNetwork(null, 'none')).toBe('none');
-  });
-
-  it('defaults to full egress when nothing is configured', () => {
-    // Explicit product decision: npm install / git remotes / web must work.
-    expect(resolveVmNetwork(undefined, undefined)).toBe('default');
-  });
-
-  it('ignores an unrecognised setting rather than failing the call', () => {
-    expect(resolveVmNetwork(undefined, 'bridge')).toBe('default');
-    expect(resolveVmNetwork('nonsense', 'internal')).toBe('internal');
-  });
-});
-
-describe('sandboxVm — resolveVmImage', () => {
-  it('prefers the argument, then the setting, then the built-in default', () => {
-    expect(resolveVmImage('a:1', 'b:2')).toBe('a:1');
-    expect(resolveVmImage(undefined, 'b:2')).toBe('b:2');
-    expect(resolveVmImage(undefined, undefined)).toBe(DEFAULT_VM_IMAGE);
-  });
-
-  it('treats blank and whitespace-only values as unset', () => {
-    expect(resolveVmImage('   ', '  ')).toBe(DEFAULT_VM_IMAGE);
-    expect(resolveVmImage('', 'b:2')).toBe('b:2');
-  });
-
-  it('trims surrounding whitespace from a pasted setting', () => {
-    expect(resolveVmImage(undefined, '  b:2  ')).toBe('b:2');
   });
 });
 
@@ -353,7 +315,7 @@ describe('SandboxVmManager — enter', () => {
       success: false,
       error: expect.stringContaining('already running'),
     });
-    expect((second as { error: string }).error).toContain('exit_vm');
+    expect((second as { error: string }).error).toContain('Remove it');
     expect(runner.calls.length).toBe(before);
     // The first VM's state must survive the rejected call.
     expect(manager.getActive()?.mountedFrom).toBe('/a');
@@ -367,7 +329,7 @@ describe('SandboxVmManager — enter', () => {
 
     expect(result.success).toBe(false);
     expect((result as { error: string }).error).toContain(NAME);
-    expect((result as { error: string }).error).toContain('exit_vm');
+    expect((result as { error: string }).error).toContain('Remove it');
     expect(runner.ran('run')).toBe(false);
     expect(manager.getActive()).toBeNull();
   });
@@ -529,7 +491,7 @@ describe('SandboxVmManager — execCommand', () => {
 
     const result = await manager.execCommand({ command: 'ls', timeoutSeconds: 5 });
 
-    expect(result).toEqual({ success: false, error: 'No sandbox VM is running for this thread. Call enter_vm first.' });
+    expect(result).toEqual({ success: false, error: 'No sandbox VM is running for this thread. Start the sandbox VM first.' });
     expect(runner.ran('exec')).toBe(false);
   });
 
@@ -598,7 +560,7 @@ describe('SandboxVmManager — exit', () => {
     await manager.exit();
 
     expect(await manager.execCommand({ command: 'ls', timeoutSeconds: 5 }))
-      .toEqual({ success: false, error: 'No sandbox VM is running for this thread. Call enter_vm first.' });
+      .toEqual({ success: false, error: 'No sandbox VM is running for this thread. Start the sandbox VM first.' });
   });
 
   it('after exit, enter can start a fresh VM', async () => {
@@ -730,12 +692,12 @@ describe('SandboxVmManager — ensureHarnessContainer (ADR-0015 §3)', () => {
     expect(runner.calls.length).toBe(before);
   });
 
-  it('marks an agent-started container (via enter_vm) harness-owned once the harness also claims it', async () => {
+  it('marks an agent-started container (via enter()) harness-owned once the harness also claims it', async () => {
     const { manager } = makeManager(CLI_OK_NO_CONTAINER);
     await manager.enter({ image: 'img:1', mountPath: '/work', network: 'default' });
     const result = await manager.ensureHarnessContainer({ image: 'img:1', mountPath: '/work', network: 'default' });
     expect(result.success).toBe(true);
-    // The container is now harness-owned — exit_vm (without the internal
+    // The container is now harness-owned — exit() (without the internal
     // override) must refuse to remove it. Verified in the exit() suite below.
     expect(await manager.exit()).toMatchObject({ success: false });
   });
