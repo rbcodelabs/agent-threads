@@ -10,7 +10,7 @@ import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './current
 import type { ToolCallRecord, ImageAttachment } from './types';
 import { parseExtraEnv } from './types';
 import { debugLog } from './logger';
-import { formatToolName, getToolIcon, isBrowserTool } from './toolNameUtils';
+import { formatToolName, getToolIcon, isBrowserTool, buildPermissionDetail, requiresPerCallApproval } from './toolNameUtils';
 import { browserToolSummary, parseBrowserToolResult } from './browserSession';
 // SessionCallbacks/TaskTrackerEvent are ClaudeSession.ts's contract, kept as the
 // single canonical definition while the two classes coexist during the Stage 2
@@ -318,8 +318,8 @@ export class ThreadSession {
           await clearPlanMode();
           return { behavior: 'deny' as const, message: 'Plan approved — proceed with implementation.', interrupt: false };
         }
-        const detail = opts.description ?? opts.decisionReason ?? opts.blockedPath ?? JSON.stringify(input).slice(0, 4000);
-        const title = opts.title ?? toolName;
+        const detail = buildPermissionDetail(toolName, input, opts);
+        const title = requiresPerCallApproval(toolName) ? toolName : (opts.title ?? toolName);
         const allowed = await callbacks.onPermissionRequest(title, detail);
         // Never return `updatedPermissions` (e.g. `opts.suggestions`): the CLI
         // persists those rules to `.claude/settings.local.json`, turning every

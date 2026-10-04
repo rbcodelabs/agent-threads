@@ -1948,6 +1948,21 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             });
         });
+
+      new Setting(containerEl)
+        .setName('Allow agents to evaluate JavaScript in the browser')
+        .setDesc(
+          'Let Claude run JavaScript expressions in the page it is browsing (browser_eval). Powerful: the code can read or change anything on the page, so it asks for approval like clicking and typing do. Off by default; applies immediately.',
+        )
+        .addToggle((toggle) => {
+          toggle
+            .setValue(this.plugin.settings.enableAgentBrowserEval ?? false)
+            .setDisabled(!agentBrowserAvailable)
+            .onChange(async (value) => {
+              this.plugin.settings.enableAgentBrowserEval = value;
+              await this.plugin.saveSettings();
+            });
+        });
     }
 
     new Setting(containerEl)

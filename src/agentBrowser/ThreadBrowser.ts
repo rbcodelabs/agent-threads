@@ -33,12 +33,25 @@ import {
   type SaveFormat,
 } from './agentBrowserScript';
 import { VmLoopbackError, type VmUrlResolution } from '../vmPortForward';
-import { frameUntrusted, matchesKnownSecret, stripInvisible } from './agentBrowserSanitize';
+import { containsKnownSecret, frameUntrusted, matchesKnownSecret, stripInvisible } from './agentBrowserSanitize';
 import {
+  buildEvalScript,
+  buildNetworkReadScript,
+  findPolicyViolationInExpression,
+  normalizeNetworkEntries,
+  selectNetworkEntries,
+  type ConsoleLevel,
+  type RawEvalResult,
+  type RawNetworkLog,
+} from './agentBrowserDevtools';
+import {
+  MAX_EVAL_EXPRESSION_CHARS,
+  MAX_NETWORK_URL_CHARS,
   MAX_SAVE_CHARS,
   MAX_SAVED_FILES_PER_THREAD,
   MAX_SNAPSHOT_CHARS,
   SAVE_CHUNK_CHARS,
+  type UrlPolicyOptions,
 } from './agentBrowserPolicy';
 
 /**
@@ -116,7 +129,29 @@ export interface ThreadBrowserOptions {
    * container, not the Mac (see vmPortForward.ts). Absent = no mapping.
    */
   resolveUrl?: (url: string) => Promise<VmUrlResolution>;
+  /** Read live (not captured) so toggling the setting applies to the next call. Absent = eval disabled. */
+  isEvalEnabled?: () => boolean;
+  /** URL policy applied to literal URLs in eval expressions. Absent = defaults (private network refused). */
+  getUrlPolicy?: () => UrlPolicyOptions;
 }
+
+export const EVAL_DISABLED_MESSAGE =
+  'browser_eval is disabled. Ask the user to enable "Allow agents to evaluate JavaScript in the browser" under Settings > Tools > Agent browser (setting: enableAgentBrowserEval).';
+
+export interface ConsoleToolResult {
+  url: string;
+  total: number;
+  returned: number;
+  buffered: number;
+  dropped: number;
+  content: string;
+}
+
+export interface NetworkToolResult extends ConsoleToolResult {}
+
+export type EvalToolResult =
+  | { url: string; type: string; truncated: boolean; threw: false; content: string }
+  | { url: string; type: 'exception'; truncated: false; threw: true; content: string };
 
 export class ThreadBrowser {
   readonly threadId: string;
@@ -127,6 +162,8 @@ export class ThreadBrowser {
   private readonly saveSink: SaveSink | undefined;
   private saveSeq = 0;
   private readonly resolveUrl: ((url: string) => Promise<VmUrlResolution>) | undefined;
+  private readonly isEvalEnabled: () => boolean;
+  private readonly getUrlPolicy: () => UrlPolicyOptions;
 
   /** The guest these refs belong to. A new guest invalidates everything. */
   private boundGuest: AgentBrowserGuest | null = null;
@@ -141,6 +178,8 @@ export class ThreadBrowser {
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.saveSink = options.saveSink;
     this.resolveUrl = options.resolveUrl;
+    this.isEvalEnabled = options.isEvalEnabled ?? (() => false);
+    this.getUrlPolicy = options.getUrlPolicy ?? (() => ({}));
   }
 
   /** Whether browser_save_page can work: only when the host supplied a file sink. */
@@ -397,6 +436,134 @@ export class ThreadBrowser {
     }
   }
 
+  /**
+   * Buffered console output for the current page, framed as untrusted: log text
+   * is page-authored. Read-only; the buffer resets on navigation.
+   */
+  async console(options: { level?: ConsoleLevel; limit?: number; clear?: boolean } = {}): Promise<ConsoleToolResult> {
+    const guest = await this.guest();
+    const result = await guest.readConsole(options);
+    const url = hostUrl(result.url);
+    const origin = originOf(url);
+    return {
+      url,
+      total: result.matched,
+      returned: result.entries.length,
+      buffered: result.buffered,
+      dropped: result.dropped,
+      content: frameUntrusted(JSON.stringify(result.entries, null, 2), {
+        origin,
+        url,
+        retrievedAt: this.nowIso(),
+        truncated: result.matched > result.entries.length,
+      }),
+    };
+  }
+
+  /**
+   * Buffered network activity for the current page (no headers, no bodies),
+   * framed as untrusted. The log is read from a hook living in the page, so it
+   * is validated and re-capped here; see agentBrowserDevtools.ts for its limits.
+   */
+  async network(options: { filter?: string; limit?: number; failedOnly?: boolean; clear?: boolean } = {}): Promise<NetworkToolResult> {
+    const guest = await this.guest();
+    const raw = (await guest.runScript(buildNetworkReadScript(guest.networkKey, options.clear === true))) as RawNetworkLog | null;
+    if (!raw || typeof raw !== 'object' || !Array.isArray(raw.entries)) {
+      throw new AgentBrowserError({
+        code: 'script_timeout',
+        message: 'The page did not return its network log.',
+        retryable: true,
+      });
+    }
+    // URL and origin come from the webview, never from the page's own return value.
+    const url = hostUrl(guest.currentUrl());
+    const origin = originOf(url);
+    const dropped = typeof raw.dropped === 'number' && Number.isFinite(raw.dropped) ? Math.max(0, Math.floor(raw.dropped)) : 0;
+    const selected = selectNetworkEntries(normalizeNetworkEntries(raw.entries, this.nowMs), options, dropped);
+    return {
+      url,
+      total: selected.matched,
+      returned: selected.entries.length,
+      buffered: selected.buffered,
+      dropped: selected.dropped,
+      content: frameUntrusted(JSON.stringify(selected.entries, null, 2), {
+        origin,
+        url,
+        retrievedAt: this.nowIso(),
+        truncated: selected.matched > selected.entries.length,
+      }),
+    };
+  }
+
+  /**
+   * Evaluate an expression in the page. Off unless the user enabled it. Both the
+   * value and any thrown error are page-influenced, so both are framed as
+   * untrusted data. Literal URLs in the expression face the same URL policy as
+   * navigation (a tripwire, not a boundary; see findPolicyViolationInExpression).
+   */
+  async evaluate(expression: string): Promise<EvalToolResult> {
+    if (!this.isEvalEnabled()) {
+      throw new AgentBrowserError({
+        code: 'capability_unavailable',
+        message: EVAL_DISABLED_MESSAGE,
+        retryable: false,
+        hint: 'Turn on "Allow agents to evaluate JavaScript in the browser" in the plugin settings, then call browser_eval again.',
+      });
+    }
+    if (typeof expression !== 'string' || !expression.trim()) {
+      throw new AgentBrowserError({ code: 'operation_failed', message: 'No expression was supplied.', retryable: false });
+    }
+    if (expression.length > MAX_EVAL_EXPRESSION_CHARS) {
+      throw new AgentBrowserError({
+        code: 'operation_failed',
+        message: `The expression is ${expression.length} characters; the limit is ${MAX_EVAL_EXPRESSION_CHARS}.`,
+        retryable: false,
+      });
+    }
+    if (containsKnownSecret(expression, this.getSecrets())) {
+      throw new AgentBrowserError({
+        code: 'not_actionable',
+        message: 'Refusing to evaluate a stored secret in a web page.',
+        retryable: false,
+      });
+    }
+    const violation = findPolicyViolationInExpression(expression, this.getUrlPolicy());
+    if (violation) {
+      throw new AgentBrowserError({ code: 'navigation_blocked', message: violation, retryable: false });
+    }
+    const guest = await this.guest();
+    const raw = (await guest.runScript(buildEvalScript(expression))) as RawEvalResult | null;
+    if (!raw || typeof raw !== 'object') {
+      throw new AgentBrowserError({
+        code: 'script_timeout',
+        message: 'The page did not return a result for the expression.',
+        retryable: true,
+      });
+    }
+    // URL and origin come from the webview, never from the page's own return value.
+    const url = hostUrl(guest.currentUrl());
+    const framing = { origin: originOf(url), url, retrievedAt: this.nowIso() };
+    if (raw.ok === true) {
+      const type = typeof raw.type === 'string' ? stripInvisible(raw.type).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 20) : '';
+      return {
+        url,
+        type: type || 'unknown',
+        truncated: raw.truncated === true,
+        threw: false,
+        content: frameUntrusted(typeof raw.json === 'string' ? raw.json : '', { ...framing, truncated: raw.truncated === true }),
+      };
+    }
+    const errName = typeof (raw as { name?: unknown }).name === 'string' ? (raw as { name: string }).name : 'Error';
+    const errMessage = typeof (raw as { message?: unknown }).message === 'string' ? (raw as { message: string }).message : '';
+    return {
+      url,
+      type: 'exception',
+      truncated: false,
+      threw: true,
+      content: frameUntrusted(`${errName}: ${errMessage}`, framing),
+    };
+  }
+
   async click(ref: string, epoch: number): Promise<ActResult> {
     return this.act({ kind: 'click', ref, epoch });
   }
@@ -471,4 +638,17 @@ export class ThreadBrowser {
       threadHasSession: this.pool.peek(this.threadId) !== null,
     };
   }
+}
+
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '';
+  }
+}
+
+/** A host-read URL, capped and cleaned before it is shown to the agent or used as a frame attribute. */
+function hostUrl(url: string): string {
+  return stripInvisible(String(url)).slice(0, MAX_NETWORK_URL_CHARS);
 }

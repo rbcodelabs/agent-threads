@@ -52,7 +52,7 @@ export function toolKey(raw: string): string {
 const BROWSER_TOOL_KEYS: ReadonlySet<string> = new Set([
   'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
   'browser_type', 'browser_screenshot', 'browser_status', 'browser_close',
-  'browser_resize',
+  'browser_resize', 'browser_console', 'browser_network', 'browser_eval',
 ]);
 
 /**
@@ -148,6 +148,9 @@ export function getToolIcon(raw: string): string {
     case 'browser_close':        return 'circle-x';
     case 'browser_resize':       return 'maximize';
     case 'browser_save_page':    return 'save';
+    case 'browser_console':      return 'terminal';
+    case 'browser_network':      return 'network';
+    case 'browser_eval':         return 'braces';
     default:               return 'wrench';
   }
 }
@@ -179,7 +182,7 @@ const CANONICAL_BUILT_IN_TOOLS = new Set([
   // exposed under the legacy obsidian_ names and need no compatibility alias.
   'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
   'browser_type', 'browser_screenshot', 'browser_status', 'browser_close',
-  'browser_resize', 'browser_save_page',
+  'browser_resize', 'browser_save_page', 'browser_console', 'browser_network', 'browser_eval',
 ]);
 
 /** True only for a known first-party tool on the canonical or compatibility server. */
@@ -200,9 +203,36 @@ export function isTrustedBuiltInTool(raw: string): boolean {
  */
 export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
 
+/**
+ * Trusted built-ins that still need a card on every call, under any host
+ * prefix. `browser_eval` runs agent-authored JavaScript in a page whose content
+ * the agent also reads, so neither "trusted built-in" nor a persisted
+ * "Always Allow" may stand in for the user seeing the expression.
+ */
+const PER_CALL_APPROVAL_TOOL_KEYS: ReadonlySet<string> = new Set(['browser_eval']);
+
+/** True when each call must be approved on a card, whatever shortcuts exist. */
+export function requiresPerCallApproval(toolName: string): boolean {
+  return PER_CALL_APPROVAL_TOOL_KEYS.has(toolKey(toolName));
+}
+
 /** False for requests that must be decided afresh every time. */
 export function canAlwaysAllow(toolName: string): boolean {
-  return toolName !== HOST_EXEC_PERMISSION_TOOL;
+  return toolName !== HOST_EXEC_PERMISSION_TOOL && !requiresPerCallApproval(toolName);
+}
+
+/**
+ * Detail text for a harness permission request. Per-call-approval tools show
+ * their complete input (the SDK description would hide the expression) up to a
+ * generous cap; everything else keeps the SDK-provided description first.
+ */
+export function buildPermissionDetail(
+  toolName: string,
+  input: unknown,
+  opts: { description?: string; decisionReason?: string; blockedPath?: string },
+): string {
+  if (requiresPerCallApproval(toolName)) return JSON.stringify(input).slice(0, 20000);
+  return opts.description ?? opts.decisionReason ?? opts.blockedPath ?? JSON.stringify(input).slice(0, 4000);
 }
 
 /**
@@ -265,6 +295,9 @@ export function getActivityKind(raw: string): ActivityKind {
     case 'browser_close':
     case 'browser_resize':
     case 'browser_save_page':
+    case 'browser_console':
+    case 'browser_network':
+    case 'browser_eval':
       return 'researching';
     case 'ToolSearch':
     case 'Agent':

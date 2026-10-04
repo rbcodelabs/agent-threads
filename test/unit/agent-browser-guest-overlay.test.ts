@@ -109,7 +109,8 @@ describe('AgentBrowserGuest overlay', () => {
     exec.mockClear();
     guest.element!.dispatchEvent(new Event('dom-ready'));
     await Promise.resolve();
-    expect(exec).toHaveBeenCalledTimes(1);
-    expect(String(exec.mock.calls[0][0])).toContain('var UPDATE');
+    // dom-ready also installs the devtools network hook (see agent-browser-devtools.test.ts).
+    const overlayCalls = exec.mock.calls.filter((c) => String(c[0]).includes('var UPDATE'));
+    expect(overlayCalls).toHaveLength(1);
   });
 });
