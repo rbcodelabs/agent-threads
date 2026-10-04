@@ -6,8 +6,8 @@ Never edit files in the main checkout. Always work in a git worktree:
 
 ```bash
 # 1. Create worktree on a new branch
-git -C ~/projects/obsidian-claude-threads \
-  worktree add ~/.geode/worktrees/obsidian-claude-threads/<branch> -b <branch>
+git -C ~/projects/agent-threads \
+  worktree add ~/.geode/worktrees/agent-threads/<branch> -b <branch>
 
 # 2. Commit the first meaningful change immediately — do not accumulate
 #    uncommitted work (see "Commit early" below)

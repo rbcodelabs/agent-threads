@@ -96,12 +96,12 @@ Vote on upcoming features and see what's in progress at the [public roadmap](htt
 
 1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat) from Obsidian's Community Plugins
 2. Open BRAT settings → **Add Beta Plugin**
-3. Enter: `rbcodelabs/obsidian-claude-threads`
+3. Enter: `rbcodelabs/agent-threads`
 4. Enable **Agent Threads** in Settings → Community Plugins
 
 ### Manual install
 
-1. Download the latest release from [GitHub Releases](https://github.com/rbcodelabs/obsidian-claude-threads/releases)
+1. Download the latest release from [GitHub Releases](https://github.com/rbcodelabs/agent-threads/releases)
 2. Extract into your vault's plugin folder: `<vault>/.obsidian/plugins/claude-threads/`
 3. Enable **Agent Threads** in Settings → Community Plugins
 
@@ -1129,8 +1129,8 @@ blocked. See [Inline message content](docs/public-api.md#inline-message-content)
 for registration, reference formatting, lifecycle and image-source details.
 
 ```bash
-git clone https://github.com/rbcodelabs/obsidian-claude-threads
-cd obsidian-claude-threads
+git clone https://github.com/rbcodelabs/agent-threads
+cd agent-threads
 npm install
 npm run build
 # Output is in dist/
@@ -1142,8 +1142,8 @@ The project uses a worktree-based workflow — edits directly to the main checko
 
 1. **Create a worktree** for the version bump:
    ```bash
-   git worktree add ~/.geode/worktrees/obsidian-claude-threads/chore/bump-version-X.Y.Z -b chore/bump-version-X.Y.Z
-   cd ~/.geode/worktrees/obsidian-claude-threads/chore/bump-version-X.Y.Z
+   git worktree add ~/.geode/worktrees/agent-threads/chore/bump-version-X.Y.Z -b chore/bump-version-X.Y.Z
+   cd ~/.geode/worktrees/agent-threads/chore/bump-version-X.Y.Z
    ```
 
 2. **Bump the version** with the repository workflow. This updates `package.json`, `package-lock.json`, and `manifest.json`, then syncs `versions.json`. Update the README version badge to the same version and verify all five files agree:
