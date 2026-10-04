@@ -556,36 +556,84 @@
   container: ct-conversation-pane / inline-size;
 }
 
-/* ── Sticky last-user-message header ─────────────────────────────────────── */
-/* Overlays the top of .ct-messages (absolute, so no layout shift) once the
-   user's prompt has scrolled out of view. Toggled via .ct-hidden.
-   Every selector is scoped with `.ct-root ` (0,2,0) so the fill and shadow
-   out-rank the `.ct-root button` reset above (0,1,1); a bare `.ct-sticky-user`
-   would lose to it and render transparent over the transcript. */
-.ct-root .ct-sticky-user {
+/* ── Sticky last-user-message bubble ─────────────────────────────────────── */
+/* A compact, floating copy of the user's chat bubble pinned to the top of
+   .ct-messages once their prompt has scrolled out of view. It lives in a
+   click-through layer (absolute, so no layout shift) whose ::before is a
+   background-coloured scrim: transcript text fades out toward the top instead
+   of colliding with the bubble. Hidden state fades/slides rather than
+   display:none; both elements carry .ct-hidden.
+   Selectors are scoped with `.ct-root ` (0,2,0) so fill/shadow out-rank the
+   `.ct-root button` reset (0,1,1); a bare class would render transparent. */
+.ct-root .ct-sticky-user-layer {
   position: absolute;
   top: 0;
   left: 0;
   right: 12px; /* leave the scrollbar clear */
   z-index: 10; /* below the summary banner (20) and scroll-bottom pill (15) */
-  display: block;
+  display: flex;
+  justify-content: flex-end; /* same side as the user's real bubbles */
+  box-sizing: border-box;
+  padding: 8px 12px 0 24px;
+  pointer-events: none; /* never intercept clicks/selection on the transcript */
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.18s ease, transform 0.18s ease, visibility 0s linear 0s;
+}
+
+.ct-root .ct-sticky-user-layer::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 -40px 0;
+  background: linear-gradient(
+    to bottom,
+    var(--background-primary) 0%,
+    var(--background-primary) 58%,
+    transparent 100%
+  );
+  pointer-events: none;
+  z-index: -1;
+}
+
+.ct-root .ct-sticky-user-layer.ct-hidden {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-6px);
+  transition: opacity 0.18s ease, transform 0.18s ease, visibility 0s linear 0.18s;
+}
+
+.ct-root .ct-sticky-user {
+  position: relative;
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   box-sizing: border-box;
   height: auto;
+  max-width: 82%;
   margin: 0;
   padding: 6px 12px;
   text-align: left;
   font-size: var(--font-ui-smaller);
   line-height: 1.35;
-  color: var(--text-muted);
-  background: var(--background-primary);
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
   border: none;
-  border-bottom: 1px solid var(--background-modifier-border);
-  border-radius: 0;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+  border-radius: 14px 14px 4px 14px; /* the real bubble's shape, scaled down */
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18), 0 1px 3px rgba(0, 0, 0, 0.12);
   cursor: pointer;
+  transition: filter 0.12s ease, box-shadow 0.12s ease;
 }
 
-.ct-root .ct-sticky-user.ct-hidden { display: none; }
+/* Subtle "jump up" affordance; a pseudo-element so it is not part of the text. */
+.ct-root .ct-sticky-user::before {
+  content: '\2191';
+  flex: none;
+  opacity: 0.65;
+  font-weight: 600;
+}
+
+.ct-root .ct-sticky-user.ct-hidden { pointer-events: none; }
 
 /* The 2-line clamp lives on an inner span: -webkit-line-clamp on an element
    that has its own padding lets the clipped 3rd line bleed into the bottom
@@ -597,19 +645,29 @@
   line-clamp: 2;
   overflow: hidden;
   overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .ct-root .ct-sticky-user:hover {
-  color: var(--text-normal);
-  background: var(--background-secondary);
+  filter: brightness(1.08);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24), 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 .ct-root[data-density="compact"] .ct-sticky-user {
-  padding: 3px 8px;
+  padding: 4px 10px;
+  border-radius: 12px 12px 3px 12px;
 }
 
 .ct-root[data-density="spacious"] .ct-sticky-user {
-  padding: 8px 16px;
+  padding: 8px 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-root .ct-sticky-user-layer,
+  .ct-root .ct-sticky-user-layer.ct-hidden,
+  .ct-root .ct-sticky-user {
+    transition: none;
+  }
 }
 
 /* ── Summary peek banner ─────────────────────────────────────────────────── */

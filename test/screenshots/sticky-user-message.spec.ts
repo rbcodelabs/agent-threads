@@ -51,6 +51,10 @@ async function seedLongConversation(page: Page, prompts = PROMPTS): Promise<void
   }, prompts);
   await expect(page.locator('.ct-messages > .ct-message-user')).toHaveCount(prompts.length);
   await settle(page);
+  // Lazily-loaded font subsets resolve a beat after first paint and reflow the transcript by a
+  // couple of px; let that land before any scroll offset or snapshot is taken.
+  await page.waitForTimeout(400);
+  await settle(page);
 }
 
 async function settle(page: Page): Promise<void> {
@@ -78,12 +82,14 @@ async function scrollPastUserMsg(page: Page, index: number, px: number): Promise
     const sc = document.querySelector('.ct-messages') as HTMLElement;
     const el = sc.querySelectorAll(':scope > .ct-message-user')[i] as HTMLElement;
     const delta = el.getBoundingClientRect().bottom - sc.getBoundingClientRect().top + p;
-    sc.scrollTop += delta;
+    // Whole-pixel offsets keep glyph rasterisation (and so snapshots) identical run to run.
+    sc.scrollTop = Math.round(sc.scrollTop + delta);
   }, [index, px] as const);
   await settle(page);
 }
 
 const sticky = (page: Page) => page.locator('.ct-sticky-user');
+const layer = (page: Page) => page.locator('.ct-sticky-user-layer');
 const expectShown = async (page: Page, textStart?: string) => {
   await expect(sticky(page)).not.toHaveClass(/ct-hidden/);
   await expect(sticky(page)).toBeVisible();
@@ -91,10 +97,13 @@ const expectShown = async (page: Page, textStart?: string) => {
 };
 const expectHidden = async (page: Page) => {
   await expect(sticky(page)).toHaveClass(/ct-hidden/);
+  await expect(layer(page)).toHaveClass(/ct-hidden/);
   await expect(sticky(page)).toBeHidden();
 };
 
 async function open(page: Page, size = { width: 420, height: 740 }, url = harnessUrl): Promise<void> {
+  // The bubble fades/slides in; reduced motion removes the transition so visibility and snapshots are deterministic.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.setViewportSize(size);
   await page.goto(url);
   await page.waitForSelector('.ct-title-row');
@@ -111,6 +120,7 @@ test.describe('sticky last-user-message header', () => {
   });
 
   test('stays hidden while the only user message is still visible, even mid-reply', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.setViewportSize({ width: 420, height: 740 });
     await page.goto(harnessUrl);
     await page.waitForSelector('.ct-title-row');
@@ -141,6 +151,7 @@ test.describe('sticky last-user-message header', () => {
     await expectShown(page, 'Prompt ONE');
     // Regression: the `.ct-root button` reset once left the header transparent, so
     // transcript text rendered straight through it. It must be an opaque surface.
+    // It also reuses the real user-bubble fill/colour (accent), floating on the same (right) side.
     const paint = await sticky(page).evaluate((el) => {
       const cs = getComputedStyle(el);
       const r = el.getBoundingClientRect();
@@ -150,6 +161,23 @@ test.describe('sticky last-user-message header', () => {
     expect(paint.bg, 'header background must be opaque').not.toMatch(/^rgba\(0, 0, 0, 0\)$|^transparent$/);
     expect(paint.shadow).not.toBe('none');
     expect(paint.hitIsHeader).toBe(true);
+    const look = await page.evaluate(() => {
+      const b = document.querySelector('.ct-sticky-user') as HTMLElement;
+      const real = document.querySelector('.ct-message-user .ct-message-content') as HTMLElement;
+      const sc = document.querySelector('.ct-messages') as HTMLElement;
+      const cb = getComputedStyle(b), cr = getComputedStyle(real);
+      return {
+        bg: [cb.backgroundColor, cr.backgroundColor], color: [cb.color, cr.color],
+        radius: cb.borderTopLeftRadius, bRight: b.getBoundingClientRect().right, scRight: sc.getBoundingClientRect().right,
+        bLeft: b.getBoundingClientRect().left, scLeft: sc.getBoundingClientRect().left, scTop: sc.getBoundingClientRect().top, bTop: b.getBoundingClientRect().top,
+      };
+    });
+    expect(look.bg[0]).toBe(look.bg[1]);
+    expect(look.color[0]).toBe(look.color[1]);
+    expect(parseFloat(look.radius)).toBeGreaterThanOrEqual(10);
+    expect(look.bTop).toBeGreaterThan(look.scTop + 2); // floats with a margin, not flush
+    expect(look.bLeft - look.scLeft).toBeGreaterThan(40); // right-aligned like user bubbles, not full width
+    expect(look.scRight - look.bRight).toBeGreaterThanOrEqual(8);
     await shot(page.locator('.ct-main'), 'sticky-user-header-shown.png');
   });
 
@@ -193,6 +221,7 @@ test.describe('sticky last-user-message header', () => {
     });
     // Visible height is at most 2 lines + padding + border (allow 1px rounding).
     expect(m.height).toBeLessThanOrEqual(2 * m.lineHeight + m.pad + m.border + 1);
+    expect(m.border).toBe(0);
     // ...and it is exactly 2 lines, i.e. the text really overflowed (not a 1-line label).
     expect(m.height).toBeGreaterThan(1.5 * m.lineHeight + m.pad);
     // Regression: line-clamp on the padded button leaked a clipped 3rd line into the
@@ -353,7 +382,7 @@ test.describe('sticky last-user-message header', () => {
       expect(r[1], `message ${i} height`).toBe(withoutHeader.rects[i][1]);
     });
     // The header is out of flow: absolutely positioned over the scroller.
-    await expect(sticky(page)).toHaveCSS('position', 'absolute');
+    await expect(layer(page)).toHaveCSS('position', 'absolute');
   });
 
   test('sits below the summary banner and never covers the scroll-bottom pill', async ({ page }) => {
@@ -371,7 +400,7 @@ test.describe('sticky last-user-message header', () => {
 
     const z = await page.evaluate(() => {
       const zi = (s: string) => parseInt(getComputedStyle(document.querySelector(s)!).zIndex, 10);
-      return { sticky: zi('.ct-sticky-user'), pill: zi('.ct-scroll-bottom-pill'), banner: zi('.ct-summary-banner') };
+      return { sticky: zi('.ct-sticky-user-layer'), pill: zi('.ct-scroll-bottom-pill'), banner: zi('.ct-summary-banner') };
     });
     expect(z.sticky).toBeLessThan(z.pill);
     expect(z.pill).toBeLessThan(z.banner);
@@ -383,7 +412,7 @@ test.describe('sticky last-user-message header', () => {
       const bannerHit = document.elementFromPoint(bc.left + bc.width / 2, bc.top + 12);
       const pr = pill.getBoundingClientRect();
       const pillHit = document.elementFromPoint(pr.left + pr.width / 2, pr.top + pr.height / 2);
-      const sr = (document.querySelector('.ct-sticky-user') as HTMLElement).getBoundingClientRect();
+      const sr = (document.querySelector('.ct-sticky-user-layer') as HTMLElement).getBoundingClientRect();
       return {
         bannerTopmost: !!bannerHit && banner.contains(bannerHit),
         pillTopmost: !!pillHit && pill.contains(pillHit),
@@ -399,6 +428,52 @@ test.describe('sticky last-user-message header', () => {
     await shot(page.locator('.ct-main'), 'sticky-user-header-with-banner.png');
   });
 
+  test('fade scrim is click-through, matches the background, and does not block the transcript', async ({ page }) => {
+    await open(page);
+    await scrollPastUserMsg(page, 1, 200);
+    await expectShown(page, 'Prompt TWO');
+    const r = await page.evaluate(() => {
+      const l = document.querySelector('.ct-sticky-user-layer') as HTMLElement;
+      const b = document.querySelector('.ct-sticky-user') as HTMLElement;
+      const lr = l.getBoundingClientRect(), br = b.getBoundingClientRect();
+      // A point inside the layer/scrim, left of the bubble: must hit the transcript, not the layer.
+      const x = lr.left + 8, y = lr.top + 4;
+      const hit = document.elementFromPoint(x, y);
+      const scrim = getComputedStyle(l, '::before');
+      const bg = getComputedStyle(document.querySelector('.ct-messages') as HTMLElement).backgroundColor;
+      const primary = (() => { const t = document.createElement('div'); t.style.background = 'var(--background-primary)'; document.body.appendChild(t); const c = getComputedStyle(t).backgroundColor; t.remove(); return c; })();
+      return {
+        layerPE: getComputedStyle(l).pointerEvents, scrimPE: scrim.pointerEvents, hitIsLayer: !!hit && l.contains(hit),
+        hitTag: hit?.className, scrimImage: scrim.backgroundImage, primary, bg, bubbleLeft: br.left, layerLeft: lr.left,
+        scrimBottom: lr.bottom + 40,
+      };
+    });
+    expect(r.layerPE).toBe('none');
+    expect(r.scrimPE).toBe('none');
+    expect(r.hitIsLayer, 'transcript beneath the scrim must receive pointer events: ' + r.hitTag).toBe(false);
+    expect(r.scrimImage).toContain('linear-gradient');
+    expect(r.scrimImage).toContain(r.primary); // opaque top stop is exactly --background-primary
+    expect(r.scrimImage).toMatch(/rgba\(0, 0, 0, 0\)|transparent/); // ...fading to transparent
+    await shot(page.locator('.ct-main'), 'sticky-user-header-fade.png');
+  });
+
+  test('follows a light theme: scrim fades to the light background', async ({ page }) => {
+    await open(page);
+    await page.evaluate(() => {
+      document.body.classList.remove('theme-dark');
+      document.body.classList.add('theme-light');
+      const root = document.documentElement.style;
+      root.setProperty('--background-primary', 'rgb(255, 255, 255)');
+      root.setProperty('--background-secondary', 'rgb(245, 246, 248)');
+      root.setProperty('--text-normal', 'rgb(34, 34, 34)');
+    });
+    await scrollPastUserMsg(page, 1, 200);
+    await expectShown(page, 'Prompt TWO');
+    const img = await layer(page).evaluate((el) => getComputedStyle(el, '::before').backgroundImage);
+    expect(img).toContain('rgb(255, 255, 255)');
+    await shot(page.locator('.ct-main'), 'sticky-user-header-light.png');
+  });
+
   test('works on a mobile-width viewport', async ({ page }) => {
     await open(page, { width: 390, height: 844 }, mobileHarnessUrl);
     await expect(page.locator('.ct-root')).toHaveClass(/ct-mobile/);
@@ -411,7 +486,14 @@ test.describe('sticky last-user-message header', () => {
     });
     expect(box.sLeft).toBeGreaterThanOrEqual(box.mLeft - 1);
     expect(box.sRight).toBeLessThanOrEqual(box.mRight + 1);
-    expect(Math.abs(box.sTop - box.mTop)).toBeLessThanOrEqual(1);
+    expect(box.sTop - box.mTop).toBeLessThanOrEqual(16); // floats just below the top edge
+    expect(box.sTop - box.mTop).toBeGreaterThanOrEqual(0);
+    const layerBox = await layer(page).evaluate((el) => {
+      const r = el.getBoundingClientRect(); const m = (document.querySelector('.ct-messages') as HTMLElement).getBoundingClientRect();
+      return { dTop: Math.abs(r.top - m.top), left: r.left - m.left };
+    });
+    expect(layerBox.dTop).toBeLessThanOrEqual(1);
+    expect(layerBox.left).toBeGreaterThanOrEqual(-1);
     await shot(page.locator('.ct-main'), 'sticky-user-header-mobile.png');
   });
 
@@ -425,8 +507,8 @@ test.describe('sticky last-user-message header', () => {
         const cs = getComputedStyle(el);
         return { padTop: parseFloat(cs.paddingTop), padLeft: parseFloat(cs.paddingLeft), h: el.getBoundingClientRect().height, lh: parseFloat(cs.lineHeight) };
       });
-      expect(m.padTop).toBe(density === 'compact' ? 3 : 8);
-      expect(m.padLeft).toBe(density === 'compact' ? 8 : 16);
+      expect(m.padTop).toBe(density === 'compact' ? 4 : 8);
+      expect(m.padLeft).toBe(density === 'compact' ? 10 : 14);
       // Still clamped to two lines in every density.
       expect(m.h).toBeLessThanOrEqual(2 * m.lh + 2 * m.padTop + 2);
     });

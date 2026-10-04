@@ -148,6 +148,7 @@ export class ThreadsView extends ItemView {
   private scrollBottomBtn: HTMLButtonElement | null = null;
   /** Sticky "last user message" header; lives on .ct-main so messagesEl.empty() never wipes it. */
   private stickyUserEl: HTMLButtonElement | null = null;
+  private stickyUserLayerEl: HTMLElement | null = null;
   private stickyUserTextEl: HTMLElement | null = null;
   private stickyUserTarget: HTMLElement | null = null;
   private stickyUserFrame: number | null = null;
@@ -3145,8 +3146,11 @@ export class ThreadsView extends ItemView {
    */
   private setupStickyUserHeader(): void {
     this.stickyUserObserver?.disconnect();
-    this.stickyUserEl?.remove();
-    const btn = this.mainEl.createEl('button', {
+    this.stickyUserLayerEl?.remove();
+    // Layer = click-through scrim (fades the transcript out under the bubble) + the bubble itself.
+    const layer = this.mainEl.createDiv({ cls: 'ct-sticky-user-layer ct-hidden' });
+    this.stickyUserLayerEl = layer;
+    const btn = layer.createEl('button', {
       cls: 'ct-sticky-user ct-hidden',
       attr: { type: 'button', 'aria-label': 'Scroll to your last message' },
     });
@@ -3170,9 +3174,13 @@ export class ThreadsView extends ItemView {
   private updateStickyUserHeader(): void {
     const btn = this.stickyUserEl;
     if (!btn || !this.messagesEl) return;
+    const setHidden = (hidden: boolean) => {
+      btn.classList.toggle('ct-hidden', hidden);
+      this.stickyUserLayerEl?.classList.toggle('ct-hidden', hidden);
+    };
     const hide = () => {
       this.stickyUserTarget = null;
-      btn.classList.add('ct-hidden');
+      setHidden(true);
     };
     if (this.messagesEl.classList.contains('ct-messages-agent-view')) return hide();
     const userEls = Array.from(
@@ -3194,7 +3202,7 @@ export class ThreadsView extends ItemView {
       this.stickyUserTextEl?.setText(text);
       btn.title = text;
     }
-    btn.classList.remove('ct-hidden');
+    setHidden(false);
   }
 
   private async renderMessagesBody(): Promise<void> {
