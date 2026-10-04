@@ -148,6 +148,7 @@ export class ThreadsView extends ItemView {
   private scrollBottomBtn: HTMLButtonElement | null = null;
   /** Sticky "last user message" header; lives on .ct-main so messagesEl.empty() never wipes it. */
   private stickyUserEl: HTMLButtonElement | null = null;
+  private stickyUserTextEl: HTMLElement | null = null;
   private stickyUserTarget: HTMLElement | null = null;
   private stickyUserFrame: number | null = null;
   private stickyUserObserver: MutationObserver | null = null;
@@ -3149,6 +3150,7 @@ export class ThreadsView extends ItemView {
       cls: 'ct-sticky-user ct-hidden',
       attr: { type: 'button', 'aria-label': 'Scroll to your last message' },
     });
+    this.stickyUserTextEl = btn.createSpan({ cls: 'ct-sticky-user-text' });
     btn.addEventListener('click', () => {
       this.stickyUserTarget?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     });
@@ -3177,14 +3179,19 @@ export class ThreadsView extends ItemView {
       this.messagesEl.querySelectorAll<HTMLElement>(':scope > .ct-message.ct-message-user'),
     );
     const viewportTop = this.messagesEl.getBoundingClientRect().top;
-    const idx = pickStickyUserIndex(userEls.length, i => userEls[i].getBoundingClientRect().bottom, viewportTop);
+    const idx = pickStickyUserIndex(
+      userEls.length,
+      i => userEls[i].getBoundingClientRect().bottom,
+      viewportTop,
+      i => userEls[i].getBoundingClientRect().top,
+    );
     if (idx < 0) return hide();
     const target = userEls[idx];
     const text = truncateStickyText(target.querySelector('.ct-message-content')?.textContent ?? '');
     if (!text) return hide();
     if (target !== this.stickyUserTarget) {
       this.stickyUserTarget = target;
-      btn.setText(text);
+      this.stickyUserTextEl?.setText(text);
       btn.title = text;
     }
     btn.classList.remove('ct-hidden');

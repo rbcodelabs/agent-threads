@@ -558,18 +558,17 @@
 
 /* ── Sticky last-user-message header ─────────────────────────────────────── */
 /* Overlays the top of .ct-messages (absolute, so no layout shift) once the
-   user's prompt has scrolled out of view. Toggled via .ct-hidden. */
-.ct-sticky-user {
+   user's prompt has scrolled out of view. Toggled via .ct-hidden.
+   Every selector is scoped with `.ct-root ` (0,2,0) so the fill and shadow
+   out-rank the `.ct-root button` reset above (0,1,1); a bare `.ct-sticky-user`
+   would lose to it and render transparent over the transcript. */
+.ct-root .ct-sticky-user {
   position: absolute;
   top: 0;
   left: 0;
   right: 12px; /* leave the scrollbar clear */
   z-index: 10; /* below the summary banner (20) and scroll-bottom pill (15) */
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  overflow: hidden;
+  display: block;
   box-sizing: border-box;
   height: auto;
   margin: 0;
@@ -586,7 +585,21 @@
   cursor: pointer;
 }
 
-.ct-sticky-user:hover {
+.ct-root .ct-sticky-user.ct-hidden { display: none; }
+
+/* The 2-line clamp lives on an inner span: -webkit-line-clamp on an element
+   that has its own padding lets the clipped 3rd line bleed into the bottom
+   padding. */
+.ct-root .ct-sticky-user-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.ct-root .ct-sticky-user:hover {
   color: var(--text-normal);
   background: var(--background-secondary);
 }

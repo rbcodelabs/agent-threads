@@ -21,6 +21,24 @@ describe('pickStickyUserIndex', () => {
   });
 });
 
+describe('pickStickyUserIndex with getTop (straddling message)', () => {
+  const tops = [0, 300, 800];
+  const bottoms = [100, 400, 900];
+  const pick = (vt: number) => pickStickyUserIndex(3, i => bottoms[i], vt, i => tops[i]);
+  it('hides when a later message straddles the top edge', () => {
+    expect(pick(350)).toBe(-1);
+    expect(pick(300)).toBe(-1);
+    expect(pick(297)).toBe(0); // beyond the 2px tolerance: msg 1 is still below the edge
+  });
+  it('tolerates sub-pixel rest positions', () => {
+    expect(pick(298.5)).toBe(-1);
+  });
+  it('still shows the prompt of the turn being read', () => {
+    expect(pick(500)).toBe(1);
+    expect(pick(100)).toBe(0);
+  });
+});
+
 describe('truncateStickyText', () => {
   it('collapses whitespace', () => {
     expect(truncateStickyText('  a\n\n b\t c ')).toBe('a b c');
