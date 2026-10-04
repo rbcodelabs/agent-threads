@@ -478,3 +478,34 @@ describe('mergeAdjacentToolOnlyMessages', () => {
     expect(result[3]).toBe(m4);
   });
 });
+
+describe('groupToolCalls — browser session with interleaved non-browser tools', () => {
+  it('keeps one browser card when Bash calls fall between browser calls', () => {
+    const entries = groupToolCalls([
+      tool('mcp__x__browser_navigate', { toolUseId: 'b1' }),
+      tool('Bash', { toolUseId: 'x1' }),
+      tool('mcp__x__browser_click', { toolUseId: 'b2' }),
+      tool('Bash', { toolUseId: 'x2' }),
+      tool('mcp__x__browser_eval', { toolUseId: 'b3' }),
+    ]);
+    const browsers = entries.filter((e) => e.kind === 'browser');
+    expect(browsers).toHaveLength(1);
+    expect(browsers[0].kind === 'browser' && browsers[0].tools).toHaveLength(3);
+    expect(entries).toHaveLength(2); // card + the two deferred Bash calls grouped
+  });
+
+  it('starts a new card after browser_close', () => {
+    const entries = groupToolCalls([
+      tool('mcp__x__browser_navigate'),
+      tool('mcp__x__browser_close'),
+      tool('Bash'),
+      tool('mcp__x__browser_navigate'),
+    ]);
+    expect(entries.filter((e) => e.kind === 'browser')).toHaveLength(2);
+  });
+
+  it('leaves trailing non-browser tools to normal grouping', () => {
+    const entries = groupToolCalls([tool('mcp__x__browser_navigate'), tool('Bash')]);
+    expect(entries.map((e) => e.kind)).toEqual(['browser', 'single']);
+  });
+});

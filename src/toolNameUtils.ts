@@ -52,7 +52,8 @@ export function toolKey(raw: string): string {
 const BROWSER_TOOL_KEYS: ReadonlySet<string> = new Set([
   'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
   'browser_type', 'browser_screenshot', 'browser_status', 'browser_close',
-  'browser_resize',
+  'browser_resize', 'browser_eval', 'browser_console', 'browser_network',
+  'browser_save_page',
 ]);
 
 /**
@@ -269,21 +270,33 @@ export function groupToolCalls(tools: import('./types').ToolCallRecord[]): ToolC
   let i = 0;
   while (i < tools.length) {
     // Browser sessions are carved out BEFORE activity-kind grouping so they are
-    // never folded into a "Researching" group. A session is a run of consecutive
-    // browser_* calls ending at (and including) browser_close.
+    // never folded into a "Researching" group. A session runs from the first
+    // browser_* call to browser_close (or the last browser call in the list).
     //
-    // v1 limitation: a non-browser tool between two browser calls ends the run,
-    // so the later calls start a NEW card. A session spanning several messages
-    // is already handled upstream by mergeAdjacentToolOnlyMessages, which
-    // re-joins tool-only rows before this function sees them.
+    // Non-browser tools (Bash sleeps, Reads, ...) interleaved between browser
+    // calls do NOT end the session: they are deferred and emitted right after
+    // the session card, so one session stays one card instead of a card per
+    // browser burst.
     if (isBrowserTool(tools[i].name)) {
+      const session: import('./types').ToolCallRecord[] = [];
+      const deferred: import('./types').ToolCallRecord[] = [];
       let j = i;
-      while (j < tools.length && isBrowserTool(tools[j].name)) {
-        const closes = toolKey(tools[j].name) === 'browser_close';
-        j++;
-        if (closes) break;
+      let closed = false;
+      while (j < tools.length && !closed) {
+        if (isBrowserTool(tools[j].name)) {
+          session.push(tools[j]);
+          closed = toolKey(tools[j].name) === 'browser_close';
+          j++;
+          continue;
+        }
+        let k = j;
+        while (k < tools.length && !isBrowserTool(tools[k].name)) k++;
+        if (k >= tools.length) break; // trailing non-browser tools: normal grouping
+        deferred.push(...tools.slice(j, k));
+        j = k;
       }
-      result.push({ kind: 'browser', tools: tools.slice(i, j) });
+      result.push({ kind: 'browser', tools: session });
+      if (deferred.length > 0) result.push(...groupToolCalls(deferred));
       i = j;
       continue;
     }
