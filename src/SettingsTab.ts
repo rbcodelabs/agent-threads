@@ -3,6 +3,7 @@ import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
+import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifactStorage';
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState } from './types';
 import { serializeKey } from './stt';
 import { debugLog, setDebugLogging } from './logger';
@@ -2077,6 +2078,23 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.vaultFolder)
           .onChange(async (value) => {
             this.plugin.settings.vaultFolder = value || DEFAULT_VAULT_FOLDER;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Visible artifact folder')
+      .setDesc(
+        'Vault folder where plugins that opt in store user-visible artifact files, as <folder>/<plugin>/<artifact>. ' +
+        'A single folder name (no slashes); invalid or empty falls back to "Artifacts". Changing it affects new artifacts only: ' +
+        'existing ones stay where they are and are only cleaned up automatically if they sit under the current folder or "Artifacts".',
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_VISIBLE_ARTIFACT_ROOT)
+          .setValue(this.plugin.settings.visibleArtifactRoot)
+          .onChange(async (value) => {
+            this.plugin.settings.visibleArtifactRoot = sanitizeVisibleRootName(value);
             await this.plugin.saveSettings();
           }),
       );

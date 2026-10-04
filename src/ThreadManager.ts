@@ -924,7 +924,7 @@ export class ThreadManager {
     const vaultRoot = this.vaultRoot;
     const roots = (thread.artifacts ?? []).map(artifact => artifact.storageRoot).filter((root): root is string => !!root);
     if (!vaultRoot || roots.length === 0) return;
-    const pending = roots.map(root => removeStorageRoot(vaultRoot, root, this.artifactStorageFs).catch(() => undefined));
+    const pending = roots.map(root => removeStorageRoot(vaultRoot, root, this.artifactStorageFs, this.settings.visibleArtifactRoot).catch(() => undefined));
     // Chained rather than replaced, so awaiting after several deletions covers
     // all of them rather than only the most recent.
     this.artifactCleanupSettled = this.artifactCleanupSettled

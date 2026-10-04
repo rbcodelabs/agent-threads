@@ -47,7 +47,8 @@ describe('AgentToolRegistry — host injects the thread id', () => {
     expect(bound.name).toBe('AcmeTool');
     await bound.invoke({ brief: 'hello' });
 
-    expect(invoke).toHaveBeenCalledWith('thread-42', { brief: 'hello' }, NOOP_HOST);
+    // The host is wrapped per tool so allocateStorage carries the registered owner.
+    expect(invoke).toHaveBeenCalledWith('thread-42', { brief: 'hello' }, expect.objectContaining({ permissions: expect.any(Function), allocateStorage: expect.any(Function) }));
   });
 
   it('binds the same contribution separately per thread', async () => {
