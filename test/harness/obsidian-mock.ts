@@ -508,8 +508,6 @@ export class SliderComponent {
     return this;
   }
 
-  setDynamicTooltip(): this { return this; }
-
   setDisabled(disabled: boolean): this {
     this.sliderEl.disabled = disabled;
     return this;
