@@ -113,40 +113,8 @@ const SKILLS_VIEW_TYPE = 'claude-threads:skills';
 // Kept in sync with AGENT_BROWSER_VIEW_TYPE in agentBrowser/AgentBrowserPreviewView.ts.
 const AGENT_BROWSER_VIEW_TYPE = 'claude-threads:browser-preview';
 
-interface AgentThreadCreateParams {
-  prompt: string;
-  title?: string;
-  cwd?: string;
-  projectId?: string | null;
-  elevatedProjectId?: string;
-}
-
-/** Builds the host callback behind the agent-facing threads_create tool. */
-export function createAgentThreadCallback(deps: {
-  sourceThreadId: string;
-  getThread: (id: string) => { cwd?: string; projectId?: string } | undefined;
-  createThread: (title: string, cwd?: string, projectId?: string) => { id: string; title: string };
-  saveSettings: () => Promise<void>;
-  sendMessage: (id: string, prompt: string) => Promise<void>;
-  authorizeProject?: (projectId: string | undefined, elevatedProjectId?: string) => boolean;
-}): (params: AgentThreadCreateParams) => Promise<{ threadId: string; title: string }> {
-  return async ({ prompt, title, cwd, projectId, elevatedProjectId }) => {
-    const sourceThread = deps.getThread(deps.sourceThreadId);
-    const resolvedTitle = title ?? prompt.trim().split('\n')[0]!.slice(0, 80);
-    const resolvedProjectId = projectId === undefined ? sourceThread?.projectId : projectId ?? undefined;
-    if (deps.authorizeProject && !deps.authorizeProject(resolvedProjectId, elevatedProjectId)) {
-      throw new Error('Requested Project is outside coordination scope.');
-    }
-    const createdThread = deps.createThread(
-      resolvedTitle,
-      cwd ?? sourceThread?.cwd,
-      resolvedProjectId,
-    );
-    await deps.saveSettings();
-    void deps.sendMessage(createdThread.id, prompt);
-    return { threadId: createdThread.id, title: createdThread.title };
-  };
-}
+export { CROSS_PROJECT_SPAWN_TOOL, createAgentThreadCallback } from './agentThreadCreation';
+import { createAgentThreadCallback } from './agentThreadCreation';
 
 /** Builds the persistence boundary behind the agent-facing Project update tool. */
 export function createAgentProjectUpdateCallback(deps: {
@@ -748,6 +716,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
             createThread: (title, cwd, projectId) => this.createThreadFromAgent(threadId, title, cwd, projectId),
             saveSettings: () => this.saveSettings(),
             sendMessage: (id, prompt) => this.manager.sendMessage(id, prompt),
+            requestApproval: (toolName, detail) => this.manager.requestToolApproval(threadId, toolName, detail),
+            getProjectName: id => this.manager.getProject(id)?.name,
             authorizeProject: (projectId, elevatedProjectId) => {
               const caller = this.manager.getThread(threadId);
               if (!caller) return false;
