@@ -241,6 +241,30 @@ export const SAVE_CHUNK_CHARS = 256_000;
 /** Saved pages kept per thread; the oldest are deleted beyond this. */
 export const MAX_SAVED_FILES_PER_THREAD = 20;
 
+// ── Devtools buffers ─────────────────────────────────────────────────────────
+// Console and network logs are bounded rings: a chatty page must not be able to
+// grow host (or page) memory without limit, and what the agent reads back is
+// capped again on the way out.
+
+/** Console entries retained per guest; the oldest are dropped first. */
+export const MAX_CONSOLE_ENTRIES = 500;
+/** Characters kept per console message; longer ones are cut with a marker. */
+export const MAX_CONSOLE_MESSAGE_CHARS = 1_000;
+/** Network entries retained per page (the ring lives in the page and resets with it). */
+export const MAX_NETWORK_ENTRIES = 500;
+/** Characters kept per logged URL. */
+export const MAX_NETWORK_URL_CHARS = 500;
+/** Entries a single browser_console / browser_network call returns by default. */
+export const DEFAULT_DEVTOOLS_LIMIT = 50;
+/** Hard ceiling on entries returned by one call. */
+export const MAX_DEVTOOLS_LIMIT = 200;
+/** Characters of serialized result a browser_eval call returns. */
+export const MAX_EVAL_RESULT_CHARS = 20_000;
+/** Characters accepted as an eval expression. */
+export const MAX_EVAL_EXPRESSION_CHARS = 20_000;
+/** Eval gets the standard script timeout; async expressions are raced against it. */
+export const EVAL_TIMEOUT_MS = SCRIPT_TIMEOUT_MS;
+
 // ── URL policy ───────────────────────────────────────────────────────────────
 
 export type UrlDecision =

@@ -1281,6 +1281,12 @@ export interface PluginSettings {
    */
   agentBrowserAllowPrivateNetwork?: boolean;
   /**
+   * Let agents run JavaScript in the agent browser's page via `browser_eval`.
+   * Defaults to false: the tool is always registered but refuses, naming this
+   * setting, until the user opts in. Read live, so no reload is needed.
+   */
+  enableAgentBrowserEval?: boolean;
+  /**
    * When true, a canonical wrapped `visualize` content reference in an
    * assistant message renders as a live sandboxed visualization inline instead
    * of raw text. Legacy bare references remain supported. Desktop only.
@@ -1372,6 +1378,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   enableAgentBrowser: false,
   agentBrowserMaxGuests: 2,
   agentBrowserAllowPrivateNetwork: false,
+  enableAgentBrowserEval: false,
   enableInlineVisualizations: true,
   kanbanGroupBy: 'status',
   kanbanCollapseSide: 'none',

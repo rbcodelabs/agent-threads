@@ -52,7 +52,7 @@ export function toolKey(raw: string): string {
 const BROWSER_TOOL_KEYS: ReadonlySet<string> = new Set([
   'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
   'browser_type', 'browser_screenshot', 'browser_status', 'browser_close',
-  'browser_resize',
+  'browser_resize', 'browser_console', 'browser_network', 'browser_eval',
 ]);
 
 /**
@@ -142,6 +142,9 @@ export function getToolIcon(raw: string): string {
     case 'browser_close':        return 'circle-x';
     case 'browser_resize':       return 'maximize';
     case 'browser_save_page':    return 'save';
+    case 'browser_console':      return 'terminal';
+    case 'browser_network':      return 'network';
+    case 'browser_eval':         return 'braces';
     default:               return 'wrench';
   }
 }
@@ -173,7 +176,7 @@ const CANONICAL_BUILT_IN_TOOLS = new Set([
   // exposed under the legacy obsidian_ names and need no compatibility alias.
   'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
   'browser_type', 'browser_screenshot', 'browser_status', 'browser_close',
-  'browser_resize', 'browser_save_page',
+  'browser_resize', 'browser_save_page', 'browser_console', 'browser_network', 'browser_eval',
 ]);
 
 /** True only for a known first-party tool on the canonical or compatibility server. */
@@ -259,6 +262,9 @@ export function getActivityKind(raw: string): ActivityKind {
     case 'browser_close':
     case 'browser_resize':
     case 'browser_save_page':
+    case 'browser_console':
+    case 'browser_network':
+    case 'browser_eval':
       return 'researching';
     case 'ToolSearch':
     case 'Agent':

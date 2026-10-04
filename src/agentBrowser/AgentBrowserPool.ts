@@ -354,6 +354,7 @@ export class AgentBrowserPool {
       partition: this.partition,
       urlPolicy: this.getUrlPolicy(),
       now: this.now,
+      devtools: role === 'primary',
       onDied: (reason, error) => this.handleGuestDied(threadId, role, reason, error),
       // Screenshots need the container composited, which it is not while parked
       // off-screen. Routed through the host so overlapping captures from

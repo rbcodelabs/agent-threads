@@ -56,6 +56,11 @@ export function browserToolSummary(name: string, input: Record<string, unknown>)
       if (input.submit === true) parts.push('Enter');
       return parts.filter(Boolean).join(' · ');
     }
+    case 'browser_eval':
+      // Length only: the expression is agent-authored code and can embed anything.
+      return typeof input.expression === 'string' ? `${input.expression.length} chars` : '';
+    case 'browser_network':
+      return typeof input.filter === 'string' ? input.filter.slice(0, 60) : '';
     case 'browser_resize':
       return typeof input.width === 'number' && typeof input.height === 'number'
         ? `${input.width}×${input.height}`
@@ -193,6 +198,9 @@ const VERBS: Record<string, string> = {
   browser_status: 'status',
   browser_close: 'close',
   browser_resize: 'resize',
+  browser_console: 'console',
+  browser_network: 'network',
+  browser_eval: 'eval',
 };
 
 export function browserVerb(name: string): string {
@@ -259,6 +267,12 @@ function stepTarget(t: ToolCallRecord, pageUrl: string | null): string {
       return 'browser status';
     case 'browser_resize':
       return t.summary || 'viewport';
+    case 'browser_console':
+      return 'console log';
+    case 'browser_network':
+      return t.summary ? `requests matching ${t.summary}` : 'network log';
+    case 'browser_eval':
+      return t.summary ? `script (${t.summary})` : 'script';
     default:
       return t.summary || '';
   }

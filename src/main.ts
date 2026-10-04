@@ -3306,6 +3306,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
       pool: this.agentBrowser,
       getSecrets: () => this.collectSecretValues(),
       resolveUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
+      // Read lazily so toggling the setting applies to the next browser_eval call.
+      isEvalEnabled: () => this.settings.enableAgentBrowserEval ?? false,
+      getUrlPolicy: () => ({ allowPrivateNetwork: this.settings.agentBrowserAllowPrivateNetwork ?? false }),
       // Only reached when the pool is capable, i.e. desktop, where fs exists.
       saveSink: this.saveSinkModule().createFsSaveSink(),
     });
