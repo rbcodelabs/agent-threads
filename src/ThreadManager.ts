@@ -22,6 +22,7 @@ import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
 import { checkImageHealth } from './sandboxImage';
+import { sweepOrphanedThreadContainers, type OrphanSweepResult } from './sandboxVmSweep';
 import { containerNameForThread, createDefaultVmCommandRunner, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
 import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
@@ -872,13 +873,16 @@ export class ThreadManager {
     // fire-and-forget: deleteThread() is synchronous and this is best-effort
     // cleanup, never a correctness gate — a stray container is one
     // `container rm -f` away regardless.
-    const vmManager = this.sandboxVmManagers.get(id);
-    if (vmManager) {
-      this.sandboxVmManagers.delete(id);
-      void vmManager.exit({ force: true, allowHarnessOwned: true }).catch((err) => {
-        console.error(`[ClaudeThreads] Failed to tear down sandbox VM for deleted thread ${id}:`, err);
-      });
-    }
+    // Always attempt teardown, even with no cached manager: the map is lazily
+    // populated and empty after a plugin reload/restart, but the container name
+    // is derived from the thread id, so a fresh manager reaches the same
+    // container. exit() resolves (never rejects) and is a no-op when the
+    // container doesn't exist; the catch guards runner rejections.
+    const vmManager = this.getSandboxVmManager(id);
+    this.sandboxVmManagers.delete(id);
+    void vmManager.exit({ force: true, allowHarnessOwned: true }).catch((err) => {
+      console.error(`[ClaudeThreads] Failed to tear down sandbox VM for deleted thread ${id}:`, err);
+    });
     this.cancelPendingGoalContext(id);
     this.pendingToolResultImages.delete(id);
     this.activeBgTasks.delete(id);
@@ -2129,6 +2133,18 @@ export class ThreadManager {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Removes `claude-threads-vm-*` containers whose thread is no longer live
+   * (leaked by deletes that predate/missed teardown). Best-effort; never throws.
+   */
+  sweepOrphanedSandboxContainers(): Promise<OrphanSweepResult> {
+    return sweepOrphanedThreadContainers({
+      run: this.vmCommandRunner ?? createDefaultVmCommandRunner(),
+      liveThreadIds: Array.from(this.threads.keys()),
+      log: (message) => console.log(`[ClaudeThreads] ${message}`),
+    });
   }
 
   /**

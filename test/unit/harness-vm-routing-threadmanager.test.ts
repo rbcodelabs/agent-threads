@@ -134,10 +134,31 @@ describe('ThreadManager — sandbox VM teardown at thread deletion (ADR-0015 §3
     expect(exitSpy).toHaveBeenCalledWith({ force: true, allowHarnessOwned: true });
   });
 
-  it('does nothing when no sandbox VM manager was ever created for the thread (no-op, not an error)', () => {
+  it('still attempts teardown when no manager was cached (e.g. after plugin reload)', async () => {
     const manager = new ThreadManager(DEFAULT_SETTINGS);
+    const calls: string[][] = [];
+    manager.vmCommandRunner = async (args) => {
+      calls.push(args);
+      // probe + inspect succeed so exit() proceeds to rm.
+      return { exitCode: 0, stdout: '', stderr: '' };
+    };
     manager.loadThreads([thread({ agentHarness: 'claude' })]);
+
+    manager.deleteThread('t1');
+    await vi.waitFor(() => expect(calls.some((a) => a[0] === 'rm')).toBe(true));
+
+    const rm = calls.find((a) => a[0] === 'rm')!;
+    expect(rm).toEqual(['rm', '--force', 'claude-threads-vm-t1']);
+  });
+
+  it('does not throw when the container runtime is unavailable or rejects', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.vmCommandRunner = async () => { throw new Error('container CLI missing'); };
+    manager.loadThreads([thread({ agentHarness: 'claude' })]);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     expect(() => manager.deleteThread('t1')).not.toThrow();
+    await new Promise((r) => setTimeout(r, 0));
+    errSpy.mockRestore();
   });
 
   it('a deleted thread\'s sandbox VM manager is dropped from tracking (a later re-creation with the same id starts fresh)', async () => {
