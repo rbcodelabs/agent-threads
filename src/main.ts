@@ -1208,6 +1208,18 @@ export default class ClaudeThreadsPlugin extends Plugin {
     );
     if (repairedOrchestrators) this.manager.loadProjects(this.manager.getProjects());
 
+    // Reclaim sandbox containers leaked by thread deletes that never tore them
+    // down. Desktop only, delayed so vault thread recovery and startup work
+    // finish first, and fire-and-forget so it can never block load.
+    if (!Platform.isMobile) {
+      const orphanSweepTimer = window.setTimeout(() => {
+        void this.manager.sweepOrphanedSandboxContainers().catch((err) => {
+          console.error('[ClaudeThreads] Orphan sandbox sweep failed:', err);
+        });
+      }, 60_000);
+      this.register(() => window.clearTimeout(orphanSweepTimer));
+    }
+
     // Initialize the built-in scheduler
     this.scheduler = new Scheduler({
       getItems: () => this.settings.scheduledItems ?? [],
