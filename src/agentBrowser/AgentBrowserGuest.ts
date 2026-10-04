@@ -189,7 +189,9 @@ interface ConsoleMessageEventLike {
   level?: unknown;
   message?: unknown;
   line?: unknown;
+  lineNumber?: unknown;
   sourceId?: unknown;
+  details?: unknown;
 }
 
 export class AgentBrowserGuest {
@@ -414,14 +416,23 @@ export class AgentBrowserGuest {
     // itself. `will-navigate` on the tag is not cancelable from the renderer, so
     // this is detect-and-abort and is inherently racy — the real fix is a
     // main-process guard (gap G2).
+    // The console resets on COMMIT, not on start: a navigation that is aborted,
+    // blocked or fails never replaces the document, so it must not wipe the log.
+    // `did-navigate` fires for top-frame commits only (same-document navigations
+    // use `did-navigate-in-page`). Messages the new document logs before this
+    // event is delivered to the host can be lost; that is the cost of not
+    // clearing early.
+    on('did-navigate', (event) => {
+      if ((event as unknown as { isMainFrame?: boolean }).isMainFrame === false) return;
+      this.consoleBuffer.clear();
+    });
+
     on('did-start-navigation', (event) => {
       const detail = event as unknown as DidNavigateEventLike;
       if (detail.isMainFrame === false) return;
       if (!detail.url || detail.url === BOOTSTRAP_URL) return;
       // The old page's coordinates mean nothing on the next one.
       this.pointer = null;
-      // Nor does its console: a new document starts with a clean log.
-      if (detail.isInPlace !== true) this.consoleBuffer.clear();
       const decision = evaluateUrl(detail.url, this.urlPolicy);
       if (decision.allowed) return;
       try {
@@ -793,6 +804,12 @@ export class AgentBrowserGuest {
     } catch {
       /* best effort */
     }
+  }
+
+  /** The webview's own current URL (host-read, not page-supplied). Empty when unavailable. */
+  currentUrl(): string {
+    const el = this.el;
+    return el ? safeUrl(el) : '';
   }
 
   /** Run a script string in the page and return its value. */

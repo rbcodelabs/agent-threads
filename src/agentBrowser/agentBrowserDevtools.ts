@@ -69,10 +69,30 @@ export interface ConsoleEntry {
 
 /** Shape of the `console-message` event, as far as we rely on it. */
 export interface RawConsoleMessage {
+  /** Numeric 0..3 (older Electron) or 'verbose' | 'info' | 'warning' | 'error' (newer). */
   level?: unknown;
   message?: unknown;
   line?: unknown;
+  lineNumber?: unknown;
   sourceId?: unknown;
+  /** Newer Electron nests the same fields under `details`. */
+  details?: unknown;
+}
+
+const LEVEL_BY_NAME: Record<string, ConsoleLevel> = {
+  verbose: 'debug',
+  debug: 'debug',
+  info: 'info',
+  log: 'info',
+  warning: 'warning',
+  warn: 'warning',
+  error: 'error',
+};
+
+function parseLevel(level: unknown): ConsoleLevel {
+  if (typeof level === 'number' && Number.isInteger(level)) return LEVEL_BY_NUMBER[Math.min(3, Math.max(0, level))];
+  if (typeof level === 'string') return LEVEL_BY_NAME[level.toLowerCase()] ?? 'info';
+  return 'info';
 }
 
 export interface ConsoleReadOptions {
@@ -103,16 +123,19 @@ export class ConsoleBuffer {
     private readonly now: () => number = Date.now,
   ) {}
 
-  push(raw: RawConsoleMessage): void {
-    const levelIndex = typeof raw.level === 'number' && Number.isInteger(raw.level) ? raw.level : 1;
-    const level = LEVEL_BY_NUMBER[Math.min(3, Math.max(0, levelIndex))];
+  push(event: RawConsoleMessage): void {
+    // Prefer the nested `details` shape when present, else the flat one.
+    const nested = event.details && typeof event.details === 'object' ? (event.details as RawConsoleMessage) : null;
+    const raw: RawConsoleMessage = nested ? { ...event, ...nested } : event;
+    const level = parseLevel(raw.level);
     const message = typeof raw.message === 'string' ? raw.message : String(raw.message ?? '');
+    const lineValue = typeof raw.line === 'number' ? raw.line : raw.lineNumber;
     this.entries.push({
       level,
       text: cut(message, MAX_CONSOLE_MESSAGE_CHARS),
       timestamp: new Date(this.now()).toISOString(),
-      source: typeof raw.sourceId === 'string' ? cut(raw.sourceId, MAX_NETWORK_URL_CHARS) : '',
-      line: typeof raw.line === 'number' && Number.isFinite(raw.line) ? Math.max(0, Math.floor(raw.line)) : 0,
+      source: typeof raw.sourceId === 'string' ? redactUrl(raw.sourceId) : '',
+      line: typeof lineValue === 'number' && Number.isFinite(lineValue) ? Math.max(0, Math.floor(lineValue)) : 0,
     });
     if (this.entries.length > this.maxEntries) {
       this.entries.shift();
@@ -206,6 +229,16 @@ function finiteNonNegative(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
 }
 
+/** ISO string for `t`, falling back to `now()` when it is absent or outside the Date range. */
+function safeIso(t: number | undefined, now: () => number): string {
+  for (const candidate of [t, now()]) {
+    if (candidate === undefined) continue;
+    const date = new Date(candidate);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  return new Date(0).toISOString();
+}
+
 /**
  * Validate what the in-page hook returned. The page controls that object, so
  * every field is re-typed and re-capped here rather than trusted.
@@ -213,13 +246,14 @@ function finiteNonNegative(value: unknown): number | undefined {
 export function normalizeNetworkEntries(raw: unknown, now: () => number = Date.now): NetworkEntry[] {
   if (!Array.isArray(raw)) return [];
   const out: NetworkEntry[] = [];
-  for (const item of raw.slice(0, MAX_NETWORK_ENTRIES)) {
+  // Newest win: the synthesized main-document entry is appended last, so a full
+  // ring must not push it out.
+  for (const item of raw.slice(-MAX_NETWORK_ENTRIES)) {
     if (!item || typeof item !== 'object') continue;
     const e = item as Record<string, unknown>;
     if (typeof e.url !== 'string' || !e.url) continue;
-    const t = finiteNonNegative(e.t) ?? now();
     const entry: NetworkEntry = {
-      timestamp: new Date(t).toISOString(),
+      timestamp: safeIso(finiteNonNegative(e.t), now),
       type: typeof e.type === 'string' ? e.type.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24) || 'other' : 'other',
       method: typeof e.method === 'string' ? e.method.replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 12) || 'GET' : 'GET',
       url: redactUrl(e.url),
@@ -261,6 +295,12 @@ export function selectNetworkEntries(
 /**
  * Source for the in-page network hook. Idempotent: state lives on a
  * non-enumerable `window[key]` property and a second run is a no-op.
+ *
+ * The in-page ring cap and URL cap are hygiene (they keep an honest page's
+ * memory and the bridge payload small); they are NOT a boundary against a
+ * hostile page, which owns this JS world. The host re-validates, re-caps and
+ * keeps the newest entries in `normalizeNetworkEntries`, and takes the page URL
+ * and origin from the webview itself rather than from this script's result.
  *
  * Limits, by construction:
  *  - `fetch` / XHR calls made BEFORE the hook is installed (it is installed at
@@ -389,8 +429,6 @@ export function buildNetworkInstallScript(key: string): string {
 }
 
 export interface RawNetworkLog {
-  url: string;
-  origin: string;
   dropped: number;
   entries: unknown[];
 }
@@ -411,7 +449,7 @@ export function buildNetworkReadScript(key: string, clear: boolean): string {
         });
       }
     } catch (e) {}
-    var out = { url: location.href, origin: location.origin, dropped: st.dropped, entries: list };
+    var out = { dropped: st.dropped, entries: list };
     if (${clear ? 'true' : 'false'}) { st.entries.length = 0; st.dropped = 0; }
     return out;
   })()`;
@@ -420,8 +458,8 @@ export function buildNetworkReadScript(key: string, clear: boolean): string {
 // ── Eval ─────────────────────────────────────────────────────────────────────
 
 export type RawEvalResult =
-  | { ok: true; type: string; json: string; truncated: boolean; url: string; origin: string }
-  | { ok: false; name: string; message: string; url: string; origin: string };
+  | { ok: true; type: string; json: string; truncated: boolean }
+  | { ok: false; name: string; message: string };
 
 /**
  * Evaluate `expression` in the page and return a JSON-serializable, size-capped
@@ -434,12 +472,22 @@ export type RawEvalResult =
  * have an explicit textual form so the agent is not told `null` for a thing
  * that was not null. The cap is applied inside the page so an enormous value
  * never crosses the bridge.
+ *
+ * The result carries no URL or origin: the page controls this script's return
+ * value, so the host takes those from the webview instead. Everything here is
+ * page-influenced and is validated and framed as untrusted by the caller.
+ *
+ * The guest's script timeout stops the host WAITING; it does not cancel the
+ * script. A runaway or never-settling expression keeps running in the page
+ * until the page is navigated away or closed.
  */
 export function buildEvalScript(expression: string): string {
   return `(async function () {
     var MAX = ${MAX_EVAL_RESULT_CHARS};
-    function meta() { return { url: location.href, origin: location.origin }; }
+    // Bounds total work when describing a huge or lazily-infinite structure.
+    var budget = 5000;
     function describe(v, seen, depth) {
+      if (--budget < 0) return { $budget: true };
       if (v === undefined) return { $undefined: true };
       if (v === null || typeof v === 'boolean' || typeof v === 'string') return v;
       if (typeof v === 'number') return isFinite(v) ? v : { $number: String(v) };
@@ -477,14 +525,12 @@ export function buildEvalScript(expression: string): string {
       if (value && typeof value.then === 'function') value = await value;
       var json = JSON.stringify(describe(value, [], 0));
       if (json === undefined) json = 'null';
-      var m = meta();
       var truncated = json.length > MAX;
       return { ok: true, type: value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value,
-               json: truncated ? json.slice(0, MAX) : json, truncated: truncated, url: m.url, origin: m.origin };
+               json: truncated ? json.slice(0, MAX) : json, truncated: truncated };
     } catch (err) {
-      var m2 = meta();
       return { ok: false, name: String(err && err.name || 'Error').slice(0, 100),
-               message: String(err && err.message !== undefined ? err.message : err).slice(0, 2000), url: m2.url, origin: m2.origin };
+               message: String(err && err.message !== undefined ? err.message : err).slice(0, 2000) };
     }
   })()`;
 }

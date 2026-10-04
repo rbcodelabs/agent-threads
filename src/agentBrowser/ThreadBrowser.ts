@@ -33,7 +33,7 @@ import {
   type SaveFormat,
 } from './agentBrowserScript';
 import { VmLoopbackError, type VmUrlResolution } from '../vmPortForward';
-import { frameUntrusted, matchesKnownSecret, stripInvisible } from './agentBrowserSanitize';
+import { containsKnownSecret, frameUntrusted, matchesKnownSecret, stripInvisible } from './agentBrowserSanitize';
 import {
   buildEvalScript,
   buildNetworkReadScript,
@@ -46,6 +46,7 @@ import {
 } from './agentBrowserDevtools';
 import {
   MAX_EVAL_EXPRESSION_CHARS,
+  MAX_NETWORK_URL_CHARS,
   MAX_SAVE_CHARS,
   MAX_SAVED_FILES_PER_THREAD,
   MAX_SNAPSHOT_CHARS,
@@ -442,16 +443,17 @@ export class ThreadBrowser {
   async console(options: { level?: ConsoleLevel; limit?: number; clear?: boolean } = {}): Promise<ConsoleToolResult> {
     const guest = await this.guest();
     const result = await guest.readConsole(options);
-    const origin = originOf(result.url);
+    const url = hostUrl(result.url);
+    const origin = originOf(url);
     return {
-      url: result.url,
+      url,
       total: result.matched,
       returned: result.entries.length,
       buffered: result.buffered,
       dropped: result.dropped,
       content: frameUntrusted(JSON.stringify(result.entries, null, 2), {
         origin,
-        url: result.url,
+        url,
         retrievedAt: this.nowIso(),
         truncated: result.matched > result.entries.length,
       }),
@@ -473,8 +475,9 @@ export class ThreadBrowser {
         retryable: true,
       });
     }
-    const url = typeof raw.url === 'string' ? raw.url : '';
-    const origin = typeof raw.origin === 'string' ? raw.origin : originOf(url);
+    // URL and origin come from the webview, never from the page's own return value.
+    const url = hostUrl(guest.currentUrl());
+    const origin = originOf(url);
     const dropped = typeof raw.dropped === 'number' && Number.isFinite(raw.dropped) ? Math.max(0, Math.floor(raw.dropped)) : 0;
     const selected = selectNetworkEntries(normalizeNetworkEntries(raw.entries, this.nowMs), options, dropped);
     return {
@@ -517,7 +520,7 @@ export class ThreadBrowser {
         retryable: false,
       });
     }
-    if (matchesKnownSecret(expression, this.getSecrets())) {
+    if (containsKnownSecret(expression, this.getSecrets())) {
       throw new AgentBrowserError({
         code: 'not_actionable',
         message: 'Refusing to evaluate a stored secret in a web page.',
@@ -537,24 +540,27 @@ export class ThreadBrowser {
         retryable: true,
       });
     }
-    const url = typeof raw.url === 'string' ? raw.url : '';
-    const origin = typeof raw.origin === 'string' ? raw.origin : originOf(url);
-    const framing = { origin, url, retrievedAt: this.nowIso() };
+    // URL and origin come from the webview, never from the page's own return value.
+    const url = hostUrl(guest.currentUrl());
+    const framing = { origin: originOf(url), url, retrievedAt: this.nowIso() };
     if (raw.ok === true) {
+      const type = typeof raw.type === 'string' ? stripInvisible(raw.type).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 20) : '';
       return {
         url,
-        type: typeof raw.type === 'string' ? raw.type.slice(0, 20) : 'unknown',
+        type: type || 'unknown',
         truncated: raw.truncated === true,
         threw: false,
-        content: frameUntrusted(String(raw.json ?? ''), { ...framing, truncated: raw.truncated === true }),
+        content: frameUntrusted(typeof raw.json === 'string' ? raw.json : '', { ...framing, truncated: raw.truncated === true }),
       };
     }
+    const errName = typeof (raw as { name?: unknown }).name === 'string' ? (raw as { name: string }).name : 'Error';
+    const errMessage = typeof (raw as { message?: unknown }).message === 'string' ? (raw as { message: string }).message : '';
     return {
       url,
       type: 'exception',
       truncated: false,
       threw: true,
-      content: frameUntrusted(`${String((raw as { name?: unknown }).name ?? 'Error')}: ${String((raw as { message?: unknown }).message ?? '')}`, framing),
+      content: frameUntrusted(`${errName}: ${errMessage}`, framing),
     };
   }
 
@@ -640,4 +646,9 @@ function originOf(url: string): string {
   } catch {
     return '';
   }
+}
+
+/** A host-read URL, capped and cleaned before it is shown to the agent or used as a frame attribute. */
+function hostUrl(url: string): string {
+  return stripInvisible(String(url)).slice(0, MAX_NETWORK_URL_CHARS);
 }
