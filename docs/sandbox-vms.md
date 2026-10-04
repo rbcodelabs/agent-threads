@@ -101,9 +101,14 @@ deadline, not a security boundary against deliberately detached processes.
 
 Call `exit_vm` when finished. It removes the VM's ephemeral filesystem and leaves
 the mounted host files intact. Detached VMs survive plugin reloads; the same
-thread can reconnect with `vm_exec` or remove its VM with `exit_vm`. Cleanup is
-explicit, so call `exit_vm` before deleting the thread. Changing working directory
-does not change an existing mount: exit and enter again to switch workspaces.
+thread can reconnect with `vm_exec` or remove its VM with `exit_vm`. Deleting or
+archiving a thread removes its container automatically, so `exit_vm` first is
+optional. As a safety net for containers leaked by older versions or by a reload
+that interrupted a delete, the plugin also runs a one-time sweep about a minute
+after startup (desktop only, best-effort). It removes only `claude-threads-vm-*`
+containers whose thread no longer exists, and leaves anything it cannot match
+alone. Changing working directory does not change an existing mount: exit and
+enter again to switch workspaces.
 
 ### Opening a server running in the VM from the host browser
 
