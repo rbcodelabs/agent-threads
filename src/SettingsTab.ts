@@ -25,6 +25,7 @@ import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY, MAX_VM_CPUS, resolveVmCpus, resolve
 import { describeReset, getSandboxSetupStatus, resetSandbox, runSandboxSetup } from './sandboxSetup';
 import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
 import { promptConfirm } from './confirmModal';
+import { formatToolName } from './toolNameUtils';
 
 // View-type string constants, mirrored as local literals (see main.ts) so referencing
 // them never triggers a static import of the desktop-only KanbanView/AgentDashboard
@@ -1991,7 +1992,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       } else {
         for (const tool of tools) {
           new Setting(allowedList)
-            .setName(tool)
+            .setName(formatToolName(tool))
             .addButton((btn) =>
               btn.setButtonText('Remove').setWarning().onClick(async () => {
                 this.plugin.settings.alwaysAllowedTools =

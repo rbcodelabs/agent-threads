@@ -55,7 +55,9 @@ test.describe('cross-project threads_create approval', () => {
     });
     const card = page.locator('.ct-permission-card');
     await expect(card).toBeVisible();
-    await expect(card).toContainText('cross-project') // formatToolName renders threads_create:cross-project as just "cross-project";
+    await expect(card).toContainText('Spawn thread in another project');
+    // Detail keeps its line breaks (one row per field), not a run-on line.
+    expect(await card.locator('.ct-permission-detail').innerText()).toContain('\nWorking directory:');
     await expect(card).toContainText('Project: Agent Threads');
     await expect(card).toContainText('Working directory: /Users/mock/projects/claude-threads');
     await expect(card).toContainText('Prompt: Draft release notes for v2.4');

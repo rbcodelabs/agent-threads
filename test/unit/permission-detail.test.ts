@@ -29,6 +29,16 @@ describe('parsePermissionDetail', () => {
     expect(r.fields?.[1].value).toBe('{\n  "a": 1\n}');
   });
 
+  it('keeps line breaks for multi-line plain text while the summary stays flat', () => {
+    const r = parsePermissionDetail('Project: A\nWorking directory: /x\nPrompt: go');
+    expect(r.multiline).toBe('Project: A\nWorking directory: /x\nPrompt: go');
+    expect(r.summary).toBe('Project: A Working directory: /x Prompt: go');
+  });
+
+  it('does not set multiline for single-line text', () => {
+    expect(parsePermissionDetail('Run the build').multiline).toBeUndefined();
+  });
+
   it('treats malformed JSON as text', () => {
     expect(parsePermissionDetail('{"command": "ls').fields).toBeNull();
   });

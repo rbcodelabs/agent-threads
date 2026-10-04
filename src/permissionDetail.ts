@@ -14,6 +14,13 @@ export interface ParsedPermissionDetail {
   summary: string;
   /** Structured key/value rows when detail was a JSON object; otherwise null. */
   fields: PermissionDetailField[] | null;
+  /**
+   * Plain-text details that span several lines (e.g. the cross-project spawn
+   * request) keep their line breaks here, each line capped. Only set when the
+   * detail is non-JSON and has more than one non-empty line; the card prefers
+   * it over `summary`, compact surfaces keep using the flattened `summary`.
+   */
+  multiline?: string;
 }
 
 /** Input keys that best describe "what is this call about", in priority order. */
@@ -54,6 +61,14 @@ export function parsePermissionDetail(detail: string): ParsedPermissionDetail {
     } catch {
       // not JSON — fall through to plain text
     }
+  }
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length > 1) {
+    return {
+      summary: truncate(text, SUMMARY_MAX),
+      fields: null,
+      multiline: lines.map(l => truncate(l, SUMMARY_MAX)).join("\n"),
+    };
   }
   return { summary: truncate(text, SUMMARY_MAX), fields: null };
 }

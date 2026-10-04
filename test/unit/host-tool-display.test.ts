@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CROSS_PROJECT_SPAWN_TOOL } from '../../src/agentThreadCreation';
 import { formatToolName, getActivityKind, getToolIcon } from '../../src/toolNameUtils';
 
 describe('host-neutral tool display', () => {
@@ -46,5 +47,16 @@ describe('host-neutral tool display', () => {
 
   it('keeps legacy display compatibility', () => {
     expect(formatToolName('mcp__obsidian__obsidian_search_vault')).toBe('search vault');
+  });
+});
+
+describe('cross-project spawn pseudo tool', () => {
+  it('renders a friendly label instead of dropping the prefix', () => {
+    expect(formatToolName(CROSS_PROJECT_SPAWN_TOOL)).toBe('Spawn thread in another project');
+  });
+
+  it('leaves other colon-prefixed tools unchanged', () => {
+    expect(formatToolName('threads_create')).toBe('threads create');
+    expect(formatToolName('obsidian:obsidian_search_vault')).toBe('search vault');
   });
 });
