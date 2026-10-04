@@ -24,6 +24,9 @@ vi.mock('obsidian', async importOriginal => {
       const c: Record<string, unknown> = new Proxy({}, {
         get: (_t, prop) => prop === 'setDisabled'
           ? (d: boolean) => { this.rec.disabled = d; return c; }
+          // Geode's Setting host has no setDynamicTooltip; mirror that so a
+          // regression throws here instead of silently truncating the tab.
+          : prop === 'setDynamicTooltip' ? undefined
           : () => c,
       });
       cb(c);
@@ -68,5 +71,14 @@ describe('Agent browser settings on the Tools tab', () => {
     expect(priv?.control).toBe('toggle');
     expect(max?.disabled).toBe(disabled);
     expect(priv?.disabled).toBe(disabled);
+  });
+
+  it("renders every setting after the session slider (host without setDynamicTooltip)", () => {
+    (window as unknown as { geode?: unknown }).geode = { getFdPressure: () => ({}) };
+    const names = renderTools().map(r => r.name);
+    const after = names.slice(names.indexOf("Maximum browser sessions") + 1);
+    expect(after).toContain("Allow private network access");
+    expect(after).toContain("Allow agents to evaluate JavaScript in the browser");
+    expect(after).toContain("Inline visualizations");
   });
 });

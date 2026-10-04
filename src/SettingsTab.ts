@@ -1926,12 +1926,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           slider
             .setLimits(1, 4, 1)
             .setValue(this.plugin.settings.agentBrowserMaxGuests ?? 2)
-            .setDisabled(!agentBrowserAvailable)
-            .setDynamicTooltip()
-            .onChange(async (value) => {
-              this.plugin.settings.agentBrowserMaxGuests = value;
-              await this.plugin.saveSettings();
-            });
+            .setDisabled(!agentBrowserAvailable);
+          // Geode's Setting host has no setDynamicTooltip. Calling it
+          // unconditionally threw mid-render and silently dropped every
+          // setting below this one (private network, JS eval, and the rest
+          // of the Tools tab). Cosmetic, so call it only when present.
+          (slider as { setDynamicTooltip?: () => unknown }).setDynamicTooltip?.();
+          slider.onChange(async (value) => {
+            this.plugin.settings.agentBrowserMaxGuests = value;
+            await this.plugin.saveSettings();
+          });
         });
 
       new Setting(containerEl)
