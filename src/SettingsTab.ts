@@ -1917,37 +1917,37 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             });
         });
 
-      if (agentBrowserAvailable && (this.plugin.settings.enableAgentBrowser ?? false)) {
-        new Setting(containerEl)
-          .setName('Maximum browser sessions')
-          .setDesc(
-            'Concurrent in-app browser sessions across all threads. Each one is a separate sandboxed process, so this is a real resource ceiling rather than a preference.',
-          )
-          .addSlider((slider) => {
-            slider
-              .setLimits(1, 4, 1)
-              .setValue(this.plugin.settings.agentBrowserMaxGuests ?? 2)
-              .setDynamicTooltip()
-              .onChange(async (value) => {
-                this.plugin.settings.agentBrowserMaxGuests = value;
-                await this.plugin.saveSettings();
-              });
-          });
+      new Setting(containerEl)
+        .setName('Maximum browser sessions')
+        .setDesc(
+          'Concurrent in-app browser sessions across all threads. Each one is a separate sandboxed process, so this is a real resource ceiling rather than a preference.',
+        )
+        .addSlider((slider) => {
+          slider
+            .setLimits(1, 4, 1)
+            .setValue(this.plugin.settings.agentBrowserMaxGuests ?? 2)
+            .setDisabled(!agentBrowserAvailable)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+              this.plugin.settings.agentBrowserMaxGuests = value;
+              await this.plugin.saveSettings();
+            });
+        });
 
-        new Setting(containerEl)
-          .setName('Allow private network access')
-          .setDesc(
-            'Let the agent browser reach private addresses such as 192.168.x.x and .local hosts. Cloud metadata endpoints stay blocked either way.',
-          )
-          .addToggle((toggle) => {
-            toggle
-              .setValue(this.plugin.settings.agentBrowserAllowPrivateNetwork ?? false)
-              .onChange(async (value) => {
-                this.plugin.settings.agentBrowserAllowPrivateNetwork = value;
-                await this.plugin.saveSettings();
-              });
-          });
-      }
+      new Setting(containerEl)
+        .setName('Allow private network access')
+        .setDesc(
+          'Let the agent browser reach private addresses such as 192.168.x.x and .local hosts. Cloud metadata endpoints stay blocked either way.',
+        )
+        .addToggle((toggle) => {
+          toggle
+            .setValue(this.plugin.settings.agentBrowserAllowPrivateNetwork ?? false)
+            .setDisabled(!agentBrowserAvailable)
+            .onChange(async (value) => {
+              this.plugin.settings.agentBrowserAllowPrivateNetwork = value;
+              await this.plugin.saveSettings();
+            });
+        });
     }
 
     new Setting(containerEl)
