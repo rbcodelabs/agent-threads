@@ -239,6 +239,34 @@ function safeIso(t: number | undefined, now: () => number): string {
   return new Date(0).toISOString();
 }
 
+/** Redact every absolute http(s) URL embedded in free text (e.g. Chromium fetch errors echo the full URL). */
+export function redactUrlsInText(text: string): string {
+  return text.replace(/\bhttps?:\/\/[^\s"'<>)]+/gi, (m) => redactUrl(m));
+}
+
+/**
+ * A failing <img>/<script> yields both a Resource Timing entry (often with an
+ * HTTP status) and an error event (failed:true). Fold them into one entry per
+ * resource: same url + type, keeping failed:true and any known status. Only
+ * failure pairs are merged, so repeated successful requests stay distinct.
+ */
+function mergeFailureDuplicates(entries: NetworkEntry[]): NetworkEntry[] {
+  const consumed = new Set<NetworkEntry>();
+  for (const failure of entries) {
+    if (!failure.failed || consumed.has(failure)) continue;
+    const twin = entries.find(
+      (o) => o !== failure && !o.failed && !consumed.has(o) && o.url === failure.url && o.type === failure.type
+        && (o.status === undefined || o.status >= 400),
+    );
+    if (!twin) continue;
+    consumed.add(twin);
+    failure.status ??= twin.status;
+    failure.durationMs ??= twin.durationMs;
+    failure.sizeBytes ??= twin.sizeBytes;
+  }
+  return entries.filter((e) => !consumed.has(e));
+}
+
 /**
  * Validate what the in-page hook returned. The page controls that object, so
  * every field is re-typed and re-capped here rather than trusted.
@@ -265,11 +293,11 @@ export function normalizeNetworkEntries(raw: unknown, now: () => number = Date.n
     if (duration !== undefined) entry.durationMs = duration;
     const size = finiteNonNegative(e.size);
     if (size !== undefined) entry.sizeBytes = size;
-    if (typeof e.error === 'string' && e.error) entry.error = cut(e.error, 200);
+    if (typeof e.error === 'string' && e.error) entry.error = cut(redactUrlsInText(e.error), 200);
     out.push(entry);
   }
   // Resource Timing entries are delivered in batches, so order by start time.
-  return out.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+  return mergeFailureDuplicates(out).sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
 }
 
 /** Apply filter / failedOnly / limit to normalized entries (most recent `limit` win). */

@@ -180,6 +180,29 @@ describe('network entry handling', () => {
     expect(normalizeNetworkEntries('nope')).toEqual([]);
   });
 
+  it('redacts URLs embedded in the error text', () => {
+    const [e] = normalizeNetworkEntries([
+      { t: 1, type: 'fetch', url: 'https://a.test/x', failed: true, error: 'Failed to fetch http://user:pw@host/ok.json?token=abc12345#frag' },
+    ]);
+    expect(e.error).not.toContain('pw');
+    expect(e.error).not.toContain('abc12345');
+    expect(e.error).not.toContain('frag');
+    expect(e.error).toContain('host/ok.json');
+  });
+
+  it('folds a failing resource\'s timing entry and error event into one failed entry', () => {
+    const out = normalizeNetworkEntries([
+      { t: 1000, type: 'img', url: 'https://a.test/x.png', status: 404, duration: 9 },
+      { t: 1010, type: 'img', url: 'https://a.test/x.png', failed: true, error: 'failed to load' },
+      { t: 2000, type: 'fetch', url: 'https://a.test/ok', status: 200 },
+      { t: 2100, type: 'fetch', url: 'https://a.test/ok', status: 200 },
+    ]);
+    const imgs = out.filter((e) => e.type === 'img');
+    expect(imgs).toHaveLength(1);
+    expect(imgs[0]).toMatchObject({ failed: true, status: 404, durationMs: 9, error: 'failed to load' });
+    expect(out.filter((e) => e.type === 'fetch')).toHaveLength(2);
+  });
+
   it('survives an out-of-range timestamp instead of throwing', () => {
     const now = () => Date.parse('2026-05-05T00:00:00.000Z');
     for (const t of [1e20, 8.64e15 + 1, Number.MAX_VALUE]) {
