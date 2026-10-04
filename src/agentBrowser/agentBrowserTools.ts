@@ -13,7 +13,8 @@
  * setting: it is always registered, and refuses with a message naming the
  * setting while that is off. It is not in the read-only set, so harnesses that
  * honour `requiresApproval` (Codex, OpenCode) prompt for it. On the Claude path
- * it is a trusted built-in like click and type, so the setting is the gate.
+ * it is deliberately not pre-approved (see requiresPerCallApproval): every call
+ * shows a card with the full expression, and Always Allow is not offered.
  */
 
 import { z } from 'zod';

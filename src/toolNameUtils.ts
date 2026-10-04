@@ -197,9 +197,36 @@ export function isTrustedBuiltInTool(raw: string): boolean {
  */
 export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
 
+/**
+ * Trusted built-ins that still need a card on every call, under any host
+ * prefix. `browser_eval` runs agent-authored JavaScript in a page whose content
+ * the agent also reads, so neither "trusted built-in" nor a persisted
+ * "Always Allow" may stand in for the user seeing the expression.
+ */
+const PER_CALL_APPROVAL_TOOL_KEYS: ReadonlySet<string> = new Set(['browser_eval']);
+
+/** True when each call must be approved on a card, whatever shortcuts exist. */
+export function requiresPerCallApproval(toolName: string): boolean {
+  return PER_CALL_APPROVAL_TOOL_KEYS.has(toolKey(toolName));
+}
+
 /** False for requests that must be decided afresh every time. */
 export function canAlwaysAllow(toolName: string): boolean {
-  return toolName !== HOST_EXEC_PERMISSION_TOOL;
+  return toolName !== HOST_EXEC_PERMISSION_TOOL && !requiresPerCallApproval(toolName);
+}
+
+/**
+ * Detail text for a harness permission request. Per-call-approval tools show
+ * their complete input (the SDK description would hide the expression) up to a
+ * generous cap; everything else keeps the SDK-provided description first.
+ */
+export function buildPermissionDetail(
+  toolName: string,
+  input: unknown,
+  opts: { description?: string; decisionReason?: string; blockedPath?: string },
+): string {
+  if (requiresPerCallApproval(toolName)) return JSON.stringify(input).slice(0, 20000);
+  return opts.description ?? opts.decisionReason ?? opts.blockedPath ?? JSON.stringify(input).slice(0, 4000);
 }
 
 /**
