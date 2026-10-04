@@ -3,6 +3,7 @@ import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
+import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifactStorage';
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState } from './types';
 import { serializeKey } from './stt';
 import { debugLog, setDebugLogging } from './logger';
@@ -25,6 +26,7 @@ import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY, MAX_VM_CPUS, resolveVmCpus, resolve
 import { describeReset, getSandboxSetupStatus, resetSandbox, runSandboxSetup } from './sandboxSetup';
 import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
 import { promptConfirm } from './confirmModal';
+import { formatToolName } from './toolNameUtils';
 
 // View-type string constants, mirrored as local literals (see main.ts) so referencing
 // them never triggers a static import of the desktop-only KanbanView/AgentDashboard
@@ -2007,7 +2009,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       } else {
         for (const tool of tools) {
           new Setting(allowedList)
-            .setName(tool)
+            .setName(formatToolName(tool))
             .addButton((btn) =>
               btn.setButtonText('Remove').setWarning().onClick(async () => {
                 this.plugin.settings.alwaysAllowedTools =
@@ -2092,6 +2094,23 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.vaultFolder)
           .onChange(async (value) => {
             this.plugin.settings.vaultFolder = value || DEFAULT_VAULT_FOLDER;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Visible artifact folder')
+      .setDesc(
+        'Vault folder where plugins that opt in store user-visible artifact files, as <folder>/<plugin>/<artifact>. ' +
+        'A single folder name (no slashes); invalid or empty falls back to "Artifacts". Changing it affects new artifacts only: ' +
+        'existing ones stay where they are and are only cleaned up automatically if they sit under the current folder or "Artifacts".',
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_VISIBLE_ARTIFACT_ROOT)
+          .setValue(this.plugin.settings.visibleArtifactRoot)
+          .onChange(async (value) => {
+            this.plugin.settings.visibleArtifactRoot = sanitizeVisibleRootName(value);
             await this.plugin.saveSettings();
           }),
       );

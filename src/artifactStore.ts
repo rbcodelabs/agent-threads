@@ -12,7 +12,7 @@
 
 import type { ArtifactActionResult, ArtifactStoreHost } from './ArtifactContributions';
 import type { ThreadArtifactRecord } from './types';
-import { allocateStorageRoot, removeStorageRoot, resolveStorageRoot, type ArtifactStorageFs, type StorageRootResolution } from './artifactStorage';
+import { allocateStorageRoot, removeStorageRoot, resolveStorageRoot, type AllocateStorageRootOptions, type ArtifactStorageFs, type StorageRootResolution } from './artifactStorage';
 
 export interface ArtifactStoreDeps {
   /** Absolute vault path, or '' where the host has no local filesystem. */
@@ -27,6 +27,8 @@ export interface ArtifactStoreDeps {
   onChanged?(threadId: string): void;
   /** Injectable for tests; defaults to the real filesystem. */
   storageFs?: ArtifactStorageFs;
+  /** The `visibleArtifactRoot` setting, read per call so a settings change applies immediately. */
+  visibleRoot?(): string | undefined;
 }
 
 export const NO_VIEW_MESSAGE = 'The Agent Threads view is not open, so artifact actions cannot run.';
@@ -46,15 +48,15 @@ export function createArtifactStore(deps: ArtifactStoreDeps): ArtifactStoreHost 
     },
 
     resolveStorageRoot(candidate: unknown): StorageRootResolution {
-      return resolveStorageRoot(deps.vaultRoot(), candidate, deps.storageFs);
+      return resolveStorageRoot(deps.vaultRoot(), candidate, deps.storageFs, deps.visibleRoot?.());
     },
 
-    allocateStorageRoot(artifactId: unknown): Promise<StorageRootResolution & { existed?: boolean }> {
-      return allocateStorageRoot(deps.vaultRoot(), artifactId, deps.storageFs);
+    allocateStorageRoot(artifactId: unknown, options?: AllocateStorageRootOptions): Promise<StorageRootResolution & { existed?: boolean }> {
+      return allocateStorageRoot(deps.vaultRoot(), artifactId, deps.storageFs, { ...options, visibleRoot: deps.visibleRoot?.() });
     },
 
     releaseStorageRoot(candidate: unknown): Promise<boolean> {
-      return removeStorageRoot(deps.vaultRoot(), candidate, deps.storageFs);
+      return removeStorageRoot(deps.vaultRoot(), candidate, deps.storageFs, deps.visibleRoot?.());
     },
 
     async put(threadId: string, record: ThreadArtifactRecord) {

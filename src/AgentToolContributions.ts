@@ -26,7 +26,7 @@
 
 import { z } from 'zod';
 import type { PeerIdentity } from './ArtifactContributions';
-import type { StorageAllocationResult, ThreadPermissionSnapshot } from './types';
+import type { StorageAllocationOptions, StorageAllocationResult, ThreadPermissionSnapshot } from './types';
 
 /** A tool result, in the same shape the built-in MCP handlers already return. */
 export interface AgentToolResult {
@@ -46,8 +46,8 @@ export interface AgentToolResult {
 export interface AgentToolHost {
   /** Effective permission mode and pending-plan state for the calling thread. */
   permissions(): Promise<ThreadPermissionSnapshot | null>;
-  /** Creates and returns the host-owned storage root for `artifactId`. */
-  allocateStorage(artifactId: string): Promise<StorageAllocationResult>;
+  /** Creates and returns the host-owned storage root for `artifactId`. See `artifacts.allocateStorage` for `options`. */
+  allocateStorage(artifactId: string, options?: StorageAllocationOptions): Promise<StorageAllocationResult>;
 }
 
 export interface AgentToolContribution {
@@ -233,6 +233,22 @@ interface RegistryEntry {
   readonly resolved: RegisteredAgentTool;
 }
 
+/**
+ * Binds `host.allocateStorage` to the tool's registered owner. The registry
+ * recorded `owner` when the tool was registered, so unlike the self-declared
+ * owner on the public API this one is host-derived: whatever `owner` the tool
+ * passes is overwritten, and a tool can never write into another plugin's
+ * visible namespace.
+ */
+function hostForOwner(host: AgentToolHost, owner: PeerIdentity): AgentToolHost {
+  return Object.freeze({
+    ...host,
+    permissions: () => host.permissions(),
+    allocateStorage: (artifactId: string, options?: StorageAllocationOptions) =>
+      host.allocateStorage(artifactId, { ...options, owner: Object.freeze({ pluginId: owner.pluginId }) }),
+  });
+}
+
 /** A host that can do nothing, for bindings made outside a thread session. */
 const UNAVAILABLE_HOST: AgentToolHost = Object.freeze({
   permissions: async () => null,
@@ -288,7 +304,7 @@ export function bindAgentTool(
   contribution: AgentToolContribution,
   threadId: string,
   host: AgentToolHost = UNAVAILABLE_HOST,
-  options: { readonly ownerId?: string; readonly invokeTimeoutMs?: number } = {},
+  options: { readonly ownerId?: string; readonly owner?: PeerIdentity; readonly invokeTimeoutMs?: number } = {},
 ): BoundAgentTool | null {
   const inputSchema = zodShapeFromJsonSchema(contribution.inputSchema);
   if (!inputSchema || typeof contribution.invoke !== 'function') return null;
@@ -301,7 +317,7 @@ export function bindAgentTool(
     alwaysLoad: contribution.alwaysLoad !== false,
     requiresApproval: contribution.requiresApproval !== false,
     invoke: (args: Record<string, unknown>) =>
-      isolatedInvoke(contribution.name, ownerId, timeoutMs, () => contribution.invoke(threadId, args, host)),
+      isolatedInvoke(contribution.name, ownerId, timeoutMs, () => contribution.invoke(threadId, args, options.owner ? hostForOwner(host, options.owner) : host)),
   });
 }
 
@@ -422,6 +438,7 @@ export class AgentToolRegistry {
     for (const entry of this.entries.values()) {
       const binding = bindAgentTool(entry.contribution, threadId, host, {
         ownerId: entry.owner.pluginId,
+        owner: entry.owner,
         invokeTimeoutMs: this.invokeTimeoutMs,
       });
       // A contribution that no longer binds (its schema went bad) is skipped
@@ -445,6 +462,6 @@ export class AgentToolRegistry {
     const entry = this.entries.get(name);
     if (!entry) return textResult(`Error: no agent tool is registered for "${name}".`, true);
     return isolatedInvoke(name, entry.owner.pluginId, this.invokeTimeoutMs, () =>
-      entry.contribution.invoke(threadId, args, host));
+      entry.contribution.invoke(threadId, args, hostForOwner(host, entry.owner)));
   }
 }

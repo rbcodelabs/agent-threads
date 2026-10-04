@@ -71,7 +71,13 @@ export function isBrowserTool(raw: string): boolean {
  *       mcp__github__create_issue           → "create issue"
  *       Read                                → "Read"
  */
+/** Pseudo tool name used for the cross-project spawn approval (mirrors CROSS_PROJECT_SPAWN_TOOL;
+ *  duplicated because this module must stay import-free). */
+const CROSS_PROJECT_SPAWN_RAW = 'threads_create:cross-project';
+const CROSS_PROJECT_SPAWN_LABEL = 'Spawn thread in another project';
+
 export function formatToolName(raw: string): string {
+  if (raw === CROSS_PROJECT_SPAWN_RAW) return CROSS_PROJECT_SPAWN_LABEL;
   return normalizeToolName(raw).display;
 }
 

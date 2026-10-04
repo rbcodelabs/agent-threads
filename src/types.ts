@@ -532,6 +532,28 @@ export interface ThreadPermissionSnapshot {
 }
 
 /**
+ * Options for `artifacts.allocateStorage`. Omitting them (or `location:
+ * 'hidden'`) keeps the original behavior: `<vault>/.geode/artifacts/<artifactId>`.
+ * `'visible'` allocates `<vault>/<root>/<namespace>/<folderName>` instead
+ * (ADR-0010 addendum). `<root>` is the host's `visibleArtifactRoot` setting
+ * (default `Artifacts`); `<namespace>` is the sanitized `owner.pluginId`. Hosts
+ * without the `artifacts.visibleStorage` capability ignore these options and
+ * allocate hidden.
+ */
+export interface StorageAllocationOptions {
+  readonly location?: 'hidden' | 'visible';
+  /** Visible only. Sanitized and de-duplicated by the host; defaults to the artifact id. */
+  readonly folderName?: string;
+  /**
+   * Required when `location` is `'visible'`; ignored for hidden. Names the
+   * namespace folder. Self-declared by the caller, exactly like the `owner` on
+   * `attach`/`update`: advisory, not authenticated. Agent tools get their
+   * registered owner injected by the host instead, overriding anything passed.
+   */
+  readonly owner?: { readonly pluginId: string; readonly displayName?: string };
+}
+
+/**
  * Outcome of `artifacts.allocateStorage`. The host creates the directory and
  * returns it, so an artifact root is a contract rather than a convention a
  * peer has to reproduce from an undisclosed vault layout.
@@ -1051,6 +1073,13 @@ export interface PluginSettings {
    */
   saveRawLogs: boolean;
   vaultFolder: string;
+  /**
+   * Name of the single host-owned, user-visible vault folder for visible
+   * artifact storage (`<vault>/<name>/<plugin>/<artifact folder>`). Sanitized
+   * to one path segment; empty or invalid falls back to `Artifacts`. Renaming
+   * it affects new allocations only; see `trustedVisibleRootNames`.
+   */
+  visibleArtifactRoot: string;
   permissionMode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
   /** Thinking mode for extended reasoning. 'disabled' sends no thinking param; 'adaptive' lets Claude decide; 'enabled' uses a fixed token budget. */
   thinkingMode: 'disabled' | 'adaptive' | 'enabled';
@@ -1325,6 +1354,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   saveThreadsToVault: true,
   saveRawLogs: true,
   vaultFolder: DEFAULT_VAULT_FOLDER,
+  visibleArtifactRoot: 'Artifacts',
   permissionMode: 'acceptEdits',
   thinkingMode: 'disabled',
   thinkingBudgetTokens: 8000,

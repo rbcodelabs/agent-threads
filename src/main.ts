@@ -1,4 +1,4 @@
-import type { AgentHarness } from './types';
+import type { AgentHarness, StorageAllocationOptions } from './types';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createPublicThreadLifecycle } from './publicThreadLifecycle';
@@ -113,40 +113,8 @@ const SKILLS_VIEW_TYPE = 'claude-threads:skills';
 // Kept in sync with AGENT_BROWSER_VIEW_TYPE in agentBrowser/AgentBrowserPreviewView.ts.
 const AGENT_BROWSER_VIEW_TYPE = 'claude-threads:browser-preview';
 
-interface AgentThreadCreateParams {
-  prompt: string;
-  title?: string;
-  cwd?: string;
-  projectId?: string | null;
-  elevatedProjectId?: string;
-}
-
-/** Builds the host callback behind the agent-facing threads_create tool. */
-export function createAgentThreadCallback(deps: {
-  sourceThreadId: string;
-  getThread: (id: string) => { cwd?: string; projectId?: string } | undefined;
-  createThread: (title: string, cwd?: string, projectId?: string) => { id: string; title: string };
-  saveSettings: () => Promise<void>;
-  sendMessage: (id: string, prompt: string) => Promise<void>;
-  authorizeProject?: (projectId: string | undefined, elevatedProjectId?: string) => boolean;
-}): (params: AgentThreadCreateParams) => Promise<{ threadId: string; title: string }> {
-  return async ({ prompt, title, cwd, projectId, elevatedProjectId }) => {
-    const sourceThread = deps.getThread(deps.sourceThreadId);
-    const resolvedTitle = title ?? prompt.trim().split('\n')[0]!.slice(0, 80);
-    const resolvedProjectId = projectId === undefined ? sourceThread?.projectId : projectId ?? undefined;
-    if (deps.authorizeProject && !deps.authorizeProject(resolvedProjectId, elevatedProjectId)) {
-      throw new Error('Requested Project is outside coordination scope.');
-    }
-    const createdThread = deps.createThread(
-      resolvedTitle,
-      cwd ?? sourceThread?.cwd,
-      resolvedProjectId,
-    );
-    await deps.saveSettings();
-    void deps.sendMessage(createdThread.id, prompt);
-    return { threadId: createdThread.id, title: createdThread.title };
-  };
-}
+export { CROSS_PROJECT_SPAWN_TOOL, createAgentThreadCallback } from './agentThreadCreation';
+import { createAgentThreadCallback } from './agentThreadCreation';
 
 /** Builds the persistence boundary behind the agent-facing Project update tool. */
 export function createAgentProjectUpdateCallback(deps: {
@@ -748,6 +716,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
             createThread: (title, cwd, projectId) => this.createThreadFromAgent(threadId, title, cwd, projectId),
             saveSettings: () => this.saveSettings(),
             sendMessage: (id, prompt) => this.manager.sendMessage(id, prompt),
+            requestApproval: (toolName, detail) => this.manager.requestToolApproval(threadId, toolName, detail),
+            getProjectName: id => this.manager.getProject(id)?.name,
             authorizeProject: (projectId, elevatedProjectId) => {
               const caller = this.manager.getThread(threadId);
               if (!caller) return false;
@@ -1207,6 +1177,18 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.settings.orchestratorThreadId,
     );
     if (repairedOrchestrators) this.manager.loadProjects(this.manager.getProjects());
+
+    // Reclaim sandbox containers leaked by thread deletes that never tore them
+    // down. Desktop only, delayed so vault thread recovery and startup work
+    // finish first, and fire-and-forget so it can never block load.
+    if (!Platform.isMobile) {
+      const orphanSweepTimer = window.setTimeout(() => {
+        void this.manager.sweepOrphanedSandboxContainers().catch((err) => {
+          console.error('[ClaudeThreads] Orphan sandbox sweep failed:', err);
+        });
+      }, 60_000);
+      this.register(() => window.clearTimeout(orphanSweepTimer));
+    }
 
     // Initialize the built-in scheduler
     this.scheduler = new Scheduler({
@@ -2903,6 +2885,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         vaultRoot: () => this.manager.vaultRoot,
         getThread: (id) => this.manager.getThread(id),
         saveSettings: () => this.saveSettings(),
+        visibleRoot: () => this.settings.visibleArtifactRoot,
         // Delegating to the view is what keeps a peer's invokeAction and a
         // user's card click on one code path. Absent view ⇒ error result.
         invokeAction: (threadId, artifactId, actionId) => this.getView()?.invokeArtifactAction(threadId, artifactId, actionId),
@@ -3550,12 +3533,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private agentToolHost(threadId: string): AgentToolHost {
     return {
       permissions: async () => (await this.api?.v1.threads.permissions(threadId)) ?? null,
-      allocateStorage: async (artifactId: string) => {
+      allocateStorage: async (artifactId: string, options?: StorageAllocationOptions) => {
         const api = this.api?.v1;
         if (!api) {
           return { success: false, status: 'unavailable', artifactId, message: 'Agent Threads public API is unavailable.' };
         }
-        return api.artifacts.allocateStorage(threadId, artifactId);
+        return api.artifacts.allocateStorage(threadId, artifactId, options);
       },
     };
   }

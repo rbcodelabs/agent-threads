@@ -22,6 +22,7 @@ import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
 import { checkImageHealth } from './sandboxImage';
+import { sweepOrphanedThreadContainers, type OrphanSweepResult } from './sandboxVmSweep';
 import { containerNameForThread, createDefaultVmCommandRunner, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
 import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
@@ -317,6 +318,16 @@ export class ThreadManager {
   sandboxVmHooks: VmHooks | undefined = undefined;
   githubEnvResolver: ((cwd: string, baseEnv: Record<string, string | undefined>) => Record<string, string>) | undefined = undefined;
   permissionHandler: (threadId: string, toolName: string, detail: string) => Promise<boolean> = async () => false;
+
+  /**
+   * Raises a permission card for a thread through the same bookkeeping and UI
+   * path as SDK tool-permission requests (pending state, permission_request /
+   * permission_resolved events, resolver cleanup). Used by host-side gates such
+   * as cross-project threads_create that need a human decision on behalf of a thread.
+   */
+  requestToolApproval(threadId: string, toolName: string, detail: string): Promise<boolean> {
+    return this.enqueuePermissionPrompt(threadId, toolName, detail);
+  }
   questionHandler: (threadId: string, questions: AskQuestion[]) => Promise<Record<string, string>> = async () => ({});
   openNewTabHandler: (title?: string, initialPrompt?: string) => Promise<{ threadId: string; title: string }> = async (title) => ({ threadId: '', title: title ?? 'New Thread' });
   vaultRoot = '';
@@ -872,13 +883,16 @@ export class ThreadManager {
     // fire-and-forget: deleteThread() is synchronous and this is best-effort
     // cleanup, never a correctness gate — a stray container is one
     // `container rm -f` away regardless.
-    const vmManager = this.sandboxVmManagers.get(id);
-    if (vmManager) {
-      this.sandboxVmManagers.delete(id);
-      void vmManager.exit({ force: true, allowHarnessOwned: true }).catch((err) => {
-        console.error(`[ClaudeThreads] Failed to tear down sandbox VM for deleted thread ${id}:`, err);
-      });
-    }
+    // Always attempt teardown, even with no cached manager: the map is lazily
+    // populated and empty after a plugin reload/restart, but the container name
+    // is derived from the thread id, so a fresh manager reaches the same
+    // container. exit() resolves (never rejects) and is a no-op when the
+    // container doesn't exist; the catch guards runner rejections.
+    const vmManager = this.getSandboxVmManager(id);
+    this.sandboxVmManagers.delete(id);
+    void vmManager.exit({ force: true, allowHarnessOwned: true }).catch((err) => {
+      console.error(`[ClaudeThreads] Failed to tear down sandbox VM for deleted thread ${id}:`, err);
+    });
     this.cancelPendingGoalContext(id);
     this.pendingToolResultImages.delete(id);
     this.activeBgTasks.delete(id);
@@ -910,7 +924,7 @@ export class ThreadManager {
     const vaultRoot = this.vaultRoot;
     const roots = (thread.artifacts ?? []).map(artifact => artifact.storageRoot).filter((root): root is string => !!root);
     if (!vaultRoot || roots.length === 0) return;
-    const pending = roots.map(root => removeStorageRoot(vaultRoot, root, this.artifactStorageFs).catch(() => undefined));
+    const pending = roots.map(root => removeStorageRoot(vaultRoot, root, this.artifactStorageFs, this.settings.visibleArtifactRoot).catch(() => undefined));
     // Chained rather than replaced, so awaiting after several deletions covers
     // all of them rather than only the most recent.
     this.artifactCleanupSettled = this.artifactCleanupSettled
@@ -2129,6 +2143,18 @@ export class ThreadManager {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Removes `claude-threads-vm-*` containers whose thread is no longer live
+   * (leaked by deletes that predate/missed teardown). Best-effort; never throws.
+   */
+  sweepOrphanedSandboxContainers(): Promise<OrphanSweepResult> {
+    return sweepOrphanedThreadContainers({
+      run: this.vmCommandRunner ?? createDefaultVmCommandRunner(),
+      liveThreadIds: Array.from(this.threads.keys()),
+      log: (message) => console.log(`[ClaudeThreads] ${message}`),
+    });
   }
 
   /**

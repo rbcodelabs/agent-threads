@@ -2,7 +2,8 @@ import './obsidian-mock'; // must be first — sets up HTMLElement.prototype
 import { ThreadsView } from '../../src/ThreadsView';
 import { ThreadManager } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS } from '../../src/types';
-import { fixtureThreads, inlineContentMessages } from './fixtures';
+import { fixtureThreads, inlineContentMessages, kanbanFixtureProjects } from './fixtures';
+import { createAgentThreadCallback } from '../../src/agentThreadCreation';
 import { browserFixtureMessages, PRICING_IMAGE, type BrowserFixtureKind } from './browser-fixtures';
 import { LoginHandoffController } from '../../src/agentBrowser/LoginHandoffController';
 import type { AgentBrowserPool } from '../../src/agentBrowser/AgentBrowserPool';
@@ -412,6 +413,40 @@ const mgrInternals = manager as unknown as {
   const message = { id, role: 'user' as const, content, timestamp: Date.now() };
   thread.messages.push(message);
   mgrInternals.emit(threadId, { type: 'user_message_added', message } as any);
+};
+
+/**
+ * Drive the REAL createAgentThreadCallback (src/agentThreadCreation.ts) against
+ * the REAL ThreadManager: approval goes through manager.requestToolApproval ->
+ * the view's permissionHandler -> the real permission card. Only saveSettings
+ * and sendMessage are stubbed (no agent turn runs in the harness). The thrown
+ * error is surfaced as an errored tool call on the source thread, standing in
+ * for the agent turn that would normally render the tool result.
+ */
+(window as any).__spawnFromThread = (sourceThreadId: string, params: { prompt: string; title?: string; cwd?: string; projectId?: string | null }) => {
+  manager.loadProjects(kanbanFixtureProjects);
+  const outcome: { threadId?: string; error?: string; done: boolean } = { done: false };
+  (window as any).__spawnOutcome = outcome;
+  const callback = createAgentThreadCallback({
+    sourceThreadId,
+    getThread: id => manager.getThread(id),
+    createThread: (title, cwd, projectId) => manager.createThread(title, cwd, projectId),
+    saveSettings: async () => {},
+    sendMessage: async () => {},
+    requestApproval: (toolName, detail) => manager.requestToolApproval(sourceThreadId, toolName, detail),
+    getProjectName: id => manager.getProject(id)?.name,
+  });
+  callback(params).then(
+    result => { outcome.threadId = result.threadId; },
+    (error: Error) => {
+      outcome.error = error.message;
+      const thread = manager.getThread(sourceThreadId)!;
+      const record = { name: 'mcp__claude_threads__threads_create', summary: error.message, timestamp: Date.now(), toolUseId: 'spawn-denied', status: 'error' };
+      const message = { id: 'spawn-error', role: 'assistant' as const, content: `threads_create failed: ${error.message}`, timestamp: Date.now(), toolCalls: [record] };
+      thread.messages.push(message as any);
+      mgrInternals.emit(sourceThreadId, { type: 'message', message } as any);
+    },
+  ).finally(() => { outcome.done = true; });
 };
 
 const view = new ThreadsView(mockLeaf as any, mockPlugin as any);

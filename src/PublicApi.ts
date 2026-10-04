@@ -1,5 +1,5 @@
 import type { AgentHarness } from './types';
-import type { ChatMessage, StorageAllocationResult, Thread, ThreadArtifactRecord, ThreadPermissionSnapshot, ThreadStatus } from './types';
+import type { ChatMessage, StorageAllocationOptions, StorageAllocationResult, Thread, ThreadArtifactRecord, ThreadPermissionSnapshot, ThreadStatus } from './types';
 import type { AgentToolContribution, AgentToolRegistrationResult, AgentToolRegistry } from './AgentToolContributions';
 import type { SlashCommandContribution, SlashCommandRegistrationResult, SlashCommandRegistry } from './SlashCommandContributions';
 export type { SlashCommandContribution, SlashCommandRegistrationResult, SlashCommandContext, SlashCommandHost, SlashCommandResult, SlashCommandScope } from './SlashCommandContributions';
@@ -15,7 +15,7 @@ export type { MessageContentJson, MessageContentRef, MessageContentContext, Mess
 
 export type { ArtifactAction, ArtifactActionHost, ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactPresentation, ArtifactRegistrationResult, ArtifactStoreHost, ArtifactViewPlacement, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
 export type { AgentToolContribution, AgentToolHost, AgentToolRegistrationResult, AgentToolResult } from './AgentToolContributions';
-export type { StorageAllocationResult, ThreadPermissionSnapshot } from './types';
+export type { StorageAllocationOptions, StorageAllocationResult, ThreadPermissionSnapshot } from './types';
 
 export type PublicErrorCode = 'PLUGIN_UNAVAILABLE' | 'THREAD_NOT_FOUND' | 'RUN_NOT_FOUND' | 'RUN_FAILED' | 'RUN_INTERRUPTED' | 'THREAD_BUSY' | 'IDEMPOTENCY_CONFLICT' | 'TRACE_NOT_FOUND' | 'CURSOR_INVALID' | 'CONSTRAINT_UNSUPPORTED' | 'ORCHESTRATOR_NOT_FOUND' | 'INVALID_ARGUMENT';
 export interface PublicError { readonly code: PublicErrorCode; readonly message: string }
@@ -203,8 +203,19 @@ export interface ClaudeThreadsApiV1 {
      * artifact exists, so there is no registered provider to check a caller
      * against. It creates an empty directory and grants nothing — attaching
      * under a provider id is still owner-checked.
+     *
+     * `options.location: 'visible'` (capability `artifacts.visibleStorage`)
+     * allocates `<vault>/<root>/<namespace>/<sanitized folderName>` instead of
+     * the hidden default, de-duplicating with `-2`, `-3`… when the folder
+     * belongs to someone else. `<root>` is the host's `visibleArtifactRoot`
+     * setting (default `Artifacts`); `<namespace>` is `options.owner.pluginId`,
+     * which is required for visible allocation. `owner` is self-declared, like
+     * `attach`'s: advisory, not authenticated; per-plugin API handles would be
+     * the enforcement path. Idempotent per thread and `artifactId`, returning
+     * the same path whatever `owner` is passed later. Older hosts ignore
+     * `options` and allocate hidden, so feature-detect before relying on it.
      */
-    allocateStorage(threadId: string, artifactId: string): Promise<StorageAllocationResult>;
+    allocateStorage(threadId: string, artifactId: string, options?: StorageAllocationOptions): Promise<StorageAllocationResult>;
   };
 }
 export interface PublicApiDependencies {
@@ -270,7 +281,7 @@ function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   if (deps.agentTools) capabilities.push('extensions.registerAgentTool');
   if (deps.slashCommands) capabilities.push('extensions.registerSlashCommand');
   if (deps.getDefaultPermissionMode) capabilities.push('threads.permissions');
-  if (deps.artifactStore && deps.artifactProviders) capabilities.push('artifacts.list', 'artifacts.attach', 'artifacts.update', 'artifacts.detach', 'artifacts.invokeAction', 'artifacts.allocateStorage');
+  if (deps.artifactStore && deps.artifactProviders) capabilities.push('artifacts.list', 'artifacts.attach', 'artifacts.update', 'artifacts.detach', 'artifacts.invokeAction', 'artifacts.allocateStorage', 'artifacts.visibleStorage');
   return Object.freeze(capabilities);
 }
 function freeze<T extends object>(value: T): Readonly<T> { for (const nested of Object.values(value)) if (nested && typeof nested === 'object' && !Object.isFrozen(nested)) freeze(nested as object); return Object.freeze(value); }
@@ -416,6 +427,12 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     readonly allocatedRoots: Set<string>;
   };
   const provisionalThreads = new Map<string, ProvisionalState>();
+  /** Roots handed out by `artifacts.allocateStorage`, so re-allocation before attach is idempotent. */
+  const allocatedRootByArtifact = new Map<string, string>();
+  /** Serializes allocations so two same-name visible requests cannot pick one folder. */
+  let allocationQueue: Promise<unknown> = Promise.resolve();
+  const allocationKey = (threadId: string, artifactId: string): string => `${threadId}\0${artifactId}`;
+  const forgetAllocations = (threadId: string): void => { const prefix = `${threadId}\0`; for (const key of [...allocatedRootByArtifact.keys()]) if (key.startsWith(prefix)) allocatedRootByArtifact.delete(key); };
   let active = true; let started = false; let stopped = false;
   const unavailable = () => new ClaudeThreadsApiError('PLUGIN_UNAVAILABLE', 'Agent Threads is not available.', generation);
   const guard = () => { if (!active) throw unavailable(); };
@@ -529,6 +546,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       if (state.status === 'committed') return freeze({ status: 'committed' as const, threadId: state.threadId });
       if (state.status === 'rolled-back') return freeze({ status: 'already-rolled-back' as const, threadId: state.threadId });
       await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root)));
+      forgetAllocations(state.threadId);
       await state.host.rollback();
       state.status = 'rolled-back';
       provisionalThreads.delete(state.threadId);
@@ -1022,7 +1040,13 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     return freeze(await store.invokeAction(threadId, id, action));
   };
 
-  const allocateArtifactStorage = async (threadId: string, artifactId: string): Promise<StorageAllocationResult> => {
+  const allocateArtifactStorage = (threadId: string, artifactId: string, options?: StorageAllocationOptions): Promise<StorageAllocationResult> => {
+    const run = allocationQueue.catch(() => undefined).then(() => allocateArtifactStorageNow(threadId, artifactId, options));
+    allocationQueue = run;
+    return run;
+  };
+
+  const allocateArtifactStorageNow = async (threadId: string, artifactId: string, options?: StorageAllocationOptions): Promise<StorageAllocationResult> => {
     guard();
     const id = typeof artifactId === 'string' ? artifactId.trim() : '';
     const store = deps.artifactStore;
@@ -1035,8 +1059,15 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     // The thread has to exist: an allocated root is garbage-collected when its
     // thread is deleted, so a root under no thread would never be collected.
     if (!store.list(threadId)) return artifactFailure(id, 'thread-not-found', `Thread not found: ${threadId}`);
-    const resolved = await store.allocateStorageRoot(id);
+    const key = allocationKey(threadId, id);
+    // The artifact's own root, from this session or from its persisted record,
+    // so a visible re-allocation returns it instead of colliding with itself.
+    const ownedRoot = allocatedRootByArtifact.get(key) ?? store.list(threadId)?.find(record => record.id === id)?.storageRoot;
+    const resolved = await store.allocateStorageRoot(id, {
+      location: options?.location, folderName: options?.folderName, owner: options?.owner, ownedRoot,
+    });
     if (resolved.status !== 'ok') return artifactFailure(id, 'invalid', resolved.message);
+    allocatedRootByArtifact.set(key, resolved.path);
     provisionalThreads.get(threadId)?.allocatedRoots.add(resolved.path);
     return freeze({
       success: true as const,
@@ -1069,7 +1100,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction, allocateStorage: allocateArtifactStorage },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
-    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const state of [...provisionalThreads.values()]) { const cleanup = state.operation.catch(() => undefined).then(async () => { if (state.status !== 'pending') return; await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root))); await state.host.rollback(); state.status = 'rolled-back'; provisionalThreads.delete(state.threadId); }); state.operation = cleanup; void cleanup.catch(error => console.error('[ClaudeThreads] Provisional rollback failed during API stop:', error)); } for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
+    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const state of [...provisionalThreads.values()]) { const cleanup = state.operation.catch(() => undefined).then(async () => { if (state.status !== 'pending') return; await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root))); forgetAllocations(state.threadId); await state.host.rollback(); state.status = 'rolled-back'; provisionalThreads.delete(state.threadId); }); state.operation = cleanup; void cleanup.catch(error => console.error('[ClaudeThreads] Provisional rollback failed during API stop:', error)); } for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
 }
 
 function toolTimeout(args: Record<string, unknown>): number { return Math.min(Math.max(10, Number(args.timeout_secs) || 120), 300) * 1_000; }

@@ -96,12 +96,12 @@ Vote on upcoming features and see what's in progress at the [public roadmap](htt
 
 1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat) from Obsidian's Community Plugins
 2. Open BRAT settings → **Add Beta Plugin**
-3. Enter: `rbcodelabs/obsidian-claude-threads`
+3. Enter: `rbcodelabs/agent-threads`
 4. Enable **Agent Threads** in Settings → Community Plugins
 
 ### Manual install
 
-1. Download the latest release from [GitHub Releases](https://github.com/rbcodelabs/obsidian-claude-threads/releases)
+1. Download the latest release from [GitHub Releases](https://github.com/rbcodelabs/agent-threads/releases)
 2. Extract into your vault's plugin folder: `<vault>/.obsidian/plugins/claude-threads/`
 3. Enable **Agent Threads** in Settings → Community Plugins
 
@@ -939,7 +939,7 @@ Control the current thread's session state.
 | `vm_exec` | `command`, `timeoutSeconds?` | Runs a shell command inside this thread's sandbox VM with cwd `/work`. Returns `exitCode`, `stdout`, and `stderr`; a non-zero exit is reported, not thrown. Each stream is truncated at 100,000 characters with an explicit marker. Defaults to a 300s guest deadline plus a five-second kill grace. Edits made on the host with `Read`/`Write`/`Edit` are visible immediately — there is no sync step. |
 | `host_exec` | `command`, `cwd?`, `reason`, `timeoutSeconds?` | Only present for threads whose Claude harness runs inside the sandbox VM (desktop). Runs ONE command on the real host after you approve it: every call shows the exact command, directory and the agent's reason as an inline permission card with **Allow once** / **Deny** (never "Always allow"), regardless of permission mode. Scheduled threads cannot prompt and are denied. Runs with a minimal environment (no credentials). See [Host commands from a sandboxed thread](docs/sandbox-vms.md#host-commands-from-a-sandboxed-thread-host_exec). |
 | `exit_vm` | `force?` | Stops and removes this thread's sandbox VM. Pass `force: true` to skip the graceful stop. |
-| `threads_create` | `prompt`, `title?`, `cwd?`, `projectId?` | Creates a persistent thread and immediately queues its initial prompt. Working directory and project inherit from the caller when omitted; pass `projectId: null` to clear the project. |
+| `threads_create` | `prompt`, `title?`, `cwd?`, `projectId?` | Creates a persistent thread and immediately queues its initial prompt. Working directory and project inherit from the caller when omitted; pass `projectId: null` to clear the project. Targeting a different project or `cwd` than the caller raises a permission card for user approval (Allow / Always allow / Deny) and errors if denied. |
 | `request_secret` | `secretName`, `reason`, `force?` | Prompts the user (via a modal) to provide a secret value such as an API key. The value is stored in the OS keychain under the plugin's namespace and injected into future sessions as an environment variable — it never appears in the conversation. On success, the calling thread's live session is also flagged to restart at its next turn (conversation history is preserved via session resume), so the new secret becomes available to *this same thread* right away rather than only in later sessions. Returns `{success: true, secretName, alreadyExisted: boolean}` if the user saves, or `{success: false, reason}` if cancelled. If a secret with the same name already exists, returns `alreadyExisted: true` immediately without prompting. Pass `force: true` to always re-prompt (e.g. when rotating a stale token) — the modal will indicate that the existing value will be replaced. |
 | `watch_document` | `path` | Watches a vault note for content changes, owned by the calling thread. Any subsequent edit — from you, another thread, or a sync — sends this thread an injected alert message referencing the file via an `@[[filename]]` mention. Re-watching an already-watched path is a no-op that keeps the existing watch. See [Watch a document](#watch-a-document). |
 | `unwatch_document` | `path?`, `id?` | Removes a watch owned by the calling thread, by path or watch id (at least one required). Never affects another thread's watch on the same path. |
@@ -1136,8 +1136,8 @@ blocked. See [Inline message content](docs/public-api.md#inline-message-content)
 for registration, reference formatting, lifecycle and image-source details.
 
 ```bash
-git clone https://github.com/rbcodelabs/obsidian-claude-threads
-cd obsidian-claude-threads
+git clone https://github.com/rbcodelabs/agent-threads
+cd agent-threads
 npm install
 npm run build
 # Output is in dist/
@@ -1149,8 +1149,8 @@ The project uses a worktree-based workflow — edits directly to the main checko
 
 1. **Create a worktree** for the version bump:
    ```bash
-   git worktree add ~/.geode/worktrees/obsidian-claude-threads/chore/bump-version-X.Y.Z -b chore/bump-version-X.Y.Z
-   cd ~/.geode/worktrees/obsidian-claude-threads/chore/bump-version-X.Y.Z
+   git worktree add ~/.geode/worktrees/agent-threads/chore/bump-version-X.Y.Z -b chore/bump-version-X.Y.Z
+   cd ~/.geode/worktrees/agent-threads/chore/bump-version-X.Y.Z
    ```
 
 2. **Bump the version** with the repository workflow. This updates `package.json`, `package-lock.json`, and `manifest.json`, then syncs `versions.json`. Update the README version badge to the same version and verify all five files agree:

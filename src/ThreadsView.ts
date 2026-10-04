@@ -4130,9 +4130,9 @@ export class ThreadsView extends ItemView {
 
   /** Readable summary line plus an expandable key/value breakdown for JSON tool input. */
   private renderPermissionDetail(body: HTMLElement, detail: string): void {
-    const { summary, fields } = parsePermissionDetail(detail);
+    const { summary, fields, multiline } = parsePermissionDetail(detail);
     if (!summary) return;
-    body.createEl('p', { cls: 'ct-permission-detail', text: summary });
+    body.createEl('p', { cls: 'ct-permission-detail', text: multiline ?? summary });
     if (!fields || (fields.length === 1 && fields[0].value === summary)) return;
     const details = body.createEl('details', { cls: 'ct-permission-fields' });
     details.createEl('summary', { text: `Details (${fields.length})` });
