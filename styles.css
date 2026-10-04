@@ -556,6 +556,49 @@
   container: ct-conversation-pane / inline-size;
 }
 
+/* ── Sticky last-user-message header ─────────────────────────────────────── */
+/* Overlays the top of .ct-messages (absolute, so no layout shift) once the
+   user's prompt has scrolled out of view. Toggled via .ct-hidden. */
+.ct-sticky-user {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 12px; /* leave the scrollbar clear */
+  z-index: 10; /* below the summary banner (20) and scroll-bottom pill (15) */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  box-sizing: border-box;
+  height: auto;
+  margin: 0;
+  padding: 6px 12px;
+  text-align: left;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.35;
+  color: var(--text-muted);
+  background: var(--background-primary);
+  border: none;
+  border-bottom: 1px solid var(--background-modifier-border);
+  border-radius: 0;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+  cursor: pointer;
+}
+
+.ct-sticky-user:hover {
+  color: var(--text-normal);
+  background: var(--background-secondary);
+}
+
+.ct-root[data-density="compact"] .ct-sticky-user {
+  padding: 3px 8px;
+}
+
+.ct-root[data-density="spacious"] .ct-sticky-user {
+  padding: 8px 16px;
+}
+
 /* ── Summary peek banner ─────────────────────────────────────────────────── */
 /* Floats over the top of .ct-messages when returning to a thread after a break */
 
