@@ -2,8 +2,9 @@ import { test, expect, type Page } from '@playwright/test';
 import path from 'path';
 import { shot } from './helpers';
 
-const harnessUrl = 'file://' + path.resolve('test/harness/index.html');
-const mobileHarnessUrl = harnessUrl + '?mobile';
+const harnessUrl = 'file://' + path.resolve('test/harness/index.html') + '?sticky';
+// Other specs hide the sticky bubble in the shared harness; ?sticky opts back in.
+const mobileHarnessUrl = harnessUrl + '&mobile';
 
 /**
  * Sticky "last user message" header (.ct-sticky-user).
@@ -393,7 +394,9 @@ test.describe('sticky last-user-message header', () => {
 
     await page.evaluate(() => {
       const view = (window as any).__view;
-      view['showSummaryBanner'](view.manager.getThread('thread-new'), 'Returning to this thread: we audited login and added rate limiting; the release notes are still pending.');
+      const t = view.manager.getThread('thread-new');
+      t.updatedAt = Date.now() - 3 * 3_600_000; // banner prints "Last active Nh ago"; pin it so the baseline is stable
+      view['showSummaryBanner'](t, 'Returning to this thread: we audited login and added rate limiting; the release notes are still pending.');
     });
     await page.waitForSelector('.ct-summary-banner');
     await page.waitForTimeout(350); // slide-in animation

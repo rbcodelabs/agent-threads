@@ -26,6 +26,14 @@ import {
 
 if (new URLSearchParams(window.location.search).has('mobile')) Platform.isMobile = true;
 
+// The sticky last-user-message bubble floats over the top of any scrolled transcript, so it would
+// repaint every unrelated screenshot baseline. Hide it by default; its own spec opts in with ?sticky.
+if (!new URLSearchParams(window.location.search).has('sticky')) {
+  const hideSticky = document.createElement('style');
+  hideSticky.textContent = '.ct-sticky-user-layer { display: none !important; }';
+  document.head.appendChild(hideSticky);
+}
+
 // threadViewPlacement is pinned explicitly rather than inherited from
 // DEFAULT_SETTINGS: this harness backs the large majority of screenshot/unit
 // fixtures that exercise ThreadsView rendering independent of placement, and
