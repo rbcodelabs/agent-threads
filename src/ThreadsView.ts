@@ -56,6 +56,7 @@ import { MessageContentMountManager } from './messageContentRenderer';
 import { VisualizeMountManager, resolveVisualizeTokens, toFileUrl, type VisualizeFs } from './visualizeRenderer';
 import { deleteScheduledActivity, scheduledActivityForThread, scheduledActivitySummary, type ScheduledActivity } from './scheduledActivity';
 import { ConversationViewPlacementState, resolveHostRestoredActiveThread } from './conversationFirstPlacement';
+import { pickStickyUserIndex, truncateStickyText } from './stickyUserMessage';
 
 export const VIEW_TYPE = 'claude-threads:chat';
 
@@ -145,6 +146,13 @@ export class ThreadsView extends ItemView {
   private pendingMainScroll: AgentScrollState | null = null;
   /** Floating "scroll to bottom" pill, shown whenever the scroller isn't parked at the tail. */
   private scrollBottomBtn: HTMLButtonElement | null = null;
+  /** Sticky "last user message" header; lives on .ct-main so messagesEl.empty() never wipes it. */
+  private stickyUserEl: HTMLButtonElement | null = null;
+  private stickyUserLayerEl: HTMLElement | null = null;
+  private stickyUserTextEl: HTMLElement | null = null;
+  private stickyUserTarget: HTMLElement | null = null;
+  private stickyUserFrame: number | null = null;
+  private stickyUserObserver: MutationObserver | null = null;
   private moreBtn!: HTMLButtonElement;
   private statusRailEl!: HTMLElement;
   private queueRowsEl!: HTMLElement;
@@ -751,6 +759,10 @@ export class ThreadsView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.stickyUserObserver?.disconnect();
+    this.stickyUserObserver = null;
+    if (this.stickyUserFrame !== null) cancelAnimationFrame(this.stickyUserFrame);
+    this.stickyUserFrame = null;
     this.messageContentController.abort();
     this.messageContentManager?.dispose();
     this.messageContentManager = null;
@@ -846,7 +858,11 @@ export class ThreadsView extends ItemView {
 
     this.mainEl = root.createDiv('ct-main');
     this.messagesEl = this.mainEl.createDiv('ct-messages');
-    this.messagesEl.addEventListener('scroll', () => this.updateScrollBottomPillVisibility());
+    this.messagesEl.addEventListener('scroll', () => {
+      this.updateScrollBottomPillVisibility();
+      this.scheduleStickyUserUpdate();
+    });
+    this.setupStickyUserHeader();
     this.visualizeManager?.detach();
     this.visualizeManager = new VisualizeMountManager(this.messagesEl, this.buildVisualizeHost());
     this.visualizeManager.attach();
@@ -3118,7 +3134,75 @@ export class ThreadsView extends ItemView {
       await this.renderMessagesBody();
     } finally {
       this.updateScrollBottomPillVisibility();
+      this.scheduleStickyUserUpdate();
     }
+  }
+
+  /**
+   * Sticky header showing the most recent user message that has scrolled above
+   * the viewport. Absolutely positioned over .ct-main (no layout shift) and
+   * refreshed from a rAF-throttled scroll handler plus a childList observer
+   * (covers appended/streamed rows and thread switches).
+   */
+  private setupStickyUserHeader(): void {
+    this.stickyUserObserver?.disconnect();
+    this.stickyUserLayerEl?.remove();
+    // Layer = click-through scrim (fades the transcript out under the bubble) + the bubble itself.
+    const layer = this.mainEl.createDiv({ cls: 'ct-sticky-user-layer ct-hidden' });
+    this.stickyUserLayerEl = layer;
+    const btn = layer.createEl('button', {
+      cls: 'ct-sticky-user ct-hidden',
+      attr: { type: 'button', 'aria-label': 'Scroll to your last message' },
+    });
+    this.stickyUserTextEl = btn.createSpan({ cls: 'ct-sticky-user-text' });
+    btn.addEventListener('click', () => {
+      this.stickyUserTarget?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    });
+    this.stickyUserEl = btn;
+    this.stickyUserObserver = new MutationObserver(() => this.scheduleStickyUserUpdate());
+    this.stickyUserObserver.observe(this.messagesEl, { childList: true });
+  }
+
+  private scheduleStickyUserUpdate(): void {
+    if (this.stickyUserFrame !== null) return;
+    this.stickyUserFrame = requestAnimationFrame(() => {
+      this.stickyUserFrame = null;
+      this.updateStickyUserHeader();
+    });
+  }
+
+  private updateStickyUserHeader(): void {
+    const btn = this.stickyUserEl;
+    if (!btn || !this.messagesEl) return;
+    const setHidden = (hidden: boolean) => {
+      btn.classList.toggle('ct-hidden', hidden);
+      this.stickyUserLayerEl?.classList.toggle('ct-hidden', hidden);
+    };
+    const hide = () => {
+      this.stickyUserTarget = null;
+      setHidden(true);
+    };
+    if (this.messagesEl.classList.contains('ct-messages-agent-view')) return hide();
+    const userEls = Array.from(
+      this.messagesEl.querySelectorAll<HTMLElement>(':scope > .ct-message.ct-message-user'),
+    );
+    const viewportTop = this.messagesEl.getBoundingClientRect().top;
+    const idx = pickStickyUserIndex(
+      userEls.length,
+      i => userEls[i].getBoundingClientRect().bottom,
+      viewportTop,
+      i => userEls[i].getBoundingClientRect().top,
+    );
+    if (idx < 0) return hide();
+    const target = userEls[idx];
+    const text = truncateStickyText(target.querySelector('.ct-message-content')?.textContent ?? '');
+    if (!text) return hide();
+    if (target !== this.stickyUserTarget) {
+      this.stickyUserTarget = target;
+      this.stickyUserTextEl?.setText(text);
+      btn.title = text;
+    }
+    setHidden(false);
   }
 
   private async renderMessagesBody(): Promise<void> {
