@@ -66,9 +66,9 @@ describe('groupToolCalls with browser sessions', () => {
     expect((grouped[1] as { tools: unknown[] }).tools).toHaveLength(2);
   });
 
-  it('a non-browser tool between two browser calls starts a NEW card (v1 limitation)', () => {
+  it('a non-browser tool between two browser calls stays in ONE card, emitted after it', () => {
     const tools = [b('navigate'), tool('Read'), b('snapshot')];
-    expect(groupToolCalls(tools).map((g) => g.kind)).toEqual(['browser', 'single', 'browser']);
+    expect(groupToolCalls(tools).map((g) => g.kind)).toEqual(['browser', 'single']);
   });
 
   it('keeps neighbouring research tools out of the browser entry', () => {
