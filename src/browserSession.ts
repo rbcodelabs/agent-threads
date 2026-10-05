@@ -61,6 +61,11 @@ export function browserToolSummary(name: string, input: Record<string, unknown>)
       return typeof input.expression === 'string' ? `${input.expression.length} chars` : '';
     case 'browser_network':
       return typeof input.filter === 'string' ? input.filter.slice(0, 60) : '';
+    case 'browser_scroll': {
+      if (typeof input.ref === 'string') return input.ref;
+      const dir = typeof input.direction === 'string' ? input.direction : '';
+      return typeof input.amount === 'number' ? `${dir} ${input.amount}px`.trim() : dir;
+    }
     case 'browser_resize':
       return typeof input.width === 'number' && typeof input.height === 'number'
         ? `${input.width}×${input.height}`
@@ -200,6 +205,7 @@ const VERBS: Record<string, string> = {
   browser_resize: 'resize',
   browser_console: 'console',
   browser_network: 'network',
+  browser_scroll: 'scroll',
   browser_eval: 'eval',
 };
 
@@ -271,6 +277,8 @@ function stepTarget(t: ToolCallRecord, pageUrl: string | null): string {
       return 'console log';
     case 'browser_network':
       return t.summary ? `requests matching ${t.summary}` : 'network log';
+    case 'browser_scroll':
+      return t.summary ? `scroll ${t.summary}` : 'page';
     case 'browser_eval':
       return t.summary ? `script (${t.summary})` : 'script';
     default:

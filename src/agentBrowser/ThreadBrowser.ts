@@ -21,6 +21,8 @@ import {
   buildChunkScript,
   buildReadTextScript,
   buildReleaseScript,
+  buildScrollScript,
+  MAX_SCROLL_AMOUNT,
   buildSnapshotScript,
   buildStashScript,
   makeRefTableKey,
@@ -28,6 +30,8 @@ import {
   type ActKind,
   type RawActResult,
   type RawPageText,
+  type RawScrollResult,
+  type ScrollDirection,
   type RawSnapshot,
   type RawStashMeta,
   type SaveFormat,
@@ -110,6 +114,15 @@ export interface SnapshotResult {
 export interface ActResult {
   url: string;
   title: string;
+}
+
+export interface ScrollResult extends ActResult {
+  /** False when the target was already at its limit in that direction. */
+  moved: boolean;
+  scrollX: number;
+  scrollY: number;
+  maxScrollX: number;
+  maxScrollY: number;
 }
 
 export interface ThreadBrowserOptions {
@@ -580,6 +593,67 @@ export class ThreadBrowser {
       });
     }
     return this.act({ kind: 'type', ref, epoch, text, submit });
+  }
+
+  /**
+   * Scroll the page (or a scrollable region under the viewport centre) by
+   * direction, or bring a snapshot ref into view. Runs a dedicated built-in
+   * script, never the browser_eval path, so it needs no per-call approval.
+   */
+  async scroll(request: { direction?: ScrollDirection; amount?: number; ref?: string; epoch?: number }): Promise<ScrollResult> {
+    const hasRef = request.ref !== undefined;
+    if (hasRef === (request.direction !== undefined)) {
+      throw new AgentBrowserError({
+        code: 'not_actionable',
+        message: 'Pass either direction (up, down, left, right) or ref with epoch, not both and not neither.',
+        retryable: false,
+      });
+    }
+    if (hasRef && request.epoch === undefined) {
+      throw new AgentBrowserError({
+        code: 'stale_snapshot',
+        message: 'Scrolling to a ref needs the epoch of the snapshot it came from.',
+        retryable: true,
+        hint: 'Call browser_snapshot and pass its epoch along with the ref.',
+      });
+    }
+    if (request.amount !== undefined && (!Number.isFinite(request.amount) || request.amount < 0 || request.amount > MAX_SCROLL_AMOUNT)) {
+      throw new AgentBrowserError({
+        code: 'not_actionable',
+        message: `amount must be between 0 and ${MAX_SCROLL_AMOUNT} pixels.`,
+        retryable: false,
+      });
+    }
+    const guest = await this.guest();
+    if (hasRef && this.lastEpoch === 0) {
+      throw new AgentBrowserError({
+        code: 'stale_snapshot',
+        message: 'No snapshot has been taken for this page yet.',
+        retryable: true,
+        hint: 'Call browser_snapshot first and act on the refs it returns.',
+      });
+    }
+    const raw = (await guest.runScript(buildScrollScript(this.refTableKey, request))) as RawScrollResult | null;
+    if (!raw || typeof raw !== 'object') {
+      throw new AgentBrowserError({ code: 'script_timeout', message: 'The page did not confirm the scroll.', retryable: true });
+    }
+    if (!raw.ok) {
+      throw new AgentBrowserError({
+        code: raw.code,
+        message: raw.reason,
+        retryable: true,
+        hint: raw.code === 'stale_snapshot' ? REFS_INVALIDATED_HINT : 'Take a fresh snapshot; the page has changed since these refs were produced.',
+      });
+    }
+    return {
+      url: raw.url,
+      title: stripInvisible(raw.title),
+      moved: raw.moved,
+      scrollX: raw.scrollX,
+      scrollY: raw.scrollY,
+      maxScrollX: raw.maxScrollX,
+      maxScrollY: raw.maxScrollY,
+    };
   }
 
   private async act(request: { kind: ActKind; ref: string; epoch: number; text?: string; submit?: boolean }): Promise<ActResult> {

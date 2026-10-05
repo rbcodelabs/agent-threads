@@ -10,6 +10,7 @@ import {
 } from '../../src/toolNameUtils';
 import {
   assignBrowserScreenshots,
+  browserVerb,
   browserToolSummary,
   buildBrowserSessionViewModel,
   buildStandaloneHandoffViewModel,
@@ -37,6 +38,7 @@ describe('isBrowserTool', () => {
     expect(isBrowserTool('mcp__obsidian__browser_click')).toBe(true);
     expect(isBrowserTool('claude_threads:browser_screenshot')).toBe(true);
     expect(isBrowserTool('browser_close')).toBe(true);
+    expect(isBrowserTool('mcp__claude_threads__browser_scroll')).toBe(true);
   });
   it('rejects everything else, including lookalikes', () => {
     expect(isBrowserTool('WebFetch')).toBe(false);
@@ -131,6 +133,12 @@ describe('browserToolSummary', () => {
     const s = browserToolSummary('browser_type', { ref: 'e3', text: 'hunter2', submit: true });
     expect(s).toBe('e3 · 7 chars · Enter');
     expect(s).not.toContain('hunter2');
+  });
+  it('scroll reports the ref, or direction and amount', () => {
+    expect(browserToolSummary('browser_scroll', { ref: 'e7', epoch: 1 })).toBe('e7');
+    expect(browserToolSummary('browser_scroll', { direction: 'down' })).toBe('down');
+    expect(browserToolSummary('browser_scroll', { direction: 'up', amount: 300 })).toBe('up 300px');
+    expect(browserVerb('mcp__claude_threads__browser_scroll')).toBe('scroll');
   });
   it('click reports the ref; resize the size', () => {
     expect(browserToolSummary('browser_click', { ref: 'e5', epoch: 2 })).toBe('e5');

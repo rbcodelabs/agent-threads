@@ -37,10 +37,15 @@ describe('browser_eval per-call approval', () => {
   });
 
   it('leaves the other browser tools pre-approved and always-allowable', () => {
-    for (const k of ['browser_navigate', 'browser_click', 'browser_type', 'browser_console', 'browser_network', 'browser_snapshot']) {
+    for (const k of ['browser_navigate', 'browser_click', 'browser_type', 'browser_console', 'browser_network', 'browser_snapshot', 'browser_scroll']) {
       expect(isPermissionPreApproved(`mcp__claude_threads__${k}`, [])).toBe(true);
       expect(canAlwaysAllow(`mcp__claude_threads__${k}`)).toBe(true);
     }
+  });
+
+  it('does not extend per-call approval to browser_scroll', () => {
+    expect(requiresPerCallApproval('mcp__claude_threads__browser_scroll')).toBe(false);
+    expect(requiresPerCallApproval('browser_scroll')).toBe(false);
   });
 
   it('shows the full expression on the card, ignoring the SDK description', () => {

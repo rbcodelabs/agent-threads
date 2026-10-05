@@ -14,10 +14,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildActScript,
   buildReadTextScript,
+  buildScrollScript,
   buildSnapshotScript,
   makeRefTableKey,
   type RawActResult,
   type RawPageText,
+  type RawScrollResult,
   type RawSnapshot,
 } from '../../src/agentBrowser/agentBrowserScript';
 import {
@@ -222,6 +224,72 @@ describe('act script', () => {
     runScript<RawActResult>(buildActScript(REF_KEY, { kind: 'type', ref: 'e1', epoch: snap.epoch, text: 'hi' }));
     expect(seen).toEqual(['input', 'change']);
     expect(input.value).toBe('hi');
+  });
+});
+
+describe('scroll script', () => {
+  function snapshot(): RawSnapshot {
+    return runScript<RawSnapshot>(buildSnapshotScript(REF_KEY));
+  }
+
+  it('scrolls the window by 80% of the viewport by default and reports the position', () => {
+    const by = vi.fn();
+    window.scrollBy = by as unknown as typeof window.scrollBy;
+    const result = runScript<RawScrollResult>(buildScrollScript(REF_KEY, { direction: 'down' }));
+    expect(result.ok).toBe(true);
+    expect(by).toHaveBeenCalledWith({ left: 0, top: Math.round(window.innerHeight * 0.8), behavior: 'instant' });
+  });
+
+  it('honours direction and amount', () => {
+    const by = vi.fn();
+    window.scrollBy = by as unknown as typeof window.scrollBy;
+    runScript<RawScrollResult>(buildScrollScript(REF_KEY, { direction: 'up', amount: 300 }));
+    expect(by).toHaveBeenLastCalledWith({ left: 0, top: -300, behavior: 'instant' });
+    runScript<RawScrollResult>(buildScrollScript(REF_KEY, { direction: 'right', amount: 50 }));
+    expect(by).toHaveBeenLastCalledWith({ left: 50, top: 0, behavior: 'instant' });
+  });
+
+  it('prefers a scrollable panel under the viewport centre over the window', () => {
+    document.body.innerHTML = '<div id="panel" style="overflow-y:auto"><p id="inner">row</p></div>';
+    const panel = document.getElementById('panel')!;
+    Object.defineProperty(panel, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(panel, 'clientHeight', { value: 500, configurable: true });
+    const panelBy = vi.fn();
+    panel.scrollBy = panelBy as unknown as typeof panel.scrollBy;
+    const windowBy = vi.fn();
+    window.scrollBy = windowBy as unknown as typeof window.scrollBy;
+    document.elementFromPoint = () => document.getElementById('inner');
+    runScript<RawScrollResult>(buildScrollScript(REF_KEY, { direction: 'down', amount: 100 }));
+    expect(panelBy).toHaveBeenCalledWith({ left: 0, top: 100, behavior: 'instant' });
+    expect(windowBy).not.toHaveBeenCalled();
+  });
+
+  it('scrolls a ref into view without clicking it', () => {
+    const click = vi.fn();
+    document.getElementById('go')!.addEventListener('click', click);
+    const intoView = vi.fn();
+    Element.prototype.scrollIntoView = intoView;
+    const snap = snapshot();
+    const result = runScript<RawScrollResult>(buildScrollScript(REF_KEY, { ref: 'e2', epoch: snap.epoch }));
+    expect(result.ok).toBe(true);
+    expect(intoView).toHaveBeenCalledOnce();
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it('refuses a ref from a superseded snapshot', () => {
+    const stale = snapshot();
+    snapshot();
+    const result = runScript<RawScrollResult>(buildScrollScript(REF_KEY, { ref: 'e2', epoch: stale.epoch }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('stale_snapshot');
+  });
+
+  it('refuses a ref whose element has left the page', () => {
+    const snap = snapshot();
+    document.getElementById('go')!.remove();
+    const result = runScript<RawScrollResult>(buildScrollScript(REF_KEY, { ref: 'e2', epoch: snap.epoch }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('ref_not_found');
   });
 });
 

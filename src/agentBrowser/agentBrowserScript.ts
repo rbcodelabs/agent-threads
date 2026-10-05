@@ -483,3 +483,124 @@ export function buildActScript(refTableKey: string, request: ActRequest): string
     return { ok: true, url: location.href, title: document.title || '', pointer: pointer };
   })()`;
 }
+
+export type ScrollDirection = 'up' | 'down' | 'left' | 'right';
+
+/** Either a direction (page scroll) or a ref+epoch (scroll that element into view). */
+export interface ScrollRequest {
+  direction?: ScrollDirection;
+  /** Pixels. Defaults to 80% of the viewport along the scrolled axis. */
+  amount?: number;
+  ref?: string;
+  epoch?: number;
+}
+
+/** Largest single scroll the tool will perform, in CSS pixels. */
+export const MAX_SCROLL_AMOUNT = 20000;
+
+/** Result of a scroll script. Failures are values, not thrown errors. */
+export type RawScrollResult =
+  | {
+      ok: true;
+      url: string;
+      title: string;
+      /** False when the target was already at its limit in that direction. */
+      moved: boolean;
+      scrollX: number;
+      scrollY: number;
+      maxScrollX: number;
+      maxScrollY: number;
+    }
+  | { ok: false; code: 'stale_snapshot' | 'ref_not_found' | 'not_actionable'; reason: string; origin?: string };
+
+/**
+ * Build a scroll script.
+ *
+ * Scrolling is a built-in primitive rather than something the agent composes
+ * through `browser_eval`: it only moves the viewport (no click, no input, no
+ * navigation), so it needs no per-call approval. By ref it reuses the act
+ * script's epoch and origin checks in a single call, for the same reason.
+ * By direction it scrolls the nearest scrollable ancestor of the viewport
+ * centre (single-page apps usually scroll an inner container), else the window.
+ */
+export function buildScrollScript(refTableKey: string, request: ScrollRequest): string {
+  const { direction, amount, ref, epoch } = request;
+  return `(function () {
+    var KEY = ${JSON.stringify(refTableKey)};
+    var DIRECTION = ${JSON.stringify(direction ?? null)};
+    var AMOUNT = ${JSON.stringify(amount ?? null)};
+    var REF = ${JSON.stringify(ref ?? null)};
+    var EPOCH = ${JSON.stringify(epoch ?? null)};
+
+    function report(moved, target) {
+      var isWindow = !target || target === window;
+      var se = document.scrollingElement || document.documentElement;
+      var x = isWindow ? (window.scrollX || 0) : target.scrollLeft;
+      var y = isWindow ? (window.scrollY || 0) : target.scrollTop;
+      var maxX = isWindow ? Math.max(0, se.scrollWidth - window.innerWidth) : Math.max(0, target.scrollWidth - target.clientWidth);
+      var maxY = isWindow ? Math.max(0, se.scrollHeight - window.innerHeight) : Math.max(0, target.scrollHeight - target.clientHeight);
+      return { ok: true, url: location.href, title: document.title || '', moved: moved,
+        scrollX: Math.round(x), scrollY: Math.round(y), maxScrollX: Math.round(maxX), maxScrollY: Math.round(maxY) };
+    }
+
+    if (REF !== null) {
+      var table = window[KEY];
+      if (!table || typeof table !== 'object') {
+        return { ok: false, code: 'stale_snapshot', reason: 'The page has navigated or reloaded since the last snapshot.', origin: location.origin };
+      }
+      if (table.epoch !== EPOCH) {
+        return { ok: false, code: 'stale_snapshot', reason: 'A newer snapshot has replaced the one these refs came from.', origin: location.origin };
+      }
+      if (table.origin !== location.origin) {
+        return { ok: false, code: 'stale_snapshot', reason: 'The page changed origin after the snapshot was taken.', origin: location.origin };
+      }
+      var el = table.refs[REF];
+      if (!el || !(el instanceof Element)) {
+        return { ok: false, code: 'ref_not_found', reason: 'No element is registered for ' + REF + '.' };
+      }
+      if (!el.isConnected) {
+        return { ok: false, code: 'ref_not_found', reason: REF + ' is no longer attached to the page.' };
+      }
+      var beforeX = window.scrollX || 0, beforeY = window.scrollY || 0;
+      var before = el.getBoundingClientRect();
+      try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {}
+      var after = el.getBoundingClientRect();
+      var movedRef = Math.abs(after.top - before.top) > 0.5 || Math.abs(after.left - before.left) > 0.5
+        || (window.scrollX || 0) !== beforeX || (window.scrollY || 0) !== beforeY;
+      return report(movedRef, window);
+    }
+
+    var horizontal = DIRECTION === 'left' || DIRECTION === 'right';
+    var sign = (DIRECTION === 'up' || DIRECTION === 'left') ? -1 : 1;
+
+    function scrollable(node) {
+      if (!(node instanceof Element)) return false;
+      var style = node.ownerDocument.defaultView.getComputedStyle(node);
+      if (!style) return false;
+      var overflow = horizontal ? style.overflowX : style.overflowY;
+      if (overflow !== 'auto' && overflow !== 'scroll' && overflow !== 'overlay') return false;
+      return horizontal ? node.scrollWidth > node.clientWidth : node.scrollHeight > node.clientHeight;
+    }
+
+    var target = window;
+    var node = null;
+    try { node = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2); } catch (e) {}
+    while (node && node !== document.body && node !== document.documentElement) {
+      if (scrollable(node)) { target = node; break; }
+      node = node.parentElement;
+    }
+
+    var span = target === window ? (horizontal ? window.innerWidth : window.innerHeight) : (horizontal ? target.clientWidth : target.clientHeight);
+    var distance = (AMOUNT !== null ? AMOUNT : Math.round(span * 0.8)) * sign;
+    var startX = target === window ? (window.scrollX || 0) : target.scrollLeft;
+    var startY = target === window ? (window.scrollY || 0) : target.scrollTop;
+    var dx = horizontal ? distance : 0;
+    var dy = horizontal ? 0 : distance;
+    // Instant, not smooth: the position is read straight back below.
+    if (target === window) window.scrollBy({ left: dx, top: dy, behavior: 'instant' });
+    else target.scrollBy({ left: dx, top: dy, behavior: 'instant' });
+    var endX = target === window ? (window.scrollX || 0) : target.scrollLeft;
+    var endY = target === window ? (window.scrollY || 0) : target.scrollTop;
+    return report(endX !== startX || endY !== startY, target);
+  })()`;
+}

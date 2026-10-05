@@ -14,10 +14,10 @@ import type { App } from 'obsidian';
 vi.mock('@anthropic-ai/claude-agent-sdk/browser', () => ({
   tool: (
     name: string,
-    _description: string,
+    description: string,
     _schema: unknown,
     handler: (args: Record<string, unknown>, extra: unknown) => Promise<ToolResult>,
-  ) => ({ _toolName: name, _handler: handler }),
+  ) => ({ _toolName: name, _description: description, _handler: handler }),
   createSdkMcpServer: ({ tools }: { tools: CapturedTool[] }) => ({ tools }),
 }));
 
@@ -77,6 +77,7 @@ function fakeBrowser(overrides: Partial<ThreadBrowser> = {}): ThreadBrowser {
     readText: vi.fn().mockResolvedValue({ url: 'https://example.com/', title: 'Example', content: 'framed' }),
     click: vi.fn().mockResolvedValue({ url: 'https://example.com/', title: 'Example' }),
     type: vi.fn().mockResolvedValue({ url: 'https://example.com/', title: 'Example' }),
+    scroll: vi.fn().mockResolvedValue({ url: 'https://example.com/', title: 'Example', moved: true, scrollX: 0, scrollY: 400, maxScrollX: 0, maxScrollY: 2000 }),
     screenshot: vi.fn().mockResolvedValue(new Uint8Array([137, 80, 78, 71])),
     close: vi.fn(),
     status: vi.fn().mockReturnValue({ inUse: 1, max: 2, fdBlocked: false, fdAvailable: true, guests: [], threadHasSession: true }),
@@ -123,6 +124,44 @@ describe('agent browser tool registration', () => {
     const server = createObsidianMcpServer(makeApp(), { browser: fakeBrowser() }) as unknown as CapturedServer;
     const names = server.tools.map((t) => t._toolName);
     expect(new Set(names).size).toBe(names.length);
+  });
+});
+
+describe('browser_scroll', () => {
+  it('is registered, prompt-free (read-only set) and a trusted built-in', () => {
+    expect(AGENT_BROWSER_TOOL_NAMES).toContain('browser_scroll');
+    expect(AGENT_BROWSER_READ_ONLY_TOOL_NAMES).toContain('browser_scroll');
+    expect(isTrustedBuiltInTool('mcp__claude_threads__browser_scroll')).toBe(true);
+  });
+
+  it('passes direction, amount, ref and epoch through to the browser', async () => {
+    const browser = fakeBrowser();
+    const server = createObsidianMcpServer(makeApp(), { browser }) as unknown as CapturedServer;
+    const down = parse(await getTool(server, 'browser_scroll')._handler({ direction: 'down', amount: 250 }));
+    expect(browser.scroll).toHaveBeenCalledWith({ direction: 'down', amount: 250, ref: undefined, epoch: undefined });
+    expect(down.success).toBe(true);
+    expect(down.moved).toBe(true);
+    await getTool(server, 'browser_scroll')._handler({ ref: 'e4', epoch: 9 });
+    expect(browser.scroll).toHaveBeenLastCalledWith({ direction: undefined, amount: undefined, ref: 'e4', epoch: 9 });
+  });
+
+  it('returns a refusal as an error value, not a throw', async () => {
+    const browser = fakeBrowser({
+      scroll: vi.fn().mockRejectedValue(new AgentBrowserError({ code: 'stale_snapshot', message: 'stale', retryable: true })),
+    } as Partial<ThreadBrowser>);
+    const server = createObsidianMcpServer(makeApp(), { browser }) as unknown as CapturedServer;
+    const result = await getTool(server, 'browser_scroll')._handler({ ref: 'e1', epoch: 1 });
+    expect(result.isError).toBe(true);
+  });
+
+  it('browser_eval description is an explicit last resort naming the safe tools', () => {
+    const server = createObsidianMcpServer(makeApp(), { browser: fakeBrowser() }) as unknown as CapturedServer;
+    const description = String((getTool(server, 'browser_eval') as unknown as { _description: string })._description);
+    expect(description).toMatch(/LAST RESORT/);
+    for (const safe of ['browser_snapshot', 'browser_scroll', 'browser_click', 'browser_type', 'browser_read_text', 'browser_console', 'browser_network']) {
+      expect(description, safe).toContain(safe);
+    }
+    expect(description).toMatch(/approval prompt/);
   });
 });
 
