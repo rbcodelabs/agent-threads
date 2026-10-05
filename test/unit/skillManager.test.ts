@@ -19,14 +19,19 @@
  * every containment check for the wrong reason.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { execSync } from 'child_process';
 import type { SkillSource } from '../../src/types';
+import { setGitHttpClient } from '../../src/gitClient';
+import { localGitHttp, localGitUrl } from '../helpers/localGitHttp';
 
 const mockRequestUrl = vi.fn();
+beforeAll(() => setGitHttpClient(localGitHttp));
+afterAll(() => setGitHttpClient(undefined));
+
 vi.mock('obsidian', () => ({
   requestUrl: (...args: unknown[]) => mockRequestUrl(...args),
 }));
@@ -47,7 +52,6 @@ import {
   cloneGithubSource,
   addGithubSkillSource,
   parseGithubRepoUrl,
-  checkGitAvailable,
   ensureGithubSourcesCloned,
   checkSourceForUpdates,
   checkAllSourcesForUpdates,
@@ -452,6 +456,12 @@ function initGitRepo(dir: string): void {
   execSync('git add . && git commit --quiet -m "initial"', { cwd: dir });
 }
 
+/** A clone made by the git CLI (like clones that predate the pure-JS client), pointed at the fake HTTP remote. */
+function nativeClone(origin: string, dest: string): void {
+  execSync(`git clone --quiet "${origin}" "${dest}"`);
+  execSync(`git remote set-url origin "${localGitUrl(origin)}"`, { cwd: dest });
+}
+
 describe('checkSourceForUpdates / checkAllSourcesForUpdates / pullGithubSourceUpdates', () => {
   let origin: string;
   let clone: string;
@@ -461,7 +471,7 @@ describe('checkSourceForUpdates / checkAllSourcesForUpdates / pullGithubSourceUp
     clone = fs.mkdtempSync(path.join(os.tmpdir(), 'skillmanager-clone-'));
     fs.rmSync(clone, { recursive: true, force: true }); // git clone needs the target to not exist
     initGitRepo(origin);
-    execSync(`git clone --quiet "${origin}" "${clone}"`);
+    nativeClone(origin, clone);
   });
 
   afterEach(() => {
@@ -581,7 +591,7 @@ describe('cloneGithubSource', () => {
 
   it('clones into a path whose parent does not exist yet', async () => {
     const dest = path.join(cloneBase, 'gh-abc');
-    await cloneGithubSource(origin, dest);
+    await cloneGithubSource(localGitUrl(origin), dest);
     expect(fs.existsSync(path.join(dest, 'file.txt'))).toBe(true);
     expect(isGitWorkingCopy(dest)).toBe(true);
   });
@@ -589,7 +599,7 @@ describe('cloneGithubSource', () => {
   it('throws and leaves no directory behind when the remote does not exist', async () => {
     const dest = path.join(cloneBase, 'gh-missing');
     await expect(
-      cloneGithubSource(path.join(tmpHome, 'does-not-exist'), dest),
+      cloneGithubSource(localGitUrl(path.join(tmpHome, 'does-not-exist')), dest),
     ).rejects.toThrow();
     expect(fs.existsSync(dest)).toBe(false);
   });
@@ -606,45 +616,6 @@ describe('parseGithubRepoUrl', () => {
     expect(parseGithubRepoUrl('')).toBeNull();
     expect(parseGithubRepoUrl('https://gitlab.com/owner/repo')).toBeNull();
     expect(parseGithubRepoUrl('https://github.com/owner')).toBeNull();
-  });
-});
-
-describe('checkGitAvailable', () => {
-  function runner(ok: Record<string, boolean>) {
-    const calls: string[] = [];
-    const run = async (cmd: string, args: string[]) => {
-      const key = [cmd, ...args].join(' ');
-      calls.push(key);
-      if (!ok[key]) throw new Error(`${key} failed`);
-    };
-    return { run, calls };
-  }
-
-  it('runs git --version on non-macOS platforms', async () => {
-    const { run } = runner({ 'git --version': true });
-    expect(await checkGitAvailable({ platform: 'linux', pathEnv: '/usr/bin', exists: () => true, run })).toBe(true);
-    const failing = runner({});
-    expect(await checkGitAvailable({ platform: 'linux', pathEnv: '/usr/bin', exists: () => true, run: failing.run })).toBe(false);
-  });
-
-  it('on macOS checks xcode-select first and runs git only when developer tools exist', async () => {
-    const { run, calls } = runner({ 'xcode-select -p': true, 'git --version': true });
-    expect(await checkGitAvailable({ platform: 'darwin', pathEnv: '/usr/bin', exists: () => true, run })).toBe(true);
-    expect(calls).toEqual(['xcode-select -p', 'git --version']);
-  });
-
-  it('on macOS without developer tools never invokes the /usr/bin/git stub (which pops an install dialog)', async () => {
-    const { run, calls } = runner({});
-    const exists = (p: string) => p === '/usr/bin/git';
-    expect(await checkGitAvailable({ platform: 'darwin', pathEnv: '/usr/bin:/bin', exists, run })).toBe(false);
-    expect(calls).toEqual(['xcode-select -p']);
-  });
-
-  it('on macOS without developer tools accepts a non-stub git elsewhere on PATH (e.g. Homebrew)', async () => {
-    const { run, calls } = runner({ '/opt/homebrew/bin/git --version': true });
-    const exists = (p: string) => p === '/opt/homebrew/bin/git' || p === '/usr/bin/git';
-    expect(await checkGitAvailable({ platform: 'darwin', pathEnv: '/usr/bin:/opt/homebrew/bin', exists, run })).toBe(true);
-    expect(calls).toEqual(['xcode-select -p', '/opt/homebrew/bin/git --version']);
   });
 });
 
@@ -667,20 +638,20 @@ describe('addGithubSkillSource (shared by the add-source modal and Chief of Staf
     fs.writeFileSync(path.join(origin, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'cos', displayName: 'Chief of Staff' }));
     execSync('git add . && git commit --quiet -m manifest', { cwd: origin });
 
-    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-fixed' });
+    const source = await addGithubSkillSource({ repoUrl: localGitUrl(origin), cloneBase, id: 'gh-fixed' });
     expect(source).toMatchObject({ id: 'gh-fixed', name: 'Chief of Staff', type: 'github', clonePath: path.join(cloneBase, 'gh-fixed') });
     expect(isGitWorkingCopy(source.clonePath!)).toBe(true);
-    expect(source.repoUrl).toBe(origin.replace(/\.git$/, ''));
+    expect(source.repoUrl).toBe(localGitUrl(origin).replace(/\.git$/, ''));
   });
 
   it('prefers an explicit display name, and derives a deterministic id when none is given', async () => {
-    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, displayName: 'Mine' });
+    const source = await addGithubSkillSource({ repoUrl: localGitUrl(origin), cloneBase, displayName: 'Mine' });
     expect(source.name).toBe('Mine');
-    expect(source.id).toBe(deriveSourceIdFromRepoUrl(origin.replace(/\.git$/, '')));
+    expect(source.id).toBe(deriveSourceIdFromRepoUrl(localGitUrl(origin).replace(/\.git$/, '')));
   });
 
   it('falls back to the repo name when there is no manifest', async () => {
-    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-n' });
+    const source = await addGithubSkillSource({ repoUrl: localGitUrl(origin), cloneBase, id: 'gh-n' });
     expect(source.name).toBe('fixture');
   });
 
@@ -689,13 +660,13 @@ describe('addGithubSkillSource (shared by the add-source modal and Chief of Staf
     fs.writeFileSync(path.join(origin, 'file.txt'), 'v2', 'utf-8');
     execSync('git commit --quiet -am later', { cwd: origin });
 
-    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-ref', ref: 'v0.1.0' });
+    const source = await addGithubSkillSource({ repoUrl: localGitUrl(origin), cloneBase, id: 'gh-ref', ref: 'v0.1.0' });
     expect(source.ref).toBe('v0.1.0');
     expect(fs.readFileSync(path.join(source.clonePath!, 'file.txt'), 'utf-8')).toBe('v1');
   });
 
   it('omits ref (default branch) when none is given', async () => {
-    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-def' });
+    const source = await addGithubSkillSource({ repoUrl: localGitUrl(origin), cloneBase, id: 'gh-def' });
     expect(source.ref).toBeUndefined();
   });
 
@@ -703,13 +674,13 @@ describe('addGithubSkillSource (shared by the add-source modal and Chief of Staf
     execSync('git tag v0.1.0', { cwd: origin });
     const dest = path.join(cloneBase, 'gh-adopt');
     fs.mkdirSync(cloneBase, { recursive: true });
-    execSync(`git clone --quiet "${origin}" "${dest}"`);
+    nativeClone(origin, dest);
     fs.writeFileSync(path.join(origin, 'file.txt'), 'v2', 'utf-8');
     execSync('git commit --quiet -am later', { cwd: origin });
-    execSync('git pull --quiet', { cwd: dest });
+    execSync(`git pull --quiet "${origin}" HEAD`, { cwd: dest });
     expect(fs.readFileSync(path.join(dest, 'file.txt'), 'utf-8')).toBe('v2');
 
-    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-adopt', ref: 'v0.1.0' });
+    const source = await addGithubSkillSource({ repoUrl: localGitUrl(origin), cloneBase, id: 'gh-adopt', ref: 'v0.1.0' });
     expect(source.clonePath).toBe(dest);
     expect(fs.readFileSync(path.join(dest, 'file.txt'), 'utf-8')).toBe('v1');
   });
@@ -717,8 +688,8 @@ describe('addGithubSkillSource (shared by the add-source modal and Chief of Staf
   it('adopts an existing working copy as-is when no ref is given', async () => {
     const dest = path.join(cloneBase, 'gh-adopt2');
     fs.mkdirSync(cloneBase, { recursive: true });
-    execSync(`git clone --quiet "${origin}" "${dest}"`);
-    const source = await addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-adopt2' });
+    nativeClone(origin, dest);
+    const source = await addGithubSkillSource({ repoUrl: localGitUrl(origin), cloneBase, id: 'gh-adopt2' });
     expect(isGitWorkingCopy(source.clonePath!)).toBe(true);
   });
 
@@ -726,20 +697,20 @@ describe('addGithubSkillSource (shared by the add-source modal and Chief of Staf
     const dest = path.join(cloneBase, 'gh-junk');
     fs.mkdirSync(dest, { recursive: true });
     fs.writeFileSync(path.join(dest, 'mine.txt'), 'keep', 'utf-8');
-    await expect(addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-junk' })).rejects.toThrow(/not a git/);
+    await expect(addGithubSkillSource({ repoUrl: localGitUrl(origin), cloneBase, id: 'gh-junk' })).rejects.toThrow(/not a git/);
     expect(fs.readFileSync(path.join(dest, 'mine.txt'), 'utf-8')).toBe('keep');
   });
 
   it('does not delete an adopted working copy when checking out the ref fails', async () => {
     const dest = path.join(cloneBase, 'gh-badref');
     fs.mkdirSync(cloneBase, { recursive: true });
-    execSync(`git clone --quiet "${origin}" "${dest}"`);
-    await expect(addGithubSkillSource({ repoUrl: origin, cloneBase, id: 'gh-badref', ref: 'no-such-tag' })).rejects.toThrow();
+    nativeClone(origin, dest);
+    await expect(addGithubSkillSource({ repoUrl: localGitUrl(origin), cloneBase, id: 'gh-badref', ref: 'no-such-tag' })).rejects.toThrow();
     expect(isGitWorkingCopy(dest)).toBe(true);
   });
 
   it('throws and leaves nothing behind when the clone fails', async () => {
-    await expect(addGithubSkillSource({ repoUrl: path.join(tmpHome, 'nope.git'), cloneBase, id: 'gh-bad' })).rejects.toThrow();
+    await expect(addGithubSkillSource({ repoUrl: localGitUrl(path.join(tmpHome, 'nope.git')), cloneBase, id: 'gh-bad' })).rejects.toThrow();
     expect(fs.existsSync(path.join(cloneBase, 'gh-bad'))).toBe(false);
   });
 });
@@ -764,7 +735,7 @@ describe('ensureGithubSourcesCloned', () => {
   });
 
   it('clones a declared source that has neither an id nor a clonePath, and persists both', async () => {
-    const sources: SkillSource[] = [{ id: '', name: 'Declared A', type: 'github', repoUrl: originA }];
+    const sources: SkillSource[] = [{ id: '', name: 'Declared A', type: 'github', repoUrl: localGitUrl(originA) }];
 
     const result = await ensureGithubSourcesCloned(sources, cloneBase);
 
@@ -772,13 +743,13 @@ describe('ensureGithubSourcesCloned', () => {
     expect(result.cloned.map((c) => c.name)).toEqual(['Declared A']);
     expect(result.changed).toBe(true);
     // id derived deterministically, clonePath computed under the managed base
-    expect(sources[0].id).toBe(deriveSourceIdFromRepoUrl(originA));
+    expect(sources[0].id).toBe(deriveSourceIdFromRepoUrl(localGitUrl(originA)));
     expect(sources[0].clonePath).toBe(path.join(cloneBase, sources[0].id));
     expect(fs.existsSync(path.join(sources[0].clonePath!, 'file.txt'))).toBe(true);
   });
 
   it('is a no-op on a second pass: nothing cloned, nothing changed, clone untouched', async () => {
-    const sources: SkillSource[] = [{ id: '', name: 'Declared A', type: 'github', repoUrl: originA }];
+    const sources: SkillSource[] = [{ id: '', name: 'Declared A', type: 'github', repoUrl: localGitUrl(originA) }];
     await ensureGithubSourcesCloned(sources, cloneBase);
     const clonePath = sources[0].clonePath!;
     // Sentinel proves the existing clone was not deleted and re-cloned.
@@ -796,7 +767,7 @@ describe('ensureGithubSourcesCloned', () => {
   });
 
   it('leaves an existing clone completely alone even when it is behind the remote (no auto-pull)', async () => {
-    const sources: SkillSource[] = [{ id: '', name: 'Declared A', type: 'github', repoUrl: originA }];
+    const sources: SkillSource[] = [{ id: '', name: 'Declared A', type: 'github', repoUrl: localGitUrl(originA) }];
     await ensureGithubSourcesCloned(sources, cloneBase);
     const clonePath = sources[0].clonePath!;
 
@@ -815,7 +786,7 @@ describe('ensureGithubSourcesCloned', () => {
       // Ordered first on purpose: a failure must not abort the sources after it.
       { id: '', name: 'Broken', type: 'github', repoUrl: path.join(fixtureRoot, 'nope.git') },
       { id: '', name: 'Missing URL', type: 'github' },
-      { id: '', name: 'Good B', type: 'github', repoUrl: originB },
+      { id: '', name: 'Good B', type: 'github', repoUrl: localGitUrl(originB) },
     ];
 
     const result = await ensureGithubSourcesCloned(sources, cloneBase);
@@ -841,12 +812,12 @@ describe('ensureGithubSourcesCloned', () => {
   });
 
   it('re-clones over a stale non-git directory inside the managed clone base', async () => {
-    const id = deriveSourceIdFromRepoUrl(originA);
+    const id = deriveSourceIdFromRepoUrl(localGitUrl(originA));
     const clonePath = path.join(cloneBase, id);
     fs.mkdirSync(clonePath, { recursive: true });
     fs.writeFileSync(path.join(clonePath, 'junk.txt'), 'interrupted clone', 'utf-8');
 
-    const sources: SkillSource[] = [{ id, name: 'Declared A', type: 'github', repoUrl: originA, clonePath }];
+    const sources: SkillSource[] = [{ id, name: 'Declared A', type: 'github', repoUrl: localGitUrl(originA), clonePath }];
     const result = await ensureGithubSourcesCloned(sources, cloneBase);
 
     expect(result.cloned).toHaveLength(1);
@@ -859,7 +830,7 @@ describe('ensureGithubSourcesCloned', () => {
     fs.mkdirSync(outside, { recursive: true });
     fs.writeFileSync(path.join(outside, 'precious.txt'), 'user data', 'utf-8');
 
-    const sources: SkillSource[] = [{ id: 'gh-1', name: 'Hand-edited', type: 'github', repoUrl: originA, clonePath: outside }];
+    const sources: SkillSource[] = [{ id: 'gh-1', name: 'Hand-edited', type: 'github', repoUrl: localGitUrl(originA), clonePath: outside }];
     const result = await ensureGithubSourcesCloned(sources, cloneBase);
 
     expect(result.cloned).toEqual([]);
@@ -872,7 +843,7 @@ describe('ensureGithubSourcesCloned', () => {
     const empty = { changed: false, cloned: [], present: [], failed: [] };
     expect(await ensureGithubSourcesCloned([], cloneBase)).toEqual(empty);
     expect(await ensureGithubSourcesCloned(undefined, cloneBase)).toEqual(empty);
-    expect(await ensureGithubSourcesCloned([{ id: '', name: 'A', type: 'github', repoUrl: originA }], '')).toEqual(empty);
+    expect(await ensureGithubSourcesCloned([{ id: '', name: 'A', type: 'github', repoUrl: localGitUrl(originA) }], '')).toEqual(empty);
   });
 });
 
@@ -970,3 +941,29 @@ describe('installSkillFromMarketplace', () => {
 
 // buildSkillPlugins lives in this module but is covered end-to-end (pure
 // enumeration plus the real ThreadManager wiring) in session-plugins.test.ts.
+
+describe('skill source removal helpers', () => {
+  it('withoutSkillSource drops only the matching id and does not mutate', async () => {
+    const { withoutSkillSource } = await import('../../src/skillManager');
+    const a = { id: 'a', name: 'A', type: 'local' } as SkillSource;
+    const b = { id: 'b', name: 'B', type: 'local' } as SkillSource;
+    const input = [a, b];
+    expect(withoutSkillSource(input, 'a')).toEqual([b]);
+    expect(input).toHaveLength(2);
+  });
+
+  it('deleteSkillSourceFiles removes a github clone but leaves a local folder alone', async () => {
+    const { deleteSkillSourceFiles } = await import('../../src/skillManager');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'src-rm-'));
+    const clone = path.join(tmp, 'clone');
+    const local = path.join(tmp, 'local');
+    fs.mkdirSync(clone); fs.mkdirSync(local);
+    deleteSkillSourceFiles({ id: 'g', name: 'G', type: 'github', clonePath: clone } as SkillSource);
+    deleteSkillSourceFiles({ id: 'l', name: 'L', type: 'local', skillsPath: local } as SkillSource);
+    expect(fs.existsSync(clone)).toBe(false);
+    expect(fs.existsSync(local)).toBe(true);
+    // missing clone must not throw
+    expect(() => deleteSkillSourceFiles({ id: 'g', name: 'G', type: 'github', clonePath: clone } as SkillSource)).not.toThrow();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+});

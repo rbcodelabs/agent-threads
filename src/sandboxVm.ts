@@ -38,6 +38,17 @@
  */
 
 import { managedRuntimeBinDirIfPresent, parseSystemStatus } from './sandboxRuntime';
+import { mountSignature, parseMountSignature, type VmExtraMount } from './skillMounts';
+import {
+  VmPortForwarder,
+  buildGuestRelayArgs,
+  interpretProbeExit,
+  parseLoopbackHttpUrl,
+  probeHostLoopbackPort,
+  type GuestProbeResult,
+  type RelayProcess,
+  type VmUrlResolution,
+} from './vmPortForward';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -48,6 +59,32 @@ export const VM_NETWORK_MODES: readonly VmNetworkMode[] = ['default', 'internal'
 
 /** Image built from `sandbox/Dockerfile`. Overridable per call and in settings. */
 export const DEFAULT_VM_IMAGE = 'claude-threads-coding:1';
+/**
+ * Apple's `container` CLI defaults to 1 GiB per VM, which OOM-kills pnpm/tsc/tests
+ * once the harness is resident. Cap is a ceiling, not a reservation.
+ */
+export const DEFAULT_VM_MEMORY = '4G';
+export const DEFAULT_VM_CPUS = 4;
+export const MAX_VM_CPUS = 64;
+
+const VM_MEMORY_PATTERN = /^\d+[MG]$/i;
+
+/**
+ * Validates a memory limit before it reaches the `container run` argv.
+ * Accepts `<digits>M|G` (e.g. `4G`, `512M`) with a non-zero amount; anything else
+ * falls back to the default. Returned normalised (trimmed, upper-case suffix).
+ */
+export function resolveVmMemory(value?: string | null): string {
+  const v = typeof value === 'string' ? value.trim() : '';
+  if (!VM_MEMORY_PATTERN.test(v) || Number.parseInt(v, 10) <= 0) return DEFAULT_VM_MEMORY;
+  return v.toUpperCase();
+}
+
+/** Positive integer in [1, MAX_VM_CPUS]; non-integers/invalid fall back to the default, large values clamp. */
+export function resolveVmCpus(value?: number | null): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) return DEFAULT_VM_CPUS;
+  return Math.min(value, MAX_VM_CPUS);
+}
 
 /** Where the thread's working directory is bind-mounted, and the guest cwd. */
 export const VM_WORKDIR = '/work';
@@ -286,22 +323,151 @@ export function networkArgsFor(network: VmNetworkMode): string[] {
   return [];
 }
 
+/** Parent of the read-only bind mounts for connected Geode external roots. */
+export const VM_EXTERNAL_ROOT = '/ext';
+/** Fixed guest path of the vault, always mounted READ-WRITE regardless of the thread cwd (/work). */
+export const VM_VAULT_MOUNT = '/vault';
+
+/**
+ * The vault as a read-write mount at {@link VM_VAULT_MOUNT}. Returns [] when the
+ * host path is unavailable (mobile / non-filesystem adapter) or fails vetting
+ * (not absolute, contains ':', NUL or '..', not a directory). A cwd equal to
+ * the vault root still gets /vault: the same directory is simply mounted twice.
+ */
+export function resolveVaultMount(
+  vaultPath: string | null | undefined,
+  isDirectory: (hostPath: string) => boolean,
+): VmExtraMount[] {
+  if (typeof vaultPath !== 'string' || !vaultPath.startsWith('/')) return [];
+  if (vaultPath.includes(':') || vaultPath.includes('\0') || vaultPath.split('/').includes('..')) return [];
+  const hostPath = vaultPath.length > 1 ? vaultPath.replace(/\/+$/, '') : vaultPath;
+  let isDir = false;
+  try { isDir = isDirectory(hostPath); } catch { isDir = false; }
+  return isDir ? [{ hostPath, guestPath: VM_VAULT_MOUNT, readWrite: true }] : [];
+}
+
+/** A Geode external root as reported by the host's `externalRoots.listMountRoots()`. */
+export interface ExternalMountRootInput {
+  rootId?: string;
+  label?: string;
+  path?: string;
+  projectId?: string;
+}
+
+/**
+ * Like {@link sanitizeContainerName} but keeps the label readable as a path
+ * segment: preserves case and `.`/`_`/`-`; everything else becomes `-`.
+ * Never returns '.', '..' or an empty string.
+ */
+export function sanitizeMountLabel(raw: string): string {
+  const cleaned = (raw ?? '')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 48);
+  return cleaned || 'root';
+}
+
+/**
+ * Turns host-reported external roots into vetted read-only mounts at
+ * `/ext/<label>`. The host is treated as untrusted-ish input: entries whose
+ * path is not absolute, contains ':', NUL or '..' segments, is not an existing
+ * directory, or equals/lies inside the /work mount are dropped, as are exact
+ * duplicate paths. Colliding labels get -2, -3 suffixes.
+ */
+export function resolveExternalMounts(
+  entries: readonly ExternalMountRootInput[] | null | undefined,
+  opts: { workPath: string; isDirectory: (hostPath: string) => boolean },
+): VmExtraMount[] {
+  if (!Array.isArray(entries)) return [];
+  const trim = (p: string) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
+  const work = trim(opts.workPath);
+  const usedNames = new Set<string>();
+  const usedPaths = new Set<string>();
+  const mounts: VmExtraMount[] = [];
+  for (const entry of entries) {
+    const raw = entry?.path;
+    if (typeof raw !== 'string' || !raw.startsWith('/')) continue;
+    if (raw.includes(':') || raw.includes('\0')) continue;
+    if (raw.split('/').includes('..')) continue;
+    const hostPath = trim(raw);
+    if (hostPath === work || hostPath.startsWith(work === '/' ? '/' : `${work}/`)) continue;
+    if (usedPaths.has(hostPath)) continue;
+    let isDir = false;
+    try { isDir = opts.isDirectory(hostPath); } catch { isDir = false; }
+    if (!isDir) continue;
+    const base = sanitizeMountLabel(typeof entry.label === 'string' ? entry.label : '');
+    let name = base;
+    for (let n = 2; usedNames.has(name.toLowerCase()); n++) name = `${base}-${n}`;
+    usedNames.add(name.toLowerCase());
+    usedPaths.add(hostPath);
+    mounts.push({ hostPath, guestPath: `${VM_EXTERNAL_ROOT}/${name}` });
+  }
+  return mounts;
+}
+
+/** Concatenates mount lists, first occurrence of a guest path wins. */
+export function mergeExtraMounts(...lists: Array<readonly VmExtraMount[] | undefined>): VmExtraMount[] {
+  const seen = new Set<string>();
+  const out: VmExtraMount[] = [];
+  for (const list of lists) {
+    for (const m of list ?? []) {
+      if (seen.has(m.guestPath)) continue;
+      seen.add(m.guestPath);
+      out.push(m);
+    }
+  }
+  return out;
+}
+
+/** Container labels recording how a harness container was built, so a later session can compare. */
+export const LABEL_HARNESS_ORIGIN = 'claude-threads.origin';
+export const LABEL_EXTRA_MOUNTS = 'claude-threads.mounts';
+
+/** `--volume host:guest[:ro]` flags for extra mounts: deduped by guest path, read-only unless `readWrite`, validated. */
+function extraMountArgs(extraMounts: readonly VmExtraMount[] | undefined): string[] {
+  const seen = new Set<string>();
+  const args: string[] = [];
+  for (const m of extraMounts ?? []) {
+    if (m.hostPath.includes(':') || m.guestPath.includes(':')) {
+      throw new Error('Extra mount paths cannot contain a colon (the container volume delimiter).');
+    }
+    if (!m.hostPath.startsWith('/') || !m.guestPath.startsWith('/')) {
+      throw new Error('Extra mount paths must be absolute.');
+    }
+    if (seen.has(m.guestPath)) continue;
+    seen.add(m.guestPath);
+    args.push('--volume', `${m.hostPath}:${m.guestPath}${m.readWrite ? '' : ':ro'}`);
+  }
+  return args;
+}
+
 export function buildRunArgs(opts: {
   containerName: string;
   image: string;
   mountPath: string;
   network: VmNetworkMode;
   workdir?: string;
+  /** Additional bind mounts (read-only unless `readWrite`, e.g. the vault). Fixed for the container's lifetime. */
+  extraMounts?: readonly VmExtraMount[];
+  labels?: Record<string, string>;
+  memory?: string;
+  cpus?: number;
 }): string[] {
   if (opts.mountPath.includes(':')) throw new Error('mountPath cannot contain a colon (the container volume delimiter).');
   if (!opts.image.trim() || opts.image.startsWith('-')) throw new Error('Invalid container image reference.');
   const workdir = opts.workdir ?? VM_WORKDIR;
+  const labelArgs = Object.entries(opts.labels ?? {}).flatMap(([k, v]) => ['--label', `${k}=${v}`]);
   return [
     'run',
     '--detach',
     '--name', opts.containerName,
     '--volume', `${opts.mountPath}:${workdir}`,
+    ...extraMountArgs(opts.extraMounts),
+    ...labelArgs,
     '--workdir', workdir,
+    '--memory', resolveVmMemory(opts.memory),
+    '--cpus', String(resolveVmCpus(opts.cpus)),
     ...networkArgsFor(opts.network),
     opts.image,
     // The container only has to stay alive so `container exec` has somewhere to
@@ -331,6 +497,11 @@ export function buildShellExecArgs(opts: { containerName: string; command: strin
 
 export function buildStopArgs(containerName: string): string[] {
   return ['stop', containerName];
+}
+
+/** `container start <name>` — restarts a stopped container (e.g. after a host reboot). */
+export function buildStartArgs(containerName: string): string[] {
+  return ['start', containerName];
 }
 
 export function buildRemoveArgs(opts: { containerName: string; force?: boolean }): string[] {
@@ -414,6 +585,40 @@ export interface SandboxVmState {
    * container the harness process is still attached to — see `exit()`.
    */
   origin: 'agent' | 'harness';
+  /** Extra read-only mounts this container was created with (harness containers only). */
+  extraMounts?: VmExtraMount[];
+}
+
+/** Labels from `container inspect` JSON, or null when the shape is not recognised. */
+export function parseContainerLabels(stdout: string): Record<string, string> | null {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    const entry = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | undefined;
+    const labels = (entry?.configuration as Record<string, unknown> | undefined)?.labels
+      ?? entry?.labels ?? (entry?.Config as Record<string, unknown> | undefined)?.Labels;
+    if (!labels || typeof labels !== 'object') return null;
+    return Object.fromEntries(Object.entries(labels).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True only when `container inspect` JSON positively reports a non-running
+ * state. An unrecognised shape returns false so we never issue a spurious start.
+ */
+export function isContainerStopped(stdout: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    const entry = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | undefined;
+    const status = entry?.status;
+    const raw = (typeof status === 'object' && status !== null
+      ? (status as Record<string, unknown>).state : status) ?? entry?.state
+      ?? (entry?.State as Record<string, unknown> | undefined)?.Status;
+    return typeof raw === 'string' && raw.length > 0 && raw.toLowerCase() !== 'running';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -433,7 +638,11 @@ export interface VmHooks {
 }
 
 export type EnterVmResult =
-  | { success: true; containerName: string; image: string; mountedFrom: string; network: VmNetworkMode; notes?: string[] }
+  | {
+    success: true; containerName: string; image: string; mountedFrom: string; network: VmNetworkMode; notes?: string[];
+    /** Read-only extra mounts the container actually has (omitted when none/unknown). */
+    extraMounts?: VmExtraMount[];
+  }
   | { success: false; error: string };
 
 export type VmExecResult =
@@ -451,6 +660,13 @@ export interface SandboxVmManagerDeps {
   run?: VmCommandRunner;
   /** Lifecycle hooks (GitHub credential delivery). */
   hooks?: VmHooks;
+  /**
+   * Optional image health check for `enter_vm`: a returned warning is added to the
+   * result's `notes` (the VM still starts). See sandboxImage.checkImageHealth.
+   */
+  checkImageHealth?: (image: string) => Promise<string | null>;
+  /** Starts a guest port relay (see vmPortForward.ts). Defaults to `container exec`; tests inject a fake. */
+  spawnRelay?: (containerName: string, port: number) => RelayProcess;
 }
 
 /**
@@ -471,10 +687,60 @@ export class SandboxVmManager {
   private readonly deps: SandboxVmManagerDeps;
   private readonly runner: VmCommandRunner;
   private active: SandboxVmState | null = null;
+  private portForwarder: VmPortForwarder | null = null;
 
   constructor(deps: SandboxVmManagerDeps) {
     this.deps = deps;
     this.runner = deps.run ?? createDefaultVmCommandRunner();
+  }
+
+  /**
+   * What a HOST-side tool (browser_navigate, host_open_url) should open for
+   * `url`. A server started in the container on 127.0.0.1:PORT is not at the
+   * host's 127.0.0.1:PORT, so for a thread that has a sandbox container a
+   * loopback URL is forwarded (see vmPortForward.ts) and rewritten. Anything
+   * else — non-loopback URLs, threads without a container, a missing runtime —
+   * is `passthrough`, i.e. completely unchanged host-local behavior.
+   * Throws `VmLoopbackError` when the port is not served anywhere.
+   */
+  async resolveLoopbackUrl(url: string): Promise<VmUrlResolution> {
+    if (!parseLoopbackHttpUrl(url)) return { kind: 'passthrough' };
+    if (!this.active) {
+      try {
+        if (!(await this.containerExists(this.deps.containerName()))) return { kind: 'passthrough' };
+      } catch {
+        return { kind: 'passthrough' };
+      }
+    }
+    return this.getPortForwarder().resolve(url);
+  }
+
+  /** Stops every host listener forwarding into this thread's container. */
+  closePortForwards(): void {
+    this.portForwarder?.close();
+    this.portForwarder = null;
+  }
+
+  private getPortForwarder(): VmPortForwarder {
+    if (!this.portForwarder) {
+      this.portForwarder = new VmPortForwarder({
+        containerName: () => this.active?.containerName ?? this.deps.containerName(),
+        probeGuestPort: (port) => this.probeGuestPort(port),
+        probeHostPort: (port) => probeHostLoopbackPort(port),
+        spawnRelay: this.deps.spawnRelay ?? spawnGuestRelay,
+      });
+    }
+    return this.portForwarder;
+  }
+
+  private async probeGuestPort(port: number): Promise<GuestProbeResult> {
+    try {
+      const name = this.active?.containerName ?? this.deps.containerName();
+      const result = await this.runner(buildGuestRelayArgs(name, port, { probe: true }), { timeoutMs: 15_000 });
+      return interpretProbeExit(result.exitCode);
+    } catch {
+      return 'error';
+    }
   }
 
   /** Currently tracked container for this session, if `enter_vm` has run. */
@@ -584,9 +850,16 @@ export class SandboxVmManager {
     image: string;
     mountPath: string;
     network: VmNetworkMode;
+    /** Read-only extra mounts (e.g. external roots). A leftover container with a different set is recreated. */
+    extraMounts?: readonly VmExtraMount[];
+    /** Resource limits for a newly created container; validated in buildRunArgs. */
+    memory?: string;
+    cpus?: number;
   }): Promise<EnterVmResult> {
     try {
       const containerName = this.deps.containerName();
+      const wanted = [...(params.extraMounts ?? [])];
+      const wantedSignature = mountSignature(wanted);
 
       if (this.active) {
         if (this.active.origin === 'harness') {
@@ -601,6 +874,7 @@ export class SandboxVmManager {
             image: this.active.image,
             mountedFrom: this.active.mountedFrom,
             network: this.active.network,
+            ...(this.active.extraMounts?.length ? { extraMounts: this.active.extraMounts } : {}),
           };
         }
         return {
@@ -615,11 +889,26 @@ export class SandboxVmManager {
       // An untracked container under this thread's name is a leftover from an
       // earlier session. Adopting it would silently ignore the image/network/
       // mount just requested, so report it and let exit_vm clear it instead.
-      if (await this.containerExists(containerName)) {
-        return {
-          success: false,
-          error: `A container named ${containerName} already exists from an earlier session. Call exit_vm to remove it, then enter_vm again.`,
-        };
+      // Exception: when the requested extra-mount set differs from the one the
+      // leftover was created with (label), it would silently lack or wrongly
+      // keep mounts, so recreate it.
+      const existing = await this.exec(buildInspectArgs(containerName));
+      if (existing.exitCode === 0) {
+        const existingSignature = parseContainerLabels(existing.stdout)?.[LABEL_EXTRA_MOUNTS] ?? '';
+        if (existingSignature === wantedSignature) {
+          return {
+            success: false,
+            error: `A container named ${containerName} already exists from an earlier session. Call exit_vm to remove it, then enter_vm again.`,
+          };
+        }
+        await this.exec(buildStopArgs(containerName));
+        const removedStale = await this.exec(buildRemoveArgs({ containerName, force: true }));
+        if (removedStale.exitCode !== 0) {
+          return {
+            success: false,
+            error: `Could not recreate ${containerName} with the updated mounts: ${firstLine(removedStale.stderr) || `exit code ${removedStale.exitCode}`}`,
+          };
+        }
       }
 
       if (params.network === 'internal') {
@@ -628,7 +917,16 @@ export class SandboxVmManager {
       }
 
       const result = await this.exec(
-        buildRunArgs({ containerName, image: params.image, mountPath: params.mountPath, network: params.network }),
+        buildRunArgs({
+          containerName,
+          image: params.image,
+          mountPath: params.mountPath,
+          network: params.network,
+          extraMounts: wanted,
+          memory: params.memory,
+          cpus: params.cpus,
+          ...(wantedSignature ? { labels: { [LABEL_EXTRA_MOUNTS]: wantedSignature } } : {}),
+        }),
       );
       if (result.exitCode !== 0) {
         return {
@@ -643,14 +941,20 @@ export class SandboxVmManager {
         mountedFrom: params.mountPath,
         network: params.network,
         origin: 'agent',
+        ...(wanted.length ? { extraMounts: wanted } : {}),
       };
       const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
+      try {
+        const warning = await this.deps.checkImageHealth?.(params.image);
+        if (warning) notes.push(warning);
+      } catch { /* a failed health check must never fail enter_vm */ }
       return {
         success: true,
         containerName: this.active.containerName,
         image: this.active.image,
         mountedFrom: this.active.mountedFrom,
         network: this.active.network,
+        ...(wanted.length ? { extraMounts: wanted } : {}),
         ...(notes.length ? { notes } : {}),
       };
     } catch (err) {
@@ -671,9 +975,34 @@ export class SandboxVmManager {
     image: string;
     mountPath: string;
     network: VmNetworkMode;
+    /**
+     * Read-only extra mounts (skills). Mounts are fixed at `container run`, so
+     * they only take effect when THIS call creates the container. Policy when
+     * a container already exists with a different mount set:
+     *   - tracked by this manager (a session may be live in it) -> keep it,
+     *     report the mounts it really has; callers must not assume the request
+     *     was honoured. Never disrupts a running session.
+     *   - untracked (fresh start / plugin reload) -> keep it and report the
+     *     existing mounts. Claude's native conversation files also live in
+     *     the guest filesystem; recreating it would make resume impossible.
+     */
+    extraMounts?: readonly VmExtraMount[];
+    /** Resource limits for a newly created container; validated in buildRunArgs. */
+    memory?: string;
+    cpus?: number;
   }): Promise<EnterVmResult> {
     try {
       const containerName = this.deps.containerName();
+      const wanted = [...(params.extraMounts ?? [])];
+      const wantedSignature = mountSignature(wanted);
+      const attached = (state: SandboxVmState): EnterVmResult => ({
+        success: true,
+        containerName: state.containerName,
+        image: state.image,
+        mountedFrom: state.mountedFrom,
+        network: state.network,
+        ...(state.extraMounts?.length ? { extraMounts: state.extraMounts } : {}),
+      });
 
       if (this.active) {
         // Already tracked — whether from a prior ensureHarnessContainer call
@@ -681,32 +1010,36 @@ export class SandboxVmManager {
         // way the container is shared per thread; just mark it harness-owned
         // going forward so exit_vm stops short of removing it.
         this.active = { ...this.active, origin: 'harness' };
-        return {
-          success: true,
-          containerName: this.active.containerName,
-          image: this.active.image,
-          mountedFrom: this.active.mountedFrom,
-          network: this.active.network,
-        };
+        return attached(this.active);
       }
 
       const probe = await this.probe();
       if (!probe.available) return { success: false, error: probe.error ?? VM_UNAVAILABLE_HINT };
 
-      if (await this.containerExists(containerName)) {
-        // Still running from an earlier session/plugin reload — adopt it.
-        // The harness PROCESS inside it does not survive a reload the way
-        // the container does (its stdio pipes were held by the now-gone host
-        // process), so the caller re-execs; this call only needs the
-        // container itself, which is already there.
-        this.active = { containerName, image: params.image, mountedFrom: params.mountPath, network: params.network, origin: 'harness' };
-        return {
-          success: true,
-          containerName: this.active.containerName,
-          image: this.active.image,
-          mountedFrom: this.active.mountedFrom,
-          network: this.active.network,
+      const inspected = await this.exec(buildInspectArgs(containerName));
+      if (inspected.exitCode === 0) {
+        const labels = parseContainerLabels(inspected.stdout);
+        const existingSignature = labels?.[LABEL_EXTRA_MOUNTS] ?? '';
+        // Restart a stopped container without replacing its filesystem.
+        if (isContainerStopped(inspected.stdout)) {
+          const started = await this.exec(buildStartArgs(containerName));
+          if (started.exitCode !== 0) {
+            return {
+              success: false,
+              error: `Failed to start stopped container ${containerName}: ${firstLine(started.stderr) || `exit code ${started.exitCode}`}`,
+            };
+          }
+        }
+        // Re-exec the harness in its existing container, even when skills
+        // changed. Removing it would discard ~/.claude/projects and break
+        // the saved session id. Report actual mounts so unavailable plugins
+        // are omitted rather than pointing at paths the guest cannot see.
+        const mounted = labels ? (parseMountSignature(existingSignature) ?? []) : [];
+        this.active = {
+          containerName, image: params.image, mountedFrom: params.mountPath, network: params.network,
+          origin: 'harness', ...(mounted.length ? { extraMounts: mounted } : {}),
         };
+        return attached(this.active);
       }
 
       if (params.network === 'internal') {
@@ -715,7 +1048,19 @@ export class SandboxVmManager {
       }
 
       const result = await this.exec(
-        buildRunArgs({ containerName, image: params.image, mountPath: params.mountPath, network: params.network }),
+        buildRunArgs({
+          containerName,
+          image: params.image,
+          mountPath: params.mountPath,
+          network: params.network,
+          extraMounts: wanted,
+          memory: params.memory,
+          cpus: params.cpus,
+          labels: {
+            [LABEL_HARNESS_ORIGIN]: 'harness',
+            ...(wantedSignature ? { [LABEL_EXTRA_MOUNTS]: wantedSignature } : {}),
+          },
+        }),
       );
       if (result.exitCode !== 0) {
         return {
@@ -724,16 +1069,12 @@ export class SandboxVmManager {
         };
       }
 
-      this.active = { containerName, image: params.image, mountedFrom: params.mountPath, network: params.network, origin: 'harness' };
-      const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
-      return {
-        success: true,
-        containerName: this.active.containerName,
-        image: this.active.image,
-        mountedFrom: this.active.mountedFrom,
-        network: this.active.network,
-        ...(notes.length ? { notes } : {}),
+      this.active = {
+        containerName, image: params.image, mountedFrom: params.mountPath, network: params.network,
+        origin: 'harness', ...(wanted.length ? { extraMounts: wanted } : {}),
       };
+      const notes = await this.runHook(this.deps.hooks?.afterEnter, containerName);
+      return { ...attached(this.active), ...(notes.length ? { notes } : {}) };
     } catch (err) {
       return { success: false, error: errorMessage(err) };
     }
@@ -831,6 +1172,7 @@ export class SandboxVmManager {
       }
 
       this.active = null;
+      this.closePortForwards();
       return { success: true, removedContainer: containerName };
     } catch (err) {
       return { success: false, error: errorMessage(err) };
@@ -839,6 +1181,24 @@ export class SandboxVmManager {
 }
 
 // ── Local utilities ──────────────────────────────────────────────────────────
+
+/** Default relay: one `container exec --interactive … node <relay>` per proxied connection. */
+function spawnGuestRelay(containerName: string, port: number): RelayProcess {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { spawn } = require('child_process') as typeof import('child_process');
+  const child = spawn(VM_BINARY, buildGuestRelayArgs(containerName, port), {
+    env: runnerEnv() as NodeJS.ProcessEnv,
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  child.on('error', () => undefined);
+  return {
+    stdin: child.stdin!,
+    stdout: child.stdout!,
+    kill: () => { child.kill(); },
+    // 'close' (not 'exit') so stdout has been fully drained first.
+    onExit: (cb) => { child.on('close', (code) => cb(code)); },
+  };
+}
 
 function firstLine(text: string | undefined): string {
   return (text ?? '').trim().split('\n')[0]?.trim() ?? '';

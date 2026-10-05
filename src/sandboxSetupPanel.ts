@@ -74,6 +74,13 @@ export const SIGN_IN_NOTE =
 export interface SandboxSettingsPanelDeps extends SandboxSetupFlowDeps {
   /** Desktop-only feature: on mobile the block explains that and offers no button. */
   isMobile: boolean;
+  /**
+   * Removes the local images and re-runs setup from scratch. When provided
+   * (with `resetMessage`), an installed runtime also gets a "Reset sandbox" button.
+   */
+  reset?(opts: { onProgress: (p: SandboxSetupProgress) => void; signal: AbortSignal }): Promise<SandboxSetupResult>;
+  /** Confirmation text for the reset; shown instead of the download estimate. */
+  resetMessage?: string;
 }
 
 export interface SandboxSettingsPanel {
@@ -119,16 +126,25 @@ export function renderSandboxSettingsPanel(parent: HTMLElement, deps: SandboxSet
     if (!status.supported) return;
     line('Service', view.serviceLine);
     line('Sandbox image', view.imageLine);
-    if (!view.buttonLabel) return;
-
-    const button = actionsEl.createEl('button', { cls: 'mod-cta ct-sandbox-setup-btn', text: view.buttonLabel });
-    button.addEventListener('click', () => { void start(status, button); });
+    if (view.imageDetailLine) line('Image version', view.imageDetailLine);
+    const buttons: HTMLButtonElement[] = [];
+    if (view.buttonLabel) {
+      const button = actionsEl.createEl('button', { cls: 'mod-cta ct-sandbox-setup-btn', text: view.buttonLabel });
+      button.addEventListener('click', () => { void start(status, buttons, false); });
+      buttons.push(button);
+    }
+    if (deps.reset && status.runtime === 'installed') {
+      const resetBtn = actionsEl.createEl('button', { cls: 'ct-sandbox-reset-btn', text: 'Reset sandbox' });
+      resetBtn.addEventListener('click', () => { void start(status, buttons, true); });
+      buttons.push(resetBtn);
+    }
   };
 
-  const start = async (status: SandboxSetupStatus, button: HTMLButtonElement): Promise<void> => {
+  const start = async (status: SandboxSetupStatus, buttons: HTMLButtonElement[], reset: boolean): Promise<void> => {
     if (busy) return;
     busy = true;
-    button.disabled = true;
+    const setButtonsDisabled = (disabled: boolean) => { for (const b of buttons) b.disabled = disabled; };
+    setButtonsDisabled(true);
     errorEl.empty();
     progressEl.empty();
     const controller = new AbortController();
@@ -136,9 +152,10 @@ export function renderSandboxSettingsPanel(parent: HTMLElement, deps: SandboxSet
     const outcome = await runSetupFlow(
       {
         ...deps,
+        ...(reset && deps.reset ? { run: deps.reset } : {}),
         // Show Cancel only once the run really starts (after the user confirmed).
         confirm: async (msg) => {
-          const ok = await deps.confirm(msg);
+          const ok = await deps.confirm(reset && deps.resetMessage ? deps.resetMessage : msg);
           if (ok) {
             const btn = cancel.btn = actionsEl.createEl('button', { cls: 'ct-sandbox-setup-cancel', text: 'Cancel' });
             btn.addEventListener('click', () => { btn.disabled = true; controller.abort(); });
@@ -155,17 +172,17 @@ export function renderSandboxSettingsPanel(parent: HTMLElement, deps: SandboxSet
     busy = false;
     switch (outcome.kind) {
       case 'declined':
-        button.disabled = false;
+        setButtonsDisabled(false);
         return;
       case 'cancelled':
         progressEl.setText('Setup cancelled.');
-        button.disabled = false;
+        setButtonsDisabled(false);
         return;
       case 'failed':
         progressEl.empty();
         errorEl.createDiv({ cls: 'ct-sandbox-setup-error-title', text: `${outcome.stepLabel} failed` });
         errorEl.createEl('pre', { cls: 'ct-sandbox-setup-error-tail', text: outcome.message });
-        button.disabled = false;
+        setButtonsDisabled(false);
         return;
       case 'done':
         progressEl.setText('Sandbox ready. New sessions will run inside it.');

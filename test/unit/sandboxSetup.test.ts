@@ -9,7 +9,9 @@ import {
   estimateSetup,
   getSandboxSetupStatus,
   isSandboxSetupRunning,
+  describeReset,
   parsePercent,
+  resetSandbox,
   runSandboxSetup,
   type SandboxSetupDeps,
   type SandboxSetupProgress,
@@ -25,7 +27,7 @@ const runner: VmCommandRunner = async () => ({ exitCode: 0, stdout: '', stderr: 
 
 interface World {
   runtime: RuntimeStatus;
-  images: { base: 'ok' | 'missing'; harness: 'ok' | 'missing' | 'stale' };
+  images: { base: 'ok' | 'missing' | 'stale'; harness: 'ok' | 'missing' | 'stale' };
 }
 const MISSING: RuntimeStatus = { supported: true, running: false };
 const STOPPED: RuntimeStatus = { supported: true, running: false, detected: { source: 'system', binary: SYSTEM_BIN, version: '1.5.0' } };
@@ -50,6 +52,11 @@ function makeDeps(world: World) {
       return { started: true, alreadyRunning: false };
     }) as never,
     getSandboxImageStatus: vi.fn(async () => { log.push('imageStatus'); return world.images; }) as never,
+    removeSandboxImages: vi.fn(async (opts) => {
+      log.push('remove');
+      world.images = { base: 'missing', harness: 'missing' };
+      return [opts.harnessImage ?? ''];
+    }),
     ensureSandboxImages: vi.fn(async (opts) => {
       log.push('ensure');
       opts.onProgress?.('[1/2] Fetching image 45%');
@@ -385,5 +392,64 @@ describe('estimateSetup', () => {
   it('ready: says there is nothing to download', () => {
     expect(estimateSetup({ ...base, runtime: 'installed', running: true, images: { base: 'ok', harness: 'ok' } }))
       .toContain('Nothing to download');
+  });
+});
+
+describe('resetSandbox', () => {
+  it('describeReset names both images', () => {
+    expect(describeReset('h:9')).toContain('claude-threads-coding:1');
+    expect(describeReset('h:9')).toContain('h:9');
+  });
+
+  it('running runtime: removes the images, then re-runs setup so they are pulled/rebuilt', async () => {
+    const { deps, log } = makeDeps({ runtime: RUNNING, images: ALL_OK });
+    const progress: SandboxSetupProgress[] = [];
+    const result = await resetSandbox({ harnessImage: 'h:9', deps, onProgress: (p) => progress.push(p) });
+    expect(log.filter((l) => l === 'remove' || l === 'ensure')).toEqual(['remove', 'ensure']);
+    expect(deps.removeSandboxImages).toHaveBeenCalledWith(expect.objectContaining({ runner, harnessImage: 'h:9' }));
+    expect(result).toMatchObject({ pulledBase: true, builtHarness: true, stepsRun: ['images'] });
+    expect(progress[0]).toMatchObject({ step: 'images', label: 'Removing the old sandbox images' });
+  });
+
+  it('stopped runtime: nothing to remove, just a normal setup', async () => {
+    const { deps, log } = makeDeps({ runtime: STOPPED, images: NONE });
+    await resetSandbox({ deps });
+    expect(deps.removeSandboxImages).not.toHaveBeenCalled();
+    expect(log).toContain('ensure');
+  });
+
+  it('a removal failure (image in use) stops before any rebuild and names the images step', async () => {
+    const { deps } = makeDeps({ runtime: RUNNING, images: ALL_OK });
+    deps.removeSandboxImages = vi.fn(async () => { throw new SandboxImageError('remove', 'Could not remove an image. stop it'); });
+    const err = await resetSandbox({ deps }).catch((e) => e);
+    expect(err).toBeInstanceOf(SandboxSetupError);
+    expect(err.step).toBe('images');
+    expect(err.detail).toContain('Could not remove');
+    expect(deps.ensureSandboxImages).not.toHaveBeenCalled();
+    expect(isSandboxSetupRunning()).toBe(false);
+  });
+
+  it('abort during removal maps to SandboxSetupAbortedError', async () => {
+    const { deps } = makeDeps({ runtime: RUNNING, images: ALL_OK });
+    deps.removeSandboxImages = vi.fn(async () => { throw new SandboxImageAbortedError(); });
+    await expect(resetSandbox({ deps })).rejects.toBeInstanceOf(SandboxSetupAbortedError);
+  });
+
+  it('unsupported Mac: fails the check without removing anything', async () => {
+    const { deps } = makeDeps({ runtime: { supported: false, reason: 'needs macOS 26', running: false }, images: ALL_OK });
+    const err = await resetSandbox({ deps }).catch((e) => e);
+    expect(err).toMatchObject({ step: 'check' });
+    expect(deps.removeSandboxImages).not.toHaveBeenCalled();
+  });
+
+  it('refuses while a setup run is already in flight', async () => {
+    const { deps } = makeDeps({ runtime: MISSING, images: NONE });
+    let release!: () => void;
+    deps.installManagedRuntime = vi.fn(() => new Promise((r) => { release = () => r({ binary: MANAGED_BIN, version: '1.5.0', alreadyInstalled: false } as never); })) as never;
+    const running = runSandboxSetup({ deps });
+    await new Promise((r) => setTimeout(r, 0));
+    await expect(resetSandbox({ deps })).rejects.toMatchObject({ step: 'check' });
+    release();
+    await running;
   });
 });

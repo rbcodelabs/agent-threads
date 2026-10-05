@@ -3526,6 +3526,48 @@
   overflow-y: auto;
 }
 
+.ct-permission-fields {
+  margin-top: 4px;
+  font-size: var(--font-ui-smaller);
+}
+
+.ct-permission-fields > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.ct-permission-fields-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.ct-permission-field {
+  display: grid;
+  grid-template-columns: minmax(60px, max-content) 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.ct-permission-field-key {
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+}
+
+.ct-permission-field-value {
+  margin: 0;
+  padding: 0;
+  background: none;
+  font-family: var(--font-monospace);
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .ct-permission-actions {
   display: flex;
   gap: 6px;
@@ -7580,12 +7622,13 @@ body.ct-skills-resizing {
     max-width: none;
   }
 
-  .ct-skills-list .ct-skills-tree-source--github {
+  .ct-skills-list .ct-skills-tree-source {
     min-height: 44px;
     padding-block: 0;
   }
 
-  .ct-skills-tree-source .ct-skills-tree-toggle--button {
+  .ct-skills-tree-source .ct-skills-tree-toggle {
+    justify-content: center;
     width: 44px;
     height: 44px;
     margin-left: -10px;
@@ -8022,6 +8065,22 @@ body.ct-skills-resizing {
 }
 
 /* Pills reuse .ct-skills-tab / .ct-skills-tab--active from the existing tab bar */
+
+.ct-skills-source-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+}
+
+.ct-skills-source-bar .ct-skills-meta-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ── Skill Sources — settings tab ──────────────────────────────────────── */
 
@@ -8915,6 +8974,11 @@ button.ct-agent-crumb:focus-visible {
   flex-shrink: 0;
 }
 .ct-browser-preview-stop.is-hidden { display: none; }
+.ct-browser-preview-takeover {
+  flex-shrink: 0;
+  font-size: var(--font-ui-small);
+}
+.ct-browser-preview-takeover.is-hidden { display: none; }
 .ct-browser-preview-body {
   flex: 1;
   min-height: 0;
@@ -8927,6 +8991,9 @@ button.ct-agent-crumb:focus-visible {
   background: var(--background-secondary);
 }
 .ct-browser-preview-frame {
+  -webkit-user-drag: none;
+  user-select: none;
+  width: 100%;
   max-width: 100%;
   height: auto;
   display: block;
@@ -8994,7 +9061,7 @@ button.ct-agent-crumb:focus-visible {
 .ct-inline-content-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .ct-inline-content .ct-inline-content-action { max-width: 100%; white-space: normal; height: auto; min-height: 44px; overflow-wrap: anywhere; }
 .ct-inline-content-image { display: block; max-width: 100%; height: auto; border-radius: 6px; margin-top: 10px; }
-.ct-inline-content-document { display: block; width: 100%; height: 360px; border: 0; border-radius: 6px; margin-top: 10px; background: white; }
+.ct-inline-content-document { display: block; width: 100%; height: 360px; border: 0; border-radius: 6px; margin-top: 10px; background: transparent; }
 
 /* ============================================================
    Browser session card (docs/mockups/browser-session-card)

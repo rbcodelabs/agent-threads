@@ -160,7 +160,8 @@ describe('deferred cwd rebuild (EnterWorktree hang fix)', () => {
     expect(mock.resumeSessionId).toBeUndefined(); // fresh, not resumed
     // history preamble prepended so the model isn't amnesiac after the switch
     const lastPrompt = mock.sentPrompts[mock.sentPrompts.length - 1];
-    expect(lastPrompt).toContain('the working directory was changed to');
+    expect(lastPrompt).toContain(`The current working directory is ${NEW_CWD}`);
+    expect(lastPrompt).toContain('reply one');
     expect(lastPrompt).toContain('second turn');
   });
 

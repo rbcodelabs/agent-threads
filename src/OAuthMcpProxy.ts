@@ -217,7 +217,7 @@ export class OAuthMcpProxy {
     try {
       let accessToken = await this.tokenStore.getAccessToken(this.serverName);
       if (!accessToken) {
-        this.reply(res, 401, { jsonrpc: '2.0', error: { code: -32001, message: 'OAuth token expired — re-authorize in Agent Threads settings.' } });
+        this.replyReauthorize(res);
         return;
       }
 
@@ -241,9 +241,13 @@ export class OAuthMcpProxy {
 
       let response = await this.forward(req, body, accessToken, controller.signal);
       if (response.status === 401) {
-        try { await this.tokenStore.refresh(this.serverName); } catch { /* fall through — retry surfaces the same failure if the refresh failed */ }
-        accessToken = await this.tokenStore.getAccessToken(this.serverName);
-        if (accessToken) response = await this.forward(req, body, accessToken, controller.signal);
+        let refreshed = true;
+        try { await this.tokenStore.refresh(this.serverName); } catch { refreshed = false; }
+        accessToken = refreshed ? await this.tokenStore.getAccessToken(this.serverName) : null;
+        if (!accessToken) { this.replyReauthorize(res); return; }
+        response = await this.forward(req, body, accessToken, controller.signal);
+        // Still rejected with a fresh token: re-authorizing is the only fix.
+        if (response.status === 401) { this.replyReauthorize(res); return; }
       }
 
       await this.pipeResponse(response, res, parsedBody, controller.signal);
@@ -252,6 +256,17 @@ export class OAuthMcpProxy {
     } finally {
       this.requests.delete(controller);
     }
+  }
+
+  /**
+   * Token is dead and cannot be renewed. Deliberately NOT a 401: the Claude
+   * Agent SDK answers a 401 from an HTTP MCP server by starting its own OAuth
+   * discovery against this loopback proxy, which cannot succeed and surfaces
+   * as a confusing "Dynamic Client Registration rejected" error. A 503 with a
+   * JSON-RPC body reports the real problem instead.
+   */
+  private replyReauthorize(res: ServerResponse): void {
+    this.reply(res, 503, { jsonrpc: '2.0', error: { code: -32001, message: `OAuth token for "${this.serverName}" expired and cannot be renewed — re-authorize it in Agent Threads settings (Settings → MCP).` } });
   }
 
   private async forward(req: IncomingMessage, body: Buffer, accessToken: string, signal: AbortSignal): Promise<UpstreamResponse> {

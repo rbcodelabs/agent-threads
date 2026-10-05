@@ -25,12 +25,11 @@ type Internals = {
   firstRunSetup(offer: boolean): Promise<void>;
   openFirstRunPanels(): Promise<void>;
   isHarnessResolvable(h: string): boolean;
-  isGitAvailable(): Promise<boolean>;
   getSkillSourceCloneBase(): string | null;
   runChiefOfStaffCommand(): Promise<void>;
 };
 
-function makePlugin(opts: { harnessReady?: boolean; resolvable?: string[]; gitAvailable?: boolean; cloneFails?: boolean; sources?: SkillSource[] } = {}) {
+function makePlugin(opts: { harnessReady?: boolean; resolvable?: string[]; cloneFails?: boolean; sources?: SkillSource[] } = {}) {
   const plugin = Object.create(ClaudeThreadsPlugin.prototype) as ClaudeThreadsPlugin & Internals;
   plugin.settings = { ...DEFAULT_SETTINGS, defaultCwd: '/tmp', threads: [], skillSources: opts.sources ?? [] };
   plugin.manager = new ThreadManager(plugin.settings);
@@ -45,7 +44,6 @@ function makePlugin(opts: { harnessReady?: boolean; resolvable?: string[]; gitAv
   (plugin as unknown as { openThreadInChatView: typeof openThread }).openThreadInChatView = openThread;
   plugin.openFirstRunPanels = vi.fn(async () => { simulateChatOpen(); });
   plugin.isHarnessResolvable = (h: string) => (opts.harnessReady === false ? false : (opts.resolvable ?? ['claude', 'codex', 'opencode']).includes(h));
-  plugin.isGitAvailable = vi.fn(async () => opts.gitAvailable ?? true);
   plugin.getSkillSourceCloneBase = () => '/tmp/vault/.obsidian/plugins/claude-threads/skill-sources';
 
   const created = new Map<string, string>();
@@ -196,14 +194,6 @@ describe('first run — review fixes', () => {
     const { plugin } = makePlugin({ cloneFails: true });
     await plugin.firstRunSetup(true);
     expect(Notice.hidden).toContain('Setting up your Chief of Staff…');
-  });
-
-  it('falls back without attempting a clone when git is missing', async () => {
-    const { plugin, created, addSource } = makePlugin({ gitAvailable: false });
-    await plugin.firstRunSetup(true);
-    expect(addSource).not.toHaveBeenCalled();
-    expect(plugin.manager.getThreads().map(t => t.title)).toEqual(['Thread 1']); // no Chief of Staff thread; Chat's auto-created one only
-    expect([...created.values()][0]).toContain(CHIEF_OF_STAFF_COMMAND_NAME);
   });
 
   it('falls back when the vault has no clone base (getSkillSourceCloneBase() → null)', async () => {

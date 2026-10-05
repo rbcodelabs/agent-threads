@@ -33,6 +33,17 @@ import {
 } from './agentBrowserPolicy';
 import { AgentBrowserError, REFS_INVALIDATED_HINT } from './agentBrowserErrors';
 import type { GuestInputEvent } from './agentBrowserInput';
+import { buildOverlayScript, type OverlayPointer } from './agentBrowserOverlay';
+import { makeRefTableKey } from './agentBrowserScript';
+import {
+  ConsoleBuffer,
+  buildNetworkInstallScript,
+  type ConsoleReadOptions,
+  type ConsoleReadResult,
+} from './agentBrowserDevtools';
+
+/** Best-effort overlay paint must never delay or fail a capture. */
+const OVERLAY_TIMEOUT_MS = 500;
 
 /**
  * The subset of Electron's `WebviewTag` this module uses.
@@ -109,6 +120,12 @@ export interface AgentBrowserGuestOptions {
    * a screenshot. Optional so a guest can be built without a host in tests.
    */
   captureSurface?: { begin(): void; end(): void };
+  /**
+   * Record console output and install the network hook. True only for the
+   * agent's own (primary) guest: the human login guest is left untouched, since
+   * nothing there is ever read back by the agent.
+   */
+  devtools?: boolean;
 }
 
 /**
@@ -164,6 +181,17 @@ interface DidFailLoadEventLike {
 interface DidNavigateEventLike {
   url: string;
   isMainFrame?: boolean;
+  /** Same-document navigation (hash change, pushState): the page, and its logs, carry on. */
+  isInPlace?: boolean;
+}
+
+interface ConsoleMessageEventLike {
+  level?: unknown;
+  message?: unknown;
+  line?: unknown;
+  lineNumber?: unknown;
+  sourceId?: unknown;
+  details?: unknown;
 }
 
 export class AgentBrowserGuest {
@@ -175,6 +203,7 @@ export class AgentBrowserGuest {
   private readonly onDied: (reason: GuestEndReason, error: AgentBrowserError) => void;
   private readonly now: () => number;
   private readonly captureSurface?: { begin(): void; end(): void };
+  private readonly devtools: boolean;
 
   private el: WebviewLike | null = null;
   private state: GuestState = 'creating';
@@ -184,6 +213,22 @@ export class AgentBrowserGuest {
   private navCount = 0;
   private scriptCount = 0;
   private captureCount = 0;
+  /** Per-guest random name for the in-page overlay's state (see agentBrowserOverlay.ts). */
+  private readonly overlayKey = makeRefTableKey();
+  /** Where the agent last acted, for the cursor marker. Reset on navigation. */
+  private pointer: OverlayPointer | null = null;
+  /** Host-side console log; cleared on every top-frame navigation. */
+  private readonly consoleBuffer: ConsoleBuffer;
+  /** Per-guest random name for the in-page network hook's state (see agentBrowserDevtools.ts). */
+  readonly networkKey = makeRefTableKey();
+  /** True while a person is driving this guest (login handoff): exempt from reaping. */
+  handoffActive = false;
+  /**
+   * True while a person has taken over this (agent) guest. Every agent-facing
+   * operation is refused with `user_in_control` so the two never fight over the
+   * page, and the agent cannot read a sign-in screen through a screenshot.
+   */
+  userDriving = false;
   private width = GUEST_WIDTH;
   private height = GUEST_HEIGHT;
 
@@ -208,6 +253,8 @@ export class AgentBrowserGuest {
     this.onDied = options.onDied;
     this.now = options.now ?? Date.now;
     this.captureSurface = options.captureSurface;
+    this.devtools = options.devtools ?? true;
+    this.consoleBuffer = new ConsoleBuffer(undefined, this.now);
     this.createdAt = this.now();
     this.lastUsedAt = this.createdAt;
   }
@@ -252,6 +299,9 @@ export class AgentBrowserGuest {
 
   /** True when a budget or nothing-left-to-give condition means recycle. */
   budgetExhausted(): boolean {
+    // A human-driven login handoff streams a frame every 250ms; the agent budgets
+    // do not apply while a person is signing in.
+    if (this.handoffActive) return false;
     return (
       this.navCount >= NAV_BUDGET ||
       this.scriptCount >= SCRIPT_BUDGET ||
@@ -343,6 +393,22 @@ export class AgentBrowserGuest {
       // promise reports it. Nothing to do here beyond leaving the guest usable.
     });
 
+    // A new document starts with no overlay: re-install (idempotent) so the focus
+    // ring tracks from the first frame.
+    on('dom-ready', () => {
+      void this.paintOverlay();
+      void this.installNetworkHook();
+    });
+
+    // Buffered on the host, outside the page's JS world, so the page cannot
+    // rewrite `console` to hide what it logged. Uncaught errors and unhandled
+    // rejections are reported through this same event.
+    if (this.devtools) {
+      on('console-message', (event) => {
+        this.consoleBuffer.push(event as unknown as ConsoleMessageEventLike);
+      });
+    }
+
     on('unresponsive', () => this.handleUnresponsive());
     on('responsive', () => this.handleResponsive());
 
@@ -350,10 +416,23 @@ export class AgentBrowserGuest {
     // itself. `will-navigate` on the tag is not cancelable from the renderer, so
     // this is detect-and-abort and is inherently racy — the real fix is a
     // main-process guard (gap G2).
+    // The console resets on COMMIT, not on start: a navigation that is aborted,
+    // blocked or fails never replaces the document, so it must not wipe the log.
+    // `did-navigate` fires for top-frame commits only (same-document navigations
+    // use `did-navigate-in-page`). Messages the new document logs before this
+    // event is delivered to the host can be lost; that is the cost of not
+    // clearing early.
+    on('did-navigate', (event) => {
+      if ((event as unknown as { isMainFrame?: boolean }).isMainFrame === false) return;
+      this.consoleBuffer.clear();
+    });
+
     on('did-start-navigation', (event) => {
       const detail = event as unknown as DidNavigateEventLike;
       if (detail.isMainFrame === false) return;
       if (!detail.url || detail.url === BOOTSTRAP_URL) return;
+      // The old page's coordinates mean nothing on the next one.
+      this.pointer = null;
       const decision = evaluateUrl(detail.url, this.urlPolicy);
       if (decision.allowed) return;
       try {
@@ -516,7 +595,17 @@ export class AgentBrowserGuest {
    * interleave a navigation with a snapshot and produce refs describing a page
    * that is no longer loaded.
    */
-  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  private enqueue<T>(fn: () => Promise<T>, opts: { human?: boolean } = {}): Promise<T> {
+    if (this.userDriving && !opts.human) {
+      return Promise.reject(
+        new AgentBrowserError({
+          code: 'user_in_control',
+          message: 'A person has taken over this browser (for example to sign in). Wait for them to return control, then re-snapshot the page.',
+          retryable: true,
+          hint: REFS_INVALIDATED_HINT,
+        }),
+      );
+    }
     if (this.state === 'destroyed' || this.state === 'dead') {
       return Promise.reject(
         new AgentBrowserError({
@@ -655,6 +744,74 @@ export class AgentBrowserGuest {
     });
   }
 
+  /**
+   * Remember where the agent just acted so frames show a cursor marker there.
+   * `click` additionally makes the next frames show a short ripple.
+   */
+  markAgentPointer(x: number, y: number, click: boolean): void {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    this.pointer = { x: Math.round(x), y: Math.round(y), clickAt: click ? this.now() : null };
+  }
+
+  /**
+   * Paint the agent overlay (cursor, ripple, focus ring) into the page.
+   *
+   * Goes straight to the element rather than through `runScript`: it must not
+   * consume SCRIPT_BUDGET, queue behind agent work, or be refused while a person
+   * is driving. Any failure (page navigating, guest gone) is swallowed: a frame
+   * without the overlay is far better than no frame.
+   */
+  private async paintOverlay(): Promise<void> {
+    const el = this.el;
+    if (!el || !this.isAlive()) return;
+    try {
+      await withTimeout(
+        el.executeJavaScript(buildOverlayScript(this.overlayKey, { pointer: this.pointer, now: this.now() }), false),
+        OVERLAY_TIMEOUT_MS,
+        () => new AgentBrowserError({ code: 'script_timeout', message: 'overlay paint timed out', retryable: true }),
+      );
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /**
+   * Read the buffered console log. Goes through the operation queue so it obeys
+   * the same refusals as any other agent call (a person has taken over, the
+   * guest is dead) without touching the page.
+   */
+  readConsole(options: ConsoleReadOptions = {}): Promise<ConsoleReadResult & { url: string }> {
+    return this.enqueue(async () => {
+      const el = this.requireElement();
+      return { ...this.consoleBuffer.read(options), url: safeUrl(el) };
+    });
+  }
+
+  /**
+   * Install the network hook straight on the element, like the overlay: it must
+   * not consume SCRIPT_BUDGET or be refused while a person is driving. Best
+   * effort; a page that is mid-navigation simply gets it on its next dom-ready.
+   */
+  private async installNetworkHook(): Promise<void> {
+    const el = this.el;
+    if (!this.devtools || !el || !this.isAlive()) return;
+    try {
+      await withTimeout(
+        el.executeJavaScript(buildNetworkInstallScript(this.networkKey), false),
+        OVERLAY_TIMEOUT_MS,
+        () => new AgentBrowserError({ code: 'script_timeout', message: 'network hook install timed out', retryable: true }),
+      );
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /** The webview's own current URL (host-read, not page-supplied). Empty when unavailable. */
+  currentUrl(): string {
+    const el = this.el;
+    return el ? safeUrl(el) : '';
+  }
+
   /** Run a script string in the page and return its value. */
   runScript(code: string): Promise<unknown> {
     return this.enqueue(async () => {
@@ -682,12 +839,13 @@ export class AgentBrowserGuest {
    * (behind the app, inert) for the duration, given a moment to actually draw,
    * and parked again in a `finally` so a failure cannot strand it in view.
    */
-  capture(maxWidth = GUEST_WIDTH): Promise<Uint8Array> {
+  capture(maxWidth = GUEST_WIDTH, opts: { human?: boolean } = {}): Promise<Uint8Array> {
     return this.enqueue(async () => {
       const el = this.requireElement();
       this.captureCount += 1;
       this.captureSurface?.begin();
       try {
+        await this.paintOverlay();
         // A fixed delay rather than requestAnimationFrame: rAF does not fire in
         // a window that is not being drawn, which is one of the states this
         // needs to survive.
@@ -707,7 +865,7 @@ export class AgentBrowserGuest {
       } finally {
         this.captureSurface?.end();
       }
-    });
+    }, opts);
   }
 
   /**

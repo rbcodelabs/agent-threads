@@ -16,11 +16,14 @@ import { legacyWorktreeRoot, resolveWorktreeRoot } from './worktreePaths';
 import { debugLog } from './logger';
 import { codexSkillRoots, buildSkillPlugins } from './skillManager';
 import { pluginSkillsRootFrom } from './skillPaths';
+import { nodeMountFs, planSkillMounts, type SkillMountPlan } from './skillMounts';
 import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
 import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
-import { containerNameForThread, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
+import { checkImageHealth } from './sandboxImage';
+import { sweepOrphanedThreadContainers, type OrphanSweepResult } from './sandboxVmSweep';
+import { containerNameForThread, createDefaultVmCommandRunner, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
 import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
 import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
@@ -28,6 +31,8 @@ import type { App } from 'obsidian';
 import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun } from './types';
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
+import { formatHostExecPermissionDetail, type HostExecRequest } from './hostExec';
+import { HOST_EXEC_PERMISSION_TOOL } from './permissionDetail';
 
 type ThreadStateListener = (threadId: string, event: ThreadEvent) => void;
 
@@ -86,6 +91,7 @@ export type ThreadEvent =
   | { type: 'permission_denied'; toolName: string; toolUseId: string; message: string; agentId?: string; decisionReasonType?: string }
   | { type: 'rate_limit'; limitStatus: 'allowed' | 'allowed_warning' | 'rejected'; resetsAt?: number }
   | { type: 'usage'; usage: import('./Usage').UsageSnapshot }
+  | { type: 'active_model'; model: string }
   | { type: 'interrupted' }
   | { type: 'cwd_changed'; cwd: string }
   | { type: 'project_changed' }
@@ -191,6 +197,7 @@ export class ThreadManager {
   private claudeVmRoutingByThread: Map<string, { containerName: string; containerBinaryPath: string } | null> = new Map();
   /** Threads whose "Run this thread in a sandbox?" card is currently pending (so a re-render of the thread can restore it). */
   private sandboxSetupOffers: Map<string, HarnessVmFallbackReason> = new Map();
+  private staleImageWarned = new Set<string>();
   /** Threads that have been offered the card this app session — at most one card each, however many sessions start. */
   private sandboxSetupOffered: Set<string> = new Set();
   /** Test seam: whether sandbox setup can run on this machine. Production uses the real macOS/arch check. */
@@ -244,6 +251,21 @@ export class ThreadManager {
   private pendingPermissions: Map<string, { toolName: string; detail: string }> = new Map();
   private permissionResolvers: Map<string, (allow: boolean) => void> = new Map();
   /**
+   * Tail of each thread's permission-prompt chain. `pendingPermissions` and
+   * `permissionResolvers` are single-slot per thread, so parallel tool calls
+   * (e.g. two `Read`s) must be prompted one at a time — otherwise the second
+   * request overwrites the first's slot and orphans its resolver/UI card.
+   */
+  private permissionQueue: Map<string, Promise<unknown>> = new Map();
+  /**
+   * Same single-slot problem for AskUserQuestion (`pendingQuestionResolvers`
+   * and `thread.pendingQuestions` are per-thread): chain parallel questions.
+   * `questionInterruptEpoch` lets interrupt() drop queued questions instead of
+   * having each one pop up after the user pressed stop.
+   */
+  private questionQueue: Map<string, Promise<unknown>> = new Map();
+  private questionInterruptEpoch: Map<string, number> = new Map();
+  /**
    * In-memory store for pending AskUserQuestion answer resolvers, keyed by
    * thread ID. Mirrors `permissionResolvers` — the *state* (the questions
    * themselves) is persisted on `thread.pendingQuestions` like `pendingPlan`,
@@ -296,9 +318,21 @@ export class ThreadManager {
   sandboxVmHooks: VmHooks | undefined = undefined;
   githubEnvResolver: ((cwd: string, baseEnv: Record<string, string | undefined>) => Record<string, string>) | undefined = undefined;
   permissionHandler: (threadId: string, toolName: string, detail: string) => Promise<boolean> = async () => false;
+
+  /**
+   * Raises a permission card for a thread through the same bookkeeping and UI
+   * path as SDK tool-permission requests (pending state, permission_request /
+   * permission_resolved events, resolver cleanup). Used by host-side gates such
+   * as cross-project threads_create that need a human decision on behalf of a thread.
+   */
+  requestToolApproval(threadId: string, toolName: string, detail: string): Promise<boolean> {
+    return this.enqueuePermissionPrompt(threadId, toolName, detail);
+  }
   questionHandler: (threadId: string, questions: AskQuestion[]) => Promise<Record<string, string>> = async () => ({});
   openNewTabHandler: (title?: string, initialPrompt?: string) => Promise<{ threadId: string; title: string }> = async (title) => ({ threadId: '', title: title ?? 'New Thread' });
   vaultRoot = '';
+  /** Geode-only, set from main.ts: connected external roots to mount read-only in the sandbox VM. */
+  getExternalMounts?: ClaudeVmRoutingInputs['getExternalMounts'];
 
   private localSkillsRoot(): string {
     if (!this.vaultRoot) return '';
@@ -607,7 +641,7 @@ export class ThreadManager {
 
     const snapshot = {
       agentHarness: thread.agentHarness, sessionGeneration: thread.sessionGeneration,
-      sessionId: thread.sessionId, model: thread.model, usageSnapshot: thread.usageSnapshot,
+      sessionId: thread.sessionId, model: thread.model, activeModel: thread.activeModel, usageSnapshot: thread.usageSnapshot,
       tasks: thread.tasks, pendingBackgroundTasks: thread.pendingBackgroundTasks,
       recap: thread.recap, lastError: thread.lastError,
       updatedAt: thread.updatedAt,
@@ -629,6 +663,7 @@ export class ThreadManager {
       thread.agentHarness = targetHarness;
       delete thread.sessionId;
       delete thread.model;
+      delete thread.activeModel;
       delete thread.usageSnapshot;
       delete thread.tasks;
       delete thread.pendingBackgroundTasks;
@@ -651,6 +686,7 @@ export class ThreadManager {
         Object.assign(thread, snapshot);
         if (snapshot.sessionId === undefined) delete thread.sessionId;
         if (snapshot.model === undefined) delete thread.model;
+        if (snapshot.activeModel === undefined) delete thread.activeModel;
         if (snapshot.usageSnapshot === undefined) delete thread.usageSnapshot;
         if (snapshot.tasks === undefined) delete thread.tasks;
         if (snapshot.pendingBackgroundTasks === undefined) delete thread.pendingBackgroundTasks;
@@ -847,13 +883,16 @@ export class ThreadManager {
     // fire-and-forget: deleteThread() is synchronous and this is best-effort
     // cleanup, never a correctness gate — a stray container is one
     // `container rm -f` away regardless.
-    const vmManager = this.sandboxVmManagers.get(id);
-    if (vmManager) {
-      this.sandboxVmManagers.delete(id);
-      void vmManager.exit({ force: true, allowHarnessOwned: true }).catch((err) => {
-        console.error(`[ClaudeThreads] Failed to tear down sandbox VM for deleted thread ${id}:`, err);
-      });
-    }
+    // Always attempt teardown, even with no cached manager: the map is lazily
+    // populated and empty after a plugin reload/restart, but the container name
+    // is derived from the thread id, so a fresh manager reaches the same
+    // container. exit() resolves (never rejects) and is a no-op when the
+    // container doesn't exist; the catch guards runner rejections.
+    const vmManager = this.getSandboxVmManager(id);
+    this.sandboxVmManagers.delete(id);
+    void vmManager.exit({ force: true, allowHarnessOwned: true }).catch((err) => {
+      console.error(`[ClaudeThreads] Failed to tear down sandbox VM for deleted thread ${id}:`, err);
+    });
     this.cancelPendingGoalContext(id);
     this.pendingToolResultImages.delete(id);
     this.activeBgTasks.delete(id);
@@ -885,7 +924,7 @@ export class ThreadManager {
     const vaultRoot = this.vaultRoot;
     const roots = (thread.artifacts ?? []).map(artifact => artifact.storageRoot).filter((root): root is string => !!root);
     if (!vaultRoot || roots.length === 0) return;
-    const pending = roots.map(root => removeStorageRoot(vaultRoot, root, this.artifactStorageFs).catch(() => undefined));
+    const pending = roots.map(root => removeStorageRoot(vaultRoot, root, this.artifactStorageFs, this.settings.visibleArtifactRoot).catch(() => undefined));
     // Chained rather than replaced, so awaiting after several deletions covers
     // all of them rather than only the most recent.
     this.artifactCleanupSettled = this.artifactCleanupSettled
@@ -1097,6 +1136,9 @@ export class ThreadManager {
   setThreadModel(id: string, model: string | undefined): void {
     const thread = this.threads.get(id);
     if (thread) {
+      // The last reported model belongs to the previous override; the next
+      // init/reply reports the new one.
+      if (thread.model !== model) delete thread.activeModel;
       thread.model = model;
       thread.updatedAt = Date.now();
       // ADR-0002 §2: model changes become a direct control-request on the
@@ -1272,6 +1314,59 @@ export class ThreadManager {
    */
   getRunningThreads(): Thread[] {
     return this.getThreads().filter((t) => this.sessions.has(t.id));
+  }
+
+  /** Shared by harness permission requests and {@link requestHostExecApproval}. */
+  private async promptPermission(threadId: string, toolName: string, detail: string): Promise<boolean> {
+    this.pendingPermissions.set(threadId, { toolName, detail });
+    this.emit(threadId, { type: 'permission_request', toolName, detail });
+    try {
+      return await this.permissionHandler(threadId, toolName, detail);
+    } finally {
+      this.pendingPermissions.delete(threadId);
+      this.permissionResolvers.delete(threadId);
+      this.emit(threadId, { type: 'permission_resolved' });
+    }
+  }
+
+  /**
+   * Per-call approval for `host_exec`, shown as the thread's in-chat permission
+   * card. Called directly by the tool handler rather than through a session's
+   * `onPermissionRequest`, so no harness permission mode (bypassPermissions,
+   * dontAsk, auto-approve) can resolve it. The `host_exec` tool name makes the
+   * permission handler ignore `alwaysAllowedTools` and hide Always Allow
+   * (see `canAlwaysAllow`).
+   */
+  requestHostExecApproval(threadId: string, request: HostExecRequest): Promise<boolean> {
+    return this.enqueuePermissionPrompt(threadId, HOST_EXEC_PERMISSION_TOOL, formatHostExecPermissionDetail(request));
+  }
+
+  /**
+   * Queues a permission prompt behind any already pending for the thread so
+   * `pendingPermissions` and the card never hold two prompts at once. Runs after
+   * the previous prompt settles (allowed, denied or threw); starts synchronously
+   * when nothing is queued so state is visible to callers right away.
+   * `isCurrent` re-checks session generation once the prompt reaches the front.
+   */
+  private enqueuePermissionPrompt(
+    threadId: string,
+    toolName: string,
+    detail: string,
+    isCurrent: () => boolean = () => true,
+  ): Promise<boolean> {
+    const prompt = async (): Promise<boolean> => {
+      // Re-check: the session may have been replaced while we were queued.
+      if (!isCurrent()) return false;
+      return this.promptPermission(threadId, toolName, detail);
+    };
+    const previous = this.permissionQueue.get(threadId);
+    const result = previous ? previous.then(prompt, prompt) : prompt();
+    const tail = result.catch(() => undefined);
+    this.permissionQueue.set(threadId, tail);
+    void tail.then(() => {
+      if (this.permissionQueue.get(threadId) === tail) this.permissionQueue.delete(threadId);
+    });
+    return result;
   }
 
   hasPendingPermission(threadId: string): boolean {
@@ -2051,6 +2146,18 @@ export class ThreadManager {
   }
 
   /**
+   * Removes `claude-threads-vm-*` containers whose thread is no longer live
+   * (leaked by deletes that predate/missed teardown). Best-effort; never throws.
+   */
+  sweepOrphanedSandboxContainers(): Promise<OrphanSweepResult> {
+    return sweepOrphanedThreadContainers({
+      run: this.vmCommandRunner ?? createDefaultVmCommandRunner(),
+      liveThreadIds: Array.from(this.threads.keys()),
+      log: (message) => console.log(`[ClaudeThreads] ${message}`),
+    });
+  }
+
+  /**
    * Shared per-thread sandbox VM manager (ADR-0015 §3) — see the field's own
    * doc comment for why sharing the instance matters. Created lazily on
    * first access and reused for the thread's whole lifetime.
@@ -2062,6 +2169,7 @@ export class ThreadManager {
         containerName: () => containerNameForThread(threadId),
         run: this.vmCommandRunner,
         hooks: this.sandboxVmHooks,
+        checkImageHealth: (image) => checkImageHealth(this.vmCommandRunner ?? createDefaultVmCommandRunner(), image, 'base'),
       });
       this.sandboxVmManagers.set(threadId, manager);
     }
@@ -2160,12 +2268,39 @@ export class ThreadManager {
     const mode = resolveEffectiveHarnessVmMode(thread.harnessVmMode, this.settings.harnessVmMode);
     if (mode === 'never') return undefined;
     if ((thread.agentHarness ?? 'claude') !== 'claude') return undefined;
+    // Skills live at host paths the container cannot see; plan read-only
+    // mounts for them (and ~/.claude/skills|agents). Planning only reads the
+    // filesystem — failure must never block the session, so it degrades to
+    // "no skills in the VM" rather than throwing.
+    let skillMountPlan: SkillMountPlan | undefined;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const os = require('os') as typeof import('os');
+      skillMountPlan = planSkillMounts({ plugins: this.buildHostSkillPlugins(), homeDir: os.homedir(), fs: nodeMountFs() });
+    } catch (err) {
+      console.warn('[ClaudeThreads] Could not plan skill mounts for the sandbox VM:', err);
+    }
     return {
       mode,
       image: this.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE,
       vmManager: this.getSandboxVmManager(threadId),
       mountPath: thread.cwd,
+      skillMountPlan,
+      getExternalMounts: this.getExternalMounts,
+      memory: resolveVmMemory(this.settings.sandboxVmMemory),
+      cpus: resolveVmCpus(this.settings.sandboxVmCpus),
+      getVaultPath: () => this.vaultRoot,
+      checkImageHealth: (image) => checkImageHealth(this.vmCommandRunner ?? createDefaultVmCommandRunner(), image, 'harness'),
+      onImageWarning: (message) => this.warnStaleSandboxImage(threadId, message),
     };
+  }
+
+  /** Tells the user (once per thread per message) that its sandbox image is stale; the session still starts. */
+  private warnStaleSandboxImage(threadId: string, message: string): void {
+    const key = `${threadId}|${message}`;
+    if (this.staleImageWarned.has(key)) return;
+    this.staleImageWarned.add(key);
+    this.addNoticeMessage(threadId, 'failed', message);
   }
 
   /**
@@ -2257,7 +2392,7 @@ export class ThreadManager {
         ? (modelOverride ?? thread.model ?? undefined)
         : modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
       appendSystemPrompt,
-      resumeFallbackHistory: (thread.agentHarness === 'codex' || thread.agentHarness === 'opencode') && thread.sessionId
+      resumeFallbackHistory: thread.sessionId
         ? buildHistoryPreamble(
             latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
             thread.cwd,
@@ -2584,35 +2719,43 @@ export class ThreadManager {
         this.emit(threadId, { type: 'error', error: err });
         this.emitRunStateSettledWhenIdle(threadId);
       },
-      onPermissionRequest: async (toolName, detail) => {
-        if (!isCurrentGeneration()) return false;
-        this.pendingPermissions.set(threadId, { toolName, detail });
-        this.emit(threadId, { type: 'permission_request', toolName, detail });
-        try {
-          return await this.permissionHandler(threadId, toolName, detail);
-        } finally {
-          this.pendingPermissions.delete(threadId);
-          this.permissionResolvers.delete(threadId);
-          this.emit(threadId, { type: 'permission_resolved' });
-        }
+      onPermissionRequest: (toolName, detail) => {
+        if (!isCurrentGeneration()) return Promise.resolve(false);
+        return this.enqueuePermissionPrompt(threadId, toolName, detail, isCurrentGeneration);
       },
-      onAskUserQuestion: async (questions) => {
-        if (!isCurrentGeneration()) return {};
-        // Persist the question set so the card can be restored after a
-        // reload/crash OR after the user switches threads mid-session,
-        // mirroring the pendingPlan pattern.
-        thread.pendingQuestions = questions;
-        thread.updatedAt = Date.now();
-        this.emit(threadId, { type: 'pending_question_changed', questions });
-        this.emit(threadId, { type: 'question_ready', questions });
-        try {
-          return await this.questionHandler(threadId, questions);
-        } finally {
-          delete thread.pendingQuestions;
+      onAskUserQuestion: (questions) => {
+        if (!isCurrentGeneration()) return Promise.resolve({});
+        const epochAtEnqueue = this.questionInterruptEpoch.get(threadId) ?? 0;
+        const prompt = async (): Promise<Record<string, string>> => {
+          // Re-check: the session may have been replaced or interrupted while queued.
+          if (!isCurrentGeneration()) return {};
+          if ((this.questionInterruptEpoch.get(threadId) ?? 0) !== epochAtEnqueue) return {};
+          // Persist the question set so the card can be restored after a
+          // reload/crash OR after the user switches threads mid-session,
+          // mirroring the pendingPlan pattern.
+          thread.pendingQuestions = questions;
           thread.updatedAt = Date.now();
-          this.pendingQuestionResolvers.delete(threadId);
-          this.emit(threadId, { type: 'pending_question_changed', questions: undefined });
-        }
+          this.emit(threadId, { type: 'pending_question_changed', questions });
+          this.emit(threadId, { type: 'question_ready', questions });
+          try {
+            return await this.questionHandler(threadId, questions);
+          } finally {
+            delete thread.pendingQuestions;
+            thread.updatedAt = Date.now();
+            this.pendingQuestionResolvers.delete(threadId);
+            this.emit(threadId, { type: 'pending_question_changed', questions: undefined });
+          }
+        };
+        // Start immediately (synchronously) when nothing is queued so state is
+        // visible to callers right away; otherwise wait for the predecessor.
+        const previous = this.questionQueue.get(threadId);
+        const result = previous ? previous.then(prompt, prompt) : prompt();
+        const tail = result.catch(() => undefined);
+        this.questionQueue.set(threadId, tail);
+        void tail.then(() => {
+          if (this.questionQueue.get(threadId) === tail) this.questionQueue.delete(threadId);
+        });
+        return result;
       },
       onAskUserQuestionCanceled: () => {
         if (!isCurrentGeneration()) return;
@@ -2756,6 +2899,11 @@ export class ThreadManager {
         thread.usageSnapshot = usage;
         thread.updatedAt = Date.now();
         this.emit(threadId, { type: 'usage', usage });
+      },
+      onActiveModel: (model) => {
+        if (!isCurrentGeneration() || thread.activeModel === model) return;
+        thread.activeModel = model;
+        this.emit(threadId, { type: 'active_model', model });
       },
       onModelFallback: (trigger, fromModel, toModel) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'model_fallback', trigger, fromModel, toModel }); },
       onModelRefusalFallback: (refusal) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'model_refusal_fallback', ...refusal }); },
@@ -2928,6 +3076,24 @@ export class ThreadManager {
     thread.updatedAt = Date.now();
   }
 
+  /** Skill plugins as HOST paths. VM-routed sessions map these to guest mounts (see skillMounts.ts). */
+  private buildHostSkillPlugins(): Array<{ type: 'local'; path: string }> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require('path') as typeof import('path');
+    return buildSkillPlugins({
+      localSkillsRoot: this.localSkillsRoot(),
+      skillSources: this.settings.skillSources ?? [],
+      pluginSkillsRoot: pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
+      // Bundled thread-orchestrator skill — ships inside the plugin's own
+      // dist/ (copied there by esbuild.config.mjs from resources/skills/),
+      // so it is discoverable in every session. Registered unconditionally,
+      // not gated by any setting.
+      bundledSkillPath: this.pluginResourceDir
+        ? path.join(this.pluginResourceDir, 'resources', 'skills', 'thread-orchestrator')
+        : undefined,
+    });
+  }
+
   /** Build the sessionOptions object from plugin settings (and thread-level overrides). */
   private buildSessionOptions(
     thread: Thread,
@@ -2982,21 +3148,7 @@ export class ThreadManager {
     // directory rather than a plugin root. That is wrong: verified against the
     // real `claude` CLI, the root form registers fine and yields better names.)
     {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const path = require('path') as typeof import('path');
-      const plugins = buildSkillPlugins({
-        localSkillsRoot: this.localSkillsRoot(),
-        skillSources: s.skillSources ?? [],
-        pluginSkillsRoot: pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
-        // Bundled thread-orchestrator skill — ships inside the plugin's own
-        // dist/ (copied there by esbuild.config.mjs from resources/skills/),
-        // so it is discoverable in every session. Registered unconditionally,
-        // not gated by any setting.
-        bundledSkillPath: this.pluginResourceDir
-          ? path.join(this.pluginResourceDir, 'resources', 'skills', 'thread-orchestrator')
-          : undefined,
-      });
-
+      const plugins = this.buildHostSkillPlugins();
       if (plugins.length > 0) opts.plugins = plugins;
     }
 
@@ -3037,6 +3189,7 @@ export class ThreadManager {
       // AskUserQuestion blocks inside canUseTool until its answer promise
       // resolves. Release that promise before interrupting the query so the
       // question card and resolver cannot survive into later turns.
+      this.questionInterruptEpoch.set(threadId, (this.questionInterruptEpoch.get(threadId) ?? 0) + 1);
       this.pendingQuestionResolvers.get(threadId)?.({});
       await session.interrupt();
     }
@@ -3275,7 +3428,7 @@ function buildHistoryPreamble(priorMessages: ChatMessage[], newCwd: string): str
 
   const omitted = priorMessages.length - messages.length;
   const lines: string[] = [
-    `[Note: the working directory was changed to ${newCwd} and the Claude Code session could not be resumed. The prior conversation is summarised below to restore context.]`,
+    `[Note: the native session could not be resumed. The current working directory is ${newCwd}. The prior conversation is summarised below to restore context.]`,
     '',
   ];
 

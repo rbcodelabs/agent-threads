@@ -90,6 +90,22 @@ async function call(definition: ToolDef, args: Record<string, unknown>) {
 // ── Registration ─────────────────────────────────────────────────────────────
 
 describe('sandbox VM tools — registration', () => {
+  it('omits lifecycle tools from both VM-routed surfaces and describes the existing container', () => {
+    const servers = createClaudeThreadsMcpServers(app, {
+      harnessInVm: true,
+      hostExec: { isInteractive: () => true, requestApproval: async () => true, redact: value => value },
+    });
+    for (const key of ['claude_threads', 'obsidian'] as const) {
+      const tools = (servers[key] as unknown as { tools: ToolDef[] }).tools;
+      expect(tools.map(t => t.name)).not.toContain('enter_vm');
+      expect(tools.map(t => t.name)).not.toContain('exit_vm');
+      const exec = tools.find(t => t.name === 'vm_exec')!;
+      expect(exec.description).toContain('already running inside');
+      expect(exec.description).not.toContain('Call enter_vm first');
+      expect(exec.description).not.toContain('editing stays on the host');
+      expect(tools.some(t => t.name === 'host_exec')).toBe(key === 'claude_threads');
+    }
+  });
   it('registers all three tools on both the canonical and compatibility servers', () => {
     const servers = createClaudeThreadsMcpServers(app);
     const names = (key: 'claude_threads' | 'obsidian') =>
@@ -220,6 +236,17 @@ describe('enter_vm', () => {
 
     expect(payload).toMatchObject({ image: 'explicit:9', network: 'none' });
     expect(runner.argvs().at(-1)).toContain('--network none');
+  });
+
+  it('plumbs the configured memory/cpus into the container run', async () => {
+    const runner = makeRunner(CLI_OK_NO_CONTAINER);
+    const { enter } = vmTools({
+      vmCommandRunner: runner.run,
+      getVmMemory: () => '8G',
+      getVmCpus: () => 2,
+    });
+    await call(enter, {});
+    expect(runner.argvs().at(-1)).toContain('--memory 8G --cpus 2');
   });
 
   it('honours an explicit mountPath override', async () => {
@@ -478,5 +505,71 @@ describe('sandbox VM tools — shared SandboxVmManager (ADR-0015 §3)', () => {
     const { enter } = vmTools({ vmCommandRunner: makeRunner(CLI_OK_NO_CONTAINER).run });
     const result = await call(enter, {});
     expect(result.isError).toBe(false);
+  });
+});
+
+// ── Agent-facing guidance: localhost servers in the VM ───────────────────────
+
+describe('sandbox VM tools — localhost server guidance', () => {
+  it('vm_exec tells the agent to background servers and that localhost is forwarded to host browsers', () => {
+    const { exec, enter } = vmTools({});
+    expect(exec.description).toMatch(/background/i);
+    expect(exec.description).toMatch(/nohup/);
+    expect(exec.description).toMatch(/forward/i);
+    expect(enter.description).toMatch(/forwarded automatically/i);
+  });
+});
+
+// ── External roots (Geode) ───────────────────────────────────────────────────
+
+describe('sandbox VM tools — external root mounts', () => {
+  // The /work mount must not contain the external root. On Linux os.tmpdir()
+  // is /tmp, which is MOUNT itself, so mounting MOUNT would swallow extDir
+  // (it is correctly dropped as "inside /work"). Use a sibling work dir.
+  const WORK = fs.realpathSync(fs.mkdtempSync(path.join(MOUNT, 'vm-work-')));
+  const extDir = fs.mkdtempSync(path.join(MOUNT, 'ext-root-'));
+
+  it('mounts host-reported roots read-only and lists them as mountedExternal', async () => {
+    const runner = makeRunner(CLI_OK_NO_CONTAINER);
+    const { enter } = vmTools({
+      vmCommandRunner: runner.run,
+      getExternalMounts: async () => [
+        { rootId: 'r1', label: 'Notes', path: extDir },
+        { rootId: 'r2', label: 'Bad', path: 'relative' },
+        { rootId: 'r3', label: 'Gone', path: path.join(extDir, 'nope') },
+      ],
+    });
+    const { isError, payload } = await call(enter, { mountPath: WORK });
+    expect(isError).toBe(false);
+    expect(payload.mountedExternal).toEqual([
+      { label: 'Notes', hostPath: extDir, guestPath: '/ext/Notes', readOnly: true },
+    ]);
+    expect(payload.message).toContain('/ext/Notes');
+    expect(runner.argvs().find((a) => a.startsWith('run '))).toContain(`--volume ${extDir}:/ext/Notes:ro`);
+  });
+
+  it('does not mount a root that is the /work mount itself', async () => {
+    const runner = makeRunner(CLI_OK_NO_CONTAINER);
+    const { enter } = vmTools({
+      vmCommandRunner: runner.run,
+      getExternalMounts: async () => [{ rootId: 'r', label: 'Same', path: MOUNT }],
+    });
+    const { payload } = await call(enter, { mountPath: MOUNT });
+    expect(payload.mountedExternal).toEqual([]);
+  });
+
+  it('falls back to no extra mounts when the host lacks the method or it throws', async () => {
+    for (const getExternalMounts of [undefined, async () => { throw new Error('boom'); }]) {
+      const runner = makeRunner(CLI_OK_NO_CONTAINER);
+      const { enter } = vmTools({ vmCommandRunner: runner.run, getExternalMounts });
+      const { isError, payload } = await call(enter, {});
+      expect(isError).toBe(false);
+      expect(payload.mountedExternal).toEqual([]);
+      expect(runner.argvs().find((a) => a.startsWith('run '))).not.toContain('/ext/');
+    }
+  });
+
+  it('mentions the read-only external mounts in the tool description', () => {
+    expect(vmTools({}).enter.description).toContain('/ext/<label>');
   });
 });

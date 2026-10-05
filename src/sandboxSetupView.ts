@@ -5,6 +5,7 @@
  */
 
 import type { SandboxSetupProgress, SandboxSetupStatus } from './sandboxSetup';
+import { SANDBOX_IMAGE_VERSION, formatImageVersion } from './sandboxImage';
 
 export type SandboxSetupButtonLabel = 'Set up sandbox' | 'Finish setup' | 'Update sandbox';
 
@@ -12,6 +13,8 @@ export interface SandboxSetupView {
   runtimeLine: string;
   serviceLine: string;
   imageLine: string;
+  /** Installed version and why an update is offered, e.g. "Image v1 → v2 available (missing gh)". Null when there is nothing to add. */
+  imageDetailLine: string | null;
   /** Null when there is nothing to offer: unsupported, or already fully ready. */
   buttonLabel: SandboxSetupButtonLabel | null;
   ready: boolean;
@@ -33,8 +36,30 @@ export function describeService(status: SandboxSetupStatus): string {
 export function describeImage(status: SandboxSetupStatus): 'Ready' | 'Needs setup' | 'Update available' {
   const { base, harness } = status.images;
   if (base === 'ok' && harness === 'ok') return 'Ready';
-  if (base === 'ok' && harness === 'stale') return 'Update available';
+  if (base === 'stale' || (base === 'ok' && harness === 'stale')) return 'Update available';
   return 'Needs setup';
+}
+
+/**
+ * Installed image version, and (for a stale image) what changes. Reads the
+ * detail the status probe collected; null when the images were not inspected.
+ */
+export function describeImageDetail(status: SandboxSetupStatus): string | null {
+  const detail = status.images.detail;
+  if (!detail) return null;
+  const parts: string[] = [];
+  for (const [key, label] of [['base', 'Image'], ['harness', 'Harness image']] as const) {
+    const d = detail[key];
+    if (!d) continue;
+    const state = status.images[key];
+    let text = `${label} ${formatImageVersion(d.version)}`;
+    if (state === 'stale') {
+      text += d.version === SANDBOX_IMAGE_VERSION ? ' needs a rebuild' : ` → v${SANDBOX_IMAGE_VERSION} available`;
+      if (d.missingTools.length > 0) text += ` (missing ${d.missingTools.join(', ')})`;
+    }
+    parts.push(text);
+  }
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 export function buildSandboxSetupView(status: SandboxSetupStatus): SandboxSetupView {
@@ -50,6 +75,7 @@ export function buildSandboxSetupView(status: SandboxSetupStatus): SandboxSetupV
     runtimeLine: describeRuntime(status),
     serviceLine: describeService(status),
     imageLine,
+    imageDetailLine: describeImageDetail(status),
     buttonLabel,
     ready,
   };

@@ -10,7 +10,7 @@ import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './current
 import type { ToolCallRecord, ImageAttachment } from './types';
 import { parseExtraEnv } from './types';
 import { debugLog } from './logger';
-import { formatToolName, getToolIcon, isBrowserTool } from './toolNameUtils';
+import { formatToolName, getToolIcon, isBrowserTool, buildPermissionDetail, requiresPerCallApproval } from './toolNameUtils';
 import { browserToolSummary, parseBrowserToolResult } from './browserSession';
 // SessionCallbacks/TaskTrackerEvent are ClaudeSession.ts's contract, kept as the
 // single canonical definition while the two classes coexist during the Stage 2
@@ -29,11 +29,13 @@ import {
   type ResolvedClaudeVmRouting,
 } from './harnessVmRouting';
 import { runnerEnv as hostRunnerEnv, VM_BINARY } from './sandboxVm';
+import { rewritePluginsForGuest } from './skillMounts';
 import {
   isTransportClosedError,
   shouldAutoRetryTransportError,
   TRANSPORT_ERROR_CONTINUATION_PROMPT,
 } from './transportErrorRecovery';
+import { appendStderrTail, isResumeFailure, withStderr } from './resumeFailureRecovery';
 import {
   isRateLimitError,
   shouldAutoRetryRateLimitError,
@@ -46,6 +48,7 @@ import {
   shouldAutoRetryAuthError,
 } from './claudeAuthRecovery';
 import { stripHostOnlyGitEnv } from './githubCredentialHelper';
+import { isReportedModelId } from './modelOptions';
 import { mergeUsageSnapshot,normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
 
 /**
@@ -107,6 +110,10 @@ export class ThreadSession {
   private transportErrorRetryCount = 0;
   /** Auto-retry budget for rate-limit / overload errors, reset on every successful `result`. */
   private rateLimitRetryCount = 0;
+  /** Bounded tail of the CLI's stderr for the current Query, used to enrich exit-code errors. */
+  private stderrTail = '';
+  /** One-shot budget: retry a failed --resume as a fresh session. Reset on every successful `result`. */
+  private resumeFallbackUsed = false;
   /**
    * Expired-sign-in retry budget for the current USER turn (see
    * claudeAuthRecovery.ts). Reset only by a public send(), never by an
@@ -256,6 +263,7 @@ export class ThreadSession {
     this._pendingInteractiveCallbacks = 0;
     this._lastActivityAt = Date.now();
     this.openChannel();
+    this.stderrTail = '';
 
     const callbacks = options.callbacks;
 
@@ -310,8 +318,8 @@ export class ThreadSession {
           await clearPlanMode();
           return { behavior: 'deny' as const, message: 'Plan approved — proceed with implementation.', interrupt: false };
         }
-        const detail = opts.description ?? opts.decisionReason ?? opts.blockedPath ?? JSON.stringify(input).slice(0, 120);
-        const title = opts.title ?? toolName;
+        const detail = buildPermissionDetail(toolName, input, opts);
+        const title = requiresPerCallApproval(toolName) ? toolName : (opts.title ?? toolName);
         const allowed = await callbacks.onPermissionRequest(title, detail);
         // Never return `updatedPermissions` (e.g. `opts.suggestions`): the CLI
         // persists those rules to `.claude/settings.local.json`, turning every
@@ -383,6 +391,7 @@ export class ThreadSession {
       cwd: options.cwd,
       includePartialMessages: true,
       canUseTool,
+      stderr: (data: string) => { this.stderrTail = appendStderrTail(this.stderrTail, data); },
       // Keep task-tracking tools (TaskCreate/TaskUpdate/TaskList/TodoWrite) in the
       // default tool surface — SDK 0.3.233 drops them on Opus 4.8 / Sonnet 5 / Fable 5
       // and newer models unless opted back in. The plugin's dashboard depends on them.
@@ -437,7 +446,19 @@ export class ThreadSession {
     if (claude?.sessionOptions?.agentProgressSummaries !== undefined) sdkOptions.agentProgressSummaries = claude.sessionOptions.agentProgressSummaries;
     if (claude?.sessionOptions?.betas?.length) sdkOptions.betas = claude.sessionOptions.betas;
     if (claude?.sessionOptions?.persistSession === false) sdkOptions.persistSession = false;
-    if (claude?.sessionOptions?.plugins?.length) sdkOptions.plugins = claude.sessionOptions.plugins;
+    if (claude?.sessionOptions?.plugins?.length) {
+      // A containerized CLI cannot see host paths, so VM-routed sessions get
+      // guest paths (and lose plugins that are not mounted). Host-local
+      // sessions keep the host paths untouched.
+      const plugins = vmRouting && claude.vm?.skillMountPlan
+        ? rewritePluginsForGuest(
+            claude.sessionOptions.plugins as Array<{ type: 'local'; path: string }>,
+            claude.vm.skillMountPlan,
+            vmRouting.mountedExtra,
+          )
+        : claude.sessionOptions.plugins;
+      if (plugins.length) sdkOptions.plugins = plugins;
+    }
     if (claude?.sessionOptions?.agents && Object.keys(claude.sessionOptions.agents).length > 0) {
       sdkOptions.agents = { ...sdkOptions.agents, ...claude.sessionOptions.agents };
     }
@@ -447,9 +468,11 @@ export class ThreadSession {
     sdkOptions.toolAliases = {
       EnterWorktree: 'mcp__claude_threads__enter_worktree',
       ExitWorktree: 'mcp__claude_threads__exit_worktree',
-      EnterVm: 'mcp__claude_threads__enter_vm',
       VmExec: 'mcp__claude_threads__vm_exec',
-      ExitVm: 'mcp__claude_threads__exit_vm',
+      ...(!vmRouting ? {
+        EnterVm: 'mcp__claude_threads__enter_vm',
+        ExitVm: 'mcp__claude_threads__exit_vm',
+      } : {}),
     };
 
     debugLog('[ClaudeThreads] opening thread session', {
@@ -746,6 +769,12 @@ export class ThreadSession {
     // transport-error auto-retry restart, so the `finally` block below
     // doesn't clobber the NEW Query that restart() already installed.
     let supersededByRestart = false;
+    // Init/status/error events aren't work. Replaying is safe until the
+    // assistant has produced content or tools have begun executing.
+    let sawMessage = false;
+    let terminalErrorReported = false;
+    const startedWithResume = !!this.currentOptions?.resume;
+    const fallbackHistory = this.currentOptions?.resumeFallbackHistory;
 
     const pendingToolCalls: ToolCallRecord[] = [];
     let streamingText = '';
@@ -758,6 +787,10 @@ export class ThreadSession {
 
     try {
       pump: for await (const msg of q) {
+        if (msg.type === 'assistant' && msg.message.content.some(block =>
+          block.type === 'tool_use' || block.type === 'text' && block.text.trim().length > 0)) sawMessage = true;
+        if (msg.type === 'user' && Array.isArray(msg.message.content)
+          && msg.message.content.some(block => block.type === 'tool_result')) sawMessage = true;
         debugLog('[ClaudeThreads] msg.type:', msg.type, (msg as Record<string, unknown>).subtype ?? '');
         if (callbacks.onRawEvent && msg.type !== 'stream_event') {
           callbacks.onRawEvent(msg as { type?: string } & Record<string, unknown>);
@@ -765,6 +798,8 @@ export class ThreadSession {
         switch (msg.type) {
           case 'stream_event': {
             const evt = msg.event;
+            if (evt.type === 'content_block_start' && evt.content_block.type === 'tool_use'
+              || evt.type === 'content_block_delta') sawMessage = true;
             if (evt.type === 'content_block_delta') {
               const delta = evt.delta as { type: string; text?: string };
               if (delta.type === 'text_delta' && delta.text) {
@@ -786,6 +821,8 @@ export class ThreadSession {
                 streamingText = '';
                 break;
               }
+              const replyModel = (msg.message as { model?: unknown }).model;
+              if (isReportedModelId(replyModel)) callbacks.onActiveModel?.(replyModel);
             }
             const parts: string[] = [];
             for (const block of msg.message.content) {
@@ -841,6 +878,11 @@ export class ThreadSession {
           }
 
           case 'result': {
+            // The SDK can emit this result and then throw the same failure.
+            // Route it through recovery immediately, before showing an error.
+            if (msg.is_error && 'errors' in msg && msg.errors.some(error => /no conversation found/i.test(error))) {
+              throw new Error(`Claude Code returned an error result: ${msg.errors.join('\n')}`);
+            }
             this.applyUsage(normalizeClaudeResult(msg as unknown as Record<string, any>));
             this._lastActivityAt = Date.now();
             if (!this.interrupted && !this.internalCompactionResolve) {
@@ -857,6 +899,7 @@ export class ThreadSession {
               this.lastKnownSessionId = msg.session_id;
               this.transportErrorRetryCount = 0;
               this.rateLimitRetryCount = 0;
+              this.resumeFallbackUsed = false;
               if (allToolCalls.length > 0 && !this.recapEmitted) {
                 const names = [...new Set(allToolCalls.map(t => formatToolName(t.name)))];
                 callbacks.onRecap(`Used ${names.join(', ')} (${allToolCalls.length} call${allToolCalls.length > 1 ? 's' : ''})`);
@@ -879,6 +922,7 @@ export class ThreadSession {
               this.internalCompactionResolve = null;
               resolve(false);
             } else {
+              terminalErrorReported = true;
               callbacks.onError(
                 new Error(`Claude session ended: ${(msg as { subtype: string }).subtype}`),
               );
@@ -896,6 +940,9 @@ export class ThreadSession {
           case 'system': {
             const sys = msg as Record<string, unknown>;
             switch (sys.subtype) {
+              case 'init':
+                if (isReportedModelId(sys.model)) callbacks.onActiveModel?.(sys.model);
+                break;
               case 'status':
                 callbacks.onStatus?.(sys.status as 'compacting' | 'requesting' | null);
                 break;
@@ -1195,6 +1242,27 @@ export class ThreadSession {
         // message. Entirely internal to ThreadSession; the UI only learns of
         // it via onRateLimitRetry (a transient 'reconnecting'-style notice),
         // never a terminal onError, unless the backoff budget is exhausted.
+        else if (!this.resumeFallbackUsed && this._turnInFlight && this.lastUserTurn
+          && isResumeFailure(e.message, this.stderrTail, { resumed: startedWithResume, sawMessage })) {
+          // The persisted session can't be resumed (transcript missing after a
+          // restart, moved config dir, ...). Start a fresh session once and
+          // replay the turn instead of leaving the thread permanently broken.
+          this.resumeFallbackUsed = true;
+          supersededByRestart = true;
+          console.warn('[ClaudeThreads] resume failed; retrying as a fresh session:', withStderr(e.message, this.stderrTail));
+          callbacks.onReconnecting?.(withStderr(e.message, this.stderrTail));
+          const turn = this.lastUserTurn;
+          try {
+            // 'cwd-change' drops the resume id, so start() begins a new session.
+            await this.restart('cwd-change');
+            // start() reports synchronous query initialization errors itself.
+            // A closed channel here must not produce a second terminal error.
+            if (this.query) this.sendInternal(`${fallbackHistory ?? ''}${turn.text}`, turn.images, turn.userMessageUuid);
+          } catch (retryErr) {
+            console.error('[ClaudeThreads] ThreadSession resume-fallback failed:', retryErr);
+            callbacks.onError(retryErr instanceof Error ? retryErr : new Error(String(retryErr)));
+          }
+        }
         else if (isRateLimitError(e.message) && shouldAutoRetryRateLimitError(e.message, this.rateLimitRetryCount)) {
           this.rateLimitRetryCount++;
           const attempt = this.rateLimitRetryCount;
@@ -1245,10 +1313,10 @@ export class ThreadSession {
             console.error('[ClaudeThreads] ThreadSession transport-error auto-retry failed:', restartErr);
             callbacks.onError(restartErr instanceof Error ? restartErr : new Error(String(restartErr)));
           }
-        } else {
+        } else if (!terminalErrorReported) {
           const zodIssues = (err as Record<string, unknown>).issues;
           console.error('[ClaudeThreads] ThreadSession pump error:', e, zodIssues ? JSON.stringify(zodIssues, null, 2) : '');
-          callbacks.onError(new Error(`${e.message}${zodIssues ? '\n\nZod issues: ' + JSON.stringify(zodIssues) : ''}\n\nStack: ${e.stack ?? 'none'}`));
+          callbacks.onError(new Error(`${withStderr(e.message, this.stderrTail)}${zodIssues ? '\n\nZod issues: ' + JSON.stringify(zodIssues) : ''}\n\nStack: ${e.stack ?? 'none'}`));
         }
       }
     } finally {

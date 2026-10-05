@@ -4,6 +4,7 @@ import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread, TaskItem } from './types';
 import { formatToolName } from './ClaudeSession';
+import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
 import { relativeTime, buildCwdLabel, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, formatWakeupCountdown } from './dashboardUtils';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
 import { parsePrUrlRepo } from './gitDiffUtils';
@@ -76,6 +77,8 @@ const PROJECT_SECTION_MAP: Record<ThreadRowState, { label: string; state: RowSta
   error:           { label: 'Failed', state: 'error' },
   empty:           { label: 'Ready', state: 'empty' },
 };
+
+const NEW_PROJECT_VALUE = '__new_project__';
 
 export class KanbanView extends ItemView {
   private plugin: ClaudeThreadsPlugin;
@@ -361,7 +364,14 @@ export class KanbanView extends ItemView {
     const label = container.createEl('label', { cls: 'ct-dispatch-project' });
     label.createSpan({ text: 'Project', cls: 'ct-dispatch-project-label' });
     this.projectSelectEl = label.createEl('select', { attr: { 'aria-label': 'Dispatch Project' } });
-    this.projectSelectEl.addEventListener('change', () => { this.selectedProjectId = this.projectSelectEl.value; });
+    this.projectSelectEl.addEventListener('change', () => {
+      if (this.projectSelectEl.value === NEW_PROJECT_VALUE) {
+        this.projectSelectEl.value = this.selectedProjectId;
+        this.plugin.openNewProjectSettings();
+        return;
+      }
+      this.selectedProjectId = this.projectSelectEl.value;
+    });
     this.refreshProjectSelector();
   }
 
@@ -372,6 +382,7 @@ export class KanbanView extends ItemView {
     for (const project of this.manager.getProjects()) {
       select.createEl('option', { text: project.name, attr: { value: project.id } });
     }
+    select.createEl('option', { text: 'New Project…', attr: { value: NEW_PROJECT_VALUE } });
     const selectionStillExists = !this.selectedProjectId || this.manager.getProject(this.selectedProjectId);
     if (!selectionStillExists) this.selectedProjectId = '';
     select.value = this.selectedProjectId;
@@ -950,7 +961,7 @@ export class KanbanView extends ItemView {
       const toolRow = permContent.createDiv('ct-kanban-card-perm-tool');
       toolRow.createSpan({ cls: 'ct-agents-permission-tool', text: pendingInfo?.toolName ? formatToolName(pendingInfo.toolName) : 'permission' });
       if (pendingInfo?.detail) {
-        toolRow.createSpan({ cls: 'ct-agents-permission-detail ct-kanban-perm-detail', text: pendingInfo.detail });
+        toolRow.createSpan({ cls: 'ct-agents-permission-detail ct-kanban-perm-detail', text: summarizePermissionDetail(pendingInfo.detail) });
       }
       const activityEl = permContent.createDiv('ct-kanban-card-activity');
       this.activityEls.set(thread.id, activityEl);
@@ -960,15 +971,17 @@ export class KanbanView extends ItemView {
       deny.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, false); });
       const allow = btns.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
       allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, true); });
-      const always = btns.createEl('button', { text: 'Always', cls: 'ct-permission-btn ct-permission-always' });
-      always.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (pendingInfo) {
-          this.plugin.settings.alwaysAllowedTools.push(pendingInfo.toolName);
-          await this.plugin.saveSettings();
-        }
-        this.manager.resolvePermission(thread.id, true);
-      });
+      if (!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) {
+        const always = btns.createEl('button', { text: 'Always', cls: 'ct-permission-btn ct-permission-always' });
+        always.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (pendingInfo) {
+            this.plugin.settings.alwaysAllowedTools.push(pendingInfo.toolName);
+            await this.plugin.saveSettings();
+          }
+          this.manager.resolvePermission(thread.id, true);
+        });
+      }
     } else {
       const activityEl = card.createDiv({ cls: 'ct-kanban-card-activity' });
       this.activityEls.set(thread.id, activityEl);

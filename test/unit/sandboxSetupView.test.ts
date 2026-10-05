@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildSandboxSetupView, errorTail, formatSetupProgress } from '../../src/sandboxSetupView';
+import { describeImageDetail, buildSandboxSetupView, errorTail, formatSetupProgress } from '../../src/sandboxSetupView';
 import type { SandboxSetupStatus } from '../../src/sandboxSetup';
 
 const st = (o: Partial<SandboxSetupStatus>): SandboxSetupStatus => ({
@@ -9,7 +9,7 @@ const st = (o: Partial<SandboxSetupStatus>): SandboxSetupStatus => ({
 describe('buildSandboxSetupView', () => {
   it('fresh Mac: Not installed / Stopped / Needs setup, button "Set up sandbox"', () => {
     expect(buildSandboxSetupView(st({}))).toEqual({
-      runtimeLine: 'Not installed', serviceLine: 'Stopped', imageLine: 'Needs setup', buttonLabel: 'Set up sandbox', ready: false,
+      runtimeLine: 'Not installed', serviceLine: 'Stopped', imageLine: 'Needs setup', imageDetailLine: null, buttonLabel: 'Set up sandbox', ready: false,
     });
   });
 
@@ -28,6 +28,11 @@ describe('buildSandboxSetupView', () => {
     expect(buildSandboxSetupView(st({
       runtime: 'installed', runtimeSource: 'system', running: true, images: { base: 'missing', harness: 'missing' },
     })).buttonLabel).toBe('Finish setup');
+  });
+
+  it('running with a stale base image: "Update sandbox" / "Update available"', () => {
+    const v = buildSandboxSetupView(st({ runtime: 'installed', runtimeSource: 'system', running: true, images: { base: 'stale', harness: 'ok' } }));
+    expect(v).toMatchObject({ imageLine: 'Update available', buttonLabel: 'Update sandbox', ready: false });
   });
 
   it('running with only a stale harness layer: "Update sandbox" / "Update available"', () => {
@@ -62,5 +67,36 @@ describe('errorTail', () => {
     const long = Array.from({ length: 20 }, (_, i) => `l${i}`).join('\n');
     const out = errorTail(long, 3);
     expect(out).toBe('…\nl17\nl18\nl19');
+  });
+});
+
+describe('describeImageDetail', () => {
+  const base = { runtime: 'installed', runtimeSource: 'system', running: true } as const;
+  it('is null when images were not inspected', () => {
+    expect(describeImageDetail(st({ ...base }))).toBeNull();
+  });
+  it('shows "unlabeled -> v2 available (missing gh)" for the gh-less local image', () => {
+    const line = describeImageDetail(st({
+      ...base,
+      images: {
+        base: 'stale', harness: 'stale',
+        detail: { base: { version: null, missingTools: ['gh'] }, harness: { version: '2', missingTools: ['gh'] } },
+      },
+    }));
+    expect(line).toBe('Image unlabeled → v2 available (missing gh) · Harness image v2 needs a rebuild (missing gh)');
+  });
+  it('shows just the version when current', () => {
+    expect(describeImageDetail(st({
+      ...base,
+      images: { base: 'ok', harness: 'ok', detail: { base: { version: '2', missingTools: [] }, harness: { version: '2', missingTools: [] } } },
+    }))).toBe('Image v2 · Harness image v2');
+  });
+  it('flows into the view, which offers Update sandbox', () => {
+    const v = buildSandboxSetupView(st({
+      ...base,
+      images: { base: 'stale', harness: 'ok', detail: { base: { version: '1', missingTools: [] } } },
+    }));
+    expect(v.imageDetailLine).toBe('Image v1 → v2 available');
+    expect(v.buttonLabel).toBe('Update sandbox');
   });
 });

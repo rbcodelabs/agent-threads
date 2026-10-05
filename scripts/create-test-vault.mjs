@@ -1,15 +1,15 @@
 /**
  * create-test-vault.mjs
  *
- * Spins up an isolated Obsidian test vault with the current plugin build
- * installed, registered in Obsidian's vault picker, and pre-seeded with
- * notes about the current branch/changes.
+ * Spins up an isolated Geode test vault with the current plugin build
+ * installed under .geode/plugins, listed in Geode's recent vaults, and
+ * pre-seeded with notes about the current branch/changes.
  *
  * Usage:
  *   node scripts/create-test-vault.mjs [--update] [--open] [--name <n>]
  *
  *   --update / -u   Rebuild and re-copy dist only; don't recreate vault structure or notes
- *   --open   / -o   Open vault in Obsidian after finishing
+ *   --open   / -o   Open vault in Geode after finishing
  *   --name <n>      Override vault name (default: derived from branch)
  */
 
@@ -71,7 +71,8 @@ try {
 const sanitized = branch.replace(/\//g, '-').replace(/[^a-zA-Z0-9\-_]/g, '');
 const vaultName = forceName ?? `ct-${sanitized}`;
 const vaultPath = path.join(os.homedir(), '.claude', 'test-vaults', vaultName);
-const pluginDir = path.join(vaultPath, '.obsidian', 'plugins', 'claude-threads');
+const geodeDir  = path.join(vaultPath, '.geode');
+const pluginDir = path.join(geodeDir, 'plugins', 'claude-threads');
 
 // ---------------------------------------------------------------------------
 // Build step (always runs)
@@ -109,15 +110,12 @@ if (!vaultExists) {
   // Directory structure
   fs.mkdirSync(pluginDir, { recursive: true });
 
-  // .obsidian/app.json
-  fs.writeFileSync(
-    path.join(vaultPath, '.obsidian', 'app.json'),
-    '{}\n',
-  );
+  // .geode/app.json
+  fs.writeFileSync(path.join(geodeDir, 'app.json'), '{}\n');
 
-  // .obsidian/community-plugins.json
+  // .geode/plugins.json — ids of enabled plugins
   fs.writeFileSync(
-    path.join(vaultPath, '.obsidian', 'community-plugins.json'),
+    path.join(geodeDir, 'plugins.json'),
     JSON.stringify(['claude-threads'], null, 2) + '\n',
   );
 
@@ -178,36 +176,31 @@ ${changeStat}
 }
 
 // ---------------------------------------------------------------------------
-// Register vault in Obsidian's vault picker (best-effort)
+// List the vault in Geode's recent vaults (best-effort)
 // ---------------------------------------------------------------------------
 
-const obsidianJsonPath = path.join(
+const geodeJsonPath = path.join(
   os.homedir(),
-  'Library', 'Application Support', 'obsidian', 'obsidian.json',
+  'Library', 'Application Support', 'geode', 'geode.json',
 );
 
 try {
-  let obsidianConfig = {};
-  if (fs.existsSync(obsidianJsonPath)) {
-    obsidianConfig = JSON.parse(fs.readFileSync(obsidianJsonPath, 'utf8'));
+  let geodeConfig = {};
+  if (fs.existsSync(geodeJsonPath)) {
+    geodeConfig = JSON.parse(fs.readFileSync(geodeJsonPath, 'utf8'));
   }
-
-  const vaults = obsidianConfig.vaults ?? {};
-
-  // Check whether this vault path is already registered
-  const alreadyRegistered = Object.values(vaults).some(v => v.path === vaultPath);
-
-  if (!alreadyRegistered) {
-    const vaultId = crypto.createHash('sha256').update(vaultPath).digest('hex').slice(0, 16);
-    vaults[vaultId] = { path: vaultPath, ts: Date.now() };
-    obsidianConfig.vaults = vaults;
-    fs.writeFileSync(obsidianJsonPath, JSON.stringify(obsidianConfig, null, 2) + '\n');
-    console.log(`\nRegistered vault "${vaultName}" in Obsidian`);
+  const recent = geodeConfig.recentVaults ?? [];
+  if (!recent.includes(vaultPath)) {
+    // Leave lastVault alone: it decides which vault Geode launches into.
+    geodeConfig.recentVaults = [vaultPath, ...recent];
+    fs.mkdirSync(path.dirname(geodeJsonPath), { recursive: true });
+    fs.writeFileSync(geodeJsonPath, JSON.stringify(geodeConfig, null, 2) + '\n');
+    console.log(`\nAdded "${vaultName}" to Geode's recent vaults`);
   } else {
-    console.log(`\nVault "${vaultName}" already registered in Obsidian`);
+    console.log(`\nVault "${vaultName}" already in Geode's recent vaults`);
   }
 } catch (err) {
-  console.warn(`\nWarning: could not register vault in Obsidian (${err.message}). Open it manually if needed.`);
+  console.warn(`\nWarning: could not update Geode's recent vaults (${err.message}). Open it manually if needed.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +210,7 @@ try {
 console.log('\nCopying dist files to plugin directory...');
 fs.mkdirSync(pluginDir, { recursive: true });
 
+fs.cpSync(path.join(repoRoot, 'dist', 'resources'), path.join(pluginDir, 'resources'), { recursive: true });
 for (const file of ['main.js', 'styles.css', 'manifest.json']) {
   const src = path.join(repoRoot, 'dist', file);
   if (fs.existsSync(src)) {
@@ -234,15 +228,12 @@ const homeRelative = vaultPath.replace(os.homedir(), '~');
 console.log(`
 Test vault ready: ${homeRelative}
 
-  First open: Obsidian will prompt to enable community plugins — click "Turn off Restricted Mode" once.
-  To reload plugin after changes: run with --update, then Cmd+R in Obsidian (or use BRAT's reload command).
+  To reload plugin after changes: run with --update, then use "Reload plugin (safe)" in Geode.
 
 Vault path: ${vaultPath}
 `);
 
 if (open) {
-  // Open by filesystem path — more reliable than ?vault=<name> which requires
-  // a matching "name" field in obsidian.json (not present in auto-registered vaults).
   console.log(`Opening: ${vaultPath}`);
-  execSync(`open -a Obsidian "${vaultPath}"`);
+  execSync(`open -a Geode "${vaultPath}"`);
 }

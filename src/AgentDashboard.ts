@@ -5,6 +5,7 @@ import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread } from './types';
 import { buildMessageWithAttachment, deriveDispatchTitle } from './attachmentUtils';
 import { formatToolName } from './ClaudeSession';
+import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
 import { relativeTime, buildCwdLabel, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, formatWakeupCountdown } from './dashboardUtils';
 import { DispatchInput } from './DispatchInput';
 import { seedDocumentChatDraft } from './documentChat';
@@ -335,6 +336,11 @@ export class AgentDashboard extends ItemView {
         .setChecked(this.selectedProjectId === project.id)
         .onClick(() => this.selectProject(project.id)));
     }
+    menu.addSeparator();
+    menu.addItem(item => item
+      .setTitle('New Project…')
+      .setIcon('folder-plus')
+      .onClick(() => this.plugin.openNewProjectSettings()));
     menu.showAtMouseEvent(event);
   }
 
@@ -688,7 +694,7 @@ export class AgentDashboard extends ItemView {
       const attentionLabel = hasPlan ? 'Plan ready — open to review' : hasQuestion ? 'Question ready — open to answer' : pendingInfo?.toolName ? formatToolName(pendingInfo.toolName) : 'Permission required';
       activityEl.createSpan({ cls: 'ct-agents-permission-tool', text: attentionLabel });
       if (pendingInfo?.detail) {
-        activityEl.createSpan({ cls: 'ct-agents-permission-detail', text: pendingInfo.detail });
+        activityEl.createSpan({ cls: 'ct-agents-permission-detail', text: summarizePermissionDetail(pendingInfo.detail) });
       }
 
       if (hasPermission) {
@@ -700,15 +706,17 @@ export class AgentDashboard extends ItemView {
         const allow = btns.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
         allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, true); });
 
-        const always = btns.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' });
-        always.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          if (pendingInfo) {
-            this.plugin.settings.alwaysAllowedTools.push(pendingInfo.toolName);
-            await this.plugin.saveSettings();
-          }
-          this.manager.resolvePermission(thread.id, true);
-        });
+        if (!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) {
+          const always = btns.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' });
+          always.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (pendingInfo) {
+              this.plugin.settings.alwaysAllowedTools.push(pendingInfo.toolName);
+              await this.plugin.saveSettings();
+            }
+            this.manager.resolvePermission(thread.id, true);
+          });
+        }
       }
     } else {
       activityEl.setText(this.getActivityText(thread, state));

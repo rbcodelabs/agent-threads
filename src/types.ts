@@ -364,6 +364,13 @@ export interface Thread {
    */
   rateLimitRetryCount?: number;
   model?: string;
+  /**
+   * Exact model id the provider last reported for this thread (session `init`
+   * or the latest top-level assistant reply), e.g. `claude-opus-5-5`. Unlike
+   * `model` (the requested alias/override), this is what actually ran.
+   * Cleared when the override changes or the harness is switched.
+   */
+  activeModel?: string;
   projectId?: string;
   /** Stable producer identity for peer-plugin jobs; absent for user-authored threads. */
   origin?: string;
@@ -522,6 +529,28 @@ export interface ThreadPermissionSnapshot {
   readonly planApprovalPending: boolean;
   /** True while an AskUserQuestion prompt is awaiting an answer. */
   readonly questionPending: boolean;
+}
+
+/**
+ * Options for `artifacts.allocateStorage`. Omitting them (or `location:
+ * 'hidden'`) keeps the original behavior: `<vault>/.geode/artifacts/<artifactId>`.
+ * `'visible'` allocates `<vault>/<root>/<namespace>/<folderName>` instead
+ * (ADR-0010 addendum). `<root>` is the host's `visibleArtifactRoot` setting
+ * (default `Artifacts`); `<namespace>` is the sanitized `owner.pluginId`. Hosts
+ * without the `artifacts.visibleStorage` capability ignore these options and
+ * allocate hidden.
+ */
+export interface StorageAllocationOptions {
+  readonly location?: 'hidden' | 'visible';
+  /** Visible only. Sanitized and de-duplicated by the host; defaults to the artifact id. */
+  readonly folderName?: string;
+  /**
+   * Required when `location` is `'visible'`; ignored for hidden. Names the
+   * namespace folder. Self-declared by the caller, exactly like the `owner` on
+   * `attach`/`update`: advisory, not authenticated. Agent tools get their
+   * registered owner injected by the host instead, overriding anything passed.
+   */
+  readonly owner?: { readonly pluginId: string; readonly displayName?: string };
 }
 
 /**
@@ -823,7 +852,7 @@ export interface SkillSource {
    */
   clonePath?: string;
   /**
-   * Tag or branch the clone is pinned to (`git clone --branch <ref> --depth 1`),
+   * Tag or branch the clone is pinned to (a shallow clone of that tag/branch),
    * e.g. the Chief of Staff pack at `CHIEF_OF_STAFF_REF`. Omitted = default
    * branch. A pinned source is detached at that ref: update checks report it as
    * current and "Pull updates" re-syncs it to the same ref rather than moving to
@@ -1004,6 +1033,14 @@ export interface PluginSettings {
    */
   harnessVmMode: HarnessVmMode;
   /**
+   * Memory ceiling for newly created sandbox containers, `<digits>M|G`
+   * (default `'4G'`). Invalid values fall back to the default. Applies only at
+   * `container run`; existing containers keep their old limit.
+   */
+  sandboxVmMemory: string;
+  /** CPU count for newly created sandbox containers (positive integer, default 4, max 64). */
+  sandboxVmCpus: number;
+  /**
    * Container image the harness routes into. Built from
    * `sandbox/Dockerfile.harness` (`container build --tag
    * claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`) —
@@ -1036,6 +1073,13 @@ export interface PluginSettings {
    */
   saveRawLogs: boolean;
   vaultFolder: string;
+  /**
+   * Name of the single host-owned, user-visible vault folder for visible
+   * artifact storage (`<vault>/<name>/<plugin>/<artifact folder>`). Sanitized
+   * to one path segment; empty or invalid falls back to `Artifacts`. Renaming
+   * it affects new allocations only; see `trustedVisibleRootNames`.
+   */
+  visibleArtifactRoot: string;
   permissionMode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
   /** Thinking mode for extended reasoning. 'disabled' sends no thinking param; 'adaptive' lets Claude decide; 'enabled' uses a fixed token budget. */
   thinkingMode: 'disabled' | 'adaptive' | 'enabled';
@@ -1170,7 +1214,7 @@ export interface PluginSettings {
   /** Runtime connection status for each `oauthMcpServers` entry, keyed the same way. */
   oauthMcpState: Record<string, OAuthMcpState>;
   /** Opt-in Google-provided MCP toolsets, authenticated by Google Docs Sync. */
-  googleWorkspaceMcp?: Partial<Record<'docs' | 'drive' | 'sheets' | 'slides', boolean>>;
+  googleWorkspaceMcp?: Partial<Record<'docs' | 'drive' | 'sheets' | 'slides' | 'gmail' | 'calendar', boolean>>;
   /** Nonsecret identity/service pinning; local bearer capabilities are never persisted. */
   googleWorkspaceBindings?: Record<string, import('./GoogleWorkspaceMcp').GoogleWorkspaceBinding>;
   /**
@@ -1266,6 +1310,12 @@ export interface PluginSettings {
    */
   agentBrowserAllowPrivateNetwork?: boolean;
   /**
+   * Let agents run JavaScript in the agent browser's page via `browser_eval`.
+   * Defaults to false: the tool is always registered but refuses, naming this
+   * setting, until the user opts in. Read live, so no reload is needed.
+   */
+  enableAgentBrowserEval?: boolean;
+  /**
    * When true, a canonical wrapped `visualize` content reference in an
    * assistant message renders as a live sandboxed visualization inline instead
    * of raw text. Legacy bare references remain supported. Desktop only.
@@ -1276,6 +1326,8 @@ export interface PluginSettings {
   skillSources: SkillSource[];
   /** Vault-relative folder for authored packages; installs retain their own root. */
   localSkillsFolder?: string;
+  /** Fast-forward GitHub skill sources in the background on launch and every 6 hours. Default on. */
+  autoUpdateSkillSources?: boolean;
   /** Durable peer-API correlations and bounded run results. Internal format; consumers use api.v1. */
   publicApiState?: import('./PublicApi').PublicApiPersistedState;
   /** Width in px of the Skills Manager's left list panel, set by dragging the divider. */
@@ -1292,6 +1344,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   vmImage: 'claude-threads-coding:1',
   vmDefaultNetwork: 'default',
   harnessVmMode: 'auto',
+  sandboxVmMemory: '4G',
+  sandboxVmCpus: 4,
   harnessVmImage: 'claude-threads-harness:1',
   sandboxSetupPromptDismissed: false,
   githubConnectionEnabled: true,
@@ -1300,6 +1354,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   saveThreadsToVault: true,
   saveRawLogs: true,
   vaultFolder: DEFAULT_VAULT_FOLDER,
+  visibleArtifactRoot: 'Artifacts',
   permissionMode: 'acceptEdits',
   thinkingMode: 'disabled',
   thinkingBudgetTokens: 8000,
@@ -1353,12 +1408,14 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   enableAgentBrowser: false,
   agentBrowserMaxGuests: 2,
   agentBrowserAllowPrivateNetwork: false,
+  enableAgentBrowserEval: false,
   enableInlineVisualizations: true,
   kanbanGroupBy: 'status',
   kanbanCollapseSide: 'none',
   stackScheduledThreads: true,
   skillSources: [],
   localSkillsFolder: 'Skills',
+  autoUpdateSkillSources: true,
   skillsListWidth: 200,
 };
 

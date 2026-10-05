@@ -98,7 +98,7 @@ describe('checked-in consumer declaration', () => {
   });
 
   it('still declares the mcp namespace that once drifted out of it', () => {
-    expect(declaredSurface().mcp).toEqual(['register', 'requestSecret']);
+    expect(declaredSurface().mcp).toEqual(['listPresets', 'register', 'registerPreset', 'requestSecret']);
     expect(declaredSurface().extensions).toEqual(['registerAgentTool', 'registerArtifactProvider', 'registerMessageContentProvider', 'registerSlashCommand']);
   });
 
@@ -117,10 +117,13 @@ describe('checked-in consumer declaration', () => {
       agentTools: new AgentToolRegistry(), slashCommands: new SlashCommandRegistry(), getDefaultPermissionMode: () => 'default',
     } as never).api;
     // agentTools advertises a profile rather than a method name; everything
-    // else is `<namespace>.<method>`.
-    const expected = Object.entries(runtimeSurface())
-      .flatMap(([namespace, methods]) => namespace === 'agentTools' ? ['agentTools.voice-orchestration'] : methods.map(method => `${namespace}.${method}`))
-      .sort();
+    // else is `<namespace>.<method>`. `artifacts.visibleStorage` is a feature
+    // flag for an option of `artifacts.allocateStorage`, not an operation.
+    const expected = [
+      ...Object.entries(runtimeSurface())
+        .flatMap(([namespace, methods]) => namespace === 'agentTools' ? ['agentTools.voice-orchestration'] : methods.map(method => `${namespace}.${method}`)),
+      'artifacts.visibleStorage',
+    ].sort();
     expect([...api.capabilities].sort()).toEqual(expected);
   });
 });

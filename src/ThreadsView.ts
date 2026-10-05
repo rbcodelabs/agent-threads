@@ -1,10 +1,12 @@
 import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
+import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
 import { effectiveExtraEnv } from './types';
 import { parseLoopArgs, formatLoopInterval } from './loopUtils';
+import { buildClaudeModelOptions, aliasLabel, activeModelLabel, formatModelId, type ModelOption } from './modelOptions';
 import { THREAD_BUILTIN_COMMANDS, THREAD_ARG_COMPLETIONS, MODEL_ALIASES, goalKickoffMessage, resolveCreatePrMessage, escalationCommand } from './slashCommands';
 import { isSetAsGoalEligible } from './goalContext';
 import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo } from './gitDiffUtils';
@@ -18,7 +20,7 @@ import * as fsp from 'fs/promises';
 import type ClaudeThreadsPlugin from './main';
 import { isDefaultThreadTitle } from './thread-title-utils';
 import { formatToolName, getToolIcon } from './ClaudeSession';
-import { isTrustedBuiltInTool } from './toolNameUtils';
+import { isPermissionPreApproved } from './toolNameUtils';
 import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, ACTIVITY_LABELS, smoothToolGroups, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
 import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
@@ -361,15 +363,19 @@ export class ThreadsView extends ItemView {
     { label: 'Auto-approve', value: 'auto' },
   ];
 
-  // Ordered list for the footer model switcher menu. `value: undefined` means
-  // "use the global default" (clears the per-thread override).
-  private static readonly CLAUDE_MODEL_OPTIONS: Array<{ label: string; value: string | undefined }> = [
-    { label: 'Default', value: undefined },
-    { label: 'Opus', value: 'opus' },
-    { label: 'Sonnet', value: 'sonnet' },
-    { label: 'Haiku', value: 'haiku' },
-    { label: 'Fable', value: 'fable' },
-  ];
+  /**
+   * Rows for the per-thread model switcher. Claude threads get family aliases
+   * labelled with the version they currently resolve to plus pinned catalog
+   * models; other harnesses list their own discovered catalog.
+   * `value: undefined` means "use the global default" (clears the override).
+   */
+  private modelOptionsFor(harness: AgentHarness): ModelOption[] {
+    if (harness === 'claude') return buildClaudeModelOptions(this.plugin.discoveredModelsByHarness.claude);
+    return [
+      { label: 'Default', value: undefined },
+      ...this.plugin.discoveredModelsByHarness[harness].map((m) => ({ label: m.displayName, value: m.value })),
+    ];
+  }
 
   constructor(leaf: WorkspaceLeaf, plugin: ClaudeThreadsPlugin) {
     super(leaf);
@@ -455,8 +461,9 @@ export class ThreadsView extends ItemView {
     this.manager.permissionHandler = (threadId, toolName, detail) => {
       // First-party host tools are always trusted; classification is an explicit
       // capability allowlist, not a forgeable naming-prefix convention.
-      if (isTrustedBuiltInTool(toolName)) return Promise.resolve(true);
-      if (this.plugin.settings.alwaysAllowedTools.includes(toolName)) return Promise.resolve(true);
+      // Requests that cannot be always-allowed (host_exec) skip both shortcuts
+      // and are decided on the card every time.
+      if (isPermissionPreApproved(toolName, this.plugin.settings.alwaysAllowedTools)) return Promise.resolve(true);
 
       return new Promise((resolve) => {
         let resolved = false;
@@ -2436,19 +2443,26 @@ export class ThreadsView extends ItemView {
     return thread?.model ?? undefined;
   }
 
+  /**
+   * Label for the ⋯ menu Model row: the selected option, followed by the exact
+   * model the provider last reported, e.g. "Default · Opus 5.5".
+   */
   private currentModelLabel(): string {
-    const escalated = this.activeThreadId
-      ? this.escalatedTurnModels.get(this.activeThreadId)
-      : undefined;
-    if (escalated) return `${escalated} (this turn)`;
-    const model = this.currentModel();
-    if (!model) return 'Default';
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
+    const selected = this.selectedModelLabel(thread);
+    const active = thread?.activeModel;
+    if (!active) return selected;
+    const running = formatModelId(active);
+    return selected.includes(running) ? selected : `${selected} · ${running}`;
+  }
+
+  private selectedModelLabel(thread: import('./types').Thread | null | undefined): string {
+    const escalated = thread ? this.escalatedTurnModels.get(thread.id) : undefined;
+    if (escalated) return `${aliasLabel(escalated, this.plugin.discoveredModelsByHarness.claude)} (this turn)`;
+    const model = thread?.model ?? undefined;
+    if (!model) return 'Default';
     const harness = thread?.agentHarness ?? 'claude';
-    const options = harness !== 'claude'
-      ? this.plugin.discoveredModelsByHarness[harness].map((m) => ({ label: m.displayName, value: m.value }))
-      : ThreadsView.CLAUDE_MODEL_OPTIONS;
-    return options.find(option => option.value === model)?.label ?? model;
+    return this.modelOptionsFor(harness).find(option => option.value === model)?.label ?? model;
   }
 
   /**
@@ -2466,9 +2480,16 @@ export class ThreadsView extends ItemView {
     const menu = new Menu();
     const thread = this.manager.getThread(this.activeThreadId);
     const harness = thread?.agentHarness ?? 'claude';
-    const options = harness !== 'claude'
-      ? [{ label: 'Default', value: undefined }, ...this.plugin.discoveredModelsByHarness[harness].map((m) => ({ label: m.displayName, value: m.value }))]
-      : ThreadsView.CLAUDE_MODEL_OPTIONS;
+    const options = this.modelOptionsFor(harness);
+    if (thread?.activeModel) {
+      // Informational header: the exact provider model id of the last reply.
+      const running = thread.activeModel;
+      menu.addItem(item => item
+        .setTitle(`Running: ${activeModelLabel(running)}`)
+        .setIcon('cpu')
+        .setDisabled(true));
+      menu.addSeparator();
+    }
     for (const opt of options) {
       menu.addItem(item => {
         item
@@ -4107,6 +4128,22 @@ export class ThreadsView extends ItemView {
     return this.streamingEl?.isConnected ? this.streamingEl : this.messagesEl;
   }
 
+  /** Readable summary line plus an expandable key/value breakdown for JSON tool input. */
+  private renderPermissionDetail(body: HTMLElement, detail: string): void {
+    const { summary, fields, multiline } = parsePermissionDetail(detail);
+    if (!summary) return;
+    body.createEl('p', { cls: 'ct-permission-detail', text: multiline ?? summary });
+    if (!fields || (fields.length === 1 && fields[0].value === summary)) return;
+    const details = body.createEl('details', { cls: 'ct-permission-fields' });
+    details.createEl('summary', { text: `Details (${fields.length})` });
+    const list = details.createDiv('ct-permission-fields-list');
+    for (const f of fields) {
+      const row = list.createDiv('ct-permission-field');
+      row.createSpan({ cls: 'ct-permission-field-key', text: f.key });
+      row.createEl('pre', { cls: 'ct-permission-field-value', text: f.value });
+    }
+  }
+
   private renderPermissionCard(toolName: string, detail: string, done: (allow: boolean) => void): HTMLElement {
     // Anchor inside the active streaming element so the card sits visually
     // inside the current response turn rather than floating as a sibling that
@@ -4121,21 +4158,21 @@ export class ThreadsView extends ItemView {
 
     const body = card.createDiv('ct-permission-body');
     body.createEl('code', { cls: 'ct-permission-tool', text: formatToolName(toolName) });
-    if (detail) {
-      body.createEl('p', { cls: 'ct-permission-detail', text: detail });
-    }
+    this.renderPermissionDetail(body, detail);
 
     const actions = card.createDiv('ct-permission-actions');
     actions.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' })
       .addEventListener('click', () => done(false));
     actions.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
       .addEventListener('click', () => done(true));
-    actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
-      .addEventListener('click', async () => {
-        this.plugin.settings.alwaysAllowedTools.push(toolName);
-        await this.plugin.saveSettings();
-        done(true);
-      });
+    if (canAlwaysAllow(toolName)) {
+      actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
+        .addEventListener('click', async () => {
+          this.plugin.settings.alwaysAllowedTools.push(toolName);
+          await this.plugin.saveSettings();
+          done(true);
+        });
+    }
 
     return card;
   }

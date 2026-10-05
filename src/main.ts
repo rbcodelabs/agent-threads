@@ -1,4 +1,4 @@
-import type { AgentHarness } from './types';
+import type { AgentHarness, StorageAllocationOptions } from './types';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createPublicThreadLifecycle } from './publicThreadLifecycle';
@@ -29,6 +29,8 @@ import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { GithubCredentialBroker, resolveGithubBridge } from './githubCredentials';
 import { GithubHostDelivery } from './githubHostDelivery';
+import { setGitAuthProvider } from './gitClient';
+import { createGithubGitAuth } from './skillSourceGithubAuth';
 import { createGithubVmHooks } from './githubVmDelivery';
 import { createRequestUrlFetch } from './requestUrlFetch';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
@@ -42,6 +44,9 @@ import { isWatchableDocument, watchMenuLabel } from './documentWatch';
 import { mergeMcpServers, overlayMatchingMcpServers } from './mcpServerMerge';
 import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
+import type { HostExecHooks } from './hostExec';
+import { canAlwaysAllow } from './permissionDetail';
+import { redactGithubSecrets } from './githubCredentials';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
@@ -69,6 +74,7 @@ import { RelayClient } from './RelayClient';
 import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
+import { setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
 import { CONTAINER_AUTH_TOKEN_SECRET } from './claudeContainerAuthCli';
@@ -80,7 +86,8 @@ import {
   type PersistenceWriterToken,
 } from './PersistenceWriterFence';
 import { mergeDisallowedTools, withCreatorToolRestrictions } from './toolRestrictions';
-import { DIAGNOSTICS_FOLDER, mergePersistedSettings, selectWelcomeGuidePath } from './productIdentity';
+import { registerDispatchQuickSwitcher } from './quickSwitcherDispatch';
+import { DIAGNOSTICS_FOLDER,mergePersistedSettings, selectWelcomeGuidePath } from './productIdentity';
 import {
   CHIEF_OF_STAFF_COMMAND_ID,
   CHIEF_OF_STAFF_COMMAND_NAME,
@@ -106,40 +113,8 @@ const SKILLS_VIEW_TYPE = 'claude-threads:skills';
 // Kept in sync with AGENT_BROWSER_VIEW_TYPE in agentBrowser/AgentBrowserPreviewView.ts.
 const AGENT_BROWSER_VIEW_TYPE = 'claude-threads:browser-preview';
 
-interface AgentThreadCreateParams {
-  prompt: string;
-  title?: string;
-  cwd?: string;
-  projectId?: string | null;
-  elevatedProjectId?: string;
-}
-
-/** Builds the host callback behind the agent-facing threads_create tool. */
-export function createAgentThreadCallback(deps: {
-  sourceThreadId: string;
-  getThread: (id: string) => { cwd?: string; projectId?: string } | undefined;
-  createThread: (title: string, cwd?: string, projectId?: string) => { id: string; title: string };
-  saveSettings: () => Promise<void>;
-  sendMessage: (id: string, prompt: string) => Promise<void>;
-  authorizeProject?: (projectId: string | undefined, elevatedProjectId?: string) => boolean;
-}): (params: AgentThreadCreateParams) => Promise<{ threadId: string; title: string }> {
-  return async ({ prompt, title, cwd, projectId, elevatedProjectId }) => {
-    const sourceThread = deps.getThread(deps.sourceThreadId);
-    const resolvedTitle = title ?? prompt.trim().split('\n')[0]!.slice(0, 80);
-    const resolvedProjectId = projectId === undefined ? sourceThread?.projectId : projectId ?? undefined;
-    if (deps.authorizeProject && !deps.authorizeProject(resolvedProjectId, elevatedProjectId)) {
-      throw new Error('Requested Project is outside coordination scope.');
-    }
-    const createdThread = deps.createThread(
-      resolvedTitle,
-      cwd ?? sourceThread?.cwd,
-      resolvedProjectId,
-    );
-    await deps.saveSettings();
-    void deps.sendMessage(createdThread.id, prompt);
-    return { threadId: createdThread.id, title: createdThread.title };
-  };
-}
+export { CROSS_PROJECT_SPAWN_TOOL, createAgentThreadCallback } from './agentThreadCreation';
+import { createAgentThreadCallback } from './agentThreadCreation';
 
 /** Builds the persistence boundary behind the agent-facing Project update tool. */
 export function createAgentProjectUpdateCallback(deps: {
@@ -277,6 +252,7 @@ export function subscribeAgentRunPersistence(
 }
 
 export default class ClaudeThreadsPlugin extends Plugin {
+  private settingTab?: ClaudeThreadsSettingTab;
   /** Stable peer-plugin entry point. Its v1 generation is revoked on unload. */
   api!: { readonly v1: ClaudeThreadsApiV1 };
   settings!: PluginSettings;
@@ -406,6 +382,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
   /** How long to wait between background task poll attempts. */
   private static readonly BG_TASK_POLL_INTERVAL_MS = 30_000;
 
+  /** Geode-only: connected external roots. Undefined on Obsidian / older Geode -> no extras. */
+  private async listExternalMountRoots() {
+    const host = (this.app as unknown as {
+      host?: { externalRoots?: { listMountRoots?: () => Promise<Array<{ rootId: string; label: string; path: string; projectId?: string }>> } };
+    }).host;
+    return host?.externalRoots?.listMountRoots?.();
+  }
+
   async onload(): Promise<void> {
     // Claim persistence before any awaited startup work. Obsidian may construct
     // this generation before the prior instance's async onunload has finished.
@@ -448,6 +432,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
       await this.onloadDesktop();
     }
 
+    // Geode's global quick switcher (Cmd+O) lets plugins add rows; real Obsidian
+    // has no such API, so this is a no-op there. Dispatch is desktop-only and
+    // mirrors the dispatch input: default project/cwd, then open the new thread.
+    if (!Platform.isMobile) {
+      registerDispatchQuickSwitcher(this, (text) => {
+        void this.dispatchNewThread(text)
+          .then((threadId) => this.openThreadInChatView(threadId))
+          .catch((err) => {
+            console.error('[ClaudeThreads] Quick switcher dispatch failed:', err);
+            new Notice('Could not start a new conversation. Check the developer console for details.');
+          });
+      });
+    }
+
     // Diagnostics command (both platforms). Desktop-gated inside the handler so
     // it's discoverable on mobile but shows a "desktop only" Notice there.
     this.addCommand({
@@ -459,7 +457,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
 
     // Settings tab (both platforms)
-    this.addSettingTab(new ClaudeThreadsSettingTab(this.app, this));
+    this.settingTab = new ClaudeThreadsSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
   }
 
   private async onloadDesktop(): Promise<void> {
@@ -504,7 +503,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.settings.googleWorkspaceBindings ??= {};
     this.googleWorkspaceMcp = new GoogleWorkspaceMcp(() =>
       (this.app as unknown as { plugins?: { getPlugin(id: string): unknown } }).plugins?.getPlugin('obsidian-gdocs-sync'), undefined, undefined,
-      { bindings: this.settings.googleWorkspaceBindings, save: () => this.saveSettings() });
+      { bindings: this.settings.googleWorkspaceBindings, save: () => this.saveSettings() },
+      // Large-file Drive tools may only touch the thread's working directory and the vault.
+      (threadId) => [this.manager.getThread(threadId)?.cwd, this.manager.vaultRoot].filter((root): root is string => !!root));
     await this.googleWorkspaceMcp.configure(this.settings.googleWorkspaceMcp ?? {});
     this.register(() => this.googleWorkspaceMcp?.close());
 
@@ -553,8 +554,13 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.detectOpenCodeBinary();
     this.migrateGithubSourcesIntoVault();
     this.scheduleGithubSourceClonePass();
+    this.registerInterval(window.setInterval(() => { void this.runSkillSourceAutoUpdate(); }, 6 * 60 * 60 * 1000));
 
+    // Mask stored secret values in every log sink (console, ring, raw JSONL).
+    setKnownSecretsProvider(() => this.collectSecretValues());
+    this.register(() => setKnownSecretsProvider(null));
     this.manager = new ThreadManager(this.settings);
+    this.manager.getExternalMounts = () => this.listExternalMountRoots();
     this.contextPanel = new ContextPanelController(this.app, () =>
       this.app.workspace.getLeavesOfType(VIEW_TYPE)[0] ?? null,
       () => this.settings.conversationCompanionMarker,
@@ -603,9 +609,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
         catch (error) { this.mcpRegistrationModals.delete(modal); reject(error); }
       }),
     });
-    this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
-      try {
-        const mcpServers = createClaudeThreadsMcpServers(this.app, {
+    const vmBuiltInServers = new WeakMap<object, ReturnType<typeof createClaudeThreadsMcpServers>>();
+    // Shared by the ordinary roster and the VM-routed overlay below; `hostExec`
+    // is passed only by the overlay, so host_exec exists only after routing
+    // into the sandbox container has actually succeeded.
+    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks, harnessInVm = false) =>
+        createClaudeThreadsMcpServers(this.app, {
+          harnessInVm,
+          ...(hostExec ? { hostExec } : {}),
           // Contributed agent tools, bound to this thread here — the host does
           // the binding so a peer never reaches the factory (ADR-0008). Built-in
           // Design arrives through this list like any other contribution; there
@@ -630,6 +641,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // is checked here rather than inside the tools so an unsupported host
           // costs nothing per turn instead of advertising tools that only refuse.
           browser: this.agentBrowser?.capable ? this.createThreadBrowser(threadId) : undefined,
+          // Host-side browser tools run on the Mac; for a thread with a sandbox
+          // container, `localhost` must be forwarded into it (vmPortForward.ts).
+          resolveSandboxUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
           openContextualFile: async (file) => {
             if (!this.isConversationFirst()) return false;
             await this.contextPanel.openFile(file);
@@ -655,6 +669,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // needing a session restart.
           getVmImage: () => this.settings.vmImage,
           getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
+          getVmMemory: () => this.settings.sandboxVmMemory,
+          getVmCpus: () => this.settings.sandboxVmCpus,
+          // Geode-only, optional: connected external roots to mount read-only
+          // at /ext/<label>. Undefined on Obsidian / older Geode -> no extras.
+          getExternalMounts: () => this.listExternalMountRoots(),
+          getVaultPath: () => this.manager.vaultRoot,
           // ADR-0015 §3: share the same per-thread SandboxVmManager this
           // thread's Claude harness routes into, so enter_vm/vm_exec/exit_vm
           // see the container's real origin instead of each side tracking it
@@ -696,6 +716,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
             createThread: (title, cwd, projectId) => this.createThreadFromAgent(threadId, title, cwd, projectId),
             saveSettings: () => this.saveSettings(),
             sendMessage: (id, prompt) => this.manager.sendMessage(id, prompt),
+            requestApproval: (toolName, detail) => this.manager.requestToolApproval(threadId, toolName, detail),
+            getProjectName: id => this.manager.getProject(id)?.name,
             authorizeProject: (projectId, elevatedProjectId) => {
               const caller = this.manager.getThread(threadId);
               if (!caller) return false;
@@ -911,6 +933,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
           onRequestSecret: (secretName: string, reason: string, force?: boolean) =>
             this.requestSecretForThread(threadId, secretName, reason, force),
         });
+    this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
+      try {
+        const mcpServers = buildBuiltInMcpServers(threadId, initialCwd);
+        vmBuiltInServers.set(mcpServers.claude_threads, buildBuiltInMcpServers(threadId, initialCwd, undefined, true));
         const mcpDebug = Object.fromEntries(Object.entries(mcpServers).map(([key, server]) => [key, {
           type: (server as unknown as Record<string, unknown>).type,
           name: (server as unknown as Record<string, unknown>).name,
@@ -953,20 +979,25 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }
     };
     // Host-loopback OAuth/Google brokers cannot be reached from Apple's VM.
-    // Overlay only those plugin-owned entries with in-process SDK bridges;
-    // built-ins, remote servers and stdio configs remain byte-for-byte the
-    // ordinary roster. ThreadSession chooses this view only after routing has
-    // actually succeeded, so automatic host fallback retains HTTP configs.
+    // Overlay plugin-owned brokers with in-process SDK bridges. Built-ins use
+    // the container-specific lifecycle surface; remote servers and stdio configs
+    // retain the ordinary roster. ThreadSession chooses this view only after
+    // routing succeeds, so automatic host fallback retains HTTP configs.
     this.manager.vmMcpServerFactory = (threadId, ordinaryServers) => {
+      const vmBuiltIns = ordinaryServers.claude_threads
+        ? vmBuiltInServers.get(ordinaryServers.claude_threads)
+        : undefined;
+      const servers = vmBuiltIns ? { ...ordinaryServers, ...vmBuiltIns } : ordinaryServers;
       const googleHosts = this.googleWorkspaceMcp?.serversForThread(threadId) ?? {};
       const oauthHosts = this.oauthMcpRegistry?.serversForThread(threadId) ?? {};
       const googleMcps = this.googleWorkspaceMcp?.vmServersForThread(threadId) ?? {};
       const oauthMcps = this.oauthMcpRegistry?.vmServersForThread(threadId) ?? {};
-      return overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(
-        overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(ordinaryServers, googleHosts, googleMcps),
+      const overlaid = overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(
+        overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(servers, googleHosts, googleMcps),
         oauthHosts,
         oauthMcps,
       );
+      return this.withHostExec(threadId, overlaid, (id, cwd, hostExec) => buildBuiltInMcpServers(id, cwd, hostExec, true));
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect
@@ -1146,6 +1177,18 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.settings.orchestratorThreadId,
     );
     if (repairedOrchestrators) this.manager.loadProjects(this.manager.getProjects());
+
+    // Reclaim sandbox containers leaked by thread deletes that never tore them
+    // down. Desktop only, delayed so vault thread recovery and startup work
+    // finish first, and fire-and-forget so it can never block load.
+    if (!Platform.isMobile) {
+      const orphanSweepTimer = window.setTimeout(() => {
+        void this.manager.sweepOrphanedSandboxContainers().catch((err) => {
+          console.error('[ClaudeThreads] Orphan sandbox sweep failed:', err);
+        });
+      }, 60_000);
+      this.register(() => window.clearTimeout(orphanSweepTimer));
+    }
 
     // Initialize the built-in scheduler
     this.scheduler = new Scheduler({
@@ -1375,6 +1418,22 @@ export default class ClaudeThreadsPlugin extends Plugin {
         notify: (message) => { new Notice(message); },
       });
       this.loginHandoff.start();
+      // Signing in needs real room: the moment a handoff turns active, put the
+      // browser in the main area (not the cramped sidebar) so it can be driven.
+      const handoffActiveThreads = new Set<string>();
+      const unsubscribeHandoff = this.loginHandoff.subscribe((threadId) => {
+        const isActive = this.loginHandoff?.getSnapshot(threadId)?.phase === 'active';
+        if (isActive && !handoffActiveThreads.has(threadId)) {
+          handoffActiveThreads.add(threadId);
+          void this.activateAgentBrowserView().then(() => {
+            // Opening/revealing the tab moves focus into the pane; hand it to the login page.
+            window.setTimeout(() => this.loginHandoff?.focusActiveGuest(threadId), 250);
+          });
+        } else if (!isActive) {
+          handoffActiveThreads.delete(threadId);
+        }
+      });
+      this.register(unsubscribeHandoff);
       this.register(() => { this.loginHandoff?.stop(); this.loginHandoff = null; });
 
       // Teardown goes through register() rather than onunload(): register
@@ -1908,20 +1967,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return source;
   }
 
-  /** Whether git can run, without triggering the macOS developer-tools install dialog. */
-  private async isGitAvailable(): Promise<boolean> {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fs = require('fs') as typeof import('fs');
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { checkGitAvailable, runCommandQuietly } = require('./skillManager') as typeof import('./skillManager');
-    return checkGitAvailable({
-      platform: process.platform,
-      pathEnv: process.env.PATH,
-      exists: p => { try { return fs.existsSync(p); } catch { return false; } },
-      run: runCommandQuietly,
-    });
-  }
-
   /** Whether `harness`'s configured binary can be found, so a first turn can start. */
   private isHarnessResolvable(harness: AgentHarness): boolean {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1967,7 +2012,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private runChiefOfStaffSetup(): Promise<ChiefOfStaffResult> {
     return setUpChiefOfStaff({
       getSkillSources: () => this.settings.skillSources ?? [],
-      isGitAvailable: () => this.isGitAvailable(),
       addGithubSkillSource: async (repoUrl, ref) => { await this.addManagedGithubSkillSource(repoUrl, ref); },
       resolveHarness: () => chooseChiefOfStaffHarness(this.settings.agentHarness ?? 'claude', h => this.isHarnessResolvable(h)),
       reloadThreadSkills: (id) => this.manager.requestSessionRestart(id),
@@ -2176,7 +2220,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
     // 3.11 — When mobile sends Always Allow, persist the tool name to settings.
     this.relayClient.onAlwaysAllowTool = (toolName: string) => {
-      if (!this.settings.alwaysAllowedTools.includes(toolName)) {
+      // Defence in depth: a forged resolve_permission must not persist host_exec.
+      if (canAlwaysAllow(toolName) && !this.settings.alwaysAllowedTools.includes(toolName)) {
         this.settings.alwaysAllowedTools.push(toolName);
         this.saveSettings().catch(console.error);
       }
@@ -2325,6 +2370,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
             );
           }
           if (result.changed) await this.saveSettings();
+          await this.runSkillSourceAutoUpdate();
         } catch (err) {
           // Defensive: ensureGithubSourcesCloned isolates per-source failures
           // itself, so reaching here means something unexpected. Still swallowed —
@@ -2333,6 +2379,29 @@ export default class ClaudeThreadsPlugin extends Plugin {
         }
       })();
     });
+  }
+
+  /**
+   * Fast-forwards GitHub skill sources in the background. No-op when the
+   * \`autoUpdateSkillSources\` setting is off. Skills are rebuilt per session, so
+   * updated skills show up in the next thread; failures only warn to the console.
+   */
+  async runSkillSourceAutoUpdate(): Promise<void> {
+    if (this.settings.autoUpdateSkillSources === false) return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { autoUpdateGithubSources } = require('./skillManager') as typeof import('./skillManager');
+      const result = await autoUpdateGithubSources(this.settings.skillSources);
+      for (const f of result.failed) {
+        console.warn(`[ClaudeThreads] skill source "${f.name}" auto-update failed: ${f.error}`);
+      }
+      if (result.changed) await this.saveSettings();
+      if (result.updated.length > 0) {
+        new Notice(`Updated skill source${result.updated.length === 1 ? '' : 's'}: ${result.updated.map(u => u.name).join(', ')}. New threads will use the latest skills.`, 8000);
+      }
+    } catch (err) {
+      console.error('[ClaudeThreads] skill-source auto-update failed', err);
+    }
   }
 
   getEffectiveCwd(): string {
@@ -2371,6 +2440,35 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.reportedMcpWarnings.add(warning);
       new Notice(warning, 10000);
     }
+  }
+
+  /**
+   * Adds `host_exec` to a VM-routed session's roster by swapping in a built-in
+   * `claude_threads` server that includes it. Called only from the VM overlay
+   * (i.e. after routing succeeded), never on desktop-less hosts.
+   *
+   * The approval prompt is the thread's in-chat permission card, requested
+   * directly by the tool (not through the harness permission path), so
+   * bypassPermissions / dontAsk / auto-approve / always-allow cannot skip it.
+   */
+  private withHostExec<T>(
+    threadId: string,
+    servers: Record<string, T>,
+    build: (threadId: string, cwd: string, hostExec: HostExecHooks) => Record<string, T>,
+  ): Record<string, T> {
+    if (Platform.isMobile || !servers.claude_threads) return servers;
+    const thread = this.manager.getThread(threadId);
+    if (!thread) return servers;
+    const hostExec: HostExecHooks = {
+      isInteractive: () => this.mcpRegistrationAvailable && !this.manager.getThread(threadId)?.scheduledItemId,
+      requestApproval: async request => {
+        if (!this.mcpRegistrationAvailable) throw new Error('Host unavailable');
+        return this.manager.requestHostExecApproval(threadId, request);
+      },
+      redact: redactGithubSecrets,
+    };
+    const rebuilt = build(threadId, thread.cwd, hostExec);
+    return rebuilt.claude_threads ? { ...servers, claude_threads: rebuilt.claude_threads } : servers;
   }
 
   /**
@@ -2604,6 +2702,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
         return { id: body.id, login: body.login, name: typeof body.name === 'string' ? body.name : null };
       },
     });
+    // Private skill-source repos: isomorphic-git asks for credentials only after a 401, and the
+    // provider only answers for github.com, so public sources and other hosts never see a token.
+    setGitAuthProvider(createGithubGitAuth({
+      broker: this.githubBroker,
+      isEnabled: () => this.settings.githubConnectionEnabled !== false,
+    }));
     // Harness threads create their container through ThreadManager's shared VM manager, not the
     // enter_vm tool, so it needs the same credential/identity hooks (no-ops while unavailable).
     this.manager.sandboxVmHooks = createGithubVmHooks({
@@ -2624,6 +2728,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   async onunload(): Promise<void> {
+    setGitAuthProvider(undefined);
     // Delete the published GitHub token file immediately; never wait on the shutdown poll below.
     void this.githubHost?.stop();
     // Revoke peer references before asynchronous shutdown begins. Obsidian does
@@ -2780,6 +2885,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         vaultRoot: () => this.manager.vaultRoot,
         getThread: (id) => this.manager.getThread(id),
         saveSettings: () => this.saveSettings(),
+        visibleRoot: () => this.settings.visibleArtifactRoot,
         // Delegating to the view is what keeps a peer's invokeAction and a
         // user's card click on one code path. Absent view ⇒ error result.
         invokeAction: (threadId, artifactId, actionId) => this.getView()?.invokeArtifactAction(threadId, artifactId, actionId),
@@ -3182,6 +3288,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
       threadId,
       pool: this.agentBrowser,
       getSecrets: () => this.collectSecretValues(),
+      resolveUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
+      // Read lazily so toggling the setting applies to the next browser_eval call.
+      isEvalEnabled: () => this.settings.enableAgentBrowserEval ?? false,
+      getUrlPolicy: () => ({ allowPrivateNetwork: this.settings.agentBrowserAllowPrivateNetwork ?? false }),
       // Only reached when the pool is capable, i.e. desktop, where fs exists.
       saveSink: this.saveSinkModule().createFsSaveSink(),
     });
@@ -3228,17 +3338,21 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   /**
-   * Show the agent browser preview, in the right sidebar.
+   * Show the agent browser preview as a main-area tab.
    *
-   * Always a sidebar leaf rather than a main-area tab: this is something you
-   * glance at while the agent works, and putting it in the main area would mean
-   * it competes with the conversation for the space you are actually reading.
+   * It used to live in the right sidebar, which is far too small to sign in
+   * through (login handoff needs to click and type into a real page). A pane
+   * still sitting in a sidebar from an earlier version is moved out.
    */
   async activateAgentBrowserView(): Promise<void> {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(AGENT_BROWSER_VIEW_TYPE)[0];
+    if (leaf && leaf.getRoot() !== workspace.rootSplit) {
+      leaf.detach();
+      leaf = undefined as unknown as WorkspaceLeaf;
+    }
     if (!leaf) {
-      leaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+      leaf = workspace.getLeaf('tab');
       await leaf.setViewState({ type: AGENT_BROWSER_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
@@ -3342,6 +3456,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return threadId;
   }
 
+  /** Open Settings → Projects with a blank new-project draft. */
+  openNewProjectSettings(): void {
+    this.settingTab?.showNewProject();
+    const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
+    setting?.open();
+    setting?.openTabById(this.manifest.id);
+  }
+
   async deleteProject(projectId: string): Promise<void> {
     const project = this.manager.getProject(projectId);
     if (!project) return;
@@ -3411,12 +3533,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private agentToolHost(threadId: string): AgentToolHost {
     return {
       permissions: async () => (await this.api?.v1.threads.permissions(threadId)) ?? null,
-      allocateStorage: async (artifactId: string) => {
+      allocateStorage: async (artifactId: string, options?: StorageAllocationOptions) => {
         const api = this.api?.v1;
         if (!api) {
           return { success: false, status: 'unavailable', artifactId, message: 'Agent Threads public API is unavailable.' };
         }
-        return api.artifacts.allocateStorage(threadId, artifactId);
+        return api.artifacts.allocateStorage(threadId, artifactId, options);
       },
     };
   }

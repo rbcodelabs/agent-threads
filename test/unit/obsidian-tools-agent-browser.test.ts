@@ -84,6 +84,9 @@ function fakeBrowser(overrides: Partial<ThreadBrowser> = {}): ThreadBrowser {
       url: 'https://example.com/', title: 'Example', origin: 'https://example.com',
       epoch: 3, count: 1, truncated: false, snapshot: '- link "Home" [ref=e1]',
     }),
+    console: vi.fn().mockResolvedValue({ url: 'https://example.com/', total: 0, returned: 0, buffered: 0, dropped: 0, content: 'framed' }),
+    network: vi.fn().mockResolvedValue({ url: 'https://example.com/', total: 0, returned: 0, buffered: 0, dropped: 0, content: 'framed' }),
+    evaluate: vi.fn().mockResolvedValue({ url: 'https://example.com/', type: 'number', truncated: false, threw: false, content: 'framed' }),
     ...overrides,
   } as unknown as ThreadBrowser;
 }
@@ -143,6 +146,48 @@ describe('browser_save_page registration', () => {
   });
 });
 
+describe('devtools tools (console / network / eval)', () => {
+  it('console and network are read-only; eval is not (same approval as click/type)', () => {
+    expect(AGENT_BROWSER_READ_ONLY_TOOL_NAMES).toContain('browser_console');
+    expect(AGENT_BROWSER_READ_ONLY_TOOL_NAMES).toContain('browser_network');
+    expect(AGENT_BROWSER_READ_ONLY_TOOL_NAMES).not.toContain('browser_eval');
+    expect(AGENT_BROWSER_TOOL_NAMES).toContain('browser_eval');
+  });
+
+  it('is trusted as a built-in', () => {
+    for (const name of ['browser_console', 'browser_network', 'browser_eval']) {
+      expect(isTrustedBuiltInTool(`mcp__claude_threads__${name}`), name).toBe(true);
+    }
+  });
+
+  it('eval is always registered (so it can explain itself), even though it defaults off', () => {
+    const server = createObsidianMcpServer(makeApp(), { browser: fakeBrowser() }) as unknown as CapturedServer;
+    expect(server.tools.map((t) => t._toolName)).toContain('browser_eval');
+  });
+
+  it('passes console, network and eval arguments through', async () => {
+    const browser = fakeBrowser();
+    const server = createObsidianMcpServer(makeApp(), { browser }) as unknown as CapturedServer;
+    await getTool(server, 'browser_console')._handler({ level: 'error', limit: 5, clear: true });
+    expect(browser.console).toHaveBeenCalledWith({ level: 'error', limit: 5, clear: true });
+    await getTool(server, 'browser_network')._handler({ filter: 'api', limit: 9, failedOnly: true });
+    expect(browser.network).toHaveBeenCalledWith({ filter: 'api', limit: 9, failedOnly: true, clear: undefined });
+    const result = await getTool(server, 'browser_eval')._handler({ expression: 'document.title' });
+    expect(browser.evaluate).toHaveBeenCalledWith('document.title');
+    expect(parse(result)).toMatchObject({ success: true, type: 'number' });
+  });
+
+  it('eval returns the setting-naming error as an isError result when disabled', async () => {
+    const evaluate = vi.fn().mockRejectedValue(
+      new AgentBrowserError({ code: 'capability_unavailable', message: 'browser_eval is disabled. enable X', retryable: false }),
+    );
+    const server = createObsidianMcpServer(makeApp(), { browser: fakeBrowser({ evaluate } as never) }) as unknown as CapturedServer;
+    const result = await getTool(server, 'browser_eval')._handler({ expression: '1' });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(parse(result))).toContain('disabled');
+  });
+});
+
 describe('agent browser tool behaviour', () => {
   it('returns the snapshot and its epoch from navigate', () => {
     const server = createObsidianMcpServer(makeApp(), { browser: fakeBrowser() }) as unknown as CapturedServer;
@@ -172,6 +217,28 @@ describe('agent browser tool behaviour', () => {
     expect(result.content[0].mimeType).toBe('image/png');
     // Base64 of the PNG magic bytes, produced without Node's Buffer.
     expect(result.content[0].data).toBe('iVBORw==');
+  });
+
+  it('save: returns the inline image AND the saved path/size, passing maxWidth and filename through', async () => {
+    const screenshotAndSave = vi.fn().mockResolvedValue({ png: new Uint8Array([137, 80, 78, 71]), path: '/tmp/geode-browser/t1/1-shot.png', bytes: 4 });
+    const screenshot = vi.fn();
+    const server = createObsidianMcpServer(makeApp(), { browser: fakeBrowser({ screenshotAndSave, screenshot } as never) }) as unknown as CapturedServer;
+    const result = await getTool(server, 'browser_screenshot')._handler({ save: true, maxWidth: 640, filename: 'x' });
+    expect(screenshotAndSave).toHaveBeenCalledWith({ maxWidth: 640, filename: 'x' });
+    expect(screenshot).not.toHaveBeenCalled();
+    expect(result.content[0].type).toBe('image');
+    expect(result.content[0].data).toBe('iVBORw==');
+    expect(JSON.parse(result.content[1].text ?? '{}')).toEqual({ success: true, path: '/tmp/geode-browser/t1/1-shot.png', bytes: 4 });
+  });
+
+  it('save: a failure is a value (isError), with no image', async () => {
+    const screenshotAndSave = vi.fn().mockRejectedValue(
+      new AgentBrowserError({ code: 'capability_unavailable', message: 'nope', retryable: false }),
+    );
+    const server = createObsidianMcpServer(makeApp(), { browser: fakeBrowser({ screenshotAndSave } as never) }) as unknown as CapturedServer;
+    const result = await getTool(server, 'browser_screenshot')._handler({ save: true });
+    expect(result.isError).toBe(true);
+    expect(result.content.some((c) => c.type === 'image')).toBe(false);
   });
 
   it('reports a failure as a value, never as a thrown exception', async () => {

@@ -32,12 +32,26 @@ import {
   type RawStashMeta,
   type SaveFormat,
 } from './agentBrowserScript';
-import { frameUntrusted, matchesKnownSecret, stripInvisible } from './agentBrowserSanitize';
+import { VmLoopbackError, type VmUrlResolution } from '../vmPortForward';
+import { containsKnownSecret, frameUntrusted, matchesKnownSecret, stripInvisible } from './agentBrowserSanitize';
 import {
+  buildEvalScript,
+  buildNetworkReadScript,
+  findPolicyViolationInExpression,
+  normalizeNetworkEntries,
+  selectNetworkEntries,
+  type ConsoleLevel,
+  type RawEvalResult,
+  type RawNetworkLog,
+} from './agentBrowserDevtools';
+import {
+  MAX_EVAL_EXPRESSION_CHARS,
+  MAX_NETWORK_URL_CHARS,
   MAX_SAVE_CHARS,
   MAX_SAVED_FILES_PER_THREAD,
   MAX_SNAPSHOT_CHARS,
   SAVE_CHUNK_CHARS,
+  type UrlPolicyOptions,
 } from './agentBrowserPolicy';
 
 /**
@@ -50,6 +64,8 @@ export interface SaveSink {
   resolvePath(threadId: string, name: string): string;
   /** Write a chunk, creating the file (and its directory) unless `append`. */
   write(path: string, chunk: string, append: boolean): Promise<void>;
+  /** Write binary data (a screenshot), creating the file and directory. Absent = binary saves unavailable. */
+  writeBytes?(path: string, bytes: Uint8Array): Promise<void>;
   /** Paths of the thread's saved files, oldest first. */
   list(threadId: string): Promise<string[]>;
   /** Delete one saved file. Missing files are not an error. */
@@ -107,7 +123,35 @@ export interface ThreadBrowserOptions {
   saveSink?: SaveSink;
   /** Injected so saved filenames are deterministic in tests. */
   nowMs?: () => number;
+  /**
+   * Maps a URL the agent asked for to the one the HOST browser should load.
+   * Supplied for threads with a sandbox container, where `localhost` means the
+   * container, not the Mac (see vmPortForward.ts). Absent = no mapping.
+   */
+  resolveUrl?: (url: string) => Promise<VmUrlResolution>;
+  /** Read live (not captured) so toggling the setting applies to the next call. Absent = eval disabled. */
+  isEvalEnabled?: () => boolean;
+  /** URL policy applied to literal URLs in eval expressions. Absent = defaults (private network refused). */
+  getUrlPolicy?: () => UrlPolicyOptions;
 }
+
+export const EVAL_DISABLED_MESSAGE =
+  'browser_eval is disabled. Ask the user to enable "Allow agents to evaluate JavaScript in the browser" under Settings > Tools > Agent browser (setting: enableAgentBrowserEval).';
+
+export interface ConsoleToolResult {
+  url: string;
+  total: number;
+  returned: number;
+  buffered: number;
+  dropped: number;
+  content: string;
+}
+
+export interface NetworkToolResult extends ConsoleToolResult {}
+
+export type EvalToolResult =
+  | { url: string; type: string; truncated: boolean; threw: false; content: string }
+  | { url: string; type: 'exception'; truncated: false; threw: true; content: string };
 
 export class ThreadBrowser {
   readonly threadId: string;
@@ -117,6 +161,9 @@ export class ThreadBrowser {
   private readonly nowMs: () => number;
   private readonly saveSink: SaveSink | undefined;
   private saveSeq = 0;
+  private readonly resolveUrl: ((url: string) => Promise<VmUrlResolution>) | undefined;
+  private readonly isEvalEnabled: () => boolean;
+  private readonly getUrlPolicy: () => UrlPolicyOptions;
 
   /** The guest these refs belong to. A new guest invalidates everything. */
   private boundGuest: AgentBrowserGuest | null = null;
@@ -130,11 +177,48 @@ export class ThreadBrowser {
     this.nowIso = options.nowIso ?? (() => new Date().toISOString());
     this.nowMs = options.nowMs ?? (() => Date.now());
     this.saveSink = options.saveSink;
+    this.resolveUrl = options.resolveUrl;
+    this.isEvalEnabled = options.isEvalEnabled ?? (() => false);
+    this.getUrlPolicy = options.getUrlPolicy ?? (() => ({}));
   }
 
   /** Whether browser_save_page can work: only when the host supplied a file sink. */
   get canSavePages(): boolean {
     return this.saveSink !== undefined;
+  }
+
+  /** Whether browser_screenshot can save to disk: needs a sink that can write binary. */
+  get canSaveScreenshots(): boolean {
+    return typeof this.saveSink?.writeBytes === 'function';
+  }
+
+  /**
+   * Capture a screenshot (overlay included, `maxWidth` honoured) and also write
+   * the PNG to this thread's scratch directory, using the same filename
+   * sanitising, unique prefix and retention as saved pages. The capture goes
+   * through the guest like any screenshot, so it is refused while a person has
+   * taken over, and nothing is written if it fails.
+   */
+  async screenshotAndSave(options: { maxWidth?: number; filename?: string } = {}): Promise<{ png: Uint8Array; path: string; bytes: number }> {
+    const sink = this.saveSink;
+    if (!sink || typeof sink.writeBytes !== 'function') {
+      throw new AgentBrowserError({
+        code: 'capability_unavailable',
+        message: 'Saving screenshots to disk is not available in this environment.',
+        retryable: false,
+      });
+    }
+    const png = await this.screenshot(options.maxWidth);
+    const base = sanitizeSaveFilename(options.filename, 'screenshot').replace(/\.[^.]*$/, '') || 'screenshot';
+    const path = sink.resolvePath(this.threadId, this.uniqueSaveName(`${base}.png`));
+    try {
+      await sink.writeBytes(path, png);
+    } catch (error) {
+      await sink.remove(path).catch(() => undefined);
+      throw error;
+    }
+    await this.pruneSavedFiles(sink);
+    return { png, path, bytes: png.length };
   }
 
   /**
@@ -151,10 +235,32 @@ export class ThreadBrowser {
     return guest;
   }
 
-  async navigate(url: string): Promise<SnapshotResult> {
+  async navigate(url: string): Promise<SnapshotResult & { requestedUrl?: string; note?: string }> {
+    const resolution = await this.resolveForHost(url);
     const guest = await this.guest();
+    if (resolution.kind === 'forwarded') {
+      await guest.navigate(resolution.url);
+      return { ...(await this.snapshotWith(guest)), requestedUrl: resolution.requestedUrl, note: resolution.note };
+    }
     await guest.navigate(url);
     return this.snapshotWith(guest);
+  }
+
+  private async resolveForHost(url: string): Promise<VmUrlResolution> {
+    if (!this.resolveUrl) return { kind: 'passthrough' };
+    try {
+      return await this.resolveUrl(url);
+    } catch (error) {
+      if (error instanceof VmLoopbackError) {
+        throw new AgentBrowserError({
+          code: 'operation_failed',
+          message: error.message,
+          retryable: false,
+          hint: error.hint,
+        });
+      }
+      throw error;
+    }
   }
 
   /**
@@ -308,9 +414,11 @@ export class ThreadBrowser {
   private saveFileName(requested: string | undefined, format: SaveFormat, contentType: string): string {
     const base = sanitizeSaveFilename(requested, 'page');
     const ext = format === 'html' ? 'html' : /json/i.test(contentType ?? '') ? 'json' : 'txt';
-    const named = base.includes('.') ? base : `${base}.${ext}`;
-    // Fixed-width timestamp then a counter, so names sort oldest-first and
-    // repeated saves never collide.
+    return this.uniqueSaveName(base.includes('.') ? base : `${base}.${ext}`);
+  }
+
+  /** Fixed-width timestamp then a counter, so names sort oldest-first and repeated saves never collide. */
+  private uniqueSaveName(named: string): string {
     this.saveSeq += 1;
     const stamp = String(this.nowMs()).padStart(14, '0');
     return `${stamp}-${String(this.saveSeq).padStart(3, '0')}-${named}`;
@@ -326,6 +434,134 @@ export class ThreadBrowser {
     } catch {
       // Housekeeping only; a failure here must not fail a save that succeeded.
     }
+  }
+
+  /**
+   * Buffered console output for the current page, framed as untrusted: log text
+   * is page-authored. Read-only; the buffer resets on navigation.
+   */
+  async console(options: { level?: ConsoleLevel; limit?: number; clear?: boolean } = {}): Promise<ConsoleToolResult> {
+    const guest = await this.guest();
+    const result = await guest.readConsole(options);
+    const url = hostUrl(result.url);
+    const origin = originOf(url);
+    return {
+      url,
+      total: result.matched,
+      returned: result.entries.length,
+      buffered: result.buffered,
+      dropped: result.dropped,
+      content: frameUntrusted(JSON.stringify(result.entries, null, 2), {
+        origin,
+        url,
+        retrievedAt: this.nowIso(),
+        truncated: result.matched > result.entries.length,
+      }),
+    };
+  }
+
+  /**
+   * Buffered network activity for the current page (no headers, no bodies),
+   * framed as untrusted. The log is read from a hook living in the page, so it
+   * is validated and re-capped here; see agentBrowserDevtools.ts for its limits.
+   */
+  async network(options: { filter?: string; limit?: number; failedOnly?: boolean; clear?: boolean } = {}): Promise<NetworkToolResult> {
+    const guest = await this.guest();
+    const raw = (await guest.runScript(buildNetworkReadScript(guest.networkKey, options.clear === true))) as RawNetworkLog | null;
+    if (!raw || typeof raw !== 'object' || !Array.isArray(raw.entries)) {
+      throw new AgentBrowserError({
+        code: 'script_timeout',
+        message: 'The page did not return its network log.',
+        retryable: true,
+      });
+    }
+    // URL and origin come from the webview, never from the page's own return value.
+    const url = hostUrl(guest.currentUrl());
+    const origin = originOf(url);
+    const dropped = typeof raw.dropped === 'number' && Number.isFinite(raw.dropped) ? Math.max(0, Math.floor(raw.dropped)) : 0;
+    const selected = selectNetworkEntries(normalizeNetworkEntries(raw.entries, this.nowMs), options, dropped);
+    return {
+      url,
+      total: selected.matched,
+      returned: selected.entries.length,
+      buffered: selected.buffered,
+      dropped: selected.dropped,
+      content: frameUntrusted(JSON.stringify(selected.entries, null, 2), {
+        origin,
+        url,
+        retrievedAt: this.nowIso(),
+        truncated: selected.matched > selected.entries.length,
+      }),
+    };
+  }
+
+  /**
+   * Evaluate an expression in the page. Off unless the user enabled it. Both the
+   * value and any thrown error are page-influenced, so both are framed as
+   * untrusted data. Literal URLs in the expression face the same URL policy as
+   * navigation (a tripwire, not a boundary; see findPolicyViolationInExpression).
+   */
+  async evaluate(expression: string): Promise<EvalToolResult> {
+    if (!this.isEvalEnabled()) {
+      throw new AgentBrowserError({
+        code: 'capability_unavailable',
+        message: EVAL_DISABLED_MESSAGE,
+        retryable: false,
+        hint: 'Turn on "Allow agents to evaluate JavaScript in the browser" in the plugin settings, then call browser_eval again.',
+      });
+    }
+    if (typeof expression !== 'string' || !expression.trim()) {
+      throw new AgentBrowserError({ code: 'operation_failed', message: 'No expression was supplied.', retryable: false });
+    }
+    if (expression.length > MAX_EVAL_EXPRESSION_CHARS) {
+      throw new AgentBrowserError({
+        code: 'operation_failed',
+        message: `The expression is ${expression.length} characters; the limit is ${MAX_EVAL_EXPRESSION_CHARS}.`,
+        retryable: false,
+      });
+    }
+    if (containsKnownSecret(expression, this.getSecrets())) {
+      throw new AgentBrowserError({
+        code: 'not_actionable',
+        message: 'Refusing to evaluate a stored secret in a web page.',
+        retryable: false,
+      });
+    }
+    const violation = findPolicyViolationInExpression(expression, this.getUrlPolicy());
+    if (violation) {
+      throw new AgentBrowserError({ code: 'navigation_blocked', message: violation, retryable: false });
+    }
+    const guest = await this.guest();
+    const raw = (await guest.runScript(buildEvalScript(expression))) as RawEvalResult | null;
+    if (!raw || typeof raw !== 'object') {
+      throw new AgentBrowserError({
+        code: 'script_timeout',
+        message: 'The page did not return a result for the expression.',
+        retryable: true,
+      });
+    }
+    // URL and origin come from the webview, never from the page's own return value.
+    const url = hostUrl(guest.currentUrl());
+    const framing = { origin: originOf(url), url, retrievedAt: this.nowIso() };
+    if (raw.ok === true) {
+      const type = typeof raw.type === 'string' ? stripInvisible(raw.type).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 20) : '';
+      return {
+        url,
+        type: type || 'unknown',
+        truncated: raw.truncated === true,
+        threw: false,
+        content: frameUntrusted(typeof raw.json === 'string' ? raw.json : '', { ...framing, truncated: raw.truncated === true }),
+      };
+    }
+    const errName = typeof (raw as { name?: unknown }).name === 'string' ? (raw as { name: string }).name : 'Error';
+    const errMessage = typeof (raw as { message?: unknown }).message === 'string' ? (raw as { message: string }).message : '';
+    return {
+      url,
+      type: 'exception',
+      truncated: false,
+      threw: true,
+      content: frameUntrusted(`${errName}: ${errMessage}`, framing),
+    };
   }
 
   async click(ref: string, epoch: number): Promise<ActResult> {
@@ -375,6 +611,8 @@ export class ThreadBrowser {
             : 'Take a fresh snapshot; the page has changed since these refs were produced.',
       });
     }
+    // Show the agent's "hand" in the next frames (best effort; presentation only).
+    if (raw.pointer) guest.markAgentPointer(raw.pointer.x, raw.pointer.y, request.kind === 'click');
     return { url: raw.url, title: stripInvisible(raw.title) };
   }
 
@@ -400,4 +638,17 @@ export class ThreadBrowser {
       threadHasSession: this.pool.peek(this.threadId) !== null,
     };
   }
+}
+
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '';
+  }
+}
+
+/** A host-read URL, capped and cleaned before it is shown to the agent or used as a frame attribute. */
+function hostUrl(url: string): string {
+  return stripInvisible(String(url)).slice(0, MAX_NETWORK_URL_CHARS);
 }

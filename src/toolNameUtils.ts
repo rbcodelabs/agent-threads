@@ -72,7 +72,13 @@ export function isBrowserTool(raw: string): boolean {
  *       mcp__github__create_issue           → "create issue"
  *       Read                                → "Read"
  */
+/** Pseudo tool name used for the cross-project spawn approval (mirrors CROSS_PROJECT_SPAWN_TOOL;
+ *  duplicated because this module must stay import-free). */
+const CROSS_PROJECT_SPAWN_RAW = 'threads_create:cross-project';
+const CROSS_PROJECT_SPAWN_LABEL = 'Spawn thread in another project';
+
 export function formatToolName(raw: string): string {
+  if (raw === CROSS_PROJECT_SPAWN_RAW) return CROSS_PROJECT_SPAWN_LABEL;
   return normalizeToolName(raw).display;
 }
 
@@ -129,6 +135,7 @@ export function getToolIcon(raw: string): string {
     case 'exit_worktree':        return 'git-branch';
     case 'enter_vm':             return 'box';
     case 'vm_exec':              return 'terminal';
+    case 'host_exec':            return 'square-terminal';
     case 'exit_vm':              return 'square-x';
     case 'get_open_tabs':        return 'layout-panel-top';
     case 'ScheduleWakeup':       return 'alarm-clock';
@@ -142,6 +149,9 @@ export function getToolIcon(raw: string): string {
     case 'browser_close':        return 'circle-x';
     case 'browser_resize':       return 'maximize';
     case 'browser_save_page':    return 'save';
+    case 'browser_console':      return 'terminal';
+    case 'browser_network':      return 'network';
+    case 'browser_eval':         return 'braces';
     default:               return 'wrench';
   }
 }
@@ -173,7 +183,7 @@ const CANONICAL_BUILT_IN_TOOLS = new Set([
   // exposed under the legacy obsidian_ names and need no compatibility alias.
   'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
   'browser_type', 'browser_screenshot', 'browser_status', 'browser_close',
-  'browser_resize', 'browser_save_page',
+  'browser_resize', 'browser_save_page', 'browser_console', 'browser_network', 'browser_eval',
 ]);
 
 /** True only for a known first-party tool on the canonical or compatibility server. */
@@ -185,6 +195,55 @@ export function isTrustedBuiltInTool(raw: string): boolean {
     return false;
   }
   return CANONICAL_BUILT_IN_TOOLS.has(raw) || LEGACY_BUILT_IN_TOOLS.has(raw);
+}
+
+/**
+ * Tool name `host_exec` uses on the permission card. Cards for this name are
+ * always shown (permission mode, auto-approve, trusted-tool and persisted
+ * "Always Allow" shortcuts are all ignored) and offer Allow once / Deny only.
+ */
+export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
+
+/**
+ * Trusted built-ins that still need a card on every call, under any host
+ * prefix. `browser_eval` runs agent-authored JavaScript in a page whose content
+ * the agent also reads, so neither "trusted built-in" nor a persisted
+ * "Always Allow" may stand in for the user seeing the expression.
+ */
+const PER_CALL_APPROVAL_TOOL_KEYS: ReadonlySet<string> = new Set(['browser_eval']);
+
+/** True when each call must be approved on a card, whatever shortcuts exist. */
+export function requiresPerCallApproval(toolName: string): boolean {
+  return PER_CALL_APPROVAL_TOOL_KEYS.has(toolKey(toolName));
+}
+
+/** False for requests that must be decided afresh every time. */
+export function canAlwaysAllow(toolName: string): boolean {
+  return toolName !== HOST_EXEC_PERMISSION_TOOL && !requiresPerCallApproval(toolName);
+}
+
+/**
+ * Detail text for a harness permission request. Per-call-approval tools show
+ * their complete input (the SDK description would hide the expression) up to a
+ * generous cap; everything else keeps the SDK-provided description first.
+ */
+export function buildPermissionDetail(
+  toolName: string,
+  input: unknown,
+  opts: { description?: string; decisionReason?: string; blockedPath?: string },
+): string {
+  if (requiresPerCallApproval(toolName)) return JSON.stringify(input).slice(0, 20000);
+  return opts.description ?? opts.decisionReason ?? opts.blockedPath ?? JSON.stringify(input).slice(0, 4000);
+}
+
+/**
+ * True when a permission request may be resolved without showing a card:
+ * first-party tools or a persisted "Always Allow". Requests that cannot be
+ * always-allowed (host_exec) are never pre-approved, whatever the lists say.
+ */
+export function isPermissionPreApproved(toolName: string, alwaysAllowedTools: readonly string[]): boolean {
+  if (!canAlwaysAllow(toolName)) return false;
+  return isTrustedBuiltInTool(toolName) || alwaysAllowedTools.includes(toolName);
 }
 
 /**
@@ -237,6 +296,9 @@ export function getActivityKind(raw: string): ActivityKind {
     case 'browser_close':
     case 'browser_resize':
     case 'browser_save_page':
+    case 'browser_console':
+    case 'browser_network':
+    case 'browser_eval':
       return 'researching';
     case 'ToolSearch':
     case 'Agent':

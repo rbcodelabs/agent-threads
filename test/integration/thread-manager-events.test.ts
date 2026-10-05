@@ -402,6 +402,200 @@ describe('permission handler', () => {
 
     expect(result).toBe(false);
   });
+
+  describe('concurrent requests on one thread', () => {
+    const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+
+    it('serializes: only the first is pending; resolving it surfaces the second', async () => {
+      const manager = makeManager();
+      const thread = manager.createThread('T', os.tmpdir());
+      const asked: string[] = [];
+      const responders: Array<(allow: boolean) => void> = [];
+      manager.permissionHandler = (_id, _tool, detail) => new Promise<boolean>((resolve) => {
+        asked.push(detail);
+        responders.push(resolve);
+      });
+      const events: ThreadEvent[] = [];
+      manager.subscribe((_, e) => events.push(e));
+
+      await manager.sendMessage(thread.id, 'Hi');
+      const first = mock.callbacks!.onPermissionRequest('Read', 'a.md');
+      const second = mock.callbacks!.onPermissionRequest('Read', 'b.md');
+      await flush();
+
+      expect(asked).toEqual(['a.md']);
+      expect(manager.getPendingPermission(thread.id)).toEqual({ toolName: 'Read', detail: 'a.md' });
+      expect(events.filter(e => e.type === 'permission_request')).toHaveLength(1);
+
+      responders[0](true);
+      await expect(first).resolves.toBe(true);
+      await flush();
+
+      expect(asked).toEqual(['a.md', 'b.md']);
+      expect(manager.getPendingPermission(thread.id)).toEqual({ toolName: 'Read', detail: 'b.md' });
+
+      responders[1](false);
+      await expect(second).resolves.toBe(false);
+      expect(manager.hasPendingPermission(thread.id)).toBe(false);
+      expect(events.filter(e => e.type === 'permission_request')).toHaveLength(2);
+      expect(events.filter(e => e.type === 'permission_resolved')).toHaveLength(2);
+      driveResponse('Done');
+    });
+
+    it('a rejected earlier request does not block the next one', async () => {
+      const manager = makeManager();
+      const thread = manager.createThread('T', os.tmpdir());
+      let call = 0;
+      manager.permissionHandler = async () => {
+        call += 1;
+        if (call === 1) throw new Error('boom');
+        return true;
+      };
+
+      await manager.sendMessage(thread.id, 'Hi');
+      const first = mock.callbacks!.onPermissionRequest('Read', 'a.md');
+      const second = mock.callbacks!.onPermissionRequest('Read', 'b.md');
+
+      await expect(first).rejects.toThrow('boom');
+      await expect(second).resolves.toBe(true);
+      expect(manager.hasPendingPermission(thread.id)).toBe(false);
+      driveResponse('Done');
+    });
+
+    it('denies a queued request whose session generation went stale while waiting', async () => {
+      const manager = makeManager();
+      const thread = manager.createThread('T', os.tmpdir());
+      const asked: string[] = [];
+      let respondFirst!: (allow: boolean) => void;
+      manager.permissionHandler = (_id, _tool, detail) => new Promise<boolean>((resolve) => {
+        asked.push(detail);
+        if (asked.length === 1) respondFirst = resolve;
+      });
+
+      await manager.sendMessage(thread.id, 'Hi');
+      const first = mock.callbacks!.onPermissionRequest('Read', 'a.md');
+      const second = mock.callbacks!.onPermissionRequest('Read', 'b.md');
+      await flush();
+
+      thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
+      respondFirst(true);
+      await first;
+
+      await expect(second).resolves.toBe(false);
+      expect(asked).toEqual(['a.md']);
+      expect(manager.hasPendingPermission(thread.id)).toBe(false);
+    });
+  });
+});
+
+describe('AskUserQuestion handler', () => {
+  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  const q = (text: string) => [{ question: text, header: 'h', options: [{ label: 'a', description: '' }], multiSelect: false }] as any;
+
+  it('serializes concurrent questions on one thread', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    const asked: string[] = [];
+    const responders: Array<(a: Record<string, string>) => void> = [];
+    manager.questionHandler = (_id, questions) => new Promise((resolve) => {
+      asked.push(questions[0].question);
+      responders.push(resolve);
+    });
+
+    await manager.sendMessage(thread.id, 'Hi');
+    const first = mock.callbacks!.onAskUserQuestion(q('one'));
+    const second = mock.callbacks!.onAskUserQuestion(q('two'));
+    await flush();
+
+    expect(asked).toEqual(['one']);
+    expect(thread.pendingQuestions?.[0].question).toBe('one');
+
+    responders[0]({ one: 'a' });
+    await expect(first).resolves.toEqual({ one: 'a' });
+    await flush();
+
+    expect(asked).toEqual(['one', 'two']);
+    expect(thread.pendingQuestions?.[0].question).toBe('two');
+
+    responders[1]({ two: 'b' });
+    await expect(second).resolves.toEqual({ two: 'b' });
+    expect(thread.pendingQuestions).toBeUndefined();
+    driveResponse('Done');
+  });
+
+  it('a rejected earlier question does not block the next one', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    let call = 0;
+    manager.questionHandler = async () => {
+      call += 1;
+      if (call === 1) throw new Error('boom');
+      return { ok: 'yes' };
+    };
+
+    await manager.sendMessage(thread.id, 'Hi');
+    const first = mock.callbacks!.onAskUserQuestion(q('one'));
+    const second = mock.callbacks!.onAskUserQuestion(q('two'));
+    await expect(first).rejects.toThrow('boom');
+    await expect(second).resolves.toEqual({ ok: 'yes' });
+    driveResponse('Done');
+  });
+
+  it('interrupt releases the active question and drops queued ones without prompting', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    const asked: string[] = [];
+    manager.questionHandler = (id, questions) => new Promise((resolve) => {
+      asked.push(questions[0].question);
+      manager.registerQuestionResolver(id, resolve);
+    });
+
+    await manager.sendMessage(thread.id, 'Hi');
+    const first = mock.callbacks!.onAskUserQuestion(q('one'));
+    const second = mock.callbacks!.onAskUserQuestion(q('two'));
+    await flush();
+
+    await manager.interrupt(thread.id);
+    await expect(first).resolves.toEqual({});
+    await expect(second).resolves.toEqual({});
+    expect(asked).toEqual(['one']);
+    expect(thread.pendingQuestions).toBeUndefined();
+  });
+});
+
+describe('host_exec approval card', () => {
+  const request = { command: 'ls -la', cwd: os.tmpdir(), reason: 'inspect', timeoutSeconds: 60 };
+
+  it('prompts on the thread card even in bypassPermissions with host_exec always-allowed', async () => {
+    const manager = makeManager({ permissionMode: 'bypassPermissions', alwaysAllowedTools: ['host_exec'] });
+    const thread = manager.createThread('T', os.tmpdir());
+    thread.permissionMode = 'bypassPermissions';
+    const events: ThreadEvent[] = [];
+    manager.subscribe((_id, e) => events.push(e));
+    let respond!: (allow: boolean) => void;
+    const handler = vi.fn((_id: string, _tool: string, _detail: string) => new Promise<boolean>((resolve) => { respond = resolve; }));
+    manager.permissionHandler = handler;
+
+    const approval = manager.requestHostExecApproval(thread.id, request);
+    await Promise.resolve();
+
+    expect(handler).toHaveBeenCalledWith(thread.id, 'host_exec', expect.stringContaining('"command":"ls -la"'));
+    expect(manager.getPendingPermission(thread.id)?.toolName).toBe('host_exec');
+    expect(events).toContainEqual(expect.objectContaining({ type: 'permission_request', toolName: 'host_exec' }));
+
+    respond(true);
+    await expect(approval).resolves.toBe(true);
+    expect(manager.hasPendingPermission(thread.id)).toBe(false);
+    expect(events).toContainEqual({ type: 'permission_resolved' });
+  });
+
+  it('resolves false when the user denies', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    manager.permissionHandler = async () => false;
+    await expect(manager.requestHostExecApproval(thread.id, request)).resolves.toBe(false);
+    expect(manager.hasPendingPermission(thread.id)).toBe(false);
+  });
 });
 
 describe('tool use events', () => {

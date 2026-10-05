@@ -37,8 +37,10 @@ import {
 import {
   SandboxImageAbortedError,
   SandboxImageError,
+  SANDBOX_CODING_IMAGE,
   ensureSandboxImages,
   getSandboxImageStatus,
+  removeSandboxImages,
   type EnsureSandboxImagesOptions,
   type EnsureSandboxImagesResult,
   type SandboxImageStatus,
@@ -71,6 +73,8 @@ export interface SandboxSetupStatus {
   images: {
     base: SandboxImageState<SandboxImageStatus['base']>;
     harness: SandboxImageState<SandboxImageStatus['harness']>;
+    /** Installed versions / missing tools, when the images could be inspected. */
+    detail?: SandboxImageStatus['detail'];
   };
 }
 
@@ -135,6 +139,7 @@ export interface SandboxSetupDeps {
   installManagedRuntime?: typeof installManagedRuntime;
   startRuntime?: typeof startRuntime;
   getSandboxImageStatus?: typeof getSandboxImageStatus;
+  removeSandboxImages?: typeof removeSandboxImages;
   ensureSandboxImages?: (opts: EnsureSandboxImagesOptions) => Promise<EnsureSandboxImagesResult>;
   /** Called lazily, once per operation that needs it, never before the runtime step has finished. */
   createRunner?: () => VmCommandRunner;
@@ -146,6 +151,7 @@ interface ResolvedDeps {
   installManagedRuntime: typeof installManagedRuntime;
   startRuntime: typeof startRuntime;
   getSandboxImageStatus: typeof getSandboxImageStatus;
+  removeSandboxImages: typeof removeSandboxImages;
   ensureSandboxImages: (opts: EnsureSandboxImagesOptions) => Promise<EnsureSandboxImagesResult>;
   createRunner: () => VmCommandRunner;
 }
@@ -157,6 +163,7 @@ function resolveDeps(deps: SandboxSetupDeps = {}): ResolvedDeps {
     installManagedRuntime: deps.installManagedRuntime ?? installManagedRuntime,
     startRuntime: deps.startRuntime ?? startRuntime,
     getSandboxImageStatus: deps.getSandboxImageStatus ?? getSandboxImageStatus,
+    removeSandboxImages: deps.removeSandboxImages ?? removeSandboxImages,
     ensureSandboxImages: deps.ensureSandboxImages ?? ensureSandboxImages,
     createRunner: deps.createRunner ?? (() => createDefaultVmCommandRunner()),
   };
@@ -447,4 +454,47 @@ async function execute(params: {
     result.builtHarness = ensured.builtHarness;
   }
   return result;
+}
+
+// ── Reset ────────────────────────────────────────────────────────────────────
+
+/** What a reset will do, for the confirmation dialog. */
+export function describeReset(harnessImage: string = DEFAULT_HARNESS_VM_IMAGE): string {
+  return `This removes the local sandbox images (${SANDBOX_CODING_IMAGE} and ${harnessImage}) and downloads and `
+    + 'rebuilds them from scratch (the base image is several hundred MB). Stop any running sandbox VMs first, '
+    + 'otherwise the images cannot be removed. Threads started afterwards use the fresh image. Continue?';
+}
+
+/**
+ * Removes the local coding + harness images, then runs the normal setup so
+ * they are pulled/rebuilt from scratch. Fails up front, before removing
+ * anything, if a setup run is already in flight; if removal fails (an image in
+ * use by a running VM) it stops with that error rather than rebuilding on top
+ * of a half-removed state. When the runtime is not installed/running there is
+ * nothing to remove and this is just a normal setup.
+ */
+export async function resetSandbox(opts: RunSandboxSetupOptions = {}): Promise<SandboxSetupResult> {
+  const harnessImage = opts.harnessImage ?? DEFAULT_HARNESS_VM_IMAGE;
+  if (isSandboxSetupRunning()) {
+    throw new SandboxSetupError('check', 'A sandbox setup is already running. Wait for it to finish, then reset.');
+  }
+  const d = resolveDeps(opts.deps);
+  const { status } = await readStatus({ harnessImage, deps: opts.deps });
+  if (!status.supported) throw new SandboxSetupError('check', status.reason ?? 'This Mac cannot run sandboxed VMs.');
+  if (status.runtime === 'installed' && status.running) {
+    opts.onProgress?.({
+      step: 'images', stepNumber: SANDBOX_SETUP_STEP_NUMBER.images, totalSteps: SANDBOX_SETUP_TOTAL_STEPS,
+      label: 'Removing the old sandbox images',
+    });
+    try {
+      await d.removeSandboxImages({ runner: d.createRunner(), harnessImage, signal: opts.signal });
+    } catch (err) {
+      if (opts.signal?.aborted || err instanceof SandboxImageAbortedError) throw new SandboxSetupAbortedError();
+      if (err instanceof VmUnavailableError) {
+        throw new SandboxSetupError('images', 'The `container` command could not be run. Reopen Obsidian and try again.');
+      }
+      throw new SandboxSetupError('images', err instanceof Error ? err.message : String(err));
+    }
+  }
+  return runSandboxSetup(opts);
 }

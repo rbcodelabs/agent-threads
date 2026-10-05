@@ -1,12 +1,15 @@
 import { isAgentHarness } from './types';
+import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
+import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifactStorage';
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState } from './types';
 import { serializeKey } from './stt';
 import { debugLog, setDebugLogging } from './logger';
 import { telemetry } from './telemetry';
 import { secretStorageKey } from './secretUtils';
+import { describeSkillSourceCount } from './skillSourceMenu';
 import type { KanbanView } from './KanbanView';
 import type { AgentDashboard } from './AgentDashboard';
 import type { McpServerEntry } from './mcpServerStore';
@@ -14,12 +17,16 @@ import type { McpServerEntry } from './mcpServerStore';
 // (pure JS, no Node built-ins), so this adds nothing to module-init that
 // Obsidian Mobile's require() interceptor would return null for.
 // See test/unit/bundle-safety.test.ts.
-import { mcpRegistrationSchema } from './mcpServerStore';
+import { mcpRegistrationSchema, listMcpServers, deleteMcpServer, findUnresolvedPlaceholders } from './mcpServerStore';
+import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
+import type { OAuthMcpPreset } from './oauthMcpPresets';
 import { classifyScheduledItems, describeScheduledExecution, formatNextOccurrence } from './scheduledWorkView';
 import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
-import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
+import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY, MAX_VM_CPUS, resolveVmCpus, resolveVmMemory } from './sandboxVm';
+import { describeReset, getSandboxSetupStatus, resetSandbox, runSandboxSetup } from './sandboxSetup';
 import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
 import { promptConfirm } from './confirmModal';
+import { formatToolName } from './toolNameUtils';
 
 // View-type string constants, mirrored as local literals (see main.ts) so referencing
 // them never triggers a static import of the desktop-only KanbanView/AgentDashboard
@@ -40,6 +47,101 @@ const AGENT_VIEW_TYPE = 'claude-threads:agents';
 function formatOAuthDuration(ms: number): string {
   const totalMinutes = Math.max(0, Math.round(ms / 60_000));
   return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
+}
+
+/**
+ * The one place an OAuth MCP connection is attempted from the settings UI: the
+ * Add MCP server modal and the Quick connect rows both go through it, so they
+ * validate against the shared schema and call `OAuthMcpRegistry.registerServer()`
+ * identically. The typed secret is passed separately because
+ * `mcpRegistrationSchema` rejects literal secrets (it is for the agent tool
+ * path, whose arguments are logged); the registry puts it in the OS keychain.
+ */
+export async function connectOAuthMcpServer(
+  registry: NonNullable<ClaudeThreadsPlugin['oauthMcpRegistry']>,
+  entry: { name: string; url: string; scopes?: string; tools?: { allow?: string[]; deny?: string[] }; clientId?: string; authorizationServerUrl?: string; redirectUri?: string; grantType?: 'client_credentials'; audience?: string },
+  clientSecret?: string,
+): Promise<{ success: boolean; message: string }> {
+  const parsed = mcpRegistrationSchema.safeParse({ ...entry, type: 'oauth' });
+  if (!parsed.success) return { success: false, message: parsed.error.issues[0]?.message ?? 'Invalid OAuth MCP configuration.' };
+  try {
+    return await registry.registerServer({
+      name: entry.name,
+      url: entry.url,
+      scopes: entry.scopes,
+      tools: entry.tools,
+      clientId: entry.clientId,
+      ...(clientSecret ? { clientSecret } : {}),
+      authorizationServerUrl: entry.authorizationServerUrl,
+      redirectUri: entry.redirectUri,
+      grantType: entry.grantType,
+      audience: entry.audience,
+    });
+  } catch (err) {
+    return { success: false, message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Asks for the credentials a no-DCR preset cannot connect without, then hands
+ * them to `onConnect`. Stays open on failure so a typo does not cost the user
+ * the note and setup link.
+ */
+export class OAuthPresetCredentialsModal extends Modal {
+  constructor(
+    app: App,
+    private preset: OAuthMcpPreset,
+    private onConnect: (credentials: { clientId: string; clientSecret?: string }) => Promise<{ success: boolean; message: string }>,
+  ) { super(app); }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl('h2', { text: `Connect ${this.preset.label}` });
+    const note = contentEl.createEl('p', { cls: 'ct-modal-desc' });
+    if (this.preset.notes) note.createEl('span', { text: this.preset.notes + ' ' });
+    if (this.preset.setupUrl) note.createEl('a', { text: 'Create the app', href: this.preset.setupUrl });
+
+    contentEl.createEl('label', { text: 'Client ID (required)', cls: 'ct-modal-label' });
+    const clientIdInput = contentEl.createEl('input', { type: 'text', cls: 'ct-modal-input' });
+    let secretInput: HTMLInputElement | undefined;
+    if (this.preset.requiresClientSecret) {
+      contentEl.createEl('label', { text: 'Client secret (stored in the OS keychain)', cls: 'ct-modal-label' });
+      secretInput = contentEl.createEl('input', { type: 'password', cls: 'ct-modal-input' });
+      secretInput.autocomplete = 'off';
+    }
+    const errorEl = contentEl.createEl('p', { cls: 'ct-modal-error' });
+    errorEl.style.display = 'none';
+    const row = contentEl.createDiv('ct-modal-button-row');
+    const cancelBtn = row.createEl('button', { text: 'Cancel' });
+    cancelBtn.addEventListener('click', () => this.close());
+    const connectBtn = row.createEl('button', { text: 'Connect', cls: 'mod-cta' });
+
+    let connecting = false;
+    const submit = async () => {
+      if (connecting) return;
+      const clientId = clientIdInput.value.trim();
+      const clientSecret = secretInput?.value;
+      const fail = (msg: string) => { errorEl.textContent = msg; errorEl.style.display = ''; };
+      errorEl.style.display = 'none';
+      if (!clientId) { fail('Client ID is required.'); return; }
+      if (this.preset.requiresClientSecret && !clientSecret) { fail('Client secret is required.'); return; }
+      connecting = true;
+      connectBtn.setAttribute('disabled', 'true');
+      connectBtn.textContent = 'Connecting…';
+      const result = await this.onConnect({ clientId, ...(clientSecret ? { clientSecret } : {}) });
+      connecting = false;
+      connectBtn.removeAttribute('disabled');
+      connectBtn.textContent = 'Connect';
+      if (!result.success) { fail(result.message || 'Could not connect this OAuth MCP server.'); return; }
+      this.close();
+    };
+    connectBtn.addEventListener('click', () => { void submit(); });
+    clientIdInput.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Enter') void submit(); });
+    setTimeout(() => clientIdInput.focus(), 50);
+  }
+
+  onClose(): void { this.contentEl.empty(); }
 }
 
 /** Status dot color + human-readable label for one OAuth MCP server row. */
@@ -569,243 +671,6 @@ class PairingModal extends Modal {
   }
 }
 
-/** Modal for adding a new skill source (GitHub or local path). */
-class AddSkillSourceModal extends Modal {
-  private sourceType: 'github' | 'local' = 'github';
-  private contentEl2!: HTMLElement; // content area below type toggle
-
-  constructor(
-    app: App,
-    private plugin: ClaudeThreadsPlugin,
-    private onAdded: () => void,
-  ) {
-    super(app);
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-
-    contentEl.createEl('h2', { text: 'Add skill source' });
-
-    // Type toggle
-    const typeRow = contentEl.createEl('div', { cls: 'ct-modal-type-row' });
-    const githubBtn = typeRow.createEl('button', {
-      cls: 'ct-modal-type-btn' + (this.sourceType === 'github' ? ' ct-modal-type-btn--active' : ''),
-      text: 'GitHub URL',
-    });
-    const localBtn = typeRow.createEl('button', {
-      cls: 'ct-modal-type-btn' + (this.sourceType === 'local' ? ' ct-modal-type-btn--active' : ''),
-      text: 'Local path',
-    });
-
-    this.contentEl2 = contentEl.createEl('div');
-
-    githubBtn.addEventListener('click', () => {
-      this.sourceType = 'github';
-      githubBtn.addClass('ct-modal-type-btn--active');
-      localBtn.removeClass('ct-modal-type-btn--active');
-      this.renderTypeContent();
-    });
-    localBtn.addEventListener('click', () => {
-      this.sourceType = 'local';
-      localBtn.addClass('ct-modal-type-btn--active');
-      githubBtn.removeClass('ct-modal-type-btn--active');
-      this.renderTypeContent();
-    });
-
-    this.renderTypeContent();
-  }
-
-  private renderTypeContent(): void {
-    this.contentEl2.empty();
-
-    if (this.sourceType === 'github') {
-      this.renderGithubForm();
-    } else {
-      this.renderLocalForm();
-    }
-  }
-
-  private renderGithubForm(): void {
-    const el = this.contentEl2;
-
-    el.createEl('p', {
-      cls: 'ct-modal-desc',
-      text: 'Paste a GitHub repository URL. The repo will be cloned inside this vault\'s plugin folder and its skills will be injected into each Claude session automatically.',
-    });
-
-    el.createEl('label', { text: 'GitHub URL', cls: 'ct-modal-label' });
-    const urlInput = el.createEl('input', {
-      type: 'text',
-      placeholder: 'https://github.com/owner/repo',
-      cls: 'ct-modal-input',
-    });
-
-    el.createEl('label', { text: 'Display name (optional)', cls: 'ct-modal-label' });
-    const nameInput = el.createEl('input', {
-      type: 'text',
-      placeholder: 'Auto-detected from plugin.json',
-      cls: 'ct-modal-input',
-    });
-
-    const errorEl = el.createEl('p', { cls: 'ct-modal-error' });
-    errorEl.style.display = 'none';
-
-    const progressEl = el.createEl('p', { cls: 'ct-modal-progress' });
-    progressEl.style.display = 'none';
-
-    const buttonRow = el.createDiv('ct-modal-button-row');
-    const cancelBtn = buttonRow.createEl('button', { text: 'Cancel' });
-    cancelBtn.addEventListener('click', () => this.close());
-    const addBtn = buttonRow.createEl('button', { text: 'Clone & Add', cls: 'mod-cta' });
-
-    const showError = (msg: string) => {
-      errorEl.textContent = msg;
-      errorEl.style.display = '';
-      progressEl.style.display = 'none';
-      addBtn.removeAttribute('disabled');
-    };
-
-    const showProgress = (msg: string) => {
-      progressEl.textContent = msg;
-      progressEl.style.display = '';
-      errorEl.style.display = 'none';
-    };
-
-    const handleAdd = async () => {
-      const rawUrl = urlInput.value.trim();
-      if (!rawUrl) { showError('GitHub URL is required.'); return; }
-
-      // Required lazily (not imported at the top of this file) because
-      // skillManager pulls in Node built-ins, and SettingsTab loads on mobile too.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { parseGithubRepoUrl, addGithubSkillSource } = require('./skillManager') as typeof import('./skillManager');
-
-      const repoUrl = parseGithubRepoUrl(rawUrl);
-      if (!repoUrl) { showError('Please enter a valid GitHub repo URL (e.g. https://github.com/owner/repo).'); return; }
-
-      // Clones live inside the vault's plugin folder, never the home directory.
-      const cloneBase = this.plugin.getSkillSourceCloneBase();
-      if (!cloneBase) {
-        showError('Cannot resolve the vault folder on this platform, so there is nowhere to clone to. Skill sources need a desktop vault on a real filesystem.');
-        return;
-      }
-
-      addBtn.setAttribute('disabled', 'true');
-      showProgress('Cloning repository…');
-
-      try {
-        // Shared with Chief of Staff onboarding: clones non-interactively,
-        // removes a partial clone on failure, and names the source from
-        // plugin.json. A hand-added source keeps its random id.
-        const source: SkillSource = await addGithubSkillSource({
-          repoUrl,
-          cloneBase,
-          displayName: nameInput.value,
-          id: crypto.randomUUID(),
-        });
-        this.plugin.settings.skillSources.push(source);
-        await this.plugin.saveSettings();
-        this.close();
-        this.onAdded();
-      } catch (err) {
-        showError(`Clone failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    };
-
-    addBtn.addEventListener('click', () => void handleAdd());
-    urlInput.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Enter') void handleAdd(); });
-
-    setTimeout(() => urlInput.focus(), 50);
-  }
-
-  private renderLocalForm(): void {
-    const el = this.contentEl2;
-
-    el.createEl('label', { text: 'Name', cls: 'ct-modal-label' });
-    const nameInput = el.createEl('input', {
-      type: 'text',
-      placeholder: 'Agentic PM Playbook',
-      cls: 'ct-modal-input',
-    });
-
-    el.createEl('label', { text: 'Skills path', cls: 'ct-modal-label' });
-    const skillsPathInput = el.createEl('input', {
-      type: 'text',
-      placeholder: '~/projects/my-playbook/skills/',
-      cls: 'ct-modal-input',
-    });
-
-    el.createEl('label', { text: 'Git repo path (optional)', cls: 'ct-modal-label' });
-    const repoPathInput = el.createEl('input', {
-      type: 'text',
-      placeholder: '~/projects/my-playbook/',
-      cls: 'ct-modal-input',
-    });
-
-    const errorEl = el.createEl('p', { cls: 'ct-modal-error' });
-    errorEl.style.display = 'none';
-
-    const buttonRow = el.createDiv('ct-modal-button-row');
-    const cancelBtn = buttonRow.createEl('button', { text: 'Cancel' });
-    cancelBtn.addEventListener('click', () => this.close());
-    const addBtn = buttonRow.createEl('button', { text: 'Add', cls: 'mod-cta' });
-
-    const showError = (msg: string) => {
-      errorEl.textContent = msg;
-      errorEl.style.display = '';
-    };
-
-    const handleAdd = async () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const fsNode = require('fs') as typeof import('fs');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const osNode = require('os') as typeof import('os');
-
-      const name = nameInput.value.trim();
-      const rawSkillsPath = skillsPathInput.value.trim();
-      const rawRepoPath = repoPathInput.value.trim();
-
-      if (!name) { showError('Name must not be empty.'); return; }
-      if (!rawSkillsPath) { showError('Skills path must not be empty.'); return; }
-
-      const expandedSkillsPath = rawSkillsPath.replace(/^~/, osNode.homedir());
-      if (!fsNode.existsSync(expandedSkillsPath)) {
-        showError(`Skills path does not exist: ${expandedSkillsPath}`);
-        return;
-      }
-
-      const source: SkillSource = {
-        id: crypto.randomUUID(),
-        name,
-        type: 'local',
-        skillsPath: rawSkillsPath,
-      };
-      if (rawRepoPath) {
-        source.repoPath = rawRepoPath;
-      }
-
-      this.plugin.settings.skillSources.push(source);
-      await this.plugin.saveSettings();
-      this.close();
-      this.onAdded();
-    };
-
-    addBtn.addEventListener('click', () => void handleAdd());
-
-    const handleEnter = (e: KeyboardEvent) => { if (e.key === 'Enter') void handleAdd(); };
-    nameInput.addEventListener('keydown', handleEnter);
-    skillsPathInput.addEventListener('keydown', handleEnter);
-
-    setTimeout(() => nameInput.focus(), 50);
-  }
-
-  onClose(): void {
-    this.contentEl.empty();
-  }
-}
-
 /**
  * Add/edit modal for one entry in `PluginSettings.mcpServers` (this plugin's
  * own data.json). Operates on the raw, unresolved config — ${VAR} placeholders
@@ -1130,7 +995,6 @@ export class McpServerModal extends Modal {
     };
     grantSelect.addEventListener('change', applyGrantVisibility);
     applyGrantVisibility();
-
     const errorEl = el.createEl('p', { cls: 'ct-modal-error' });
     errorEl.style.display = 'none';
     const statusEl = el.createEl('p', { cls: 'ct-modal-desc' });
@@ -1200,24 +1064,8 @@ export class McpServerModal extends Modal {
         : 'Waiting for you to finish signing in…';
       statusEl.style.display = '';
 
-      let result: { success: boolean; message: string };
-      try {
-        result = await registry.registerServer({
-          name: entry.name,
-          url: entry.url,
-          scopes: entry.scopes,
-          tools: entry.tools,
-          clientId: entry.clientId,
-          // Read here rather than from `entry` — see the input's declaration.
-          ...(clientSecretInput.value ? { clientSecret: clientSecretInput.value } : {}),
-          authorizationServerUrl: entry.authorizationServerUrl,
-          redirectUri: entry.redirectUri,
-          grantType: entry.grantType,
-          audience: entry.audience,
-        });
-      } catch (err) {
-        result = { success: false, message: err instanceof Error ? err.message : String(err) };
-      }
+      // Read the secret here rather than from `entry` — see the input's declaration.
+      const result = await connectOAuthMcpServer(registry, entry, clientSecretInput.value || undefined);
 
       connecting = false;
       statusEl.style.display = 'none';
@@ -1273,9 +1121,10 @@ const TAB_GROUPS: { label: string; tabs: { id: SettingsTabId; label: string }[] 
 
 /** Fallback model list shown before any session has run and populated discoveredModels. */
 const FALLBACK_MODELS: { value: string; displayName: string }[] = [
-  { value: 'claude-fable-5', displayName: 'Claude Fable 5' },
+  { value: 'claude-fable-5-1', displayName: 'Claude Fable 5.1' },
+  { value: 'claude-opus-5-5', displayName: 'Claude Opus 5.5' },
   { value: 'claude-opus-4-8', displayName: 'Claude Opus 4.8' },
-  { value: 'claude-sonnet-5', displayName: 'Claude Sonnet 5' },
+  { value: 'claude-sonnet-5-5', displayName: 'Claude Sonnet 5.5' },
   { value: 'claude-haiku-4-5', displayName: 'Claude Haiku 4.5' },
 ];
 
@@ -1284,6 +1133,11 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   private activeTab: SettingsTabId = 'general';
   private selectedProjectId: string | null = null;
   private selectedSecretName: string | null = null;
+
+  showNewProject(): void {
+    this.activeTab = 'projects';
+    this.selectedProjectId = '';
+  }
 
   constructor(
     app: App,
@@ -1316,20 +1170,19 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       dropdown.addOption('', 'CLI default');
     }
     const harness = this.plugin.settings.agentHarness ?? 'claude';
-    if (harness === 'claude') {
-      // Family aliases are Claude Code-specific and must not be sent to Codex.
-      dropdown.addOption('fable', 'Fable (latest)');
-      dropdown.addOption('opus', 'Opus (latest)');
-      dropdown.addOption('sonnet', 'Sonnet (latest)');
-      dropdown.addOption('haiku', 'Haiku (latest)');
-    }
     const discovered = this.plugin.discoveredModelsByHarness[harness];
+    if (harness === 'claude') {
+      // Family aliases (Claude Code-specific, never sent to Codex) labelled
+      // with the version they resolve to, then pinned models labelled from
+      // their ids. Same rows as the per-thread model menu.
+      for (const opt of buildClaudeModelOptions(discovered.length > 0 ? discovered : FALLBACK_MODELS)) {
+        if (opt.value) dropdown.addOption(opt.value, opt.label);
+      }
+      return;
+    }
     // Codex and OpenCode intentionally have no guessed fallback: wait for their
     // native model catalogs so we never offer a model the account cannot use.
-    const pinned = harness === 'claude'
-      ? (discovered.length > 0 ? discovered : FALLBACK_MODELS)
-      : discovered;
-    for (const m of pinned) {
+    for (const m of discovered) {
       dropdown.addOption(m.value, m.displayName);
     }
   }
@@ -1648,6 +1501,38 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
+    const resourceHelp = 'Applies only to newly created containers. To pick up a change for an existing one, remove it '
+      + '(`container rm --force claude-threads-vm-<thread-id>`); it is recreated on next use.';
+    new Setting(containerEl)
+      .setName('Sandbox VM memory')
+      .setClass('ct-sandbox-setting')
+      .setDesc(`Memory limit per sandbox container, e.g. 4G or 2048M (default 4G). Invalid values fall back to 4G. ${resourceHelp}`)
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_VM_MEMORY)
+          .setValue(this.plugin.settings.sandboxVmMemory ?? DEFAULT_VM_MEMORY)
+          .onChange(async (value) => {
+            this.plugin.settings.sandboxVmMemory = resolveVmMemory(value);
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Sandbox VM CPUs')
+      .setClass('ct-sandbox-setting')
+      .setDesc(`CPU count per sandbox container, a whole number from 1 to ${MAX_VM_CPUS} (default ${DEFAULT_VM_CPUS}). ${resourceHelp}`)
+      .addText((text) =>
+        text
+          .setPlaceholder(String(DEFAULT_VM_CPUS))
+          .setValue(String(this.plugin.settings.sandboxVmCpus ?? DEFAULT_VM_CPUS))
+          .onChange(async (value) => {
+            this.plugin.settings.sandboxVmCpus = resolveVmCpus(/^\s*\d+\s*$/.test(value) ? Number(value) : undefined);
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
     // GitHub connection (Geode >= 0.25 only; hidden elsewhere so Obsidian is unchanged).
     if (this.plugin.githubBroker?.available) {
       new Setting(containerEl)
@@ -1744,6 +1629,8 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         isMobile: Platform.isMobile,
         getStatus: () => getSandboxSetupStatus({ harnessImage }),
         run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
+        reset: ({ onProgress, signal }) => resetSandbox({ harnessImage, onProgress, signal }),
+        resetMessage: describeReset(harnessImage),
         confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       });
     }
@@ -1889,7 +1776,8 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.defaultCwd = value;
             await this.plugin.saveSettings();
-          }),
+          })
+          .then((component) => this.addDirectoryBrowse(component.inputEl, this.plugin.settings.defaultCwd || undefined)),
       );
 
     // — Environment —
@@ -2029,37 +1917,56 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             });
         });
 
-      if (agentBrowserAvailable && (this.plugin.settings.enableAgentBrowser ?? false)) {
-        new Setting(containerEl)
-          .setName('Maximum browser sessions')
-          .setDesc(
-            'Concurrent in-app browser sessions across all threads. Each one is a separate sandboxed process, so this is a real resource ceiling rather than a preference.',
-          )
-          .addSlider((slider) => {
-            slider
-              .setLimits(1, 4, 1)
-              .setValue(this.plugin.settings.agentBrowserMaxGuests ?? 2)
-              .setDynamicTooltip()
-              .onChange(async (value) => {
-                this.plugin.settings.agentBrowserMaxGuests = value;
-                await this.plugin.saveSettings();
-              });
+      new Setting(containerEl)
+        .setName('Maximum browser sessions')
+        .setDesc(
+          'Concurrent in-app browser sessions across all threads. Each one is a separate sandboxed process, so this is a real resource ceiling rather than a preference.',
+        )
+        .addSlider((slider) => {
+          slider
+            .setLimits(1, 4, 1)
+            .setValue(this.plugin.settings.agentBrowserMaxGuests ?? 2)
+            .setDisabled(!agentBrowserAvailable);
+          // Geode's Setting host has no setDynamicTooltip. Calling it
+          // unconditionally threw mid-render and silently dropped every
+          // setting below this one (private network, JS eval, and the rest
+          // of the Tools tab). Cosmetic, so call it only when present.
+          (slider as { setDynamicTooltip?: () => unknown }).setDynamicTooltip?.();
+          slider.onChange(async (value) => {
+            this.plugin.settings.agentBrowserMaxGuests = value;
+            await this.plugin.saveSettings();
           });
+        });
 
-        new Setting(containerEl)
-          .setName('Allow private network access')
-          .setDesc(
-            'Let the agent browser reach private addresses such as 192.168.x.x and .local hosts. Cloud metadata endpoints stay blocked either way.',
-          )
-          .addToggle((toggle) => {
-            toggle
-              .setValue(this.plugin.settings.agentBrowserAllowPrivateNetwork ?? false)
-              .onChange(async (value) => {
-                this.plugin.settings.agentBrowserAllowPrivateNetwork = value;
-                await this.plugin.saveSettings();
-              });
-          });
-      }
+      new Setting(containerEl)
+        .setName('Allow private network access')
+        .setDesc(
+          'Let the agent browser reach private addresses such as 192.168.x.x and .local hosts. Cloud metadata endpoints stay blocked either way.',
+        )
+        .addToggle((toggle) => {
+          toggle
+            .setValue(this.plugin.settings.agentBrowserAllowPrivateNetwork ?? false)
+            .setDisabled(!agentBrowserAvailable)
+            .onChange(async (value) => {
+              this.plugin.settings.agentBrowserAllowPrivateNetwork = value;
+              await this.plugin.saveSettings();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName('Allow agents to evaluate JavaScript in the browser')
+        .setDesc(
+          'Let Claude run JavaScript expressions in the page it is browsing (browser_eval). Powerful: the code can read or change anything on the page, so it asks for approval like clicking and typing do. Off by default; applies immediately.',
+        )
+        .addToggle((toggle) => {
+          toggle
+            .setValue(this.plugin.settings.enableAgentBrowserEval ?? false)
+            .setDisabled(!agentBrowserAvailable)
+            .onChange(async (value) => {
+              this.plugin.settings.enableAgentBrowserEval = value;
+              await this.plugin.saveSettings();
+            });
+        });
     }
 
     new Setting(containerEl)
@@ -2105,7 +2012,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       } else {
         for (const tool of tools) {
           new Setting(allowedList)
-            .setName(tool)
+            .setName(formatToolName(tool))
             .addButton((btn) =>
               btn.setButtonText('Remove').setWarning().onClick(async () => {
                 this.plugin.settings.alwaysAllowedTools =
@@ -2194,6 +2101,23 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
+    new Setting(containerEl)
+      .setName('Visible artifact folder')
+      .setDesc(
+        'Vault folder where plugins that opt in store user-visible artifact files, as <folder>/<plugin>/<artifact>. ' +
+        'A single folder name (no slashes); invalid or empty falls back to "Artifacts". Changing it affects new artifacts only: ' +
+        'existing ones stay where they are and are only cleaned up automatically if they sit under the current folder or "Artifacts".',
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_VISIBLE_ARTIFACT_ROOT)
+          .setValue(this.plugin.settings.visibleArtifactRoot)
+          .onChange(async (value) => {
+            this.plugin.settings.visibleArtifactRoot = sanitizeVisibleRootName(value);
+            await this.plugin.saveSettings();
+          }),
+      );
+
   }
 
   private renderManagerHeader(container: HTMLElement, title: string, description: string, actionLabel: string, onAction: () => void): void {
@@ -2221,6 +2145,42 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     if (options.disabled && input instanceof HTMLInputElement) input.disabled = true;
     if (options.description) field.createEl('small', { text: options.description });
     return input;
+  }
+
+  /** Adds a "Browse…" button beside a path input that opens the native folder picker (desktop only). */
+  private addDirectoryBrowse(input: HTMLInputElement, defaultPath?: string): void {
+    if (Platform.isMobile) return;
+    const row = document.createElement('div');
+    row.className = 'ct-manager-path-row';
+    row.style.display = 'flex';
+    row.style.gap = '8px';
+    input.parentElement?.insertBefore(row, input);
+    row.appendChild(input);
+    input.style.flex = '1';
+    const browse = document.createElement('button');
+    browse.type = 'button';
+    browse.textContent = 'Browse…';
+    browse.setAttribute('aria-label', 'Browse for working directory');
+    row.appendChild(browse);
+    browse.addEventListener('click', async (event) => {
+      event.preventDefault();
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const electron = require('electron') as any;
+        const dialog = electron.remote?.dialog ?? (require('@electron/remote') as any).dialog;
+        const result = await dialog.showOpenDialog({
+          title: 'Choose working directory',
+          defaultPath: input.value.trim() || defaultPath,
+          properties: ['openDirectory', 'createDirectory'],
+        });
+        if (result.canceled || !result.filePaths?.[0]) return;
+        input.value = result.filePaths[0];
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      } catch (err) {
+        new Notice('Folder picker is unavailable in this environment. Type the path instead.');
+        console.error('[ClaudeThreads] directory picker failed', err);
+      }
+    });
   }
 
   private renderProjectsTab(containerEl: HTMLElement): void {
@@ -2277,6 +2237,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const cwd = this.createManagerField(form, 'Filesystem working directory', project?.cwdOverride ?? '', {
       placeholder: 'Optional absolute path', description: project ? `Effective cwd: ${this.plugin.manager.getProjectCwd(project)}` : 'Leave blank to derive it from the vault folder.',
     }) as HTMLInputElement;
+    this.addDirectoryBrowse(cwd, project?.cwdOverride || undefined);
     const description = this.createManagerField(form, 'Project context', project?.description ?? '', {
       textarea: true, placeholder: 'Goals, conventions, and key files…', description: 'Injected into the agent system prompt for every thread in this project.',
     }) as HTMLTextAreaElement;
@@ -2943,108 +2904,22 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         } catch (error) { new Notice(String(error)); }
       }));
     containerEl.createEl('h2', { text: 'Skill Sources' });
-    containerEl.createEl('p', {
-      text: 'Register local skill collections to browse and install from within the Skills Manager.',
-      cls: 'setting-item-description',
-    });
-
-    const sourcesList = containerEl.createDiv({ cls: 'ct-skill-sources-list' });
-    const renderSources = () => {
-      sourcesList.empty();
-      const sources = this.plugin.settings.skillSources ?? [];
-      if (sources.length === 0) {
-        sourcesList.createEl('p', { text: 'No skill sources configured yet.', cls: 'ct-settings-empty' });
-      } else {
-        for (const source of sources) {
-          const desc = source.type === 'github'
-            ? (source.repoUrl ?? source.clonePath ?? '')
-            : (source.skillsPath ?? '');
-
-          const row = new Setting(sourcesList)
-            .setName(source.name)
-            .setDesc(desc);
-
-          // Staleness badge
-          if (source.type === 'github' && source.behindCount && source.behindCount > 0) {
-            row.nameEl.createEl('span', {
-              cls: 'ct-skill-source-updates-badge',
-              text: `• ${source.behindCount} update${source.behindCount > 1 ? 's' : ''} available`,
-            });
-          }
-
-          if (source.type === 'github' && source.repoUrl) {
-            row.descEl.createEl('br');
-            row.descEl.createEl('span', {
-              text: `Clone: ${source.clonePath ?? source.id}`,
-              cls: 'ct-skill-source-repo',
-            });
-          } else if (source.type === 'local' && source.repoPath) {
-            row.descEl.createEl('br');
-            row.descEl.createEl('span', {
-              text: `Repo: ${source.repoPath}`,
-              cls: 'ct-skill-source-repo',
-            });
-          }
-
-          // Update button (github sources only, when behind)
-          if (source.type === 'github' && source.behindCount && source.behindCount > 0) {
-            row.addButton((btn) =>
-              btn.setButtonText('Update').onClick(async () => {
-                try {
-                  // eslint-disable-next-line @typescript-eslint/no-require-imports
-                  const { execSync } = require('child_process') as typeof import('child_process');
-                  execSync(`git -C "${source.clonePath}" pull`, { stdio: 'pipe', timeout: 60_000 });
-                  source.behindCount = 0;
-                  await this.plugin.saveSettings();
-                  renderSources();
-                  new Notice(`Updated ${source.name}`);
-                } catch (err) {
-                  new Notice(`Update failed: ${err instanceof Error ? err.message : String(err)}`);
-                }
-              }),
-            );
-          }
-
-          row.addButton((btn) =>
-            btn.setButtonText('Remove').setWarning().onClick(async () => {
-              if (source.type === 'github' && source.clonePath) {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const fsNode = require('fs') as typeof import('fs');
-                try { fsNode.rmSync(source.clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
-              }
-              this.plugin.settings.skillSources =
-                this.plugin.settings.skillSources.filter((s) => s.id !== source.id);
-              await this.plugin.saveSettings();
-              renderSources();
-              // Refresh Skills Manager view if it is currently open
-              const { SKILLS_VIEW_TYPE, SkillsManagerView } =
-                require('./SkillsManagerView') as typeof import('./SkillsManagerView');
-              for (const leaf of this.app.workspace.getLeavesOfType(SKILLS_VIEW_TYPE)) {
-                if (leaf.view instanceof SkillsManagerView) {
-                  void leaf.view.refresh();
-                }
-              }
-            }),
-          );
-        }
-      }
-    };
-    renderSources();
-
     new Setting(containerEl)
+      .setName('Auto-update GitHub skill sources')
+      .setDesc('Fetch and fast-forward GitHub skill sources in the background on launch and every 6 hours. Updated skills apply to new threads. Skills are instructions your agents follow, so only enable this for repos you trust.')
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoUpdateSkillSources !== false).onChange(async (v) => {
+          this.plugin.settings.autoUpdateSkillSources = v;
+          await this.plugin.saveSettings();
+        }),
+      );
+    const sourceCount = (this.plugin.settings.skillSources ?? []).length;
+    new Setting(containerEl)
+      .setName('Skill sources')
+      .setDesc(`${describeSkillSourceCount(sourceCount)} Add, update and remove GitHub repos and local skill folders in the Skills Manager.`)
       .addButton((btn) =>
-        btn.setButtonText('Add Source').setCta().onClick(() => {
-          new AddSkillSourceModal(this.app, this.plugin, () => {
-            renderSources();
-            // Refresh Skills Manager view if it is currently open
-            const { SKILLS_VIEW_TYPE, SkillsManagerView } =
-              require('./SkillsManagerView') as typeof import('./SkillsManagerView');
-            for (const leaf of this.app.workspace.getLeavesOfType(SKILLS_VIEW_TYPE)) {
-              if (leaf.view instanceof SkillsManagerView) {
-                void leaf.view.refresh();
-              }
-            }
-          }).open();
+        btn.setButtonText('Open Skills Manager').setCta().onClick(() => {
+          void this.plugin.activateSkillsView();
         }),
       );
   }
@@ -3052,10 +2927,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   // ── MCP ─────────────────────────────────────────────────────────────────
 
   private renderMcpTab(containerEl: HTMLElement): void {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { listMcpServers, deleteMcpServer, findUnresolvedPlaceholders } =
-      require('./mcpServerStore') as typeof import('./mcpServerStore');
-
+    const MAIL_CALENDAR_DESC = {
+      gmail: 'Agents can read, send, and delete mail. Requires reconnecting your account in Google Docs Sync to grant the Gmail scopes.',
+      calendar: 'Agents can read, create, change, and delete events. Requires reconnecting your account in Google Docs Sync to grant the Calendar scopes.',
+    } as const;
     containerEl.createEl('h2', { text: 'MCP Servers' });
     containerEl.createEl('h3', { text: 'Google Workspace' });
     const googleStatus = containerEl.createEl('p', {
@@ -3066,8 +2941,11 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       cls: 'setting-item-description',
       text: 'Enable Google-provided read and write tools using your Google Docs Sync connection. Selected services apply to new threads, including scheduled threads. Disabling a service revokes existing Google connections. After reconnecting, changing auth hosts, or token rotation, start a new thread. Google Workspace Developer Preview enrollment and service APIs are required.',
     });
-    for (const [service, label] of [['docs', 'Google Docs'], ['drive', 'Google Drive'], ['sheets', 'Google Sheets'], ['slides', 'Google Slides']] as const) {
-      new Setting(containerEl).setName(label).addToggle(toggle => toggle
+    for (const [service, label] of [['docs', 'Google Docs'], ['drive', 'Google Drive'], ['sheets', 'Google Sheets'], ['slides', 'Google Slides'], ['gmail', 'Gmail'], ['calendar', 'Google Calendar']] as const) {
+      const setting = new Setting(containerEl).setName(label);
+      if (service === 'gmail') setting.setDesc(MAIL_CALENDAR_DESC.gmail);
+      if (service === 'calendar') setting.setDesc(MAIL_CALENDAR_DESC.calendar);
+      setting.addToggle(toggle => toggle
         .setValue(this.plugin.settings.googleWorkspaceMcp?.[service] === true)
         .onChange(async enabled => {
           this.plugin.settings.googleWorkspaceMcp = { ...this.plugin.settings.googleWorkspaceMcp, [service]: enabled };
@@ -3076,6 +2954,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           googleStatus.setText(this.plugin.googleWorkspaceMcp?.status() ?? 'Google Workspace requires desktop Google Docs Sync with a connected account.');
         }));
     }
+    containerEl.createEl('h3', { text: 'Quick connect' });
+    containerEl.createEl('p', {
+      cls: 'setting-item-description',
+      text: 'One-click sign-in for well-known remote MCP servers. Each opens the provider\'s consent screen in the Web Viewer; tokens are kept in the OS keychain.',
+    });
+    const quickConnectEl = containerEl.createDiv({ cls: 'ct-oauth-mcp-presets-list' });
     containerEl.createEl('h3', { text: 'OAuth MCP servers' });
     containerEl.createEl('p', {
       cls: 'setting-item-description',
@@ -3107,12 +2991,65 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           btn.setButtonText('Disconnect').setWarning().onClick(async () => {
             await this.plugin.oauthMcpRegistry?.disconnect(name);
             new Notice(`Disconnected "${name}".`);
-            renderOAuthList();
+            refreshOAuth();
           }),
         );
       }
     };
-    renderOAuthList();
+    const runPresetConnect = async (preset: OAuthMcpPreset, credentials?: { clientId: string; clientSecret?: string }) => {
+      const registry = this.plugin.oauthMcpRegistry;
+      if (!registry) return { success: false, message: 'OAuth MCP registration is unavailable in this context.' };
+      const result = await connectOAuthMcpServer(registry, {
+        name: preset.name,
+        url: preset.url,
+        ...(preset.scopes ? { scopes: preset.scopes } : {}),
+        ...(preset.redirectUri ? { redirectUri: preset.redirectUri } : {}),
+        ...(credentials?.clientId ? { clientId: credentials.clientId } : preset.clientId ? { clientId: preset.clientId } : {}),
+      }, credentials?.clientSecret);
+      if (result.success) new Notice(`Connected OAuth MCP server "${preset.name}".`);
+      else new Notice(result.message || 'Could not connect this OAuth MCP server.');
+      return result;
+    };
+    const renderQuickConnect = () => {
+      quickConnectEl.empty();
+      for (const preset of OAUTH_MCP_PRESETS) {
+        const connected = (this.plugin.settings.oauthMcpServers ?? {})[preset.name] !== undefined;
+        const row = new Setting(quickConnectEl).setName(preset.label).setDesc(preset.url);
+        if (connected) {
+          const { label, tone } = describeOAuthMcpStatus(this.plugin.oauthMcpRegistry?.status(preset.name));
+          row.nameEl.createEl('span', { cls: `ct-oauth-status-dot ct-oauth-status-dot--${tone}` });
+          row.nameEl.createEl('span', { cls: 'ct-oauth-status-label', text: label });
+        } else if (preset.requiresClientId || preset.requiresClientSecret) {
+          row.descEl.createEl('br');
+          row.descEl.createEl('span', { text: 'Needs your own Client ID' + (preset.requiresClientSecret ? ' and secret.' : '.') });
+        }
+        row.addButton((btn) => {
+          if (connected) {
+            btn.setButtonText('Disconnect').setWarning().onClick(async () => {
+              await this.plugin.oauthMcpRegistry?.disconnect(preset.name);
+              new Notice(`Disconnected "${preset.name}".`);
+              refreshOAuth();
+            });
+            return;
+          }
+          btn.setButtonText('Connect').onClick(async () => {
+            if (preset.requiresClientId || preset.requiresClientSecret) {
+              new OAuthPresetCredentialsModal(this.app, preset, async (credentials) => {
+                const result = await runPresetConnect(preset, credentials);
+                if (result.success) refreshOAuth();
+                return result;
+              }).open();
+              return;
+            }
+            btn.setDisabled(true).setButtonText('Connecting…');
+            const result = await runPresetConnect(preset);
+            if (result.success) refreshOAuth(); else btn.setDisabled(false).setButtonText('Connect');
+          });
+        });
+      }
+    };
+    const refreshOAuth = () => { renderQuickConnect(); renderOAuthList(); };
+    refreshOAuth();
 
     containerEl.createEl('h3', { text: 'Custom MCP servers' });
     containerEl.createEl('p', {

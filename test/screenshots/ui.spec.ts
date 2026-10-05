@@ -1309,12 +1309,12 @@ test.describe('Agent Threads UI', () => {
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
     await page.getByText('Model: Default').click();
-    await page.getByText('Sonnet', { exact: true }).click();
+    await page.getByText(/^Sonnet \d+(\.\d+)? \(latest\)$/).click();
     await expect.poll(() => page.evaluate(() => (window as any).__manager.getThread('thread-fix-auth').model)).toBe('sonnet');
 
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await expect(page.locator('.menu')).toContainText('Model: Sonnet');
+    await expect(page.locator('.menu')).toContainText(/Model: Sonnet \d+(\.\d+)? \(latest\)/);
     await page.getByText('Permissions: Global default').click();
     await page.getByText('Plan only (read & propose, no execute)', { exact: true }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__manager.getThread('thread-fix-auth').permissionMode)).toBe('plan');
@@ -1326,7 +1326,7 @@ test.describe('Agent Threads UI', () => {
     await page.evaluate(() => (window as any).__view['escalatedTurnModels'].set('thread-fix-auth', 'opus'));
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await expect(page.locator('.menu')).toContainText('Model: opus (this turn)');
+    await expect(page.locator('.menu')).toContainText(/Model: Opus \d+(\.\d+)? \(latest\) \(this turn\)/);
   });
 
   test('unified context truncates without overlapping footer actions', async ({ page }) => {
@@ -2367,7 +2367,7 @@ test.describe('Agent Threads UI', () => {
     // The OAuth arm collects its own field set — no command/args/env or headers.
     await expect(page.getByPlaceholder('https://mcp.vercel.com/')).toBeVisible();
     await expect(page.getByPlaceholder('openid profile email')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
+    await expect(page.locator('.ct-modal-button-row').getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
     await shot(page, 'settings-mcp-add-oauth.png', { fullPage: true });
   });
 
@@ -2425,6 +2425,11 @@ test.describe('Agent Threads UI', () => {
     await expect(modal.getByText('Client ID (required)', { exact: true })).toBeVisible();
     await expect(modal.getByText('Client secret (required)', { exact: true })).toBeVisible();
     await expect(modal.getByText('no browser and no sign-in', { exact: false })).toBeVisible();
+    // Pin the focus state. The modal moves focus to the Name field on open and
+    // re-renders when the grant type changes; whether that focus ring is
+    // present at capture time was a race, so the screenshot flaked on it.
+    await modal.locator('input').first().focus();
+    await expect(modal.locator('input').first()).toBeFocused();
     await shot(page, 'settings-mcp-add-oauth-client-credentials.png', { fullPage: true });
   });
 
@@ -3624,7 +3629,7 @@ test.describe('Agent Threads UI', () => {
     });
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await expect(page.locator('.menu')).toContainText('Model: opus (this turn)');
+    await expect(page.locator('.menu')).toContainText(/Model: Opus \d+(\.\d+)? \(latest\) \(this turn\)/);
     await page.waitForTimeout(100);
     await shot(page, 'model-escalation-turn-button.png', { fullPage: true });
     await page.mouse.click(0, 0);

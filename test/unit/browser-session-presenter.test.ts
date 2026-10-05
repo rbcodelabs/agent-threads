@@ -26,6 +26,7 @@ const b = (short: string, extra: Partial<ToolCallRecord> = {}): ToolCallRecord =
 
 function setup(over: Partial<{ messages: ChatMessage[]; pending: Array<{ mediaType: string; data?: string; path?: string }>; running: boolean }> = {}) {
   let running = over.running ?? false;
+  let visible = true;
   const messages: ChatMessage[] = over.messages ?? [];
   const pending = over.pending ?? [];
   const chip = vi.fn();
@@ -40,7 +41,15 @@ function setup(over: Partial<{ messages: ChatMessage[]; pending: Array<{ mediaTy
     facts: () => ({ viewport: { width: 1280, height: 800 } }),
   } as unknown as AgentBrowserGuest;
   let openCb: ((r: { url: string; guestId: number; disposition: string }) => void) | null = null;
+  // The agent's own page, as seen by the passive live view.
+  const primary = { alive: true };
+  const primaryGuest = {
+    capture: vi.fn().mockResolvedValue(new Uint8Array([137, 80, 78, 71])),
+    isAlive: () => primary.alive,
+    currentState: 'busy',
+  } as unknown as AgentBrowserGuest;
   const pool = {
+    peek: () => (primary.alive ? primaryGuest : null),
     findPrimaryByWebContentsId: () => THREAD,
     findLoginByWebContentsId: () => THREAD,
     acquireLoginGuest: vi.fn().mockResolvedValue(loginGuest),
@@ -68,12 +77,13 @@ function setup(over: Partial<{ messages: ChatMessage[]; pending: Array<{ mediaTy
     setControlChip: chip,
     setComposerHuman: human,
     announce,
-    isVisible: () => true,
+    isVisible: () => visible,
   };
   const presenter = new BrowserSessionPresenter(host);
   presenter.attach();
   return {
-    presenter, controller, loginGuest, pool, messages, pending, chip, human, announce, refresh,
+    presenter, controller, loginGuest, pool, messages, pending, chip, human, announce, refresh, primary, primaryGuest,
+    setVisible: (v: boolean) => { visible = v; },
     setRunning: (v: boolean) => { running = v; },
     fireOpen: () => openCb?.({ url: 'https://accounts.acme.io/login?tok=SECRET', guestId: 1, disposition: 'foreground-tab' }),
   };
@@ -250,7 +260,7 @@ describe('BrowserSessionPresenter — handoff wiring', () => {
     expect(frameImg.getAttribute('src')).toMatch(/^data:image\/png;base64,/);
     // ... and typing reaches the login guest ...
     for (const ch of 'hunter2') h.controller.forwardKey(THREAD, { key: ch, type: 'keydown', shiftKey: false, ctrlKey: false, altKey: false, metaKey: false });
-    expect(h.loginGuest.sendInputEvent).toHaveBeenCalledTimes(7);
+    expect(h.loginGuest.sendInputEvent).toHaveBeenCalledTimes(14); // keyDown + char per character;
 
     // ... but nothing the agent can read or that is persisted changed.
     const after = snapshot();
@@ -263,5 +273,114 @@ describe('BrowserSessionPresenter — handoff wiring', () => {
     expect(JSON.stringify(h.announce.mock.calls)).not.toContain('SECRET');
     // And the card's own DOM shows host+path only, not the query string.
     expect(root.textContent).not.toContain('SECRET');
+  });
+});
+
+describe('BrowserSessionPresenter — live view of the agent\'s page', () => {
+  const tools = () => [b('navigate', { summary: 'https://acme.io/pricing' }), b('screenshot')];
+  const shot = [{ mediaType: 'image/png', data: 'FINAL_SHOT' }];
+
+  it('mirrors the live session with frames from the agent guest, no handoff needed', async () => {
+    const t = tools();
+    const h = setup({ messages: [row('r', t, { toolResultImages: shot })], running: true });
+    const root = render(h.presenter, t);
+    h.presenter.syncChrome();
+    const img = root.querySelector('.ct-bc.is-live .ct-bc-view img') as HTMLImageElement;
+    expect(img.getAttribute('src')).toContain('FINAL_SHOT'); // until the first frame lands
+
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(h.primaryGuest.capture).toHaveBeenCalled();
+    expect(img.getAttribute('src')).toMatch(/^data:image\/png;base64,/);
+    expect(img.getAttribute('src')).not.toContain('FINAL_SHOT');
+  });
+
+  it('shows a first frame arriving into a card that had no screenshot yet', async () => {
+    const t = tools();
+    const h = setup({ messages: [row('r', t)], running: true });
+    const root = render(h.presenter, t);
+    h.presenter.syncChrome();
+    await vi.advanceTimersByTimeAsync(1500);
+    const img = root.querySelector('.ct-bc.is-live .ct-bc-view img') as HTMLImageElement;
+    expect(img.getAttribute('src')).toMatch(/^data:image\/png;base64,/);
+    expect(root.querySelector('.ct-bc-skel')).toBeNull();
+  });
+
+  it('spends no capture budget while the pane is hidden or the card is collapsed', async () => {
+    const t = tools();
+    const h = setup({ messages: [row('r', t)], running: true });
+    const root = render(h.presenter, t);
+    h.presenter.syncChrome();
+
+    h.setVisible(false);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.primaryGuest.capture).not.toHaveBeenCalled();
+
+    h.setVisible(true);
+    root.querySelector('.ct-bc')!.classList.add('is-collapsed');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.primaryGuest.capture).not.toHaveBeenCalled();
+
+    root.querySelector('.ct-bc')!.classList.remove('is-collapsed');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(h.primaryGuest.capture).toHaveBeenCalled();
+  });
+
+  it('settles to the final screenshot when the session ends and stops capturing', async () => {
+    const t = tools();
+    const h = setup({ messages: [row('r', t, { toolResultImages: shot })], running: true });
+    render(h.presenter, t);
+    h.presenter.syncChrome();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    // The turn ends: the view rebuilds the row and calls syncChrome.
+    h.setRunning(false);
+    h.presenter.invalidate();
+    h.presenter.resetForRebuild();
+    const root = render(h.presenter, t);
+    h.presenter.syncChrome();
+    h.primaryGuest.capture = vi.fn().mockResolvedValue(new Uint8Array([1]));
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const img = root.querySelector('.ct-bc .ct-bc-view img') as HTMLImageElement;
+    expect(img.getAttribute('src')).toContain('FINAL_SHOT');
+    expect(h.primaryGuest.capture).not.toHaveBeenCalled();
+    expect(root.querySelector('.ct-bc')!.className).toContain('is-done');
+  });
+
+  it('a finished card in the same thread never takes live frames', async () => {
+    const old = [b('navigate', { summary: 'https://old.example/' }), b('screenshot'), b('close')];
+    const cur = tools();
+    const h = setup({ messages: [row('a', old, { toolResultImages: shot }), row('b', cur)], running: true });
+    const rootOld = render(h.presenter, old);
+    render(h.presenter, cur);
+    h.presenter.syncChrome();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(h.primaryGuest.capture).toHaveBeenCalled();
+    const oldImg = rootOld.querySelector('.ct-bc .ct-bc-view img') as HTMLImageElement;
+    expect(oldImg.getAttribute('src')).toContain('FINAL_SHOT');
+  });
+
+  it('prefers the handoff path: in control the live viewer is released', async () => {
+    const t = tools();
+    const h = setup({ messages: [row('r', t)], running: true });
+    render(h.presenter, t);
+    h.presenter.syncChrome();
+    h.fireOpen();
+    await h.controller.takeControl(THREAD);
+    h.primaryGuest.capture = vi.fn().mockResolvedValue(new Uint8Array([1]));
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.primaryGuest.capture).not.toHaveBeenCalled();
+  });
+
+  it('PRIVACY: live frames reach the DOM only, never transcript data', async () => {
+    const t = tools();
+    const messages = [row('r', t, { toolResultImages: shot })];
+    const pending: Array<{ mediaType: string; data?: string }> = [];
+    const h = setup({ messages, pending, running: true });
+    const before = JSON.stringify({ messages, pending });
+    render(h.presenter, t);
+    h.presenter.syncChrome();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(JSON.stringify({ messages, pending })).toBe(before);
   });
 });

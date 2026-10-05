@@ -21,10 +21,24 @@ async function call(config: { url: string; headers: Record<string, string> }, ex
   return fetch(config.url, { method: 'POST', headers: { ...config.headers, 'Content-Type': 'application/json', 'MCP-Protocol-Version': '2025-03-26' }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}', ...extra });
 }
 describe('Google Workspace MCP connection', () => {
+  it('routes Gmail and Calendar to their vendor hosts and explains scope failures', async () => {
+    const f = setup(); await f.proxy.configure({ gmail: true, calendar: true });
+    const servers = f.proxy.serversForThread('thread');
+    expect(Object.keys(servers)).toEqual(['google-gmail', 'google-calendar']);
+    expect((await call(servers['google-gmail'])).status).toBe(200);
+    expect(f.fetchUpstream).toHaveBeenLastCalledWith('https://gmailmcp.googleapis.com/mcp/v1', expect.anything());
+    expect((await call(servers['google-calendar'])).status).toBe(200);
+    expect(f.fetchUpstream).toHaveBeenLastCalledWith('https://calendarmcp.googleapis.com/mcp/v1', expect.anything());
+    expect(f.proxy.status()).toContain('reconnect your account in Google Docs Sync');
+  });
+  it('omits the scope hint when only the original services are enabled', async () => {
+    const f = setup(); await f.proxy.configure({ docs: true });
+    expect(f.proxy.status()).not.toContain('Gmail');
+  });
   it('exposes all selected vendor servers with opaque local credentials and untouched payloads', async () => {
     const f = setup(); await f.proxy.configure({ docs: true, drive: true, sheets: true, slides: true });
     const servers = f.proxy.serversForThread('thread');
-    expect(Object.keys(servers)).toEqual(['google-docs', 'google-drive', 'google-sheets', 'google-slides']);
+    expect(Object.keys(servers)).toEqual(['google-docs', 'google-drive', 'google-drive-files', 'google-sheets', 'google-slides']);
     expect(JSON.stringify(servers)).not.toContain('SECRET');
     const res = await call(servers['google-sheets']);
     expect(res.status).toBe(200);
@@ -52,7 +66,7 @@ describe('Google Workspace MCP connection', () => {
     const f = setup(); await f.proxy.configure({ docs: true, drive: true });
     const first = f.proxy.vmServersForThread('thread');
     const second = f.proxy.vmServersForThread('thread');
-    expect(Object.keys(first)).toEqual(['google-docs', 'google-drive']);
+    expect(Object.keys(first)).toEqual(['google-docs', 'google-drive', 'google-drive-files']);
     expect(first['google-docs']).toMatchObject({ type: 'sdk', name: 'google-docs', instance: expect.any(Object) });
     expect(second['google-docs']).toBe(first['google-docs']);
     expect(f.proxy.serversForThread('thread')['google-docs']).toMatchObject({ type: 'http' });
@@ -87,12 +101,12 @@ describe('Google Workspace MCP connection', () => {
     const res = await call(f.proxy.serversForThread('thread')['google-docs']);
     expect(res.status).toBe(502); expect(await res.text()).not.toContain('SECRET_TOKEN');
   });
-  it('passes the same four vendor configurations to Claude and Codex adapters', async () => {
+  it('passes the same vendor and local-transfer configurations to Claude and Codex adapters', async () => {
     const f = setup(); await f.proxy.configure({ docs: true, drive: true, sheets: true, slides: true });
     const servers = mergeMcpServers({ claude_threads: { type: 'sdk' as const, name: 'threads', instance: {} as never } }, f.proxy.serversForThread('thread'));
     const codex = codexMcpServers(servers);
-    expect(Object.keys(codex)).toEqual(['google-docs', 'google-drive', 'google-sheets', 'google-slides']);
-    for (const service of ['docs', 'drive', 'sheets', 'slides']) {
+    expect(Object.keys(codex)).toEqual(['google-docs', 'google-drive', 'google-drive-files', 'google-sheets', 'google-slides']);
+    for (const service of ['docs', 'drive', 'drive-files', 'sheets', 'slides']) {
       const server = servers[`google-${service}`] as { url: string; headers: Record<string, string> };
       expect(codex[`google-${service}`]).toEqual({ url: server.url, http_headers: server.headers });
     }

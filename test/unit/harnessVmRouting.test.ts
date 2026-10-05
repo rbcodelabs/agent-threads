@@ -132,8 +132,34 @@ describe('resolveClaudeVmRouting', () => {
     const result = await resolveClaudeVmRouting({
       mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
     });
-    expect(result).toEqual({ routed: true, routing: { containerName: NAME, containerBinaryPath: CLAUDE_CONTAINER_BINARY_PATH } });
+    expect(result).toEqual({ routed: true, routing: { containerName: NAME, containerBinaryPath: CLAUDE_CONTAINER_BINARY_PATH, mountedExtra: [] } });
     expect(runner.ran('run', '--detach')).toBe(true);
+  });
+
+  it('warns about a stale image but still routes into the VM', async () => {
+    const { manager } = makeManager(CAPABLE_SCRIPT);
+    const onImageWarning = vi.fn();
+    const result = await resolveClaudeVmRouting({
+      mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
+      checkImageHealth: async () => 'image is out of date', onImageWarning,
+    });
+    expect(result.routed).toBe(true);
+    expect(onImageWarning).toHaveBeenCalledWith('image is out of date');
+  });
+
+  it('a throwing or clean health check neither warns nor blocks routing', async () => {
+    const onImageWarning = vi.fn();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (const check of [async () => null, async () => { throw new Error('boom'); }]) {
+      const { manager } = makeManager(CAPABLE_SCRIPT);
+      const result = await resolveClaudeVmRouting({
+        mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
+        checkImageHealth: check, onImageWarning,
+      });
+      expect(result.routed).toBe(true);
+    }
+    expect(onImageWarning).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it('auto mode: falls back to host spawn silently when incapable', async () => {
@@ -171,7 +197,7 @@ describe('resolveClaudeVmRouting', () => {
   it('auto mode: falls back silently when the capability check passes but the container fails to start', async () => {
     const { manager } = makeManager({
       ...CAPABLE_SCRIPT,
-      'run --detach --name claude-threads-vm-test-thread --volume /work:/work --workdir /work claude-threads-harness:1 sleep infinity': { exitCode: 1, stderr: 'boom' },
+      'run --detach --name claude-threads-vm-test-thread --volume /work:/work --label claude-threads.origin=harness --workdir /work --memory 4G --cpus 4 claude-threads-harness:1 sleep infinity': { exitCode: 1, stderr: 'boom' },
     });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const result = await resolveClaudeVmRouting({
@@ -186,7 +212,7 @@ describe('resolveClaudeVmRouting', () => {
     const result = await resolveClaudeVmRouting({
       mode: 'always', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
     });
-    expect(result).toEqual({ routed: true, routing: { containerName: NAME, containerBinaryPath: CLAUDE_CONTAINER_BINARY_PATH } });
+    expect(result).toEqual({ routed: true, routing: { containerName: NAME, containerBinaryPath: CLAUDE_CONTAINER_BINARY_PATH, mountedExtra: [] } });
   });
 
   it('always mode: THROWS instead of silently falling back when incapable', async () => {
@@ -199,7 +225,7 @@ describe('resolveClaudeVmRouting', () => {
   it('always mode: THROWS when capable but the container itself fails to start', async () => {
     const { manager } = makeManager({
       ...CAPABLE_SCRIPT,
-      'run --detach --name claude-threads-vm-test-thread --volume /work:/work --workdir /work claude-threads-harness:1 sleep infinity': { exitCode: 1, stderr: 'boom' },
+      'run --detach --name claude-threads-vm-test-thread --volume /work:/work --label claude-threads.origin=harness --workdir /work --memory 4G --cpus 4 claude-threads-harness:1 sleep infinity': { exitCode: 1, stderr: 'boom' },
     });
     await expect(resolveClaudeVmRouting({
       mode: 'always', image: IMAGE, vmManager: manager, mountPath: '/work', platform: 'darwin', arch: 'arm64',
@@ -212,7 +238,7 @@ describe('resolveClaudeVmRouting', () => {
       mode: 'auto', image: IMAGE, vmManager: manager, mountPath: '/work', containerBinaryPath: '/custom/claude',
       platform: 'darwin', arch: 'arm64',
     });
-    expect(result).toEqual({ routed: true, routing: { containerName: NAME, containerBinaryPath: '/custom/claude' } });
+    expect(result).toEqual({ routed: true, routing: { containerName: NAME, containerBinaryPath: '/custom/claude', mountedExtra: [] } });
   });
 
   it('defaults the harness image to DEFAULT_HARNESS_VM_IMAGE when unset', () => {

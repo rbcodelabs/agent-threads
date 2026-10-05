@@ -10,8 +10,14 @@ import {
   SANDBOX_IMAGE_VERSION_LABEL,
   SandboxImageAbortedError,
   SandboxImageError,
+  buildImageRemoveArgs,
   ensureSandboxImages,
   getSandboxImageStatus,
+  checkImageHealth,
+  buildToolProbeArgs,
+  parseToolProbe,
+  formatImageVersion,
+  removeSandboxImages,
   parseImageVersionLabel,
 } from '../../src/sandboxImage';
 import type { VmCommandResult, VmCommandRunner } from '../../src/sandboxVm';
@@ -29,6 +35,11 @@ interface FakeState {
   pullResult?: VmCommandResult;
   tagResult?: VmCommandResult;
   buildResult?: VmCommandResult;
+  rmResults?: Record<string, VmCommandResult>;
+  /** tag -> tools the image lacks. A tag absent here makes the probe fail to run (unknown). */
+  missing?: Record<string, string[]>;
+  /** Keep reporting `missing` after a build (simulates a build that still lacks a tool). */
+  buildStaysBroken?: boolean;
   onBuild?: (args: string[]) => void | Promise<void>;
 }
 
@@ -50,13 +61,27 @@ function fakeRunner(state: FakeState) {
     if (a === 'image' && b === 'tag') {
       if (state.tagResult) return state.tagResult;
       state.images[args[3]] = null;
+      if (state.missing) state.missing[args[3]] = []; // the pulled image is the fixed one
       return ok();
+    }
+    if (a === 'image' && b === 'rm') {
+      const res = state.rmResults?.[args[2]] ?? ok();
+      if (res.exitCode === 0) delete state.images[args[2]];
+      return res;
+    }
+    if (a === 'run') {
+      const miss = state.missing?.[args[2]];
+      if (!miss) return fail('cannot run');
+      return ok(`${miss.map((t) => `CT_MISSING:${t}`).join('\n')}\nCT_PROBE_OK\n`);
     }
     if (a === 'build') {
       await state.onBuild?.(args);
       opts.onOutput?.('step 1');
       const res = state.buildResult ?? ok();
-      if (res.exitCode === 0) state.images[args[2]] = SANDBOX_IMAGE_VERSION;
+      if (res.exitCode === 0) {
+        state.images[args[2]] = SANDBOX_IMAGE_VERSION;
+        if (state.missing && !state.buildStaysBroken) state.missing[args[2]] = [];
+      }
       return res;
     }
     return fail('unexpected');
@@ -64,7 +89,7 @@ function fakeRunner(state: FakeState) {
   return { runner, calls };
 }
 
-const stripCalls = (calls: string[][]) => calls.filter((c) => !(c[0] === 'image' && c[1] === 'inspect'));
+const stripCalls = (calls: string[][]) => calls.filter((c) => !(c[0] === 'image' && c[1] === 'inspect') && c[0] !== 'run');
 
 describe('drift guards', () => {
   it('SANDBOX_IMAGE_VERSION equals sandbox/IMAGE_VERSION', () => {
@@ -98,19 +123,94 @@ describe('getSandboxImageStatus', () => {
     ['nothing', {}, { base: 'missing', harness: 'missing' }],
     ['base only', { [SANDBOX_CODING_IMAGE]: null }, { base: 'ok', harness: 'missing' }],
     ['current harness', { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION }, { base: 'ok', harness: 'ok' }],
+    ['stale published base', { [SANDBOX_CODING_IMAGE]: '1', [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION }, { base: 'stale', harness: 'ok' }],
+    ['current-labelled base', { [SANDBOX_CODING_IMAGE]: SANDBOX_IMAGE_VERSION, [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION }, { base: 'ok', harness: 'ok' }],
     ['stale label', { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: '0' }, { base: 'ok', harness: 'stale' }],
     ['unlabelled harness (hand-built)', { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: null }, { base: 'ok', harness: 'stale' }],
     ['harness without base', { [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION }, { base: 'missing', harness: 'ok' }],
   ];
   it.each(cases)('%s', async (_n, images, expected) => {
     const { runner } = fakeRunner({ images });
-    expect(await getSandboxImageStatus(runner)).toEqual(expected);
+    expect(await getSandboxImageStatus(runner)).toMatchObject(expected);
   });
   it('probes a custom harness image name', async () => {
     const { runner } = fakeRunner({ images: { custom: SANDBOX_IMAGE_VERSION } });
     expect((await getSandboxImageStatus(runner, 'custom')).harness).toBe('ok');
   });
 });
+
+describe('tool probe', () => {
+  it('builds a sh probe for the image', () => {
+    const args = buildToolProbeArgs('img:1', ['gh', 'git']);
+    expect(args.slice(0, 5)).toEqual(['run', '--rm', 'img:1', 'sh', '-c']);
+    expect(args[5]).toContain('for t in gh git');
+  });
+  it('parses missing tools and requires the sentinel', () => {
+    expect(parseToolProbe('CT_MISSING:gh\nCT_PROBE_OK\n')).toEqual(['gh']);
+    expect(parseToolProbe('CT_PROBE_OK')).toEqual([]);
+    expect(parseToolProbe('CT_MISSING:gh')).toBeNull();
+  });
+  it('formats versions', () => {
+    expect(formatImageVersion(null)).toBe('unlabeled');
+    expect(formatImageVersion('2')).toBe('v2');
+  });
+});
+
+describe('getSandboxImageStatus with the tool probe (the unlabeled-gh-less-image bug)', () => {
+  const current = SANDBOX_IMAGE_VERSION;
+  it('treats an UNLABELED base lacking gh as stale (was: assumed user-built, never upgraded)', async () => {
+    const { runner } = fakeRunner({
+      images: { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: current },
+      missing: { [SANDBOX_CODING_IMAGE]: ['gh'], [SANDBOX_HARNESS_IMAGE]: ['gh'] },
+    });
+    const st = await getSandboxImageStatus(runner);
+    expect(st.base).toBe('stale');
+    expect(st.harness).toBe('stale'); // current label, but built on a gh-less base
+    expect(st.detail?.base).toEqual({ version: null, missingTools: ['gh'] });
+    expect(st.detail?.harness).toEqual({ version: current, missingTools: ['gh'] });
+  });
+  it('keeps an unlabeled base that has every tool (a genuine user build)', async () => {
+    const { runner } = fakeRunner({
+      images: { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: current },
+      missing: { [SANDBOX_CODING_IMAGE]: [], [SANDBOX_HARNESS_IMAGE]: [] },
+    });
+    expect(await getSandboxImageStatus(runner)).toMatchObject({ base: 'ok', harness: 'ok' });
+  });
+  it('a probe that cannot run is unknown, never stale', async () => {
+    const { runner } = fakeRunner({ images: { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: current } });
+    expect(await getSandboxImageStatus(runner)).toMatchObject({ base: 'ok', harness: 'ok' });
+  });
+  it('reports the label version for a stale labelled base without probing', async () => {
+    const { runner, calls } = fakeRunner({ images: { [SANDBOX_CODING_IMAGE]: '1', [SANDBOX_HARNESS_IMAGE]: current }, missing: { [SANDBOX_HARNESS_IMAGE]: [] } });
+    const st = await getSandboxImageStatus(runner);
+    expect(st.detail?.base).toEqual({ version: '1', missingTools: [] });
+    expect(calls.filter((c) => c[0] === 'run').map((c) => c[2])).toEqual([SANDBOX_HARNESS_IMAGE]);
+  });
+});
+
+describe('checkImageHealth', () => {
+  it('returns null for a healthy image', async () => {
+    const { runner } = fakeRunner({ images: { img: current() }, missing: { img: [] } });
+    expect(await checkImageHealth(runner, 'img', 'harness')).toBeNull();
+  });
+  it('names the missing tool and the update button', async () => {
+    const { runner } = fakeRunner({ images: { img: null }, missing: { img: ['gh'] } });
+    const msg = await checkImageHealth(runner, 'img', 'base');
+    expect(msg).toContain('missing `gh`');
+    expect(msg).toContain('Update sandbox');
+  });
+  it('names the version for an old label', async () => {
+    const { runner } = fakeRunner({ images: { img: '1' } });
+    expect(await checkImageHealth(runner, 'img', 'base')).toContain('v1, current is v');
+  });
+  it('is null when the image does not exist or the runner throws', async () => {
+    const { runner } = fakeRunner({ images: {} });
+    expect(await checkImageHealth(runner, 'img', 'base')).toBeNull();
+    expect(await checkImageHealth((async () => { throw new Error('x'); }) as VmCommandRunner, 'img', 'base')).toBeNull();
+  });
+});
+
+function current(): string { return SANDBOX_IMAGE_VERSION; }
 
 describe('ensureSandboxImages', () => {
   it('pulls, then tags, then builds — in that order', async () => {
@@ -245,5 +345,81 @@ describe('ensureSandboxImages', () => {
     await expect(ensureSandboxImages({ runner })).rejects.toBeInstanceOf(SandboxImageError);
     state.pullResult = undefined;
     expect(await ensureSandboxImages({ runner })).toEqual({ pulledBase: true, builtHarness: true });
+  });
+});
+
+describe('ensureSandboxImages with a stale base', () => {
+  it('re-pulls over an older labelled base and rebuilds the harness even if its label is current', async () => {
+    const { runner, calls } = fakeRunner({ images: { [SANDBOX_CODING_IMAGE]: '1', [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION } });
+    expect(await ensureSandboxImages({ runner })).toEqual({ pulledBase: true, builtHarness: true });
+    const c = stripCalls(calls);
+    expect(c.map((x) => x[0] === 'build' ? 'build' : x[1])).toEqual(['pull', 'tag', 'build']);
+    expect(c[1]).toEqual(['image', 'tag', SANDBOX_BASE_IMAGE_REF, SANDBOX_CODING_IMAGE]);
+  });
+});
+
+describe('ensureSandboxImages with an unlabeled gh-less base', () => {
+  it('pulls the published image over it and rebuilds the harness', async () => {
+    const { runner, calls } = fakeRunner({
+      images: { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION },
+      missing: { [SANDBOX_CODING_IMAGE]: ['gh'], [SANDBOX_HARNESS_IMAGE]: ['gh'] },
+    });
+    expect(await ensureSandboxImages({ runner })).toEqual({ pulledBase: true, builtHarness: true });
+    expect(stripCalls(calls).map((x) => x[0] === 'build' ? 'build' : x[1])).toEqual(['pull', 'tag', 'build']);
+  });
+  it('fails clearly when the rebuilt harness still lacks a tool', async () => {
+    const state: FakeState = { images: {}, missing: { [SANDBOX_HARNESS_IMAGE]: ['gh'] }, buildStaysBroken: true };
+    const { runner } = fakeRunner(state);
+    const err = await ensureSandboxImages({ runner }).catch((e) => e);
+    expect(err).toBeInstanceOf(SandboxImageError);
+    expect((err as SandboxImageError).step).toBe('verify');
+    expect((err as Error).message).toContain('lacks: gh');
+  });
+});
+
+describe('removeSandboxImages', () => {
+  it('builds `image rm` args', () => {
+    expect(buildImageRemoveArgs('x:1')).toEqual(['image', 'rm', 'x:1']);
+  });
+
+  it('removes harness then coding image', async () => {
+    const { runner, calls } = fakeRunner({ images: { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION } });
+    expect(await removeSandboxImages({ runner })).toEqual([SANDBOX_HARNESS_IMAGE, SANDBOX_CODING_IMAGE]);
+    expect(calls.filter((c) => c[1] === 'rm')).toEqual([
+      ['image', 'rm', SANDBOX_HARNESS_IMAGE],
+      ['image', 'rm', SANDBOX_CODING_IMAGE],
+    ]);
+  });
+
+  it('tolerates missing images (no rm call, no error)', async () => {
+    const { runner, calls } = fakeRunner({ images: {} });
+    expect(await removeSandboxImages({ runner })).toEqual([]);
+    expect(calls.some((c) => c[1] === 'rm')).toBe(false);
+  });
+
+  it('honours a custom harness image name', async () => {
+    const { runner, calls } = fakeRunner({ images: { 'my-harness:9': '2' } });
+    expect(await removeSandboxImages({ runner, harnessImage: 'my-harness:9' })).toEqual(['my-harness:9']);
+    expect(calls.filter((c) => c[1] === 'rm')).toEqual([['image', 'rm', 'my-harness:9']]);
+  });
+
+  it('attempts both removals and reports an in-use image with a clear message', async () => {
+    const { runner, calls } = fakeRunner({
+      images: { [SANDBOX_CODING_IMAGE]: null, [SANDBOX_HARNESS_IMAGE]: SANDBOX_IMAGE_VERSION },
+      rmResults: { [SANDBOX_HARNESS_IMAGE]: fail('image in use by container abc') },
+    });
+    const err = await removeSandboxImages({ runner }).catch((e) => e);
+    expect(err).toBeInstanceOf(SandboxImageError);
+    expect(err.step).toBe('remove');
+    expect(err.message).toContain('stop it');
+    expect(err.message).toContain('image in use by container abc');
+    expect(calls.filter((c) => c[1] === 'rm')).toHaveLength(2);
+  });
+
+  it('stops when aborted', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const { runner } = fakeRunner({ images: { [SANDBOX_CODING_IMAGE]: null } });
+    await expect(removeSandboxImages({ runner, signal: ac.signal })).rejects.toBeInstanceOf(SandboxImageAbortedError);
   });
 });

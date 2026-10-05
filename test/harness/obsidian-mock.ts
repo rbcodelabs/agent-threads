@@ -487,6 +487,38 @@ export class TextAreaComponent {
   }
 }
 
+export class SliderComponent {
+  sliderEl: HTMLInputElement;
+  private changeCb: ((value: number) => unknown) | null = null;
+
+  constructor(containerEl: HTMLElement) {
+    this.sliderEl = containerEl.createEl('input', { type: 'range', cls: 'slider' });
+    this.sliderEl.addEventListener('input', () => this.changeCb?.(Number(this.sliderEl.value)));
+  }
+
+  setLimits(min: number, max: number, step: number | 'any'): this {
+    this.sliderEl.min = String(min);
+    this.sliderEl.max = String(max);
+    this.sliderEl.step = String(step);
+    return this;
+  }
+
+  setValue(value: number): this {
+    this.sliderEl.value = String(value);
+    return this;
+  }
+
+  setDisabled(disabled: boolean): this {
+    this.sliderEl.disabled = disabled;
+    return this;
+  }
+
+  onChange(cb: (value: number) => unknown): this {
+    this.changeCb = cb;
+    return this;
+  }
+}
+
 export class ToggleComponent {
   toggleEl: HTMLElement;
   private value = false;
@@ -663,6 +695,11 @@ export class Setting {
 
   addToggle(cb: (component: ToggleComponent) => unknown): this {
     cb(new ToggleComponent(this.controlEl));
+    return this;
+  }
+
+  addSlider(cb: (component: SliderComponent) => unknown): this {
+    cb(new SliderComponent(this.controlEl));
     return this;
   }
 

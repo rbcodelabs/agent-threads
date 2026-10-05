@@ -337,3 +337,45 @@ describe('AgentBrowserPool — login-guest role (ADR-0014 §3)', () => {
     pool.destroy();
   });
 });
+
+// ── Take over: a person drives the agent's own guest ────────────────────────
+
+describe('AgentBrowserGuest — user takeover lock', () => {
+  async function makeGuest() {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const guest = new AgentBrowserGuest({
+      threadId: 't1',
+      container,
+      doc: document,
+      partition: AGENT_BROWSER_PARTITION,
+      urlPolicy: {},
+      onDied: vi.fn(),
+    });
+    await guest.start();
+    return guest;
+  }
+
+  it('refuses agent operations with user_in_control while a person is driving, and resumes after', async () => {
+    const guest = await makeGuest();
+    guest.userDriving = true;
+
+    await expect(guest.capture()).rejects.toMatchObject({ code: 'user_in_control', retryable: true });
+    await expect(guest.runScript('1')).rejects.toMatchObject({ code: 'user_in_control' });
+
+    guest.userDriving = false;
+    await expect(guest.capture()).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  it('still lets the person\'s own preview capture through while driving', async () => {
+    const guest = await makeGuest();
+    guest.userDriving = true;
+    await expect(guest.capture(640, { human: true })).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  it('a guest a person is driving is exempt from budget retirement', async () => {
+    const guest = await makeGuest();
+    guest.handoffActive = true;
+    expect(guest.budgetExhausted()).toBe(false);
+  });
+});

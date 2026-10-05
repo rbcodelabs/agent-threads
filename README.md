@@ -8,7 +8,7 @@ Direct child-agent messaging and single-agent interruption are capability-gated.
 
 A native Obsidian and Geode plugin for running multiple Claude Code sessions in parallel — with streaming markdown responses, tab management, and deep vault integration.
 
-![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.53.1-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
+![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.60.1-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
 
 <p align="center">
   <img src="docs/screenshot-main.png" width="800" alt="Main view: conversation panel with tool calls and Agents List showing thread summaries" />
@@ -33,11 +33,11 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 **Key features:**
 
 - **Multi-tab sessions** — open as many Claude threads as you need, switch between them instantly
-- **Opt-in sandbox VMs** — Claude and Codex can run explicit coding commands in a Linux VM through Apple Container on Apple-silicon Macs with macOS 26+. Only the selected working directory is mounted (writable); ordinary host tools remain outside the VM. See the [setup and safety guide](docs/sandbox-vms.md).
+- **Opt-in sandbox VMs** — Claude and Codex can run explicit coding commands in a Linux VM through Apple Container on Apple-silicon Macs with macOS 26+. New containers mount the working directory at `/work` and the vault read-write at `/vault`; guest code can modify notes. Existing harness containers retain their mounts and native history across restarts. Ordinary host tools remain outside the VM; VM-routed Claude threads can request individually approved host commands through `host_exec`. See the [setup and safety guide](docs/sandbox-vms.md).
 - **Streaming responses** — tokens stream in with live markdown rendering (code blocks, tables, lists, etc.)
 - **Responsive conversation width** — wide conversation panes center the complete timeline and composer in a readable-width column, while narrow panes remain full width
 - **Clickable links in messages** — both `[[wikilinks]]` and ordinary `[label](path.md)` Markdown links in a response open the target note, in the sidebar and in conversation-first placement alike. Agents writing from outside Obsidian often emit an absolute filesystem path rather than a vault-relative one; when that path lands inside your vault, it still resolves to the right note — heading and block anchors included. A path that points outside the vault says so rather than opening (or creating) anything. An ordinary `http(s)://` link in a message opens the same way status-line pill links do — in a fresh tab in the host's in-app Web Viewer when enabled (in the conversation-first context region when that placement is active), otherwise the system browser; Cmd-click (Ctrl-click) always forces the system browser
-- **Persistent conversations** — sessions resume where you left off after restarting the host app
+- **Persistent conversations** — sessions resume where you left off after restarting the host app. If Claude's native session is missing before any assistant or tool work begins, the plugin retries once in a fresh session with recent saved conversation context and your pending message; this does not restore the full missing native transcript
 - **Auto-naming** — tabs rename themselves based on what you're working on (powered by the summarizer)
 - **Thread summaries** — a header bar shows what each thread is about, auto-updated after each response
 - **Agents List** — monitor and dispatch to multiple threads from a compact, responsive two-line list; use the host header's native Search and Group actions to group independently by **Project**, **Status**, or both; attach images or files to dispatched tasks via the paperclip button or drag-and-drop; resolve pending permission requests directly from list rows without switching threads; right-click any row or card to **archive** it — or to bulk-archive every run of a scheduled job; open the **Agent Board** to visualize agent state in a kanban layout (idle, running, waiting, done), or regroup the board into **folder swimlanes** or **project columns** — one lane/column per app/project — to see every conversation for a codebase together; the Agent Board has its own floating dispatch panel so you can launch new tasks without leaving the board view
@@ -49,7 +49,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 - **Native document header** — when the conversation is in a main document pane, its title and thread controls use the host's native header instead of adding a second title bar. The compact custom title bar remains available in sidebars, and the view adapts automatically when you drag it between the two
 - **Slash commands** — built-in context commands plus every skill the session can see (`~/.claude/skills/`, vault-installed, and plugin sources), browseable with `/`
 - **Model switching** — set a persistent model per thread with `/model fable|opus|sonnet|haiku`, or a global default in settings
-- **Agent browser** — Claude drives a browser inside Geode using the embedded web view, reading pages as accessibility snapshots and acting on element refs, with no second Chrome process. Sessions are capped, reclaimed when idle, and closed with their thread; a sidebar pane lets you watch one work and stop it. Geode desktop only, off by default
+- **Agent browser** — Claude drives a browser inside Geode using the embedded web view, reading pages as accessibility snapshots and acting on element refs, with no second Chrome process. Sessions are capped, reclaimed when idle, and closed with their thread; a pane lets you watch one work, stop it, or take over and drive it yourself. Geode desktop only, off by default
 - **Claude or Bedrock** — authenticate with your Claude account or route every session through Amazon Bedrock (one dropdown in settings)
 - **Goals and loops** — pin a persistent goal on a thread with `/goal`, or re-run a prompt on an interval with `/loop 10m <prompt>`
 - **Task list pill** — Claude Code's task checklist (TodoWrite / TaskCreate) and Codex's `update_plan` checklist show as a small "3/5 tasks" pill in the composer footer, next to the schedule and sub-agent pills, so the checklist never takes over the conversation. Click it to open the live list in a popover (completed tasks struck through, the in-progress one highlighted); Escape or an outside click closes it
@@ -61,7 +61,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 - **Push-to-talk voice input** — hold a configurable hotkey to dictate a message via speech-to-text (uses the Claude Code STT pipeline); transcript populates the input box ready to send or edit
 - **Projects** — group threads, choose their initial working directory, and inject shared context into every message (a context aid, not a tool or filesystem security boundary)
 - **Draft persistence** — input text and attachments auto-save when switching threads and survive plugin reloads
-- **First-run onboarding** — on a brand-new install, Agent Threads opens the conversation and Agents List panels, adds the [Chief of Staff](https://github.com/rbcodelabs/chief-of-staff) skill source (pinned to the pack release that shipped with this plugin version; each plugin release bumps it), and starts a **Chief of Staff** thread that runs `cos-setup` to get you set up. It runs on Claude Code or Codex (OpenCode sessions don't load skill sources yet). If that can't start (offline, git or a supported agent harness not installed yet), you get the static getting-started guide instead. The Chief of Staff thread can't use the shell: Bash is blocked for it and for the scheduled rituals and sub-threads it creates. Run **Set up Chief of Staff** from the command palette any time; it reopens your existing Chief of Staff thread rather than creating a second one. Turn off **Settings → General → Offer Chief of Staff on first run** to always get the static guide.
+- **First-run onboarding** — on a brand-new install, Agent Threads opens the conversation and Agents List panels, adds the [Chief of Staff](https://github.com/rbcodelabs/chief-of-staff) skill source (pinned to the pack release that shipped with this plugin version; each plugin release bumps it), and starts a **Chief of Staff** thread that runs `cos-setup` to get you set up. It runs on Claude Code or Codex (OpenCode sessions don't load skill sources yet). If that can't start (offline, or a supported agent harness not installed yet), you get the static getting-started guide instead. The Chief of Staff thread can't use the shell: Bash is blocked for it and for the scheduled rituals and sub-threads it creates. Run **Set up Chief of Staff** from the command palette any time; it reopens your existing Chief of Staff thread rather than creating a second one. Turn off **Settings → General → Offer Chief of Staff on first run** to always get the static guide.
 - **Context recap banner** — when you return to a thread you haven't viewed in over a minute, a floating banner shows the thread summary and how long ago you were last active; auto-dismisses after 10 seconds
 - **Keep computer awake** — prevents the computer from sleeping while Claude is active; shows a ☕ indicator in the status bar (uses Geode's native Electron power-save blocker when available, with `caffeinate -i` for Obsidian on macOS and the Web Wake Lock API as fallback)
 - **Plan Mode** — Claude and Codex can propose a written plan before making any mutations, and Codex can autonomously invoke `EnterPlanMode` when a task needs investigation first. An inline card lets you **Approve**, **Edit**, or **Reject** the plan with optional revision feedback before execution begins
@@ -96,12 +96,12 @@ Vote on upcoming features and see what's in progress at the [public roadmap](htt
 
 1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat) from Obsidian's Community Plugins
 2. Open BRAT settings → **Add Beta Plugin**
-3. Enter: `rbcodelabs/obsidian-claude-threads`
+3. Enter: `rbcodelabs/agent-threads`
 4. Enable **Agent Threads** in Settings → Community Plugins
 
 ### Manual install
 
-1. Download the latest release from [GitHub Releases](https://github.com/rbcodelabs/obsidian-claude-threads/releases)
+1. Download the latest release from [GitHub Releases](https://github.com/rbcodelabs/agent-threads/releases)
 2. Extract into your vault's plugin folder: `<vault>/.obsidian/plugins/claude-threads/`
 3. Enable **Agent Threads** in Settings → Community Plugins
 
@@ -235,7 +235,9 @@ Open the **Skills Manager** from the ribbon (puzzle icon) or command palette to 
   <img src="docs/screenshot-skills-manager.png" width="800" alt="Skills Manager: source tree on the left with skill/agent detail and editor on the right" />
 </p>
 
-**Installed tab** — shows everything installed as a collapsible source tree. The top-right corner of the tab bar has two icon buttons (Installed tab only): **Import** (+) opens a menu with **Folder…** and **File (.skill)…**, letting you install a skill directly from a local folder or a packaged `.skill`/`.zip` archive without going through GitHub; and **Check for updates** (↻, shown once you have at least one GitHub plugin source) re-fetches staleness for all GitHub plugin sources in parallel — its icon spins while running, and a toast reports the result when it finishes (including which sources failed to check, e.g. if you're offline). An indicator dot appears on the button afterward if any plugin has updates (hover either button for its full status/tooltip). GitHub plugin sources appear as top-level nodes with a badge (`•N`) when updates are available; clicking one expands it to reveal its skills and opens a detail panel with **Update** (git pull, highlighted when updates are available), **Reload** (re-scan from disk), **Reinstall** (delete and re-clone for broken installs), and **Remove Source**. Two more nodes sit at the bottom. **Vault** lists the skills this plugin installed into your vault — click one to view and edit it, with **Save**, **Reload**, **Reveal in Finder**, and **Uninstall**. **Claude Code** lists everything in `~/.claude/` (skills *and* agent profiles), marked `read-only`: the plugin shows them because the Claude CLI genuinely loads them into every session, but it never writes to that directory, so those panes offer only **Reload** and **Reveal in Finder**. Edit or remove them with the `claude` CLI, or by hand.
+**Installed tab** — shows everything installed as a collapsible source tree. The top-right corner of the tab bar has two icon buttons (Installed tab only): **Import** (+) opens a menu with **Folder…** and **File (.skill)…**, letting you install a skill directly from a local folder or a packaged `.skill`/`.zip` archive without going through GitHub; and **Check for updates** (↻, shown once you have at least one GitHub plugin source) re-fetches staleness for all GitHub plugin sources in parallel — its icon spins while running, and a toast reports the result when it finishes (including which sources failed to check, e.g. if you're offline). An indicator dot appears on the button afterward if any plugin has updates (hover either button for its full status/tooltip). GitHub plugin sources appear as top-level nodes with a badge (`•N`) when updates are available; clicking one expands it to reveal its skills and opens a detail panel with **Update** (fast-forward, highlighted when updates are available), **Reload** (re-scan from disk), **Reinstall** (delete and re-clone for broken installs), and **Remove Source**. Two more nodes sit at the bottom. **Vault** lists the skills this plugin installed into your vault — click one to view and edit it, with **Save**, **Reload**, **Reveal in Finder**, and **Uninstall**. **Claude Code** lists everything in `~/.claude/` (skills *and* agent profiles), marked `read-only`: the plugin shows them because the Claude CLI genuinely loads them into every session, but it never writes to that directory, so those panes offer only **Reload** and **Reveal in Finder**. Edit or remove them with the `claude` CLI, or by hand.
+
+> **Adding skill sources.** Skill sources are managed here, not in Settings. Click the **+** button in the Installed tab and choose **GitHub repo…** (clones the repo into the plugin folder) or **Local folder source…** (registers a folder you already have). Update, Reinstall and Remove live in the source's detail panel for GitHub sources, and **Remove source** in the Browse tab for local ones. **Settings → Skills** only shows how many sources are configured and a button that opens Skills Manager.
 
 > **Where installs go.** Everything the Skills Manager installs or imports lands in `<vault>/.obsidian/plugins/claude-threads/skills/`, beside the plugin's `skill-sources/` clones — never in `~/.claude/`. That folder shares the plugin folder's fate: community-plugin *updates* leave unknown subdirectories alone, but manually uninstalling and reinstalling the plugin will delete your installed skills along with it.
 
@@ -249,9 +251,11 @@ Agents can use `skills_create_local({ skillId, skillMd, files? })` and `skills_u
 
 Authored skills are available in newly started Claude and Codex sessions as `/local:<identifier>`. Active sessions are not restarted. Installed Claude skills retain `/vault:<name>`. Use qualified identifiers from `skills_list_installed`, such as `local:meeting-notes`, with `skills_get` and `skills_uninstall` to distinguish same-named packages. Ambiguous removal involving an authored skill is rejected. `skills_update` continues to pull configured GitHub sources.
 
+**Auto-update.** GitHub skill sources are fetched and fast-forwarded in the background on launch and every 6 hours (**Settings → Skills → Auto-update GitHub skill sources**, on by default). Skill sources use a built-in git client (isomorphic-git), so no `git` install is needed. Updates are fast-forward only: a clone with local commits, or a locally edited file that upstream also changed, is left alone and a warning is logged. Public repos are fetched anonymously. Private repos use Geode's GitHub connection (**Settings → GitHub**) and need the Geode GitHub App installed on the repo; the token is only ever sent to `github.com`, and only after GitHub rejects the anonymous request. Obsidian and older Geode have no connection, so private repos fail there with a hint; pinned (`ref`) sources are skipped. Updated skills apply to new threads, and a notice tells you which sources changed. Skills are instructions your agents follow, so turn this off if you source skills from repos you don't trust.
+
 #### Declaring skill sources in config
 
-GitHub skill sources don't have to be added through the UI. A vault whose `data.json` is committed to a config repo can **declare** them, and the plugin materializes each one on load:
+GitHub skill sources don't have to be added through the Skills Manager UI. A vault whose `data.json` is committed to a config repo can **declare** them, and the plugin materializes each one on load:
 
 ```jsonc
 "skillSources": [
@@ -334,16 +338,25 @@ Claude reads that, hands back a ref, and acts on it. No coordinate guessing, no 
 | `browser_read_text` | Visible page prose (up to ~20,000 characters), for when the snapshot isn't enough |
 | `browser_save_page` | Save the page's text or HTML to a temp file and return its path and size, for pages too large to read inline (e.g. raw JSON). Explore it with `jq`, `grep` or Read; files are deleted when the session or thread ends |
 | `browser_click` / `browser_type` | Act on a ref |
-| `browser_screenshot` | PNG of the current page |
+| `browser_screenshot` | PNG of the current page (with Claude's cursor and focus ring drawn in). Optional `maxWidth`; set `save` (and optionally `filename`) to also write the PNG to a temp file and get its path and size back alongside the inline image |
 | `browser_status` | How many sessions are open, and the cap |
 | `browser_close` | End this thread's session |
 | `browser_resize` | Resize the viewport (320-1920 wide, 240-1080 tall) and return a fresh snapshot |
+| `browser_console` | Buffered console output (log/info/warn/error/debug, uncaught errors, unhandled rejections) for the current page. `level` is a minimum severity; `limit` and `clear` are optional. Last 500 messages, reset on navigation |
+| `browser_network` | Requests the current page made: type, method, URL, status, duration, size, failed. `filter` (URL substring), `limit`, `failedOnly`, `clear`. Last 500 entries, reset on navigation |
+| `browser_eval` | Evaluate a JavaScript expression in the page and get back size-capped JSON. **Off by default**; see below |
 
-`browser_save_page` writes a file, so unlike the read-only tools above it goes through the normal permission prompt. Files live under the system temp folder (outside your vault), are capped at 10 million characters each, and only the 20 most recent per thread are kept.
+`browser_console` and `browser_network` only report what the page already did, so they are read-only and skip the permission prompt. Console text and network entries are page-authored, so they come back in the same untrusted-content block as `browser_read_text`. The console is captured by the host from the web view's `console-message` event, outside the page's own JavaScript, so a page cannot rewrite `console` to hide what it logged. The network log comes from a small script injected into the page (the web view exposes no request events to a plugin), which sets its limits: requests that fire before the page finishes parsing show up without method or error detail, status and size are absent for cross-origin resources that do not send `Timing-Allow-Origin`, WebSocket traffic is not logged, and only the top frame is covered. Request and response headers and bodies are never recorded, and credentials and sensitive-looking query values (`token`, `key`, `password`, `code`, ...) are masked in logged URLs.
+
+**Evaluating JavaScript.** `browser_eval` is registered always but refuses until you turn on **Settings → Tools → Agent browser → Allow agents to evaluate JavaScript in the browser** (`enableAgentBrowserEval`, applies immediately). Unlike `browser_click` and `browser_type`, every call asks for approval on a card showing the full expression, and Always Allow is not offered. Results, and any exception the expression throws, are returned in the untrusted-content block and capped at 20,000 characters. Navigation policy is not a bypass target: literal URLs in the expression are checked against the same scheme and private-network rules as `browser_navigate`, and a page that gets navigated somewhere blocked is stopped. A URL assembled at run time cannot be checked in advance, and a page with a strict Content-Security-Policy may reject evaluation outright.
 
 **Watching it work.** In the chat, each browser session is **one live card** instead of a stack of tool pills: a small browser bar with the current address and status, the latest screenshot (a placeholder until the agent takes one), and a caption naming the step in progress. Other tool calls (such as Bash) made mid-session do not split it into extra cards; they appear right after the session card. A step list under it keeps every action's verb, target, outcome and duration. When the session ends the card folds into a one-line chip with a thumbnail (click to expand, click the picture to see the screenshot larger); a failure stays open and shows the error; `browser_close` mutes it. In a wide pane the card goes two-column. You can also run **Open Agent Browser** from the command palette for a sidebar pane showing live frames, the page, session age, and a stop button. It streams only while visible, and closing it never closes Claude's session.
 
-**Signing in.** Some sites open a separate popup for login (Google, GitHub, SSO) — the kind of flow Claude can't complete on its own, since it never sees or drives popups. When a page tries to open one, the same chat card turns amber with **"Sign-in needed"**, a 30-second countdown, and **Take control** / **Not now** (the Agent Browser pane shows the same request as a banner). Accepting opens a second, temporary browser page: the card becomes a solid amber **"You're in control"** with the sign-in page streamed live in an amber frame, a persistent *"You're in control · Claude is waiting"* chip above the composer, and a big **Return control** button. Typing and clicking there go to that page, not to Claude's session, which is left completely untouched — and **Claude can't see that page or what you type**: the frames and keystrokes are never added to the conversation, images, saved data, logs or tool results. Click **Return control** (or just close the temporary page) when you're done; the card confirms *"Signed in · Claude resumed"*, folds back to normal and keeps a "sign in · you" step, and Claude picks up wherever the sign-in left things — reading whatever the identity provider left on the page, the same as any other page state. If the countdown lapses before you click, the card says the request expired; ask Claude to try again. Mode changes are announced to screen readers, and everything is reachable by keyboard. This is mouse clicks and typing only — no drag, hover, or right-click — and keyboard support covers printable characters plus the common editing/navigation keys, which is what a login or MFA form needs.
+`browser_save_page` writes a file, so unlike the read-only tools above it goes through the normal permission prompt. Files live under the system temp folder (outside your vault), are capped at 10 million characters each, and only the 20 most recent per thread are kept. `browser_screenshot` with `save` writes into the same folder under the same limits (pages and screenshots count together); the tool stays in the read-only group, so saving a screenshot does not raise a separate prompt on hosts that gate by tool name.
+
+**Watching it work.** In the chat, each browser session is **one live card** instead of a stack of tool pills: a small browser bar with the current address and status, and a live view of the page that mirrors the Agent Browser pane (a frame about once a second while Claude is acting, every few seconds when idle, and only while the card is actually on screen), and a caption naming the step in progress. Frames carry a visible **agent cursor** where Claude last clicked or typed (with a brief ripple on a click) and a **focus ring** around the field it is typing into, so you can follow what it is doing; these marks are drawn into the page the agent is browsing but are invisible to its snapshots and never change the page's layout. When the session ends the card settles to the final screenshot. A step list under it keeps every action's verb, target, outcome and duration. When the session ends the card folds into a one-line chip with a thumbnail (click to expand, click the picture to see the screenshot larger); a failure stays open and shows the error; `browser_close` mutes it. In a wide pane the card goes two-column. You can also run **Open Agent Browser** from the command palette for a pane (opened as a main-area tab, so there's room to work in it) showing live frames, the page, session age, a stop button and **Take over**. It streams only while visible, and closing it never closes Claude's session.
+
+**Signing in.** Some sites open a separate popup for login (Google, GitHub, SSO) — the kind of flow Claude can't complete on its own, since it never sees or drives popups. When a page tries to open one, the same chat card turns amber with **"Sign-in needed"**, a 30-second countdown, and **Take control** / **Not now** (the Agent Browser pane shows the same request as a banner). Accepting opens a second, temporary browser page: the card becomes a solid amber **"You're in control"** with the sign-in page streamed live in an amber frame, a persistent *"You're in control · Claude is waiting"* chip above the composer, and a big **Return control** button. Typing and clicking there go to that page, not to Claude's session, which is left completely untouched — and **Claude can't see that page or what you type**: the frames and keystrokes are never added to the conversation, images, saved data, logs or tool results. Click **Return control** (or just close the temporary page) when you're done; the card confirms *"Signed in · Claude resumed"*, folds back to normal and keeps a "sign in · you" step, and Claude picks up wherever the sign-in left things — reading whatever the identity provider left on the page, the same as any other page state. If the countdown lapses before you click, the card says the request expired; ask Claude to try again. Mode changes are announced to screen readers, and everything is reachable by keyboard. **Take over any page.** Not every login is a popup — Reddit's is an ordinary form. The Agent Browser pane has a **Take over** button whenever Claude has a browser open: it opens the pane in the main area and lets you click and type straight into Claude's own page (its cookies stay, so the login carries over). While you're driving, Claude is paused — any browser action it tries returns "a person has taken over" and it can't screenshot or read the page — and the page is exempt from the usual idle/age recycling. **Return control** hands the page back exactly as you left it (Claude re-reads it before continuing). Popup sign-ins also open the pane in the main area automatically. This is mouse clicks and typing only — no drag, hover, or right-click — and keyboard support covers printable characters plus the common editing/navigation keys, which is what a login or MFA form needs.
 
 **Resource limits.** Each session is a real browser process, so they're capped (2 by default, 4 maximum), reclaimed after 5 minutes idle, recycled after 30 minutes, and closed automatically when their thread is deleted or the plugin unloads. Geode measures file-descriptor pressure, and the browser refuses to start a session when the app is running low — the specific condition under which a sandboxed page process dies on arrival.
 
@@ -365,7 +378,7 @@ Claude reads that, hands back a ref, and acts on it. No coordinate guessing, no 
 
 A **Default model** dropdown in settings picks the model for threads that have no `/model` override. Family aliases (Fable / Opus / Sonnet / Haiku "latest") are always listed first; pinned model IDs are sourced from the SDK's `capabilities_discovered` event, which fires the first time a thread starts in the current host session. Before any thread has run, the dropdown falls back to a hardcoded list of current models — start a thread and reopen Settings to see the full CLI-sourced list, so no plugin update is needed when Anthropic adds a new model. The Escalation model dropdown is populated the same way.
 
-You can also switch models without typing: open the **menu button** in the conversation footer and pick the **Model** row, which names the model currently in effect. Choosing it opens the Default / Opus / Sonnet / Haiku / Fable list, and it stays in sync with the `/model` command.
+You can also switch models without typing: open the **menu button** in the conversation footer and pick the **Model** row, which names the model currently in effect. Choosing it opens the Default list followed by each family alias labelled with the version it currently resolves to (for example **Opus 5.5 (latest)**, **Sonnet 5.5 (latest)**), plus any pinned model IDs the SDK reports so an older version can be selected explicitly. Before a session has run, the labels use built-in current versions. It stays in sync with the `/model` command. Once the thread has replied, the menu also shows the exact model the provider reports for it: the Model row reads, for example, **Default · Opus 5.5**, and the top of the model list shows **Running: Opus 5.5 (us.anthropic.claude-opus-5-5)**, so you can see what **Default** or a "latest" alias actually resolves to, including Bedrock and Vertex model IDs.
 
 The active model is shown as a badge in the thread info bar. You can also use `/escalate` as a one-turn override — it routes just that message to the Escalation model chosen in settings (Fable 5, Opus, Sonnet, or Haiku), then the thread model resumes. Both the keyword and the target model are configurable, and (when escalation is enabled) the current keyword shows up alongside `/model`, `/goal`, etc. in the `/` autocomplete popup so it's discoverable without reading the docs — renaming the keyword or toggling escalation off in Settings updates the popup immediately. While an escalated turn is running, the footer menu's model row names the escalated model and marks it "(this turn)", so you always have visible confirmation that the escalation took effect. The label reverts automatically when the turn finishes.
 
@@ -412,6 +425,10 @@ to see its next run and prompt, then use the row's **Stop** control. One-time
 `ScheduleWakeup` entries appear in the same popover as distinct wakeup rows with
 their own **Cancel** controls; when both are present the pill summarizes the next
 item and adds a count (for example, `Resumes in 4m · +1`).
+
+### Dispatching from the quick switcher
+
+In Geode, type a prompt into the global quick switcher (Cmd+O) and choose **Dispatch new conversation: "<your text>"** to start a new thread from it (default project and working directory) and open it. This relies on Geode's plugin quick-switcher API; in Obsidian the row is simply not shown.
 
 ### Dispatching with commands
 
@@ -557,18 +574,20 @@ Without elicitation support the session would stall indefinitely with no visible
 #### Google Workspace
 
 On desktop Geode and Obsidian, Settings → **MCP → Google Workspace** offers
-**Google Docs**, **Google Drive**, **Google Sheets**, and **Google Slides**.
-All four start disabled. Enable the services you want, then start a new thread.
+**Google Docs**, **Google Drive**, **Google Sheets**, **Google Slides**, **Gmail**, and
+**Google Calendar**. All six start disabled. Gmail and Calendar tools can send and delete
+mail and modify events, so enable them deliberately. Enable the services you want, then start a new thread.
 Google's servers supply their complete read and write toolsets and schemas; Claude
-Threads does not implement a separate set of Google tools. Interactive and newly
+Threads adds no replacement tools, only the local large-file transfer tools described below. Interactive and newly
 scheduled threads inherit the same selection on Claude and Codex, with their
 existing permission behavior.
 
 Install and connect **Google Docs Sync v0.7.1 or later** first. This integration requires its guarded
 connection refresh support (`tokenStore.supportsConnectionGuard`); older builds
 show an update instruction. The auth service must request the Docs, Drive, Sheets,
-and Slides scopes. After updating the auth service, disconnect and reconnect
-Google Docs Sync to grant the additional scopes. A corporate auth host can be
+Slides, Gmail, and Calendar scopes. After updating the auth service, disconnect and reconnect
+Google Docs Sync to grant the additional scopes; Gmail and Calendar calls fail with a
+403 until you do. A corporate auth host can be
 selected through Google Docs Sync's **Auth proxy URL** setting; disconnect the
 old account before changing it.
 
@@ -581,6 +600,31 @@ Access tokens are refreshed inside Google Docs Sync. The harness receives only a
 ephemeral credential for a loopback transport; no Google token is written to MCP
 configuration. Missing or incompatible Google Docs Sync does not prevent a thread
 from starting; its Google services are omitted and Settings → MCP explains why.
+**Large Drive files.** Google's Drive tools move file contents inline as base64, so
+every byte passes through the model's context and the local proxy's 10 MiB request
+cap. Enabling **Google Drive** therefore also gives each thread a local
+`google-drive-files` server with two tools that move bytes between Drive and the
+local disk instead:
+
+- `upload_local_file` — resumable, chunked upload of a local file of any size.
+  Files are stored as-is (no conversion to Docs/Sheets/Slides). Google Docs Sync
+  grants the `drive.file` scope, so Google may refuse a `parentId` for a folder
+  this app did not create.
+- `download_to_local_file` — streams a Drive file to disk. Google-native files
+  are exported (Docs and Slides to PDF, Sheets to XLSX, Drawings to PNG, or pass
+  `exportMimeType`); Google caps exports at 10 MB.
+
+These tools read and write local files outside the agent's normal file-permission
+checks, so they are confined to the thread's working directory and the vault (symlinks
+cannot escape), and these locations are always refused, case-insensitively, for both
+upload sources and download destinations: `.obsidian`, `.git`, `.claude`, `.ssh`,
+`.aws`, `.gnupg`, `.env` / `.env.*` and `.mcp.json`. A Drive file with such a name is
+saved with a leading underscore. Stalled connections time out after 120 seconds and
+uploads resume from Google's committed offset. In a sandbox VM, `/work`
+refers to the working directory. Downloads refuse to replace an existing file
+unless `overwrite` is true. The tools share the Drive opt-in and revocation
+described below, and a fresh access token is requested for each Google request.
+
 Disabling a service revokes existing Google connections. Reconnecting accounts,
 changing auth hosts, or refresh-token rotation requires a new thread; ordinary
 access-token refresh remains automatic. Google may report missing scopes, service
@@ -620,7 +664,7 @@ A remote MCP server that requires OAuth 2.1 + PKCE (Vercel's, for example) regis
 
 Connect one either way:
 
-- **Settings → MCP → Add MCP server → OAuth.** Fill in a name and the server's URL; scopes, a tool allow/deny filter, and `clientId`/`authorizationServerUrl`/`redirectUri` overrides are optional. Set `redirectUri` for providers that register one exact callback URI instead of accepting any loopback port — Slack's MCP server requires `http://localhost:3118/callback` (note `localhost`, not `127.0.0.1`: exact string matching makes those different URIs).
+- **Settings → MCP → Add MCP server → OAuth.** For well-known servers (Atlassian, v0, Linear, Notion, Vercel, Sentry, Asana) skip the form: the **Quick connect** section above the OAuth servers list has a row per server with a **Connect** button (and **Disconnect** with live status once connected). Asana has no Dynamic Client Registration, so its Connect button first asks for your own Client ID and Client secret from an app you register with the provider. Or use the form: fill in a name and the server's URL; scopes, a tool allow/deny filter, and `clientId`/`authorizationServerUrl`/`redirectUri` overrides are optional. Set `redirectUri` for providers that register one exact callback URI instead of accepting any loopback port — Slack's MCP server requires `http://localhost:3118/callback` (note `localhost`, not `127.0.0.1`: exact string matching makes those different URIs).
 - **Ask an agent** to call `mcp_register_server` with `type: "oauth"`.
 
 The plugin is a public client by default — PKCE, no secret at all. For the few providers that issue a `client_secret` and then require it at the token endpoint, the OAuth form's Advanced section has a masked **Client secret** field, and the tool takes `clientSecret` as a `${NAME}` placeholder naming a secret already saved with `request_secret` (a literal is rejected, because tool arguments are logged verbatim). Either way the secret lives only in the OS keychain; `data.json` records only that one exists.
@@ -893,10 +937,11 @@ Control the current thread's session state.
 | `ScheduleWakeup` | `delaySeconds`, `prompt`, `reason` | Schedules a message to be injected into this thread after a delay. Useful for polling CI, waiting for a deploy, or self-pacing loop work. While the wake-up is pending the thread shows a waiting indicator — a "Waiting" group with a live countdown (`Resumes in 4m — <reason>`) in the Agents List and the [Agent Board](#kanban-board). In the thread composer, a compact `Resumes in …` pill opens scheduled activity with the wakeup reason, exact time, and an item-specific **Cancel** control. |
 | `EnterWorktree` | `branch?`, `baseBranch?`, `repoPath?` | Creates a git worktree for the current repo and switches the session cwd to it. Automatically routed to the plugin's MCP implementation, which tracks the in-session cwd correctly after `set_working_directory`. |
 | `ExitWorktree` | `worktreePath?`, `force?` | Removes the worktree and restores the session cwd to the original repo root. Defaults to the current effective cwd. Pass `force: true` to remove even if there are uncommitted changes. |
-| `enter_vm` | `image?`, `network?`, `mountPath?` | Starts a sandbox VM for this thread and bind-mounts the current effective cwd at `/work` inside it. Requires Apple's `container` runtime (macOS 26+, Apple silicon). `network` is one of `default` (full egress — the default), `internal` (no internet, host still reachable), or `none` (no route at all). Because each container is its own lightweight VM, guest code cannot reach any host path other than the mounted directory. |
+| `enter_vm` | `image?`, `network?`, `mountPath?` | Starts a sandbox VM for this thread and bind-mounts the current effective cwd at `/work` inside it. Requires Apple's `container` runtime (macOS 26+, Apple silicon). `network` is one of `default` (full egress — the default), `internal` (no internet, host still reachable), or `none` (no route at all). The vault is also always mounted **read-write** at `/vault` (regardless of cwd), so guest code can modify any note; apart from that, connected external roots (read-only, `/ext/<label>`), and skills in harness VMs, guest code cannot reach any other host path. See [Sandbox VMs](docs/sandbox-vms.md). |
 | `vm_exec` | `command`, `timeoutSeconds?` | Runs a shell command inside this thread's sandbox VM with cwd `/work`. Returns `exitCode`, `stdout`, and `stderr`; a non-zero exit is reported, not thrown. Each stream is truncated at 100,000 characters with an explicit marker. Defaults to a 300s guest deadline plus a five-second kill grace. Edits made on the host with `Read`/`Write`/`Edit` are visible immediately — there is no sync step. |
+| `host_exec` | `command`, `cwd?`, `reason`, `timeoutSeconds?` | Only present for threads whose Claude harness runs inside the sandbox VM (desktop). Runs ONE command on the real host after you approve it: every call shows the exact command, directory and the agent's reason as an inline permission card with **Allow once** / **Deny** (never "Always allow"), regardless of permission mode. Scheduled threads cannot prompt and are denied. Runs with a minimal environment (no credentials). See [Host commands from a sandboxed thread](docs/sandbox-vms.md#host-commands-from-a-sandboxed-thread-host_exec). |
 | `exit_vm` | `force?` | Stops and removes this thread's sandbox VM. Pass `force: true` to skip the graceful stop. |
-| `threads_create` | `prompt`, `title?`, `cwd?`, `projectId?` | Creates a persistent thread and immediately queues its initial prompt. Working directory and project inherit from the caller when omitted; pass `projectId: null` to clear the project. |
+| `threads_create` | `prompt`, `title?`, `cwd?`, `projectId?` | Creates a persistent thread and immediately queues its initial prompt. Working directory and project inherit from the caller when omitted; pass `projectId: null` to clear the project. Targeting a different project or `cwd` than the caller raises a permission card for user approval (Allow / Always allow / Deny) and errors if denied. |
 | `request_secret` | `secretName`, `reason`, `force?` | Prompts the user (via a modal) to provide a secret value such as an API key. The value is stored in the OS keychain under the plugin's namespace and injected into future sessions as an environment variable — it never appears in the conversation. On success, the calling thread's live session is also flagged to restart at its next turn (conversation history is preserved via session resume), so the new secret becomes available to *this same thread* right away rather than only in later sessions. Returns `{success: true, secretName, alreadyExisted: boolean}` if the user saves, or `{success: false, reason}` if cancelled. If a secret with the same name already exists, returns `alreadyExisted: true` immediately without prompting. Pass `force: true` to always re-prompt (e.g. when rotating a stale token) — the modal will indicate that the existing value will be replaced. |
 | `watch_document` | `path` | Watches a vault note for content changes, owned by the calling thread. Any subsequent edit — from you, another thread, or a sync — sends this thread an injected alert message referencing the file via an `@[[filename]]` mention. Re-watching an already-watched path is a no-op that keeps the existing watch. See [Watch a document](#watch-a-document). |
 | `unwatch_document` | `path?`, `id?` | Removes a watch owned by the calling thread, by path or watch id (at least one required). Never affects another thread's watch on the same path. |
@@ -906,8 +951,12 @@ Control the current thread's session state.
 | `github_check_repo` | `repo` | Checks whether the Geode GitHub App can access `owner/name`; when it cannot, returns the install URL to grant access. |
 
 See [Sandbox VMs](docs/sandbox-vms.md) for setup and a worktree workflow. Only
-`vm_exec` runs commands in the guest; host shell and file tools remain on the
-host. The selected directory is writable and guest edits persist after exit.
+`vm_exec` runs commands in the guest for host-local harnesses; their shell and
+file tools remain on the host. When Claude itself runs inside the container,
+native shell and file tools use the guest filesystem, `vm_exec` remains available,
+and `enter_vm`/`exit_vm` and their aliases are omitted from both MCP surfaces.
+Host-local sessions, including automatic VM-routing fallbacks, retain all three
+tools. The selected directory is writable and guest edits persist after exit.
 
 ### Thread coordination tools
 
@@ -976,6 +1025,8 @@ The TypeScript contract and structured error codes are defined in [`src/PublicAp
 `api.v1.mcp` lets a peer plugin reuse Agent Threads' own MCP-registration and secret-storage machinery instead of reinventing OS-keychain storage or its own MCP config UI:
 
 - **`mcp.register(input)`** registers a global external MCP server (`stdio`, `http`, `sse`, or `oauth` — same shape as the `mcp_register_server` agent tool). Registration **always** shows the same interactive `McpRegistrationModal` confirmation to the human that the agent tool shows — there is no silent or bypassed path for a peer-plugin caller, including for `stdio` servers that can execute an arbitrary local command. An `oauth` entry goes through the identical OAuth 2.1 + PKCE consent flow (`OAuthMcpRegistry`) as agent-initiated oauth registration. If the host has no interactive context available (e.g. the plugin is unloading), it returns `{success: false, status: 'unavailable', ...}` rather than throwing. Returns the same `McpRegistrationResult` shape (`status`: `registered` | `unchanged` | `conflict` | `invalid` | `cancelled` | `unavailable` | `failed`) documented for `mcp_register_server` above.
+- **`mcp.listPresets()`** returns the built-in OAuth MCP presets (the same data behind the Add MCP server modal's chips) as a frozen array of `{ id, label, name, url, scopes?, redirectUri?, requiresClientId, requiresClientSecret, notes?, setupUrl?, source }`. Each call returns fresh frozen copies, so a peer can read but never alter the host's list. Feature-detect with `api.capabilities.includes('mcp.listPresets')` and fall back to your own URLs on hosts that lack it.
+- **`mcp.registerPreset(id, overrides?)`** merges a preset with caller overrides (`name`, `scopes`, `tools`, `clientId`, `clientSecret`, `authorizationServerUrl`, `redirectUri`, `audience`; overrides win) and hands the result to the same registration path as `mcp.register`, so validation, the consent dialog and the `registered` / `unchanged` / `unavailable` results are identical. `url`, `type` and `grantType` belong to the preset and cannot be overridden — use `mcp.register` for a custom server. `clientSecret` still must be a `${NAME}` placeholder for a secret saved with `mcp.requestSecret`. It throws `INVALID_ARGUMENT` for an unknown id, a non-overridable field, or a preset with `requiresClientId: true` and no `clientId` override. Feature-detect with `'mcp.registerPreset'`.
 - **`mcp.requestSecret(input)`** prompts the user, via the same `RequestSecretModal` the `request_secret` agent tool uses, to provide a credential. The value is stored directly in the OS keychain under the plugin's namespace and is **never returned to the caller** — only `{success: true, secretName, alreadyExisted}` or `{success: false, reason}`. If a secret with that name already exists, it short-circuits with `alreadyExisted: true` without prompting again, unless `force: true` is passed.
 
 ### Vault Bridges integration
@@ -1008,12 +1059,12 @@ Everything the [Skills Manager](#skills-manager) panel can do — browse the [sk
 | `skills_search` | `query`, `limit?` | Searches the skills.sh marketplace registry. Returns each match's name, slug, GitHub source, install count, and whether it's already installed. Default limit: 15. |
 | `skills_get` | `identifier` | Returns full detail for one skill, whether installed or not. Pass an installed skill's name, or a marketplace slug in `owner/repo/skill-id` form (as returned by `skills_search`). Installed skills include their full `SKILL.md` content. |
 | `skills_list_sources` | — | Lists configured skill sources (GitHub-cloned or local-path plugin sources) plus the built-in skills.sh registry, with id, name, type, and (for GitHub sources) staleness info. |
-| `skills_check_updates` | — | Checks every configured GitHub-type skill source for upstream commits it's behind (`git fetch` + count). Returns each source's id, name, and either its refreshed `behindCount`/`lastFetched` or an `error` if the check failed (e.g. offline). |
+| `skills_check_updates` | — | Checks every configured GitHub-type skill source for upstream commits it's behind (fetches each source; `behindCount` is 1 when upstream has moved, since clones are shallow). Returns each source's id, name, and either its refreshed `behindCount`/`lastFetched` or an `error` if the check failed (e.g. offline). |
 | `skills_install` | `slug`, `skillId`, `source`, `name` | Installs a skill from the marketplace into `<vault>/.obsidian/plugins/claude-threads/skills/`. Pass the four fields exactly as returned by `skills_search` for the skill you want. |
 | `skills_uninstall` | `name` | Permanently deletes an installed or authored vault package. Use its qualified identifier to distinguish duplicate names. Home skills remain read-only. |
 | `skills_create_local` | `skillId`, `skillMd`, `files?` | Creates a complete authored package in the configured vault folder, available in new sessions. Rejects existing packages. |
 | `skills_update_local` | `skillId`, `files?`, `deleteFiles?` | Patches an authored package; preserves omitted files and protects `SKILL.md` from deletion. |
-| `skills_update` | `sourceId` | Pulls the latest commits for a configured GitHub-type skill source (`git pull` on its local clone), refreshing every skill it provides. Use the source id from `skills_list_sources` — not `"registry"`, which has no single-source update (reinstall individual skills instead). |
+| `skills_update` | `sourceId` | Pulls the latest commits for a configured GitHub-type skill source (fast-forwards its local clone), refreshing every skill it provides. Use the source id from `skills_list_sources` — not `"registry"`, which has no single-source update (reinstall individual skills instead). |
 
 ## Settings
 
@@ -1028,9 +1079,10 @@ In **Secrets**, choose **Add secret** or select an existing entry. Save the valu
 | Codex computer use | Off by default. Disables bundled Codex desktop-control capabilities for newly initialized sessions. On inherits local Codex configuration. Existing sessions require a restart; shared Codex browser REPL capabilities may also be unavailable while off. |
 | Default working directory | `cwd` for new threads; defaults to vault root |
 | Worktree location | Root directory for worktrees created by `enter_worktree` (default: `~/.geode/worktrees`, laid out as `<repo>/<branch>`). Must be durable storage — a temp directory is cleared on reboot, which deletes the worktree and any uncommitted work in it. |
-| Sandbox setup | Status block (Runtime / Service / Sandbox image) with a **Set up sandbox** button (also **Finish setup** / **Update sandbox** depending on state). One click installs Apple's container runtime for you (no Homebrew, no admin password, kept outside the vault), starts it, pulls the base image and builds the Claude layer — after a confirmation that states what will be downloaded, with live progress and a Cancel button. macOS 26+ / Apple silicon, desktop only. |
+| Sandbox setup | Status block (Runtime / Service / Sandbox image) with a **Set up sandbox** button (also **Finish setup** / **Update sandbox** depending on state). One click installs Apple's container runtime for you (no Homebrew, no admin password, kept outside the vault), starts it, pulls the base image and builds the Claude layer — after a confirmation that states what will be downloaded, with live progress and a Cancel button. **Update sandbox** refreshes an out-of-date published image; **Reset sandbox** removes the local images and re-pulls/rebuilds them from scratch (stop running sandbox VMs first). macOS 26+ / Apple silicon, desktop only. |
 | Sandbox VM image | Container image `enter_vm` starts (default: `claude-threads-coding:1`). **Set up sandbox** fetches it for you. Advanced fallback: build it yourself from the bundled `sandbox/Dockerfile` with `container build --tag claude-threads-coding:1 sandbox/` after `brew install container` and `container system start`. |
 | Sandbox VM network | Network isolation `enter_vm` applies when a call does not pass one. `Full egress` (default) lets `npm install`, git remotes, and web access work. `Internal` blocks the internet but leaves the host reachable; `None` removes the route entirely. |
+| Sandbox VM memory / CPUs | Resource limits for newly created sandbox containers: memory as `<digits>M\|G` (default `4G`) and a whole CPU count 1-64 (default `4`). Invalid values fall back to the defaults. Existing containers keep their old limits until removed (`container rm --force claude-threads-vm-<thread-id>`). |
 | Run harness inside sandbox VM | `Auto` (default), `Always`, or `Never`. Claude-only: routes a thread's own Claude CLI process into its sandbox container instead of the host, so a supported Mac only needs the `container` runtime — not a host `claude` install. `Auto` only activates once the sandbox is set up (Settings → Claude → **Set up sandbox**); until then threads keep running on your Mac, and the first such thread offers a one-time in-thread card — **Run this thread in a sandbox?** with `Set up sandbox`, `Not now` and `Don't ask again` — without interrupting it. A finished setup applies from a thread's next fresh session start. `Always` errors clearly instead of silently falling back if the container isn't ready. The first time a routed thread needs Claude sign-in, an in-thread card walks through the container's own `claude setup-token` (it opens a URL for you; paste back the login code) instead of a host `claude auth login`. The resulting token is a separate credential used only by container-routed threads, so it never affects host-spawned ones — see [Sandbox VMs](docs/sandbox-vms.md#running-the-claude-harness-inside-the-vm-adr-0015). |
 | Harness VM image | Container image the harness routes into (default: `claude-threads-harness:1`) — a separate image from the sandbox VM image above. **Set up sandbox** builds it for you. Advanced fallback: `container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`. |
 | Use Geode GitHub connection | Geode only. Lets threads use the GitHub account connected in Geode (Settings → GitHub) for `git` over HTTPS, `gh` and the GitHub API, on the host and in the sandbox VM, with no personal access token. The token is never put in prompts, logs or environment variables; your own `GH_TOKEN`, `gh auth login` and git credential helpers take priority. See [GitHub via Geode](docs/github-integration.md). |
@@ -1086,8 +1138,8 @@ blocked. See [Inline message content](docs/public-api.md#inline-message-content)
 for registration, reference formatting, lifecycle and image-source details.
 
 ```bash
-git clone https://github.com/rbcodelabs/obsidian-claude-threads
-cd obsidian-claude-threads
+git clone https://github.com/rbcodelabs/agent-threads
+cd agent-threads
 npm install
 npm run build
 # Output is in dist/
@@ -1099,8 +1151,8 @@ The project uses a worktree-based workflow — edits directly to the main checko
 
 1. **Create a worktree** for the version bump:
    ```bash
-   git worktree add ~/.geode/worktrees/obsidian-claude-threads/chore/bump-version-X.Y.Z -b chore/bump-version-X.Y.Z
-   cd ~/.geode/worktrees/obsidian-claude-threads/chore/bump-version-X.Y.Z
+   git worktree add ~/.geode/worktrees/agent-threads/chore/bump-version-X.Y.Z -b chore/bump-version-X.Y.Z
+   cd ~/.geode/worktrees/agent-threads/chore/bump-version-X.Y.Z
    ```
 
 2. **Bump the version** with the repository workflow. This updates `package.json`, `package-lock.json`, and `manifest.json`, then syncs `versions.json`. Update the README version badge to the same version and verify all five files agree:

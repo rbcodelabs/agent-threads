@@ -46,6 +46,7 @@ export class AgentBrowserPreviewView extends ItemView {
   private detailEl!: HTMLElement;
   private imageEl!: HTMLImageElement;
   private emptyEl!: HTMLElement;
+  private takeOverButtonEl!: HTMLButtonElement;
   private stopButtonEl!: HTMLButtonElement;
   private bannerEl!: HTMLElement;
   private bannerTextEl!: HTMLElement;
@@ -54,6 +55,7 @@ export class AgentBrowserPreviewView extends ItemView {
   private tick = 0;
   /** Guards against overlapping captures when one is slower than the interval. */
   private capturing = false;
+  private lastMoveAt = 0;
 
   /**
    * The login-handoff controller (ADR-0014). Normally the plugin-wide shared
@@ -100,6 +102,10 @@ export class AgentBrowserPreviewView extends ItemView {
     this.summaryEl = textEl.createDiv({ cls: 'ct-browser-preview-summary' });
     this.detailEl = textEl.createDiv({ cls: 'ct-browser-preview-detail' });
 
+    this.takeOverButtonEl = this.headerEl.createEl('button', { cls: 'ct-browser-preview-takeover', text: 'Take over' });
+    setTooltip(this.takeOverButtonEl, 'Drive this browser yourself (sign in, solve a captcha). The agent waits until you return control.');
+    this.takeOverButtonEl.addEventListener('click', () => this.takeOver());
+
     this.stopButtonEl = this.headerEl.createEl('button', { cls: 'ct-browser-preview-stop' });
     setIcon(this.stopButtonEl, 'circle-x');
     setTooltip(this.stopButtonEl, 'Close this browser session');
@@ -125,9 +131,27 @@ export class AgentBrowserPreviewView extends ItemView {
     this.imageEl.alt = 'Current agent browser page';
     // Focusable so keydown/keyup can be forwarded during a login handoff.
     this.imageEl.tabIndex = 0;
+    // The frame is a live remote screen, not an image to drag or save: a drag
+    // would swallow the pointerup and the click never reaches the page.
+    this.imageEl.draggable = false;
+    // Stop the <img> taking DOM focus on press; the guest is given focus instead.
+    this.registerDomEvent(this.imageEl, 'mousedown', (event) => event.preventDefault());
+    this.registerDomEvent(this.imageEl, 'dragstart', (event) => event.preventDefault());
     this.emptyEl = body.createDiv({ cls: 'ct-browser-preview-empty' });
 
-    this.registerDomEvent(this.imageEl, 'pointerdown', (event) => this.forwardMouseEvent('mouseDown', event));
+    // Pages (Apple ID widgets among them) drive hover/focus state off mouse
+    // moves, so a bare press with no preceding move is often ignored and takes
+    // several tries. Send moves (throttled) and one right before every press.
+    this.registerDomEvent(this.imageEl, 'pointermove', (event) => {
+      const at = this.now();
+      if (at - this.lastMoveAt < 40) return;
+      this.lastMoveAt = at;
+      this.forwardMouseEvent('mouseMove', event);
+    });
+    this.registerDomEvent(this.imageEl, 'pointerdown', (event) => {
+      this.forwardMouseEvent('mouseMove', event);
+      this.forwardMouseEvent('mouseDown', event);
+    });
     this.registerDomEvent(this.imageEl, 'pointerup', (event) => this.forwardMouseEvent('mouseUp', event));
     this.registerDomEvent(this.imageEl, 'keydown', (event) => this.forwardKeyboardEvent(event));
     this.registerDomEvent(this.imageEl, 'keyup', (event) => this.forwardKeyboardEvent(event));
@@ -201,12 +225,19 @@ export class AgentBrowserPreviewView extends ItemView {
     void this.controller?.takeControl(snapshot.threadId);
   }
 
+  private takeOver(): void {
+    const guest = this.getPool()?.mostRecentlyUsed() ?? null;
+    if (!guest) return;
+    const result = this.controller?.takeOver(guest.threadId);
+    if (result && !result.ok && result.message) new Notice(result.message);
+  }
+
   private returnControl(): void {
     const active = this.controller?.getActiveSnapshot();
     if (active) this.controller?.returnControl(active.threadId, 'login-complete');
   }
 
-  private forwardMouseEvent(type: 'mouseDown' | 'mouseUp', event: { clientX: number; clientY: number }): void {
+  private forwardMouseEvent(type: 'mouseDown' | 'mouseUp' | 'mouseMove', event: { clientX: number; clientY: number }): void {
     const active = this.controller?.getActiveSnapshot();
     if (!active) return;
     this.controller?.forwardPointer(active.threadId, type, event.clientX, event.clientY, this.imageEl.getBoundingClientRect());
@@ -258,8 +289,12 @@ export class AgentBrowserPreviewView extends ItemView {
     this.capturing = true;
     try {
       const png = await guest.capture(PREVIEW_WIDTH);
-      this.imageEl.src = pngDataUrl(png);
+      const dataUrl = pngDataUrl(png);
+      this.imageEl.src = dataUrl;
       this.imageEl.style.display = '';
+      // Share the frame with the chat card so it shows the same picture without
+      // a second capture against this guest's budget.
+      this.controller?.publishLiveFrame(guest.threadId, dataUrl);
     } catch {
       // A capture can fail because the guest died between render and capture.
       // The next render reflects that; there is nothing to report here.
@@ -292,6 +327,7 @@ export class AgentBrowserPreviewView extends ItemView {
       // control (which only ever targets the primary guest) stays hidden —
       // "Return control" in the banner is the only exit while one is active.
       this.stopButtonEl.toggleClass('is-hidden', true);
+      this.takeOverButtonEl.toggleClass('is-hidden', true);
       this.detailEl.setText('Signing in — you have control of this page.');
       this.emptyEl.style.display = 'none';
       this.renderBanner(guest);
@@ -299,6 +335,7 @@ export class AgentBrowserPreviewView extends ItemView {
     }
 
     this.stopButtonEl.toggleClass('is-hidden', guest === null);
+    this.takeOverButtonEl.toggleClass('is-hidden', guest === null || !this.controller);
 
     if (!guest) {
       this.detailEl.setText(status.fdBlocked ? 'Paused — low on file handles' : 'No session running');
@@ -343,7 +380,11 @@ export class AgentBrowserPreviewView extends ItemView {
     if (snapshot?.phase === 'active') {
       this.bannerEl.style.display = '';
       this.bannerEl.toggleClass('is-handoff-active', true);
-      this.bannerTextEl.setText('You are signing in on a temporary browser page.');
+      this.bannerTextEl.setText(
+        snapshot.mode === 'takeover'
+          ? 'You are driving the agent\'s browser — the agent is paused until you return control.'
+          : 'You are signing in on a temporary browser page.',
+      );
       this.takeControlButtonEl.style.display = 'none';
       this.returnControlButtonEl.style.display = '';
       return;
