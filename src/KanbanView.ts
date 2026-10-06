@@ -5,7 +5,8 @@ import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread, TaskItem } from './types';
 import { formatToolName } from './ClaudeSession';
 import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
-import { relativeTime, buildCwdLabel, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, formatWakeupCountdown } from './dashboardUtils';
+import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
+import { renderAwsReauthButton } from './awsReauthButton';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
 import { parsePrUrlRepo } from './gitDiffUtils';
 import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks';
@@ -989,34 +990,7 @@ export class KanbanView extends ItemView {
 
       // AWS SSO reauth button for expired tokens
       if (state === 'error' && isAwsSsoError(thread.lastError)) {
-        const profile = extractAwsProfile(this.plugin.settings.extraEnv ?? '');
-        const reauthBtn = card.createEl('button', {
-          cls: 'ct-aws-reauth-btn',
-          text: '🔑 Re-authenticate AWS SSO',
-        });
-        reauthBtn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          reauthBtn.setText('Authenticating…');
-          reauthBtn.disabled = true;
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { exec } = require('child_process') as typeof import('child_process');
-            const awsBin = resolveAwsBinary();
-            const cmd = profile ? `${awsBin} sso login --profile ${profile}` : `${awsBin} sso login`;
-            await new Promise<void>((resolve, reject) => {
-              exec(cmd, { env: awsExecEnv() }, (err, _stdout, stderr) => {
-                if (err) reject(new Error(stderr?.trim() || err.message));
-                else resolve();
-              });
-            });
-            new Notice('AWS SSO login successful — retry your request');
-            reauthBtn.setText('✓ Done — retry your request');
-          } catch (err) {
-            new Notice(`AWS SSO login failed: ${(err as Error).message}`);
-            reauthBtn.setText('🔑 Re-authenticate AWS SSO');
-            reauthBtn.disabled = false;
-          }
-        });
+        renderAwsReauthButton(card, this.plugin.settings, thread.lastError, { stopPropagation: true });
       }
     }
 

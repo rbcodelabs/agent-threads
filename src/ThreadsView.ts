@@ -24,8 +24,11 @@ import { isPermissionPreApproved } from './toolNameUtils';
 import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, ACTIVITY_LABELS, smoothToolGroups, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
 import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
-import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, execEnv, splitErrorMessage } from './dashboardUtils';
-import { isClaudeSignInExpiredError } from './claudeAuthRecovery';
+import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, execEnv, splitErrorMessage } from './dashboardUtils';
+import { renderAwsReauthButton } from './awsReauthButton';
+import { reauthenticateAws } from './awsReauth';
+import { isAwsSignInExpiredError } from './awsAuthRecovery';
+import { isSignInExpiredError } from './claudeAuthRecovery';
 import { signInToClaude, type SpawnLike } from './claudeAuthCli';
 import { signInToClaudeInContainer, type SpawnLike as ContainerSpawnLike } from './claudeContainerAuthCli';
 import { runnerEnv as hostRunnerEnv } from './sandboxVm';
@@ -5799,7 +5802,7 @@ export class ThreadsView extends ItemView {
           this.streamingEl = null;
           this.streamingContentEl = null;
         }
-        if (isClaudeSignInExpiredError(event.error.message) && this.activeThreadId) {
+        if (isSignInExpiredError(event.error.message) && this.activeThreadId) {
           this.renderClaudeSignInCard(this.activeThreadId, event.error.message);
           this.setRunningState(false);
           break;
@@ -5820,33 +5823,7 @@ export class ThreadsView extends ItemView {
         // button inline in the conversation so the user doesn't need to find
         // the Agent Dashboard to re-authenticate.
         if (isAwsSsoError(event.error.message)) {
-          const profile = extractAwsProfile(this.plugin.settings.extraEnv ?? '');
-          const reauthBtn = errEl.createEl('button', {
-            cls: 'ct-aws-reauth-btn',
-            text: '🔑 Re-authenticate AWS SSO',
-          });
-          reauthBtn.addEventListener('click', async () => {
-            reauthBtn.setText('Authenticating…');
-            reauthBtn.disabled = true;
-            try {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { exec } = require('child_process') as typeof import('child_process');
-              const awsBin = resolveAwsBinary();
-              const cmd = profile ? `${awsBin} sso login --profile ${profile}` : `${awsBin} sso login`;
-              await new Promise<void>((resolve, reject) => {
-                exec(cmd, { env: awsExecEnv() }, (err, _stdout, stderr) => {
-                  if (err) reject(new Error(stderr?.trim() || err.message));
-                  else resolve();
-                });
-              });
-              new Notice('AWS SSO login successful — retry your request');
-              reauthBtn.setText('✓ Done — retry your request');
-            } catch (err) {
-              new Notice(`AWS SSO login failed: ${(err as Error).message}`);
-              reauthBtn.setText('🔑 Re-authenticate AWS SSO');
-              reauthBtn.disabled = false;
-            }
-          });
+          renderAwsReauthButton(errEl, this.plugin.settings, event.error.message);
         }
         this.setRunningState(false);
         this.scrollToBottom();
@@ -5877,6 +5854,7 @@ export class ThreadsView extends ItemView {
     renderClaudeSignInBanner(this.messagesEl, {
       message,
       canSignIn: Platform.isDesktopApp,
+      flavor: isAwsSignInExpiredError(message) ? 'aws' : 'claude',
       // The flow is chosen when the button is CLICKED, not when the card is
       // rendered: this card is also rebuilt from persisted `authRequired` state
       // after a plugin reload, before any session has started, when the
@@ -5884,6 +5862,11 @@ export class ThreadsView extends ItemView {
       // picked the host flow there — which can never authenticate a
       // containerized session.
       signIn: async (onProgress, onUrl, onCodePrompt) => {
+        // Bedrock credential failure: native AWS SSO device-flow sign-in on the
+        // host (opens the browser itself; the URL is the manual fallback).
+        if (isAwsSignInExpiredError(message)) {
+          return reauthenticateAws(this.plugin.settings, message, { onProgress, onUrl });
+        }
         const routing = await this.manager.resolveClaudeVmRoutingForSignIn(threadId);
         if (!routing) {
           // eslint-disable-next-line @typescript-eslint/no-require-imports

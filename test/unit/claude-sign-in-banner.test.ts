@@ -8,6 +8,7 @@ import '../setup/obsidian-dom';
 import { describe, it, expect, vi } from 'vitest';
 import { renderClaudeSignInBanner } from '../../src/claudeSignInBanner';
 import { formatSignInExpiredMessage } from '../../src/claudeAuthRecovery';
+import { formatAwsSignInExpiredMessage } from '../../src/awsAuthRecovery';
 import type { SignInResult } from '../../src/claudeAuthCli';
 
 const MESSAGE = formatSignInExpiredMessage('Failed to authenticate: OAuth session expired and could not be refreshed');
@@ -202,5 +203,39 @@ describe('renderClaudeSignInBanner', () => {
       expect(capturedOnCodePrompt).toBeDefined();
       expect(el.querySelector('.ct-auth-code-prompt')).toBeNull();
     });
+  });
+});
+
+describe("renderClaudeSignInBanner — AWS flavor", () => {
+  const AWS_DETAIL = "API Error: Could not load AWS credentials · The SSO session token associated with profile=probe-expired was not found or is invalid.";
+  const AWS_MESSAGE = formatAwsSignInExpiredMessage(AWS_DETAIL);
+
+  it("auto-selects AWS copy from the message and keeps the raw detail", () => {
+    const { el, button } = mount({ message: AWS_MESSAGE });
+    expect(el.querySelector(".ct-error-text")?.textContent).toBe("AWS sign-in expired");
+    expect(el.querySelector(".ct-error-stack")?.textContent).toContain("profile=probe-expired");
+    expect(button("Sign in to AWS")).toBeDefined();
+    expect(button("Sign in to Claude")).toBeUndefined();
+    expect(button("Retry")).toBeDefined();
+  });
+
+  it("signs in and retries the pending message like the Claude flavor", async () => {
+    const { el, deps, button } = mount({ message: AWS_MESSAGE });
+    button("Sign in to AWS")!.click();
+    await flush();
+    expect(deps.signIn).toHaveBeenCalledTimes(1);
+    expect(deps.retry).toHaveBeenCalledTimes(1);
+    expect(el.isConnected).toBe(false);
+  });
+
+  it("surfaces the manual sign-in link from the CLI", async () => {
+    const signIn = vi.fn(async (_p: (t: string) => void, onUrl: (u: string) => void) => {
+      onUrl("https://oidc.us-east-1.amazonaws.com/authorize?x=1");
+      return new Promise<SignInResult>(() => {});
+    });
+    const { el, button } = mount({ message: AWS_MESSAGE, signIn });
+    button("Sign in to AWS")!.click();
+    await flush();
+    expect((el.querySelector("a.ct-auth-link") as HTMLAnchorElement).href).toBe("https://oidc.us-east-1.amazonaws.com/authorize?x=1");
   });
 });

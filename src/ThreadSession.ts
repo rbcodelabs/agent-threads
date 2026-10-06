@@ -47,6 +47,7 @@ import {
   formatSignInExpiredMessage,
   shouldAutoRetryAuthError,
 } from './claudeAuthRecovery';
+import { isAwsCredentialErrorText } from './awsAuthRecovery';
 import { stripHostOnlyGitEnv } from './githubCredentialHelper';
 import { isReportedModelId } from './modelOptions';
 import { mergeUsageSnapshot,normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
@@ -745,7 +746,9 @@ export class ThreadSession {
   private async recoverFromAuthFailure(detail: string, callbacks: SessionCallbacks): Promise<boolean> {
     this.pendingAuthFailure = null;
     const turn = this.lastUserTurn;
-    if (turn && !this.interrupted && shouldAutoRetryAuthError(this.authRetryCount)) {
+    // A restart only helps a raced Claude OAuth refresh; an expired AWS SSO
+    // session can only be fixed by `aws sso login`, so go straight to sign-in.
+    if (turn && !this.interrupted && !isAwsCredentialErrorText(detail) && shouldAutoRetryAuthError(this.authRetryCount)) {
       this.authRetryCount++;
       console.warn('[ClaudeThreads] Claude authentication failed — restarting the CLI process and retrying once:', detail);
       callbacks.onAuthRetry?.(detail);

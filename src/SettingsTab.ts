@@ -25,6 +25,7 @@ import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
 import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY, MAX_VM_CPUS, resolveVmCpus, resolveVmMemory } from './sandboxVm';
 import { describeReset, getSandboxSetupStatus, resetSandbox, runSandboxSetup } from './sandboxSetup';
 import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
+import { checkAwsCredentialsNow, reauthenticateAws, resolveSignInProfile } from './awsReauth';
 import { promptConfirm } from './confirmModal';
 import { formatToolName } from './toolNameUtils';
 
@@ -1662,9 +1663,48 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.provider ?? 'claude')
           .onChange(async (value) => {
             this.plugin.settings.provider = value as ProviderMode;
+            awsCredsSetting.settingEl.toggle(value === "bedrock" && Platform.isDesktop);
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
           }),
+      );
+
+    // Bedrock-only: verify (and, if needed, refresh) AWS credentials without
+    // waiting for a turn to fail. Desktop only — reads the AWS config and SSO token cache directly.
+    const awsCredsSetting = new Setting(containerEl)
+      .setName("AWS credentials")
+      .setDesc("Checks the profile from Extra environment variables (AWS_PROFILE), falling back to the default profile.");
+    awsCredsSetting.settingEl.toggle((this.plugin.settings.provider ?? "claude") === "bedrock" && Platform.isDesktop);
+    const awsStatus = awsCredsSetting.descEl.createDiv({ cls: "ct-auth-status" });
+    const runAwsCheck = async (): Promise<void> => {
+      awsStatus.setText("Checking…");
+      awsStatus.removeClass("is-error");
+      const res = await checkAwsCredentialsNow(this.plugin.settings);
+      if (res.ok) awsStatus.setText(`Signed in — account ${res.account}`);
+      else {
+        awsStatus.addClass("is-error");
+        awsStatus.setText(res.expired ? "Not signed in (SSO session expired or missing)." : res.error);
+      }
+    };
+    awsCredsSetting
+      .addButton((btn) => btn.setButtonText("Check").onClick(() => void runAwsCheck()))
+      .addButton((btn) =>
+        btn.setButtonText("Sign in").onClick(async () => {
+          btn.setDisabled(true);
+          try {
+            const profile = resolveSignInProfile(this.plugin.settings);
+            const res = await reauthenticateAws(this.plugin.settings, undefined, {
+              onProgress: (t) => awsStatus.setText(profile ? `${t} (profile ${profile})` : t),
+            });
+            if (res.ok) await runAwsCheck();
+            else {
+              awsStatus.addClass("is-error");
+              awsStatus.setText(res.error);
+            }
+          } finally {
+            btn.setDisabled(false);
+          }
+        }),
       );
 
     new Setting(containerEl)

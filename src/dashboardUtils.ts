@@ -102,41 +102,6 @@ export function extractAwsProfile(extraEnv: string): string | null {
 }
 
 /**
- * Resolves the absolute path to the `aws` CLI binary.
- *
- * Obsidian launches with a minimal PATH (no `/opt/homebrew/bin`), so spawning
- * `aws` via `child_process.exec` fails with "command not found" on Macs where
- * the AWS CLI was installed via Homebrew. Walk the common install locations
- * and fall back to the bare name so users with `aws` on PATH still work.
- *
- * Accepts an optional `fileExists` predicate for testing — defaults to the
- * real `fs.existsSync`.
- */
-export function resolveAwsBinary(fileExists?: (p: string) => boolean): string {
-  const exists = fileExists ?? defaultFileExists;
-  const home = process.env.HOME ?? '';
-  const candidates = [
-    '/opt/homebrew/bin/aws',
-    '/usr/local/bin/aws',
-    home ? `${home}/.local/bin/aws` : '',
-  ].filter(Boolean);
-  for (const p of candidates) {
-    try {
-      if (exists(p)) return p;
-    } catch {
-      // ignore — fall through to the next candidate
-    }
-  }
-  return 'aws';
-}
-
-function defaultFileExists(p: string): boolean {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const fs = require('fs') as typeof import('fs');
-  return fs.existsSync(p);
-}
-
-/**
  * Returns an env object suitable for `child_process.exec` that prepends the
  * common Homebrew / user-local bin directories to PATH, so subprocesses can
  * find tools like `aws`, `gh`, `jq`, and `git` despite Obsidian's minimal PATH.

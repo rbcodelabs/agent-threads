@@ -16,6 +16,8 @@
  * `is_error` result must carry recognisable auth text or a 401 status.
  */
 
+import { classifyAwsAuthFailure, formatAwsSignInExpiredMessage, isAwsCredentialErrorText, isAwsSignInExpiredError } from './awsAuthRecovery';
+
 /** One silent retry per user turn — never loop. */
 export const MAX_AUTH_AUTO_RETRIES = 1;
 
@@ -48,8 +50,15 @@ export function isClaudeSignInExpiredError(message: string | undefined): boolean
   return !!message && message.startsWith(CLAUDE_SIGN_IN_EXPIRED_MESSAGE);
 }
 
+/** True for either terminal sign-in error (Claude OAuth or AWS credentials). */
+export function isSignInExpiredError(message: string | undefined): boolean {
+  return isClaudeSignInExpiredError(message) || isAwsSignInExpiredError(message);
+}
+
 /** Terminal error text: clear headline, raw CLI detail underneath. */
 export function formatSignInExpiredMessage(detail: string): string {
+  // Bedrock credential failures need the AWS headline, not the Claude one.
+  if (isAwsCredentialErrorText(detail)) return formatAwsSignInExpiredMessage(detail);
   return detail ? `${CLAUDE_SIGN_IN_EXPIRED_MESSAGE}\n\n${detail}` : CLAUDE_SIGN_IN_EXPIRED_MESSAGE;
 }
 
@@ -67,6 +76,9 @@ function assistantText(message: unknown): string {
  * Returns the error text if `msg` — an SDK stream message or a thrown error —
  * is an authentication failure, otherwise null.
  *
+ * AWS/Bedrock credential failures (`cloud_credential_error`) are recognised
+ * first via awsAuthRecovery so they take the same recovery path.
+ *
  * - `assistant` with `error: 'authentication_failed'`, or with any `error`
  *   flag and auth text (the CLI's synthetic API-error message)
  * - `result` with `is_error` whose `result`/`errors[]` text matches, or
@@ -75,6 +87,8 @@ function assistantText(message: unknown): string {
  * - an `Error` whose message matches
  */
 export function classifyClaudeAuthFailure(msg: unknown): string | null {
+  const aws = classifyAwsAuthFailure(msg);
+  if (aws) return aws;
   if (msg instanceof Error) return isClaudeAuthErrorText(msg.message) ? msg.message : null;
   if (!msg || typeof msg !== 'object') return null;
   const m = msg as Record<string, unknown>;
