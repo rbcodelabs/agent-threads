@@ -114,7 +114,7 @@ export function resolveArchiveIds(scope: ArchiveMenuScope, threads: Thread[]): s
  * Wires the per-thread menu onto a row/card.
  *
  * Eligibility is checked *before* `preventDefault()` (the pattern from
- * `ThreadsView.attachSetAsGoalMenu`): if the thread no longer resolves we fall
+ * `ThreadsView.attachUserMessageMenu`): if the thread no longer resolves we fall
  * through so the host's native context menu still works rather than swallowing
  * the gesture.
  */

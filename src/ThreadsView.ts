@@ -1,5 +1,5 @@
 import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
-import { ItemView, WorkspaceLeaf, Modal, Menu, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
+import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import type { ViewStateResult } from 'obsidian';
@@ -9,6 +9,7 @@ import { parseLoopArgs, formatLoopInterval } from './loopUtils';
 import { buildClaudeModelOptions, aliasLabel, activeModelLabel, formatModelId, type ModelOption } from './modelOptions';
 import { THREAD_BUILTIN_COMMANDS, THREAD_ARG_COMPLETIONS, MODEL_ALIASES, goalKickoffMessage, resolveCreatePrMessage, escalationCommand } from './slashCommands';
 import { isSetAsGoalEligible } from './goalContext';
+import { isRetryEligible } from './retryMessage';
 import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo } from './gitDiffUtils';
 import type { Thread, ChatMessage, ToolCallRecord, AskQuestion, ImageAttachment } from './types';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
@@ -3672,7 +3673,7 @@ export class ThreadsView extends ItemView {
     }
 
     const el = this.messagesEl.createDiv(`ct-message ct-message-${msg.role}`);
-    if (msg.role === 'user') this.attachSetAsGoalMenu(el, msg);
+    if (msg.role === 'user') this.attachUserMessageMenu(el, msg);
 
     if (msg.toolCalls && msg.toolCalls.length > 0) {
       this.renderToolCalls(el, msg.toolCalls);
@@ -5035,7 +5036,7 @@ export class ThreadsView extends ItemView {
         // assigned the canonical ChatMessage. Bind the menu only now, once we
         // have that stable id/content. External live messages take the same
         // path through the element created just above.
-        if (liveUserEl) this.attachSetAsGoalMenu(liveUserEl, event.message);
+        if (liveUserEl) this.attachUserMessageMenu(liveUserEl, event.message);
         break;
       }
 
@@ -6364,28 +6365,98 @@ export class ThreadsView extends ItemView {
     }
   }
 
-  private attachSetAsGoalMenu(el: HTMLElement, message: ChatMessage): void {
+  /**
+   * Right-click menu on a user message: "Retry" (any user turn) and
+   * "Set as goal" (latest turn only). When neither applies the native menu is
+   * left alone. Because this now intercepts every user message, a "Copy" item
+   * is added when text is selected so the native copy affordance isn't lost.
+   */
+  private attachUserMessageMenu(el: HTMLElement, message: ChatMessage): void {
     el.dataset.messageId = message.id;
     el.addEventListener('contextmenu', (event) => {
       const threadId = this.activeThreadId;
       if (!threadId) return;
       const thread = this.manager.getThread(threadId);
-      if (!thread || !isSetAsGoalEligible(thread.messages, message)) return;
+      if (!thread) return;
+
+      const canRetry = isRetryEligible(message);
+      const canSetGoal = isSetAsGoalEligible(thread.messages, message);
+      if (!canRetry && !canSetGoal) return;
 
       event.preventDefault();
       const menu = new Menu();
-      menu.addItem((item) => item
-        .setTitle('Set as goal')
-        .setIcon('target')
-        .onClick(() => {
-          const current = this.manager.getThread(threadId);
-          if (!current || !isSetAsGoalEligible(current.messages, message)) return;
-          void this.applyThreadGoal(threadId, message.content).catch((error) => {
-            this.surfaceGoalActionError(threadId, error);
-          });
-        }));
+
+      const selection = window.getSelection()?.toString() ?? '';
+      if (selection.trim().length > 0) {
+        menu.addItem((item) => item
+          .setTitle('Copy')
+          .setIcon('copy')
+          .onClick(() => { void navigator.clipboard.writeText(selection); }));
+      }
+
+      if (canRetry) {
+        menu.addItem((item) => item
+          .setTitle('Retry')
+          .setIcon('rotate-cw')
+          // Mid-turn a send would be coalesced into the running generation
+          // rather than start a fresh one, which is not what "retry" promises.
+          .setDisabled(this.manager.isRunning(threadId))
+          .onClick(() => { void this.retryUserMessage(threadId, message); }));
+      }
+
+      if (canSetGoal) {
+        menu.addItem((item) => item
+          .setTitle('Set as goal')
+          .setIcon('target')
+          .onClick(() => {
+            const current = this.manager.getThread(threadId);
+            if (!current || !isSetAsGoalEligible(current.messages, message)) return;
+            void this.applyThreadGoal(threadId, message.content).catch((error) => {
+              this.surfaceGoalActionError(threadId, error);
+            });
+          }));
+      }
       menu.showAtMouseEvent(event);
     });
+  }
+
+  /**
+   * Re-sends a user message as a new turn through the same path as the input
+   * box, so slash commands, escalation keywords and draft/banner cleanup behave
+   * identically to typing it again. Images persisted to the vault have lost
+   * their inline base64 (see ImageAttachment.base64), so read those back first;
+   * if any can't be recovered, send the text alone and say so rather than
+   * silently dropping them.
+   */
+  private async retryUserMessage(threadId: string, message: ChatMessage): Promise<void> {
+    if (this.activeThreadId !== threadId || this.manager.isRunning(threadId)) return;
+
+    const images: ImageAttachment[] = [];
+    let dropped = 0;
+    for (const image of message.images ?? []) {
+      if (image.base64) { images.push(image); continue; }
+      if (image.path) {
+        try {
+          const buffer = await this.app.vault.adapter.readBinary(image.path);
+          images.push({ ...image, base64: arrayBufferToBase64(buffer) });
+          continue;
+        } catch { /* fall through to dropped */ }
+      }
+      dropped++;
+    }
+    if (dropped > 0) {
+      new Notice(`Retrying without ${dropped} image${dropped === 1 ? '' : 's'} that could not be loaded.`);
+    }
+
+    // The thread may have changed or started running while images loaded.
+    if (this.activeThreadId !== threadId || this.manager.isRunning(threadId)) return;
+    if (message.content.trim().length === 0 && images.length === 0) return;
+
+    try {
+      await this.handleSendFromDispatch(message.content, images, null);
+    } catch (err) {
+      new Notice(`Retry failed: ${(err as Error).message}`);
+    }
   }
 
   /**
