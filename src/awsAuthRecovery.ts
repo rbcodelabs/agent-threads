@@ -23,7 +23,7 @@
  */
 
 /** Headline of the terminal error surfaced for an AWS credential failure. */
-export const AWS_SIGN_IN_EXPIRED_MESSAGE = 'AWS sign-in expired — run `aws sso login`';
+export const AWS_SIGN_IN_EXPIRED_MESSAGE = 'AWS sign-in expired — sign in to AWS SSO again';
 
 const AWS_CREDENTIAL_PATTERN = new RegExp(
   [

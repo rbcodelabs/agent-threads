@@ -1663,7 +1663,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.provider ?? 'claude')
           .onChange(async (value) => {
             this.plugin.settings.provider = value as ProviderMode;
-            awsCredsSetting.settingEl.toggle(value === "bedrock" && Platform.isDesktop);
+            awsCredsSetting.settingEl.style.display = value === "bedrock" && !Platform.isMobile ? "" : "none";
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
           }),
@@ -1674,7 +1674,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const awsCredsSetting = new Setting(containerEl)
       .setName("AWS credentials")
       .setDesc("Checks the profile from Extra environment variables (AWS_PROFILE), falling back to the default profile.");
-    awsCredsSetting.settingEl.toggle((this.plugin.settings.provider ?? "claude") === "bedrock" && Platform.isDesktop);
+    // style.display, not HTMLElement.toggle(): Geode's DOM shim has no toggle(), and the
+    // throw aborted display() so every setting below this row never rendered.
+    awsCredsSetting.settingEl.style.display = (this.plugin.settings.provider ?? "claude") === "bedrock" && !Platform.isMobile ? "" : "none";
     const awsStatus = awsCredsSetting.descEl.createDiv({ cls: "ct-auth-status" });
     const runAwsCheck = async (): Promise<void> => {
       awsStatus.setText("Checking…");

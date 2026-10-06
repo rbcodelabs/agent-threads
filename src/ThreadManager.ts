@@ -32,6 +32,7 @@ import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, 
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { formatHostExecPermissionDetail, type HostExecRequest } from './hostExec';
+import { isAuthErrorTranscriptMessage } from './claudeAuthRecovery';
 import { HOST_EXEC_PERMISSION_TOOL } from './permissionDetail';
 
 type ThreadStateListener = (threadId: string, event: ThreadEvent) => void;
@@ -1888,6 +1889,11 @@ export class ThreadManager {
   async retryAfterSignIn(threadId: string): Promise<boolean> {
     const thread = this.threads.get(threadId);
     if (!thread?.authRequired || this.isRunning(threadId)) return false;
+    // Transcripts written by older builds (or a Claude CLI that surfaced the
+    // synthetic "API Error: ... credentials" reply) end with that error as an
+    // assistant message after the user turn. Drop it so the user turn is the
+    // pending one; anything else trailing means there is genuinely nothing to resend.
+    while (isAuthErrorTranscriptMessage(thread.messages[thread.messages.length - 1])) thread.messages.pop();
     const pending = thread.messages[thread.messages.length - 1];
     if (pending?.role !== 'user') {
       delete thread.authRequired;

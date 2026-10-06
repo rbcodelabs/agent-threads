@@ -16,6 +16,7 @@
  * `is_error` result must carry recognisable auth text or a 401 status.
  */
 
+import type { ChatMessage } from './types';
 import { classifyAwsAuthFailure, formatAwsSignInExpiredMessage, isAwsCredentialErrorText, isAwsSignInExpiredError } from './awsAuthRecovery';
 
 /** One silent retry per user turn — never loop. */
@@ -36,6 +37,17 @@ const AUTH_ERROR_PATTERN = new RegExp(
   ].join('|'),
   'i',
 );
+
+/**
+ * True for a transcript entry that is just the CLI's synthetic auth-error reply
+ * ("API Error: Could not load AWS credentials…"). Older builds (and the CLI
+ * itself) leave it after the user turn; resending the turn must drop it first.
+ */
+export function isAuthErrorTranscriptMessage(m: ChatMessage | undefined): boolean {
+  if (!m || m.role !== 'assistant' || (m.toolCalls && m.toolCalls.length > 0)) return false;
+  const text = m.content ?? '';
+  return isClaudeAuthErrorText(text) || isAwsCredentialErrorText(text);
+}
 
 export function isClaudeAuthErrorText(text: string): boolean {
   return !!text && AUTH_ERROR_PATTERN.test(text);

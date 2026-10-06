@@ -75,8 +75,15 @@ export function renderClaudeSignInBanner(parent: HTMLElement, deps: ClaudeSignIn
   let busy = false;
   const retryNow = async () => {
     busy = true;
+    // Keep the card until the retry is actually accepted; an outright false
+    // means there was nothing to resend, so say so instead of vanishing.
+    const retried = await deps.retry();
+    if (retried === false) {
+      busy = false;
+      setStatus('Nothing to retry — send your message again.', true);
+      return;
+    }
     card.remove();
-    await deps.retry();
   };
 
   // Owned by whichever onCodePrompt() call is currently in flight, so a

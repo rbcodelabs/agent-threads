@@ -5906,10 +5906,11 @@ export class ThreadsView extends ItemView {
       },
       retry: async () => {
         try {
-          const retried = await this.manager.retryAfterSignIn(threadId);
-          if (!retried) new Notice('Nothing to retry — send your message again.');
+          // The card stays (and shows why) when this returns false.
+          return await this.manager.retryAfterSignIn(threadId);
         } catch (err) {
           new Notice(`Retry failed: ${(err as Error).message}`);
+          return false;
         }
       },
     });
