@@ -177,6 +177,8 @@ controls:
 | `harnessVmMode: 'never'` | Exactly today's host-local spawn. The rollback lever. |
 
 **Per-thread override.** In a Claude thread, the chat's menu (Harness) has a **Run in** section: *Container* (`always`), *Host (no container)* (`never`), or *Default (follows settings)*. The choice is saved on the thread and applies from the next turn. Switching between container and host resets the native Claude session (it cannot be resumed across the two environments); the conversation continues from a summary and transcript references, like a harness switch. It is unavailable while a turn is running or other work is pending.
+
+**Choosing at dispatch time.** When starting a *new* Claude thread from the dashboard or Kanban dispatch box, right-click (or long-press, or Shift+F10 on) the send button to open the picker; its **Run in** section sets Container / Host / Default for the thread being created. The choice is sticky for that dispatch box, shown as a badge and in the button's accessible label, and dropped if you switch the picker to Codex. Because the thread has no native session yet, no session reset happens.
 | Harness VM image | The image tag to route into. Blank falls back to `claude-threads-harness:1`. |
 
 Settings shows a live status block next to these controls (runtime, service,

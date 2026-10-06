@@ -2950,6 +2950,29 @@ test.describe('Agent Threads UI', () => {
     await shot(page.locator('.ct-kanban-dispatch'), 'kanban-harness-picker-opencode.png');
   });
 
+  test('kanban kickoff picker offers Run in (container/host) for Claude and badges the button', async ({ page }) => {
+    await page.setViewportSize({ width: 1240, height: 820 });
+    await page.goto(kanbanUrl);
+    await page.waitForSelector('.ct-kanban-board');
+
+    const harnessButton = page.locator('.ct-kanban-dispatch .ct-harness-send-btn');
+    await harnessButton.click({ button: 'right' });
+    const menu = page.locator('.ct-harness-menu');
+    await expect(menu.locator('.ct-run-mode-item')).toHaveCount(3);
+    const box = await page.locator('.ct-kanban-dispatch').boundingBox();
+    await shot(page, 'kanban-run-mode-menu.png', { clip: { x: 620, y: Math.max(0, box!.y - 300), width: 620, height: 300 + box!.height } });
+    await menu.locator('.ct-run-mode-item[data-run-mode="always"]').click();
+    await expect(menu).toHaveCount(0);
+    await expect(harnessButton).toHaveAttribute('aria-label', /in a container/);
+    await expect(harnessButton.locator('.ct-run-mode-badge')).toHaveCount(1);
+    await shot(page.locator('.ct-kanban-dispatch'), 'kanban-run-mode-badge.png');
+
+    await harnessButton.click({ button: 'right' });
+    await menu.getByRole('menuitemradio', { name: 'Codex' }).click();
+    await expect(harnessButton.locator('.ct-run-mode-badge')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(0);
+  });
+
   test('kanban kickoff harness picker selects without dispatching', async ({ page }) => {
     await page.setViewportSize({ width: 1240, height: 820 });
     await page.goto(kanbanUrl);
