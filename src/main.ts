@@ -1,4 +1,4 @@
-import type { AgentHarness, StorageAllocationOptions } from './types';
+import type { AgentHarness, HarnessVmMode, StorageAllocationOptions } from './types';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createPublicThreadLifecycle } from './publicThreadLifecycle';
@@ -3489,6 +3489,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       loop?: { intervalSeconds: number };
       /** Harness override selected at kickoff; does not change Settings. */
       agentHarness?: AgentHarness;
+      /** Container/host override selected at kickoff (Claude only); omit to follow Settings. */
+      harnessVmMode?: HarnessVmMode;
       /** Project selected by a dispatch surface. Omit for deliberate Unassigned. */
       projectId?: string;
     },
@@ -3502,6 +3504,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const cwd = project ? this.manager.getProjectCwd(project) : this.getEffectiveCwd();
     const thread = this.manager.createThread(title, cwd, project?.id, opts?.agentHarness);
     if (opts?.model) this.manager.setThreadModel(thread.id, opts.model);
+    // Container routing exists only for Claude; the picker never offers it for
+    // other harnesses, so a mismatched request is ignored rather than fatal.
+    if (opts?.harnessVmMode && (thread.agentHarness ?? 'claude') === 'claude') {
+      this.manager.setInitialThreadHarnessVmMode(thread.id, opts.harnessVmMode);
+    }
     const goalRevision = opts?.goal ? this.manager.setThreadGoal(thread.id, opts.goal) : undefined;
     if (opts?.loop) {
       await this.scheduler.createItem({

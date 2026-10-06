@@ -211,6 +211,8 @@ already selected; successful preview results require the actual artifact view ty
 
 `DispatchInput` only renders the bottom footer row (attach button, mic button) when either `showCwdChip` or `appendFooterActions` is passed. If you want the footer layout without other chips (e.g. in AgentDashboard), pass `appendFooterActions: () => {}` as an empty callback — this sets `needsFooter = true` internally.
 
+With `harnessPicker`, the send button doubles as a sticky picker (right-click / long-press / Shift+F10). For Claude it also offers a **Run in** section (Container / Host / Default); the choice travels as `DispatchPayload.harnessVmMode` to `dispatchNewThread`, which applies it via `ThreadManager.setInitialThreadHarnessVmMode` (no session reset — the thread is brand new) before the first message. It is dropped for non-Claude harnesses.
+
 ---
 
 ## Screenshot Harness
