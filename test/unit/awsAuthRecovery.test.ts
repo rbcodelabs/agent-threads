@@ -119,7 +119,7 @@ describe('awsAuthRecovery', () => {
       expect(msg.startsWith(AWS_SIGN_IN_EXPIRED_MESSAGE)).toBe(true);
       expect(isAwsSignInExpiredError(msg)).toBe(true);
       expect(isAwsSignInExpiredError(REAL_TEXT)).toBe(false);
-      expect(AWS_SIGN_IN_EXPIRED_MESSAGE).toMatch(/aws sso login/);
+      expect(AWS_SIGN_IN_EXPIRED_MESSAGE).toMatch(/sign in to AWS SSO/);
     });
   });
 

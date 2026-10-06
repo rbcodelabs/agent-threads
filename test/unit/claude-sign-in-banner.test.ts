@@ -56,6 +56,18 @@ describe('renderClaudeSignInBanner', () => {
     expect(el.isConnected).toBe(false);
   });
 
+  it('keeps the card and says so when there is nothing to retry', async () => {
+    const { parent, el, deps, button, status } = mount({ retry: vi.fn(async () => false) });
+    button('Retry')!.click();
+    await flush();
+    expect(deps.retry).toHaveBeenCalledTimes(1);
+    expect(parent.contains(el)).toBe(true);
+    expect(status()).toContain('Nothing to retry');
+    button('Retry')!.click();
+    await flush();
+    expect(deps.retry).toHaveBeenCalledTimes(2);
+  });
+
   it('shows the failure and keeps the button on a failed sign-in', async () => {
     const { el, deps, button, status } = mount({ signIn: vi.fn(async () => ({ ok: false as const, error: 'Sign-in timed out after 5 min.' })) });
     document.body.appendChild(el);
