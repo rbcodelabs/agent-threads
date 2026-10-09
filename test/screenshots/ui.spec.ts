@@ -519,7 +519,7 @@ test.describe('Agent Threads UI', () => {
     await shot(page.locator('.ct-agent-popover'), 'native-agent-popover.png');
 
     // Escape dismisses and returns focus to the pill.
-    await page.evaluate(() => document.querySelectorAll('.menu').forEach((m) => m.remove()));
+    await page.keyboard.press('Escape');
     await expect(page.locator('.ct-agent-popover')).toHaveCount(0);
     await expect(pill).toHaveAttribute('aria-expanded', 'false');
   });
@@ -1152,7 +1152,7 @@ test.describe('Agent Threads UI', () => {
     await expect(page.locator('.ct-schedule-row')).toHaveCount(1);
     await expect(page.locator('.ct-schedule-row')).toContainText('One-time wakeup');
     await expect(pill).toContainText('Resumes in 4m');
-    await page.evaluate(() => document.querySelectorAll('.menu').forEach((m) => m.remove()));
+    await page.keyboard.press('Escape');
     await expect(page.locator('.ct-schedule-popover')).toHaveCount(0);
     await pill.click();
     await page.locator('.ct-messages').click({ position: { x: 10, y: 10 } });
@@ -2669,7 +2669,7 @@ test.describe('Agent Threads UI', () => {
     await shot(page.locator('.ct-tasklist-popover'), 'task-list-popover.png');
 
     // Escape dismisses and returns the pill to its collapsed state.
-    await page.evaluate(() => document.querySelectorAll('.menu').forEach((m) => m.remove()));
+    await page.keyboard.press('Escape');
     await expect(page.locator('.ct-tasklist-popover')).toHaveCount(0);
     await expect(pill).toHaveAttribute('aria-expanded', 'false');
   });
