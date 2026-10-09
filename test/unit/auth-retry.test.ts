@@ -13,6 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SessionCallbacks } from '../../src/ClaudeSession';
 import type { ThreadSessionOptions } from '../../src/ThreadSession';
+import { isAwsSignInExpiredError } from '../../src/awsAuthRecovery';
 import { CLAUDE_SIGN_IN_EXPIRED_MESSAGE, isClaudeSignInExpiredError } from '../../src/claudeAuthRecovery';
 
 const OAUTH_EXPIRED = 'Failed to authenticate: OAuth session expired and could not be refreshed';
@@ -321,5 +322,29 @@ describe('ThreadSession — expired Claude sign-in recovery', () => {
     expect(events).toEqual(['done']);
     expect(sdk.generations).toHaveLength(1);
     session.close();
+  });
+
+  it("AWS Bedrock credential failures skip the silent restart and go straight to onAuthRequired (a restart cannot fix an expired SSO session)", async () => {
+    const AWS_TEXT = "API Error: Could not load AWS credentials · The SSO session token associated with profile=probe-expired was not found or is invalid. To refresh this SSO session run 'aws sso login' with the corresponding profile.";
+    const out0 = makeThrowableChannel();
+    sdk.nextIterable = out0;
+    const events: string[] = [];
+    const required: string[] = [];
+    const session = new ThreadSession("/fake/claude");
+    await session.start(options(callbacks({
+      onAuthRetry: () => events.push("auth_retry"),
+      onAuthRequired: (m) => { events.push("auth_required"); required.push(m); },
+      onDone: () => events.push("done"),
+      onError: () => events.push("error"),
+    })));
+    session.send("do the thing");
+    out0.push({ type: "assistant", error: "cloud_credential_error", parent_tool_use_id: null, message: { content: [{ type: "text", text: AWS_TEXT }] }, session_id: "s1" });
+    out0.push({ type: "result", subtype: "success", is_error: true, result: AWS_TEXT, api_error_status: null, terminal_reason: "api_error", session_id: "s1", total_cost_usd: 0, num_turns: 1, usage: {} });
+    await flush();
+    expect(sdk.generations).toHaveLength(1); // no silent respawn
+    expect(events).toEqual(["auth_required"]);
+    expect(isAwsSignInExpiredError(required[0])).toBe(true);
+    expect(required[0]).toContain("profile=probe-expired");
+    expect(isClaudeSignInExpiredError(required[0])).toBe(false);
   });
 });

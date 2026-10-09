@@ -91,6 +91,22 @@ describe('ThreadManager — expired Claude sign-in', () => {
     expect(t.status).toBe('active');
   });
 
+  it('retryAfterSignIn drops a trailing synthetic auth-error reply and resends the user turn', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    const t = thread();
+    manager.loadThreads([t]);
+    await manager.sendMessage('t', 'hello');
+    fake.callbacks!.onAuthRequired!(EXPIRED);
+    t.messages.push({ id: 'a1', role: 'assistant', content: 'API Error: Could not load credentials from any providers', timestamp: Date.now() } as never);
+
+    const retried = await manager.retryAfterSignIn('t');
+
+    expect(retried).toBe(true);
+    expect(fake.sends.map(s => s.prompt)).toEqual(['hello', 'hello']);
+    expect(t.messages.filter(m => m.role === 'assistant')).toHaveLength(0);
+    expect(t.messages.filter(m => m.role === 'user')).toHaveLength(1);
+  });
+
   it('retryAfterSignIn is a no-op when nothing is pending', async () => {
     const manager = new ThreadManager(DEFAULT_SETTINGS);
     manager.loadThreads([thread()]);

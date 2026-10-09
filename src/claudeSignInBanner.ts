@@ -1,9 +1,15 @@
 import { CLAUDE_SIGN_IN_EXPIRED_MESSAGE } from './claudeAuthRecovery';
+import { AWS_SIGN_IN_EXPIRED_MESSAGE, isAwsSignInExpiredError } from './awsAuthRecovery';
 import type { SignInResult } from './claudeAuthCli';
 
 export interface ClaudeSignInBannerDeps {
   /** The terminal sign-in-expired error (headline + raw CLI detail). */
   message: string;
+  /**
+   * Which credential is expired. Defaults from `message`'s headline so a card
+   * rebuilt from persisted `authRequired` state picks the right copy.
+   */
+  flavor?: 'claude' | 'aws';
   /** False where the CLI can't be launched (mobile) — hides the sign-in button. */
   canSignIn: boolean;
   /**
@@ -22,6 +28,20 @@ export interface ClaudeSignInBannerDeps {
   retry: () => Promise<unknown> | void;
 }
 
+const CLAUDE_COPY = {
+  title: 'Claude sign-in expired',
+  bodySignIn: 'Restarting the Claude session didn’t help. Sign in again and this message will be sent automatically.',
+  bodyManual: 'Restarting the Claude session didn’t help. Run `claude auth login` on your computer, then retry.',
+  button: 'Sign in to Claude',
+};
+
+const AWS_COPY = {
+  title: 'AWS sign-in expired',
+  bodySignIn: 'Amazon Bedrock couldn’t load your AWS credentials. Sign in with AWS SSO and this message will be sent automatically.',
+  bodyManual: 'Amazon Bedrock couldn’t load your AWS credentials. Sign in to AWS SSO on your computer, then retry.',
+  button: 'Sign in to AWS',
+};
+
 /**
  * In-thread error card for an expired Claude sign-in that the silent
  * fresh-process retry could not fix. Same `.ct-message.ct-error` shell and
@@ -29,17 +49,15 @@ export interface ClaudeSignInBannerDeps {
  * Claude" (desktop) and "Retry". Removes itself once a retry is sent.
  */
 export function renderClaudeSignInBanner(parent: HTMLElement, deps: ClaudeSignInBannerDeps): HTMLElement {
+  const flavor = deps.flavor ?? (isAwsSignInExpiredError(deps.message) ? 'aws' : 'claude');
+  const copy = flavor === 'aws' ? AWS_COPY : CLAUDE_COPY;
   const card = parent.createDiv('ct-message ct-error ct-auth-required');
-  card.createEl('div', { cls: 'ct-error-text', text: 'Claude sign-in expired' });
-  card.createEl('div', {
-    cls: 'ct-auth-body',
-    text: deps.canSignIn
-      ? 'Restarting the Claude session didn’t help. Sign in again and this message will be sent automatically.'
-      : 'Restarting the Claude session didn’t help. Run `claude auth login` on your computer, then retry.',
-  });
+  card.createEl('div', { cls: 'ct-error-text', text: copy.title });
+  card.createEl('div', { cls: 'ct-auth-body', text: deps.canSignIn ? copy.bodySignIn : copy.bodyManual });
 
-  const detail = deps.message.startsWith(CLAUDE_SIGN_IN_EXPIRED_MESSAGE)
-    ? deps.message.slice(CLAUDE_SIGN_IN_EXPIRED_MESSAGE.length).trim()
+  const headline = flavor === 'aws' ? AWS_SIGN_IN_EXPIRED_MESSAGE : CLAUDE_SIGN_IN_EXPIRED_MESSAGE;
+  const detail = deps.message.startsWith(headline)
+    ? deps.message.slice(headline.length).trim()
     : deps.message;
   if (detail) {
     const details = card.createEl('details', { cls: 'ct-error-details' });
@@ -57,8 +75,15 @@ export function renderClaudeSignInBanner(parent: HTMLElement, deps: ClaudeSignIn
   let busy = false;
   const retryNow = async () => {
     busy = true;
+    // Keep the card until the retry is actually accepted; an outright false
+    // means there was nothing to resend, so say so instead of vanishing.
+    const retried = await deps.retry();
+    if (retried === false) {
+      busy = false;
+      setStatus('Nothing to retry — send your message again.', true);
+      return;
+    }
     card.remove();
-    await deps.retry();
   };
 
   // Owned by whichever onCodePrompt() call is currently in flight, so a
@@ -99,7 +124,7 @@ export function renderClaudeSignInBanner(parent: HTMLElement, deps: ClaudeSignIn
   };
 
   if (deps.canSignIn) {
-    const signInBtn = actions.createEl('button', { cls: 'ct-auth-btn ct-auth-signin-btn mod-cta', text: 'Sign in to Claude' });
+    const signInBtn = actions.createEl('button', { cls: 'ct-auth-btn ct-auth-signin-btn mod-cta', text: copy.button });
     signInBtn.addEventListener('click', async () => {
       if (busy) return;
       busy = true;

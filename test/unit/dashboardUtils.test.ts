@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { relativeTime, shortenPath, isAwsSsoError, extractAwsProfile, resolveAwsBinary, awsExecEnv, formatWakeupCountdown, splitErrorMessage } from '../../src/dashboardUtils';
+import { relativeTime, shortenPath, isAwsSsoError, extractAwsProfile, awsExecEnv, formatWakeupCountdown, splitErrorMessage } from '../../src/dashboardUtils';
 
 // ── formatWakeupCountdown ───────────────────────────────────────────────────────
 
@@ -272,59 +272,6 @@ describe('extractAwsProfile', () => {
 
   it('handles profile name with hyphens and underscores', () => {
     expect(extractAwsProfile('AWS_PROFILE=my-team_prod')).toBe('my-team_prod');
-  });
-});
-
-// ── resolveAwsBinary ──────────────────────────────────────────────────────────
-
-describe('resolveAwsBinary', () => {
-  it('returns /opt/homebrew/bin/aws when present (Apple Silicon Homebrew)', () => {
-    const exists = (p: string) => p === '/opt/homebrew/bin/aws';
-    expect(resolveAwsBinary(exists)).toBe('/opt/homebrew/bin/aws');
-  });
-
-  it('returns /usr/local/bin/aws when present (Intel Homebrew)', () => {
-    const exists = (p: string) => p === '/usr/local/bin/aws';
-    expect(resolveAwsBinary(exists)).toBe('/usr/local/bin/aws');
-  });
-
-  it('returns ~/.local/bin/aws when present (user install)', () => {
-    const home = process.env.HOME ?? '';
-    const exists = (p: string) => p === `${home}/.local/bin/aws`;
-    expect(resolveAwsBinary(exists)).toBe(`${home}/.local/bin/aws`);
-  });
-
-  it('prefers Apple Silicon Homebrew over Intel when both exist', () => {
-    const exists = (p: string) =>
-      p === '/opt/homebrew/bin/aws' || p === '/usr/local/bin/aws';
-    expect(resolveAwsBinary(exists)).toBe('/opt/homebrew/bin/aws');
-  });
-
-  it('falls back to bare "aws" when no candidate exists', () => {
-    expect(resolveAwsBinary(() => false)).toBe('aws');
-  });
-
-  it('returns "aws" if fileExists throws on every candidate', () => {
-    expect(
-      resolveAwsBinary(() => {
-        throw new Error('permission denied');
-      }),
-    ).toBe('aws');
-  });
-
-  it('skips the ~/.local candidate when HOME is unset', () => {
-    const origHome = process.env.HOME;
-    delete process.env.HOME;
-    try {
-      const checked: string[] = [];
-      resolveAwsBinary((p) => {
-        checked.push(p);
-        return false;
-      });
-      expect(checked).toEqual(['/opt/homebrew/bin/aws', '/usr/local/bin/aws']);
-    } finally {
-      process.env.HOME = origHome;
-    }
   });
 });
 
