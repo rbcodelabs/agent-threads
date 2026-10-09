@@ -1,4 +1,4 @@
-import type { AgentHarness } from './types';
+import type { AgentHarness, HarnessVmMode } from './types';
 import { ItemView, WorkspaceLeaf, setIcon, Notice, Platform } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
@@ -282,11 +282,12 @@ export class KanbanView extends ItemView {
       argCompletions: DISPATCH_ARG_COMPLETIONS,
       peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
       harnessPicker: { initialHarness: this.plugin.settings.agentHarness ?? 'claude' },
-      onSend: async ({ text, images, attachment, agentHarness }) => {
+      onSend: async ({ text, images, attachment, agentHarness, harnessVmMode }) => {
         // Intercept contributed commands, then core model/goal/loop directives.
         // Apply directives instead of sending command text to the agent verbatim.
-        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; projectId?: string } = {
+        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; harnessVmMode?: HarnessVmMode; projectId?: string } = {
           agentHarness,
+          harnessVmMode,
           projectId: this.selectedProjectId || undefined,
         };
         let titleText = text;

@@ -448,3 +448,24 @@ describe('per-thread harnessVmMode override', () => {
     expect(manager.getThread('t1')!.harnessVmMode).toBeUndefined();
   });
 });
+
+describe('setInitialThreadHarnessVmMode (dispatch-time run mode)', () => {
+  it('sets and clears the override on a fresh thread without touching session state', () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.loadThreads([thread({ sessionId: undefined, sessionGeneration: 1 })]);
+    manager.setInitialThreadHarnessVmMode('t1', 'always');
+    const t = manager.getThread('t1')!;
+    expect(t.harnessVmMode).toBe('always');
+    expect(t.sessionGeneration).toBe(1);
+    expect(t.pendingHarnessHandoff).toBeUndefined();
+    manager.setInitialThreadHarnessVmMode('t1', undefined);
+    expect(manager.getThread('t1')!.harnessVmMode).toBeUndefined();
+  });
+
+  it('refuses non-Claude threads and threads that already have a session', () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.loadThreads([thread({ id: 't2', agentHarness: 'codex' }), thread({ sessionId: 'native-1' })]);
+    expect(() => manager.setInitialThreadHarnessVmMode('t2', 'never')).toThrow();
+    expect(() => manager.setInitialThreadHarnessVmMode('t1', 'never')).toThrow();
+  });
+});
