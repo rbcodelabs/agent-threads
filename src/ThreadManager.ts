@@ -782,6 +782,26 @@ export class ThreadManager {
     }
   }
 
+  /**
+   * Sets the container-routing override on a thread that has not started yet
+   * (no messages, no session) — used by dispatch surfaces before the first
+   * turn. Synchronous and side-effect free beyond the field: there is no live
+   * session to recycle and no native session to reset, unlike
+   * `setThreadHarnessVmMode`. Persisting is the caller's job (`saveSettings`).
+   */
+  setInitialThreadHarnessVmMode(id: string, mode: HarnessVmMode | undefined): void {
+    const thread = this.threads.get(id);
+    if (!thread) throw new Error(`Thread not found: ${id}`);
+    if ((thread.agentHarness ?? 'claude') !== 'claude') {
+      throw new Error('Container execution is only available for the Claude harness.');
+    }
+    if (thread.sessionId || this.sessions.has(id) || thread.messages.length > 0) {
+      throw new Error('The execution mode of a started thread must be changed with setThreadHarnessVmMode.');
+    }
+    if (mode === undefined) delete thread.harnessVmMode; else thread.harnessVmMode = mode;
+    thread.updatedAt = Date.now();
+  }
+
   private claimHarnessHandoff(id: string): Thread['pendingHarnessHandoff'] {
     const thread = this.threads.get(id);
     if (!thread?.pendingHarnessHandoff || this.claimedHarnessHandoffs.has(id)) return undefined;

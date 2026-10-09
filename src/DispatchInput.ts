@@ -1,4 +1,4 @@
-import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
+import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, type AgentHarness, type HarnessVmMode } from './types';
 import { App, setIcon, setTooltip, Notice } from 'obsidian';
 import type { ImageAttachment, ImageMediaType } from './types';
 import { MAX_ATTACHMENT_BYTES } from './attachmentUtils';
@@ -20,7 +20,26 @@ export interface DispatchPayload {
   attachment: string | null;
   /** Harness selected by a kickoff picker, when that picker is enabled. */
   agentHarness?: AgentHarness;
+  /**
+   * Per-thread container-routing override chosen in the kickoff picker's
+   * "Run in" section (`'always'` = container, `'never'` = host). Absent means
+   * follow Settings. Only ever set for the Claude harness.
+   */
+  harnessVmMode?: HarnessVmMode;
 }
+
+/**
+ * Run-in choices offered by the kickoff picker; `undefined` = Default (follow
+ * Settings). Only explicit overrides are offered — `auto` is reachable through
+ * Default plus the global setting.
+ */
+type RunModeChoice = Exclude<HarnessVmMode, 'auto'>;
+const RUN_MODE_OPTIONS: ReadonlyArray<RunModeChoice | undefined> = ['always', 'never', undefined];
+
+const RUN_MODE_ICONS: Record<RunModeChoice, string> = {
+  always: 'box',
+  never: 'laptop',
+};
 
 export interface DispatchInputOptions {
   app: App;
@@ -163,6 +182,8 @@ export class DispatchInput {
   private sttController: SttController | null = null;
   private dispatching = false;
   private selectedHarness: AgentHarness | null = null;
+  /** Sticky "Run in" override for the next dispatches; undefined follows Settings. */
+  private selectedVmMode: RunModeChoice | undefined;
   private harnessMenu: HTMLElement | null = null;
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressNextSendClick = false;
@@ -504,6 +525,7 @@ export class DispatchInput {
         images,
         attachment,
         ...(this.selectedHarness ? { agentHarness: this.selectedHarness } : {}),
+        ...(this.effectiveVmMode() ? { harnessVmMode: this.effectiveVmMode() } : {}),
       });
     } catch (err) {
       // Dispatch can fail after selection state changes (for example, a
@@ -572,11 +594,27 @@ export class DispatchInput {
     const name = agentHarnessLabel(this.selectedHarness);
     this.sendBtn.empty();
     this.createHarnessMark(this.sendBtn, this.selectedHarness);
-    const label = `Start task with ${name}; right-click or hold to change agent`;
+    const vmMode = this.effectiveVmMode();
+    this.sendBtn.removeClass('ct-harness-send-btn--container', 'ct-harness-send-btn--host');
+    if (vmMode) {
+      this.sendBtn.addClass(vmMode === 'always' ? 'ct-harness-send-btn--container' : 'ct-harness-send-btn--host');
+      const badge = this.sendBtn.createSpan({
+        cls: 'ct-run-mode-badge',
+        attr: { 'aria-hidden': 'true', 'data-run-mode': vmMode },
+      });
+      setIcon(badge, RUN_MODE_ICONS[vmMode]);
+    }
+    const where = vmMode ? ` in ${vmMode === 'always' ? 'a container' : 'the host (no container)'}` : '';
+    const label = `Start task with ${name}${where}; right-click or hold to change agent or where it runs`;
     this.sendBtn.setAttribute('aria-label', label);
     this.sendBtn.setAttribute('aria-haspopup', 'menu');
     this.sendBtn.setAttribute('aria-expanded', this.harnessMenu ? 'true' : 'false');
     this.sendBtn.title = label;
+  }
+
+  /** The run-mode override to apply, or undefined. Container routing exists only for Claude. */
+  private effectiveVmMode(): RunModeChoice | undefined {
+    return this.selectedHarness === 'claude' ? this.selectedVmMode : undefined;
   }
 
   private openHarnessMenu(): void {
@@ -609,6 +647,39 @@ export class DispatchInput {
         const offset = event.key === 'ArrowDown' ? 1 : -1;
         items[(items.indexOf(item) + offset + items.length) % items.length]?.focus();
       });
+    }
+    if (this.selectedHarness === 'claude') {
+      menu.createDiv({ cls: 'ct-harness-menu-separator', attr: { role: 'separator' } });
+      menu.createDiv({ cls: 'ct-harness-menu-heading', text: 'Run in' });
+      for (const mode of RUN_MODE_OPTIONS) {
+        const item = menu.createEl('button', {
+          cls: 'ct-harness-menu-item ct-run-mode-item',
+          attr: {
+            role: 'menuitemradio',
+            'aria-checked': String(this.selectedVmMode === mode),
+            'data-run-mode': mode ?? 'default',
+          },
+        });
+        if (mode) {
+          const mark = item.createSpan({ cls: 'ct-run-mode-mark', attr: { 'aria-hidden': 'true' } });
+          setIcon(mark, RUN_MODE_ICONS[mode]);
+        }
+        item.createSpan({ text: harnessVmModeLabel(mode) });
+        item.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.selectedVmMode = mode;
+          this.closeHarnessMenu(true);
+          this.renderHarnessIdentity();
+        });
+        item.addEventListener('keydown', (event) => {
+          if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+          event.preventDefault();
+          const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'));
+          const offset = event.key === 'ArrowDown' ? 1 : -1;
+          items[(items.indexOf(item) + offset + items.length) % items.length]?.focus();
+        });
+      }
     }
     this.sendBtn.setAttribute('aria-expanded', 'true');
     document.addEventListener('pointerdown', this.closeHarnessMenuOnPointerDown);

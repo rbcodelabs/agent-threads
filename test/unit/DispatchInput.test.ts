@@ -451,3 +451,88 @@ describe('DispatchInput — harness picker', () => {
     }
   });
 });
+
+describe('DispatchInput — run mode (container / host)', () => {
+  function mountPicker(onSend = vi.fn(), initialHarness: 'claude' | 'codex' = 'claude') {
+    const di = new DispatchInput({ app: makeApp(), onSend, harnessPicker: { initialHarness } });
+    const container = makeContainer();
+    document.body.appendChild(container);
+    const root = di.mount(container);
+    const textarea = root.querySelector('textarea')!;
+    const sendButton = root.querySelector<HTMLButtonElement>('.ct-send-btn')!;
+    return { di, root, textarea, sendButton, onSend };
+  }
+  const openMenu = (btn: HTMLElement) =>
+    btn.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  const runModeItem = (root: HTMLElement, mode: string) =>
+    root.querySelector<HTMLButtonElement>(`.ct-run-mode-item[data-run-mode="${mode}"]`);
+
+  it('shows a Run in section with Container / Host / Default for Claude', () => {
+    const { root, sendButton } = mountPicker();
+    openMenu(sendButton);
+    expect(runModeItem(root, 'always')).toBeTruthy();
+    expect(runModeItem(root, 'never')).toBeTruthy();
+    expect(runModeItem(root, 'default')).toBeTruthy();
+    expect(runModeItem(root, 'default')!.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('omits harnessVmMode from the payload by default', async () => {
+    const { textarea, sendButton, onSend } = mountPicker();
+    textarea.value = 'hello';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend.mock.calls[0][0]).not.toHaveProperty('harnessVmMode');
+  });
+
+  it('choosing Container sends harnessVmMode "always", labels the button and does not dispatch', async () => {
+    const { root, textarea, sendButton, onSend } = mountPicker();
+    openMenu(sendButton);
+    runModeItem(root, 'always')!.click();
+    expect(onSend).not.toHaveBeenCalled();
+    expect(sendButton.getAttribute('aria-label')).toContain('in a container');
+    expect(sendButton.classList.contains('ct-harness-send-btn--container')).toBe(true);
+    expect(sendButton.querySelector('.ct-run-mode-badge')).toBeTruthy();
+
+    textarea.value = 'go';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ harnessVmMode: 'always' }));
+  });
+
+  it('choosing Host sends harnessVmMode "never"; choosing Default clears it', async () => {
+    const { root, textarea, sendButton, onSend } = mountPicker();
+    openMenu(sendButton);
+    runModeItem(root, 'never')!.click();
+    expect(sendButton.getAttribute('aria-label')).toContain('host (no container)');
+    textarea.value = 'one';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend).toHaveBeenLastCalledWith(expect.objectContaining({ harnessVmMode: 'never' }));
+
+    openMenu(sendButton);
+    runModeItem(root, 'default')!.click();
+    expect(sendButton.querySelector('.ct-run-mode-badge')).toBeFalsy();
+    textarea.value = 'two';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend.mock.calls.at(-1)![0]).not.toHaveProperty('harnessVmMode');
+  });
+
+  it('is not offered for Codex, and switching to Codex drops a chosen mode', async () => {
+    const codex = mountPicker(vi.fn(), 'codex');
+    openMenu(codex.sendButton);
+    expect(runModeItem(codex.root, 'always')).toBeFalsy();
+
+    const { root, textarea, sendButton, onSend } = mountPicker();
+    openMenu(sendButton);
+    runModeItem(root, 'always')!.click();
+    openMenu(sendButton);
+    root.querySelector<HTMLButtonElement>('[role="menuitemradio"][data-harness="codex"]')!.click();
+    expect(sendButton.querySelector('.ct-run-mode-badge')).toBeFalsy();
+    textarea.value = 'codex task';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend.mock.calls[0][0]).toMatchObject({ agentHarness: 'codex' });
+    expect(onSend.mock.calls[0][0]).not.toHaveProperty('harnessVmMode');
+  });
+});

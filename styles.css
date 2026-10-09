@@ -2621,6 +2621,60 @@
   background: var(--background-modifier-hover);
 }
 
+/* "Run in" section of the kickoff picker (Claude only) */
+.ct-harness-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--background-modifier-border);
+}
+
+.ct-harness-menu-heading {
+  padding: 4px 9px 2px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.ct-run-mode-item {
+  white-space: nowrap;
+}
+
+.ct-run-mode-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+}
+
+.ct-run-mode-mark svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Default has no icon; keep its label aligned with the icon rows. */
+.ct-run-mode-item[data-run-mode='default'] {
+  padding-left: 35px;
+}
+
+/* Badge on the send button when a run-mode override is active */
+.ct-run-mode-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: inline-flex;
+  width: 11px;
+  height: 11px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.ct-run-mode-badge svg {
+  width: 11px;
+  height: 11px;
+  stroke-width: 2.5;
+}
+
 .ct-root .ct-stop-btn {
   background: var(--color-red, #e05252);
   color: white;

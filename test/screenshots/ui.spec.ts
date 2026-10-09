@@ -422,12 +422,14 @@ test.describe('Agent Threads UI', () => {
     const userMessages = page.locator('.ct-message-user');
     await expect(userMessages).toHaveCount(3);
 
-    // Restored older rows preserve the host/browser menu; only the latest
-    // canonical text-bearing user row opens the plugin action.
+    // Older rows offer Retry only; Set as goal is limited to the latest
+    // canonical text-bearing user row.
     await userMessages.first().click({ button: 'right' });
+    await expect(page.locator('.menu .menu-item')).toHaveText(['Retry']);
+    await page.evaluate(() => document.querySelectorAll('.menu').forEach((m) => m.remove()));
     await expect(page.locator('.menu')).toHaveCount(0);
     await userMessages.last().click({ button: 'right' });
-    await expect(page.locator('.menu .menu-item')).toHaveText('Set as goal');
+    await expect(page.locator('.menu .menu-item')).toHaveText(['Retry', 'Set as goal']);
     await shot(page, 'set-as-goal-context-menu.png', { fullPage: true });
   });
 
@@ -440,14 +442,14 @@ test.describe('Agent Threads UI', () => {
     const latest = page.locator('.ct-message-user').last();
     await latest.click({ button: 'right' });
     await page.evaluate(() => (window as any).__addLiveUserMessage('thread-fix-auth', 'live-newer', 'Canonical live goal'));
-    await page.locator('.menu .menu-item').click();
+    await page.locator('.menu .menu-item', { hasText: 'Set as goal' }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__goalKickoffs.length)).toBe(0);
 
     // The live row gets the same menu binding. Delay persistence, switch
     // threads, then release: the action must still target thread-fix-auth.
     await page.locator('.ct-message-user').last().click({ button: 'right' });
     await page.evaluate(() => (window as any).__blockNextSave());
-    await page.locator('.menu .menu-item').click();
+    await page.locator('.menu .menu-item', { hasText: 'Set as goal' }).click();
     await page.evaluate(() => (window as any).__view.focusThread('thread-brainstorm'));
     await page.evaluate(() => (window as any).__releaseNextSave());
 
@@ -469,7 +471,7 @@ test.describe('Agent Threads UI', () => {
     await page.evaluate(() => (window as any).__failNextSave('disk full'));
 
     await page.locator('.ct-message-user').last().click({ button: 'right' });
-    await page.locator('.menu .menu-item').click();
+    await page.locator('.menu .menu-item', { hasText: 'Set as goal' }).click();
 
     await expect(page.locator('.ct-error')).toContainText('Failed to set goal: disk full');
     const result = await page.evaluate(() => ({
@@ -2948,6 +2950,29 @@ test.describe('Agent Threads UI', () => {
     await expect(harnessButton.locator('.ct-harness-mark-opencode')).toHaveAttribute('data-icon', 'opencode-mark');
     expect(await page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(0);
     await shot(page.locator('.ct-kanban-dispatch'), 'kanban-harness-picker-opencode.png');
+  });
+
+  test('kanban kickoff picker offers Run in (container/host) for Claude and badges the button', async ({ page }) => {
+    await page.setViewportSize({ width: 1240, height: 820 });
+    await page.goto(kanbanUrl);
+    await page.waitForSelector('.ct-kanban-board');
+
+    const harnessButton = page.locator('.ct-kanban-dispatch .ct-harness-send-btn');
+    await harnessButton.click({ button: 'right' });
+    const menu = page.locator('.ct-harness-menu');
+    await expect(menu.locator('.ct-run-mode-item')).toHaveCount(3);
+    const box = await page.locator('.ct-kanban-dispatch').boundingBox();
+    await shot(page, 'kanban-run-mode-menu.png', { clip: { x: 620, y: Math.max(0, box!.y - 300), width: 620, height: 300 + box!.height } });
+    await menu.locator('.ct-run-mode-item[data-run-mode="always"]').click();
+    await expect(menu).toHaveCount(0);
+    await expect(harnessButton).toHaveAttribute('aria-label', /in a container/);
+    await expect(harnessButton.locator('.ct-run-mode-badge')).toHaveCount(1);
+    await shot(page.locator('.ct-kanban-dispatch'), 'kanban-run-mode-badge.png');
+
+    await harnessButton.click({ button: 'right' });
+    await menu.getByRole('menuitemradio', { name: 'Codex' }).click();
+    await expect(harnessButton.locator('.ct-run-mode-badge')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(0);
   });
 
   test('kanban kickoff harness picker selects without dispatching', async ({ page }) => {
