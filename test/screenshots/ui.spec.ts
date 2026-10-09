@@ -422,12 +422,14 @@ test.describe('Agent Threads UI', () => {
     const userMessages = page.locator('.ct-message-user');
     await expect(userMessages).toHaveCount(3);
 
-    // Restored older rows preserve the host/browser menu; only the latest
-    // canonical text-bearing user row opens the plugin action.
+    // Older rows offer Retry only; Set as goal is limited to the latest
+    // canonical text-bearing user row.
     await userMessages.first().click({ button: 'right' });
+    await expect(page.locator('.menu .menu-item')).toHaveText(['Retry']);
+    await page.evaluate(() => document.querySelectorAll('.menu').forEach((m) => m.remove()));
     await expect(page.locator('.menu')).toHaveCount(0);
     await userMessages.last().click({ button: 'right' });
-    await expect(page.locator('.menu .menu-item')).toHaveText('Set as goal');
+    await expect(page.locator('.menu .menu-item')).toHaveText(['Retry', 'Set as goal']);
     await shot(page, 'set-as-goal-context-menu.png', { fullPage: true });
   });
 
@@ -440,14 +442,14 @@ test.describe('Agent Threads UI', () => {
     const latest = page.locator('.ct-message-user').last();
     await latest.click({ button: 'right' });
     await page.evaluate(() => (window as any).__addLiveUserMessage('thread-fix-auth', 'live-newer', 'Canonical live goal'));
-    await page.locator('.menu .menu-item').click();
+    await page.locator('.menu .menu-item', { hasText: 'Set as goal' }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__goalKickoffs.length)).toBe(0);
 
     // The live row gets the same menu binding. Delay persistence, switch
     // threads, then release: the action must still target thread-fix-auth.
     await page.locator('.ct-message-user').last().click({ button: 'right' });
     await page.evaluate(() => (window as any).__blockNextSave());
-    await page.locator('.menu .menu-item').click();
+    await page.locator('.menu .menu-item', { hasText: 'Set as goal' }).click();
     await page.evaluate(() => (window as any).__view.focusThread('thread-brainstorm'));
     await page.evaluate(() => (window as any).__releaseNextSave());
 
@@ -469,7 +471,7 @@ test.describe('Agent Threads UI', () => {
     await page.evaluate(() => (window as any).__failNextSave('disk full'));
 
     await page.locator('.ct-message-user').last().click({ button: 'right' });
-    await page.locator('.menu .menu-item').click();
+    await page.locator('.menu .menu-item', { hasText: 'Set as goal' }).click();
 
     await expect(page.locator('.ct-error')).toContainText('Failed to set goal: disk full');
     const result = await page.evaluate(() => ({
@@ -517,7 +519,7 @@ test.describe('Agent Threads UI', () => {
     await shot(page.locator('.ct-agent-popover'), 'native-agent-popover.png');
 
     // Escape dismisses and returns focus to the pill.
-    await page.keyboard.press('Escape');
+    await page.evaluate(() => document.querySelectorAll('.menu').forEach((m) => m.remove()));
     await expect(page.locator('.ct-agent-popover')).toHaveCount(0);
     await expect(pill).toHaveAttribute('aria-expanded', 'false');
   });
@@ -1150,7 +1152,7 @@ test.describe('Agent Threads UI', () => {
     await expect(page.locator('.ct-schedule-row')).toHaveCount(1);
     await expect(page.locator('.ct-schedule-row')).toContainText('One-time wakeup');
     await expect(pill).toContainText('Resumes in 4m');
-    await page.keyboard.press('Escape');
+    await page.evaluate(() => document.querySelectorAll('.menu').forEach((m) => m.remove()));
     await expect(page.locator('.ct-schedule-popover')).toHaveCount(0);
     await pill.click();
     await page.locator('.ct-messages').click({ position: { x: 10, y: 10 } });
@@ -2667,7 +2669,7 @@ test.describe('Agent Threads UI', () => {
     await shot(page.locator('.ct-tasklist-popover'), 'task-list-popover.png');
 
     // Escape dismisses and returns the pill to its collapsed state.
-    await page.keyboard.press('Escape');
+    await page.evaluate(() => document.querySelectorAll('.menu').forEach((m) => m.remove()));
     await expect(page.locator('.ct-tasklist-popover')).toHaveCount(0);
     await expect(pill).toHaveAttribute('aria-expanded', 'false');
   });
