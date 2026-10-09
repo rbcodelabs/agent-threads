@@ -57,7 +57,7 @@ test.describe('Claude sign-in expired card', () => {
   });
 });
 
-const AWS_MESSAGE = 'AWS sign-in expired — run `aws sso login`\n\n'
+const AWS_MESSAGE = 'AWS sign-in expired — sign in to AWS SSO again\n\n'
   + "API Error: Could not load AWS credentials · The SSO session token associated with profile=bedrock-dev was not found or is invalid. To refresh this SSO session run 'aws sso login' with the corresponding profile.";
 
 test.describe('AWS sign-in expired card (Bedrock)', () => {
