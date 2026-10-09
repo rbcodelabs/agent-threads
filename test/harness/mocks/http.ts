@@ -1,7 +1,7 @@
 /**
  * Stub for Node's http module in the Playwright browser harness.
  *
- * OpenCodeSession and its host-tool MCP bridge require('http') lazily, but
+ * OpenCodeSession, its host-tool MCP bridge and awsSsoLogin (as https) require('http') lazily, but
  * esbuild still resolves the specifier when ThreadManager pulls HarnessFactory
  * into the bundle. The harness never starts an OpenCode session, so any call
  * here is a bug and fails loudly.

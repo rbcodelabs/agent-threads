@@ -40,6 +40,8 @@ const sharedConfig = {
     // http is required lazily by OpenCodeSession / OpenCodeHostTools, which
     // HarnessFactory pulls in; the harness never starts an OpenCode session.
     'http':                             resolve('./mocks/http.ts'),
+    // https is required lazily by awsSsoLogin (native AWS SSO sign-in); same story as http.
+    'https':                            resolve('./mocks/http.ts'),
     // isomorphic-git's Node HTTP transport is required lazily by gitClient (skill
     // sources); its deps (https, url, querystring) don't resolve for the browser target.
     'isomorphic-git/http/node':         resolve('./mocks/isomorphic-git-http.ts'),
