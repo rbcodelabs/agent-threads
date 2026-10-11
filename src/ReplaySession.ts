@@ -79,6 +79,8 @@ export interface ReplayScript {
   version: 1;
   /** Reported through `onActiveModel`. */
   model?: string;
+  /** Slash commands and skills reported through `onCommandsChanged` when the session starts. */
+  commands?: { name: string; description: string; argumentHint?: string }[];
   pacing?: {
     /** Streaming speed for message text. Default 90. */
     charsPerSecond?: number;
@@ -215,6 +217,9 @@ export class ReplaySession implements HarnessSession {
     this.callbacks = options.callbacks;
     this.closed = false;
     if (this.script.model) options.callbacks.onActiveModel?.(this.script.model);
+    if (this.script.commands?.length) {
+      options.callbacks.onCommandsChanged?.(this.script.commands.map((c) => ({ argumentHint: '', ...c })));
+    }
   }
 
   send(text: string, _images?: ImageAttachment[], _userMessageUuid?: string): void {

@@ -1,0 +1,164 @@
+{
+  "version": 1,
+  "model": "claude-sonnet-4-5",
+  "pacing": { "charsPerSecond": 75, "chunkChars": 4 },
+  "commands": [
+    { "name": "compact", "description": "Clear conversation history but keep a summary in context", "argumentHint": "[instructions]" },
+    { "name": "review", "description": "Review a pull request" },
+    { "name": "create-pr", "description": "Create a pull request for the current branch" },
+    { "name": "pr-checklist", "description": "Run the pre-PR definition-of-done checklist" },
+    { "name": "security-review", "description": "Complete a security review of the pending changes" },
+    { "name": "simplify", "description": "Review changed code for reuse, quality and efficiency" },
+    { "name": "init", "description": "Initialize a CLAUDE.md file with codebase documentation" },
+    { "name": "brainstorm", "description": "Active ideation partner that produces a structured note" },
+    { "name": "stash", "description": "Park the current work as a resumable handoff note" },
+    { "name": "web-search", "description": "Search the web and summarize what matters" }
+  ],
+  "turns": [
+    {
+      "match": "decisions from this week",
+      "steps": [
+        { "type": "message", "text": "I'll start with the meeting notes.", "tools": [{ "name": "Glob", "input": { "pattern": "Meetings/*.md" }, "durationMs": 900 }] },
+        { "type": "message", "tools": [{ "name": "Read", "input": { "file_path": "Meetings/Weekly Sync.md" }, "durationMs": 1100 }] },
+        { "type": "message", "tools": [{ "name": "Read", "input": { "file_path": "Meetings/Kickoff.md" }, "durationMs": 900 }] },
+        { "type": "message", "tools": [{ "name": "Read", "input": { "file_path": "Projects/Roadmap.md" }, "durationMs": 1000 }] },
+        { "type": "message", "tools": [{ "name": "Grep", "input": { "pattern": "decid", "path": "Meetings" }, "durationMs": 800 }] },
+        {
+          "type": "message",
+          "text": "Here is what the team settled on this week.\n\n**Decisions**\n- Ship offline capture before audio transcription.\n- Keep the Team tier at $24 per seat until the next round of interviews.\n\n**Still open**\n- Who owns the press kit\n- Whether we need a status page before launch\n\nWant me to add this summary to the Weekly Sync note?"
+        }
+      ]
+    },
+    {
+      "match": "add it to the weekly sync",
+      "steps": [
+        {
+          "type": "message",
+          "text": "I'll add a short summary section to the note.",
+          "tools": [
+            {
+              "name": "Edit",
+              "input": {
+                "file_path": "Meetings/Weekly Sync.md",
+                "old_string": "## Open questions",
+                "new_string": "## Summary\nOffline capture ships first. The Team tier stays at $24 per seat.\n\n## Open questions"
+              },
+              "durationMs": 1200,
+              "filesEdited": ["Meetings/Weekly Sync.md"],
+              "permission": {
+                "ifDenied": [{ "type": "message", "text": "No problem, I left the note as it is." }]
+              }
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "text": "Done. The new Summary section is in [[Weekly Sync]], and each decision points back to the [[Roadmap]] and the [[Launch Plan]] it came from."
+        }
+      ]
+    },
+    {
+      "match": "compare",
+      "steps": [{ "type": "message", "text": "Sure, comparing the two now." }]
+    },
+    {
+      "match": "release notes",
+      "steps": [
+        { "type": "message", "text": "I'll split this into two parts and run them side by side.", "tools": [{ "name": "Read", "input": { "file_path": "Projects/Roadmap.md" }, "durationMs": 900 }] },
+        {
+          "type": "message",
+          "text": "One agent gathers what shipped while another drafts the copy.",
+          "tools": [
+            {
+              "name": "Agent",
+              "input": { "description": "Collect shipped features", "subagent_type": "Explore" },
+              "agent": {
+                "taskId": "demo-agent-features",
+                "description": "Collect shipped features",
+                "subagentType": "Explore",
+                "progress": [
+                  { "afterMs": 1500, "description": "Reading Projects/Roadmap.md", "lastToolName": "Read" },
+                  { "afterMs": 3500, "description": "Searching notes for shipped items", "lastToolName": "Grep" },
+                  { "afterMs": 4000, "description": "Reading Projects/Launch Plan.md", "lastToolName": "Read" }
+                ],
+                "hold": true
+              }
+            },
+            {
+              "name": "Agent",
+              "input": { "description": "Draft the release notes", "subagent_type": "general-purpose" },
+              "agent": {
+                "taskId": "demo-agent-draft",
+                "description": "Draft the release notes",
+                "subagentType": "general-purpose",
+                "progress": [
+                  { "afterMs": 2500, "description": "Outlining the notes", "lastToolName": "Read" },
+                  { "afterMs": 5000, "description": "Writing the offline capture section", "lastToolName": "Write" }
+                ],
+                "hold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "match": "launch plan for risks",
+      "steps": [
+        { "type": "message", "text": "Reading the plan and the pricing research.", "tools": [{ "name": "Read", "input": { "file_path": "Projects/Launch Plan.md" }, "durationMs": 1200 }] },
+        { "type": "message", "tools": [{ "name": "Read", "input": { "file_path": "Research/Pricing Research.md" }, "durationMs": 1200 }] },
+        { "type": "pause", "ms": 9000 },
+        {
+          "type": "message",
+          "text": "Two risks stand out. Offline sync is still the biggest unknown, and the Studio tier cannot ship until audit logs exist."
+        }
+      ]
+    },
+    {
+      "match": "tidy up the onboarding",
+      "steps": [
+        {
+          "type": "message",
+          "text": "I'll group the ideas by when a new user would see them.",
+          "tools": [
+            {
+              "name": "Edit",
+              "input": {
+                "file_path": "Ideas/Onboarding Ideas.md",
+                "old_string": "- Start from a sample notebook instead of an empty page",
+                "new_string": "## First launch\n- Start from a sample notebook instead of an empty page"
+              },
+              "filesEdited": ["Ideas/Onboarding Ideas.md"],
+              "permission": {
+                "ifDenied": [{ "type": "message", "text": "Understood, the note stays as it is." }]
+              }
+            }
+          ]
+        },
+        { "type": "message", "text": "The note is regrouped, with the first-launch ideas on top." }
+      ]
+    },
+    {
+      "match": "launch checklist",
+      "steps": [
+        {
+          "type": "message",
+          "text": "I'll track the checklist as tasks and work through them.",
+          "tools": [
+            { "name": "TaskCreate", "summary": "Review the open milestones", "input": { "subject": "Review the open milestones" }, "durationMs": 400, "taskEvent": { "kind": "create", "id": "1", "content": "Review the open milestones" } }
+          ]
+        },
+        { "type": "message", "tools": [{ "name": "TaskCreate", "summary": "Check the onboarding flow", "input": { "subject": "Check the onboarding flow" }, "durationMs": 400, "taskEvent": { "kind": "create", "id": "2", "content": "Check the onboarding flow" } }] },
+        { "type": "message", "tools": [{ "name": "TaskCreate", "summary": "Confirm the support runbook", "input": { "subject": "Confirm the support runbook" }, "durationMs": 400, "taskEvent": { "kind": "create", "id": "3", "content": "Confirm the support runbook" } }] },
+        { "type": "message", "tools": [{ "name": "TaskUpdate", "summary": "Review the open milestones", "input": { "taskId": "1", "status": "in_progress" }, "durationMs": 400, "taskEvent": { "kind": "update", "id": "1", "status": "in_progress" } }] },
+        { "type": "message", "tools": [{ "name": "Read", "input": { "file_path": "Projects/Launch Plan.md" }, "durationMs": 1500 }] },
+        { "type": "message", "tools": [{ "name": "TaskUpdate", "summary": "Review the open milestones", "input": { "taskId": "1", "status": "completed" }, "durationMs": 400, "taskEvent": { "kind": "update", "id": "1", "status": "completed" } }] },
+        { "type": "message", "tools": [{ "name": "TaskUpdate", "summary": "Check the onboarding flow", "input": { "taskId": "2", "status": "in_progress" }, "durationMs": 400, "taskEvent": { "kind": "update", "id": "2", "status": "in_progress" } }] },
+        { "type": "pause", "ms": 6000 },
+        { "type": "message", "tools": [{ "name": "TaskUpdate", "summary": "Check the onboarding flow", "input": { "taskId": "2", "status": "completed" }, "durationMs": 400, "taskEvent": { "kind": "update", "id": "2", "status": "completed" } }] },
+        { "type": "message", "text": "Two of three checks are done. The support runbook is still open." }
+      ]
+    }
+  ],
+  "fallback": [{ "type": "message", "text": "Sure, I'm on it." }]
+}

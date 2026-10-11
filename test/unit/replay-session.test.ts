@@ -31,6 +31,7 @@ function makeCallbacks(overrides: Partial<SessionCallbacks> = {}) {
     onTaskEvent: (e: { kind: string }) => log.push(`task_event:${e.kind}`),
     onFilesEdited: (p: string[]) => log.push(`files:${p.join(',')}`),
     onActiveModel: (m: string) => log.push(`model:${m}`),
+    onCommandsChanged: (c: { name: string }[]) => log.push(`commands:${c.map((x) => x.name).join(',')}`),
     ...overrides,
   } as unknown as SessionCallbacks;
   return { callbacks, log };
@@ -114,6 +115,12 @@ describe('ReplaySession', () => {
       'files:a.md',
       'done',
     ]);
+  });
+
+  it('reports scripted slash commands when the session starts', async () => {
+    const { callbacks, log } = makeCallbacks();
+    await run({ version: 1, commands: [{ name: 'review', description: 'Review a PR' }], turns: [] }, 'x', callbacks);
+    expect(log).toContain('commands:review');
   });
 
   it('reports turnInFlight only while a turn runs', async () => {

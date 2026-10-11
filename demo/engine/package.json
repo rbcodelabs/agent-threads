@@ -1,0 +1,18 @@
+{
+  "name": "demo-engine",
+  "private": true,
+  "type": "module",
+  "description": "Product demo video engine, vendored from the Agentic PM Playbook (skills/product-demo-video).",
+  "scripts": {
+    "doctor": "node doctor.mts",
+    "voiceover": "node voiceover.mts",
+    "record": "node record.mts",
+    "compose": "node compose.mts",
+    "run": "node run.mts",
+    "sync-report": "node sync-report.mts"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.62.1",
+    "electron": "^42.4.0"
+  }
+}
