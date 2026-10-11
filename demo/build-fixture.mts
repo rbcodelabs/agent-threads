@@ -65,7 +65,7 @@ function seededThread(opts: {
     agentHarness: "claude",
     title: opts.title,
     titleUserSet: true,
-    cwd: "",
+    cwd: opts.projectId === PROJECT_LAUNCH ? "Projects" : "Research",
     projectId: opts.projectId,
     status: "waiting",
     reviewed: opts.reviewed,
