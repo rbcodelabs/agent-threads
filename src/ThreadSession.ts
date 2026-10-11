@@ -646,6 +646,12 @@ export class ThreadSession {
     await this.query.setPermissionMode(mode);
   }
 
+  /** SDK-native connection state of every MCP server in the live query; [] when no session is open. */
+  async mcpServerStatus(): Promise<Array<{ name: string; status: string }>> {
+    if (!this.query) return [];
+    return (await this.query.mcpServerStatus()).map(({ name, status }) => ({ name, status }));
+  }
+
   /**
    * Returns a snapshot of current context window usage from the live query.
    * Returns null when no session is open or the call fails.

@@ -52,6 +52,8 @@ export interface HarnessSession {
   setModel(model: string | undefined): Promise<void>;
   setPermissionMode(mode: HarnessPermissionMode): Promise<void>;
   getContextUsage(): Promise<HarnessContextUsage | null>;
+  /** Connection state of the session's MCP servers, when the harness can report it (Claude SDK). */
+  mcpServerStatus?(): Promise<Array<{ name: string; status: string }>>;
   getUsageSnapshot(includeAccountUsage?: boolean): Promise<import('./Usage').UsageSnapshot | null>;
 }
 
