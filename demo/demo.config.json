@@ -145,7 +145,7 @@
         },
         {
           "type": "pause",
-          "ms": 4000
+          "ms": 6000
         }
       ]
     },
@@ -173,7 +173,7 @@
         },
         {
           "type": "pause",
-          "ms": 7000
+          "ms": 8500
         }
       ]
     },
@@ -251,7 +251,7 @@
         },
         {
           "type": "pause",
-          "ms": 6500
+          "ms": 8000
         }
       ]
     },
@@ -311,8 +311,44 @@
           "cue": "browse every command and skill"
         },
         {
-          "type": "pause",
-          "ms": 350
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
         },
         {
           "type": "press",
@@ -320,23 +356,7 @@
         },
         {
           "type": "pause",
-          "ms": 350
-        },
-        {
-          "type": "press",
-          "key": "ArrowDown"
-        },
-        {
-          "type": "pause",
-          "ms": 350
-        },
-        {
-          "type": "press",
-          "key": "ArrowDown"
-        },
-        {
-          "type": "pause",
-          "ms": 2500
+          "ms": 1800
         },
         {
           "type": "press",
@@ -375,7 +395,7 @@
         {
           "type": "click",
           "selector": ".ct-agents-dispatch-input",
-          "cue": "running more than one thread"
+          "cue": "The real power"
         },
         {
           "type": "type",
@@ -426,7 +446,7 @@
         },
         {
           "type": "pause",
-          "ms": 7000
+          "ms": 8500
         }
       ]
     },
@@ -451,23 +471,27 @@
         },
         {
           "type": "hover",
-          "selector": ".ct-kanban-col:has-text(\"New\") .ct-kanban-card",
-          "cue": "idle"
+          "selector": ".ct-kanban-col:has(.ct-kanban-col-label:text-is(\"New\")) .ct-kanban-card",
+          "cue": "idle",
+          "optional": true
         },
         {
           "type": "hover",
           "selector": ".ct-kanban-card-running",
-          "cue": "running"
+          "cue": "running",
+          "optional": true
         },
         {
           "type": "hover",
           "selector": ".ct-kanban-col-permission .ct-kanban-card",
-          "cue": "waiting"
+          "cue": "waiting",
+          "optional": true
         },
         {
           "type": "hover",
-          "selector": ".ct-kanban-col:has-text(\"Done\") .ct-kanban-card",
-          "cue": "done"
+          "selector": ".ct-kanban-col:has(.ct-kanban-col-label:text-is(\"Done\")) .ct-kanban-card",
+          "cue": "done",
+          "optional": true
         },
         {
           "type": "pause",
@@ -505,7 +529,7 @@
         },
         {
           "type": "pause",
-          "ms": 8000
+          "ms": 10000
         }
       ]
     },
@@ -534,7 +558,7 @@
         },
         {
           "type": "pause",
-          "ms": 6500
+          "ms": 8000
         },
         {
           "type": "click",
@@ -615,7 +639,7 @@
         },
         {
           "type": "pause",
-          "ms": 6500
+          "ms": 8500
         }
       ]
     }

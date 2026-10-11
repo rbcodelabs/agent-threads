@@ -274,7 +274,7 @@
         },
         {
           "type": "pause",
-          "ms": 9000
+          "ms": 4000
         },
         {
           "type": "message",
