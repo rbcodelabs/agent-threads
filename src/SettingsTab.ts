@@ -1,6 +1,7 @@
 import { isAgentHarness } from './types';
 import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
+import type { ButtonComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
 import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifactStorage';
@@ -157,12 +158,60 @@ export function describeOAuthMcpStatus(state: OAuthMcpState | undefined): { labe
     if (state.accessTokenExpiresAt !== undefined) {
       const remaining = state.accessTokenExpiresAt - Date.now();
       if (selfRenewing) return { label: `Connected · renews in ${formatOAuthDuration(remaining)}`, tone: 'green' };
+      // Past expiry with no refresh token nothing can renew it, so this is not
+      // "expiring soon" — the connection is already dead and only consent fixes it.
+      if (remaining <= 0 && !state.hasRefreshToken) return { label: 'Needs re-authorization', tone: 'red' };
+      // Past expiry but renewable: the background renewal timer did not get to run
+      // (app closed, machine asleep). The next request renews it.
+      if (remaining <= 0) return { label: 'Token expired · renews on next use', tone: 'yellow' };
       if (remaining < 15 * 60_000) return { label: 'Expires soon', tone: 'yellow' };
+      // A token that will simply run out is worth saying so: the provider issued no refresh token.
+      if (!state.hasRefreshToken) return { label: `Expires in ${formatOAuthDuration(remaining)} · no refresh token`, tone: 'yellow' };
       return { label: `Connected · expires in ${formatOAuthDuration(remaining)}`, tone: 'green' };
     }
     return { label: 'Connected', tone: 'green' };
   }
   return { label: selfRenewing ? 'Needs new credentials' : 'Needs re-authorization', tone: 'red' };
+}
+
+/** Whether a row should lead with its Re-authorize button: anything short of healthy, including "Expires soon". */
+export function oauthMcpNeedsAttention(status: { tone: 'green' | 'yellow' | 'red' | 'grey' }): boolean {
+  return status.tone === 'yellow' || status.tone === 'red';
+}
+
+/** Status dot + label on its own line under the server URL, so it never runs into the name. */
+function renderOAuthStatusBadge(parent: HTMLElement, status: { label: string; tone: string }): void {
+  const badge = parent.createDiv({ cls: 'ct-oauth-status' });
+  badge.createSpan({ cls: `ct-oauth-status-dot ct-oauth-status-dot--${status.tone}` });
+  badge.createSpan({ cls: 'ct-oauth-status-label', text: status.label });
+}
+
+/**
+ * Runs the consent flow again for an existing connection. The button shows
+ * progress and re-enables on failure; `onDone` repaints the lists on success.
+ */
+async function reauthorizeFromSettings(
+  registry: ClaudeThreadsPlugin['oauthMcpRegistry'],
+  name: string,
+  btn: ButtonComponent,
+  idleLabel: string,
+  onDone: () => void,
+): Promise<void> {
+  if (!registry) { new Notice('OAuth MCP is unavailable in this context.'); return; }
+  btn.setDisabled(true).setButtonText('Authorizing…');
+  let result: { success: boolean; message: string };
+  try {
+    result = await registry.reauthorize(name);
+  } catch (err) {
+    result = { success: false, message: err instanceof Error ? err.message : String(err) };
+  }
+  if (result.success) {
+    new Notice(`Re-authorized "${name}".`);
+    onDone();
+  } else {
+    new Notice(result.message || `Could not re-authorize "${name}".`);
+    btn.setDisabled(false).setButtonText(idleLabel);
+  }
 }
 
 export function isWebViewerEnabled(app: App): boolean {
@@ -3023,12 +3072,15 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         const state = this.plugin.oauthMcpRegistry?.status(name);
         const { label, tone } = describeOAuthMcpStatus(state);
         const row = new Setting(oauthListEl).setName(name).setDesc(entry.url);
-        row.nameEl.createEl('span', { cls: `ct-oauth-status-dot ct-oauth-status-dot--${tone}` });
-        row.nameEl.createEl('span', { cls: 'ct-oauth-status-label', text: label });
-        if (state?.status === 'error' && state.errorMessage) {
-          row.descEl.createEl('br');
-          row.descEl.createEl('span', { cls: 'ct-mcp-server-warning', text: state.errorMessage });
+        renderOAuthStatusBadge(row.descEl, { label, tone });
+        if (state && state.status !== 'connected' && state.errorMessage) {
+          row.descEl.createDiv({ cls: 'ct-mcp-server-warning', text: state.errorMessage });
         }
+        row.addButton((btn) => {
+          btn.setButtonText('Re-authorize').onClick(() =>
+            reauthorizeFromSettings(this.plugin.oauthMcpRegistry, name, btn, 'Re-authorize', refreshOAuth));
+          if (oauthMcpNeedsAttention({ tone })) btn.setCta();
+        });
         row.addButton((btn) =>
           btn.setButtonText('Disconnect').setWarning().onClick(async () => {
             await this.plugin.oauthMcpRegistry?.disconnect(name);
@@ -3059,8 +3111,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         const row = new Setting(quickConnectEl).setName(preset.label).setDesc(preset.url);
         if (connected) {
           const { label, tone } = describeOAuthMcpStatus(this.plugin.oauthMcpRegistry?.status(preset.name));
-          row.nameEl.createEl('span', { cls: `ct-oauth-status-dot ct-oauth-status-dot--${tone}` });
-          row.nameEl.createEl('span', { cls: 'ct-oauth-status-label', text: label });
+          renderOAuthStatusBadge(row.descEl, { label, tone });
+          row.addButton((btn) => {
+            btn.setButtonText('Re-authorize').onClick(() =>
+              reauthorizeFromSettings(this.plugin.oauthMcpRegistry, preset.name, btn, 'Re-authorize', refreshOAuth));
+            if (oauthMcpNeedsAttention({ tone })) btn.setCta();
+          });
         } else if (preset.requiresClientId || preset.requiresClientSecret) {
           row.descEl.createEl('br');
           row.descEl.createEl('span', { text: 'Needs your own Client ID' + (preset.requiresClientSecret ? ' and secret.' : '.') });

@@ -2508,9 +2508,15 @@ test.describe('Agent Threads UI', () => {
     await expect(figmaRow.getByText('Needs re-authorization')).toBeVisible();
     await expect(figmaRow.getByText('Refresh failed: invalid_grant', { exact: false })).toBeVisible();
     await expect(figmaRow.getByRole('button', { name: 'Disconnect' })).toBeVisible();
+    // Every row can be re-authorized in place; the unhealthy one leads with it (CTA).
+    await expect(figmaRow.getByRole('button', { name: 'Re-authorize' })).toBeVisible();
+    await expect(figmaRow.getByRole('button', { name: 'Re-authorize' })).toHaveClass(/mod-cta/);
+    // The status sits under the URL, not inside the name (it used to render "figmaNeeds re-authorization").
+    await expect(figmaRow.locator('.setting-item-name')).toHaveText('figma');
     const vercelRow = page.locator('.ct-oauth-mcp-servers-list .setting-item').filter({ hasText: 'vercel' });
     await expect(vercelRow.getByText('Connected · expires in 2h 45m', { exact: false })).toBeVisible();
     await expect(vercelRow.getByRole('button', { name: 'Disconnect' })).toBeVisible();
+    await expect(vercelRow.getByRole('button', { name: 'Re-authorize' })).not.toHaveClass(/mod-cta/);
     // The client_credentials server renews itself from the keychain secret, so
     // its countdown says "renews in" and it reads as healthy despite holding no
     // refresh token — the grant never issues one (RFC 6749 §4.4.3).

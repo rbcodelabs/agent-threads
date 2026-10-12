@@ -28,6 +28,8 @@ export interface ToolFilter {
 export interface ProxyTokenStore {
   getAccessToken(serverName: string): Promise<string | null>;
   refresh(serverName: string): Promise<unknown>;
+  /** Told when the proxy gives up on a token, so the Settings status reflects it instead of staying green. */
+  markNeedsReauth?(serverName: string, reason: string): void;
 }
 
 interface UpstreamResponse {
@@ -266,7 +268,8 @@ export class OAuthMcpProxy {
    * JSON-RPC body reports the real problem instead.
    */
   private replyReauthorize(res: ServerResponse): void {
-    this.reply(res, 503, { jsonrpc: '2.0', error: { code: -32001, message: `OAuth token for "${this.serverName}" expired and cannot be renewed — re-authorize it in Agent Threads settings (Settings → MCP).` } });
+    this.tokenStore.markNeedsReauth?.(this.serverName, 'The provider rejected the stored token and it could not be renewed.');
+    this.reply(res, 503, { jsonrpc: '2.0', error: { code: -32001, message: `OAuth token for "${this.serverName}" expired and cannot be renewed — open Agent Threads Settings → MCP → OAuth MCP servers and click "Re-authorize" on "${this.serverName}".` } });
   }
 
   private async forward(req: IncomingMessage, body: Buffer, accessToken: string, signal: AbortSignal): Promise<UpstreamResponse> {
