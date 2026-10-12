@@ -506,6 +506,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       { bindings: this.settings.googleWorkspaceBindings, save: () => this.saveSettings() },
       // Large-file Drive tools may only touch the thread's working directory and the vault.
       (threadId) => [this.manager.getThread(threadId)?.cwd, this.manager.vaultRoot].filter((root): root is string => !!root));
+    // A new listening origin invalidates every URL/capability sessions were built with.
+    this.googleWorkspaceMcp.onOriginChange = () => { this.manager?.requestAllSessionsRestart(); };
     await this.googleWorkspaceMcp.configure(this.settings.googleWorkspaceMcp ?? {});
     this.register(() => this.googleWorkspaceMcp?.close());
 
@@ -531,6 +533,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
         });
         return { target };
       },
+      // New proxies mean new capability tokens/ports; rebuild sessions holding the old ones.
+      onCapabilityLayerChanged: () => { this.manager?.requestAllSessionsRestart(); },
     });
     await this.oauthMcpRegistry.configure();
     this.register(() => this.oauthMcpRegistry?.close());
@@ -561,6 +565,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.register(() => setKnownSecretsProvider(null));
     this.manager = new ThreadManager(this.settings);
     this.manager.getExternalMounts = () => this.listExternalMountRoots();
+    // Lets the manager detect sessions holding stale Google/OAuth proxy configs (per-send check).
+    this.manager.proxyMcpServersForThread = (threadId) => ({
+      ...(this.googleWorkspaceMcp?.serversForThread(threadId) ?? {}),
+      ...(this.oauthMcpRegistry?.serversForThread(threadId) ?? {}),
+    });
     this.contextPanel = new ContextPanelController(this.app, () =>
       this.app.workspace.getLeavesOfType(VIEW_TYPE)[0] ?? null,
       () => this.settings.conversationCompanionMarker,

@@ -65,6 +65,9 @@ export class GoogleWorkspaceMcp {
   private server?: Server;
   private starting?: Promise<void>;
   private origin = '';
+  private lastAnnouncedOrigin = '';
+  /** Called when the proxy starts listening on an origin different from the last one announced. */
+  onOriginChange?: (origin: string) => void;
   private enabled: GoogleWorkspaceSelection = {};
   private bindings = new Map<string, Binding>();
   private requests = new Set<AbortController>();
@@ -126,6 +129,11 @@ export class GoogleWorkspaceMcp {
         if (this.closed) { server.close(); resolve(); return; }
         const address = server.address();
         if (address && typeof address !== 'string') this.origin = `http://127.0.0.1:${address.port}`;
+        // Sessions built against a previous origin (or before this one existed) hold dead URLs.
+        if (this.origin && this.origin !== this.lastAnnouncedOrigin) {
+          this.lastAnnouncedOrigin = this.origin;
+          try { this.onOriginChange?.(this.origin); } catch (err) { console.error('[GoogleWorkspaceMcp] onOriginChange failed:', err); }
+        }
         resolve();
       });
     });

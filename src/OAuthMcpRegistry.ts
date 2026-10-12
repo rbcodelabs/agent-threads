@@ -70,6 +70,11 @@ export interface OAuthMcpRegistryHost {
    * renderer (`file://` origin blocks cross-origin fetch). Tests inject a stub.
    */
   fetchFn?: typeof fetch;
+  /**
+   * Called after proxies are (re)created. Their capability tokens and ports are
+   * in-memory only, so sessions built earlier hold dead configs and must be rebuilt.
+   */
+  onCapabilityLayerChanged?: () => void;
 }
 
 interface Connection {
@@ -225,6 +230,7 @@ export class OAuthMcpRegistry {
     const settings = this.host.getSettings();
     const entries = Object.entries(settings.oauthMcpServers ?? {});
     let dirty = false;
+    let rebuilt = false;
 
     for (const [name, entry] of entries) {
       try {
@@ -272,6 +278,7 @@ export class OAuthMcpRegistry {
           : (!accessExpired || canRenew) ? 'connected' : 'needs-auth';
 
         this.connections.set(name, { flow, tokenStore, proxy, asMetadata });
+        rebuilt = true;
         settings.oauthMcpState[name] = {
           ...this.buildState(name, clientId, storedSecret !== undefined, asMetadata, proxy, tokens, status),
           ...(entry.grantType ? { grantType: entry.grantType } : {}),
@@ -304,6 +311,11 @@ export class OAuthMcpRegistry {
     if (dirty) {
       try { await this.host.save(); } catch (err) { console.error('[OAuthMcpRegistry] Could not save state after configure():', err); }
     }
+    if (rebuilt) this.notifyCapabilityLayerChanged();
+  }
+
+  private notifyCapabilityLayerChanged(): void {
+    try { this.host.onCapabilityLayerChanged?.(); } catch (err) { console.error('[OAuthMcpRegistry] onCapabilityLayerChanged failed:', err); }
   }
 
   /**
@@ -556,6 +568,7 @@ export class OAuthMcpRegistry {
     }
 
     this.connections.set(entry.name, { flow, tokenStore, proxy, asMetadata });
+    this.notifyCapabilityLayerChanged();
     return { success: true, status: 'registered', message: `"${entry.name}" connected. New threads can now use it.` };
   }
 
