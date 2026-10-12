@@ -51,6 +51,7 @@ import { isAwsCredentialErrorText } from './awsAuthRecovery';
 import { stripHostOnlyGitEnv } from './githubCredentialHelper';
 import { isReportedModelId } from './modelOptions';
 import { mergeUsageSnapshot,normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
+import { resolvePlanText, isPlanFilePath } from './planText';
 
 /**
  * Everything needed to open a thread's long-lived `Query`, once, for the
@@ -268,9 +269,12 @@ export class ThreadSession {
 
     const callbacks = options.callbacks;
 
+    let lastWrittenPlanPath: string | undefined;
     const canUseTool: CanUseTool = async (toolName, input, opts) => {
       this._pendingInteractiveCallbacks++;
       try {
+        const wrotePath = (input as { file_path?: unknown })?.file_path;
+        if ((toolName === 'Write' || toolName === 'Edit') && isPlanFilePath(wrotePath)) lastWrittenPlanPath = wrotePath;
         if (toolName === 'AskUserQuestion') {
           const questions = (input as { questions: import('./types').AskQuestion[] }).questions;
           const answers = await callbacks.onAskUserQuestion(questions);
@@ -296,7 +300,7 @@ export class ThreadSession {
               console.error('[ClaudeThreads] failed to clear plan mode via setPermissionMode:', err);
             }
           };
-          const planText = String((input as { plan?: unknown }).plan ?? '');
+          const planText = resolvePlanText(input, lastWrittenPlanPath);
           if (callbacks.onPlanReady) {
             const result = await new Promise<import('@anthropic-ai/claude-agent-sdk').PermissionResult>((resolve) => {
               callbacks.onPlanReady!(
