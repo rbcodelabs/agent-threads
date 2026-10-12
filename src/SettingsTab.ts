@@ -1155,7 +1155,7 @@ export class McpServerModal extends Modal {
 // Settings tab
 // ───────────────────────────────────────────────────────────────────────────
 
-type SettingsTabId = 'general' | 'claude' | 'tools' | 'vault' | 'features' | 'projects' | 'secrets' | 'scheduled' | 'remote' | 'skills' | 'mcp';
+export type SettingsTabId = 'general' | 'claude' | 'tools' | 'vault' | 'features' | 'projects' | 'secrets' | 'scheduled' | 'remote' | 'skills' | 'mcp';
 
 const TAB_GROUPS: { label: string; tabs: { id: SettingsTabId; label: string }[] }[] = [
   { label: 'Preferences', tabs: [
@@ -1168,6 +1168,9 @@ const TAB_GROUPS: { label: string; tabs: { id: SettingsTabId; label: string }[] 
   { label: 'Extensions', tabs: [{ id: 'skills', label: 'Skills' }, { id: 'mcp', label: 'MCP' }] },
   { label: 'Connectivity', tabs: [{ id: 'remote', label: 'Remote' }] },
 ];
+
+/** Flat list of every settings section, in sidebar order (used for host-registered sections). */
+export const SETTINGS_SECTIONS: { id: SettingsTabId; label: string }[] = TAB_GROUPS.flatMap((g) => g.tabs);
 
 /** Fallback model list shown before any session has run and populated discoveredModels. */
 const FALLBACK_MODELS: { value: string; displayName: string }[] = [
@@ -1189,11 +1192,17 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     this.selectedProjectId = '';
   }
 
+  /**
+   * When set, this instance renders exactly one section with no in-pane
+   * navigation: the host (Geode) lists the sections in its own sidebar.
+   */
   constructor(
     app: App,
     private plugin: ClaudeThreadsPlugin,
+    private fixedSection?: SettingsTabId,
   ) {
     super(app, plugin);
+    if (fixedSection) this.activeTab = fixedSection;
   }
 
   /** Re-renders any open Kanban board / Agent Dashboard leaves so a setting toggled here (e.g. scheduled-thread stacking) takes effect immediately, without requiring the user to close and reopen the tab. */
@@ -1246,6 +1255,11 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       return;
     }
 
+    if (this.fixedSection) {
+      this.renderActiveTab(containerEl.createDiv({ cls: 'ct-settings-tab-body' }));
+      return;
+    }
+
     const shell = containerEl.createDiv({ cls: 'ct-settings-shell' });
     const compact = shell.createDiv({ cls: 'ct-settings-compact-nav' });
     compact.createEl('strong', { text: 'Agent Threads' });
@@ -1264,7 +1278,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       if (retainFocus) containerEl.querySelector<HTMLSelectElement>('.ct-settings-compact-nav select')?.focus();
     });
 
-    const body = shell.createDiv({ cls: 'ct-settings-tab-body' });
+    this.renderActiveTab(shell.createDiv({ cls: 'ct-settings-tab-body' }));
+  }
+
+  private renderActiveTab(body: HTMLElement): void {
     switch (this.activeTab) {
       case 'general': this.renderGeneralTab(body); break;
       case 'claude': this.renderClaudeTab(body); break;
