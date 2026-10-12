@@ -181,6 +181,18 @@ export class OAuthTokenStore {
     this.refreshTimers.set(serverName, timer);
   }
 
+  /**
+   * Stops the proactive-refresh timer without touching the keychain. Used when a
+   * newer connection for the same server (a re-authorization) takes over the
+   * same keychain slots: a stale store whose timer fired would otherwise renew
+   * the old grant and overwrite the fresh tokens.
+   */
+  cancelScheduledRefresh(serverName: string): void {
+    const timer = this.refreshTimers.get(serverName);
+    if (timer) clearTimeout(timer);
+    this.refreshTimers.delete(serverName);
+  }
+
   /** Clear all tokens and the client_id for a server (unregister/revoke), and cancel its scheduled refresh. */
   clear(serverName: string): void {
     const timer = this.refreshTimers.get(serverName);

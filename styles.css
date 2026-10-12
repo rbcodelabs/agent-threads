@@ -8355,6 +8355,35 @@ body.ct-skills-resizing {
   font-size: 12px;
 }
 
+/* ── OAuth MCP server status (Settings → MCP) ──────────────────────────────
+   Rendered in the row's description under the URL, on its own line. These
+   classes previously had no rules at all, so the dot and label ran into the
+   server name as bare inline spans ("compassExpires soon"). */
+.ct-oauth-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: var(--font-ui-smaller, 12px);
+}
+
+.ct-oauth-status-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.ct-oauth-status-dot--green { background: var(--color-green, #3fb950); }
+.ct-oauth-status-dot--yellow { background: var(--color-yellow, #d4a72c); }
+.ct-oauth-status-dot--red { background: var(--color-red, #e5534b); }
+.ct-oauth-status-dot--grey { background: var(--text-faint); }
+
+.ct-oauth-status-label {
+  color: var(--text-muted);
+}
+
 /* ── Staleness badge in settings ────────────────────────────────────────── */
 
 .ct-skill-source-updates-badge {

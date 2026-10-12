@@ -13,7 +13,7 @@
  */
 import '../setup/obsidian-dom';
 import { describe, it, expect } from 'vitest';
-import { describeOAuthMcpStatus } from '../../src/SettingsTab';
+import { describeOAuthMcpStatus, oauthMcpNeedsAttention } from '../../src/SettingsTab';
 import type { OAuthMcpState } from '../../src/types';
 
 function state(over: Partial<OAuthMcpState> = {}): OAuthMcpState {
@@ -46,9 +46,31 @@ describe('describeOAuthMcpStatus — authorization_code', () => {
       .toEqual({ label: 'Expires soon', tone: 'yellow' });
   });
 
-  it('treats an already-passed expiry as expiring soon rather than reporting negative time', () => {
+  /**
+   * Regression: three connections whose token had already died (hiptrip, compass,
+   * vercel) read "Expires soon" because any past expiry fell under the <15 minute
+   * branch. A past expiry is not "soon", and with no refresh token it is final.
+   */
+  it('says Needs re-authorization, not "Expires soon", for a past expiry with no refresh token', () => {
+    expect(describeOAuthMcpStatus(state({ hasRefreshToken: false, accessTokenExpiresAt: Date.now() - 60_000 })))
+      .toEqual({ label: 'Needs re-authorization', tone: 'red' });
+  });
+
+  it('says the token expired and will renew on next use when a refresh token is on hand', () => {
     expect(describeOAuthMcpStatus(state({ accessTokenExpiresAt: Date.now() - 60_000 })))
-      .toEqual({ label: 'Expires soon', tone: 'yellow' });
+      .toEqual({ label: 'Token expired · renews on next use', tone: 'yellow' });
+  });
+
+  it('warns that a token with no refresh token will simply run out', () => {
+    expect(describeOAuthMcpStatus(state({ hasRefreshToken: false, accessTokenExpiresAt: Date.now() + 90 * 60_000 })))
+      .toEqual({ label: 'Expires in 1h 30m · no refresh token', tone: 'yellow' });
+  });
+
+  it('flags yellow and red rows for attention, leaves green and grey alone', () => {
+    expect(oauthMcpNeedsAttention({ tone: 'yellow' })).toBe(true);
+    expect(oauthMcpNeedsAttention({ tone: 'red' })).toBe(true);
+    expect(oauthMcpNeedsAttention({ tone: 'green' })).toBe(false);
+    expect(oauthMcpNeedsAttention({ tone: 'grey' })).toBe(false);
   });
 
   it('says plain "Connected" when the provider issued no expiry', () => {

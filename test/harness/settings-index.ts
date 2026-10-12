@@ -290,6 +290,7 @@ const mockPlugin = {
   },
   oauthMcpRegistry: {
     status: (name: string) => settings.oauthMcpState[name],
+    reauthorize: async () => ({ success: true, status: 'registered', message: 'ok' }),
     disconnect: async (name: string) => {
       delete settings.oauthMcpServers[name];
       delete settings.oauthMcpState[name];

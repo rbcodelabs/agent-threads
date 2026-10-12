@@ -19,11 +19,11 @@ function jsonUpstream(payload: unknown, status = 200): Upstream {
   }));
 }
 
-function setup(opts: { toolFilter?: ToolFilter; upstream?: Upstream; accessToken?: string | null } = {}) {
+function setup(opts: { toolFilter?: ToolFilter; upstream?: Upstream; accessToken?: string | null; markNeedsReauth?: ProxyTokenStore["markNeedsReauth"] } = {}) {
   let accessToken: string | null = opts.accessToken !== undefined ? opts.accessToken : 'token-1';
   const getAccessToken = vi.fn(async () => accessToken);
   const refresh = vi.fn(async () => { accessToken = 'token-2'; });
-  const tokenStore: ProxyTokenStore = { getAccessToken, refresh };
+  const tokenStore: ProxyTokenStore = { getAccessToken, refresh, markNeedsReauth: opts.markNeedsReauth };
   const upstream = opts.upstream ?? jsonUpstream({ jsonrpc: '2.0', result: { tools: [{ name: 'a' }, { name: 'b' }] } });
   const proxy = new OAuthMcpProxy('vercel', 'https://mcp.vercel.com/', tokenStore, opts.toolFilter, upstream);
   instances.push(proxy);
@@ -115,6 +115,18 @@ describe('OAuthMcpProxy — capability tokens', () => {
     const res = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': token }, body: '{}' });
     expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ jsonrpc: '2.0', error: { code: -32001 } });
+  });
+
+  it('names the real Settings affordance in the error and tells the registry the token is dead', async () => {
+    const markNeedsReauth = vi.fn();
+    const { proxy } = setup({ accessToken: null, markNeedsReauth });
+    await proxy.start();
+    const token = proxy.capabilityTokenFor('thread-1');
+    const res = await fetch(proxy.url, { method: 'POST', headers: { 'x-capability-token': token }, body: '{}' });
+    const body = await res.json() as { error: { message: string } };
+    expect(body.error.message).toContain('Settings → MCP → OAuth MCP servers');
+    expect(body.error.message).toContain('"Re-authorize"');
+    expect(markNeedsReauth).toHaveBeenCalledWith(expect.any(String), expect.stringContaining('could not be renewed'));
   });
 });
 
