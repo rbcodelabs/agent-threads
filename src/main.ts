@@ -69,7 +69,7 @@ import { createDeferredThreadArchiver } from './deferredThreadArchive';
 import { getVaultBridgesAPI, findBridgesForFiles, type BridgeInfo } from './bridgeUtils';
 import { execEnv } from './dashboardUtils';
 import { createGateRunner, makeGateEnvironment, type GateExec } from './gateRunner';
-import { ClaudeThreadsSettingTab, isWebViewerEnabled, RequestSecretModal } from './SettingsTab';
+import { ClaudeThreadsSettingTab, SETTINGS_SECTIONS, isWebViewerEnabled, RequestSecretModal, type SettingsTabId } from './SettingsTab';
 import { RelayClient } from './RelayClient';
 import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
@@ -253,6 +253,8 @@ export function subscribeAgentRunPersistence(
 
 export default class ClaudeThreadsPlugin extends Plugin {
   private settingTab?: ClaudeThreadsSettingTab;
+  private settingSectionTabs = new Map<SettingsTabId, ClaudeThreadsSettingTab>();
+  private projectsSectionId?: string;
   /** Stable peer-plugin entry point. Its v1 generation is revoked on unload. */
   api!: { readonly v1: ClaudeThreadsApiV1 };
   settings!: PluginSettings;
@@ -457,8 +459,22 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
 
     // Settings tab (both platforms)
-    this.settingTab = new ClaudeThreadsSettingTab(this.app, this);
-    this.addSettingTab(this.settingTab);
+    // On hosts that support it (Geode), register each section so it lists in the
+    // host Settings sidebar. Obsidian (and mobile) keep the single tabbed pane.
+    const host = this as unknown as {
+      addSettingSection?: (s: { id: string; name: string; tab: ClaudeThreadsSettingTab }) => string;
+    };
+    if (!Platform.isMobile && typeof host.addSettingSection === 'function') {
+      for (const section of SETTINGS_SECTIONS) {
+        const tab = new ClaudeThreadsSettingTab(this.app, this, section.id);
+        const tabId = host.addSettingSection({ id: section.id, name: section.label, tab });
+        this.settingSectionTabs.set(section.id, tab);
+        if (section.id === 'projects') this.projectsSectionId = tabId;
+      }
+    } else {
+      this.settingTab = new ClaudeThreadsSettingTab(this.app, this);
+      this.addSettingTab(this.settingTab);
+    }
   }
 
   private async onloadDesktop(): Promise<void> {
@@ -3467,10 +3483,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   /** Open Settings → Projects with a blank new-project draft. */
   openNewProjectSettings(): void {
-    this.settingTab?.showNewProject();
+    (this.settingSectionTabs.get('projects') ?? this.settingTab)?.showNewProject();
     const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
     setting?.open();
-    setting?.openTabById(this.manifest.id);
+    setting?.openTabById(this.projectsSectionId || this.manifest.id);
   }
 
   async deleteProject(projectId: string): Promise<void> {
