@@ -14,8 +14,14 @@ import { autoUpdateGithubSources, cloneGithubSource } from '../../src/skillManag
 beforeAll(() => setGitHttpClient(localGitHttp));
 afterAll(() => setGitHttpClient(undefined));
 
+// Fixture git runs with auto-maintenance off. After a fetch/commit, git spawns a detached
+// `git maintenance run --auto` that can repack the object store *after the command has
+// returned*, while the code under test (isomorphic-git) is reading the same packs. That
+// race made isomorphic-git fail to read a pack index mid-rewrite, which gitSync reported
+// as "Clone has local commits" — about 1 in 8 runs on CI. Production never shells out to git.
+const NO_MAINTENANCE = '-c maintenance.auto=false -c gc.auto=0';
 const git = (cwd: string, cmd: string) =>
-  execSync(`git -C "${cwd}" -c user.email=t@t -c user.name=t ${cmd}`, { stdio: 'pipe' }).toString();
+  execSync(`git -C "${cwd}" -c user.email=t@t -c user.name=t ${NO_MAINTENANCE} ${cmd}`, { stdio: 'pipe' }).toString();
 
 describe('autoUpdateGithubSources', () => {
   let tmp: string;
@@ -37,7 +43,7 @@ describe('autoUpdateGithubSources', () => {
     fs.mkdirSync(origin);
     git(origin, 'init -q -b main');
     commit('a');
-    execSync(`git clone -q "${origin}" "${clone}"`);
+    execSync(`git ${NO_MAINTENANCE} clone -q "${origin}" "${clone}"`);
     git(clone, `remote set-url origin ${localGitUrl(origin)}`);
   });
   afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
