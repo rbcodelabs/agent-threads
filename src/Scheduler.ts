@@ -341,6 +341,19 @@ function nextWeeklyRun(timeOfDay: string, daysOfWeek: number[], fromMs: number):
 const CATCHUP_BASE_DELAY_MS = 5_000;
 const CATCHUP_STAGGER_STEP_MS = 2_000;
 const CATCHUP_STAGGER_MAX_MS = 30_000;
+// A missed run is only caught up if it is overdue by at most this much (a quick
+// restart/update). Anything staler (e.g. an 8am job on a 11:46 restart) is
+// skipped and advanced to its next slot, so a restart never fires a storm of
+// hours-old jobs. One-shot ('once') items are exempt: a missed one must fire.
+export const CATCHUP_GRACE_MS = 15 * 60_000;
+
+function isStaleMiss(item: ScheduledItem, now: number): boolean {
+  return (
+    !!item.nextRun &&
+    item.schedule.type !== 'once' &&
+    now - item.nextRun > CATCHUP_GRACE_MS
+  );
+}
 
 export class Scheduler {
   private timers = new Map<string, number>();
@@ -412,6 +425,20 @@ export class Scheduler {
     const now = Date.now();
     let delayMs: number;
 
+    // Stale miss: too old to catch up. Skip to the next slot without firing;
+    // lastRun is untouched because nothing ran.
+    if (item.nextRun && item.nextRun < now && isStaleMiss(item, now)) {
+      const overdueBy = now - item.nextRun;
+      item.nextRun = computeNextRun(item, true);
+      const idx = this.items.findIndex((i) => i.id === item.id);
+      if (idx >= 0 && this.items[idx] !== item) this.items[idx] = { ...this.items[idx], nextRun: item.nextRun };
+      this.options.saveItem({ ...item }).catch(console.error);
+      console.warn(
+        `[Scheduler] Skipped stale missed run for "${item.name}" (${item.id}): ` +
+          `overdue by ${overdueBy}ms (> ${CATCHUP_GRACE_MS}ms grace); next run ${new Date(item.nextRun).toISOString()}`
+      );
+    }
+
     // Missed run detection: if nextRun is in the past, fire after a short delay.
     // Successive catch-up items in the same boot are staggered further out so
     // a batch of overdue items (e.g. after a stale-data reload) doesn't all
@@ -448,7 +475,7 @@ export class Scheduler {
         { noOverlap: true },
       );
       task.on('execution:missed', () => {
-        this.requestFire(item.id, Date.now()).catch(console.error);
+        this.requestFire(item.id, Date.now(), true).catch(console.error);
       });
       task.start();
       this.calendarTasks.set(item.id, task);
@@ -477,10 +504,15 @@ export class Scheduler {
     }
   }
 
-  private async requestFire(id: string, _wakeAt: number): Promise<void> {
+  private async requestFire(id: string, _wakeAt: number, guardStale = false): Promise<void> {
     const current = this.items.find((candidate) => candidate.id === id);
     if (!current || !current.enabled) return;
-    if (!current.nextRun || Date.now() < current.nextRun) {
+    // Not due yet, or (for node-cron 'execution:missed' after sleep/wake) a
+    // stale miss: re-arm, which skips stale misses to the next slot. Timer
+    // paths are already grace-checked in armTimer, and catch-up timers are
+    // legitimately delayed past the grace by their stagger, so only the
+    // missed-event path re-checks here.
+    if (!current.nextRun || Date.now() < current.nextRun || (guardStale && isStaleMiss(current, Date.now()))) {
       this.armTimer(current);
       return;
     }
