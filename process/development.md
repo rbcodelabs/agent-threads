@@ -58,7 +58,20 @@ npm test                         # unit tests via vitest
 npm run test:screenshots:remote  # screenshots on dev-builder (2 intentional skips are normal)
 ```
 
-Typecheck and unit tests can run locally or on dev-builder (`npm ci && npx tsc --noEmit && npm test`) when the Mac is loaded. **Do not run `npm run test:screenshots` on the Mac** — see [Screenshot Tests](#screenshot-tests). Skipping the remote run and trusting the PR's "Screenshot Tests" CI job is acceptable.
+**Run the typecheck + unit gate through the `tq` test-worker queue first** (operating guide: vault note `Agent How-Tos/Test Worker Pool`). There is no agent-threads profile yet, so use a `custom` spec. The commit must be pushed, and `--sha` must be the exact 40-hex SHA:
+
+```bash
+cat > /tmp/at-gate.json <<'EOF'
+{"reserve_mb": 4096, "node": "22", "steps": [
+  {"name": "install", "run": "npm ci"},
+  {"name": "tsc", "run": "npx tsc --noEmit"},
+  {"name": "unit", "run": "npm test"}
+]}
+EOF
+tq submit --repo rbcodelabs/agent-threads --sha "$(git rev-parse HEAD)" --profile custom --spec /tmp/at-gate.json --wait
+```
+
+Exit 0 means passed; anything else is not a pass. Check reachability first (`tq workers`). Only if the queue/homelab is unreachable (e.g. off the home LAN), fall back to running `npm ci && npx tsc --noEmit && npm test` locally, after checking `uptime` against the core count (see Machine Capacity in the global `CLAUDE.md`), and say in the report that it ran locally and why. Do not run the gate locally just because load is low while the queue is available. **Do not run `npm run test:screenshots` on the Mac** — see [Screenshot Tests](#screenshot-tests). Skipping the remote run and trusting the PR's "Screenshot Tests" CI job is acceptable.
 
 Pass criteria: zero type errors, all unit tests green, screenshot count unchanged (or new tests added for new UI).
 
