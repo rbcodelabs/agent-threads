@@ -80,6 +80,17 @@ describe('OAUTH_MCP_PRESETS data', () => {
     }
   });
 
+  it('has a Compass preset that relies on Dynamic Client Registration with offline_access', () => {
+    const compass = OAUTH_MCP_PRESETS.find(p => p.id === 'compass');
+    expect(compass).toMatchObject({
+      label: 'Compass', name: 'compass', url: 'https://compass.rbcodelabs.com/api/mcp',
+      scopes: 'mcp:read mcp:write offline_access', source: 'https://compass.rbcodelabs.com/help/09-mcp-api',
+    });
+    expect(compass!.clientId).toBeUndefined();
+    expect(compass!.requiresClientId).toBeUndefined();
+    expect(compass!.notes).toContain('offline_access');
+  });
+
   it('never ships a client ID for presets that require the user\'s own', () => {
     for (const p of OAUTH_MCP_PRESETS.filter(x => x.requiresClientId)) {
       expect(p.clientId).toBeUndefined();
@@ -130,6 +141,16 @@ describe('Quick connect section on the MCP settings screen', () => {
     await flush();
     expect(registerServer).toHaveBeenCalledTimes(1);
     expect(registerServer.mock.calls[0]![0]).toMatchObject({ name: 'linear', url: 'https://mcp.linear.app/mcp' });
+  });
+
+  it('connects Compass in one click with its scopes and no client ID', async () => {
+    const { rowFor, btn, registerServer } = render();
+    btn(rowFor('Compass')).click();
+    await flush();
+    expect(registerServer).toHaveBeenCalledTimes(1);
+    const cfg = registerServer.mock.calls[0]![0];
+    expect(cfg).toMatchObject({ name: 'compass', url: 'https://compass.rbcodelabs.com/api/mcp', scopes: 'mcp:read mcp:write offline_access' });
+    expect(cfg.clientId).toBeUndefined();
   });
 
   it('prompts for a Client ID and secret before connecting a requiresClientId preset', async () => {

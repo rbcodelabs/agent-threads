@@ -40,6 +40,15 @@ export interface OAuthMcpPreset {
 
 export const OAUTH_MCP_PRESETS: readonly OAuthMcpPreset[] = [
   {
+    id: 'compass',
+    label: 'Compass',
+    name: 'compass',
+    url: 'https://compass.rbcodelabs.com/api/mcp',
+    scopes: 'mcp:read mcp:write offline_access',
+    notes: 'Signs in with your Compass account; no client ID is needed (Dynamic Client Registration). offline_access keeps the connection renewable without signing in again.',
+    source: 'https://compass.rbcodelabs.com/help/09-mcp-api',
+  },
+  {
     id: 'atlassian',
     label: 'Atlassian (Jira / Confluence)',
     name: 'atlassian',
