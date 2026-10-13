@@ -21,18 +21,17 @@ describe('built-in tool permission classification', () => {
   });
 });
 
-import { isPermissionPreApproved, canAlwaysAllow, buildPermissionDetail, requiresPerCallApproval } from '../../src/toolNameUtils';
+import { isPermissionPreApproved, canAlwaysAllow, buildPermissionDetail } from '../../src/toolNameUtils';
 import { parsePermissionDetail } from '../../src/permissionDetail';
 
-describe('browser_eval per-call approval', () => {
+describe('browser_eval permissions', () => {
   const evalNames = ['browser_eval', 'mcp__claude_threads__browser_eval'];
 
-  it('is never pre-approved, even when persisted as Always Allow', () => {
+  it('is permissioned like other browser tools, including Always Allow', () => {
     for (const n of evalNames) {
-      expect(isPermissionPreApproved(n, [])).toBe(false);
-      expect(isPermissionPreApproved(n, [n])).toBe(false);
-      expect(canAlwaysAllow(n)).toBe(false);
-      expect(requiresPerCallApproval(n)).toBe(true);
+      expect(isPermissionPreApproved(n, [])).toBe(n.startsWith('mcp__'));
+      expect(isPermissionPreApproved(n, [n])).toBe(true);
+      expect(canAlwaysAllow(n)).toBe(true);
     }
   });
 
@@ -41,11 +40,6 @@ describe('browser_eval per-call approval', () => {
       expect(isPermissionPreApproved(`mcp__claude_threads__${k}`, [])).toBe(true);
       expect(canAlwaysAllow(`mcp__claude_threads__${k}`)).toBe(true);
     }
-  });
-
-  it('does not extend per-call approval to browser_scroll', () => {
-    expect(requiresPerCallApproval('mcp__claude_threads__browser_scroll')).toBe(false);
-    expect(requiresPerCallApproval('browser_scroll')).toBe(false);
   });
 
   it('shows the full expression on the card, ignoring the SDK description', () => {

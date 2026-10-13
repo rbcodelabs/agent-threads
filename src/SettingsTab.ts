@@ -2064,7 +2064,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       new Setting(containerEl)
         .setName('Allow agents to evaluate JavaScript in the browser')
         .setDesc(
-          'Let Claude run JavaScript expressions in the page it is browsing (browser_eval). Powerful: the code can read or change anything on the page, so it asks for approval like clicking and typing do. Off by default; applies immediately.',
+          'Let Claude run JavaScript expressions in the page it is browsing (browser_eval). Powerful: the code can read or change anything on the page, so it is permissioned like clicking and typing, including Always Allow. Off by default; applies immediately.',
         )
         .addToggle((toggle) => {
           toggle

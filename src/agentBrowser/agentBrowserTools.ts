@@ -13,8 +13,8 @@
  * setting: it is always registered, and refuses with a message naming the
  * setting while that is off. It is not in the read-only set, so harnesses that
  * honour `requiresApproval` (Codex, OpenCode) prompt for it. On the Claude path
- * it is deliberately not pre-approved (see requiresPerCallApproval): every call
- * shows a card with the full expression, and Always Allow is not offered.
+ * it is permissioned like any other trusted tool, including Always Allow; the
+ * card shows the full expression.
  */
 
 import { z } from 'zod';
@@ -115,7 +115,7 @@ export function createAgentBrowserTools(browser: ThreadBrowser): SdkMcpToolDefin
       'The snapshot lists interactive elements as "role \\"name\\" [ref=eN]"; pass a ref and the returned epoch to browser_click or browser_type to act on one.',
       'Only http: and https: URLs are allowed. This browser runs on the host Mac, not in the sandbox VM: if this thread has a sandbox VM, a localhost / 127.0.0.1 URL naming a server started inside the VM (via vm_exec) is forwarded automatically to a loopback port on the Mac, and the result includes requestedUrl and a note. The server must be running in the background inside the VM. The browser runs in its own session, separate from your signed-in Web Viewer tabs, so most sites will be logged out.',
       'It cannot drive Electron desktop apps, bypass bot detection, or run in a cloud browser — use the agent-browser CLI skill for those.',
-      'Drive the page with browser_snapshot, browser_click, browser_type, browser_scroll, browser_read_text, browser_console and browser_network. Do not reach for browser_eval: it is a last resort that interrupts the user with an approval prompt on every call.',
+      'Drive the page with browser_snapshot, browser_click, browser_type, browser_scroll, browser_read_text, browser_console and browser_network. Do not reach for browser_eval: it is a last resort for page state no other browser tool exposes.',
     ].join(' '),
     {
       url: z.string().describe('Absolute http(s) URL to open, e.g. "https://example.com/docs"'),
@@ -236,7 +236,7 @@ export function createAgentBrowserTools(browser: ThreadBrowser): SdkMcpToolDefin
   const boundEval = tool(
     'browser_eval',
     [
-      'LAST RESORT. Every call interrupts the user with an approval prompt that shows your full expression, and "Allow all" / "Always Allow" never cover it. Call this only to read page state that no other browser tool exposes (for example a JavaScript variable or framework store that is not rendered in the page).',
+      'LAST RESORT. It can read or change anything on the page, so prefer the dedicated tools. Call this only to read page state that no other browser tool exposes (for example a JavaScript variable or framework store that is not rendered in the page).',
       'Do NOT use it to find or locate elements (use browser_snapshot), scroll (use browser_scroll), click (browser_click), type (browser_type), read page text (browser_read_text), read console output (browser_console), read network requests (browser_network), or anything else those tools can do. If one of them can answer the question, calling this tool is a mistake.',
       'If you do need it: evaluates a JavaScript expression in the current page and returns its value as size-capped JSON (up to ' + MAX_EVAL_RESULT_CHARS + ' characters), wrapped in an untrusted-content block.',
       'Disabled unless the user has turned on "Allow agents to evaluate JavaScript in the browser" in the plugin settings; while off it returns an error saying so.',
