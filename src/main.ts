@@ -2136,7 +2136,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     try {
       const existingDash = workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
       if (!existingDash) {
-        const dashLeaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+        const dashLeaf = workspace.getLeftLeaf(false) as WorkspaceLeaf;
         await dashLeaf.setViewState({ type: AGENT_VIEW_TYPE, active: true });
         workspace.revealLeaf(dashLeaf);
       } else {
@@ -3332,7 +3332,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
     if (!leaf) {
-      leaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+      // Conversations list lives in the left sidebar so the default layout
+      // needs no right-hand panels.
+      leaf = workspace.getLeftLeaf(false) as WorkspaceLeaf;
       await leaf.setViewState({ type: AGENT_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
@@ -3354,9 +3356,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     let leaf = workspace.getLeavesOfType(SKILLS_VIEW_TYPE)[0];
     if (!leaf) {
       // In conversation-first mode the main area holds the conversation, so
-      // route to the right sidebar like activateAgentView(). In classic mode
+      // route to the left sidebar like activateAgentView(). In classic mode
       // the main area is free for editing, so a tab still makes sense.
-      leaf = (this.isConversationFirst() ? workspace.getRightLeaf(false) : workspace.getLeaf('tab')) as WorkspaceLeaf;
+      leaf = (this.isConversationFirst() ? workspace.getLeftLeaf(false) : workspace.getLeaf('tab')) as WorkspaceLeaf;
       await leaf.setViewState({ type: SKILLS_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);

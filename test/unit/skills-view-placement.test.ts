@@ -16,14 +16,14 @@ describe('Skills Manager placement', () => {
     const workspace = {
       getLeavesOfType: vi.fn().mockReturnValue([]),
       getLeaf: vi.fn().mockReturnValue(leaf),
-      getRightLeaf: vi.fn(),
+      getLeftLeaf: vi.fn(),
       revealLeaf: vi.fn(),
     };
 
     await pluginWithWorkspace(workspace, false).activateSkillsView();
 
     expect(workspace.getLeaf).toHaveBeenCalledWith('tab');
-    expect(workspace.getRightLeaf).not.toHaveBeenCalled();
+    expect(workspace.getLeftLeaf).not.toHaveBeenCalled();
     expect(leaf.setViewState).toHaveBeenCalledWith({
       type: SKILLS_VIEW_TYPE,
       active: true,
@@ -31,18 +31,18 @@ describe('Skills Manager placement', () => {
     expect(workspace.revealLeaf).toHaveBeenCalledWith(leaf);
   });
 
-  it('opens a new Skills Manager in the right sidebar in conversation-first mode', async () => {
+  it('opens a new Skills Manager in the left sidebar in conversation-first mode', async () => {
     const leaf = { setViewState: vi.fn().mockResolvedValue(undefined) };
     const workspace = {
       getLeavesOfType: vi.fn().mockReturnValue([]),
       getLeaf: vi.fn(),
-      getRightLeaf: vi.fn().mockReturnValue(leaf),
+      getLeftLeaf: vi.fn().mockReturnValue(leaf),
       revealLeaf: vi.fn(),
     };
 
     await pluginWithWorkspace(workspace, true).activateSkillsView();
 
-    expect(workspace.getRightLeaf).toHaveBeenCalledWith(false);
+    expect(workspace.getLeftLeaf).toHaveBeenCalledWith(false);
     expect(workspace.getLeaf).not.toHaveBeenCalled();
     expect(leaf.setViewState).toHaveBeenCalledWith({
       type: SKILLS_VIEW_TYPE,
@@ -57,14 +57,14 @@ describe('Skills Manager placement', () => {
       const workspace = {
         getLeavesOfType: vi.fn().mockReturnValue([existingLeaf]),
         getLeaf: vi.fn(),
-        getRightLeaf: vi.fn(),
+        getLeftLeaf: vi.fn(),
         revealLeaf: vi.fn(),
       };
 
       await pluginWithWorkspace(workspace, conversationFirst).activateSkillsView();
 
       expect(workspace.getLeaf).not.toHaveBeenCalled();
-      expect(workspace.getRightLeaf).not.toHaveBeenCalled();
+      expect(workspace.getLeftLeaf).not.toHaveBeenCalled();
       expect(existingLeaf.setViewState).not.toHaveBeenCalled();
       expect(workspace.revealLeaf).toHaveBeenCalledWith(existingLeaf);
     }
