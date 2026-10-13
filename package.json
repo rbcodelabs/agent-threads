@@ -4,7 +4,7 @@
   "description": "Multi-threaded Claude Code sessions in Obsidian and Geode",
   "main": "dist/main.js",
   "scripts": {
-    "build": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs && node scripts/check-mobile-bundle.mts",
     "dev": "node esbuild.config.mjs --watch",
     "build:harness": "node test/harness/esbuild.mjs",
     "gen:harness-icons": "node scripts/gen-harness-icons.mts",
@@ -44,6 +44,7 @@
     "@types/marked": "^5.0.2",
     "@types/node": "^20.0.0",
     "@types/qrcode": "^1.5.5",
+    "es-module-lexer": "2.1.0",
     "esbuild": "^0.28.0",
     "jsdom": "^29.1.1",
     "lucide-static": "1.39.0",

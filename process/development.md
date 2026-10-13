@@ -120,7 +120,7 @@ After copying, verify by grepping the installed bundle for a string unique to th
 grep -c "someNewSymbol" "<vault>/.geode/plugins/claude-threads/main.js"
 ```
 
-Copy only `main.js`, `manifest.json`, and `styles.css`. **Never copy `data.json`** — it is live settings and conversation state, written continuously by the running app.
+Copy only `main.js`, `main.mobile.js`, `manifest.json`, and `styles.css` (`main.mobile.js` is the slim Geode-mobile bundle; Obsidian and desktop Geode ignore it). **Never copy `data.json`** — it is live settings and conversation state, written continuously by the running app.
 
 **Rule: commit the work and push a branch (draft PR is fine) BEFORE copying a dev build into the live vault.** The installed plugin is overwritten by the next BRAT release update — an uncommitted dev build is the only copy of the work, and it silently evaporates.
 
@@ -300,3 +300,15 @@ them instead of needing a real Electron/Geode host:
   listeners the view's real `startLoginBridge()` registered.
 
 This exercises the real production wiring rather than re-implementing it.
+
+---
+
+## Geode Mobile Bundle (`main.mobile.js`)
+
+Geode mobile (iOS WKWebView, no Node/Electron) cannot run the ~20 MB desktop `main.js`: its runtime rejects entrypoints over 16 MiB and its CommonJS `require` shim only resolves `obsidian`, `geode`, `@codemirror/{state,view,commands,language,autocomplete}` and `@lezer/{common,highlight}`. On mobile Geode loads `main.mobile.js` from the plugin folder when present, else `main.js`.
+
+- Entry: `src/mobile-main.ts` (+ `MobileSettingsTab.ts`, `mobilePairing.ts`). Build options: `esbuild.mobile.mjs`; `npm run build` emits `dist/main.mobile.js` (~170 KB) and then runs `scripts/check-mobile-bundle.mts`.
+- The check fails the build on any `require` outside the allow-list, any `import`/`export`/`import()`/`import.meta` (Geode preflights with es-module-lexer), or a bundle over 2 MiB. `test/unit/mobile-bundle.test.ts` repeats the scan and loads the built bundle through a `new Function('module','exports','require','fetch', code)` shim like Geode's loader.
+- **Never import desktop modules (ThreadManager, ThreadsView, SettingsTab, Claude SDK, `pathUtils`…) from the mobile entry's import graph.** If the build fails with "Could not resolve `path`", an import crept in; extract the shared bit into a dependency-free module (see `errorMessage.ts`).
+- Same plugin id, command ids and `data.json` shape as desktop. The room id is stored via `loadSecret/saveSecret` when the host offers them (migrated out of `data.json`), and is never logged. Pairing is the prototype shared-link relay (ADR-0008).
+- BRAT only fetches `main.js`/`manifest.json`/`styles.css`; `main.mobile.js` is a release asset for Geode's own installer.

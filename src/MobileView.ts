@@ -16,7 +16,7 @@ import type { MobileThreadStore } from './MobileThreadStore';
 import type { SerializedThread, SerializedMessage, PendingPermission, PendingQuestion } from './relay-protocol';
 import type { ToolCallRecord, ImageAttachment } from './types';
 import { formatToolName, getToolIcon, groupToolCalls, smoothToolGroups, ACTIVITY_LABELS, type ToolCallGroup } from './toolNameUtils';
-import { splitErrorMessage } from './dashboardUtils';
+import { splitErrorMessage } from './errorMessage';
 import { extractMessageContent } from './MessageContent';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from './linkUtils';
 import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';

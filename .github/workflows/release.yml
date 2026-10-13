@@ -55,12 +55,14 @@ jobs:
             --title "${{ github.ref_name }}" \
             --notes "Auto-generated release assets." \
             dist/main.js \
+            dist/main.mobile.js \
             dist/styles.css \
             manifest.json \
             versions.json \
           || gh release upload "${{ github.ref_name }}" \
             --clobber \
             dist/main.js \
+            dist/main.mobile.js \
             dist/styles.css \
             manifest.json \
             versions.json

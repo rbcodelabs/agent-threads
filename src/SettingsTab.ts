@@ -1,4 +1,5 @@
 import { isAgentHarness } from './types';
+import { buildPairingUrl, detectPairingScheme, formatRoomIdAsCode, parsePairingInput } from './mobilePairing';
 import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type { ButtonComponent } from 'obsidian';
@@ -226,14 +227,6 @@ function generateRoomId(): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-function formatRoomIdAsCode(roomId: string): string {
-  // Format as XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX
-  const groups: string[] = [];
-  for (let i = 0; i < 32; i += 8) {
-    groups.push(roomId.slice(i, i + 8).toUpperCase());
-  }
-  return groups.join('-');
-}
 
 function maskOpenAiKey(key: string | null | undefined): string {
   if (!key) return 'No key set';
@@ -639,15 +632,18 @@ class PairingModal extends Modal {
     ra.pairingExpiresAt = Date.now() + 5 * 60 * 1000;
     this.plugin.saveSettings().catch(console.error);
 
-    // obsidian:// deep link — iOS/Android camera apps will offer "Open in Obsidian"
-    // when the user scans this QR code. registerObsidianProtocolHandler('pair', ...)
-    // handles obsidian://pair?... on the mobile side.
-    const pairingUrl = `obsidian://pair?roomId=${ra.roomId}&relay=${encodeURIComponent(ra.relayUrl)}`;
+    // Deep link: iOS/Android camera apps offer to open the matching app when the
+    // user scans this QR code. A Geode desktop host emits geode://pair (so a phone
+    // with Geode installed opens Geode); real Obsidian keeps obsidian://pair. The
+    // mobile side handles either via registerObsidianProtocolHandler('pair', ...).
+    const scheme = detectPairingScheme(typeof window === 'undefined' ? undefined : window);
+    const hostLabel = scheme === 'geode' ? 'Geode' : 'Obsidian';
+    const pairingUrl = buildPairingUrl(scheme, ra.roomId, ra.relayUrl);
     const formatted = formatRoomIdAsCode(ra.roomId);
 
     contentEl.createEl('h2', { text: 'Pair with mobile' });
     contentEl.createEl('p', {
-      text: 'Scan this QR code from Obsidian on your mobile device, or enter the code manually in Settings > Remote access.',
+      text: `Scan this QR code with your phone camera to open ${hostLabel}, or paste the code or link below into Settings > Agent Threads on your phone.`,
       cls: 'ct-pairing-desc',
     });
 
@@ -671,6 +667,14 @@ class PairingModal extends Modal {
     codeEl.addEventListener('click', () => {
       navigator.clipboard.writeText(ra.roomId);
       new Notice('Room ID copied to clipboard');
+    });
+
+    // The raw link too, for hosts where scanning/deep links are not available.
+    contentEl.createEl('p', { cls: 'ct-pairing-code-label', text: 'Pairing link:' });
+    const linkEl = contentEl.createEl('code', { cls: 'ct-pairing-code', text: pairingUrl });
+    linkEl.addEventListener('click', () => {
+      navigator.clipboard.writeText(pairingUrl);
+      new Notice('Pairing link copied to clipboard');
     });
 
     contentEl.createEl('p', {
@@ -3313,8 +3317,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       .addButton((btn) =>
         btn.setButtonText('Connect').setCta().onClick(async () => {
           // Accept both the formatted code (XXXX-XXXX-...) and raw hex
-          const raw = manualRoomId.replace(/-/g, '').toLowerCase();
-          if (!/^[0-9a-f]{32}$/.test(raw)) {
+          const parsed = parsePairingInput(manualRoomId);
+          const raw = parsed?.roomId ?? '';
+          if (!raw) {
             new Notice('Invalid pairing code. Copy the code exactly from desktop Settings.');
             return;
           }

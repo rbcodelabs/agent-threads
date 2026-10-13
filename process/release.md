@@ -103,7 +103,7 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
 - Verifies `manifest.json` version matches the tag (fails fast if not)
 - Runs `npm run build`
 - Prepends the new entry to `versions.json`
-- Creates the GitHub release with `dist/main.js`, `dist/styles.css`, `manifest.json`, `versions.json`
+- Creates the GitHub release with `dist/main.js`, `dist/main.mobile.js`, `dist/styles.css`, `manifest.json`, `versions.json`
 
 Verify it appeared:
 ```bash

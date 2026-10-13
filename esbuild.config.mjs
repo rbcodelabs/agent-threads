@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { mobileBuildOptions } from './esbuild.mobile.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -68,6 +69,9 @@ const ctx = await esbuild.context({
   },
 });
 
+// Slim Geode-mobile bundle: see esbuild.mobile.mjs for why it is a separate entry.
+const mobileCtx = await esbuild.context({ ...mobileBuildOptions, outfile: 'dist/main.mobile.js' });
+
 // Copy static assets
 fs.copyFileSync('manifest.json', 'dist/manifest.json');
 if (fs.existsSync('styles.css')) fs.copyFileSync('styles.css', 'dist/styles.css');
@@ -81,9 +85,12 @@ if (fs.existsSync('resources/skills')) {
 
 if (isWatch) {
   await ctx.watch();
+  await mobileCtx.watch();
   console.log('Watching for changes...');
 } else {
   await ctx.rebuild();
   await ctx.dispose();
+  await mobileCtx.rebuild();
+  await mobileCtx.dispose();
   console.log('Build complete');
 }

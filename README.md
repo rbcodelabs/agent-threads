@@ -1183,7 +1183,7 @@ The project uses a worktree-based workflow — edits directly to the main checko
    git push origin vX.Y.Z
    ```
 
-5. That's it. The [release workflow](.github/workflows/release.yml) verifies the tag and committed `versions.json`, builds the plugin, and publishes a GitHub release with `main.js`, `styles.css`, `manifest.json`, and `versions.json` attached — BRAT will pick it up within a few minutes.
+5. That's it. The [release workflow](.github/workflows/release.yml) verifies the tag and committed `versions.json`, builds the plugin, and publishes a GitHub release with `main.js`, `main.mobile.js`, `styles.css`, `manifest.json`, and `versions.json` attached — BRAT will pick it up within a few minutes.
 
 ## License
 

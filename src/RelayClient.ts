@@ -194,7 +194,8 @@ export class RelayClient {
     try {
       ws = new WebSocket(url);
     } catch (err) {
-      console.error('[RelayClient] WebSocket constructor failed:', err);
+      // Log only the error name: the message can echo the URL, which contains the room id (a bearer secret).
+      console.error('[RelayClient] WebSocket constructor failed:', err instanceof Error ? err.name : 'error');
       this.scheduleReconnect();
       return;
     }
@@ -237,7 +238,8 @@ export class RelayClient {
     });
 
     ws.addEventListener('error', (event) => {
-      console.error('[RelayClient] WebSocket error:', event);
+      // Not the event itself: event.target is the socket, whose .url carries the room id.
+      console.error('[RelayClient] WebSocket error:', event.type);
       // The close event fires after error, so reconnect happens there.
     });
   }
