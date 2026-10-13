@@ -1,4 +1,5 @@
 import { agentHarnessLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
+import { extractUrls } from './urlLinks';
 import { mergeDisallowedTools } from './toolRestrictions';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
@@ -2662,6 +2663,13 @@ export class ThreadManager {
         thread.updatedAt = Date.now();
         // Externalize tool-result images to vault files (see sendMessage above).
         this.externalizeMessageImages(threadId, assistantMsg);
+        // Surface links the assistant shared in the recent-files pill. Kept in
+        // linkedUrls (not editedFiles) so file counts stay about files.
+        const urls = extractUrls(content).filter(u => !thread.linkedUrls?.includes(u));
+        if (urls.length > 0) {
+          thread.linkedUrls = [...(thread.linkedUrls ?? []), ...urls].slice(-50);
+          this.emit(threadId, { type: 'files_edited', paths: urls });
+        }
         this.emit(threadId, { type: 'message', message: assistantMsg });
       },
       onDone: (sessionId, cost, _numTurns, metadata) => {

@@ -4,6 +4,7 @@ import { hasVisibleDirectViewHeader } from './headerPresentation';
 import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
+import { splitTextWithUrls, isHttpUrl, urlChipLabel } from './urlLinks';
 import { effectiveExtraEnv } from './types';
 import { parseLoopArgs, formatLoopInterval } from './loopUtils';
 import { buildClaudeModelOptions, aliasLabel, activeModelLabel, formatModelId, type ModelOption } from './modelOptions';
@@ -1663,6 +1664,7 @@ export class ThreadsView extends ItemView {
           }
         }
       }
+      for (const url of thread.linkedUrls ?? []) this.editedFilesSet.add(url);
       for (const filePath of thread.userModifiedFiles ?? []) {
         this.userModifiedFilesSet.add(filePath);
       }
@@ -1879,6 +1881,7 @@ export class ThreadsView extends ItemView {
       const rel = relByPath.get(filePath) ?? null;
       const isVaultFile = rel != null;
       // Tooltip shows vault-relative path for vault files, full path for external files.
+      const isUrl = isHttpUrl(filePath);
       const tooltipPath = rel ?? filePath;
       const showFull = !iconOnly || i < 3;
       const chip = list.createDiv({
@@ -1887,8 +1890,9 @@ export class ThreadsView extends ItemView {
       const fileIcon = chip.createSpan('ct-edited-file-chip-icon');
       // Vault files get file-edit; external files get link to signal they're outside the vault.
       setIcon(fileIcon, isVaultFile ? 'file-edit' : 'link');
+      const chipLabel = isUrl ? urlChipLabel(filePath) : path.basename(filePath);
       if (showFull) {
-        chip.createSpan({ cls: 'ct-edited-file-chip-name', text: path.basename(filePath) });
+        chip.createSpan({ cls: 'ct-edited-file-chip-name', text: chipLabel });
       }
       if (this.userModifiedFilesSet.has(filePath)) {
         chip.createSpan({ cls: 'ct-edited-file-chip-modified', text: '✎', attr: { title: 'You modified this file' } });
@@ -1953,6 +1957,10 @@ export class ThreadsView extends ItemView {
   /** Open HTML in the Web Viewer when available; otherwise use vault, host, or OS routing. */
   private async openEditedFile(filePath: string): Promise<void> {
     try {
+      if (isHttpUrl(filePath)) {
+        this.openLink(filePath);
+        return;
+      }
       if (/\.html?$/i.test(filePath) && isWebViewerEnabled(this.app)) {
         this.openLink(toFileUrl(filePath));
         return;
@@ -2836,6 +2844,45 @@ export class ThreadsView extends ItemView {
       });
     });
     this.linkifyBridgePaths(el);
+    this.linkifyUrls(el);
+  }
+
+  /**
+   * Turn bare http(s) URLs in rendered text into clickable anchors. Marked's
+   * GFM autolink misses URLs inside inline code and plain-text user messages;
+   * this walks text nodes (excluding <pre> blocks and existing anchors) and
+   * wires clicks through openLink() like every other external link.
+   */
+  private linkifyUrls(root: HTMLElement): void {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => {
+        const parent = (node as Text).parentElement;
+        if (!parent || parent.closest('pre, a')) return NodeFilter.FILTER_REJECT;
+        return /https?:\/\//i.test(node.textContent ?? '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      },
+    });
+    const nodes: Text[] = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n as Text);
+    for (const tn of nodes) {
+      const segments = splitTextWithUrls(tn.textContent ?? '');
+      if (!segments.some(sg => sg.url)) continue;
+      const frag = document.createDocumentFragment();
+      for (const seg of segments) {
+        if (!seg.url) { frag.appendChild(document.createTextNode(seg.text)); continue; }
+        const url = seg.url;
+        const a = document.createElement('a');
+        a.className = 'ct-auto-link';
+        a.setAttribute('href', url);
+        a.textContent = url;
+        a.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.openLink(url, event.metaKey || event.ctrlKey);
+        });
+        frag.appendChild(a);
+      }
+      tn.replaceWith(frag);
+    }
   }
 
   /**
@@ -3739,7 +3786,7 @@ export class ThreadsView extends ItemView {
         });
       }
     } else {
-      content.createEl('p', { text: msg.content });
+      this.linkifyUrls(content.createEl('p', { text: msg.content }));
       // Render image thumbnails attached to user messages (e.g. sent from
       // the dispatch box or conversation input). The live-streaming path
       // renders these via the 'sending' event; this covers the renderMessages()
@@ -5021,7 +5068,7 @@ export class ThreadsView extends ItemView {
           liveUserEl = this.messagesEl.createDiv('ct-message ct-message-user');
           this.pendingUserEl = liveUserEl;
           const content = liveUserEl.createDiv('ct-message-content');
-          content.createEl('p', { text: event.message.content });
+          this.linkifyUrls(content.createEl('p', { text: event.message.content }));
           if (event.message.images && event.message.images.length > 0) {
             const imgRow = content.createDiv('ct-message-images');
             for (const img of event.message.images) {
@@ -5188,7 +5235,7 @@ export class ThreadsView extends ItemView {
         const userEl = this.messagesEl.createDiv('ct-message ct-message-user');
         this.pendingUserEl = userEl; // prevent the subsequent 'send' event from creating a duplicate bubble
         const dqContent = userEl.createDiv('ct-message-content');
-        if (event.text) dqContent.createEl('p', { text: event.text });
+        if (event.text) this.linkifyUrls(dqContent.createEl('p', { text: event.text }));
         if (event.images && event.images.length > 0) {
           const imgRow = dqContent.createDiv('ct-message-images');
           for (const img of event.images) {
