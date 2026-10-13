@@ -176,7 +176,7 @@ Welcome! Agent Threads turns Obsidian into a multi-agent workspace powered by Cl
 | Panel | Location | What it does |
 |---|---|---|
 | **Chat** | Left sidebar | Full conversation history for each thread |
-| **Agents List** | Right sidebar | Dispatch tasks, track running agents, review results |
+| **Agents List** | Left sidebar | Dispatch tasks, track running agents, review results |
 | **This guide** | Center | You're reading it — save it anywhere in your vault |
 
 Reopen the panels any time from the ribbon icons (left edge of the window) or via the command palette (\`Cmd+P\`).
