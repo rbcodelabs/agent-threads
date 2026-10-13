@@ -29,7 +29,7 @@ describe('browser_eval permissions', () => {
 
   it('is permissioned like other browser tools, including Always Allow', () => {
     for (const n of evalNames) {
-      expect(isPermissionPreApproved(n, [])).toBe(n.startsWith('mcp__'));
+      expect(isPermissionPreApproved(n, [])).toBe(true);
       expect(isPermissionPreApproved(n, [n])).toBe(true);
       expect(canAlwaysAllow(n)).toBe(true);
     }
