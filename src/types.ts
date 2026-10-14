@@ -379,6 +379,8 @@ export interface Thread {
   reviewed?: boolean;
   /** Paths of files written or edited during this thread's lifetime. */
   editedFiles?: string[];
+  /** http(s) links the assistant shared, oldest first; shown in the recent-files pill. */
+  linkedUrls?: string[];
   /**
    * Durable local artifacts created from this thread. The host owns identity
    * and lifecycle; the owning provider owns the rest of the record's shape.
