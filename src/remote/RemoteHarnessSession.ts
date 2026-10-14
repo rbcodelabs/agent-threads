@@ -44,6 +44,11 @@ type Dict = Record<string, unknown>;
 
 export interface RemoteSessionDeps {
   log?: (message: string) => void;
+  /**
+   * `thread.remote.turnPending` flipped. The host persists on this so a quit
+   * right after a send still re-attaches the turn on the next start.
+   */
+  onPendingChanged?: (pending: boolean) => void;
   /** Test seam for the generated message uuid. */
   newId?: () => string;
 }
@@ -314,8 +319,13 @@ export class RemoteHarnessSession implements HarnessSession {
   }
 
   private syncPending(): void {
-    if (this.turnInFlight || this.queued.length > 0) this.remote.turnPending = true;
+    const was = this.remote.turnPending === true;
+    const now = this.turnInFlight || this.queued.length > 0;
+    if (now) this.remote.turnPending = true;
     else delete this.remote.turnPending;
+    if (now !== was) {
+      try { this.deps.onPendingChanged?.(now); } catch (err) { this.log(`onPendingChanged threw: ${errText(err)}`); }
+    }
   }
 
   private dispatch(frame: EventFrame, reopen: boolean): void {

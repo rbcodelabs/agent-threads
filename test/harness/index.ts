@@ -151,7 +151,25 @@ loginHandoff.start();
 /** The login popup closes itself (window.close()). */
 (window as any).__fireLoginClose = () => (handoffIpc.get('agent-browser-window-close') ?? []).forEach((l) => l({}, 43));
 
+// Remote-thread fixtures: a stand-in daemon registry whose connection state the test drives.
+type FakeConn = { status: string; attempt: number; detail?: string };
+let fakeConn: FakeConn = { status: 'connected', attempt: 0 };
+const fakeConnListeners = new Set<(id: string, s: FakeConn) => void>();
+const fakeDaemonRegistry = {
+  nameOf: (id: string) => (id === 'claude-box' ? 'claude-box' : id),
+  clientFor: () => ({ connect() {}, get connection() { return fakeConn; } }),
+  stateOf: () => fakeConn,
+  onState: (l: (id: string, s: FakeConn) => void) => { fakeConnListeners.add(l); return () => fakeConnListeners.delete(l); },
+};
+(window as any).__setRemoteState = (state: FakeConn) => { fakeConn = state; fakeConnListeners.forEach((l) => l('claude-box', fakeConn)); };
+(window as any).__markRemote = (threadId: string) => {
+  const t = manager.getThread(threadId)!;
+  t.remote = { daemonId: 'claude-box', ownership: 'client', remoteCwd: '/srv/workspaces/agent-threads', lastSeq: 0, ownerClientId: 'harness' };
+  t.cwd = '/srv/workspaces/agent-threads';
+};
+
 const mockPlugin = {
+  daemonRegistry: fakeDaemonRegistry,
   app: (mockLeaf as any).app,
   settings,
   discoveredModelsByHarness: { claude: [], codex: [], opencode: [] },

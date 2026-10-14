@@ -129,6 +129,34 @@ describe('reconnect', () => {
   });
 });
 
+describe('reconnect is single-flight', () => {
+  it('a state listener that calls connect() during a drop does not open a second socket', async () => {
+    const t = fakeTransport();
+    t.autoServe();
+    const c = make({ transport: t, backoffMs: [30] });
+    c.onState(() => c.connect()); // like the thread header, which connects whenever it re-renders
+    c.connect();
+    await until(() => c.connection.status === 'connected');
+    t.current.serverClose(1006);
+    await until(() => t.sockets.length === 2 && c.connection.status === 'connected');
+    await tick(120); // long enough for a stray backoff timer to fire
+    expect(t.sockets).toHaveLength(2);
+    expect(t.sockets[1].terminated).toBe(false);
+    expect(c.connection.status).toBe('connected');
+  });
+
+  it('openSocket never replaces a live socket', async () => {
+    const t = fakeTransport();
+    t.autoServe();
+    const c = make({ transport: t });
+    c.connect();
+    c.connect();
+    await until(() => c.connection.status === 'connected');
+    c.connect();
+    expect(t.sockets).toHaveLength(1);
+  });
+});
+
 describe('channels: resume and duplicate drop', () => {
   async function connected(): Promise<{ t: ReturnType<typeof fakeTransport>; c: DaemonClient }> {
     const t = fakeTransport();

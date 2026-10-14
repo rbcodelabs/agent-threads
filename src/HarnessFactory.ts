@@ -2,7 +2,7 @@ import { CodexSession } from './CodexSession';
 import { OpenCodeSession } from './OpenCodeSession';
 import { ThreadSession } from './ThreadSession';
 import type { HarnessSession } from './HarnessSession';
-import { RemoteHarnessSession } from './remote/RemoteHarnessSession';
+import { RemoteHarnessSession, type RemoteSessionDeps } from './remote/RemoteHarnessSession';
 import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
 import type { PluginSettings, Thread } from './types';
 
@@ -11,6 +11,7 @@ export function createHarnessSession(
   thread: Thread,
   settings: PluginSettings,
   remoteDaemons?: RemoteDaemonResolver,
+  remoteHooks?: Pick<RemoteSessionDeps, 'onPendingChanged' | 'log'>,
 ): HarnessSession {
   // A remote thread runs on a daemon whatever its harness says.
   if (thread.remote) {
@@ -22,7 +23,7 @@ export function createHarnessSession(
           : 'Remote threads are not available on this host.',
       );
     }
-    return new RemoteHarnessSession(client, thread);
+    return new RemoteHarnessSession(client, thread, remoteHooks);
   }
   switch (thread.agentHarness) {
     case 'codex':

@@ -1224,7 +1224,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Remote transcripts are persisted as soon as a turn produces something durable, not only when a
     // view happens to save, and each save tells the daemon how much of its replay buffer can go (ack).
     this.register(this.manager.subscribe((threadId, event) => {
-      if (event.type !== 'message' && event.type !== 'done' && event.type !== 'error' && event.type !== 'interrupted') return;
+      if (event.type !== 'message' && event.type !== 'done' && event.type !== 'error' && event.type !== 'interrupted' && event.type !== 'remote_pending_changed') return;
       if (!this.manager.getThread(threadId)?.remote) return;
       this.saveSettings().then(() => this.manager.notifyThreadPersisted(threadId)).catch(console.error);
     }));

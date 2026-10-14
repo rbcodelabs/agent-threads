@@ -9699,7 +9699,8 @@ button.ct-agent-crumb:focus-visible {
 .ct-remote-strip {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   padding: 3px 10px;
   min-height: 26px;
   flex-shrink: 0;
@@ -9733,7 +9734,7 @@ button.ct-agent-crumb:focus-visible {
 }
 
 .ct-remote-cwd {
-  flex: 1;
+  flex: 1 1 80px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -9742,6 +9743,7 @@ button.ct-agent-crumb:focus-visible {
 }
 
 .ct-remote-pill {
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 5px;

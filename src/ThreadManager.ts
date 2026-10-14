@@ -105,6 +105,8 @@ export type ThreadEvent =
   | { type: 'thread_renamed'; threadId: string; title: string }
   | { type: 'permission_request'; toolName: string; detail: string }
   | { type: 'permission_resolved' }
+  /** A remote thread's `turnPending` marker flipped: persist so a quit now still re-attaches the turn. */
+  | { type: 'remote_pending_changed' }
   | { type: 'active_thread_changed' }
   | { type: 'user_message_added'; message: ChatMessage }
   | { type: 'summary_updated' }
@@ -927,7 +929,7 @@ export class ThreadManager {
       if (!thread.remote?.turnPending || thread.status === 'archived' || this.sessions.has(id)) continue;
       let session: HarnessSession;
       try {
-        session = createHarnessSession(thread, this.settings, this.remoteDaemons);
+        session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread));
       } catch (err) {
         // Daemon removed from Settings (or no resolver on this host): nothing to follow.
         console.warn(`[ClaudeThreads] cannot resume remote turn for "${thread.title}":`, err);
@@ -949,6 +951,11 @@ export class ThreadManager {
       });
     }
     return resumed;
+  }
+
+  private remoteHooks(thread: Thread): { onPendingChanged: () => void } | undefined {
+    if (!thread.remote) return undefined;
+    return { onPendingChanged: () => this.emit(thread.id, { type: 'remote_pending_changed' }) };
   }
 
   /** The host has durably saved this thread's state: a remote session may release its replay buffer. */
@@ -1938,7 +1945,7 @@ export class ThreadManager {
 
     let session = this.sessions.get(threadId);
     if (!session) {
-      session = createHarnessSession(thread, this.settings, this.remoteDaemons);
+      session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread));
       this.sessions.set(threadId, session);
       const options = this.buildThreadSessionOptions(threadId, thread, undefined, false);
       if (!options) {
@@ -2152,7 +2159,7 @@ export class ThreadManager {
     if (!session) this.sessionRestartRequested.delete(threadId);
     const isNewSession = !session;
     if (!session) {
-      session = createHarnessSession(thread, this.settings, this.remoteDaemons);
+      session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread));
       this.sessions.set(threadId, session);
       const goalState = this.getGoalContextState(threadId);
       goalState.appliedRevision = goalState.desiredRevision;

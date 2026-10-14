@@ -327,17 +327,13 @@ export class DaemonClient {
   }
 
   private openSocket(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.ws) return;
+    this.clearReconnectTimer();
     const token = this.opts.getToken();
     if (!token) {
       this.setState({ status: 'unauthorized', attempt: this.state.attempt, detail: 'no access token is configured for this daemon' });
       return;
     }
-    this.setState({
-      status: this.state.attempt === 0 ? 'connecting' : this.state.attempt >= this.opts.unreachableAfter ? 'unreachable' : 'reconnecting',
-      attempt: this.state.attempt,
-      detail: this.state.detail,
-    });
     const gen = ++this.socketGen;
     let ws: WebSocketLike;
     try {
@@ -348,6 +344,12 @@ export class DaemonClient {
     }
     this.ws = ws;
     this.welcomed = false;
+    // After `this.ws` is set: a state listener that calls connect() (the thread header does) must see a socket in flight.
+    this.setState({
+      status: this.state.attempt === 0 ? 'connecting' : this.state.attempt >= this.opts.unreachableAfter ? 'unreachable' : 'reconnecting',
+      attempt: this.state.attempt,
+      detail: this.state.detail,
+    });
     ws.onopen = () => {
       if (gen !== this.socketGen) return;
       this.lastRx = Date.now();
@@ -420,12 +422,14 @@ export class DaemonClient {
       return;
     }
     const delay = this.opts.backoffMs[Math.min(attempt - 1, this.opts.backoffMs.length - 1)];
-    this.setState({ status: attempt >= this.opts.unreachableAfter ? 'unreachable' : 'reconnecting', attempt, detail });
-    this.log(`${detail}; retry ${attempt} in ${delay} ms`);
+    // The timer is armed BEFORE listeners hear about the new state: a listener that calls connect()
+    // (the thread header does) must find a retry already pending, not open a second socket.
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (this.wantConnected) this.openSocket();
+      if (this.wantConnected && !this.ws) this.openSocket();
     }, delay);
+    this.setState({ status: attempt >= this.opts.unreachableAfter ? 'unreachable' : 'reconnecting', attempt, detail });
+    this.log(`${detail}; retry ${attempt} in ${delay} ms`);
   }
 
   // ── inbound ──────────────────────────────────────────────────────────────
