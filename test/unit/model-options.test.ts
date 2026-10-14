@@ -29,8 +29,8 @@ describe('modelVersionFromId', () => {
 
 describe('aliasLabel', () => {
   it('uses the catalog resolvedModel when present', () => {
-    const catalog = [{ value: 'opus', displayName: 'Opus', resolvedModel: 'claude-opus-4-9' }];
-    expect(aliasLabel('opus', catalog)).toBe('Opus 4.9 (latest)');
+    const catalog = [{ value: 'opus', displayName: 'Opus', resolvedModel: 'claude-opus-5-6' }];
+    expect(aliasLabel('opus', catalog)).toBe('Opus 5.6 (latest)');
   });
 
   it('falls back to built-in versions before any session has run', () => {

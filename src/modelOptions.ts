@@ -124,7 +124,7 @@ function compareVersions(a: string, b: string): number {
  * resolvedModel of every row) and the built-in fallback.
  */
 function highestKnownVersion(family: string, aliasValue: string, catalog: readonly ModelCatalogEntry[]): string | undefined {
-  const ids = [FALLBACK_RESOLVED[aliasValue]];
+  const ids: Array<string | undefined> = [FALLBACK_RESOLVED[aliasValue]];
   for (const m of catalog) ids.push(m.value, m.resolvedModel);
   let best: string | undefined;
   for (const id of ids) {
