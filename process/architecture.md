@@ -231,6 +231,21 @@ The "core" is the part of the plugin that must run in plain Node, with no Obsidi
 
 Rules: core files never import `obsidian`; anything host-bound goes behind an interface in `src/host/` and its Obsidian-backed implementation lives in a file outside the closure (`obsidianHost.ts` is the only `src/host/` file that may import `obsidian`). Use `globalThis`-level timers (`setTimeout`), not `window.setTimeout`, in core.
 
+## Daemon protocol (`src/protocol/`)
+
+Pure-TypeScript wire contract for the planned headless daemon (design section 3). It is a core entry (`src/protocol/index.ts`), so the boundary checks cover it and it must never import `obsidian`, DOM or Node-only modules.
+
+| File | Role |
+|---|---|
+| `relayTypes.ts` | Relay v1 payload types (frozen). `src/relay-protocol.ts` is a re-export shim so `RelayClient`, `MobileThreadStore` and mobile are untouched. |
+| `sessionEvents.ts` | `SessionEvent` derived from `SessionCallbacks` (`WireArgs`), request/resolve overrides, `NOT_ON_WIRE`, and `CALLBACK_DISPOSITION` (typed over `keyof SessionCallbacks`). **Adding a callback to `SessionCallbacks` requires classifying it here**; `tsc` and `test/unit/protocol-drift.test.ts` both fail otherwise. |
+| `commands.ts`, `spec.ts` | Client commands and `RemoteSessionSpec` (`SESSION_OPTION_DISPOSITION` does the same job for `HarnessSessionOptions`). |
+| `envelope.ts` | Frame shapes, `StreamCursor` (idempotent apply: drop `seq <= lastSeq`). |
+| `codec.ts` | `encodeFrame`, `decodeClientFrame`, `decodeServerFrame`: validate and return a result, tolerant of unknown additive fields. |
+| `journal.ts`, `journalPolicy.ts` | `Journal` interface plus `InMemoryJournal` (append, replay-after-cursor, ack, compact, checkpoint; per-channel seq never reused). A disk journal implements the same interface later. |
+
+Journal rules worth remembering: `lowWater` rises only on size/age **eviction**, never on token compaction; `replay(afterSeq < lowWater)` returns a `resync` checkpoint; compaction drops only `onToken` events that precede an acked `onMessage`/`onDone`/`onInterrupted`/`onError`.
+
 ---
 
 ## DispatchInput Component

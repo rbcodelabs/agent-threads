@@ -29,6 +29,8 @@ export const ENTRY_FILES = [
   'src/OpenCodeSession.ts',
   'src/Scheduler.ts',
   'src/HarnessFactory.ts',
+  // Daemon wire protocol (design section 3): pure TS, must stay Node-safe.
+  'src/protocol/index.ts',
 ];
 
 /**

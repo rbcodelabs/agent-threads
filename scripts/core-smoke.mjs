@@ -20,6 +20,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const entries = [
   'ThreadManager', 'ThreadSession', 'ClaudeSession', 'CodexSession',
   'OpenCodeSession', 'Scheduler', 'HarnessFactory',
+  'protocol/index',
 ];
 
 const out = mkdtempSync(join(tmpdir(), 'core-smoke-'));
@@ -27,7 +28,7 @@ try {
   const outfile = join(out, 'core.cjs');
   const contents = [
     ...entries.map((name, i) => `import * as m${i} from './src/${name}.ts';`),
-    `const mods = { ${entries.map((name, i) => `${name}: m${i}`).join(', ')} };`,
+    `const mods = { ${entries.map((name, i) => `${JSON.stringify(name)}: m${i}`).join(', ')} };`,
     'for (const [name, mod] of Object.entries(mods)) {',
     '  if (Object.keys(mod).length === 0) throw new Error(`${name} exported nothing`);',
     '}',
