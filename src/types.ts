@@ -616,6 +616,8 @@ export interface Project {
   description?: string;
   /** Vault-relative folder path (e.g. "Claude/my-project" or "Work/Acme"). */
   vaultFolder: string;
+  /** Vault-relative path of the Project overview note injected into the system prompt. Defaults to `<vaultFolder>/_overview.md`. */
+  overviewPath?: string;
   /**
    * Optional explicit filesystem cwd override. When absent the plugin derives
    * the cwd automatically from vaultFolder + vault root.

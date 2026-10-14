@@ -154,6 +154,7 @@ export function createAgentProjectUpdateCallback(deps: {
       name: updated.name,
       description: updated.description,
       vaultFolder: updated.vaultFolder,
+      overviewPath: updated.overviewPath,
       cwdOverride: updated.cwdOverride,
       effectiveCwd: deps.getProjectCwd(updated),
       orchestratorThreadId: updated.orchestratorThreadId,
@@ -849,14 +850,15 @@ export default class ClaudeThreadsPlugin extends Plugin {
             name: p.name,
             description: p.description,
             vaultFolder: p.vaultFolder,
+            overviewPath: p.overviewPath,
             cwdOverride: p.cwdOverride,
             effectiveCwd: this.manager.getProjectCwd(p),
             orchestratorThreadId: p.orchestratorThreadId,
           })),
-          createProject: (name, vaultFolder, description, cwdOverride) => {
-            const p = this.manager.createProject(name, vaultFolder, description, cwdOverride);
+          createProject: (name, vaultFolder, description, cwdOverride, overviewPath) => {
+            const p = this.manager.createProject(name, vaultFolder, description, cwdOverride, overviewPath);
             this.saveSettings().catch(console.error);
-            return { id: p.id, name: p.name, description: p.description, vaultFolder: p.vaultFolder, cwdOverride: p.cwdOverride, effectiveCwd: this.manager.getProjectCwd(p) };
+            return { id: p.id, name: p.name, description: p.description, vaultFolder: p.vaultFolder, overviewPath: p.overviewPath, cwdOverride: p.cwdOverride, effectiveCwd: this.manager.getProjectCwd(p) };
           },
           updateProject: updateProjectFromAgent,
           setThreadProject: (threadId, projectId, alignCwd) => {
