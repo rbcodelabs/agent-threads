@@ -1014,6 +1014,68 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'permission-card.png', { fullPage: true });
   });
 
+  // browser_eval follows normal tool permissions. The canonical tool name is a
+  // trusted built-in (pre-approved, like browser_click); when the SDK supplies a
+  // non-trusted display title the card shows the full expression and offers
+  // Allow / Deny / Always Allow, and Always Allow persists so the next call is
+  // pre-approved without a card.
+  for (const viewport of [
+    { name: 'desktop', width: 1280, height: 800, query: '', golden: 'permission-card-browser-eval-desktop.png' },
+    { name: 'mobile', width: 390, height: 844, query: '?mobile=1', golden: 'permission-card-browser-eval-mobile.png' },
+  ]) {
+    test(`browser_eval permission card shows the expression and Always Allow (${viewport.name})`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(harnessUrl + viewport.query);
+      await page.waitForSelector('.ct-title-row');
+      await page.waitForSelector('.ct-messages');
+      const expression = "const rows = document.querySelectorAll('table tr');\nreturn Array.from(rows).map((r) => r.innerText);";
+      const detail = JSON.stringify({ expression });
+      await page.evaluate((d) => {
+        (window as any).__evalDecision = null;
+        (window as any).__view.plugin.settings.alwaysAllowedTools = [];
+        (window as any).__view.plugin.saveSettings = async () => {};
+        (window as any).__view.manager
+          .permissionHandler('thread-fix-auth', 'Claude wants to run browser_eval', d)
+          .then((v: boolean) => { (window as any).__evalDecision = v; });
+      }, detail);
+
+      const card = page.locator('.ct-permission-card');
+      await expect(card).toBeVisible();
+      await expect(card.locator('.ct-permission-detail')).toContainText("document.querySelectorAll('table tr')");
+      await card.locator('.ct-permission-fields summary').click();
+      await expect(card.locator('.ct-permission-field-value')).toContainText('return Array.from(rows)');
+      const always = card.getByRole('button', { name: 'Always Allow' });
+      await expect(always).toBeVisible();
+      await expect(always).toBeEnabled();
+      await expect(card.getByRole('button', { name: 'Allow', exact: true })).toBeEnabled();
+      await expect(card.getByRole('button', { name: 'Deny' })).toBeEnabled();
+
+      const overflow = await card.evaluate((el) => el.scrollWidth > el.clientWidth);
+      expect(overflow).toBe(false);
+      // The floating scroll-to-bottom pill can overlap the card capture.
+      await page.addStyleTag({ content: '.ct-scroll-bottom-pill { display: none !important; }' });
+      await shot(card, viewport.golden);
+
+      await always.click();
+      await expect(card).toHaveCount(0);
+      expect(await page.evaluate(() => (window as any).__evalDecision)).toBe(true);
+      expect(await page.evaluate(() => (window as any).__view.plugin.settings.alwaysAllowedTools))
+        .toContain('Claude wants to run browser_eval');
+
+      // Persisted Always Allow: the next call resolves immediately, no card.
+      const second = await page.evaluate(() =>
+        (window as any).__view.manager.permissionHandler('thread-fix-auth', 'Claude wants to run browser_eval', '{"expression":"1"}'));
+      expect(second).toBe(true);
+      await expect(card).toHaveCount(0);
+
+      // The canonical tool name is a trusted built-in: pre-approved, no card.
+      const trusted = await page.evaluate(() =>
+        (window as any).__view.manager.permissionHandler('thread-fix-auth', 'mcp__claude_threads__browser_eval', '{"expression":"1"}'));
+      expect(trusted).toBe(true);
+      await expect(card).toHaveCount(0);
+    });
+  }
+
   test('permission card reappears after switching away and back', async ({ page }) => {
     await page.setViewportSize({ width: 420, height: 740 });
     await page.goto(harnessUrl);

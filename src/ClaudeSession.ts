@@ -6,7 +6,7 @@ import { mergeUsageSnapshot, normalizeClaudeRateLimit, normalizeClaudeResult, ti
 // Import from the mobile-safe utility module, then re-export so that desktop
 // callers that already import formatToolName/getToolIcon from ClaudeSession
 // continue to work without changes.
-import { formatToolName, getToolIcon, isBrowserTool, buildPermissionDetail, requiresPerCallApproval } from './toolNameUtils';
+import { formatToolName, getToolIcon, isBrowserTool, buildPermissionDetail } from './toolNameUtils';
 import { browserToolSummary, parseBrowserToolResult } from './browserSession';
 import { resolvePlanText, isPlanFilePath } from './planText';
 export { formatToolName, getToolIcon };
@@ -363,7 +363,7 @@ export class ClaudeSession {
           return { behavior: 'deny' as const, message: 'Plan approved — proceed with implementation.', interrupt: false };
         }
         const detail = buildPermissionDetail(toolName, input, opts);
-        const title = requiresPerCallApproval(toolName) ? toolName : (opts.title ?? toolName);
+        const title = opts.title ?? toolName;
         const allowed = await callbacks.onPermissionRequest(title, detail);
         // Never return `updatedPermissions` (e.g. `opts.suggestions`): the CLI
         // persists those rules to `.claude/settings.local.json`, turning every

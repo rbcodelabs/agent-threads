@@ -212,6 +212,23 @@ test.describe('Mobile View', () => {
     await shot(page.locator('.ct-mobile-permission-card'), 'mobile-permission-card.png');
   });
 
+  test('browser_eval permission card (expression, Always Allow — 44px tap targets)', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(mobileHarnessUrl('mobile-permission-eval'));
+    const card = page.locator('.ct-mobile-permission-card');
+    await card.waitFor();
+    await expect(card).toContainText("document.querySelectorAll('table tr')");
+    const always = card.getByRole('button', { name: 'Always Allow' });
+    await expect(always).toBeVisible();
+    await expect(always).toBeEnabled();
+    const heights = await card.locator('.ct-mobile-permission-btn').evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
+    expect(heights.length).toBe(3);
+    for (const h of heights) expect(h).toBeGreaterThanOrEqual(44);
+    expect(await card.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(false);
+    await page.waitForTimeout(300);
+    await shot(card, 'mobile-permission-card-browser-eval.png');
+  });
+
   test('question card (single-select + multiSelect, Other, 44px tap targets)', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(mobileHarnessUrl('mobile-question'));

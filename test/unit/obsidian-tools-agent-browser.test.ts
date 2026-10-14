@@ -161,7 +161,6 @@ describe('browser_scroll', () => {
     for (const safe of ['browser_snapshot', 'browser_scroll', 'browser_click', 'browser_type', 'browser_read_text', 'browser_console', 'browser_network']) {
       expect(description, safe).toContain(safe);
     }
-    expect(description).toMatch(/approval prompt/);
   });
 });
 

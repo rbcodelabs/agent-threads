@@ -169,6 +169,27 @@ if (view === 'mobile-overflow') {
   (window as any).__mobileView = mobileView;
   (window as any).__store = store;
 
+} else if (view === 'mobile-permission-eval') {
+  // Pending browser_eval permission request with a multi-line expression.
+  const store = new MobileThreadStore();
+  const relay = new MockRelayClient();
+  store.applyFrame(serializedFixtures(fixtureThreads[0].id));
+  store.applyFrame({
+    type: 'permission_request',
+    threadId: fixtureThreads[0].id,
+    toolName: 'mcp__claude_threads__browser_eval',
+    detail: JSON.stringify({
+      expression: "const rows = document.querySelectorAll('table tr');\nreturn Array.from(rows).map((r) => r.innerText);",
+    }),
+    requestId: 'perm-fixture-eval',
+  });
+
+  const mobileView = new MobileView(mockLeaf as any, relay as any, store);
+  app.appendChild(mobileView.containerEl);
+  mobileView.onOpen();
+  (window as any).__mobileView = mobileView;
+  (window as any).__store = store;
+
 } else if (view === 'mobile-question') {
   // Active thread with a pending AskUserQuestion card: one single-select question
   // and one multiSelect question (with an option description) so the card can be
