@@ -20,6 +20,7 @@ import type {
 } from './relay-protocol';
 import type { Thread, ChatMessage } from './types';
 import { debugLog } from './logger';
+import { RECONNECT_BACKOFF_MS } from './remote/backoff';
 
 type FrameListener = (frame: RelayFrame) => void;
 type ConnectionStateListener = (state: ConnectionState) => void;
@@ -30,7 +31,7 @@ const PONG_TIMEOUT_MS = 10_000;
 const PING_INTERVAL_MS = 20_000;
 
 /** Backoff sequence in ms, capped at 30s. */
-const BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000];
+const BACKOFF = RECONNECT_BACKOFF_MS;
 
 function serializeThread(thread: Thread): SerializedThread {
   return {

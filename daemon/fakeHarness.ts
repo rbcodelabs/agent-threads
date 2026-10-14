@@ -4,7 +4,8 @@
  * enough control over shape and pacing to exercise resume and backpressure.
  *
  * Script grammar (first word of the sent text):
- *   /tokens N [size=S] [burst=B]  N tokens `t<i>:` padded to S chars, B per macrotask (default 10)
+ *   /tokens N [size=S] [burst=B] [delay=MS]  N tokens `t<i>:` padded to S chars, B per macrotask
+ *                                 (default 10), MS ms between bursts (default 0 = back to back)
  *   /hang                         one token, then wait for interrupt
  *   /permission                   open a permission_request, finish after resolve.permission
  *   /question | /plan | /elicitation   same shape with a question_request / plan_ready / elicitation_request
@@ -29,6 +30,7 @@ interface ParsedScript {
   count: number;
   size: number;
   burst: number;
+  delay: number;
   text: string;
 }
 
@@ -41,13 +43,15 @@ function parseScript(text: string): ParsedScript {
   };
   if (head === '/tokens') {
     const n = Number(rest[0]);
-    return { kind: 'tokens', count: Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0, size: opt('size', 0), burst: opt('burst', 10), text };
+    return { kind: 'tokens', count: Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0, size: opt('size', 0), burst: opt('burst', 10), delay: opt('delay', 0), text };
   }
-  if (head === '/hang') return { kind: 'hang', count: 0, size: 0, burst: 1, text };
+  if (head === '/hang') return { kind: 'hang', count: 0, size: 0, burst: 1, delay: 0, text };
   for (const k of REQUEST_SCRIPTS) {
-    if (head === `/${k}`) return { kind: k, count: 0, size: 0, burst: 1, text };
+    if (head === `/${k}`) return { kind: k, count: 0, size: 0, burst: 1, delay: 0, text };
   }
-  return { kind: 'echo', count: 0, size: 0, burst: 4, text };
+  // Plain text echoes word by word; `delay=MS` anywhere in the text slows it (the e2e uses this to watch tokens arrive).
+  const echoDelay = /delay=(\d+)/.exec(text);
+  return { kind: 'echo', count: 0, size: 0, burst: 4, delay: echoDelay ? Number(echoDelay[1]) : 0, text };
 }
 
 export class FakeHarnessSession implements SessionDriver {
@@ -109,7 +113,7 @@ export class FakeHarnessSession implements SessionDriver {
       }
       default: {
         const words = `echo: ${script.text}`.split(' ').map((w, i, a) => (i < a.length - 1 ? `${w} ` : w));
-        this.streamChunks(words, script.burst, alive, () => this.finish(script, words.join(''), alive));
+        this.streamChunks(words, script.burst, script.delay, alive, () => this.finish(script, words.join(''), alive));
       }
     }
   }
@@ -117,19 +121,20 @@ export class FakeHarnessSession implements SessionDriver {
   private streamTokens(script: ParsedScript, alive: () => boolean): void {
     const chunks: string[] = [];
     for (let i = 0; i < script.count; i++) chunks.push(fakeTokenText(i, script.size));
-    this.streamChunks(chunks, script.burst, alive, () => this.finish(script, chunks.join(''), alive));
+    this.streamChunks(chunks, script.burst, script.delay, alive, () => this.finish(script, chunks.join(''), alive));
   }
 
-  private streamChunks(chunks: string[], burst: number, alive: () => boolean, done: () => void): void {
+  private streamChunks(chunks: string[], burst: number, delay: number, alive: () => boolean, done: () => void): void {
     let i = 0;
     const step = () => {
       if (!alive()) return;
       const end = Math.min(i + burst, chunks.length);
       for (; i < end; i++) this.emit({ name: 'onToken', args: [chunks[i]] });
-      if (i < chunks.length) setImmediate(step);
+      if (i < chunks.length) later();
       else done();
     };
-    setImmediate(step);
+    const later = (): void => { if (delay > 0) setTimeout(step, delay); else setImmediate(step); };
+    later();
   }
 
   private finish(_script: ParsedScript, content: string, alive: () => boolean): void {

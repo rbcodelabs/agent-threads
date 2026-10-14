@@ -48,7 +48,21 @@ export interface HarnessSession {
   /** Native child-agent controls. Absent unless a harness exposes a directly verified route. */
   sendAgentMessage?(nativeAgentId: string, text: string): Promise<void>;
   interruptAgent?(nativeAgentId: string): Promise<void>;
+  /** Terminate the session. For a remote session this stops the process on the daemon. */
   close(): void;
+  /**
+   * Stop listening WITHOUT ending the session. Used instead of `close()` when
+   * the host itself is going away (quit, plugin unload): a remote turn must
+   * survive that, so only the client side lets go. Absent for local harnesses,
+   * where closing is the only way to release the child process.
+   */
+  detach?(): void;
+  /**
+   * The host has durably saved everything this session has delivered so far.
+   * A remote session uses it to tell the daemon how much of its replay buffer
+   * can be released (the `ack` command).
+   */
+  notifyPersisted?(): void;
   setModel(model: string | undefined): Promise<void>;
   setPermissionMode(mode: HarnessPermissionMode): Promise<void>;
   getContextUsage(): Promise<HarnessContextUsage | null>;

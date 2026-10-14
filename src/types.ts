@@ -275,6 +275,45 @@ export interface GitDiffInfo {
   ownerRepo?: { owner: string; repo: string };
 }
 
+/** A daemon this Geode can run threads on (Settings -> Remote daemons). */
+export interface RemoteDaemonConfig {
+  /** Stable key referenced by `Thread.remote.daemonId`. */
+  id: string;
+  /** Shown in the thread header badge and the "Run on" picker. */
+  name: string;
+  /** `ws://` or `wss://` base URL of the daemon (no path); `/v1/ws` is appended. */
+  url: string;
+  /** Name of the keychain secret (`app.secretStorage`, via `secretStorageKey`) holding the bearer token. */
+  tokenSecretName: string;
+  /** Default directory offered for new remote threads (a path on the daemon's machine). */
+  defaultCwdRoot?: string;
+}
+
+export interface ThreadRemote {
+  daemonId: string;
+  /** Stage 1 is always `'client'`: this plugin owns the transcript (design 4.4). */
+  ownership: 'client' | 'daemon';
+  /** Working directory on the daemon's machine. */
+  remoteCwd: string;
+  /**
+   * Resume cursor for channel `t:<id>`: every event up to here is reflected in
+   * the persisted transcript. Conservative: it stops before an unfinished
+   * assistant message, so a restart replays that message's tokens.
+   */
+  lastSeq: number;
+  /** Daemon process epoch last seen; a change means the daemon restarted. */
+  epoch?: string;
+  /** Harness-native session id on that daemon (valid only there). */
+  nativeSessionId?: string;
+  /** Which Geode instance owns the read-write seat (`PluginSettings.remoteClientId`). */
+  ownerClientId: string;
+  /**
+   * A turn was started and not yet seen to finish. After a restart the plugin
+   * re-attaches such threads so the transcript completes without user action.
+   */
+  turnPending?: boolean;
+}
+
 export interface Thread {
   id: string;
   sessionId?: string;
@@ -285,6 +324,13 @@ export interface Thread {
   sessionGeneration?: number;
   /** Per-thread container-routing override; absent means follow `settings.harnessVmMode`. Claude harness only. */
   harnessVmMode?: HarnessVmMode;
+  /**
+   * Present when this thread's session runs on a remote agent-threads daemon
+   * instead of this machine (daemon design section 4.2). `thread.cwd` mirrors
+   * `remote.remoteCwd` for display; it is a path on the daemon's machine, so
+   * nothing may stat it locally.
+   */
+  remote?: ThreadRemote;
   /** One-time context bridge consumed only by the first successful target turn. */
   pendingHarnessHandoff?: {
     sourceHarness: AgentHarness;
@@ -1034,6 +1080,10 @@ export interface PluginSettings {
    * `harnessVmImage` — see `HarnessVmMode`'s doc comment.
    */
   harnessVmMode: HarnessVmMode;
+  /** Daemons threads can be run on (Settings -> Remote daemons). Tokens live in the keychain, not here. */
+  remoteDaemons?: RemoteDaemonConfig[];
+  /** Random id of this Geode install, stamped on remote threads as `ownerClientId`. */
+  remoteClientId?: string;
   /**
    * Memory ceiling for newly created sandbox containers, `<digits>M|G`
    * (default `'4G'`). Invalid values fall back to the default. Applies only at
