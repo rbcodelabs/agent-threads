@@ -62,9 +62,11 @@ describe('request / resolve round trips', () => {
     const req = await c.waitFor((f) => f.name === 'permission_request');
     expect(await c.cmd('resolve.question', { threadId: 't', requestId: req.args.requestId, answers: {} })).toMatchObject({ type: 'err', code: 'not_found' });
     expect(await c.cmd('resolve.permission', { threadId: 't', requestId: 'nope', allow: true })).toMatchObject({ type: 'err', code: 'not_found' });
-    expect((await c.cmd('resolve.permission', { threadId: 't', requestId: req.args.requestId, allow: false, alwaysAllow: true })).type).toBe('ack');
+    // "Always allow" is not implemented: the ack says so and the journal does not claim a standing rule.
+    expect(await c.cmd('resolve.permission', { threadId: 't', requestId: req.args.requestId, allow: false, alwaysAllow: true })).toMatchObject({ type: 'ack', result: { alwaysAllow: 'not_supported' } });
     const resolved = await c.waitFor((f) => f.name === 'request_resolved');
-    expect(resolved.args).toMatchObject({ alwaysAllow: true });
+    expect(resolved.args).toMatchObject({ outcome: 'resolved' });
+    expect(resolved.args).not.toHaveProperty('alwaysAllow');
   });
 
   it('open-tab resolution is refused: daemon sessions cannot create Geode threads', async () => {

@@ -8,7 +8,7 @@ import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifa
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig } from './types';
 import { daemonWsUrl, probeDaemon, type ProbeWorkspaces } from './remote/DaemonClient';
 import { connectionPill } from './remote/connectionPill';
-import { checkDaemonInput, checkVaultMappingInput, describeTest, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
+import { checkDaemonInput, checkVaultMappingInput, describeTest, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
 import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel } from './remote/workspaceChoice';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { serializeKey } from './stt';
@@ -567,8 +567,13 @@ export class RemoteDaemonModal extends Modal {
 
     new Setting(contentEl).setName('Name').setDesc('Shown on threads that run there, for example my-server.')
       .addText((t) => t.setPlaceholder('my-server').setValue(name).onChange((v) => { name = v; }));
+    // Plain ws:// to a host that is not loopback or on the tailnet sends the token in the clear.
+    let cleartext: HTMLElement | null = null;
+    const showTransportWarning = (): void => { cleartext?.setText(plainTransportWarning(url) ?? ''); };
     new Setting(contentEl).setName('Address').setDesc('wss://<machine>.<tailnet>.ts.net:8443 through `tailscale serve`, or ws://<tailscale-ip>:<port> for a raw tailnet port.')
-      .addText((t) => t.setPlaceholder('wss://my-server.tailnet-name.ts.net:8443').setValue(url).onChange((v) => { url = v; }));
+      .addText((t) => t.setPlaceholder('wss://my-server.tailnet-name.ts.net:8443').setValue(url).onChange((v) => { url = v; showTransportWarning(); }));
+    cleartext = contentEl.createDiv({ cls: 'setting-item-description mod-warning ct-remote-cleartext-warning', attr: { role: 'alert' } });
+    showTransportWarning();
     new Setting(contentEl).setName('Access token').setDesc(this.existing ? 'Leave blank to keep the stored token.' : 'From `agent-threads token create --scope control` on the daemon machine.')
       .addText((t) => { t.inputEl.type = 'password'; t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { token = v; }); });
 

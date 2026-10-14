@@ -28,6 +28,7 @@ import type {
   HarnessSessionOptions,
 } from '../HarnessSession';
 import {
+  CALLBACK_DISPOSITION,
   OVERRIDES,
   type EventFrame,
   type RemoteSessionSpec,
@@ -56,7 +57,12 @@ export interface RemoteSessionDeps {
    * dispatched through it so the transcript keeps their original time. Absent = real time.
    */
   runAtTime?: <T>(ts: number, fn: () => T) => T;
+  /** Waits (ms) between attempts when the daemon answers a send with a retryable `conflict` (default 1 s doubling to 30 s). */
+  retryDelaysMs?: readonly number[];
 }
+
+/** The daemon was momentarily full (retryable `conflict`): try again after these waits, then give up. */
+const DEFAULT_SEND_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
 
 interface OpenRequest {
   kind: 'permission' | 'question' | 'plan' | 'elicitation';
@@ -73,6 +79,17 @@ interface QueuedSend {
 const ERROR_ARG_CALLBACKS = new Set(['onError', 'onPlanTransitionError']);
 const WIRE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
+/**
+ * Only names the protocol classifies as plain events may be invoked on the host's callbacks object. The
+ * name comes off the wire, so without this a daemon (or a corrupted journal) could make us call any
+ * function-valued property: `onRawEvent`, `onStreamReset`, a request callback, or anything else on it.
+ */
+export function isEventCallbackName(name: unknown): name is keyof SessionCallbacks {
+  return typeof name === 'string'
+    && Object.prototype.hasOwnProperty.call(CALLBACK_DISPOSITION, name)
+    && CALLBACK_DISPOSITION[name as keyof SessionCallbacks] === 'event';
+}
+
 export class RemoteHarnessSession implements HarnessSession {
   private callbacks: SessionCallbacks | null = null;
   private spec: RemoteSessionSpec | null = null;
@@ -88,6 +105,8 @@ export class RemoteHarnessSession implements HarnessSession {
   /** Seq just before the first token of the assistant message being streamed (null = none open). */
   private streamOpenFrom: number | null = null;
   private observerNoticeShown = false;
+  /** A send waiting out a retryable `conflict`; cleared by interrupt/close. */
+  private sendRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly client: DaemonClient,
@@ -198,6 +217,7 @@ export class RemoteHarnessSession implements HarnessSession {
     this.sub?.close();
     this.sub = null;
     this.cancelLocalRequests();
+    this.cancelSendRetry();
     this.queued = [];
     if (this.opened || this.opening) {
       void this.client.command('session.close', { threadId: this.threadId }).catch((err: unknown) => {
@@ -214,6 +234,7 @@ export class RemoteHarnessSession implements HarnessSession {
     this.sub?.close();
     this.sub = null;
     this.cancelLocalRequests();
+    this.cancelSendRetry();
     // Also when we only re-attached (never opened): that attach claimed the seat and a server-side subscription.
     if (this.opened || attached) {
       void this.client.command('session.detach', { threadId: this.threadId }, { timeoutMs: 3000 }).catch(() => { /* the disconnect releases the seat anyway */ });
@@ -255,6 +276,10 @@ export class RemoteHarnessSession implements HarnessSession {
   private dispatchSend(item: QueuedSend): void {
     this.sendAwaitingState = true;
     this.syncPending();
+    this.attemptSend(item, 0);
+  }
+
+  private attemptSend(item: QueuedSend, attempt: number): void {
     void this.ensureOpen()
       .then(() => this.client.command('session.send', {
         threadId: this.threadId,
@@ -264,15 +289,53 @@ export class RemoteHarnessSession implements HarnessSession {
       }))
       .catch((err: unknown) => {
         if (this.closed) return;
-        this.log(`session.send failed: ${errText(err)}`);
-        this.failTurn(err instanceof DaemonCommandError && err.code === 'unreachable'
-          ? new Error('The remote daemon is unreachable; your message was not delivered. Check the connection and send it again.')
-          : err instanceof Error ? err : new Error(String(err)));
+        this.log(`session.send failed (attempt ${attempt + 1}): ${errText(err)}`);
+        // The daemon is at capacity right now (maxConcurrentTurns): it said so, and said "retryable". Wait and
+        // resend the SAME message id (the daemon deduplicates by it), instead of failing the user's turn.
+        const delays = this.deps.retryDelaysMs ?? DEFAULT_SEND_RETRY_DELAYS_MS;
+        if (err instanceof DaemonCommandError && err.retryable && attempt < delays.length) {
+          this.sendRetryTimer = setTimeout(() => {
+            this.sendRetryTimer = null;
+            if (!this.closed) this.attemptSend(item, attempt + 1);
+          }, delays[attempt]);
+          return;
+        }
+        this.failTurn(this.sendFailure(err));
       });
+  }
+
+  private cancelSendRetry(): boolean {
+    if (!this.sendRetryTimer) return false;
+    clearTimeout(this.sendRetryTimer);
+    this.sendRetryTimer = null;
+    return true;
+  }
+
+  /**
+   * What to tell the user when a send did not get an ack. "Not delivered" is only true when the command never
+   * left this process; once it was written to a socket the daemon may have run it, so say that instead and let
+   * the replay (this session stays attached) show what actually happened.
+   */
+  private sendFailure(err: unknown): Error {
+    if (err instanceof DaemonCommandError) {
+      if (err.unconfirmed) {
+        return new Error('The remote daemon did not confirm your message. It may still have received it and be working on it: anything it produces will appear here when the connection catches up. Check this thread before sending the message again.');
+      }
+      if (err.code === 'unreachable') {
+        return new Error('The remote daemon is unreachable; your message was not delivered. Check the connection and send it again.');
+      }
+    }
+    return err instanceof Error ? err : new Error(String(err));
   }
 
   async interrupt(): Promise<void> {
     this.queued = [];
+    if (this.cancelSendRetry()) {
+      // The message was still waiting for a free slot on the daemon; the user changed their mind.
+      this.sendAwaitingState = false;
+      this.syncPending();
+      return;
+    }
     await this.client.command('session.interrupt', { threadId: this.threadId });
   }
 
@@ -397,6 +460,10 @@ export class RemoteHarnessSession implements HarnessSession {
           this.log(`ignoring ${frame.name} (host tools are not proxied yet)`);
           return;
         default: {
+          if (!isEventCallbackName(frame.name)) {
+            this.log(`ignoring event "${String(frame.name).slice(0, 60)}": not a session event`);
+            return;
+          }
           const fn = (cb as unknown as Dict)[frame.name];
           if (typeof fn !== 'function') return;
           const list = (Array.isArray(args) ? args : []) as unknown[];

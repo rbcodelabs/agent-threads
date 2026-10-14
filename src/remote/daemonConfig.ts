@@ -59,6 +59,38 @@ export function checkDaemonInput(
   return { ok: true, url: withScheme.replace(/\/+$/, '') };
 }
 
+function isLoopbackHost(host: string): boolean {
+  return host === 'localhost' || host === '::1' || /^127\.\d+\.\d+\.\d+$/.test(host);
+}
+
+/** `*.ts.net` (MagicDNS), 100.64.0.0/10 (Tailscale IPv4) or fd7a:115c:a1e0::/48 (Tailscale IPv6). */
+function isTailnetHost(host: string): boolean {
+  if (host.endsWith('.ts.net')) return true;
+  const v4 = /^100\.(\d+)\.\d+\.\d+$/.exec(host);
+  if (v4) return Number(v4[1]) >= 64 && Number(v4[1]) <= 127;
+  return host.toLowerCase().startsWith('fd7a:115c:a1e0:');
+}
+
+/**
+ * A warning for an address that sends the access token and every message in the clear to a host that is not
+ * known to be on this machine or inside a Tailscale tunnel. `undefined` for wss/https and for loopback / tailnet
+ * hosts. (A bare machine name could be a tailnet name; it cannot be told apart from a LAN name, so it is warned.)
+ */
+export function plainTransportWarning(rawUrl: string): string | undefined {
+  const raw = rawUrl.trim();
+  if (!raw) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `ws://${raw}`);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'ws:' && parsed.protocol !== 'http:') return undefined;
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (isLoopbackHost(host) || isTailnetHost(host)) return undefined;
+  return 'This address is plain ws://, so the access token and every message cross the network unencrypted. Use wss:// (for example through `tailscale serve`) unless this machine is only reachable over a VPN such as Tailscale.';
+}
+
 /** What the Edit/Add dialog gets back from Test connection. */
 export interface DaemonTestOutcome {
   tone: 'ok' | 'error';

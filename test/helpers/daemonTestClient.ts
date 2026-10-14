@@ -74,9 +74,9 @@ export class TestClient {
   }
 
   /** Connect and complete hello; resolves with the welcome frame on the client. */
-  static async connect(url: string, token: string, wsOpts: WebSocket.ClientOptions = {}): Promise<TestClient> {
+  static async connect(url: string, token: string, wsOpts: WebSocket.ClientOptions = {}, helloExtra: object = {}): Promise<TestClient> {
     const c = await TestClient.open(url, wsOpts);
-    const reply = await c.cmd('hello', { protocol: 1, client: 'cli', clientVersion: 'test', token });
+    const reply = await c.cmd('hello', { protocol: 1, client: 'cli', clientVersion: 'test', token, ...helloExtra });
     if (reply.type !== 'welcome') throw new Error(`hello failed: ${JSON.stringify(reply)}`);
     return c;
   }

@@ -34,6 +34,9 @@ serve options:
   --idle-reap-minutes <n>      stop a session idle this long; the next send resumes it (default 30, 0 = off)
   --journal-ttl-days <n>       drop replay-journal entries older than this (default 7, 0 = keep); a client away longer resyncs
   --journal-max-mb <n>         cap one thread's replay journal at about this many MB (default 64, 0 = no cap)
+  --max-connections <n>        sockets accepted at once (default 64)
+  --max-live-sessions <n>      sessions with a live claude process at once (default 8)
+  --request-timeout-minutes <n>  cancel a permission/question nobody answers after this long (default 60, 0 = never)
   --claude-binary <path> path to the claude CLI (env AGENT_THREADS_CLAUDE_BINARY; default: PATH, ~/.npm-global/bin, ~/.local/bin)
   --fake-harness         scripted stand-in instead of Claude (tests and smoke runs only)
 
@@ -78,6 +81,26 @@ function dataDirOf(p: Parsed): string {
 
 function fmt(ms: number | null): string {
   return ms === null ? '-' : new Date(ms).toISOString();
+}
+
+/**
+ * After startup succeeded the daemon is serving other people's turns: a stray exception or rejected
+ * promise (a bug, a malformed client frame that slipped past a guard) is logged and the process keeps
+ * serving. Startup failures happen before this is installed and still exit non-zero. Returns the uninstaller.
+ */
+export function installCrashGuards(io: Io, proc: NodeJS.Process = process): () => void {
+  const onError = (err: unknown): void => {
+    io.err(`ERROR (continuing to serve): uncaught exception: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+  };
+  const onRejection = (reason: unknown): void => {
+    io.err(`ERROR (continuing to serve): unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`);
+  };
+  proc.on('uncaughtException', onError);
+  proc.on('unhandledRejection', onRejection);
+  return () => {
+    proc.off('uncaughtException', onError);
+    proc.off('unhandledRejection', onRejection);
+  };
 }
 
 export async function runCli(argv: string[], io: Io = consoleIo): Promise<number> {
@@ -149,12 +172,19 @@ export async function runCli(argv: string[], io: Io = consoleIo): Promise<number
     if (journalTtl !== undefined) flags.journalTtlDays = Number(journalTtl);
     const journalMax = one(p, 'journal-max-mb');
     if (journalMax !== undefined) flags.journalMaxMb = Number(journalMax);
+    const maxConnections = one(p, 'max-connections');
+    if (maxConnections !== undefined) flags.maxConnections = Number(maxConnections);
+    const maxLive = one(p, 'max-live-sessions');
+    if (maxLive !== undefined) flags.maxLiveSessions = Number(maxLive);
+    const requestTimeout = one(p, 'request-timeout-minutes');
+    if (requestTimeout !== undefined) flags.requestTimeoutMinutes = Number(requestTimeout);
     const claudeBinary = one(p, 'claude-binary');
     if (claudeBinary) flags.claudeBinaryPath = claudeBinary;
 
     let config;
     try { config = resolveConfig({ flags }); } catch (e) { io.err((e as Error).message); return 2; }
     const daemon = await startDaemon({ config, log: (l) => io.out(l) });
+    const uninstallGuards = installCrashGuards(io);
     if (!daemon.tokens.hasActiveTokens) {
       io.out(`No tokens exist yet. Create one with: agent-threads token create --name <name> --scope admin --data-dir ${config.dataDir}`);
     }
@@ -162,7 +192,7 @@ export async function runCli(argv: string[], io: Io = consoleIo): Promise<number
     await new Promise<void>((resolve) => {
       const shutdown = (sig: string) => {
         io.out(`${sig} received, shutting down`);
-        void daemon.stop().then(resolve);
+        void daemon.stop().then(() => { uninstallGuards(); resolve(); });
       };
       process.once('SIGINT', () => shutdown('SIGINT'));
       process.once('SIGTERM', () => shutdown('SIGTERM'));

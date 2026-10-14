@@ -20,7 +20,12 @@ export interface WireImage {
 
 export type ClientCommand =
   // Lifecycle
-  | { type: 'hello'; protocol: number; client: ClientKind; clientVersion: string; token: string }
+  /**
+   * `instanceId` is a stable id for one client install (the plugin's `remoteClientId`). The daemon keys the
+   * read-write seat on (token, instance): the same instance reconnecting takes its own seat back, a different
+   * instance sharing the token is refused. Absent (older clients) = one instance per token. Additive within v1.
+   */
+  | { type: 'hello'; protocol: number; client: ClientKind; clientVersion: string; token: string; instanceId?: string }
   | { type: 'session.open'; threadId: string; spec: RemoteSessionSpec; resume?: string }
   | { type: 'session.detach'; threadId: string }
   | { type: 'session.close'; threadId: string }
@@ -113,6 +118,39 @@ export interface PathListReply {
   entries: PathListEntry[];
   /** More subfolders exist than were returned. */
   truncated: boolean;
+}
+
+export const WIRE_IMAGE_MEDIA_TYPES: readonly string[] = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+/** Caps on one `session.send` / `session.prepareForSend`: the model API rejects larger images anyway. */
+export const MAX_WIRE_IMAGES = 10;
+export const MAX_WIRE_IMAGE_BASE64_CHARS = 7_000_000;
+export const MAX_WIRE_IMAGES_TOTAL_CHARS = 14_000_000;
+const MAX_WIRE_IMAGE_NAME = 256;
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/**
+ * Check the `images` of a send. Returns a message naming the first problem, or null. Every element is
+ * checked (a `null` or a non-object used to slip past an "is it an array" test and throw later, inside
+ * the session driver). Unknown media types are refused rather than silently dropped.
+ */
+export function validateWireImages(images: unknown): string | null {
+  if (images === undefined) return null;
+  if (!Array.isArray(images)) return 'images must be an array';
+  if (images.length > MAX_WIRE_IMAGES) return `at most ${MAX_WIRE_IMAGES} images per message`;
+  let total = 0;
+  for (let i = 0; i < images.length; i++) {
+    const img: unknown = images[i];
+    if (typeof img !== 'object' || img === null || Array.isArray(img)) return `images[${i}] must be an object`;
+    const { base64, mediaType, name } = img as Record<string, unknown>;
+    if (typeof mediaType !== 'string' || !WIRE_IMAGE_MEDIA_TYPES.includes(mediaType)) return `images[${i}].mediaType must be one of ${WIRE_IMAGE_MEDIA_TYPES.join(', ')}`;
+    if (typeof base64 !== 'string' || base64.length === 0) return `images[${i}].base64 must be a non-empty string`;
+    if (base64.length > MAX_WIRE_IMAGE_BASE64_CHARS) return `images[${i}] is too large (limit ${MAX_WIRE_IMAGE_BASE64_CHARS} base64 characters)`;
+    if (!BASE64.test(base64)) return `images[${i}].base64 is not valid base64`;
+    if (name !== undefined && (typeof name !== 'string' || name.length > MAX_WIRE_IMAGE_NAME)) return `images[${i}].name must be a string of at most ${MAX_WIRE_IMAGE_NAME} characters`;
+    total += base64.length;
+  }
+  if (total > MAX_WIRE_IMAGES_TOTAL_CHARS) return 'images are too large in total';
+  return null;
 }
 
 /** At most this many subfolders are returned by one `path.list`. */

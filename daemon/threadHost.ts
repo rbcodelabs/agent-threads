@@ -46,6 +46,11 @@ export interface ThreadHostOptions {
   policy?: SessionPolicy;
   /** At most this many turns at once; further sends are refused with a retryable `conflict`. */
   maxConcurrentTurns?: number;
+  /**
+   * At most this many sessions with a live process at once (each is a `claude` child). Opening or cold-resuming
+   * beyond it is refused; idle reaping or `session.close` frees a slot. Unset = unbounded.
+   */
+  maxLiveSessions?: number;
   /** Idle sessions are stopped after this long (ms). 0 or unset disables the reaper. */
   idleReapMs?: number;
   /** Raw SDK events for the daemon's own JSONL log. */
@@ -59,7 +64,11 @@ interface Runtime {
   meta: SessionMeta | null;
   /** Bumped whenever the live driver is replaced or stopped; late events from an old one are dropped. */
   gen: number;
+  /** `userMessageUuid`s already accepted, newest last, so a client retry of a send cannot run the turn twice. */
+  seenSends: string[];
 }
+
+const SEEN_SENDS_KEPT = 64;
 
 export interface ThreadListEntry {
   threadId: string;
@@ -199,6 +208,9 @@ export class ThreadHost {
 
   send(threadId: string, text: string, userMessageUuid: string, images?: WireImage[]): void {
     const rt = this.requireThread(threadId);
+    // A client that never saw our ack (timeout, dropped socket) sends the same message again under a new
+    // cmdId. The message id is the idempotency key: accept it once, acknowledge repeats without running them.
+    if (rt.seenSends.includes(userMessageUuid)) return;
     if (rt.driver?.turnInFlight) throw new HostError('conflict', 'a turn is already in flight');
     const cap = this.opts.maxConcurrentTurns;
     if (cap !== undefined && this.turnsInFlight() >= cap) {
@@ -206,6 +218,8 @@ export class ThreadHost {
     }
     if (!rt.driver) this.coldResume(threadId, rt);
     rt.driver!.send(text, userMessageUuid, images);
+    rt.seenSends.push(userMessageUuid);
+    if (rt.seenSends.length > SEEN_SENDS_KEPT) rt.seenSends.shift();
   }
 
   async prepareForSend(threadId: string, text: string, images?: WireImage[]): Promise<void> {
@@ -283,7 +297,9 @@ export class ThreadHost {
     }
     rt.journal.append({
       name: 'request_resolved',
-      args: { requestId, by, outcome: 'resolved', ...(payload.alwaysAllow === true ? { alwaysAllow: true } : {}) },
+      // No `alwaysAllow` here: the driver answers a permission once and creates no standing rule, so the
+      // journal must not claim one exists.
+      args: { requestId, by, outcome: 'resolved' },
     }, this.now());
   }
 
@@ -394,7 +410,17 @@ export class ThreadHost {
     this.startDriver(threadId, rt, spec, rt.meta.nativeSessionId);
   }
 
+  private liveSessions(): number {
+    let n = 0;
+    for (const rt of this.threads.values()) if (rt.driver) n++;
+    return n;
+  }
+
   private startDriver(threadId: string, rt: Runtime, spec: RemoteSessionSpec, resume: string | undefined): void {
+    const cap = this.opts.maxLiveSessions;
+    if (cap !== undefined && this.liveSessions() >= cap) {
+      throw new HostError('conflict', `the daemon already has ${cap} live sessions (maxLiveSessions); close or wait for an idle one to be reaped, then retry`);
+    }
     const gen = ++rt.gen;
     let driver: SessionDriver;
     try {
@@ -457,7 +483,7 @@ export class ThreadHost {
         isBoundary,
         isTurnInFlight: (cp) => cp.state?.event.name === 'session.state' && cp.state.event.args.turnInFlight === true,
       });
-      rt = { journal, driver: null, meta: null, gen: 0 };
+      rt = { journal, driver: null, meta: null, gen: 0, seenSends: [] };
       this.threads.set(threadId, rt);
     }
     return rt;

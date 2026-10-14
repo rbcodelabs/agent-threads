@@ -2,6 +2,7 @@ import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, resolveEffectiv
 import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import { connectionPill } from './remote/connectionPill';
+import { forkBlockedReason } from './remote/threadLocation';
 import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
@@ -2411,12 +2412,15 @@ export class ThreadsView extends ItemView {
         .setIcon('brain-circuit')
         .onClick(() => this.summarizeThread(thread.id))
     );
-    menu.addItem(item =>
-      item
-        .setTitle('Fork conversation')
-        .setIcon('git-branch')
-        .onClick(() => this.forkThread(thread.id))
-    );
+    // A fork is a local thread; for a remote thread it would run on this machine in the daemon's folder.
+    if (!thread.remote) {
+      menu.addItem(item =>
+        item
+          .setTitle('Fork conversation')
+          .setIcon('git-branch')
+          .onClick(() => this.forkThread(thread.id))
+      );
+    }
     // Orchestrator threads are pinned to their scope by ThreadManager.setThreadProject,
     // so offering the move would only ever produce an error notice.
     if (this.canMoveToProject(thread.id)) {
@@ -3155,6 +3159,11 @@ export class ThreadsView extends ItemView {
     const thread = this.manager.getThread(threadId);
     if (!thread || thread.messages.filter(m => m.role !== 'compact' && m.role !== 'notice').length === 0) {
       new Notice('Nothing to fork — thread has no messages yet.');
+      return;
+    }
+    const blocked = forkBlockedReason(thread, (id) => this.plugin.daemonRegistry?.nameOf(id) ?? id);
+    if (blocked) {
+      new Notice(blocked, 8000);
       return;
     }
 

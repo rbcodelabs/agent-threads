@@ -14,7 +14,10 @@
  * - boundary events (done/error/permission_request/session.state idle) flush
  *   immediately and fsync, so a turn's outcome survives a crash;
  * - on open, a torn final line (crash mid-write) is discarded and the file is
- *   truncated to the last whole record.
+ *   truncated to the last whole record. A damaged line in the MIDDLE of the file
+ *   (bit rot, a bad edit) is skipped and logged, the records after it are kept,
+ *   and the file is rewritten without it; losing one event is better than
+ *   silently losing the whole history behind it.
  *
  * All file I/O is synchronous on purpose: ordering is trivially correct and the
  * volumes (one small line per event) make it cheaper than the bookkeeping that
@@ -254,7 +257,7 @@ export class DiskJournal<E> implements Journal<E> {
 
   private recover(): void {
     const idx = this.readIdx();
-    const { entries, validBytes } = this.readEntries();
+    const { entries, validBytes, skipped } = this.readEntries();
     if (existsSync(this.ndjsonPath) && statSync(this.ndjsonPath).size !== validBytes) {
       // Torn tail from a crash mid-append: keep every whole record, drop the rest.
       const fd = openSync(this.ndjsonPath, 'r+');
@@ -268,11 +271,17 @@ export class DiskJournal<E> implements Journal<E> {
       ackedSeq: idx?.ackedSeq,
     });
     this.fileLowWater = lowWater;
+    if (skipped > 0) {
+      console.error(`[daemon] journal ${this.ndjsonPath}: skipped ${skipped} damaged line${skipped === 1 ? '' : 's'} in the middle of the log and kept the ${entries.length} readable entries`);
+      this.fileLowWater = 0;
+      this.needsRewrite = true;
+    }
     this.epochChain = recordEpoch(idx, this.opts.epoch, this.inner.lastSeq);
     // Persist the chain NOW: if this process dies before its first sync flush, the next one must still know it existed.
     if (idx?.epochs?.at(-1)?.epoch !== this.opts.epoch) this.writeIdx();
     // Entries at/below lowWater may still be on disk; shed them on next flush.
     if (entries.some((e) => e.seq <= lowWater)) { this.fileLowWater = 0; this.needsRewrite = true; }
+    if (skipped > 0) this.flush(true); // drop the damaged lines from the file now, not at the next boundary event
   }
 
   private readIdx(): JournalIndex | null {
@@ -284,27 +293,35 @@ export class DiskJournal<E> implements Journal<E> {
     return null;
   }
 
-  private readEntries(): { entries: Array<JournalEntry<E>>; validBytes: number } {
-    if (!existsSync(this.ndjsonPath)) return { entries: [], validBytes: 0 };
+  private readEntries(): { entries: Array<JournalEntry<E>>; validBytes: number; skipped: number } {
+    if (!existsSync(this.ndjsonPath)) return { entries: [], validBytes: 0, skipped: 0 };
     const raw = readFileSync(this.ndjsonPath);
     const entries: Array<JournalEntry<E>> = [];
     let offset = 0;
     let prevSeq = 0;
+    let lastGoodEnd = 0;
+    let skippedAfterLastGood = 0;
+    let skipped = 0;
     while (offset < raw.length) {
       const nl = raw.indexOf(0x0a, offset);
-      if (nl === -1) break; // no terminating newline: torn
+      if (nl === -1) break; // no terminating newline: torn tail
       const line = raw.subarray(offset, nl).toString('utf8');
       let parsed: JournalEntry<E> | null = null;
       try {
         const v = JSON.parse(line) as JournalEntry<E>;
         if (Number.isInteger(v.seq) && v.seq > prevSeq && typeof v.ts === 'number' && v.event !== undefined) parsed = v;
-      } catch { /* torn or corrupt */ }
-      if (!parsed) break;
+      } catch { /* damaged line */ }
+      offset = nl + 1;
+      if (!parsed) { skippedAfterLastGood++; continue; }
+      // A good record after damaged ones means those were mid-file damage, not a torn tail.
+      skipped += skippedAfterLastGood;
+      skippedAfterLastGood = 0;
       entries.push(parsed);
       prevSeq = parsed.seq;
-      offset = nl + 1;
+      lastGoodEnd = offset;
     }
-    return { entries, validBytes: offset };
+    // Damaged lines with nothing readable behind them are the torn tail: truncated, not "skipped".
+    return { entries, validBytes: lastGoodEnd, skipped };
   }
 }
 

@@ -10,7 +10,8 @@
  * `unknown_type` (server frames) so the caller can decide, instead of being
  * silently mis-parsed.
  */
-import { CLIENT_COMMAND_TYPES, type ClientCommandType } from './commands';
+import { CLIENT_COMMAND_TYPES, validateWireImages, type ClientCommandType } from './commands';
+import { validateSpecShape } from './spec';
 import {
   PROTOCOL_VERSION,
   isChannel,
@@ -98,7 +99,7 @@ function validateFields(obj: Record<string, unknown>, spec: FieldSpec): string |
 }
 
 const COMMAND_FIELDS: Record<ClientCommandType, FieldSpec> = {
-  hello: { protocol: 'i', client: 'S', clientVersion: 's', token: 's' },
+  hello: { protocol: 'i', client: 'S', clientVersion: 's', token: 's', instanceId: 's?' },
   'session.open': { threadId: 'S', spec: 'o', resume: 's?' },
   'session.detach': { threadId: 'S' },
   'session.close': { threadId: 'S' },
@@ -162,6 +163,19 @@ function fail(code: CodecErrorCode, message: string, extra: { cmdId?: string; fr
   return { ok: false, error: { code, message, ...(extra.cmdId ? { cmdId: extra.cmdId } : {}), ...(extra.frameType ? { frameType: extra.frameType } : {}) } };
 }
 
+/** Element-level checks that the flat field kinds cannot express (images, spec). */
+function validateDeep(type: string, obj: Record<string, unknown>): string | null {
+  switch (type) {
+    case 'session.send':
+    case 'session.prepareForSend':
+      return validateWireImages(obj.images);
+    case 'session.open':
+      return validateSpecShape(obj.spec);
+    default:
+      return null;
+  }
+}
+
 export function decodeClientFrame(text: string): DecodeResult<ClientFrame> {
   const env = parseEnvelope(text);
   if (!env.ok) return env;
@@ -172,7 +186,7 @@ export function decodeClientFrame(text: string): DecodeResult<ClientFrame> {
   if (!Object.prototype.hasOwnProperty.call(CLIENT_COMMAND_TYPES, type)) {
     return fail('unknown_command', `unknown command "${type}"`, { cmdId, frameType: type });
   }
-  const problem = validateFields(obj, COMMAND_FIELDS[type as ClientCommandType]);
+  const problem = validateFields(obj, COMMAND_FIELDS[type as ClientCommandType]) ?? validateDeep(type, obj);
   if (problem) return fail('bad_frame', `${type}: ${problem}`, { cmdId, frameType: type });
   return { ok: true, frame: obj as unknown as ClientFrame };
 }

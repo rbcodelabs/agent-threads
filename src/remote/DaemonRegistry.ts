@@ -24,6 +24,8 @@ export interface DaemonRegistryOptions {
   getToken: (daemon: RemoteDaemonConfig) => string | undefined;
   createSocket: WebSocketFactory;
   clientVersion: string;
+  /** This install's stable id, sent in `hello` so the daemon can tell installs sharing a token apart. */
+  getInstanceId?: () => string | undefined;
   log?: (message: string) => void;
 }
 
@@ -66,6 +68,7 @@ export class DaemonRegistry implements RemoteDaemonResolver {
       getToken: () => this.opts.getToken(cfg),
       createSocket: this.opts.createSocket,
       clientVersion: this.opts.clientVersion,
+      instanceId: this.opts.getInstanceId?.(),
       log: this.opts.log,
     });
     const unsubscribe = client.onState((s) => {

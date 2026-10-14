@@ -149,6 +149,28 @@ test.describe('Remote daemon dialog: folders are chosen from what the daemon adv
     await expect(modal.getByLabel('Default folder')).toHaveValue('/home/user/projects');
   });
 
+  test('plain ws:// to a host outside the tailnet warns that the token is sent in the clear', async ({ page }) => {
+    await openModal(page, { url: 'ws://files.example.org:7433' });
+    const modal = page.locator('.modal-container');
+    await expect(modal.locator('.ct-remote-cleartext-warning')).toContainText('plain ws://');
+    await settleView(page);
+    await expect(modal).toHaveScreenshot('remote-daemon-dialog-cleartext-warning.png');
+    // Switching to a TLS address clears it.
+    const address = modal.locator('input[placeholder="wss://my-server.tailnet-name.ts.net:8443"]');
+    await address.fill('wss://files.example.org:8443');
+    await expect(modal.locator('.ct-remote-cleartext-warning')).toBeEmpty();
+  });
+
+  test('no warning for wss:// or for a tailnet / loopback ws:// address', async ({ page }) => {
+    await openModal(page, {});
+    const modal = page.locator('.modal-container');
+    const address = modal.locator('input[placeholder="wss://my-server.tailnet-name.ts.net:8443"]');
+    for (const ok of ['wss://my-server.tailnet-name.ts.net:8443', 'ws://100.101.102.103:7598', 'ws://my-server.tailnet-name.ts.net:7598', 'ws://127.0.0.1:7433', 'ws://localhost:7433']) {
+      await address.fill(ok);
+      await expect(modal.locator('.ct-remote-cleartext-warning'), ok).toBeEmpty();
+    }
+  });
+
   test('a daemon too old to advertise folders opens Advanced with the raw fields', async ({ page }) => {
     await openModal(page, { advertise: 'old' });
     const modal = page.locator('.modal-container');

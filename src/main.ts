@@ -602,6 +602,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       getToken: (daemon) => this.app.secretStorage.getSecret(secretStorageKey(daemon.tokenSecretName)) || undefined,
       createSocket: createPluginWebSocketFactory(),
       clientVersion: this.manifest.version,
+      getInstanceId: () => this.settings.remoteClientId,
       log: (message) => debugLog(message),
     });
     this.remoteFolders = createRemoteFolderSource(this.daemonRegistry);

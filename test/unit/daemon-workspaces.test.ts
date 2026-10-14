@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { detectWorkspaceKind, listSubfolders, listWorkspaces } from '../../daemon/workspaces';
+import { MAX_LINKS_RESOLVED, detectWorkspaceKind, listSubfolders, listWorkspaces } from '../../daemon/workspaces';
 
 let base: string;
 beforeEach(() => { base = realpathSync(mkdtempSync(join(tmpdir(), 'ws-list-'))); });
@@ -104,6 +104,23 @@ describe('listSubfolders confinement', () => {
 
   it('allows a file path but lists nothing', () => {
     expect(listSubfolders(join(root, 'a-file.md'), policy())).toEqual({ allowed: true, entries: [], truncated: false });
+  });
+
+  it('bounds the symlink resolutions per call (a directory of links is not a stat storm)', () => {
+    const many = dir('links');
+    const target = dir('links', 'target');
+    for (let i = 0; i < MAX_LINKS_RESOLVED + 20; i++) symlinkSync(target, join(many, `l${String(i).padStart(4, '0')}`));
+    const r = listSubfolders(many, { workspaces: [many], allowBypass: false }, 10_000);
+    expect(r.truncated).toBe(true);
+    expect(r.entries.length).toBeLessThanOrEqual(MAX_LINKS_RESOLVED + 1);
+  });
+
+  it('plain subdirectories are listed without being resolved individually', () => {
+    const many = dir('plain');
+    for (let i = 0; i < 50; i++) dir('plain', `d${i}`);
+    const r = listSubfolders(many, { workspaces: [many], allowBypass: false });
+    expect(r.entries).toHaveLength(50);
+    expect(r.truncated).toBe(false);
   });
 
   it('covers read-only workspaces and caps the list', () => {

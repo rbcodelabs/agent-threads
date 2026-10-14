@@ -46,6 +46,9 @@ export function listWorkspaces(policy: SessionPolicy): WorkspaceInfo[] {
   return out.map((w, i) => ({ ...w, isDefault: i === 0 }));
 }
 
+/** Symlinked entries resolved per `path.list` call. */
+export const MAX_LINKS_RESOLVED = 500;
+
 const NOT_ALLOWED: PathListReply = { allowed: false, entries: [], truncated: false };
 
 /**
@@ -61,22 +64,29 @@ export function listSubfolders(path: string, policy: SessionPolicy, max = PATH_L
   try { real = realpathSync(resolved); } catch { return NOT_ALLOWED; }
   if (!roots.some((r) => isWithin(r, real))) return NOT_ALLOWED;
   if (!isDirectory(real)) return { allowed: true, entries: [], truncated: false };
-  let names: string[];
+  let dirents: Array<{ name: string; link: boolean }>;
   try {
-    names = readdirSync(real, { withFileTypes: true })
+    dirents = readdirSync(real, { withFileTypes: true })
       .filter((d) => (d.isDirectory() || d.isSymbolicLink()) && !d.name.startsWith('.'))
-      .map((d) => d.name);
+      .map((d) => ({ name: d.name, link: d.isSymbolicLink() }));
   } catch {
     return { allowed: true, entries: [], truncated: false };
   }
-  names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }));
+  dirents.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
   const entries: PathListEntry[] = [];
   let truncated = false;
-  for (const name of names) {
-    let childReal: string;
-    try { childReal = realpathSync(join(real, name)); } catch { continue; }
-    if (!isDirectory(childReal) || !roots.some((r) => isWithin(r, childReal))) continue;
+  let linksResolved = 0;
+  for (const { name, link } of dirents) {
     if (entries.length >= max) { truncated = true; break; }
+    // A real subdirectory of a path already known to be inside the roots is inside them too: no syscall.
+    // Only a symlink can lead elsewhere, and resolving each costs a realpath, so the number of those per
+    // request is capped (a directory of thousands of links cannot turn one read-scope call into thousands of stats).
+    if (link) {
+      if (++linksResolved > MAX_LINKS_RESOLVED) { truncated = true; break; }
+      let childReal: string;
+      try { childReal = realpathSync(join(real, name)); } catch { continue; }
+      if (!isDirectory(childReal) || !roots.some((r) => isWithin(r, childReal))) continue;
+    }
     entries.push({ name, path: join(resolved, name) });
   }
   return { allowed: true, entries, truncated };

@@ -83,14 +83,57 @@ describe('DiskJournal', () => {
     b.close();
   });
 
-  it('stops at a non-monotonic or corrupt record instead of trusting what follows', () => {
+  it('skips a damaged line in the middle, keeps what follows, logs it and rewrites the file', () => {
     const dir = tmp();
     const a = open(dir);
     a.append(tok('1'));
     a.close();
-    appendFileSync(a.path, 'garbage\n{"seq":2,"ts":1,"event":{"name":"onToken","args":["z"]}}\n');
-    const b = open(dir);
+    appendFileSync(a.path, 'garbage\n{"seq":2,"ts":1,"event":{"name":"onToken","args":["z"]}}\n{"seq":3,"ts":1,"event":{"name":"onToken","args":["y"]}}\n');
+    const logged: unknown[][] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => { logged.push(a); };
+    let b;
+    try { b = open(dir); } finally { console.error = orig; }
+    expect(b.lastSeq).toBe(3);
+    expect(b.checkpoint().inFlightText).toBe('1zy');
+    expect(logged.flat().join(' ')).toContain('skipped 1 damaged line');
+    expect(readFileSync(b.path, 'utf8')).not.toContain('garbage');
+    b.close();
+    const c = open(dir);
+    expect(c.lastSeq).toBe(3);
+    c.close();
+  });
+
+  it('a record that goes backwards in seq is skipped, not trusted', () => {
+    const dir = tmp();
+    const a = open(dir);
+    a.append(tok('1')); a.append(tok('2'));
+    a.close();
+    appendFileSync(a.path, '{"seq":1,"ts":1,"event":{"name":"onToken","args":["dup"]}}\n{"seq":3,"ts":1,"event":{"name":"onToken","args":["3"]}}\n');
+    const orig = console.error;
+    console.error = () => {};
+    let b;
+    try { b = open(dir); } finally { console.error = orig; }
+    expect(b.lastSeq).toBe(3);
+    expect(b.checkpoint().inFlightText).toBe('123');
+    b.close();
+  });
+
+  it('damage with nothing readable behind it is a torn tail: truncated quietly', () => {
+    const dir = tmp();
+    const a = open(dir);
+    a.append(tok('1'));
+    a.close();
+    const size = statSync(a.path).size;
+    appendFileSync(a.path, 'garbage\nmore garbage\n');
+    const orig = console.error;
+    const logged: unknown[][] = [];
+    console.error = (...x: unknown[]) => { logged.push(x); };
+    let b;
+    try { b = open(dir); } finally { console.error = orig; }
     expect(b.lastSeq).toBe(1);
+    expect(statSync(b.path).size).toBe(size);
+    expect(logged).toHaveLength(0);
     b.close();
   });
 

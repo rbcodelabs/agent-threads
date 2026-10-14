@@ -231,3 +231,16 @@ describe('local polling skips remote threads', () => {
     svc.stop();
   });
 });
+
+describe('plainTransportWarning (finding K)', () => {
+  it('warns for plain ws:// / http:// outside loopback and the tailnet, and for nothing else', async () => {
+    const { plainTransportWarning } = await import('../../src/remote/daemonConfig');
+    for (const bad of ['ws://files.example.org:7433', 'files.example.org:7433', 'ws://192.168.1.20:7433', 'ws://100.128.0.1:1', 'ws://100.63.255.255:1', 'http://example.org', 'ws://my-server:7598', 'ws://[2001:db8::1]:7433']) {
+      expect(plainTransportWarning(bad), bad).toMatch(/plain ws:\/\//);
+    }
+    for (const ok of ['', '  ', 'wss://files.example.org:8443', 'https://example.org', 'ws://localhost:7433', 'ws://127.0.0.1:7433', 'ws://[::1]:7433',
+      'ws://my-server.tailnet-name.ts.net:7598', 'ws://100.64.0.1:1', 'ws://100.127.255.255:1', 'ws://100.101.102.103:7598', 'ws://[fd7a:115c:a1e0::1]:7433', 'not a url at all %%']) {
+      expect(plainTransportWarning(ok), ok).toBeUndefined();
+    }
+  });
+});

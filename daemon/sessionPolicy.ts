@@ -2,8 +2,9 @@
  * What the daemon refuses to run, decided before any process is spawned
  * (design 5.2): the cwd must sit under an allowlisted workspace root,
  * `bypassPermissions` needs an explicit operator opt-in, only the Claude
- * harness exists yet, and a client cannot override the variables that carry
- * the daemon's own credentials or redirect its process environment.
+ * harness exists yet, the permission mode must be one the daemon knows, and a
+ * client cannot choose the agent's environment: `extraEnvRaw` is ignored unless
+ * the operator lists the variable names a client may set (`allowedClientEnv`).
  */
 import { realpathSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
@@ -19,6 +20,13 @@ export interface SessionPolicy {
    */
   readOnlyWorkspaces?: string[];
   allowBypass: boolean;
+  /**
+   * Variable names a client may set through `extraEnvRaw`. Empty or absent (the default) = the client's
+   * environment is ignored. An allowlist is the only safe shape: a denylist cannot enumerate every
+   * variable that redirects traffic or code (HTTPS_PROXY, NODE_EXTRA_CA_CERTS, NODE_TLS_REJECT_UNAUTHORIZED,
+   * BASH_ENV, GIT_SSH_COMMAND, CLAUDE_CODE_USE_*, ANTHROPIC_*_BASE_URL, ...).
+   */
+  allowedClientEnv?: string[];
 }
 
 export class PolicyError extends Error {
@@ -121,7 +129,13 @@ export function describePathAccess(path: string, policy: SessionPolicy): PathAcc
   return { allowed: true, exists: true, isDirectory, readOnly: isReadOnlyPath(real, policy) };
 }
 
+/** Every permission mode the plugin can send. Anything else is refused rather than passed to the harness. */
+export const KNOWN_PERMISSION_MODES: ReadonlySet<string> = new Set(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']);
+
 export function assertPermissionModeAllowed(mode: string, policy: SessionPolicy, opts: { readOnly?: boolean } = {}): void {
+  if (typeof mode !== 'string' || !KNOWN_PERMISSION_MODES.has(mode)) {
+    throw new PolicyError('bad_frame', `unknown permission mode ${JSON.stringify(String(mode).slice(0, 40))}; expected one of ${[...KNOWN_PERMISSION_MODES].join(', ')}`);
+  }
   if (mode === 'bypassPermissions' && !policy.allowBypass) {
     throw new PolicyError('forbidden', 'bypassPermissions is disabled on this daemon (set allowBypass in config.json to enable it)');
   }
@@ -130,7 +144,10 @@ export function assertPermissionModeAllowed(mode: string, policy: SessionPolicy,
   }
 }
 
-/** Variables a client may not set: they carry the daemon's credentials or change how it runs. */
+/**
+ * Variables that stay unsettable even if an operator lists them in `allowedClientEnv`: they carry the
+ * daemon's credentials or change how it runs. (Defence in depth; the allowlist is the real control.)
+ */
 const PROTECTED_ENV = new Set([
   'HOME', 'PATH', 'USER', 'SHELL', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN',
   'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
@@ -147,6 +164,26 @@ export function sanitizeExtraEnv(raw: string): { text: string; dropped: string[]
     const key = eq > 0 && !trimmed.startsWith('#') ? trimmed.slice(0, eq).trim() : '';
     if (key && PROTECTED_ENV.has(key.toUpperCase())) dropped.push(key);
     else kept.push(line);
+  }
+  return { text: kept.join('\n'), dropped };
+}
+
+/**
+ * Keep only `KEY=value` lines whose KEY the operator allowed (and that is not protected). With no
+ * allowlist this returns nothing: client-supplied environment is ignored.
+ */
+export function filterClientEnv(raw: string, allowed: readonly string[] | undefined): { text: string; dropped: string[] } {
+  if (!raw.trim()) return { text: '', dropped: [] };
+  const allow = new Set(allowed ?? []);
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    const key = eq > 0 ? trimmed.slice(0, eq).trim() : '';
+    if (key && allow.has(key) && !PROTECTED_ENV.has(key.toUpperCase())) kept.push(line);
+    else dropped.push(key || trimmed.slice(0, 20));
   }
   return { text: kept.join('\n'), dropped };
 }
@@ -172,7 +209,7 @@ export function validateSpec(spec: RemoteSessionSpec, policy: SessionPolicy): Re
     cwd,
     ...(disallowedTools ? { disallowedTools } : {}),
     ...(additionalDirectories.length ? { additionalDirectories } : { additionalDirectories: undefined }),
-    extraEnvRaw: sanitizeExtraEnv(spec.extraEnvRaw ?? '').text,
+    extraEnvRaw: filterClientEnv(spec.extraEnvRaw ?? '', policy.allowedClientEnv).text,
   };
 }
 

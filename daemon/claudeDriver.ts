@@ -35,6 +35,12 @@ export interface ClaudeDriverDeps {
   createHarness(spec: RemoteSessionSpec): HarnessSession;
   /** Extra env for the Claude process (e.g. a token read from `$CREDENTIALS_DIRECTORY`). */
   secretEnv?: Record<string, string>;
+  /**
+   * A permission/question/plan/elicitation request nobody answers within this many ms is canceled
+   * (the harness gets a denial / rejection), so an abandoned prompt cannot hold a turn slot forever.
+   * 0 or absent = wait indefinitely.
+   */
+  requestTimeoutMs?: number;
 }
 
 // ── spec -> options ────────────────────────────────────────────────────────
@@ -94,9 +100,27 @@ interface PendingRequest {
   settle(payload: Record<string, unknown>): void;
   /** Unblock the harness without an answer (interrupt, close, abort). */
   cancel(): void;
+  /** Expiry timer; cleared when the request ends any other way. */
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 const WIRE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+/**
+ * The attachments a harness can take. Defensive on every element even though the codec validates the
+ * frame: this runs before the turn flag is raised, so a bad element can never leave a turn "in flight".
+ */
+function toAttachments(images: unknown): Array<{ base64: string; mediaType: WireImage['mediaType']; name: string }> {
+  if (!Array.isArray(images)) return [];
+  const out: Array<{ base64: string; mediaType: WireImage['mediaType']; name: string }> = [];
+  for (const i of images as unknown[]) {
+    if (typeof i !== 'object' || i === null) continue;
+    const { base64, mediaType, name } = i as Partial<WireImage>;
+    if (typeof base64 !== 'string' || typeof mediaType !== 'string' || !WIRE_IMAGE_TYPES.has(mediaType)) continue;
+    out.push({ base64, mediaType, name: typeof name === 'string' ? name : 'image' });
+  }
+  return out;
+}
 
 export class ClaudeSessionDriver implements SessionDriver {
   private readonly harness: HarnessSession;
@@ -240,18 +264,25 @@ export class ClaudeSessionDriver implements SessionDriver {
     const requestId = randomUUID();
     this.touch();
     // Registered before it is journaled: a client can answer the moment it sees it.
-    this.pending.set(requestId, { kind, settle, cancel });
+    const req: PendingRequest = { kind, settle, cancel };
+    const ttl = this.deps.requestTimeoutMs;
+    if (ttl && ttl > 0) {
+      req.timer = setTimeout(() => this.cancelRequest(requestId, 'expired'), ttl);
+      req.timer.unref?.();
+    }
+    this.pending.set(requestId, req);
     this.emit(makeEvent(requestId));
     this.emitState();
     return requestId;
   }
 
-  private cancelRequest(requestId: string): void {
+  private cancelRequest(requestId: string, outcome: 'canceled' | 'expired' = 'canceled'): void {
     const req = this.pending.get(requestId);
     if (!req) return;
     this.pending.delete(requestId);
+    if (req.timer) clearTimeout(req.timer);
     try { req.cancel(); } catch { /* the harness callback is already gone */ }
-    this.emit({ name: 'request_resolved', args: { requestId, outcome: 'canceled' } });
+    this.emit({ name: 'request_resolved', args: { requestId, outcome } });
     this.scheduleState();
   }
 
@@ -267,12 +298,12 @@ export class ClaudeSessionDriver implements SessionDriver {
 
   send(text: string, userMessageUuid: string, images?: WireImage[]): void {
     if (this.closed) throw new Error('session is closed');
+    // Validate first: the flag below keeps `turnInFlight` true until the harness has been handed the send,
+    // so anything that throws after it is raised and before the handoff would wedge the session.
+    const attachments = toAttachments(images);
     this.touch();
     this.sendAccepted = true;
     this.emitState();
-    const attachments = (images ?? [])
-      .filter((i) => WIRE_IMAGE_TYPES.has(i.mediaType) && typeof i.base64 === 'string')
-      .map((i) => ({ base64: i.base64, mediaType: i.mediaType, name: i.name }));
     void this.ready.then(() => {
       if (this.closed) return;
       try {
@@ -288,7 +319,7 @@ export class ClaudeSessionDriver implements SessionDriver {
 
   async prepareForSend(text: string, images?: WireImage[]): Promise<void> {
     await this.ready;
-    const attachments = (images ?? []).map((i) => ({ base64: i.base64, mediaType: i.mediaType, name: i.name }));
+    const attachments = toAttachments(images);
     await this.harness.prepareForSend?.(text, attachments.length ? attachments : undefined);
   }
 
@@ -307,6 +338,7 @@ export class ClaudeSessionDriver implements SessionDriver {
     const req = this.pending.get(requestId);
     if (!req || req.kind !== kind) return false;
     this.pending.delete(requestId);
+    if (req.timer) clearTimeout(req.timer);
     this.touch();
     req.settle(payload);
     this.scheduleState();
@@ -422,6 +454,8 @@ export interface ClaudeDriverFactoryOptions {
   claudeBinaryPath?: string;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
+  /** See `ClaudeDriverDeps.requestTimeoutMs`. */
+  requestTimeoutMs?: number;
 }
 
 export function createClaudeDriverFactory(opts: ClaudeDriverFactoryOptions = {}): DriverFactory {
@@ -437,5 +471,5 @@ export function createClaudeDriverFactory(opts: ClaudeDriverFactoryOptions = {})
       return createHarnessSession({ agentHarness: 'claude' } as Thread, { claudeBinaryPath: binary } as PluginSettings);
     };
   })();
-  return (ctx) => new ClaudeSessionDriver(ctx, { createHarness, secretEnv }, opts.now);
+  return (ctx) => new ClaudeSessionDriver(ctx, { createHarness, secretEnv, requestTimeoutMs: opts.requestTimeoutMs }, opts.now);
 }

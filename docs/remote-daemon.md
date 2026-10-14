@@ -41,10 +41,13 @@ via `tailscale serve --tcp` (plain, but inside the WireGuard tunnel).
 
 ## Install on the daemon machine
 
-Build on your Mac from this branch:
+Build from a checkout of this repository, at the release or commit you intend to run (the daemon and the plugin
+must come from the same version, because the daemon refuses a plugin older than its `minClientVersion`):
 
 ```bash
-cd ~/.geode/worktrees/agent-threads/feat/remote-threads   # or your checkout of feat/remote-threads
+git clone https://github.com/rbcodelabs/agent-threads.git
+cd agent-threads
+git checkout <release tag or commit>
 npm ci
 npm run build:daemon          # -> dist/agent-threads.cjs (one file, plain node)
 npm run build                 # -> dist/main.js, manifest.json, styles.css (the plugin)
@@ -55,7 +58,8 @@ On the daemon machine (needs Node 22+ and a logged-in `claude`):
 
 ```bash
 mkdir -p ~/agent-threads/data && cd ~/agent-threads
-# one admin token for Geode; shown once, only its hash is stored
+# a control-scope token for Geode (read < control < admin); shown once, only its hash is stored.
+# `control` is all Geode needs. Keep `admin` for operator tooling: it adds nothing Geode uses.
 node agent-threads.cjs token create --name geode --scope control --data-dir ~/agent-threads/data
 
 # Run the daemon (use tmux/screen for now; a systemd unit comes with the packaging PR).
@@ -75,6 +79,55 @@ Use `--fake-harness` on `serve` for a no-tokens-spent dry run (a scripted stand-
 `/tokens 60 burst=1 delay=40` to watch streaming).
 
 To remove the tailnet exposure: `sudo tailscale serve --https=8443 off`.
+
+## Security
+
+Read this before exposing the daemon beyond `127.0.0.1`.
+
+- **A control token is shell access as the daemon user.** A `control` (or `admin`) client can start sessions that run
+  `claude` with shell and file tools on that machine, as the user the daemon runs as. Treat the token like an SSH key,
+  create one per client, and revoke it (`agent-threads token revoke <id|name>`) when a device is lost. Run the daemon as a
+  dedicated, unprivileged user, ideally on a machine (VM) with nothing on it you cannot lose.
+- **Workspaces are a working-directory guard, not a sandbox.** `--workspace` decides where a session may *start*
+  (symlinks are resolved first). It does not stop the agent from reading or writing elsewhere once it is running a shell
+  command. `--readonly-workspace` only removes the harness's edit tools; shell commands are not blocked.
+- **A `read` token sees everything.** It can attach to any thread and receive its transcript and tool output (file
+  contents, command output, anything the agent printed). It cannot send or resolve anything.
+- **The journal and raw logs are not redacted for content.** `<data-dir>/journal` and `<data-dir>/logs` hold prompts, replies
+  and tool output. Known credentials are masked in the raw log, but a secret the agent prints (a `.env` it reads, an
+  environment dump) is stored. Files are `0600` in a `0700` directory; the retention settings below bound how long they
+  live. Deleting a thread in Geode does not delete its daemon-side files.
+- **`tailscale serve` exposes the daemon to your whole tailnet.** Anyone on the tailnet can reach the port and try
+  tokens (256-bit tokens make guessing infeasible, but reachability should still be deliberate). Restrict who can reach
+  the machine with a Tailscale ACL (`tag:`-based `accept` rule limited to your devices, and the daemon's port) rather than
+  relying on the token alone.
+- **Plain `ws://` sends the token in the clear.** `wss://` (for example through `tailscale serve`) is encrypted by
+  Tailscale. `ws://` to a raw port is only acceptable inside a VPN tunnel. Geode's Add/Edit daemon dialog shows a warning
+  when the address is `ws://` (or `http://`) and the host is not loopback, `*.ts.net`, or a Tailscale address.
+- **Environment is not client-controlled.** A client's environment (`extraEnvRaw`) is ignored by default. Variables such
+  as `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`, `BASH_ENV` or `GIT_SSH_COMMAND` would let a client redirect the agent's traffic or
+  commands. If you really need one, list the names the operator permits in `config.json`
+  (`"allowedClientEnv": ["MY_FLAG"]`, or `AGENT_THREADS_ALLOWED_CLIENT_ENV`, colon separated). Credential-carrying and
+  process-altering names (`HOME`, `PATH`, `NODE_OPTIONS`, `ANTHROPIC_*` keys, ...) stay refused even if listed.
+- **Permission modes are an allowlist.** Only `default`, `acceptEdits`, `plan`, `dontAsk`, `auto` (and `bypassPermissions` when
+  you set `allowBypass`) are accepted; anything else is refused.
+- **Throttling behind a proxy.** Behind `tailscale serve` (or any local reverse proxy) every client reaches the daemon from
+  `127.0.0.1`, so a per-address failure counter would let one peer's bad tokens lock the owner out. Loopback peers are
+  therefore **not** throttled; protection there is the 256-bit token plus the tailnet ACL. When the daemon is bound to a
+  non-loopback address directly, bad-token attempts are throttled per address (5 in 60 s). A daemon does not trust a
+  forwarded-address header.
+- **Revocation is not instant for a connection that is already open.** A new connection with a revoked token is refused
+  immediately; an open connection is dropped at its next heartbeat, up to 20 seconds later.
+- **If `tokens.json` is damaged** the daemon rejects *all* authentication (and says so once in its log) until the file is
+  fixed, rather than crashing or guessing. Starting the daemon with a damaged file fails.
+
+Limits that keep one bad client from exhausting the machine (all in `config.json`, env or flags): at most 64 sockets
+(`maxConnections`) and 16 not-yet-authenticated ones; frames before `hello` are capped at 4 KB; a client that stops reading
+replies is dropped like a slow event consumer; at most 8 live sessions (`maxLiveSessions`); an unanswered permission or
+question is canceled after 60 minutes (`requestTimeoutMinutes`, 0 = never) so a forgotten prompt cannot block a turn
+forever. The audit log (`audit.ndjson`) is batched, does not record per-event acknowledgements, and rotates at 5 MB keeping
+three old files. Raw logs (`logs/<thread>.jsonl`) follow the journal retention: files older than `journalTtlDays` are
+deleted and a file past `journalMaxMb` is rotated to `.jsonl.1` (so at most about twice the cap per thread).
 
 ## Connect from Geode
 
@@ -212,6 +265,21 @@ actually happened, not "just now". What makes that work:
   from there, so the client sees the `daemon_restarted` notice instead of silently dropping it.
 
 ## Known limits of this stage
+
+- One writer per thread. The seat is held by (token, Geode install): the same install reconnecting takes its own seat back
+  at once, a second install using the same token is an observer and gets `conflict` on writes. Installs identify
+  themselves with the `remoteClientId` in their settings; an older plugin sends none and is treated as one install per token.
+- "Always allow" on a permission prompt is **not supported** on a daemon session: the answer applies once, and the
+  daemon's acknowledgement says `alwaysAllow: "not_supported"`. Nothing in the journal claims a standing rule.
+- A remote thread cannot be forked (Fork conversation and `/fork` are refused with an explanation): a fork is a local
+  thread and would start in the daemon's folder on the wrong machine.
+- A send the daemon answers with a retryable `conflict` (it is running its maximum number of turns) is retried
+  automatically with backoff (1 s doubling to 30 s, six tries). A send whose acknowledgement never comes back within 30 s
+  is reported as *unconfirmed*, not "not delivered": the daemon may have run it. The thread stays attached, so what
+  actually happened appears when the connection catches up; the daemon ignores a repeat of a message id it already
+  accepted, so a retry cannot run a turn twice.
+- A journal line that is damaged in the middle of the file is skipped and logged, and the entries after it are kept (the
+  file is rewritten without it); only a damaged *tail* is dropped.
 
 - Host tools (vault/editor), proxied MCP servers, skills, secrets: not forwarded (PR 7 and PR 9).
 - A `resync` (Geode was away longer than the daemon keeps history) restores the last 20 finished messages

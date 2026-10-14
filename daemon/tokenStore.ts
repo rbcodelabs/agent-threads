@@ -8,6 +8,15 @@
  *
  * The file is re-read when its mtime changes, so `agent-threads token create|revoke`
  * run from a shell take effect in a running daemon without a restart.
+ *
+ * A token file that cannot be read or parsed fails CLOSED: while it is broken
+ * `verify` rejects everything and `isActive` reports false (open connections
+ * are dropped at their next heartbeat), and the problem is logged once per
+ * distinct failure. Nothing here throws on the authentication path, so a
+ * corrupt file can never crash a socket handler or timer. Fixing the file
+ * restores service without a restart. The constructor and the management
+ * methods (`list`, `create`, `revoke`) still throw, so startup and the CLI
+ * report the corruption loudly.
  */
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -46,6 +55,14 @@ const TOKEN_PREFIX = 'atd_';
 /** Don't rewrite tokens.json on every connection; once a minute per token is plenty. */
 const LAST_USED_WRITE_INTERVAL_MS = 60_000;
 
+function isTokenRecord(r: unknown): r is TokenRecord {
+  if (typeof r !== 'object' || r === null) return false;
+  const t = r as Record<string, unknown>;
+  return typeof t.id === 'string' && typeof t.sha256 === 'string' && /^[0-9a-f]{64}$/.test(t.sha256)
+    && Array.isArray(t.scopes) && t.scopes.every((x) => (TOKEN_SCOPES as readonly unknown[]).includes(x))
+    && (t.revokedAt === null || typeof t.revokedAt === 'number');
+}
+
 export const sha256Hex = (s: string): string => createHash('sha256').update(s).digest('hex');
 
 export function highestScope(scopes: readonly TokenScope[]): TokenScope {
@@ -57,8 +74,15 @@ export class TokenStore {
   private records: TokenRecord[] = [];
   private mtimeMs = -1;
   private readonly lastUsedWritten = new Map<string, number>();
+  /** Why the file is currently unusable (null = fine). */
+  private broken: string | null = null;
+  private lastLogged = '';
 
-  constructor(dataDir: string, private readonly now: () => number = () => Date.now()) {
+  constructor(
+    dataDir: string,
+    private readonly now: () => number = () => Date.now(),
+    private readonly log: (line: string) => void = (l) => console.error(l),
+  ) {
     this.file = join(dataDir, 'tokens.json');
     this.reload();
   }
@@ -68,14 +92,42 @@ export class TokenStore {
     if (!existsSync(this.file)) {
       this.records = [];
       this.mtimeMs = -1;
+      this.broken = null;
       return;
     }
     const { mtimeMs } = statSync(this.file);
-    if (mtimeMs === this.mtimeMs) return;
-    const parsed: unknown = JSON.parse(readFileSync(this.file, 'utf8'));
-    if (!Array.isArray(parsed)) throw new Error(`${this.file}: expected a JSON array`);
-    this.records = parsed as TokenRecord[];
+    if (mtimeMs === this.mtimeMs) {
+      if (this.broken) throw new Error(this.broken);
+      return;
+    }
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.file, 'utf8'));
+      if (!Array.isArray(parsed)) throw new Error('expected a JSON array');
+      if (!parsed.every(isTokenRecord)) throw new Error('an entry is not a token record');
+      this.records = parsed;
+      this.broken = null;
+    } catch (err) {
+      // Remember the failure for this mtime so every connection does not re-parse (and re-log) the same bad file.
+      this.records = [];
+      this.broken = `${this.file} is unusable: ${err instanceof Error ? err.message : String(err)}`;
+    }
     this.mtimeMs = mtimeMs;
+    if (this.broken) throw new Error(this.broken);
+  }
+
+  /** `reload` for the authentication path: never throws; false means the store is unusable (fail closed). */
+  private reloadOrFailClosed(): boolean {
+    try {
+      this.reload();
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg !== this.lastLogged) {
+        this.lastLogged = msg;
+        this.log(`ERROR: ${msg}. Rejecting ALL authentication until it is fixed (restoring a valid tokens.json takes effect immediately).`);
+      }
+      return false;
+    }
   }
 
   list(): TokenRecord[] {
@@ -118,12 +170,12 @@ export class TokenStore {
 
   /** Is the token with this id still usable? (Open connections re-check this.) */
   isActive(id: string): boolean {
-    this.reload();
+    if (!this.reloadOrFailClosed()) return false;
     return this.records.some((r) => r.id === id && r.revokedAt === null);
   }
 
   verify(token: string): VerifiedToken | null {
-    this.reload();
+    if (!this.reloadOrFailClosed()) return null;
     const presented = Buffer.from(sha256Hex(token), 'hex');
     let match: TokenRecord | null = null;
     for (const r of this.records) {

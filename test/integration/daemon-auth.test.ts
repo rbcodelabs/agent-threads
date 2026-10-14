@@ -84,7 +84,7 @@ describe('first-frame authentication', () => {
 
 describe('abuse controls', () => {
   it('throttles an address after repeated failures (429 on the next upgrade)', async () => {
-    td = await startTestDaemon({ throttle: new FailureThrottle(3, 60_000) });
+    td = await startTestDaemon({ throttle: new FailureThrottle(3, 60_000), throttleLoopback: true });
     for (let i = 0; i < 3; i++) {
       const c = await TestClient.open(td.daemon.url);
       await c.cmd('hello', { protocol: 1, client: 'cli', clientVersion: 't', token: `bad-${i}` });

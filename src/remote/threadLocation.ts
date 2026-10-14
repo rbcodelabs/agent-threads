@@ -12,6 +12,17 @@ export function remoteHostName(thread: Pick<Thread, 'remote'>, nameOf?: DaemonNa
   return nameOf ? nameOf(thread.remote.daemonId) : thread.remote.daemonId;
 }
 
+/**
+ * Why a thread cannot be forked, or undefined when it can. A fork creates a LOCAL thread in the same `cwd`; for
+ * a remote thread that `cwd` is a path on another machine, so the fork would run locally in a folder that does not
+ * exist (or worse, a different one that does). Until a fork can carry the remote marker, it is refused.
+ */
+export function forkBlockedReason(thread: Pick<Thread, 'remote'>, nameOf?: DaemonNameResolver): string | undefined {
+  if (!thread.remote) return undefined;
+  const host = remoteHostName(thread, nameOf);
+  return `Forking is not available for remote threads yet (this one runs on ${host}). Start a new thread on ${host} and paste what you need.`;
+}
+
 /** `my-server:/srv/workspaces/x`: a path on another machine, spelled so nobody mistakes it for a local one. */
 export function remoteCwdLabel(thread: Pick<Thread, 'remote' | 'cwd'>, nameOf?: DaemonNameResolver): string | undefined {
   const host = remoteHostName(thread, nameOf);

@@ -102,7 +102,7 @@ describe('policy at the door', () => {
 
 describe('spec -> HarnessSessionOptions', () => {
   it('carries the spec, never sets VM routing or client-supplied secrets, and keeps http MCP servers only', async () => {
-    const td = await daemon();
+    const td = await daemon({ config: { allowedClientEnv: ['FOO'] } });
     const c = await client(td);
     await open(c, 't', {
       disallowedTools: ['WebFetch'],
@@ -178,7 +178,7 @@ describe('callbacks become journaled events', () => {
     await open(c);
     const h = await harness();
     const img = { base64: 'AAAA', mediaType: 'image/png', name: 'a.png' };
-    await c.cmd('session.send', { threadId: 't', text: 'look', userMessageUuid: 'u', images: [img, { base64: 'x', mediaType: 'text/html', name: 'bad' }] });
+    await c.cmd('session.send', { threadId: 't', text: 'look', userMessageUuid: 'u', images: [img] });
     await sleep(20);
     expect(h.sent[0].images).toEqual([img]);
     expect(await c.cmd('session.send', { threadId: 't', text: 'again', userMessageUuid: 'u2' })).toMatchObject({ type: 'err', code: 'conflict' });
@@ -429,5 +429,90 @@ describe('raw log', () => {
     expect(log).toContain('"type":"assistant"');
     expect(log).not.toContain('sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789');
     expect(c.events().some((f) => f.name === 'onRawEvent')).toBe(false);
+  });
+});
+
+describe('hardening: environment, images, request expiry, live-session cap', () => {
+  it('ignores client-supplied environment by default (operator allowlist is empty)', async () => {
+    const td = await daemon();
+    const c = await client(td);
+    await open(c, 't', { extraEnvRaw: 'HTTPS_PROXY=http://evil\nBASH_ENV=/tmp/x\nFOO=1' });
+    expect((await harness()).options!.extraEnvRaw).toBe('');
+  });
+
+  it('refuses a malformed image element at the door and the session is not wedged afterwards', async () => {
+    const td = await daemon();
+    const c = await client(td);
+    await open(c);
+    const h = await harness();
+    for (const images of [[null], [{}], [{ base64: 'AAAA', mediaType: 'text/html', name: 'x' }], [{ base64: 5, mediaType: 'image/png' }], 'nope', [{ base64: '!!!', mediaType: 'image/png' }]]) {
+      expect(await c.cmd('session.send', { threadId: 't', text: 'x', userMessageUuid: 'bad', images }), JSON.stringify(images)).toMatchObject({ type: 'err', code: 'bad_frame' });
+    }
+    expect(h.sent).toHaveLength(0);
+    // The thread is not stuck "in flight": a valid send goes straight through.
+    expect((await c.cmd('session.send', { threadId: 't', text: 'ok', userMessageUuid: 'good' })).type).toBe('ack');
+    await sleep(20);
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it('driver: a bad element reaching send() directly is skipped, never left holding turnInFlight', async () => {
+    const td = await daemon();
+    const c = await client(td);
+    await open(c);
+    const h = await harness();
+    const driver = (td.daemon.threads as unknown as { threads: Map<string, { driver: { send(t: string, u: string, i?: unknown): void; turnInFlight: boolean } }> }).threads.get('t')!.driver;
+    expect(() => driver.send('x', 'u', [null])).not.toThrow(); // skipped, not fatal
+    await sleep(20);
+    // Handed to the harness without the bad attachment; the flag follows the harness (its turn), not a stuck latch.
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].images).toBeUndefined();
+    h.finish('done');
+    await sleep(20);
+    expect(driver.turnInFlight).toBe(false);
+  });
+
+  it('unanswered requests expire, deny the tool and free the turn', async () => {
+    const td = await startTestDaemon({
+      config: { harness: 'claude', workspaces: [workspace] },
+      driverFactory: createClaudeDriverFactory({ createHarness: scriptedFactory(made), env: {}, requestTimeoutMs: 60 }),
+    });
+    cleanups.push(() => td.cleanup());
+    const c = await client(td);
+    await open(c);
+    const h = await harness();
+    await c.cmd('attach', { ch: 't:t', afterSeq: 0 });
+    await c.cmd('session.send', { threadId: 't', text: 'go', userMessageUuid: 'u' });
+    await sleep(20);
+    const allowed = h.options!.callbacks.onPermissionRequest('Bash', 'rm -rf /');
+    const req = await c.waitFor((f) => f.name === 'permission_request');
+    const expired = await c.waitFor((f) => f.name === 'request_resolved' && f.args.requestId === req.args.requestId, 2000);
+    expect(expired.args).toMatchObject({ outcome: 'expired' });
+    await expect(allowed).resolves.toBe(false);
+    // A late answer is refused, not applied.
+    expect(await c.cmd('resolve.permission', { threadId: 't', requestId: req.args.requestId, allow: true })).toMatchObject({ type: 'err', code: 'not_found' });
+  });
+
+  it('maxLiveSessions: a further session.open is refused until a slot frees', async () => {
+    const td = await daemon({ config: { maxLiveSessions: 2 } });
+    const c = await client(td);
+    expect((await open(c, 'a')).type).toBe('ack');
+    expect((await open(c, 'b')).type).toBe('ack');
+    expect(await open(c, 'c')).toMatchObject({ type: 'err', code: 'conflict' });
+    await c.cmd('session.close', { threadId: 'a' });
+    expect((await open(c, 'c')).type).toBe('ack');
+  });
+
+  it('dedupes a retried send by userMessageUuid (a lost ack must not run the turn twice)', async () => {
+    const td = await daemon();
+    const c = await client(td);
+    await open(c);
+    const h = await harness();
+    expect((await c.cmd('session.send', { threadId: 't', text: 'once', userMessageUuid: 'same' })).type).toBe('ack');
+    await sleep(20);
+    h.options!.callbacks.onDone('s', 0, 0, undefined);
+    await sleep(20);
+    expect((await c.cmd('session.send', { threadId: 't', text: 'once', userMessageUuid: 'same' })).type).toBe('ack');
+    await sleep(20);
+    expect(h.sent).toHaveLength(1);
   });
 });

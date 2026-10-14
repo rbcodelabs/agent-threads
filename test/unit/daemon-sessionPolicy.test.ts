@@ -72,9 +72,24 @@ describe('validateSpec', () => {
     expect(code(() => validateSpec(spec({ additionalDirectories: [outside] }), policy()))).toBe('forbidden');
     expect(validateSpec(spec({ additionalDirectories: [join(ws, 'repo')] }), policy()).additionalDirectories).toEqual([join(ws, 'repo')]);
   });
-  it('strips protected variables from extraEnvRaw but keeps the rest', () => {
-    const out = validateSpec(spec({ extraEnvRaw: 'FOO=1\nHOME=/tmp/evil\n# c\nclaude_code_oauth_token=x\nBAR=two' }), policy());
-    expect(out.extraEnvRaw).toBe('FOO=1\n# c\nBAR=two');
+  it('ignores client-supplied environment entirely unless the operator allowlists names', () => {
+    const raw = 'FOO=1\nHTTPS_PROXY=http://evil\nBASH_ENV=/tmp/x\nNODE_EXTRA_CA_CERTS=/tmp/ca\nGIT_SSH_COMMAND=evil';
+    expect(validateSpec(spec({ extraEnvRaw: raw }), policy()).extraEnvRaw).toBe('');
+    expect(validateSpec(spec({ extraEnvRaw: raw }), policy({ allowedClientEnv: [] })).extraEnvRaw).toBe('');
+  });
+  it('with an allowlist keeps only the listed names, and never a protected one', () => {
+    const out = validateSpec(
+      spec({ extraEnvRaw: 'FOO=1\nHOME=/tmp/evil\n# c\nclaude_code_oauth_token=x\nBAR=two\nHTTPS_PROXY=http://evil' }),
+      policy({ allowedClientEnv: ['FOO', 'BAR', 'HOME', 'CLAUDE_CODE_OAUTH_TOKEN'] }),
+    );
+    expect(out.extraEnvRaw).toBe('FOO=1\nBAR=two');
+  });
+  it('refuses a permission mode the daemon does not know', () => {
+    expect(code(() => validateSpec(spec({ permissionMode: 'yolo' as never }), policy()))).toBe('bad_frame');
+    expect(code(() => validateSpec(spec({ permissionMode: '' as never }), policy()))).toBe('bad_frame');
+    for (const m of ['default', 'acceptEdits', 'plan', 'dontAsk', 'auto']) {
+      expect(code(() => validateSpec(spec({ permissionMode: m as never }), policy())), m).toBeUndefined();
+    }
   });
 });
 

@@ -38,6 +38,18 @@ export interface DaemonConfig {
   journalTtlDays: number;
   /** Cap on one thread's retained journal (approximate JSON bytes); oldest entries go first. 0 = no cap. */
   journalMaxMb: number;
+  /** Sockets accepted at once (authenticated or not); further upgrades get 503. */
+  maxConnections: number;
+  /** Sessions with a live `claude` process at once; `session.open` / a cold resume beyond this is refused. */
+  maxLiveSessions: number;
+  /** A permission/question/plan/elicitation request nobody answers for this long is canceled so it cannot hold a turn slot forever. 0 = never. */
+  requestTimeoutMinutes: number;
+  /**
+   * Environment variable NAMES a client may set through `extraEnvRaw`. Empty (the default) means the
+   * daemon ignores client-supplied environment entirely: a client-chosen variable such as HTTPS_PROXY,
+   * NODE_EXTRA_CA_CERTS, BASH_ENV or GIT_SSH_COMMAND can redirect or subvert the agent's traffic and commands.
+   */
+  allowedClientEnv: string[];
 }
 
 export type HarnessKind = 'claude' | 'fake';
@@ -47,12 +59,16 @@ export const DEFAULT_MAX_CONCURRENT_TURNS = 3;
 export const DEFAULT_IDLE_REAP_MINUTES = 30;
 export const DEFAULT_JOURNAL_TTL_DAYS = 7;
 export const DEFAULT_JOURNAL_MAX_MB = 64;
+export const DEFAULT_MAX_CONNECTIONS = 64;
+export const DEFAULT_MAX_LIVE_SESSIONS = 8;
+export const DEFAULT_REQUEST_TIMEOUT_MINUTES = 60;
 
 export interface ConfigInputs {
   flags?: Partial<{
     dataDir: string; listen: string; port: number; allowedOrigins: string[]; acknowledgeOpen: boolean;
     harness: HarnessKind; workspaces: string[]; readOnlyWorkspaces: string[]; allowBypass: boolean; maxConcurrentTurns: number;
     idleReapMinutes: number; claudeBinaryPath: string; journalTtlDays: number; journalMaxMb: number;
+    maxConnections: number; maxLiveSessions: number; requestTimeoutMinutes: number; allowedClientEnv: string[];
   }>;
   env?: NodeJS.ProcessEnv;
 }
@@ -81,6 +97,10 @@ interface ConfigFile {
   claudeBinaryPath?: string;
   journalTtlDays?: number;
   journalMaxMb?: number;
+  maxConnections?: number;
+  maxLiveSessions?: number;
+  requestTimeoutMinutes?: number;
+  allowedClientEnv?: string[];
 }
 
 /** `~` and `~/x` mean the daemon user's home; everything else must already be absolute. */
@@ -121,6 +141,14 @@ export function isWildcardAddress(host: string): boolean {
 
 export function isLoopbackAddress(host: string): boolean {
   return host === 'localhost' || host === '::1' || host.startsWith('127.');
+}
+
+function allowedClientEnv(names: unknown): string[] {
+  if (!Array.isArray(names) || !names.every((n) => typeof n === 'string')) throw new Error('invalid allowedClientEnv: expected a list of variable names');
+  for (const n of names as string[]) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n)) throw new Error(`invalid allowedClientEnv entry: ${n}`);
+  }
+  return [...new Set(names as string[])];
 }
 
 export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
@@ -171,6 +199,10 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     idleReapMinutes: positiveInt('idleReapMinutes', flags.idleReapMinutes ?? envInt(env.AGENT_THREADS_IDLE_REAP_MINUTES) ?? file.idleReapMinutes ?? DEFAULT_IDLE_REAP_MINUTES, 0),
     journalTtlDays: positiveInt('journalTtlDays', flags.journalTtlDays ?? envInt(env.AGENT_THREADS_JOURNAL_TTL_DAYS) ?? file.journalTtlDays ?? DEFAULT_JOURNAL_TTL_DAYS, 0),
     journalMaxMb: positiveInt('journalMaxMb', flags.journalMaxMb ?? envInt(env.AGENT_THREADS_JOURNAL_MAX_MB) ?? file.journalMaxMb ?? DEFAULT_JOURNAL_MAX_MB, 0),
+    maxConnections: positiveInt('maxConnections', flags.maxConnections ?? envInt(env.AGENT_THREADS_MAX_CONNECTIONS) ?? file.maxConnections ?? DEFAULT_MAX_CONNECTIONS, 1),
+    maxLiveSessions: positiveInt('maxLiveSessions', flags.maxLiveSessions ?? envInt(env.AGENT_THREADS_MAX_LIVE_SESSIONS) ?? file.maxLiveSessions ?? DEFAULT_MAX_LIVE_SESSIONS, 1),
+    requestTimeoutMinutes: positiveInt('requestTimeoutMinutes', flags.requestTimeoutMinutes ?? envInt(env.AGENT_THREADS_REQUEST_TIMEOUT_MINUTES) ?? file.requestTimeoutMinutes ?? DEFAULT_REQUEST_TIMEOUT_MINUTES, 0),
+    allowedClientEnv: allowedClientEnv(flags.allowedClientEnv ?? envList(env.AGENT_THREADS_ALLOWED_CLIENT_ENV) ?? file.allowedClientEnv ?? []),
     ...(claudeBinaryPath ? { claudeBinaryPath } : {}),
   };
 }

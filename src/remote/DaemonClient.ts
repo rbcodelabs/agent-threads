@@ -112,6 +112,11 @@ export class DaemonCommandError extends Error {
     readonly code: ErrorCode | 'unreachable' | 'timeout' | 'closed' | 'incompatible',
     message: string,
     readonly retryable = false,
+    /**
+     * The command was written to a socket but no ack came back, so the daemon MAY have run it. Only
+     * meaningful for `timeout` / `unreachable` / `closed`; a command that never left this process is `false`.
+     */
+    readonly unconfirmed = false,
   ) {
     super(message);
     this.name = 'DaemonCommandError';
@@ -168,6 +173,11 @@ export interface DaemonClientOptions {
   getToken: () => string | undefined;
   createSocket: WebSocketFactory;
   client?: ClientKind;
+  /**
+   * Stable id of this client install (the plugin's `remoteClientId`), sent in `hello`. The daemon keys the
+   * read-write seat on (token, instance), so two installs sharing one token cannot both write a thread.
+   */
+  instanceId?: string;
   clientVersion: string;
   /** Default `RECONNECT_BACKOFF_MS`. */
   backoffMs?: readonly number[];
@@ -191,6 +201,8 @@ interface PendingCommand {
   type: string;
   /** Re-sent after a reconnect (same cmdId). Attach and probes are not: they are re-issued. */
   resend: boolean;
+  /** Written to a socket at least once: the daemon may have acted even if its ack never arrived. */
+  transmitted: boolean;
   /** Runs synchronously when the ack frame is processed, before any frame behind it (the promise would not). */
   onAck?(result: CommandResult): void;
   resolve(result: CommandResult): void;
@@ -381,6 +393,7 @@ export class DaemonClient {
         client: this.opts.client ?? 'geode-plugin',
         clientVersion: this.opts.clientVersion,
         token,
+        ...(this.opts.instanceId ? { instanceId: this.opts.instanceId } : {}),
       });
       this.helloTimer = setTimeout(() => {
         if (gen === this.socketGen && !this.welcomed) this.onSocketFailed(gen, 'daemon did not answer the handshake');
@@ -419,7 +432,7 @@ export class DaemonClient {
       if (!cmd.resend) {
         this.pending.delete(id);
         if (cmd.timer) clearTimeout(cmd.timer);
-        cmd.reject(new DaemonCommandError('unreachable', 'connection lost'));
+        cmd.reject(new DaemonCommandError('unreachable', 'connection lost', false, cmd.transmitted));
       }
     }
   }
@@ -495,7 +508,7 @@ export class DaemonClient {
     // Order matters: channels first (events start flowing), then the commands whose acks were lost.
     for (const sub of this.channels.values()) this.attach(sub);
     for (const cmd of this.pending.values()) {
-      if (cmd.resend) this.rawSendText(cmd.text);
+      if (cmd.resend) this.transmit(cmd);
     }
     for (const sub of this.channels.values()) {
       if (sub.ackTarget > sub.ackSent) this.scheduleAck(sub);
@@ -612,6 +625,7 @@ export class DaemonClient {
         text,
         type,
         resend: opts.resend,
+        transmitted: false,
         onAck: opts.onAck,
         resolve,
         reject,
@@ -621,18 +635,30 @@ export class DaemonClient {
           reject(new DaemonCommandError(
             connected ? 'timeout' : 'unreachable',
             connected ? `${type} timed out waiting for the daemon` : `daemon unreachable${this.state.detail ? ` (${this.state.detail})` : ''}`,
+            false,
+            cmd.transmitted,
           ));
         }, opts.timeoutMs),
       };
       this.pending.set(cmdId, cmd);
-      if (this.welcomed && this.ws?.readyState === WS_OPEN) this.rawSendText(text);
+      if (this.welcomed && this.ws?.readyState === WS_OPEN) this.transmit(cmd);
     });
+  }
+
+  /** Write a pending command to the socket and remember that the daemon may now have seen it. */
+  private transmit(cmd: PendingCommand): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WS_OPEN) return;
+    cmd.transmitted = true;
+    this.rawSendText(cmd.text);
   }
 
   private failAllPending(err: Error): void {
     for (const cmd of [...this.pending.values()]) {
       if (cmd.timer) clearTimeout(cmd.timer);
-      cmd.reject(err);
+      cmd.reject(cmd.transmitted && err instanceof DaemonCommandError
+        ? new DaemonCommandError(err.code, err.message, err.retryable, true)
+        : err);
     }
     this.pending.clear();
   }

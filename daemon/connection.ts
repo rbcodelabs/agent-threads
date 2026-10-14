@@ -11,6 +11,12 @@
  * never penalised. What is bounded (4 MB) is LIVE data that was produced faster
  * than this client reads it, plus whatever the socket has buffered; exceeding
  * it closes the connection with 4408 and the client resumes from its cursor.
+ * The control-reply queue (acks, errs) is bounded the same way, so a client that
+ * sends commands but never reads cannot grow it without limit.
+ *
+ * Nothing a client sends may take the process down: every socket handler is
+ * wrapped, a reply that cannot be serialized becomes an `internal` error, and
+ * an unexpected throw closes only that connection.
  */
 import type { IncomingMessage } from 'node:http';
 import type { RawData, WebSocket } from 'ws';
@@ -21,6 +27,7 @@ import {
   decodeClientFrame,
   encodeFrame,
   isChannel,
+  ProtocolEncodeError,
   threadChannel,
   type AckFrame,
   type Channel,
@@ -42,6 +49,24 @@ import { scopeSatisfies, type TokenScope, type TokenStore, type VerifiedToken } 
 import { DAEMON_VERSION, MIN_CLIENT_VERSION } from './version';
 
 export const MAX_OUTBOUND_BYTES = 4 * 1024 * 1024;
+/** Largest frame accepted before `hello` completes (a token is ~50 bytes); raised to `MAX_FRAME_BYTES` once authenticated. */
+export const PRE_AUTH_MAX_FRAME_BYTES = 4 * 1024;
+/** Largest frame accepted from an authenticated client (images ride in `session.send`). */
+export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
+/**
+ * `ws` enforces `maxPayload` per frame inside its receiver, before any of our code runs, which is what
+ * makes a pre-auth cap worth having. The server is created with the small cap; an authenticated
+ * connection raises its own receiver's limit. `_receiver` is internal to `ws`, so a version that
+ * stops exposing it fails the "large authenticated frame" integration test instead of silently
+ * limiting every client to the pre-auth size.
+ */
+export function raiseFrameLimit(ws: WebSocket, bytes: number): boolean {
+  const receiver = (ws as unknown as { _receiver?: { _maxPayload?: number } })._receiver;
+  if (!receiver || typeof receiver._maxPayload !== 'number') return false;
+  receiver._maxPayload = bytes;
+  return true;
+}
 /** Stop handing frames to the socket once this much is already buffered in it. */
 const SOCKET_HIGH_WATER = 256 * 1024;
 /** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
@@ -84,7 +109,7 @@ export interface ServerContext {
 }
 
 /** Minimum scope per command. Unlisted commands are admin-only. */
-const REQUIRED_SCOPE: Record<string, TokenScope> = {
+export const REQUIRED_SCOPE: Record<string, TokenScope> = {
   attach: 'read',
   'session.list': 'read',
   'path.check': 'read',
@@ -156,12 +181,15 @@ let nextConnectionId = 0;
 export class Connection {
   readonly id = ++nextConnectionId;
   private auth: VerifiedToken | null = null;
+  /** The client install behind this connection (`hello.instanceId`), if it sent one. */
+  private instanceId: string | undefined;
   private readonly preAuth: VerifiedToken | null;
   private helloSeen = false;
   private dead = false;
   private pumping = false;
   private liveBytes = 0;
   private readonly control: string[] = [];
+  private controlBytes = 0;
   private readonly subs = new Map<Channel, ChannelSub>();
   private helloTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -174,9 +202,13 @@ export class Connection {
     preAuth: VerifiedToken | null,
     private readonly onGone: (c: Connection) => void,
     readonly request?: IncomingMessage,
+    /** Loopback peer (a local reverse proxy): failures are not counted against the shared address. */
+    private readonly throttleExempt = false,
   ) {
     this.preAuth = preAuth;
-    ws.on('message', (data) => this.onMessage(data));
+    // A connection authenticated at the upgrade (Bearer header) never sends a small-frame-only hello.
+    if (preAuth) raiseFrameLimit(ws, MAX_FRAME_BYTES);
+    ws.on('message', (data) => this.guarded('message', () => this.onMessage(data)));
     ws.on('close', () => this.cleanup());
     ws.on('error', () => this.cleanup());
     ws.on('pong', () => { if (this.pongTimer) { clearTimeout(this.pongTimer); this.pongTimer = null; } });
@@ -187,18 +219,43 @@ export class Connection {
   }
 
   get tokenId(): string | null { return this.auth?.id ?? null; }
+  get authenticated(): boolean { return this.auth !== null || this.preAuth !== null; }
+
+  /** The seat identity of this connection: token plus (when sent) the client install. */
+  private seat(auth: VerifiedToken): { id: number; tokenId: string; instanceId?: string } {
+    return { id: this.id, tokenId: auth.id, ...(this.instanceId !== undefined ? { instanceId: this.instanceId } : {}) };
+  }
+
+  /** Cache key for idempotent commands: two installs sharing a token must not see each other's replies. */
+  private cacheScope(auth: VerifiedToken): string {
+    return this.instanceId !== undefined ? `${auth.id}:${this.instanceId}` : auth.id;
+  }
+
+  /** Run a socket/timer handler so a throw drops this connection, never the process. */
+  private guarded(what: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (err) {
+      this.ctx.audit({ event: 'handler_error', what, tokenId: this.tokenId, error: err instanceof Error ? err.message : String(err) });
+      console.error(`[daemon] ${what} handler failed:`, err);
+      this.closeWith(1011, 'internal error');
+    }
+  }
 
   // ── lifecycle ────────────────────────────────────────────────────────────
 
   private heartbeat(): void {
-    if (this.dead) return;
-    if (this.auth && !this.ctx.tokens.isActive(this.auth.id)) {
-      this.closeWith(CLOSE_UNAUTHORIZED, 'token revoked');
-      return;
-    }
-    if (this.pongTimer) return;
-    this.pongTimer = setTimeout(() => this.ws.terminate(), this.ctx.timings.pongTimeoutMs);
-    try { this.ws.ping(); } catch { this.ws.terminate(); }
+    this.guarded('heartbeat', () => {
+      if (this.dead) return;
+      // Revocation is noticed here, so a revoked token can stay connected for up to one ping interval (20 s).
+      if (this.auth && !this.ctx.tokens.isActive(this.auth.id)) {
+        this.closeWith(CLOSE_UNAUTHORIZED, 'token revoked');
+        return;
+      }
+      if (this.pongTimer) return;
+      this.pongTimer = setTimeout(() => this.ws.terminate(), this.ctx.timings.pongTimeoutMs);
+      try { this.ws.ping(); } catch { this.ws.terminate(); }
+    });
   }
 
   closeWith(code: number, reason: string): void {
@@ -213,6 +270,8 @@ export class Connection {
 
   private cleanup(notify = true): void {
     this.dead = true;
+    this.control.length = 0;
+    this.controlBytes = 0;
     this.dropSubscriptions();
     this.ctx.controllers.releaseAll(this.id);
     if (this.helloTimer) { clearTimeout(this.helloTimer); this.helloTimer = null; }
@@ -257,7 +316,7 @@ export class Connection {
     }
     const verified = this.preAuth ?? (frame.token ? this.ctx.tokens.verify(frame.token) : null);
     if (!verified) {
-      this.ctx.throttle.recordFailure(this.ip);
+      if (!this.throttleExempt) this.ctx.throttle.recordFailure(this.ip);
       this.ctx.audit({ event: 'auth_failed', ip: this.ip });
       this.queueControl(this.err(frame.cmdId, 'unauthorized', 'invalid token'));
       this.closeWith(CLOSE_UNAUTHORIZED, 'unauthorized');
@@ -265,6 +324,8 @@ export class Connection {
     }
     this.ctx.throttle.reset(this.ip);
     this.auth = verified;
+    if (typeof frame.instanceId === 'string' && frame.instanceId.length > 0) this.instanceId = frame.instanceId.slice(0, 128);
+    raiseFrameLimit(this.ws, MAX_FRAME_BYTES);
     this.ctx.audit({ event: 'connected', tokenId: verified.id, ip: this.ip, client: frame.client });
     const welcome: WelcomeFrame = {
       v: PROTOCOL_VERSION,
@@ -288,11 +349,11 @@ export class Connection {
     }
     const cacheable = !NOT_CACHED.has(frame.type);
     if (cacheable) {
-      const hit = this.ctx.cmdCache.get(auth.id, frame.cmdId);
+      const hit = this.ctx.cmdCache.get(this.cacheScope(auth), frame.cmdId);
       if (hit) { this.queueControl(encodeFrame(hit)); return; }
       // A retry that arrives while the original is still running joins it instead of running twice.
-      const running = this.ctx.cmdCache.pending(auth.id, frame.cmdId);
-      if (running) { void running.then((reply) => this.queueControl(encodeFrame(reply))); return; }
+      const running = this.ctx.cmdCache.pending(this.cacheScope(auth), frame.cmdId);
+      if (running) { void running.then((reply) => this.guarded('reply', () => this.queueControl(encodeFrame(reply)))); return; }
     }
     let outcome: unknown;
     try {
@@ -306,17 +367,29 @@ export class Connection {
         (result): AckFrame => ({ v: PROTOCOL_VERSION, type: 'ack', cmdId: frame.cmdId, result }),
         (e): ErrFrame => this.toErr(frame.cmdId, e),
       );
-      if (cacheable) this.ctx.cmdCache.track(auth.id, frame.cmdId, settled);
-      void settled.then((reply) => this.reply(frame, auth, false, reply));
+      if (cacheable) this.ctx.cmdCache.track(this.cacheScope(auth), frame.cmdId, settled);
+      void settled.then((reply) => this.guarded('reply', () => this.reply(frame, auth, false, reply)));
       return;
     }
     this.reply(frame, auth, cacheable, { v: PROTOCOL_VERSION, type: 'ack', cmdId: frame.cmdId, result: outcome });
   }
 
   private reply(frame: ClientFrame, auth: VerifiedToken, cache: boolean, reply: AckFrame | ErrFrame): void {
-    if (cache) this.ctx.cmdCache.set(auth.id, frame.cmdId, reply);
-    this.ctx.audit({ event: 'command', tokenId: auth.id, type: frame.type, ok: reply.type === 'ack', ...('threadId' in frame ? { threadId: frame.threadId } : {}) });
-    this.queueControl(encodeFrame(reply));
+    let text: string;
+    try {
+      text = encodeFrame(reply);
+    } catch (err) {
+      // A result that cannot be serialized (cycle, BigInt) is the command's failure, not the process's.
+      if (!(err instanceof ProtocolEncodeError)) throw err;
+      reply = { v: PROTOCOL_VERSION, type: 'err', cmdId: frame.cmdId, code: 'internal', message: 'the reply could not be serialized' };
+      text = encodeFrame(reply);
+    }
+    if (cache) this.ctx.cmdCache.set(this.cacheScope(auth), frame.cmdId, reply);
+    // The debounced retention ack arrives per event; auditing each would make the log a transcript of traffic.
+    if (frame.type !== 'ack') {
+      this.ctx.audit({ event: 'command', tokenId: auth.id, type: frame.type, ok: reply.type === 'ack', ...('threadId' in frame ? { threadId: frame.threadId } : {}) });
+    }
+    this.queueControl(text);
   }
 
   private toErr(cmdId: string, e: unknown): ErrFrame {
@@ -327,7 +400,7 @@ export class Connection {
 
   /** Mutating commands need to be the thread's single read-write client; a free thread is claimed on first use. */
   private requireControl(threadId: string, auth: VerifiedToken): void {
-    if (!this.ctx.controllers.claim(threadId, { id: this.id, tokenId: auth.id })) {
+    if (!this.ctx.controllers.claim(threadId, this.seat(auth))) {
       throw new CommandError('conflict', `thread ${threadId} is controlled by another client; detach it there first (or use a read-only attach)`);
     }
   }
@@ -397,8 +470,10 @@ export class Connection {
       case 'path.list': return { ...this.ctx.listPath(frame.path) };
       case 'resolve.permission':
         this.requireControl(frame.threadId, auth);
-        host.resolve(frame.threadId, 'permission', frame.requestId, { allow: frame.allow, alwaysAllow: frame.alwaysAllow }, auth.id);
-        return {};
+        host.resolve(frame.threadId, 'permission', frame.requestId, { allow: frame.allow }, auth.id);
+        // "Always allow" would need a persistent permission rule in the harness, which this daemon does not
+        // create. The answer still counts as a one-time allow; say so instead of pretending.
+        return frame.alwaysAllow === true ? { alwaysAllow: 'not_supported' } : {};
       case 'resolve.question':
         this.requireControl(frame.threadId, auth);
         host.resolve(frame.threadId, 'question', frame.requestId, { answers: frame.answers }, auth.id);
@@ -457,7 +532,7 @@ export class Connection {
     // A control-scope client takes (or, with the same token, takes back) the read-write seat;
     // anyone else observes. Mutating commands re-check, so this is advisory for the client UI.
     const controller = scopeSatisfies(auth.scope, 'control')
-      && this.ctx.controllers.claim(ch.slice(2), { id: this.id, tokenId: auth.id });
+      && this.ctx.controllers.claim(ch.slice(2), this.seat(auth));
     const result = { lastSeq: replay.lastSeq, lowWater: journal.lowWater, epoch: this.ctx.epoch, resync: replay.kind === 'resync', controller, ...(rewind !== null ? { rewind } : {}) };
     // The ack is queued first (control drains before channels) so the client
     // learns the cursor before the first replayed event.
@@ -488,7 +563,15 @@ export class Connection {
   }
 
   private queueControl(text: string): void {
+    if (this.dead) return;
     this.control.push(text);
+    this.controlBytes += text.length;
+    if (this.controlBytes > this.ctx.maxOutboundBytes) {
+      // A peer that sends commands and never reads replies; same treatment as a slow event consumer.
+      this.ctx.audit({ event: 'slow_consumer', tokenId: this.tokenId, ch: 'control' });
+      this.closeWith(CLOSE_SLOW_CONSUMER, 'slow_consumer');
+      return;
+    }
     this.pump();
   }
 
@@ -511,7 +594,7 @@ export class Connection {
 
   private nextFrame(): string | null {
     const c = this.control.shift();
-    if (c !== undefined) return c;
+    if (c !== undefined) { this.controlBytes -= c.length; return c; }
     // Round-robin one frame per channel so a long backlog cannot starve another channel.
     for (const sub of this.subs.values()) {
       if (sub.resyncText !== null) {

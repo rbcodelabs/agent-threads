@@ -370,10 +370,10 @@ tab.display();
  * Opens the Remote daemons edit dialog (remote-thread.spec.ts). `advertise` says what the stand-in daemon
  * answers to Test connection: its workspaces, or that it is too old to list them.
  */
-(window as any).__openRemoteDaemonModal = (opts: { advertise?: 'workspaces' | 'old'; saved?: boolean } = {}): void => {
+(window as any).__openRemoteDaemonModal = (opts: { advertise?: 'workspaces' | 'old'; saved?: boolean; url?: string } = {}): void => {
   const advertise = opts.advertise ?? 'workspaces';
   const existing = {
-    id: 'my-server', name: 'my-server', url: 'wss://my-server.tailnet-name.ts.net:8443', tokenSecretName: 'T',
+    id: 'my-server', name: 'my-server', url: opts.url ?? 'wss://my-server.tailnet-name.ts.net:8443', tokenSecretName: 'T',
     ...(opts.saved ? { defaultCwdRoot: '/home/user/projects', vaultMapping: { remoteRoot: '/home/user/vault' } } : {}),
   };
   new RemoteDaemonModal(mockApp as any, existing, [existing], '/Users/me/Documents/vault', {

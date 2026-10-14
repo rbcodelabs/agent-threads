@@ -6,23 +6,24 @@
  * from the first `hello` frame or an `Authorization: Bearer` header, never the
  * URL, so tokens do not end up in proxy logs.
  */
-import { appendFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { PROTOCOL_VERSION } from '../src/protocol';
+import { AuditLog } from './auditLog';
 import { CommandCache } from './cmdCache';
 import { isLoopbackAddress, isWildcardAddress, loadOrCreateDaemonId, type DaemonConfig } from './config';
 import { createClaudeDriverFactory, describeCredentialSource, findClaudeBinary, resolveCredentialEnv } from './claudeDriver';
 import { describePathAccess, type SessionPolicy } from './sessionPolicy';
 import { listSubfolders, listWorkspaces } from './workspaces';
-import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, capabilitiesFor, type ServerContext, type Timings } from './connection';
+import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, PRE_AUTH_MAX_FRAME_BYTES, capabilitiesFor, type ServerContext, type Timings } from './connection';
 import { ControlRegistry } from './controlRegistry';
 import { fakeHarnessFactory } from './fakeHarness';
 import { FailureThrottle } from './failureThrottle';
 import { ensureDir } from './fsutil';
+import { sweepRawLogs } from './logRetention';
 import type { DriverFactory } from './sessionDriver';
 import { ThreadHost } from './threadHost';
 import { RawLogWriter } from '../src/RawLogWriter';
@@ -47,6 +48,14 @@ export interface DaemonOptions {
   /** How often journals are compacted for TTL/size regardless of acks (default 5 min). */
   maintenanceMs?: number;
   throttle?: FailureThrottle;
+  /**
+   * Apply the per-address failure throttle to loopback peers too (default false). Behind `tailscale serve`
+   * or a reverse proxy every client arrives from 127.0.0.1, so throttling loopback would let one peer's
+   * bad tokens lock the owner out; off by default, on in tests that exercise the throttle.
+   */
+  throttleLoopback?: boolean;
+  /** Test seam: audit log tuning. */
+  audit?: ConstructorParameters<typeof AuditLog>[1];
   log?: (line: string) => void;
 }
 
@@ -66,6 +75,14 @@ export interface DaemonHandle {
   crash(): Promise<void>;
 }
 
+/** Sockets that have not authenticated yet, at most. */
+export const MAX_UNAUTHENTICATED_CONNECTIONS = 16;
+
+/** Is the peer on this machine? (`::ffff:127.0.0.1` is how Node reports IPv4 loopback on a dual-stack socket.) */
+export function isLoopbackPeer(ip: string): boolean {
+  return ip === '::1' || ip.startsWith('127.') || ip.startsWith('::ffff:127.');
+}
+
 export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle> {
   const { config } = options;
   const log = options.log ?? (() => {});
@@ -73,12 +90,16 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   ensureDir(join(config.dataDir, 'journal'));
   const daemonId = loadOrCreateDaemonId(config.dataDir);
   const epoch = randomUUID();
-  const tokens = new TokenStore(config.dataDir);
-  const auditPath = join(config.dataDir, 'audit.ndjson');
-  const audit = (record: Record<string, unknown>): void => {
-    // Who did what, never content. Best effort: audit failure must not take the daemon down.
-    try { appendFileSync(auditPath, `${JSON.stringify({ ts: Date.now(), ...record })}\n`, { mode: 0o600 }); } catch { /* ignore */ }
+  // Throws on a corrupt tokens.json: a startup failure, reported and fatal. Later corruption fails closed (tokenStore.ts).
+  const tokens = new TokenStore(config.dataDir, undefined, (l) => (options.log ?? console.error)(l));
+  // Who did what, never content. Batched and rotated; best effort (audit failure must not take the daemon down).
+  const auditLog = new AuditLog(join(config.dataDir, 'audit.ndjson'), options.audit);
+  const audit = (record: Record<string, unknown>): void => auditLog.record(record);
+  const rawLogLimits = {
+    ...(config.journalTtlDays > 0 || options.journalLimits?.maxAgeMs !== undefined ? { maxAgeMs: options.journalLimits?.maxAgeMs ?? config.journalTtlDays * 86_400_000 } : {}),
+    ...(config.journalMaxMb > 0 || options.journalLimits?.maxBytes !== undefined ? { maxBytes: options.journalLimits?.maxBytes ?? config.journalMaxMb * 1024 * 1024 } : {}),
   };
+  const logsDir = join(config.dataDir, 'logs');
 
   const real = config.harness === 'claude';
   let driverFactory = options.driverFactory;
@@ -98,15 +119,15 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     const credentialEnv = resolveCredentialEnv(env);
     setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN].filter((v): v is string => !!v));
     if (!driverFactory) {
-      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, env });
+      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, env, requestTimeoutMs: config.requestTimeoutMinutes * 60_000 });
       const binary = findClaudeBinary(config.claudeBinaryPath, env);
       log(binary ? `claude CLI: ${binary}` : 'WARNING: claude CLI not found; session.open will fail until it is installed (or set claudeBinaryPath / AGENT_THREADS_CLAUDE_BINARY)');
       log(`claude credential: ${describeCredentialSource(env)}`);
     }
-    log(`workspaces: ${config.workspaces.join(', ') || '(none)'}${config.readOnlyWorkspaces.length ? `; read-only workspaces: ${config.readOnlyWorkspaces.join(', ')}` : ''}; bypassPermissions ${config.allowBypass ? 'ALLOWED' : 'refused'}; maxConcurrentTurns ${config.maxConcurrentTurns}; idle reap ${config.idleReapMinutes ? `${config.idleReapMinutes} min` : 'off'}`);
+    log(`workspaces: ${config.workspaces.join(', ') || '(none)'}${config.readOnlyWorkspaces.length ? `; read-only workspaces: ${config.readOnlyWorkspaces.join(', ')}` : ''}; bypassPermissions ${config.allowBypass ? 'ALLOWED' : 'refused'}; maxConcurrentTurns ${config.maxConcurrentTurns}; maxLiveSessions ${config.maxLiveSessions}; client env ${config.allowedClientEnv.length ? `limited to ${config.allowedClientEnv.join(', ')}` : 'ignored'}; idle reap ${config.idleReapMinutes ? `${config.idleReapMinutes} min` : 'off'}`);
   }
 
-  const sessionPolicy: SessionPolicy = { workspaces: config.workspaces, readOnlyWorkspaces: config.readOnlyWorkspaces, allowBypass: config.allowBypass };
+  const sessionPolicy: SessionPolicy = { workspaces: config.workspaces, readOnlyWorkspaces: config.readOnlyWorkspaces, allowBypass: config.allowBypass, allowedClientEnv: config.allowedClientEnv };
   const host = new ThreadHost({
     dataDir: config.dataDir,
     epoch,
@@ -120,10 +141,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     // The scripted fake has no side effects, so only the real host is policed.
     ...(real ? { policy: sessionPolicy } : {}),
     maxConcurrentTurns: config.maxConcurrentTurns,
+    maxLiveSessions: config.maxLiveSessions,
     idleReapMs: options.idleReapMs ?? config.idleReapMinutes * 60_000,
     rawLog,
   });
   const recovered = host.recover();
+  sweepRawLogs(logsDir, rawLogLimits, options.now?.());
   for (const id of recovered) log(`recovered thread ${id}: closed in-flight turn as daemon_restarted`);
 
   const ctx: ServerContext = {
@@ -144,7 +167,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   };
 
   const connections = new Set<Connection>();
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
+  // Small until `hello` succeeds (an unauthenticated peer can make us buffer at most this much per frame);
+  // an authenticated connection raises its own limit (connection.ts).
+  const wss = new WebSocketServer({ noServer: true, maxPayload: PRE_AUTH_MAX_FRAME_BYTES });
+  const throttleExempt = (ip: string): boolean => !options.throttleLoopback && isLoopbackPeer(ip);
 
   const http = createServer((req, res) => {
     const path = (req.url ?? '/').split('?')[0];
@@ -167,7 +193,13 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     const path = (req.url ?? '/').split('?')[0];
     if (path !== '/v1/ws') { reject('404 Not Found', 'path'); return; }
     const ip = req.socket.remoteAddress ?? 'unknown';
-    if (ctx.throttle.isBlocked(ip)) { reject('429 Too Many Requests', 'throttled'); return; }
+    if (!throttleExempt(ip) && ctx.throttle.isBlocked(ip)) { reject('429 Too Many Requests', 'throttled'); return; }
+    // Bound the sockets we hold. Unauthenticated ones are limited much harder so a flood of them cannot
+    // crowd out the owner's reconnect.
+    if (connections.size >= config.maxConnections) { reject('503 Service Unavailable', 'max_connections'); return; }
+    let unauthenticated = 0;
+    for (const c of connections) if (!c.authenticated) unauthenticated++;
+    if (unauthenticated >= MAX_UNAUTHENTICATED_CONNECTIONS) { reject('503 Service Unavailable', 'max_unauthenticated'); return; }
     // Browsers always send Origin on WebSocket handshakes; the CLI does not.
     const origin = req.headers.origin;
     if (origin !== undefined && !config.allowedOrigins.includes(origin)) { reject('403 Forbidden', 'origin'); return; }
@@ -176,13 +208,13 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     if (bearer) {
       preAuth = tokens.verify(bearer[1]);
       if (!preAuth) {
-        ctx.throttle.recordFailure(ip);
+        if (!throttleExempt(ip)) ctx.throttle.recordFailure(ip);
         reject('401 Unauthorized', 'bad bearer');
         return;
       }
     }
     wss.handleUpgrade(req, socket, Buffer.alloc(0), (ws) => {
-      const conn = new Connection(ws, ip, ctx, preAuth, (c) => connections.delete(c), req);
+      const conn = new Connection(ws, ip, ctx, preAuth, (c) => connections.delete(c), req, throttleExempt(ip));
       connections.add(conn);
     });
   });
@@ -192,6 +224,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   // Retention (TTL and size) must hold even for a client that never acks, so compaction is not only ack-driven.
   const maintenance = setInterval(() => {
     try { host.compactAll(); } catch (err) { console.error('journal maintenance:', err); }
+    try { sweepRawLogs(logsDir, rawLogLimits, options.now?.()); } catch (err) { console.error('raw log maintenance:', err); }
   }, options.maintenanceMs ?? 5 * 60_000);
   maintenance.unref();
   const idleMs = options.idleReapMs ?? config.idleReapMinutes * 60_000;
@@ -237,6 +270,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       for (const c of connections) c.closeWith(1001, 'daemon shutting down');
       host.shutdown();
       wss.close();
+      auditLog.flushSync();
       await closeHttp(http);
     },
     async crash() {
@@ -244,6 +278,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       clearInterval(maintenance);
       if (reaper) clearInterval(reaper);
       host.crash();
+      auditLog.flushSync();
       for (const ws of wss.clients) ws.terminate();
       wss.close();
       await closeHttp(http);
