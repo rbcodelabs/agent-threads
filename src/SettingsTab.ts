@@ -1,3 +1,4 @@
+import { isValidOverviewPath } from './projectOverview';
 import { isAgentHarness } from './types';
 import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
@@ -2342,6 +2343,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const folder = this.createManagerField(form, 'Vault folder', project?.vaultFolder ?? '', {
       placeholder: 'Products/My Project', description: 'Changing this updates future context. Existing files are not moved.',
     }) as HTMLInputElement;
+    const overview = this.createManagerField(form, 'Overview note', project?.overviewPath ?? '', {
+      placeholder: 'Defaults to <vault folder>/_overview.md', description: 'Vault-relative note injected into the system prompt of every thread in this project, if it exists.',
+    }) as HTMLInputElement;
     const cwd = this.createManagerField(form, 'Filesystem working directory', project?.cwdOverride ?? '', {
       placeholder: 'Optional absolute path', description: project ? `Effective cwd: ${this.plugin.manager.getProjectCwd(project)}` : 'Leave blank to derive it from the vault folder.',
     }) as HTMLInputElement;
@@ -2368,7 +2372,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     }
     const actions = detail.createEl('footer', { cls: 'ct-manager-actions' });
     const state = actions.createEl('span', { text: isNew ? 'New project draft' : 'No unsaved changes' });
-    for (const input of [name, folder, cwd, description]) input.addEventListener('input', () => { state.textContent = 'Unsaved changes'; });
+    for (const input of [name, folder, overview, cwd, description]) input.addEventListener('input', () => { state.textContent = 'Unsaved changes'; });
     const cancel = actions.createEl('button', { text: 'Cancel', attr: { type: 'button' } });
     cancel.addEventListener('click', () => { if (isNew) this.selectedProjectId = projects[0]?.id ?? null; this.display(); });
     const save = actions.createEl('button', { text: isNew ? 'Create project' : 'Save changes', cls: 'mod-cta', attr: { type: 'button' } });
@@ -2376,8 +2380,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       const projectName = name.value.trim();
       const vaultFolder = folder.value.trim();
       if (!projectName || !vaultFolder) { error.textContent = 'Project name and vault folder are required.'; error.style.display = ''; return; }
-      if (project) this.plugin.manager.updateProject(project.id, { name: projectName, vaultFolder, cwdOverride: cwd.value.trim() || undefined, description: description.value });
-      else this.selectedProjectId = this.plugin.manager.createProject(projectName, vaultFolder, description.value, cwd.value.trim() || undefined).id;
+      if (!isValidOverviewPath(overview.value)) { error.textContent = 'Overview note must be a vault-relative path without "..".'; error.style.display = ''; return; }
+      if (project) this.plugin.manager.updateProject(project.id, { name: projectName, vaultFolder, cwdOverride: cwd.value.trim() || undefined, overviewPath: overview.value.trim() || undefined, description: description.value });
+      else this.selectedProjectId = this.plugin.manager.createProject(projectName, vaultFolder, description.value, cwd.value.trim() || undefined, overview.value.trim() || undefined).id;
       await this.plugin.saveSettings();
       this.display();
     });

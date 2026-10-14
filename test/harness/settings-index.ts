@@ -261,8 +261,8 @@ const mockPlugin = {
       ? [{ id: 'thread-1' }, { id: 'thread-2' }]
       : [{ id: 'thread-3' }],
     deleteProject: (id: string) => { settings.projects = settings.projects.filter(project => project.id !== id); },
-    createProject: (name: string, vaultFolder: string, description?: string, cwdOverride?: string) => {
-      const project = { id: `proj-${settings.projects.length + 1}`, name, vaultFolder, description, cwdOverride, orchestratorEnabled: true, createdAt: Date.now() };
+    createProject: (name: string, vaultFolder: string, description?: string, cwdOverride?: string, overviewPath?: string) => {
+      const project = { id: `proj-${settings.projects.length + 1}`, name, vaultFolder, description, cwdOverride, overviewPath, orchestratorEnabled: true, createdAt: Date.now() };
       settings.projects.push(project);
       return project;
     },
