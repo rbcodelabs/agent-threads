@@ -22,7 +22,11 @@
     "sync-versions": "node scripts/sync-versions.mts --backfill",
     "check-versions": "node scripts/sync-versions.mts --check",
     "test:screenshots:remote": "node scripts/screenshots-remote.mts",
-    "test:screenshots:remote:update": "node scripts/screenshots-remote.mts --update"
+    "test:screenshots:remote:update": "node scripts/screenshots-remote.mts --update",
+    "demo:fixture": "npm run build && node demo/build-fixture.mts",
+    "demo": "node demo/engine/run.mts",
+    "demo:doctor": "node demo/engine/run.mts doctor",
+    "demo:all": "npm run demo:fixture && node demo/engine/run.mts all"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.284",
