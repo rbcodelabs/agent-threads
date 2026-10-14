@@ -2261,13 +2261,36 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
   }
 
+  /** Primary action for the current manager tab when the page header is folded into the host sidebar. */
+  private managerAction: { label: string; onAction: () => void } | null = null;
+
   private renderManagerHeader(container: HTMLElement, title: string, description: string, actionLabel: string, onAction: () => void): void {
+    // Hosted in a sidebar that already names the section: skip the big header
+    // and surface the action as a compact button beside the list search.
+    if (this.fixedSection) {
+      this.managerAction = { label: actionLabel, onAction };
+      container.addClass('is-compact');
+      return;
+    }
+    this.managerAction = null;
     const header = container.createDiv({ cls: 'ct-settings-page-header' });
     const copy = header.createDiv();
     copy.createEl('h1', { text: title });
     copy.createEl('p', { text: description });
     const action = header.createEl('button', { text: actionLabel, cls: 'mod-cta', attr: { type: 'button' } });
     action.addEventListener('click', onAction);
+  }
+
+  /** Search box for a manager list, with the tab's primary action as a "+" button when the header is folded away. */
+  private createManagerListToolbar(list: HTMLElement, label: string, placeholder: string): HTMLInputElement {
+    const toolbar = list.createDiv({ cls: 'ct-manager-list-toolbar' });
+    const search = toolbar.createEl('input', { type: 'search', placeholder, attr: { 'aria-label': label } });
+    const action = this.managerAction;
+    if (action) {
+      const add = toolbar.createEl('button', { text: '+', cls: 'mod-cta ct-manager-add', attr: { type: 'button', 'aria-label': action.label, title: action.label } });
+      add.addEventListener('click', action.onAction);
+    }
+    return search;
   }
 
   private createManagerField(
@@ -2279,7 +2302,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const field = container.createEl('label', { cls: 'ct-manager-field' });
     field.createSpan({ text: label, cls: 'ct-manager-field-label' });
     const input = options.textarea
-      ? field.createEl('textarea', { attr: { rows: '6', 'aria-label': label } })
+      ? field.createEl('textarea', { attr: { rows: '4', 'aria-label': label } })
       : field.createEl('input', { type: options.type ?? 'text', attr: { 'aria-label': label } });
     input.value = value;
     if (options.placeholder) input.setAttribute('placeholder', options.placeholder);
@@ -2337,7 +2360,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     }
     const manager = containerEl.createDiv({ cls: 'ct-settings-manager' });
     const list = manager.createEl('section', { cls: 'ct-manager-list', attr: { 'aria-label': 'Projects' } });
-    const search = list.createEl('input', { type: 'search', placeholder: 'Search projects', attr: { 'aria-label': 'Search projects' } });
+    const search = this.createManagerListToolbar(list, 'Search projects', 'Search projects');
     const rows = list.createDiv({ cls: 'ct-manager-list-rows' });
     const renderRows = () => {
       rows.empty();
@@ -2433,7 +2456,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     if (this.selectedSecretName === null || (this.selectedSecretName && !keys.includes(this.selectedSecretName))) this.selectedSecretName = keys[0] ?? '';
     const manager = containerEl.createDiv({ cls: 'ct-settings-manager' });
     const list = manager.createEl('section', { cls: 'ct-manager-list', attr: { 'aria-label': 'Secrets' } });
-    const search = list.createEl('input', { type: 'search', placeholder: 'Search secrets', attr: { 'aria-label': 'Search secrets' } });
+    const search = this.createManagerListToolbar(list, 'Search secrets', 'Search secrets');
     const rows = list.createDiv({ cls: 'ct-manager-list-rows' });
     const mask = (value: string | null) => !value ? 'No value stored' : value.length <= 8 ? '••••••••' : `${value.slice(0, 4)}••••${value.slice(-4)}`;
     const renderRows = () => {
