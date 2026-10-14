@@ -1,3 +1,4 @@
+import { isValidOverviewPath } from './projectOverview';
 import { z } from 'zod';
 // Import from the browser entry point to avoid Node.js-only APIs (e.g. setTimeout().unref())
 // that crash in Electron's renderer context.
@@ -1783,6 +1784,9 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         if (!options.createProject) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'createProject is not available in this context.' }) }], isError: true };
         }
+        if (args.overviewPath !== undefined && !isValidOverviewPath(args.overviewPath)) {
+          throw new Error('overviewPath must be vault-relative and must not contain "..".');
+        }
         const project = options.createProject(args.name, args.vaultFolder, args.description, args.cwdOverride, args.overviewPath);
         return { content: [{ type: 'text' as const, text: JSON.stringify(project, null, 2) }] };
       } catch (err: unknown) {
@@ -1837,7 +1841,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         }
         if (hasOverviewPath) {
           const overviewPath = args.overviewPath === null ? '' : args.overviewPath!.trim();
-          if (overviewPath && (path.posix.isAbsolute(overviewPath) || path.win32.isAbsolute(overviewPath) || overviewPath.split(/[\\/]/).includes('..'))) {
+          if (!isValidOverviewPath(overviewPath)) {
             throw new Error('overviewPath must be vault-relative and must not contain "..".');
           }
           patch.overviewPath = overviewPath || undefined;

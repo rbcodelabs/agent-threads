@@ -1,5 +1,12 @@
 import type { Project } from './types';
 
+/** True for a vault-relative overview path: not absolute (POSIX or Windows) and no `..` segment. Empty is valid (means the default). */
+export function isValidOverviewPath(value: string): boolean {
+  const v = value.trim();
+  if (!v) return true;
+  return !(v.startsWith('/') || v.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(v) || v.split(/[\\/]/).includes('..'));
+}
+
 /** Vault-relative path of the Project overview note (explicit setting, else `<vaultFolder>/_overview.md`). */
 export function resolveProjectOverviewPath(project: Pick<Project, 'vaultFolder' | 'overviewPath'>): string {
   const explicit = project.overviewPath?.trim();

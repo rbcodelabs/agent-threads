@@ -1,3 +1,4 @@
+import { isValidOverviewPath } from './projectOverview';
 import { isAgentHarness } from './types';
 import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
@@ -2379,6 +2380,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       const projectName = name.value.trim();
       const vaultFolder = folder.value.trim();
       if (!projectName || !vaultFolder) { error.textContent = 'Project name and vault folder are required.'; error.style.display = ''; return; }
+      if (!isValidOverviewPath(overview.value)) { error.textContent = 'Overview note must be a vault-relative path without "..".'; error.style.display = ''; return; }
       if (project) this.plugin.manager.updateProject(project.id, { name: projectName, vaultFolder, cwdOverride: cwd.value.trim() || undefined, overviewPath: overview.value.trim() || undefined, description: description.value });
       else this.selectedProjectId = this.plugin.manager.createProject(projectName, vaultFolder, description.value, cwd.value.trim() || undefined, overview.value.trim() || undefined).id;
       await this.plugin.saveSettings();

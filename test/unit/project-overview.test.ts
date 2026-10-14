@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildProjectOverviewContext,
   composeAppendSystemPrompt,
+  isValidOverviewPath,
   readProjectOverview,
   resolveProjectOverviewPath,
 } from '../../src/projectOverview';
@@ -64,5 +65,14 @@ describe('project overview', () => {
     const idx = ['ENV', 'DESC', '## Project overview', 'OVERVIEW', 'GOAL'].map(s => out.indexOf(s));
     expect(idx.every(i => i >= 0)).toBe(true);
     expect([...idx].sort((a, b) => a - b)).toEqual(idx);
+  });
+});
+
+describe('isValidOverviewPath', () => {
+  it('accepts empty and vault-relative paths', () => {
+    for (const ok of ['', '  ', 'Notes/o.md', 'a b/c.md']) expect(isValidOverviewPath(ok)).toBe(true);
+  });
+  it('rejects absolute, drive-letter and .. paths', () => {
+    for (const bad of ['/etc/passwd', '\\\\srv\\x', 'C:\\x.md', '../x.md', 'a/../../x.md', 'a\\..\\x.md']) expect(isValidOverviewPath(bad)).toBe(false);
   });
 });
