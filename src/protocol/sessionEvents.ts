@@ -146,6 +146,14 @@ export interface SessionStateArgs {
   /** Whether a client able to serve host tools is attached. */
   hostAttached: boolean;
   cwd?: string;
+  /** Mirror of `HarnessSession.canIdleReap()` (no turn running, nothing awaiting a human). */
+  canIdleReap?: boolean;
+  /**
+   * Set when the daemon stopped the live session: 'idle' = reaped by the idle
+   * reaper, 'client' = `session.close`. History stays attachable and the next
+   * `session.send` cold-resumes the native session.
+   */
+  closed?: 'idle' | 'client';
 }
 
 /** Events that do not originate from a `SessionCallbacks` entry. */
@@ -153,7 +161,7 @@ export type ControlEvent =
   /** Mirror of the synchronous getters on HarnessSession (not RPCs). */
   | { name: 'session.state'; args: SessionStateArgs }
   /** Closes any request id: first resolver wins; others learn who. */
-  | { name: 'request_resolved'; args: { requestId: string; by?: string; outcome?: 'resolved' | 'canceled' | 'expired' } }
+  | { name: 'request_resolved'; args: { requestId: string; by?: string; outcome?: 'resolved' | 'canceled' | 'expired'; alwaysAllow?: boolean } }
   /** Daemon asks the attached host to run one of its tools (design 3.6). */
   | { name: 'tool.call'; args: { callId: string; threadId: string; tool: string; input: Record<string, unknown> } }
   | { name: 'tool.cancel'; args: { callId: string } };

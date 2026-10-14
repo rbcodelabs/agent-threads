@@ -14,6 +14,7 @@ export type CachedReply = AckFrame | ErrFrame;
 
 export class CommandCache {
   private readonly entries = new Map<string, { at: number; reply: CachedReply }>();
+  private readonly inflight = new Map<string, Promise<CachedReply>>();
 
   constructor(private readonly ttlMs = CMD_CACHE_TTL_MS, private readonly now: () => number = () => Date.now()) {}
 
@@ -34,6 +35,18 @@ export class CommandCache {
 
   set(tokenId: string, cmdId: string, reply: CachedReply): void {
     this.entries.set(this.key(tokenId, cmdId), { at: this.now(), reply });
+  }
+
+  /** A command still running (async commands): a retry of the same cmdId joins it. */
+  pending(tokenId: string, cmdId: string): Promise<CachedReply> | undefined {
+    return this.inflight.get(this.key(tokenId, cmdId));
+  }
+
+  /** Remember an in-flight command's reply, then cache it once it settles. */
+  track(tokenId: string, cmdId: string, reply: Promise<CachedReply>): void {
+    const k = this.key(tokenId, cmdId);
+    this.inflight.set(k, reply);
+    void reply.then((r) => { this.inflight.delete(k); this.entries.set(k, { at: this.now(), reply: r }); });
   }
 
   sweep(): void {

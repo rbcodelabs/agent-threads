@@ -32,6 +32,7 @@ import {
   type WireEvent,
 } from '../src/protocol';
 import type { CommandCache } from './cmdCache';
+import type { ControlRegistry } from './controlRegistry';
 import type { FailureThrottle } from './failureThrottle';
 import { HostError, type ThreadHost, type ThreadJournal } from './threadHost';
 import { scopeSatisfies, type TokenScope, type TokenStore, type VerifiedToken } from './tokenStore';
@@ -40,7 +41,9 @@ import { DAEMON_VERSION, MIN_CLIENT_VERSION } from './version';
 export const MAX_OUTBOUND_BYTES = 4 * 1024 * 1024;
 /** Stop handing frames to the socket once this much is already buffered in it. */
 const SOCKET_HIGH_WATER = 256 * 1024;
-export const CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'harness.fake'];
+/** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
+export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume'];
+export const capabilitiesFor = (harness: string): string[] => [...BASE_CAPABILITIES, `harness.${harness}`];
 
 export interface Timings {
   helloTimeoutMs: number;
@@ -63,6 +66,9 @@ export interface ServerContext {
   cmdCache: CommandCache;
   daemonId: string;
   epoch: string;
+  /** Advertised in `welcome`. */
+  capabilities: string[];
+  controllers: ControlRegistry;
   timings: Timings;
   maxOutboundBytes: number;
   audit(record: Record<string, unknown>): void;
@@ -109,6 +115,8 @@ interface QueueItem {
   entry: JournalEntry<WireEvent>;
   live: boolean;
   text?: string;
+  /** A still-open request re-delivered below the client's cursor. */
+  reopen?: true;
 }
 
 class ChannelSub {
@@ -131,7 +139,10 @@ class ChannelSub {
   }
 }
 
+let nextConnectionId = 0;
+
 export class Connection {
+  readonly id = ++nextConnectionId;
   private auth: VerifiedToken | null = null;
   private readonly preAuth: VerifiedToken | null;
   private helloSeen = false;
@@ -191,6 +202,7 @@ export class Connection {
   private cleanup(notify = true): void {
     this.dead = true;
     this.dropSubscriptions();
+    this.ctx.controllers.releaseAll(this.id);
     if (this.helloTimer) { clearTimeout(this.helloTimer); this.helloTimer = null; }
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
     if (this.pongTimer) { clearTimeout(this.pongTimer); this.pongTimer = null; }
@@ -249,7 +261,7 @@ export class Connection {
       protocol: PROTOCOL_VERSION,
       daemonVersion: DAEMON_VERSION,
       minClientVersion: MIN_CLIENT_VERSION,
-      capabilities: CAPABILITIES,
+      capabilities: this.ctx.capabilities,
       daemonId: this.ctx.daemonId,
       epoch: this.ctx.epoch,
     };
@@ -266,57 +278,127 @@ export class Connection {
     if (cacheable) {
       const hit = this.ctx.cmdCache.get(auth.id, frame.cmdId);
       if (hit) { this.queueControl(encodeFrame(hit)); return; }
+      // A retry that arrives while the original is still running joins it instead of running twice.
+      const running = this.ctx.cmdCache.pending(auth.id, frame.cmdId);
+      if (running) { void running.then((reply) => this.queueControl(encodeFrame(reply))); return; }
     }
-    let reply: AckFrame | ErrFrame;
+    let outcome: unknown;
     try {
-      reply = { v: PROTOCOL_VERSION, type: 'ack', cmdId: frame.cmdId, result: this.dispatch(frame, auth) };
+      outcome = this.dispatch(frame, auth);
     } catch (e) {
-      reply = this.toErr(frame.cmdId, e);
+      this.reply(frame, auth, cacheable, this.toErr(frame.cmdId, e));
+      return;
     }
-    if (cacheable) this.ctx.cmdCache.set(auth.id, frame.cmdId, reply);
+    if (outcome instanceof Promise) {
+      const settled: Promise<AckFrame | ErrFrame> = outcome.then(
+        (result): AckFrame => ({ v: PROTOCOL_VERSION, type: 'ack', cmdId: frame.cmdId, result }),
+        (e): ErrFrame => this.toErr(frame.cmdId, e),
+      );
+      if (cacheable) this.ctx.cmdCache.track(auth.id, frame.cmdId, settled);
+      void settled.then((reply) => this.reply(frame, auth, false, reply));
+      return;
+    }
+    this.reply(frame, auth, cacheable, { v: PROTOCOL_VERSION, type: 'ack', cmdId: frame.cmdId, result: outcome });
+  }
+
+  private reply(frame: ClientFrame, auth: VerifiedToken, cache: boolean, reply: AckFrame | ErrFrame): void {
+    if (cache) this.ctx.cmdCache.set(auth.id, frame.cmdId, reply);
     this.ctx.audit({ event: 'command', tokenId: auth.id, type: frame.type, ok: reply.type === 'ack', ...('threadId' in frame ? { threadId: frame.threadId } : {}) });
     this.queueControl(encodeFrame(reply));
   }
 
   private toErr(cmdId: string, e: unknown): ErrFrame {
     if (e instanceof CommandError) return { v: PROTOCOL_VERSION, type: 'err', cmdId, code: e.code, message: e.message };
-    if (e instanceof HostError) return { v: PROTOCOL_VERSION, type: 'err', cmdId, code: e.code, message: e.message };
+    if (e instanceof HostError) return { v: PROTOCOL_VERSION, type: 'err', cmdId, code: e.code, message: e.message, ...(e.retryable ? { retryable: true } : {}) };
     return { v: PROTOCOL_VERSION, type: 'err', cmdId, code: 'internal', message: e instanceof Error ? e.message : String(e) };
+  }
+
+  /** Mutating commands need to be the thread's single read-write client; a free thread is claimed on first use. */
+  private requireControl(threadId: string, auth: VerifiedToken): void {
+    if (!this.ctx.controllers.claim(threadId, { id: this.id, tokenId: auth.id })) {
+      throw new CommandError('conflict', `thread ${threadId} is controlled by another client; detach it there first (or use a read-only attach)`);
+    }
   }
 
   private dispatch(frame: ClientFrame, auth: VerifiedToken): unknown {
     const { host } = this.ctx;
     switch (frame.type) {
-      case 'attach': return this.attach(frame.ch, frame.afterSeq);
+      case 'attach': return this.attach(frame.ch, frame.afterSeq, auth);
       case 'ack': {
-        if (frame.ch === 'ctl') return {};
+        // Only the controlling client's acks bound retention.
+        if (frame.ch === 'ctl' || !this.ctx.controllers.isController(frame.ch.slice(2), this.id)) return {};
         host.ack(frame.ch.slice(2), frame.seq);
         return {};
       }
       case 'session.open': {
-        const res = host.open(frame.threadId, frame.spec);
-        return { created: res.created, adopted: !res.created, ch: threadChannel(frame.threadId), lastSeq: res.lastSeq, epoch: this.ctx.epoch };
+        this.requireControl(frame.threadId, auth);
+        const res = host.open(frame.threadId, frame.spec, frame.resume);
+        return {
+          created: res.created,
+          adopted: !res.created,
+          ch: threadChannel(frame.threadId),
+          lastSeq: res.lastSeq,
+          epoch: this.ctx.epoch,
+          ...(res.nativeSessionId ? { nativeSessionId: res.nativeSessionId } : {}),
+        };
       }
-      case 'session.send': host.send(frame.threadId, frame.text, frame.userMessageUuid); return {};
-      case 'session.interrupt': host.interrupt(frame.threadId); return {};
-      case 'session.detach':
-      case 'session.close': host.closeSession(frame.threadId); return {};
+      case 'session.send':
+        this.requireControl(frame.threadId, auth);
+        host.send(frame.threadId, frame.text, frame.userMessageUuid, frame.images);
+        return {};
+      case 'session.prepareForSend':
+        this.requireControl(frame.threadId, auth);
+        return host.prepareForSend(frame.threadId, frame.text, frame.images).then(() => ({}));
+      case 'session.interrupt':
+        this.requireControl(frame.threadId, auth);
+        return host.interrupt(frame.threadId).then(() => ({}));
+      case 'session.sendAgentMessage':
+        this.requireControl(frame.threadId, auth);
+        return host.sendAgentMessage(frame.threadId, frame.nativeAgentId, frame.text).then(() => ({}));
+      case 'session.interruptAgent':
+        this.requireControl(frame.threadId, auth);
+        return host.interruptAgent(frame.threadId, frame.nativeAgentId).then(() => ({}));
+      case 'session.setModel':
+        this.requireControl(frame.threadId, auth);
+        return host.setModel(frame.threadId, frame.model).then(() => ({}));
+      case 'session.setPermissionMode':
+        this.requireControl(frame.threadId, auth);
+        return host.setPermissionMode(frame.threadId, frame.mode).then(() => ({}));
+      case 'session.getContextUsage': return host.getContextUsage(frame.threadId).then((usage) => ({ usage }));
+      case 'session.mcpServerStatus': return host.mcpServerStatus(frame.threadId).then((servers) => ({ servers }));
+      case 'session.getUsageSnapshot': return host.getUsageSnapshot(frame.threadId, frame.includeAccountUsage).then((snapshot) => ({ snapshot }));
+      case 'session.detach': {
+        // The client goes away; the session (and any running turn) keeps going.
+        if (!host.has(frame.threadId)) throw new HostError('not_found', `unknown thread ${frame.threadId}`);
+        this.subs.get(threadChannel(frame.threadId))?.unsubscribe?.();
+        this.subs.delete(threadChannel(frame.threadId));
+        this.ctx.controllers.release(frame.threadId, this.id);
+        return {};
+      }
+      case 'session.close':
+        this.requireControl(frame.threadId, auth);
+        host.closeSession(frame.threadId);
+        return {};
       case 'session.list': return { threads: host.list() };
       case 'resolve.permission':
+        this.requireControl(frame.threadId, auth);
         host.resolve(frame.threadId, 'permission', frame.requestId, { allow: frame.allow, alwaysAllow: frame.alwaysAllow }, auth.id);
         return {};
       case 'resolve.question':
+        this.requireControl(frame.threadId, auth);
         host.resolve(frame.threadId, 'question', frame.requestId, { answers: frame.answers }, auth.id);
         return {};
       case 'resolve.plan':
+        this.requireControl(frame.threadId, auth);
         host.resolve(frame.threadId, 'plan', frame.requestId, { approve: frame.approve, editedPlan: frame.editedPlan }, auth.id);
         return {};
       case 'resolve.elicitation':
+        this.requireControl(frame.threadId, auth);
         host.resolve(frame.threadId, 'elicitation', frame.requestId, { result: frame.result }, auth.id);
         return {};
       case 'resolve.openTab':
-        host.resolve(frame.threadId, 'openTab', frame.requestId, { openedThreadId: frame.openedThreadId, title: frame.title }, auth.id);
-        return {};
+        // OpenNewTab is refused when the harness asks (daemon sessions cannot create Geode threads), so nothing is ever pending.
+        throw new CommandError('unknown_command', 'open-tab requests are not supported by this daemon build');
       default:
         throw new CommandError('unknown_command', `${frame.type} is not supported by this daemon build`);
     }
@@ -324,7 +406,7 @@ export class Connection {
 
   // ── attach: replay then live, one ordered queue ──────────────────────────
 
-  private attach(ch: Channel, afterSeq: number): unknown {
+  private attach(ch: Channel, afterSeq: number, auth: VerifiedToken): unknown {
     if (!isChannel(ch)) throw new CommandError('bad_frame', 'invalid channel');
     if (ch === 'ctl') return { lastSeq: 0, lowWater: 0, epoch: this.ctx.epoch };
     const journal: ThreadJournal | null = this.ctx.host.journalFor(ch.slice(2));
@@ -343,11 +425,21 @@ export class Connection {
       const cp = replay.checkpoint;
       sub.resyncText = encodeFrame({ v: PROTOCOL_VERSION, ch, seq: cp.seq, ts: cp.ts, type: 'resync', checkpoint: cp });
     } else {
+      // A request opened at or below the cursor that is still unanswered was seen
+      // by the client, but a client that lost its socket (or its UI) needs the
+      // prompt again. Re-deliver it first, flagged so it is not dropped as a duplicate.
+      for (const entry of journal.checkpoint().openRequests) {
+        if (entry.seq <= afterSeq) sub.items.push({ entry, live: false, reopen: true });
+      }
       for (const entry of replay.entries) sub.items.push({ entry, live: false });
     }
     sub.unsubscribe = journal.subscribe((entry) => this.onLive(sub, entry));
     this.subs.set(ch, sub);
-    const result = { lastSeq: replay.lastSeq, lowWater: journal.lowWater, epoch: this.ctx.epoch, resync: replay.kind === 'resync' };
+    // A control-scope client takes (or, with the same token, takes back) the read-write seat;
+    // anyone else observes. Mutating commands re-check, so this is advisory for the client UI.
+    const controller = scopeSatisfies(auth.scope, 'control')
+      && this.ctx.controllers.claim(ch.slice(2), { id: this.id, tokenId: auth.id });
+    const result = { lastSeq: replay.lastSeq, lowWater: journal.lowWater, epoch: this.ctx.epoch, resync: replay.kind === 'resync', controller };
     // The ack is queued first (control drains before channels) so the client
     // learns the cursor before the first replayed event.
     return result;
@@ -366,8 +458,8 @@ export class Connection {
     this.pump();
   }
 
-  private eventText(ch: Channel, entry: JournalEntry<WireEvent>): string {
-    return encodeFrame({ v: PROTOCOL_VERSION, ch, seq: entry.seq, ts: entry.ts, type: 'event', ...entry.event });
+  private eventText(ch: Channel, entry: JournalEntry<WireEvent>, reopen?: true): string {
+    return encodeFrame({ v: PROTOCOL_VERSION, ch, seq: entry.seq, ts: entry.ts, type: 'event', ...(reopen ? { reopen } : {}), ...entry.event });
   }
 
   // ── outbound ─────────────────────────────────────────────────────────────
@@ -411,7 +503,7 @@ export class Connection {
       const item = sub.next();
       if (!item) continue;
       if (item.live) this.liveBytes -= item.text?.length ?? 0;
-      const text = item.text ?? this.eventText(sub.ch, item.entry);
+      const text = item.text ?? this.eventText(sub.ch, item.entry, item.reopen);
       // Rotate so the next call starts at a different channel.
       this.subs.delete(sub.ch);
       this.subs.set(sub.ch, sub);

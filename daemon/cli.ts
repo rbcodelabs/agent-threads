@@ -27,6 +27,12 @@ serve options:
   --data-dir <dir>       state directory (env DATA_DIR; default /var/lib/agent-threads or ~/.agent-threads)
   --allow-origin <o>     browser Origin allowed to connect (repeatable; env AGENT_THREADS_ALLOWED_ORIGINS, comma separated)
   --i-know-this-is-open  required to bind 0.0.0.0 / ::
+  --workspace <dir>      directory sessions may run in (repeatable; env AGENT_THREADS_WORKSPACES, colon separated; default /srv/workspaces)
+  --allow-bypass         accept permissionMode bypassPermissions (off by default; config.json allowBypass)
+  --max-concurrent-turns <n>   turns running at once (default 3)
+  --idle-reap-minutes <n>      stop a session idle this long; the next send resumes it (default 30, 0 = off)
+  --claude-binary <path> path to the claude CLI (env AGENT_THREADS_CLAUDE_BINARY; default: PATH, ~/.npm-global/bin, ~/.local/bin)
+  --fake-harness         scripted stand-in instead of Claude (tests and smoke runs only)
 
 The token commands accept --data-dir too.
 `;
@@ -44,7 +50,7 @@ interface Parsed {
   bools: Set<string>;
 }
 
-const BOOLEAN_FLAGS = new Set(['i-know-this-is-open', 'help', 'version']);
+const BOOLEAN_FLAGS = new Set(['i-know-this-is-open', 'help', 'version', 'allow-bypass', 'fake-harness']);
 
 export function parseArgs(argv: string[]): Parsed {
   const out: Parsed = { positionals: [], flags: new Map(), bools: new Set() };
@@ -126,6 +132,18 @@ export async function runCli(argv: string[], io: Io = consoleIo): Promise<number
     const origins = p.flags.get('allow-origin');
     if (origins) flags.allowedOrigins = origins;
     if (p.bools.has('i-know-this-is-open')) flags.acknowledgeOpen = true;
+    const workspaces = p.flags.get('workspace');
+    if (workspaces) flags.workspaces = workspaces;
+    if (p.bools.has('allow-bypass')) flags.allowBypass = true;
+    if (p.bools.has('fake-harness')) flags.harness = 'fake';
+    const maxTurns = one(p, 'max-concurrent-turns');
+    if (maxTurns !== undefined) flags.maxConcurrentTurns = Number(maxTurns);
+    const idle = one(p, 'idle-reap-minutes');
+    if (idle !== undefined) flags.idleReapMinutes = Number(idle);
+    const claudeBinary = one(p, 'claude-binary');
+    if (claudeBinary) flags.claudeBinaryPath = claudeBinary;
+    // Everything the daemon writes (journals, logs, session recipes) is private to its user.
+    process.umask(0o077);
 
     let config;
     try { config = resolveConfig({ flags }); } catch (e) { io.err((e as Error).message); return 2; }
@@ -133,7 +151,7 @@ export async function runCli(argv: string[], io: Io = consoleIo): Promise<number
     if (!daemon.tokens.hasActiveTokens) {
       io.out(`No tokens exist yet. Create one with: agent-threads token create --name <name> --scope admin --data-dir ${config.dataDir}`);
     }
-    io.out('Session host: scripted fake harness (real Claude sessions arrive in a later release).');
+    io.out(config.harness === 'fake' ? 'Session host: scripted fake harness (--fake-harness).' : 'Session host: Claude (ThreadSession).');
     await new Promise<void>((resolve) => {
       const shutdown = (sig: string) => {
         io.out(`${sig} received, shutting down`);

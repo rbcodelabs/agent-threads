@@ -1,26 +1,35 @@
 /**
- * Owns every thread's journal and (when open) its session driver.
+ * Owns every thread's journal and (when live) its session driver.
  *
- * Journals outlive sessions: after a daemon restart the history is still
- * attachable from disk, and the client re-opens the session (idempotent by
- * threadId) when it wants to talk to it again.
+ * Journals outlive sessions: after an idle reap or a daemon restart the history
+ * is still attachable from disk. The recipe for bringing the process back (the
+ * validated spec and the native session id) is persisted in `sessions/`, so the
+ * next `session.send` or `session.open` cold-resumes the native session.
  */
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   classifyWireEvent,
   wireJournalPolicy,
+  type ErrorCode,
   type RemoteSessionSpec,
   type WireEvent,
+  type WireImage,
 } from '../src/protocol';
 import { DiskJournal, type DiskJournalOptions } from './diskJournal';
 import { ensureDir, isSafeThreadId } from './fsutil';
 import type { DriverFactory, RequestKind, SessionDriver } from './sessionDriver';
+import { SessionMetaStore, type SessionMeta } from './sessionMeta';
+import { PolicyError, assertPermissionModeAllowed, validateSpec, type SessionPolicy } from './sessionPolicy';
 
 export type ThreadJournal = DiskJournal<WireEvent>;
 
 export class HostError extends Error {
-  constructor(readonly code: 'not_found' | 'conflict' | 'bad_frame', message: string) {
+  constructor(
+    readonly code: Extract<ErrorCode, 'not_found' | 'conflict' | 'bad_frame' | 'forbidden' | 'unknown_command' | 'internal'>,
+    message: string,
+    readonly retryable = false,
+  ) {
     super(message);
     this.name = 'HostError';
   }
@@ -33,12 +42,35 @@ export interface ThreadHostOptions {
   flushMs?: number;
   journalOptions?: Omit<DiskJournalOptions<WireEvent>, 'epoch' | 'flushMs' | 'isBoundary' | 'isTurnInFlight'>;
   now?: () => number;
+  /** Enforced on every open and cold resume when set (the fake harness runs without it). */
+  policy?: SessionPolicy;
+  /** At most this many turns at once; further sends are refused with a retryable `conflict`. */
+  maxConcurrentTurns?: number;
+  /** Idle sessions are stopped after this long (ms). 0 or unset disables the reaper. */
+  idleReapMs?: number;
+  /** Raw SDK events for the daemon's own JSONL log. */
+  rawLog?: (threadId: string, event: Record<string, unknown>) => void;
 }
 
 interface Runtime {
   journal: ThreadJournal;
   driver: SessionDriver | null;
-  spec: RemoteSessionSpec | null;
+  /** Persisted recipe for restarting the process (see sessionMeta.ts). */
+  meta: SessionMeta | null;
+  /** Bumped whenever the live driver is replaced or stopped; late events from an old one are dropped. */
+  gen: number;
+}
+
+export interface ThreadListEntry {
+  threadId: string;
+  lastSeq: number;
+  /** A live driver exists (false after an idle reap or a restart). */
+  open: boolean;
+  turnInFlight: boolean;
+  hasPendingPermission: boolean;
+  cwd?: string;
+  nativeSessionId?: string;
+  lastActivityAt?: number;
 }
 
 /**
@@ -56,6 +88,7 @@ const isBoundary = (e: WireEvent): boolean => {
 export class ThreadHost {
   private readonly threads = new Map<string, Runtime>();
   private readonly journalDir: string;
+  private readonly metaStore: SessionMetaStore;
   private readonly now: () => number;
   private compactTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -63,21 +96,25 @@ export class ThreadHost {
     this.journalDir = join(opts.dataDir, 'journal');
     this.now = opts.now ?? (() => Date.now());
     ensureDir(this.journalDir);
+    this.metaStore = new SessionMetaStore(opts.dataDir);
   }
 
   // ── startup ──────────────────────────────────────────────────────────────
 
   /**
-   * Load every journal and close out turns the previous process left running:
-   * a synthetic `error{daemon_restarted}` + `interrupted` + idle state, and
-   * `expired` for blocking requests nobody can answer any more.
+   * Load every journal and session recipe, and close out turns the previous
+   * process left running: a synthetic `error{daemon_restarted}` +
+   * `interrupted` + idle state, and `expired` for blocking requests nobody can
+   * answer any more. The native session id survives, so the next send resumes.
    * @returns thread ids that needed closing out.
    */
   recover(): string[] {
     const interrupted: string[] = [];
-    for (const id of DiskJournal.listIds(this.journalDir, readdirSync)) {
+    const ids = new Set([...DiskJournal.listIds(this.journalDir, readdirSync), ...this.metaStore.listIds()]);
+    for (const id of ids) {
       if (!isSafeThreadId(id)) continue;
       const rt = this.runtime(id);
+      rt.meta = this.metaStore.load(id);
       const cp = rt.journal.checkpoint();
       const state = cp.state?.event.name === 'session.state' ? cp.state.event.args : null;
       const inFlight = state?.turnInFlight === true || cp.inFlightText !== '';
@@ -89,10 +126,10 @@ export class ThreadHost {
       }
       if (inFlight) {
         rt.journal.append({ name: 'onError', args: [{ name: 'daemon_restarted', message: 'The daemon restarted while this turn was running' }] }, this.now());
-        rt.journal.append({ name: 'onInterrupted', args: [`restart-${id}`] }, this.now());
+        rt.journal.append({ name: 'onInterrupted', args: [rt.meta?.nativeSessionId ?? `restart-${id}`] }, this.now());
         rt.journal.append({
           name: 'session.state',
-          args: { turnInFlight: false, hasPendingPermission: false, hostAttached: false, ...(state?.cwd ? { cwd: state.cwd } : {}) },
+          args: { turnInFlight: false, hasPendingPermission: false, hostAttached: false, canIdleReap: true, ...(state?.cwd ? { cwd: state.cwd } : {}) },
         }, this.now());
         interrupted.push(id);
       }
@@ -111,58 +148,157 @@ export class ThreadHost {
     return this.threads.get(threadId)?.journal ?? null;
   }
 
-  list(): Array<{ threadId: string; lastSeq: number; open: boolean; turnInFlight: boolean }> {
+  list(): ThreadListEntry[] {
     return [...this.threads.entries()].map(([threadId, rt]) => ({
       threadId,
       lastSeq: rt.journal.lastSeq,
       open: rt.driver !== null,
       turnInFlight: rt.driver?.turnInFlight ?? false,
+      hasPendingPermission: rt.driver?.hasPendingPermission ?? false,
+      ...(rt.driver?.cwd ?? rt.meta?.spec.cwd ? { cwd: rt.driver?.cwd ?? rt.meta?.spec.cwd } : {}),
+      ...(rt.meta?.nativeSessionId ? { nativeSessionId: rt.meta.nativeSessionId } : {}),
+      ...(rt.driver ? { lastActivityAt: rt.driver.lastActivityAt } : {}),
     }));
+  }
+
+  /** Turns running right now across all sessions (what `maxConcurrentTurns` bounds). */
+  turnsInFlight(): number {
+    let n = 0;
+    for (const rt of this.threads.values()) if (rt.driver?.turnInFlight) n++;
+    return n;
   }
 
   // ── commands ─────────────────────────────────────────────────────────────
 
-  /** Open-or-adopt: idempotent by threadId. */
-  open(threadId: string, spec: RemoteSessionSpec): { created: boolean; lastSeq: number } {
+  /**
+   * Open-or-adopt: idempotent by threadId. With no live session a new driver is
+   * started, resuming the native session: the one the daemon remembers, else
+   * the client's `resume`, else `spec.resume`. (The daemon's copy is the
+   * freshest: it is updated on every event.)
+   */
+  open(threadId: string, spec: RemoteSessionSpec, resume?: string): { created: boolean; lastSeq: number; nativeSessionId?: string } {
     if (!isSafeThreadId(threadId)) throw new HostError('bad_frame', `invalid threadId "${threadId}"`);
     const rt = this.runtime(threadId);
-    if (rt.driver) return { created: false, lastSeq: rt.journal.lastSeq };
-    rt.spec = spec;
-    rt.driver = this.opts.driverFactory({ threadId, spec, emit: (e) => { rt.journal.append(e, this.now()); } });
-    rt.journal.append({
-      name: 'session.state',
-      args: { turnInFlight: false, hasPendingPermission: false, hostAttached: false, cwd: spec.cwd },
-    }, this.now());
-    return { created: true, lastSeq: rt.journal.lastSeq };
+    if (rt.driver) return { created: false, lastSeq: rt.journal.lastSeq, nativeSessionId: rt.meta?.nativeSessionId };
+    const valid = this.validate(spec);
+    const nativeSessionId = rt.meta?.nativeSessionId ?? resume ?? valid.resume;
+    rt.meta = { threadId, spec: valid, ...(nativeSessionId ? { nativeSessionId } : {}), updatedAt: this.now() };
+    this.metaStore.save(rt.meta);
+    this.startDriver(threadId, rt, valid, nativeSessionId);
+    return { created: true, lastSeq: rt.journal.lastSeq, nativeSessionId };
   }
 
-  send(threadId: string, text: string, userMessageUuid: string): void {
-    const driver = this.driverFor(threadId);
-    if (driver.turnInFlight) throw new HostError('conflict', 'a turn is already in flight');
-    driver.send(text, userMessageUuid);
+  send(threadId: string, text: string, userMessageUuid: string, images?: WireImage[]): void {
+    const rt = this.requireThread(threadId);
+    if (rt.driver?.turnInFlight) throw new HostError('conflict', 'a turn is already in flight');
+    const cap = this.opts.maxConcurrentTurns;
+    if (cap !== undefined && this.turnsInFlight() >= cap) {
+      throw new HostError('conflict', `the daemon is already running ${cap} turns (maxConcurrentTurns); retry shortly`, true);
+    }
+    if (!rt.driver) this.coldResume(threadId, rt);
+    rt.driver!.send(text, userMessageUuid, images);
   }
 
-  interrupt(threadId: string): void {
-    this.driverFor(threadId).interrupt();
+  async prepareForSend(threadId: string, text: string, images?: WireImage[]): Promise<void> {
+    const driver = this.liveDriver(threadId);
+    await driver.prepareForSend?.(text, images);
   }
 
-  resolve(threadId: string, kind: RequestKind, requestId: string, payload: Record<string, unknown>, by: string): void {
+  async interrupt(threadId: string): Promise<void> {
+    const rt = this.requireThread(threadId);
+    // No live session means no turn to stop (reaped, or lost in a restart).
+    await rt.driver?.interrupt();
+  }
+
+  async sendAgentMessage(threadId: string, nativeAgentId: string, text: string): Promise<void> {
+    const d = this.liveDriver(threadId);
+    if (!d.sendAgentMessage) throw new HostError('unknown_command', 'this session cannot message child agents');
+    await d.sendAgentMessage(nativeAgentId, text);
+  }
+
+  async interruptAgent(threadId: string, nativeAgentId: string): Promise<void> {
+    const d = this.liveDriver(threadId);
+    if (!d.interruptAgent) throw new HostError('unknown_command', 'this session cannot interrupt child agents');
+    await d.interruptAgent(nativeAgentId);
+  }
+
+  /** With no live session the change is recorded and applies at the next cold resume. */
+  async setModel(threadId: string, model: string | undefined): Promise<void> {
+    const rt = this.requireThread(threadId);
+    if (rt.driver) {
+      if (!rt.driver.setModel) throw new HostError('unknown_command', 'this session cannot change model');
+      await rt.driver.setModel(model);
+    }
+    this.updateSpec(rt, { model });
+  }
+
+  async setPermissionMode(threadId: string, mode: string): Promise<void> {
+    const rt = this.requireThread(threadId);
+    this.guard(() => { if (this.opts.policy) assertPermissionModeAllowed(mode, this.opts.policy); });
+    if (rt.driver) {
+      if (!rt.driver.setPermissionMode) throw new HostError('unknown_command', 'this session cannot change permission mode');
+      await rt.driver.setPermissionMode(mode);
+    }
+    this.updateSpec(rt, { permissionMode: mode as RemoteSessionSpec['permissionMode'] });
+  }
+
+  async getContextUsage(threadId: string): Promise<unknown> {
+    const rt = this.requireThread(threadId);
+    return rt.driver?.getContextUsage ? rt.driver.getContextUsage() : null;
+  }
+
+  async mcpServerStatus(threadId: string): Promise<Array<{ name: string; status: string }>> {
+    const rt = this.requireThread(threadId);
+    return rt.driver?.mcpServerStatus ? rt.driver.mcpServerStatus() : [];
+  }
+
+  async getUsageSnapshot(threadId: string, includeAccountUsage?: boolean): Promise<unknown> {
+    const rt = this.requireThread(threadId);
+    return rt.driver?.getUsageSnapshot ? rt.driver.getUsageSnapshot(includeAccountUsage) : null;
+  }
+
+  resolve(
+    threadId: string,
+    kind: RequestKind,
+    requestId: string,
+    payload: Record<string, unknown>,
+    by: string,
+  ): void {
     const rt = this.threads.get(threadId);
     if (!rt?.driver) throw new HostError('not_found', `session ${threadId} is not open`);
     if (!rt.driver.resolve(kind, requestId, payload)) {
       throw new HostError('not_found', `no pending ${kind} request ${requestId}`);
     }
-    rt.journal.append({ name: 'request_resolved', args: { requestId, by, outcome: 'resolved' } }, this.now());
+    rt.journal.append({
+      name: 'request_resolved',
+      args: { requestId, by, outcome: 'resolved', ...(payload.alwaysAllow === true ? { alwaysAllow: true } : {}) },
+    }, this.now());
   }
 
-  /** Detach/close: stop the driver; the journal (history) stays attachable. */
+  /** `session.close`: stop the live session. History stays attachable; the next send cold-resumes. */
   closeSession(threadId: string): void {
     const rt = this.threads.get(threadId);
     if (!rt) throw new HostError('not_found', `unknown thread ${threadId}`);
-    if (rt.driver) {
-      rt.driver.close();
-      rt.driver = null;
+    if (rt.driver) this.stop(threadId, rt, 'client');
+  }
+
+  /**
+   * Stop sessions that have been idle (no turn, nothing awaiting a human) for
+   * `idleReapMs`. Their journal and native session survive; the next send
+   * cold-resumes. @returns the reaped thread ids.
+   */
+  reapIdle(at: number = this.now()): string[] {
+    const idleMs = this.opts.idleReapMs;
+    if (!idleMs || idleMs <= 0) return [];
+    const reaped: string[] = [];
+    for (const [id, rt] of this.threads) {
+      const d = rt.driver;
+      if (d && d.canIdleReap() && at - d.lastActivityAt >= idleMs) {
+        this.stop(id, rt, 'idle');
+        reaped.push(id);
+      }
     }
+    return reaped;
   }
 
   /** Retention: the owner acknowledged everything up to `seq`. */
@@ -189,6 +325,7 @@ export class ThreadHost {
     for (const rt of this.threads.values()) {
       rt.driver?.close();
       rt.driver = null;
+      rt.gen++;
       rt.journal.close();
     }
   }
@@ -198,6 +335,7 @@ export class ThreadHost {
     for (const t of this.compactTimers.values()) clearTimeout(t);
     this.compactTimers.clear();
     for (const rt of this.threads.values()) {
+      rt.gen++;
       rt.driver?.close();
       rt.journal.abandon();
     }
@@ -206,10 +344,88 @@ export class ThreadHost {
 
   // ── internals ────────────────────────────────────────────────────────────
 
-  private driverFor(threadId: string): SessionDriver {
-    const driver = this.threads.get(threadId)?.driver;
-    if (!driver) throw new HostError('not_found', `session ${threadId} is not open; send session.open first`);
-    return driver;
+  private requireThread(threadId: string): Runtime {
+    const rt = this.threads.get(threadId);
+    if (!rt) throw new HostError('not_found', `session ${threadId} is not open; send session.open first`);
+    return rt;
+  }
+
+  private liveDriver(threadId: string): SessionDriver {
+    const d = this.requireThread(threadId).driver;
+    if (!d) throw new HostError('not_found', `session ${threadId} is not running (idle or restarted); send a message or session.open to resume it`);
+    return d;
+  }
+
+  private guard<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (err) {
+      if (err instanceof PolicyError) throw new HostError(err.code, err.message);
+      throw err;
+    }
+  }
+
+  private validate(spec: RemoteSessionSpec): RemoteSessionSpec {
+    return this.opts.policy ? this.guard(() => validateSpec(spec, this.opts.policy!)) : spec;
+  }
+
+  private coldResume(threadId: string, rt: Runtime): void {
+    if (!rt.meta) throw new HostError('not_found', `session ${threadId} is not open; send session.open first`);
+    const spec = this.validate(rt.meta.spec);
+    this.startDriver(threadId, rt, spec, rt.meta.nativeSessionId);
+  }
+
+  private startDriver(threadId: string, rt: Runtime, spec: RemoteSessionSpec, resume: string | undefined): void {
+    const gen = ++rt.gen;
+    let driver: SessionDriver;
+    try {
+      driver = this.opts.driverFactory({
+        threadId,
+        spec,
+        resume,
+        // A closed or replaced driver may still fire late callbacks; they must not reach the journal.
+        emit: (e) => { if (rt.gen === gen) rt.journal.append(e, this.now()); },
+        onNativeSessionId: (id) => { if (rt.gen === gen) this.rememberNative(rt, id); },
+        onRawEvent: (e) => { if (rt.gen === gen) this.opts.rawLog?.(threadId, e); },
+      });
+    } catch (err) {
+      rt.gen++;
+      throw new HostError('internal', err instanceof Error ? err.message : String(err));
+    }
+    rt.driver = driver;
+  }
+
+  private rememberNative(rt: Runtime, id: string): void {
+    if (!rt.meta || rt.meta.nativeSessionId === id) return;
+    rt.meta = { ...rt.meta, nativeSessionId: id, updatedAt: this.now() };
+    this.metaStore.save(rt.meta);
+  }
+
+  private updateSpec(rt: Runtime, patch: Partial<RemoteSessionSpec>): void {
+    if (!rt.meta) return;
+    rt.meta = { ...rt.meta, spec: { ...rt.meta.spec, ...patch }, updatedAt: this.now() };
+    this.metaStore.save(rt.meta);
+  }
+
+  /** Stop the live process, leaving the journal consistent: no dangling turn, no dangling request. */
+  private stop(threadId: string, rt: Runtime, reason: 'idle' | 'client'): void {
+    const driver = rt.driver;
+    if (!driver) return;
+    const hadTurn = driver.turnInFlight;
+    const cwd = driver.cwd;
+    try { driver.close(); } catch (err) { console.error(`close ${threadId}:`, err); }
+    rt.gen++;
+    rt.driver = null;
+    for (const req of rt.journal.checkpoint().openRequests) {
+      const requestId = (req.event.args as { requestId?: string; callId?: string }).requestId
+        ?? (req.event.args as { callId?: string }).callId;
+      if (requestId) rt.journal.append({ name: 'request_resolved', args: { requestId, outcome: 'canceled' } }, this.now());
+    }
+    if (hadTurn) rt.journal.append({ name: 'onInterrupted', args: [rt.meta?.nativeSessionId ?? ''] }, this.now());
+    rt.journal.append({
+      name: 'session.state',
+      args: { turnInFlight: false, hasPendingPermission: false, hostAttached: false, canIdleReap: true, closed: reason, ...(cwd ? { cwd } : {}) },
+    }, this.now());
   }
 
   private runtime(threadId: string): Runtime {
@@ -222,7 +438,7 @@ export class ThreadHost {
         isBoundary,
         isTurnInFlight: (cp) => cp.state?.event.name === 'session.state' && cp.state.event.args.turnInFlight === true,
       });
-      rt = { journal, driver: null, spec: null };
+      rt = { journal, driver: null, meta: null, gen: 0 };
       this.threads.set(threadId, rt);
     }
     return rt;

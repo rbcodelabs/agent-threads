@@ -117,6 +117,9 @@ describe('abuse controls', () => {
     expect(await r.cmd('session.open', { threadId: 's2', spec: SPEC })).toMatchObject({ type: 'err', code: 'forbidden' });
 
     const c = await TestClient.connect(td.daemon.url, control);
+    // One read-write client per thread: s1 is still held by the admin token's connection.
+    expect(await c.cmd('session.send', { threadId: 's1', text: 'hi', userMessageUuid: 'u' })).toMatchObject({ type: 'err', code: 'conflict' });
+    expect((await admin.cmd('session.detach', { threadId: 's1' })).type).toBe('ack');
     expect((await c.cmd('session.send', { threadId: 's1', text: 'hi', userMessageUuid: 'u' })).type).toBe('ack');
     expect(await c.cmd('creds.push', { kind: 'x', ttlSec: 1, fields: {} })).toMatchObject({ type: 'err', code: 'forbidden' });
     await Promise.all([admin.close(), r.close(), c.close()]);

@@ -111,10 +111,12 @@ describe('restart recovery', () => {
     expect(events.length).toBeGreaterThanOrEqual(5);
     expect(before).toBeGreaterThanOrEqual(3);
 
-    // The thread is usable again after a re-open, and numbering never reuses a seq.
+    // The thread is usable again without a re-open (cold resume from the stored recipe),
+    // and numbering never reuses a seq.
     const c2 = await TestClient.connect(second.daemon.url, second.adminToken);
-    expect((await c2.cmd('session.send', { threadId: 'crash', text: 'x', userMessageUuid: 'u2' })).code).toBe('not_found');
+    expect((await c2.cmd('session.send', { threadId: 'crash', text: 'x', userMessageUuid: 'u2' })).type).toBe('ack');
     const opened = await c2.cmd('session.open', { threadId: 'crash', spec: SPEC });
+    expect(opened.result).toMatchObject({ created: false, adopted: true });
     expect(opened.result.lastSeq).toBeGreaterThan(last.seq);
     await c2.close();
   });

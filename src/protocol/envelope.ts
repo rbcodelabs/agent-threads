@@ -52,6 +52,13 @@ export type EventFrame = {
   seq: number;
   ts: number;
   type: 'event';
+  /**
+   * Set on a re-delivered request event: the request is still open but its
+   * original `seq` is at or below the client's cursor (it saw it, then lost
+   * the socket). The client must NOT drop it as a duplicate; it re-shows the
+   * prompt if it is not already showing it. Additive within v1.
+   */
+  reopen?: true;
 } & WireEvent;
 
 /** The cursor fell behind the journal; rebuild from the checkpoint then continue live. */

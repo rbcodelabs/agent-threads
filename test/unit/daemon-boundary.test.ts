@@ -11,7 +11,9 @@ import { computeClosure, readCoreFiles, violations } from '../../scripts/core-cl
  */
 const root = resolve(__dirname, '../..');
 const DAEMON_ENTRY = 'daemon/main.ts';
-const ALLOWED_PACKAGES = new Set(['ws']);
+// ws: the transport. @anthropic-ai/claude-agent-sdk: the daemon hosts real ThreadSession, which drives it; it is
+// already bundled by the plugin (esbuild.config.mjs) and by the daemon (esbuild.daemon.mjs).
+const ALLOWED_PACKAGES = new Set(['ws', '@anthropic-ai/claude-agent-sdk']);
 const NODE_BUILTINS = new Set(builtinModules.map((m) => m.replace(/^node:/, '')));
 
 describe('daemon boundary', () => {

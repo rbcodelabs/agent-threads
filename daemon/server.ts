@@ -15,12 +15,16 @@ import { WebSocketServer } from 'ws';
 import { PROTOCOL_VERSION } from '../src/protocol';
 import { CommandCache } from './cmdCache';
 import { isLoopbackAddress, isWildcardAddress, loadOrCreateDaemonId, type DaemonConfig } from './config';
-import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, type ServerContext, type Timings } from './connection';
+import { createClaudeDriverFactory, describeCredentialSource, findClaudeBinary, resolveCredentialEnv } from './claudeDriver';
+import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, capabilitiesFor, type ServerContext, type Timings } from './connection';
+import { ControlRegistry } from './controlRegistry';
 import { fakeHarnessFactory } from './fakeHarness';
 import { FailureThrottle } from './failureThrottle';
 import { ensureDir } from './fsutil';
 import type { DriverFactory } from './sessionDriver';
 import { ThreadHost } from './threadHost';
+import { RawLogWriter } from '../src/RawLogWriter';
+import { setKnownSecretsProvider } from '../src/secretRedaction';
 import { TokenStore } from './tokenStore';
 import { DAEMON_VERSION } from './version';
 
@@ -29,6 +33,8 @@ export interface DaemonOptions {
   driverFactory?: DriverFactory;
   timings?: Partial<Timings>;
   journalFlushMs?: number;
+  /** How often the idle reaper looks (default: half the idle window, at most a minute). */
+  reapCheckMs?: number;
   maxOutboundBytes?: number;
   throttle?: FailureThrottle;
   log?: (line: string) => void;
@@ -64,11 +70,39 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     try { appendFileSync(auditPath, `${JSON.stringify({ ts: Date.now(), ...record })}\n`, { mode: 0o600 }); } catch { /* ignore */ }
   };
 
+  const real = config.harness === 'claude';
+  let driverFactory = options.driverFactory;
+  let rawLog: ((threadId: string, event: Record<string, unknown>) => void) | undefined;
+  if (real) {
+    const env = process.env;
+    // Raw SDK events -> <dataDir>/logs/<threadId>.jsonl (full fidelity, secrets masked). Never on the wire.
+    const writer = new RawLogWriter(() => config.dataDir, () => '.');
+    rawLog = (threadId, event) => {
+      const type = typeof event.type === 'string' ? event.type : 'event';
+      if (!RawLogWriter.shouldLog(type)) return;
+      writer.append(threadId, typeof event.session_id === 'string' ? event.session_id : undefined, type, event);
+    };
+    const credentialEnv = resolveCredentialEnv(env);
+    setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN].filter((v): v is string => !!v));
+    if (!driverFactory) {
+      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, env });
+      const binary = findClaudeBinary(config.claudeBinaryPath, env);
+      log(binary ? `claude CLI: ${binary}` : 'WARNING: claude CLI not found; session.open will fail until it is installed (or set claudeBinaryPath / AGENT_THREADS_CLAUDE_BINARY)');
+      log(`claude credential: ${describeCredentialSource(env)}`);
+    }
+    log(`workspaces: ${config.workspaces.join(', ') || '(none)'}; bypassPermissions ${config.allowBypass ? 'ALLOWED' : 'refused'}; maxConcurrentTurns ${config.maxConcurrentTurns}; idle reap ${config.idleReapMinutes ? `${config.idleReapMinutes} min` : 'off'}`);
+  }
+
   const host = new ThreadHost({
     dataDir: config.dataDir,
     epoch,
-    driverFactory: options.driverFactory ?? fakeHarnessFactory,
+    driverFactory: driverFactory ?? fakeHarnessFactory,
     flushMs: options.journalFlushMs,
+    // The scripted fake has no side effects, so only the real host is policed.
+    ...(real ? { policy: { workspaces: config.workspaces, allowBypass: config.allowBypass } } : {}),
+    maxConcurrentTurns: config.maxConcurrentTurns,
+    idleReapMs: config.idleReapMinutes * 60_000,
+    rawLog,
   });
   const recovered = host.recover();
   for (const id of recovered) log(`recovered thread ${id}: closed in-flight turn as daemon_restarted`);
@@ -80,6 +114,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     cmdCache: new CommandCache(),
     daemonId,
     epoch,
+    capabilities: capabilitiesFor(config.harness),
+    controllers: new ControlRegistry(),
     timings: { ...DEFAULT_TIMINGS, ...options.timings },
     maxOutboundBytes: options.maxOutboundBytes ?? MAX_OUTBOUND_BYTES,
     audit,
@@ -131,6 +167,15 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
 
   const sweep = setInterval(() => ctx.cmdCache.sweep(), 60_000);
   sweep.unref();
+  const idleMs = config.idleReapMinutes * 60_000;
+  const reaper = idleMs > 0
+    ? setInterval(() => {
+      try {
+        for (const id of host.reapIdle()) log(`idle-reaped session ${id}`);
+      } catch (err) { console.error('idle reaper:', err); }
+    }, options.reapCheckMs ?? Math.min(60_000, Math.max(1_000, Math.floor(idleMs / 2))))
+    : null;
+  reaper?.unref();
 
   await new Promise<void>((resolve, reject) => {
     http.once('error', reject);
@@ -160,6 +205,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     recovered,
     async stop() {
       clearInterval(sweep);
+      if (reaper) clearInterval(reaper);
       for (const c of connections) c.closeWith(1001, 'daemon shutting down');
       host.shutdown();
       wss.close();
@@ -167,6 +213,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     },
     async crash() {
       clearInterval(sweep);
+      if (reaper) clearInterval(reaper);
       host.crash();
       for (const ws of wss.clients) ws.terminate();
       wss.close();

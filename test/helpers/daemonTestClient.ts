@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { resolveConfig } from '../../daemon/config';
+import { resolveConfig, type ConfigInputs } from '../../daemon/config';
 import { startDaemon, type DaemonHandle, type DaemonOptions } from '../../daemon/server';
 
 export type Frame = Record<string, any> & { type: string };
@@ -22,12 +22,13 @@ export interface TestDaemon {
 }
 
 export async function startTestDaemon(
-  opts: Partial<DaemonOptions> & { dataDir?: string; allowedOrigins?: string[] } = {},
+  opts: Partial<DaemonOptions> & { dataDir?: string; allowedOrigins?: string[]; config?: NonNullable<ConfigInputs['flags']> } = {},
 ): Promise<TestDaemon> {
   const ownsDir = !opts.dataDir;
   const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), 'agent-threads-test-'));
-  const config = resolveConfig({ flags: { dataDir, port: 0, allowedOrigins: opts.allowedOrigins }, env: {} });
-  const daemon = await startDaemon({ config, journalFlushMs: 5, ...opts });
+  const { config: configFlags, dataDir: _d, allowedOrigins: _o, ...daemonOpts } = opts;
+  const config = resolveConfig({ flags: { dataDir, port: 0, allowedOrigins: opts.allowedOrigins, harness: 'fake', ...configFlags }, env: {} });
+  const daemon = await startDaemon({ config, journalFlushMs: 5, ...daemonOpts });
   const adminToken = daemon.tokens.create('test-admin', 'admin').token;
   let stopped = false;
   return {
