@@ -142,8 +142,6 @@ export async function runCli(argv: string[], io: Io = consoleIo): Promise<number
     if (idle !== undefined) flags.idleReapMinutes = Number(idle);
     const claudeBinary = one(p, 'claude-binary');
     if (claudeBinary) flags.claudeBinaryPath = claudeBinary;
-    // Everything the daemon writes (journals, logs, session recipes) is private to its user.
-    process.umask(0o077);
 
     let config;
     try { config = resolveConfig({ flags }); } catch (e) { io.err((e as Error).message); return 2; }

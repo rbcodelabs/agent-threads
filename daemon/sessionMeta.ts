@@ -6,7 +6,7 @@
  * `sessions/<threadId>.json`, 0600, tmp + rename. The journal is the history;
  * this is only the recipe for restarting the process behind it.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RemoteSessionSpec } from '../src/protocol';
 import { ensureDir, isSafeThreadId, writeFileAtomic } from './fsutil';
@@ -29,6 +29,11 @@ export class SessionMetaStore {
   save(meta: SessionMeta): void {
     if (!isSafeThreadId(meta.threadId)) throw new Error(`invalid threadId "${meta.threadId}"`);
     writeFileAtomic(join(this.dir, `${meta.threadId}.json`), `${JSON.stringify(meta)}\n`);
+  }
+
+  delete(threadId: string): void {
+    if (!isSafeThreadId(threadId)) return;
+    rmSync(join(this.dir, `${threadId}.json`), { force: true });
   }
 
   load(threadId: string): SessionMeta | null {

@@ -4,7 +4,7 @@
  * network). Covers callback -> event mapping, blocking callbacks as durable
  * requests, policy, native-session resume across idle reaps and restarts.
  */
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -94,6 +94,9 @@ describe('policy at the door', () => {
     const c = await client(td);
     expect(await open(c)).toMatchObject({ type: 'err', code: 'internal' });
     expect((await open(c)).message).toMatch(/claude CLI not found/);
+    // No recipe was kept for the failed session, so a send does not retry a start that cannot work.
+    expect(readdirSync(join(td.dataDir, 'sessions'))).toEqual([]);
+    expect(await c.cmd('session.send', { threadId: 't', text: 'x', userMessageUuid: 'u' })).toMatchObject({ type: 'err', code: 'not_found' });
   });
 });
 
@@ -248,6 +251,15 @@ describe('blocking callbacks as durable requests', () => {
     expect(h.interrupts).toBe(1);
     expect((await a.waitFor((f) => f.name === 'request_resolved')).args).toMatchObject({ requestId: req.args.requestId, outcome: 'canceled' });
     await a.waitFor((f) => f.name === 'onInterrupted');
+  });
+
+  it('interrupting an idle session does not reach the harness (ThreadSession latches "interrupted")', async () => {
+    const td = await daemon();
+    const c = await client(td);
+    await open(c);
+    const h = await harness();
+    expect((await c.cmd('session.interrupt', { threadId: 't' })).type).toBe('ack');
+    expect(h.interrupts).toBe(0);
   });
 
   it('ask-question: answers are returned to the harness', async () => {

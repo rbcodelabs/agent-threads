@@ -78,6 +78,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   if (real) {
     const env = process.env;
     // Raw SDK events -> <dataDir>/logs/<threadId>.jsonl (full fidelity, secrets masked). Never on the wire.
+    // The directory is 0700 so the log files inside are private whatever mode appendFile gives them
+    // (a process-wide umask would instead leak into every file the agent creates in a workspace).
+    ensureDir(join(config.dataDir, 'logs'));
     const writer = new RawLogWriter(() => config.dataDir, () => '.');
     rawLog = (threadId, event) => {
       const type = typeof event.type === 'string' ? event.type : 'event';

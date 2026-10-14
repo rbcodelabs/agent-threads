@@ -296,7 +296,9 @@ export class ClaudeSessionDriver implements SessionDriver {
     // The harness is waiting on these; release them first so the interrupt can land.
     this.cancelAllRequests();
     await this.ready;
-    await this.harness.interrupt();
+    // ThreadSession latches "interrupted" until its pump ends, so interrupting an idle
+    // session would make the NEXT turn's result report as interrupted.
+    if (this.turnInFlight) await this.harness.interrupt();
     this.scheduleState();
   }
 

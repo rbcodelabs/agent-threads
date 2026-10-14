@@ -181,10 +181,18 @@ export class ThreadHost {
     const rt = this.runtime(threadId);
     if (rt.driver) return { created: false, lastSeq: rt.journal.lastSeq, nativeSessionId: rt.meta?.nativeSessionId };
     const valid = this.validate(spec);
-    const nativeSessionId = rt.meta?.nativeSessionId ?? resume ?? valid.resume;
+    const previous = rt.meta;
+    const nativeSessionId = previous?.nativeSessionId ?? resume ?? valid.resume;
     rt.meta = { threadId, spec: valid, ...(nativeSessionId ? { nativeSessionId } : {}), updatedAt: this.now() };
     this.metaStore.save(rt.meta);
-    this.startDriver(threadId, rt, valid, nativeSessionId);
+    try {
+      this.startDriver(threadId, rt, valid, nativeSessionId);
+    } catch (err) {
+      // A recipe for a session that never started would make every later send fail the same way.
+      rt.meta = previous;
+      if (previous) this.metaStore.save(previous); else this.metaStore.delete(threadId);
+      throw err;
+    }
     return { created: true, lastSeq: rt.journal.lastSeq, nativeSessionId };
   }
 
