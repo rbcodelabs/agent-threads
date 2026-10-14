@@ -107,6 +107,7 @@ export const CALLBACK_DISPOSITION: Record<keyof SessionCallbacks, CallbackDispos
   onToolResultImages: 'event',
   onTaskEvent: 'event',
   onRawEvent: 'not_on_wire',
+  onStreamReset: 'not_on_wire', // client-local: raised by RemoteHarnessSession on a resync
   onModelFallback: 'event',
   onActiveModel: 'event',
   onModelRefusalFallback: 'event',

@@ -11,7 +11,7 @@ export function createHarnessSession(
   thread: Thread,
   settings: PluginSettings,
   remoteDaemons?: RemoteDaemonResolver,
-  remoteHooks?: Pick<RemoteSessionDeps, 'onPendingChanged' | 'log'>,
+  remoteHooks?: Pick<RemoteSessionDeps, 'onPendingChanged' | 'log' | 'runAtTime'>,
 ): HarnessSession {
   // A remote thread runs on a daemon whatever its harness says.
   if (thread.remote) {

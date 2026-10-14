@@ -64,9 +64,10 @@ export interface HarnessSession {
   /**
    * The host has durably saved everything this session has delivered so far.
    * A remote session uses it to tell the daemon how much of its replay buffer
-   * can be released (the `ack` command).
+   * can be released (the `ack` command). `seq` is the cursor as it stood when the
+   * save was requested (the live cursor may have moved on since); omitted = current.
    */
-  notifyPersisted?(): void;
+  notifyPersisted?(seq?: number): void;
   setModel(model: string | undefined): Promise<void>;
   setPermissionMode(mode: HarnessPermissionMode): Promise<void>;
   getContextUsage(): Promise<HarnessContextUsage | null>;

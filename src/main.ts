@@ -1230,7 +1230,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.register(this.manager.subscribe((threadId, event) => {
       if (event.type !== 'message' && event.type !== 'done' && event.type !== 'error' && event.type !== 'interrupted' && event.type !== 'remote_pending_changed') return;
       if (!this.manager.getThread(threadId)?.remote) return;
-      this.saveSettings().then(() => this.manager.notifyThreadPersisted(threadId)).catch(console.error);
+      // Ack only what the save covers: the cursor as of NOW (the snapshot is taken at or after this
+      // call), not whatever it has moved to by the time the write finishes.
+      const savedThrough = this.manager.getThread(threadId)?.remote?.lastSeq;
+      this.saveSettings().then(() => this.manager.notifyThreadPersisted(threadId, savedThrough)).catch(console.error);
     }));
     const repairedOrchestrators = repairStaleProjectOrchestrators(
       this.manager.getProjects(),

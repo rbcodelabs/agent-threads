@@ -51,6 +51,11 @@ export interface RemoteSessionDeps {
   onPendingChanged?: (pending: boolean) => void;
   /** Test seam for the generated message uuid. */
   newId?: () => string;
+  /**
+   * Run `fn` with the host's clock pinned to `ts` (`ThreadManager.runAtTime`). Replayed events are
+   * dispatched through it so the transcript keeps their original time. Absent = real time.
+   */
+  runAtTime?: <T>(ts: number, fn: () => T) => T;
 }
 
 interface OpenRequest {
@@ -151,7 +156,7 @@ export class RemoteHarnessSession implements HarnessSession {
     this.sub = this.client.subscribe(
       this.threadId,
       {
-        onEvent: (frame, meta) => this.onEvent(frame, meta.reopen),
+        onEvent: (frame, meta) => this.onEvent(frame, meta.reopen, meta.replay),
         onResync: (frame) => this.onResync(frame),
         onAttached: (info) => {
           this.remote.epoch = info.epoch;
@@ -199,8 +204,13 @@ export class RemoteHarnessSession implements HarnessSession {
     }
   }
 
-  notifyPersisted(): void {
-    this.sub?.ack(this.remote.lastSeq);
+  /**
+   * The host saved the thread. Ack the cursor the save covered (`savedThrough`), never past the live
+   * cursor: an event applied after the save was requested is not on disk yet.
+   */
+  notifyPersisted(savedThrough?: number): void {
+    const live = this.remote.lastSeq;
+    this.sub?.ack(savedThrough === undefined ? live : Math.min(savedThrough, live));
   }
 
   private cancelLocalRequests(): void {
@@ -286,14 +296,26 @@ export class RemoteHarnessSession implements HarnessSession {
 
   // ── events ───────────────────────────────────────────────────────────────
 
-  private onEvent(frame: EventFrame, reopen: boolean): void {
+  private onEvent(frame: EventFrame, reopen: boolean, replay: boolean): void {
     if (this.closed) return;
-    if (!reopen) this.trackStream(frame);
-    this.dispatch(frame, reopen);
     if (!reopen) {
-      this.settleSendFlag(frame);
+      this.trackStream(frame);
+      // BEFORE the callbacks: a callback may save the thread (the host persists on every message),
+      // and that snapshot must carry a cursor that already covers the event it just recorded. With
+      // the cursor behind, a quit right after that save replays the event into a transcript that has it.
       this.advanceCursor(frame);
     }
+    // Backlog keeps its original time; a live event is stamped with this machine's clock (the
+    // daemon's clock may differ, and "now" is accurate for something that just happened).
+    this.atEventTime(replay && !reopen ? frame.ts : undefined, () => this.dispatch(frame, reopen));
+    if (!reopen) {
+      this.settleSendFlag(frame);
+      this.syncPending();
+    }
+  }
+
+  private atEventTime<T>(ts: number | undefined, fn: () => T): T {
+    return ts !== undefined && this.deps.runAtTime ? this.deps.runAtTime(ts, fn) : fn();
   }
 
   /** Remember where the open assistant message began so the persisted cursor can stay before it. */
@@ -308,7 +330,6 @@ export class RemoteHarnessSession implements HarnessSession {
   private advanceCursor(frame: EventFrame): void {
     const next = this.streamOpenFrom ?? frame.seq;
     if (next > this.remote.lastSeq) this.remote.lastSeq = next;
-    this.syncPending();
   }
 
   /** Clear the optimistic "turn started" flag once the stream shows the turn really started or ended. */
@@ -463,28 +484,74 @@ export class RemoteHarnessSession implements HarnessSession {
   // ── resync ───────────────────────────────────────────────────────────────
 
   /**
-   * The daemon's journal no longer reaches our cursor. Full reconciliation is
-   * PR 6; this keeps the stream usable: show the text streamed so far, re-offer
-   * open requests, and move the cursor to the checkpoint.
+   * The daemon's journal no longer reaches our cursor (or the daemon's history was reset), so it sent
+   * its folded state instead of the missing events. Reconcile, never replay:
+   *
+   *   - the unfinished assistant message's text is DISCARDED (`onStreamReset`) and re-streamed from
+   *     the checkpoint's in-flight text, so nothing is shown twice;
+   *   - the finalized transcript is KEPT; messages finished while we were away arrive in the
+   *     checkpoint's `recentMessages`, and only those past what we already applied are added (each at
+   *     its original time), so none is lost or duplicated;
+   *   - a request still open on the daemon is re-presented once (dedup by request id); one we are
+   *     still showing that the daemon no longer has open is withdrawn;
+   *   - a turn we thought was running that is not any more is settled from what was recovered.
+   *
+   * Limit: the checkpoint carries the last K messages (default 20), so a client away across more than
+   * K messages of a still-retained turn history misses the oldest ones. The raw log has them all.
    */
   private onResync(frame: ResyncFrame): void {
     if (this.closed) return;
     const cp = frame.checkpoint;
-    this.log(`resync to seq ${cp.seq}`);
+    // What the transcript already holds (the persisted cursor, conservatively before any unfinished message).
+    const applied = this.remote.lastSeq;
+    this.log(`resync to seq ${cp.seq} (applied through ${applied})`);
     this.streamOpenFrom = null;
+    try { this.callbacks?.onStreamReset?.(); } catch (err) { this.log(`onStreamReset threw: ${errText(err)}`); }
+
+    // A cursor AHEAD of the journal means the daemon's history was reset; its seqs are unrelated to
+    // ours, so we cannot tell which messages we already have. Add none rather than risk duplicates.
+    let recovered = 0;
+    if (cp.seq >= applied) {
+      for (const entry of cp.recentMessages) {
+        if (entry.seq <= applied) continue;
+        this.atEventTime(entry.ts, () => this.dispatch({ v: 1, ch: frame.ch, seq: entry.seq, ts: entry.ts, type: 'event', ...entry.event } as EventFrame, false));
+        recovered++;
+      }
+    }
+
     if (cp.inFlightText) {
       this.streamOpenFrom = cp.seq - 1;
       try { this.callbacks?.onToken(cp.inFlightText); } catch (err) { this.log(`onToken threw: ${errText(err)}`); }
     }
+
+    const stillOpen = new Set<string>();
     for (const entry of cp.openRequests) {
+      const id = (entry.event.args as { requestId?: unknown } | undefined)?.requestId;
+      if (typeof id === 'string') stillOpen.add(id);
       this.dispatch({ v: 1, ch: frame.ch, seq: entry.seq, ts: entry.ts, type: 'event', ...entry.event } as EventFrame, true);
     }
+    for (const id of [...this.requests.keys()]) {
+      if (!stillOpen.has(id)) this.onRequestResolved({ requestId: id });
+    }
+
     if (cp.state) this.dispatch({ v: 1, ch: frame.ch, seq: cp.state.seq, ts: cp.state.ts, type: 'event', ...cp.state.event } as EventFrame, false);
-    if (cp.seq > this.remote.lastSeq || cp.seq < this.remote.lastSeq) this.remote.lastSeq = this.streamOpenFrom ?? cp.seq;
-    if (this.turnInFlight && !this.state.turnInFlight) {
-      // We believed a turn was running but the daemon says it is not, and its history no longer
-      // tells us how it ended.
-      this.failTurn(new Error('Lost track of the remote turn: the daemon\'s history moved on while this app was away.'));
+    this.remote.lastSeq = this.streamOpenFrom ?? cp.seq;
+
+    if (this.sendAwaitingState && !this.state.turnInFlight) {
+      // We believed a turn was running; the daemon says it is not, and its history no longer tells us how it ended.
+      this.sendAwaitingState = false;
+      if (recovered > 0) {
+        // It produced output we have just added, so it finished: close it like a normal completion.
+        const sessionId = this.remote.nativeSessionId ?? this.thread.sessionId ?? '';
+        const at = cp.state?.ts ?? cp.ts;
+        try { this.atEventTime(at, () => this.callbacks?.onDone(sessionId, 0, 0, undefined)); } catch (err) { this.log(`onDone threw: ${errText(err)}`); }
+        this.syncPending();
+        this.flushQueue();
+      } else {
+        this.failTurn(new Error('Lost track of the remote turn: the daemon\'s history moved on while this app was away.'));
+      }
+    } else {
+      this.syncPending();
     }
   }
 }

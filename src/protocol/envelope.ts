@@ -59,6 +59,13 @@ export type EventFrame = {
    * prompt if it is not already showing it. Additive within v1.
    */
   reopen?: true;
+  /**
+   * Set on an event delivered from the journal backlog (history the client was away for),
+   * absent on an event delivered live as it happened. `ts` is when the daemon journaled it;
+   * the client uses it to keep the original time of a replayed message instead of the time of
+   * the replay. Additive within v1: an older daemon never sends it (everything reads as live).
+   */
+  replay?: true;
 } & WireEvent;
 
 /** The cursor fell behind the journal; rebuild from the checkpoint then continue live. */

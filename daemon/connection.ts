@@ -473,8 +473,8 @@ export class Connection {
     this.pump();
   }
 
-  private eventText(ch: Channel, entry: JournalEntry<WireEvent>, reopen?: true): string {
-    return encodeFrame({ v: PROTOCOL_VERSION, ch, seq: entry.seq, ts: entry.ts, type: 'event', ...(reopen ? { reopen } : {}), ...entry.event });
+  private eventText(ch: Channel, entry: JournalEntry<WireEvent>, reopen?: true, replay?: true): string {
+    return encodeFrame({ v: PROTOCOL_VERSION, ch, seq: entry.seq, ts: entry.ts, type: 'event', ...(reopen ? { reopen } : {}), ...(replay ? { replay } : {}), ...entry.event });
   }
 
   // ── outbound ─────────────────────────────────────────────────────────────
@@ -518,7 +518,7 @@ export class Connection {
       const item = sub.next();
       if (!item) continue;
       if (item.live) this.liveBytes -= item.text?.length ?? 0;
-      const text = item.text ?? this.eventText(sub.ch, item.entry, item.reopen);
+      const text = item.text ?? this.eventText(sub.ch, item.entry, item.reopen, item.live ? undefined : true);
       // Rotate so the next call starts at a different channel.
       this.subs.delete(sub.ch);
       this.subs.set(sub.ch, sub);

@@ -134,8 +134,10 @@ export interface ChannelHandlers {
   /**
    * A fresh event (`seq` above the cursor), in order. `reopen` is set for a
    * request re-delivered below the cursor: it did not advance the cursor.
+   * `replay` is set for journal backlog (the client was away) as opposed to an event
+   * delivered live; its `frame.ts` is then the original time, not "now".
    */
-  onEvent(frame: EventFrame, meta: { reopen: boolean }): void;
+  onEvent(frame: EventFrame, meta: { reopen: boolean; replay: boolean }): void;
   /** The cursor fell behind the daemon's journal: rebuild from the checkpoint. */
   onResync?(frame: ResyncFrame): void;
   onAttached?(info: AttachInfo): void;
@@ -529,13 +531,13 @@ export class DaemonClient {
     try {
       if (frame.type === 'event' && frame.reopen) {
         // A still-open request seen before: never dropped, never moves the cursor.
-        sub.handlers.onEvent(frame, { reopen: true });
+        sub.handlers.onEvent(frame, { reopen: true, replay: frame.replay === true });
         return;
       }
       const outcome = sub.cursor.accept(frame);
       if (outcome === 'duplicate') return;
       if (outcome === 'resync') sub.handlers.onResync?.(frame as ResyncFrame);
-      else sub.handlers.onEvent(frame as EventFrame, { reopen: false });
+      else sub.handlers.onEvent(frame as EventFrame, { reopen: false, replay: (frame as EventFrame).replay === true });
     } catch (err) {
       // A consumer bug must not wedge the socket loop or lose the cursor.
       this.log(`handler for ${frame.ch} threw: ${errText(err)}`);

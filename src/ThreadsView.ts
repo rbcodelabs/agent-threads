@@ -585,6 +585,10 @@ export class ThreadsView extends ItemView {
         // Once real tokens arrive, clear the sub-agent placeholder label —
         // the token content will replace it when the thread is restored.
         if (buf.subagentLabel) buf.subagentLabel = undefined;
+      } else if (event.type === 'stream_reset') {
+        // Remote resync: the text streamed so far for the unfinished message is stale.
+        const buf = this.streamingBuffers.get(threadId);
+        if (buf) buf.content = '';
       } else if (event.type === 'tool_use') {
         let buf = this.streamingBuffers.get(threadId);
         if (!buf) { buf = { content: '', tools: [] }; this.streamingBuffers.set(threadId, buf); }
@@ -5154,6 +5158,13 @@ export class ThreadsView extends ItemView {
 
       case 'escalated': {
         this.showModelEscalationTip(`⚡ Using ${event.model} for this turn`);
+        break;
+      }
+
+      case 'stream_reset': {
+        // Drop the half-rendered text; the daemon's checkpoint re-streams it as tokens.
+        this.streamingContent = '';
+        this.scheduleStreamingRender();
         break;
       }
 

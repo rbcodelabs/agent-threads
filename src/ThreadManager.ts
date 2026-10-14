@@ -4,6 +4,7 @@ import { mergeDisallowedTools } from './toolRestrictions';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
 import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
+import type { RemoteSessionDeps } from './remote/RemoteHarnessSession';
 import { buildRemoteEnvironmentPrompt } from './remote/sessionSpec';
 import { resolveCodexPermissions, serializableMcpServers, type HarnessContextUsage, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
 import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
@@ -107,6 +108,8 @@ export type ThreadEvent =
   | { type: 'permission_resolved' }
   /** A remote thread's `turnPending` marker flipped: persist so a quit now still re-attaches the turn. */
   | { type: 'remote_pending_changed' }
+  /** A remote resync: whatever the view accumulated for the unfinished assistant message is stale; text re-streams after this. */
+  | { type: 'stream_reset' }
   | { type: 'active_thread_changed' }
   | { type: 'user_message_added'; message: ChatMessage }
   | { type: 'summary_updated' }
@@ -414,6 +417,45 @@ export class ThreadManager {
 
   updateSettings(settings: PluginSettings): void {
     this.settings = settings;
+  }
+
+  // ── clock ──────────────────────────────────────────────────────────────────
+  //
+  // Every timestamp a session callback stamps onto the transcript (message and
+  // compact-marker `timestamp`, `updatedAt`, agent-run events, auth banner) comes
+  // from `now()`, never `Date.now()` directly. A live event is stamped with real
+  // time. An event REPLAYED from a remote daemon's journal (a turn that finished
+  // while this app was closed) is delivered through `runAtTime(ts, ...)` so it
+  // keeps the time it actually happened, instead of every message of a
+  // transcript replayed hours later reading "just now".
+
+  /** Wall clock; replaceable so tests can run time forward without sleeping. */
+  clock: () => number = () => Date.now();
+  private clockOverride: number | null = null;
+
+  /** The time to stamp onto whatever a session callback is recording right now. */
+  now(): number {
+    return this.clockOverride ?? this.clock();
+  }
+
+  /**
+   * Run `fn` (synchronously) with `now()` pinned to `ts`. Pinning is clamped to the
+   * real clock so a daemon whose clock runs ahead cannot stamp the future. Nests;
+   * the previous pin is always restored.
+   */
+  runAtTime<T>(ts: number, fn: () => T): T {
+    const previous = this.clockOverride;
+    this.clockOverride = Number.isFinite(ts) ? Math.min(ts, this.clock()) : previous;
+    try {
+      return fn();
+    } finally {
+      this.clockOverride = previous;
+    }
+  }
+
+  /** `updatedAt` only ever moves forward: replaying an old event must not make a thread look stale. */
+  private touch(thread: Thread): void {
+    thread.updatedAt = Math.max(thread.updatedAt ?? 0, this.now());
   }
 
   /**
@@ -953,14 +995,21 @@ export class ThreadManager {
     return resumed;
   }
 
-  private remoteHooks(thread: Thread): { onPendingChanged: () => void } | undefined {
+  private remoteHooks(thread: Thread): Pick<RemoteSessionDeps, 'onPendingChanged' | 'runAtTime'> | undefined {
     if (!thread.remote) return undefined;
-    return { onPendingChanged: () => this.emit(thread.id, { type: 'remote_pending_changed' }) };
+    return {
+      onPendingChanged: () => this.emit(thread.id, { type: 'remote_pending_changed' }),
+      runAtTime: (ts, fn) => this.runAtTime(ts, fn),
+    };
   }
 
-  /** The host has durably saved this thread's state: a remote session may release its replay buffer. */
-  notifyThreadPersisted(id: string): void {
-    this.sessions.get(id)?.notifyPersisted?.();
+  /**
+   * The host has durably saved this thread's state through `seq`: a remote session may release its
+   * replay buffer up to there. `seq` is the cursor as it stood when the save was REQUESTED; the live
+   * cursor may already be past what that save captured.
+   */
+  notifyThreadPersisted(id: string, seq?: number): void {
+    this.sessions.get(id)?.notifyPersisted?.(seq);
   }
 
   deleteThread(id: string): void {
@@ -2709,7 +2758,7 @@ export class ThreadManager {
   private clearReconnectingStatus(thread: Thread): void {
     if (thread.status === 'reconnecting') {
       thread.status = 'active';
-      thread.updatedAt = Date.now();
+      this.touch(thread);
     }
   }
 
@@ -2756,6 +2805,10 @@ export class ThreadManager {
         this.clearReconnectingStatus(thread);
         this.emit(threadId, { type: 'token', text });
       },
+      onStreamReset: () => {
+        if (!isCurrentGeneration()) return;
+        this.emit(threadId, { type: 'stream_reset' });
+      },
       onToolUse: (record) => {
         if (!isCurrentGeneration()) return;
         this.threadActivity.set(threadId, record.summary);
@@ -2793,14 +2846,14 @@ export class ThreadManager {
           id: crypto.randomUUID(),
           role: 'assistant',
           content,
-          timestamp: Date.now(),
+          timestamp: this.now(),
           agentHarness: harnessAtStart,
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
           toolResultImages: images && images.length > 0 ? [...images] : undefined,
         };
         this.pendingToolResultImages.delete(threadId);
         thread.messages.push(assistantMsg);
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         // Externalize tool-result images to vault files (see sendMessage above).
         this.externalizeMessageImages(threadId, assistantMsg);
         // Surface links the assistant shared in the recent-files pill. Kept in
@@ -2834,11 +2887,11 @@ export class ThreadManager {
             if (remaining.length > 0) this.pendingUserMessageIds.set(threadId, remaining);
             else this.pendingUserMessageIds.delete(threadId);
           }
-          thread.updatedAt = Date.now();
+          this.touch(thread);
           thread.status = 'active';
           return;
         }
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         thread.status = 'waiting';
         thread.streamCloseRetryCount = 0; // TODO: likely vestigial post-Stage-C — see types.ts's doc comment on this field
         thread.rateLimitRetryCount = 0;
@@ -2917,7 +2970,7 @@ export class ThreadManager {
           thread.messages = thread.messages.filter((m) => !idSet.has(m.id));
         }
         this.pendingUserMessageIds.delete(threadId);
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         thread.status = 'waiting';
         // Do NOT update thread.sessionId — the last successful session ID is still valid
         this.threadActivity.delete(threadId);
@@ -2949,7 +3002,7 @@ export class ThreadManager {
         // isn't transport-related — either way it's terminal from
         // ThreadManager's perspective, so there is no longer a second
         // retry-and-requeue branch here.
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         thread.lastError = err.message;
         thread.status = 'error';
         thread.streamCloseRetryCount = 0; // TODO: likely vestigial post-Stage-C — see types.ts's doc comment on this field
@@ -2979,14 +3032,14 @@ export class ThreadManager {
           // reload/crash OR after the user switches threads mid-session,
           // mirroring the pendingPlan pattern.
           thread.pendingQuestions = questions;
-          thread.updatedAt = Date.now();
+          this.touch(thread);
           this.emit(threadId, { type: 'pending_question_changed', questions });
           this.emit(threadId, { type: 'question_ready', questions });
           try {
             return await this.questionHandler(threadId, questions);
           } finally {
             delete thread.pendingQuestions;
-            thread.updatedAt = Date.now();
+            this.touch(thread);
             this.pendingQuestionResolvers.delete(threadId);
             this.emit(threadId, { type: 'pending_question_changed', questions: undefined });
           }
@@ -3026,7 +3079,7 @@ export class ThreadManager {
         // again (see that method's doc comment for why onDone/onError don't
         // also need to clear it).
         thread.status = 'reconnecting';
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'reconnecting', error });
       },
       onRateLimitRetry: (attempt, maxRetries, delayMs) => {
@@ -3040,7 +3093,7 @@ export class ThreadManager {
         // copy (attempt N/M, retrying in Ns).
         thread.status = 'reconnecting';
         thread.rateLimitRetryCount = attempt;
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'rate_limit_retry', attempt, maxRetries, delayMs });
       },
       onAuthRetry: (error) => {
@@ -3049,7 +3102,7 @@ export class ThreadManager {
         // new one re-reads the keychain) and replaying the turn once. Same
         // transient treatment as the other auto-recoveries above.
         thread.status = 'reconnecting';
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'auth_retry', error });
       },
       onAuthRequired: (message) => {
@@ -3057,7 +3110,7 @@ export class ThreadManager {
         // The silent retry failed too. Record the state that drives the
         // in-thread "Sign in to Claude" banner, then settle exactly like any
         // terminal error (the user message stays in the transcript, once).
-        thread.authRequired = { message, at: Date.now() };
+        thread.authRequired = { message, at: this.now() };
         callbacks.onError(new Error(message));
       },
       onVmRouting: (routing, fallbackReason) => {
@@ -3071,12 +3124,12 @@ export class ThreadManager {
           id: crypto.randomUUID(),
           role: 'compact',
           content: '',
-          timestamp: Date.now(),
+          timestamp: this.now(),
           compactTrigger: trigger,
           preTokens,
         };
         thread.messages.push(compactMsg);
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'compact', message: compactMsg });
       },
       onTaskStarted: (taskId, description, skipTranscript, taskType, workflowName, subagentType, parentNativeAgentId, model) => {
@@ -3086,14 +3139,14 @@ export class ThreadManager {
         // if they're still running when the session ends.
         if (skipTranscript) {
           const active = this.activeBgTasks.get(threadId) ?? new Map<string, { description: string; startedAt: number }>();
-          active.set(taskId, { description, startedAt: Date.now() });
+          active.set(taskId, { description, startedAt: this.now() });
           this.activeBgTasks.set(threadId, active);
         }
         if (AgentRunStore.isAgentTask({ skipTranscript, taskType, subagentType })) {
           this.agentRuns.observeStart({
             threadId, harness: harnessAtStart, nativeAgentId: taskId, sessionGeneration: generationAtStart,
             taskId, description, role: subagentType, parentNativeAgentId, model,
-          });
+          }, this.now());
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_started', taskId, description, skipTranscript, taskType, workflowName, subagentType });
@@ -3104,7 +3157,7 @@ export class ThreadManager {
         if (run) {
           if (patch.description) run.description = patch.description;
           const status = patch.status === 'completed' ? 'completed' : patch.status === 'failed' ? 'failed' : patch.status === 'killed' ? 'interrupted' : patch.status === 'pending' ? 'waiting' : 'working';
-          this.agentRuns.observeStatus(threadId, run.harness, taskId, status, undefined, patch.error, Date.now(), generationAtStart);
+          this.agentRuns.observeStatus(threadId, run.harness, taskId, status, undefined, patch.error, this.now(), generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_updated', taskId, ...patch });
@@ -3115,7 +3168,7 @@ export class ThreadManager {
         this.threadActivity.set(threadId, description + suffix);
         const run = this.agentRuns.getByNativeId(threadId, harnessAtStart, taskId, generationAtStart);
         if (run) {
-          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: lastToolName ? 'tool' : 'activity', text: description, toolName: lastToolName, timestamp: Date.now() }, generationAtStart);
+          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: lastToolName ? 'tool' : 'activity', text: description, toolName: lastToolName, timestamp: this.now() }, generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_progress', taskId, description, lastToolName });
@@ -3129,7 +3182,7 @@ export class ThreadManager {
         this.clearPendingBackgroundTask(threadId, taskId);
         const run = this.agentRuns.getByNativeId(threadId, harnessAtStart, taskId, generationAtStart);
         if (run) {
-          this.agentRuns.observeStatus(threadId, run.harness, taskId, status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'interrupted', summary, undefined, Date.now(), generationAtStart);
+          this.agentRuns.observeStatus(threadId, run.harness, taskId, status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'interrupted', summary, undefined, this.now(), generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_notification', taskId, status, summary });
@@ -3142,7 +3195,7 @@ export class ThreadManager {
       onUsage: (usage) => {
         if (!isCurrentGeneration()) return;
         thread.usageSnapshot = usage;
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'usage', usage });
       },
       onActiveModel: (model) => {
@@ -3160,7 +3213,7 @@ export class ThreadManager {
         if (!isCurrentGeneration()) return;
         const run = this.agentRuns.getByNativeId(threadId, harnessAtStart, taskId, generationAtStart);
         if (run) {
-          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: 'activity', text: summary, timestamp: Date.now() }, generationAtStart);
+          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: 'activity', text: summary, timestamp: this.now() }, generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_progress_summary', taskId, summary });
@@ -3174,13 +3227,13 @@ export class ThreadManager {
         // the reduced-capability state here; the adapter owns the matching
         // app-server settings update so there is one live control request.
         thread.permissionMode = 'plan';
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'permission_mode_changed', mode: 'plan' });
       },
       onPlanApprovalCommitted: () => {
         if (!isCurrentGeneration()) return;
         thread.permissionMode = 'default';
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'permission_mode_changed', mode: 'default' });
         delete thread.pendingPlan;
         this.pendingPlanResolvers.delete(threadId);
@@ -3189,7 +3242,7 @@ export class ThreadManager {
       onPlanTransitionError: (error) => {
         if (!isCurrentGeneration()) return;
         thread.lastError = error.message;
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'plan_transition_error', error });
       },
       onPlanReady: (planText, approve, reject) => {
@@ -3197,7 +3250,7 @@ export class ThreadManager {
         // Persist the plan text so the card can be restored after a reload/crash
         // OR after the user switches threads mid-session.
         thread.pendingPlan = planText;
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'pending_plan_changed', planText });
         // Wrap callbacks to clear both the persisted plan and the in-memory
         // resolvers when the user acts on the card.
@@ -3212,14 +3265,14 @@ export class ThreadManager {
             this.setThreadPermissionMode(threadId, 'default');
           }
           delete thread.pendingPlan;
-          thread.updatedAt = Date.now();
+          this.touch(thread);
           this.pendingPlanResolvers.delete(threadId);
           this.emit(threadId, { type: 'pending_plan_changed', planText: undefined });
           approve(editedPlan);
         };
         const wrappedReject = (): boolean => {
           delete thread.pendingPlan;
-          thread.updatedAt = Date.now();
+          this.touch(thread);
           this.pendingPlanResolvers.delete(threadId);
           this.emit(threadId, { type: 'pending_plan_changed', planText: undefined });
           const adapterHadFeedback = reject();
@@ -3318,7 +3371,7 @@ export class ThreadManager {
         tasks.push({ id: event.id, content: event.content, status: status ?? 'pending' });
       }
     }
-    thread.updatedAt = Date.now();
+    this.touch(thread);
   }
 
   /** Skill plugins as HOST paths. VM-routed sessions map these to guest mounts (see skillMounts.ts). */
