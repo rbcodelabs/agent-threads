@@ -94,7 +94,7 @@ test.describe('Run on a daemon: vault folder', () => {
 
 test.describe('Remote daemon dialog: vault folder', () => {
   test('edit dialog shows the vault folder fields and the folder-aware test result', async ({ page }) => {
-    await page.setViewportSize({ width: 760, height: 900 });
+    await page.setViewportSize({ width: 760, height: 1400 });
     await page.goto('file://' + path.resolve('test/harness/settings.html'));
     await page.waitForSelector('.vertical-tab-content');
     await page.evaluate(() => (window as any).__openRemoteDaemonModal());

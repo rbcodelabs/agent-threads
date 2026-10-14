@@ -568,7 +568,7 @@ export class RemoteDaemonModal extends Modal {
     new Setting(contentEl).setName('Default folder').setDesc('Optional. The folder on that machine offered for new threads, for example /srv/workspaces/project.')
       .addText((t) => t.setPlaceholder('/srv/workspaces').setValue(folder).onChange((v) => { folder = v; }));
     new Setting(contentEl).setName('Vault folder on this daemon')
-      .setDesc('Optional. Where a synced copy of your vault lives on that machine, for example /home/rick/vault. Vault threads then default to the same folder there (the daemon must be started with --workspace for it). Changes sync with a delay of up to a few minutes.')
+      .setDesc('Optional. Where a synced copy of your vault lives there, for example /home/rick/vault. The daemon needs --workspace for it. Synced changes lag by minutes.')
       .addText((t) => t.setPlaceholder('/home/rick/vault').setValue(vaultRemote).onChange((v) => { vaultRemote = v; }));
     new Setting(contentEl).setName('Local folder it mirrors')
       .setDesc('Optional. Leave blank to use this vault.')
