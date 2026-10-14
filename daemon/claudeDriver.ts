@@ -197,6 +197,7 @@ export class ClaudeSessionDriver implements SessionDriver {
         this.scheduleState();
       };
     }
+    cb.onStreamReset = () => { /* client-local: the daemon never resyncs itself */ };
     cb.onRawEvent = (event: Record<string, unknown>) => {
       this.touch();
       // Every SDK event carries the session id; the first turn of a session

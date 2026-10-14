@@ -22,7 +22,9 @@ async function allEvents(url: string, token: string, threadId: string, afterSeq 
 
 describe('slow consumer (4408)', () => {
   it('closes a client that does not read, then lets a healthy client resume the whole stream', async () => {
-    const td = await track();
+    // ~100 MB of journal (the tokens, then the finished message repeating them): lift the default 64 MB cap
+    // so this stays a test of backpressure, not of retention.
+    const td = await track({ config: { journalMaxMb: 0 } });
     const ctl = await TestClient.connect(td.daemon.url, td.adminToken);
     await ctl.cmd('session.open', { threadId: 'slow', spec: SPEC });
 
