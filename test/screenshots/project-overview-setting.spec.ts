@@ -66,6 +66,19 @@ test.describe('Project overview note setting', () => {
     })).toBe('QA/Overview/grounding.md');
   });
 
+
+  for (const bad of ['../evil.md', '/etc/passwd', 'a/../../b.md', 'C:\\x.md']) {
+    test(`rejects invalid overview note "${bad}" with an inline error and does not persist`, async ({ page }) => {
+      await openProjects(page);
+      await page.getByLabel('Overview note').fill(bad);
+      await page.getByRole('button', { name: 'Save changes' }).click();
+      await expect(page.getByRole('alert')).toContainText('Overview note must be a vault-relative path');
+      expect(await overviewOf(page, 0)).toBeUndefined();
+      // The form is still open with the user's input intact (not re-rendered/cleared).
+      await expect(page.getByLabel('Overview note')).toHaveValue(bad);
+    });
+  }
+
   test('a narrow 390px viewport keeps the field reachable without horizontal overflow', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await openProjects(page);
