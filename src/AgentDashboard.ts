@@ -168,7 +168,15 @@ export class AgentDashboard extends ItemView {
       subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
       argCompletions: DISPATCH_ARG_COMPLETIONS,
       peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
-      harnessPicker: { initialHarness: this.plugin.settings.agentHarness ?? 'claude', getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [] },
+      harnessPicker: {
+        initialHarness: this.plugin.settings.agentHarness ?? 'claude',
+        getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
+        getLocalCwd: () => {
+          const project = this.manager.getProject(this.selectedProjectId);
+          return project ? this.manager.getProjectCwd(project) : this.plugin.getEffectiveCwd();
+        },
+        getVaultRoot: () => this.manager.vaultRoot,
+      },
       onSend: async ({ text, images, attachment, agentHarness, harnessVmMode, remote }) => {
         // Intercept contributed commands, then core model/goal/loop directives.
         // Apply directives instead of sending command text to the agent verbatim.

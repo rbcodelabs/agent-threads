@@ -9800,6 +9800,9 @@ button.ct-agent-crumb:focus-visible {
   font-family: var(--font-monospace);
 }
 
+.ct-run-on-folder-hint { color: var(--text-faint); }
+.ct-run-on-folder-hint.is-hidden { display: none; }
+
 /* Settings -> Remote daemons */
 .ct-remote-daemon-status {
   display: inline-flex;

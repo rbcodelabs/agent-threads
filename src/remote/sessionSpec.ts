@@ -19,7 +19,8 @@
  */
 import type { HarnessSessionOptions } from '../HarnessSession';
 import type { RemoteSessionSpec } from '../protocol';
-import type { Thread } from '../types';
+import type { RemoteVaultMapping, Thread } from '../types';
+import { isUnderRemoteRoot, normalizePosixPath, relativeWithin } from './vaultMapping';
 
 export function projectSessionOptions(options: HarnessSessionOptions, thread: Thread): RemoteSessionSpec {
   const remote = thread.remote;
@@ -55,17 +56,30 @@ export function projectSessionOptions(options: HarnessSessionOptions, thread: Th
   };
 }
 
+/** What the vault addendum needs to know; absent for threads outside the mirrored vault. */
+export interface RemoteVaultContext {
+  mapping: RemoteVaultMapping;
+  /** Vault-relative folder where completed threads are saved as notes (`settings.vaultFolder`). */
+  vaultFolder?: string;
+  saveThreadsToVault?: boolean;
+}
+
 /**
  * The environment note a remote Claude gets instead of `buildEnvironmentSystemPrompt`
  * (which leads with the Mac's vault root and the vault_* / editor tools that a
  * remote thread does not have yet).
+ *
+ * When `vault` is given AND the remote cwd is inside its `remoteRoot`, the note
+ * also explains that the folder is a synced mirror of the vault and carries the
+ * rules vault sessions follow locally.
  */
 export function buildRemoteEnvironmentPrompt(
   cwd: string,
   daemonName: string,
   hostName: 'Geode' | 'Obsidian' = 'Obsidian',
+  vault?: RemoteVaultContext,
 ): string {
-  return [
+  const lines = [
     `You are running on the remote machine "${daemonName}", driven from the ${hostName} Agent Threads plugin on the user's computer.`,
     '',
     `Working directory: ${cwd}`,
@@ -73,5 +87,25 @@ export function buildRemoteEnvironmentPrompt(
     'Notes:',
     '- You only have this machine\'s own tools (shell, file read/write, search). The user\'s vault and editor tools (vault_*, host_*, workspace_*) are not available in this session.',
     '- All paths are paths on this remote machine.',
-  ].join('\n');
+  ];
+  const addendum = vault && isUnderRemoteRoot(vault.mapping, cwd) ? buildRemoteVaultAddendum(cwd, vault) : [];
+  return [...lines, ...addendum].join('\n');
+}
+
+/** Lines appended to the remote environment prompt for a session working in the mirrored vault. */
+export function buildRemoteVaultAddendum(cwd: string, vault: RemoteVaultContext): string[] {
+  const root = normalizePosixPath(vault.mapping.remoteRoot) ?? vault.mapping.remoteRoot;
+  const inside = relativeWithin(root, cwd);
+  const lines = [
+    '',
+    'Vault (synced mirror):',
+    `- The user's Obsidian vault is mirrored on this machine at ${root}${inside ? ` (your working directory is "${inside}" inside it)` : ''}. Vault-relative paths such as "Daily/2026-05-18.md" are relative to that folder; use absolute paths with file tools.`,
+    '- This is a COPY kept in sync with the user\'s computer in both directions. Changes propagate with a delay of up to about 5 minutes, and a file the user edits on their computer at the same time as you may end up conflicting. Re-read a file right before you edit it, prefer small targeted edits or new files over rewriting existing notes, and do not assume the user sees your change immediately.',
+    '- Never delete or rename vault files unless the user explicitly asks you to.',
+    `- When you create a new file in the vault, add a wikilink to it in today's Daily note (${root}/Daily/YYYY-MM-DD.md) under the "## Claude Sessions" heading (append only; create the note or heading if missing).`,
+  ];
+  if (vault.saveThreadsToVault && vault.vaultFolder) {
+    lines.push(`- Conversation history: completed threads are auto-saved as Markdown notes to "${vault.vaultFolder}/YYYY-MM-DD-<title-slug>.md" in the vault (here: ${root}/${vault.vaultFolder}/). Search that folder to look up prior conversations.`);
+  }
+  return lines;
 }

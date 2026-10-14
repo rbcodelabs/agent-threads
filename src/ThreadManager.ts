@@ -2632,13 +2632,21 @@ export class ThreadManager {
     const remote = thread.remote!;
     const project = thread.projectId ? this.getProject(thread.projectId) : undefined;
     const daemonName = this.remoteDaemons?.nameOf(remote.daemonId) ?? remote.daemonId;
+    const vaultMapping = this.remoteDaemons?.vaultMappingOf?.(remote.daemonId);
     const goalContext = thread.goal
       ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
         'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
         'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
       : '';
     const appendSystemPrompt = [
-      buildRemoteEnvironmentPrompt(remote.remoteCwd, daemonName, this.hostName),
+      buildRemoteEnvironmentPrompt(
+        remote.remoteCwd,
+        daemonName,
+        this.hostName,
+        vaultMapping
+          ? { mapping: vaultMapping, vaultFolder: this.settings.vaultFolder, saveThreadsToVault: this.settings.saveThreadsToVault }
+          : undefined,
+      ),
       project?.description?.trim(),
       goalContext,
     ].filter(Boolean).join('\n\n');

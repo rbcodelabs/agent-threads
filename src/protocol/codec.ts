@@ -103,6 +103,7 @@ const COMMAND_FIELDS: Record<ClientCommandType, FieldSpec> = {
   'session.detach': { threadId: 'S' },
   'session.close': { threadId: 'S' },
   'session.list': {},
+  'path.check': { path: 'S' },
   attach: { ch: 'c', afterSeq: 'i' },
   ack: { ch: 'c', seq: 'i' },
   'session.send': { threadId: 'S', text: 's', userMessageUuid: 'S', images: 'a?' },

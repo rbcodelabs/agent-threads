@@ -25,6 +25,8 @@ export type ClientCommand =
   | { type: 'session.detach'; threadId: string }
   | { type: 'session.close'; threadId: string }
   | { type: 'session.list' }
+  /** Is this folder usable as a session cwd on the daemon? (additive; older daemons answer `unknown_command`.) */
+  | { type: 'path.check'; path: string }
   | { type: 'attach'; ch: Channel; afterSeq: number }
   | { type: 'ack'; ch: Channel; seq: number }
   // Turn
@@ -51,6 +53,21 @@ export type ClientCommand =
   // Credentials (PR 17)
   | { type: 'creds.push'; kind: string; ttlSec: number; fields: Record<string, string> };
 
+/**
+ * Reply to `path.check`. A path outside every workspace reports only
+ * `allowed:false`: a read-scope token must not be able to probe the disk
+ * beyond what sessions may use.
+ */
+export interface PathCheckReply {
+  /** Inside a configured workspace (symlinks followed). */
+  allowed: boolean;
+  /** Only meaningful when `allowed`. */
+  exists: boolean;
+  isDirectory: boolean;
+  /** The workspace is read-only: edits are refused there. */
+  readOnly: boolean;
+}
+
 export type ClientCommandType = ClientCommand['type'];
 
 /** Every command type, for codec dispatch and exhaustiveness tests. */
@@ -60,6 +77,7 @@ export const CLIENT_COMMAND_TYPES: Record<ClientCommandType, true> = {
   'session.detach': true,
   'session.close': true,
   'session.list': true,
+  'path.check': true,
   attach: true,
   ack: true,
   'session.send': true,

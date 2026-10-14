@@ -10,7 +10,14 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import type { RemoteSessionSpec } from '../src/protocol';
 
 export interface SessionPolicy {
+  /** Folders sessions may run in (read-write). */
   workspaces: string[];
+  /**
+   * Folders sessions may run in but not edit through the harness (for example a
+   * synced vault mirror you only want read). Also allowed as cwd; the most
+   * specific root that contains a path decides whether it is read-only.
+   */
+  readOnlyWorkspaces?: string[];
   allowBypass: boolean;
 }
 
@@ -52,9 +59,74 @@ export function assertWithinWorkspaces(path: string, workspaces: readonly string
   return resolved;
 }
 
-export function assertPermissionModeAllowed(mode: string, policy: SessionPolicy): void {
+/** Every root a session may use: read-write first, then read-only. */
+export function allWorkspaceRoots(policy: SessionPolicy): string[] {
+  return [...policy.workspaces, ...(policy.readOnlyWorkspaces ?? [])];
+}
+
+/**
+ * Modes that cannot auto-approve an edit. `acceptEdits`, `bypassPermissions` and
+ * `auto` can, so they are refused in a read-only workspace; `default` asks,
+ * `plan` cannot edit, `dontAsk` denies anything not pre-approved.
+ */
+export const READ_ONLY_PERMISSION_MODES: ReadonlySet<string> = new Set(['default', 'plan', 'dontAsk']);
+/** The harness's file-editing tools, denied in a read-only workspace. Shell commands are NOT covered (see docs). */
+export const READ_ONLY_DENIED_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'] as const;
+
+/**
+ * Is `realPath` (already symlink-resolved) read-only under `policy`? The most
+ * specific root containing it wins, so a read-write workspace nested inside a
+ * read-only one stays writable.
+ */
+export function isReadOnlyPath(realPath: string, policy: SessionPolicy): boolean {
+  let best: { depth: number; readOnly: boolean } | undefined;
+  const consider = (roots: readonly string[], readOnly: boolean): void => {
+    for (const root of roots.map(realOrResolved)) {
+      if (!isWithin(root, realPath)) continue;
+      const depth = root.length;
+      // Ties go to read-only: a path listed both ways is treated as the safer one.
+      if (!best || depth > best.depth || (depth === best.depth && readOnly)) best = { depth, readOnly };
+    }
+  };
+  consider(policy.workspaces, false);
+  consider(policy.readOnlyWorkspaces ?? [], true);
+  return best?.readOnly ?? false;
+}
+
+export interface PathAccess {
+  allowed: boolean;
+  exists: boolean;
+  isDirectory: boolean;
+  readOnly: boolean;
+}
+
+/**
+ * What `path.check` reports. Never throws. A path outside every workspace
+ * reveals nothing about the disk beyond `allowed:false`.
+ */
+export function describePathAccess(path: string, policy: SessionPolicy): PathAccess {
+  const none: PathAccess = { allowed: false, exists: false, isDirectory: false, readOnly: false };
+  if (typeof path !== 'string' || !isAbsolute(path)) return none;
+  const resolved = resolve(path);
+  const roots = allWorkspaceRoots(policy).map(realOrResolved);
+  let real: string;
+  try { real = realpathSync(resolved); } catch {
+    // Missing: it may still be inside a workspace (a useful answer), judged lexically.
+    const inside = roots.some((r) => isWithin(r, resolved));
+    return inside ? { allowed: true, exists: false, isDirectory: false, readOnly: isReadOnlyPath(resolved, policy) } : none;
+  }
+  if (!roots.some((r) => isWithin(r, real))) return none;
+  let isDirectory = false;
+  try { isDirectory = statSync(real).isDirectory(); } catch { /* raced away */ }
+  return { allowed: true, exists: true, isDirectory, readOnly: isReadOnlyPath(real, policy) };
+}
+
+export function assertPermissionModeAllowed(mode: string, policy: SessionPolicy, opts: { readOnly?: boolean } = {}): void {
   if (mode === 'bypassPermissions' && !policy.allowBypass) {
     throw new PolicyError('forbidden', 'bypassPermissions is disabled on this daemon (set allowBypass in config.json to enable it)');
+  }
+  if (opts.readOnly && !READ_ONLY_PERMISSION_MODES.has(mode)) {
+    throw new PolicyError('forbidden', `permission mode "${mode}" is refused in a read-only workspace on this daemon; use default, plan or dontAsk`);
   }
 }
 
@@ -85,14 +157,27 @@ export function validateSpec(spec: RemoteSessionSpec, policy: SessionPolicy): Re
   if (spec.harness !== 'claude') {
     throw new PolicyError('bad_frame', `harness "${String(spec.harness)}" is not supported by this daemon build (claude only)`);
   }
-  assertPermissionModeAllowed(spec.permissionMode, policy);
-  const cwd = assertWithinWorkspaces(spec.cwd, policy.workspaces, 'cwd');
+  const roots = allWorkspaceRoots(policy);
+  const cwd = assertWithinWorkspaces(spec.cwd, roots, 'cwd');
   const additionalDirectories = (spec.additionalDirectories ?? []).map((d) =>
-    assertWithinWorkspaces(d, policy.workspaces, 'additionalDirectories entry'));
+    assertWithinWorkspaces(d, roots, 'additionalDirectories entry'));
+  // One read-only directory makes the whole session read-only: the edit tools are not per-directory.
+  const readOnly = specIsReadOnly({ cwd, additionalDirectories }, policy);
+  assertPermissionModeAllowed(spec.permissionMode, policy, { readOnly });
+  const disallowedTools = readOnly
+    ? [...new Set([...(spec.disallowedTools ?? []), ...READ_ONLY_DENIED_TOOLS])]
+    : spec.disallowedTools;
   return {
     ...spec,
     cwd,
+    ...(disallowedTools ? { disallowedTools } : {}),
     ...(additionalDirectories.length ? { additionalDirectories } : { additionalDirectories: undefined }),
     extraEnvRaw: sanitizeExtraEnv(spec.extraEnvRaw ?? '').text,
   };
+}
+
+/** True when the session's cwd or any additional directory is in a read-only workspace. */
+export function specIsReadOnly(spec: Pick<RemoteSessionSpec, 'cwd' | 'additionalDirectories'>, policy: SessionPolicy): boolean {
+  if (!(policy.readOnlyWorkspaces?.length)) return false;
+  return [spec.cwd, ...(spec.additionalDirectories ?? [])].some((d) => isReadOnlyPath(realOrResolved(d), policy));
 }

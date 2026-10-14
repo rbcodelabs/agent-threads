@@ -16,6 +16,7 @@ import { PROTOCOL_VERSION } from '../src/protocol';
 import { CommandCache } from './cmdCache';
 import { isLoopbackAddress, isWildcardAddress, loadOrCreateDaemonId, type DaemonConfig } from './config';
 import { createClaudeDriverFactory, describeCredentialSource, findClaudeBinary, resolveCredentialEnv } from './claudeDriver';
+import { describePathAccess, type SessionPolicy } from './sessionPolicy';
 import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, capabilitiesFor, type ServerContext, type Timings } from './connection';
 import { ControlRegistry } from './controlRegistry';
 import { fakeHarnessFactory } from './fakeHarness';
@@ -95,16 +96,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       log(binary ? `claude CLI: ${binary}` : 'WARNING: claude CLI not found; session.open will fail until it is installed (or set claudeBinaryPath / AGENT_THREADS_CLAUDE_BINARY)');
       log(`claude credential: ${describeCredentialSource(env)}`);
     }
-    log(`workspaces: ${config.workspaces.join(', ') || '(none)'}; bypassPermissions ${config.allowBypass ? 'ALLOWED' : 'refused'}; maxConcurrentTurns ${config.maxConcurrentTurns}; idle reap ${config.idleReapMinutes ? `${config.idleReapMinutes} min` : 'off'}`);
+    log(`workspaces: ${config.workspaces.join(', ') || '(none)'}${config.readOnlyWorkspaces.length ? `; read-only workspaces: ${config.readOnlyWorkspaces.join(', ')}` : ''}; bypassPermissions ${config.allowBypass ? 'ALLOWED' : 'refused'}; maxConcurrentTurns ${config.maxConcurrentTurns}; idle reap ${config.idleReapMinutes ? `${config.idleReapMinutes} min` : 'off'}`);
   }
 
+  const sessionPolicy: SessionPolicy = { workspaces: config.workspaces, readOnlyWorkspaces: config.readOnlyWorkspaces, allowBypass: config.allowBypass };
   const host = new ThreadHost({
     dataDir: config.dataDir,
     epoch,
     driverFactory: driverFactory ?? fakeHarnessFactory,
     flushMs: options.journalFlushMs,
     // The scripted fake has no side effects, so only the real host is policed.
-    ...(real ? { policy: { workspaces: config.workspaces, allowBypass: config.allowBypass } } : {}),
+    ...(real ? { policy: sessionPolicy } : {}),
     maxConcurrentTurns: config.maxConcurrentTurns,
     idleReapMs: options.idleReapMs ?? config.idleReapMinutes * 60_000,
     rawLog,
@@ -121,6 +123,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     epoch,
     capabilities: capabilitiesFor(config.harness),
     controllers: new ControlRegistry(),
+    checkPath: (path) => describePathAccess(path, sessionPolicy),
     timings: { ...DEFAULT_TIMINGS, ...options.timings },
     maxOutboundBytes: options.maxOutboundBytes ?? MAX_OUTBOUND_BYTES,
     audit,

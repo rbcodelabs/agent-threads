@@ -20,7 +20,7 @@ import { DiskJournal, type DiskJournalOptions } from './diskJournal';
 import { ensureDir, isSafeThreadId } from './fsutil';
 import type { DriverFactory, RequestKind, SessionDriver } from './sessionDriver';
 import { SessionMetaStore, type SessionMeta } from './sessionMeta';
-import { PolicyError, assertPermissionModeAllowed, validateSpec, type SessionPolicy } from './sessionPolicy';
+import { PolicyError, assertPermissionModeAllowed, specIsReadOnly, validateSpec, type SessionPolicy } from './sessionPolicy';
 
 export type ThreadJournal = DiskJournal<WireEvent>;
 
@@ -242,7 +242,10 @@ export class ThreadHost {
 
   async setPermissionMode(threadId: string, mode: string): Promise<void> {
     const rt = this.requireThread(threadId);
-    this.guard(() => { if (this.opts.policy) assertPermissionModeAllowed(mode, this.opts.policy); });
+    this.guard(() => {
+      const policy = this.opts.policy;
+      if (policy) assertPermissionModeAllowed(mode, policy, { readOnly: !!rt.meta && specIsReadOnly(rt.meta.spec, policy) });
+    });
     if (rt.driver) {
       if (!rt.driver.setPermissionMode) throw new HostError('unknown_command', 'this session cannot change permission mode');
       await rt.driver.setPermissionMode(mode);

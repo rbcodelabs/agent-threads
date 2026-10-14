@@ -28,6 +28,7 @@ serve options:
   --allow-origin <o>     browser Origin allowed to connect (repeatable; env AGENT_THREADS_ALLOWED_ORIGINS, comma separated)
   --i-know-this-is-open  required to bind 0.0.0.0 / ::
   --workspace <dir>      directory sessions may run in (repeatable; env AGENT_THREADS_WORKSPACES, colon separated; default /srv/workspaces)
+  --readonly-workspace <dir>  like --workspace, but the harness's edit tools are denied and acceptEdits/auto/bypass modes are refused there (repeatable; env AGENT_THREADS_READONLY_WORKSPACES; shell commands are not blocked)
   --allow-bypass         accept permissionMode bypassPermissions (off by default; config.json allowBypass)
   --max-concurrent-turns <n>   turns running at once (default 3)
   --idle-reap-minutes <n>      stop a session idle this long; the next send resumes it (default 30, 0 = off)
@@ -134,6 +135,8 @@ export async function runCli(argv: string[], io: Io = consoleIo): Promise<number
     if (p.bools.has('i-know-this-is-open')) flags.acknowledgeOpen = true;
     const workspaces = p.flags.get('workspace');
     if (workspaces) flags.workspaces = workspaces;
+    const readOnlyWorkspaces = p.flags.get('readonly-workspace');
+    if (readOnlyWorkspaces) flags.readOnlyWorkspaces = readOnlyWorkspaces;
     if (p.bools.has('allow-bypass')) flags.allowBypass = true;
     if (p.bools.has('fake-harness')) flags.harness = 'fake';
     const maxTurns = one(p, 'max-concurrent-turns');

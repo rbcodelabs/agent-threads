@@ -1,5 +1,6 @@
 import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, type AgentHarness, type HarnessVmMode, type RemoteDaemonConfig } from './types';
 import { resolveRunOn, runOnSuffix, type RunOnRemote, type RunOnSelection } from './remote/runOn';
+import { suggestRemoteCwd } from './remote/vaultMapping';
 import { App, setIcon, setTooltip, Notice } from 'obsidian';
 import type { ImageAttachment, ImageMediaType } from './types';
 import { MAX_ATTACHMENT_BYTES } from './attachmentUtils';
@@ -116,6 +117,13 @@ export interface DispatchInputOptions {
     initialHarness: AgentHarness;
     /** Configured remote daemons; when non-empty the menu offers a "Run on" section. */
     getRemoteDaemons?: () => RemoteDaemonConfig[];
+    /**
+     * Where a thread started now would run on this computer (the selected Project's folder, else
+     * the default folder), and this vault's root. With a daemon's vault mapping they pre-fill the
+     * remote folder: a vault folder maps to the same folder in the daemon's vault mirror.
+     */
+    getLocalCwd?: () => string | undefined;
+    getVaultRoot?: () => string | undefined;
   };
   /**
    * Called on every keydown/keyup to retrieve the current push-to-talk hotkey
@@ -193,6 +201,8 @@ export class DispatchInput {
   private selectedVmMode: RunModeChoice | undefined;
   /** Sticky "Run on" choice: this computer (undefined) or a remote daemon plus a folder on it. */
   private selectedRunOn: RunOnSelection = {};
+  /** The user typed in the remote folder field, so the suggestion no longer overwrites it. */
+  private runOnCwdEdited = false;
   private harnessMenu: HTMLElement | null = null;
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressNextSendClick = false;
@@ -639,6 +649,12 @@ export class DispatchInput {
     return this.selectedHarness === 'claude' ? this.selectedVmMode : undefined;
   }
 
+  /** Default remote folder for `daemon`: its mapped vault folder when we are in the vault, else its default folder. */
+  private suggestedRemoteCwd(daemon: RemoteDaemonConfig): { cwd: string; fromVault: boolean } {
+    const picker = this.options.harnessPicker;
+    return suggestRemoteCwd(daemon, picker?.getLocalCwd?.(), picker?.getVaultRoot?.());
+  }
+
   private remoteDaemons(): RemoteDaemonConfig[] {
     return this.options.harnessPicker?.getRemoteDaemons?.() ?? [];
   }
@@ -725,6 +741,9 @@ export class DispatchInput {
   private renderRunOnSection(menu: HTMLElement, daemons: RemoteDaemonConfig[]): void {
     menu.createDiv({ cls: 'ct-harness-menu-separator', attr: { role: 'separator' } });
     menu.createDiv({ cls: 'ct-harness-menu-heading', text: 'Run on' });
+    // The Project selection may have changed since the menu was last open.
+    const selected = daemons.find((d) => d.id === this.selectedRunOn.daemonId);
+    if (selected && !this.runOnCwdEdited) this.selectedRunOn = { daemonId: selected.id, cwd: this.suggestedRemoteCwd(selected).cwd };
     const choices: Array<{ id: string | undefined; label: string; icon: string }> = [
       { id: undefined, label: 'This computer', icon: 'laptop' },
       ...daemons.map((d) => ({ id: d.id, label: d.name, icon: 'server' })),
@@ -745,7 +764,11 @@ export class DispatchInput {
         event.preventDefault();
         event.stopPropagation();
         const daemon = daemons.find((d) => d.id === choice.id);
-        this.selectedRunOn = choice.id ? { daemonId: choice.id, cwd: this.selectedRunOn.cwd ?? daemon?.defaultCwdRoot ?? '' } : {};
+        if (!choice.id) this.runOnCwdEdited = false;
+        const cwd = this.runOnCwdEdited && this.selectedRunOn.cwd !== undefined
+          ? this.selectedRunOn.cwd
+          : (daemon ? this.suggestedRemoteCwd(daemon).cwd : '');
+        this.selectedRunOn = choice.id ? { daemonId: choice.id, cwd } : {};
         if (!choice.id) this.closeHarnessMenu(true);
         else this.refreshRunOnFolderRow(menu, daemons);
         this.renderHarnessIdentity();
@@ -769,7 +792,19 @@ export class DispatchInput {
       attr: { id: 'ct-run-on-folder-input', type: 'text', placeholder: '/srv/workspaces/project', spellcheck: 'false', 'aria-label': `Folder on ${daemon.name}` },
     });
     input.value = this.selectedRunOn.cwd ?? '';
-    input.addEventListener('input', () => { this.selectedRunOn = { daemonId: daemon.id, cwd: input.value }; });
+    const suggestion = this.suggestedRemoteCwd(daemon);
+    const hint = row.createDiv({ cls: 'ct-run-on-folder-hint', attr: { 'data-testid': 'run-on-folder-hint' } });
+    const refreshHint = (): void => {
+      const show = suggestion.fromVault && input.value === suggestion.cwd;
+      hint.toggleClass('is-hidden', !show);
+      hint.setText(show ? `Same folder as in your vault, in ${daemon.name}'s copy of it.` : '');
+    };
+    refreshHint();
+    input.addEventListener('input', () => {
+      this.runOnCwdEdited = true;
+      this.selectedRunOn = { daemonId: daemon.id, cwd: input.value };
+      refreshHint();
+    });
     input.addEventListener('keydown', (event) => {
       event.stopPropagation();
       if (event.key === 'Enter') { event.preventDefault(); this.closeHarnessMenu(true); }

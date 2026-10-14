@@ -38,6 +38,7 @@ import {
   type ErrFrame,
   type ErrorCode,
   type EventFrame,
+  type PathCheckReply,
   type ResyncFrame,
   type WelcomeFrame,
 } from '../protocol';
@@ -687,13 +688,21 @@ function errText(err: unknown): string {
 
 // ── one-shot probe (Settings -> Test connection) ────────────────────────────
 
+/** What `path.check` came back with; `unsupported` = a daemon from before the command existed. */
+export type ProbePathCheck = PathCheckReply | { unsupported: true } | { failed: string };
+
 export type ProbeResult =
-  | { ok: true; info: DaemonInfo }
+  | { ok: true; info: DaemonInfo; pathCheck?: ProbePathCheck }
   | { ok: false; status: ConnectionStatus; detail: string; info?: DaemonInfo };
 
 /** Connect once, report what the daemon said, disconnect. Never retries. */
 export function probeDaemon(
-  options: Pick<DaemonClientOptions, 'url' | 'createSocket' | 'clientVersion' | 'client'> & { token: string; timeoutMs?: number },
+  options: Pick<DaemonClientOptions, 'url' | 'createSocket' | 'clientVersion' | 'client'> & {
+    token: string;
+    timeoutMs?: number;
+    /** After connecting, also ask the daemon whether this folder is usable (`path.check`). */
+    checkPath?: string;
+  },
 ): Promise<ProbeResult> {
   return new Promise<ProbeResult>((resolve) => {
     const client = new DaemonClient({
@@ -713,7 +722,19 @@ export function probeDaemon(
       resolve(r);
     };
     client.onState((s) => {
-      if (s.status === 'connected' && s.info) finish({ ok: true, info: s.info });
+      if (s.status === 'connected' && s.info) {
+        const info = s.info;
+        if (options.checkPath === undefined) { finish({ ok: true, info }); return; }
+        client.command('path.check', { path: options.checkPath }, { timeoutMs: options.timeoutMs ?? 8000 })
+          .then((r) => finish({ ok: true, info, pathCheck: r as unknown as PathCheckReply }))
+          .catch((err: unknown) => finish({
+            ok: true,
+            info,
+            pathCheck: err instanceof DaemonCommandError && err.code === 'unknown_command'
+              ? { unsupported: true }
+              : { failed: errText(err) },
+          }));
+      }
       else if (s.status === 'unauthorized' || s.status === 'incompatible' || s.status === 'unreachable' || s.status === 'closed') {
         finish({ ok: false, status: s.status, detail: s.detail ?? s.status, info: s.info });
       }

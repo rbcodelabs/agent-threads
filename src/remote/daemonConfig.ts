@@ -4,8 +4,9 @@
  * Settings class so they are unit-testable and the screenshot harness can
  * reuse the exact strings.
  */
-import type { RemoteDaemonConfig } from '../types';
-import type { ProbeResult } from './DaemonClient';
+import type { RemoteDaemonConfig, RemoteVaultMapping } from '../types';
+import type { ProbePathCheck, ProbeResult } from './DaemonClient';
+import { normalizePosixPath } from './vaultMapping';
 
 export function slugifyDaemonName(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'daemon';
@@ -69,4 +70,60 @@ export function describeProbe(result: ProbeResult): { tone: 'ok' | 'error'; text
     case 'incompatible': return { tone: 'error', text: `Incompatible: ${result.detail}` };
     default: return { tone: 'error', text: `Could not connect: ${result.detail}` };
   }
+}
+
+export type VaultMappingCheck =
+  | { ok: true; mapping: RemoteVaultMapping | undefined }
+  | { ok: false; field: 'localRoot' | 'remoteRoot'; reason: string };
+
+/**
+ * Validate the "Vault on this daemon" fields. Both blank = no mapping. The
+ * remote root must be a real absolute folder (not "/", no `..`); the local
+ * root is optional and defaults to this vault's root at use time.
+ */
+export function checkVaultMappingInput(input: { localRoot?: string; remoteRoot?: string }): VaultMappingCheck {
+  const remoteRaw = (input.remoteRoot ?? '').trim();
+  const localRaw = (input.localRoot ?? '').trim();
+  if (!remoteRaw && !localRaw) return { ok: true, mapping: undefined };
+  if (!remoteRaw) return { ok: false, field: 'remoteRoot', reason: 'Enter the vault folder on the daemon machine, or clear the local folder too.' };
+  if (/(^|\/)\.\.(\/|$)/.test(remoteRaw)) return { ok: false, field: 'remoteRoot', reason: 'The vault folder on the daemon cannot contain "..".' };
+  const remoteRoot = normalizePosixPath(remoteRaw);
+  if (remoteRoot === undefined) return { ok: false, field: 'remoteRoot', reason: 'Use an absolute path on the daemon machine (it starts with "/"), for example /home/rick/vault.' };
+  if (remoteRoot === '/') return { ok: false, field: 'remoteRoot', reason: 'That is the whole disk. Use the vault folder itself, for example /home/rick/vault.' };
+  let localRoot: string | undefined;
+  if (localRaw) {
+    if (/(^|\/)\.\.(\/|$)/.test(localRaw)) return { ok: false, field: 'localRoot', reason: 'The local folder cannot contain "..".' };
+    localRoot = normalizePosixPath(localRaw);
+    if (localRoot === undefined) return { ok: false, field: 'localRoot', reason: 'Use an absolute path on this computer, or leave it blank to use this vault.' };
+    if (localRoot === '/') return { ok: false, field: 'localRoot', reason: 'That is the whole disk. Leave it blank to use this vault.' };
+  }
+  return { ok: true, mapping: { remoteRoot, ...(localRoot ? { localRoot } : {}) } };
+}
+
+/** Wording for the vault-folder part of Test connection. */
+export function describePathCheck(path: string, reply: ProbePathCheck): { tone: 'ok' | 'error'; text: string } {
+  if ('failed' in reply) return { tone: 'error', text: `Connected, but checking ${path} failed: ${reply.failed}` };
+  if ('unsupported' in reply) {
+    return { tone: 'error', text: `Connected, but this daemon is too old to check folders. Update it, or just try a thread in ${path}.` };
+  }
+  if (!reply.allowed) {
+    return { tone: 'error', text: `${path} is not inside a folder this daemon may use. Start it with --workspace ${path} (see docs/remote-daemon.md, "Working in the vault").` };
+  }
+  if (!reply.exists || !reply.isDirectory) {
+    return { tone: 'error', text: `${path} does not exist on the daemon machine (or is not a folder).` };
+  }
+  return { tone: 'ok', text: `${path} is allowed on the daemon${reply.readOnly ? ' (read-only: edits are refused there)' : ''}.` };
+}
+
+/**
+ * Test connection wording: the connection line, plus (when a vault folder is
+ * configured and the daemon answered) whether that folder is usable. A bad
+ * folder makes the whole test read as an error even though the socket is fine,
+ * because a thread started there would be refused.
+ */
+export function describeTest(result: ProbeResult, remoteRoot?: string): { tone: 'ok' | 'error'; text: string } {
+  const connection = describeProbe(result);
+  if (!result.ok || !remoteRoot || !result.pathCheck) return connection;
+  const folder = describePathCheck(remoteRoot, result.pathCheck);
+  return { tone: folder.tone, text: `${connection.text}. ${folder.text}` };
 }

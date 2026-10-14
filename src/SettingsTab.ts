@@ -8,7 +8,7 @@ import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifa
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig } from './types';
 import { daemonWsUrl, probeDaemon } from './remote/DaemonClient';
 import { connectionPill } from './remote/connectionPill';
-import { checkDaemonInput, describeProbe, tokenSecretNameFor, uniqueDaemonId } from './remote/daemonConfig';
+import { checkDaemonInput, checkVaultMappingInput, describeTest, tokenSecretNameFor, uniqueDaemonId } from './remote/daemonConfig';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { serializeKey } from './stt';
 import { debugLog, setDebugLogging } from './logger';
@@ -538,6 +538,7 @@ export class RemoteDaemonModal extends Modal {
     app: App,
     private readonly existing: RemoteDaemonConfig | null,
     private readonly all: readonly RemoteDaemonConfig[],
+    private readonly vaultRoot: string,
     private readonly actions: {
       test(candidate: RemoteDaemonConfig, typedToken: string): Promise<{ tone: 'ok' | 'error'; text: string }>;
       save(config: RemoteDaemonConfig, token: string): Promise<void>;
@@ -554,6 +555,8 @@ export class RemoteDaemonModal extends Modal {
     let url = this.existing?.url ?? '';
     let token = '';
     let folder = this.existing?.defaultCwdRoot ?? '';
+    let vaultRemote = this.existing?.vaultMapping?.remoteRoot ?? '';
+    let vaultLocal = this.existing?.vaultMapping?.localRoot ?? '';
     const status = contentEl.createDiv({ cls: 'ct-remote-daemon-test setting-item-description', attr: { role: 'status' } });
 
     new Setting(contentEl).setName('Name').setDesc('Shown on threads that run there, for example claude-box.')
@@ -564,10 +567,18 @@ export class RemoteDaemonModal extends Modal {
       .addText((t) => { t.inputEl.type = 'password'; t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { token = v; }); });
     new Setting(contentEl).setName('Default folder').setDesc('Optional. The folder on that machine offered for new threads, for example /srv/workspaces/project.')
       .addText((t) => t.setPlaceholder('/srv/workspaces').setValue(folder).onChange((v) => { folder = v; }));
+    new Setting(contentEl).setName('Vault folder on this daemon')
+      .setDesc('Optional. Where a synced copy of your vault lives on that machine, for example /home/rick/vault. Vault threads then default to the same folder there (the daemon must be started with --workspace for it). Changes sync with a delay of up to a few minutes.')
+      .addText((t) => t.setPlaceholder('/home/rick/vault').setValue(vaultRemote).onChange((v) => { vaultRemote = v; }));
+    new Setting(contentEl).setName('Local folder it mirrors')
+      .setDesc('Optional. Leave blank to use this vault.')
+      .addText((t) => t.setPlaceholder(this.vaultRoot || 'This vault').setValue(vaultLocal).onChange((v) => { vaultLocal = v; }));
 
     const candidate = (): { config: RemoteDaemonConfig; url: string } | null => {
       const check = checkDaemonInput({ name, url, token, requireToken: !this.existing }, this.all, this.existing?.id);
       if (!check.ok) { status.setText(check.reason); status.addClass('mod-warning'); return null; }
+      const mapping = checkVaultMappingInput({ remoteRoot: vaultRemote, localRoot: vaultLocal });
+      if (!mapping.ok) { status.setText(mapping.reason); status.addClass('mod-warning'); return null; }
       status.removeClass('mod-warning');
       const id = this.existing?.id ?? uniqueDaemonId(name, this.all);
       return {
@@ -578,6 +589,7 @@ export class RemoteDaemonModal extends Modal {
           url: check.url,
           tokenSecretName: this.existing?.tokenSecretName ?? tokenSecretNameFor(id),
           ...(folder.trim() ? { defaultCwdRoot: folder.trim() } : {}),
+          ...(mapping.mapping ? { vaultMapping: mapping.mapping } : {}),
         },
       };
     };
@@ -3132,12 +3144,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       token,
       createSocket: createPluginWebSocketFactory(),
       clientVersion: this.plugin.manifest.version,
+      ...(daemon.vaultMapping ? { checkPath: daemon.vaultMapping.remoteRoot } : {}),
     });
-    return describeProbe(result);
+    return describeTest(result, daemon.vaultMapping?.remoteRoot);
   }
 
   private openDaemonModal(existing: RemoteDaemonConfig | null): void {
-    new RemoteDaemonModal(this.app, existing, this.plugin.settings.remoteDaemons ?? [], {
+    new RemoteDaemonModal(this.app, existing, this.plugin.settings.remoteDaemons ?? [], this.plugin.manager.vaultRoot ?? '', {
       test: (candidate, token) => this.testDaemon(candidate, token),
       save: async (config, token) => {
         const list = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);

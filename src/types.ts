@@ -287,6 +287,19 @@ export interface RemoteDaemonConfig {
   tokenSecretName: string;
   /** Default directory offered for new remote threads (a path on the daemon's machine). */
   defaultCwdRoot?: string;
+  /**
+   * This daemon holds a synced mirror of the vault. A vault thread run there
+   * defaults to the same relative folder under `remoteRoot`.
+   */
+  vaultMapping?: RemoteVaultMapping;
+}
+
+/** Which folder on a daemon's machine mirrors the vault (see `src/remote/vaultMapping.ts`). */
+export interface RemoteVaultMapping {
+  /** Local folder that corresponds to `remoteRoot`. Omitted = this vault's root. Absolute path on this computer. */
+  localRoot?: string;
+  /** Absolute path on the daemon's machine, e.g. /home/rick/vault. */
+  remoteRoot: string;
 }
 
 export interface ThreadRemote {

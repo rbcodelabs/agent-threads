@@ -24,6 +24,8 @@ export interface DaemonConfig {
   harness: HarnessKind;
   /** Absolute directories a session's cwd (and additionalDirectories) must sit under. */
   workspaces: string[];
+  /** Folders sessions may run in but whose files the harness's edit tools may not change (also allowed as cwd). */
+  readOnlyWorkspaces: string[];
   /** Accept `permissionMode: 'bypassPermissions'`. Off unless the operator opts in. */
   allowBypass: boolean;
   /** At most this many turns run at once; further `session.send` is refused (retryable). */
@@ -43,7 +45,7 @@ export const DEFAULT_IDLE_REAP_MINUTES = 30;
 export interface ConfigInputs {
   flags?: Partial<{
     dataDir: string; listen: string; port: number; allowedOrigins: string[]; acknowledgeOpen: boolean;
-    harness: HarnessKind; workspaces: string[]; allowBypass: boolean; maxConcurrentTurns: number;
+    harness: HarnessKind; workspaces: string[]; readOnlyWorkspaces: string[]; allowBypass: boolean; maxConcurrentTurns: number;
     idleReapMinutes: number; claudeBinaryPath: string;
   }>;
   env?: NodeJS.ProcessEnv;
@@ -66,6 +68,7 @@ interface ConfigFile {
   port?: number;
   allowedOrigins?: string[];
   workspaces?: string[];
+  readOnlyWorkspaces?: string[];
   allowBypass?: boolean;
   maxConcurrentTurns?: number;
   idleReapMinutes?: number;
@@ -137,6 +140,11 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
   for (const w of workspaces) {
     if (!isAbsolute(w)) throw new Error(`workspace "${w}" must be an absolute path`);
   }
+  const readOnlyWorkspaces = (flags.readOnlyWorkspaces ?? envList(env.AGENT_THREADS_READONLY_WORKSPACES) ?? file.readOnlyWorkspaces ?? [])
+    .map((w) => expandHome(w));
+  for (const w of readOnlyWorkspaces) {
+    if (!isAbsolute(w)) throw new Error(`read-only workspace "${w}" must be an absolute path`);
+  }
   const harness = flags.harness ?? (env.AGENT_THREADS_HARNESS as HarnessKind | undefined) ?? 'claude';
   if (harness !== 'claude' && harness !== 'fake') throw new Error(`invalid harness: ${String(harness)}`);
   const envInt = (v: string | undefined) => (v !== undefined && v !== '' ? Number(v) : undefined);
@@ -149,6 +157,7 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     acknowledgeOpen,
     harness,
     workspaces: [...new Set(workspaces.map((w) => resolve(w)))],
+    readOnlyWorkspaces: [...new Set(readOnlyWorkspaces.map((w) => resolve(w)))],
     allowBypass: flags.allowBypass ?? (env.AGENT_THREADS_ALLOW_BYPASS === '1' || file.allowBypass === true),
     maxConcurrentTurns: positiveInt('maxConcurrentTurns', flags.maxConcurrentTurns ?? envInt(env.AGENT_THREADS_MAX_CONCURRENT_TURNS) ?? file.maxConcurrentTurns ?? DEFAULT_MAX_CONCURRENT_TURNS, 1),
     idleReapMinutes: positiveInt('idleReapMinutes', flags.idleReapMinutes ?? envInt(env.AGENT_THREADS_IDLE_REAP_MINUTES) ?? file.idleReapMinutes ?? DEFAULT_IDLE_REAP_MINUTES, 0),
