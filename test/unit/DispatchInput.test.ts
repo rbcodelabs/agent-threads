@@ -536,3 +536,83 @@ describe('DispatchInput — run mode (container / host)', () => {
     expect(onSend.mock.calls[0][0]).not.toHaveProperty('harnessVmMode');
   });
 });
+
+describe('DispatchInput — Run on a remote daemon: vault folder suggestion', () => {
+  const VAULT = '/Users/rick/Library/Mobile Documents/com~apple~CloudDocs/Documents/Personal';
+  const box = { id: 'box', name: 'claude-box', url: 'wss://x', tokenSecretName: 'T', defaultCwdRoot: '/home/rick/projects', vaultMapping: { remoteRoot: '/home/rick/vault' } };
+  const plain = { id: 'plain', name: 'plain-box', url: 'wss://y', tokenSecretName: 'U', defaultCwdRoot: '/srv/workspaces' };
+
+  function mountRemote(state: { localCwd: string | undefined }, onSend = vi.fn()) {
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend,
+      harnessPicker: {
+        initialHarness: 'claude',
+        getRemoteDaemons: () => [box, plain],
+        getLocalCwd: () => state.localCwd,
+        getVaultRoot: () => VAULT,
+      },
+    });
+    const container = makeContainer();
+    document.body.appendChild(container);
+    const root = di.mount(container);
+    const textarea = root.querySelector('textarea')!;
+    const sendButton = root.querySelector<HTMLButtonElement>('.ct-send-btn')!;
+    return { root, textarea, sendButton, onSend };
+  }
+  const openMenu = (btn: HTMLElement) => btn.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  const pick = (root: HTMLElement, id: string) => root.querySelector<HTMLButtonElement>(`.ct-run-on-item[data-run-on="${id}"]`)!.click();
+  const folder = (root: HTMLElement) => root.querySelector<HTMLInputElement>('.ct-run-on-folder-input')!;
+  const hint = (root: HTMLElement) => root.querySelector<HTMLElement>('[data-testid="run-on-folder-hint"]')!;
+
+  it('pre-fills the mapped vault folder (iCloud path with spaces) and says why', () => {
+    const { root, sendButton } = mountRemote({ localCwd: `${VAULT}/Products/Agent Threads` });
+    openMenu(sendButton);
+    pick(root, 'box');
+    expect(folder(root).value).toBe('/home/rick/vault/Products/Agent Threads');
+    expect(hint(root).classList.contains('is-hidden')).toBe(false);
+    expect(hint(root).textContent).toContain('Same folder as in your vault');
+  });
+
+  it('keeps the daemon default folder for a non-vault cwd, with no hint', () => {
+    const { root, sendButton } = mountRemote({ localCwd: '/Users/rick/projects/agent-threads' });
+    openMenu(sendButton);
+    pick(root, 'box');
+    expect(folder(root).value).toBe('/home/rick/projects');
+    expect(hint(root).classList.contains('is-hidden')).toBe(true);
+  });
+
+  it('a daemon with no mapping keeps its default even for a vault cwd', () => {
+    const { root, sendButton } = mountRemote({ localCwd: VAULT });
+    openMenu(sendButton);
+    pick(root, 'plain');
+    expect(folder(root).value).toBe('/srv/workspaces');
+  });
+
+  it('typing replaces the suggestion, hides the hint, and is what gets sent', async () => {
+    const { root, textarea, sendButton, onSend } = mountRemote({ localCwd: VAULT });
+    openMenu(sendButton);
+    pick(root, 'box');
+    expect(folder(root).value).toBe('/home/rick/vault');
+    folder(root).value = '/home/rick/vault/Elsewhere';
+    folder(root).dispatchEvent(new Event('input', { bubbles: true }));
+    expect(hint(root).classList.contains('is-hidden')).toBe(true);
+    textarea.value = 'go';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ remote: { daemonId: 'box', cwd: '/home/rick/vault/Elsewhere' } }));
+  });
+
+  it('re-suggests when the Project (local cwd) changed since the menu was last open, unless the user typed', () => {
+    const state = { localCwd: `${VAULT}/Daily` as string | undefined };
+    const { root, sendButton } = mountRemote(state);
+    openMenu(sendButton);
+    pick(root, 'box');
+    expect(folder(root).value).toBe('/home/rick/vault/Daily');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); // dismiss the menu
+    expect(root.querySelector('.ct-harness-menu')).toBeNull();
+    state.localCwd = `${VAULT}/Products`;
+    openMenu(sendButton);
+    expect(folder(root).value).toBe('/home/rick/vault/Products');
+  });
+});

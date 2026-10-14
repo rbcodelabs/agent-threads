@@ -63,3 +63,31 @@ test.describe('remote thread strip', () => {
     await expect(strip(page)).toHaveScreenshot('remote-strip-narrow-unreachable.png');
   });
 });
+
+test.describe('Run on a daemon: vault folder', () => {
+  const dashboardUrl = 'file://' + path.resolve('test/harness/kanban.html') + '?dashboard=1&remote=1';
+
+  async function openRunOn(page: Page, daemon: string): Promise<void> {
+    await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
+    await page.setViewportSize({ width: 420, height: 760 });
+    await page.goto(dashboardUrl);
+    await page.waitForSelector('.ct-agents-dispatch-btn');
+    await page.locator('.ct-agents-dispatch-btn').dispatchEvent('contextmenu');
+    await page.locator(`.ct-run-on-item[data-run-on="${daemon}"]`).click();
+    await page.waitForSelector('.ct-run-on-folder-input');
+  }
+
+  test('a vault folder pre-fills the mapped folder on the daemon, with the explanation', async ({ page }) => {
+    await openRunOn(page, 'claude-box');
+    await expect(page.locator('.ct-run-on-folder-input')).toHaveValue('/home/rick/vault/Products/Agent Threads');
+    await expect(page.locator('[data-testid="run-on-folder-hint"]')).toBeVisible();
+    await settleView(page);
+    await expect(page.locator('.ct-harness-menu')).toHaveScreenshot('run-on-vault-folder.png');
+  });
+
+  test('a daemon without a mapping keeps its own default folder and shows no explanation', async ({ page }) => {
+    await openRunOn(page, 'plain-box');
+    await expect(page.locator('.ct-run-on-folder-input')).toHaveValue('/srv/workspaces');
+    await expect(page.locator('[data-testid="run-on-folder-hint"]')).toBeHidden();
+  });
+});

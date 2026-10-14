@@ -23,6 +23,16 @@ const settings = { ...DEFAULT_SETTINGS, claudeBinaryPath: '/opt/homebrew/bin/cla
 const dashboardMode = new URLSearchParams(window.location.search).has('dashboard');
 if (new URLSearchParams(window.location.search).has('mobile')) Platform.isMobile = true;
 const manager = new ThreadManager(settings);
+// `?remote=1`: one daemon with a vault mapping, and a default folder inside the (fake) vault, so the
+// dispatch "Run on" menu pre-fills the mapped remote folder (test/screenshots/remote-thread.spec.ts).
+if (new URLSearchParams(window.location.search).has('remote')) {
+  settings.remoteDaemons = [
+    { id: 'claude-box', name: 'claude-box', url: 'wss://claude-box.example.ts.net:8443', tokenSecretName: 'T', defaultCwdRoot: '/home/rick/projects', vaultMapping: { remoteRoot: '/home/rick/vault' } },
+    { id: 'plain-box', name: 'plain-box', url: 'wss://plain.example.ts.net:8443', tokenSecretName: 'U', defaultCwdRoot: '/srv/workspaces' },
+  ];
+  settings.defaultCwd = '/Users/rick/Vault/Products/Agent Threads';
+  manager.vaultRoot = '/Users/rick/Vault';
+}
 manager.loadProjects(kanbanFixtureProjects);
 const agentFixtureThread = kanbanFixtureThreads.find(thread => thread.id === kanbanRunningThreadId);
 if (dashboardMode && agentFixtureThread) {
@@ -117,6 +127,7 @@ const mockPlugin = {
     manager.deleteThread(threadId);
   },
   cancelWakeups: (threadId: string) => { pendingWakeups.delete(threadId); },
+  getEffectiveCwd: () => settings.defaultCwd || '',
 };
 
 mockPlugin.slashCommands.register({ pluginId: 'agent-threads.design' }, createDesignSlashCommand({
