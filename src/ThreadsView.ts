@@ -1151,7 +1151,9 @@ export class ThreadsView extends ItemView {
     const pill = connectionPill(client?.connection, name);
     strip.empty();
     const badge = strip.createSpan({ cls: 'ct-remote-badge', attr: { title: `This thread runs on ${name}`, 'data-testid': 'remote-badge' } });
-    setIcon(badge.createSpan({ cls: 'ct-remote-badge-icon', attr: { 'aria-hidden': 'true' } }), 'server');
+    const badgeIcon = badge.createSpan({ cls: 'ct-remote-badge-icon' });
+    badgeIcon.setAttribute('aria-hidden', 'true');
+    setIcon(badgeIcon, 'server');
     badge.createSpan({ cls: 'ct-remote-badge-name', text: name });
     strip.createSpan({ cls: 'ct-remote-cwd', text: remote.remoteCwd, attr: { title: `${name}:${remote.remoteCwd}` } });
     strip.createSpan({
