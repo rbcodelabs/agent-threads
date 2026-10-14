@@ -242,9 +242,34 @@ Pure-TypeScript wire contract for the planned headless daemon (design section 3)
 | `commands.ts`, `spec.ts` | Client commands and `RemoteSessionSpec` (`SESSION_OPTION_DISPOSITION` does the same job for `HarnessSessionOptions`). |
 | `envelope.ts` | Frame shapes, `StreamCursor` (idempotent apply: drop `seq <= lastSeq`). |
 | `codec.ts` | `encodeFrame`, `decodeClientFrame`, `decodeServerFrame`: validate and return a result, tolerant of unknown additive fields. |
-| `journal.ts`, `journalPolicy.ts` | `Journal` interface plus `InMemoryJournal` (append, replay-after-cursor, ack, compact, checkpoint; per-channel seq never reused). A disk journal implements the same interface later. |
+| `journal.ts`, `journalPolicy.ts` | `Journal` interface plus `InMemoryJournal` (append, replay-after-cursor, ack, compact, checkpoint; per-channel seq never reused). `restore()` rebuilds one from durable storage; `daemon/diskJournal.ts` wraps it. |
 
 Journal rules worth remembering: `lowWater` rises only on size/age **eviction**, never on token compaction; `replay(afterSeq < lowWater)` returns a `resync` checkpoint; compaction drops only `onToken` events that precede an acked `onMessage`/`onDone`/`onInterrupted`/`onError`.
+
+
+## Daemon (`daemon/`)
+
+The headless server (design sections 3.1, 3.4, 5.1-5.3). `agent-threads serve` speaks the `src/protocol` wire format over WebSocket. **Stage 1 / PR 3 is a skeleton**: transport, auth, durability and resume are real; the session behind `session.open` is a scripted fake (`daemon/fakeHarness.ts`) until PR 4 swaps in `ThreadSession` through the `DriverFactory` seam (`daemon/sessionDriver.ts`).
+
+| File | Role |
+|---|---|
+| `main.ts`, `cli.ts` | Bundle entry and CLI: `serve`, `token create\|list\|revoke`, `--version`. |
+| `config.ts` | Flag > env > `config.json` > default. `DATA_DIR` (default `/var/lib/agent-threads` if writable, else `~/.agent-threads`), `--listen` (default `127.0.0.1`; wildcard needs `--i-know-this-is-open`), `--port` (7433), `--allow-origin`. |
+| `server.ts` | `GET /healthz` -> `{ok:true,protocol:1}`; `GET /v1/ws` upgrade guards (path, per-IP throttle -> 429, Origin allowlist -> 403, optional `Authorization: Bearer`). |
+| `connection.ts` | One client: first-frame `hello{token}` within 5 s else close 4401, scope checks, `cmdId` idempotency, attach (replay + live in one synchronous turn, so no gap or duplicate), ping 20 s / pong 10 s, 4 MB live backpressure -> close 4408. |
+| `tokenStore.ts` | `tokens.json` holds SHA-256 digests only; scopes `read < control < admin`; compares against every digest with `timingSafeEqual`; re-reads on mtime change so CLI create/revoke apply to a running daemon (open sockets are re-checked each heartbeat). |
+| `diskJournal.ts` | `Journal` over `journal/<id>.ndjson` + `.idx`. Wraps `InMemoryJournal` (same replay/compaction semantics as PR 2), 50 ms batched flush, fsync on boundary events, torn-tail repair on open, file rewrite after compaction/eviction. |
+| `threadHost.ts` | Owns journals and drivers. `recover()` runs at startup: a turn left running gets `onError{name:'daemon_restarted'}` + `onInterrupted` + idle `session.state`, and open requests are closed as `expired`. |
+| `cmdCache.ts`, `failureThrottle.ts` | 10-minute reply cache keyed by (token, cmdId); 5 failures / 60 s per IP. |
+
+Rules worth remembering:
+
+- **Boundary.** `daemon/` may use Node (`fs`, `http`, `ws`) but never `obsidian`, `electron` or DOM globals, and every `src/` file it imports must already be in `core-files.json`. `src/` never imports `daemon/`, so `ws` cannot reach the plugin bundle. Enforced by `tsconfig.daemon.json` (Node types, `obsidian` is a compile error), `test/unit/daemon-boundary.test.ts`, and a bundler plugin in `esbuild.daemon.mjs` that fails the build on an `obsidian`/`electron` import. `npm run check:core` runs all of it plus `npm run check:daemon` (typecheck, bundle, and `scripts/daemon-smoke.mjs`, which runs `node dist/agent-threads.cjs serve` and drives a real session round trip).
+- **Build.** `npm run build:daemon` produces `dist/agent-threads.cjs` (plain `node dist/agent-threads.cjs serve` works; `bin/agent-threads` is the launcher). The plugin build is untouched.
+- **Durability.** The ndjson file is authoritative for entries; the `.idx` sidecar carries `lowWater`/`ackedSeq`. `session.state` events are fsynced (not just done/error/permission_request as in design 3.4) so a `session.send` that was acked is known to the journal after a crash.
+- **Backpressure only bounds LIVE data.** A replay backlog is drained lazily as the socket accepts it, so a healthy client replaying more than 4 MB is not penalised.
+- **Not in this PR.** Real Claude sessions (PR 4), the plugin client (PR 5), `resync` after ack/low-water tuning and `thread.remote.lastSeq` (PR 6), `GET /v1/threads|log|blobs`, `ctl` channel events, redaction of journal content (arrives with real content), systemd/Docker packaging (Phase 3).
+- **Behind a proxy.** `tailscale serve`/Caddy make every client look like 127.0.0.1, so the failure throttle is global there; the origin of a Geode renderer for `--allow-origin` is settled by the PR 5 ws/wss spike.
 
 ---
 

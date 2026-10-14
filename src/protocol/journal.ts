@@ -140,6 +140,33 @@ export class InMemoryJournal<E> implements Journal<E> {
     this.now = options.now ?? (() => Date.now());
   }
 
+  /**
+   * Rebuild state from entries read back from durable storage. Only valid on
+   * a fresh journal. Entries at or below `lowWater` are dropped (they were
+   * evicted but may still be on disk), and the checkpoint fold is replayed
+   * from the retained entries. `seq` numbering continues after `lastSeq`.
+   */
+  restore(
+    entries: ReadonlyArray<JournalEntry<E>>,
+    state: { lastSeq: number; lowWater: number; ackedSeq?: number },
+  ): void {
+    if (this.entries.length > 0 || this._lastSeq > 0) {
+      throw new Error('InMemoryJournal.restore requires an empty journal');
+    }
+    const retained = entries.filter((e) => e.seq > state.lowWater);
+    for (const e of retained) {
+      const role = this.policy.classify(e.event);
+      const bytes = approxBytes(e.event);
+      this.entries.push({ seq: e.seq, ts: e.ts, event: e.event, bytes, role });
+      this.bytes += bytes;
+      this.fold({ seq: e.seq, ts: e.ts, event: e.event }, role);
+    }
+    const tail = retained.length ? retained[retained.length - 1].seq : 0;
+    this._lastSeq = Math.max(state.lastSeq, tail, state.lowWater);
+    this._lowWater = state.lowWater;
+    this._ackedSeq = Math.min(Math.max(state.ackedSeq ?? 0, 0), this._lastSeq);
+  }
+
   get lastSeq(): number { return this._lastSeq; }
   get lowWater(): number { return this._lowWater; }
   get ackedSeq(): number { return this._ackedSeq; }
