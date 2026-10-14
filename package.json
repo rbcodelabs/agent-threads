@@ -8,6 +8,8 @@
     "dev": "node esbuild.config.mjs --watch",
     "build:harness": "node test/harness/esbuild.mjs",
     "gen:harness-icons": "node scripts/gen-harness-icons.mts",
+    "core:update": "node scripts/core-closure.mts",
+    "check:core": "node scripts/core-closure.mts --check && tsc -p tsconfig.core.json --noEmit && node scripts/core-smoke.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "pretest:screenshots": "node test/harness/esbuild.mjs",

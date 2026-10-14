@@ -1,0 +1,77 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": [
+      "ES2022"
+    ],
+    "types": [
+      "node"
+    ],
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "obsidian": [
+        "scripts/core/obsidian-forbidden.ts"
+      ]
+    }
+  },
+  "include": [],
+  "files": [
+    "src/AgentProfiles.ts",
+    "src/ClaudeSession.ts",
+    "src/CodexRawLog.ts",
+    "src/CodexSession.ts",
+    "src/HarnessFactory.ts",
+    "src/HarnessSession.ts",
+    "src/OpenCodeHostTools.ts",
+    "src/OpenCodeSession.ts",
+    "src/RawLogWriter.ts",
+    "src/ScheduleCoordinator.ts",
+    "src/Scheduler.ts",
+    "src/ThreadManager.ts",
+    "src/ThreadSession.ts",
+    "src/Usage.ts",
+    "src/agentRuns/AgentRunStore.ts",
+    "src/artifactStorage.ts",
+    "src/awsAuthRecovery.ts",
+    "src/browserSession.ts",
+    "src/claudeAuthRecovery.ts",
+    "src/claudeSettings.ts",
+    "src/currentTimeContext.ts",
+    "src/gateRunner.ts",
+    "src/gitClient.ts",
+    "src/githubCredentialHelper.ts",
+    "src/harnessVmRouting.ts",
+    "src/host/AttachmentStore.ts",
+    "src/hostExec.ts",
+    "src/imageExternalization.ts",
+    "src/localSkills.ts",
+    "src/logger.ts",
+    "src/mcpServerMerge.ts",
+    "src/modelOptions.ts",
+    "src/pathUtils.ts",
+    "src/permissionDetail.ts",
+    "src/planText.ts",
+    "src/productIdentity.ts",
+    "src/rateLimitRecovery.ts",
+    "src/resumeFailureRecovery.ts",
+    "src/sandboxImage.ts",
+    "src/sandboxRuntime.ts",
+    "src/sandboxSetupPrompt.ts",
+    "src/sandboxVm.ts",
+    "src/sandboxVmSweep.ts",
+    "src/secretRedaction.ts",
+    "src/skillManager.ts",
+    "src/skillMounts.ts",
+    "src/skillPaths.ts",
+    "src/statusLine.ts",
+    "src/toolNameUtils.ts",
+    "src/toolRestrictions.ts",
+    "src/trailingSlashes.ts",
+    "src/transportErrorRecovery.ts",
+    "src/types.ts",
+    "src/urlLinks.ts",
+    "src/vmPortForward.ts",
+    "src/worktreePaths.ts"
+  ]
+}

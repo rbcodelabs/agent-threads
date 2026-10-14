@@ -207,6 +207,32 @@ owns its design kickoff message. New-thread dispatch retains its provisional-thr
 rollback behavior. Artifact controls are refreshed even when the calling thread was
 already selected; successful preview results require the actual artifact view type.
 
+## Core boundary (daemon groundwork)
+
+The "core" is the part of the plugin that must run in plain Node, with no Obsidian and no DOM, so a headless daemon can reuse it (design: Option B, boundary enforced in place, no file moves). It is defined as the **runtime import closure** of the entry set `ThreadManager`, `ThreadSession`, `ClaudeSession`, `CodexSession`, `OpenCodeSession`, `Scheduler`, `HarnessFactory`.
+
+| Piece | Role |
+|---|---|
+| `scripts/core-closure.mts` | Walks the closure (type-only and type-position-only imports are elided, like the compiler does) and writes `core-files.json` and `tsconfig.core.json`. Run `npm run core:update` after changing core imports. |
+| `core-files.json` | Committed manifest: entries, every closure file, and an `allowlist` of host-bound files (must be empty; any entry is a tracked TODO and can only shrink). |
+| `tsconfig.core.json` | Generated. Node types only, no DOM lib, `obsidian` mapped to `scripts/core/obsidian-forbidden.ts`, whose resolution is a compile error. |
+| `test/unit/core-boundary.test.ts` | Fails if a closure file imports `obsidian`/`electron` or touches `window`/`document`, or if the closure drifts from `core-files.json`. |
+| `scripts/core-smoke.mjs` | Bundles the entry set for Node with `obsidian` aliased to a throwing stub and loads it in a fresh process; prints `core loads without obsidian`. |
+
+`npm run check:core` runs the manifest check, the core `tsc`, and the smoke bundle (also a CI step).
+
+**Host seams** (`src/host/`) are how core reaches host functionality without importing it. The plugin passes the existing implementations from `main.ts` / the views; a daemon passes its own.
+
+| Seam | Replaces | Plugin implementation |
+|---|---|---|
+| `YamlParser` | `parseYaml` from `obsidian` (`localSkills.ts`) | `obsidianYamlParser` in `src/host/obsidianHost.ts` |
+| `HttpFetch` | `requestUrl` from `obsidian` (`skillManager.ts` marketplace lookups) | `obsidianHttpFetch` in `src/host/obsidianHost.ts` |
+| `AttachmentStore` | `AttachmentWriter(App)` built inside the `ThreadManager` constructor | `AttachmentWriter` (passed as the second constructor argument; the default `NULL_ATTACHMENT_STORE` leaves images inline) |
+
+Rules: core files never import `obsidian`; anything host-bound goes behind an interface in `src/host/` and its Obsidian-backed implementation lives in a file outside the closure (`obsidianHost.ts` is the only `src/host/` file that may import `obsidian`). Use `globalThis`-level timers (`setTimeout`), not `window.setTimeout`, in core.
+
+---
+
 ## DispatchInput Component
 
 `DispatchInput` only renders the bottom footer row (attach button, mic button) when either `showCwdChip` or `appendFooterActions` is passed. If you want the footer layout without other chips (e.g. in AgentDashboard), pass `appendFooterActions: () => {}` as an empty callback — this sets `needsFooter = true` internally.

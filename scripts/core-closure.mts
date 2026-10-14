@@ -3,7 +3,7 @@
  * Walks the runtime import closure of the daemon entry set and reports which
  * files are "core" (must run in plain Node with no Obsidian / DOM).
  *
- *   node scripts/core-closure.mts            write core-files.json
+ *   node scripts/core-closure.mts            write core-files.json + tsconfig.core.json
  *   node scripts/core-closure.mts --check    exit 1 if core-files.json drifted
  *                                            or any closure file is host-bound
  *
@@ -37,6 +37,27 @@ export const ENTRY_FILES = [
  * violation so the allowlist can only shrink.
  */
 export const ALLOWLIST_FILE = 'core-files.json';
+export const CORE_TSCONFIG = 'tsconfig.core.json';
+
+/**
+ * tsconfig for the core closure: Node types only, no DOM lib, and `obsidian`
+ * mapped to a stub whose mere resolution is a compile error. `files` is
+ * generated from the closure so the two can never disagree.
+ */
+export function renderCoreTsconfig(files: string[]): string {
+  return `${JSON.stringify({
+    extends: './tsconfig.json',
+    compilerOptions: {
+      lib: ['ES2022'],
+      types: ['node'],
+      noEmit: true,
+      baseUrl: '.',
+      paths: { obsidian: ['scripts/core/obsidian-forbidden.ts'] },
+    },
+    include: [],
+    files,
+  }, null, 2)}\n`;
+}
 
 export interface FileFacts {
   /** Relative, repo-rooted, posix path. */
@@ -250,11 +271,12 @@ function main(): void {
     })),
   };
   const out = `${JSON.stringify(next, null, 2)}\n`;
+  const tsconfigOut = renderCoreTsconfig(closure.files);
+  const read = (f: string) => (existsSync(join(root, f)) ? readFileSync(join(root, f), 'utf8') : '');
 
   if (process.argv.includes('--check')) {
-    const current = existsSync(join(root, ALLOWLIST_FILE)) ? readFileSync(join(root, ALLOWLIST_FILE), 'utf8') : '';
-    if (current !== out) {
-      console.error(`${ALLOWLIST_FILE} is out of date; run: node scripts/core-closure.mts`);
+    if (read(ALLOWLIST_FILE) !== out || read(CORE_TSCONFIG) !== tsconfigOut) {
+      console.error(`${ALLOWLIST_FILE} / ${CORE_TSCONFIG} out of date; run: node scripts/core-closure.mts`);
       process.exit(1);
     }
     if (bad.length) {
@@ -265,7 +287,8 @@ function main(): void {
   }
 
   writeFileSync(join(root, ALLOWLIST_FILE), out);
-  console.log(`wrote ${ALLOWLIST_FILE}: ${closure.files.length} files, ${bad.length} host-bound`);
+  writeFileSync(join(root, CORE_TSCONFIG), tsconfigOut);
+  console.log(`wrote ${ALLOWLIST_FILE} and ${CORE_TSCONFIG}: ${closure.files.length} files, ${bad.length} host-bound`);
   for (const f of bad) {
     const x = closure.facts[f];
     console.log(`  host-bound: ${f}${x.importsObsidian ? ' [obsidian]' : ''}${x.importsElectron ? ' [electron]' : ''}${x.domGlobals.length ? ` [${x.domGlobals.join(',')}]` : ''}`);
