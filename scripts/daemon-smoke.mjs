@@ -24,7 +24,7 @@ try {
   const token = /token:\s+(\S+)/.exec(created)?.[1];
   if (!token) throw new Error(`no token in output:\n${created}`);
 
-  child = spawn(process.execPath, [bundle, 'serve', '--port', '0'], { env, stdio: ['ignore', 'pipe', 'inherit'] });
+  child = spawn(process.execPath, [bundle, 'serve', '--port', '0', '--fake-harness'], { env, stdio: ['ignore', 'pipe', 'inherit'] });
   const port = await new Promise((res, rej) => {
     let buf = '';
     const t = setTimeout(() => rej(new Error(`daemon did not report a port:\n${buf}`)), 10_000);

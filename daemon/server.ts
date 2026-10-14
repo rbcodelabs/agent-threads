@@ -33,6 +33,8 @@ export interface DaemonOptions {
   driverFactory?: DriverFactory;
   timings?: Partial<Timings>;
   journalFlushMs?: number;
+  /** Test seam: idle window in ms, overriding `config.idleReapMinutes`. */
+  idleReapMs?: number;
   /** How often the idle reaper looks (default: half the idle window, at most a minute). */
   reapCheckMs?: number;
   maxOutboundBytes?: number;
@@ -101,7 +103,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     // The scripted fake has no side effects, so only the real host is policed.
     ...(real ? { policy: { workspaces: config.workspaces, allowBypass: config.allowBypass } } : {}),
     maxConcurrentTurns: config.maxConcurrentTurns,
-    idleReapMs: config.idleReapMinutes * 60_000,
+    idleReapMs: options.idleReapMs ?? config.idleReapMinutes * 60_000,
     rawLog,
   });
   const recovered = host.recover();
@@ -167,7 +169,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
 
   const sweep = setInterval(() => ctx.cmdCache.sweep(), 60_000);
   sweep.unref();
-  const idleMs = config.idleReapMinutes * 60_000;
+  const idleMs = options.idleReapMs ?? config.idleReapMinutes * 60_000;
   const reaper = idleMs > 0
     ? setInterval(() => {
       try {
