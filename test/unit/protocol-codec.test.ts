@@ -20,7 +20,9 @@ const clientSamples: ClientFrame[] = [
   { v: 1, cmdId: 'c5', type: 'resolve.permission', threadId: 'abc', requestId: 'R', allow: true, alwaysAllow: false },
   { v: 1, cmdId: 'c6', type: 'session.list' },
   { v: 1, cmdId: 'c7', type: 'session.open', threadId: 'abc', spec: { harness: 'claude', cwd: '/w', permissionMode: 'default', extraEnvRaw: '' } as never },
-  { v: 1, cmdId: 'c9', type: 'path.check', path: '/home/rick/vault' },
+  { v: 1, cmdId: 'c9', type: 'path.check', path: '/home/user/vault' },
+  { v: 1, cmdId: 'c10', type: 'workspaces.list' },
+  { v: 1, cmdId: 'c11', type: 'path.list', path: '/home/user/vault' },
   { v: 1, cmdId: 'c8', type: 'creds.push', kind: 'claude', ttlSec: 60, fields: { token: 'x' } },
 ];
 
@@ -63,7 +65,7 @@ describe('client frame codec', () => {
 
   it('has a validator for every command type (no command is accept-anything)', () => {
     // A frame with only the envelope must be rejected for every command that has required fields.
-    const noFields = new Set(['session.list']);
+    const noFields = new Set(['session.list', 'workspaces.list']);
     for (const type of Object.keys(CLIENT_COMMAND_TYPES)) {
       const r = decodeClientFrame(JSON.stringify({ v: 1, cmdId: 'x', type }));
       expect(r.ok, type).toBe(noFields.has(type));

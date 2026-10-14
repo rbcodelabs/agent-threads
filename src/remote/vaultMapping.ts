@@ -1,8 +1,8 @@
 /**
  * Vault path mapping for remote daemons.
  *
- * A daemon may hold a synced mirror of the vault (for example /home/rick/vault
- * on claude-box). A vault thread run there should default to the same folder
+ * A daemon may hold a synced mirror of the vault (for example /home/user/vault
+ * on my-server). A vault thread run there should default to the same folder
  * the thread would use on this computer, expressed under the daemon's root.
  *
  * Everything here is LEXICAL and pure: no filesystem access, no symlink

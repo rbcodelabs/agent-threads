@@ -5,7 +5,7 @@
  * reuse the exact strings.
  */
 import type { RemoteDaemonConfig, RemoteVaultMapping } from '../types';
-import type { ProbePathCheck, ProbeResult } from './DaemonClient';
+import type { ProbePathCheck, ProbeResult, ProbeWorkspaces } from './DaemonClient';
 import { normalizePosixPath } from './vaultMapping';
 
 export function slugifyDaemonName(name: string): string {
@@ -39,7 +39,7 @@ export function checkDaemonInput(
     return { ok: false, field: 'name', reason: 'Another daemon already has that name.' };
   }
   const raw = input.url.trim();
-  if (!raw) return { ok: false, field: 'url', reason: 'Enter the daemon address, for example wss://claude-box.tailnet.ts.net:8443.' };
+  if (!raw) return { ok: false, field: 'url', reason: 'Enter the daemon address, for example wss://my-server.tailnet-name.ts.net:8443.' };
   const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `ws://${raw}`;
   let parsed: URL;
   try {
@@ -57,6 +57,14 @@ export function checkDaemonInput(
     return { ok: false, field: 'token', reason: 'Paste an access token created with `agent-threads token create`.' };
   }
   return { ok: true, url: withScheme.replace(/\/+$/, '') };
+}
+
+/** What the Edit/Add dialog gets back from Test connection. */
+export interface DaemonTestOutcome {
+  tone: 'ok' | 'error';
+  text: string;
+  /** What the daemon advertised (`workspaces.list`), when the connection worked. */
+  discovery?: ProbeWorkspaces;
 }
 
 /** One line for the Test connection button. */
@@ -88,8 +96,8 @@ export function checkVaultMappingInput(input: { localRoot?: string; remoteRoot?:
   if (!remoteRaw) return { ok: false, field: 'remoteRoot', reason: 'Enter the vault folder on the daemon machine, or clear the local folder too.' };
   if (/(^|\/)\.\.(\/|$)/.test(remoteRaw)) return { ok: false, field: 'remoteRoot', reason: 'The vault folder on the daemon cannot contain "..".' };
   const remoteRoot = normalizePosixPath(remoteRaw);
-  if (remoteRoot === undefined) return { ok: false, field: 'remoteRoot', reason: 'Use an absolute path on the daemon machine (it starts with "/"), for example /home/rick/vault.' };
-  if (remoteRoot === '/') return { ok: false, field: 'remoteRoot', reason: 'That is the whole disk. Use the vault folder itself, for example /home/rick/vault.' };
+  if (remoteRoot === undefined) return { ok: false, field: 'remoteRoot', reason: 'Use an absolute path on the daemon machine (it starts with "/"), for example /home/user/vault.' };
+  if (remoteRoot === '/') return { ok: false, field: 'remoteRoot', reason: 'That is the whole disk. Use the vault folder itself, for example /home/user/vault.' };
   let localRoot: string | undefined;
   if (localRaw) {
     if (/(^|\/)\.\.(\/|$)/.test(localRaw)) return { ok: false, field: 'localRoot', reason: 'The local folder cannot contain "..".' };

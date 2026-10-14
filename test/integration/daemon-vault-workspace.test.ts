@@ -12,15 +12,15 @@ import { TestClient, sleep, startTestDaemon, type TestDaemon } from '../helpers/
 import { ScriptedHarness, scriptedFactory } from '../helpers/scriptedHarness';
 
 let base: string;
-let vault: string;       // <base>/home/rick/vault  (the allowlisted root; a symlink target in the symlink case)
+let vault: string;       // <base>/user/vault  (the allowlisted root; a symlink target in the symlink case)
 let outside: string;
 let made: ScriptedHarness[];
 const cleanups: Array<() => Promise<void>> = [];
 
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'vault-ws-')));
-  vault = join(base, 'rick', 'vault');
-  outside = join(base, 'rick', 'secrets');
+  vault = join(base, 'user', 'vault');
+  outside = join(base, 'user', 'secrets');
   mkdirSync(join(vault, 'Products', 'Agent Threads'), { recursive: true });
   mkdirSync(join(vault, 'Daily'), { recursive: true });
   mkdirSync(join(vault, '.obsidian'), { recursive: true });
@@ -69,7 +69,7 @@ describe('a vault as an allowed workspace', () => {
   });
 
   it('works when the vault root itself is a symlink (e.g. ~/vault -> /data/vault)', async () => {
-    const link = join(base, 'rick', 'vault-link');
+    const link = join(base, 'user', 'vault-link');
     symlinkSync(vault, link);
     const c = await client(await daemon({ workspaces: [link] }));
     // Allowed both through the link and by the real path: the allowlist is compared after realpath.
@@ -121,6 +121,45 @@ describe('path.check', () => {
   it('rejects a frame without a path as bad_frame', async () => {
     const c = await client(await daemon({ workspaces: [vault] }));
     expect(await c.cmd('path.check', {})).toMatchObject({ type: 'err', code: 'bad_frame' });
+  });
+});
+
+describe('workspaces.list and path.list over the wire', () => {
+  it('advertises the workspaces with vault detection and the capabilities', async () => {
+    const projects = join(base, 'user', 'projects');
+    mkdirSync(projects, { recursive: true });
+    const td = await daemon({ workspaces: [projects, vault], readOnlyWorkspaces: [] });
+    const c = await client(td);
+    const r = await c.cmd('workspaces.list', {});
+    expect(r.result.workspaces).toEqual([
+      { path: projects, name: 'projects', readOnly: false, kind: 'folder', isDefault: true },
+      { path: vault, name: 'vault', readOnly: false, kind: 'vault', isDefault: false },
+    ]);
+    const welcome = await c.waitFor((f) => f.type === 'welcome');
+    expect(welcome.capabilities).toEqual(expect.arrayContaining(['workspaces.list', 'path.list']));
+  });
+
+  it('lists subfolders of an allowed folder and confines everything else (read scope is enough)', async () => {
+    const td = await daemon({ workspaces: [vault] });
+    const read = td.daemon.tokens.create('ro', 'read').token;
+    const c = await TestClient.connect(td.daemon.url, read);
+    cleanups.push(() => c.close().catch(() => {}));
+    const ok = await c.cmd('path.list', { path: vault });
+    expect(ok.result.allowed).toBe(true);
+    expect(ok.result.entries.map((e: { name: string }) => e.name)).toEqual(['Daily', 'Products']);
+    const denied = { allowed: false, entries: [], truncated: false };
+    expect((await c.cmd('path.list', { path: outside })).result).toEqual(denied);
+    expect((await c.cmd('path.list', { path: join(vault, 'sneaky') })).result).toEqual(denied);
+    expect((await c.cmd('path.list', { path: join(vault, '..', 'secrets') })).result).toEqual(denied);
+    expect((await c.cmd('workspaces.list', {})).type).toBe('ack');
+    expect(await c.cmd('path.list', {})).toMatchObject({ type: 'err', code: 'bad_frame' });
+  });
+
+  it('is answered by the unpoliced fake harness too', async () => {
+    const td = await startTestDaemon({ config: { workspaces: [vault], readOnlyWorkspaces: [] } });
+    cleanups.push(() => td.cleanup());
+    const c = await client(td);
+    expect((await c.cmd('workspaces.list', {})).result.workspaces).toHaveLength(1);
   });
 });
 

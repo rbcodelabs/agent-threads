@@ -4,6 +4,8 @@ import {
   DaemonCommandError,
   compareVersions,
   daemonWsUrl,
+  fetchSubfolders,
+  fetchWorkspaces,
   probeDaemon,
   type ConnectionState,
 } from '../../src/remote/DaemonClient';
@@ -32,7 +34,7 @@ const ev = (seq: number, name: string, args: unknown, extra: Json = {}): Json =>
 
 describe('daemonWsUrl', () => {
   it('normalises schemes and appends the endpoint once', () => {
-    expect(daemonWsUrl('claude-box:7433')).toBe('ws://claude-box:7433/v1/ws');
+    expect(daemonWsUrl('my-server:7433')).toBe('ws://my-server:7433/v1/ws');
     expect(daemonWsUrl('https://box.ts.net:8443/')).toBe('wss://box.ts.net:8443/v1/ws');
     expect(daemonWsUrl('http://127.0.0.1:1')).toBe('ws://127.0.0.1:1/v1/ws');
     expect(daemonWsUrl('wss://x/v1/ws')).toBe('wss://x/v1/ws');
@@ -325,9 +327,9 @@ describe('probeDaemon', () => {
     t.autoServe((f, s) => {
       if (f.type === 'path.check') { s.serverSend({ type: 'ack', cmdId: f.cmdId, result: { allowed: true, exists: true, isDirectory: true, readOnly: false } }); return true; }
     });
-    const r = await probeDaemon({ url: 'ws://x/v1/ws', token: 'tok', createSocket: t.factory, clientVersion: '0.62.2', checkPath: '/home/rick/vault' });
+    const r = await probeDaemon({ url: 'ws://x/v1/ws', token: 'tok', createSocket: t.factory, clientVersion: '0.62.2', checkPath: '/home/user/vault' });
     expect(r).toMatchObject({ ok: true, pathCheck: { allowed: true, exists: true, isDirectory: true, readOnly: false } });
-    expect(t.sockets[0].sent.find((f) => f.type === 'path.check')).toMatchObject({ path: '/home/rick/vault' });
+    expect(t.sockets[0].sent.find((f) => f.type === 'path.check')).toMatchObject({ path: '/home/user/vault' });
   });
 
   it('an older daemon that does not know path.check still counts as connected, flagged unsupported', async () => {
@@ -337,6 +339,45 @@ describe('probeDaemon', () => {
     });
     const r = await probeDaemon({ url: 'ws://x/v1/ws', token: 'tok', createSocket: t.factory, clientVersion: '0.62.2', checkPath: '/v' });
     expect(r).toMatchObject({ ok: true, pathCheck: { unsupported: true } });
+  });
+
+  it('with listWorkspaces it returns what the daemon advertises', async () => {
+    const t = fakeTransport();
+    const ws = [{ path: '/home/user/vault', name: 'vault', readOnly: false, kind: 'vault', isDefault: true }];
+    t.autoServe((f, s) => {
+      if (f.type === 'workspaces.list') { s.serverSend({ type: 'ack', cmdId: f.cmdId, result: { workspaces: ws } }); return true; }
+    });
+    const r = await probeDaemon({ url: 'ws://x/v1/ws', token: 'tok', createSocket: t.factory, clientVersion: '0.62.2', listWorkspaces: true });
+    expect(r).toMatchObject({ ok: true, workspaces: { list: ws } });
+    expect(t.sockets[0].sent.some((f) => f.type === 'path.check')).toBe(false);
+  });
+
+  it('an older daemon without workspaces.list is connected but flagged unsupported; other failures are reported', async () => {
+    const old = fakeTransport();
+    old.autoServe((f, s) => {
+      if (f.type === 'workspaces.list') { s.serverSend({ type: 'err', cmdId: f.cmdId, code: 'unknown_command', message: 'nope' }); return true; }
+    });
+    expect(await probeDaemon({ url: 'ws://x/v1/ws', token: 'tok', createSocket: old.factory, clientVersion: '0.62.2', listWorkspaces: true }))
+      .toMatchObject({ ok: true, workspaces: { unsupported: true } });
+    const broken = fakeTransport();
+    broken.autoServe((f, s) => {
+      if (f.type === 'workspaces.list') { s.serverSend({ type: 'err', cmdId: f.cmdId, code: 'internal', message: 'disk on fire' }); return true; }
+    });
+    expect(await probeDaemon({ url: 'ws://x/v1/ws', token: 'tok', createSocket: broken.factory, clientVersion: '0.62.2', listWorkspaces: true }))
+      .toMatchObject({ ok: true, workspaces: { failed: expect.stringContaining('disk on fire') } });
+  });
+
+  it('fetchWorkspaces / fetchSubfolders return undefined for an old daemon and normalise replies', async () => {
+    const t = fakeTransport();
+    t.autoServe((f, s) => {
+      if (f.type === 'path.list') { s.serverSend({ type: 'ack', cmdId: f.cmdId, result: { allowed: true, entries: [{ name: 'a', path: '/w/a' }], truncated: false } }); return true; }
+      if (f.type === 'workspaces.list') { s.serverSend({ type: 'err', cmdId: f.cmdId, code: 'unknown_command', message: 'nope' }); return true; }
+    });
+    const c = make({ transport: t });
+    c.connect();
+    await until(() => c.connection.status === 'connected');
+    expect(await fetchWorkspaces(c)).toBeUndefined();
+    expect(await fetchSubfolders(c, '/w')).toEqual({ allowed: true, entries: [{ name: 'a', path: '/w/a' }], truncated: false });
   });
 
   it('does not send path.check unless asked', async () => {

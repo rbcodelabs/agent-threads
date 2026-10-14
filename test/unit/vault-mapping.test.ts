@@ -10,8 +10,8 @@ import {
 import { checkVaultMappingInput, describePathCheck, describeTest } from '../../src/remote/daemonConfig';
 
 // The real vault lives on iCloud: spaces and a "~" in the path.
-const ICLOUD = '/Users/rickbowman/Library/Mobile Documents/com~apple~CloudDocs/Documents/Personal';
-const mapping = { remoteRoot: '/home/rick/vault' };
+const ICLOUD = '/Users/me/Documents/My Vault';
+const mapping = { remoteRoot: '/home/user/vault' };
 
 describe('normalizePosixPath', () => {
   it('collapses slashes, dots and trailing slashes', () => {
@@ -42,14 +42,14 @@ describe('relativeWithin', () => {
 
 describe('mapLocalToRemote', () => {
   it('maps the vault root to the remote root and folders to the same relative path', () => {
-    expect(mapLocalToRemote(mapping, ICLOUD, ICLOUD)).toBe('/home/rick/vault');
-    expect(mapLocalToRemote(mapping, ICLOUD, `${ICLOUD}/Products/Agent Threads`)).toBe('/home/rick/vault/Products/Agent Threads');
+    expect(mapLocalToRemote(mapping, ICLOUD, ICLOUD)).toBe('/home/user/vault');
+    expect(mapLocalToRemote(mapping, ICLOUD, `${ICLOUD}/Products/Agent Threads`)).toBe('/home/user/vault/Products/Agent Threads');
   });
   it('tolerates trailing slashes on every input', () => {
-    expect(mapLocalToRemote({ remoteRoot: '/home/rick/vault/' }, `${ICLOUD}/`, `${ICLOUD}/Daily/`)).toBe('/home/rick/vault/Daily');
+    expect(mapLocalToRemote({ remoteRoot: '/home/user/vault/' }, `${ICLOUD}/`, `${ICLOUD}/Daily/`)).toBe('/home/user/vault/Daily');
   });
   it('returns undefined for paths outside the vault (including prefix lookalikes and traversal)', () => {
-    expect(mapLocalToRemote(mapping, ICLOUD, '/Users/rickbowman/projects/agent-threads')).toBeUndefined();
+    expect(mapLocalToRemote(mapping, ICLOUD, '/Users/me/projects/agent-threads')).toBeUndefined();
     expect(mapLocalToRemote(mapping, ICLOUD, `${ICLOUD}-other/x`)).toBeUndefined();
     expect(mapLocalToRemote(mapping, ICLOUD, `${ICLOUD}/../Elsewhere`)).toBeUndefined();
     expect(mapLocalToRemote(mapping, ICLOUD, '/')).toBeUndefined();
@@ -62,17 +62,17 @@ describe('mapLocalToRemote', () => {
     expect(mapLocalToRemote({ remoteRoot: 'relative/vault' }, ICLOUD, `${ICLOUD}/x`)).toBeUndefined();
   });
   it('uses an explicit localRoot instead of the vault root', () => {
-    const m = { localRoot: `${ICLOUD}/Products`, remoteRoot: '/home/rick/products' };
-    expect(mapLocalToRemote(m, ICLOUD, `${ICLOUD}/Products/Agent Threads`)).toBe('/home/rick/products/Agent Threads');
+    const m = { localRoot: `${ICLOUD}/Products`, remoteRoot: '/home/user/products' };
+    expect(mapLocalToRemote(m, ICLOUD, `${ICLOUD}/Products/Agent Threads`)).toBe('/home/user/products/Agent Threads');
     expect(mapLocalToRemote(m, ICLOUD, `${ICLOUD}/Daily`)).toBeUndefined(); // in the vault, outside the mapped folder
     expect(effectiveLocalRoot(m, ICLOUD)).toBe(`${ICLOUD}/Products`);
     expect(effectiveLocalRoot({ remoteRoot: '/r' }, ICLOUD)).toBe(ICLOUD);
   });
   it('is lexical only: it never consults the filesystem, so a symlinked path maps by its text', () => {
-    expect(mapLocalToRemote(mapping, '/Users/me/vault', '/Users/me/vault/link-to-elsewhere/x')).toBe('/home/rick/vault/link-to-elsewhere/x');
+    expect(mapLocalToRemote(mapping, '/Users/me/vault', '/Users/me/vault/link-to-elsewhere/x')).toBe('/home/user/vault/link-to-elsewhere/x');
   });
   it('matches a decomposed (NFD) macOS name against a composed one', () => {
-    expect(mapLocalToRemote(mapping, '/v', '/v/Café/notes')).toBe('/home/rick/vault/Café/notes');
+    expect(mapLocalToRemote(mapping, '/v', '/v/Café/notes')).toBe('/home/user/vault/Café/notes');
   });
   it('handles a remote root that is /', () => {
     expect(mapLocalToRemote({ remoteRoot: '/' }, '/v', '/v/a')).toBe('/a');
@@ -82,22 +82,22 @@ describe('mapLocalToRemote', () => {
 
 describe('isUnderRemoteRoot', () => {
   it('is true for the root and below, false for lookalikes, other places and no mapping', () => {
-    expect(isUnderRemoteRoot(mapping, '/home/rick/vault')).toBe(true);
-    expect(isUnderRemoteRoot(mapping, '/home/rick/vault/Daily/')).toBe(true);
-    expect(isUnderRemoteRoot(mapping, '/home/rick/vault-backup')).toBe(false);
-    expect(isUnderRemoteRoot(mapping, '/home/rick/projects')).toBe(false);
-    expect(isUnderRemoteRoot(undefined, '/home/rick/vault')).toBe(false);
+    expect(isUnderRemoteRoot(mapping, '/home/user/vault')).toBe(true);
+    expect(isUnderRemoteRoot(mapping, '/home/user/vault/Daily/')).toBe(true);
+    expect(isUnderRemoteRoot(mapping, '/home/user/vault-backup')).toBe(false);
+    expect(isUnderRemoteRoot(mapping, '/home/user/projects')).toBe(false);
+    expect(isUnderRemoteRoot(undefined, '/home/user/vault')).toBe(false);
     expect(isUnderRemoteRoot(mapping, undefined)).toBe(false);
   });
 });
 
 describe('suggestRemoteCwd', () => {
-  const daemon = { defaultCwdRoot: '/home/rick/projects', vaultMapping: mapping };
+  const daemon = { defaultCwdRoot: '/home/user/projects', vaultMapping: mapping };
   it('suggests the mapped vault folder for a vault cwd', () => {
-    expect(suggestRemoteCwd(daemon, `${ICLOUD}/Products`, ICLOUD)).toEqual({ cwd: '/home/rick/vault/Products', fromVault: true });
+    expect(suggestRemoteCwd(daemon, `${ICLOUD}/Products`, ICLOUD)).toEqual({ cwd: '/home/user/vault/Products', fromVault: true });
   });
   it('leaves non-vault cwds on the daemon default (unchanged behaviour)', () => {
-    expect(suggestRemoteCwd(daemon, '/Users/rickbowman/projects/x', ICLOUD)).toEqual({ cwd: '/home/rick/projects', fromVault: false });
+    expect(suggestRemoteCwd(daemon, '/Users/me/projects/x', ICLOUD)).toEqual({ cwd: '/home/user/projects', fromVault: false });
   });
   it('without a mapping it is exactly the old behaviour, even for a vault cwd', () => {
     expect(suggestRemoteCwd({ defaultCwdRoot: '/srv/w' }, ICLOUD, ICLOUD)).toEqual({ cwd: '/srv/w', fromVault: false });
@@ -111,10 +111,10 @@ describe('checkVaultMappingInput', () => {
     expect(checkVaultMappingInput({ remoteRoot: '  ', localRoot: ' ' })).toEqual({ ok: true, mapping: undefined });
   });
   it('normalizes and accepts a remote root alone', () => {
-    expect(checkVaultMappingInput({ remoteRoot: ' /home/rick/vault/ ' })).toEqual({ ok: true, mapping: { remoteRoot: '/home/rick/vault' } });
+    expect(checkVaultMappingInput({ remoteRoot: ' /home/user/vault/ ' })).toEqual({ ok: true, mapping: { remoteRoot: '/home/user/vault' } });
   });
   it('accepts a local folder with spaces', () => {
-    expect(checkVaultMappingInput({ remoteRoot: '/home/rick/vault', localRoot: `${ICLOUD}/` })).toEqual({ ok: true, mapping: { remoteRoot: '/home/rick/vault', localRoot: ICLOUD } });
+    expect(checkVaultMappingInput({ remoteRoot: '/home/user/vault', localRoot: `${ICLOUD}/` })).toEqual({ ok: true, mapping: { remoteRoot: '/home/user/vault', localRoot: ICLOUD } });
   });
   it.each([
     [{ localRoot: '/x' }, 'remoteRoot', /vault folder on the daemon/],
@@ -133,7 +133,7 @@ describe('checkVaultMappingInput', () => {
 
 describe('Test connection wording for the vault folder', () => {
   const info = { daemonId: 'd', daemonVersion: '0.1.0', protocol: 1, minClientVersion: '0.0.0', capabilities: [], epoch: 'e' };
-  const root = '/home/rick/vault';
+  const root = '/home/user/vault';
   it('ok when allowed and present', () => {
     const r = describeTest({ ok: true, info, pathCheck: { allowed: true, exists: true, isDirectory: true, readOnly: false } }, root);
     expect(r.tone).toBe('ok');

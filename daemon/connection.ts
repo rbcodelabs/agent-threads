@@ -28,8 +28,10 @@ import {
   type ErrFrame,
   type ErrorCode,
   type JournalEntry,
+  type PathListReply,
   type WelcomeFrame,
   type WireEvent,
+  type WorkspaceInfo,
 } from '../src/protocol';
 import type { CommandCache } from './cmdCache';
 import type { PathAccess } from './sessionPolicy';
@@ -43,7 +45,7 @@ export const MAX_OUTBOUND_BYTES = 4 * 1024 * 1024;
 /** Stop handing frames to the socket once this much is already buffered in it. */
 const SOCKET_HIGH_WATER = 256 * 1024;
 /** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
-export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check'];
+export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list'];
 export const capabilitiesFor = (harness: string): string[] => [...BASE_CAPABILITIES, `harness.${harness}`];
 
 export interface Timings {
@@ -72,6 +74,10 @@ export interface ServerContext {
   controllers: ControlRegistry;
   /** Answers `path.check` from the configured workspaces (set even when the session host is not policed). */
   checkPath(path: string): PathAccess;
+  /** Answers `workspaces.list`: the configured roots, with vault detection. */
+  listWorkspaces(): WorkspaceInfo[];
+  /** Answers `path.list`: subfolders of an allowed folder. */
+  listPath(path: string): PathListReply;
   timings: Timings;
   maxOutboundBytes: number;
   audit(record: Record<string, unknown>): void;
@@ -82,6 +88,8 @@ const REQUIRED_SCOPE: Record<string, TokenScope> = {
   attach: 'read',
   'session.list': 'read',
   'path.check': 'read',
+  'workspaces.list': 'read',
+  'path.list': 'read',
   'session.getContextUsage': 'read',
   'session.mcpServerStatus': 'read',
   'session.getUsageSnapshot': 'read',
@@ -385,6 +393,8 @@ export class Connection {
         return {};
       case 'session.list': return { threads: host.list() };
       case 'path.check': return { ...this.ctx.checkPath(frame.path) };
+      case 'workspaces.list': return { workspaces: this.ctx.listWorkspaces() };
+      case 'path.list': return { ...this.ctx.listPath(frame.path) };
       case 'resolve.permission':
         this.requireControl(frame.threadId, auth);
         host.resolve(frame.threadId, 'permission', frame.requestId, { allow: frame.allow, alwaysAllow: frame.alwaysAllow }, auth.id);

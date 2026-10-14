@@ -77,6 +77,7 @@ import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
 import { DaemonRegistry } from './remote/DaemonRegistry';
+import { createRemoteFolderSource, type RemoteFolderSource } from './remote/folderSource';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
@@ -265,6 +266,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
   manager!: ThreadManager;
   /** Connections to the remote agent-threads daemons (Settings -> Remote daemons). */
   daemonRegistry: DaemonRegistry | null = null;
+  /** What the Run on picker asks for a daemon's folders (advertised workspaces, subfolders). */
+  remoteFolders: RemoteFolderSource | null = null;
   persistence!: VaultPersistence;
   inProcessSummarizer!: InProcessSummarizer;
   wakeLock!: WakeLockService;
@@ -600,6 +603,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       clientVersion: this.manifest.version,
       log: (message) => debugLog(message),
     });
+    this.remoteFolders = createRemoteFolderSource(this.daemonRegistry);
     this.register(() => { this.daemonRegistry?.disposeAll(); });
     this.manager.remoteDaemons = this.daemonRegistry;
     this.manager.getExternalMounts = () => this.listExternalMountRoots();

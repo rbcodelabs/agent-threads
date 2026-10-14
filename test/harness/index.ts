@@ -156,15 +156,15 @@ type FakeConn = { status: string; attempt: number; detail?: string };
 let fakeConn: FakeConn = { status: 'connected', attempt: 0 };
 const fakeConnListeners = new Set<(id: string, s: FakeConn) => void>();
 const fakeDaemonRegistry = {
-  nameOf: (id: string) => (id === 'claude-box' ? 'claude-box' : id),
+  nameOf: (id: string) => (id === 'my-server' ? 'my-server' : id),
   clientFor: () => ({ connect() {}, get connection() { return fakeConn; } }),
   stateOf: () => fakeConn,
   onState: (l: (id: string, s: FakeConn) => void) => { fakeConnListeners.add(l); return () => fakeConnListeners.delete(l); },
 };
-(window as any).__setRemoteState = (state: FakeConn) => { fakeConn = state; fakeConnListeners.forEach((l) => l('claude-box', fakeConn)); };
+(window as any).__setRemoteState = (state: FakeConn) => { fakeConn = state; fakeConnListeners.forEach((l) => l('my-server', fakeConn)); };
 (window as any).__markRemote = (threadId: string) => {
   const t = manager.getThread(threadId)!;
-  t.remote = { daemonId: 'claude-box', ownership: 'client', remoteCwd: '/srv/workspaces/agent-threads', lastSeq: 0, ownerClientId: 'harness' };
+  t.remote = { daemonId: 'my-server', ownership: 'client', remoteCwd: '/srv/workspaces/agent-threads', lastSeq: 0, ownerClientId: 'harness' };
   t.cwd = '/srv/workspaces/agent-threads';
 };
 

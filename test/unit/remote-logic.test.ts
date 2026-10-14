@@ -12,13 +12,13 @@ import { buildRemoteEnvironmentPrompt, projectSessionOptions } from '../../src/r
 import { remoteCwdLabel, remoteGroup, threadCwdLabel } from '../../src/remote/threadLocation';
 import type { RemoteDaemonConfig, Thread } from '../../src/types';
 
-const box: RemoteDaemonConfig = { id: 'claude-box', name: 'claude-box', url: 'wss://claude-box.ts.net:8443', tokenSecretName: 'T', defaultCwdRoot: '/srv/workspaces' };
+const box: RemoteDaemonConfig = { id: 'my-server', name: 'my-server', url: 'wss://my-server.tailnet-name.ts.net:8443', tokenSecretName: 'T', defaultCwdRoot: '/srv/workspaces' };
 const lab: RemoteDaemonConfig = { id: 'lab', name: 'lab', url: 'ws://100.1.2.3:7433', tokenSecretName: 'T2' };
 
 function remoteThread(over: Partial<Thread> = {}): Thread {
   return {
     id: 't1', title: 't', cwd: '/srv/workspaces/x', messages: [], createdAt: 0, updatedAt: 0, status: 'waiting',
-    remote: { daemonId: 'claude-box', ownership: 'client', remoteCwd: '/srv/workspaces/x', lastSeq: 0, ownerClientId: 'c' },
+    remote: { daemonId: 'my-server', ownership: 'client', remoteCwd: '/srv/workspaces/x', lastSeq: 0, ownerClientId: 'c' },
     ...over,
   } as Thread;
 }
@@ -85,8 +85,8 @@ describe('projectSessionOptions', () => {
   });
 
   it('describes the remote machine, not the Mac vault, in the environment prompt', () => {
-    const p = buildRemoteEnvironmentPrompt('/srv/workspaces/x', 'claude-box', 'Geode');
-    expect(p).toContain('claude-box');
+    const p = buildRemoteEnvironmentPrompt('/srv/workspaces/x', 'my-server', 'Geode');
+    expect(p).toContain('my-server');
     expect(p).toContain('/srv/workspaces/x');
     expect(p).not.toContain('Vault root');
   });
@@ -106,8 +106,8 @@ describe('Run on picker logic', () => {
   });
 
   it('resolves a daemon + folder, falling back to the daemon default folder', () => {
-    expect(resolveRunOn({ daemonId: 'claude-box', cwd: '/srv/workspaces/p' }, [box, lab])).toEqual({ ok: true, remote: { daemonId: 'claude-box', cwd: '/srv/workspaces/p' } });
-    expect(resolveRunOn({ daemonId: 'claude-box' }, [box])).toEqual({ ok: true, remote: { daemonId: 'claude-box', cwd: '/srv/workspaces' } });
+    expect(resolveRunOn({ daemonId: 'my-server', cwd: '/srv/workspaces/p' }, [box, lab])).toEqual({ ok: true, remote: { daemonId: 'my-server', cwd: '/srv/workspaces/p' } });
+    expect(resolveRunOn({ daemonId: 'my-server' }, [box])).toEqual({ ok: true, remote: { daemonId: 'my-server', cwd: '/srv/workspaces' } });
   });
 
   it('never falls back to local when the folder is bad or the daemon is gone', () => {
@@ -117,7 +117,7 @@ describe('Run on picker logic', () => {
   });
 
   it('labels the send button', () => {
-    expect(runOnSuffix({ daemonId: 'claude-box' }, [box])).toBe(' on claude-box');
+    expect(runOnSuffix({ daemonId: 'my-server' }, [box])).toBe(' on my-server');
     expect(runOnSuffix({}, [box])).toBe('');
     expect(runOnSuffix({ daemonId: 'gone' }, [box])).toBe('');
   });
@@ -125,17 +125,17 @@ describe('Run on picker logic', () => {
 
 describe('daemon settings logic', () => {
   it('derives unique ids and secret names', () => {
-    expect(slugifyDaemonName('  Claude Box! ')).toBe('claude-box');
+    expect(slugifyDaemonName('  My Server! ')).toBe('my-server');
     expect(slugifyDaemonName('!!!')).toBe('daemon');
-    expect(uniqueDaemonId('claude-box', [box])).toBe('claude-box-2');
+    expect(uniqueDaemonId('my-server', [box])).toBe('my-server-2');
     expect(uniqueDaemonId('Lab', [box])).toBe('lab');
-    expect(tokenSecretNameFor('claude-box')).toBe('AGENT_THREADS_DAEMON_CLAUDE_BOX_TOKEN');
+    expect(tokenSecretNameFor('my-server')).toBe('AGENT_THREADS_DAEMON_MY_SERVER_TOKEN');
   });
 
   it('validates input', () => {
     expect(checkDaemonInput({ name: '', url: 'wss://x' }, [])).toMatchObject({ ok: false, field: 'name' });
-    expect(checkDaemonInput({ name: 'CLAUDE-BOX', url: 'wss://x' }, [box])).toMatchObject({ ok: false, field: 'name' });
-    expect(checkDaemonInput({ name: 'claude-box', url: 'wss://x' }, [box], 'claude-box')).toMatchObject({ ok: true });
+    expect(checkDaemonInput({ name: 'MY-SERVER', url: 'wss://x' }, [box])).toMatchObject({ ok: false, field: 'name' });
+    expect(checkDaemonInput({ name: 'my-server', url: 'wss://x' }, [box], 'my-server')).toMatchObject({ ok: true });
     expect(checkDaemonInput({ name: 'a', url: '' }, [])).toMatchObject({ ok: false, field: 'url' });
     expect(checkDaemonInput({ name: 'a', url: 'ftp://x' }, [])).toMatchObject({ ok: false, field: 'url' });
     expect(checkDaemonInput({ name: 'a', url: 'wss://user:pw@x' }, [])).toMatchObject({ ok: false, field: 'url', reason: expect.stringMatching(/credentials/) });
@@ -167,13 +167,13 @@ describe('connection pill', () => {
 });
 
 describe('where a thread runs', () => {
-  const nameOf = (id: string) => (id === 'claude-box' ? 'Claude Box' : id);
+  const nameOf = (id: string) => (id === 'my-server' ? 'My Server' : id);
   it('spells remote folders as host:path and groups them by daemon + folder', () => {
     const t = remoteThread();
-    expect(remoteCwdLabel(t, nameOf)).toBe('Claude Box:/srv/workspaces/x');
-    expect(threadCwdLabel(t, () => 'local label', nameOf)).toBe('Claude Box:/srv/workspaces/x');
+    expect(remoteCwdLabel(t, nameOf)).toBe('My Server:/srv/workspaces/x');
+    expect(threadCwdLabel(t, () => 'local label', nameOf)).toBe('My Server:/srv/workspaces/x');
     expect(threadCwdLabel({ ...t, remote: undefined }, () => 'local label', nameOf)).toBe('local label');
-    expect(remoteGroup(t, nameOf)).toEqual({ key: 'remote:claude-box:/srv/workspaces/x', label: 'Claude Box · x' });
+    expect(remoteGroup(t, nameOf)).toEqual({ key: 'remote:my-server:/srv/workspaces/x', label: 'My Server · x' });
     expect(remoteGroup({ ...t, remote: undefined })).toBeUndefined();
   });
 

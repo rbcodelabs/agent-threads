@@ -27,6 +27,10 @@ export type ClientCommand =
   | { type: 'session.list' }
   /** Is this folder usable as a session cwd on the daemon? (additive; older daemons answer `unknown_command`.) */
   | { type: 'path.check'; path: string }
+  /** The folders this daemon allows sessions in, so a client can offer them instead of asking for a typed path. Additive; older daemons answer `unknown_command`. */
+  | { type: 'workspaces.list' }
+  /** Subfolders of an allowed folder, for browsing. Directories only, capped, confined to the workspaces. Additive. */
+  | { type: 'path.list'; path: string }
   | { type: 'attach'; ch: Channel; afterSeq: number }
   | { type: 'ack'; ch: Channel; seq: number }
   // Turn
@@ -68,6 +72,47 @@ export interface PathCheckReply {
   readOnly: boolean;
 }
 
+/** One folder the daemon allows sessions in (reply to `workspaces.list`). */
+export interface WorkspaceInfo {
+  /** Absolute path on the daemon's machine, as configured. */
+  path: string;
+  /** Last path segment; a label for pickers. */
+  name: string;
+  /** Edits are refused there (a read-only workspace). */
+  readOnly: boolean;
+  /** `vault` when the folder holds a `.geode`, `.obsidian` or `.vault` directory, else `folder`. */
+  kind: 'vault' | 'folder';
+  /** The daemon's preferred starting folder: its first read-write workspace. */
+  isDefault: boolean;
+}
+
+export interface WorkspacesListReply {
+  workspaces: WorkspaceInfo[];
+}
+
+/** A subfolder in a `path.list` reply. */
+export interface PathListEntry {
+  name: string;
+  /** Absolute path (the requested path joined with `name`). */
+  path: string;
+}
+
+/**
+ * Reply to `path.list`. A path outside every workspace (or one that is not a
+ * folder) yields no entries and, like `path.check`, nothing else: no names
+ * from outside the workspaces are ever returned.
+ */
+export interface PathListReply {
+  /** The requested path is inside a configured workspace. */
+  allowed: boolean;
+  entries: PathListEntry[];
+  /** More subfolders exist than were returned. */
+  truncated: boolean;
+}
+
+/** At most this many subfolders are returned by one `path.list`. */
+export const PATH_LIST_MAX_ENTRIES = 300;
+
 export type ClientCommandType = ClientCommand['type'];
 
 /** Every command type, for codec dispatch and exhaustiveness tests. */
@@ -78,6 +123,8 @@ export const CLIENT_COMMAND_TYPES: Record<ClientCommandType, true> = {
   'session.close': true,
   'session.list': true,
   'path.check': true,
+  'workspaces.list': true,
+  'path.list': true,
   attach: true,
   ack: true,
   'session.send': true,

@@ -298,7 +298,7 @@ export interface RemoteDaemonConfig {
 export interface RemoteVaultMapping {
   /** Local folder that corresponds to `remoteRoot`. Omitted = this vault's root. Absolute path on this computer. */
   localRoot?: string;
-  /** Absolute path on the daemon's machine, e.g. /home/rick/vault. */
+  /** Absolute path on the daemon's machine, e.g. /home/user/vault. */
   remoteRoot: string;
 }
 

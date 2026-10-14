@@ -17,6 +17,7 @@ import { CommandCache } from './cmdCache';
 import { isLoopbackAddress, isWildcardAddress, loadOrCreateDaemonId, type DaemonConfig } from './config';
 import { createClaudeDriverFactory, describeCredentialSource, findClaudeBinary, resolveCredentialEnv } from './claudeDriver';
 import { describePathAccess, type SessionPolicy } from './sessionPolicy';
+import { listSubfolders, listWorkspaces } from './workspaces';
 import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, capabilitiesFor, type ServerContext, type Timings } from './connection';
 import { ControlRegistry } from './controlRegistry';
 import { fakeHarnessFactory } from './fakeHarness';
@@ -124,6 +125,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     capabilities: capabilitiesFor(config.harness),
     controllers: new ControlRegistry(),
     checkPath: (path) => describePathAccess(path, sessionPolicy),
+    listWorkspaces: () => listWorkspaces(sessionPolicy),
+    listPath: (path) => listSubfolders(path, sessionPolicy),
     timings: { ...DEFAULT_TIMINGS, ...options.timings },
     maxOutboundBytes: options.maxOutboundBytes ?? MAX_OUTBOUND_BYTES,
     audit,

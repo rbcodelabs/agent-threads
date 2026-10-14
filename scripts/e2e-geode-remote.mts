@@ -13,7 +13,10 @@
  *   5. vault path mapping: with a vault mapping configured, choosing "Run on" in the real composer for a
  *      thread whose folder is inside the vault pre-fills the mapped remote folder, the thread runs there
  *      on a daemon whose workspace allowlist is that root, its system prompt carries the vault-mirror
- *      addendum, and `path.check` answers allowed / not allowed over the wire.
+ *      addendum, and `path.check` answers allowed / not allowed over the wire;
+ *   6. folder discovery: the same composer shows the folders the daemon itself advertises (a dropdown, no
+ *      text field to type a path into), the vault-kind folder is detected from its marker directory, the
+ *      mapped folder is preselected for the vault thread, and Browse lists subfolders over `path.list`.
  *
  *   npm run build && npm run build:daemon && node scripts/e2e-geode-remote.mts
  *
@@ -77,7 +80,7 @@ async function main(): Promise<void> {
   // The "remote" vault mirror the daemon is allowed to work in, and the matching local vault folder.
   const remoteVault = path.join(base, 'remote-vault');
   await Promise.all([fs.mkdir(daemonDir), fs.mkdir(userData), fs.mkdir(plugin, { recursive: true }),
-    fs.mkdir(path.join(remoteVault, 'Projects/Alpha'), { recursive: true }), fs.mkdir(path.join(vault, 'Projects/Alpha'), { recursive: true })]);
+    fs.mkdir(path.join(remoteVault, 'Projects/Alpha'), { recursive: true }), fs.mkdir(path.join(remoteVault, '.obsidian'), { recursive: true }), fs.mkdir(path.join(vault, 'Projects/Alpha'), { recursive: true })]);
 
   let daemon: ChildProcess | undefined;
   let proxy: KillableProxy | undefined;
@@ -211,11 +214,29 @@ async function main(): Promise<void> {
     await page.evaluate(`document.querySelector('.ct-agents-dispatch-btn').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))`);
     await until('Run on menu', () => page.evaluate(`!!document.querySelector('.ct-run-on-item[data-run-on="${DAEMON_ID}"]')`), 5000, 50);
     await page.evaluate(`document.querySelector('.ct-run-on-item[data-run-on="${DAEMON_ID}"]').click()`);
-    const suggested = await page.evaluate(`document.querySelector('.ct-run-on-folder-input')?.value`);
-    check('composer pre-fills the mapped remote folder for a vault cwd', suggested === mappedCwd, `${suggested} vs ${mappedCwd}`);
+    await until('folder dropdown (advertised by the daemon)', () => page.evaluate(`!!document.querySelector('.ct-run-on-folder-select')`), 10000, 50);
+    const suggested = await page.evaluate(`document.querySelector('.ct-run-on-folder-select')?.value`);
+    check('composer preselects the mapped remote folder for a vault cwd, from the daemon\'s own list', suggested === mappedCwd, `${suggested} vs ${mappedCwd}`);
     check('composer explains the suggestion', (await page.evaluate(`document.querySelector('[data-testid=run-on-folder-hint]')?.classList.contains('is-hidden')`)) === false);
+    check('no text field to type a remote path into', (await page.evaluate(`!!document.querySelector('.ct-run-on-folder-input')`)) === false);
+    const options: Array<{ value: string; text: string }> = await page.evaluate(`[...document.querySelectorAll('.ct-run-on-folder-select option')].map(o => ({ value: o.value, text: o.textContent }))`);
+    const advertisedVault = options.find((o) => o.value === remoteVault);
+    check('dropdown lists the daemon workspaces, with the vault detected from its marker folder',
+      !!advertisedVault && advertisedVault.text.includes('(vault)') && options.some((o) => o.value === '/srv/workspaces'), JSON.stringify(options.map((o) => o.value)));
+    const wire = await page.evaluate(`${P}.daemonRegistry.clientFor('${DAEMON_ID}').command('workspaces.list', {})`) as { workspaces: Array<{ path: string; kind: string; isDefault: boolean }> };
+    check('workspaces.list over the wire: vault kind detected, first workspace is the default',
+      wire.workspaces.find((w) => w.path === remoteVault)?.kind === 'vault' && wire.workspaces[0].isDefault === true && wire.workspaces[0].path === remoteVault, JSON.stringify(wire.workspaces));
+    await page.evaluate(`document.querySelector('.ct-run-on-browse-btn').click()`);
+    await until('browse panel lists the current folder', () => page.evaluate(`!document.querySelector('[data-testid=run-on-browser]').classList.contains('is-hidden') && !!document.querySelector('.ct-run-on-browse-up')`), 10000, 50);
+    await page.evaluate(`document.querySelector('.ct-run-on-browse-up').click()`);
+    const browsed: string[] = await until('subfolders of the parent', async () => {
+      const names: string[] = await page.evaluate(`[...document.querySelectorAll('.ct-run-on-browse-item')].map(e => e.textContent)`);
+      return names.length ? names : false;
+    }, 10000, 50);
+    check('Browse lists the daemon\'s subfolders over path.list', browsed.includes('Alpha'), JSON.stringify(browsed));
     await page.screenshot({ path: path.join(SHOTS, 'run-on-vault-folder.png') });
-    await page.evaluate(`document.querySelector('.ct-run-on-folder-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`); // closes the menu
+    check('browsing did not change the preselected folder', (await page.evaluate(`document.querySelector('.ct-run-on-folder-select')?.value`)) === mappedCwd);
+    await page.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`); // closes the menu
     await page.evaluate(`(() => { const ta = document.querySelector('.ct-agents-dispatch-input'); ta.value = '/tokens 5 burst=5 delay=1'; document.querySelector('.ct-agents-dispatch-btn').click(); })()`);
     const vaultThreadId: string = await until('vault thread to exist', () => page.evaluate(`(() => { const all = ${P}.manager.getThreads(); const t = all.find(t => t.remote && t.remote.remoteCwd === ${JSON.stringify(mappedCwd)}); return t ? t.id : false; })()`), 15000, 100) as string;
     check('thread created from the composer runs at the mapped remote folder', !!vaultThreadId, vaultThreadId);

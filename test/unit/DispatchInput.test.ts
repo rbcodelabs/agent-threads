@@ -538,8 +538,8 @@ describe('DispatchInput — run mode (container / host)', () => {
 });
 
 describe('DispatchInput — Run on a remote daemon: vault folder suggestion', () => {
-  const VAULT = '/Users/rick/Library/Mobile Documents/com~apple~CloudDocs/Documents/Personal';
-  const box = { id: 'box', name: 'claude-box', url: 'wss://x', tokenSecretName: 'T', defaultCwdRoot: '/home/rick/projects', vaultMapping: { remoteRoot: '/home/rick/vault' } };
+  const VAULT = '/Users/me/Documents/My Vault';
+  const box = { id: 'box', name: 'my-server', url: 'wss://x', tokenSecretName: 'T', defaultCwdRoot: '/home/user/projects', vaultMapping: { remoteRoot: '/home/user/vault' } };
   const plain = { id: 'plain', name: 'plain-box', url: 'wss://y', tokenSecretName: 'U', defaultCwdRoot: '/srv/workspaces' };
 
   function mountRemote(state: { localCwd: string | undefined }, onSend = vi.fn()) {
@@ -569,16 +569,16 @@ describe('DispatchInput — Run on a remote daemon: vault folder suggestion', ()
     const { root, sendButton } = mountRemote({ localCwd: `${VAULT}/Products/Agent Threads` });
     openMenu(sendButton);
     pick(root, 'box');
-    expect(folder(root).value).toBe('/home/rick/vault/Products/Agent Threads');
+    expect(folder(root).value).toBe('/home/user/vault/Products/Agent Threads');
     expect(hint(root).classList.contains('is-hidden')).toBe(false);
     expect(hint(root).textContent).toContain('Same folder as in your vault');
   });
 
   it('keeps the daemon default folder for a non-vault cwd, with no hint', () => {
-    const { root, sendButton } = mountRemote({ localCwd: '/Users/rick/projects/agent-threads' });
+    const { root, sendButton } = mountRemote({ localCwd: '/Users/me/projects/app' });
     openMenu(sendButton);
     pick(root, 'box');
-    expect(folder(root).value).toBe('/home/rick/projects');
+    expect(folder(root).value).toBe('/home/user/projects');
     expect(hint(root).classList.contains('is-hidden')).toBe(true);
   });
 
@@ -593,14 +593,14 @@ describe('DispatchInput — Run on a remote daemon: vault folder suggestion', ()
     const { root, textarea, sendButton, onSend } = mountRemote({ localCwd: VAULT });
     openMenu(sendButton);
     pick(root, 'box');
-    expect(folder(root).value).toBe('/home/rick/vault');
-    folder(root).value = '/home/rick/vault/Elsewhere';
+    expect(folder(root).value).toBe('/home/user/vault');
+    folder(root).value = '/home/user/vault/Elsewhere';
     folder(root).dispatchEvent(new Event('input', { bubbles: true }));
     expect(hint(root).classList.contains('is-hidden')).toBe(true);
     textarea.value = 'go';
     sendButton.click();
     await Promise.resolve();
-    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ remote: { daemonId: 'box', cwd: '/home/rick/vault/Elsewhere' } }));
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ remote: { daemonId: 'box', cwd: '/home/user/vault/Elsewhere' } }));
   });
 
   it('re-suggests when the Project (local cwd) changed since the menu was last open, unless the user typed', () => {
@@ -608,11 +608,150 @@ describe('DispatchInput — Run on a remote daemon: vault folder suggestion', ()
     const { root, sendButton } = mountRemote(state);
     openMenu(sendButton);
     pick(root, 'box');
-    expect(folder(root).value).toBe('/home/rick/vault/Daily');
+    expect(folder(root).value).toBe('/home/user/vault/Daily');
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); // dismiss the menu
     expect(root.querySelector('.ct-harness-menu')).toBeNull();
     state.localCwd = `${VAULT}/Products`;
     openMenu(sendButton);
-    expect(folder(root).value).toBe('/home/rick/vault/Products');
+    expect(folder(root).value).toBe('/home/user/vault/Products');
+  });
+});
+
+
+describe('DispatchInput — Run on a remote daemon: the daemon offers its own folders', () => {
+  const VAULT = '/Users/me/Documents/My Vault';
+  const projects = { path: '/home/user/projects', name: 'projects', readOnly: false, kind: 'folder' as const, isDefault: true };
+  const notes = { path: '/home/user/notes', name: 'notes', readOnly: false, kind: 'vault' as const, isDefault: false };
+  const tree: Record<string, string[]> = {
+    '/home/user/projects': ['app', 'site'],
+    '/home/user/projects/app': ['packages'],
+    '/home/user/notes': ['Daily', 'Products'],
+  };
+  const box = { id: 'box', name: 'my-server', url: 'wss://x', tokenSecretName: 'T', vaultMapping: { remoteRoot: '/home/user/notes' } };
+  const old = { id: 'old', name: 'old-server', url: 'wss://y', tokenSecretName: 'U', defaultCwdRoot: '/srv/workspaces' };
+
+  function source(failFor: Record<string, 'unsupported' | 'error'> = {}) {
+    return {
+      workspaces: vi.fn(async (id: string) => {
+        const fail = failFor[id];
+        if (fail) return { ok: false as const, reason: fail, detail: fail === 'unsupported' ? 'This daemon is too old to list its folders.' : 'boom' };
+        return { ok: true as const, value: [projects, notes] };
+      }),
+      subfolders: vi.fn(async (_id: string, path: string) => ({
+        ok: true as const,
+        value: { allowed: path in tree, entries: (tree[path] ?? []).map((name) => ({ name, path: `${path}/${name}` })), truncated: false },
+      })),
+    };
+  }
+  const flush = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0)); };
+
+  function mount(state: { localCwd: string | undefined }, src = source(), onSend = vi.fn()) {
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend,
+      harnessPicker: {
+        initialHarness: 'claude',
+        getRemoteDaemons: () => [box, old],
+        getLocalCwd: () => state.localCwd,
+        getVaultRoot: () => VAULT,
+        getFolderSource: () => src,
+      },
+    });
+    const container = makeContainer();
+    document.body.appendChild(container);
+    const root = di.mount(container);
+    return { root, textarea: root.querySelector('textarea')!, sendButton: root.querySelector<HTMLButtonElement>('.ct-send-btn')!, onSend, src };
+  }
+  const openMenu = (btn: HTMLElement) => btn.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  const pick = (root: HTMLElement, id: string) => root.querySelector<HTMLButtonElement>(`.ct-run-on-item[data-run-on="${id}"]`)!.click();
+  const select = (root: HTMLElement) => root.querySelector<HTMLSelectElement>('.ct-run-on-folder-select')!;
+  const hint = (root: HTMLElement) => root.querySelector<HTMLElement>('[data-testid="run-on-folder-hint"]')!;
+
+  it('shows the daemon\'s workspaces and preselects the mapped vault folder for a vault thread, no typing', async () => {
+    const { root, sendButton } = mount({ localCwd: `${VAULT}/Products` });
+    openMenu(sendButton);
+    pick(root, 'box');
+    await flush();
+    const opts = Array.from(select(root).options).map((o) => o.value);
+    expect(opts).toEqual(['/home/user/projects', '/home/user/notes', '/home/user/notes/Products', '__other__']);
+    expect(select(root).value).toBe('/home/user/notes/Products');
+    expect(root.querySelector('.ct-run-on-folder-input')).toBeNull();
+    expect(hint(root).classList.contains('is-hidden')).toBe(false);
+  });
+
+  it('defaults to the daemon\'s advertised default workspace when nothing else applies, and sends it', async () => {
+    const { root, textarea, sendButton, onSend } = mount({ localCwd: '/Users/me/projects/app' });
+    openMenu(sendButton);
+    pick(root, 'box');
+    await flush();
+    expect(select(root).value).toBe('/home/user/projects');
+    expect(hint(root).classList.contains('is-hidden')).toBe(true);
+    textarea.value = 'go';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ remote: { daemonId: 'box', cwd: '/home/user/projects' } }));
+  });
+
+  it('choosing another workspace from the dropdown is what gets sent', async () => {
+    const { root, textarea, sendButton, onSend } = mount({ localCwd: undefined });
+    openMenu(sendButton);
+    pick(root, 'box');
+    await flush();
+    select(root).value = '/home/user/notes';
+    select(root).dispatchEvent(new Event('change', { bubbles: true }));
+    expect(select(root).value).toBe('/home/user/notes');
+    textarea.value = 'go';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ remote: { daemonId: 'box', cwd: '/home/user/notes' } }));
+  });
+
+  it('Browse lists subfolders via the daemon, descends, goes up only inside a workspace, and uses the chosen folder', async () => {
+    const { root, textarea, sendButton, onSend, src } = mount({ localCwd: undefined });
+    openMenu(sendButton);
+    pick(root, 'box');
+    await flush();
+    const panel = () => root.querySelector<HTMLElement>('[data-testid="run-on-browser"]')!;
+    expect(panel().classList.contains('is-hidden')).toBe(true);
+    root.querySelector<HTMLButtonElement>('.ct-run-on-browse-btn')!.click();
+    await flush();
+    expect(src.subfolders).toHaveBeenCalledWith('box', '/home/user/projects');
+    const names = () => Array.from(root.querySelectorAll('.ct-run-on-browse-item')).map((e) => e.textContent);
+    expect(names()).toEqual(['app', 'site']);
+    expect(root.querySelector<HTMLButtonElement>('.ct-run-on-browse-up')!.disabled).toBe(true);
+    root.querySelector<HTMLButtonElement>('.ct-run-on-browse-item[data-path="/home/user/projects/app"]')!.click();
+    await flush();
+    expect(names()).toEqual(['packages']);
+    expect(root.querySelector<HTMLButtonElement>('.ct-run-on-browse-up')!.disabled).toBe(false);
+    root.querySelector<HTMLButtonElement>('.ct-run-on-browse-item[data-path="/home/user/projects/app/packages"]')!.click();
+    await flush();
+    root.querySelector<HTMLButtonElement>('.ct-run-on-browse-use')!.click();
+    await flush();
+    expect(select(root).value).toBe('/home/user/projects/app/packages');
+    textarea.value = 'go';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ remote: { daemonId: 'box', cwd: '/home/user/projects/app/packages' } }));
+  });
+
+  it('a daemon too old to list folders falls back to the text field with its default and a reason', async () => {
+    const { root, sendButton } = mount({ localCwd: undefined }, source({ old: 'unsupported' }));
+    openMenu(sendButton);
+    pick(root, 'old');
+    await flush();
+    expect(select(root)).toBeNull();
+    expect(root.querySelector<HTMLInputElement>('.ct-run-on-folder-input')!.value).toBe('/srv/workspaces');
+    expect(root.querySelector('[data-testid="run-on-folder-note"]')!.textContent).toContain('too old');
+  });
+
+  it('"Other folder…" switches to typing', async () => {
+    const { root, sendButton } = mount({ localCwd: undefined });
+    openMenu(sendButton);
+    pick(root, 'box');
+    await flush();
+    select(root).value = '__other__';
+    select(root).dispatchEvent(new Event('change', { bubbles: true }));
+    expect(root.querySelector('.ct-run-on-folder-input')).not.toBeNull();
+    expect(select(root)).toBeNull();
   });
 });

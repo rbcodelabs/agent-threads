@@ -6,13 +6,13 @@ import type { Thread } from '../types';
 
 export type DaemonNameResolver = (daemonId: string) => string;
 
-/** `claude-box` for a remote thread, undefined for a local one. */
+/** `my-server` for a remote thread, undefined for a local one. */
 export function remoteHostName(thread: Pick<Thread, 'remote'>, nameOf?: DaemonNameResolver): string | undefined {
   if (!thread.remote) return undefined;
   return nameOf ? nameOf(thread.remote.daemonId) : thread.remote.daemonId;
 }
 
-/** `claude-box:/srv/workspaces/x`: a path on another machine, spelled so nobody mistakes it for a local one. */
+/** `my-server:/srv/workspaces/x`: a path on another machine, spelled so nobody mistakes it for a local one. */
 export function remoteCwdLabel(thread: Pick<Thread, 'remote' | 'cwd'>, nameOf?: DaemonNameResolver): string | undefined {
   const host = remoteHostName(thread, nameOf);
   return host === undefined ? undefined : `${host}:${thread.remote!.remoteCwd}`;

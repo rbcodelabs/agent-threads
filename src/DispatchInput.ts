@@ -1,6 +1,9 @@
 import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, type AgentHarness, type HarnessVmMode, type RemoteDaemonConfig } from './types';
 import { resolveRunOn, runOnSuffix, type RunOnRemote, type RunOnSelection } from './remote/runOn';
 import { suggestRemoteCwd } from './remote/vaultMapping';
+import type { RemoteFolderSource, FolderLoad } from './remote/folderSource';
+import { parentPath, pickDefaultWorkspace, workspaceContaining, workspaceForPath, workspaceLabel } from './remote/workspaceChoice';
+import type { WorkspaceInfo } from './protocol';
 import { App, setIcon, setTooltip, Notice } from 'obsidian';
 import type { ImageAttachment, ImageMediaType } from './types';
 import { MAX_ATTACHMENT_BYTES } from './attachmentUtils';
@@ -124,6 +127,12 @@ export interface DispatchInputOptions {
      */
     getLocalCwd?: () => string | undefined;
     getVaultRoot?: () => string | undefined;
+    /**
+     * Where to ask a daemon which folders it offers (and what is inside them). With it the "Run on"
+     * folder is a dropdown plus Browse instead of a text field; without it, or when a daemon is too
+     * old to answer, the text field is used.
+     */
+    getFolderSource?: () => RemoteFolderSource | undefined;
   };
   /**
    * Called on every keydown/keyup to retrieve the current push-to-talk hotkey
@@ -156,6 +165,8 @@ export interface ExtraSkillDir {
    */
   prefix?: string;
 }
+
+const OTHER_FOLDER = '__other__';
 
 export class DispatchInput {
   private app: App;
@@ -203,6 +214,9 @@ export class DispatchInput {
   private selectedRunOn: RunOnSelection = {};
   /** The user typed in the remote folder field, so the suggestion no longer overwrites it. */
   private runOnCwdEdited = false;
+  /** Workspaces each daemon advertised, loaded when the menu opens (cleared on every open). */
+  private runOnFolders = new Map<string, FolderLoad<WorkspaceInfo[]>>();
+  private runOnLoadToken = 0;
   private harnessMenu: HTMLElement | null = null;
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressNextSendClick = false;
@@ -667,6 +681,7 @@ export class DispatchInput {
 
   private openHarnessMenu(): void {
     if (this.harnessMenu) return;
+    this.runOnFolders.clear();
     const menu = this.rootEl.createDiv({ cls: 'ct-harness-menu', attr: { role: 'menu', 'aria-label': 'Choose agent harness' } });
     this.harnessMenu = menu;
     for (const harness of AGENT_HARNESSES) {
@@ -780,12 +795,41 @@ export class DispatchInput {
     this.refreshRunOnFolderRow(menu, daemons);
   }
 
-  /** The folder field under "Run on", present only while a daemon is selected. */
+  /**
+   * The folder control under "Run on", present only while a daemon is selected.
+   * With a folder source it is a dropdown of the daemon's own workspaces plus a
+   * Browse panel (no typing); without one, or when the daemon cannot list its
+   * folders, it is the plain text field.
+   */
   private refreshRunOnFolderRow(menu: HTMLElement, daemons: RemoteDaemonConfig[]): void {
     menu.querySelector('.ct-run-on-folder')?.remove();
     const daemon = daemons.find((d) => d.id === this.selectedRunOn.daemonId);
     if (!daemon) return;
     const row = menu.createDiv({ cls: 'ct-run-on-folder' });
+    const source = this.options.harnessPicker?.getFolderSource?.();
+    if (!source) { this.renderRunOnFolderText(row, daemon); return; }
+    const loaded = this.runOnFolders.get(daemon.id);
+    if (!loaded) {
+      row.createEl('label', { text: `Folder on ${daemon.name}` });
+      row.createDiv({ cls: 'ct-run-on-folder-hint', attr: { 'data-testid': 'run-on-folder-loading' }, text: 'Loading folders…' });
+      const token = ++this.runOnLoadToken;
+      void source.workspaces(daemon.id).then((result) => {
+        this.runOnFolders.set(daemon.id, result);
+        if (token !== this.runOnLoadToken || !this.harnessMenu || this.selectedRunOn.daemonId !== daemon.id) return;
+        this.refreshRunOnFolderRow(this.harnessMenu, this.remoteDaemons());
+      });
+      return;
+    }
+    if (!loaded.ok || loaded.value.length === 0) {
+      const why = !loaded.ok ? loaded.detail : `${daemon.name} has no folders configured. Start it with --workspace <folder>.`;
+      this.renderRunOnFolderText(row, daemon, `${why} Type a folder instead.`);
+      return;
+    }
+    this.renderRunOnFolderChooser(row, daemon, loaded.value, source);
+  }
+
+  /** Free-text folder field: the fallback for a daemon that cannot list its folders. */
+  private renderRunOnFolderText(row: HTMLElement, daemon: RemoteDaemonConfig, note?: string): void {
     row.createEl('label', { text: `Folder on ${daemon.name}`, attr: { for: 'ct-run-on-folder-input' } });
     const input = row.createEl('input', {
       cls: 'ct-run-on-folder-input',
@@ -800,6 +844,7 @@ export class DispatchInput {
       hint.setText(show ? `Same folder as in your vault, in ${daemon.name}'s copy of it.` : '');
     };
     refreshHint();
+    if (note) row.createDiv({ cls: 'ct-run-on-folder-hint', attr: { 'data-testid': 'run-on-folder-note' }, text: note });
     input.addEventListener('input', () => {
       this.runOnCwdEdited = true;
       this.selectedRunOn = { daemonId: daemon.id, cwd: input.value };
@@ -810,6 +855,81 @@ export class DispatchInput {
       if (event.key === 'Enter') { event.preventDefault(); this.closeHarnessMenu(true); }
     });
     input.focus();
+  }
+
+  private renderRunOnFolderChooser(row: HTMLElement, daemon: RemoteDaemonConfig, workspaces: WorkspaceInfo[], source: RemoteFolderSource): void {
+    // Nothing chosen yet (no mapping, no default folder): start in the daemon's own default workspace.
+    if (!this.selectedRunOn.cwd?.trim()) {
+      const fallback = pickDefaultWorkspace(workspaces);
+      if (fallback) this.selectedRunOn = { daemonId: daemon.id, cwd: fallback.path };
+    }
+    const cwd = this.selectedRunOn.cwd ?? '';
+    row.createEl('label', { text: `Folder on ${daemon.name}`, attr: { for: 'ct-run-on-folder-select' } });
+    const controls = row.createDiv({ cls: 'ct-run-on-folder-controls' });
+    const select = controls.createEl('select', {
+      cls: 'ct-run-on-folder-select dropdown',
+      attr: { id: 'ct-run-on-folder-select', 'aria-label': `Folder on ${daemon.name}` },
+    });
+    for (const w of workspaces) select.createEl('option', { value: w.path, text: workspaceLabel(w) });
+    if (cwd && !workspaceForPath(workspaces, cwd)) select.createEl('option', { value: cwd, text: cwd });
+    select.createEl('option', { value: OTHER_FOLDER, text: 'Other folder…' });
+    select.value = cwd;
+    const browseBtn = controls.createEl('button', { cls: 'ct-run-on-browse-btn', text: 'Browse…', attr: { type: 'button', 'aria-expanded': 'false' } });
+
+    const suggestion = this.suggestedRemoteCwd(daemon);
+    const hint = row.createDiv({ cls: 'ct-run-on-folder-hint', attr: { 'data-testid': 'run-on-folder-hint' } });
+    const refreshHint = (): void => {
+      const show = suggestion.fromVault && (this.selectedRunOn.cwd ?? '') === suggestion.cwd;
+      hint.toggleClass('is-hidden', !show);
+      hint.setText(show ? `Same folder as in your vault, in ${daemon.name}'s copy of it.` : '');
+    };
+    refreshHint();
+    const choose = (path: string): void => {
+      this.runOnCwdEdited = true;
+      this.selectedRunOn = { daemonId: daemon.id, cwd: path };
+      this.refreshRunOnFolderRow(this.harnessMenu ?? row.parentElement as HTMLElement, this.remoteDaemons());
+    };
+    select.addEventListener('keydown', (event) => event.stopPropagation());
+    select.addEventListener('change', () => {
+      if (select.value !== OTHER_FOLDER) { choose(select.value); return; }
+      // "Other folder…": fall back to typing for this daemon.
+      row.empty();
+      this.renderRunOnFolderText(row, daemon);
+    });
+
+    const panel = row.createDiv({ cls: 'ct-run-on-browser is-hidden', attr: { 'data-testid': 'run-on-browser' } });
+    const renderBrowser = async (path: string): Promise<void> => {
+      panel.empty();
+      panel.createDiv({ cls: 'ct-run-on-browser-path', text: path });
+      const listing = panel.createDiv({ cls: 'ct-run-on-browser-list', attr: { role: 'listbox', 'aria-label': 'Subfolders' } });
+      listing.createDiv({ cls: 'ct-run-on-folder-hint', text: 'Loading…' });
+      const actions = panel.createDiv({ cls: 'ct-run-on-browser-actions' });
+      const parent = parentPath(path);
+      const up = actions.createEl('button', { text: 'Up', cls: 'ct-run-on-browse-up', attr: { type: 'button' } });
+      up.disabled = !parent || !workspaceContaining(workspaces, parent);
+      up.addEventListener('click', () => { if (parent) void renderBrowser(parent); });
+      const use = actions.createEl('button', { text: 'Use this folder', cls: 'mod-cta ct-run-on-browse-use', attr: { type: 'button' } });
+      use.addEventListener('click', () => choose(path));
+      const result = await source.subfolders(daemon.id, path);
+      if (!panel.isConnected) return;
+      listing.empty();
+      if (!result.ok) { listing.createDiv({ cls: 'ct-run-on-folder-hint', text: result.detail }); return; }
+      if (!result.value.allowed) { listing.createDiv({ cls: 'ct-run-on-folder-hint', text: 'This folder is not available on the daemon.' }); return; }
+      if (result.value.entries.length === 0) listing.createDiv({ cls: 'ct-run-on-folder-hint', text: 'No subfolders.' });
+      for (const entry of result.value.entries) {
+        const item = listing.createEl('button', { cls: 'ct-run-on-browse-item', text: entry.name, attr: { type: 'button', role: 'option', 'data-path': entry.path } });
+        item.addEventListener('click', () => { void renderBrowser(entry.path); });
+      }
+      if (result.value.truncated) listing.createDiv({ cls: 'ct-run-on-folder-hint', text: 'Only the first folders are shown. Use Other folder… to type a deeper path.' });
+    };
+    browseBtn.addEventListener('click', () => {
+      const open = panel.hasClass('is-hidden');
+      panel.toggleClass('is-hidden', !open);
+      browseBtn.setAttribute('aria-expanded', String(open));
+      if (!open) return;
+      const start = workspaceContaining(workspaces, cwd) ? cwd : (pickDefaultWorkspace(workspaces)?.path ?? workspaces[0].path);
+      void renderBrowser(start);
+    });
   }
 
   private createHarnessMark(container: HTMLElement, harness: AgentHarness): void {

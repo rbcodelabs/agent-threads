@@ -10,16 +10,16 @@ its own `claude` login. It does not have the vault/editor tools, your MCP server
 secrets (those arrive in later PRs). Claude only. A message sent while a turn is running is held by the
 plugin and sent when the turn ends.
 
-## ws:// vs wss:// from Geode (spike result, 2026-10-14)
+## ws:// vs wss:// from Geode (spike findings)
 
-Measured with the real Geode renderer (v0.27.1, headless, throwaway profile) against a throwaway daemon on
-`claude-box` reached over Tailscale:
+Measured with the real Geode renderer (v0.27.1, headless, throwaway profile) against a throwaway daemon on a
+Linux box reached over Tailscale:
 
 | Transport | Renderer global `WebSocket` | Node `ws` module in the renderer |
 |---|---|---|
-| `ws://100.113.251.93:7598` (raw tailnet TCP) | **blocked** | connects, `welcome` received |
-| `ws://claude-box:7598` (MagicDNS) | **blocked** | connects |
-| `wss://claude-box.taila7fd11.ts.net:8443` (`tailscale serve`) | **blocked** | connects |
+| `ws://<tailscale-ip>:<port>` (raw tailnet TCP) | **blocked** | connects, `welcome` received |
+| `ws://<machine-name>:<port>` (MagicDNS short name) | **blocked** | connects |
+| `wss://<machine>.<tailnet>.ts.net:8443` (`tailscale serve`) | **blocked** | connects |
 
 Why: the renderer ships `Content-Security-Policy: default-src 'self'; ...` with no `connect-src`, so
 `connect-src` falls back to `'self'` and the console reports `Connecting to 'wss://...' violates the
@@ -30,16 +30,16 @@ allows, which is not subject to the page CSP, and which sends no `Origin` header
 `--allow-origin` list is irrelevant to it. Both `ws://` and `wss://` work. (The global `WebSocket` is only
 used where there is no Node, i.e. mobile.)
 
-Also found on `claude-box`: `tailscaled` runs with `--tun=userspace-networking`, so the machine has **no
-tailnet interface**. A daemon cannot bind the Tailscale IP (`EADDRNOTAVAIL`); inbound tailnet traffic only
-reaches it through `tailscale serve`. So: run the daemon on `127.0.0.1` and publish it with `tailscale
-serve` (needs `sudo` unless `tailscale set --operator=$USER` was run). The existing hub already uses
-`https://claude-box...:443`, so use another HTTPS port (8443) rather than touching it.
+Also worth knowing: a machine whose `tailscaled` runs with `--tun=userspace-networking` has **no tailnet
+interface**. A daemon cannot bind the Tailscale IP (`EADDRNOTAVAIL`); inbound tailnet traffic only reaches it
+through `tailscale serve`. So: run the daemon on `127.0.0.1` and publish it with `tailscale serve` (needs
+`sudo` unless `tailscale set --operator=$USER` was run). If you already serve something on HTTPS port 443,
+use another HTTPS port (8443) rather than touching it.
 
-Recommended: `wss://claude-box.taila7fd11.ts.net:8443` (TLS from Tailscale). Fallback: `ws://claude-box:7598`
+Recommended: `wss://<machine>.<tailnet>.ts.net:8443` (TLS from Tailscale). Fallback: `ws://<machine>:7598`
 via `tailscale serve --tcp` (plain, but inside the WireGuard tunnel).
 
-## Install on claude-box
+## Install on the daemon machine
 
 Build on your Mac from this branch:
 
@@ -48,10 +48,10 @@ cd ~/.geode/worktrees/agent-threads/feat/remote-threads   # or your checkout of 
 npm ci
 npm run build:daemon          # -> dist/agent-threads.cjs (one file, plain node)
 npm run build                 # -> dist/main.js, manifest.json, styles.css (the plugin)
-scp dist/agent-threads.cjs claude-box:~/agent-threads/agent-threads.cjs
+scp dist/agent-threads.cjs my-server:~/agent-threads/agent-threads.cjs
 ```
 
-On `claude-box` (Node 22+ and a logged-in `claude`; both already there):
+On the daemon machine (needs Node 22+ and a logged-in `claude`):
 
 ```bash
 mkdir -p ~/agent-threads/data && cd ~/agent-threads
@@ -59,11 +59,11 @@ mkdir -p ~/agent-threads/data && cd ~/agent-threads
 node agent-threads.cjs token create --name geode --scope control --data-dir ~/agent-threads/data
 
 # Run the daemon (use tmux/screen for now; a systemd unit comes with the packaging PR).
-# --workspace: folders sessions may run in. Add ~/vault if you want threads there.
+# --workspace: folders sessions may run in. Add your vault folder if you want threads there.
 node agent-threads.cjs serve \
   --data-dir ~/agent-threads/data \
   --listen 127.0.0.1 --port 7433 \
-  --workspace /home/rick/projects --workspace /home/rick/vault
+  --workspace /home/user/projects --workspace /home/user/vault
 curl -s http://127.0.0.1:7433/healthz     # {"ok":true,"protocol":1}
 
 # Publish it on the tailnet as wss:// on 8443 (leaves the hub on :443 alone)
@@ -81,18 +81,46 @@ To remove the tailnet exposure: `sudo tailscale serve --https=8443 off`.
 1. Install the build: copy `dist/main.js`, `dist/manifest.json`, `dist/styles.css` into
    `<vault>/.geode/plugins/claude-threads/` (never `data.json`), then run **Reload plugin (safe)**.
    Commit and push the branch first (see `process/development.md`, "Dev Builds in the Live Vault").
-2. Settings, Remote, **Remote daemons**, **Add daemon**: name `claude-box`, address
-   `wss://claude-box.taila7fd11.ts.net:8443`, the token, default folder `/home/rick/projects`.
-   **Test connection** should say `Connected: agent-threads <version>, protocol 1`.
+2. Settings, Remote, **Remote daemons**, **Add daemon**: a name (for example `my-server`), the address
+   (for example `wss://my-server.tailnet-name.ts.net:8443`) and the token. Press **Test connection**: it
+   should say `Connected: agent-threads <version>, protocol 1`, and the dialog then offers the folders the
+   daemon itself advertises (next section). You do not type any path on the daemon machine.
 3. In the Agents list composer, right-click (or hold) the send button: under **Run on** choose
-   `claude-box`, type the folder on that machine, send. The thread shows a `claude-box` badge, the remote
-   folder and a connection pill.
+   `my-server`. The folder is a dropdown of the daemon's own folders (with **Browse...** to pick a
+   subfolder); send. The thread shows a `my-server` badge, the remote folder and a connection pill.
 4. Quit Geode mid-turn, wait, reopen: the transcript completes without any action.
+
+## Folders are discovered, not typed
+
+A current daemon tells Geode which folders it allows, so you never type a remote path from memory. Two
+additive, read-scope commands do this (an older daemon answers `unknown_command` and Geode falls back to text
+fields):
+
+- `workspaces.list` returns the configured workspaces: `{path, name, readOnly, kind, isDefault}`. `kind` is
+  `vault` when the folder contains a `.geode`, `.obsidian` or `.vault` directory, otherwise `folder`.
+  `isDefault` marks the daemon's first read-write workspace. Capabilities `workspaces.list` and `path.list` are
+  advertised in `welcome`.
+- `path.list {path}` returns the subfolders of an allowed folder (directories only, dot-folders skipped, at
+  most 300). A path outside every workspace gets `allowed:false` and no names; symlinks are resolved before
+  the check, so a link that leads outside a workspace is neither listed nor enterable. File names and
+  contents are never returned.
+
+What Geode does with it:
+
+- **Add / Edit daemon, after Test connection succeeds:** the vault folder and default folder become dropdowns
+  of the daemon's workspaces (plus None). The vault folder is chosen for you: if exactly one advertised
+  folder looks like a vault it is used; otherwise the folder whose name equals this vault's folder name;
+  otherwise it stays on None with a hint. The default folder starts as the daemon's default workspace. A value
+  you already saved or chose yourself is never overwritten. The raw text fields live under **Advanced** (and
+  open by themselves when the daemon is too old to advertise folders).
+- **Run on:** the folder is a dropdown of the daemon's workspaces. A vault thread with a mapping has its
+  mapped folder preselected. **Browse...** lists subfolders (`path.list`) to descend into and **Use this
+  folder** selects one. **Other folder...** switches to typing.
 
 ## Working in the vault
 
-A daemon can hold a synced copy of your vault (on `claude-box`: `/home/rick/vault`, two-way synced to the
-hub every ~300 s, and your Mac syncs to the same hub). Vault threads can then run there with the same
+A daemon can hold a synced copy of your vault (for example `/home/user/vault`, kept in sync with your
+main machine by a file-sync tool every few minutes). Vault threads can then run there with the same
 folder they would use on the Mac.
 
 **Caveats, read these first.** The daemon works on a *copy*, not the live vault:
@@ -112,40 +140,38 @@ repeat every folder you already use. Edit the unit (find it with `systemctl --us
 ```ini
 [Service]
 ExecStart=
-ExecStart=/usr/bin/node /home/rick/agent-threads/agent-threads.cjs serve \
-  --data-dir /home/rick/agent-threads/data --listen 127.0.0.1 --port 7433 \
-  --workspace /home/rick/projects \
-  --workspace /home/rick/vault
+ExecStart=/usr/bin/node /home/user/agent-threads/agent-threads.cjs serve \
+  --data-dir /home/user/agent-threads/data --listen 127.0.0.1 --port 7433 \
+  --workspace /home/user/projects \
+  --workspace /home/user/vault
 ```
 
-(Keep your existing flags and paths; only add the `--workspace /home/rick/vault` line.) Then
+(Keep your existing flags and paths; only add the `--workspace /home/user/vault` line.) Then
 `systemctl --user daemon-reload && systemctl --user restart agent-threads` (system unit: drop `--user` and
-use `sudo`). Alternatives with the same effect: `AGENT_THREADS_WORKSPACES=/home/rick/projects:/home/rick/vault`
+use `sudo`). Alternatives with the same effect: `AGENT_THREADS_WORKSPACES=/home/user/projects:/home/user/vault`
 in the unit's `Environment=`, or `"workspaces": [...]` in `<data-dir>/config.json`. Restarting stops live `claude` processes (a running turn is marked interrupted); threads resume on the next message.
 
 The workspace check follows symlinks before comparing, so `~/vault` may itself be a link to another disk, but
 a link *inside* the vault that points outside it is refused as a cwd.
 
-**Optional: read-only.** `--readonly-workspace /home/rick/vault` (env `AGENT_THREADS_READONLY_WORKSPACES`,
+**Optional: read-only.** `--readonly-workspace /home/user/vault` (env `AGENT_THREADS_READONLY_WORKSPACES`,
 config `readOnlyWorkspaces`) allows sessions there but denies the harness's edit tools (`Edit`, `MultiEdit`,
 `Write`, `NotebookEdit`) and refuses the `acceptEdits`, `auto` and `bypassPermissions` modes (Geode's default setting
 is `acceptEdits`, so such a thread must use the default or plan permission mode). This is a guard rail, not a sandbox: shell commands
 (`Bash`) are not blocked. Use it together with `--workspace` for other folders (a read-write workspace nested
 inside a read-only one stays writable).
 
-**2. Tell Geode.** Settings, Remote, Remote daemons, edit `claude-box`:
+**2. Tell Geode.** Settings, Remote, Remote daemons, edit your daemon and press **Test connection**. With a
+current daemon the **Vault folder on this daemon** dropdown fills itself in (see the previous section); you
+only confirm it. Under **Advanced**, **Local folder it mirrors** stays blank to use this vault, or names a
+subfolder of it if only part of the vault is mirrored. **Test connection** also checks the chosen folder: it
+reports whether the daemon allows it and whether it exists (an older daemon says it cannot check folders).
 
-- **Vault folder on this daemon**: `/home/rick/vault`.
-- **Local folder it mirrors**: leave blank to use this vault (or a subfolder if only part of the vault is
-  mirrored).
-- **Test connection** now also checks that folder: it reports whether the daemon allows it and whether it
-  exists (an older daemon says it cannot check folders).
-
-**3. Use it.** In the composer, choose **Run on** `claude-box`: when the thread's folder (the selected
-Project's folder, otherwise the default folder) is inside this vault, the remote folder is pre-filled with
-the same relative path under the vault folder, with a note saying so. Edit it if you want something else.
-Folders outside the vault keep the daemon's default folder. Threads whose remote folder is inside the vault
-folder get a system-prompt addendum describing the points above.
+**3. Use it.** In the composer, choose **Run on** your daemon: when the thread's folder (the selected
+Project's folder, otherwise the default folder) is inside this vault, the remote folder is preselected as the
+same relative path under the vault folder, with a note saying so. Pick another folder if you want something
+else. Folders outside the vault keep the daemon's default folder. Threads whose remote folder is inside the
+vault folder get a system-prompt addendum describing the points above.
 
 ## States you will see
 

@@ -28,11 +28,11 @@ export class PolicyError extends Error {
   }
 }
 
-function realOrResolved(p: string): string {
+export function realOrResolved(p: string): string {
   try { return realpathSync(p); } catch { return resolve(p); }
 }
 
-function isWithin(root: string, target: string): boolean {
+export function isWithin(root: string, target: string): boolean {
   const rel = relative(root, target);
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }

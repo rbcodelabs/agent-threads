@@ -46,7 +46,7 @@ export function resolveRunOn(selection: RunOnSelection, daemons: readonly Remote
   return { ok: true, remote: { daemonId: daemon.id, cwd: cwd.cwd } };
 }
 
-/** Send-button label fragment, e.g. ` on claude-box`. */
+/** Send-button label fragment, e.g. ` on my-server`. */
 export function runOnSuffix(selection: RunOnSelection, daemons: readonly RemoteDaemonConfig[]): string {
   if (!selection.daemonId) return '';
   const daemon = daemons.find((d) => d.id === selection.daemonId);

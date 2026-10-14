@@ -37,7 +37,7 @@ test.describe('remote thread strip', () => {
       await open(page);
       await page.evaluate((s) => (window as any).__setRemoteState(s), state);
       await expect(strip(page)).toBeVisible();
-      await expect(strip(page).locator('.ct-remote-badge-name')).toHaveText('claude-box');
+      await expect(strip(page).locator('.ct-remote-badge-name')).toHaveText('my-server');
       await expect(strip(page).locator('.ct-remote-pill')).toHaveText(label);
       await settleView(page);
       await expect(strip(page)).toHaveScreenshot(`remote-strip-${name}.png`);
@@ -64,49 +64,98 @@ test.describe('remote thread strip', () => {
   });
 });
 
-test.describe('Run on a daemon: vault folder', () => {
+test.describe('Run on a daemon: folders come from the daemon', () => {
   const dashboardUrl = 'file://' + path.resolve('test/harness/kanban.html') + '?dashboard=1&remote=1';
 
-  async function openRunOn(page: Page, daemon: string): Promise<void> {
+  async function openRunOn(page: Page, daemon: string, ready = '.ct-run-on-folder-select'): Promise<void> {
     await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
     await page.setViewportSize({ width: 420, height: 760 });
     await page.goto(dashboardUrl);
     await page.waitForSelector('.ct-agents-dispatch-btn');
     await page.locator('.ct-agents-dispatch-btn').dispatchEvent('contextmenu');
     await page.locator(`.ct-run-on-item[data-run-on="${daemon}"]`).click();
-    await page.waitForSelector('.ct-run-on-folder-input');
+    await page.waitForSelector(ready);
   }
 
-  test('a vault folder pre-fills the mapped folder on the daemon, with the explanation', async ({ page }) => {
-    await openRunOn(page, 'claude-box');
-    await expect(page.locator('.ct-run-on-folder-input')).toHaveValue('/home/rick/vault/Products/Agent Threads');
+  test('a vault thread preselects the mapped folder from the daemon\'s own list, with no typing', async ({ page }) => {
+    await openRunOn(page, 'my-server');
+    const select = page.locator('.ct-run-on-folder-select');
+    await expect(select).toHaveValue('/home/user/vault/Products/Agent Threads');
+    await expect(select.locator('option')).toHaveText([
+      'projects - /home/user/projects',
+      'vault (vault) - /home/user/vault',
+      '/home/user/vault/Products/Agent Threads',
+      'Other folder…',
+    ]);
+    await expect(page.locator('.ct-run-on-folder-input')).toHaveCount(0);
     await expect(page.locator('[data-testid="run-on-folder-hint"]')).toBeVisible();
     await settleView(page);
     await expect(page.locator('.ct-harness-menu')).toHaveScreenshot('run-on-vault-folder.png');
   });
 
-  test('a daemon without a mapping keeps its own default folder and shows no explanation', async ({ page }) => {
-    await openRunOn(page, 'plain-box');
+  test('Browse starts at the chosen folder, goes up inside the workspace, and Use this folder selects one', async ({ page }) => {
+    await openRunOn(page, 'my-server');
+    await page.locator('.ct-run-on-browse-btn').click();
+    await expect(page.locator('.ct-run-on-browser-path')).toHaveText('/home/user/vault/Products/Agent Threads');
+    await page.locator('.ct-run-on-browse-up').click();
+    await expect(page.locator('.ct-run-on-browse-item')).toHaveText(['Agent Threads', 'Other Product']);
+    await settleView(page);
+    await expect(page.locator('.ct-harness-menu')).toHaveScreenshot('run-on-browse.png');
+    await page.locator('.ct-run-on-browse-item[data-path="/home/user/vault/Products/Other Product"]').click();
+    await expect(page.locator('.ct-run-on-browse-item')).toHaveText(['Notes', 'Specs']);
+    await page.locator('.ct-run-on-browse-use').click();
+    await expect(page.locator('.ct-run-on-folder-select')).toHaveValue('/home/user/vault/Products/Other Product');
+  });
+
+  test('a daemon too old to list folders keeps the text field with its default folder and says why', async ({ page }) => {
+    await openRunOn(page, 'plain-box', '.ct-run-on-folder-input');
     await expect(page.locator('.ct-run-on-folder-input')).toHaveValue('/srv/workspaces');
+    await expect(page.locator('[data-testid="run-on-folder-note"]')).toContainText('too old');
     await expect(page.locator('[data-testid="run-on-folder-hint"]')).toBeHidden();
   });
 });
 
-test.describe('Remote daemon dialog: vault folder', () => {
-  test('edit dialog shows the vault folder fields and the folder-aware test result', async ({ page }) => {
+test.describe('Remote daemon dialog: folders are chosen from what the daemon advertises', () => {
+  async function openModal(page: Page, opts: Record<string, unknown>): Promise<void> {
     await page.setViewportSize({ width: 760, height: 1400 });
     await page.goto('file://' + path.resolve('test/harness/settings.html'));
     await page.waitForSelector('.vertical-tab-content');
-    await page.evaluate(() => (window as any).__openRemoteDaemonModal());
+    await page.evaluate((o) => (window as any).__openRemoteDaemonModal(o), opts);
     await page.waitForSelector('.modal-container');
+  }
+
+  test('after Test connection the only vault is selected for you; the raw paths are under Advanced', async ({ page }) => {
+    await openModal(page, {});
     const modal = page.locator('.modal-container');
-    await expect(modal.getByText('Vault folder on this daemon')).toBeVisible();
-    await expect(modal.getByText('Local folder it mirrors')).toBeVisible();
-    await expect(modal.locator('input[placeholder="/home/rick/vault"]')).toHaveValue('/home/rick/vault');
-    await expect(modal.locator('input[placeholder="/Users/rick/Vault"]')).toHaveValue('');
+    await expect(modal.locator('.ct-remote-folders-hint')).toContainText('Test the connection');
+    await expect(modal.locator('details.ct-remote-advanced')).not.toHaveAttribute('open', '');
     await modal.getByRole('button', { name: 'Test connection' }).click();
-    await expect(modal.locator('.ct-remote-daemon-test')).toContainText('/home/rick/vault is allowed on the daemon');
+    const vault = modal.getByLabel('Vault folder on this daemon');
+    await expect(vault).toHaveValue('/home/user/vault');
+    await expect(modal.getByLabel('Default folder')).toHaveValue('/home/user/projects');
+    await expect(modal.getByText('Chosen for you: the only vault on my-server.')).toBeVisible();
     await settleView(page);
-    await expect(modal).toHaveScreenshot('remote-daemon-dialog-vault.png');
+    await expect(modal).toHaveScreenshot('remote-daemon-dialog-autodetect.png');
+    // The raw field mirrors the dropdown, under Advanced.
+    await modal.locator('summary', { hasText: 'Advanced' }).click();
+    await expect(modal.locator('input[placeholder="/home/user/vault"]')).toHaveValue('/home/user/vault');
+  });
+
+  test('a saved choice is kept, not replaced by discovery', async ({ page }) => {
+    await openModal(page, { saved: true });
+    const modal = page.locator('.modal-container');
+    await modal.getByRole('button', { name: 'Test connection' }).click();
+    await expect(modal.getByLabel('Vault folder on this daemon')).toHaveValue('/home/user/vault');
+    await expect(modal.getByLabel('Default folder')).toHaveValue('/home/user/projects');
+  });
+
+  test('a daemon too old to advertise folders opens Advanced with the raw fields', async ({ page }) => {
+    await openModal(page, { advertise: 'old' });
+    const modal = page.locator('.modal-container');
+    await modal.getByRole('button', { name: 'Test connection' }).click();
+    await expect(modal.locator('.ct-remote-folders-hint')).toContainText('too old to list its folders');
+    await expect(modal.locator('details.ct-remote-advanced')).toHaveAttribute('open', '');
+    await expect(modal.getByLabel('Vault folder on this daemon')).toHaveCount(0);
+    await expect(modal.locator('input[placeholder="/home/user/vault"]')).toBeVisible();
   });
 });

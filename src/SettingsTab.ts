@@ -1,14 +1,15 @@
 import { isAgentHarness } from './types';
 import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
-import type { ButtonComponent } from 'obsidian';
+import type { ButtonComponent, TextComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
 import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifactStorage';
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig } from './types';
-import { daemonWsUrl, probeDaemon } from './remote/DaemonClient';
+import { daemonWsUrl, probeDaemon, type ProbeWorkspaces } from './remote/DaemonClient';
 import { connectionPill } from './remote/connectionPill';
-import { checkDaemonInput, checkVaultMappingInput, describeTest, tokenSecretNameFor, uniqueDaemonId } from './remote/daemonConfig';
+import { checkDaemonInput, checkVaultMappingInput, describeTest, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
+import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel } from './remote/workspaceChoice';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { serializeKey } from './stt';
 import { debugLog, setDebugLogging } from './logger';
@@ -540,7 +541,7 @@ export class RemoteDaemonModal extends Modal {
     private readonly all: readonly RemoteDaemonConfig[],
     private readonly vaultRoot: string,
     private readonly actions: {
-      test(candidate: RemoteDaemonConfig, typedToken: string): Promise<{ tone: 'ok' | 'error'; text: string }>;
+      test(candidate: RemoteDaemonConfig, typedToken: string): Promise<DaemonTestOutcome>;
       save(config: RemoteDaemonConfig, token: string): Promise<void>;
     },
   ) {
@@ -557,28 +558,86 @@ export class RemoteDaemonModal extends Modal {
     let folder = this.existing?.defaultCwdRoot ?? '';
     let vaultRemote = this.existing?.vaultMapping?.remoteRoot ?? '';
     let vaultLocal = this.existing?.vaultMapping?.localRoot ?? '';
+    let vaultTouched = false;
+    let folderTouched = false;
+    /** What the daemon advertised at the last successful test. */
+    let discovered: ProbeWorkspaces | undefined;
+    const vaultName = (this.vaultRoot.split('/').filter(Boolean).pop() ?? '').trim();
     const status = contentEl.createDiv({ cls: 'ct-remote-daemon-test setting-item-description', attr: { role: 'status' } });
 
-    new Setting(contentEl).setName('Name').setDesc('Shown on threads that run there, for example claude-box.')
-      .addText((t) => t.setPlaceholder('claude-box').setValue(name).onChange((v) => { name = v; }));
+    new Setting(contentEl).setName('Name').setDesc('Shown on threads that run there, for example my-server.')
+      .addText((t) => t.setPlaceholder('my-server').setValue(name).onChange((v) => { name = v; }));
     new Setting(contentEl).setName('Address').setDesc('wss://<machine>.<tailnet>.ts.net:8443 through `tailscale serve`, or ws://<tailscale-ip>:<port> for a raw tailnet port.')
-      .addText((t) => t.setPlaceholder('wss://claude-box.tailnet.ts.net:8443').setValue(url).onChange((v) => { url = v; }));
+      .addText((t) => t.setPlaceholder('wss://my-server.tailnet-name.ts.net:8443').setValue(url).onChange((v) => { url = v; }));
     new Setting(contentEl).setName('Access token').setDesc(this.existing ? 'Leave blank to keep the stored token.' : 'From `agent-threads token create --scope control` on the daemon machine.')
       .addText((t) => { t.inputEl.type = 'password'; t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { token = v; }); });
-    new Setting(contentEl).setName('Default folder').setDesc('Optional. The folder on that machine offered for new threads, for example /srv/workspaces/project.')
-      .addText((t) => t.setPlaceholder('/srv/workspaces').setValue(folder).onChange((v) => { folder = v; }));
-    new Setting(contentEl).setName('Vault folder on this daemon')
-      .setDesc('Optional. Where a synced copy of your vault lives there, for example /home/rick/vault. The daemon needs --workspace for it. Synced changes lag by minutes.')
-      .addText((t) => t.setPlaceholder('/home/rick/vault').setValue(vaultRemote).onChange((v) => { vaultRemote = v; }));
-    new Setting(contentEl).setName('Local folder it mirrors')
-      .setDesc('Optional. Leave blank to use this vault.')
+
+    // Folders: chosen from what the daemon offers once a test has succeeded; typed paths live under Advanced.
+    const foldersEl = contentEl.createDiv({ cls: 'ct-remote-folders' });
+    const advanced = contentEl.createEl('details', { cls: 'ct-remote-advanced' });
+    advanced.createEl('summary', { text: 'Advanced' });
+    let vaultText: TextComponent | null = null;
+    let folderText: TextComponent | null = null;
+    new Setting(advanced).setName('Vault folder path')
+      .setDesc('Where a synced copy of your vault lives on the daemon machine. Normally chosen for you above. The daemon needs --workspace for it.')
+      .addText((t) => { vaultText = t; t.setPlaceholder('/home/user/vault').setValue(vaultRemote).onChange((v) => { vaultRemote = v; vaultTouched = true; renderFolders(); }); });
+    new Setting(advanced).setName('Local folder it mirrors')
+      .setDesc('Leave blank to use this vault. Set it only if just a subfolder of your vault is mirrored.')
       .addText((t) => t.setPlaceholder(this.vaultRoot || 'This vault').setValue(vaultLocal).onChange((v) => { vaultLocal = v; }));
+    new Setting(advanced).setName('Default folder path')
+      .setDesc('The folder on that machine offered for new threads. Normally chosen for you above.')
+      .addText((t) => { folderText = t; t.setPlaceholder('/srv/workspaces').setValue(folder).onChange((v) => { folder = v; folderTouched = true; renderFolders(); }); });
+
+    const setVault = (v: string): void => { vaultRemote = v; vaultTouched = true; vaultText?.setValue(v); };
+    const setFolder = (v: string): void => { folder = v; folderTouched = true; folderText?.setValue(v); };
+
+    const renderFolders = (): void => {
+      foldersEl.empty();
+      if (!discovered) {
+        foldersEl.createDiv({ cls: 'setting-item-description ct-remote-folders-hint', text: 'Test the connection to choose folders from the ones this daemon offers.' });
+        return;
+      }
+      if (!('list' in discovered)) {
+        const why = 'unsupported' in discovered
+          ? 'This daemon is too old to list its folders. Update it, or type the paths under Advanced.'
+          : `Could not load the daemon's folders (${discovered.failed}). You can type the paths under Advanced.`;
+        foldersEl.createDiv({ cls: 'setting-item-description mod-warning ct-remote-folders-hint', text: why });
+        advanced.open = true;
+        return;
+      }
+      const list = discovered.list;
+      if (list.length === 0) {
+        foldersEl.createDiv({ cls: 'setting-item-description ct-remote-folders-hint', text: 'This daemon has no folders configured. Start it with --workspace <folder>.' });
+        return;
+      }
+      const options = (current: string): Record<string, string> => {
+        const out: Record<string, string> = { '': 'None' };
+        for (const w of list) out[w.path] = workspaceLabel(w);
+        if (current.trim() && !(current.trim() in out)) out[current.trim()] = `${current.trim()} (not advertised by this daemon)`;
+        return out;
+      };
+      const pick = pickVaultWorkspace(list, vaultName);
+      const vaultHint = vaultRemote.trim() && vaultRemote.trim() === pick.workspace?.path
+        ? describeVaultPick(pick, name.trim() || 'this daemon')
+        : !vaultRemote.trim() ? describeVaultPick({ reason: 'none' }, name.trim() || 'this daemon') : 'A synced copy of your vault. Synced changes lag by minutes.';
+      new Setting(foldersEl).setName('Vault folder on this daemon').setDesc(vaultHint)
+        .addDropdown((d) => {
+          d.addOptions(options(vaultRemote)).setValue(vaultRemote.trim()).onChange((v) => { setVault(v); renderFolders(); });
+          d.selectEl.setAttribute('aria-label', 'Vault folder on this daemon');
+        });
+      new Setting(foldersEl).setName('Default folder').setDesc('Where new threads start on this daemon.')
+        .addDropdown((d) => {
+          d.addOptions(options(folder)).setValue(folder.trim()).onChange((v) => { setFolder(v); });
+          d.selectEl.setAttribute('aria-label', 'Default folder');
+        });
+    };
+    renderFolders();
 
     const candidate = (): { config: RemoteDaemonConfig; url: string } | null => {
       const check = checkDaemonInput({ name, url, token, requireToken: !this.existing }, this.all, this.existing?.id);
       if (!check.ok) { status.setText(check.reason); status.addClass('mod-warning'); return null; }
       const mapping = checkVaultMappingInput({ remoteRoot: vaultRemote, localRoot: vaultLocal });
-      if (!mapping.ok) { status.setText(mapping.reason); status.addClass('mod-warning'); return null; }
+      if (!mapping.ok) { status.setText(mapping.reason); status.addClass('mod-warning'); advanced.open = true; return null; }
       status.removeClass('mod-warning');
       const id = this.existing?.id ?? uniqueDaemonId(name, this.all);
       return {
@@ -605,6 +664,15 @@ export class RemoteDaemonModal extends Modal {
       testBtn.disabled = false;
       status.setText(outcome.text);
       status.toggleClass('mod-warning', outcome.tone === 'error');
+      if (outcome.discovery) {
+        discovered = outcome.discovery;
+        if ('list' in outcome.discovery) {
+          const applied = applyDiscovery({ vaultRemote, folder, vaultTouched, folderTouched }, outcome.discovery.list, vaultName);
+          if (applied.draft.vaultRemote !== vaultRemote) { vaultRemote = applied.draft.vaultRemote; vaultText?.setValue(vaultRemote); }
+          if (applied.draft.folder !== folder) { folder = applied.draft.folder; folderText?.setValue(folder); }
+        }
+        renderFolders();
+      }
     });
     buttons.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
     const save = buttons.createEl('button', { text: 'Save', cls: 'mod-cta' });
@@ -3136,7 +3204,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     applySecretStorageCopy(this.app, containerEl.createEl('p', { cls: 'setting-item-description' }), (storage) => `${storage} The token never appears in data.json.`);
   }
 
-  private async testDaemon(daemon: RemoteDaemonConfig, typedToken: string | undefined): Promise<{ tone: 'ok' | 'error'; text: string }> {
+  private async testDaemon(daemon: RemoteDaemonConfig, typedToken: string | undefined): Promise<DaemonTestOutcome> {
     const token = typedToken?.trim() || this.app.secretStorage.getSecret(secretStorageKey(daemon.tokenSecretName)) || '';
     if (!token) return { tone: 'error', text: 'No token is stored for this daemon yet.' };
     const result = await probeDaemon({
@@ -3144,9 +3212,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       token,
       createSocket: createPluginWebSocketFactory(),
       clientVersion: this.plugin.manifest.version,
+      listWorkspaces: true,
       ...(daemon.vaultMapping ? { checkPath: daemon.vaultMapping.remoteRoot } : {}),
     });
-    return describeTest(result, daemon.vaultMapping?.remoteRoot);
+    return {
+      ...describeTest(result, daemon.vaultMapping?.remoteRoot),
+      ...(result.ok && result.workspaces ? { discovery: result.workspaces } : {}),
+    };
   }
 
   private openDaemonModal(existing: RemoteDaemonConfig | null): void {

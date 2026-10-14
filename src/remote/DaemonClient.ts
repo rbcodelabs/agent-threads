@@ -39,6 +39,9 @@ import {
   type ErrorCode,
   type EventFrame,
   type PathCheckReply,
+  type PathListReply,
+  type WorkspaceInfo,
+  type WorkspacesListReply,
   type ResyncFrame,
   type WelcomeFrame,
 } from '../protocol';
@@ -691,9 +694,14 @@ function errText(err: unknown): string {
 /** What `path.check` came back with; `unsupported` = a daemon from before the command existed. */
 export type ProbePathCheck = PathCheckReply | { unsupported: true } | { failed: string };
 
+/** What `workspaces.list` came back with; `unsupported` = a daemon from before the command existed. */
+export type ProbeWorkspaces = { list: WorkspaceInfo[] } | { unsupported: true } | { failed: string };
+
 export type ProbeResult =
-  | { ok: true; info: DaemonInfo; pathCheck?: ProbePathCheck }
+  | { ok: true; info: DaemonInfo; pathCheck?: ProbePathCheck; workspaces?: ProbeWorkspaces }
   | { ok: false; status: ConnectionStatus; detail: string; info?: DaemonInfo };
+
+const isUnknownCommand = (err: unknown): boolean => err instanceof DaemonCommandError && err.code === 'unknown_command';
 
 /** Connect once, report what the daemon said, disconnect. Never retries. */
 export function probeDaemon(
@@ -702,6 +710,8 @@ export function probeDaemon(
     timeoutMs?: number;
     /** After connecting, also ask the daemon whether this folder is usable (`path.check`). */
     checkPath?: string;
+    /** After connecting, also ask which folders the daemon offers (`workspaces.list`). */
+    listWorkspaces?: boolean;
   },
 ): Promise<ProbeResult> {
   return new Promise<ProbeResult>((resolve) => {
@@ -721,19 +731,32 @@ export function probeDaemon(
       client.dispose();
       resolve(r);
     };
+    const timeoutMs = options.timeoutMs ?? 8000;
+    const gather = async (info: DaemonInfo): Promise<ProbeResult> => {
+      let pathCheck: ProbePathCheck | undefined;
+      let workspaces: ProbeWorkspaces | undefined;
+      if (options.checkPath !== undefined) {
+        try {
+          pathCheck = (await client.command('path.check', { path: options.checkPath }, { timeoutMs })) as unknown as PathCheckReply;
+        } catch (err) {
+          pathCheck = isUnknownCommand(err) ? { unsupported: true } : { failed: errText(err) };
+        }
+      }
+      if (options.listWorkspaces) {
+        try {
+          const r = (await client.command('workspaces.list', {}, { timeoutMs })) as unknown as WorkspacesListReply;
+          workspaces = { list: Array.isArray(r.workspaces) ? r.workspaces : [] };
+        } catch (err) {
+          workspaces = isUnknownCommand(err) ? { unsupported: true } : { failed: errText(err) };
+        }
+      }
+      return { ok: true, info, ...(pathCheck ? { pathCheck } : {}), ...(workspaces ? { workspaces } : {}) };
+    };
     client.onState((s) => {
       if (s.status === 'connected' && s.info) {
         const info = s.info;
-        if (options.checkPath === undefined) { finish({ ok: true, info }); return; }
-        client.command('path.check', { path: options.checkPath }, { timeoutMs: options.timeoutMs ?? 8000 })
-          .then((r) => finish({ ok: true, info, pathCheck: r as unknown as PathCheckReply }))
-          .catch((err: unknown) => finish({
-            ok: true,
-            info,
-            pathCheck: err instanceof DaemonCommandError && err.code === 'unknown_command'
-              ? { unsupported: true }
-              : { failed: errText(err) },
-          }));
+        if (options.checkPath === undefined && !options.listWorkspaces) { finish({ ok: true, info }); return; }
+        void gather(info).then(finish);
       }
       else if (s.status === 'unauthorized' || s.status === 'incompatible' || s.status === 'unreachable' || s.status === 'closed') {
         finish({ ok: false, status: s.status, detail: s.detail ?? s.status, info: s.info });
@@ -741,4 +764,27 @@ export function probeDaemon(
     });
     client.connect();
   });
+}
+
+// ── folder discovery (Run on picker) ────────────────────────────────────────
+
+/** `workspaces.list` / `path.list` on a live client; `undefined` when the daemon is too old to answer. */
+export async function fetchWorkspaces(client: DaemonClient, timeoutMs = 8000): Promise<WorkspaceInfo[] | undefined> {
+  try {
+    const r = (await client.command('workspaces.list', {}, { timeoutMs })) as unknown as WorkspacesListReply;
+    return Array.isArray(r.workspaces) ? r.workspaces : [];
+  } catch (err) {
+    if (isUnknownCommand(err)) return undefined;
+    throw err;
+  }
+}
+
+export async function fetchSubfolders(client: DaemonClient, path: string, timeoutMs = 8000): Promise<PathListReply | undefined> {
+  try {
+    const r = (await client.command('path.list', { path }, { timeoutMs })) as unknown as PathListReply;
+    return { allowed: !!r.allowed, entries: Array.isArray(r.entries) ? r.entries : [], truncated: !!r.truncated };
+  } catch (err) {
+    if (isUnknownCommand(err)) return undefined;
+    throw err;
+  }
 }
