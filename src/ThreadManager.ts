@@ -5,7 +5,7 @@ import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
 import { resolveCodexPermissions, serializableMcpServers, type HarnessContextUsage, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
 import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
-import { AttachmentWriter } from './AttachmentWriter';
+import { NULL_ATTACHMENT_STORE, type AttachmentStore } from './host/AttachmentStore';
 // Safe to import statically on mobile: this module requires `fs`/`path` lazily,
 // inside functions, so nothing Node-only runs at module-init scope.
 import { removeStorageRoot, type ArtifactStorageFs } from './artifactStorage';
@@ -28,7 +28,6 @@ import { containerNameForThread, createDefaultVmCommandRunner, resolveVmCpus, re
 import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
 import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
-import type { App } from 'obsidian';
 import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun } from './types';
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
@@ -353,13 +352,6 @@ export class ThreadManager {
     catch (error) { console.warn('[ClaudeThreads] Local skills unavailable:', error); return ''; }
   }
   /**
-   * Obsidian App handle, set once from main.ts alongside `vaultRoot`. Needed by
-   * AttachmentWriter to write image files through the vault API (so they
-   * register with the metadata cache). Null in tests / on mobile, where image
-   * externalization is skipped.
-   */
-  app: App | null = null;
-  /**
    * Absolute filesystem path to this plugin's installed directory (vaultRoot +
    * manifest.dir), set once from main.ts alongside vaultRoot. Used to resolve
    * the bundled thread-orchestrator skill at <pluginResourceDir>/resources/skills/
@@ -385,7 +377,7 @@ export class ThreadManager {
   /** Appends each thread's raw SDK event stream to a per-thread JSONL log. */
   private rawLogWriter: RawLogWriter;
   /** Writes message images out to vault attachment files (ADR-0003, PR 1). */
-  private attachmentWriter: AttachmentWriter;
+  private attachmentWriter: AttachmentStore;
   /** Injectable filesystem for artifact-storage GC; defaults to the real one. */
   artifactStorageFs?: ArtifactStorageFs;
   /**
@@ -397,16 +389,17 @@ export class ThreadManager {
    */
   artifactCleanupSettled: Promise<void> = Promise.resolve();
 
-  constructor(settings: PluginSettings) {
+  /**
+   * `attachmentStore` is the host's image-file writer (see `src/host/`). The
+   * default leaves images inline, which is the behavior in tests and on mobile.
+   */
+  constructor(settings: PluginSettings, attachmentStore: AttachmentStore = NULL_ATTACHMENT_STORE) {
     this.settings = settings;
     this.rawLogWriter = new RawLogWriter(
       () => this.vaultRoot,
       () => this.settings.vaultFolder,
     );
-    this.attachmentWriter = new AttachmentWriter(
-      () => this.app,
-      () => this.settings.vaultFolder,
-    );
+    this.attachmentWriter = attachmentStore;
   }
 
   updateSettings(settings: PluginSettings): void {

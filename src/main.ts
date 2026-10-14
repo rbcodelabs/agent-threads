@@ -33,6 +33,8 @@ import { setGitAuthProvider } from './gitClient';
 import { createGithubGitAuth } from './skillSourceGithubAuth';
 import { createGithubVmHooks } from './githubVmDelivery';
 import { createRequestUrlFetch } from './requestUrlFetch';
+import { obsidianHttpFetch, obsidianYamlParser } from './host/obsidianHost';
+import { AttachmentWriter } from './AttachmentWriter';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
 import {
   HandoffDebouncer,
@@ -579,7 +581,13 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Mask stored secret values in every log sink (console, ring, raw JSONL).
     setKnownSecretsProvider(() => this.collectSecretValues());
     this.register(() => setKnownSecretsProvider(null));
-    this.manager = new ThreadManager(this.settings);
+    // Images are externalized through the vault API / Geode bridge (ADR-0003);
+    // core only sees the AttachmentStore interface. App and vaultFolder are read
+    // lazily because settings load and app wiring finish after construction.
+    this.manager = new ThreadManager(
+      this.settings,
+      new AttachmentWriter(() => this.app, () => this.settings.vaultFolder),
+    );
     this.manager.getExternalMounts = () => this.listExternalMountRoots();
     // Lets the manager detect sessions holding stale Google/OAuth proxy configs (per-send check).
     this.manager.proxyMcpServersForThread = (threadId) => ({
@@ -911,9 +919,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
           },
           onSkillsSearch: async (query, limit) => {
             const installed = await skillManager.listInstalledSkills(this.settings.skillSources ?? [], this.getManagedSkillRoots());
-            return skillManager.searchMarketplaceSkills(query, limit ?? 15, installed);
+            return skillManager.searchMarketplaceSkills(query, limit ?? 15, installed, obsidianHttpFetch);
           },
-          onSkillsGet: (identifier) => skillManager.getSkillDetail(identifier, this.settings.skillSources ?? [], this.getManagedSkillRoots()),
+          onSkillsGet: (identifier) => skillManager.getSkillDetail(identifier, this.settings.skillSources ?? [], this.getManagedSkillRoots(), obsidianHttpFetch),
           onSkillsListSources: () => skillManager.listSkillSources(this.settings.skillSources ?? []),
           onSkillsCheckUpdates: async () => {
             const results = await skillManager.checkAllSourcesForUpdates(this.settings.skillSources ?? []);
@@ -937,11 +945,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
           }),
           onSkillsCreateLocal: params => {
             const { createLocalSkill } = require('./localSkills') as typeof import('./localSkills');
-            return createLocalSkill(this.getLocalSkillsRoot(), params);
+            return createLocalSkill(this.getLocalSkillsRoot(), params, obsidianYamlParser);
           },
           onSkillsUpdateLocal: params => {
             const { updateLocalSkill } = require('./localSkills') as typeof import('./localSkills');
-            return updateLocalSkill(this.getLocalSkillsRoot(), params);
+            return updateLocalSkill(this.getLocalSkillsRoot(), params, obsidianYamlParser);
           },
           onSkillsUninstall: (name) => skillManager.uninstallSkillByName(name, this.settings.skillSources ?? [], this.getManagedSkillRoots()),
           onSkillsUpdate: async (sourceId) => {
@@ -1028,8 +1036,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // intentionally point at a repository outside the vault and must not affect
     // that derivation.
     this.manager.vaultRoot = resolveProjectVaultRoot(this.app.vault.adapter);
-    // App handle for AttachmentWriter (writes image files through the vault API).
-    this.manager.app = this.app;
     // Absolute path to this plugin's installed dist/ dir, used to resolve the
     // bundled thread-orchestrator skill (see ThreadManager.buildSessionOptions()).
     {
@@ -2642,12 +2648,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   createLocalSkill(params: import('./localSkills').CreateLocalSkillInput) {
     const { createLocalSkill } = require('./localSkills') as typeof import('./localSkills');
-    return createLocalSkill(this.getLocalSkillsRoot(), params);
+    return createLocalSkill(this.getLocalSkillsRoot(), params, obsidianYamlParser);
   }
 
   updateLocalSkill(params: import('./localSkills').UpdateLocalSkillInput) {
     const { updateLocalSkill } = require('./localSkills') as typeof import('./localSkills');
-    return updateLocalSkill(this.getLocalSkillsRoot(), params);
+    return updateLocalSkill(this.getLocalSkillsRoot(), params, obsidianYamlParser);
   }
 
   async setLocalSkillsFolder(folder: string): Promise<void> {
