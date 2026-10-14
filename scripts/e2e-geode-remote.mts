@@ -9,7 +9,11 @@
  *   2. dropping the socket mid-turn (a killable TCP proxy) resumes with no lost or duplicated text;
  *   3. quitting Geode mid-turn leaves the turn running on the daemon, and reopening completes
  *      the transcript without any user action;
- *   4. the host badge / connection pill render (screenshots saved).
+ *   4. the host badge / connection pill render (screenshots saved);
+ *   5. vault path mapping: with a vault mapping configured, choosing "Run on" in the real composer for a
+ *      thread whose folder is inside the vault pre-fills the mapped remote folder, the thread runs there
+ *      on a daemon whose workspace allowlist is that root, its system prompt carries the vault-mirror
+ *      addendum, and `path.check` answers allowed / not allowed over the wire.
  *
  *   npm run build && npm run build:daemon && node scripts/e2e-geode-remote.mts
  *
@@ -70,7 +74,10 @@ async function main(): Promise<void> {
   const userData = path.join(base, 'userdata');
   const vault = path.join(base, 'vault');
   const plugin = path.join(vault, '.geode/plugins', PLUGIN_ID);
-  await Promise.all([fs.mkdir(daemonDir), fs.mkdir(userData), fs.mkdir(plugin, { recursive: true })]);
+  // The "remote" vault mirror the daemon is allowed to work in, and the matching local vault folder.
+  const remoteVault = path.join(base, 'remote-vault');
+  await Promise.all([fs.mkdir(daemonDir), fs.mkdir(userData), fs.mkdir(plugin, { recursive: true }),
+    fs.mkdir(path.join(remoteVault, 'Projects/Alpha'), { recursive: true }), fs.mkdir(path.join(vault, 'Projects/Alpha'), { recursive: true })]);
 
   let daemon: ChildProcess | undefined;
   let proxy: KillableProxy | undefined;
@@ -78,7 +85,7 @@ async function main(): Promise<void> {
   try {
     // ── daemon ──────────────────────────────────────────────────────────────
     const daemonPort = await freePort();
-    daemon = spawn(process.execPath, [path.join(repo, 'dist/agent-threads.cjs'), 'serve', '--fake-harness', '--data-dir', daemonDir, '--port', String(daemonPort), '--listen', '127.0.0.1'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    daemon = spawn(process.execPath, [path.join(repo, 'dist/agent-threads.cjs'), 'serve', '--fake-harness', '--data-dir', daemonDir, '--port', String(daemonPort), '--listen', '127.0.0.1', '--workspace', remoteVault, '--workspace', '/srv/workspaces'], { stdio: ['ignore', 'pipe', 'pipe'] });
     daemon.stdout!.on('data', (d) => process.env.E2E_VERBOSE && process.stdout.write(`[daemon] ${d}`));
     daemon.stderr!.on('data', (d) => process.stderr.write(`[daemon:err] ${d}`));
     await until('daemon health', async () => fetch(`http://127.0.0.1:${daemonPort}/healthz`).then((r) => r.ok).catch(() => false), 15000);
@@ -195,6 +202,35 @@ async function main(): Promise<void> {
     await page.evaluate(`${P}.openThreadInChatView('${threadId}')`);
     await sleep(500);
     await page.screenshot({ path: path.join(SHOTS, 'remote-strip-after-reopen.png') });
+
+    // 5. vault path mapping, driven through the real composer
+    const mappedCwd = path.join(remoteVault, 'Projects/Alpha');
+    await page.evaluate(`(() => { const p = ${P}; const d = p.settings.remoteDaemons[0]; d.vaultMapping = { remoteRoot: ${JSON.stringify(remoteVault)} }; d.defaultCwdRoot = '/srv/workspaces'; p.settings.defaultCwd = p.manager.vaultRoot + '/Projects/Alpha'; })()`);
+    await page.evaluate(`${P}.activateAgentView()`);
+    await until('composer mounted', () => page.evaluate(`!!document.querySelector('.ct-agents-dispatch-btn')`), 15000, 100);
+    await page.evaluate(`document.querySelector('.ct-agents-dispatch-btn').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))`);
+    await until('Run on menu', () => page.evaluate(`!!document.querySelector('.ct-run-on-item[data-run-on="${DAEMON_ID}"]')`), 5000, 50);
+    await page.evaluate(`document.querySelector('.ct-run-on-item[data-run-on="${DAEMON_ID}"]').click()`);
+    const suggested = await page.evaluate(`document.querySelector('.ct-run-on-folder-input')?.value`);
+    check('composer pre-fills the mapped remote folder for a vault cwd', suggested === mappedCwd, `${suggested} vs ${mappedCwd}`);
+    check('composer explains the suggestion', (await page.evaluate(`document.querySelector('[data-testid=run-on-folder-hint]')?.classList.contains('is-hidden')`)) === false);
+    await page.screenshot({ path: path.join(SHOTS, 'run-on-vault-folder.png') });
+    await page.evaluate(`document.querySelector('.ct-run-on-folder-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`); // closes the menu
+    await page.evaluate(`(() => { const ta = document.querySelector('.ct-agents-dispatch-input'); ta.value = '/tokens 5 burst=5 delay=1'; document.querySelector('.ct-agents-dispatch-btn').click(); })()`);
+    const vaultThreadId: string = await until('vault thread to exist', () => page.evaluate(`(() => { const all = ${P}.manager.getThreads(); const t = all.find(t => t.remote && t.remote.remoteCwd === ${JSON.stringify(mappedCwd)}); return t ? t.id : false; })()`), 15000, 100) as string;
+    check('thread created from the composer runs at the mapped remote folder', !!vaultThreadId, vaultThreadId);
+    await until('vault thread turn', () => page.evaluate(`${P}.manager.getThread('${vaultThreadId}').messages.some(m => m.role === 'assistant') && ${P}.manager.getThread('${vaultThreadId}').status === 'waiting'`), 30000, 100);
+    const meta = JSON.parse(readFileSync(path.join(daemonDir, 'sessions', `${vaultThreadId}.json`), 'utf8'));
+    check('daemon opened the session in the mapped folder', meta.spec.cwd === mappedCwd, meta.spec.cwd);
+    check('session prompt has the vault-mirror addendum with remote paths and no Mac path',
+      typeof meta.spec.appendSystemPrompt === 'string' && meta.spec.appendSystemPrompt.includes('Vault (synced mirror):')
+      && meta.spec.appendSystemPrompt.includes(`mirrored on this machine at ${remoteVault}`) && meta.spec.appendSystemPrompt.includes('Never delete or rename vault files')
+      && !meta.spec.appendSystemPrompt.includes(vault));
+    const pc = (p: string) => page.evaluate(`${P}.daemonRegistry.clientFor('${DAEMON_ID}').command('path.check', { path: ${JSON.stringify(p)} })`) as Promise<Record<string, unknown>>;
+    const okRoot = await pc(remoteVault);
+    const badRoot = await pc('/etc');
+    check('path.check over the wire: mapped root allowed', okRoot.allowed === true && okRoot.exists === true && okRoot.isDirectory === true, JSON.stringify(okRoot));
+    check('path.check over the wire: unrelated folder refused', badRoot.allowed === false, JSON.stringify(badRoot));
 
     // pill when the daemon becomes unreachable
     await proxy.close();
