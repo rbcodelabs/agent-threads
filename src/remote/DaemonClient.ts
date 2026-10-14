@@ -128,6 +128,11 @@ export interface AttachInfo {
   resync: boolean;
   /** False when another client holds the read-write seat and this one only observes. */
   controller: boolean;
+  /**
+   * Set when the daemon crashed after this client had applied events it never flushed: history resumed at
+   * this seq, so the client's cursor was lowered to it and replay starts there.
+   */
+  rewind?: number;
 }
 
 export interface ChannelHandlers {
@@ -141,6 +146,11 @@ export interface ChannelHandlers {
   /** The cursor fell behind the daemon's journal: rebuild from the checkpoint. */
   onResync?(frame: ResyncFrame): void;
   onAttached?(info: AttachInfo): void;
+  /**
+   * The cursor was lowered to `seq` (see `AttachInfo.rewind`). Called synchronously, before any event of the
+   * replay that follows, so the consumer can lower its own persisted cursor in step.
+   */
+  onRewind?(seq: number): void;
   onAttachError?(err: DaemonCommandError): void;
 }
 
@@ -181,6 +191,8 @@ interface PendingCommand {
   type: string;
   /** Re-sent after a reconnect (same cmdId). Attach and probes are not: they are re-issued. */
   resend: boolean;
+  /** Runs synchronously when the ack frame is processed, before any frame behind it (the promise would not). */
+  onAck?(result: CommandResult): void;
   resolve(result: CommandResult): void;
   reject(err: Error): void;
   timer: ReturnType<typeof setTimeout> | null;
@@ -188,6 +200,8 @@ interface PendingCommand {
 
 class ChannelSubscriptionImpl implements ChannelSubscription {
   readonly cursor: StreamCursor;
+  /** Daemon process epoch last seen on this channel; sent on attach so a crash that reused seqs is detected. */
+  epoch: string | undefined;
   ackTarget = 0;
   ackSent = 0;
   ackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -501,7 +515,9 @@ export class DaemonClient {
     if (!cmd) return;
     this.pending.delete(frame.cmdId);
     if (cmd.timer) clearTimeout(cmd.timer);
-    cmd.resolve((frame.result && typeof frame.result === 'object' ? frame.result : {}) as CommandResult);
+    const result = (frame.result && typeof frame.result === 'object' ? frame.result : {}) as CommandResult;
+    try { cmd.onAck?.(result); } catch (err) { this.log(`${cmd.type} onAck threw: ${errText(err)}`); }
+    cmd.resolve(result);
   }
 
   private settleErr(frame: ErrFrame, gen: number): void {
@@ -580,7 +596,7 @@ export class DaemonClient {
   private request(
     type: string,
     payload: Record<string, unknown>,
-    opts: { resend: boolean; timeoutMs: number },
+    opts: { resend: boolean; timeoutMs: number; onAck?: (result: CommandResult) => void },
   ): Promise<CommandResult> {
     if (this.disposed) return Promise.reject(new DaemonCommandError('closed', 'client closed'));
     const st = this.state.status;
@@ -596,6 +612,7 @@ export class DaemonClient {
         text,
         type,
         resend: opts.resend,
+        onAck: opts.onAck,
         resolve,
         reject,
         timer: setTimeout(() => {
@@ -635,12 +652,13 @@ export class DaemonClient {
    * each connection re-attaches with `afterSeq = cursor.lastSeq`. Replaces any
    * existing subscription for the thread.
    */
-  subscribe(threadId: string, handlers: ChannelHandlers, afterSeq = 0): ChannelSubscription {
+  subscribe(threadId: string, handlers: ChannelHandlers, afterSeq = 0, epoch?: string): ChannelSubscription {
     const channel = threadChannel(threadId);
     this.channels.get(channel)?.close();
     const sub = new ChannelSubscriptionImpl(channel, afterSeq, handlers, this);
     sub.ackSent = afterSeq;
     sub.ackTarget = afterSeq;
+    sub.epoch = epoch;
     this.channels.set(channel, sub);
     if (!this.wantConnected) this.connect();
     if (this.welcomed) this.attach(sub);
@@ -650,7 +668,20 @@ export class DaemonClient {
   private attach(sub: ChannelSubscriptionImpl): void {
     const gen = this.socketGen;
     // `afterSeq` is read NOW, not at subscribe time: it is the exact point this client has applied.
-    this.request('attach', { ch: sub.channel, afterSeq: sub.cursor.lastSeq }, { resend: false, timeoutMs: this.opts.commandTimeoutMs })
+    this.request('attach', { ch: sub.channel, afterSeq: sub.cursor.lastSeq, ...(sub.epoch ? { epoch: sub.epoch } : {}) }, {
+      resend: false,
+      timeoutMs: this.opts.commandTimeoutMs,
+      onAck: (result) => {
+        if (sub.closed || gen !== this.socketGen) return;
+        const rewind = result.rewind;
+        if (typeof rewind === 'number' && rewind < sub.cursor.lastSeq) {
+          sub.cursor.lastSeq = rewind;
+          if (sub.ackTarget > rewind) { sub.ackTarget = rewind; sub.ackSent = Math.min(sub.ackSent, rewind); }
+          sub.handlers.onRewind?.(rewind);
+        }
+        if (typeof result.epoch === 'string') sub.epoch = result.epoch;
+      },
+    })
       .then((result) => {
         if (sub.closed || gen !== this.socketGen) return;
         sub.handlers.onAttached?.(result as unknown as AttachInfo);

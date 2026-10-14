@@ -31,7 +31,12 @@ export type ClientCommand =
   | { type: 'workspaces.list' }
   /** Subfolders of an allowed folder, for browsing. Directories only, capped, confined to the workspaces. Additive. */
   | { type: 'path.list'; path: string }
-  | { type: 'attach'; ch: Channel; afterSeq: number }
+  /**
+   * `epoch` is the daemon process epoch the client last saw on this channel. If the daemon has restarted
+   * since and lost journal entries the client already applied (a crash before they were flushed, so their
+   * seqs were reused), the reply carries `rewind` and replay starts there. Additive within v1.
+   */
+  | { type: 'attach'; ch: Channel; afterSeq: number; epoch?: string }
   | { type: 'ack'; ch: Channel; seq: number }
   // Turn
   | { type: 'session.send'; threadId: string; text: string; userMessageUuid: string; images?: WireImage[] }

@@ -32,6 +32,8 @@ serve options:
   --allow-bypass         accept permissionMode bypassPermissions (off by default; config.json allowBypass)
   --max-concurrent-turns <n>   turns running at once (default 3)
   --idle-reap-minutes <n>      stop a session idle this long; the next send resumes it (default 30, 0 = off)
+  --journal-ttl-days <n>       drop replay-journal entries older than this (default 7, 0 = keep); a client away longer resyncs
+  --journal-max-mb <n>         cap one thread's replay journal at about this many MB (default 64, 0 = no cap)
   --claude-binary <path> path to the claude CLI (env AGENT_THREADS_CLAUDE_BINARY; default: PATH, ~/.npm-global/bin, ~/.local/bin)
   --fake-harness         scripted stand-in instead of Claude (tests and smoke runs only)
 
@@ -143,6 +145,10 @@ export async function runCli(argv: string[], io: Io = consoleIo): Promise<number
     if (maxTurns !== undefined) flags.maxConcurrentTurns = Number(maxTurns);
     const idle = one(p, 'idle-reap-minutes');
     if (idle !== undefined) flags.idleReapMinutes = Number(idle);
+    const journalTtl = one(p, 'journal-ttl-days');
+    if (journalTtl !== undefined) flags.journalTtlDays = Number(journalTtl);
+    const journalMax = one(p, 'journal-max-mb');
+    if (journalMax !== undefined) flags.journalMaxMb = Number(journalMax);
     const claudeBinary = one(p, 'claude-binary');
     if (claudeBinary) flags.claudeBinaryPath = claudeBinary;
 

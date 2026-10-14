@@ -40,6 +40,12 @@ export interface DaemonOptions {
   /** How often the idle reaper looks (default: half the idle window, at most a minute). */
   reapCheckMs?: number;
   maxOutboundBytes?: number;
+  /** Test seam: wall clock for journal timestamps and TTL (default `Date.now`). */
+  now?: () => number;
+  /** Test seam: journal retention overriding `config.journalTtlDays` / `journalMaxMb`. */
+  journalLimits?: { maxAgeMs?: number; maxBytes?: number };
+  /** How often journals are compacted for TTL/size regardless of acks (default 5 min). */
+  maintenanceMs?: number;
   throttle?: FailureThrottle;
   log?: (line: string) => void;
 }
@@ -106,6 +112,11 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     epoch,
     driverFactory: driverFactory ?? fakeHarnessFactory,
     flushMs: options.journalFlushMs,
+    ...(options.now ? { now: options.now } : {}),
+    journalOptions: {
+      ...(options.now ? { now: options.now } : {}),
+      ...journalLimits(config, options.journalLimits),
+    },
     // The scripted fake has no side effects, so only the real host is policed.
     ...(real ? { policy: sessionPolicy } : {}),
     maxConcurrentTurns: config.maxConcurrentTurns,
@@ -178,6 +189,11 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
 
   const sweep = setInterval(() => ctx.cmdCache.sweep(), 60_000);
   sweep.unref();
+  // Retention (TTL and size) must hold even for a client that never acks, so compaction is not only ack-driven.
+  const maintenance = setInterval(() => {
+    try { host.compactAll(); } catch (err) { console.error('journal maintenance:', err); }
+  }, options.maintenanceMs ?? 5 * 60_000);
+  maintenance.unref();
   const idleMs = options.idleReapMs ?? config.idleReapMinutes * 60_000;
   const reaper = idleMs > 0
     ? setInterval(() => {
@@ -216,6 +232,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     recovered,
     async stop() {
       clearInterval(sweep);
+      clearInterval(maintenance);
       if (reaper) clearInterval(reaper);
       for (const c of connections) c.closeWith(1001, 'daemon shutting down');
       host.shutdown();
@@ -224,6 +241,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     },
     async crash() {
       clearInterval(sweep);
+      clearInterval(maintenance);
       if (reaper) clearInterval(reaper);
       host.crash();
       for (const ws of wss.clients) ws.terminate();
@@ -233,3 +251,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   };
 }
 
+
+/** The configured journal bounds as `InMemoryJournal` options; 0 means unbounded. */
+function journalLimits(config: DaemonConfig, override?: { maxAgeMs?: number; maxBytes?: number }): { maxAgeMs?: number; maxBytes?: number } {
+  const maxAgeMs = override?.maxAgeMs ?? (config.journalTtlDays > 0 ? config.journalTtlDays * 86_400_000 : undefined);
+  const maxBytes = override?.maxBytes ?? (config.journalMaxMb > 0 ? config.journalMaxMb * 1024 * 1024 : undefined);
+  return { ...(maxAgeMs !== undefined ? { maxAgeMs } : {}), ...(maxBytes !== undefined ? { maxBytes } : {}) };
+}

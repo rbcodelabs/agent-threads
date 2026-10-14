@@ -158,6 +158,7 @@ export class RemoteHarnessSession implements HarnessSession {
       {
         onEvent: (frame, meta) => this.onEvent(frame, meta.reopen, meta.replay),
         onResync: (frame) => this.onResync(frame),
+        onRewind: (seq) => this.onRewind(seq),
         onAttached: (info) => {
           this.remote.epoch = info.epoch;
           if (!info.controller && !this.observerNoticeShown) {
@@ -174,7 +175,20 @@ export class RemoteHarnessSession implements HarnessSession {
         },
       },
       this.remote.lastSeq,
+      this.remote.epoch,
     );
+  }
+
+  /**
+   * The daemon crashed after we applied events it never flushed; its history resumed at `seq` with the
+   * same seqs reused. Lower our persisted cursor to match (it only ever moves forward otherwise) and drop
+   * the half-streamed text those lost events produced; the restart notice that follows ends the turn.
+   */
+  private onRewind(seq: number): void {
+    this.log(`daemon history resumed at seq ${seq} (we had applied through ${this.remote.lastSeq})`);
+    if (this.remote.lastSeq > seq) this.remote.lastSeq = seq;
+    this.streamOpenFrom = null;
+    try { this.callbacks?.onStreamReset?.(); } catch (err) { this.log(`onStreamReset threw: ${errText(err)}`); }
   }
 
   /** Stop and tear down the session on the daemon (history stays attachable there). */
@@ -196,10 +210,12 @@ export class RemoteHarnessSession implements HarnessSession {
   detach(): void {
     if (this.closed) return;
     this.closed = true;
+    const attached = this.sub !== null;
     this.sub?.close();
     this.sub = null;
     this.cancelLocalRequests();
-    if (this.opened) {
+    // Also when we only re-attached (never opened): that attach claimed the seat and a server-side subscription.
+    if (this.opened || attached) {
       void this.client.command('session.detach', { threadId: this.threadId }, { timeoutMs: 3000 }).catch(() => { /* the disconnect releases the seat anyway */ });
     }
   }
@@ -504,6 +520,7 @@ export class RemoteHarnessSession implements HarnessSession {
     const cp = frame.checkpoint;
     // What the transcript already holds (the persisted cursor, conservatively before any unfinished message).
     const applied = this.remote.lastSeq;
+    const wasBusy = this.turnInFlight;
     this.log(`resync to seq ${cp.seq} (applied through ${applied})`);
     this.streamOpenFrom = null;
     try { this.callbacks?.onStreamReset?.(); } catch (err) { this.log(`onStreamReset threw: ${errText(err)}`); }
@@ -537,8 +554,9 @@ export class RemoteHarnessSession implements HarnessSession {
     if (cp.state) this.dispatch({ v: 1, ch: frame.ch, seq: cp.state.seq, ts: cp.state.ts, type: 'event', ...cp.state.event } as EventFrame, false);
     this.remote.lastSeq = this.streamOpenFrom ?? cp.seq;
 
-    if (this.sendAwaitingState && !this.state.turnInFlight) {
+    if (wasBusy && !this.state.turnInFlight) {
       // We believed a turn was running; the daemon says it is not, and its history no longer tells us how it ended.
+      // Always finish it here (never leave a streaming bubble hanging).
       this.sendAwaitingState = false;
       if (recovered > 0) {
         // It produced output we have just added, so it finished: close it like a normal completion.

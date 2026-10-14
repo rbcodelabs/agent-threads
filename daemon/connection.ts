@@ -335,7 +335,7 @@ export class Connection {
   private dispatch(frame: ClientFrame, auth: VerifiedToken): unknown {
     const { host } = this.ctx;
     switch (frame.type) {
-      case 'attach': return this.attach(frame.ch, frame.afterSeq, auth);
+      case 'attach': return this.attach(frame.ch, frame.afterSeq, auth, frame.epoch);
       case 'ack': {
         // Only the controlling client's acks bound retention.
         if (frame.ch === 'ctl' || !this.ctx.controllers.isController(frame.ch.slice(2), this.id)) return {};
@@ -421,12 +421,16 @@ export class Connection {
 
   // ── attach: replay then live, one ordered queue ──────────────────────────
 
-  private attach(ch: Channel, afterSeq: number, auth: VerifiedToken): unknown {
+  private attach(ch: Channel, requestedAfterSeq: number, auth: VerifiedToken, clientEpoch?: string): unknown {
     if (!isChannel(ch)) throw new CommandError('bad_frame', 'invalid channel');
     if (ch === 'ctl') return { lastSeq: 0, lowWater: 0, epoch: this.ctx.epoch };
     const journal: ThreadJournal | null = this.ctx.host.journalFor(ch.slice(2));
     if (!journal) throw new CommandError('not_found', `unknown thread ${ch.slice(2)}`);
 
+    // A client that applied events a crashed daemon never flushed holds seqs we have since reused:
+    // start from where history really resumed, and tell it (it must lower its own cursor to match).
+    const rewind = journal.rewindFor(clientEpoch, requestedAfterSeq);
+    const afterSeq = rewind ?? requestedAfterSeq;
     this.subs.get(ch)?.unsubscribe?.();
     const sub = new ChannelSub(ch);
     // Everything from here to the end of this block runs in one synchronous
@@ -454,7 +458,7 @@ export class Connection {
     // anyone else observes. Mutating commands re-check, so this is advisory for the client UI.
     const controller = scopeSatisfies(auth.scope, 'control')
       && this.ctx.controllers.claim(ch.slice(2), { id: this.id, tokenId: auth.id });
-    const result = { lastSeq: replay.lastSeq, lowWater: journal.lowWater, epoch: this.ctx.epoch, resync: replay.kind === 'resync', controller };
+    const result = { lastSeq: replay.lastSeq, lowWater: journal.lowWater, epoch: this.ctx.epoch, resync: replay.kind === 'resync', controller, ...(rewind !== null ? { rewind } : {}) };
     // The ack is queued first (control drains before channels) so the client
     // learns the cursor before the first replayed event.
     return result;

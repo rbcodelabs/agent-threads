@@ -14,6 +14,9 @@
  *      thread whose folder is inside the vault pre-fills the mapped remote folder, the thread runs there
  *      on a daemon whose workspace allowlist is that root, its system prompt carries the vault-mirror
  *      addendum, and `path.check` answers allowed / not allowed over the wire;
+ *   3b. replay fidelity: quitting Geode mid-turn and reopening after a delay completes the transcript with the
+ *      message's ORIGINAL time (the daemon's journal time, not the reopen time), acks the daemon only up to
+ *      the persisted cursor, and the daemon compacts the acked turns on disk;
  *   6. folder discovery: the same composer shows the folders the daemon itself advertises (a dropdown, no
  *      text field to type a path into), the vault-kind folder is detected from its marker directory, the
  *      mapped folder is preselected for the vault thread, and Browse lists subfolders over `path.list`.
@@ -205,6 +208,36 @@ async function main(): Promise<void> {
     await page.evaluate(`${P}.openThreadInChatView('${threadId}')`);
     await sleep(500);
     await page.screenshot({ path: path.join(SHOTS, 'remote-strip-after-reopen.png') });
+
+    // 3b. replay fidelity: close Geode mid-turn, reopen LATER; the transcript keeps the original times
+    const dataThread = () => dataJson().threads?.find((t: any) => t.id === threadId);
+    const journalMessages = (): Array<{ seq: number; ts: number; content: string }> => (existsSync(journal)
+      ? readFileSync(journal, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e: any) => e.event?.name === 'onMessage').map((e: any) => ({ seq: e.seq, ts: e.ts, content: e.event.args[0] }))
+      : []);
+    await page.evaluate(`${P}.manager.sendMessage('${threadId}', '/tokens 80 burst=1 delay=40')`);
+    await until('streaming past 20 chars (turn 4)', async () => (await streamingLen()) > 20, 20000, 25);
+    await until('turnPending persisted before quitting (turn 4)', () => dataThread()?.remote?.turnPending === true, 10000, 50);
+    await app!.close();
+    app = undefined;
+    log('Geode closed mid-turn (turn 4)');
+    await until('daemon to finish turn 4 while Geode is closed', () => journalMessages().length >= 4, 30000, 200);
+    const originalMessage = journalMessages()[3];
+    const AWAY_MS = 6000;
+    await sleep(AWAY_MS); // "reopen minutes later", compressed: the point is that reopen time != event time
+    const reopenedAt = Date.now();
+    page = await bootPage();
+    await until('transcript to complete after the later reopen', async () => (await page.evaluate(`${P}.manager.getThread('${threadId}')?.messages.filter(m => m.role === 'assistant').length`)) >= 4, 30000, 100);
+    const after: Array<{ content: string; timestamp: number }> = await page.evaluate(`${P}.manager.getThread('${threadId}').messages.filter(m => m.role === 'assistant').map(m => ({ content: m.content, timestamp: m.timestamp }))`);
+    check('later reopen: the transcript completes with the exact text, once', after.length === 4 && after[3].content === tokens(80), `assistant messages ${after.length}`);
+    check('later reopen: the replayed message keeps its ORIGINAL time (the daemon\'s journal time), not the reopen time',
+      after[3].timestamp === originalMessage.ts, `message ${after[3].timestamp} vs journal ${originalMessage.ts}`);
+    check('later reopen: that time is from before the away period, not "just now"', reopenedAt - after[3].timestamp >= AWAY_MS - 500, `${reopenedAt - after[3].timestamp} ms before reopen`);
+    const idxPath = path.join(daemonDir, 'journal', `${threadId}.idx`);
+    const savedCursor = await until('data.json cursor to cover the whole turn', () => { const t = dataThread(); return t?.messages?.filter((m: any) => m.role === 'assistant').length === 4 && t.remote.turnPending === undefined ? t.remote.lastSeq : false; }, 15000, 100);
+    await until('daemon acked what the plugin persisted', () => existsSync(idxPath) && JSON.parse(readFileSync(idxPath, 'utf8')).ackedSeq >= savedCursor, 15000, 100);
+    check('the daemon was acked only up to the persisted cursor', JSON.parse(readFileSync(idxPath, 'utf8')).ackedSeq === savedCursor, `acked ${JSON.parse(readFileSync(idxPath, 'utf8')).ackedSeq} vs saved ${savedCursor}`);
+    await sleep(800); // compaction runs 250 ms after the ack
+    check('journal tokens of the acked turns were compacted away on disk', (readFileSync(journal, 'utf8').match(/"onToken"/g)?.length ?? 0) === 0);
 
     // 5. vault path mapping, driven through the real composer
     const mappedCwd = path.join(remoteVault, 'Projects/Alpha');

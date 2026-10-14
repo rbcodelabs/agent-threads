@@ -137,3 +137,61 @@ describe('DiskJournal', () => {
     j.close();
   });
 });
+
+describe('DiskJournal.rewindFor (a crash reused seqs the client had applied)', () => {
+  const openAs = (dir: string, epoch: string) => open(dir, { epoch });
+
+  it('does nothing for the current epoch, an unknown epoch, or a client that is not past the recovery point', () => {
+    const dir = tmp();
+    const a = openAs(dir, 'A');
+    for (let i = 0; i < 10; i++) a.append(tok(String(i)));
+    a.close();
+    const b = openAs(dir, 'B'); // clean restart: recovered everything (startSeq 10)
+    expect(b.rewindFor('B', 99)).toBeNull();
+    expect(b.rewindFor(undefined, 99)).toBeNull();
+    expect(b.rewindFor('never-seen', 99)).toBeNull();
+    expect(b.rewindFor('A', 10)).toBeNull(); // saw exactly what survived
+    expect(b.rewindFor('A', 4)).toBeNull();
+    b.close();
+  });
+
+  it('points a client that applied unflushed events back to where history resumed', () => {
+    const dir = tmp();
+    const a = openAs(dir, 'A');
+    a.append(msg('kept'));
+    a.flush(true);
+    for (let i = 0; i < 5; i++) a.append(tok(String(i))); // the client saw these (live), the disk never did
+    a.abandon(); // kill -9
+    const b = openAs(dir, 'B');
+    expect(b.lastSeq).toBe(1);
+    expect(b.append({ name: 'onInterrupted', args: ['s'] }).seq).toBe(2); // the reused seq
+    expect(b.rewindFor('A', 6)).toBe(1);
+    b.close();
+  });
+
+  it('remembers every restart: a client two restarts behind is rewound to the FIRST recovery point', () => {
+    const dir = tmp();
+    const a = openAs(dir, 'A');
+    a.append(msg('m1')); a.flush(true);
+    for (let i = 0; i < 3; i++) a.append(tok('lost'));
+    a.abandon();
+    const b = openAs(dir, 'B');
+    b.append(msg('b-event')); b.append(msg('b-event-2')); b.flush(true); // seqs 2, 3, reused from A's lost tail
+    b.abandon();
+    const c = openAs(dir, 'C');
+    expect(c.lastSeq).toBe(3);
+    expect(c.rewindFor('A', 4)).toBe(1); // not 3: B's events replaced everything after seq 1
+    expect(c.rewindFor('B', 3)).toBeNull();
+    expect(c.rewindFor('B', 5)).toBe(3);
+    c.close();
+  });
+
+  it('writes the chain to the sidecar at open, before any flush', () => {
+    const dir = tmp();
+    openAs(dir, 'A').close();
+    const b = openAs(dir, 'B');
+    const idx = JSON.parse(readFileSync(join(dir, 'th.idx'), 'utf8')) as { epochs: Array<{ epoch: string; startSeq: number }> };
+    expect(idx.epochs.map((e) => e.epoch)).toEqual(['A', 'B']);
+    b.abandon();
+  });
+});

@@ -135,6 +135,7 @@ export class ThreadHost {
       }
       rt.journal.flush(true);
     }
+    this.compactAll(); // TTL/size/acked-token bounds hold from the first moment, not only after the next ack
     return interrupted;
   }
 
@@ -310,6 +311,13 @@ export class ThreadHost {
       }
     }
     return reaped;
+  }
+
+  /** Apply TTL, size caps and acked-token compaction to every journal (also runs on a timer and at startup). */
+  compactAll(): void {
+    for (const [id, rt] of this.threads) {
+      try { rt.journal.compact(); } catch (err) { console.error(`compact ${id}:`, err); }
+    }
   }
 
   /** Retention: the owner acknowledged everything up to `seq`. */

@@ -183,11 +183,43 @@ vault folder get a system-prompt addendum describing the points above.
 | Protocol too old | plugin and daemon do not speak the same protocol (or the plugin is older than the daemon's minimum); retrying will not help, update the older side |
 | Token rejected | the daemon refused the token (Settings, Remote daemons) |
 
+## Catching up after being away
+
+Quit Geode mid-turn, come back hours later: the transcript completes and every message shows the time it
+actually happened, not "just now". What makes that work:
+
+- **Original times.** The daemon stamps each event when it happens. Events delivered from its backlog are
+  flagged `replay`, and Geode records them at that time; an event delivered live is stamped with Geode's own
+  clock. `ThreadManager.now()` / `runAtTime()` carry this, and every timestamp the session callbacks write
+  (messages, compact markers, `updatedAt`, agent runs, the sign-in banner) goes through it.
+- **Acks follow the save.** Geode tells the daemon it may drop history only after the transcript is written to
+  `data.json`, and only up to the position that save covered (not whatever arrived while it was writing). The
+  saved position also never lags the saved transcript, so a quit right after a message is saved cannot replay
+  that message into the transcript twice.
+- **The daemon forgets, within limits.** Acked turns are compacted: their streamed tokens go (the finished
+  message stays) and the file on disk shrinks. Independent of acks, history older than `--journal-ttl-days`
+  (default 7, 0 = keep) or beyond `--journal-max-mb` (default 64 per thread, 0 = no cap) is dropped, checked
+  on startup and every few minutes. Config: `journalTtlDays` / `journalMaxMb` in `config.json`, or
+  `AGENT_THREADS_JOURNAL_TTL_DAYS` / `AGENT_THREADS_JOURNAL_MAX_MB`.
+- **Resync.** A client whose position is older than what the daemon still holds gets the daemon's folded state
+  instead of the missing events. Geode discards the half-streamed text of the unfinished message (it
+  re-streams from the checkpoint), keeps the finished transcript, adds the messages it missed exactly once (at
+  their original times), shows an open permission/question prompt once (and withdraws one the daemon no longer
+  has open), and closes a turn that ended unseen.
+- **Daemon crash.** A `kill -9` can lose events that were streamed live but not yet written, and the restarted
+  daemon reuses their numbers. Geode sends the daemon epoch it last saw with each attach; if the daemon
+  restarted and the client is ahead of where history resumed, the daemon tells the client to rewind and replay
+  from there, so the client sees the `daemon_restarted` notice instead of silently dropping it.
+
 ## Known limits of this stage
 
 - Host tools (vault/editor), proxied MCP servers, skills, secrets: not forwarded (PR 7 and PR 9).
-- No `resync` reconciliation beyond showing the checkpoint text; replayed messages are stamped with the
-  replay time, not the original time (PR 6).
+- A `resync` (Geode was away longer than the daemon keeps history) restores the last 20 finished messages
+  only; anything older that was missed is in the daemon's raw log (`<data-dir>/logs/<thread>.jsonl`), not in
+  the transcript. There is no "Recover from daemon" command yet.
+- A replayed message keeps the daemon's clock reading of when it happened. If the two machines' clocks
+  differ a lot, replayed times are off by that difference (never later than "now"); live messages always use
+  this machine's clock.
 - Deleting a thread in Geode does not delete its daemon-side journal.
 - A prompt left on screen after another client answered it, or after a daemon restart, is dismissed by
   answering it; the answer is ignored.

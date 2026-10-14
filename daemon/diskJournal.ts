@@ -42,6 +42,12 @@ export interface JournalIndex {
   ackedSeq: number;
   epoch: string;
   openRequests: string[];
+  /**
+   * Process epochs that have written to this journal, oldest first, each with the seq the journal held
+   * when that process opened it (what survived the previous one's exit). Lets `rewindFor` tell a client
+   * that applied events a crashed process never flushed where history really resumed.
+   */
+  epochs?: Array<{ epoch: string; startSeq: number }>;
   /** Advisory: lets tooling see in-flight turns without parsing the log. */
   turnInFlight: boolean;
   updatedAt: number;
@@ -71,6 +77,7 @@ export class DiskJournal<E> implements Journal<E> {
   private lastIdxLowWater = -1;
   private listeners = new Set<JournalListener<E>>();
   private closed = false;
+  private epochChain: Array<{ epoch: string; startSeq: number }> = [];
 
   private constructor(
     dir: string,
@@ -89,6 +96,20 @@ export class DiskJournal<E> implements Journal<E> {
     const j = new DiskJournal<E>(dir, id, policy, opts);
     j.recover();
     return j;
+  }
+
+  /**
+   * Where history really resumed after a daemon restart that the client did not see. `null` = nothing to
+   * correct. A client that applied events past the restart's recovery point (they were never flushed, and
+   * their seqs were reused by the events that followed) must rewind to it and replay from there.
+   * An epoch this journal never recorded is left alone (a client from before epochs, or a reset data dir).
+   */
+  rewindFor(clientEpoch: string | undefined, afterSeq: number): number | null {
+    if (!clientEpoch || clientEpoch === this.opts.epoch) return null;
+    const i = this.epochChain.findIndex((e) => e.epoch === clientEpoch);
+    if (i === -1 || i + 1 >= this.epochChain.length) return null;
+    const resumedAt = this.epochChain[i + 1].startSeq;
+    return afterSeq > resumedAt ? resumedAt : null;
   }
 
   /** Thread ids that have a journal in `dir`. */
@@ -221,6 +242,7 @@ export class DiskJournal<E> implements Journal<E> {
       ackedSeq: this.inner.ackedSeq,
       epoch: this.opts.epoch,
       openRequests: cp.openRequests.map((r) => requestIdOf(this.policy, r.event)).filter((s): s is string => s !== null),
+      epochs: this.epochChain,
       turnInFlight: this.opts.isTurnInFlight?.(cp) ?? false,
       updatedAt: Date.now(),
     };
@@ -246,6 +268,9 @@ export class DiskJournal<E> implements Journal<E> {
       ackedSeq: idx?.ackedSeq,
     });
     this.fileLowWater = lowWater;
+    this.epochChain = recordEpoch(idx, this.opts.epoch, this.inner.lastSeq);
+    // Persist the chain NOW: if this process dies before its first sync flush, the next one must still know it existed.
+    if (idx?.epochs?.at(-1)?.epoch !== this.opts.epoch) this.writeIdx();
     // Entries at/below lowWater may still be on disk; shed them on next flush.
     if (entries.some((e) => e.seq <= lowWater)) { this.fileLowWater = 0; this.needsRewrite = true; }
   }
@@ -286,4 +311,14 @@ export class DiskJournal<E> implements Journal<E> {
 function requestIdOf<E>(policy: JournalPolicy<E>, event: E): string | null {
   const role = policy.classify(event);
   return role.role === 'request_open' ? role.requestId : null;
+}
+
+const MAX_EPOCH_HISTORY = 16;
+
+/** The previous chain with this process appended (once), starting at the seq it recovered. */
+function recordEpoch(idx: JournalIndex | null, epoch: string, recoveredSeq: number): Array<{ epoch: string; startSeq: number }> {
+  const chain = Array.isArray(idx?.epochs) ? idx!.epochs!.filter((e) => typeof e?.epoch === 'string' && Number.isInteger(e.startSeq)) : [];
+  if (chain.length === 0 && idx && typeof idx.epoch === 'string') chain.push({ epoch: idx.epoch, startSeq: 0 }); // journal from before the chain existed
+  if (chain.at(-1)?.epoch !== epoch) chain.push({ epoch, startSeq: recoveredSeq });
+  return chain.slice(-MAX_EPOCH_HISTORY);
 }

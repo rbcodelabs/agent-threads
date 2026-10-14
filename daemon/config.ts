@@ -34,6 +34,10 @@ export interface DaemonConfig {
   idleReapMinutes: number;
   /** Explicit path to the `claude` CLI; otherwise discovered on PATH and in the usual install dirs. */
   claudeBinaryPath?: string;
+  /** A journal entry older than this is dropped (a client that was away longer gets a `resync`). 0 = keep forever. */
+  journalTtlDays: number;
+  /** Cap on one thread's retained journal (approximate JSON bytes); oldest entries go first. 0 = no cap. */
+  journalMaxMb: number;
 }
 
 export type HarnessKind = 'claude' | 'fake';
@@ -41,12 +45,14 @@ export type HarnessKind = 'claude' | 'fake';
 export const DEFAULT_WORKSPACES = ['/srv/workspaces'];
 export const DEFAULT_MAX_CONCURRENT_TURNS = 3;
 export const DEFAULT_IDLE_REAP_MINUTES = 30;
+export const DEFAULT_JOURNAL_TTL_DAYS = 7;
+export const DEFAULT_JOURNAL_MAX_MB = 64;
 
 export interface ConfigInputs {
   flags?: Partial<{
     dataDir: string; listen: string; port: number; allowedOrigins: string[]; acknowledgeOpen: boolean;
     harness: HarnessKind; workspaces: string[]; readOnlyWorkspaces: string[]; allowBypass: boolean; maxConcurrentTurns: number;
-    idleReapMinutes: number; claudeBinaryPath: string;
+    idleReapMinutes: number; claudeBinaryPath: string; journalTtlDays: number; journalMaxMb: number;
   }>;
   env?: NodeJS.ProcessEnv;
 }
@@ -73,6 +79,8 @@ interface ConfigFile {
   maxConcurrentTurns?: number;
   idleReapMinutes?: number;
   claudeBinaryPath?: string;
+  journalTtlDays?: number;
+  journalMaxMb?: number;
 }
 
 /** `~` and `~/x` mean the daemon user's home; everything else must already be absolute. */
@@ -161,6 +169,8 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     allowBypass: flags.allowBypass ?? (env.AGENT_THREADS_ALLOW_BYPASS === '1' || file.allowBypass === true),
     maxConcurrentTurns: positiveInt('maxConcurrentTurns', flags.maxConcurrentTurns ?? envInt(env.AGENT_THREADS_MAX_CONCURRENT_TURNS) ?? file.maxConcurrentTurns ?? DEFAULT_MAX_CONCURRENT_TURNS, 1),
     idleReapMinutes: positiveInt('idleReapMinutes', flags.idleReapMinutes ?? envInt(env.AGENT_THREADS_IDLE_REAP_MINUTES) ?? file.idleReapMinutes ?? DEFAULT_IDLE_REAP_MINUTES, 0),
+    journalTtlDays: positiveInt('journalTtlDays', flags.journalTtlDays ?? envInt(env.AGENT_THREADS_JOURNAL_TTL_DAYS) ?? file.journalTtlDays ?? DEFAULT_JOURNAL_TTL_DAYS, 0),
+    journalMaxMb: positiveInt('journalMaxMb', flags.journalMaxMb ?? envInt(env.AGENT_THREADS_JOURNAL_MAX_MB) ?? file.journalMaxMb ?? DEFAULT_JOURNAL_MAX_MB, 0),
     ...(claudeBinaryPath ? { claudeBinaryPath } : {}),
   };
 }
