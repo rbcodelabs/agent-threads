@@ -1,5 +1,5 @@
 import './obsidian-mock'; // must be first — sets up HTMLElement.prototype
-import { ClaudeThreadsSettingTab, RequestSecretModal } from '../../src/SettingsTab';
+import { ClaudeThreadsSettingTab, RemoteDaemonModal, RequestSecretModal } from '../../src/SettingsTab';
 import { DEFAULT_SETTINGS, type PluginSettings, type Project, type ScheduledItem, type WatchedDocument } from '../../src/types';
 import { mockApp } from './obsidian-mock';
 import { McpRegistrationModal } from '../../src/confirmModal';
@@ -365,3 +365,15 @@ tab.display();
     );
     modal.open();
   });
+
+/** Opens the Remote daemons edit dialog on a daemon that has a vault mapping (remote-thread.spec.ts). */
+(window as any).__openRemoteDaemonModal = (): void => {
+  const existing = {
+    id: 'claude-box', name: 'claude-box', url: 'wss://claude-box.example.ts.net:8443', tokenSecretName: 'T',
+    defaultCwdRoot: '/home/rick/projects', vaultMapping: { remoteRoot: '/home/rick/vault' },
+  };
+  new RemoteDaemonModal(mockApp as any, existing, [existing], '/Users/rick/Vault', {
+    test: async () => ({ tone: 'ok', text: 'Connected: agent-threads 0.1.0, protocol 1. /home/rick/vault is allowed on the daemon.' }),
+    save: async () => {},
+  }).open();
+};

@@ -91,3 +91,22 @@ test.describe('Run on a daemon: vault folder', () => {
     await expect(page.locator('[data-testid="run-on-folder-hint"]')).toBeHidden();
   });
 });
+
+test.describe('Remote daemon dialog: vault folder', () => {
+  test('edit dialog shows the vault folder fields and the folder-aware test result', async ({ page }) => {
+    await page.setViewportSize({ width: 760, height: 900 });
+    await page.goto('file://' + path.resolve('test/harness/settings.html'));
+    await page.waitForSelector('.vertical-tab-content');
+    await page.evaluate(() => (window as any).__openRemoteDaemonModal());
+    await page.waitForSelector('.modal-container');
+    const modal = page.locator('.modal-container');
+    await expect(modal.getByText('Vault folder on this daemon')).toBeVisible();
+    await expect(modal.getByText('Local folder it mirrors')).toBeVisible();
+    await expect(modal.locator('input[placeholder="/home/rick/vault"]')).toHaveValue('/home/rick/vault');
+    await expect(modal.locator('input[placeholder="/Users/rick/Vault"]')).toHaveValue('');
+    await modal.getByRole('button', { name: 'Test connection' }).click();
+    await expect(modal.locator('.ct-remote-daemon-test')).toContainText('/home/rick/vault is allowed on the daemon');
+    await settleView(page);
+    await expect(modal).toHaveScreenshot('remote-daemon-dialog-vault.png');
+  });
+});
