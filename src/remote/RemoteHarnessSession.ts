@@ -114,6 +114,8 @@ export class RemoteHarnessSession implements HarnessSession {
     this.spec = projectSessionOptions(options, this.thread);
     this.resume = options.resume;
     if (mode.attachOnly) {
+      // A turn was running when the host quit: show it as running until the replay says otherwise.
+      if (this.remote.turnPending) this.sendAwaitingState = true;
       this.follow();
       return;
     }

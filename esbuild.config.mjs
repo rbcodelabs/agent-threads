@@ -29,6 +29,9 @@ const ctx = await esbuild.context({
   external: [
     'obsidian',
     'electron',
+    // Optional native accelerators of `ws` (daemon client); it falls back to pure JS without them.
+    'bufferutil',
+    'utf-8-validate',
     'codemirror',
     '@codemirror/autocomplete',
     '@codemirror/closebrackets',

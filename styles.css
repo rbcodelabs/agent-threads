@@ -9693,3 +9693,116 @@ button.ct-agent-crumb:focus-visible {
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
 }
+
+
+/* ── Remote threads (daemon): host badge, folder and connection pill ───────── */
+.ct-remote-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  min-height: 26px;
+  flex-shrink: 0;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ct-remote-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.ct-remote-badge-icon {
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+}
+
+.ct-remote-badge-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.ct-remote-cwd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-monospace);
+}
+
+.ct-remote-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  border: 1px solid var(--background-modifier-border);
+}
+
+.ct-remote-pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.ct-remote-pill--connected::before { background: var(--color-green, #3fa66b); }
+.ct-remote-pill--connecting::before,
+.ct-remote-pill--reconnecting::before { background: var(--color-yellow, #d9a21b); }
+.ct-remote-pill--reconnecting::before { animation: ct-remote-pulse 1.2s ease-in-out infinite; }
+.ct-remote-pill--unreachable::before,
+.ct-remote-pill--protocol::before,
+.ct-remote-pill--auth::before { background: var(--color-red, #e05252); }
+
+.ct-remote-pill--unreachable,
+.ct-remote-pill--protocol,
+.ct-remote-pill--auth { color: var(--text-error, var(--color-red, #e05252)); }
+
+@keyframes ct-remote-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-remote-pill--reconnecting::before { animation: none; }
+}
+
+/* Dispatch send button when the next thread will run on a daemon */
+.ct-harness-send-btn--remote { box-shadow: inset 0 0 0 1px var(--interactive-accent); }
+
+.ct-run-on-folder {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 9px 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.ct-run-on-folder-input {
+  width: 100%;
+  min-width: 220px;
+  font-family: var(--font-monospace);
+}
+
+/* Settings -> Remote daemons */
+.ct-remote-daemon-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  font-size: var(--font-ui-smaller);
+}

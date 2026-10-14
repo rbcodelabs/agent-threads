@@ -5,7 +5,11 @@ import type { ButtonComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
 import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifactStorage';
-import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState } from './types';
+import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig } from './types';
+import { daemonWsUrl, probeDaemon } from './remote/DaemonClient';
+import { connectionPill } from './remote/connectionPill';
+import { checkDaemonInput, describeProbe, tokenSecretNameFor, uniqueDaemonId } from './remote/daemonConfig';
+import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { serializeKey } from './stt';
 import { debugLog, setDebugLogging } from './logger';
 import { telemetry } from './telemetry';
@@ -517,6 +521,87 @@ class OpenAiKeyModal extends Modal {
 
     // Focus the input after the modal animates in
     setTimeout(() => input.focus(), 50);
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+/**
+ * Add / edit one remote daemon. The token is written to the keychain
+ * (`app.secretStorage`) under a name derived from the daemon id and never to
+ * data.json; leaving the token blank while editing keeps the stored one.
+ */
+export class RemoteDaemonModal extends Modal {
+  constructor(
+    app: App,
+    private readonly existing: RemoteDaemonConfig | null,
+    private readonly all: readonly RemoteDaemonConfig[],
+    private readonly actions: {
+      test(candidate: RemoteDaemonConfig, typedToken: string): Promise<{ tone: 'ok' | 'error'; text: string }>;
+      save(config: RemoteDaemonConfig, token: string): Promise<void>;
+    },
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl('h2', { text: this.existing ? `Edit ${this.existing.name}` : 'Add a remote daemon' });
+    let name = this.existing?.name ?? '';
+    let url = this.existing?.url ?? '';
+    let token = '';
+    let folder = this.existing?.defaultCwdRoot ?? '';
+    const status = contentEl.createDiv({ cls: 'ct-remote-daemon-test setting-item-description', attr: { role: 'status' } });
+
+    new Setting(contentEl).setName('Name').setDesc('Shown on threads that run there, for example claude-box.')
+      .addText((t) => t.setPlaceholder('claude-box').setValue(name).onChange((v) => { name = v; }));
+    new Setting(contentEl).setName('Address').setDesc('wss://<machine>.<tailnet>.ts.net:8443 through `tailscale serve`, or ws://<tailscale-ip>:<port> for a raw tailnet port.')
+      .addText((t) => t.setPlaceholder('wss://claude-box.tailnet.ts.net:8443').setValue(url).onChange((v) => { url = v; }));
+    new Setting(contentEl).setName('Access token').setDesc(this.existing ? 'Leave blank to keep the stored token.' : 'From `agent-threads token create --scope control` on the daemon machine.')
+      .addText((t) => { t.inputEl.type = 'password'; t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { token = v; }); });
+    new Setting(contentEl).setName('Default folder').setDesc('Optional. The folder on that machine offered for new threads, for example /srv/workspaces/project.')
+      .addText((t) => t.setPlaceholder('/srv/workspaces').setValue(folder).onChange((v) => { folder = v; }));
+
+    const candidate = (): { config: RemoteDaemonConfig; url: string } | null => {
+      const check = checkDaemonInput({ name, url, token, requireToken: !this.existing }, this.all, this.existing?.id);
+      if (!check.ok) { status.setText(check.reason); status.addClass('mod-warning'); return null; }
+      status.removeClass('mod-warning');
+      const id = this.existing?.id ?? uniqueDaemonId(name, this.all);
+      return {
+        url: check.url,
+        config: {
+          id,
+          name: name.trim(),
+          url: check.url,
+          tokenSecretName: this.existing?.tokenSecretName ?? tokenSecretNameFor(id),
+          ...(folder.trim() ? { defaultCwdRoot: folder.trim() } : {}),
+        },
+      };
+    };
+
+    const buttons = contentEl.createDiv('ct-modal-button-row');
+    const testBtn = buttons.createEl('button', { text: 'Test connection' });
+    testBtn.addEventListener('click', async () => {
+      const c = candidate();
+      if (!c) return;
+      testBtn.disabled = true;
+      status.setText('Testing…');
+      const outcome = await this.actions.test(c.config, token);
+      testBtn.disabled = false;
+      status.setText(outcome.text);
+      status.toggleClass('mod-warning', outcome.tone === 'error');
+    });
+    buttons.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
+    const save = buttons.createEl('button', { text: 'Save', cls: 'mod-cta' });
+    save.addEventListener('click', async () => {
+      const c = candidate();
+      if (!c) return;
+      await this.actions.save(c.config, token.trim());
+      this.close();
+    });
   }
 
   onClose(): void {
@@ -2995,6 +3080,75 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             }),
         );
     }
+
+    this.renderRemoteDaemonsSection(containerEl);
+  }
+
+  // ── Remote daemons ──────────────────────────────────────────────────────
+
+  private renderRemoteDaemonsSection(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName('Remote daemons').setHeading();
+    containerEl.createEl('p', {
+      cls: 'setting-item-description',
+      text: 'Run threads on an agent-threads daemon on another machine (for example a homelab box). They keep running there when this app is closed, and reconnect to the live stream when you return. Reach the daemon over Tailscale; see docs/remote-daemon.md.',
+    });
+    const daemons = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
+    for (const daemon of daemons) {
+      const state = this.plugin.daemonRegistry?.stateOf(daemon.id);
+      const pill = connectionPill(state, daemon.name);
+      const row = new Setting(containerEl)
+        .setName(daemon.name)
+        .setDesc(`${daemon.url}${daemon.defaultCwdRoot ? ` · default folder ${daemon.defaultCwdRoot}` : ''}`);
+      row.nameEl.createSpan({ cls: `ct-remote-pill ct-remote-pill--${pill.kind} ct-remote-daemon-status`, text: pill.label, attr: { title: pill.title } });
+      row.addButton((btn) => btn.setButtonText('Test').onClick(async () => {
+        btn.setDisabled(true).setButtonText('Testing…');
+        const outcome = await this.testDaemon(daemon, undefined);
+        btn.setDisabled(false).setButtonText('Test');
+        new Notice(outcome.text, outcome.tone === 'ok' ? 4000 : 9000);
+      }));
+      row.addButton((btn) => btn.setButtonText('Edit').onClick(() => this.openDaemonModal(daemon)));
+      row.addButton((btn) => btn.setButtonText('Remove').setWarning().onClick(async () => {
+        const inUse = this.plugin.manager.getThreads().filter((t) => t.remote?.daemonId === daemon.id && t.status !== 'archived').length;
+        if (inUse > 0 && !window.confirm(`${inUse} thread${inUse === 1 ? '' : 's'} run on "${daemon.name}". They stay in your list but cannot continue until a daemon with this id is configured again. Remove it?`)) return;
+        this.plugin.settings.remoteDaemons = daemons.filter((d) => d.id !== daemon.id);
+        this.app.secretStorage.setSecret(secretStorageKey(daemon.tokenSecretName), '');
+        await this.plugin.saveSettings();
+        this.plugin.daemonRegistry?.refresh();
+        this.display();
+      }));
+    }
+    new Setting(containerEl)
+      .setName('Add a remote daemon')
+      .setDesc('You need the daemon address (wss://… through `tailscale serve`) and a token from `agent-threads token create` on that machine.')
+      .addButton((btn) => btn.setButtonText('Add daemon').setCta().onClick(() => this.openDaemonModal(null)));
+    applySecretStorageCopy(this.app, containerEl.createEl('p', { cls: 'setting-item-description' }), (storage) => `${storage} The token never appears in data.json.`);
+  }
+
+  private async testDaemon(daemon: RemoteDaemonConfig, typedToken: string | undefined): Promise<{ tone: 'ok' | 'error'; text: string }> {
+    const token = typedToken?.trim() || this.app.secretStorage.getSecret(secretStorageKey(daemon.tokenSecretName)) || '';
+    if (!token) return { tone: 'error', text: 'No token is stored for this daemon yet.' };
+    const result = await probeDaemon({
+      url: daemonWsUrl(daemon.url),
+      token,
+      createSocket: createPluginWebSocketFactory(),
+      clientVersion: this.plugin.manifest.version,
+    });
+    return describeProbe(result);
+  }
+
+  private openDaemonModal(existing: RemoteDaemonConfig | null): void {
+    new RemoteDaemonModal(this.app, existing, this.plugin.settings.remoteDaemons ?? [], {
+      test: (candidate, token) => this.testDaemon(candidate, token),
+      save: async (config, token) => {
+        const list = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
+        const index = list.findIndex((d) => d.id === config.id);
+        if (index >= 0) list[index] = config; else list.push(config);
+        if (token) this.app.secretStorage.setSecret(secretStorageKey(config.tokenSecretName), token);
+        await this.plugin.saveSettings();
+        this.plugin.daemonRegistry?.refresh();
+        this.display();
+      },
+    }).open();
   }
 
   // ── Skills ───────────────────────────────────────────────────────────────

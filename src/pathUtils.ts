@@ -112,6 +112,8 @@ export interface ThreadProjectNameInput {
   cwd: string;
   originRepoPath?: string;
   projectNameOverride?: string;
+  /** Present on a remote thread: `cwd` is on another machine, so it is never walked on this disk. */
+  remote?: unknown;
 }
 
 /**
@@ -130,6 +132,11 @@ export interface ThreadProjectNameInput {
  *    fallback so callers always get a non-empty label.
  */
 export function resolveThreadProjectName(thread: ThreadProjectNameInput): string {
+  if (thread.remote) {
+    if (thread.projectNameOverride) return thread.projectNameOverride;
+    const trimmed = thread.cwd.replace(/\/+$/, '');
+    return trimmed.slice(trimmed.lastIndexOf('/') + 1) || trimmed || 'remote';
+  }
   if (thread.originRepoPath) {
     const viaOrigin = resolveGitProjectName(thread.originRepoPath);
     if (viaOrigin) return viaOrigin;

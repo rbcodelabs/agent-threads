@@ -40,7 +40,11 @@ export interface HarnessSession {
   readonly cwd: string | undefined;
   readonly hasPendingPermission: boolean;
   canIdleReap(): boolean;
-  start(options: HarnessSessionOptions): Promise<void>;
+  /**
+   * `startMode.attachOnly` is for remote sessions only: follow a turn that was
+   * running when the host last quit, without making the daemon start anything.
+   */
+  start(options: HarnessSessionOptions, startMode?: { attachOnly?: boolean }): Promise<void>;
   /** Optional harness-specific maintenance before a user turn is submitted. */
   prepareForSend?(text: string, images?: ImageAttachment[]): Promise<void>;
   send(text: string, images?: ImageAttachment[], userMessageUuid?: string): void;

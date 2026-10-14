@@ -17,6 +17,7 @@ import { partitionThreads } from './threadRowState';
 import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
 import { handleContributedDispatch } from './slashCommandRouting';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
+import { remoteGroup, threadCwdLabel } from './remote/threadLocation';
 import { parsePrUrlRepo } from './gitDiffUtils';
 import { groupDashboardThreads, normalizeAgentsGroupBy, toggleAgentsGrouping, type AgentsGroupBy, type AgentsGroupingDimension } from './dashboardProjectGroups';
 import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps } from './threadArchiveMenu';
@@ -167,13 +168,14 @@ export class AgentDashboard extends ItemView {
       subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
       argCompletions: DISPATCH_ARG_COMPLETIONS,
       peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
-      harnessPicker: { initialHarness: this.plugin.settings.agentHarness ?? 'claude' },
-      onSend: async ({ text, images, attachment, agentHarness, harnessVmMode }) => {
+      harnessPicker: { initialHarness: this.plugin.settings.agentHarness ?? 'claude', getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [] },
+      onSend: async ({ text, images, attachment, agentHarness, harnessVmMode, remote }) => {
         // Intercept contributed commands, then core model/goal/loop directives.
         // Apply directives instead of sending command text to the agent verbatim.
-        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; harnessVmMode?: HarnessVmMode; projectId?: string } = {
+        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; harnessVmMode?: HarnessVmMode; projectId?: string; remote?: { daemonId: string; cwd: string } } = {
           agentHarness,
           harnessVmMode,
+          remote,
           projectId: this.selectedProjectId || undefined,
         };
         let titleText = text;
@@ -744,7 +746,7 @@ export class AgentDashboard extends ItemView {
     if (this.currentGroupMode() === 'status') {
       secondary.createDiv({ cls: 'ct-agents-row-project', text: this.threadGroup(thread).label });
     } else if (thread.cwd) {
-      secondary.createDiv({ cls: 'ct-agents-row-cwd', text: buildCwdLabel(thread.cwd, this.plugin.manager.vaultRoot) });
+      secondary.createDiv({ cls: 'ct-agents-row-cwd', text: threadCwdLabel(thread, () => buildCwdLabel(thread.cwd, this.plugin.manager.vaultRoot), (id) => this.plugin.daemonRegistry?.nameOf(id) ?? id) });
     }
 
     const agentRuns = this.manager.getAgentRuns(thread.id);
@@ -790,6 +792,8 @@ export class AgentDashboard extends ItemView {
       const project = this.manager.getProject(thread.projectId);
       if (project) return { key: `project:${project.id}`, label: project.name };
     }
+    const remote = remoteGroup(thread, (id) => this.plugin.daemonRegistry?.nameOf(id) ?? id);
+    if (remote) return remote;
     if (thread.cwd || thread.originRepoPath) {
       const threadRoot = this.normalizedRepoOrCwd(thread.originRepoPath || thread.cwd);
       const matchingProject = this.manager.getProjects()

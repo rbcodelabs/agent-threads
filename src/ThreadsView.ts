@@ -1,6 +1,7 @@
 import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
+import { connectionPill } from './remote/connectionPill';
 import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
@@ -167,6 +168,9 @@ export class ThreadsView extends ItemView {
   private artifactCardEl!: HTMLElement;
   /** Small badge shown in the title bar when the active thread is ephemeral. */
   private ephemeralBadgeEl!: HTMLSpanElement;
+  /** Host badge, remote folder and connection pill, shown only for a remote thread. */
+  private remoteStripEl: HTMLElement | null = null;
+  private remoteStateSubscribed = false;
   /** Models discovered from the active session via supportedModels(). */
   private discoveredModels: import('@anthropic-ai/claude-agent-sdk').ModelInfo[] = [];
   /** Agents discovered from the active session via supportedAgents(). */
@@ -861,6 +865,14 @@ export class ThreadsView extends ItemView {
       if (this.activeThreadId) this.closeThread(this.activeThreadId).catch(console.error);
     });
 
+    // Always visible (unlike the title row, which a native view header hides): which machine this
+    // thread runs on and whether it is reachable.
+    this.remoteStripEl = root.createDiv({ cls: 'ct-remote-strip ct-hidden', attr: { 'data-testid': 'remote-strip' } });
+    if (!this.remoteStateSubscribed && this.plugin.daemonRegistry) {
+      this.remoteStateSubscribed = true;
+      this.register(this.plugin.daemonRegistry.onState(() => this.renderRemoteStrip()));
+    }
+
     this.mainEl = root.createDiv('ct-main');
     this.messagesEl = this.mainEl.createDiv('ct-messages');
     this.messagesEl.addEventListener('scroll', () => {
@@ -1101,6 +1113,7 @@ export class ThreadsView extends ItemView {
     if (this.ephemeralBadgeEl) {
       this.ephemeralBadgeEl.toggleClass('ct-hidden', !thread?.ephemeral);
     }
+    this.renderRemoteStrip();
 
     const threads = this.manager.getThreads();
     const hasRunning = threads.some(t => t.id !== this.activeThreadId && this.manager.isRunning(t.id));
@@ -1120,6 +1133,32 @@ export class ThreadsView extends ItemView {
       this.closeThreadBtn.classList.toggle('ct-hidden', threads.length <= 1);
     }
     this.nativeCloseThreadActionEl?.classList.toggle('ct-hidden', threads.length <= 1);
+  }
+
+  /** Host badge + remote folder + connection pill for the active thread; hidden for local threads. */
+  private renderRemoteStrip(): void {
+    const strip = this.remoteStripEl;
+    if (!strip) return;
+    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
+    const remote = thread?.remote;
+    strip.toggleClass('ct-hidden', !remote);
+    if (!remote) return;
+    const registry = this.plugin.daemonRegistry;
+    const name = registry?.nameOf(remote.daemonId) ?? remote.daemonId;
+    // Viewing a remote thread is enough reason to be connected: it makes the pill truthful and warms the socket.
+    const client = registry?.clientFor(remote.daemonId);
+    client?.connect();
+    const pill = connectionPill(client?.connection, name);
+    strip.empty();
+    const badge = strip.createSpan({ cls: 'ct-remote-badge', attr: { title: `This thread runs on ${name}`, 'data-testid': 'remote-badge' } });
+    setIcon(badge.createSpan({ cls: 'ct-remote-badge-icon', attr: { 'aria-hidden': 'true' } }), 'server');
+    badge.createSpan({ cls: 'ct-remote-badge-name', text: name });
+    strip.createSpan({ cls: 'ct-remote-cwd', text: remote.remoteCwd, attr: { title: `${name}:${remote.remoteCwd}` } });
+    strip.createSpan({
+      cls: `ct-remote-pill ct-remote-pill--${pill.kind}`,
+      text: pill.label,
+      attr: { title: pill.title, role: 'status', 'data-testid': 'remote-pill', 'data-state': pill.kind },
+    });
   }
 
   private createNativeHeaderActions(): void {
@@ -1959,6 +1998,12 @@ export class ThreadsView extends ItemView {
     try {
       if (isHttpUrl(filePath)) {
         this.openLink(filePath);
+        return;
+      }
+      // A remote thread's file paths are on the daemon's machine: opening them here would hit (or miss) an unrelated local file.
+      const activeRemote = this.activeThreadId ? this.manager.getThread(this.activeThreadId)?.remote : undefined;
+      if (activeRemote) {
+        new Notice(`This file is on ${this.plugin.daemonRegistry?.nameOf(activeRemote.daemonId) ?? 'the remote machine'}; it cannot be opened from here.`);
         return;
       }
       if (/\.html?$/i.test(filePath) && isWebViewerEnabled(this.app)) {

@@ -76,6 +76,8 @@ import { RelayClient } from './RelayClient';
 import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
+import { DaemonRegistry } from './remote/DaemonRegistry';
+import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
@@ -261,6 +263,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
   api!: { readonly v1: ClaudeThreadsApiV1 };
   settings!: PluginSettings;
   manager!: ThreadManager;
+  /** Connections to the remote agent-threads daemons (Settings -> Remote daemons). */
+  daemonRegistry: DaemonRegistry | null = null;
   persistence!: VaultPersistence;
   inProcessSummarizer!: InProcessSummarizer;
   wakeLock!: WakeLockService;
@@ -588,6 +592,16 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.settings,
       new AttachmentWriter(() => this.app, () => this.settings.vaultFolder),
     );
+    // Remote daemons: one client per configured daemon, tokens read from the keychain at each (re)connect.
+    this.daemonRegistry = new DaemonRegistry({
+      getDaemons: () => this.settings.remoteDaemons ?? [],
+      getToken: (daemon) => this.app.secretStorage.getSecret(secretStorageKey(daemon.tokenSecretName)) || undefined,
+      createSocket: createPluginWebSocketFactory(),
+      clientVersion: this.manifest.version,
+      log: (message) => debugLog(message),
+    });
+    this.register(() => { this.daemonRegistry?.disposeAll(); });
+    this.manager.remoteDaemons = this.daemonRegistry;
     this.manager.getExternalMounts = () => this.listExternalMountRoots();
     // Lets the manager detect sessions holding stale Google/OAuth proxy configs (per-send check).
     this.manager.proxyMcpServersForThread = (threadId) => ({
@@ -1201,6 +1215,19 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.loadProjects(this.settings.projects ?? []);
     const savedThreads = this.settings.threads ?? [];
     this.manager.loadThreads(savedThreads);
+    // A remote turn that was running when Geode last quit is still running (or finished) on the daemon:
+    // re-attach so its transcript completes without anyone opening the thread.
+    this.app.workspace.onLayoutReady(() => {
+      const resumed = this.manager.resumeRemoteTurns();
+      if (resumed.length > 0) debugLog(`[ClaudeThreads] re-attached ${resumed.length} remote turn(s)`);
+    });
+    // Remote transcripts are persisted as soon as a turn produces something durable, not only when a
+    // view happens to save, and each save tells the daemon how much of its replay buffer can go (ack).
+    this.register(this.manager.subscribe((threadId, event) => {
+      if (event.type !== 'message' && event.type !== 'done' && event.type !== 'error' && event.type !== 'interrupted') return;
+      if (!this.manager.getThread(threadId)?.remote) return;
+      this.saveSettings().then(() => this.manager.notifyThreadPersisted(threadId)).catch(console.error);
+    }));
     const repairedOrchestrators = repairStaleProjectOrchestrators(
       this.manager.getProjects(),
       id => this.manager.getThread(id)?.projectId,
@@ -1882,7 +1909,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
           await this.safeReloadPlugin();
           return;
         }
-        const running = this.manager.getRunningThreads();
+        // Running remote turns are not affected by a reload (they detach), so they never block it.
+        const running = this.manager.getRunningThreads().filter((t) => !t.remote);
         if (running.length === 0) {
           await this.safeReloadPlugin();
           return;
@@ -2793,7 +2821,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // starts — but sessions receive their interrupt signal synchronously before
     // that, giving them maximum time to shut down cleanly.
     if (this.manager) {
-      const runningThreads = this.manager.getRunningThreads();
+      // A running REMOTE turn is not interrupted by a reload: gracefulShutdown() detaches from it and
+      // it keeps running on the daemon, so it neither needs the wait nor the notice.
+      const runningThreads = this.manager.getRunningThreads().filter((t) => !t.remote);
       if (runningThreads.length > 0) {
         const names = runningThreads.map((t) => `"${t.title}"`).join(', ');
         const s = runningThreads.length === 1 ? '' : 's';
@@ -2817,6 +2847,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.documentWatch?.stop();
     telemetry.dispose();
     this.manager?.destroy();
+    this.daemonRegistry?.disposeAll();
 
     // Note: pending ScheduleWakeup entries are now durable Scheduler items
     // (schedule.type 'once', origin 'wakeup') persisted to disk — they must
@@ -3526,6 +3557,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       harnessVmMode?: HarnessVmMode;
       /** Project selected by a dispatch surface. Omit for deliberate Unassigned. */
       projectId?: string;
+      /** Run the thread on a remote daemon, in this folder on its machine (Claude only). */
+      remote?: { daemonId: string; cwd: string };
     },
   ): Promise<string> {
     const rawTitle = titleHint ?? text;
@@ -3535,11 +3568,21 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const project = opts?.projectId ? this.manager.getProject(opts.projectId) : undefined;
     if (opts?.projectId && !project) throw new Error(`Project not found: ${opts.projectId}`);
     const cwd = project ? this.manager.getProjectCwd(project) : this.getEffectiveCwd();
-    const thread = this.manager.createThread(title, cwd, project?.id, opts?.agentHarness);
+    if (opts?.remote) {
+      if (!(this.settings.remoteDaemons ?? []).some((d) => d.id === opts.remote!.daemonId)) {
+        throw new Error('That remote daemon is not configured. Add it under Settings, Remote daemons.');
+      }
+      if ((opts.agentHarness ?? this.settings.agentHarness ?? 'claude') !== 'claude') {
+        throw new Error('Remote threads run Claude only for now.');
+      }
+    }
+    const thread = opts?.remote
+      ? this.manager.createRemoteThread(title, { daemonId: opts.remote.daemonId, remoteCwd: opts.remote.cwd, clientId: this.settings.remoteClientId ?? 'unknown' }, project?.id)
+      : this.manager.createThread(title, cwd, project?.id, opts?.agentHarness);
     if (opts?.model) this.manager.setThreadModel(thread.id, opts.model);
     // Container routing exists only for Claude; the picker never offers it for
     // other harnesses, so a mismatched request is ignored rather than fatal.
-    if (opts?.harnessVmMode && (thread.agentHarness ?? 'claude') === 'claude') {
+    if (opts?.harnessVmMode && !thread.remote && (thread.agentHarness ?? 'claude') === 'claude') {
       this.manager.setInitialThreadHarnessVmMode(thread.id, opts.harnessVmMode);
     }
     const goalRevision = opts?.goal ? this.manager.setThreadGoal(thread.id, opts.goal) : undefined;
@@ -3856,6 +3899,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
     // Ensure projects array exists for older data
     this.settings.projects = this.settings.projects ?? [];
+    // Stable id of this install, stamped on remote threads as their owner.
+    this.settings.remoteDaemons = this.settings.remoteDaemons ?? [];
+    this.settings.remoteClientId = this.settings.remoteClientId ?? crypto.randomUUID();
     // Ensure secretEnvKeys array exists for installs predating this feature
     this.settings.secretEnvKeys = this.settings.secretEnvKeys ?? [];
     // Ensure mcpServers map exists for installs predating this feature. There is

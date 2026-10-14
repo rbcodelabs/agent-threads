@@ -1,4 +1,5 @@
-import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, type AgentHarness, type HarnessVmMode } from './types';
+import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, type AgentHarness, type HarnessVmMode, type RemoteDaemonConfig } from './types';
+import { resolveRunOn, runOnSuffix, type RunOnRemote, type RunOnSelection } from './remote/runOn';
 import { App, setIcon, setTooltip, Notice } from 'obsidian';
 import type { ImageAttachment, ImageMediaType } from './types';
 import { MAX_ATTACHMENT_BYTES } from './attachmentUtils';
@@ -26,6 +27,8 @@ export interface DispatchPayload {
    * follow Settings. Only ever set for the Claude harness.
    */
   harnessVmMode?: HarnessVmMode;
+  /** Run the thread on this remote daemon, in this folder on its machine (picked under "Run on"). */
+  remote?: RunOnRemote;
 }
 
 /**
@@ -109,7 +112,11 @@ export interface DispatchInputOptions {
   /** Title tooltip for the send button (default: 'Start task') */
   sendBtnTitle?: string;
   /** Turn the send button into a locally sticky kickoff harness picker. */
-  harnessPicker?: { initialHarness: AgentHarness };
+  harnessPicker?: {
+    initialHarness: AgentHarness;
+    /** Configured remote daemons; when non-empty the menu offers a "Run on" section. */
+    getRemoteDaemons?: () => RemoteDaemonConfig[];
+  };
   /**
    * Called on every keydown/keyup to retrieve the current push-to-talk hotkey
    * string (e.g. "Alt+Space"). When provided, hold-to-record PTT is enabled.
@@ -184,6 +191,8 @@ export class DispatchInput {
   private selectedHarness: AgentHarness | null = null;
   /** Sticky "Run in" override for the next dispatches; undefined follows Settings. */
   private selectedVmMode: RunModeChoice | undefined;
+  /** Sticky "Run on" choice: this computer (undefined) or a remote daemon plus a folder on it. */
+  private selectedRunOn: RunOnSelection = {};
   private harnessMenu: HTMLElement | null = null;
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressNextSendClick = false;
@@ -511,6 +520,13 @@ export class DispatchInput {
     const images = this.pendingImages.slice();
     if (!text && !attachment && images.length === 0) return;
 
+    // Resolved before anything is cleared: a bad remote folder must leave the draft where it is.
+    const runOn = resolveRunOn(this.effectiveRunOn(), this.remoteDaemons());
+    if (!runOn.ok) {
+      new Notice(runOn.reason);
+      return;
+    }
+
     this.dispatching = true;
     this.inputEl.value = '';
     this.removeCommandPill();
@@ -525,7 +541,8 @@ export class DispatchInput {
         images,
         attachment,
         ...(this.selectedHarness ? { agentHarness: this.selectedHarness } : {}),
-        ...(this.effectiveVmMode() ? { harnessVmMode: this.effectiveVmMode() } : {}),
+        ...(this.effectiveVmMode() && !runOn.remote ? { harnessVmMode: this.effectiveVmMode() } : {}),
+        ...(runOn.remote ? { remote: runOn.remote } : {}),
       });
     } catch (err) {
       // Dispatch can fail after selection state changes (for example, a
@@ -594,9 +611,13 @@ export class DispatchInput {
     const name = agentHarnessLabel(this.selectedHarness);
     this.sendBtn.empty();
     this.createHarnessMark(this.sendBtn, this.selectedHarness);
-    const vmMode = this.effectiveVmMode();
-    this.sendBtn.removeClass('ct-harness-send-btn--container', 'ct-harness-send-btn--host');
-    if (vmMode) {
+    const vmMode = this.effectiveRunOn().daemonId ? undefined : this.effectiveVmMode();
+    this.sendBtn.removeClass('ct-harness-send-btn--container', 'ct-harness-send-btn--host', 'ct-harness-send-btn--remote');
+    if (this.effectiveRunOn().daemonId) {
+      this.sendBtn.addClass('ct-harness-send-btn--remote');
+      const badge = this.sendBtn.createSpan({ cls: 'ct-run-mode-badge', attr: { 'aria-hidden': 'true', 'data-run-mode': 'remote' } });
+      setIcon(badge, 'server');
+    } else if (vmMode) {
       this.sendBtn.addClass(vmMode === 'always' ? 'ct-harness-send-btn--container' : 'ct-harness-send-btn--host');
       const badge = this.sendBtn.createSpan({
         cls: 'ct-run-mode-badge',
@@ -604,7 +625,8 @@ export class DispatchInput {
       });
       setIcon(badge, RUN_MODE_ICONS[vmMode]);
     }
-    const where = vmMode ? ` in ${vmMode === 'always' ? 'a container' : 'the host (no container)'}` : '';
+    const remoteWhere = runOnSuffix(this.effectiveRunOn(), this.remoteDaemons());
+    const where = remoteWhere || (vmMode ? ` in ${vmMode === 'always' ? 'a container' : 'the host (no container)'}` : '');
     const label = `Start task with ${name}${where}; right-click or hold to change agent or where it runs`;
     this.sendBtn.setAttribute('aria-label', label);
     this.sendBtn.setAttribute('aria-haspopup', 'menu');
@@ -615,6 +637,16 @@ export class DispatchInput {
   /** The run-mode override to apply, or undefined. Container routing exists only for Claude. */
   private effectiveVmMode(): RunModeChoice | undefined {
     return this.selectedHarness === 'claude' ? this.selectedVmMode : undefined;
+  }
+
+  private remoteDaemons(): RemoteDaemonConfig[] {
+    return this.options.harnessPicker?.getRemoteDaemons?.() ?? [];
+  }
+
+  /** The Run-on choice that applies: only Claude threads can run remotely, and only on a daemon still configured. */
+  private effectiveRunOn(): RunOnSelection {
+    if (this.selectedHarness !== 'claude' || !this.selectedRunOn.daemonId) return {};
+    return this.selectedRunOn;
   }
 
   private openHarnessMenu(): void {
@@ -681,10 +713,68 @@ export class DispatchInput {
         });
       }
     }
+    const daemons = this.remoteDaemons();
+    if (this.selectedHarness === 'claude' && daemons.length > 0) this.renderRunOnSection(menu, daemons);
     this.sendBtn.setAttribute('aria-expanded', 'true');
     document.addEventListener('pointerdown', this.closeHarnessMenuOnPointerDown);
     document.addEventListener('keydown', this.closeHarnessMenuOnEscape);
     menu.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
+  }
+
+  /** "Run on": this computer, or a remote daemon plus the folder to work in on that machine. */
+  private renderRunOnSection(menu: HTMLElement, daemons: RemoteDaemonConfig[]): void {
+    menu.createDiv({ cls: 'ct-harness-menu-separator', attr: { role: 'separator' } });
+    menu.createDiv({ cls: 'ct-harness-menu-heading', text: 'Run on' });
+    const choices: Array<{ id: string | undefined; label: string; icon: string }> = [
+      { id: undefined, label: 'This computer', icon: 'laptop' },
+      ...daemons.map((d) => ({ id: d.id, label: d.name, icon: 'server' })),
+    ];
+    for (const choice of choices) {
+      const item = menu.createEl('button', {
+        cls: 'ct-harness-menu-item ct-run-mode-item ct-run-on-item',
+        attr: {
+          role: 'menuitemradio',
+          'aria-checked': String(this.selectedRunOn.daemonId === choice.id),
+          'data-run-on': choice.id ?? 'local',
+        },
+      });
+      const mark = item.createSpan({ cls: 'ct-run-mode-mark', attr: { 'aria-hidden': 'true' } });
+      setIcon(mark, choice.icon);
+      item.createSpan({ text: choice.label });
+      item.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const daemon = daemons.find((d) => d.id === choice.id);
+        this.selectedRunOn = choice.id ? { daemonId: choice.id, cwd: this.selectedRunOn.cwd ?? daemon?.defaultCwdRoot ?? '' } : {};
+        if (!choice.id) this.closeHarnessMenu(true);
+        else this.refreshRunOnFolderRow(menu, daemons);
+        this.renderHarnessIdentity();
+        for (const el of Array.from(menu.querySelectorAll<HTMLElement>('.ct-run-on-item'))) {
+          el.setAttribute('aria-checked', String((el.getAttribute('data-run-on') ?? 'local') === (choice.id ?? 'local')));
+        }
+      });
+    }
+    this.refreshRunOnFolderRow(menu, daemons);
+  }
+
+  /** The folder field under "Run on", present only while a daemon is selected. */
+  private refreshRunOnFolderRow(menu: HTMLElement, daemons: RemoteDaemonConfig[]): void {
+    menu.querySelector('.ct-run-on-folder')?.remove();
+    const daemon = daemons.find((d) => d.id === this.selectedRunOn.daemonId);
+    if (!daemon) return;
+    const row = menu.createDiv({ cls: 'ct-run-on-folder' });
+    row.createEl('label', { text: `Folder on ${daemon.name}`, attr: { for: 'ct-run-on-folder-input' } });
+    const input = row.createEl('input', {
+      cls: 'ct-run-on-folder-input',
+      attr: { id: 'ct-run-on-folder-input', type: 'text', placeholder: '/srv/workspaces/project', spellcheck: 'false', 'aria-label': `Folder on ${daemon.name}` },
+    });
+    input.value = this.selectedRunOn.cwd ?? '';
+    input.addEventListener('input', () => { this.selectedRunOn = { daemonId: daemon.id, cwd: input.value }; });
+    input.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Enter') { event.preventDefault(); this.closeHarnessMenu(true); }
+    });
+    input.focus();
   }
 
   private createHarnessMark(container: HTMLElement, harness: AgentHarness): void {

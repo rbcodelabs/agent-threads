@@ -122,6 +122,8 @@ export class GitDiffService {
 
   private cwdFor(threadId: string): string | null {
     const thread = this.manager.getThread(threadId);
+    // Remote cwd = a path on the daemon's machine; never run local git against it (see StatusLineService).
+    if (thread?.remote) return null;
     const cwd = thread?.cwd || this.deps.getDefaultCwd?.() || '';
     return cwd || null;
   }
@@ -144,6 +146,7 @@ export class GitDiffService {
 
     const cwds = new Set<string>();
     for (const t of this.manager.getThreads()) {
+      if (t.remote) continue;
       const cwd = t.cwd || this.deps.getDefaultCwd?.() || '';
       if (cwd) cwds.add(cwd);
     }
@@ -189,7 +192,7 @@ export class GitDiffService {
 
   private applyToCwd(cwd: string, info: GitDiffInfo): void {
     for (const t of this.manager.getThreads()) {
-      if ((t.cwd || this.deps.getDefaultCwd?.() || '') === cwd) {
+      if (!t.remote && (t.cwd || this.deps.getDefaultCwd?.() || '') === cwd) {
         this.manager.applyGitDiff(t.id, info);
       }
     }
