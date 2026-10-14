@@ -94,7 +94,7 @@ describe('obsidian_create_project', () => {
 
     await tool._handler({ name: 'HipTrip', vaultFolder: 'Projects/HipTrip' });
 
-    expect(createProject).toHaveBeenCalledWith('HipTrip', 'Projects/HipTrip', undefined, undefined);
+    expect(createProject).toHaveBeenCalledWith('HipTrip', 'Projects/HipTrip', undefined, undefined, undefined);
   });
 
   it('passes description and cwdOverride when provided', async () => {
@@ -114,6 +114,7 @@ describe('obsidian_create_project', () => {
       'Projects/HipTrip',
       'Travel curation app',
       '/Users/rick/projects/hiptrip',
+      undefined,
     );
   });
 
