@@ -1755,6 +1755,26 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         awsStatus.setText(res.expired ? "Not signed in (SSO session expired or missing)." : res.error);
       }
     };
+    // Containers are desktop-only, so is this.
+    if (!Platform.isMobile) new Setting(containerEl)
+      .setName('AWS profiles exposed to containers')
+      .setDesc(
+        'One profile per line. Sandbox containers get a read-only copy of the AWS SSO token cache and a trimmed AWS config '
+        + 'containing only these profiles, plus the AWS_PROFILE from Extra environment variables. Takes effect for containers '
+        + 'created afterwards (a running thread keeps its container). Leave empty to expose nothing extra. '
+        + 'Note: the whole SSO token cache directory is mounted, not just these profiles\' tokens — see docs/sandbox-vms.md.',
+      )
+      .addTextArea((ta) =>
+        ta
+          .setPlaceholder('my-deploy-profile')
+          .setValue(this.plugin.settings.containerAwsProfiles ?? '')
+          .onChange(async (value) => {
+            this.plugin.settings.containerAwsProfiles = value;
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
     awsCredsSetting
       .addButton((btn) => btn.setButtonText("Check").onClick(() => void runAwsCheck()))
       .addButton((btn) =>

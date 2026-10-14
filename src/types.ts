@@ -1054,6 +1054,13 @@ export interface PluginSettings {
    */
   harnessVmImage: string;
   /**
+   * Extra AWS profiles (one per line or comma separated) exposed to harness
+   * containers, on top of the AWS_PROFILE from Extra environment variables.
+   * Non-empty enables Container AWS credentials even on the Claude provider.
+   * See containerAws.ts.
+   */
+  containerAwsProfiles: string;
+  /**
    * True once the user chose "Don't ask again" on the in-thread "Run this thread in a
    * sandbox?" card. Suppresses that offer for good; Settings → Claude → Set up
    * sandbox still works.
@@ -1351,6 +1358,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   sandboxVmMemory: '4G',
   sandboxVmCpus: 4,
   harnessVmImage: 'claude-threads-harness:1',
+  containerAwsProfiles: '',
   sandboxSetupPromptDismissed: false,
   githubConnectionEnabled: true,
   githubCommitEmail: '',

@@ -1,0 +1,70 @@
+# Harness image + AWS deploy toolchain (OpenNext / SST / Aurora DSQL).
+#
+# Layered on claude-threads-harness:1 so Claude Code still runs INSIDE the
+# container (ADR-0015). Separate opt-in tag, like Dockerfile.harness itself:
+# Chromium alone is ~1 GB, and nobody should pay that unless they deploy.
+#
+# Build:
+#   container build --tag claude-threads-harness-aws:1 \
+#     -f sandbox/Dockerfile.harness-aws sandbox/
+# Use: Settings -> Agent -> harness VM image = claude-threads-harness-aws:1
+#
+# Versions are pinned to what the 2026-10-05 sandbox spikes proved
+# (Technology/Playbook - Deploying Next.js to Sandbox AWS with OpenNext and SST).
+# Unpinned SST pulls OpenNext 3.9.14, which rejects Next >= 16.3.6.
+#
+# NO credentials baked in (no account IDs, no SSO URLs). AWS credentials are
+# mounted at runtime by the plugin (see the end of this file); the host
+# environment never reaches this container by design.
+
+FROM claude-threads-harness:1
+
+ARG PNPM_VERSION=11
+ARG SST_VERSION=4.17.1
+ARG OPENNEXT_VERSION=4.1.6
+ARG PLAYWRIGHT_VERSION=1.64.1
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2. Pick the zip for the container's own arch (Apple silicon = aarch64).
+RUN arch="$(uname -m)" \
+    && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${arch}.zip" -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/aws /tmp/awscliv2.zip
+
+# pnpm, SST and OpenNext at the proven versions. Installed globally so a fresh
+# project can run `sst deploy` without a network round-trip for the CLI itself.
+RUN npm install -g "pnpm@${PNPM_VERSION}" "sst@${SST_VERSION}" "@opennextjs/aws@${OPENNEXT_VERSION}"
+
+# Chromium for smoke-testing the preview URL. Browsers live outside $HOME so a
+# read-only rootfs / fresh /work mount does not hide them.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN npx --yes "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
+    && chmod -R a+rX /opt/pw-browsers \
+    && rm -rf /var/lib/apt/lists/*
+
+USER node
+
+# CI=1 is deliberately NOT set globally (it changes vitest/playwright/etc.
+# behavior). Deploy with `CI=1 sst deploy ...` so SST skips its interactive UI.
+# pnpm store inside the writable workspace, same reasoning as NPM_CONFIG_CACHE.
+ENV PNPM_HOME=/home/node/.local/share/pnpm \
+    npm_config_store_dir=/work/.pnpm-store \
+    AWS_PAGER=""
+ENV PATH="${PNPM_HOME}:${PATH}"
+
+# AWS credentials come from the HOST, read-only, never from this image.
+# When a thread is routed into a container and AWS is relevant (Bedrock provider,
+# or "AWS profiles exposed to containers" is set), the plugin mounts:
+#   host ~/.aws/sso/cache           -> /aws/sso-cache  (read-only)
+#   generated, trimmed AWS config   -> /aws/config     (read-only)
+# and sets AWS_CONFIG_FILE=/aws/config on the harness process itself, so it is
+# deliberately NOT set here. The SDK always reads the token cache from
+# $HOME/.aws/sso/cache (no env override), hence the symlink (dangling until the
+# mount exists). Refresh stays on the host: read-only means a container can use
+# a token but never rewrite it. See docs/sandbox-vms.md.
+RUN mkdir -p /home/node/.aws/sso && ln -s /aws/sso-cache /home/node/.aws/sso/cache

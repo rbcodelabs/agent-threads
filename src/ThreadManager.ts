@@ -27,6 +27,7 @@ import { checkImageHealth } from './sandboxImage';
 import { sweepOrphanedThreadContainers, type OrphanSweepResult } from './sandboxVmSweep';
 import { containerNameForThread, createDefaultVmCommandRunner, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
 import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
+import { resolveContainerAwsProfiles, planContainerAwsMounts, nodeContainerAwsFs, type ContainerAwsPlan } from './containerAws';
 import { isRuntimeSupported } from './sandboxRuntime';
 import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
 import type { App } from 'obsidian';
@@ -2390,6 +2391,7 @@ export class ThreadManager {
       vmManager: this.getSandboxVmManager(threadId),
       mountPath: thread.cwd,
       skillMountPlan,
+      awsMountPlan: this.planContainerAws(),
       getExternalMounts: this.getExternalMounts,
       memory: resolveVmMemory(this.settings.sandboxVmMemory),
       cpus: resolveVmCpus(this.settings.sandboxVmCpus),
@@ -2397,6 +2399,35 @@ export class ThreadManager {
       checkImageHealth: (image) => checkImageHealth(this.vmCommandRunner ?? createDefaultVmCommandRunner(), image, 'harness'),
       onImageWarning: (message) => this.warnStaleSandboxImage(threadId, message),
     };
+  }
+
+  /**
+   * Container AWS credentials: the profiles exposed to containers plus the
+   * read-only mounts that carry them, or null when not relevant. Never throws:
+   * a planning failure must not block the session, it just means no AWS in the VM.
+   */
+  private planContainerAws(): ContainerAwsPlan | null {
+    try {
+      const profiles = resolveContainerAwsProfiles({
+        provider: this.settings.provider,
+        settingValue: this.settings.containerAwsProfiles,
+        extraEnv: effectiveExtraEnv(this.settings),
+      });
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const os = require('os') as typeof import('os');
+      const plan = planContainerAwsMounts({
+        profiles,
+        homeDir: os.homedir(),
+        hostConfigPath: process.env.AWS_CONFIG_FILE,
+        dataDir: this.pluginResourceDir,
+        fs: nodeContainerAwsFs(),
+      });
+      for (const w of plan?.warnings ?? []) console.warn('[ClaudeThreads] container AWS:', w);
+      return plan;
+    } catch (err) {
+      console.warn('[ClaudeThreads] Could not plan container AWS credentials:', err);
+      return null;
+    }
   }
 
   /** Tells the user (once per thread per message) that its sandbox image is stale; the session still starts. */
