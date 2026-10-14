@@ -189,7 +189,7 @@ export class ReplaySession implements HarnessSession {
   private closed = false;
   /** Bumped by interrupt/close so an in-flight replay stops at its next await. */
   private epoch = 0;
-  private readonly sessionId = `replay-${Math.random().toString(36).slice(2, 10)}`;
+  private readonly sessionId = `replay-${globalThis.crypto.randomUUID().slice(0, 8)}`;
   private readonly sleepImpl: (ms: number) => Promise<void>;
   /** Resolvers for every sleep/hold currently waiting, so interrupt/close can end them all. */
   private readonly wakers = new Set<() => void>();
