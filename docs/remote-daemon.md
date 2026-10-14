@@ -89,6 +89,64 @@ To remove the tailnet exposure: `sudo tailscale serve --https=8443 off`.
    folder and a connection pill.
 4. Quit Geode mid-turn, wait, reopen: the transcript completes without any action.
 
+## Working in the vault
+
+A daemon can hold a synced copy of your vault (on `claude-box`: `/home/rick/vault`, two-way synced to the
+hub every ~300 s, and your Mac syncs to the same hub). Vault threads can then run there with the same
+folder they would use on the Mac.
+
+**Caveats, read these first.** The daemon works on a *copy*, not the live vault:
+
+- Changes propagate in both directions with a delay of up to about 5 minutes. A file edited in the last few
+  seconds on either side is "unsettled" and waits for the next sync run.
+- If you and a remote thread edit the same file in that window, the sync can conflict (one side's edit is
+  lost or a conflict copy appears). Remote sessions are told to re-read before editing, prefer small edits
+  and new files over rewrites, and never delete or rename vault files unless you ask.
+- The vault_* / editor tools are not available remotely; the session uses its shell and file tools on the copy.
+
+**1. Let the daemon use the folder.** Sessions may only run under a `--workspace` folder. `--workspace` is
+repeatable and a flag *replaces* the whole list (flag > `AGENT_THREADS_WORKSPACES` > `config.json`), so
+repeat every folder you already use. Edit the unit (find it with `systemctl --user cat agent-threads`, or
+`systemctl cat agent-threads` for a system unit) with `systemctl --user edit --full agent-threads`:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/node /home/rick/agent-threads/agent-threads.cjs serve \
+  --data-dir /home/rick/agent-threads/data --listen 127.0.0.1 --port 7433 \
+  --workspace /home/rick/projects \
+  --workspace /home/rick/vault
+```
+
+(Keep your existing flags and paths; only add the `--workspace /home/rick/vault` line.) Then
+`systemctl --user daemon-reload && systemctl --user restart agent-threads` (system unit: drop `--user` and
+use `sudo`). Alternatives with the same effect: `AGENT_THREADS_WORKSPACES=/home/rick/projects:/home/rick/vault`
+in the unit's `Environment=`, or `"workspaces": [...]` in `<data-dir>/config.json`. Restarting stops live `claude` processes (a running turn is marked interrupted); threads resume on the next message.
+
+The workspace check follows symlinks before comparing, so `~/vault` may itself be a link to another disk, but
+a link *inside* the vault that points outside it is refused as a cwd.
+
+**Optional: read-only.** `--readonly-workspace /home/rick/vault` (env `AGENT_THREADS_READONLY_WORKSPACES`,
+config `readOnlyWorkspaces`) allows sessions there but denies the harness's edit tools (`Edit`, `MultiEdit`,
+`Write`, `NotebookEdit`) and refuses the `acceptEdits`, `auto` and `bypassPermissions` modes (Geode's default setting
+is `acceptEdits`, so such a thread must use the default or plan permission mode). This is a guard rail, not a sandbox: shell commands
+(`Bash`) are not blocked. Use it together with `--workspace` for other folders (a read-write workspace nested
+inside a read-only one stays writable).
+
+**2. Tell Geode.** Settings, Remote, Remote daemons, edit `claude-box`:
+
+- **Vault folder on this daemon**: `/home/rick/vault`.
+- **Local folder it mirrors**: leave blank to use this vault (or a subfolder if only part of the vault is
+  mirrored).
+- **Test connection** now also checks that folder: it reports whether the daemon allows it and whether it
+  exists (an older daemon says it cannot check folders).
+
+**3. Use it.** In the composer, choose **Run on** `claude-box`: when the thread's folder (the selected
+Project's folder, otherwise the default folder) is inside this vault, the remote folder is pre-filled with
+the same relative path under the vault folder, with a note saying so. Edit it if you want something else.
+Folders outside the vault keep the daemon's default folder. Threads whose remote folder is inside the vault
+folder get a system-prompt addendum describing the points above.
+
 ## States you will see
 
 | Pill | Meaning |

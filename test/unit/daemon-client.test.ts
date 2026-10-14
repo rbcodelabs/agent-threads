@@ -320,6 +320,32 @@ describe('probeDaemon', () => {
     expect(t.current.readyState === 3 || t.current.terminated).toBe(true);
   });
 
+  it('with checkPath it asks path.check after connecting and returns the reply', async () => {
+    const t = fakeTransport();
+    t.autoServe((f, s) => {
+      if (f.type === 'path.check') { s.serverSend({ type: 'ack', cmdId: f.cmdId, result: { allowed: true, exists: true, isDirectory: true, readOnly: false } }); return true; }
+    });
+    const r = await probeDaemon({ url: 'ws://x/v1/ws', token: 'tok', createSocket: t.factory, clientVersion: '0.62.2', checkPath: '/home/rick/vault' });
+    expect(r).toMatchObject({ ok: true, pathCheck: { allowed: true, exists: true, isDirectory: true, readOnly: false } });
+    expect(t.sockets[0].sent.find((f) => f.type === 'path.check')).toMatchObject({ path: '/home/rick/vault' });
+  });
+
+  it('an older daemon that does not know path.check still counts as connected, flagged unsupported', async () => {
+    const t = fakeTransport();
+    t.autoServe((f, s) => {
+      if (f.type === 'path.check') { s.serverSend({ type: 'err', cmdId: f.cmdId, code: 'unknown_command', message: 'path.check is not supported by this daemon build' }); return true; }
+    });
+    const r = await probeDaemon({ url: 'ws://x/v1/ws', token: 'tok', createSocket: t.factory, clientVersion: '0.62.2', checkPath: '/v' });
+    expect(r).toMatchObject({ ok: true, pathCheck: { unsupported: true } });
+  });
+
+  it('does not send path.check unless asked', async () => {
+    const t = fakeTransport();
+    t.autoServe();
+    await probeDaemon({ url: 'ws://x/v1/ws', token: 'tok', createSocket: t.factory, clientVersion: '0.62.2' });
+    expect(t.sockets[0].sent.some((f) => f.type === 'path.check')).toBe(false);
+  });
+
   it('classifies a wrong token', async () => {
     const t = fakeTransport();
     t.autoServe((f, s) => {

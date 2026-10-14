@@ -20,6 +20,7 @@ const clientSamples: ClientFrame[] = [
   { v: 1, cmdId: 'c5', type: 'resolve.permission', threadId: 'abc', requestId: 'R', allow: true, alwaysAllow: false },
   { v: 1, cmdId: 'c6', type: 'session.list' },
   { v: 1, cmdId: 'c7', type: 'session.open', threadId: 'abc', spec: { harness: 'claude', cwd: '/w', permissionMode: 'default', extraEnvRaw: '' } as never },
+  { v: 1, cmdId: 'c9', type: 'path.check', path: '/home/rick/vault' },
   { v: 1, cmdId: 'c8', type: 'creds.push', kind: 'claude', ttlSec: 60, fields: { token: 'x' } },
 ];
 

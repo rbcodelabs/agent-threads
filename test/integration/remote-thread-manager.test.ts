@@ -4,6 +4,8 @@
  * (fake harness). Also pins the local-filesystem guards and the
  * detach-instead-of-close behaviour that makes remote turns outlive the host.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import WebSocket from 'ws';
 import os from 'os';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -19,10 +21,10 @@ const wsFactory: WebSocketFactory = (url) => new WebSocket(url) as unknown as Re
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
 
-async function setup(): Promise<{ td: TestDaemon; manager: ThreadManager; registry: DaemonRegistry; events: Array<{ id: string; e: ThreadEvent }>; cfg: RemoteDaemonConfig }> {
+async function setup(cfgOverride: Partial<RemoteDaemonConfig> = {}): Promise<{ td: TestDaemon; manager: ThreadManager; registry: DaemonRegistry; events: Array<{ id: string; e: ThreadEvent }>; cfg: RemoteDaemonConfig }> {
   const td = await startTestDaemon();
   cleanups.push(() => td.cleanup());
-  const cfg: RemoteDaemonConfig = { id: 'box', name: 'claude-box', url: td.daemon.url, tokenSecretName: 'AT_TOKEN' };
+  const cfg: RemoteDaemonConfig = { id: 'box', name: 'claude-box', url: td.daemon.url, tokenSecretName: 'AT_TOKEN', ...cfgOverride };
   const registry = new DaemonRegistry({
     getDaemons: () => [cfg],
     getToken: () => td.adminToken,
@@ -64,6 +66,26 @@ describe('remote thread through ThreadManager', () => {
     expect(thread.sessionId).toBe('fake-' + thread.id); // the daemon-side native id
     expect(thread.remote!.lastSeq).toBe(td.daemon.threads.journalFor(thread.id)!.lastSeq);
     expect(thread.remote!.turnPending).toBeUndefined();
+    manager.destroy();
+  });
+
+  it('sends the vault-mirror addendum only for a thread whose remote cwd is inside the daemon\'s vault root', async () => {
+    const { td, manager } = await setup({ vaultMapping: { remoteRoot: '/home/rick/vault' } });
+    const promptOf = (id: string): string => (JSON.parse(readFileSync(join(td.dataDir, 'sessions', `${id}.json`), 'utf8')) as { spec: { appendSystemPrompt?: string } }).spec.appendSystemPrompt ?? '';
+
+    const inVault = manager.createRemoteThread('vault', { daemonId: 'box', remoteCwd: '/home/rick/vault/Products', clientId: 'c' });
+    await manager.sendMessage(inVault.id, '/tokens 3 burst=3 delay=1');
+    await until(() => inVault.status === 'waiting' && inVault.messages.some((m) => m.role === 'assistant'), 'vault turn');
+    const vaultPrompt = promptOf(inVault.id);
+    expect(vaultPrompt).toContain('Working directory: /home/rick/vault/Products');
+    expect(vaultPrompt).toContain('Vault (synced mirror):');
+    expect(vaultPrompt).toContain('Never delete or rename vault files unless the user explicitly asks');
+    expect(vaultPrompt).not.toMatch(/\/Users\//);
+
+    const elsewhere = manager.createRemoteThread('code', { daemonId: 'box', remoteCwd: '/srv/workspaces/x', clientId: 'c' });
+    await manager.sendMessage(elsewhere.id, '/tokens 3 burst=3 delay=1');
+    await until(() => elsewhere.status === 'waiting' && elsewhere.messages.some((m) => m.role === 'assistant'), 'code turn');
+    expect(promptOf(elsewhere.id)).not.toContain('synced mirror');
     manager.destroy();
   });
 

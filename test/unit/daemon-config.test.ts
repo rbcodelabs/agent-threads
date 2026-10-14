@@ -26,6 +26,16 @@ describe('session host settings', () => {
     expect(resolveConfig({ env, flags: { workspaces: ['/c'], maxConcurrentTurns: 9, harness: 'fake', allowBypass: false } })).toMatchObject({ workspaces: ['/c'], maxConcurrentTurns: 9, harness: 'fake', allowBypass: false });
   });
 
+  it('read-only workspaces: none by default; config.json, env and flag, ~ expanded, absolute only', () => {
+    const dir = tmp();
+    expect(resolveConfig({ env: { DATA_DIR: dir } }).readOnlyWorkspaces).toEqual([]);
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ readOnlyWorkspaces: ['~/vault'] }));
+    expect(resolveConfig({ env: { DATA_DIR: dir } }).readOnlyWorkspaces).toEqual([join(homedir(), 'vault')]);
+    expect(resolveConfig({ env: { DATA_DIR: dir, AGENT_THREADS_READONLY_WORKSPACES: '/a:/b' } }).readOnlyWorkspaces).toEqual(['/a', '/b']);
+    expect(resolveConfig({ env: { DATA_DIR: dir }, flags: { readOnlyWorkspaces: ['/c/'] } }).readOnlyWorkspaces).toEqual(['/c']);
+    expect(() => resolveConfig({ env: { DATA_DIR: dir }, flags: { readOnlyWorkspaces: ['rel'] } })).toThrow(/read-only workspace.*absolute/);
+  });
+
   it('rejects relative workspaces, a zero turn cap and an unknown harness', () => {
     const dir = tmp();
     expect(() => resolveConfig({ env: { DATA_DIR: dir }, flags: { workspaces: ['rel/path'] } })).toThrow(/absolute/);
