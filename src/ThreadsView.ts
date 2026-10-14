@@ -2509,6 +2509,18 @@ export class ThreadsView extends ItemView {
     const thread = this.manager.getThread(this.activeThreadId);
     const harness = thread?.agentHarness ?? 'claude';
     const options = this.modelOptionsFor(harness);
+    if (harness === 'claude') {
+      // Compact stale-CLI notice, only when a problem is detected.
+      const problem = this.plugin.getClaudeCliProblems()[0];
+      if (problem) {
+        const cmd = problem.upgradeCommand ?? 'claude update';
+        menu.addItem(item => item
+          .setTitle(problem.severity === 'warning' ? `Claude CLI out of date: ${cmd}` : `Some models not reported by your CLI: ${cmd}`)
+          .setIcon('alert-triangle')
+          .setDisabled(true));
+        menu.addSeparator();
+      }
+    }
     if (thread?.activeModel) {
       // Informational header: the exact provider model id of the last reply.
       const running = thread.activeModel;
