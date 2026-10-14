@@ -2081,6 +2081,30 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'settings-claude.png', { fullPage: true });
   });
 
+  test('settings — stale claude CLI notice and model menu notice', async ({ page }) => {
+    const problems = [
+      { severity: 'warning', message: 'Your claude CLI is 2.1.100; this plugin expects 2.1.284 or newer, so the model list may be out of date. Upgrade with: brew upgrade claude-code', upgradeCommand: 'brew upgrade claude-code' },
+      { severity: 'notice', message: 'Sonnet 5.5 not reported by your CLI. If you expect it, update it: brew upgrade claude-code', upgradeCommand: 'brew upgrade claude-code' },
+    ];
+    await page.addInitScript((p) => { (window as any).__cliProblems = p; }, problems);
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto('file://' + path.resolve('test/harness/settings.html'));
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('claude');
+    await expect(page.locator('.ct-cli-notice .ct-settings-warning')).toContainText('brew upgrade claude-code');
+    await expect(page.locator('.ct-cli-notice-copy')).toHaveCount(2);
+    await page.locator('.ct-cli-notice').scrollIntoViewIfNeeded();
+    await shot(page.locator('.ct-cli-notice'), 'settings-claude-cli-stale.png');
+
+    await page.goto(harnessUrl);
+    await page.waitForSelector('.ct-title-row');
+    await page.hover('.ct-floating-panel');
+    await page.click('.ct-thread-more-btn');
+    await page.getByText('Model: Default').click();
+    await expect(page.locator('.menu')).toContainText('Claude CLI out of date: brew upgrade claude-code');
+    await shot(page.locator('.menu'), 'model-menu-cli-stale.png');
+  });
+
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }, { width: 375, height: 667 }]) {
     test(`settings — sandbox VM controls ${viewport.width}`, async ({ page }) => {
       await page.setViewportSize(viewport);
