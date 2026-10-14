@@ -1,4 +1,6 @@
 import { agentHarnessLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
+import { buildProjectOverviewContext, composeAppendSystemPrompt, readProjectOverview } from './projectOverview';
+import { extractUrls } from './urlLinks';
 import { mergeDisallowedTools } from './toolRestrictions';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
@@ -175,6 +177,17 @@ export class ThreadManager {
   private sessions: Map<string, HarnessSession> = new Map();
   /** Threads whose live session must be rebuilt at the next safe turn boundary (see requestSessionRestart). */
   private sessionRestartRequested = new Set<string>();
+  /**
+   * Plugin-owned loopback MCP servers (Google Workspace, OAuth proxies) for a
+   * thread. Their URLs/capability secrets live only in memory and change when a
+   * proxy restarts, so a session built before that holds dead configs. Set by
+   * main.ts; absent in tests/other hosts, which disables stale detection.
+   */
+  proxyMcpServersForThread: ((threadId: string) => Record<string, unknown>) | undefined = undefined;
+  /** Signature of the proxy-owned MCP config each live session was built with. */
+  private sessionMcpSignatures = new WeakMap<HarnessSession, string>();
+  /** Signature at which a status-triggered rebuild already happened, to stop rebuild loops on a persistently failing server. */
+  private statusRebuildSignatures = new Map<string, string>();
   /**
    * ADR-0015: one `SandboxVmManager` per thread, SHARED between this thread's
    * `enter_vm`/`vm_exec`/`exit_vm` MCP tools and its Claude harness's own VM
@@ -495,13 +508,14 @@ export class ThreadManager {
     return this.projects.get(id);
   }
 
-  createProject(name: string, vaultFolder: string, description?: string, cwdOverride?: string): Project {
+  createProject(name: string, vaultFolder: string, description?: string, cwdOverride?: string, overviewPath?: string): Project {
     const project: Project = {
       id: crypto.randomUUID(),
       name: name.trim() || 'Untitled Project',
       description,
       vaultFolder: vaultFolder.trim(),
       cwdOverride,
+      overviewPath: overviewPath?.trim() || undefined,
       orchestratorEnabled: true,
       createdAt: Date.now(),
     };
@@ -542,6 +556,16 @@ export class ThreadManager {
     if (!this.vaultRoot) return project.vaultFolder;
     const path = require('path') as typeof import('path');
     return path.join(this.vaultRoot, project.vaultFolder);
+  }
+
+  /** Sync read of a vault-relative file; undefined if missing or no vault root. Errors propagate to readProjectOverview, which swallows them. */
+  private readVaultFileSync(vaultRelativePath: string): string | undefined {
+    if (!this.vaultRoot) return undefined;
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const abs = path.join(this.vaultRoot, vaultRelativePath);
+    if (!fs.existsSync(abs)) return undefined;
+    return fs.readFileSync(abs, 'utf8');
   }
 
   /** Assign or detach a thread from a Project, optionally aligning its cwd. */
@@ -1322,6 +1346,54 @@ export class ThreadManager {
     return true;
   }
 
+  /**
+   * Flags every live session for rebuild at its next safe turn boundary. Used
+   * when an MCP proxy restarts (new origin / capability secrets). Returns the
+   * number of sessions flagged.
+   */
+  requestAllSessionsRestart(): number {
+    this.statusRebuildSignatures.clear();
+    let count = 0;
+    for (const threadId of this.sessions.keys()) if (this.requestSessionRestart(threadId)) count++;
+    return count;
+  }
+
+  private proxyMcpServers(threadId: string): Record<string, unknown> {
+    try { return this.proxyMcpServersForThread?.(threadId) ?? {}; } catch { return {}; }
+  }
+
+  private proxyMcpSignature(threadId: string): string {
+    return JSON.stringify(this.proxyMcpServers(threadId));
+  }
+
+  /**
+   * True when an idle session's proxy-owned MCP servers can no longer work.
+   * Preferred signal: SDK `mcpServerStatus()` reports one of them `failed`.
+   * Fallback (also used when the SDK probe is unavailable or errors): the
+   * proxy-owned config differs from what the session was built with.
+   */
+  private async sessionMcpStale(threadId: string, session: HarnessSession): Promise<boolean> {
+    if (!this.proxyMcpServersForThread) return false;
+    const signature = this.proxyMcpSignature(threadId);
+    const built = this.sessionMcpSignatures.get(session);
+    if (built === undefined) { this.sessionMcpSignatures.set(session, signature); return false; }
+    if (built !== signature) return true;
+    if (!session.mcpServerStatus || this.statusRebuildSignatures.get(threadId) === signature) return false;
+    const owned = new Set(Object.keys(this.proxyMcpServers(threadId)));
+    if (owned.size === 0) return false;
+    try {
+      const statuses = await Promise.race([
+        session.mcpServerStatus(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('mcpServerStatus timed out')), 3000)),
+      ]);
+      if (statuses.some(s => owned.has(s.name) && s.status === 'failed')) {
+        this.statusRebuildSignatures.set(threadId, signature);
+        return true;
+      }
+    } catch { /* probe unavailable: config comparison above is the fallback */ }
+    return false;
+  }
+
   /** ADR-0002 §2: a simple event-derived boolean off the single session map — no second map to check. */
   isRunning(id: string): boolean {
     return this.sessions.get(id)?.turnInFlight ?? false;
@@ -2005,7 +2077,13 @@ export class ThreadManager {
     // re-introduce the mid-turn close(); that message coalesces into the current
     // generation and the rebuild happens on the following turn.
     const cwdChanged = !!session && session.cwd !== undefined && session.cwd !== thread.cwd;
-    const restartRequested = this.sessionRestartRequested.has(threadId);
+    let restartRequested = this.sessionRestartRequested.has(threadId);
+    if (session && !cwdChanged && !restartRequested && !session.turnInFlight && await this.sessionMcpStale(threadId, session)) {
+      // The await above is the only yield before get-or-create; re-read so a
+      // concurrent send that already rebuilt the session isn't rebuilt twice.
+      if (this.sessions.get(threadId) === session) restartRequested = true;
+      else session = this.sessions.get(threadId);
+    }
     if (session && (cwdChanged || restartRequested) && !session.turnInFlight) {
       session.close();
       this.sessions.delete(threadId);
@@ -2369,10 +2447,15 @@ export class ThreadManager {
     // turn — leaking these into the session context would let the model see
     // its own prior "grading" of the thread and the orchestrator's draft before
     // Rick has approved it. Do not "fix" this by adding them to the list.
-    const appendSystemPrompt = [envContext, projectDesc, goalContext]
-      .filter(Boolean)
-      .join('\n\n');
+    const overviewContext = buildProjectOverviewContext(readProjectOverview(project, rel => this.readVaultFileSync(rel)));
+    const appendSystemPrompt = composeAppendSystemPrompt({ envContext, projectDesc, overviewContext, goalContext });
     const sessionMcpServers = this.mcpServerFactory ? this.mcpServerFactory(threadId, thread.cwd) : this.mcpServers;
+    // Baseline for stale detection: options are rebuilt every turn but only used
+    // when the session (re)starts, so record once per session object.
+    const builtFor = this.sessions.get(threadId);
+    if (builtFor && this.proxyMcpServersForThread && !this.sessionMcpSignatures.has(builtFor)) {
+      this.sessionMcpSignatures.set(builtFor, this.proxyMcpSignature(threadId));
+    }
     const claudeVm = this.buildClaudeVmRoutingInputs(threadId, thread);
     const vmMcpServers = claudeVm && this.vmMcpServerFactory && sessionMcpServers
       ? this.vmMcpServerFactory(threadId, sessionMcpServers)
@@ -2591,6 +2674,13 @@ export class ThreadManager {
         thread.updatedAt = Date.now();
         // Externalize tool-result images to vault files (see sendMessage above).
         this.externalizeMessageImages(threadId, assistantMsg);
+        // Surface links the assistant shared in the recent-files pill. Kept in
+        // linkedUrls (not editedFiles) so file counts stay about files.
+        const urls = extractUrls(content).filter(u => !thread.linkedUrls?.includes(u));
+        if (urls.length > 0) {
+          thread.linkedUrls = [...(thread.linkedUrls ?? []), ...urls].slice(-50);
+          this.emit(threadId, { type: 'files_edited', paths: urls });
+        }
         this.emit(threadId, { type: 'message', message: assistantMsg });
       },
       onDone: (sessionId, cost, _numTurns, metadata) => {

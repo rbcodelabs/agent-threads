@@ -1,3 +1,4 @@
+import { isValidOverviewPath } from './projectOverview';
 import { z } from 'zod';
 // Import from the browser entry point to avoid Node.js-only APIs (e.g. setTimeout().unref())
 // that crash in Electron's renderer context.
@@ -209,6 +210,7 @@ export interface ProjectSnapshot {
   name: string;
   description?: string;
   vaultFolder?: string;
+  overviewPath?: string;
   cwdOverride?: string;
   effectiveCwd: string;
   orchestratorThreadId?: string;
@@ -218,6 +220,7 @@ export interface ProjectUpdatePatch {
   name?: string;
   description?: string;
   cwdOverride?: string;
+  overviewPath?: string;
 }
 
 // ── Vault Bridge schema ───────────────────────────────────────────────────────
@@ -401,7 +404,7 @@ export interface ObsidianMcpServerOptions {
   /** Returns all projects. */
   getAllProjects?: () => ProjectSnapshot[];
   /** Creates a new project and persists it. Returns the created project snapshot. */
-  createProject?: (name: string, vaultFolder: string, description?: string, cwdOverride?: string) => ProjectSnapshot;
+  createProject?: (name: string, vaultFolder: string, description?: string, cwdOverride?: string, overviewPath?: string) => ProjectSnapshot;
   /** Updates editable Project settings, persists them, and returns the durable snapshot. */
   updateProject?: (projectId: string, patch: ProjectUpdatePatch) => Promise<ProjectSnapshot>;
   /** Assigns or clears the project on a thread. Pass null to detach. */
@@ -1774,13 +1777,17 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         .describe(
           'Optional absolute filesystem path to use as the working directory instead of deriving it from vaultFolder + vault root',
         ),
+      overviewPath: z.string().optional().describe('Optional vault-relative path of the Project overview note injected into every thread system prompt. Defaults to <vaultFolder>/_overview.md'),
     },
     async (args, _extra) => {
       try {
         if (!options.createProject) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'createProject is not available in this context.' }) }], isError: true };
         }
-        const project = options.createProject(args.name, args.vaultFolder, args.description, args.cwdOverride);
+        if (args.overviewPath !== undefined && !isValidOverviewPath(args.overviewPath)) {
+          throw new Error('overviewPath must be vault-relative and must not contain "..".');
+        }
+        const project = options.createProject(args.name, args.vaultFolder, args.description, args.cwdOverride, args.overviewPath);
         return { content: [{ type: 'text' as const, text: JSON.stringify(project, null, 2) }] };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1798,6 +1805,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       name: z.string().optional().describe('New human-readable Project name; trimmed and must not be blank'),
       description: z.string().nullable().optional().describe('New Project context description; null clears it'),
       cwdOverride: z.string().nullable().optional().describe('New absolute filesystem cwd; null restores the vault-derived cwd'),
+      overviewPath: z.string().nullable().optional().describe('Vault-relative path of the Project overview note injected into the system prompt; null restores the default <vaultFolder>/_overview.md'),
       elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit matching Project elevation for this call.'),
     },
     async (args, _extra) => {
@@ -1811,7 +1819,8 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         const hasName = args.name !== undefined;
         const hasDescription = args.description !== undefined;
         const hasCwdOverride = args.cwdOverride !== undefined;
-        if (!hasName && !hasDescription && !hasCwdOverride) throw new Error('At least one editable field is required.');
+        const hasOverviewPath = args.overviewPath !== undefined;
+        if (!hasName && !hasDescription && !hasCwdOverride && !hasOverviewPath) throw new Error('At least one editable field is required.');
 
         const patch: ProjectUpdatePatch = {};
         if (hasName) {
@@ -1829,6 +1838,13 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
             if (!path.posix.isAbsolute(cwdOverride) && !path.win32.isAbsolute(cwdOverride)) throw new Error('cwdOverride must be an absolute filesystem path.');
             patch.cwdOverride = cwdOverride;
           }
+        }
+        if (hasOverviewPath) {
+          const overviewPath = args.overviewPath === null ? '' : args.overviewPath!.trim();
+          if (!isValidOverviewPath(overviewPath)) {
+            throw new Error('overviewPath must be vault-relative and must not contain "..".');
+          }
+          patch.overviewPath = overviewPath || undefined;
         }
         const project = await options.updateProject(args.projectId, patch);
         return { content: [{ type: 'text' as const, text: JSON.stringify(project, null, 2) }] };

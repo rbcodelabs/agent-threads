@@ -69,7 +69,7 @@ import { createDeferredThreadArchiver } from './deferredThreadArchive';
 import { getVaultBridgesAPI, findBridgesForFiles, type BridgeInfo } from './bridgeUtils';
 import { execEnv } from './dashboardUtils';
 import { createGateRunner, makeGateEnvironment, type GateExec } from './gateRunner';
-import { ClaudeThreadsSettingTab, isWebViewerEnabled, RequestSecretModal } from './SettingsTab';
+import { ClaudeThreadsSettingTab, SETTINGS_SECTIONS, isWebViewerEnabled, RequestSecretModal, type SettingsTabId } from './SettingsTab';
 import { RelayClient } from './RelayClient';
 import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
@@ -154,6 +154,7 @@ export function createAgentProjectUpdateCallback(deps: {
       name: updated.name,
       description: updated.description,
       vaultFolder: updated.vaultFolder,
+      overviewPath: updated.overviewPath,
       cwdOverride: updated.cwdOverride,
       effectiveCwd: deps.getProjectCwd(updated),
       orchestratorThreadId: updated.orchestratorThreadId,
@@ -176,7 +177,7 @@ Welcome! Agent Threads turns Obsidian into a multi-agent workspace powered by Cl
 | Panel | Location | What it does |
 |---|---|---|
 | **Chat** | Left sidebar | Full conversation history for each thread |
-| **Agents List** | Right sidebar | Dispatch tasks, track running agents, review results |
+| **Agents List** | Left sidebar | Dispatch tasks, track running agents, review results |
 | **This guide** | Center | You're reading it — save it anywhere in your vault |
 
 Reopen the panels any time from the ribbon icons (left edge of the window) or via the command palette (\`Cmd+P\`).
@@ -253,6 +254,8 @@ export function subscribeAgentRunPersistence(
 
 export default class ClaudeThreadsPlugin extends Plugin {
   private settingTab?: ClaudeThreadsSettingTab;
+  private settingSectionTabs = new Map<SettingsTabId, ClaudeThreadsSettingTab>();
+  private projectsSectionId?: string;
   /** Stable peer-plugin entry point. Its v1 generation is revoked on unload. */
   api!: { readonly v1: ClaudeThreadsApiV1 };
   settings!: PluginSettings;
@@ -457,8 +460,22 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
 
     // Settings tab (both platforms)
-    this.settingTab = new ClaudeThreadsSettingTab(this.app, this);
-    this.addSettingTab(this.settingTab);
+    // On hosts that support it (Geode), register each section so it lists in the
+    // host Settings sidebar. Obsidian (and mobile) keep the single tabbed pane.
+    const host = this as unknown as {
+      addSettingSection?: (s: { id: string; name: string; tab: ClaudeThreadsSettingTab }) => string;
+    };
+    if (!Platform.isMobile && typeof host.addSettingSection === 'function') {
+      for (const section of SETTINGS_SECTIONS) {
+        const tab = new ClaudeThreadsSettingTab(this.app, this, section.id);
+        const tabId = host.addSettingSection({ id: section.id, name: section.label, tab });
+        this.settingSectionTabs.set(section.id, tab);
+        if (section.id === 'projects') this.projectsSectionId = tabId;
+      }
+    } else {
+      this.settingTab = new ClaudeThreadsSettingTab(this.app, this);
+      this.addSettingTab(this.settingTab);
+    }
   }
 
   private async onloadDesktop(): Promise<void> {
@@ -506,6 +523,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       { bindings: this.settings.googleWorkspaceBindings, save: () => this.saveSettings() },
       // Large-file Drive tools may only touch the thread's working directory and the vault.
       (threadId) => [this.manager.getThread(threadId)?.cwd, this.manager.vaultRoot].filter((root): root is string => !!root));
+    // A new listening origin invalidates every URL/capability sessions were built with.
+    this.googleWorkspaceMcp.onOriginChange = () => { this.manager?.requestAllSessionsRestart(); };
     await this.googleWorkspaceMcp.configure(this.settings.googleWorkspaceMcp ?? {});
     this.register(() => this.googleWorkspaceMcp?.close());
 
@@ -531,6 +550,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
         });
         return { target };
       },
+      // New proxies mean new capability tokens/ports; rebuild sessions holding the old ones.
+      onCapabilityLayerChanged: () => { this.manager?.requestAllSessionsRestart(); },
     });
     await this.oauthMcpRegistry.configure();
     this.register(() => this.oauthMcpRegistry?.close());
@@ -561,6 +582,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.register(() => setKnownSecretsProvider(null));
     this.manager = new ThreadManager(this.settings);
     this.manager.getExternalMounts = () => this.listExternalMountRoots();
+    // Lets the manager detect sessions holding stale Google/OAuth proxy configs (per-send check).
+    this.manager.proxyMcpServersForThread = (threadId) => ({
+      ...(this.googleWorkspaceMcp?.serversForThread(threadId) ?? {}),
+      ...(this.oauthMcpRegistry?.serversForThread(threadId) ?? {}),
+    });
     this.contextPanel = new ContextPanelController(this.app, () =>
       this.app.workspace.getLeavesOfType(VIEW_TYPE)[0] ?? null,
       () => this.settings.conversationCompanionMarker,
@@ -824,14 +850,15 @@ export default class ClaudeThreadsPlugin extends Plugin {
             name: p.name,
             description: p.description,
             vaultFolder: p.vaultFolder,
+            overviewPath: p.overviewPath,
             cwdOverride: p.cwdOverride,
             effectiveCwd: this.manager.getProjectCwd(p),
             orchestratorThreadId: p.orchestratorThreadId,
           })),
-          createProject: (name, vaultFolder, description, cwdOverride) => {
-            const p = this.manager.createProject(name, vaultFolder, description, cwdOverride);
+          createProject: (name, vaultFolder, description, cwdOverride, overviewPath) => {
+            const p = this.manager.createProject(name, vaultFolder, description, cwdOverride, overviewPath);
             this.saveSettings().catch(console.error);
-            return { id: p.id, name: p.name, description: p.description, vaultFolder: p.vaultFolder, cwdOverride: p.cwdOverride, effectiveCwd: this.manager.getProjectCwd(p) };
+            return { id: p.id, name: p.name, description: p.description, vaultFolder: p.vaultFolder, overviewPath: p.overviewPath, cwdOverride: p.cwdOverride, effectiveCwd: this.manager.getProjectCwd(p) };
           },
           updateProject: updateProjectFromAgent,
           setThreadProject: (threadId, projectId, alignCwd) => {
@@ -2111,7 +2138,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     try {
       const existingDash = workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
       if (!existingDash) {
-        const dashLeaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+        const dashLeaf = workspace.getLeftLeaf(false) as WorkspaceLeaf;
         await dashLeaf.setViewState({ type: AGENT_VIEW_TYPE, active: true });
         workspace.revealLeaf(dashLeaf);
       } else {
@@ -3307,7 +3334,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
     if (!leaf) {
-      leaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+      // Conversations list lives in the left sidebar so the default layout
+      // needs no right-hand panels.
+      leaf = workspace.getLeftLeaf(false) as WorkspaceLeaf;
       await leaf.setViewState({ type: AGENT_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
@@ -3329,9 +3358,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     let leaf = workspace.getLeavesOfType(SKILLS_VIEW_TYPE)[0];
     if (!leaf) {
       // In conversation-first mode the main area holds the conversation, so
-      // route to the right sidebar like activateAgentView(). In classic mode
+      // route to the left sidebar like activateAgentView(). In classic mode
       // the main area is free for editing, so a tab still makes sense.
-      leaf = (this.isConversationFirst() ? workspace.getRightLeaf(false) : workspace.getLeaf('tab')) as WorkspaceLeaf;
+      leaf = (this.isConversationFirst() ? workspace.getLeftLeaf(false) : workspace.getLeaf('tab')) as WorkspaceLeaf;
       await leaf.setViewState({ type: SKILLS_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
@@ -3458,10 +3487,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   /** Open Settings → Projects with a blank new-project draft. */
   openNewProjectSettings(): void {
-    this.settingTab?.showNewProject();
+    (this.settingSectionTabs.get('projects') ?? this.settingTab)?.showNewProject();
     const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
     setting?.open();
-    setting?.openTabById(this.manifest.id);
+    setting?.openTabById(this.projectsSectionId || this.manifest.id);
   }
 
   async deleteProject(projectId: string): Promise<void> {

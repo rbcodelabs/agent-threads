@@ -6,8 +6,9 @@ import { mergeUsageSnapshot, normalizeClaudeRateLimit, normalizeClaudeResult, ti
 // Import from the mobile-safe utility module, then re-export so that desktop
 // callers that already import formatToolName/getToolIcon from ClaudeSession
 // continue to work without changes.
-import { formatToolName, getToolIcon, isBrowserTool, buildPermissionDetail, requiresPerCallApproval } from './toolNameUtils';
+import { formatToolName, getToolIcon, isBrowserTool, buildPermissionDetail } from './toolNameUtils';
 import { browserToolSummary, parseBrowserToolResult } from './browserSession';
+import { resolvePlanText, isPlanFilePath } from './planText';
 export { formatToolName, getToolIcon };
 
 /**
@@ -289,9 +290,12 @@ export class ClaudeSession {
     });
     this.inputOpen = true;
 
+    let lastWrittenPlanPath: string | undefined;
     const canUseTool: CanUseTool = async (toolName, input, opts) => {
       pendingInteractiveCallbacks++;
       try {
+        const wrotePath = (input as { file_path?: unknown })?.file_path;
+        if ((toolName === 'Write' || toolName === 'Edit') && isPlanFilePath(wrotePath)) lastWrittenPlanPath = wrotePath;
         if (toolName === 'AskUserQuestion') {
           const questions = (input as { questions: import('./types').AskQuestion[] }).questions;
           const answers = await callbacks.onAskUserQuestion(questions);
@@ -330,7 +334,7 @@ export class ClaudeSession {
               console.error('[ClaudeThreads] failed to clear plan mode via setPermissionMode:', err);
             }
           };
-          const planText = String((input as { plan?: unknown }).plan ?? '');
+          const planText = resolvePlanText(input, lastWrittenPlanPath);
           if (callbacks.onPlanReady) {
             const result = await new Promise<import('@anthropic-ai/claude-agent-sdk').PermissionResult>((resolve) => {
               callbacks.onPlanReady!(
@@ -359,7 +363,7 @@ export class ClaudeSession {
           return { behavior: 'deny' as const, message: 'Plan approved — proceed with implementation.', interrupt: false };
         }
         const detail = buildPermissionDetail(toolName, input, opts);
-        const title = requiresPerCallApproval(toolName) ? toolName : (opts.title ?? toolName);
+        const title = opts.title ?? toolName;
         const allowed = await callbacks.onPermissionRequest(title, detail);
         // Never return `updatedPermissions` (e.g. `opts.suggestions`): the CLI
         // persists those rules to `.claude/settings.local.json`, turning every

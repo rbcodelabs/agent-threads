@@ -823,3 +823,156 @@ describe('OAuthMcpRegistry.configure', () => {
     expect(proxyStartMock).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * The real OAuthMcpFlow writes the tokens it obtains into the keychain through
+ * the token store; the mocked flow does not. Reproduce that so `status()`, which
+ * reads the keychain, sees what production would.
+ */
+function authorizeStoresTokens(host: ReturnType<typeof makeHost>['host'], tokens?: { accessToken: string; refreshToken?: string; expiresAt?: number }) {
+  authorizeMock.mockImplementation(async (a: { serverName: string }) => {
+    const t = tokens ?? { accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 3600_000 };
+    new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' })).store(a.serverName, t);
+    return t;
+  });
+}
+
+describe('OAuthMcpRegistry.reauthorize', () => {
+  async function connected(extra: Partial<Parameters<OAuthMcpRegistry['registerServer']>[0]> = {}) {
+    const ctx = makeHost();
+    authorizeStoresTokens(ctx.host);
+    const registry = new OAuthMcpRegistry(ctx.host);
+    const result = await registry.registerServer({
+      name: 'hiptrip', url: 'https://mcp.hiptrip.test/', clientId: 'known-client', clientSecret: 'shh-abc',
+      redirectUri: 'http://localhost:3118/callback', audience: 'hiptrip-api', scopes: 'read',
+      tools: { deny: ['danger'] }, authorizationServerUrl: 'https://as.example.com', ...extra,
+    });
+    expect(result.success).toBe(true);
+    vi.clearAllMocks();
+    capabilityTokenForMock.mockImplementation((threadId: string) => `cap-${threadId}`);
+    proxyStartMock.mockResolvedValue(undefined);
+    proxyStopMock.mockResolvedValue(undefined);
+    discoverASMock.mockResolvedValue(fakeAsMetadata());
+    return { ...ctx, registry };
+  }
+
+  it('re-runs the consent flow from the stored entry without removing the connection first', async () => {
+    const { registry, settings, host } = await connected();
+    authorizeStoresTokens(host, { accessToken: 'at-new', refreshToken: 'rt-new', expiresAt: Date.now() + 3600_000 });
+
+    const result = await registry.reauthorize('hiptrip');
+
+    expect(result).toMatchObject({ success: true });
+    expect(discoverASMock).toHaveBeenCalledWith('https://as.example.com');
+    expect(registerClientMock).not.toHaveBeenCalled(); // no new DCR client: the stored one is reused
+    expect(revokeMock).not.toHaveBeenCalled();
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({
+      serverName: 'hiptrip', clientId: 'known-client', clientSecret: 'shh-abc',
+      redirectUri: 'http://localhost:3118/callback', audience: 'hiptrip-api',
+    }));
+    expect(settings.oauthMcpServers.hiptrip).toMatchObject({
+      url: 'https://mcp.hiptrip.test/', clientId: 'known-client', hasClientSecret: true,
+      redirectUri: 'http://localhost:3118/callback', audience: 'hiptrip-api', tools: { deny: ['danger'] },
+    });
+    const store = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    expect(store.getCurrentTokens('hiptrip')).toMatchObject({ accessToken: 'at-new', refreshToken: 'rt-new' });
+    // The superseded proxy is retired; the new one is what threads get.
+    expect(proxyStopMock).toHaveBeenCalledTimes(1);
+    expect(proxyStartMock).toHaveBeenCalledTimes(1);
+    expect(registry.serversForThread('t1')).toHaveProperty('hiptrip');
+  });
+
+  it('puts everything back exactly as it was when the user denies consent', async () => {
+    const { registry, settings, host } = await connected();
+    const store = new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' }));
+    const tokensBefore = store.getCurrentTokens('hiptrip');
+    const entryBefore = JSON.parse(JSON.stringify(settings.oauthMcpServers.hiptrip));
+    const stateBefore = JSON.parse(JSON.stringify(settings.oauthMcpState.hiptrip));
+    authorizeMock.mockRejectedValue(new Error('User denied access'));
+
+    const result = await registry.reauthorize('hiptrip');
+
+    expect(result).toMatchObject({ success: false, status: 'cancelled' });
+    expect(settings.oauthMcpServers.hiptrip).toEqual(entryBefore);
+    expect(settings.oauthMcpState.hiptrip).toEqual(stateBefore);
+    expect(store.getCurrentTokens('hiptrip')).toEqual(tokensBefore);
+    expect(store.getClientSecret('hiptrip')).toBe('shh-abc');
+    expect(store.getClientId('hiptrip')).toBe('known-client');
+    expect(proxyStopMock).not.toHaveBeenCalled(); // old connection keeps serving
+    expect(registry.serversForThread('t1')).toHaveProperty('hiptrip');
+  });
+
+  it('refuses an unknown server', async () => {
+    const { registry } = await connected();
+    expect(await registry.reauthorize('nope')).toMatchObject({ success: false });
+    expect(authorizeMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a confidential client whose secret has left the keychain, before opening a browser', async () => {
+    const { registry, host } = await connected();
+    new OAuthTokenStore(host.secretStorage, async () => ({ accessToken: 'x' })).storeClientSecret('hiptrip', '');
+    const result = await registry.reauthorize('hiptrip');
+    expect(result).toMatchObject({ success: false });
+    expect(result.message).toContain('client secret');
+    expect(authorizeMock).not.toHaveBeenCalled();
+  });
+
+  it('re-authorizes a server that never reconnected on load (no live connection)', async () => {
+    const { host, settings } = makeHost();
+    authorizeStoresTokens(host);
+    settings.oauthMcpServers.vercel = { url: 'https://mcp.vercel.com/', clientId: 'c1' };
+    const registry = new OAuthMcpRegistry(host);
+    const result = await registry.reauthorize('vercel');
+    expect(result).toMatchObject({ success: true });
+    expect(authorizeMock).toHaveBeenCalledWith(expect.objectContaining({ clientId: 'c1' }));
+    expect(registry.status('vercel')).toMatchObject({ status: 'connected' });
+  });
+});
+
+describe('OAuthMcpRegistry.status reflects the live token, not the registration snapshot', () => {
+  async function connected() {
+    const ctx = makeHost();
+    authorizeStoresTokens(ctx.host);
+    const registry = new OAuthMcpRegistry(ctx.host);
+    await registry.registerServer({ name: 'hiptrip', url: 'https://mcp.hiptrip.test/' });
+    return { ...ctx, registry };
+  }
+
+  it('picks up the new expiry after a successful renewal', async () => {
+    const { registry } = await connected();
+    const renewedExpiry = Date.now() + 7200_000;
+    flowRefreshMock.mockResolvedValue({ accessToken: 'at-2', refreshToken: 'rt-2', expiresAt: renewedExpiry });
+    await proxyTokenAccessors[0]!.refresh('hiptrip');
+    expect(registry.status('hiptrip')).toMatchObject({ status: 'connected', accessTokenExpiresAt: renewedExpiry, hasRefreshToken: true });
+  });
+
+  it('goes needs-auth with the reason when a renewal fails, instead of staying connected', async () => {
+    const { registry, settings } = await connected();
+    flowRefreshMock.mockRejectedValue(new Error('invalid_grant: refresh token revoked'));
+    await expect(proxyTokenAccessors[0]!.refresh('hiptrip')).rejects.toThrow();
+    expect(settings.oauthMcpState.hiptrip!.status).toBe('connected'); // snapshot untouched
+    expect(registry.status('hiptrip')).toMatchObject({ status: 'needs-auth', errorMessage: expect.stringContaining('invalid_grant') });
+  });
+
+  it('goes needs-auth when the proxy reports the provider rejecting a renewed token', async () => {
+    const { registry } = await connected();
+    (proxyTokenAccessors[0] as unknown as { markNeedsReauth(n: string, r: string): void }).markNeedsReauth('hiptrip', 'still 401');
+    expect(registry.status('hiptrip')).toMatchObject({ status: 'needs-auth', errorMessage: 'still 401' });
+  });
+
+  it('recovers to connected after a later successful renewal', async () => {
+    const { registry } = await connected();
+    flowRefreshMock.mockRejectedValueOnce(new Error('network down'));
+    await expect(proxyTokenAccessors[0]!.refresh('hiptrip')).rejects.toThrow();
+    expect(registry.status('hiptrip')!.status).toBe('needs-auth');
+    await proxyTokenAccessors[0]!.refresh('hiptrip');
+    expect(registry.status('hiptrip')!.status).toBe('connected');
+  });
+
+  it('reports a renewal that came back without a refresh token, so the UI can say it will not renew again', async () => {
+    const { registry } = await connected();
+    flowRefreshMock.mockResolvedValue({ accessToken: 'at-2', expiresAt: Date.now() + 3600_000 });
+    await proxyTokenAccessors[0]!.refresh('hiptrip');
+    expect(registry.status('hiptrip')).toMatchObject({ hasRefreshToken: false });
+  });
+});

@@ -337,7 +337,7 @@ describe('serialized occurrence claims', () => {
     const overdue: ScheduledItem = {
       id: 'overdue', name: 'Overdue', prompt: 'run', enabled: true,
       schedule: { type: 'interval', intervalSeconds: 60 },
-      nextRun: Date.now() - 24 * 60 * 60 * 1000,
+      nextRun: Date.now() - 10 * 60 * 1000,
     };
     const scheduler = new Scheduler(options);
     scheduler.start([overdue]);

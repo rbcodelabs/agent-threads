@@ -206,25 +206,25 @@ export function isTrustedBuiltInTool(raw: string): boolean {
 export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
 
 /**
- * Trusted built-ins that still need a card on every call, under any host
- * prefix. `browser_eval` runs agent-authored JavaScript in a page whose content
- * the agent also reads, so neither "trusted built-in" nor a persisted
- * "Always Allow" may stand in for the user seeing the expression.
+ * Tools whose permission card shows their complete input (the SDK description
+ * would hide the expression). `browser_eval` runs agent-authored JavaScript, so
+ * the user should be able to read it. It is otherwise permissioned like any
+ * other tool, including Always Allow.
  */
-const PER_CALL_APPROVAL_TOOL_KEYS: ReadonlySet<string> = new Set(['browser_eval']);
+const FULL_INPUT_DETAIL_TOOL_KEYS: ReadonlySet<string> = new Set(['browser_eval']);
 
-/** True when each call must be approved on a card, whatever shortcuts exist. */
-export function requiresPerCallApproval(toolName: string): boolean {
-  return PER_CALL_APPROVAL_TOOL_KEYS.has(toolKey(toolName));
+/** True when the card should show the tool's full input. */
+function showsFullInput(toolName: string): boolean {
+  return FULL_INPUT_DETAIL_TOOL_KEYS.has(toolKey(toolName));
 }
 
 /** False for requests that must be decided afresh every time. */
 export function canAlwaysAllow(toolName: string): boolean {
-  return toolName !== HOST_EXEC_PERMISSION_TOOL && !requiresPerCallApproval(toolName);
+  return toolName !== HOST_EXEC_PERMISSION_TOOL;
 }
 
 /**
- * Detail text for a harness permission request. Per-call-approval tools show
+ * Detail text for a harness permission request. Full-input tools show
  * their complete input (the SDK description would hide the expression) up to a
  * generous cap; everything else keeps the SDK-provided description first.
  */
@@ -233,7 +233,7 @@ export function buildPermissionDetail(
   input: unknown,
   opts: { description?: string; decisionReason?: string; blockedPath?: string },
 ): string {
-  if (requiresPerCallApproval(toolName)) return JSON.stringify(input).slice(0, 20000);
+  if (showsFullInput(toolName)) return JSON.stringify(input).slice(0, 20000);
   return opts.description ?? opts.decisionReason ?? opts.blockedPath ?? JSON.stringify(input).slice(0, 4000);
 }
 

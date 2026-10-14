@@ -80,6 +80,17 @@ describe('OAUTH_MCP_PRESETS data', () => {
     }
   });
 
+  it('has a Compass preset that relies on Dynamic Client Registration with offline_access', () => {
+    const compass = OAUTH_MCP_PRESETS.find(p => p.id === 'compass');
+    expect(compass).toMatchObject({
+      label: 'Compass', name: 'compass', url: 'https://compass.rbcodelabs.com/api/mcp',
+      scopes: 'mcp:read mcp:write offline_access', source: 'https://compass.rbcodelabs.com/help/09-mcp-api',
+    });
+    expect(compass!.clientId).toBeUndefined();
+    expect(compass!.requiresClientId).toBeUndefined();
+    expect(compass!.notes).toContain('offline_access');
+  });
+
   it('never ships a client ID for presets that require the user\'s own', () => {
     for (const p of OAUTH_MCP_PRESETS.filter(x => x.requiresClientId)) {
       expect(p.clientId).toBeUndefined();
@@ -93,12 +104,13 @@ describe('Quick connect section on the MCP settings screen', () => {
 
   function render(opts: { connected?: Record<string, { url: string }>; registerServer?: ReturnType<typeof vi.fn> } = {}) {
     const registerServer = opts.registerServer ?? vi.fn(async () => ({ success: true, status: 'registered', message: 'ok' }));
-    const disconnect = vi.fn(async () => {});
+    const reauthorize = vi.fn(async () => ({ success: true, status: 'registered', message: 'ok' }));
+    const disconnect =vi.fn(async () => {});
     const plugin = {
       settings: { mcpServers: {}, oauthMcpServers: opts.connected ?? {}, oauthMcpState: {}, secretEnvKeys: [] },
       saveSettings: vi.fn(),
       oauthMcpRegistry: {
-        registerServer, disconnect,
+        registerServer, disconnect, reauthorize,
         status: () => ({ serverName: 'x', clientId: 'c', asMetadataUrl: 'u', proxyPort: 1, status: 'connected', hasRefreshToken: true }),
       },
     } as unknown as ClaudeThreadsPlugin;
@@ -109,7 +121,7 @@ describe('Quick connect section on the MCP settings screen', () => {
     const rows = () => [...el.querySelectorAll('.ct-oauth-mcp-presets-list .setting-item')] as HTMLElement[];
     const rowFor = (label: string) => rows().find(r => r.querySelector('.setting-item-name')?.textContent?.startsWith(label))!;
     const btn = (row: HTMLElement) => row.querySelector('button')!;
-    return { el, registerServer, disconnect, rows, rowFor, btn };
+    return { el, registerServer, disconnect, reauthorize, rows, rowFor, btn };
   }
 
   it('renders a Quick connect heading and one row per preset with its URL', () => {
@@ -129,6 +141,16 @@ describe('Quick connect section on the MCP settings screen', () => {
     await flush();
     expect(registerServer).toHaveBeenCalledTimes(1);
     expect(registerServer.mock.calls[0]![0]).toMatchObject({ name: 'linear', url: 'https://mcp.linear.app/mcp' });
+  });
+
+  it('connects Compass in one click with its scopes and no client ID', async () => {
+    const { rowFor, btn, registerServer } = render();
+    btn(rowFor('Compass')).click();
+    await flush();
+    expect(registerServer).toHaveBeenCalledTimes(1);
+    const cfg = registerServer.mock.calls[0]![0];
+    expect(cfg).toMatchObject({ name: 'compass', url: 'https://compass.rbcodelabs.com/api/mcp', scopes: 'mcp:read mcp:write offline_access' });
+    expect(cfg.clientId).toBeUndefined();
   });
 
   it('prompts for a Client ID and secret before connecting a requiresClientId preset', async () => {
@@ -156,9 +178,77 @@ describe('Quick connect section on the MCP settings screen', () => {
     const { rowFor, btn, disconnect } = render({ connected: { linear: { url: 'https://mcp.linear.app/mcp' } } });
     const row = rowFor('Linear');
     expect(row.querySelector('.ct-oauth-status-dot--green')).not.toBeNull();
-    expect(btn(row).textContent).toBe('Disconnect');
-    btn(row).click();
+    const disconnectBtn = [...row.querySelectorAll('button')].find(b => b.textContent === 'Disconnect')!;
+    expect(disconnectBtn).toBeDefined();
+    disconnectBtn.click();
     await flush();
     expect(disconnect).toHaveBeenCalledWith('linear');
+  });
+
+  it('offers Re-authorize on a connected preset and runs it through the registry', async () => {
+    const { rowFor, reauthorize } = render({ connected: { linear: { url: 'https://mcp.linear.app/mcp' } } });
+    const reauth = [...rowFor('Linear').querySelectorAll('button')].find(b => b.textContent === 'Re-authorize')!;
+    reauth.click();
+    await flush();
+    expect(reauthorize).toHaveBeenCalledWith('linear');
+  });
+});
+
+describe('OAuth MCP servers list on the MCP settings screen', () => {
+  const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+  const state = (over: Record<string, unknown> = {}) => ({
+    serverName: 'x', clientId: 'c', asMetadataUrl: 'u', proxyPort: 1, status: 'connected', hasRefreshToken: true, ...over,
+  });
+
+  function render(opts: { st: Record<string, unknown>; reauthorize?: ReturnType<typeof vi.fn> }) {
+    const reauthorize = opts.reauthorize ?? vi.fn(async () => ({ success: true, status: 'registered', message: 'ok' }));
+    const plugin = {
+      settings: { mcpServers: {}, oauthMcpServers: { hiptrip: { url: 'https://mcp.hiptrip.test/' } }, oauthMcpState: {}, secretEnvKeys: [] },
+      saveSettings: vi.fn(),
+      oauthMcpRegistry: { registerServer: vi.fn(), disconnect: vi.fn(), reauthorize, status: () => state(opts.st) },
+    } as unknown as ClaudeThreadsPlugin;
+    const tab = new ClaudeThreadsSettingTab(new App(), plugin);
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    (tab as unknown as { renderMcpTab(el: HTMLElement): void }).renderMcpTab(el);
+    const row = el.querySelector('.ct-oauth-mcp-servers-list .setting-item') as HTMLElement;
+    const buttons = () => [...row.querySelectorAll('button')];
+    const button = (text: string) => buttons().find(b => b.textContent === text)!;
+    return { row, button, buttons, reauthorize };
+  }
+
+  /** Regression: the dot and label were inline spans inside the name, rendering "hiptripExpires soon". */
+  it('keeps the status out of the server name and on its own block under the URL', () => {
+    const { row } = render({ st: { accessTokenExpiresAt: Date.now() + 5 * 60_000 } });
+    expect(row.querySelector('.setting-item-name')!.textContent).toBe('hiptrip');
+    const badge = row.querySelector('.setting-item-description .ct-oauth-status')!;
+    expect(badge.tagName).toBe('DIV');
+    expect(badge.querySelector('.ct-oauth-status-label')!.textContent).toBe('Expires soon');
+    expect(badge.querySelector('.ct-oauth-status-dot--yellow')).not.toBeNull();
+  });
+
+  it('shows a Re-authorize button beside Disconnect on every row, calling the registry with the server name', async () => {
+    const { button, reauthorize } = render({ st: { accessTokenExpiresAt: Date.now() + 3 * 3600_000 } });
+    expect(button('Disconnect')).toBeDefined();
+    button('Re-authorize').click();
+    await flush();
+    expect(reauthorize).toHaveBeenCalledWith('hiptrip');
+  });
+
+  it('shows the failure reason and re-enables the button when re-authorization fails', async () => {
+    const reauthorize = vi.fn(async () => ({ success: false, status: 'cancelled', message: 'denied' }));
+    const { button } = render({ st: { status: 'needs-auth', errorMessage: 'refresh token revoked' }, reauthorize });
+    const btn = button('Re-authorize');
+    btn.click();
+    expect(btn.disabled).toBe(true);
+    await flush();
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toBe('Re-authorize');
+  });
+
+  it('surfaces the recorded reason on a needs-auth row', () => {
+    const { row } = render({ st: { status: 'needs-auth', errorMessage: 'refresh token revoked' } });
+    expect(row.querySelector('.ct-mcp-server-warning')!.textContent).toBe('refresh token revoked');
+    expect(row.querySelector('.ct-oauth-status-label')!.textContent).toBe('Needs re-authorization');
   });
 });

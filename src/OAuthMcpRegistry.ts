@@ -70,6 +70,11 @@ export interface OAuthMcpRegistryHost {
    * renderer (`file://` origin blocks cross-origin fetch). Tests inject a stub.
    */
   fetchFn?: typeof fetch;
+  /**
+   * Called after proxies are (re)created. Their capability tokens and ports are
+   * in-memory only, so sessions built earlier hold dead configs and must be rebuilt.
+   */
+  onCapabilityLayerChanged?: () => void;
 }
 
 interface Connection {
@@ -124,6 +129,14 @@ function revocationEndpointOf(asMetadata: OAuthASMetadata): string | undefined {
 export class OAuthMcpRegistry {
   private connections = new Map<string, Connection>();
   private vmBridges = new Map<string, Map<string, HostMcpSdkBridge>>();
+  /**
+   * Servers whose stored token is known to be dead: a renewal attempt failed, or
+   * the provider rejected a freshly renewed one. In-memory only — `configure()`
+   * re-derives what it can from the keychain on load. Overlaid onto the
+   * persisted state by `status()` so Settings stops reporting "connected" for a
+   * connection that every thread is already failing against.
+   */
+  private reauthReasons = new Map<string, string>();
 
   constructor(private readonly host: OAuthMcpRegistryHost) {}
 
@@ -151,9 +164,7 @@ export class OAuthMcpRegistry {
     let asMetadata: OAuthASMetadata | undefined;
     let grant: GrantConfig | undefined;
     let flow: OAuthMcpFlow;
-    const tokenStore: OAuthTokenStore = new OAuthTokenStore(
-      this.host.secretStorage,
-      (name: string): Promise<TokenSet> => {
+    const renew = (name: string): Promise<TokenSet> => {
         if (!asMetadata) return Promise.reject(new Error(`No cached authorization-server metadata for "${name}"; re-authorize in Settings.`));
         // A client_credentials server has no refresh token to present, so
         // "renewal" means minting a brand-new token from the client's own
@@ -175,6 +186,18 @@ export class OAuthMcpRegistry {
           });
         }
         return flow.refresh(name, asMetadata);
+    };
+    const tokenStore: OAuthTokenStore = new OAuthTokenStore(
+      this.host.secretStorage,
+      async (name: string): Promise<TokenSet> => {
+        try {
+          const tokens = await renew(name);
+          this.reauthReasons.delete(name);
+          return tokens;
+        } catch (err) {
+          this.reauthReasons.set(name, errorMessage(err));
+          throw err;
+        }
       },
       () => grant?.grantType === 'client_credentials',
     );
@@ -225,6 +248,7 @@ export class OAuthMcpRegistry {
     const settings = this.host.getSettings();
     const entries = Object.entries(settings.oauthMcpServers ?? {});
     let dirty = false;
+    let rebuilt = false;
 
     for (const [name, entry] of entries) {
       try {
@@ -247,6 +271,7 @@ export class OAuthMcpRegistry {
         const proxy = new OAuthMcpProxy(name, entry.url, {
           getAccessToken: (n) => tokenStore.getAccessToken(n),
           refresh: (n) => tokenStore.refresh(n),
+          markNeedsReauth: (n, reason) => { this.reauthReasons.set(n, reason); },
         }, entry.tools);
         await proxy.start();
 
@@ -272,6 +297,7 @@ export class OAuthMcpRegistry {
           : (!accessExpired || canRenew) ? 'connected' : 'needs-auth';
 
         this.connections.set(name, { flow, tokenStore, proxy, asMetadata });
+        rebuilt = true;
         settings.oauthMcpState[name] = {
           ...this.buildState(name, clientId, storedSecret !== undefined, asMetadata, proxy, tokens, status),
           ...(entry.grantType ? { grantType: entry.grantType } : {}),
@@ -304,6 +330,11 @@ export class OAuthMcpRegistry {
     if (dirty) {
       try { await this.host.save(); } catch (err) { console.error('[OAuthMcpRegistry] Could not save state after configure():', err); }
     }
+    if (rebuilt) this.notifyCapabilityLayerChanged();
+  }
+
+  private notifyCapabilityLayerChanged(): void {
+    try { this.host.onCapabilityLayerChanged?.(); } catch (err) { console.error('[OAuthMcpRegistry] onCapabilityLayerChanged failed:', err); }
   }
 
   /**
@@ -367,9 +398,9 @@ export class OAuthMcpRegistry {
    * single token request; DCR is unreachable (the grant requires a `clientId`),
    * and nothing opens a browser.
    */
-  async registerServer(entry: OAuthRegistrationEntry): Promise<McpRegistrationResult> {
+  async registerServer(entry: OAuthRegistrationEntry, opts: { replaceExisting?: boolean } = {}): Promise<McpRegistrationResult> {
     const settings = this.host.getSettings();
-    if (Object.prototype.hasOwnProperty.call(settings.oauthMcpServers ?? {}, entry.name) || this.connections.has(entry.name)) {
+    if (!opts.replaceExisting && (Object.prototype.hasOwnProperty.call(settings.oauthMcpServers ?? {}, entry.name) || this.connections.has(entry.name))) {
       return { success: false, status: 'conflict', message: `An MCP server named "${entry.name}" already exists.` };
     }
 
@@ -513,6 +544,7 @@ export class OAuthMcpRegistry {
     const proxy = new OAuthMcpProxy(entry.name, entry.url, {
       getAccessToken: (n) => tokenStore.getAccessToken(n),
       refresh: (n) => tokenStore.refresh(n),
+      markNeedsReauth: (n, reason) => { this.reauthReasons.set(n, reason); },
     }, entry.tools);
     try {
       await proxy.start();
@@ -555,8 +587,68 @@ export class OAuthMcpRegistry {
       return { success: false, status: 'failed', message: `OAuth registration for "${entry.name}" could not be saved: ${errorMessage(err)}` };
     }
 
+    // A re-authorization replaces a live connection: retire the old proxy and its
+    // VM bridges (they point at the old port) and silence its refresh timer so it
+    // cannot renew the superseded grant over the tokens just stored.
+    const previous = this.connections.get(entry.name);
+    if (previous) {
+      previous.tokenStore.cancelScheduledRefresh(entry.name);
+      void previous.proxy.stop().catch((err: unknown) => console.error(`[OAuthMcpRegistry] Could not stop the superseded proxy for "${entry.name}":`, err));
+      for (const bridges of this.vmBridges.values()) {
+        const bridge = bridges.get(entry.name);
+        if (bridge) { bridges.delete(entry.name); void bridge.close(); }
+      }
+    }
+    this.reauthReasons.delete(entry.name);
     this.connections.set(entry.name, { flow, tokenStore, proxy, asMetadata });
+    this.notifyCapabilityLayerChanged();
     return { success: true, status: 'registered', message: `"${entry.name}" connected. New threads can now use it.` };
+  }
+
+  /**
+   * Runs the consent flow again for an existing connection, from its stored
+   * configuration (url, scopes, client id/secret, redirect URI, audience, tool
+   * filter), without removing it first. The old connection keeps serving until
+   * the new one is authorized; on any failure — including the user closing the
+   * consent screen — the previous settings entry and keychain contents are put
+   * back exactly as they were.
+   */
+  async reauthorize(name: string): Promise<McpRegistrationResult> {
+    const settings = this.host.getSettings();
+    const stored = settings.oauthMcpServers?.[name];
+    if (!stored) return { success: false, status: 'failed', message: `No OAuth MCP server named "${name}" is configured.` };
+
+    const keychain = new OAuthTokenStore(this.host.secretStorage, () => Promise.reject(new Error('reauthorize does not refresh')));
+    const clientSecret = keychain.getClientSecret(name);
+    if (stored.hasClientSecret && !clientSecret) {
+      return { success: false, status: 'failed', message: `The client secret for "${name}" is no longer in the keychain. Disconnect it and connect again with the secret.` };
+    }
+
+    const savedTokens = keychain.getCurrentTokens(name);
+    const savedClientId = keychain.getClientId(name);
+    const savedState = settings.oauthMcpState[name];
+    const restore = () => {
+      settings.oauthMcpServers[name] = stored;
+      if (savedState) settings.oauthMcpState[name] = savedState; else delete settings.oauthMcpState[name];
+      if (savedClientId) keychain.storeClientId(name, savedClientId);
+      if (clientSecret) keychain.storeClientSecret(name, clientSecret);
+      if (savedTokens) keychain.store(name, savedTokens);
+    };
+
+    const result = await this.registerServer({
+      name,
+      url: stored.url,
+      scopes: stored.scopes,
+      tools: stored.tools,
+      clientId: savedClientId ?? stored.clientId,
+      clientSecret,
+      authorizationServerUrl: stored.authorizationServerUrl,
+      redirectUri: stored.redirectUri,
+      grantType: stored.grantType,
+      audience: stored.audience,
+    }, { replaceExisting: true });
+    if (!result.success) restore();
+    return result;
   }
 
   /** Revokes, stops the proxy, and clears both settings and keychain state for one server. */
@@ -575,6 +667,7 @@ export class OAuthMcpRegistry {
     }
     delete settings.oauthMcpServers[name];
     delete settings.oauthMcpState[name];
+    this.reauthReasons.delete(name);
     for (const bridges of this.vmBridges.values()) {
       const bridge = bridges.get(name);
       if (bridge) { bridges.delete(name); void bridge.close(); }
@@ -582,9 +675,34 @@ export class OAuthMcpRegistry {
     await this.host.save();
   }
 
-  /** Current status for the Settings UI. */
+  /**
+   * Current status for the Settings UI.
+   *
+   * The persisted state is a snapshot from registration or plugin load; token
+   * renewals afterwards never rewrite it. Reading it as-is made a connection look
+   * healthy (or merely "expiring") long after its token had died, so the live
+   * keychain expiry and refresh-token presence are overlaid here, along with any
+   * recorded renewal failure. Returns a copy; nothing is persisted.
+   */
   status(name: string): OAuthMcpState | undefined {
-    return this.host.getSettings().oauthMcpState[name];
+    const persisted = this.host.getSettings().oauthMcpState[name];
+    const conn = this.connections.get(name);
+    if (!persisted || !conn) return persisted;
+
+    const tokens = conn.tokenStore.getCurrentTokens(name);
+    const overlay: OAuthMcpState = {
+      ...persisted,
+      accessTokenExpiresAt: tokens?.expiresAt,
+      hasRefreshToken: !!tokens?.refreshToken,
+    };
+    if (!tokens) {
+      return { ...overlay, status: 'needs-auth', errorMessage: overlay.errorMessage ?? `No stored token for "${name}".` };
+    }
+    const reason = this.reauthReasons.get(name);
+    if (reason && overlay.status === 'connected') {
+      return { ...overlay, status: 'needs-auth', errorMessage: reason };
+    }
+    return overlay;
   }
 
   /** Plugin unload: stop every proxy. Mirrors `GoogleWorkspaceMcp.close()` — fire-and-forget, not awaited. */

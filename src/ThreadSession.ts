@@ -10,7 +10,7 @@ import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './current
 import type { ToolCallRecord, ImageAttachment } from './types';
 import { parseExtraEnv } from './types';
 import { debugLog } from './logger';
-import { formatToolName, getToolIcon, isBrowserTool, buildPermissionDetail, requiresPerCallApproval } from './toolNameUtils';
+import { formatToolName, getToolIcon, isBrowserTool, buildPermissionDetail } from './toolNameUtils';
 import { browserToolSummary, parseBrowserToolResult } from './browserSession';
 // SessionCallbacks/TaskTrackerEvent are ClaudeSession.ts's contract, kept as the
 // single canonical definition while the two classes coexist during the Stage 2
@@ -51,6 +51,7 @@ import { isAwsCredentialErrorText } from './awsAuthRecovery';
 import { stripHostOnlyGitEnv } from './githubCredentialHelper';
 import { isReportedModelId } from './modelOptions';
 import { mergeUsageSnapshot,normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
+import { resolvePlanText, isPlanFilePath } from './planText';
 
 /**
  * Everything needed to open a thread's long-lived `Query`, once, for the
@@ -268,9 +269,12 @@ export class ThreadSession {
 
     const callbacks = options.callbacks;
 
+    let lastWrittenPlanPath: string | undefined;
     const canUseTool: CanUseTool = async (toolName, input, opts) => {
       this._pendingInteractiveCallbacks++;
       try {
+        const wrotePath = (input as { file_path?: unknown })?.file_path;
+        if ((toolName === 'Write' || toolName === 'Edit') && isPlanFilePath(wrotePath)) lastWrittenPlanPath = wrotePath;
         if (toolName === 'AskUserQuestion') {
           const questions = (input as { questions: import('./types').AskQuestion[] }).questions;
           const answers = await callbacks.onAskUserQuestion(questions);
@@ -296,7 +300,7 @@ export class ThreadSession {
               console.error('[ClaudeThreads] failed to clear plan mode via setPermissionMode:', err);
             }
           };
-          const planText = String((input as { plan?: unknown }).plan ?? '');
+          const planText = resolvePlanText(input, lastWrittenPlanPath);
           if (callbacks.onPlanReady) {
             const result = await new Promise<import('@anthropic-ai/claude-agent-sdk').PermissionResult>((resolve) => {
               callbacks.onPlanReady!(
@@ -320,7 +324,7 @@ export class ThreadSession {
           return { behavior: 'deny' as const, message: 'Plan approved — proceed with implementation.', interrupt: false };
         }
         const detail = buildPermissionDetail(toolName, input, opts);
-        const title = requiresPerCallApproval(toolName) ? toolName : (opts.title ?? toolName);
+        const title = opts.title ?? toolName;
         const allowed = await callbacks.onPermissionRequest(title, detail);
         // Never return `updatedPermissions` (e.g. `opts.suggestions`): the CLI
         // persists those rules to `.claude/settings.local.json`, turning every
@@ -644,6 +648,12 @@ export class ThreadSession {
       throw new Error('[ClaudeThreads] ThreadSession.setPermissionMode() called before start()');
     }
     await this.query.setPermissionMode(mode);
+  }
+
+  /** SDK-native connection state of every MCP server in the live query; [] when no session is open. */
+  async mcpServerStatus(): Promise<Array<{ name: string; status: string }>> {
+    if (!this.query) return [];
+    return (await this.query.mcpServerStatus()).map(({ name, status }) => ({ name, status }));
   }
 
   /**

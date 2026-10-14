@@ -379,6 +379,8 @@ export interface Thread {
   reviewed?: boolean;
   /** Paths of files written or edited during this thread's lifetime. */
   editedFiles?: string[];
+  /** http(s) links the assistant shared, oldest first; shown in the recent-files pill. */
+  linkedUrls?: string[];
   /**
    * Durable local artifacts created from this thread. The host owns identity
    * and lifecycle; the owning provider owns the rest of the record's shape.
@@ -614,6 +616,8 @@ export interface Project {
   description?: string;
   /** Vault-relative folder path (e.g. "Claude/my-project" or "Work/Acme"). */
   vaultFolder: string;
+  /** Vault-relative path of the Project overview note injected into the system prompt. Defaults to `<vaultFolder>/_overview.md`. */
+  overviewPath?: string;
   /**
    * Optional explicit filesystem cwd override. When absent the plugin derives
    * the cwd automatically from vaultFolder + vault root.
