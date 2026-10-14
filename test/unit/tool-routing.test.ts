@@ -1,0 +1,120 @@
+/**
+ * Drift guard for the remote tool routing table (design 1.3): every tool the factory produces is classified,
+ * and the table's own lists agree with the domain modules and the roster order.
+ */
+import { describe, expect, it, vi } from 'vitest';
+import type { App } from 'obsidian';
+
+vi.mock('@anthropic-ai/claude-agent-sdk/browser', () => ({
+  tool: (name: string, description: string, inputSchema: unknown, handler: unknown) => ({ name, description, inputSchema, handler }),
+  createSdkMcpServer: ({ name, tools }: { name: string; tools: unknown[] }) => ({ name, tools }),
+}));
+
+import { builtInMcpToolNames, createClaudeThreadsMcpServers } from '../../src/ObsidianTools';
+import { AGENT_BROWSER_TOOL_NAMES } from '../../src/agentBrowser/agentBrowserTools';
+import { DEFAULT_DOMAIN_ROUTES, TOOL_DOMAINS, domainOf, isClassified, routeFor, toolsRouted } from '../../src/toolRouting';
+import { BROWSER_TOOL_NAMES, BUILT_IN_TOOL_ORDER, LEGACY_TO_CANONICAL_TOOL_NAMES, TOOL_NAMES_BY_DOMAIN } from '../../src/tools/toolNames';
+
+const app = {
+  plugins: { plugins: {} },
+  workspace: { getLeavesOfType: () => [], onLayoutReady: (cb: () => void) => cb() },
+  vault: { getAbstractFileByPath: () => null, getMarkdownFiles: () => [] },
+  metadataCache: { on: () => {} },
+} as unknown as App;
+
+/** The richest roster the factory can produce: host_exec, open_url, the browser tools. */
+function fullRoster(): string[] {
+  const names = (server: unknown): string[] => ((server as { tools: Array<{ name: string }> }).tools).map((t) => t.name);
+  const { claude_threads, obsidian } = createClaudeThreadsMcpServers(app, {
+    hostExec: { confirm: async () => ({ allowed: false }), run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) } as never,
+    enableOpenUrl: true,
+    // The browser tools only close over the browser; none is called here.
+    browser: { canSavePages: true } as never,
+  });
+  return [...names(claude_threads), ...names(obsidian)];
+}
+
+describe('toolRouting drift guard', () => {
+  it('classifies every tool createMcpToolSurfaces produces, on both servers', () => {
+    const produced = fullRoster();
+    expect(produced.length).toBeGreaterThan(50);
+    for (const name of AGENT_BROWSER_TOOL_NAMES) expect(produced).toContain(name);
+    expect(produced).toContain('host_exec');
+    expect(produced).toContain('host_open_url');
+    const unclassified = produced.filter((name) => !isClassified(name));
+    expect(unclassified).toEqual([]);
+  });
+
+  it('classifies every built-in name builtInMcpToolNames reports (what the contribution registry guards)', () => {
+    const unclassified = builtInMcpToolNames(app, {}).filter((name) => !isClassified(name));
+    expect(unclassified).toEqual([]);
+  });
+
+  it('the roster order lists exactly the non-conditional built-ins of the domain table', () => {
+    const fromDomains = Object.entries(TOOL_NAMES_BY_DOMAIN)
+      .filter(([domain]) => domain !== 'browser')
+      .flatMap(([, names]) => names)
+      .filter((n) => n !== 'obsidian_open_url');
+    expect([...BUILT_IN_TOOL_ORDER].sort()).toEqual([...fromDomains].sort());
+  });
+
+  it('the pure browser list matches the browser module', () => {
+    expect([...BROWSER_TOOL_NAMES]).toEqual([...AGENT_BROWSER_TOOL_NAMES]);
+  });
+
+  it('every legacy alias maps to a tool in the table', () => {
+    for (const [legacy, canonical] of Object.entries(LEGACY_TO_CANONICAL_TOOL_NAMES)) {
+      expect(domainOf(legacy)).toBeDefined();
+      expect(domainOf(canonical)).toBe(domainOf(legacy));
+    }
+  });
+
+  it('a tool the table does not know is absent (peer-contributed, future built-ins)', () => {
+    expect(isClassified('design_mode_enter')).toBe(false);
+    expect(routeFor('design_mode_enter')).toBe('absent');
+    expect(routeFor('design_mode_enter', { threads: 'host', design_mode_enter: 'host' })).toBe('absent');
+  });
+});
+
+describe('toolRouting routes', () => {
+  it('runs the worktree tools on the daemon, proxies the Geode-only tools, and drops the VM tools', () => {
+    for (const t of ['enter_worktree', 'exit_worktree', 'set_working_directory']) expect(routeFor(t)).toBe('local');
+    for (const t of ['vault_search', 'obsidian_search_vault', 'workspace_get_open_tabs', 'host_open_url', 'threads_list', 'CronCreate',
+      'ScheduleWakeup', 'skills_search', 'browser_navigate', 'request_secret', 'mcp_register_server', 'watch_document']) {
+      expect(routeFor(t), t).toBe('host');
+    }
+    for (const t of ['enter_vm', 'vm_exec', 'exit_vm', 'host_exec', 'github_list_access', 'github_check_repo']) expect(routeFor(t), t).toBe('absent');
+  });
+
+  it('legacy and canonical names route the same way', () => {
+    for (const [legacy, canonical] of Object.entries(LEGACY_TO_CANONICAL_TOOL_NAMES)) expect(routeFor(legacy)).toBe(routeFor(canonical));
+  });
+
+  it('lets the user turn a host domain or a single tool off, but never a local tool', () => {
+    expect(routeFor('vault_search', { vault: 'absent' })).toBe('absent');
+    expect(routeFor('vault_list', { vault: 'absent' })).toBe('absent');
+    expect(routeFor('threads_list', { vault: 'absent' })).toBe('host');
+    expect(routeFor('threads_list', { threads: 'absent', threads_list: 'host' })).toBe('host'); // tool beats domain
+    expect(routeFor('enter_worktree', { worktree: 'absent' })).toBe('local');
+  });
+
+  it('cannot turn on what has no backing on the daemon (VM tools, the GitHub connection)', () => {
+    expect(routeFor('vm_exec', { vm: 'host', vm_exec: 'host' })).toBe('absent');
+    expect(routeFor('github_list_access', { github_list_access: 'host', misc: 'host' })).toBe('absent');
+    expect(routeFor('request_secret', { misc: 'absent' })).toBe('absent');
+  });
+
+  it('toolsRouted lists canonical names and respects overrides', () => {
+    expect(toolsRouted('local').sort()).toEqual(['enter_worktree', 'exit_worktree', 'set_working_directory']);
+    const host = toolsRouted('host');
+    expect(host).toContain('vault_search');
+    expect(host).toContain('host_open_url');
+    expect(host).toContain('browser_eval');
+    expect(host).not.toContain('obsidian_search_vault');
+    expect(toolsRouted('host', { vault: 'absent' })).not.toContain('vault_search');
+  });
+
+  it('covers every domain', () => {
+    expect([...TOOL_DOMAINS].sort()).toEqual(Object.keys(DEFAULT_DOMAIN_ROUTES).sort());
+  });
+});
