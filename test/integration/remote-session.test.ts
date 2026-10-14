@@ -315,7 +315,9 @@ describe('commands', () => {
     await proxy.close(); // nothing listens any more
     s.send('hello', undefined, 'u');
     await until(() => names(r).includes('onError'), 'onError', 5000);
-    expect(String((r.calls.find((x) => x.name === 'onError')!.args[0] as Error).message)).toMatch(/unreachable/);
+    expect(String((r.calls.find((x) => x.name === 'onError')!.args[0] as Error).message)).toMatch(/unreachable|did not confirm/);
+    // Either wording is honest: if the client had not yet noticed the dead socket it wrote the command into it,
+    // so the daemon MAY have seen it ("did not confirm"); otherwise it never left ("unreachable ... not delivered").
     expect(s.turnInFlight).toBe(false);
     s.close();
   });

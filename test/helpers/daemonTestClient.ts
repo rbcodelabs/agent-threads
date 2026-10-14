@@ -27,7 +27,7 @@ export async function startTestDaemon(
   const ownsDir = !opts.dataDir;
   const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), 'agent-threads-test-'));
   const { config: configFlags, dataDir: _d, allowedOrigins: _o, ...daemonOpts } = opts;
-  const config = resolveConfig({ flags: { dataDir, port: 0, allowedOrigins: opts.allowedOrigins, harness: 'fake', ...configFlags }, env: {} });
+  const config = resolveConfig({ flags: { dataDir, port: 0, allowedOrigins: opts.allowedOrigins, harness: 'fake', maxLiveSessions: 10_000, ...configFlags }, env: {} });
   const daemon = await startDaemon({ config, journalFlushMs: 5, ...daemonOpts });
   const adminToken = daemon.tokens.create('test-admin', 'admin').token;
   let stopped = false;
