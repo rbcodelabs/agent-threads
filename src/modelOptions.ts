@@ -107,12 +107,48 @@ export function catalogModelLabel(m: ModelCatalogEntry): string {
   return /\[1m\]$/i.test(id) || /\[1m\]$/i.test(m.value) ? `${base} (1M context)` : base;
 }
 
-/** Label for a family alias: "Opus 4.8 (latest)", or plain "Opus" if the version is unknown. */
+/** Numeric [major, minor] for a version string like "5" or "4.10". */
+function versionParts(version: string): [number, number] {
+  const [major, minor] = version.split('.');
+  return [Number(major), minor ? Number(minor) : 0];
+}
+
+function compareVersions(a: string, b: string): number {
+  const [aMajor, aMinor] = versionParts(a);
+  const [bMajor, bMinor] = versionParts(b);
+  return aMajor - bMajor || aMinor - bMinor;
+}
+
+/**
+ * Highest version known for a family across the catalog (value and
+ * resolvedModel of every row) and the built-in fallback.
+ */
+function highestKnownVersion(family: string, aliasValue: string, catalog: readonly ModelCatalogEntry[]): string | undefined {
+  const ids: Array<string | undefined> = [FALLBACK_RESOLVED[aliasValue]];
+  for (const m of catalog) ids.push(m.value, m.resolvedModel);
+  let best: string | undefined;
+  for (const id of ids) {
+    const parsed = parseClaudeModelId(id);
+    if (!parsed || parsed.family !== family) continue;
+    if (!best || compareVersions(parsed.version, best) > 0) best = parsed.version;
+  }
+  return best;
+}
+
+/**
+ * Label for a family alias: "Opus 4.8 (latest)", or plain "Opus" if the version
+ * is unknown. "(latest)" is only claimed when the alias resolves to the newest
+ * version we know of; on Bedrock the alias can resolve to an older pinned model,
+ * in which case the label states that version without the tag.
+ */
 export function aliasLabel(alias: string, catalog: readonly ModelCatalogEntry[] = []): string {
   const entry = CLAUDE_FAMILY_ALIASES.find((a) => a.value === alias);
   if (!entry) return alias;
   const version = modelVersionFromId(resolvedIdForAlias(alias, catalog));
-  return version ? `${entry.family} ${version} (latest)` : entry.family;
+  if (!version) return entry.family;
+  const highest = highestKnownVersion(entry.family, alias, catalog);
+  const isLatest = !highest || compareVersions(version, highest) >= 0;
+  return `${entry.family} ${version}${isLatest ? ' (latest)' : ''}`;
 }
 
 /**
