@@ -1714,8 +1714,40 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             this.plugin.settings.claudeBinaryPath = value;
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
+            scheduleCliProbe();
           }),
       );
+
+    // Detected CLI version + stale-install warnings (desktop only). Re-probed
+    // shortly after the path stops changing; never upgrades anything itself.
+    const cliNoticeEl = containerEl.createDiv({ cls: 'ct-cli-notice' });
+    const renderCliNotice = (): void => {
+      if (!cliNoticeEl.isConnected) return;
+      cliNoticeEl.empty();
+      if (Platform.isMobile) return;
+      const info = this.plugin.claudeCliInfo;
+      if (info?.binaryPath === this.plugin.settings.claudeBinaryPath && info.version) {
+        cliNoticeEl.createDiv({ cls: 'ct-cli-notice-version setting-item-description', text: `Detected claude CLI ${info.version}` });
+      }
+      for (const problem of this.plugin.getClaudeCliProblems()) {
+        const row = cliNoticeEl.createDiv({ cls: problem.severity === 'warning' ? 'ct-settings-warning ct-cli-notice-row' : 'ct-cli-notice-row ct-cli-notice-soft' });
+        row.createSpan({ text: problem.message });
+        const command = problem.upgradeCommand;
+        if (command) {
+          const copy = row.createEl('button', { cls: 'ct-cli-notice-copy', text: 'Copy command' });
+          copy.addEventListener('click', () => {
+            void navigator.clipboard.writeText(command).then(() => new Notice('Copied upgrade command'));
+          });
+        }
+      }
+    };
+    let cliProbeTimer: number | undefined;
+    const scheduleCliProbe = (): void => {
+      window.clearTimeout(cliProbeTimer);
+      cliProbeTimer = window.setTimeout(() => { void this.plugin.refreshClaudeCliInfo().then(renderCliNotice); }, 600);
+    };
+    renderCliNotice();
+    void this.plugin.refreshClaudeCliInfo().then(renderCliNotice);
 
     new Setting(containerEl)
       .setName('Account / provider')

@@ -32,7 +32,7 @@ export const CLAUDE_FAMILY_ALIASES: ReadonlyArray<{ value: string; family: strin
  * Used when the SDK catalog has not been discovered yet (no session has run).
  * Mirrors the FALLBACK_MODELS list in SettingsTab.
  */
-const FALLBACK_RESOLVED: Record<string, string> = {
+export const FALLBACK_RESOLVED: Record<string, string> = {
   opus: 'claude-opus-5-5',
   sonnet: 'claude-sonnet-5-5',
   haiku: 'claude-haiku-4-5',
