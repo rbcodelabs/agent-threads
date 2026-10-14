@@ -64,7 +64,7 @@ describe('normalizeVaultListPath', () => {
   });
 
   it('rejects absolute paths', () => {
-    for (const input of ['/Users/rick/vault', '/etc', 'C:\\Users', 'c:/x', '\\\\server\\share', '~/notes']) {
+    for (const input of ['/Users/me/vault', '/etc', 'C:\\Users', 'c:/x', '\\\\server\\share', '~/notes']) {
       expect(() => normalizeVaultListPath(input)).toThrow(VaultListError);
     }
   });

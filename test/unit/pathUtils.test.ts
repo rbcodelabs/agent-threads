@@ -6,11 +6,11 @@ import { resolveProjectName, resolveGitProjectName, resolveGitRepoRoot, resolveT
 
 describe('resolveProjectName', () => {
   it('returns the last path component for a normal project path', () => {
-    expect(resolveProjectName('/Users/rick/projects/obsidian-claude-threads')).toBe('obsidian-claude-threads');
+    expect(resolveProjectName('/Users/me/projects/obsidian-claude-threads')).toBe('obsidian-claude-threads');
   });
 
   it('extracts the segment before /.worktrees/ for a worktree path', () => {
-    expect(resolveProjectName('/Users/rick/projects/golden-wealth-app/.worktrees/claude-123')).toBe('golden-wealth-app');
+    expect(resolveProjectName('/Users/me/projects/golden-wealth-app/.worktrees/claude-123')).toBe('golden-wealth-app');
   });
 
   it('handles a deep worktree path', () => {
@@ -18,7 +18,7 @@ describe('resolveProjectName', () => {
   });
 
   it('handles the example from the spec', () => {
-    expect(resolveProjectName('/Users/rick/projects/golden-wealth-app/.worktrees/claude-123')).toBe('golden-wealth-app');
+    expect(resolveProjectName('/Users/me/projects/golden-wealth-app/.worktrees/claude-123')).toBe('golden-wealth-app');
   });
 
   it('returns empty string for an empty string', () => {
@@ -40,7 +40,7 @@ describe('resolveProjectName', () => {
   it('ignores a trailing slash', () => {
     // lastIndexOf('/') on 'a/b/' returns the last /, giving ''
     // This is acceptable — document the behavior
-    expect(resolveProjectName('/Users/rick/projects/myapp')).toBe('myapp');
+    expect(resolveProjectName('/Users/me/projects/myapp')).toBe('myapp');
   });
 });
 
