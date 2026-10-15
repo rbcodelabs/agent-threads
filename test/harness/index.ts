@@ -90,7 +90,8 @@ const mockScheduler = {
 if (typeof crypto !== 'undefined' && typeof (crypto as { randomUUID?: unknown }).randomUUID !== 'function') {
   (crypto as unknown as { randomUUID: () => string }).randomUUID = () =>
     'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, char => {
-      const random = Math.floor(Math.random() * 16);
+      // getRandomValues is always present where this polyfill is needed (it is only missing randomUUID).
+      const random = crypto.getRandomValues(new Uint8Array(1))[0] & 0xf;
       return (char === 'x' ? random : (random & 0x3) | 0x8).toString(16);
     });
 }
