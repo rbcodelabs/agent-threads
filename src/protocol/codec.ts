@@ -108,7 +108,7 @@ const COMMAND_FIELDS: Record<ClientCommandType, FieldSpec> = {
   'path.check': { path: 'S' },
   'workspaces.list': {},
   'path.list': { path: 'S' },
-  attach: { ch: 'c', afterSeq: 'i', epoch: 's?' },
+  attach: { ch: 'c', afterSeq: 'i', epoch: 's?', observe: 'b?' },
   ack: { ch: 'c', seq: 'i' },
   'session.send': { threadId: 'S', text: 's', userMessageUuid: 'S', images: 'a?' },
   'session.prepareForSend': { threadId: 'S', text: 's', images: 'a?' },

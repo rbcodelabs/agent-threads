@@ -62,7 +62,8 @@ mkdir -p ~/agent-threads/data && cd ~/agent-threads
 # `control` is all Geode needs. Keep `admin` for operator tooling: it adds nothing Geode uses.
 node agent-threads.cjs token create --name geode --scope control --data-dir ~/agent-threads/data
 
-# Run the daemon (use tmux/screen for now; a systemd unit comes with the packaging PR).
+# Run the daemon in the foreground to try it. For a service that survives reboots, use the systemd
+# or Docker setups below ("Install as a service").
 # --workspace: folders sessions may run in. Add your vault folder if you want threads there.
 node agent-threads.cjs serve \
   --data-dir ~/agent-threads/data \
@@ -79,6 +80,263 @@ Use `--fake-harness` on `serve` for a no-tokens-spent dry run (a scripted stand-
 `/tokens 60 burst=1 delay=40` to watch streaming).
 
 To remove the tailnet exposure: `sudo tailscale serve --https=8443 off`.
+
+## Install as a service
+
+Pick one. All three run the same single-file bundle (`agent-threads.cjs`) and keep state in one data directory.
+Whatever you pick, finish with the same three steps: create a token, give the daemon a Claude credential, run
+`agent-threads doctor`.
+
+### A. Script + systemd user service (a Linux box you log in to)
+
+Needs Node 22+ and `curl`. No root.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rbcodelabs/agent-threads/main/deploy/install.sh | bash
+# a specific release:  AGENT_THREADS_VERSION=0.63.0 bash deploy/install.sh
+```
+
+`install.sh` downloads the bundle from the GitHub release, **verifies its SHA-256** (it refuses to continue on a
+mismatch), puts it under `~/.local/share/agent-threads/`, links `~/.local/bin/agent-threads`, and runs
+`agent-threads install`. That second step is also available on its own (`--dry-run` shows what it would do):
+
+```bash
+agent-threads install --dry-run
+agent-threads install            # idempotent: run it again after an upgrade
+```
+
+It creates `~/.config/agent-threads/{env,claude-token}` (mode 0600, **never overwritten**), a `~/workspaces` folder,
+and `~/.config/systemd/user/agent-threads.service`, then enables and starts it. It refuses to overwrite a unit it did
+not write (use `--force`), and it prints the next steps:
+
+```bash
+agent-threads token create --name geode --scope control    # shown once: paste it into Geode
+agent-threads token create --name cli --scope control --save   # lets list/attach/run on this machine find it
+loginctl enable-linger "$USER"                              # keep the service running after you log out
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:7433   # reach it from Geode over wss://
+systemctl --user status agent-threads
+agent-threads doctor
+```
+
+Local changes to the unit belong in a drop-in (`systemctl --user edit agent-threads`), which `agent-threads install`
+leaves alone. Logs: `journalctl --user -u agent-threads -f`.
+
+### B. systemd, system-wide (a dedicated VM)
+
+The reference units are in `deploy/`: `agent-threads.service` (system) and `agent-threads.user.service` (the user
+unit that `agent-threads install` writes). The system unit runs as its own unprivileged user:
+
+```bash
+sudo useradd --system --home-dir /var/lib/agent-threads/home --shell /bin/bash agent-threads
+sudo install -d -o agent-threads -g agent-threads /srv/workspaces
+sudo install -d -m 0755 /opt/agent-threads/dist
+sudo install -m 0644 agent-threads.cjs /opt/agent-threads/dist/agent-threads.cjs   # from the release, or your build
+sudo install -d -m 0755 /etc/agent-threads
+sudo install -m 0600 /dev/null /etc/agent-threads/env            # optional: CLAUDE_CODE_OAUTH_TOKEN=..., GH_TOKEN=...
+sudo install -m 0600 /dev/null /etc/agent-threads/claude-token   # the token alone (may stay empty if you sign in with `claude`)
+sudo install -m 0644 deploy/agent-threads.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now agent-threads
+sudo -u agent-threads env HOME=/var/lib/agent-threads/home DATA_DIR=/var/lib/agent-threads \
+  node /opt/agent-threads/dist/agent-threads.cjs token create --name geode --scope control
+```
+
+What the unit sets, and why:
+
+| Setting | Why |
+|---|---|
+| `Restart=on-failure` | comes back after a crash, stays down after `systemctl stop` |
+| `KillMode=control-group` | **critical.** Each live session is a `claude` child process. If the daemon dies by SIGKILL, those children are orphaned (and keep running, spending tokens) unless systemd reaps the whole cgroup. Do not change this to `process`. |
+| `EnvironmentFile=-/etc/agent-threads/env` | the Claude token and `GH_TOKEN`, in a file only root and the unit can read (0600) |
+| `LoadCredential=claude-token:...` | the token as a systemd credential (`$CREDENTIALS_DIRECTORY/claude-token`), which the daemon reads itself; the file must exist, and may be empty |
+| `StateDirectory=agent-threads` | `/var/lib/agent-threads` (tokens, journals, raw logs, the `claude` login), created and owned by systemd |
+| `ProtectSystem=strict` + `ReadWritePaths=` | the unit can only write to its state and workspaces. This limits *where* an agent writes, not *what* it runs (it must run builds and install packages); the VM is the real boundary |
+
+To run in a different workspace, edit with a drop-in (`sudo systemctl edit agent-threads`): clear `ExecStart=` and
+set your own, adding the folder to `ReadWritePaths=` too.
+
+### C. Docker and Compose
+
+The image (`sandbox/Dockerfile.daemon`) is Node 22 plus git, gh, ripgrep, jq, curl, build-essential, the bundle, and
+the native Claude Code installer; it runs as a non-root user, with `/srv/workspaces` as the working directory and
+`/var/lib/agent-threads` as state. No secret is baked in. Build and run from a checkout:
+
+```bash
+cp deploy/compose.env.example deploy/.env && chmod 600 deploy/.env     # then edit it
+docker compose -f deploy/compose.yaml up -d --build
+docker compose -f deploy/compose.yaml exec agent-threads agent-threads token create --name geode --scope control
+docker compose -f deploy/compose.yaml exec agent-threads agent-threads doctor
+```
+
+Things that differ from a host install:
+
+- **The port is published on the host's loopback only** (`127.0.0.1:7433`). Inside the container the daemon binds
+  `0.0.0.0` (it has to, for the published port to reach it), so never publish it as `-p 7433:7433` on a host other
+  machines can reach. Use `tailscale serve` on the host for `wss://`.
+- Every client reaches the daemon from the container network's gateway address, which is not loopback, so the
+  per-address bad-token throttle (5 failures in 60 s) applies to all clients together. A mistyped token on one
+  device can briefly lock the others out.
+- `docker compose exec agent-threads claude` signs in interactively; the login persists in the data volume. Or set
+  `CLAUDE_CODE_OAUTH_TOKEN` in `deploy/.env`.
+- `docker run` users: the entrypoint is `agent-threads serve`, so run other commands with
+  `--entrypoint agent-threads` (for example `docker run --rm --entrypoint agent-threads IMAGE doctor`), or use `exec`.
+
+**The published image does not contain the Claude CLI.** Releases publish `ghcr.io/rbcodelabs/agent-threads-daemon:<version>`
+(the `base` stage, `linux/amd64` and `linux/arm64`), because Claude Code has no redistribution grant. Add the CLI on
+your own machine with the thin layer built from the same Dockerfile:
+
+```bash
+docker build -f sandbox/Dockerfile.daemon \
+  --build-arg BASE_IMAGE=ghcr.io/rbcodelabs/agent-threads-daemon:0.63.0 -t agent-threads-daemon:0.63.0 .
+```
+
+(Building the Dockerfile without `BASE_IMAGE` builds everything from the checkout, with the CLI.) The package is
+private until the repository owner sets its visibility to Public once, after the first publish.
+
+## CLI
+
+The same `agent-threads` binary is also a client. It uses the daemon's wire protocol (the same `DaemonClient` the
+Geode plugin uses), so anything it shows is exactly what Geode would show.
+
+**Connecting.** `--url` > `AGENT_THREADS_URL` > `ws://127.0.0.1:7433` (or the port in the local data directory's
+`config.json`). `--token` > `AGENT_THREADS_TOKEN` > `<data-dir>/cli-token`. The daemon stores only token *hashes*, so
+the same-machine default needs a plaintext copy that you ask for once:
+
+```bash
+agent-threads token create --name cli --scope control --save    # writes <data-dir>/cli-token, mode 0600
+agent-threads list
+```
+
+That file is readable only by the daemon's own user, who can already read every journal and run `claude`; it is the
+same trust as the data directory. For another machine, pass `--url wss://my-server.tailnet-name.ts.net:8443` and a
+token created for that purpose. Nothing is ever put in the URL.
+
+| Command | What it does |
+|---|---|
+| `agent-threads list [--json]` | the daemon's threads: id, state (`waiting` for an answer, `running`, `idle`, `closed`), last sequence, folder. Needs a `read` token. |
+| `agent-threads attach <thread> [--from N\|end] [--claim] [--until-idle] [--json]` | follow a thread. Replays the journal after `--from` (default `0`: everything the daemon still holds; `end`: live only), then streams live. A unique id prefix is enough. |
+| `agent-threads run [options] "<prompt>"` | open a new session, send one prompt, stream the answer, exit with a code for how it ended. |
+| `agent-threads token create\|list\|revoke` | manage tokens (`--json` for scripts; `create --save` as above). |
+| `agent-threads doctor` | check the machine and the daemon (below). |
+| `agent-threads install` | set up the systemd user service (above). |
+
+**attach and the one-writer seat.** A thread has one read-write client at a time (see "Known limits"). `attach` is a
+**read-only observer by default**: it never takes the seat, so watching a thread from a terminal cannot lock Geode out
+of it; an open permission prompt is shown but not asked. `--claim` takes the seat when it is free and lets you answer
+permission, question and plan prompts at the terminal (`y`/`N`, an option number, ...). If Geode (or another terminal)
+holds the seat, `--claim` says so and keeps observing; to take over, detach it there first. If someone else answers a
+prompt first, the daemon's `request_resolved` event withdraws yours ("answered elsewhere") and a late answer is refused:
+first resolver wins. Prompts are only asked once the replayed backlog has been delivered, so a request that was
+answered while you were away is never asked again.
+
+**run.** `--cwd` is a folder **on the daemon machine** (default: the shell's folder when the daemon is local and
+allows it, else the daemon's default workspace); `--permission-mode` (default `default`, `dontAsk` with
+`--unattended`); `--model`; `--thread <id>` to continue a thread. `--detach` sends the prompt, prints the thread id and
+exits, leaving the turn running on the daemon; `agent-threads attach <id>` replays all of it later. The session is
+ephemeral: when the turn ends, `run` closes the session (stopping its `claude` process); the journal stays for
+`attach` until retention drops it. `--unattended` means nobody is there: a permission, question or plan request fails
+the run at once (the request is refused and the turn interrupted). The same applies with no terminal (stdin not a TTY)
+and no `--json`. Ctrl-C interrupts the turn (a second Ctrl-C leaves it running and detaches).
+
+| Exit code | Meaning |
+|---|---|
+| 0 | the turn finished (`attach --until-idle`: nothing is running, last turn fine) |
+| 1 | the turn or the command failed |
+| 2 | usage error |
+| 3 | the daemon could not be reached |
+| 4 | the token was rejected, or its scope is too low |
+| 5 | protocol mismatch: use a CLI that matches the daemon |
+| 6 | the turn was interrupted |
+| 7 | (`run`) a request needed an answer and nobody could give it |
+| 130 | Ctrl-C |
+
+**`--json` (NDJSON).** One JSON object per line on stdout; text and prompts go to stderr. Daemon frames are passed
+through *verbatim* (`type` is `event` or `resync`, with the protocol's own `ch`, `seq`, `ts`, `name`, `args`, plus
+`replay`/`reopen` when set), so they are additive-only within protocol v1. The CLI's own records have
+`"type":"cli"` and a `kind`:
+
+| `kind` | When | Fields |
+|---|---|---|
+| `attached` | first line of attach/run | `threadId, controller, lastSeq, lowWater, resync, epoch` |
+| `started` | `run`, before sending | `threadId, cwd, permissionMode, detach` |
+| `note` | a human-readable remark | `text` |
+| `connection` | the socket dropped | `status, detail` |
+| `command_result` | answer to a stdin command | `cmd, requestId?, ok, error?` |
+| `detached` | `run --detach` | `threadId` |
+| `end` | last line | `outcome` (`done, idle, error, interrupted, needs_input, stopped, failed`), `exitCode`, `lastSeq`, `threadId?`, `message?` |
+
+With `--json`, when you hold the seat (`run`, or `attach --claim`) the CLI reads NDJSON **commands from stdin**:
+`{"cmd":"resolve.permission","requestId":"...","allow":true}`, `resolve.question` (`answers`), `resolve.plan`
+(`approve`), `resolve.elicitation` (`result`), `{"cmd":"interrupt"}`, `{"cmd":"send","text":"..."}`. If stdin ends
+while a `run` has a request open, the request is refused and the run fails with exit 7.
+
+`list --json` prints one object per thread: `threadId, state, lastSeq, open, turnInFlight, hasPendingPermission, cwd,
+nativeSessionId, lastActivityAt`.
+
+## doctor
+
+`agent-threads doctor [--strict] [--json]` checks, with a PASS / WARN / FAIL / SKIP line and a `fix:` for each problem:
+Node 22+; the `claude` CLI; `git`; `gh` and whether it is logged in; `rg`; the listen address (warns on a wildcard or
+non-loopback address); whether the daemon answers `/healthz`; data directory ownership and permissions (0700), token
+and `cli-token` file modes; `tokens.json` readable with at least one active token (and `cli-token` still valid);
+a Claude credential (environment, systemd credential, env file, or an existing `~/.claude` login; values are never
+printed); workspaces exist and are writable; free disk space (warns under 5 GiB, fails under 500 MiB); clock skew
+against the daemon's HTTP `Date` header; and Tailscale (installed, running, serving the port). The exit code is 1 if
+anything FAILed (`--strict`: or warned), else 0; SKIP never counts. Run it as the user the daemon runs as, and pass
+`--data-dir` / `--url` when the daemon uses non-default ones. `--json` prints one `{"type":"check",...}` line per check
+and a `{"type":"summary",...}` line.
+
+## Upgrade
+
+The daemon and the plugin are released together; the daemon refuses a plugin older than its `minClientVersion`, so
+upgrade the daemon first (or together).
+
+- **Script / user service:** `AGENT_THREADS_VERSION=<new> bash deploy/install.sh` (re-downloads, verifies, re-runs
+  `agent-threads install`), then `systemctl --user restart agent-threads`.
+- **System unit:** replace `/opt/agent-threads/dist/agent-threads.cjs`, then `sudo systemctl restart agent-threads`.
+- **Docker:** pull the new tag (or rebuild) and `docker compose up -d`.
+
+A restart stops live `claude` processes: a running turn is closed as `daemon_restarted`, Geode shows it, and the next
+message resumes the same native session. Do it between turns when you can (`agent-threads list` shows what is running).
+
+## Backup
+
+Everything worth keeping is in the data directory: `tokens.json` (hashes), `config.json` (daemon id), `journal/`
+and `sessions/` (replay history and how to resume each session), `logs/` (raw logs), and `home/` (the `claude`
+login and its session files, in the Docker and system layouts). The repositories are in the workspaces. To back up:
+
+```bash
+systemctl --user stop agent-threads        # or: sudo systemctl stop agent-threads / docker compose stop
+tar -C "$(dirname "$DATA_DIR")" -czf agent-threads-backup.tgz "$(basename "$DATA_DIR")"   # 0600 it: it holds journals
+systemctl --user start agent-threads
+```
+
+A Proxmox snapshot of the VM does the same job and also covers the workspaces. Restoring the directory brings back
+tokens, history and resumable sessions; a Geode that was ahead of a restored journal resyncs by itself. The archive
+contains prompts and tool output: store it like the data directory itself.
+
+## Uninstall
+
+```bash
+systemctl --user disable --now agent-threads          # system unit: sudo systemctl disable --now agent-threads
+rm ~/.config/systemd/user/agent-threads.service && systemctl --user daemon-reload
+sudo tailscale serve --https=8443 off                 # if you published it
+rm -rf ~/.config/agent-threads ~/.local/share/agent-threads ~/.local/bin/agent-threads   # config, bundle, link
+rm -rf "$DATA_DIR"                                    # tokens, journals, logs: only if you do not want them
+docker compose -f deploy/compose.yaml down -v         # Docker: -v also deletes the data and workspace volumes
+```
+
+Then remove the daemon in Geode (Settings, Remote, Remote daemons). Threads that ran there stay in the transcript but
+can no longer be resumed.
+
+## Smoke test
+
+`scripts/smoke-daemon.mts` checks a running daemon (a container, a service, a VM) without spending tokens when it runs
+the fake harness: `/healthz`, a wrong token being rejected, and a short ordered stream.
+
+```bash
+AGENT_THREADS_SMOKE_URL=http://127.0.0.1:7433 AGENT_THREADS_SMOKE_TOKEN=atd_... node scripts/smoke-daemon.mts
+# against a real daemon: --no-stream (health + auth only) or --real (one short real prompt; spends a few tokens)
+```
 
 ## Security
 
@@ -229,8 +487,8 @@ folder they would use on the Mac.
 
 **1. Let the daemon use the folder.** Sessions may only run under a `--workspace` folder. `--workspace` is
 repeatable and a flag *replaces* the whole list (flag > `AGENT_THREADS_WORKSPACES` > `config.json`), so
-repeat every folder you already use. Edit the unit (find it with `systemctl --user cat agent-threads`, or
-`systemctl cat agent-threads` for a system unit) with `systemctl --user edit --full agent-threads`:
+repeat every folder you already use. Change the unit with a drop-in (`systemctl --user edit agent-threads`, or `sudo systemctl edit agent-threads` for a
+system unit; `agent-threads install` leaves drop-ins alone):
 
 ```ini
 [Service]
@@ -241,7 +499,7 @@ ExecStart=/usr/bin/node /home/user/agent-threads/agent-threads.cjs serve \
   --workspace /home/user/vault
 ```
 
-(Keep your existing flags and paths; only add the `--workspace /home/user/vault` line.) Then
+(Keep your existing flags and paths; only add the `--workspace /home/user/vault` line. A system unit also needs the folder in `ReadWritePaths=`.) Then
 `systemctl --user daemon-reload && systemctl --user restart agent-threads` (system unit: drop `--user` and
 use `sudo`). Alternatives with the same effect: `AGENT_THREADS_WORKSPACES=/home/user/projects:/home/user/vault`
 in the unit's `Environment=`, or `"workspaces": [...]` in `<data-dir>/config.json`. Restarting stops live `claude` processes (a running turn is marked interrupted); threads resume on the next message.
@@ -324,6 +582,7 @@ actually happened, not "just now". What makes that work:
   file is rewritten without it); only a damaged *tail* is dropped.
 
 - Skills and keychain secrets are not forwarded (PR 9). Host tools need the app connected (see above); there is no queue for tools that were unavailable.
+- The CLI is a client of the same protocol: `attach` is read-only unless `--claim`, and `--claim` cannot take a seat another client holds.
 - A `resync` (Geode was away longer than the daemon keeps history) restores the last 20 finished messages
   only; anything older that was missed is in the daemon's raw log (`<data-dir>/logs/<thread>.jsonl`), not in
   the transcript. There is no "Recover from daemon" command yet.

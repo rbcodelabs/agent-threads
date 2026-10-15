@@ -1,12 +1,19 @@
 /**
- * `agent-threads` command line:
- *
- *   agent-threads serve [--listen H] [--port N] [--data-dir D] [--allow-origin O]... [--i-know-this-is-open]
- *   agent-threads token create --name N [--scope read|control|admin]
- *   agent-threads token list
- *   agent-threads token revoke <id|name>
+ * `agent-threads` command line. Server side: `serve`, `token`, `doctor`, `install`. Client side
+ * (talks to a daemon over the wire protocol): `list`, `attach`, `run`.
  */
-import { ensureDir } from './fsutil';
+import { join } from 'node:path';
+import { ensureDir, writeFileAtomic } from './fsutil';
+import { runAttach } from './cmd/attach';
+import { CLI_TOKEN_FILE, connectDaemon, resolveConnectionSettings } from './cmd/connection';
+import {
+  doctorExitCode, formatReport, realProbes, resolveDoctorTarget, runChecks, summarize,
+} from './cmd/doctor';
+import { CliError, EXIT, exitCodeFor, messageOf } from './cmd/exit';
+import { runInstall, realInstallSys } from './cmd/install';
+import { fetchThreads, formatTable, jsonRecord, sortRows } from './cmd/list';
+import { processRuntime, type CliRuntime, type RawIo } from './cmd/runtime';
+import { runRun } from './cmd/run';
 import { resolveConfig, defaultDataDir, type ConfigInputs } from './config';
 import { startDaemon } from './server';
 import { TOKEN_SCOPES, TokenStore, type TokenScope } from './tokenStore';
@@ -16,10 +23,37 @@ const USAGE = `agent-threads ${DAEMON_VERSION}
 
 Usage:
   agent-threads serve [options]           run the daemon
-  agent-threads token create --name N [--scope read|control|admin]
+  agent-threads list [--json]             threads on a daemon
+  agent-threads attach <thread> [--from N|end] [--claim] [--until-idle] [--json]
+                                          follow a thread's live stream (replays from a cursor first)
+  agent-threads run [options] "<prompt>"  run one prompt in a new session and stream the answer
+  agent-threads token create --name N [--scope read|control|admin] [--save]
   agent-threads token list
   agent-threads token revoke <id|name>
+  agent-threads doctor [--strict] [--json]  check this machine and the daemon
+  agent-threads install [--dry-run] [--no-start]   set up the systemd user service (Linux)
   agent-threads --version
+
+Connecting (list, attach, run):
+  --url <u>              daemon address (env AGENT_THREADS_URL; default ws://127.0.0.1:7433, or the port in the local config.json)
+  --token <t>            access token (env AGENT_THREADS_TOKEN; default: <data-dir>/cli-token, see "token create --save")
+  --data-dir <dir>       where to look for the local token and config
+  --connect-timeout <s>  seconds to wait for the daemon (default 10)
+  --json                 NDJSON on stdout, one object per line (stable; see docs/remote-daemon.md)
+
+attach: read-only unless --claim (which takes the thread's read-write seat if it is free and lets you
+  answer permission/question/plan requests). --from N replays events after seq N (default 0 = all the
+  daemon still holds); --from end follows live only. --until-idle exits once nothing is running.
+
+run options:
+  --cwd <dir>            folder ON THE DAEMON MACHINE (default: the shell's folder for a local daemon, else the daemon's default workspace)
+  --permission-mode <m>  default | acceptEdits | plan | dontAsk | auto | bypassPermissions (default: default; dontAsk with --unattended)
+  --model <m>            model for the session
+  --thread <id>          continue an existing thread instead of starting a new one
+  --detach               send the prompt, print the thread id, exit; the turn keeps running (attach to watch it)
+  --unattended           nobody to answer: fail (exit 7) on any permission/question request
+  Exit codes: 0 done, 1 error, 2 usage, 3 unreachable, 4 unauthorized, 5 incompatible protocol, 6 interrupted, 7 needed input, 130 Ctrl-C.
+  Use "-" as the prompt to read it from stdin.
 
 serve options:
   --listen <host>        bind address (default 127.0.0.1; use "tailscale serve" for wss)
@@ -40,28 +74,55 @@ serve options:
   --claude-binary <path> path to the claude CLI (env AGENT_THREADS_CLAUDE_BINARY; default: PATH, ~/.npm-global/bin, ~/.local/bin)
   --fake-harness         scripted stand-in instead of Claude (tests and smoke runs only)
 
-The token commands accept --data-dir too.
+The token and doctor commands accept --data-dir too.
 `;
 
 export interface Io {
   out(line: string): void;
   err(line: string): void;
+  /** Raw text without a newline (streamed tokens, prompts). Falls back to line-buffering `out`/`err`. */
+  write?(text: string): void;
+  writeErr?(text: string): void;
 }
 
-const consoleIo: Io = { out: (l) => console.log(l), err: (l) => console.error(l) };
+const consoleIo: Io = {
+  out: (l) => console.log(l),
+  err: (l) => console.error(l),
+  write: (t) => { process.stdout.write(t); },
+  writeErr: (t) => { process.stderr.write(t); },
+};
 
-interface Parsed {
+/** Text writers for the client commands; an `Io` with only line methods is fed whole lines. */
+export function toRawIo(io: Io): RawIo {
+  const lineWriter = (emit: (line: string) => void): ((text: string) => void) => {
+    let pending = '';
+    return (text) => {
+      pending += text;
+      let i: number;
+      while ((i = pending.indexOf('\n')) >= 0) { emit(pending.slice(0, i)); pending = pending.slice(i + 1); }
+    };
+  };
+  return { out: io.write ? io.write.bind(io) : lineWriter((l) => io.out(l)), err: io.writeErr ? io.writeErr.bind(io) : lineWriter((l) => io.err(l)) };
+}
+
+export interface Parsed {
   positionals: string[];
   flags: Map<string, string[]>;
   bools: Set<string>;
 }
 
-const BOOLEAN_FLAGS = new Set(['i-know-this-is-open', 'help', 'version', 'allow-bypass', 'fake-harness']);
+const BOOLEAN_FLAGS = new Set([
+  'i-know-this-is-open', 'help', 'version', 'allow-bypass', 'fake-harness',
+  'json', 'detach', 'unattended', 'claim', 'until-idle', 'strict', 'save', 'dry-run', 'no-start', 'force',
+]);
 
 export function parseArgs(argv: string[]): Parsed {
   const out: Parsed = { positionals: [], flags: new Map(), bools: new Set() };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    // `--` ends the flags: everything after it is a positional (a prompt may start with dashes).
+    if (a === '--') { out.positionals.push(...argv.slice(i + 1)); break; }
+    if (a === '-h') { out.bools.add('help'); continue; }
     if (!a.startsWith('--')) { out.positionals.push(a); continue; }
     const eq = a.indexOf('=');
     const name = eq === -1 ? a.slice(2) : a.slice(2, eq);
@@ -103,7 +164,7 @@ export function installCrashGuards(io: Io, proc: NodeJS.Process = process): () =
   };
 }
 
-export async function runCli(argv: string[], io: Io = consoleIo): Promise<number> {
+export async function runCli(argv: string[], io: Io = consoleIo, runtime?: Partial<CliRuntime>): Promise<number> {
   let p: Parsed;
   try { p = parseArgs(argv); } catch (e) { io.err((e as Error).message); return 2; }
   const [cmd, sub] = p.positionals;
@@ -121,15 +182,33 @@ export async function runCli(argv: string[], io: Io = consoleIo): Promise<number
       if (!name) { io.err('token create needs --name'); return 2; }
       if (!TOKEN_SCOPES.includes(scope)) { io.err(`--scope must be one of ${TOKEN_SCOPES.join(', ')}`); return 2; }
       const { record, token } = store.create(name, scope);
+      const save = p.bools.has('save');
+      if (save) {
+        // The daemon keeps only a hash, so a same-machine CLI default needs this plaintext copy. 0600 in a 0700
+        // directory: readable by the daemon's own user, which can already read every journal and run claude.
+        writeFileAtomic(join(dataDir, CLI_TOKEN_FILE), `${token}\n`);
+      }
+      if (p.bools.has('json')) {
+        io.out(JSON.stringify({ id: record.id, name: record.name, scope, ...(save ? { savedTo: join(dataDir, CLI_TOKEN_FILE) } : { token }) }));
+        return 0;
+      }
       io.out(`id:     ${record.id}`);
       io.out(`name:   ${record.name}`);
       io.out(`scope:  ${scope}`);
-      io.out(`token:  ${token}`);
-      io.out('Store this token now; only its hash is kept and it cannot be shown again.');
+      if (save) {
+        io.out(`saved:  ${join(dataDir, CLI_TOKEN_FILE)} (mode 0600): list/attach/run on this machine use it automatically`);
+      } else {
+        io.out(`token:  ${token}`);
+        io.out('Store this token now; only its hash is kept and it cannot be shown again.');
+      }
       return 0;
     }
     if (sub === 'list') {
       const rows = store.list();
+      if (p.bools.has('json')) {
+        for (const r of rows) io.out(JSON.stringify({ id: r.id, name: r.name, scope: r.scopes.at(-1) ?? 'read', createdAt: r.createdAt, lastUsedAt: r.lastUsedAt, revokedAt: r.revokedAt }));
+        return 0;
+      }
       if (rows.length === 0) io.out('(no tokens)');
       for (const r of rows) {
         io.out(`${r.id}  ${r.name}  scope=${r.scopes.join(',')}  created=${fmt(r.createdAt)}  lastUsed=${fmt(r.lastUsedAt)}${r.revokedAt ? `  REVOKED ${fmt(r.revokedAt)}` : ''}`);
@@ -200,7 +279,107 @@ export async function runCli(argv: string[], io: Io = consoleIo): Promise<number
     return 0;
   }
 
+  if (cmd === 'list' || cmd === 'attach' || cmd === 'run' || cmd === 'doctor' || cmd === 'install') {
+    const rt: CliRuntime = { ...processRuntime(), ...runtime };
+    const raw = toRawIo(io);
+    try {
+      return await runClientCommand(cmd, p, io, raw, rt);
+    } catch (err) {
+      if (err instanceof CliError) { io.err(err.message); return err.code; }
+      io.err(messageOf(err));
+      return exitCodeFor(err);
+    }
+  }
+
   io.err(`unknown command "${cmd}"`);
   io.err(USAGE);
   return 2;
+}
+
+const connFlags = (p: Parsed): { url?: string; token?: string; dataDir?: string; connectTimeoutMs?: number } => {
+  const timeout = one(p, 'connect-timeout');
+  if (timeout !== undefined && !(Number(timeout) > 0)) throw new CliError('--connect-timeout must be a number of seconds', EXIT.USAGE);
+  return {
+    ...(one(p, 'url') ? { url: one(p, 'url') } : {}),
+    ...(one(p, 'token') ? { token: one(p, 'token') } : {}),
+    ...(one(p, 'data-dir') ? { dataDir: one(p, 'data-dir') } : {}),
+    ...(timeout !== undefined ? { connectTimeoutMs: Number(timeout) * 1000 } : {}),
+  };
+};
+
+async function readAll(stream: NodeJS.ReadableStream): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const c of stream) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(String(c)));
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function runClientCommand(cmd: string, p: Parsed, io: Io, raw: RawIo, rt: CliRuntime): Promise<number> {
+  const json = p.bools.has('json');
+  switch (cmd) {
+    case 'list': {
+      const flags = connFlags(p);
+      const client = await connectDaemon(resolveConnectionSettings(flags, rt.env), { reconnect: false, connectTimeoutMs: flags.connectTimeoutMs, createSocket: rt.createSocket });
+      try {
+        const rows = sortRows(await fetchThreads(client));
+        if (json) for (const r of rows) io.out(JSON.stringify(jsonRecord(r)));
+        else for (const l of formatTable(rows)) io.out(l);
+        return EXIT.OK;
+      } finally {
+        client.dispose();
+      }
+    }
+    case 'attach': {
+      const flags = connFlags(p);
+      return runAttach({
+        ...flags, thread: p.positionals[1], from: one(p, 'from'), claim: p.bools.has('claim'), untilIdle: p.bools.has('until-idle'), json,
+      }, raw, rt);
+    }
+    case 'run': {
+      const flags = connFlags(p);
+      let prompt = p.positionals.slice(1).join(' ');
+      if (prompt === '-') prompt = (await readAll(rt.stdin)).trim();
+      return runRun({
+        ...flags, prompt, json,
+        ...(one(p, 'cwd') ? { cwd: one(p, 'cwd') } : {}),
+        ...(one(p, 'permission-mode') ? { permissionMode: one(p, 'permission-mode') } : {}),
+        ...(one(p, 'model') ? { model: one(p, 'model') } : {}),
+        ...(one(p, 'thread') ? { thread: one(p, 'thread') } : {}),
+        detach: p.bools.has('detach'), unattended: p.bools.has('unattended'),
+      }, raw, rt);
+    }
+    case 'doctor': {
+      const probes = realProbes(rt.env);
+      const port = one(p, 'port');
+      const target = resolveDoctorTarget({
+        ...(one(p, 'data-dir') ? { dataDir: one(p, 'data-dir') } : {}),
+        ...(one(p, 'url') ? { url: one(p, 'url') } : {}),
+        ...(one(p, 'listen') ? { listen: one(p, 'listen') } : {}),
+        ...(port !== undefined ? { port: Number(port) } : {}),
+        ...(p.flags.get('workspace') ? { workspaces: p.flags.get('workspace') } : {}),
+        ...(one(p, 'claude-binary') ? { claudeBinaryPath: one(p, 'claude-binary') } : {}),
+      }, probes);
+      const results = await runChecks(probes, target);
+      const code = doctorExitCode(results, p.bools.has('strict'));
+      if (json) {
+        for (const r of results) io.out(JSON.stringify({ type: 'check', ...r }));
+        io.out(JSON.stringify({ type: 'summary', ...summarize(results), exitCode: code }));
+      } else {
+        for (const l of formatReport(results, DAEMON_VERSION)) io.out(l);
+      }
+      return code;
+    }
+    case 'install': {
+      const bundle = typeof __filename === 'string' && __filename.endsWith('.cjs') ? __filename : join(process.cwd(), 'dist/agent-threads.cjs');
+      const port = one(p, 'port');
+      runInstall({
+        dryRun: p.bools.has('dry-run'), noStart: p.bools.has('no-start'), force: p.bools.has('force'),
+        ...(one(p, 'workspace') ? { workspace: one(p, 'workspace') } : {}),
+        ...(port !== undefined ? { port: Number(port) } : {}),
+        node: process.execPath, bundle,
+      }, realInstallSys(), (l) => io.out(l));
+      return EXIT.OK;
+    }
+    default:
+      throw new CliError(`unknown command "${cmd}"`, EXIT.USAGE);
+  }
 }
