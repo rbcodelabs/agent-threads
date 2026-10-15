@@ -163,9 +163,20 @@ export type ControlEvent =
   | { name: 'session.state'; args: SessionStateArgs }
   /** Closes any request id: first resolver wins; others learn who. */
   | { name: 'request_resolved'; args: { requestId: string; by?: string; outcome?: 'resolved' | 'canceled' | 'expired'; alwaysAllow?: boolean } }
-  /** Daemon asks the attached host to run one of its tools (design 3.6). */
-  | { name: 'tool.call'; args: { callId: string; threadId: string; tool: string; input: Record<string, unknown> } }
-  | { name: 'tool.cancel'; args: { callId: string } };
+  /**
+   * Daemon asks the attached host to run one tool it offered in its manifest (design 3.6). `callId` is a daemon-owned
+   * UUID bound to this thread: only the thread's controlling client can answer it (`tool.result`). Journaled as an
+   * open request, so a client that reattaches while it is pending is shown it again.
+   */
+  | { name: 'tool.call'; args: { callId: string; threadId: string; server: string; tool: string; input: Record<string, unknown> } }
+  | { name: 'tool.cancel'; args: { callId: string } }
+  /**
+   * A host tool call failed because no host could serve it (detached past the grace period, or no answer in time).
+   * Journaled so a client that was away learns it afterwards and can tell the user; the model has already been told.
+   */
+  | { name: 'tool.unavailable'; args: { callId: string; server: string; tool: string; reason: 'detached' | 'timeout' } }
+  /** The session's working directory changed (worktree tools ran on the daemon); the client mirrors it. */
+  | { name: 'session.cwd'; args: { cwd: string; originRepoPath?: string | null } };
 
 /** Everything that can ride in an `event` frame. */
 export type WireEvent = DerivedEvent | OverrideEvent | ControlEvent;

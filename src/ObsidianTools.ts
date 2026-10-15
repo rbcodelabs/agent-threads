@@ -194,6 +194,11 @@ export interface ObsidianMcpServerOptions {
    */
   onSetCwd?: (path: string, originRepoPath?: string | null) => void;
   /**
+   * Refuses a working directory before it is adopted (throws with the reason). Absent on the plugin; a daemon
+   * sets it so `set_working_directory` / `enter_worktree` cannot move a session outside its workspaces.
+   */
+  validateCwd?: (path: string) => void;
+  /**
    * Called when the agent schedules a wakeup. delayMs is the delay in milliseconds.
    * Backed by a durable one-shot Scheduler item (survives plugin reload/restart/sleep,
    * same as the Cron tools) — awaited so the tool call doesn't resolve "success" before

@@ -7,6 +7,7 @@
 export * from './relayTypes';
 export * from './sessionEvents';
 export * from './spec';
+export * from './hostTools';
 export * from './commands';
 export * from './envelope';
 export * from './journal';

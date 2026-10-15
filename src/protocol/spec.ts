@@ -7,6 +7,7 @@
  */
 import type { HarnessMcpServerConfig, HarnessPermissionMode, HarnessSessionOptions } from '../HarnessSession';
 import type { AgentHarness } from '../types';
+import { validateHostToolSpecs } from './hostTools';
 
 /** A host tool the daemon proxies back to the attached client (name + schema only, no handler). */
 export interface RemoteHostToolSpec {
@@ -48,6 +49,10 @@ export interface RemoteSessionSpec {
     persistSession?: boolean;
     agents?: Record<string, unknown>;
   };
+  /**
+   * Host tools the client offers at open (flat; same entries as `tool.manifest`, which replaces them as the client's
+   * tools change). Names and schemas only: the daemon proxies calls back to the client, nothing is executed from here.
+   */
   hostTools?: RemoteHostToolSpec[];
   mcpServers?: Record<string, RemoteMcpServerConfig>;
   /** SkillSource ids, never paths: the daemon resolves its own checkouts. */
@@ -131,10 +136,8 @@ export function validateSpecShape(spec: unknown): string | null {
     }
   }
 
-  if (spec.hostTools !== undefined) {
-    if (!Array.isArray(spec.hostTools) || spec.hostTools.length > 500) return 'spec.hostTools must be an array (at most 500)';
-    for (const t of spec.hostTools) if (!isPlainObject(t) || typeof t.name !== 'string') return 'spec.hostTools entries must be objects with a string name';
-  }
+  problem = validateHostToolSpecs(spec.hostTools, 'spec.hostTools');
+  if (problem) return problem;
 
   if (spec.mcpServers !== undefined) {
     if (!isPlainObject(spec.mcpServers)) return 'spec.mcpServers must be an object';

@@ -27,12 +27,26 @@ export function sameClient(a: Controller, b: Controller): boolean {
 
 export class ControlRegistry {
   private readonly owners = new Map<string, Controller>();
+  private readonly listeners = new Set<(threadId: string, owner: Controller | undefined) => void>();
+
+  /** Told whenever a thread gains, changes or loses its read-write client (the host-tool broker's "is Geode attached"). */
+  onChange(listener: (threadId: string, owner: Controller | undefined) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  private changed(threadId: string, owner: Controller | undefined): void {
+    for (const l of [...this.listeners]) {
+      try { l(threadId, owner); } catch (err) { console.error('[daemon] control listener failed:', err); }
+    }
+  }
 
   /** @returns true if `who` now holds (or already held) the seat. */
   claim(threadId: string, who: Controller): boolean {
     const cur = this.owners.get(threadId);
     if (cur && cur.id !== who.id && !sameClient(cur, who)) return false;
     this.owners.set(threadId, who);
+    if (!cur || cur.id !== who.id) this.changed(threadId, who);
     return true;
   }
 
@@ -45,10 +59,17 @@ export class ControlRegistry {
   }
 
   release(threadId: string, connectionId: number): void {
-    if (this.owners.get(threadId)?.id === connectionId) this.owners.delete(threadId);
+    if (this.owners.get(threadId)?.id === connectionId) {
+      this.owners.delete(threadId);
+      this.changed(threadId, undefined);
+    }
   }
 
   releaseAll(connectionId: number): void {
-    for (const [threadId, c] of this.owners) if (c.id === connectionId) this.owners.delete(threadId);
+    for (const [threadId, c] of [...this.owners]) {
+      if (c.id !== connectionId) continue;
+      this.owners.delete(threadId);
+      this.changed(threadId, undefined);
+    }
   }
 }

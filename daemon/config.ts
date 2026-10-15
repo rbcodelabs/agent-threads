@@ -50,6 +50,18 @@ export interface DaemonConfig {
    * NODE_EXTRA_CA_CERTS, BASH_ENV or GIT_SSH_COMMAND can redirect or subvert the agent's traffic and commands.
    */
   allowedClientEnv: string[];
+  /**
+   * How long a proxied host-tool call waits for the user's Geode to (re)connect before it fails with a
+   * model-readable error. The turn is never held longer than this plus `hostToolTimeoutSec`.
+   */
+  hostToolGraceSec: number;
+  /** How long an attached Geode may take to answer one proxied host-tool call before it is failed. */
+  hostToolTimeoutSec: number;
+  /**
+   * Directory `enter_worktree` creates worktrees under (a daemon path, so it must be inside a workspace for the
+   * session to resume there). Default: `.worktrees` inside the first read-write workspace.
+   */
+  worktreeRoot?: string;
 }
 
 export type HarnessKind = 'claude' | 'fake';
@@ -62,6 +74,8 @@ export const DEFAULT_JOURNAL_MAX_MB = 64;
 export const DEFAULT_MAX_CONNECTIONS = 64;
 export const DEFAULT_MAX_LIVE_SESSIONS = 8;
 export const DEFAULT_REQUEST_TIMEOUT_MINUTES = 60;
+export const DEFAULT_HOST_TOOL_GRACE_SEC = 60;
+export const DEFAULT_HOST_TOOL_TIMEOUT_SEC = 300;
 
 export interface ConfigInputs {
   flags?: Partial<{
@@ -69,6 +83,7 @@ export interface ConfigInputs {
     harness: HarnessKind; workspaces: string[]; readOnlyWorkspaces: string[]; allowBypass: boolean; maxConcurrentTurns: number;
     idleReapMinutes: number; claudeBinaryPath: string; journalTtlDays: number; journalMaxMb: number;
     maxConnections: number; maxLiveSessions: number; requestTimeoutMinutes: number; allowedClientEnv: string[];
+    hostToolGraceSec: number; hostToolTimeoutSec: number; worktreeRoot: string;
   }>;
   env?: NodeJS.ProcessEnv;
 }
@@ -101,6 +116,9 @@ interface ConfigFile {
   maxLiveSessions?: number;
   requestTimeoutMinutes?: number;
   allowedClientEnv?: string[];
+  hostToolGraceSec?: number;
+  hostToolTimeoutSec?: number;
+  worktreeRoot?: string;
 }
 
 /** `~` and `~/x` mean the daemon user's home; everything else must already be absolute. */
@@ -184,6 +202,9 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
   const harness = flags.harness ?? (env.AGENT_THREADS_HARNESS as HarnessKind | undefined) ?? 'claude';
   if (harness !== 'claude' && harness !== 'fake') throw new Error(`invalid harness: ${String(harness)}`);
   const envInt = (v: string | undefined) => (v !== undefined && v !== '' ? Number(v) : undefined);
+  const worktreeRootRaw = flags.worktreeRoot ?? (env.AGENT_THREADS_WORKTREE_ROOT || undefined) ?? file.worktreeRoot;
+  const worktreeRoot = worktreeRootRaw ? resolve(expandHome(worktreeRootRaw)) : undefined;
+  if (worktreeRoot && !isAbsolute(worktreeRoot)) throw new Error(`worktreeRoot "${worktreeRoot}" must be an absolute path`);
   const claudeBinaryPath = flags.claudeBinaryPath ?? (env.AGENT_THREADS_CLAUDE_BINARY || undefined) ?? file.claudeBinaryPath;
   return {
     dataDir,
@@ -203,6 +224,9 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     maxLiveSessions: positiveInt('maxLiveSessions', flags.maxLiveSessions ?? envInt(env.AGENT_THREADS_MAX_LIVE_SESSIONS) ?? file.maxLiveSessions ?? DEFAULT_MAX_LIVE_SESSIONS, 1),
     requestTimeoutMinutes: positiveInt('requestTimeoutMinutes', flags.requestTimeoutMinutes ?? envInt(env.AGENT_THREADS_REQUEST_TIMEOUT_MINUTES) ?? file.requestTimeoutMinutes ?? DEFAULT_REQUEST_TIMEOUT_MINUTES, 0),
     allowedClientEnv: allowedClientEnv(flags.allowedClientEnv ?? envList(env.AGENT_THREADS_ALLOWED_CLIENT_ENV) ?? file.allowedClientEnv ?? []),
+    hostToolGraceSec: positiveInt('hostToolGraceSec', flags.hostToolGraceSec ?? envInt(env.AGENT_THREADS_HOST_TOOL_GRACE_SEC) ?? file.hostToolGraceSec ?? DEFAULT_HOST_TOOL_GRACE_SEC, 0),
+    hostToolTimeoutSec: positiveInt('hostToolTimeoutSec', flags.hostToolTimeoutSec ?? envInt(env.AGENT_THREADS_HOST_TOOL_TIMEOUT_SEC) ?? file.hostToolTimeoutSec ?? DEFAULT_HOST_TOOL_TIMEOUT_SEC, 1),
+    ...(worktreeRoot ? { worktreeRoot } : {}),
     ...(claudeBinaryPath ? { claudeBinaryPath } : {}),
   };
 }

@@ -20,7 +20,7 @@ export interface WorktreeToolsPort {
   cwd: CwdTracker;
   /** Told when the session moves into or out of a worktree (the plugin fans it out to peers); must not throw into the tool. */
   onWorktreeChanged?: (payload: Record<string, unknown>) => void;
-  options: Pick<ObsidianMcpServerOptions, 'getWorktreeRoot' | 'onSetCwd'>;
+  options: Pick<ObsidianMcpServerOptions, 'getWorktreeRoot' | 'onSetCwd' | 'validateCwd'>;
 }
 
 
@@ -55,6 +55,7 @@ export function createWorktreeTools(port: WorktreeToolsPort): Record<string, Too
 
         // Update both the persisted cwd (for next session) and the in-session
         // effective cwd (used immediately by obsidian_enter_worktree).
+        options.validateCwd?.(resolved);
         cwd.set(resolved);
         options.onSetCwd?.(resolved);
 
@@ -137,6 +138,7 @@ export function createWorktreeTools(port: WorktreeToolsPort): Record<string, Too
         if (fs.existsSync(rawWorktreePath)) {
           rawWorktreePath = `${rawWorktreePath}-${crypto.randomUUID().slice(0, 8)}`;
         }
+        options.validateCwd?.(rawWorktreePath);
         fs.mkdirSync(path.dirname(rawWorktreePath), { recursive: true });
 
         // git worktree add <path> -b <branch> [<base>]
