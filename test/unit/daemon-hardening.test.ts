@@ -53,12 +53,12 @@ describe('codec: images and spec (finding C)', () => {
   it('validates the shape of a spec', () => {
     const spec = { harness: 'claude', cwd: '/x', permissionMode: 'default', extraEnvRaw: '' };
     expect(validateSpecShape(spec)).toBeNull();
-    expect(validateSpecShape({ ...spec, sessionOptions: { effort: 'low', betas: ['b'], agents: { a: {} } }, mcpServers: { d: { type: 'http', url: 'https://x', headers: { a: 'b' } } }, hostTools: [{ name: 'n' }], skills: ['s'] })).toBeNull();
+    expect(validateSpecShape({ ...spec, sessionOptions: { effort: 'low', betas: ['b'], agents: { a: {} } }, mcpServers: { d: { type: 'http', url: 'https://x', headers: { a: 'b' } } }, hostTools: [{ name: 'n', server: 's', description: 'd', inputSchema: {}, requiresApproval: false }], skills: ['s'] })).toBeNull();
     for (const bad of [null, 'x', [], { ...spec, harness: 1 }, { ...spec, cwd: '' }, { ...spec, permissionMode: null },
       { ...spec, model: 3 }, { ...spec, disallowedTools: 'x' }, { ...spec, disallowedTools: [1] }, { ...spec, additionalDirectories: [null] },
       { ...spec, sessionOptions: 'x' }, { ...spec, sessionOptions: { betas: [1] } }, { ...spec, sessionOptions: { agents: { a: null } } },
       { ...spec, mcpServers: { a: null } }, { ...spec, mcpServers: { a: { type: 'stdio', url: 'x' } } }, { ...spec, mcpServers: { a: { type: 'http', url: 'x', headers: { a: 1 } } } },
-      { ...spec, hostTools: [null] }, { ...spec, appendSystemPrompt: 'x'.repeat(1_000_001) }]) {
+      { ...spec, hostTools: [null] }, { ...spec, hostTools: [{ name: 'n' }] }, { ...spec, appendSystemPrompt: 'x'.repeat(1_000_001) }]) {
       expect(validateSpecShape(bad), JSON.stringify(bad)?.slice(0, 80)).not.toBeNull();
     }
   });

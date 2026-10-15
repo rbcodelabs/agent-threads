@@ -7,7 +7,9 @@
     "src/OpenCodeSession.ts",
     "src/Scheduler.ts",
     "src/HarnessFactory.ts",
-    "src/protocol/index.ts"
+    "src/protocol/index.ts",
+    "src/toolRouting.ts",
+    "src/tools/worktree.ts"
   ],
   "files": [
     "src/AgentProfiles.ts",
@@ -49,6 +51,7 @@
     "src/protocol/codec.ts",
     "src/protocol/commands.ts",
     "src/protocol/envelope.ts",
+    "src/protocol/hostTools.ts",
     "src/protocol/index.ts",
     "src/protocol/journal.ts",
     "src/protocol/journalPolicy.ts",
@@ -74,6 +77,9 @@
     "src/statusLine.ts",
     "src/toolNameUtils.ts",
     "src/toolRestrictions.ts",
+    "src/toolRouting.ts",
+    "src/tools/toolNames.ts",
+    "src/tools/worktree.ts",
     "src/trailingSlashes.ts",
     "src/transportErrorRecovery.ts",
     "src/types.ts",

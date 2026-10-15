@@ -14,11 +14,12 @@
  *   omitted      callbacks, secretEnv, containerAuthToken, claude.mcpServers / vmMcpServers /
  *                vm, codex, opencode
  *
- * Host tools, proxied MCP servers, skills and the secret allowlist arrive in
- * PR 7 and PR 9; until then a remote thread has the daemon's native tools only.
+ * Host tools (`hostTools`) are added by the session once it has built the manifest; the http/sse external MCP servers
+ * that survive `mcpPartition.ts` ride in `mcpServers`. Skills and the secret allowlist arrive in PR 9.
  */
 import type { HarnessSessionOptions } from '../HarnessSession';
-import type { RemoteSessionSpec } from '../protocol';
+import type { RemoteMcpServerConfig, RemoteSessionSpec } from '../protocol';
+import { describeHostToolsForPrompt, type HostToolsSummary } from './hostTools';
 import type { RemoteVaultMapping, Thread } from '../types';
 import { isUnderRemoteRoot, normalizePosixPath, relativeWithin } from './vaultMapping';
 
@@ -40,6 +41,15 @@ export function projectSessionOptions(options: HarnessSessionOptions, thread: Th
   // Both lists are deny rules, so sending the union can only make the remote session stricter.
   const disallowed = [...new Set([...(options.claude?.disallowedTools ?? []), ...(options.disallowedTools ?? [])])];
 
+  // Only http/sse servers the caller already vetted (mcpPartition.ts) can mean anything on another machine.
+  const mcpServers: Record<string, RemoteMcpServerConfig> = {};
+  for (const [name, server] of Object.entries(options.claude?.mcpServers ?? {})) {
+    const s = server as { type?: string; url?: unknown; headers?: unknown };
+    if ((s.type === 'http' || s.type === 'sse') && typeof s.url === 'string') {
+      mcpServers[name] = { type: s.type, url: s.url, ...(s.headers ? { headers: s.headers as Record<string, string> } : {}) };
+    }
+  }
+
   return {
     // Only the Claude harness runs on the daemon today (the fake harness ignores it).
     harness: 'claude',
@@ -53,6 +63,7 @@ export function projectSessionOptions(options: HarnessSessionOptions, thread: Th
     ...(thread.goal ? { goal: thread.goal } : {}),
     extraEnvRaw: '',
     ...(Object.keys(sessionOptions).length > 0 ? { sessionOptions } : {}),
+    ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
   };
 }
 
@@ -78,6 +89,8 @@ export function buildRemoteEnvironmentPrompt(
   daemonName: string,
   hostName: 'Geode' | 'Obsidian' = 'Obsidian',
   vault?: RemoteVaultContext,
+  /** `hostTools: true` leaves a placeholder for the tools paragraph; the session fills it once it knows what is offered. */
+  options: { hostTools?: boolean } = {},
 ): string {
   const lines = [
     `You are running on the remote machine "${daemonName}", driven from the ${hostName} Agent Threads plugin on the user's computer.`,
@@ -85,11 +98,25 @@ export function buildRemoteEnvironmentPrompt(
     `Working directory: ${cwd}`,
     '',
     'Notes:',
-    '- You only have this machine\'s own tools (shell, file read/write, search). The user\'s vault and editor tools (vault_*, host_*, workspace_*) are not available in this session.',
+    ...(options.hostTools
+      ? [HOST_TOOLS_PLACEHOLDER]
+      : ['- You only have this machine\'s own tools (shell, file read/write, search). The user\'s vault and editor tools (vault_*, host_*, workspace_*) are not available in this session.']),
     '- All paths are paths on this remote machine.',
   ];
   const addendum = vault && isUnderRemoteRoot(vault.mapping, cwd) ? buildRemoteVaultAddendum(cwd, vault) : [];
   return [...lines, ...addendum].join('\n');
+}
+
+/** Where the host-tools paragraph goes in the remote environment prompt; replaced by `applyHostToolsPrompt`. */
+export const HOST_TOOLS_PLACEHOLDER = '{{HOST_TOOLS}}';
+
+/**
+ * Fill in (or fall back from) the host-tools paragraph once the manifest is known. `summary` null means this
+ * thread has no host tools, which is also what an older plugin build said unconditionally.
+ */
+export function applyHostToolsPrompt(prompt: string, summary: HostToolsSummary | null, hostName: string): string {
+  if (!prompt.includes(HOST_TOOLS_PLACEHOLDER)) return prompt;
+  return prompt.replace(HOST_TOOLS_PLACEHOLDER, describeHostToolsForPrompt(summary, hostName).join('\n'));
 }
 
 /** Lines appended to the remote environment prompt for a session working in the mirrored vault. */

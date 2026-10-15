@@ -709,5 +709,13 @@ export function toHarnessDynamicTools(
         return { success: false, text: error instanceof Error ? error.message : String(error) };
       }
     },
+    async invokeContent(args: Record<string, unknown>) {
+      try {
+        const result = await toolDefinition.handler(args as never, {});
+        return { success: !result.isError, content: result.content as Array<Record<string, unknown>> };
+      } catch (error) {
+        return { success: false, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] };
+      }
+    },
   }));
 }

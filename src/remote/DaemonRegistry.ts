@@ -6,7 +6,7 @@
  * use and rebuilt when its URL or token secret name changes; a token VALUE
  * change is picked up at the next reconnect because `getToken` is read then.
  */
-import type { RemoteDaemonConfig, RemoteVaultMapping } from '../types';
+import type { RemoteDaemonConfig, RemoteHostToolsSettings, RemoteVaultMapping } from '../types';
 import { DaemonClient, daemonWsUrl, type ConnectionState, type WebSocketFactory } from './DaemonClient';
 
 /** What `HarnessFactory` / `ThreadManager` need; implemented by `DaemonRegistry`. */
@@ -16,6 +16,8 @@ export interface RemoteDaemonResolver {
   nameOf(daemonId: string): string;
   /** Where the vault is mirrored on that daemon, if configured. */
   vaultMappingOf?(daemonId: string): RemoteVaultMapping | undefined;
+  /** What the daemon may do on this computer (host tools, MCP allowlist); undefined = defaults. */
+  hostToolsOf?(daemonId: string): RemoteHostToolsSettings | undefined;
 }
 
 export interface DaemonRegistryOptions {
@@ -52,6 +54,10 @@ export class DaemonRegistry implements RemoteDaemonResolver {
 
   vaultMappingOf(daemonId: string): RemoteVaultMapping | undefined {
     return this.config(daemonId)?.vaultMapping;
+  }
+
+  hostToolsOf(daemonId: string): RemoteHostToolsSettings | undefined {
+    return this.config(daemonId)?.hostTools;
   }
 
   clientFor(daemonId: string): DaemonClient | undefined {

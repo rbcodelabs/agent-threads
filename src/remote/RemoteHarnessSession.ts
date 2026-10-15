@@ -30,6 +30,8 @@ import type {
 import {
   CALLBACK_DISPOSITION,
   OVERRIDES,
+  manifestSignature,
+  specsFromManifest,
   type EventFrame,
   type RemoteSessionSpec,
   type ResyncFrame,
@@ -39,7 +41,9 @@ import {
 import type { ImageAttachment, Thread, ThreadRemote } from '../types';
 import type { UsageSnapshot } from '../Usage';
 import { DaemonCommandError, type ChannelSubscription, type DaemonClient } from './DaemonClient';
-import { projectSessionOptions } from './sessionSpec';
+import { applyHostToolsPrompt, projectSessionOptions } from './sessionSpec';
+import type { HostManifest, RemoteHostTools } from './hostTools';
+import { HostToolExecutor, HostToolSlots } from './hostToolExecutor';
 
 type Dict = Record<string, unknown>;
 
@@ -59,6 +63,21 @@ export interface RemoteSessionDeps {
   runAtTime?: <T>(ts: number, fn: () => T) => T;
   /** Waits (ms) between attempts when the daemon answers a send with a retryable `conflict` (default 1 s doubling to 30 s). */
   retryDelaysMs?: readonly number[];
+  /**
+   * The tools of this computer the daemon may call for this thread (vault, workspace, threads, Google, ...).
+   * Absent = the thread has the daemon's own tools only.
+   */
+  hostTools?: RemoteHostTools;
+  /** Calls in flight across every remote thread; shared so a busy daemon cannot starve the plugin. */
+  hostToolSlots?: HostToolSlots;
+  /** A persisted inline row in the transcript (host tools unavailable, dropped servers). */
+  onNotice?: (status: 'completed' | 'failed' | 'stopped', text: string) => void;
+  /** A worktree tool moved the session's folder on the daemon; mirror it on the thread. */
+  onCwdChanged?: (cwd: string, originRepoPath?: string | null) => void;
+  /** Name of this computer's host app for user-facing text. */
+  hostName?: string;
+  /** How long a replayed tool call waits for its closing event before it runs (default 300 ms). */
+  replayedCallSettleMs?: number;
 }
 
 /** The daemon was momentarily full (retryable `conflict`): try again after these waits, then give up. */
@@ -107,6 +126,14 @@ export class RemoteHarnessSession implements HarnessSession {
   private observerNoticeShown = false;
   /** A send waiting out a retryable `conflict`; cleared by interrupt/close. */
   private sendRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The manifest THIS client sent: the only thing a `tool.call` may name. */
+  private sentManifest: HostManifest | null = null;
+  private manifestSent = '';
+  private executor: HostToolExecutor | null = null;
+  /** Replayed (historic) tool calls wait here for a closing event before running, so a finished call never re-runs. */
+  private deferredCalls = new Map<string, unknown>();
+  private deferredTimer: ReturnType<typeof setTimeout> | null = null;
+  private unavailableNoticeShown = false;
 
   constructor(
     private readonly client: DaemonClient,
@@ -142,6 +169,10 @@ export class RemoteHarnessSession implements HarnessSession {
     this.startedCwd = options.cwd;
     this.spec = projectSessionOptions(options, this.thread);
     this.resume = options.resume;
+    await this.prepareHostTools();
+    if (this.spec.appendSystemPrompt) {
+      this.spec = { ...this.spec, appendSystemPrompt: applyHostToolsPrompt(this.spec.appendSystemPrompt, this.sentManifest && Object.keys(this.sentManifest).length ? this.deps.hostTools?.summary ?? null : null, this.deps.hostName ?? 'Geode') };
+    }
     if (mode.attachOnly) {
       // A turn was running when the host quit: show it as running until the replay says otherwise.
       if (this.remote.turnPending) this.sendAwaitingState = true;
@@ -151,6 +182,52 @@ export class RemoteHarnessSession implements HarnessSession {
     await this.ensureOpen();
     if (this.closed) return;
     this.follow();
+  }
+
+  // ── host tools ───────────────────────────────────────────────────────────
+
+  /** Build the manifest, attach it to the spec, and set up the gate that every `tool.call` goes through. */
+  private async prepareHostTools(): Promise<void> {
+    const tools = this.deps.hostTools;
+    if (!tools || !this.spec) return;
+    try {
+      const manifest = await tools.manifest();
+      this.sentManifest = manifest;
+      const flat = specsFromManifest(manifest);
+      if (flat.length > 0) this.spec = { ...this.spec, hostTools: flat };
+      const skipped = tools.summary.skipped;
+      if (skipped.length > 0) this.log(`host tools not offered: ${skipped.map((x) => `${x.server} (${x.reason})`).join('; ')}`);
+    } catch (err) {
+      this.log(`could not build the host tool manifest: ${errText(err)}`);
+      this.sentManifest = {};
+    }
+    this.executor = new HostToolExecutor({
+      manifest: () => this.sentManifest,
+      invoke: (server, tool, input, signal) => tools.invoke(server, tool, input, signal),
+      requestPermission: (name, detail) => (this.callbacks ? this.callbacks.onPermissionRequest(name, detail) : Promise.resolve(false)),
+      sendResult: async (callId, result) => {
+        await this.client.command('tool.result', { threadId: this.threadId, callId, success: result.success, text: result.text, ...(result.content?.length ? { content: result.content } : {}) });
+      },
+      slots: this.deps.hostToolSlots ?? new HostToolSlots(),
+      log: (m) => this.log(m),
+    });
+    this.manifestSent = this.sentManifest ? manifestSignature(this.sentManifest) : '';
+  }
+
+  /** Tell the daemon the current manifest if it changed (on open, on every attach, before each turn). */
+  private async syncManifest(force = false): Promise<void> {
+    const tools = this.deps.hostTools;
+    if (!tools || this.closed || !this.client.daemonInfo?.capabilities.includes('host.tools')) return;
+    try {
+      const manifest = await tools.manifest();
+      const sig = manifestSignature(manifest);
+      if (!force && sig === this.manifestSent) return;
+      this.sentManifest = manifest;
+      await this.client.command('tool.manifest', { threadId: this.threadId, servers: manifest });
+      this.manifestSent = sig;
+    } catch (err) {
+      this.log(`tool.manifest failed: ${errText(err)}`);
+    }
   }
 
   private resume: string | undefined;
@@ -165,6 +242,8 @@ export class RemoteHarnessSession implements HarnessSession {
         this.opened = true;
         if (typeof res.epoch === 'string') this.remote.epoch = res.epoch;
         if (typeof res.nativeSessionId === 'string') this.remote.nativeSessionId = res.nativeSessionId;
+        // session.open carried the manifest; send it again explicitly so the daemon's copy is current.
+        void this.syncManifest(true);
       })
       .finally(() => { this.opening = null; });
     return this.opening;
@@ -180,6 +259,7 @@ export class RemoteHarnessSession implements HarnessSession {
         onRewind: (seq) => this.onRewind(seq),
         onAttached: (info) => {
           this.remote.epoch = info.epoch;
+          if (info.controller) void this.syncManifest(true);
           if (!info.controller && !this.observerNoticeShown) {
             this.observerNoticeShown = true;
             this.callbacks?.onNotification?.('This thread is controlled by another client; you are viewing it read-only.', 'high');
@@ -214,6 +294,9 @@ export class RemoteHarnessSession implements HarnessSession {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.executor?.abortAll();
+    this.clearDeferred();
+    this.deps.hostTools?.dispose();
     this.sub?.close();
     this.sub = null;
     this.cancelLocalRequests();
@@ -231,6 +314,9 @@ export class RemoteHarnessSession implements HarnessSession {
     if (this.closed) return;
     this.closed = true;
     const attached = this.sub !== null;
+    this.executor?.abortAll();
+    this.clearDeferred();
+    this.deps.hostTools?.dispose();
     this.sub?.close();
     this.sub = null;
     this.cancelLocalRequests();
@@ -274,6 +360,7 @@ export class RemoteHarnessSession implements HarnessSession {
   }
 
   private dispatchSend(item: QueuedSend): void {
+    void this.syncManifest(); // tools may have changed since the last turn (a broker connected, a setting flipped)
     this.sendAwaitingState = true;
     this.syncPending();
     this.attemptSend(item, 0);
@@ -386,7 +473,7 @@ export class RemoteHarnessSession implements HarnessSession {
     }
     // Backlog keeps its original time; a live event is stamped with this machine's clock (the
     // daemon's clock may differ, and "now" is accurate for something that just happened).
-    this.atEventTime(replay && !reopen ? frame.ts : undefined, () => this.dispatch(frame, reopen));
+    this.atEventTime(replay && !reopen ? frame.ts : undefined, () => this.dispatch(frame, reopen, replay));
     if (!reopen) {
       this.settleSendFlag(frame);
       this.syncPending();
@@ -403,6 +490,7 @@ export class RemoteHarnessSession implements HarnessSession {
       this.streamOpenFrom ??= frame.seq - 1;
     } else if (frame.name === 'onMessage' || frame.name === 'onDone' || frame.name === 'onInterrupted' || frame.name === 'onError') {
       this.streamOpenFrom = null;
+      if (frame.name !== 'onMessage') this.unavailableNoticeShown = false;
     }
   }
 
@@ -428,7 +516,7 @@ export class RemoteHarnessSession implements HarnessSession {
     }
   }
 
-  private dispatch(frame: EventFrame, reopen: boolean): void {
+  private dispatch(frame: EventFrame, reopen: boolean, replay = false): void {
     const cb = this.callbacks;
     if (!cb) return;
     const args = frame.args as unknown;
@@ -438,6 +526,7 @@ export class RemoteHarnessSession implements HarnessSession {
           this.onState(args as SessionStateArgs);
           return;
         case 'request_resolved':
+          this.deferredCalls.delete((args as { requestId?: string }).requestId ?? '');
           this.onRequestResolved(args as { requestId: string; outcome?: string });
           return;
         case OVERRIDES.onPermissionRequest.event:
@@ -455,10 +544,23 @@ export class RemoteHarnessSession implements HarnessSession {
         case OVERRIDES.onOpenNewTab.event:
           return; // the daemon refuses OpenNewTab before it is ever journaled
         case 'tool.call':
-        case 'tool.cancel':
-          // Host-tool proxying is PR 7; a daemon that sends one before then gets no answer.
-          this.log(`ignoring ${frame.name} (host tools are not proxied yet)`);
+          this.onToolCall(args, reopen, replay);
           return;
+        case 'tool.cancel':
+          this.deferredCalls.delete((args as { callId?: string }).callId ?? '');
+          this.executor?.handleCancel((args as { callId?: unknown }).callId);
+          return;
+        case 'tool.unavailable':
+          this.onToolUnavailable(args as { server?: string; tool?: string; reason?: string });
+          return;
+        case 'session.cwd': {
+          const a = args as { cwd?: unknown; originRepoPath?: unknown };
+          if (typeof a.cwd === 'string' && a.cwd) {
+            this.startedCwd = a.cwd;
+            this.deps.onCwdChanged?.(a.cwd, typeof a.originRepoPath === 'string' || a.originRepoPath === null ? a.originRepoPath : undefined);
+          }
+          return;
+        }
         default: {
           if (!isEventCallbackName(frame.name)) {
             this.log(`ignoring event "${String(frame.name).slice(0, 60)}": not a session event`);
@@ -474,6 +576,47 @@ export class RemoteHarnessSession implements HarnessSession {
     } catch (err) {
       this.log(`callback ${frame.name}${reopen ? ' (reopen)' : ''} threw: ${errText(err)}`);
     }
+  }
+
+  /**
+   * A `tool.call`. Live and reopened calls run at once. A call replayed from history waits briefly for its closing
+   * event (`request_resolved` / `tool.cancel`) so a call that already finished is not run a second time.
+   */
+  private onToolCall(args: unknown, reopen: boolean, replay: boolean): void {
+    if (!this.executor) { this.log('ignoring tool.call: host tools are off for this thread'); return; }
+    const id = (args as { callId?: unknown } | null)?.callId;
+    if (replay && !reopen && typeof id === 'string') {
+      this.deferredCalls.set(id, args);
+      if (this.deferredTimer) clearTimeout(this.deferredTimer);
+      this.deferredTimer = setTimeout(() => this.flushDeferred(), this.deps.replayedCallSettleMs ?? 300);
+      return;
+    }
+    this.executor.handleCall(args, reopen);
+  }
+
+  private flushDeferred(): void {
+    this.deferredTimer = null;
+    const calls = [...this.deferredCalls.values()];
+    this.deferredCalls.clear();
+    for (const c of calls) this.executor?.handleCall(c, true);
+  }
+
+  private clearDeferred(): void {
+    if (this.deferredTimer) clearTimeout(this.deferredTimer);
+    this.deferredTimer = null;
+    this.deferredCalls.clear();
+  }
+
+  /** A host tool call failed because no host could serve it: one inline notice per turn. */
+  private onToolUnavailable(a: { server?: string; tool?: string; reason?: string }): void {
+    if (this.unavailableNoticeShown) return;
+    this.unavailableNoticeShown = true;
+    const host = this.deps.hostName ?? 'Geode';
+    const what = a.server && a.tool ? `${a.server}/${a.tool}` : 'a host tool';
+    const text = a.reason === 'timeout'
+      ? `Host tools unavailable: ${what} did not answer in time, so the remote agent carried on without it.`
+      : `Host tools unavailable: ${what} needs ${host}, which was not connected, so the remote agent carried on without it. Open ${host} on this computer and ask again.`;
+    this.deps.onNotice?.('failed', text);
   }
 
   private onState(next: SessionStateArgs): void {
@@ -517,7 +660,10 @@ export class RemoteHarnessSession implements HarnessSession {
     if (this.requests.has(a.requestId)) return; // reopen of a prompt that is still showing
     this.requests.set(a.requestId, { kind: 'permission' });
     cb.onPermissionRequest(a.toolName, a.detail).then(
-      (allow) => this.respond('resolve.permission', a.requestId, { allow: allow === true }),
+      (allow) => {
+        if (allow === true) this.executor?.recordApproval(a.toolName);
+        this.respond('resolve.permission', a.requestId, { allow: allow === true });
+      },
       () => this.respond('resolve.permission', a.requestId, { allow: false }),
     );
   }

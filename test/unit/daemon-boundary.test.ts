@@ -13,7 +13,10 @@ const root = resolve(__dirname, '../..');
 const DAEMON_ENTRY = 'daemon/main.ts';
 // ws: the transport. @anthropic-ai/claude-agent-sdk: the daemon hosts real ThreadSession, which drives it; it is
 // already bundled by the plugin (esbuild.config.mjs) and by the daemon (esbuild.daemon.mjs).
-const ALLOWED_PACKAGES = new Set(['ws', '@anthropic-ai/claude-agent-sdk']);
+// zod + @modelcontextprotocol/sdk: the host-tool MCP servers (daemon/hostMcpServer.ts) and the worktree tool schemas;
+// the SDK's /browser entry provides `tool()` for those same definitions (the plugin uses the same entry).
+const ALLOWED_PACKAGES = new Set(['ws', '@anthropic-ai/claude-agent-sdk', '@anthropic-ai/claude-agent-sdk/browser', 'zod']);
+const allowedPackage = (e: string): boolean => ALLOWED_PACKAGES.has(e) || e.startsWith('@modelcontextprotocol/sdk/');
 const NODE_BUILTINS = new Set(builtinModules.map((m) => m.replace(/^node:/, '')));
 
 describe('daemon boundary', () => {
@@ -30,7 +33,7 @@ describe('daemon boundary', () => {
   });
 
   it('uses only Node builtins and the allowlisted packages', () => {
-    const unexpected = closure.externals.filter((e) => !NODE_BUILTINS.has(e) && !ALLOWED_PACKAGES.has(e));
+    const unexpected = closure.externals.filter((e) => !NODE_BUILTINS.has(e) && !allowedPackage(e));
     expect(unexpected).toEqual([]);
   });
 
