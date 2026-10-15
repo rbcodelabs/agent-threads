@@ -6,7 +6,7 @@
  * client cannot choose the agent's environment: `extraEnvRaw` is ignored unless
  * the operator lists the variable names a client may set (`allowedClientEnv`).
  */
-import { realpathSync, statSync } from 'node:fs';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { RemoteSessionSpec } from '../src/protocol';
 
@@ -50,7 +50,13 @@ export function realpathLoose(p: string): string {
   const tail: string[] = [];
   let cur = abs;
   for (;;) {
-    try { return join(realpathSync(cur), ...tail.reverse()); } catch { /* keep climbing */ }
+    try { return join(realpathSync(cur), ...tail.reverse()); } catch { /* keep climbing, but only past components that really do not exist */ }
+    // A component that exists (lstat works) yet cannot be resolved is a dangling symlink, a loop or an unreadable
+    // directory. Climbing past it would judge the path by its parent and let a link to a not-yet-created location
+    // outside the workspace (mkdir later makes it real) stand for a path inside it.
+    let exists = true;
+    try { lstatSync(cur); } catch (err) { exists = (err as NodeJS.ErrnoException).code !== 'ENOENT' && (err as NodeJS.ErrnoException).code !== 'ENOTDIR'; }
+    if (exists) throw new Error(`cannot resolve ${cur}: a dangling symlink, a loop or an unreadable folder`);
     const parent = dirname(cur);
     if (parent === cur) return abs;
     tail.push(basename(cur));
@@ -138,7 +144,8 @@ export function describePathAccess(path: string, policy: SessionPolicy): PathAcc
   let real: string;
   try { real = realpathSync(resolved); } catch {
     // Missing: it may still be inside a workspace (a useful answer), judged lexically.
-    const loose = realpathLoose(resolved);
+    let loose: string;
+    try { loose = realpathLoose(resolved); } catch { return none; }
     const inside = roots.some((r) => isWithin(r, loose));
     return inside ? { allowed: true, exists: false, isDirectory: false, readOnly: isReadOnlyPath(loose, policy) } : none;
   }
@@ -238,9 +245,17 @@ export function specIsReadOnly(spec: Pick<RemoteSessionSpec, 'cwd' | 'additional
   return [spec.cwd, ...(spec.additionalDirectories ?? [])].some((d) => isReadOnlyPath(realOrResolved(d), policy));
 }
 
-/** Throws when `path` is not inside a configured workspace (used for cwd changes made by local tools). */
+/**
+ * Throws when `path` is not inside a configured workspace, or is inside a read-only one. Used for every directory a
+ * local tool would adopt or write beside (set_working_directory, a worktree's target, the repo and git root it is
+ * made from): a read-only workspace is not somewhere a tool may move the session or add a worktree.
+ */
 export function assertCwdAllowed(path: string, policy: SessionPolicy): void {
-  if (!describePathAccess(path, policy).allowed) {
+  const access = describePathAccess(path, policy);
+  if (!access.allowed) {
     throw new Error(`Working directory is outside the folders this daemon allows sessions in: ${path}`);
+  }
+  if (access.readOnly) {
+    throw new Error(`Working directory is in a read-only workspace on this daemon, so a tool cannot move the session or add a worktree there: ${path}`);
   }
 }

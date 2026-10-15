@@ -133,6 +133,10 @@ export function createWorktreeTools(port: WorktreeToolsPort): Record<string, Too
           };
         }
 
+        // Refuse a repo or git root the host does not allow before anything is created beside it.
+        options.validateCwd?.(repoPath);
+        options.validateCwd?.(gitRoot);
+
         const branchName = args.branch ?? `claude/${Date.now()}`;
 
         // Worktrees go under a durable, app-owned root — NOT os.tmpdir(). macOS

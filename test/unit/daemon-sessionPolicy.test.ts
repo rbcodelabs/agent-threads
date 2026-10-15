@@ -117,3 +117,27 @@ describe('a not-yet-existing path under a symlinked workspace (worktrees about t
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
 });
+
+describe('local tools cannot move into read-only workspaces or through dangling links', () => {
+  it('assertCwdAllowed refuses a read-only workspace, allows a read-write one, refuses outside', async () => {
+    const { assertCwdAllowed } = await import('../../daemon/sessionPolicy');
+    const ro = join(root, 'ro');
+    mkdirSync(join(ro, 'repo'), { recursive: true });
+    const policy = { workspaces: [ws], readOnlyWorkspaces: [ro], allowBypass: false, allowedClientEnv: [] };
+    expect(() => assertCwdAllowed(join(ws, 'repo'), policy)).not.toThrow();
+    expect(() => assertCwdAllowed(join(ro, 'repo'), policy)).toThrow(/read-only workspace/);
+    expect(() => assertCwdAllowed(join(ro, 'repo', 'new', 'worktree'), policy)).toThrow(/read-only workspace/);
+    expect(() => assertCwdAllowed(outside, policy)).toThrow(/outside the folders/);
+  });
+
+  it('refuses a dangling symlink to a not-yet-created location outside the workspace', async () => {
+    const { describePathAccess, realpathLoose } = await import('../../daemon/sessionPolicy');
+    const notYet = join(root, 'not-created-yet');
+    symlinkSync(notYet, join(ws, 'dangling'));
+    const policy = { workspaces: [ws], readOnlyWorkspaces: [], allowBypass: false, allowedClientEnv: [] };
+    expect(() => realpathLoose(join(ws, 'dangling', 'x'))).toThrow(/dangling symlink/);
+    // Without the check the climb stopped at `ws` and judged the path inside it; creating the target later would escape.
+    expect(describePathAccess(join(ws, 'dangling', 'x'), policy).allowed).toBe(false);
+    expect(describePathAccess(join(ws, 'plainly-missing', 'x'), policy)).toMatchObject({ allowed: true, exists: false });
+  });
+});

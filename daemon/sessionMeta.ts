@@ -8,7 +8,7 @@
  */
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import type { RemoteSessionSpec } from '../src/protocol';
+import { redactMcpServersForStorage, type RemoteSessionSpec } from '../src/protocol';
 import { ensureDir, isSafeThreadId, writeFileAtomic } from './fsutil';
 
 export interface SessionMeta {
@@ -16,6 +16,8 @@ export interface SessionMeta {
   spec: RemoteSessionSpec;
   nativeSessionId?: string;
   updatedAt: number;
+  /** External MCP servers left out of the stored spec because their config holds a credential (names only). */
+  omittedMcpServers?: string[];
 }
 
 export class SessionMetaStore {
@@ -28,7 +30,12 @@ export class SessionMetaStore {
 
   save(meta: SessionMeta): void {
     if (!isSafeThreadId(meta.threadId)) throw new Error(`invalid threadId "${meta.threadId}"`);
-    writeFileAtomic(join(this.dir, `${meta.threadId}.json`), `${JSON.stringify(meta)}\n`);
+    // The recipe on disk never holds a credential: a server configured with headers or a token in its URL is
+    // left out (name only). A daemon restart therefore resumes without it until the client opens the session again.
+    const { kept, omitted } = redactMcpServersForStorage(meta.spec.mcpServers);
+    const { mcpServers: _full, ...rest } = meta.spec;
+    const stored: SessionMeta = { ...meta, spec: { ...rest, ...(kept ? { mcpServers: kept } : {}) }, ...(omitted.length ? { omittedMcpServers: omitted } : {}) };
+    writeFileAtomic(join(this.dir, `${meta.threadId}.json`), `${JSON.stringify(stored)}\n`);
   }
 
   delete(threadId: string): void {

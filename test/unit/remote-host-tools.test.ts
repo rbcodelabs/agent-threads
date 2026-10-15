@@ -379,8 +379,23 @@ describe('mcpPartition', () => {
     expect(dropped.map((d) => d.name)).toEqual(['docs']);
   });
   it('recognizes loopback spellings', () => {
-    for (const u of ['http://localhost/', 'http://a.localhost/', 'http://127.0.0.2/', 'http://[::1]:3/', 'http://0.0.0.0/', 'not a url']) expect(isLoopbackUrl(u), u).toBe(true);
+    for (const u of ['http://localhost/', 'http://a.localhost/', 'http://127.0.0.2/', 'http://[::1]:3/', 'http://0.0.0.0/', 'not a url',
+      'http://[::ffff:127.0.0.1]/', 'http://[::ffff:7f00:1]:8080/x', 'http://[0:0:0:0:0:0:0:1]/', 'http://2130706433/']) expect(isLoopbackUrl(u), u).toBe(true);
     expect(isLoopbackUrl('https://example.com')).toBe(false);
+    expect(isLoopbackUrl('http://[::ffff:8.8.8.8]/')).toBe(false);
+  });
+  it('drops a server whose URL carries a credential unless the user listed it; never sends it otherwise', () => {
+    const stored = {
+      userinfo: { type: 'http' as const, url: 'https://user:pw@mcp.example.com/x' },
+      query: { type: 'http' as const, url: 'https://mcp.example.com/x?api_key=abcdef' },
+      opaque: { type: 'sse' as const, url: 'https://mcp.example.com/x?s=Zm9vYmFyMTIzNDU2Nzg5MDEyMzQ1Ng1' },
+      plain: { type: 'http' as const, url: 'https://mcp.example.com/x?page=2&q=hello' },
+    };
+    const { passthrough, dropped } = partitionExternalMcpServers(stored);
+    expect(Object.keys(passthrough)).toEqual(['plain']);
+    expect(dropped.map((d) => d.name).sort()).toEqual(['opaque', 'query', 'userinfo']);
+    expect(dropped.every((d) => d.reason.includes('carries a credential'))).toBe(true);
+    expect(Object.keys(partitionExternalMcpServers(stored, ['userinfo']).passthrough)).toEqual(['userinfo']);
   });
   it('projectSessionOptions puts only the vetted remote servers on the wire, never claude.mcpServers', () => {
     const t = { id: 't', remote: { daemonId: 'd', remoteCwd: '/w', lastSeq: 0 } } as unknown as Thread;

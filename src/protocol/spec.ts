@@ -59,6 +59,40 @@ export interface RemoteSessionSpec {
   skills?: string[];
 }
 
+const CREDENTIAL_PARAM = /(^|[_-])(token|access|auth|authorization|key|apikey|api[_-]?key|secret|password|passwd|pwd|sig|signature|credential|bearer|session)([_-]|$)/i;
+const TOKENISH_VALUE = /^(?=.*[0-9])(?=.*[A-Za-z])[A-Za-z0-9._~+/=-]{24,}$/;
+
+/**
+ * Does this URL itself carry a credential (userinfo, or a token-looking query parameter)? Such a URL is as secret as
+ * a header would be: it must not be sent to a daemon unless the user listed the server, and the daemon must not
+ * keep it on disk.
+ */
+export function urlCarriesCredentials(url: string): boolean {
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  if (u.username || u.password) return true;
+  for (const [k, v] of u.searchParams) {
+    if (CREDENTIAL_PARAM.test(k) && v.length > 0) return true;
+    if (TOKENISH_VALUE.test(v)) return true;
+  }
+  return false;
+}
+
+/**
+ * The copy of an MCP server list that is safe to keep on disk: servers whose config holds a credential (any header, or
+ * a credential-bearing URL) are left out and their names returned. The live session keeps the full config in memory.
+ */
+export function redactMcpServersForStorage(servers: Record<string, RemoteMcpServerConfig> | undefined): { kept: Record<string, RemoteMcpServerConfig> | undefined; omitted: string[] } {
+  if (!servers) return { kept: undefined, omitted: [] };
+  const kept: Record<string, RemoteMcpServerConfig> = {};
+  const omitted: string[] = [];
+  for (const [name, s] of Object.entries(servers)) {
+    const hasHeaders = !!s.headers && Object.keys(s.headers).length > 0;
+    if (hasHeaders || urlCarriesCredentials(s.url)) omitted.push(name); else kept[name] = s;
+  }
+  return { kept: Object.keys(kept).length ? kept : undefined, omitted };
+}
+
 export type SpecDisposition = 'carried' | 'transformed' | 'omitted';
 
 /**
