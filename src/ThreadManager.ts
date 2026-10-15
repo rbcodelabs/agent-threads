@@ -1021,7 +1021,7 @@ export class ThreadManager {
 
   private remoteHooks(thread: Thread): Pick<RemoteSessionDeps, 'onPendingChanged' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName'> | undefined {
     if (!thread.remote) return undefined;
-    const enabled = this.remoteDaemons?.hostToolsOf?.(thread.remote.daemonId)?.enabled !== false;
+    const enabled = this.remoteDaemons?.hostToolsOf?.(thread.remote.daemonId)?.enabled === true;
     let hostTools: RemoteHostTools | undefined;
     try {
       hostTools = enabled ? this.remoteHostToolsFactory?.(thread.id, thread) : undefined;
@@ -2718,7 +2718,7 @@ export class ThreadManager {
     const project = thread.projectId ? this.getProject(thread.projectId) : undefined;
     const daemonName = this.remoteDaemons?.nameOf(remote.daemonId) ?? remote.daemonId;
     const vaultMapping = this.remoteDaemons?.vaultMappingOf?.(remote.daemonId);
-    const hostToolsEnabled = !!this.remoteHostToolsFactory && this.remoteDaemons?.hostToolsOf?.(remote.daemonId)?.enabled !== false;
+    const hostToolsEnabled = !!this.remoteHostToolsFactory && this.remoteDaemons?.hostToolsOf?.(remote.daemonId)?.enabled === true;
     const goalContext = thread.goal
       ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
         'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +

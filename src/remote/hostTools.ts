@@ -5,8 +5,8 @@
  * daemon later makes against it:
  *
  *   - the thread's built-in `claude_threads` tools (the very handlers a local thread has), filtered by the
- *     routing table (`toolRouting.ts`): only `host` tools are offered; worktree tools run on the daemon and the
- *     VM/GitHub tools are not offered at all;
+ *     routing table (`toolRouting.ts`): only `host` tools are offered, and by default there are none (the user
+ *     opts a read-only group in per daemon); worktree tools run on the daemon, the rest is not offered at all;
  *   - the tools of the plugin-owned loopback brokers (Google Workspace, OAuth MCP), listed over MCP and
  *     proxied under their own server names, so `mcp__google-docs__*` stays the same name remotely.
  *
@@ -101,13 +101,17 @@ export class RemoteHostTools {
 
     for (const [server, source] of Object.entries(this.deps.mcpSources ?? {})) {
       if (NEVER_PROXIED_SERVERS.has(server)) { summary.skipped.push({ server, reason: 'uses file paths on this computer' }); continue; }
-      // The user can switch off one proxied server by name, or every proxied server with the key `mcp`.
-      if (this.deps.overrides?.[server] === 'absent' || (this.deps.overrides?.mcp === 'absent' && this.deps.overrides?.[server] !== 'host')) { summary.skipped.push({ server, reason: 'turned off for this daemon' }); continue; }
+      // Proxied servers are an opt-in group: the key `mcp` switches all of them on (a server can still be named
+      // `absent`), or a server is switched on by its own name. Default: none.
+      const o = this.deps.overrides;
+      const wanted = o?.[server] === 'host' || (o?.mcp === 'host' && o?.[server] !== 'absent');
+      if (!wanted) { summary.skipped.push({ server, reason: 'not turned on for this daemon' }); continue; }
       let listed;
       try {
         listed = await source.listTools();
       } catch (err) {
-        summary.skipped.push({ server, reason: `could not list its tools (${err instanceof Error ? err.message : String(err)})` });
+        this.deps.log?.(`${server}: could not list tools: ${err instanceof Error ? err.message : String(err)}`);
+        summary.skipped.push({ server, reason: 'could not list its tools' });
         continue;
       }
       for (const t of listed) {
@@ -153,7 +157,9 @@ export class RemoteHostTools {
     try {
       return await entry.run(input, signal);
     } catch (err) {
-      return { success: false, text: err instanceof Error ? err.message : String(err) };
+      // The message can carry local paths or loopback addresses; it stays here, the daemon gets a plain sentence.
+      this.deps.log?.(`${server}/${tool} threw: ${err instanceof Error ? err.message : String(err)}`);
+      return { success: false, text: `The host tool "${tool}" failed to run.` };
     }
   }
 
@@ -172,7 +178,7 @@ export function describeHostToolsForPrompt(summary: HostToolsSummary | null, hos
     '- Worktree tools (enter_worktree, exit_worktree, set_working_directory) run on this remote machine, beside the repo.',
   ];
   if (!summary || (summary.builtIn.length === 0 && Object.keys(summary.servers).length === 0)) {
-    lines.push(`- The user's ${hostName} tools (vault_*, workspace_*, host_*, threads_*) are not available in this session.`);
+    lines.push(`- The user's ${hostName} tools (vault_*, workspace_*, threads_*, Google Workspace) are not available in this session; the user has not turned any on for this machine. Do not ask for them or try to work around this.`);
     return lines;
   }
   lines.push(

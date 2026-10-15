@@ -33,6 +33,12 @@ export function safeText(text: string): string {
   return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '');
 }
 
+/** A short single-line field (id, name, outcome) from the wire: never a way to emit escape sequences or fake lines. */
+export function field(v: unknown, fallback = '', max = 80): string {
+  const text = typeof v === 'string' ? v : (typeof v === 'number' || typeof v === 'boolean' ? String(v) : '');
+  return oneLine(text, max) || fallback;
+}
+
 export function formatCost(cost: unknown): string {
   const c = num(cost);
   return c !== undefined && c > 0 ? `, $${c.toFixed(4)}` : '';
@@ -85,7 +91,7 @@ export class TextRenderer {
       }
       case 'onToolUse': {
         const rec = obj(a[0]);
-        const name = str(rec.name, 'tool');
+        const name = field(rec.name, 'tool');
         if (typeof rec.toolUseId === 'string') this.toolNames.set(rec.toolUseId, name);
         const summary = oneLine(str(rec.summary));
         this.line(`[tool] ${name}${summary ? ` ${summary}` : ''}`);
@@ -111,14 +117,14 @@ export class TextRenderer {
       case 'onInterrupted': this.line('[interrupted]'); this.streamed = false; return;
       case 'permission_request': {
         const r = obj(args);
-        this.line(`[permission ${str(r.requestId)}] ${str(r.toolName, 'tool')}`);
+        this.line(`[permission ${field(r.requestId)}] ${field(r.toolName, 'tool')}`);
         const detail = safeText(str(r.detail)).trimEnd();
         if (detail) for (const l of detail.split('\n')) this.sink.write(`    ${l}\n`);
         return;
       }
       case 'question_request': {
         const r = obj(args);
-        this.line(`[question ${str(r.requestId)}]`);
+        this.line(`[question ${field(r.requestId)}]`);
         for (const q of asArray(r.questions)) {
           const qq = obj(q);
           this.sink.write(`  ${safeText(str(qq.header))}: ${safeText(str(qq.question))}\n`);
@@ -131,37 +137,37 @@ export class TextRenderer {
       }
       case 'plan_ready': {
         const r = obj(args);
-        this.line(`[plan ${str(r.requestId)}]`);
+        this.line(`[plan ${field(r.requestId)}]`);
         for (const l of safeText(str(r.planText)).trimEnd().split('\n')) this.sink.write(`    ${l}\n`);
         return;
       }
       case 'elicitation_request': {
         const r = obj(args);
-        this.line(`[input ${str(r.requestId)}] ${oneLine(str(obj(r.request).message, 'the agent asks for input'), 500)}`);
+        this.line(`[input ${field(r.requestId)}] ${oneLine(str(obj(r.request).message, 'the agent asks for input'), 500)}`);
         return;
       }
       case 'request_resolved': {
         const r = obj(args);
-        const outcome = str(r.outcome, 'resolved');
-        this.line(`[resolved ${str(r.requestId)}]${r.by ? ` by ${str(r.by)}` : ''} (${outcome})`);
+        const outcome = field(r.outcome, 'resolved');
+        this.line(`[resolved ${field(r.requestId)}]${r.by ? ` by ${field(r.by)}` : ''} (${outcome})`);
         return;
       }
-      case 'onPermissionDenied': this.line(`[denied] ${str(a[0], 'tool')}: ${oneLine(str(a[2]), 300)}`); return;
+      case 'onPermissionDenied': this.line(`[denied] ${field(a[0], 'tool')}: ${oneLine(str(a[2]), 300)}`); return;
       case 'session.state': {
         const s = obj(args);
-        if (typeof s.closed === 'string') this.line(`[session closed: ${s.closed}]`);
+        if (typeof s.closed === 'string') this.line(`[session closed: ${field(s.closed)}]`);
         return;
       }
       case 'onReconnecting': this.line(`[reconnecting] ${oneLine(str(a[0]), 300)}`); return;
-      case 'onRateLimitRetry': this.line(`[rate limited] retry ${String(a[0])}/${String(a[1])} in ${Math.round((num(a[2]) ?? 0) / 1000)}s`); return;
-      case 'onApiRetry': this.line(`[api retry] ${String(a[0])}/${String(a[1])}: ${oneLine(str(a[2]), 200)}`); return;
+      case 'onRateLimitRetry': this.line(`[rate limited] retry ${field(a[0])}/${field(a[1])} in ${Math.round((num(a[2]) ?? 0) / 1000)}s`); return;
+      case 'onApiRetry': this.line(`[api retry] ${field(a[0])}/${field(a[1])}: ${oneLine(str(a[2]), 200)}`); return;
       case 'onAuthRetry': this.line('[sign-in] the Claude login looks expired; retrying once'); return;
       case 'onAuthRequired': this.line(`[sign-in required] ${oneLine(str(a[0]), 400)}`); return;
       case 'onNotification': this.line(`[notice] ${oneLine(str(a[0]), 400)}`); return;
       case 'onRecap': this.line(`[recap] ${oneLine(str(a[0]), 400)}`); return;
       case 'onCompact': this.line('[compact] the conversation was compacted'); return;
       case 'onTaskStarted': this.line(`[task] ${oneLine(str(a[1]), 200)}`); return;
-      case 'onTaskNotification': this.line(`[task ${str(a[1])}] ${oneLine(str(a[2]), 200)}`); return;
+      case 'onTaskNotification': this.line(`[task ${field(a[1])}] ${oneLine(str(a[2]), 200)}`); return;
       default:
         // Everything else (usage, status, progress, ...) is machine-oriented: --json carries it.
     }

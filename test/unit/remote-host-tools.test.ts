@@ -3,7 +3,7 @@ import {
   HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, manifestFromSpecs, manifestSignature,
   sanitizeResultContent, specsFromManifest, validateHostToolSpecs, validateManifestServers, validateToolResultPayload,
 } from '../../src/protocol';
-import { HostToolExecutor, HostToolSlots } from '../../src/remote/hostToolExecutor';
+import { HostToolExecutor, HostToolSlots, describeCallForApproval } from '../../src/remote/hostToolExecutor';
 import { RemoteHostTools, describeHostToolsForPrompt } from '../../src/remote/hostTools';
 import { createLoopbackMcpSource, type HostMcpSource } from '../../src/remote/hostMcpClient';
 import { describeDroppedMcp, isLoopbackUrl, partitionExternalMcpServers } from '../../src/remote/mcpPartition';
@@ -72,10 +72,11 @@ describe('protocol host-tool rules', () => {
 describe('RemoteHostTools manifest', () => {
   it('offers host-routed built-ins only, honours overrides, and runs the handler', async () => {
     const tools = new RemoteHostTools({
-      builtIn: [dyn('vault_search', false, 'found'), dyn('enter_worktree'), dyn('vm_exec'), dyn('github_list_access'), dyn('contributed_x'), dyn('threads_list')],
-      overrides: { threads: 'absent' },
+      builtIn: [dyn('vault_search', false, 'found'), dyn('enter_worktree'), dyn('vm_exec'), dyn('github_list_access'), dyn('contributed_x'), dyn('threads_list'), dyn('threads_archive'), dyn('request_secret')],
+      overrides: { vault: 'host', threads_archive: 'host', request_secret: 'host' },
     });
     const m = await tools.manifest();
+    // threads is not switched on; threads_archive and request_secret are never offered, whatever is listed.
     expect(m.claude_threads.map((t) => t.name)).toEqual(['vault_search']);
     expect(tools.summary.builtIn).toEqual(['vault_search']);
     expect(await tools.invoke('claude_threads', 'vault_search', {})).toEqual({ success: true, text: 'found' });
@@ -87,14 +88,40 @@ describe('RemoteHostTools manifest', () => {
       callTool: async () => ({ content: [{ type: 'text', text: 'body' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }] }), close: async () => undefined,
     };
     const bad: HostMcpSource = { listTools: async () => { throw new Error('down'); }, callTool: async () => ({ content: [] }), close: async () => undefined };
-    const tools = new RemoteHostTools({ mcpSources: { 'google-docs': ok, 'google-drive-files': ok, flaky: bad } });
+    const tools = new RemoteHostTools({ mcpSources: { 'google-docs': ok, 'google-drive-files': ok, flaky: bad }, overrides: { mcp: 'host' } });
     const m = await tools.manifest();
     expect(Object.keys(m)).toEqual(['google-docs']);
     expect(m['google-docs'].map((t) => [t.name, t.requiresApproval])).toEqual([['read_doc', false], ['update_doc', true]]);
     expect(tools.summary.skipped.map((s) => s.server).sort()).toEqual(['flaky', 'google-drive-files']);
     expect(await tools.invoke('google-docs', 'read_doc', {})).toEqual({ success: true, text: 'body', content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }] });
-    const off = new RemoteHostTools({ mcpSources: { 'google-docs': ok }, overrides: { mcp: 'absent' } });
-    expect(await off.manifest()).toEqual({});
+    // Off by default; on by group or by naming the server; a server can be excluded from the group.
+    expect(await new RemoteHostTools({ mcpSources: { 'google-docs': ok } }).manifest()).toEqual({});
+    expect(Object.keys(await new RemoteHostTools({ mcpSources: { 'google-docs': ok }, overrides: { 'google-docs': 'host' } }).manifest())).toEqual(['google-docs']);
+    expect(await new RemoteHostTools({ mcpSources: { 'google-docs': ok }, overrides: { mcp: 'host', 'google-docs': 'absent' } }).manifest()).toEqual({});
+  });
+  it('offers nothing by default: with no groups switched on the manifest is empty', async () => {
+    const tools = new RemoteHostTools({
+      builtIn: [dyn('vault_search'), dyn('threads_get_log'), dyn('browser_navigate'), dyn('workspace_get_active_file'), dyn('skills_list_installed')],
+      mcpSources: { 'google-docs': { listTools: async () => [{ name: 'read_doc', inputSchema: { type: 'object' } }], callTool: async () => ({ content: [] }), close: async () => undefined } },
+    });
+    expect(await tools.manifest()).toEqual({});
+    expect(tools.summary.builtIn).toEqual([]);
+  });
+  it('a read group switched on offers its read tools and still never the state-changing ones', async () => {
+    const names = ['vault_search', 'vault_restore_file_version', 'vault_add_bridge', 'threads_list', 'threads_send_message', 'host_execute_command', 'CronCreate', 'skills_install', 'browser_eval'];
+    const tools = new RemoteHostTools({ builtIn: names.map((n) => dyn(n)), overrides: { vault: 'host', threads: 'host', workspace: 'host', schedule: 'host', skills: 'host', browser: 'host', misc: 'host' } });
+    const m = await tools.manifest();
+    expect(m.claude_threads.map((t) => t.name).sort()).toEqual(['threads_list', 'vault_search']);
+  });
+  it('does not hand a thrown error message (paths, loopback addresses) to the daemon', async () => {
+    const logs: string[] = [];
+    const boom = { ...dyn('vault_search'), invoke: async () => { throw new Error('ENOENT /Users/someone/secret http://127.0.0.1:5555'); } };
+    const tools = new RemoteHostTools({ builtIn: [boom], overrides: { vault: 'host' }, log: (m) => logs.push(m) });
+    await tools.manifest();
+    const out = await tools.invoke('claude_threads', 'vault_search', {});
+    expect(out.success).toBe(false);
+    expect(out.text).not.toMatch(/Users|127\.0\.0\.1|ENOENT/);
+    expect(logs.join(' ')).toContain('ENOENT');
   });
   it('describes what is available for the environment prompt', () => {
     expect(describeHostToolsForPrompt(null, 'Geode').join('\n')).toContain('not available');
@@ -171,21 +198,52 @@ describe('HostToolExecutor gate', () => {
     await tick();
     expect(invoke).toHaveBeenCalledTimes(1);
   });
-  it('lets one prior allow stand for one call only, and expires', async () => {
-    let now = 0;
-    const { ex, requestPermission } = rig({ now: () => now });
-    ex.recordApproval('mcp__claude_threads__write');
+  it('has no approval carry-over: every call to an approval tool asks again', async () => {
+    const { ex, requestPermission, invoke } = rig();
+    expect((ex as unknown as { recordApproval?: unknown }).recordApproval).toBeUndefined();
+    requestPermission.mockResolvedValue(true);
     ex.handleCall(call('a', 'write'));
-    await tick();
-    expect(requestPermission).not.toHaveBeenCalled();
     ex.handleCall(call('b', 'write'));
     await tick();
-    expect(requestPermission).toHaveBeenCalledTimes(1);
-    ex.recordApproval('mcp__claude_threads__write');
-    now += 11 * 60_000;
-    ex.handleCall(call('c', 'write'));
-    await tick();
     expect(requestPermission).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+  it('shows an explicit marker and refuses to run input too long to be shown on the card', async () => {
+    const { ex, results, invoke, requestPermission } = rig();
+    const big = 'x'.repeat(5000);
+    const card = describeCallForApproval('write', { data: big });
+    expect(card.unseenBytes).toBeGreaterThan(900);
+    expect(card.detail).toMatch(/\(\d+ more bytes not shown\)$/);
+    ex.handleCall(call('a', 'write', 'claude_threads', { data: big }));
+    await tick();
+    expect(requestPermission).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+    expect(results[0].success).toBe(false);
+    expect(results[0].text).toMatch(/too long to show the user in full/);
+  });
+  it('runs input that fits the card completely, with no marker', async () => {
+    const { ex, invoke, requestPermission } = rig();
+    requestPermission.mockResolvedValueOnce(true);
+    expect(describeCallForApproval('write', { data: 'short' }).unseenBytes).toBe(0);
+    ex.handleCall(call('a', 'write', 'claude_threads', { data: 'short' }));
+    await tick();
+    expect(requestPermission).toHaveBeenCalledWith('mcp__claude_threads__write', expect.not.stringContaining('not shown'));
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+  it('never forgets a running call when remembering finished ones', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const slow = vi.fn(async (_s: string, tool: string) => { if (tool === 'slow') await gate; return { success: true, text: 'ok' }; });
+    const { ex, results } = rig({ invoke: slow as never }, manifestFromSpecs([spec('read'), spec('slow')]));
+    ex.handleCall(call('running', 'slow'));
+    for (let i = 0; i < 100; i++) { ex.handleCall(call(`f${i}`, 'read')); if (i % 5 === 4) await tick(); }
+    await tick();
+    ex.handleCall(call('running', 'slow'), true); // reopened while still running: must NOT start a second run
+    await tick();
+    expect(slow.mock.calls.filter((c) => c[1] === 'slow')).toHaveLength(1);
+    release();
+    await tick();
+    expect(results.some((r) => r.callId === 'running')).toBe(true);
   });
   it('does not run a call id twice; re-sends a finished result when the call is reopened', async () => {
     const { ex, results, invoke } = rig();
@@ -364,10 +422,12 @@ describe('loopback MCP source', () => {
 describe('daemon settings -> hostTools config', () => {
   it('omits the field at defaults, and builds routes and allowlist from the inputs', async () => {
     const { hostToolsSettingsFrom } = await import('../../src/SettingsTab');
-    expect(hostToolsSettingsFrom(true, '', '')).toEqual({});
-    expect(hostToolsSettingsFrom(false, '', '')).toEqual({ hostTools: { enabled: false } });
+    expect(hostToolsSettingsFrom(false, '', '')).toEqual({});
+    expect(hostToolsSettingsFrom(true, '', '')).toEqual({ hostTools: { enabled: true } });
     expect(hostToolsSettingsFrom(true, 'vault, browser  vault', 'docs,search')).toEqual({
-      hostTools: { routes: { vault: 'absent', browser: 'absent' }, mcpAllowlist: ['docs', 'search'] },
+      hostTools: { enabled: true, routes: { vault: 'host', browser: 'host' }, mcpAllowlist: ['docs', 'search'] },
     });
+    // Off but with groups remembered: stored, still not enabled.
+    expect(hostToolsSettingsFrom(false, 'vault', '')).toEqual({ hostTools: { routes: { vault: 'host' } } });
   });
 });

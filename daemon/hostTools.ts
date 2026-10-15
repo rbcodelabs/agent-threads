@@ -68,6 +68,10 @@ export class HostToolBroker {
   private readonly manifests = new Map<string, Manifest>();
   private readonly signatures = new Map<string, string>();
   private readonly attachedThreads = new Set<string>();
+  /** Connection currently holding each thread's read-write seat. */
+  private readonly seatHolders = new Map<string, number>();
+  /** Connection that sent each thread's current manifest (the only one that can serve its calls). */
+  private readonly manifestOwners = new Map<string, number>();
   private readonly pending = new Map<string, Pending>();
   private readonly changeListeners = new Map<string, Set<() => void>>();
   private readonly newId: () => string;
@@ -99,14 +103,34 @@ export class HostToolBroker {
     this.notify(threadId);
   }
 
+  /**
+   * The seat holder changed (`undefined` = nobody). A thread counts as host-tool-attached only while the seat is
+   * held by the SAME connection that sent the current manifest: a terminal that claims the seat (attach --claim,
+   * run --thread) cannot answer a call for tools it never offered, so calls fail fast after the grace instead
+   * of waiting out the answer timeout.
+   */
+  setSeatHolder(threadId: string, connectionId: number | undefined): void {
+    if (connectionId === undefined) this.seatHolders.delete(threadId); else this.seatHolders.set(threadId, connectionId);
+    this.reconcile(threadId);
+  }
+
+  private reconcile(threadId: string): void {
+    const seat = this.seatHolders.get(threadId);
+    this.setAttached(threadId, seat !== undefined && seat === this.manifestOwners.get(threadId));
+  }
+
   // ── manifest ─────────────────────────────────────────────────────────────
 
-  /** Replace a thread's manifest. @returns whether it differs from the previous one. */
-  setManifest(threadId: string, servers: Manifest): boolean {
+  /**
+   * Replace a thread's manifest. `owner` is the connection that sent it (omit only for a recipe restored from disk,
+   * which no connection stands behind yet). @returns whether it differs from the previous one.
+   */
+  setManifest(threadId: string, servers: Manifest, owner?: number): boolean {
     const sig = manifestSignature(servers);
     const changed = this.signatures.get(threadId) !== sig;
     this.manifests.set(threadId, servers);
     this.signatures.set(threadId, sig);
+    if (owner !== undefined) { this.manifestOwners.set(threadId, owner); this.reconcile(threadId); }
     if (changed) this.notify(threadId);
     return changed;
   }

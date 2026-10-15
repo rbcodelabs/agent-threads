@@ -32,6 +32,10 @@ export interface HostMcpServerOptions {
   call(tool: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<HostToolOutcome>;
 }
 
+/**
+ * Only the daemon's own worktree tools are always loaded (a handful, needed to work in a repo). Proxied tools, which
+ * can be many and come from third parties, are deferred: the model finds them through tool search when it needs one.
+ */
 const ALWAYS_LOAD = { 'anthropic/alwaysLoad': true } as const;
 
 function toResult(outcome: HostToolOutcome): CallToolResult {
@@ -55,7 +59,7 @@ export function createHostMcpServer(opts: HostMcpServerOptions): HostMcpServerHa
     }));
     for (const t of opts.proxied()) {
       if (local.has(t.name)) continue; // a local tool is never shadowed by a proxied one
-      tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema as { type: 'object' }, _meta: ALWAYS_LOAD });
+      tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema as { type: 'object' } } as (typeof tools)[number]);
     }
     return { tools };
   });
@@ -80,7 +84,7 @@ export function createHostMcpServer(opts: HostMcpServerOptions): HostMcpServerHa
   });
 
   return {
-    config: { type: 'sdk', name: opts.name, instance, alwaysLoad: true } as McpSdkServerConfigWithInstance,
+    config: { type: 'sdk', name: opts.name, instance } as McpSdkServerConfigWithInstance,
     notifyChanged: () => { void instance.server.sendToolListChanged().catch(() => undefined); },
   };
 }

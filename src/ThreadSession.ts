@@ -323,6 +323,7 @@ export class ThreadSession {
           await clearPlanMode();
           return { behavior: 'deny' as const, message: 'Plan approved — proceed with implementation.', interrupt: false };
         }
+        if (options.claude?.preApprove?.(toolName)) return { behavior: 'allow' as const, updatedInput: input };
         const detail = buildPermissionDetail(toolName, input, opts);
         const title = opts.title ?? toolName;
         const allowed = await callbacks.onPermissionRequest(title, detail);

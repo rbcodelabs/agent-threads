@@ -209,12 +209,12 @@ export class ThreadHost {
    * the client's `resume`, else `spec.resume`. (The daemon's copy is the
    * freshest: it is updated on every event.)
    */
-  open(threadId: string, spec: RemoteSessionSpec, resume?: string): { created: boolean; lastSeq: number; nativeSessionId?: string } {
+  open(threadId: string, spec: RemoteSessionSpec, resume?: string, owner?: number): { created: boolean; lastSeq: number; nativeSessionId?: string } {
     if (!isSafeThreadId(threadId)) throw new HostError('bad_frame', `invalid threadId "${threadId}"`);
     const rt = this.runtime(threadId);
     if (rt.driver) return { created: false, lastSeq: rt.journal.lastSeq, nativeSessionId: rt.meta?.nativeSessionId };
     const valid = this.validate(spec);
-    if (valid.hostTools) this.hostTools.setManifest(threadId, manifestFromSpecs(valid.hostTools));
+    if (valid.hostTools) this.hostTools.setManifest(threadId, manifestFromSpecs(valid.hostTools), owner);
     const previous = rt.meta;
     const nativeSessionId = previous?.nativeSessionId ?? resume ?? valid.resume;
     rt.meta = { threadId, spec: valid, ...(nativeSessionId ? { nativeSessionId } : {}), updatedAt: this.now() };
@@ -310,16 +310,16 @@ export class ThreadHost {
   }
 
   /** The thread's controlling client gained or lost its seat (drives the host-tool grace logic). */
-  setAttached(threadId: string, attached: boolean): void {
-    this.hostTools.setAttached(threadId, attached);
+  setSeatHolder(threadId: string, connectionId: number | undefined): void {
+    this.hostTools.setSeatHolder(threadId, connectionId);
   }
 
-  /** `tool.manifest`: replace the host tools this thread's client offers. */
-  setManifest(threadId: string, servers: Record<string, RemoteHostToolSpec[]>): { changed: boolean; tools: number } {
+  /** `tool.manifest`: replace the host tools this thread's client offers (`owner` = the sending connection). */
+  setManifest(threadId: string, servers: Record<string, RemoteHostToolSpec[]>, owner?: number): { changed: boolean; tools: number } {
     const rt = this.requireThread(threadId);
     const problem = validateManifestServers(servers);
     if (problem) throw new HostError('bad_frame', `tool.manifest: ${problem}`);
-    const changed = this.hostTools.setManifest(threadId, servers);
+    const changed = this.hostTools.setManifest(threadId, servers, owner);
     if (changed) this.updateSpec(rt, { hostTools: specsFromManifest(servers) });
     return { changed, tools: Object.values(servers).reduce((n, l) => n + l.length, 0) };
   }

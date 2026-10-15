@@ -76,42 +76,71 @@ describe('toolRouting drift guard', () => {
   });
 });
 
+const ALL_GROUPS = { vault: 'host', workspace: 'host', threads: 'host', skills: 'host', browser: 'host', schedule: 'host', misc: 'host', vm: 'host' } as const;
+
 describe('toolRouting routes', () => {
-  it('runs the worktree tools on the daemon, proxies the Geode-only tools, and drops the VM tools', () => {
+  it('runs the worktree tools on the daemon and offers nothing else by default', () => {
     for (const t of ['enter_worktree', 'exit_worktree', 'set_working_directory']) expect(routeFor(t)).toBe('local');
+    expect(toolsRouted('host')).toEqual([]);
     for (const t of ['vault_search', 'obsidian_search_vault', 'workspace_get_open_tabs', 'host_open_url', 'threads_list', 'CronCreate',
-      'ScheduleWakeup', 'skills_search', 'browser_navigate', 'request_secret', 'mcp_register_server', 'watch_document']) {
-      expect(routeFor(t), t).toBe('host');
+      'ScheduleWakeup', 'skills_search', 'browser_navigate', 'request_secret', 'mcp_register_server', 'watch_document', 'threads_get_log']) {
+      expect(routeFor(t), t).toBe('absent');
     }
     for (const t of ['enter_vm', 'vm_exec', 'exit_vm', 'host_exec', 'github_list_access', 'github_check_repo']) expect(routeFor(t), t).toBe('absent');
   });
 
-  it('legacy and canonical names route the same way', () => {
-    for (const [legacy, canonical] of Object.entries(LEGACY_TO_CANONICAL_TOOL_NAMES)) expect(routeFor(legacy)).toBe(routeFor(canonical));
+  it('legacy and canonical names route the same way, with and without groups on', () => {
+    for (const [legacy, canonical] of Object.entries(LEGACY_TO_CANONICAL_TOOL_NAMES)) {
+      expect(routeFor(legacy)).toBe(routeFor(canonical));
+      expect(routeFor(legacy, ALL_GROUPS)).toBe(routeFor(canonical, ALL_GROUPS));
+    }
   });
 
-  it('lets the user turn a host domain or a single tool off, but never a local tool', () => {
-    expect(routeFor('vault_search', { vault: 'absent' })).toBe('absent');
-    expect(routeFor('vault_list', { vault: 'absent' })).toBe('absent');
-    expect(routeFor('threads_list', { vault: 'absent' })).toBe('host');
+  it('a group switched on offers exactly its read tools, and a tool can be switched off inside it', () => {
+    expect(routeFor('vault_search', { vault: 'host' })).toBe('host');
+    expect(routeFor('vault_list', { vault: 'host' })).toBe('host');
+    expect(routeFor('threads_list', { vault: 'host' })).toBe('absent');
+    expect(routeFor('vault_search', { vault: 'host', vault_search: 'absent' })).toBe('absent');
     expect(routeFor('threads_list', { threads: 'absent', threads_list: 'host' })).toBe('host'); // tool beats domain
     expect(routeFor('enter_worktree', { worktree: 'absent' })).toBe('local');
+  });
+
+  it('pins the exact read-only tool set every group can ever offer', () => {
+    expect(toolsRouted('host', ALL_GROUPS).sort()).toEqual([
+      'browser_click', 'browser_close', 'browser_console', 'browser_navigate', 'browser_network', 'browser_read_text', 'browser_resize',
+      'browser_screenshot', 'browser_scroll', 'browser_snapshot', 'browser_status', 'browser_type',
+      'list_watched_documents',
+      'skills_get', 'skills_list_installed', 'skills_list_sources', 'skills_search',
+      'threads_get_current', 'threads_get_log', 'threads_get_messages', 'threads_list', 'threads_list_projects', 'threads_wait',
+      'vault_get_backlinks', 'vault_get_file_history', 'vault_get_note_metadata', 'vault_get_outgoing_links', 'vault_list', 'vault_list_bridges', 'vault_search',
+      'workspace_get_active_file', 'workspace_get_open_tabs',
+    ].sort());
+  });
+
+  it('never offers a tool that writes, executes, schedules, installs, sends or reads a secret, however it is configured', () => {
+    const dangerous = ['request_secret', 'mcp_register_server', 'host_execute_command', 'obsidian_execute_command', 'host_list_commands',
+      'host_open_url', 'workspace_navigate_to_file', 'workspace_insert_at_cursor', 'watch_document', 'unwatch_document',
+      'vault_restore_file_version', 'vault_add_bridge', 'threads_create', 'threads_create_project', 'threads_update_project',
+      'threads_set_project', 'threads_open', 'threads_send_message', 'threads_archive', 'threads_set_notes',
+      'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'skills_install', 'skills_create_local', 'skills_update_local',
+      'skills_uninstall', 'skills_update', 'skills_check_updates', 'ScheduleWakeup', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',
+      'browser_eval', 'browser_save_page', 'host_exec'];
+    const everything = { ...ALL_GROUPS, ...Object.fromEntries(dangerous.map((t) => [t, 'host'])) } as Record<string, 'host'>;
+    for (const t of dangerous) expect(routeFor(t, everything), t).toBe('absent');
   });
 
   it('cannot turn on what has no backing on the daemon (VM tools, the GitHub connection)', () => {
     expect(routeFor('vm_exec', { vm: 'host', vm_exec: 'host' })).toBe('absent');
     expect(routeFor('github_list_access', { github_list_access: 'host', misc: 'host' })).toBe('absent');
-    expect(routeFor('request_secret', { misc: 'absent' })).toBe('absent');
   });
 
   it('toolsRouted lists canonical names and respects overrides', () => {
     expect(toolsRouted('local').sort()).toEqual(['enter_worktree', 'exit_worktree', 'set_working_directory']);
-    const host = toolsRouted('host');
+    const host = toolsRouted('host', { vault: 'host', browser: 'host' });
     expect(host).toContain('vault_search');
-    expect(host).toContain('host_open_url');
-    expect(host).toContain('browser_eval');
+    expect(host).toContain('browser_navigate');
+    expect(host).not.toContain('browser_eval');
     expect(host).not.toContain('obsidian_search_vault');
-    expect(toolsRouted('host', { vault: 'absent' })).not.toContain('vault_search');
   });
 
   it('covers every domain', () => {

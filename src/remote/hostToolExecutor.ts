@@ -8,13 +8,15 @@
  *   - the frame is shape-checked and size-capped before anything is read from it;
  *   - concurrent calls (per thread and in total) and calls per minute are capped;
  *   - a tool that requires approval is gated here, by the same permission path a local agent uses, whatever the
- *     daemon says happened on its side (an allow the user already gave for this exact tool consumes one call);
+ *     daemon says happened on its side. The card this plugin builds (showing the real input) is the ONLY
+ *     authority: an allow on a card the daemon wrote is never carried over, and an input too long to show in
+ *     full is refused rather than run unseen;
  *   - results are clamped and structured content is limited to what the daemon will pass on.
  *
  * A call id already seen is never run twice: a reopened call that finished gets its stored result re-sent, one
  * still running is left alone.
  */
-import { HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, type RemoteHostToolSpec } from '../protocol';
+import { HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, sanitizeResultContent, type RemoteHostToolSpec } from '../protocol';
 import type { HostToolOutput } from './hostTools';
 
 /** Calls in flight across all threads; one instance per plugin. */
@@ -45,8 +47,20 @@ export interface HostToolExecutorDeps {
 type CallState = { state: 'running'; abort: AbortController } | { state: 'done'; result: { success: boolean; text: string; content?: unknown[] } };
 
 const REMEMBERED_CALLS = 64;
-/** An allow the user gave on the daemon's permission prompt stays usable for one call this long. */
-const APPROVAL_TTL_MS = 10 * 60_000;
+/** How much of a call's input the approval card shows. Input beyond this is never executed unseen. */
+export const APPROVAL_DETAIL_LIMIT = 4000;
+
+/**
+ * What the approval card shows for a call. `unseenBytes` > 0 means the serialized input is longer than the card
+ * can display (the detail then ends with an explicit marker); the executor refuses such a call.
+ */
+export function describeCallForApproval(toolName: string, input: Record<string, unknown>): { detail: string; unseenBytes: number } {
+  const full = JSON.stringify(input);
+  const shown = full.slice(0, APPROVAL_DETAIL_LIMIT);
+  const unseenBytes = new TextEncoder().encode(full.slice(APPROVAL_DETAIL_LIMIT)).length;
+  const marker = unseenBytes > 0 ? ` ... (${unseenBytes} more bytes not shown)` : '';
+  return { detail: `Run ${toolName} for a remote thread: ${shown}${marker}`, unseenBytes };
+}
 
 export const mcpToolName = (server: string, tool: string): string => `mcp__${server}__${tool}`;
 
@@ -54,27 +68,12 @@ const refusal = (text: string): { success: false; text: string } => ({ success: 
 
 export class HostToolExecutor {
   private readonly calls = new Map<string, CallState>();
-  private readonly approvals = new Map<string, number[]>();
   private recent: number[] = [];
   private active = 0;
   private readonly now: () => number;
 
   constructor(private readonly deps: HostToolExecutorDeps) {
     this.now = deps.now ?? (() => Date.now());
-  }
-
-  /** The user allowed `toolName` on a permission prompt the daemon opened; one later call may skip a second card. */
-  recordApproval(toolName: string): void {
-    const list = this.approvals.get(toolName) ?? [];
-    list.push(this.now() + APPROVAL_TTL_MS);
-    this.approvals.set(toolName, list.slice(-HOST_TOOL_LIMITS.maxConcurrentCallsPerThread));
-  }
-
-  private consumeApproval(toolName: string): boolean {
-    const list = (this.approvals.get(toolName) ?? []).filter((t) => t > this.now());
-    const used = list.shift() !== undefined;
-    if (list.length) this.approvals.set(toolName, list); else this.approvals.delete(toolName);
-    return used;
   }
 
   /** A `tool.call` event arrived (live, replayed, or reopened). */
@@ -135,26 +134,39 @@ export class HostToolExecutor {
     const name = mcpToolName(spec.server, spec.name);
     let result: { success: boolean; text: string; content?: unknown[] };
     try {
-      if (spec.requiresApproval && !this.consumeApproval(name)) {
-        const detail = `Run ${spec.name} for a remote thread: ${JSON.stringify(input).slice(0, 4000)}`;
+      if (spec.requiresApproval) {
+        const card = describeCallForApproval(spec.name, input);
+        if (card.unseenBytes > 0) {
+          this.deps.log?.(`REFUSED ${spec.server}/${spec.name}: ${card.unseenBytes} bytes of input would not be shown on the approval card`);
+          this.finish(callId, refusal(`The host tool "${spec.name}" was not run: its input is too long to show the user in full for approval (${card.unseenBytes} more bytes than the card can display). Call it again with a shorter input.`));
+          return;
+        }
+        const detail = card.detail;
         const allowed = await this.deps.requestPermission(name, detail).catch(() => false);
         if (!allowed) { this.finish(callId, refusal('The user denied this tool call.')); return; }
       }
       if (abort.signal.aborted) { this.finish(callId, refusal(`The host tool "${spec.name}" was canceled before it finished.`)); return; }
       const out = await this.deps.invoke(spec.server, spec.name, input, abort.signal);
       const clamped = clampResultText(out.text);
-      result = { success: out.success, text: clamped.text, ...(out.content?.length ? { content: out.content.slice(0, HOST_TOOL_LIMITS.maxResultContentBlocks) } : {}) };
+      // Same filter the daemon applies: images only, bounded in count and total size, so one large screenshot
+      // cannot push the frame past the transport limit and loop on re-send.
+      const sanitized = sanitizeResultContent(out.content);
+      result = { success: out.success, text: clamped.text, ...(sanitized.length ? { content: sanitized } : {}) };
     } catch (err) {
-      result = refusal(err instanceof Error ? err.message : String(err));
+      this.deps.log?.(`host tool ${spec.server}/${spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
+      result = refusal(`The host tool "${spec.name}" failed.`);
     }
     this.finish(callId, result);
   }
 
   private finish(callId: string, result: { success: boolean; text: string; content?: unknown[] }): void {
     this.calls.set(callId, { state: 'done', result });
-    while (this.calls.size > REMEMBERED_CALLS) {
-      const oldest = this.calls.keys().next().value as string;
-      this.calls.delete(oldest);
+    // Forget only finished calls: dropping a running entry would let a reopened call run a second time.
+    if (this.calls.size > REMEMBERED_CALLS) {
+      for (const [id, c] of this.calls) {
+        if (this.calls.size <= REMEMBERED_CALLS) break;
+        if (c.state === 'done') this.calls.delete(id);
+      }
     }
     void this.send(callId, result);
   }

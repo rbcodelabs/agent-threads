@@ -424,7 +424,7 @@ export class Connection {
       }
       case 'session.open': {
         this.requireControl(frame.threadId, auth);
-        const res = host.open(frame.threadId, frame.spec, frame.resume);
+        const res = host.open(frame.threadId, frame.spec, frame.resume, this.id);
         return {
           created: res.created,
           adopted: !res.created,
@@ -495,7 +495,7 @@ export class Connection {
         return {};
       case 'tool.manifest':
         this.requireSeat(frame.threadId);
-        return host.setManifest(frame.threadId, frame.servers);
+        return host.setManifest(frame.threadId, frame.servers, this.id);
       case 'tool.result':
         // Only the client holding this thread's seat can answer, and only a call made for this thread.
         this.requireSeat(frame.threadId);

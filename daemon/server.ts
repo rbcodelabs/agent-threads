@@ -154,7 +154,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     audit,
   });
   const controllers = new ControlRegistry();
-  controllers.onChange((threadId, owner) => host.setAttached(threadId, owner !== undefined));
+  controllers.onChange((threadId, owner) => host.setSeatHolder(threadId, owner?.id));
   const recovered = host.recover();
   sweepRawLogs(logsDir, rawLogLimits, options.now?.());
   for (const id of recovered) log(`recovered thread ${id}: closed in-flight turn as daemon_restarted`);

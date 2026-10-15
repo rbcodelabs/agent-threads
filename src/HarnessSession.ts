@@ -125,6 +125,12 @@ export interface ClaudeHarnessOptions {
    */
   vmMcpServers?: Record<string, McpServerConfig>;
   disallowedTools?: string[];
+  /**
+   * Tool names (`mcp__server__tool`) this process allows without opening a permission card. The daemon sets it for
+   * the host tools it proxies: the user's own app shows the real card for those (with the real input), so a
+   * second card written here would only be a second, weaker prompt. Never set for a local session.
+   */
+  preApprove?: (toolName: string) => boolean;
   sessionOptions?: {
     thinking?: Options['thinking'];
     effort?: Options['effort'];

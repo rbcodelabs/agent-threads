@@ -130,6 +130,12 @@ export class RemoteHarnessSession implements HarnessSession {
   private sentManifest: HostManifest | null = null;
   private manifestSent = '';
   private executor: HostToolExecutor | null = null;
+  /**
+   * Whether the daemon gave THIS client the thread's read-write seat (from the attach reply, or a successful
+   * `session.open`). Only the seat holder may run a `tool.call` or send a manifest: an observer sees the same
+   * journal, and executing there would run the tool twice (or run it for a call it never offered).
+   */
+  private controller: boolean | null = null;
   /** Replayed (historic) tool calls wait here for a closing event before running, so a finished call never re-runs. */
   private deferredCalls = new Map<string, unknown>();
   private deferredTimer: ReturnType<typeof setTimeout> | null = null;
@@ -219,7 +225,7 @@ export class RemoteHarnessSession implements HarnessSession {
   /** Tell the daemon the current manifest if it changed (on open, on every attach, before each turn). */
   private async syncManifest(force = false): Promise<void> {
     const tools = this.deps.hostTools;
-    if (!tools || this.closed || !this.client.daemonInfo?.capabilities.includes('host.tools')) return;
+    if (!tools || this.closed || this.controller !== true || !this.client.daemonInfo?.capabilities.includes('host.tools')) return;
     try {
       const manifest = await tools.manifest();
       const sig = manifestSignature(manifest);
@@ -242,6 +248,7 @@ export class RemoteHarnessSession implements HarnessSession {
       .command('session.open', { threadId: this.threadId, spec: this.spec, ...(this.resume ? { resume: this.resume } : {}) })
       .then((res) => {
         this.opened = true;
+        this.controller = true; // session.open requires (and takes) the seat
         if (typeof res.epoch === 'string') this.remote.epoch = res.epoch;
         if (typeof res.nativeSessionId === 'string') this.remote.nativeSessionId = res.nativeSessionId;
         // session.open carried the manifest; send it again explicitly so the daemon's copy is current.
@@ -261,7 +268,9 @@ export class RemoteHarnessSession implements HarnessSession {
         onRewind: (seq) => this.onRewind(seq),
         onAttached: (info) => {
           this.remote.epoch = info.epoch;
+          this.controller = info.controller === true;
           if (info.controller) void this.syncManifest(true);
+          else this.executor?.abortAll();
           if (!info.controller && !this.observerNoticeShown) {
             this.observerNoticeShown = true;
             this.callbacks?.onNotification?.('This thread is controlled by another client; you are viewing it read-only.', 'high');
@@ -550,7 +559,7 @@ export class RemoteHarnessSession implements HarnessSession {
           return;
         case 'tool.cancel':
           this.deferredCalls.delete((args as { callId?: string }).callId ?? '');
-          this.executor?.handleCancel((args as { callId?: unknown }).callId);
+          if (this.controller === true) this.executor?.handleCancel((args as { callId?: unknown }).callId);
           return;
         case 'tool.unavailable':
           this.onToolUnavailable(args as { server?: string; tool?: string; reason?: string });
@@ -586,6 +595,7 @@ export class RemoteHarnessSession implements HarnessSession {
    */
   private onToolCall(args: unknown, reopen: boolean, replay: boolean): void {
     if (!this.executor) { this.log('ignoring tool.call: host tools are off for this thread'); return; }
+    if (this.controller !== true) { this.log('ignoring tool.call: this client does not hold the thread\'s read-write seat'); return; }
     const id = (args as { callId?: unknown } | null)?.callId;
     if (replay && !reopen && typeof id === 'string') {
       this.deferredCalls.set(id, args);
@@ -600,6 +610,7 @@ export class RemoteHarnessSession implements HarnessSession {
     this.deferredTimer = null;
     const calls = [...this.deferredCalls.values()];
     this.deferredCalls.clear();
+    if (this.controller !== true) return;
     for (const c of calls) this.executor?.handleCall(c, true);
   }
 
@@ -663,7 +674,6 @@ export class RemoteHarnessSession implements HarnessSession {
     this.requests.set(a.requestId, { kind: 'permission' });
     cb.onPermissionRequest(a.toolName, a.detail).then(
       (allow) => {
-        if (allow === true) this.executor?.recordApproval(a.toolName);
         this.respond('resolve.permission', a.requestId, { allow: allow === true });
       },
       () => this.respond('resolve.permission', a.requestId, { allow: false }),

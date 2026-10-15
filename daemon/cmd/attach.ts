@@ -80,6 +80,13 @@ export async function runAttach(args: AttachArgs, io: RawIo, rt: CliRuntime): Pr
     });
     follower.start();
     const info = await Promise.race([follower.attached, follower.finished.then(() => null)]);
+    if (info && !args.claim && info.controller) {
+      // `observe` was requested but this daemon granted the seat anyway: it predates the flag. Holding the seat
+      // would lock the real client out of its own thread, so give it back and say why.
+      try { await client.command('session.detach', { threadId }, { timeoutMs: 3000 }); } catch { /* the disconnect releases the seat */ }
+      follower.stop('failed', 'daemon too old for read-only attach');
+      throw new CliError('this daemon is older than the CLI: it does not support read-only attach and gave this terminal the thread\'s read-write seat. Detached again so the real client is not locked out; upgrade the daemon, or use --claim to take over deliberately.', EXIT.INCOMPATIBLE);
+    }
     if (info && args.claim && !info.controller) {
       const msg = 'another client holds this thread\'s read-write seat; staying read-only (detach it there to take over)';
       if (args.json) io.out(`${cliLine('note', { text: msg })}\n`);

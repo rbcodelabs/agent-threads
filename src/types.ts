@@ -294,16 +294,21 @@ export interface RemoteDaemonConfig {
   vaultMapping?: RemoteVaultMapping;
   /**
    * What this daemon may do on THIS computer (vault, workspace, threads, Google, ... tools; design 3.3).
-   * Absent = the defaults: tools on, every `host` route of `toolRouting.ts`, no MCP allowlist.
+   * Absent = the defaults: OFF. Nothing on this computer is reachable from the daemon until `enabled` is true, and
+   * then only the groups named in `routes`.
    */
   hostTools?: RemoteHostToolsSettings;
 }
 
 /** Per-daemon choices for tools that run on this computer on a remote thread's behalf. */
 export interface RemoteHostToolsSettings {
-  /** False turns every host tool off for this daemon (its threads keep only the daemon's own tools). Default true. */
+  /** True offers the groups in `routes` to this daemon's threads. Default false: no host tool is offered. */
   enabled?: boolean;
-  /** Switch a domain (`vault`, `workspace`, `threads`, `schedule`, `skills`, `misc`, `browser`, `mcp`) or one tool off. */
+  /**
+   * Opt-in groups (`vault`, `workspace`, `threads`, `skills`, `browser`, `mcp`), a single read tool, or one proxied
+   * server name -> `host`. Unlisted means off. A tool that writes or executes (`toolRouting.ts` `NEVER_OFFERED`) is
+   * never offered whatever is listed.
+   */
   routes?: Record<string, 'host' | 'absent'>;
   /**
    * External MCP servers (Settings, MCP) that may be sent to this daemon by name. Unset: servers without headers

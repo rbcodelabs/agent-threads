@@ -54,9 +54,10 @@ export interface ClaudeDriverDeps {
  */
 export function specToSessionOptions(
   spec: RemoteSessionSpec,
-  parts: { resume?: string; callbacks: SessionCallbacks; secretEnv?: Record<string, string>; hostServers?: HostServers['servers'] },
+  parts: { resume?: string; callbacks: SessionCallbacks; secretEnv?: Record<string, string>; hostServers?: HostServers['servers']; preApprove?: (toolName: string) => boolean },
 ): HarnessSessionOptions {
   const claude: ClaudeHarnessOptions = {};
+  if (parts.preApprove) claude.preApprove = parts.preApprove;
   if (spec.disallowedTools?.length) claude.disallowedTools = spec.disallowedTools;
   const so = spec.sessionOptions;
   if (so) {
@@ -93,6 +94,21 @@ export function specToSessionOptions(
     ...(parts.secretEnv && Object.keys(parts.secretEnv).length ? { secretEnv: parts.secretEnv } : {}),
     claude,
   };
+}
+
+/**
+ * Is this `mcp__<server>__<tool>` one of the host tools currently proxied to the user's app? Those are allowed here
+ * without a card: the app shows its own (the only prompt that is shown the real input and cannot be forged by this
+ * daemon). A daemon-local tool (worktree tools) is not in the manifest and keeps its normal prompt.
+ */
+export function isProxiedHostTool(toolName: string, manifest: Readonly<Record<string, ReadonlyArray<{ name: string }>>>): boolean {
+  for (const [server, tools] of Object.entries(manifest)) {
+    const prefix = `mcp__${server}__`;
+    if (!toolName.startsWith(prefix)) continue;
+    const bare = toolName.slice(prefix.length);
+    if (tools.some((t) => t.name === bare)) return true;
+  }
+  return false;
 }
 
 // ── pending requests ───────────────────────────────────────────────────────
@@ -155,6 +171,7 @@ export class ClaudeSessionDriver implements SessionDriver {
       callbacks: this.buildCallbacks(),
       secretEnv: deps.secretEnv,
       hostServers: this.hostServers.servers,
+      preApprove: (toolName) => isProxiedHostTool(toolName, ctx.hostTools?.manifest() ?? {}),
     });
     this.ready = this.harness.start(options).catch((err: unknown) => {
       this.emit({ name: 'onError', args: [toWireArg(err instanceof Error ? err : new Error(String(err)))] } as WireEvent);

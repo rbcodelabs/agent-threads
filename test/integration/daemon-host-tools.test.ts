@@ -84,7 +84,7 @@ describe('host tool round trip', () => {
     const call = await c.waitFor((f) => f.name === 'tool.call');
     await c.cmd('tool.result', { threadId: 't', callId: call.args.callId, success: true, text: 'x'.repeat(1_500_000) });
     const text = await lastMessage(c);
-    expect(text.length).toBeLessThan(1_100_000);
+    expect(text.length).toBeLessThan(110_000); // cut at the 100K result limit plus the marker
     expect(text).toContain('output truncated');
   });
 
@@ -156,6 +156,29 @@ describe('binding and authority', () => {
     expect(await other.cmd('tool.manifest', { threadId: 't', servers: {} })).toMatchObject({ type: 'err', code: 'forbidden' });
     await owner.cmd('tool.result', { threadId: 't', callId: call.args.callId, success: true, text: 'real' });
     expect(await lastMessage(owner)).toBe('mcp ok: real');
+  });
+
+  it('once a terminal claims the seat, host tool calls fail fast instead of waiting for an answer that cannot come', async () => {
+    const td = await track({ hostToolGraceMs: 200, hostToolTimeoutMs: 60_000 });
+    const geode = await connect(td, { instanceId: 'geode' });
+    await open(geode, 't'); // Geode holds the seat and sent the manifest
+    // `attach --claim` / `run --thread`: same token, no install id, so it is treated as the same client and takes the seat.
+    const cli = await connect(td);
+    const attached = await cli.cmd('attach', { ch: 't:t', afterSeq: 0 });
+    expect(attached).toMatchObject({ type: 'ack', result: { controller: true } });
+    expect(td.daemon.threads.hostTools.isAttached('t')).toBe(false); // the seat holder never offered these tools
+    const started = Date.now();
+    await send(cli, 't', '/mcp claude_threads vault_search {}');
+    const msg = await lastMessage(cli);
+    expect(msg).toContain("The user's Geode is not connected");
+    expect(Date.now() - started).toBeLessThan(5000); // grace, not the 60 s answer timeout
+    expect(cli.events().some((f) => f.name === 'tool.call')).toBe(false); // never issued to a client that cannot answer
+    // Geode takes the seat back by re-attaching and sending its manifest: host tools work again.
+    await geode.cmd('attach', { ch: 't:t', afterSeq: 0 });
+    await cli.cmd('session.detach', { threadId: 't' });
+    await geode.cmd('attach', { ch: 't:t', afterSeq: 0 });
+    await geode.cmd('tool.manifest', { threadId: 't', servers: { claude_threads: [tool('vault_search')] } });
+    expect(td.daemon.threads.hostTools.isAttached('t')).toBe(true);
   });
 
   it('a read-scope token cannot send manifests or results', async () => {
@@ -245,6 +268,8 @@ describe('detached grace', () => {
     await sleep(100);
     const b = await connect(td, { instanceId: 'g' });
     await b.cmd('attach', { ch: 't:t', afterSeq: 0 });
+    // Like the plugin, the reconnected client re-sends its manifest on attach: that is what makes it the host.
+    await b.cmd('tool.manifest', { threadId: 't', servers: { claude_threads: [tool('vault_search')] } });
     const again = await b.waitFor((f) => f.name === 'tool.call');
     expect(again.args.callId).toBe(first.args.callId); // the open call is shown again
     await b.cmd('tool.result', { threadId: 't', callId: again.args.callId, success: true, text: 'after reconnect' });

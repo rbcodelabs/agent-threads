@@ -594,16 +594,16 @@ export class RemoteDaemonModal extends Modal {
       .setDesc('The folder on that machine offered for new threads. Normally chosen for you above.')
       .addText((t) => { folderText = t; t.setPlaceholder('/srv/workspaces').setValue(folder).onChange((v) => { folder = v; folderTouched = true; renderFolders(); }); });
 
-    // What this daemon may do on THIS computer (design 3.3). Defaults: on, every host route, no MCP allowlist.
-    let hostToolsOn = this.existing?.hostTools?.enabled !== false;
-    let turnedOff = Object.entries(this.existing?.hostTools?.routes ?? {}).filter(([, v]) => v === 'absent').map(([k]) => k).join(', ');
+    // What this daemon may do on THIS computer (design 3.3). Default: nothing; every group is opt-in.
+    let hostToolsOn = this.existing?.hostTools?.enabled === true;
+    let allowedGroups = Object.entries(this.existing?.hostTools?.routes ?? {}).filter(([, v]) => v === 'host').map(([k]) => k).join(', ');
     let mcpAllow = (this.existing?.hostTools?.mcpAllowlist ?? []).join(', ');
     new Setting(advanced).setName('Tools on this computer')
-      .setDesc('Let threads on this daemon call your vault, editor, thread and Google tools here, while this app is connected. Off: they keep only the daemon machine\'s own tools.')
+      .setDesc('Off by default. On: threads on this daemon can call the groups you list below on this computer, while this app is connected, and each tool that changes anything still asks you here first. Off: they keep only the daemon machine\'s own tools. Anything that writes, runs commands, schedules, installs or reads secrets is never offered.')
       .addToggle((t) => t.setValue(hostToolsOn).onChange((v) => { hostToolsOn = v; }));
-    new Setting(advanced).setName('Tools turned off')
-      .setDesc('Comma-separated groups or tool names to keep on this computer: vault, workspace, threads, schedule, skills, misc, browser, mcp. For example "vault" if the daemon has its own synced copy of the vault.')
-      .addText((t) => t.setPlaceholder('vault, browser').setValue(turnedOff).onChange((v) => { turnedOff = v; }));
+    new Setting(advanced).setName('Tool groups to allow')
+      .setDesc('Comma-separated, all read-only and all off until listed: vault (search and read notes), workspace (open tabs, active file), threads (list and read your other threads), skills (list installed skills), browser (the in-app browser), mcp (your Google Workspace and OAuth servers; or name one server). Only listed groups are offered, and only while "Tools on this computer" is on.')
+      .addText((t) => t.setPlaceholder('vault, mcp').setValue(allowedGroups).onChange((v) => { allowedGroups = v; }));
     new Setting(advanced).setName('MCP servers it may receive')
       .setDesc('Names of your external MCP servers (Settings, MCP) to send to this daemon. Blank: servers without headers that the daemon can reach. Servers that start a program here, use a local address or a secret are never sent.')
       .addText((t) => t.setPlaceholder('docs, search').setValue(mcpAllow).onChange((v) => { mcpAllow = v; }));
@@ -669,7 +669,7 @@ export class RemoteDaemonModal extends Modal {
           tokenSecretName: this.existing?.tokenSecretName ?? tokenSecretNameFor(id),
           ...(folder.trim() ? { defaultCwdRoot: folder.trim() } : {}),
           ...(mapping.mapping ? { vaultMapping: mapping.mapping } : {}),
-          ...hostToolsSettingsFrom(hostToolsOn, turnedOff, mcpAllow),
+          ...hostToolsSettingsFrom(hostToolsOn, allowedGroups, mcpAllow),
         },
       };
     };
@@ -3674,16 +3674,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   }
 }
 
-/** The `hostTools` field of a daemon config from the three Advanced inputs; omitted when everything is at its default. */
-export function hostToolsSettingsFrom(enabled: boolean, turnedOff: string, mcpAllow: string): { hostTools?: import('./types').RemoteHostToolsSettings } {
+/** The `hostTools` field of a daemon config from the three Advanced inputs; omitted when everything is at its default (off). */
+export function hostToolsSettingsFrom(enabled: boolean, allowedGroups: string, mcpAllow: string): { hostTools?: import('./types').RemoteHostToolsSettings } {
   const list = (v: string): string[] => [...new Set(v.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean))];
-  const off = list(turnedOff);
+  const groups = list(allowedGroups);
   const allow = list(mcpAllow);
-  if (enabled && off.length === 0 && allow.length === 0) return {};
+  if (!enabled && groups.length === 0 && allow.length === 0) return {};
   return {
     hostTools: {
-      ...(enabled ? {} : { enabled: false }),
-      ...(off.length ? { routes: Object.fromEntries(off.map((k) => [k, 'absent' as const])) } : {}),
+      ...(enabled ? { enabled: true } : {}),
+      ...(groups.length ? { routes: Object.fromEntries(groups.map((k) => [k, 'host' as const])) } : {}),
       ...(allow.length ? { mcpAllowlist: allow } : {}),
     },
   };

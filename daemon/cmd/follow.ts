@@ -15,7 +15,7 @@
  */
 import { DaemonCommandError, type AttachInfo, type ChannelSubscription, type DaemonClient } from '../../src/remote/DaemonClient';
 import type { EventFrame, ResyncFrame } from '../../src/protocol';
-import { cliLine, frameLine, TextRenderer } from './render';
+import { cliLine, field, frameLine, oneLine, TextRenderer } from './render';
 
 export type AnswerMode =
   /** Ask on the terminal (stdin is a TTY). */
@@ -185,7 +185,7 @@ export class Follower {
 
   private note(text: string): void {
     if (this.opts.json) this.opts.io.out(`${cliLine('note', { text })}\n`);
-    else { this.renderer.endLine(); this.opts.io.err(`[cli] ${text}\n`); }
+    else { this.renderer.endLine(); this.opts.io.err(`[cli] ${oneLine(text, 600)}\n`); }
   }
 
   private onAttached(info: AttachInfo): void {
@@ -333,7 +333,7 @@ export class Follower {
       const a = r.args;
       switch (r.kind) {
         case 'permission': {
-          const line = await prompter.ask(`Allow ${String(a.toolName ?? 'this tool')}? [y/N] `, abort.signal);
+          const line = await prompter.ask(`Allow ${field(a.toolName, 'this tool')}? [y/N] `, abort.signal);
           if (line === null) return;
           const yn = parseYesNo(line);
           await this.resolve({ cmd: 'resolve.permission', requestId: r.requestId, allow: yn === 'yes' });
@@ -344,7 +344,7 @@ export class Follower {
           for (const q of Array.isArray(a.questions) ? a.questions : []) {
             const qq = obj(q);
             const labels = (Array.isArray(qq.options) ? qq.options : []).map((o) => String(obj(o).label ?? ''));
-            const line = await prompter.ask(`${String(qq.header ?? 'Question')}: ${String(qq.question ?? '')}\n  answer (number${qq.multiSelect === true ? 's, comma separated' : ''} or text): `, abort.signal);
+            const line = await prompter.ask(`${field(qq.header, 'Question')}: ${oneLine(String(qq.question ?? ''), 500)}\n  answer (number${qq.multiSelect === true ? 's, comma separated' : ''} or text): `, abort.signal);
             if (line === null) return;
             const picked = parseChoice(line, labels, qq.multiSelect === true);
             if (picked !== null) answers[String(qq.id ?? qq.question ?? '')] = picked;

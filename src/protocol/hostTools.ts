@@ -27,7 +27,7 @@ export const HOST_TOOL_LIMITS = {
   /** Serialized `input` of one `tool.call`; larger is refused to the model, never truncated. */
   maxInputBytes: 256 * 1024,
   /** `tool.result.text` above this is cut with a marker before it reaches the model. */
-  maxResultTextChars: 1_000_000,
+  maxResultTextChars: 100_000,
   /** `tool.result.text` above this is a malformed frame (the client should have cut it). */
   maxResultFrameChars: 8_000_000,
   /** Structured content blocks kept from one result (images), and their total serialized size. */
