@@ -677,6 +677,15 @@ export class ThreadManager {
     return all.filter((t) => t.projectId === projectId);
   }
 
+  /**
+   * A thread hosted on a daemon. Its permission requests come from another machine (or from tools that act on this
+   * one on a daemon's behalf), so "Always Allow" never applies to them: nothing is remembered from a click and
+   * nothing remembered locally pre-approves a request, because the tool name on the card is the daemon's word.
+   */
+  isRemoteThread(threadId: string): boolean {
+    return !!this.getThread(threadId)?.remote;
+  }
+
   getThread(id: string): Thread | undefined {
     return this.threads.get(id);
   }

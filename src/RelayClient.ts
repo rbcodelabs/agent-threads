@@ -442,7 +442,8 @@ export class RelayClient {
           // Generate a stable requestId for this permission so mobile can reference it.
           // Register a resolver in ThreadManager so resolve_permission commands work.
           const requestId = crypto.randomUUID();
-          this.permissionToolNames.set(requestId, event.toolName);
+          // Always Allow is never remembered for a remote thread (the tool name is the daemon's word).
+          if (!this.threadManager!.isRemoteThread(threadId)) this.permissionToolNames.set(requestId, event.toolName);
           this.threadManager!.registerRemotePermissionResolver(requestId, (allow) => {
             this.permissionToolNames.delete(requestId);
             this.threadManager!.resolvePermission(threadId, allow);

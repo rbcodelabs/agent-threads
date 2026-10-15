@@ -481,7 +481,8 @@ export class ThreadsView extends ItemView {
       // capability allowlist, not a forgeable naming-prefix convention.
       // Requests that cannot be always-allowed (host_exec) skip both shortcuts
       // and are decided on the card every time.
-      if (isPermissionPreApproved(toolName, this.plugin.settings.alwaysAllowedTools)) return Promise.resolve(true);
+      // A remote thread's requests are never pre-approved: the tool name comes from the daemon (see isRemoteThread).
+      if (!this.manager.isRemoteThread(threadId) && isPermissionPreApproved(toolName, this.plugin.settings.alwaysAllowedTools)) return Promise.resolve(true);
 
       return new Promise((resolve) => {
         let resolved = false;
@@ -4372,7 +4373,7 @@ export class ThreadsView extends ItemView {
       .addEventListener('click', () => done(false));
     actions.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
       .addEventListener('click', () => done(true));
-    if (canAlwaysAllow(toolName)) {
+    if (canAlwaysAllow(toolName) && !(this.activeThreadId && this.manager.isRemoteThread(this.activeThreadId))) {
       actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
         .addEventListener('click', async () => {
           this.plugin.settings.alwaysAllowedTools.push(toolName);

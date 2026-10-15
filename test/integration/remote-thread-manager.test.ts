@@ -105,6 +105,26 @@ describe('remote thread through ThreadManager', () => {
     manager.destroy();
   });
 
+  it('treats a remote thread as never always-allowable and a local thread as ordinary', async () => {
+    const { manager } = await setup();
+    const remote = manager.createRemoteThread('on the box', { daemonId: 'box', remoteCwd: '/srv/workspaces/x', clientId: 'geode-1' });
+    expect(manager.isRemoteThread(remote.id)).toBe(true);
+    expect(manager.isRemoteThread('no-such-thread')).toBe(false);
+    manager.destroy();
+  });
+
+  it('offers no host tools by default: the daemon session is opened without a manifest', async () => {
+    const { td, manager } = await setup();
+    let factoryCalls = 0;
+    manager.remoteHostToolsFactory = () => { factoryCalls++; return undefined; };
+    const t = manager.createRemoteThread('no tools', { daemonId: 'box', remoteCwd: '/srv/workspaces/x', clientId: 'geode-1' });
+    await manager.sendMessage(t.id, '/mcp-list claude_threads');
+    await until(() => t.messages.some((m) => m.role === 'assistant'), 'turn');
+    expect(factoryCalls).toBe(0); // enabled must be set explicitly for the factory to be consulted
+    expect(td.daemon.threads.hostTools.manifest(t.id)).toEqual({});
+    manager.destroy();
+  });
+
   it('does not stat, repair or reroute a remote cwd that does not exist locally', async () => {
     const { manager } = await setup();
     const thread = manager.createRemoteThread('guards', { daemonId: 'box', remoteCwd: `${os.homedir()}/.geode/worktrees/nope/feat-x`, clientId: 'c' });

@@ -987,7 +987,7 @@ export class KanbanView extends ItemView {
       deny.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, false); });
       const allow = btns.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
       allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, true); });
-      if (!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) {
+      if ((!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) && !this.manager.isRemoteThread(thread.id)) {
         const always = btns.createEl('button', { text: 'Always', cls: 'ct-permission-btn ct-permission-always' });
         always.addEventListener('click', async (e) => {
           e.stopPropagation();
