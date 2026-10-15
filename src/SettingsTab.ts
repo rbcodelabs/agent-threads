@@ -593,6 +593,20 @@ export class RemoteDaemonModal extends Modal {
       .setDesc('The folder on that machine offered for new threads. Normally chosen for you above.')
       .addText((t) => { folderText = t; t.setPlaceholder('/srv/workspaces').setValue(folder).onChange((v) => { folder = v; folderTouched = true; renderFolders(); }); });
 
+    // What this daemon may do on THIS computer (design 3.3). Defaults: on, every host route, no MCP allowlist.
+    let hostToolsOn = this.existing?.hostTools?.enabled !== false;
+    let turnedOff = Object.entries(this.existing?.hostTools?.routes ?? {}).filter(([, v]) => v === 'absent').map(([k]) => k).join(', ');
+    let mcpAllow = (this.existing?.hostTools?.mcpAllowlist ?? []).join(', ');
+    new Setting(advanced).setName('Tools on this computer')
+      .setDesc('Let threads on this daemon call your vault, editor, thread and Google tools here, while this app is connected. Off: they keep only the daemon machine\'s own tools.')
+      .addToggle((t) => t.setValue(hostToolsOn).onChange((v) => { hostToolsOn = v; }));
+    new Setting(advanced).setName('Tools turned off')
+      .setDesc('Comma-separated groups or tool names to keep on this computer: vault, workspace, threads, schedule, skills, misc, browser, mcp. For example "vault" if the daemon has its own synced copy of the vault.')
+      .addText((t) => t.setPlaceholder('vault, browser').setValue(turnedOff).onChange((v) => { turnedOff = v; }));
+    new Setting(advanced).setName('MCP servers it may receive')
+      .setDesc('Names of your external MCP servers (Settings, MCP) to send to this daemon. Blank: servers without headers that the daemon can reach. Servers that start a program here, use a local address or a secret are never sent.')
+      .addText((t) => t.setPlaceholder('docs, search').setValue(mcpAllow).onChange((v) => { mcpAllow = v; }));
+
     const setVault = (v: string): void => { vaultRemote = v; vaultTouched = true; vaultText?.setValue(v); };
     const setFolder = (v: string): void => { folder = v; folderTouched = true; folderText?.setValue(v); };
 
@@ -654,6 +668,7 @@ export class RemoteDaemonModal extends Modal {
           tokenSecretName: this.existing?.tokenSecretName ?? tokenSecretNameFor(id),
           ...(folder.trim() ? { defaultCwdRoot: folder.trim() } : {}),
           ...(mapping.mapping ? { vaultMapping: mapping.mapping } : {}),
+          ...hostToolsSettingsFrom(hostToolsOn, turnedOff, mcpAllow),
         },
       };
     };
@@ -3620,4 +3635,19 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
   }
+}
+
+/** The `hostTools` field of a daemon config from the three Advanced inputs; omitted when everything is at its default. */
+export function hostToolsSettingsFrom(enabled: boolean, turnedOff: string, mcpAllow: string): { hostTools?: import('./types').RemoteHostToolsSettings } {
+  const list = (v: string): string[] => [...new Set(v.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean))];
+  const off = list(turnedOff);
+  const allow = list(mcpAllow);
+  if (enabled && off.length === 0 && allow.length === 0) return {};
+  return {
+    hostTools: {
+      ...(enabled ? {} : { enabled: false }),
+      ...(off.length ? { routes: Object.fromEntries(off.map((k) => [k, 'absent' as const])) } : {}),
+      ...(allow.length ? { mcpAllowlist: allow } : {}),
+    },
+  };
 }

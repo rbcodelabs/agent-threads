@@ -5,9 +5,9 @@ Geode. The turn keeps running there when Geode quits; reopening Geode re-attache
 completes. This is stage 1 of the daemon design: Geode still owns the transcript, the daemon owns the
 process and a replay journal.
 
-What a remote thread has today: the **daemon machine's own tools** (shell, file read/write, search) and
-its own `claude` login. It does not have the vault/editor tools, your MCP servers, skills, or keychain
-secrets (those arrive in later PRs). Claude only. A message sent while a turn is running is held by the
+What a remote thread has today: the **daemon machine's own tools** (shell, file read/write, search, git worktrees) and
+its own `claude` login, plus the tools of your computer proxied back to the app while it is connected ("Tools on your
+computer" below). It does not have skills or keychain secrets (later PRs). Claude only. A message sent while a turn is running is held by the
 plugin and sent when the turn ends.
 
 ## ws:// vs wss:// from Geode (spike findings)
@@ -121,6 +121,12 @@ Read this before exposing the daemon beyond `127.0.0.1`.
 - **If `tokens.json` is damaged** the daemon rejects *all* authentication (and says so once in its log) until the file is
   fixed, rather than crashing or guessing. Starting the daemon with a damaged file fails.
 
+- **Host tools are a remote-control channel in both directions.** `tool.call` / `tool.result` are new, so they have their own threat model.
+  - *A client lying to the daemon* (a stolen `control` token): it can feed the model any text through a `tool.result`, which is no more power than the same token has through `session.send`. It can only answer calls made for a thread it holds the seat of (call ids are random UUIDs bound to one thread, a repeat or another thread's id is refused), its manifest and results are validated and size-capped (500 tools, 2 MB manifest, results cut at 1 MB, only text and bounded images reach the model), and read-scope tokens cannot send either.
+  - *A compromised daemon asking the app to run tools* is the dangerous direction: the app runs your vault, threads, scheduler and browser tools. The app therefore trusts nothing in a `tool.call`. It runs only a tool in the manifest it sent for that thread (exact server and name; anything else is refused and logged), caps input size, calls in flight (8 per thread, 16 overall) and calls per minute (240), and applies the **same approval gate as a local agent** itself (the thread's permission mode and the approval card), whatever the daemon claims happened on its side. The remaining exposure is what you have already allowed: tools your permission mode runs without asking, and always-allow entries, are callable by a hostile daemon exactly as they are by a local agent. Keep the daemon on a machine you trust, turn off groups you do not want it to reach (Settings, Remote daemons, Advanced), and leave `vault` / `threads` / `schedule` off for a daemon you do not fully trust.
+  - *What never crosses to the daemon:* keychain values, broker addresses and capability headers, the token, and MCP servers that need a secret or run a program on your computer. Only names, schemas and results do. Results of a host tool are stored in the daemon's journal and raw log like any other tool output (see above).
+  - *Never hangs:* with the app disconnected a call waits at most `hostToolGraceSec`, then fails with a readable message; an issued call waits at most `hostToolTimeoutSec`. Both are audited (`audit.ndjson` records server, tool, sizes and outcome, never inputs or results).
+
 Limits that keep one bad client from exhausting the machine (all in `config.json`, env or flags): at most 64 sockets
 (`maxConnections`) and 16 not-yet-authenticated ones; frames before `hello` are capped at 4 KB; a client that stops reading
 replies is dropped like a slow event consumer; at most 8 live sessions (`maxLiveSessions`); an unanswered permission or
@@ -128,6 +134,42 @@ question is canceled after 60 minutes (`requestTimeoutMinutes`, 0 = never) so a 
 forever. The audit log (`audit.ndjson`) is batched, does not record per-event acknowledgements, and rotates at 5 MB keeping
 three old files. Raw logs (`logs/<thread>.jsonl`) follow the journal retention: files older than `journalTtlDays` are
 deleted and a file past `journalMaxMb` is rotated to `.jsonl.1` (so at most about twice the cap per thread).
+
+## Tools on your computer (host tools)
+
+A remote thread keeps the daemon machine's own tools (shell, file read/write, search) and now also reaches the tools that
+only exist in the app on your computer, as long as the app is connected:
+
+| Runs | Tools |
+|---|---|
+| On the daemon, beside the repo | `enter_worktree`, `exit_worktree`, `set_working_directory` (worktrees go under `<first workspace>/.worktrees`, or `worktreeRoot`) |
+| In the app on your computer (proxied) | `vault_*`, `workspace_*`, `host_*` (command palette, Web Viewer), `threads_*`, `Cron*` / `ScheduleWakeup`, `skills_*`, `browser_*`, `request_secret`, `mcp_register_server`, your Google Workspace and OAuth MCP servers (under their own names, for example `mcp__google-docs__*`) |
+| Not offered | `enter_vm` / `vm_exec` / `exit_vm` (the daemon machine is the sandbox), `host_exec`, `github_*` (the GitHub connection has no credential on the daemon), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |
+
+The names are the ones a local thread has (`mcp__claude_threads__vault_search`), so always-allow entries and approval rules
+carry over. The remote session's system prompt lists exactly which tools run on your computer.
+
+- **Approvals are the same as a local thread.** A tool that needs approval asks you in the app, through the same card and
+  permission mode. If you already allowed that tool on the card the daemon opened, that one allow is reused for one call.
+- **When the app is not connected** a call waits up to `hostToolGraceSec` (default 60; config `hostToolGraceSec`, env
+  `AGENT_THREADS_HOST_TOOL_GRACE_SEC`) for it to reconnect, then the agent is told, in words, that your computer is not
+  connected and that the tool needs it, so it carries on instead of looping. The turn is never held longer than that plus
+  `hostToolTimeoutSec` (default 300) for a slow answer. When you reopen the app a transcript row says which host tools were
+  unavailable. Nothing is queued: the call is not run later.
+- **Choose what is offered.** Settings, Remote daemons, edit, Advanced: turn host tools off for a daemon, or turn off groups
+  (`vault`, `workspace`, `threads`, `schedule`, `skills`, `misc`, `browser`, `mcp`) or single tools. If the daemon holds its
+  own synced copy of the vault you may want `vault` off so the agent uses its file tools on the copy (see "Working in the
+  vault"; the two are different views of the same notes).
+- **Your MCP servers.** Servers that start a program on your computer (stdio), use an address on your computer, or need a
+  secret from your keychain cannot work on the daemon and are not sent; a server with headers (usually credentials) is sent
+  only if you list it under "MCP servers it may receive". Each dropped server is named in a transcript row with the reason.
+  Other http/sse servers the daemon can reach are passed through.
+- **Secrets stay here.** Only tool names, descriptions, schemas and tool *results* cross to the daemon. Keychain values, the
+  loopback addresses and capability headers of your Google and OAuth brokers, and the token never do.
+- **Limits.** A new proxied server that first appears after a session started needs a new session (tools of servers already
+  present update live). `request_secret` stores the value in your keychain; it does not reach the daemon, so the remote
+  agent cannot read it. A tool call that was running when the app quit may be re-run after a restart only if the daemon
+  still shows it as open.
 
 ## Connect from Geode
 
@@ -183,7 +225,7 @@ folder they would use on the Mac.
 - If you and a remote thread edit the same file in that window, the sync can conflict (one side's edit is
   lost or a conflict copy appears). Remote sessions are told to re-read before editing, prefer small edits
   and new files over rewrites, and never delete or rename vault files unless you ask.
-- The vault_* / editor tools are not available remotely; the session uses its shell and file tools on the copy.
+- The `vault_*` / editor tools run in the app on your computer (against the live vault) while it is connected; the session's shell and file tools work on the copy. Turn the `vault` group off for this daemon if you want only the copy.
 
 **1. Let the daemon use the folder.** Sessions may only run under a `--workspace` folder. `--workspace` is
 repeatable and a flag *replaces* the whole list (flag > `AGENT_THREADS_WORKSPACES` > `config.json`), so
@@ -281,7 +323,7 @@ actually happened, not "just now". What makes that work:
 - A journal line that is damaged in the middle of the file is skipped and logged, and the entries after it are kept (the
   file is rewritten without it); only a damaged *tail* is dropped.
 
-- Host tools (vault/editor), proxied MCP servers, skills, secrets: not forwarded (PR 7 and PR 9).
+- Skills and keychain secrets are not forwarded (PR 9). Host tools need the app connected (see above); there is no queue for tools that were unavailable.
 - A `resync` (Geode was away longer than the daemon keeps history) restores the last 20 finished messages
   only; anything older that was missed is in the daemon's raw log (`<data-dir>/logs/<thread>.jsonl`), not in
   the transcript. There is no "Recover from daemon" command yet.

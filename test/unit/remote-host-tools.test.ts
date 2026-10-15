@@ -356,3 +356,14 @@ describe('loopback MCP source', () => {
     expect(made).toBe(2);
   });
 });
+
+describe('daemon settings -> hostTools config', () => {
+  it('omits the field at defaults, and builds routes and allowlist from the inputs', async () => {
+    const { hostToolsSettingsFrom } = await import('../../src/SettingsTab');
+    expect(hostToolsSettingsFrom(true, '', '')).toEqual({});
+    expect(hostToolsSettingsFrom(false, '', '')).toEqual({ hostTools: { enabled: false } });
+    expect(hostToolsSettingsFrom(true, 'vault, browser  vault', 'docs,search')).toEqual({
+      hostTools: { routes: { vault: 'absent', browser: 'absent' }, mcpAllowlist: ['docs', 'search'] },
+    });
+  });
+});
