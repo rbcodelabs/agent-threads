@@ -9,9 +9,15 @@
  *   /hang                         one token, then wait for interrupt
  *   /permission                   open a permission_request, finish after resolve.permission
  *   /question | /plan | /elicitation   same shape with a question_request / plan_ready / elicitation_request
+ *   /mcp-list <server>            list the tools the host MCP server <server> offers (as the model would see them)
+ *   /mcp <server> <tool> [json]   call a tool on a host MCP server through a real MCP client, i.e. the same
+ *                                 handlers Claude reaches (local worktree tools run here, host tools are proxied)
  *   anything else                 echo "echo: <text>" word by word
  */
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { toWireError, type WireEvent } from '../src/protocol';
+import { buildHostServers, type HostServers } from './hostServers';
 import type { DriverContext, DriverFactory, RequestKind, SessionDriver } from './sessionDriver';
 
 const REQUEST_SCRIPTS = ['permission', 'question', 'plan', 'elicitation'] as const;
@@ -26,7 +32,7 @@ export function fakeTokenText(i: number, size = 0): string {
 }
 
 interface ParsedScript {
-  kind: 'tokens' | 'hang' | RequestScript | 'echo';
+  kind: 'tokens' | 'hang' | 'mcp' | 'mcp-list' | RequestScript | 'echo';
   count: number;
   size: number;
   burst: number;
@@ -45,6 +51,7 @@ function parseScript(text: string): ParsedScript {
     const n = Number(rest[0]);
     return { kind: 'tokens', count: Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0, size: opt('size', 0), burst: opt('burst', 10), delay: opt('delay', 0), text };
   }
+  if (head === '/mcp' || head === '/mcp-list') return { kind: head === '/mcp' ? 'mcp' : 'mcp-list', count: 0, size: 0, burst: 1, delay: 0, text };
   if (head === '/hang') return { kind: 'hang', count: 0, size: 0, burst: 1, delay: 0, text };
   for (const k of REQUEST_SCRIPTS) {
     if (head === `/${k}`) return { kind: k, count: 0, size: 0, burst: 1, delay: 0, text };
@@ -65,12 +72,15 @@ export class FakeHarnessSession implements SessionDriver {
   permissionMode: string;
   private requestCounter = 0;
   private readonly sessionId: string;
+  private hostServers: HostServers | null = null;
+  private mcpAbort: AbortController | null = null;
 
   constructor(private readonly ctx: DriverContext) {
     this.sessionId = `fake-${ctx.threadId}`;
     this.model = ctx.spec.model;
     this.permissionMode = ctx.spec.permissionMode;
     ctx.onNativeSessionId(this.sessionId);
+    ctx.hostTools?.onChange(() => { if (!this.closed) this.emitState(); });
     this.emitState();
   }
 
@@ -92,6 +102,10 @@ export class FakeHarnessSession implements SessionDriver {
 
     switch (script.kind) {
       case 'tokens': this.streamTokens(script, alive); break;
+      case 'mcp':
+      case 'mcp-list':
+        void this.runMcp(script, alive);
+        break;
       case 'hang':
         this.emit({ name: 'onToken', args: ['working... '] });
         break;
@@ -116,6 +130,45 @@ export class FakeHarnessSession implements SessionDriver {
         this.streamChunks(words, script.burst, script.delay, alive, () => this.finish(script, words.join(''), alive));
       }
     }
+  }
+
+  /** Drive one host MCP server the way the harness would: list or call over a real MCP client. */
+  private async runMcp(script: ParsedScript, alive: () => boolean): Promise<void> {
+    this.mcpAbort = new AbortController();
+    let out: string;
+    // `/mcp delay=MS <server> <tool> ...` waits first, so a test can drop its connection before the call is made.
+    const delayed = /^(\/mcp(?:-list)?)\s+delay=(\d+)\s+/.exec(script.text.trim());
+    const text = delayed ? script.text.trim().replace(/\s+delay=\d+/, '') : script.text;
+    if (delayed) await new Promise((r) => setTimeout(r, Number(delayed[2])));
+    if (!alive()) return;
+    try {
+      this.hostServers ??= buildHostServers(this.ctx);
+      const m = /^\/mcp(?:-list)?\s+(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(text.trim());
+      const server = m?.[1] ? this.hostServers.servers[m[1]] : undefined;
+      if (!server) {
+        out = `mcp error: no server "${m?.[1] ?? ''}" (have: ${Object.keys(this.hostServers.servers).join(', ') || 'none'})`;
+      } else {
+        const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+        await server.instance.connect(serverSide);
+        const client = new Client({ name: 'fake-harness', version: '1.0.0' });
+        await client.connect(clientSide);
+        try {
+          if (script.kind === 'mcp-list') {
+            out = `tools: ${(await client.listTools()).tools.map((t) => t.name).sort().join(',')}`;
+          } else {
+            const args = m?.[3]?.trim() ? JSON.parse(m[3]) : {};
+            const res = await client.callTool({ name: m![2], arguments: args }, undefined, { signal: this.mcpAbort.signal, timeout: 600_000 });
+            const text = (res.content as Array<{ type: string; text?: string }>).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+            out = `mcp ${res.isError ? 'error' : 'ok'}: ${text}`;
+          }
+        } finally {
+          await client.close().catch(() => undefined);
+        }
+      }
+    } catch (err) {
+      out = `mcp error: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    if (alive()) this.finish(script, out, alive);
   }
 
   private streamTokens(script: ParsedScript, alive: () => boolean): void {
@@ -157,6 +210,7 @@ export class FakeHarnessSession implements SessionDriver {
   interrupt(): void {
     if (!this._turnInFlight) return;
     this.turnGen++;
+    this.mcpAbort?.abort();
     if (this.pending) this.emit({ name: 'request_resolved', args: { requestId: this.pending.requestId, outcome: 'canceled' } });
     this.pending = null;
     this._turnInFlight = false;
@@ -182,6 +236,8 @@ export class FakeHarnessSession implements SessionDriver {
 
   close(): void {
     this.closed = true;
+    this.mcpAbort?.abort();
+    this.hostServers?.dispose();
     this.pending = null;
   }
 
@@ -200,7 +256,7 @@ export class FakeHarnessSession implements SessionDriver {
       args: {
         turnInFlight: this._turnInFlight,
         hasPendingPermission: this.pending !== null,
-        hostAttached: false,
+        hostAttached: this.ctx.hostTools?.attached() ?? false,
         canIdleReap: this.canIdleReap(),
         cwd: this.ctx.spec.cwd,
       },

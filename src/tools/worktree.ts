@@ -12,7 +12,6 @@ import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import { resolveWorktreeRoot, worktreePathFor } from '../worktreePaths';
-import type { ObsidianMcpServerOptions } from '../ObsidianTools';
 
 type ToolDef = SdkMcpToolDefinition<any>;
 
@@ -20,7 +19,15 @@ export interface WorktreeToolsPort {
   cwd: CwdTracker;
   /** Told when the session moves into or out of a worktree (the plugin fans it out to peers); must not throw into the tool. */
   onWorktreeChanged?: (payload: Record<string, unknown>) => void;
-  options: Pick<ObsidianMcpServerOptions, 'getWorktreeRoot' | 'onSetCwd' | 'validateCwd'>;
+  /** The subset of `ObsidianMcpServerOptions` these tools read (declared here so the daemon bundle never reaches ObsidianTools.ts). */
+  options: {
+    /** Configured worktree root; blank falls back to `~/.geode/worktrees`. */
+    getWorktreeRoot?: () => string | undefined;
+    /** The agent moved the session; `originRepoPath` is passed by the worktree tools only (see ObsidianMcpServerOptions.onSetCwd). */
+    onSetCwd?: (path: string, originRepoPath?: string | null) => void;
+    /** Refuses a working directory before it is adopted (throws with the reason). */
+    validateCwd?: (path: string) => void;
+  };
 }
 
 

@@ -41,6 +41,9 @@ export interface DaemonOptions {
   /** How often the idle reaper looks (default: half the idle window, at most a minute). */
   reapCheckMs?: number;
   maxOutboundBytes?: number;
+  /** Test seams: host-tool grace and answer timeouts in ms, overriding `config.hostToolGraceSec` / `hostToolTimeoutSec`. */
+  hostToolGraceMs?: number;
+  hostToolTimeoutMs?: number;
   /** Test seam: wall clock for journal timestamps and TTL (default `Date.now`). */
   now?: () => number;
   /** Test seam: journal retention overriding `config.journalTtlDays` / `journalMaxMb`. */
@@ -140,11 +143,18 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     },
     // The scripted fake has no side effects, so only the real host is policed.
     ...(real ? { policy: sessionPolicy } : {}),
+    cwdPolicy: sessionPolicy,
     maxConcurrentTurns: config.maxConcurrentTurns,
     maxLiveSessions: config.maxLiveSessions,
     idleReapMs: options.idleReapMs ?? config.idleReapMinutes * 60_000,
     rawLog,
+    hostToolGraceMs: options.hostToolGraceMs ?? config.hostToolGraceSec * 1000,
+    hostToolTimeoutMs: options.hostToolTimeoutMs ?? config.hostToolTimeoutSec * 1000,
+    worktreeRoot: config.worktreeRoot ?? defaultWorktreeRoot(config),
+    audit,
   });
+  const controllers = new ControlRegistry();
+  controllers.onChange((threadId, owner) => host.setAttached(threadId, owner !== undefined));
   const recovered = host.recover();
   sweepRawLogs(logsDir, rawLogLimits, options.now?.());
   for (const id of recovered) log(`recovered thread ${id}: closed in-flight turn as daemon_restarted`);
@@ -157,7 +167,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     daemonId,
     epoch,
     capabilities: capabilitiesFor(config.harness),
-    controllers: new ControlRegistry(),
+    controllers,
     checkPath: (path) => describePathAccess(path, sessionPolicy),
     listWorkspaces: () => listWorkspaces(sessionPolicy),
     listPath: (path) => listSubfolders(path, sessionPolicy),
@@ -286,6 +296,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   };
 }
 
+
+/** `<first read-write workspace>/.worktrees`: inside a workspace, so a session can resume in the worktree. */
+function defaultWorktreeRoot(config: DaemonConfig): string | undefined {
+  const root = config.workspaces.find((w) => !config.readOnlyWorkspaces.includes(w));
+  return root ? join(root, '.worktrees') : undefined;
+}
 
 /** The configured journal bounds as `InMemoryJournal` options; 0 means unbounded. */
 function journalLimits(config: DaemonConfig, override?: { maxAgeMs?: number; maxBytes?: number }): { maxAgeMs?: number; maxBytes?: number } {

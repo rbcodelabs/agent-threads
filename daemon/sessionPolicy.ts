@@ -218,3 +218,10 @@ export function specIsReadOnly(spec: Pick<RemoteSessionSpec, 'cwd' | 'additional
   if (!(policy.readOnlyWorkspaces?.length)) return false;
   return [spec.cwd, ...(spec.additionalDirectories ?? [])].some((d) => isReadOnlyPath(realOrResolved(d), policy));
 }
+
+/** Throws when `path` is not inside a configured workspace (used for cwd changes made by local tools). */
+export function assertCwdAllowed(path: string, policy: SessionPolicy): void {
+  if (!describePathAccess(path, policy).allowed) {
+    throw new Error(`Working directory is outside the folders this daemon allows sessions in: ${path}`);
+  }
+}

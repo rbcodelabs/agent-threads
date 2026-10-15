@@ -10,17 +10,22 @@ import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   classifyWireEvent,
+  manifestFromSpecs,
+  specsFromManifest,
+  validateManifestServers,
   wireJournalPolicy,
+  type RemoteHostToolSpec,
   type ErrorCode,
   type RemoteSessionSpec,
   type WireEvent,
   type WireImage,
 } from '../src/protocol';
 import { DiskJournal, type DiskJournalOptions } from './diskJournal';
+import { HostToolBroker } from './hostTools';
 import { ensureDir, isSafeThreadId } from './fsutil';
 import type { DriverFactory, RequestKind, SessionDriver } from './sessionDriver';
 import { SessionMetaStore, type SessionMeta } from './sessionMeta';
-import { PolicyError, assertPermissionModeAllowed, specIsReadOnly, validateSpec, type SessionPolicy } from './sessionPolicy';
+import { PolicyError, assertCwdAllowed, assertPermissionModeAllowed, specIsReadOnly, validateSpec, type SessionPolicy } from './sessionPolicy';
 
 export type ThreadJournal = DiskJournal<WireEvent>;
 
@@ -44,6 +49,8 @@ export interface ThreadHostOptions {
   now?: () => number;
   /** Enforced on every open and cold resume when set (the fake harness runs without it). */
   policy?: SessionPolicy;
+  /** Workspace rules for working-directory changes made by local tools; set even when `policy` is not (the fake harness). */
+  cwdPolicy?: SessionPolicy;
   /** At most this many turns at once; further sends are refused with a retryable `conflict`. */
   maxConcurrentTurns?: number;
   /**
@@ -53,6 +60,13 @@ export interface ThreadHostOptions {
   maxLiveSessions?: number;
   /** Idle sessions are stopped after this long (ms). 0 or unset disables the reaper. */
   idleReapMs?: number;
+  /** Wait this long (ms) for a client to attach before a proxied host-tool call fails (default 60 s). */
+  hostToolGraceMs?: number;
+  /** Wait this long (ms) for an attached client to answer one host-tool call (default 300 s). */
+  hostToolTimeoutMs?: number;
+  /** Where `enter_worktree` puts worktrees (a daemon path inside a workspace). */
+  worktreeRoot?: string;
+  audit?: (record: Record<string, unknown>) => void;
   /** Raw SDK events for the daemon's own JSONL log. */
   rawLog?: (threadId: string, event: Record<string, unknown>) => void;
 }
@@ -100,8 +114,17 @@ export class ThreadHost {
   private readonly metaStore: SessionMetaStore;
   private readonly now: () => number;
   private compactTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Proxies Geode-only tools (design 3.3); one per daemon, state keyed by thread. */
+  readonly hostTools: HostToolBroker;
+  private get cwdPolicy(): SessionPolicy | undefined { return this.opts.cwdPolicy ?? this.opts.policy; }
 
   constructor(private readonly opts: ThreadHostOptions) {
+    this.hostTools = new HostToolBroker({
+      graceMs: opts.hostToolGraceMs ?? 60_000,
+      timeoutMs: opts.hostToolTimeoutMs ?? 300_000,
+      emit: (threadId, event) => { this.threads.get(threadId)?.journal.append(event, this.now()); },
+      audit: opts.audit,
+    });
     this.journalDir = join(opts.dataDir, 'journal');
     this.now = opts.now ?? (() => Date.now());
     ensureDir(this.journalDir);
@@ -191,6 +214,7 @@ export class ThreadHost {
     const rt = this.runtime(threadId);
     if (rt.driver) return { created: false, lastSeq: rt.journal.lastSeq, nativeSessionId: rt.meta?.nativeSessionId };
     const valid = this.validate(spec);
+    if (valid.hostTools) this.hostTools.setManifest(threadId, manifestFromSpecs(valid.hostTools));
     const previous = rt.meta;
     const nativeSessionId = previous?.nativeSessionId ?? resume ?? valid.resume;
     rt.meta = { threadId, spec: valid, ...(nativeSessionId ? { nativeSessionId } : {}), updatedAt: this.now() };
@@ -229,6 +253,8 @@ export class ThreadHost {
 
   async interrupt(threadId: string): Promise<void> {
     const rt = this.requireThread(threadId);
+    // In-flight host-tool calls end with the turn.
+    this.hostTools.cancelThread(threadId);
     // No live session means no turn to stop (reaped, or lost in a restart).
     await rt.driver?.interrupt();
   }
@@ -281,6 +307,29 @@ export class ThreadHost {
   async getUsageSnapshot(threadId: string, includeAccountUsage?: boolean): Promise<unknown> {
     const rt = this.requireThread(threadId);
     return rt.driver?.getUsageSnapshot ? rt.driver.getUsageSnapshot(includeAccountUsage) : null;
+  }
+
+  /** The thread's controlling client gained or lost its seat (drives the host-tool grace logic). */
+  setAttached(threadId: string, attached: boolean): void {
+    this.hostTools.setAttached(threadId, attached);
+  }
+
+  /** `tool.manifest`: replace the host tools this thread's client offers. */
+  setManifest(threadId: string, servers: Record<string, RemoteHostToolSpec[]>): { changed: boolean; tools: number } {
+    const rt = this.requireThread(threadId);
+    const problem = validateManifestServers(servers);
+    if (problem) throw new HostError('bad_frame', `tool.manifest: ${problem}`);
+    const changed = this.hostTools.setManifest(threadId, servers);
+    if (changed) this.updateSpec(rt, { hostTools: specsFromManifest(servers) });
+    return { changed, tools: Object.values(servers).reduce((n, l) => n + l.length, 0) };
+  }
+
+  /** `tool.result`: the client's answer to a `tool.call`. Only a call made for THIS thread can be answered. */
+  toolResult(threadId: string, callId: string, result: { success: boolean; text: string; content?: unknown[] }, by: string): void {
+    this.requireThread(threadId);
+    if (!this.hostTools.resolve(threadId, callId, result, by)) {
+      throw new HostError('not_found', `no pending host tool call ${callId} for this thread`);
+    }
   }
 
   resolve(
@@ -355,6 +404,7 @@ export class ThreadHost {
 
   /** Graceful stop: close drivers, flush + fsync every journal. */
   shutdown(): void {
+    this.hostTools.shutdown();
     for (const t of this.compactTimers.values()) clearTimeout(t);
     this.compactTimers.clear();
     for (const rt of this.threads.values()) {
@@ -367,6 +417,7 @@ export class ThreadHost {
 
   /** Test hook: behave like SIGKILL (unflushed data is lost, nothing is finalized). */
   crash(): void {
+    this.hostTools.shutdown();
     for (const t of this.compactTimers.values()) clearTimeout(t);
     this.compactTimers.clear();
     for (const rt of this.threads.values()) {
@@ -407,6 +458,8 @@ export class ThreadHost {
   private coldResume(threadId: string, rt: Runtime): void {
     if (!rt.meta) throw new HostError('not_found', `session ${threadId} is not open; send session.open first`);
     const spec = this.validate(rt.meta.spec);
+    // After a daemon restart the client has not re-sent its manifest yet: the one it opened with stands in.
+    if (spec.hostTools && Object.keys(this.hostTools.manifest(threadId)).length === 0) this.hostTools.setManifest(threadId, manifestFromSpecs(spec.hostTools));
     this.startDriver(threadId, rt, spec, rt.meta.nativeSessionId);
   }
 
@@ -431,6 +484,20 @@ export class ThreadHost {
         // A closed or replaced driver may still fire late callbacks; they must not reach the journal.
         emit: (e) => { if (rt.gen === gen) rt.journal.append(e, this.now()); },
         onNativeSessionId: (id) => { if (rt.gen === gen) this.rememberNative(rt, id); },
+        hostTools: {
+          attached: () => this.hostTools.isAttached(threadId),
+          manifest: () => this.hostTools.manifest(threadId),
+          call: (server, tool, input, signal) => (rt.gen === gen
+            ? this.hostTools.call(threadId, server, tool, input, signal)
+            : Promise.resolve({ success: false, text: 'This session has ended.' })),
+          onChange: (cb) => this.hostTools.onChange(threadId, cb),
+        },
+        localTools: {
+          enabled: !(this.cwdPolicy && specIsReadOnly(spec, this.cwdPolicy)),
+          ...(this.opts.worktreeRoot ? { worktreeRoot: this.opts.worktreeRoot } : {}),
+          checkCwd: (p) => { if (this.cwdPolicy) assertCwdAllowed(p, this.cwdPolicy); },
+        },
+        onCwdChanged: (cwd, origin) => { if (rt.gen === gen) this.cwdChanged(rt, cwd, origin); },
         onRawEvent: (e) => { if (rt.gen === gen) this.opts.rawLog?.(threadId, e); },
       });
     } catch (err) {
@@ -446,6 +513,16 @@ export class ThreadHost {
     this.metaStore.save(rt.meta);
   }
 
+  /** A worktree tool moved the session: remember it for cold resume, tell clients. */
+  private cwdChanged(rt: Runtime, cwd: string, originRepoPath?: string | null): void {
+    if (!rt.meta) return;
+    // A native session belongs to the directory it started in; resuming it from the new one fails.
+    const { nativeSessionId: _gone, ...rest } = rt.meta;
+    rt.meta = { ...rest, spec: { ...rt.meta.spec, cwd }, updatedAt: this.now() };
+    this.metaStore.save(rt.meta);
+    rt.journal.append({ name: 'session.cwd', args: { cwd, ...(originRepoPath !== undefined ? { originRepoPath } : {}) } }, this.now());
+  }
+
   private updateSpec(rt: Runtime, patch: Partial<RemoteSessionSpec>): void {
     if (!rt.meta) return;
     rt.meta = { ...rt.meta, spec: { ...rt.meta.spec, ...patch }, updatedAt: this.now() };
@@ -458,6 +535,7 @@ export class ThreadHost {
     if (!driver) return;
     const hadTurn = driver.turnInFlight;
     const cwd = driver.cwd;
+    this.hostTools.cancelThread(threadId);
     try { driver.close(); } catch (err) { console.error(`close ${threadId}:`, err); }
     rt.gen++;
     rt.driver = null;

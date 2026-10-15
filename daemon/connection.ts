@@ -70,7 +70,7 @@ export function raiseFrameLimit(ws: WebSocket, bytes: number): boolean {
 /** Stop handing frames to the socket once this much is already buffered in it. */
 const SOCKET_HIGH_WATER = 256 * 1024;
 /** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
-export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list'];
+export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'host.tools'];
 export const capabilitiesFor = (harness: string): string[] => [...BASE_CAPABILITIES, `harness.${harness}`];
 
 export interface Timings {
@@ -405,6 +405,13 @@ export class Connection {
     }
   }
 
+  /** Unlike `requireControl`, never claims a free seat: a host-tool answer must come from the thread's actual client. */
+  private requireSeat(threadId: string): void {
+    if (!this.ctx.controllers.isController(threadId, this.id)) {
+      throw new CommandError('forbidden', `this connection does not hold thread ${threadId}'s seat`);
+    }
+  }
+
   private dispatch(frame: ClientFrame, auth: VerifiedToken): unknown {
     const { host } = this.ctx;
     switch (frame.type) {
@@ -485,6 +492,14 @@ export class Connection {
       case 'resolve.elicitation':
         this.requireControl(frame.threadId, auth);
         host.resolve(frame.threadId, 'elicitation', frame.requestId, { result: frame.result }, auth.id);
+        return {};
+      case 'tool.manifest':
+        this.requireSeat(frame.threadId);
+        return host.setManifest(frame.threadId, frame.servers);
+      case 'tool.result':
+        // Only the client holding this thread's seat can answer, and only a call made for this thread.
+        this.requireSeat(frame.threadId);
+        host.toolResult(frame.threadId, frame.callId, { success: frame.success, text: frame.text, content: frame.content }, auth.id);
         return {};
       case 'resolve.openTab':
         // OpenNewTab is refused when the harness asks (daemon sessions cannot create Geode threads), so nothing is ever pending.
