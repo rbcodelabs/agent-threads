@@ -31,7 +31,8 @@ async function open(c: TestClient, threadId: string, hostTools = [tool('vault_se
   expect((await c.cmd('session.open', { threadId, spec: { ...spec, hostTools } })).type).toBe('ack');
   await c.cmd('attach', { ch: `t:${threadId}`, afterSeq: 0 });
 }
-const send = (c: TestClient, threadId: string, text: string) => c.cmd('session.send', { threadId, text, userMessageUuid: `u-${Math.random()}` });
+let sendCounter = 0;
+const send = (c: TestClient, threadId: string, text: string) => c.cmd('session.send', { threadId, text, userMessageUuid: `u-${++sendCounter}` });
 const lastMessage = async (c: TestClient, after = 0): Promise<string> => (await c.waitFor((f) => f.name === 'onMessage' && f.seq > after, 8000, 'onMessage')).args[0] as string;
 
 describe('host tool round trip', () => {

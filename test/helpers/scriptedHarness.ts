@@ -5,6 +5,7 @@
  * before `turnInFlight` clears, and blocking callbacks (permission, question,
  * elicitation) return promises the harness awaits.
  */
+import { randomUUID } from 'node:crypto';
 import type { SessionCallbacks } from '../../src/ClaudeSession';
 import type { HarnessContextUsage, HarnessSession, HarnessSessionOptions } from '../../src/HarnessSession';
 import type { ImageAttachment } from '../../src/types';
@@ -21,7 +22,7 @@ export class ScriptedHarness implements HarnessSession {
   private turn = false;
   private pendingCallbacks = 0;
 
-  constructor(sessionId = `native-${Math.random().toString(36).slice(2, 8)}`) {
+  constructor(sessionId = `native-${randomUUID().slice(0, 8)}`) {
     this.sessionId = sessionId;
   }
 

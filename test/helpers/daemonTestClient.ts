@@ -3,6 +3,7 @@
  * production DaemonClient (PR 5): tests drive the wire exactly as written in
  * the protocol, so a bug in a shared client cannot hide a server bug.
  */
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -81,7 +82,7 @@ export class TestClient {
     return c;
   }
 
-  nextId(): string { return `c${++this.n}-${Math.random().toString(36).slice(2, 8)}`; }
+  nextId(): string { return `c${++this.n}-${randomUUID().slice(0, 8)}`; }
 
   sendRaw(frame: object): void { this.ws.send(JSON.stringify({ v: 1, ...frame })); }
 
