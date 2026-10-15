@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk/browser';
 import path from 'path';
+import { isValidOverviewPath } from '../projectOverview';
 import type { ObsidianMcpServerOptions, ProjectUpdatePatch } from '../ObsidianTools';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 
@@ -146,13 +147,17 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         .describe(
           'Optional absolute filesystem path to use as the working directory instead of deriving it from vaultFolder + vault root',
         ),
+      overviewPath: z.string().optional().describe('Optional vault-relative path of the Project overview note injected into every thread system prompt. Defaults to <vaultFolder>/_overview.md'),
     },
     async (args, _extra) => {
       try {
         if (!options.createProject) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'createProject is not available in this context.' }) }], isError: true };
         }
-        const project = options.createProject(args.name, args.vaultFolder, args.description, args.cwdOverride);
+        if (args.overviewPath !== undefined && !isValidOverviewPath(args.overviewPath)) {
+          throw new Error('overviewPath must be vault-relative and must not contain "..".');
+        }
+        const project = options.createProject(args.name, args.vaultFolder, args.description, args.cwdOverride, args.overviewPath);
         return { content: [{ type: 'text' as const, text: JSON.stringify(project, null, 2) }] };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -170,6 +175,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
       name: z.string().optional().describe('New human-readable Project name; trimmed and must not be blank'),
       description: z.string().nullable().optional().describe('New Project context description; null clears it'),
       cwdOverride: z.string().nullable().optional().describe('New absolute filesystem cwd; null restores the vault-derived cwd'),
+      overviewPath: z.string().nullable().optional().describe('Vault-relative path of the Project overview note injected into the system prompt; null restores the default <vaultFolder>/_overview.md'),
       elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit matching Project elevation for this call.'),
     },
     async (args, _extra) => {
@@ -183,7 +189,8 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         const hasName = args.name !== undefined;
         const hasDescription = args.description !== undefined;
         const hasCwdOverride = args.cwdOverride !== undefined;
-        if (!hasName && !hasDescription && !hasCwdOverride) throw new Error('At least one editable field is required.');
+        const hasOverviewPath = args.overviewPath !== undefined;
+        if (!hasName && !hasDescription && !hasCwdOverride && !hasOverviewPath) throw new Error('At least one editable field is required.');
 
         const patch: ProjectUpdatePatch = {};
         if (hasName) {
@@ -201,6 +208,13 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
             if (!path.posix.isAbsolute(cwdOverride) && !path.win32.isAbsolute(cwdOverride)) throw new Error('cwdOverride must be an absolute filesystem path.');
             patch.cwdOverride = cwdOverride;
           }
+        }
+        if (hasOverviewPath) {
+          const overviewPath = args.overviewPath === null ? '' : args.overviewPath!.trim();
+          if (!isValidOverviewPath(overviewPath)) {
+            throw new Error('overviewPath must be vault-relative and must not contain "..".');
+          }
+          patch.overviewPath = overviewPath || undefined;
         }
         const project = await options.updateProject(args.projectId, patch);
         return { content: [{ type: 'text' as const, text: JSON.stringify(project, null, 2) }] };

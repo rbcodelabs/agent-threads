@@ -1,4 +1,5 @@
 import { agentHarnessLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
+import { buildProjectOverviewContext, composeAppendSystemPrompt, readProjectOverview } from './projectOverview';
 import { extractUrls } from './urlLinks';
 import { mergeDisallowedTools } from './toolRestrictions';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
@@ -564,13 +565,14 @@ export class ThreadManager {
     return this.projects.get(id);
   }
 
-  createProject(name: string, vaultFolder: string, description?: string, cwdOverride?: string): Project {
+  createProject(name: string, vaultFolder: string, description?: string, cwdOverride?: string, overviewPath?: string): Project {
     const project: Project = {
       id: crypto.randomUUID(),
       name: name.trim() || 'Untitled Project',
       description,
       vaultFolder: vaultFolder.trim(),
       cwdOverride,
+      overviewPath: overviewPath?.trim() || undefined,
       orchestratorEnabled: true,
       createdAt: Date.now(),
     };
@@ -611,6 +613,16 @@ export class ThreadManager {
     if (!this.vaultRoot) return project.vaultFolder;
     const path = require('path') as typeof import('path');
     return path.join(this.vaultRoot, project.vaultFolder);
+  }
+
+  /** Sync read of a vault-relative file; undefined if missing or no vault root. Errors propagate to readProjectOverview, which swallows them. */
+  private readVaultFileSync(vaultRelativePath: string): string | undefined {
+    if (!this.vaultRoot) return undefined;
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const abs = path.join(this.vaultRoot, vaultRelativePath);
+    if (!fs.existsSync(abs)) return undefined;
+    return fs.readFileSync(abs, 'utf8');
   }
 
   /** Assign or detach a thread from a Project, optionally aligning its cwd. */
@@ -2593,9 +2605,8 @@ export class ThreadManager {
     // turn — leaking these into the session context would let the model see
     // its own prior "grading" of the thread and the orchestrator's draft before
     // Rick has approved it. Do not "fix" this by adding them to the list.
-    const appendSystemPrompt = [envContext, projectDesc, goalContext]
-      .filter(Boolean)
-      .join('\n\n');
+    const overviewContext = buildProjectOverviewContext(readProjectOverview(project, rel => this.readVaultFileSync(rel)));
+    const appendSystemPrompt = composeAppendSystemPrompt({ envContext, projectDesc, overviewContext, goalContext });
     const sessionMcpServers = this.mcpServerFactory ? this.mcpServerFactory(threadId, thread.cwd) : this.mcpServers;
     // Baseline for stale detection: options are rebuilt every turn but only used
     // when the session (re)starts, so record once per session object.

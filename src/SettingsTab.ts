@@ -1,3 +1,4 @@
+import { isValidOverviewPath } from './projectOverview';
 import { isAgentHarness } from './types';
 import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
@@ -1898,8 +1899,40 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             this.plugin.settings.claudeBinaryPath = value;
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
+            scheduleCliProbe();
           }),
       );
+
+    // Detected CLI version + stale-install warnings (desktop only). Re-probed
+    // shortly after the path stops changing; never upgrades anything itself.
+    const cliNoticeEl = containerEl.createDiv({ cls: 'ct-cli-notice' });
+    const renderCliNotice = (): void => {
+      if (!cliNoticeEl.isConnected) return;
+      cliNoticeEl.empty();
+      if (Platform.isMobile) return;
+      const info = this.plugin.claudeCliInfo;
+      if (info?.binaryPath === this.plugin.settings.claudeBinaryPath && info.version) {
+        cliNoticeEl.createDiv({ cls: 'ct-cli-notice-version setting-item-description', text: `Detected claude CLI ${info.version}` });
+      }
+      for (const problem of this.plugin.getClaudeCliProblems()) {
+        const row = cliNoticeEl.createDiv({ cls: problem.severity === 'warning' ? 'ct-settings-warning ct-cli-notice-row' : 'ct-cli-notice-row ct-cli-notice-soft' });
+        row.createSpan({ text: problem.message });
+        const command = problem.upgradeCommand;
+        if (command) {
+          const copy = row.createEl('button', { cls: 'ct-cli-notice-copy', text: 'Copy command' });
+          copy.addEventListener('click', () => {
+            void navigator.clipboard.writeText(command).then(() => new Notice('Copied upgrade command'));
+          });
+        }
+      }
+    };
+    let cliProbeTimer: number | undefined;
+    const scheduleCliProbe = (): void => {
+      window.clearTimeout(cliProbeTimer);
+      cliProbeTimer = window.setTimeout(() => { void this.plugin.refreshClaudeCliInfo().then(renderCliNotice); }, 600);
+    };
+    renderCliNotice();
+    void this.plugin.refreshClaudeCliInfo().then(renderCliNotice);
 
     new Setting(containerEl)
       .setName('Account / provider')
@@ -2527,6 +2560,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const folder = this.createManagerField(form, 'Vault folder', project?.vaultFolder ?? '', {
       placeholder: 'Products/My Project', description: 'Changing this updates future context. Existing files are not moved.',
     }) as HTMLInputElement;
+    const overview = this.createManagerField(form, 'Overview note', project?.overviewPath ?? '', {
+      placeholder: 'Defaults to <vault folder>/_overview.md', description: 'Vault-relative note injected into the system prompt of every thread in this project, if it exists.',
+    }) as HTMLInputElement;
     const cwd = this.createManagerField(form, 'Filesystem working directory', project?.cwdOverride ?? '', {
       placeholder: 'Optional absolute path', description: project ? `Effective cwd: ${this.plugin.manager.getProjectCwd(project)}` : 'Leave blank to derive it from the vault folder.',
     }) as HTMLInputElement;
@@ -2553,7 +2589,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     }
     const actions = detail.createEl('footer', { cls: 'ct-manager-actions' });
     const state = actions.createEl('span', { text: isNew ? 'New project draft' : 'No unsaved changes' });
-    for (const input of [name, folder, cwd, description]) input.addEventListener('input', () => { state.textContent = 'Unsaved changes'; });
+    for (const input of [name, folder, overview, cwd, description]) input.addEventListener('input', () => { state.textContent = 'Unsaved changes'; });
     const cancel = actions.createEl('button', { text: 'Cancel', attr: { type: 'button' } });
     cancel.addEventListener('click', () => { if (isNew) this.selectedProjectId = projects[0]?.id ?? null; this.display(); });
     const save = actions.createEl('button', { text: isNew ? 'Create project' : 'Save changes', cls: 'mod-cta', attr: { type: 'button' } });
@@ -2561,8 +2597,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       const projectName = name.value.trim();
       const vaultFolder = folder.value.trim();
       if (!projectName || !vaultFolder) { error.textContent = 'Project name and vault folder are required.'; error.style.display = ''; return; }
-      if (project) this.plugin.manager.updateProject(project.id, { name: projectName, vaultFolder, cwdOverride: cwd.value.trim() || undefined, description: description.value });
-      else this.selectedProjectId = this.plugin.manager.createProject(projectName, vaultFolder, description.value, cwd.value.trim() || undefined).id;
+      if (!isValidOverviewPath(overview.value)) { error.textContent = 'Overview note must be a vault-relative path without "..".'; error.style.display = ''; return; }
+      if (project) this.plugin.manager.updateProject(project.id, { name: projectName, vaultFolder, cwdOverride: cwd.value.trim() || undefined, overviewPath: overview.value.trim() || undefined, description: description.value });
+      else this.selectedProjectId = this.plugin.manager.createProject(projectName, vaultFolder, description.value, cwd.value.trim() || undefined, overview.value.trim() || undefined).id;
       await this.plugin.saveSettings();
       this.display();
     });

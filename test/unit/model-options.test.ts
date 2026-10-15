@@ -29,8 +29,8 @@ describe('modelVersionFromId', () => {
 
 describe('aliasLabel', () => {
   it('uses the catalog resolvedModel when present', () => {
-    const catalog = [{ value: 'opus', displayName: 'Opus', resolvedModel: 'claude-opus-4-9' }];
-    expect(aliasLabel('opus', catalog)).toBe('Opus 4.9 (latest)');
+    const catalog = [{ value: 'opus', displayName: 'Opus', resolvedModel: 'claude-opus-5-6' }];
+    expect(aliasLabel('opus', catalog)).toBe('Opus 5.6 (latest)');
   });
 
   it('falls back to built-in versions before any session has run', () => {
@@ -134,5 +134,70 @@ describe('buildClaudeModelOptions with a Bedrock catalog', () => {
       'Opus 5',
       'Opus 4.6 (1M context)',
     ]);
+  });
+});
+
+describe('aliasLabel never claims "(latest)" for a stale alias (#751)', () => {
+  it('tags latest only when the alias resolves to the newest known version', () => {
+    expect(aliasLabel('sonnet', [])).toBe('Sonnet 5.5 (latest)');
+    const atMax = [
+      { value: 'sonnet', displayName: 'Sonnet', resolvedModel: 'claude-sonnet-5-5' },
+      { value: 'claude-sonnet-4-5', displayName: 'Sonnet 4.5' },
+    ];
+    expect(aliasLabel('sonnet', atMax)).toBe('Sonnet 5.5 (latest)');
+  });
+
+  it('drops the tag when the SDK alias entry resolves older than a catalog row', () => {
+    const catalog = [
+      { value: 'sonnet', displayName: 'Sonnet', resolvedModel: 'claude-sonnet-4-5' },
+      { value: 'claude-sonnet-5-5', displayName: 'Sonnet 5.5' },
+    ];
+    expect(aliasLabel('sonnet', catalog)).toBe('Sonnet 4.5');
+    const options = buildClaudeModelOptions(catalog);
+    expect(options.find((o) => o.value === 'sonnet')?.label).toBe('Sonnet 4.5');
+    expect(options.find((o) => o.value === 'claude-sonnet-5-5')?.label).toBe('Sonnet 5.5');
+    expect(options.filter((o) => o.value === 'claude-sonnet-4-5')).toEqual([]);
+  });
+
+  it('drops the tag when the alias is older than the built-in fallback', () => {
+    const catalog = [{ value: 'sonnet', displayName: 'Sonnet', resolvedModel: 'claude-sonnet-4-5' }];
+    expect(aliasLabel('sonnet', catalog)).toBe('Sonnet 4.5');
+  });
+
+  it('handles a stale bare-family-named Bedrock row next to a newer row', () => {
+    const catalog = [
+      { value: 'us.anthropic.claude-sonnet-4-5', displayName: 'Sonnet', resolvedModel: 'us.anthropic.claude-sonnet-4-5' },
+      { value: 'us.anthropic.claude-sonnet-5-5', displayName: 'Sonnet 5.5', resolvedModel: 'us.anthropic.claude-sonnet-5-5' },
+    ];
+    const options = buildClaudeModelOptions(catalog);
+    expect(options.find((o) => o.value === 'sonnet')?.label).toBe('Sonnet 4.5');
+    expect(options.map((o) => o.value)).toContain('us.anthropic.claude-sonnet-5-5');
+    expect(options.find((o) => o.value === 'us.anthropic.claude-sonnet-5-5')?.label).toBe('Sonnet 5.5');
+  });
+
+  it('tags latest for a Bedrock alias at the max', () => {
+    const catalog = [
+      { value: 'us.anthropic.claude-sonnet-5-5', displayName: 'Sonnet', resolvedModel: 'us.anthropic.claude-sonnet-5-5' },
+      { value: 'us.anthropic.claude-sonnet-4-5', displayName: 'Sonnet 4.5', resolvedModel: 'us.anthropic.claude-sonnet-4-5' },
+    ];
+    expect(aliasLabel('sonnet', catalog)).toBe('Sonnet 5.5 (latest)');
+  });
+
+  it('compares versions numerically, not lexically', () => {
+    const stale = [
+      { value: 'opus', displayName: 'Opus', resolvedModel: 'claude-opus-4-9' },
+      { value: 'claude-opus-4-10', displayName: 'Opus 4.10' },
+    ];
+    expect(aliasLabel('opus', stale)).toBe('Opus 4.9');
+    const fresh = [
+      { value: 'opus', displayName: 'Opus', resolvedModel: 'claude-opus-5-5' },
+      { value: 'claude-opus-4-10', displayName: 'Opus 4.10' },
+    ];
+    expect(aliasLabel('opus', fresh)).toBe('Opus 5.5 (latest)');
+  });
+
+  it('keeps plain family name when the version is unknown', () => {
+    const catalog = [{ value: 'fable', displayName: 'Fable', resolvedModel: 'weird-id' }];
+    expect(aliasLabel('fable', catalog)).toBe('Fable');
   });
 });

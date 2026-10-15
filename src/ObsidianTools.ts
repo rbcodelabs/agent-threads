@@ -134,6 +134,7 @@ export interface ProjectSnapshot {
   name: string;
   description?: string;
   vaultFolder?: string;
+  overviewPath?: string;
   cwdOverride?: string;
   effectiveCwd: string;
   orchestratorThreadId?: string;
@@ -143,6 +144,7 @@ export interface ProjectUpdatePatch {
   name?: string;
   description?: string;
   cwdOverride?: string;
+  overviewPath?: string;
 }
 
 // ── Vault Bridge schema ───────────────────────────────────────────────────────
@@ -310,7 +312,7 @@ export interface ObsidianMcpServerOptions {
   /** Returns all projects. */
   getAllProjects?: () => ProjectSnapshot[];
   /** Creates a new project and persists it. Returns the created project snapshot. */
-  createProject?: (name: string, vaultFolder: string, description?: string, cwdOverride?: string) => ProjectSnapshot;
+  createProject?: (name: string, vaultFolder: string, description?: string, cwdOverride?: string, overviewPath?: string) => ProjectSnapshot;
   /** Updates editable Project settings, persists them, and returns the durable snapshot. */
   updateProject?: (projectId: string, patch: ProjectUpdatePatch) => Promise<ProjectSnapshot>;
   /** Assigns or clears the project on a thread. Pass null to detach. */

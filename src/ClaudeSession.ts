@@ -1037,7 +1037,7 @@ export class ClaudeSession {
 }
 
 
-function formatToolSummary(name: string, input: Record<string, unknown>): string {
+export function formatToolSummary(name: string, input: Record<string, unknown>): string {
   // In-app browser tools first: their prefixed names (mcp__claude_threads__browser_*)
   // do not survive the single-word server regex below.
   const browserSummary = browserToolSummary(name, input);

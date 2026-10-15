@@ -94,7 +94,18 @@ describe('obsidian_create_project', () => {
 
     await tool._handler({ name: 'HipTrip', vaultFolder: 'Projects/HipTrip' });
 
-    expect(createProject).toHaveBeenCalledWith('HipTrip', 'Projects/HipTrip', undefined, undefined);
+    expect(createProject).toHaveBeenCalledWith('HipTrip', 'Projects/HipTrip', undefined, undefined, undefined);
+  });
+
+  it.each(['../evil.md', '/etc/passwd', 'a/../../b.md', 'C:\\x.md'])('rejects invalid overviewPath %s on create', async (bad) => {
+    const createProject = vi.fn().mockReturnValue(fakeProject);
+    const server = createObsidianMcpServer(makeApp(), { createProject }) as unknown as CapturedServer;
+    const tool = getTool(server, 'obsidian_create_project');
+
+    const result = await tool._handler({ name: 'P', vaultFolder: 'Projects/P', overviewPath: bad });
+
+    expect((parseResult(result) as { error: string }).error).toMatch(/overviewPath must be vault-relative/);
+    expect(createProject).not.toHaveBeenCalled();
   });
 
   it('passes description and cwdOverride when provided', async () => {
@@ -114,6 +125,7 @@ describe('obsidian_create_project', () => {
       'Projects/HipTrip',
       'Travel curation app',
       '/Users/me/projects/hiptrip',
+      undefined,
     );
   });
 

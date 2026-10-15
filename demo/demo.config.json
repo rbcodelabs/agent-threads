@@ -1,0 +1,647 @@
+{
+  "title": "Getting started with Geode Threads",
+  "target": {
+    "type": "electron",
+    "app": "/home/rick/geode-gate",
+    "env": {
+      "GEODE_HEADLESS": "0",
+      "GEODE_SCREENSHOT_MODE": "1",
+      "CLAUDE_THREADS_DEMO_SCRIPT": "{{fixture}}/.geode/plugins/claude-threads/demo-script.json"
+    },
+    "readySelector": ".ct-agents-row",
+    "readyTimeoutMs": 45000,
+    "fixture": {
+      "source": "demo/fixture-vault"
+    },
+    "userDataFiles": {
+      "geode.json": {
+        "recentVaults": [
+          "{{fixture}}"
+        ],
+        "lastVault": "{{fixture}}"
+      }
+    }
+  },
+  "environment": {
+    "record": {
+      "runner": "ssh",
+      "host": "dev-builder",
+      "remoteDir": "~/product-demo-work",
+      "shellInit": "export PATH=\"$HOME/.local/share/fnm:$PATH\"; eval \"$(fnm env)\"",
+      "setup": [
+        "test -f \"$HOME/geode-gate/dist/main.js\" || { echo \"no built Geode at $HOME/geode-gate (see demo/README.md)\" >&2; exit 1; }",
+        "mkdir -p node_modules && ln -sfn \"$HOME/geode-gate/node_modules/electron\" node_modules/electron"
+      ],
+      "syncExclude": [
+        "docs",
+        "screenshots",
+        "test",
+        "src",
+        "relay",
+        "api",
+        "sandbox",
+        "dist",
+        ".worktrees"
+      ]
+    }
+  },
+  "capture": {
+    "width": 1280,
+    "height": 800,
+    "fps": 30
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30
+  },
+  "look": {
+    "windowWidth": 1440,
+    "cornerRadius": 14,
+    "dock": true,
+    "menuBar": {
+      "appName": "Geode",
+      "items": [
+        "File",
+        "Edit",
+        "View",
+        "Go",
+        "Window",
+        "Help"
+      ],
+      "clock": "Sun Oct 11  9:41 AM"
+    },
+    "appIcon": "demo/assets/geode-icon.png"
+  },
+  "voice": {
+    "modelId": "eleven_multilingual_v2",
+    "stability": 0.5,
+    "similarityBoost": 0.75,
+    "style": 0
+  },
+  "timing": {
+    "leadMs": 400,
+    "tailMs": 700,
+    "maxSlowdown": 1.3
+  },
+  "scenes": [
+    {
+      "id": "intro",
+      "narration": "Meet Agent Threads, Claude Code running right inside your Geode vault. I'll show you how to start a conversation, run several at once, and stay in control of everything they do.",
+      "actions": [
+        {
+          "type": "waitFor",
+          "selector": ".ct-agents-row",
+          "timeoutMs": 15000
+        },
+        {
+          "type": "pause",
+          "ms": 1200
+        },
+        {
+          "type": "hover",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-messages",
+          "cue": "Claude Code running right inside your Geode vault"
+        },
+        {
+          "type": "hover",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-input",
+          "cue": "start a conversation"
+        },
+        {
+          "type": "hover",
+          "selector": ".ct-agents-list",
+          "cue": "run several at once"
+        },
+        {
+          "type": "pause",
+          "ms": 3500
+        }
+      ]
+    },
+    {
+      "id": "first-thread",
+      "narration": "Starting is simple. Open a new thread, type what you want, and press Enter. Each thread is its own Claude Code session, with its own working directory and its own history.",
+      "actions": [
+        {
+          "type": "click",
+          "selector": "[aria-label=\"New thread\"]",
+          "cue": "Open a new thread"
+        },
+        {
+          "type": "click",
+          "selector": ".menu-item:has-text(\"Fieldnotes Launch\")"
+        },
+        {
+          "type": "type",
+          "text": "Pull together the decisions from this week's sync",
+          "delayMs": 28,
+          "cue": "type what you want"
+        },
+        {
+          "type": "press",
+          "key": "Enter",
+          "cue": "press Enter"
+        },
+        {
+          "type": "pause",
+          "ms": 6000
+        }
+      ]
+    },
+    {
+      "id": "streaming",
+      "narration": "Replies stream in as Markdown. You can see exactly what Claude is doing, because every file it reads or edits shows up as a tool call, grouped so a long run never takes over the screen.",
+      "actions": [
+        {
+          "type": "hover",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-tool-pill",
+          "cue": "shows up as a tool call",
+          "optional": true
+        },
+        {
+          "type": "waitFor",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-tool-group .ct-expand-btn",
+          "timeoutMs": 20000,
+          "optional": true
+        },
+        {
+          "type": "click",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-tool-group .ct-expand-btn",
+          "cue": "grouped so a long run",
+          "optional": true
+        },
+        {
+          "type": "pause",
+          "ms": 8500
+        }
+      ]
+    },
+    {
+      "id": "permissions",
+      "narration": "Before Claude changes anything, it asks. You can deny, allow once, or always allow, right there in the conversation. You stay in control.",
+      "actions": [
+        {
+          "type": "click",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-input"
+        },
+        {
+          "type": "type",
+          "text": "Yes, add it to the Weekly Sync note",
+          "delayMs": 18
+        },
+        {
+          "type": "press",
+          "key": "Enter"
+        },
+        {
+          "type": "waitFor",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-permission-allow",
+          "timeoutMs": 15000
+        },
+        {
+          "type": "hover",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-permission-deny",
+          "cue": "deny"
+        },
+        {
+          "type": "hover",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-permission-allow",
+          "cue": "allow once"
+        },
+        {
+          "type": "hover",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-permission-always",
+          "cue": "always allow"
+        },
+        {
+          "type": "click",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-permission-allow",
+          "cue": "You stay in control"
+        },
+        {
+          "type": "pause",
+          "ms": 6000
+        }
+      ]
+    },
+    {
+      "id": "wikilinks",
+      "narration": "Links in a reply are real links. Click a wikilink and the note opens beside the conversation, so you can read what Claude wrote without losing your place.",
+      "actions": [
+        {
+          "type": "waitFor",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-messages a.internal-link",
+          "timeoutMs": 15000
+        },
+        {
+          "type": "click",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-messages a.internal-link",
+          "cue": "Click a wikilink"
+        },
+        {
+          "type": "waitFor",
+          "selector": ".workspace-leaf-content[data-type=\"markdown\"] .cm-content",
+          "timeoutMs": 10000
+        },
+        {
+          "type": "hover",
+          "selector": ".workspace-leaf-content[data-type=\"markdown\"] .cm-content",
+          "cue": "read what Claude wrote"
+        },
+        {
+          "type": "pause",
+          "ms": 8000
+        }
+      ]
+    },
+    {
+      "id": "mentions",
+      "narration": "To give Claude context, type the at sign and pick a note. Type a slash, and you can browse every command and skill available to the session.",
+      "actions": [
+        {
+          "type": "click",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-input"
+        },
+        {
+          "type": "type",
+          "text": "Compare this with ",
+          "delayMs": 40
+        },
+        {
+          "type": "type",
+          "text": "@Ro",
+          "delayMs": 130,
+          "cue": "type the at sign"
+        },
+        {
+          "type": "pause",
+          "ms": 900
+        },
+        {
+          "type": "press",
+          "key": "Enter",
+          "cue": "pick a note"
+        },
+        {
+          "type": "pause",
+          "ms": 100
+        },
+        {
+          "type": "press",
+          "key": "ControlOrMeta+a"
+        },
+        {
+          "type": "press",
+          "key": "Backspace"
+        },
+        {
+          "type": "type",
+          "text": "/",
+          "delayMs": 100,
+          "cue": "Type a slash"
+        },
+        {
+          "type": "pause",
+          "ms": 900
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown",
+          "cue": "browse every command and skill"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "press",
+          "key": "ArrowDown"
+        },
+        {
+          "type": "pause",
+          "ms": 1800
+        },
+        {
+          "type": "press",
+          "key": "Escape"
+        },
+        {
+          "type": "press",
+          "key": "ControlOrMeta+a"
+        },
+        {
+          "type": "press",
+          "key": "Backspace"
+        },
+        {
+          "type": "click",
+          "selector": ".ct-agents-dispatch-input"
+        },
+        {
+          "type": "click",
+          "selector": ".ct-dispatch-project"
+        },
+        {
+          "type": "click",
+          "selector": ".menu-item:has-text(\"Fieldnotes Launch\")"
+        },
+        {
+          "type": "pause",
+          "ms": 600
+        }
+      ]
+    },
+    {
+      "id": "parallel",
+      "narration": "The real power is running more than one thread. Start another, and another. The Agents List shows every thread, what it's working on, and whether it needs you.",
+      "actions": [
+        {
+          "type": "click",
+          "selector": ".ct-agents-dispatch-input",
+          "cue": "The real power"
+        },
+        {
+          "type": "type",
+          "text": "Draft the release notes for the November launch",
+          "delayMs": 12
+        },
+        {
+          "type": "press",
+          "key": "Enter"
+        },
+        {
+          "type": "click",
+          "selector": ".ct-agents-dispatch-input",
+          "cue": "Start another"
+        },
+        {
+          "type": "type",
+          "text": "Check the launch plan for risks",
+          "delayMs": 12
+        },
+        {
+          "type": "press",
+          "key": "Enter"
+        },
+        {
+          "type": "click",
+          "selector": ".ct-agents-dispatch-input",
+          "cue": "and another"
+        },
+        {
+          "type": "type",
+          "text": "Tidy up the onboarding ideas note",
+          "delayMs": 12
+        },
+        {
+          "type": "press",
+          "key": "Enter"
+        },
+        {
+          "type": "hover",
+          "selector": ".ct-agents-row-running",
+          "cue": "what it's working on"
+        },
+        {
+          "type": "hover",
+          "selector": ".ct-agents-row-permission",
+          "cue": "whether it needs you"
+        },
+        {
+          "type": "pause",
+          "ms": 8500
+        }
+      ]
+    },
+    {
+      "id": "board",
+      "narration": "Prefer a bigger picture? Open the Agent Board to see threads as cards, from idle to running to waiting to done.",
+      "actions": [
+        {
+          "type": "click",
+          "selector": ".workspace-tab-header[aria-label=\"Weekly Sync\"] .workspace-tab-header-inner-close-button",
+          "optional": true
+        },
+        {
+          "type": "click",
+          "selector": ".side-dock-ribbon-action[aria-label=\"Agent Board\"]",
+          "cue": "Open the Agent Board"
+        },
+        {
+          "type": "waitFor",
+          "selector": ".ct-kanban-card",
+          "timeoutMs": 10000
+        },
+        {
+          "type": "hover",
+          "selector": ".ct-kanban-col:has(.ct-kanban-col-label:text-is(\"New\")) .ct-kanban-card",
+          "cue": "idle",
+          "optional": true
+        },
+        {
+          "type": "hover",
+          "selector": ".ct-kanban-card-running",
+          "cue": "running",
+          "optional": true
+        },
+        {
+          "type": "hover",
+          "selector": ".ct-kanban-col-permission .ct-kanban-card",
+          "cue": "waiting",
+          "optional": true
+        },
+        {
+          "type": "hover",
+          "selector": ".ct-kanban-col:has(.ct-kanban-col-label:text-is(\"Done\")) .ct-kanban-card",
+          "cue": "done",
+          "optional": true
+        },
+        {
+          "type": "pause",
+          "ms": 8000
+        }
+      ]
+    },
+    {
+      "id": "subagents",
+      "narration": "When Claude hands work to sub-agents, a small pill in the composer counts them. Click it to see the whole tree, and open any agent to follow what it's doing.",
+      "actions": [
+        {
+          "type": "click",
+          "selector": ".ct-kanban-card-running"
+        },
+        {
+          "type": "waitFor",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-agent-pill:not(.ct-hidden)",
+          "timeoutMs": 10000
+        },
+        {
+          "type": "hover",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-agent-pill",
+          "cue": "a small pill in the composer"
+        },
+        {
+          "type": "click",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-agent-pill",
+          "cue": "Click it"
+        },
+        {
+          "type": "click",
+          "selector": ".ct-agent-row-button",
+          "cue": "open any agent"
+        },
+        {
+          "type": "pause",
+          "ms": 10000
+        }
+      ]
+    },
+    {
+      "id": "projects",
+      "narration": "Projects keep related threads together, with shared context added to every message, so each new conversation starts already knowing what you're building.",
+      "actions": [
+        {
+          "type": "click",
+          "selector": "[aria-label=\"Group agents\"]",
+          "cue": "Projects keep related threads together"
+        },
+        {
+          "type": "click",
+          "selector": ".menu-item:has-text(\"Project\")"
+        },
+        {
+          "type": "hover",
+          "selector": ".ct-agents-project:has-text(\"Fieldnotes Launch\")",
+          "cue": "shared context"
+        },
+        {
+          "type": "hover",
+          "selector": ".ct-agents-project:has-text(\"Research\")",
+          "cue": "already knowing"
+        },
+        {
+          "type": "pause",
+          "ms": 8000
+        },
+        {
+          "type": "click",
+          "selector": "[aria-label=\"New thread\"]"
+        },
+        {
+          "type": "click",
+          "selector": ".menu-item:has-text(\"Fieldnotes Launch\")"
+        },
+        {
+          "type": "pause",
+          "ms": 600
+        }
+      ]
+    },
+    {
+      "id": "schedule",
+      "narration": "You can also pin a goal, or have a prompt re-run on a schedule, and watch the task list tick along in the footer.",
+      "actions": [
+        {
+          "type": "click",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-input"
+        },
+        {
+          "type": "type",
+          "text": "/goal Ship offline capture by November 10",
+          "delayMs": 18,
+          "cue": "pin a goal"
+        },
+        {
+          "type": "press",
+          "key": "Enter"
+        },
+        {
+          "type": "type",
+          "text": "/loop 10m check the launch checklist",
+          "delayMs": 18,
+          "cue": "re-run on a schedule"
+        },
+        {
+          "type": "press",
+          "key": "Enter"
+        },
+        {
+          "type": "waitFor",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-tasklist-pill:not(.ct-hidden)",
+          "timeoutMs": 15000
+        },
+        {
+          "type": "click",
+          "selector": ".workspace-leaf-content[data-type=\"claude-threads:chat\"] .ct-tasklist-pill",
+          "cue": "task list"
+        },
+        {
+          "type": "pause",
+          "ms": 8500
+        }
+      ]
+    },
+    {
+      "id": "cta",
+      "narration": "That's Agent Threads. Install it from the Geode plugin catalog, and put your first agent to work today.",
+      "actions": [
+        {
+          "type": "click",
+          "selector": ".side-dock-ribbon-action[aria-label=\"Open settings\"]",
+          "cue": "That's Agent Threads"
+        },
+        {
+          "type": "click",
+          "selector": ".vertical-tab-nav-item:has-text(\"Community plugins\")",
+          "cue": "Install it from"
+        },
+        {
+          "type": "hover",
+          "selector": ".modal-container button:has-text(\"Install\")",
+          "cue": "Geode plugin catalog"
+        },
+        {
+          "type": "pause",
+          "ms": 8500
+        }
+      ]
+    }
+  ]
+}

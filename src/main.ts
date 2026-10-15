@@ -1,6 +1,8 @@
 import type { AgentHarness, HarnessVmMode, StorageAllocationOptions } from './types';
 import { saveThenAck } from './remote/persistAck';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
+import { checkClaudeCli, createDefaultCliProbeDeps, describeCliProblems, findMissingKnownModels, type CliInfo, type CliProblem } from './cliVersion';
+import { FALLBACK_RESOLVED } from './modelOptions';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createPublicThreadLifecycle } from './publicThreadLifecycle';
 import { promptConfirm } from './confirmModal';
@@ -162,6 +164,7 @@ export function createAgentProjectUpdateCallback(deps: {
       name: updated.name,
       description: updated.description,
       vaultFolder: updated.vaultFolder,
+      overviewPath: updated.overviewPath,
       cwdOverride: updated.cwdOverride,
       effectiveCwd: deps.getProjectCwd(updated),
       orchestratorThreadId: updated.orchestratorThreadId,
@@ -582,6 +585,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
 
     this.detectClaudeBinary();
+    void this.refreshClaudeCliInfo();
     this.detectCodexBinary();
     this.detectOpenCodeBinary();
     this.migrateGithubSourcesIntoVault();
@@ -879,14 +883,15 @@ export default class ClaudeThreadsPlugin extends Plugin {
             name: p.name,
             description: p.description,
             vaultFolder: p.vaultFolder,
+            overviewPath: p.overviewPath,
             cwdOverride: p.cwdOverride,
             effectiveCwd: this.manager.getProjectCwd(p),
             orchestratorThreadId: p.orchestratorThreadId,
           })),
-          createProject: (name, vaultFolder, description, cwdOverride) => {
-            const p = this.manager.createProject(name, vaultFolder, description, cwdOverride);
+          createProject: (name, vaultFolder, description, cwdOverride, overviewPath) => {
+            const p = this.manager.createProject(name, vaultFolder, description, cwdOverride, overviewPath);
             this.saveSettings().catch(console.error);
-            return { id: p.id, name: p.name, description: p.description, vaultFolder: p.vaultFolder, cwdOverride: p.cwdOverride, effectiveCwd: this.manager.getProjectCwd(p) };
+            return { id: p.id, name: p.name, description: p.description, vaultFolder: p.vaultFolder, overviewPath: p.overviewPath, cwdOverride: p.cwdOverride, effectiveCwd: this.manager.getProjectCwd(p) };
           },
           updateProject: updateProjectFromAgent,
           setThreadProject: (threadId, projectId, alignCwd) => {
@@ -3241,6 +3246,38 @@ export default class ClaudeThreadsPlugin extends Plugin {
       window.clearTimeout(id);
       this.pendingBgTaskTimers.delete(threadId);
     }
+  }
+
+  /** Last `claude --version` probe. In-memory only; re-probed on startup and when the binary path changes. */
+  claudeCliInfo: CliInfo | undefined;
+  private claudeCliProbe: { path: string; promise: Promise<void> } | undefined;
+
+  /**
+   * Probes the configured claude binary (desktop only; skipped when threads are
+   * forced into the sandbox VM, where the host binary is not used). Never throws.
+   */
+  refreshClaudeCliInfo(): Promise<void> {
+    const path = this.settings.claudeBinaryPath;
+    if (Platform.isMobile || !path || this.settings.harnessVmMode === 'always') {
+      this.claudeCliInfo = undefined;
+      return Promise.resolve();
+    }
+    if (this.claudeCliInfo?.binaryPath === path) return Promise.resolve();
+    if (this.claudeCliProbe?.path === path) return this.claudeCliProbe.promise;
+    const promise = checkClaudeCli(path, createDefaultCliProbeDeps())
+      .then((info) => { if (this.settings.claudeBinaryPath === path) this.claudeCliInfo = info; })
+      .catch(() => { /* checkClaudeCli does not throw; defensive */ })
+      .finally(() => { if (this.claudeCliProbe?.promise === promise) this.claudeCliProbe = undefined; });
+    this.claudeCliProbe = { path, promise };
+    return promise;
+  }
+
+  /** Problems to surface in Settings and the model menu; empty when healthy or not applicable. */
+  getClaudeCliProblems(): CliProblem[] {
+    if (Platform.isMobile || this.settings.harnessVmMode === 'always') return [];
+    const info = this.claudeCliInfo?.binaryPath === this.settings.claudeBinaryPath ? this.claudeCliInfo : undefined;
+    const missing = findMissingKnownModels(this.discoveredModelsByHarness.claude, Object.values(FALLBACK_RESOLVED));
+    return describeCliProblems(info, missing);
   }
 
   private detectClaudeBinary(): void {

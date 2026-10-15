@@ -9864,3 +9864,21 @@ button.ct-agent-crumb:focus-visible {
   margin-left: 8px;
   font-size: var(--font-ui-smaller);
 }
+
+/* Settings: detected claude CLI version and stale-install notices */
+.ct-cli-notice-version { margin: 0 0 8px; }
+.ct-cli-notice-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ct-cli-notice-soft {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  border-left: 3px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin: 8px 0 16px;
+}
+.ct-cli-notice-copy { flex-shrink: 0; }
