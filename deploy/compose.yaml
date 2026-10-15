@@ -1,0 +1,39 @@
+# agent-threads daemon with Docker Compose.  docker compose -f deploy/compose.yaml up -d
+#
+#   1. cp deploy/compose.env.example deploy/.env     and edit it (the Claude token, optional GH_TOKEN). chmod 600 it.
+#   2. docker compose -f deploy/compose.yaml up -d --build
+#   3. docker compose -f deploy/compose.yaml exec agent-threads agent-threads token create --name geode --scope control
+#   4. docker compose -f deploy/compose.yaml exec agent-threads agent-threads doctor
+#
+# To use the published image (no Claude CLI inside, see sandbox/Dockerfile.daemon) instead of building, build the
+# thin layer with BASE_IMAGE as described there. Do not publish this port beyond the host's loopback.
+name: agent-threads
+
+services:
+  agent-threads:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.daemon
+    image: agent-threads-daemon:local
+    init: true
+    restart: unless-stopped
+    # Loopback only: reach it from other machines through `tailscale serve` (wss), not by opening the port.
+    ports:
+      - "127.0.0.1:${AGENT_THREADS_PORT:-7433}:7433"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - data:/var/lib/agent-threads      # tokens, journals, raw logs, the Claude login (HOME)
+      - workspaces:/srv/workspaces       # repositories and worktrees
+    security_opt:
+      - no-new-privileges:true
+    # Bound what one runaway agent can take from the host.
+    mem_limit: 8g
+    pids_limit: 2048
+    # `docker stop` sends SIGTERM; the daemon closes sessions and flushes journals within this.
+    stop_grace_period: 30s
+
+volumes:
+  data:
+  workspaces:

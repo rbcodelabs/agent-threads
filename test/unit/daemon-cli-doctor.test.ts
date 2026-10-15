@@ -67,6 +67,9 @@ describe('doctor checks', () => {
     expect(checkCredentials(probes({ files: { '/etc/agent-threads/env': '#CLAUDE_CODE_OAUTH_TOKEN=\n' } }), ['/etc/agent-threads/env']).status).toBe('fail');
     expect(checkCredentials(probes({ stats: { '/home/user/.claude/.credentials.json': { mode: 0o600, uid: 1000, isDirectory: false } } }), []).status).toBe('pass');
     expect(checkCredentials(probes(), []).status).toBe('fail');
+    expect(checkCredentials(probes({ platform: 'darwin' }), []).status).toBe('warn');
+    // .claude.json alone (CLI installed, never signed in) is not a credential.
+    expect(checkCredentials(probes({ stats: { '/home/user/.claude.json': { mode: 0o600, uid: 1000, isDirectory: false } } }), []).status).toBe('fail');
   });
 
   it('listen: warns on wildcard and non-loopback, passes loopback; reports whether the daemon answers', async () => {

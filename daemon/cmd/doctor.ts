@@ -204,11 +204,12 @@ export function checkCredentials(p: Probes, files: string[]): CheckResult {
     if (f.endsWith('claude-token') && text.trim()) return { id: 'credentials', status: 'pass', title, detail: `${f} holds a token` };
   }
   const claudeHome = env.CLAUDE_CONFIG_DIR || join(env.HOME || p.home, '.claude');
-  for (const f of [join(claudeHome, '.credentials.json'), join(env.HOME || p.home, '.claude.json')]) {
-    if (p.stat(f)) return { id: 'credentials', status: 'pass', title, detail: `an existing Claude login (${f})` };
-  }
+  // Only `.credentials.json` is a login: `.claude.json` also exists for a CLI that was installed but never signed in.
+  const login = join(claudeHome, '.credentials.json');
+  if (p.stat(login)) return { id: 'credentials', status: 'pass', title, detail: `an existing Claude login (${login})` };
   return {
-    id: 'credentials', status: 'fail', title, detail: 'no Claude credential found for this user',
+    // macOS keeps the login in the Keychain, where this cannot look; a Mac is not a daemon host, so only warn there.
+    id: 'credentials', status: p.platform === 'darwin' ? 'warn' : 'fail', title, detail: 'no Claude credential found for this user',
     fix: 'as the daemon user run `claude` once and sign in, or run `claude setup-token` and put the token in the service env file (CLAUDE_CODE_OAUTH_TOKEN=...) or in the claude-token credential file',
   };
 }
