@@ -6498,7 +6498,9 @@
 .ct-settings-page-header button.mod-cta, .ct-manager-detail button.mod-cta { background: var(--interactive-accent); border-color: transparent; color: var(--text-on-accent); }
 .ct-manager-detail button.mod-warning { color: var(--color-red); }
 .ct-settings-manager { display: grid; grid-template-columns: minmax(190px, .78fr) minmax(300px, 1.35fr); border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; min-height: 360px; height: clamp(360px, calc(100vh - 150px), 640px); }
-.ct-settings-tab-body.is-compact .ct-settings-manager { height: calc(100vh - 56px); max-height: none; }
+.ct-settings-tab-body.is-compact { display: flex; flex-direction: column; height: calc(100vh - 32px); min-height: 380px; }
+.ct-settings-tab-body.is-compact .ct-settings-manager { flex: 1; height: auto; min-height: 0; max-height: none; }
+.ct-settings-tab-body.is-compact .ct-secret-storage-notice { margin-bottom: 8px; padding: 6px 10px; }
 .ct-manager-list-toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
 .ct-manager-list-toolbar > input { flex: 1; min-width: 0; background: var(--background-modifier-form-field); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); color: var(--text-normal); font-size: var(--font-ui-small); padding: 5px 8px; }
 .ct-manager-list-toolbar .ct-manager-add { width: 30px; padding: 0; font-size: 1.2em; line-height: 1; border: 0; border-radius: var(--radius-s); background: var(--interactive-accent); color: var(--text-on-accent); cursor: pointer; }
@@ -6519,7 +6521,10 @@
 .ct-manager-detail-header h2 { margin: 0; }
 .ct-manager-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
 .ct-manager-form > .ct-manager-field:has(textarea), .ct-manager-form > .ct-manager-field:has(.ct-manager-path-row), .ct-manager-form > :not(.ct-manager-field) { grid-column: 1 / -1; }
-.ct-manager-field { display: flex; flex-direction: column; gap: 3px; }
+.ct-manager-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ct-manager-form .ct-manager-field > small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ct-manager-danger small { display: none; }
+.ct-manager-path-row { min-width: 0; }
 .ct-manager-field-label, .ct-secret-scope-choice legend { font-weight: 600; font-size: var(--font-ui-small); }
 .ct-manager-field input, .ct-manager-field textarea { width: 100%; }
 .ct-manager-field input, .ct-manager-field textarea, .ct-manager-list > input, .ct-secret-projects > input, .ct-settings-compact-nav select { background: var(--background-modifier-form-field); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); color: var(--text-normal); font-size: var(--font-ui-small); padding: 7px 9px; }

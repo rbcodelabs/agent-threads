@@ -2307,7 +2307,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     input.value = value;
     if (options.placeholder) input.setAttribute('placeholder', options.placeholder);
     if (options.disabled && input instanceof HTMLInputElement) input.disabled = true;
-    if (options.description) field.createEl('small', { text: options.description });
+    if (options.description) field.createEl('small', { text: options.description, attr: { title: options.description } });
     return input;
   }
 
