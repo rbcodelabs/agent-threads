@@ -83,6 +83,10 @@ export function runInstall(opts: InstallOptions, sys: InstallSys, say: (line: st
   const unitDir = join(xdgConfig, 'systemd/user');
   const unitPath = join(unitDir, 'agent-threads.service');
   const workspace = opts.workspace ?? join(sys.home, 'workspaces'); // the unit's default is %h/workspaces
+  // Rendered first: a path that cannot be put in a unit (a newline) must stop the install before anything is created.
+  let unit: string;
+  try { unit = renderUnit({ variant: 'user', node: opts.node, bundle: opts.bundle, port: opts.port, workspace: opts.workspace }); }
+  catch (e) { throw new CliError(msg(e), EXIT.USAGE); }
   const steps: string[] = [];
   let changed = false;
   const act = (line: string, fn: () => void): void => {
@@ -114,7 +118,6 @@ export function runInstall(opts: InstallOptions, sys: InstallSys, say: (line: st
   if (sys.exists(workspace)) ok(`workspace ${workspace} exists`);
   else act(`create workspace ${workspace}`, () => sys.mkdir(workspace, 0o755));
 
-  const unit = renderUnit({ variant: 'user', node: opts.node, bundle: opts.bundle, port: opts.port, workspace: opts.workspace });
   const existing = sys.read(unitPath);
   if (existing === unit) {
     ok(`${unitPath} is up to date`);

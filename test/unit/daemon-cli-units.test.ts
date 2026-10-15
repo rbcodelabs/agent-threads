@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ENV_TEMPLATE, runInstall, type InstallOptions, type InstallSys } from '../../daemon/cmd/install';
-import { CANONICAL_BUNDLE, CANONICAL_NODE, MANAGED_MARKER, renderUnit } from '../../daemon/cmd/units';
+import { CANONICAL_BUNDLE, CANONICAL_NODE, MANAGED_MARKER, renderUnit, unitWord } from '../../daemon/cmd/units';
 
 const root = resolve(__dirname, '../..');
 const deployFile = (f: string): string => readFileSync(resolve(root, 'deploy', f), 'utf8');
@@ -17,8 +17,9 @@ describe('systemd units', () => {
     it(`${variant}: carries the settings the design requires`, () => {
       const u = renderUnit({ variant, node: '/n', bundle: '/b.cjs' });
       expect(u).toMatch(/^Restart=on-failure$/m);
-      // Without this a SIGKILLed daemon orphans its claude children.
-      expect(u).toMatch(/^KillMode=control-group$/m);
+      // SIGTERM to the daemon alone (it flushes), then SIGKILL for the rest of the cgroup so a killed daemon orphans nothing.
+      expect(u).toMatch(/^KillMode=mixed$/m);
+      expect(u).toMatch(/^SendSIGKILL=yes$/m);
       expect(u).toMatch(/^EnvironmentFile=-/m);
       expect(u).toMatch(/^LoadCredential=claude-token:/m);
       expect(u).toMatch(/^StateDirectory=agent-threads$/m);
@@ -27,6 +28,21 @@ describe('systemd units', () => {
       expect(u).not.toMatch(/CLAUDE_CODE_OAUTH_TOKEN=\S/);
     });
   }
+  it('quotes ExecStart words and escapes the characters systemd expands', () => {
+    const u = renderUnit({ variant: 'user', node: '/opt/my node/bin/node', bundle: '/b 100%/a"b$c.cjs', workspace: '/srv/my work/100%' });
+    const exec = u.split('\n').find((l) => l.startsWith('ExecStart='))!;
+    expect(exec).toBe('ExecStart="/opt/my node/bin/node" "/b 100%%/a\\"b$$c.cjs" serve --listen 127.0.0.1 --port 7433 --workspace "/srv/my work/100%%"');
+    // The default workspace stays a specifier on purpose.
+    expect(renderUnit({ variant: 'user', node: '/n', bundle: '/b.cjs' })).toContain('--workspace "%h/workspaces"');
+  });
+  it('refuses a newline or other control character in any path (it would start a new directive)', () => {
+    expect(() => unitWord('/srv/x\nExecStartPost=/bin/evil', '--workspace')).toThrow(/newline/);
+    expect(() => renderUnit({ variant: 'user', node: '/n', bundle: '/b.cjs', workspace: '/srv/x\nUser=root' })).toThrow(/--workspace/);
+    expect(() => unitWord('/a\u0000b', 'x')).toThrow();
+  });
+  it('tells the operator the credential file must exist', () => {
+    expect(renderUnit({ variant: 'system', node: '/n', bundle: '/b.cjs' })).toMatch(/credential file must exist/);
+  });
   it('system: confines writes', () => {
     const u = renderUnit({ variant: 'system', node: '/n', bundle: '/b.cjs' });
     expect(u).toMatch(/^ProtectSystem=strict$/m);
@@ -58,7 +74,7 @@ describe('install', () => {
     const lines: string[] = [];
     const plan = runInstall(opts, sys, (l) => lines.push(l));
     const unit = sys.files['/home/user/.config/systemd/user/agent-threads.service'];
-    expect(unit.data).toContain('ExecStart=/usr/bin/node /opt/at/agent-threads.cjs serve');
+    expect(unit.data).toContain('ExecStart="/usr/bin/node" "/opt/at/agent-threads.cjs" serve');
     expect(unit.data).toContain(MANAGED_MARKER);
     expect(sys.files['/home/user/.config/agent-threads/env']).toEqual({ data: ENV_TEMPLATE, mode: 0o600 });
     expect(sys.files['/home/user/.config/agent-threads/claude-token']).toEqual({ data: '', mode: 0o600 });
@@ -103,5 +119,13 @@ describe('install', () => {
   it('refuses outside Linux, and when there is no systemd user manager', () => {
     expect(() => runInstall(opts, fakeSys({}, { platform: 'darwin' }), () => {})).toThrow(/only works on Linux/);
     expect(() => runInstall(opts, fakeSys({}, { exec: () => { throw new Error('no'); } }), () => {})).toThrow(/no systemd user manager/);
+  });
+});
+
+describe('install rejects a path that would break the unit', () => {
+  it('a newline in --workspace is a usage error and writes nothing', () => {
+    const sys = fakeSys();
+    expect(() => runInstall({ ...opts, workspace: '/srv/x\nUser=root' }, sys, () => undefined)).toThrow(/--workspace/);
+    expect(Object.keys(sys.files)).toEqual([]);
   });
 });

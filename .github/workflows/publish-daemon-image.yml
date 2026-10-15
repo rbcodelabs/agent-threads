@@ -10,7 +10,9 @@
 # repository, which installs it at build time.
 #
 # Triggered by the same `v*` tag that creates the plugin release, so the daemon and the plugin it talks to are
-# version-locked (the daemon refuses a plugin older than its minClientVersion). It does not run on branches.
+# version-locked (the daemon refuses a plugin older than its minClientVersion). It does not run on branches: a manual
+# dispatch is honoured only from a tag or from main (job-level guard below), and then only for a version whose
+# `v<version>` tag already exists, so a feature branch can never push an image to the registry.
 #
 # ONE-TIME MANUAL STEP (repo owner only): GitHub creates new ghcr packages as PRIVATE. After the first successful
 # run, open the package settings for agent-threads-daemon under the organisation's Packages and set "Change
@@ -41,6 +43,8 @@ env:
 jobs:
   publish:
     name: Build and push linux/amd64 + linux/arm64
+    # Never publish from an arbitrary branch, even when someone dispatches the workflow from one.
+    if: github.ref_type == 'tag' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -49,7 +53,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Node.js (runs scripts/smoke-daemon.mts)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
 
@@ -71,6 +75,13 @@ jobs:
           if [ "$version" != "$manifest" ]; then
             echo "::error::manifest.json is at $manifest but the image would be tagged $version"
             exit 1
+          fi
+          # A manual run (from main) may only publish a version that was already tagged.
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF_TYPE" != tag ]; then
+            if ! git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null 2>&1; then
+              echo "::error::No tag v${version} exists; a manual run only publishes an already-tagged release."
+              exit 1
+            fi
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
