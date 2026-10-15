@@ -1,6 +1,7 @@
 import { App, FileSystemAdapter, TFile, base64ToArrayBuffer } from 'obsidian';
 import { attachmentDirForThread, attachmentRoot, buildAttachmentPath } from './imageExternalization';
 import { debugLog } from './logger';
+import type { AttachmentStore } from './host/AttachmentStore';
 
 /**
  * Writes message images out to real vault attachment files so they stop bloating
@@ -118,7 +119,7 @@ function assertWriteSize(result: unknown, expectedBytes: number): void {
   }
 }
 
-export class AttachmentWriter {
+export class AttachmentWriter implements AttachmentStore {
   /** Directories already ensured this session, to skip redundant exists/mkdir. */
   private ensuredDirs = new Set<string>();
 

@@ -1,0 +1,96 @@
+# agent-threads daemon image: runs `agent-threads serve` in a container, for a Proxmox VM, a NAS, any
+# Docker or Podman host. See docs/remote-daemon.md ("Docker and compose").
+#
+# Build (from the repository root; the context is the whole repo):
+#   docker build -f sandbox/Dockerfile.daemon -t agent-threads-daemon .
+#
+# Stages:
+#   builder      npm ci + `npm run build:daemon` -> the single-file bundle.
+#   base         Node 22 + git, ripgrep, jq, curl, gh, build-essential + the bundle. NO Claude CLI.
+#   with-claude  base + Claude Code's native installer. The DEFAULT target (last stage), so a plain
+#                `docker build` gives a ready-to-run image.
+#
+# The image published to ghcr.io is the `base` stage only: Claude Code has no redistribution grant (the
+# same rule as the sandbox image, see .github/workflows/publish-sandbox-image.yml). Add the CLI on your
+# own machine, which is exactly what installing it yourself is:
+#   docker build -f sandbox/Dockerfile.daemon --build-arg BASE_IMAGE=ghcr.io/<owner>/agent-threads-daemon:<version> -t agent-threads-daemon .
+#
+# Design rules: no secrets baked in (the Claude credential arrives at run time through an env file or a
+# mounted file, see deploy/compose.yaml); a non-root user; state only in /var/lib/agent-threads (data) and
+# /srv/workspaces (repositories). The daemon listens on 0.0.0.0 INSIDE the container, so ALWAYS publish the
+# port on the host's loopback (-p 127.0.0.1:7433:7433) and reach it through `tailscale serve` or a proxy.
+
+ARG BASE_IMAGE=base
+
+FROM node:22-bookworm-slim AS builder
+WORKDIR /src
+# Dependencies first so a source-only change reuses this layer.
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY tsconfig.json tsconfig.core.json tsconfig.daemon.json esbuild.daemon.mjs ./
+COPY src ./src
+COPY daemon ./daemon
+COPY bin ./bin
+COPY scripts/core ./scripts/core
+RUN node esbuild.daemon.mjs
+
+FROM node:22-bookworm-slim AS base
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        gh \
+        ca-certificates \
+        curl \
+        ripgrep \
+        jq \
+        less \
+        openssh-client \
+        build-essential \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# A dedicated user (UID 10001 so it never collides with a host user mapped into a bind mount by accident).
+RUN groupadd --gid 10001 agentthreads \
+ && useradd --uid 10001 --gid 10001 --home-dir /var/lib/agent-threads/home --shell /bin/bash agentthreads \
+ && install -d -o agentthreads -g agentthreads -m 0700 /var/lib/agent-threads /var/lib/agent-threads/home \
+ && install -d -o agentthreads -g agentthreads -m 0755 /srv/workspaces
+
+# The bundle, with the launcher next to it (bin/agent-threads requires ../dist/agent-threads.cjs).
+COPY --from=builder /src/dist/agent-threads.cjs /opt/agent-threads/dist/agent-threads.cjs
+COPY --from=builder /src/bin/agent-threads /opt/agent-threads/bin/agent-threads
+RUN chmod 0755 /opt/agent-threads/bin/agent-threads \
+ && ln -s /opt/agent-threads/bin/agent-threads /usr/local/bin/agent-threads
+
+# The port the daemon listens on inside the container. The daemon reads AGENT_THREADS_PORT itself, and the
+# health check below follows whatever the container is actually run with (compose passes the same value through).
+ARG AGENT_THREADS_PORT=7433
+ENV DATA_DIR=/var/lib/agent-threads \
+    HOME=/var/lib/agent-threads/home \
+    PATH="/var/lib/agent-threads/home/.local/bin:${PATH}" \
+    GIT_TERMINAL_PROMPT=0 \
+    AGENT_THREADS_PORT=${AGENT_THREADS_PORT}
+
+USER agentthreads
+WORKDIR /srv/workspaces
+VOLUME ["/var/lib/agent-threads", "/srv/workspaces"]
+EXPOSE ${AGENT_THREADS_PORT}
+
+# /healthz is unauthenticated and answers {"ok":true,"protocol":1}. Shell form on purpose: the port is read at run time.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${AGENT_THREADS_PORT:-7433}/healthz" || exit 1
+
+ENTRYPOINT ["agent-threads", "serve"]
+# Inside a container the daemon must bind all interfaces for the published port to reach it. Safe only
+# because the port is published on the host's loopback; never `-p 7433:7433` on an exposed host.
+CMD ["--listen", "0.0.0.0", "--i-know-this-is-open", "--workspace", "/srv/workspaces"]
+
+FROM ${BASE_IMAGE} AS with-claude
+USER root
+# The Claude CLI goes OUTSIDE every VOLUME path. Under /var/lib/agent-threads/home it would be copied into a named
+# volume once and then frozen there across image upgrades (or hidden entirely by a bind mount). The login and the
+# sessions still live in the persisted HOME; only the program itself is part of the image.
+RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/claude
+USER agentthreads
+RUN curl -fsSL https://claude.ai/install.sh | HOME=/opt/claude bash
+ENV PATH="/opt/claude/.local/bin:${PATH}" \
+    DISABLE_AUTOUPDATER=1

@@ -13,7 +13,7 @@
  * and `~/.claude/agents` are listed so the UI can show what the Claude CLI
  * loads, but are never written to. See `skillPaths.ts`.
  */
-import { requestUrl } from 'obsidian';
+import type { HttpFetch } from './host/HttpFetch';
 import fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
@@ -443,11 +443,9 @@ export async function searchMarketplaceSkills(
   query: string,
   limit: number,
   installedSkills: InstalledSkillInfo[],
+  http: HttpFetch,
 ): Promise<MarketplaceSkill[]> {
-  const res = await requestUrl({
-    url: `https://skills.sh/api/search?q=${encodeURIComponent(query)}&limit=${limit}`,
-    method: 'GET',
-  });
+  const res = await http.get(`https://skills.sh/api/search?q=${encodeURIComponent(query)}&limit=${limit}`);
   if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
 
   const data = res.json as { skills: RawMarketplaceSkill[] };
@@ -461,13 +459,14 @@ export async function searchMarketplaceSkills(
  */
 export async function getPopularMarketplaceSkills(
   installedSkills: InstalledSkillInfo[],
-  limit = 30,
+  limit: number,
+  http: HttpFetch,
 ): Promise<MarketplaceSkill[]> {
-  return searchMarketplaceSkills('er', limit, installedSkills);
+  return searchMarketplaceSkills('er', limit, installedSkills, http);
 }
 
 /** Fetches and parses a marketplace skill's SKILL.md description from its GitHub source, trying a few common repo layouts. Returns null if none could be found/parsed. */
-export async function getMarketplaceSkillDescription(slug: string, source: string): Promise<string | null> {
+export async function getMarketplaceSkillDescription(slug: string, source: string, http: HttpFetch): Promise<string | null> {
   if (!source) return null;
 
   // Derive the skill's own ID (last path segment after removing the source prefix)
@@ -482,7 +481,7 @@ export async function getMarketplaceSkillDescription(slug: string, source: strin
 
   for (const url of candidates) {
     try {
-      const res = await requestUrl({ url, method: 'GET', throw: false });
+      const res = await http.get(url, { throw: false });
       if (res.status === 200 && res.text) {
         const { description: fm } = parseFrontmatter(res.text);
         if (fm) {
@@ -538,6 +537,8 @@ export async function getSkillDetail(
   identifier: string,
   skillSources: SkillSource[] = [],
   roots: SkillRoots = getSkillRoots(),
+  /** Needed only to look up the description of a not-yet-installed marketplace skill. */
+  http: HttpFetch,
 ): Promise<SkillDetailResult> {
   const installed = await listInstalledSkills(skillSources, roots);
   const matches = (s: InstalledSkillInfo) => s.identifier === identifier || s.name === identifier || path.basename(s.skillPath) === identifier;
@@ -568,7 +569,7 @@ export async function getSkillDetail(
   }
   const skillId = parts[parts.length - 1];
   const source = parts.slice(0, -1).join('/');
-  const description = await getMarketplaceSkillDescription(identifier, source);
+  const description = await getMarketplaceSkillDescription(identifier, source, http);
 
   return {
     name: skillId,

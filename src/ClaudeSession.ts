@@ -45,6 +45,8 @@ export interface ResultMetadata {
 
 export interface SessionCallbacks {
   onToken: (text: string) => void;
+  /** Remote only: a resync discarded the unfinished assistant message's streamed text; it re-streams from the checkpoint. */
+  onStreamReset?: () => void;
   onToolUse: (record: ToolCallRecord) => void;
   onMessage: (content: string, toolCalls: ToolCallRecord[]) => void;
   onRecap: (summary: string) => void;

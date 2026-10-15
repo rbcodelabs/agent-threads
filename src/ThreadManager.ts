@@ -4,9 +4,15 @@ import { extractUrls } from './urlLinks';
 import { mergeDisallowedTools } from './toolRestrictions';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
+import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
+import type { RemoteSessionDeps } from './remote/RemoteHarnessSession';
+import { buildRemoteEnvironmentPrompt } from './remote/sessionSpec';
+import type { RemoteHostTools } from './remote/hostTools';
+import { HostToolSlots } from './remote/hostToolExecutor';
+import { describeDroppedMcp, partitionExternalMcpServers } from './remote/mcpPartition';
 import { resolveCodexPermissions, serializableMcpServers, type HarnessContextUsage, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
 import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
-import { AttachmentWriter } from './AttachmentWriter';
+import { NULL_ATTACHMENT_STORE, type AttachmentStore } from './host/AttachmentStore';
 // Safe to import statically on mobile: this module requires `fs`/`path` lazily,
 // inside functions, so nothing Node-only runs at module-init scope.
 import { removeStorageRoot, type ArtifactStorageFs } from './artifactStorage';
@@ -29,7 +35,6 @@ import { containerNameForThread, createDefaultVmCommandRunner, resolveVmCpus, re
 import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
 import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
-import type { App } from 'obsidian';
 import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun } from './types';
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
@@ -105,6 +110,10 @@ export type ThreadEvent =
   | { type: 'thread_renamed'; threadId: string; title: string }
   | { type: 'permission_request'; toolName: string; detail: string }
   | { type: 'permission_resolved' }
+  /** A remote thread's `turnPending` marker flipped: persist so a quit now still re-attaches the turn. */
+  | { type: 'remote_pending_changed' }
+  /** A remote resync: whatever the view accumulated for the unfinished assistant message is stale; text re-streams after this. */
+  | { type: 'stream_reset' }
   | { type: 'active_thread_changed' }
   | { type: 'user_message_added'; message: ChatMessage }
   | { type: 'summary_updated' }
@@ -313,6 +322,21 @@ export class ThreadManager {
   /** Human-readable plugin host injected into new session context. */
   hostName: 'Geode' | 'Obsidian' = 'Obsidian';
   /**
+   * Where remote threads get their daemon connection (`HarnessFactory`). Left
+   * undefined on hosts that cannot reach a daemon; a remote thread then fails
+   * to start with a clear error instead of silently running locally.
+   */
+  remoteDaemons: RemoteDaemonResolver | undefined = undefined;
+  /**
+   * Builds the host tools (vault, workspace, threads, Google, ...) a remote thread's daemon may call back into,
+   * bound to this thread. Set by the plugin; absent on hosts that cannot serve them.
+   */
+  remoteHostToolsFactory: ((threadId: string, thread: Thread) => RemoteHostTools | undefined) | undefined = undefined;
+  /** Calls in flight across every remote thread (shared cap, see HostToolExecutor). */
+  private readonly hostToolSlots = new HostToolSlots();
+  /** Last dropped-MCP notice shown per thread, so it appears again only when the set changes. */
+  private readonly remoteMcpNoticeSig = new Map<string, string>();
+  /**
    * When set, called before each session run to resolve secret env var values from
    * the OS keychain. Returns a plain key-value map that is merged into the session
    * environment. Only ever called at session start — values are not cached or stored.
@@ -354,13 +378,6 @@ export class ThreadManager {
     catch (error) { console.warn('[ClaudeThreads] Local skills unavailable:', error); return ''; }
   }
   /**
-   * Obsidian App handle, set once from main.ts alongside `vaultRoot`. Needed by
-   * AttachmentWriter to write image files through the vault API (so they
-   * register with the metadata cache). Null in tests / on mobile, where image
-   * externalization is skipped.
-   */
-  app: App | null = null;
-  /**
    * Absolute filesystem path to this plugin's installed directory (vaultRoot +
    * manifest.dir), set once from main.ts alongside vaultRoot. Used to resolve
    * the bundled thread-orchestrator skill at <pluginResourceDir>/resources/skills/
@@ -386,7 +403,7 @@ export class ThreadManager {
   /** Appends each thread's raw SDK event stream to a per-thread JSONL log. */
   private rawLogWriter: RawLogWriter;
   /** Writes message images out to vault attachment files (ADR-0003, PR 1). */
-  private attachmentWriter: AttachmentWriter;
+  private attachmentWriter: AttachmentStore;
   /** Injectable filesystem for artifact-storage GC; defaults to the real one. */
   artifactStorageFs?: ArtifactStorageFs;
   /**
@@ -398,20 +415,60 @@ export class ThreadManager {
    */
   artifactCleanupSettled: Promise<void> = Promise.resolve();
 
-  constructor(settings: PluginSettings) {
+  /**
+   * `attachmentStore` is the host's image-file writer (see `src/host/`). The
+   * default leaves images inline, which is the behavior in tests and on mobile.
+   */
+  constructor(settings: PluginSettings, attachmentStore: AttachmentStore = NULL_ATTACHMENT_STORE) {
     this.settings = settings;
     this.rawLogWriter = new RawLogWriter(
       () => this.vaultRoot,
       () => this.settings.vaultFolder,
     );
-    this.attachmentWriter = new AttachmentWriter(
-      () => this.app,
-      () => this.settings.vaultFolder,
-    );
+    this.attachmentWriter = attachmentStore;
   }
 
   updateSettings(settings: PluginSettings): void {
     this.settings = settings;
+  }
+
+  // ── clock ──────────────────────────────────────────────────────────────────
+  //
+  // Every timestamp a session callback stamps onto the transcript (message and
+  // compact-marker `timestamp`, `updatedAt`, agent-run events, auth banner) comes
+  // from `now()`, never `Date.now()` directly. A live event is stamped with real
+  // time. An event REPLAYED from a remote daemon's journal (a turn that finished
+  // while this app was closed) is delivered through `runAtTime(ts, ...)` so it
+  // keeps the time it actually happened, instead of every message of a
+  // transcript replayed hours later reading "just now".
+
+  /** Wall clock; replaceable so tests can run time forward without sleeping. */
+  clock: () => number = () => Date.now();
+  private clockOverride: number | null = null;
+
+  /** The time to stamp onto whatever a session callback is recording right now. */
+  now(): number {
+    return this.clockOverride ?? this.clock();
+  }
+
+  /**
+   * Run `fn` (synchronously) with `now()` pinned to `ts`. Pinning is clamped to the
+   * real clock so a daemon whose clock runs ahead cannot stamp the future. Nests;
+   * the previous pin is always restored.
+   */
+  runAtTime<T>(ts: number, fn: () => T): T {
+    const previous = this.clockOverride;
+    this.clockOverride = Number.isFinite(ts) ? Math.min(ts, this.clock()) : previous;
+    try {
+      return fn();
+    } finally {
+      this.clockOverride = previous;
+    }
+  }
+
+  /** `updatedAt` only ever moves forward: replaying an old event must not make a thread look stale. */
+  private touch(thread: Thread): void {
+    thread.updatedAt = Math.max(thread.updatedAt ?? 0, this.now());
   }
 
   /**
@@ -587,7 +644,8 @@ export class ThreadManager {
     if (changed) delete thread.proposedReply;
     thread.updatedAt = Date.now();
     this.emit(id, { type: 'project_changed' });
-    if (alignCwd && project) this.setThreadCwd(id, this.getProjectCwd(project));
+    // A remote thread's cwd is a path on the daemon's machine; a Project's folder is local.
+    if (alignCwd && project && !thread.remote) this.setThreadCwd(id, this.getProjectCwd(project));
   }
 
   // ── Threads ──────────────────────────────────────────────────────────────────
@@ -617,6 +675,15 @@ export class ThreadManager {
     const all = this.getThreads();
     if (projectId === null) return all;
     return all.filter((t) => t.projectId === projectId);
+  }
+
+  /**
+   * A thread hosted on a daemon. Its permission requests come from another machine (or from tools that act on this
+   * one on a daemon's behalf), so "Always Allow" never applies to them: nothing is remembered from a click and
+   * nothing remembered locally pre-approves a request, because the tool name on the card is the daemon's word.
+   */
+  isRemoteThread(threadId: string): boolean {
+    return !!this.getThread(threadId)?.remote;
   }
 
   getThread(id: string): Thread | undefined {
@@ -661,6 +728,7 @@ export class ThreadManager {
     if (!thread) throw new Error(`Thread not found: ${id}`);
     const sourceHarness = thread.agentHarness ?? 'claude';
     if (sourceHarness === targetHarness) return;
+    if (thread.remote) throw new Error('Remote threads run Claude only for now.');
     const blocked = this.getHarnessSwitchBlockReason(id);
     if (blocked) throw new Error(blocked);
 
@@ -756,6 +824,7 @@ export class ThreadManager {
   ): Promise<void> {
     const thread = this.threads.get(id);
     if (!thread) throw new Error(`Thread not found: ${id}`);
+    if (thread.remote) throw new Error('This thread runs on a remote daemon; container execution does not apply.');
     if ((thread.agentHarness ?? 'claude') !== 'claude') {
       throw new Error('Container execution is only available for the Claude harness.');
     }
@@ -902,6 +971,93 @@ export class ThreadManager {
     return thread;
   }
 
+  /**
+   * A thread whose session runs on the daemon `daemonId`, in `remoteCwd` on that
+   * machine. Claude only (the daemon hosts nothing else yet); `thread.cwd`
+   * mirrors the remote path for display and is never touched on this disk.
+   */
+  createRemoteThread(
+    title: string,
+    remote: { daemonId: string; remoteCwd: string; clientId: string },
+    projectId?: string,
+  ): Thread {
+    const thread = this.createThread(title, remote.remoteCwd, projectId, 'claude');
+    thread.remote = {
+      daemonId: remote.daemonId,
+      ownership: 'client',
+      remoteCwd: remote.remoteCwd,
+      lastSeq: 0,
+      ownerClientId: remote.clientId,
+    };
+    return thread;
+  }
+
+  /**
+   * After a restart: re-attach every remote thread whose turn was still running
+   * when this process went away, so its transcript completes without anyone
+   * opening the thread or sending a message. Attach-only: it never starts a
+   * process on the daemon just to look at a finished turn.
+   */
+  resumeRemoteTurns(): string[] {
+    const resumed: string[] = [];
+    for (const [id, thread] of this.threads) {
+      if (!thread.remote?.turnPending || thread.status === 'archived' || this.sessions.has(id)) continue;
+      let session: HarnessSession;
+      try {
+        session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread));
+      } catch (err) {
+        // Daemon removed from Settings (or no resolver on this host): nothing to follow.
+        console.warn(`[ClaudeThreads] cannot resume remote turn for "${thread.title}":`, err);
+        delete thread.remote.turnPending;
+        continue;
+      }
+      const options = this.buildThreadSessionOptions(id, thread, undefined, false);
+      if (!options) continue;
+      thread.status = 'active';
+      this.sessions.set(id, session);
+      this.emit(id, { type: 'streaming_start' });
+      resumed.push(id);
+      session.start(options, { attachOnly: true }).catch((err: unknown) => {
+        const error = err instanceof Error ? err : new Error(String(err));
+        thread.status = 'error';
+        thread.lastError = error.message;
+        if (this.sessions.get(id) === session) this.sessions.delete(id);
+        this.emit(id, { type: 'error', error });
+      });
+    }
+    return resumed;
+  }
+
+  private remoteHooks(thread: Thread): Pick<RemoteSessionDeps, 'onPendingChanged' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName'> | undefined {
+    if (!thread.remote) return undefined;
+    const enabled = this.remoteDaemons?.hostToolsOf?.(thread.remote.daemonId)?.enabled === true;
+    let hostTools: RemoteHostTools | undefined;
+    try {
+      hostTools = enabled ? this.remoteHostToolsFactory?.(thread.id, thread) : undefined;
+    } catch (err) {
+      console.warn(`[ClaudeThreads] host tools unavailable for "${thread.title}":`, err);
+    }
+    return {
+      onPendingChanged: () => this.emit(thread.id, { type: 'remote_pending_changed' }),
+      runAtTime: (ts, fn) => this.runAtTime(ts, fn),
+      ...(hostTools ? { hostTools } : {}),
+      hostToolSlots: this.hostToolSlots,
+      hostName: this.hostName,
+      onNotice: (status, text) => this.addNoticeMessage(thread.id, status, text),
+      // A worktree tool moved the session on the daemon: mirror the folder (same bookkeeping as a local cwd change).
+      onCwdChanged: (cwd, origin) => this.setThreadCwd(thread.id, cwd, origin),
+    };
+  }
+
+  /**
+   * The host has durably saved this thread's state through `seq`: a remote session may release its
+   * replay buffer up to there. `seq` is the cursor as it stood when the save was REQUESTED; the live
+   * cursor may already be past what that save captured.
+   */
+  notifyThreadPersisted(id: string, seq?: number): void {
+    this.sessions.get(id)?.notifyPersisted?.(seq);
+  }
+
   deleteThread(id: string): void {
     const thread = this.threads.get(id);
     // Hard-delete of a thread with no markdown note: remove its attachment dir.
@@ -997,6 +1153,8 @@ export class ThreadManager {
     const thread = this.threads.get(id);
     if (thread) {
       thread.cwd = cwd;
+      // `thread.cwd` mirrors the daemon-side path for a remote thread.
+      if (thread.remote) thread.remote.remoteCwd = cwd;
       if (originRepoPath !== undefined) {
         thread.originRepoPath = originRepoPath ?? undefined;
       }
@@ -1088,6 +1246,8 @@ export class ThreadManager {
     let repaired = 0;
 
     for (const [id, thread] of this.threads) {
+      // A remote thread's cwd lives on the daemon; stat-ing it here would "repair" a healthy thread.
+      if (thread.remote) continue;
       // Only repair volatile worktree paths — other non-existent cwds should be
       // surfaced as an explicit error, not silently rerouted.
       if (!thread.cwd || !isWorktreePath(thread.cwd)) continue;
@@ -1160,6 +1320,7 @@ export class ThreadManager {
     let backfilled = 0;
 
     for (const thread of this.threads.values()) {
+      if (thread.remote) continue; // cwd is not a local path
       if (thread.originRepoPath || thread.projectNameOverride) continue;
       if (!thread.prUrl) continue;
       if (resolveGitProjectName(thread.cwd)) continue; // cwd already resolves fine
@@ -1374,6 +1535,7 @@ export class ThreadManager {
    */
   private async sessionMcpStale(threadId: string, session: HarnessSession): Promise<boolean> {
     if (!this.proxyMcpServersForThread) return false;
+    if (this.threads.get(threadId)?.remote) return false; // proxied MCP servers are not forwarded to a daemon yet
     const signature = this.proxyMcpSignature(threadId);
     const built = this.sessionMcpSignatures.get(session);
     if (built === undefined) { this.sessionMcpSignatures.set(session, signature); return false; }
@@ -1878,7 +2040,7 @@ export class ThreadManager {
 
     let session = this.sessions.get(threadId);
     if (!session) {
-      session = createHarnessSession(thread, this.settings);
+      session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread));
       this.sessions.set(threadId, session);
       const options = this.buildThreadSessionOptions(threadId, thread, undefined, false);
       if (!options) {
@@ -2092,7 +2254,7 @@ export class ThreadManager {
     if (!session) this.sessionRestartRequested.delete(threadId);
     const isNewSession = !session;
     if (!session) {
-      session = createHarnessSession(thread, this.settings);
+      session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread));
       this.sessions.set(threadId, session);
       const goalState = this.getGoalContextState(threadId);
       goalState.appliedRevision = goalState.desiredRevision;
@@ -2201,6 +2363,9 @@ export class ThreadManager {
    */
   private ensureCwdExists(threadId: string, thread: Thread): boolean {
     if (!thread.cwd) return true;
+    // The cwd of a remote thread is a path on the daemon's machine. The daemon's session policy
+    // validates it at `session.open`; checking it here would stat (and "repair") a local path.
+    if (thread.remote) return true;
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
     if (fs.existsSync(thread.cwd)) return true;
@@ -2369,6 +2534,7 @@ export class ThreadManager {
    * builds the inputs that decision needs.
    */
   private buildClaudeVmRoutingInputs(threadId: string, thread: Thread): ClaudeVmRoutingInputs | undefined {
+    if (thread.remote) return undefined; // the daemon is the sandbox
     const mode = resolveEffectiveHarnessVmMode(thread.harnessVmMode, this.settings.harnessVmMode);
     if (mode === 'never') return undefined;
     if ((thread.agentHarness ?? 'claude') !== 'claude') return undefined;
@@ -2424,6 +2590,7 @@ export class ThreadManager {
     latestMessageIsCurrentSend = true,
   ): HarnessSessionOptions | null {
     if (!this.ensureCwdExists(threadId, thread)) return null;
+    if (thread.remote) return this.buildRemoteSessionOptions(threadId, thread, modelOverride, latestMessageIsCurrentSend);
 
     const additionalDirs = [...new Set([this.vaultRoot, thread.cwd].filter(Boolean))];
     const project = thread.projectId ? this.getProject(thread.projectId) : undefined;
@@ -2545,6 +2712,74 @@ export class ThreadManager {
   }
 
   /**
+   * Options for a thread whose session runs on a daemon. Everything that names
+   * a local path or carries a local secret is left out on purpose (the vault
+   * root, MCP server instances, keychain-derived env, container routing); the
+   * wire projection in `remote/sessionSpec.ts` is the second filter.
+   */
+  private buildRemoteSessionOptions(
+    threadId: string,
+    thread: Thread,
+    modelOverride: string | undefined,
+    latestMessageIsCurrentSend: boolean,
+  ): HarnessSessionOptions {
+    const remote = thread.remote!;
+    const project = thread.projectId ? this.getProject(thread.projectId) : undefined;
+    const daemonName = this.remoteDaemons?.nameOf(remote.daemonId) ?? remote.daemonId;
+    const vaultMapping = this.remoteDaemons?.vaultMappingOf?.(remote.daemonId);
+    const hostToolsEnabled = !!this.remoteHostToolsFactory && this.remoteDaemons?.hostToolsOf?.(remote.daemonId)?.enabled === true;
+    const goalContext = thread.goal
+      ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
+        'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
+        'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
+      : '';
+    const appendSystemPrompt = [
+      buildRemoteEnvironmentPrompt(
+        remote.remoteCwd,
+        daemonName,
+        this.hostName,
+        vaultMapping
+          ? { mapping: vaultMapping, vaultFolder: this.settings.vaultFolder, saveThreadsToVault: this.settings.saveThreadsToVault }
+          : undefined,
+        { hostTools: hostToolsEnabled },
+      ),
+      project?.description?.trim(),
+      goalContext,
+    ].filter(Boolean).join('\n\n');
+    const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
+    // External MCP servers: only what a daemon can use (http/sse it can reach, no secrets) goes along; the rest is
+    // dropped and the user is told once per change.
+    const hostToolSettings = this.remoteDaemons?.hostToolsOf?.(remote.daemonId);
+    const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist);
+    const droppedNote = describeDroppedMcp(partition.dropped, daemonName);
+    if ((this.remoteMcpNoticeSig.get(threadId) ?? '') !== (droppedNote ?? '')) {
+      this.remoteMcpNoticeSig.set(threadId, droppedNote ?? '');
+      if (droppedNote) this.addNoticeMessage(threadId, 'stopped', droppedNote);
+    }
+    return {
+      cwd: remote.remoteCwd,
+      permissionMode: thread.permissionMode ?? this.settings.permissionMode,
+      ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
+      extraEnvRaw: '',
+      resume: thread.sessionId,
+      callbacks: this.buildSessionCallbacks(threadId, thread),
+      model: modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
+      appendSystemPrompt,
+      resumeFallbackHistory: thread.sessionId
+        ? buildHistoryPreamble(
+            latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
+            remote.remoteCwd,
+          )
+        : undefined,
+      claude: {
+        disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
+        sessionOptions: this.buildSessionOptions(thread, agentProfiles),
+        ...(Object.keys(partition.passthrough).length ? { remoteMcpServers: partition.passthrough } : {}),
+      },
+    };
+  }
+
+  /**
    * Clears the transient `'reconnecting'` status set by `onReconnecting`
    * (see below) once the auto-retried continuation turn actually starts
    * producing events again. Under the old per-turn model, this reset
@@ -2580,7 +2815,7 @@ export class ThreadManager {
   private clearReconnectingStatus(thread: Thread): void {
     if (thread.status === 'reconnecting') {
       thread.status = 'active';
-      thread.updatedAt = Date.now();
+      this.touch(thread);
     }
   }
 
@@ -2627,6 +2862,10 @@ export class ThreadManager {
         this.clearReconnectingStatus(thread);
         this.emit(threadId, { type: 'token', text });
       },
+      onStreamReset: () => {
+        if (!isCurrentGeneration()) return;
+        this.emit(threadId, { type: 'stream_reset' });
+      },
       onToolUse: (record) => {
         if (!isCurrentGeneration()) return;
         this.threadActivity.set(threadId, record.summary);
@@ -2664,14 +2903,14 @@ export class ThreadManager {
           id: crypto.randomUUID(),
           role: 'assistant',
           content,
-          timestamp: Date.now(),
+          timestamp: this.now(),
           agentHarness: harnessAtStart,
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
           toolResultImages: images && images.length > 0 ? [...images] : undefined,
         };
         this.pendingToolResultImages.delete(threadId);
         thread.messages.push(assistantMsg);
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         // Externalize tool-result images to vault files (see sendMessage above).
         this.externalizeMessageImages(threadId, assistantMsg);
         // Surface links the assistant shared in the recent-files pill. Kept in
@@ -2705,11 +2944,11 @@ export class ThreadManager {
             if (remaining.length > 0) this.pendingUserMessageIds.set(threadId, remaining);
             else this.pendingUserMessageIds.delete(threadId);
           }
-          thread.updatedAt = Date.now();
+          this.touch(thread);
           thread.status = 'active';
           return;
         }
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         thread.status = 'waiting';
         thread.streamCloseRetryCount = 0; // TODO: likely vestigial post-Stage-C — see types.ts's doc comment on this field
         thread.rateLimitRetryCount = 0;
@@ -2788,7 +3027,7 @@ export class ThreadManager {
           thread.messages = thread.messages.filter((m) => !idSet.has(m.id));
         }
         this.pendingUserMessageIds.delete(threadId);
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         thread.status = 'waiting';
         // Do NOT update thread.sessionId — the last successful session ID is still valid
         this.threadActivity.delete(threadId);
@@ -2820,7 +3059,7 @@ export class ThreadManager {
         // isn't transport-related — either way it's terminal from
         // ThreadManager's perspective, so there is no longer a second
         // retry-and-requeue branch here.
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         thread.lastError = err.message;
         thread.status = 'error';
         thread.streamCloseRetryCount = 0; // TODO: likely vestigial post-Stage-C — see types.ts's doc comment on this field
@@ -2850,14 +3089,14 @@ export class ThreadManager {
           // reload/crash OR after the user switches threads mid-session,
           // mirroring the pendingPlan pattern.
           thread.pendingQuestions = questions;
-          thread.updatedAt = Date.now();
+          this.touch(thread);
           this.emit(threadId, { type: 'pending_question_changed', questions });
           this.emit(threadId, { type: 'question_ready', questions });
           try {
             return await this.questionHandler(threadId, questions);
           } finally {
             delete thread.pendingQuestions;
-            thread.updatedAt = Date.now();
+            this.touch(thread);
             this.pendingQuestionResolvers.delete(threadId);
             this.emit(threadId, { type: 'pending_question_changed', questions: undefined });
           }
@@ -2897,7 +3136,7 @@ export class ThreadManager {
         // again (see that method's doc comment for why onDone/onError don't
         // also need to clear it).
         thread.status = 'reconnecting';
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'reconnecting', error });
       },
       onRateLimitRetry: (attempt, maxRetries, delayMs) => {
@@ -2911,7 +3150,7 @@ export class ThreadManager {
         // copy (attempt N/M, retrying in Ns).
         thread.status = 'reconnecting';
         thread.rateLimitRetryCount = attempt;
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'rate_limit_retry', attempt, maxRetries, delayMs });
       },
       onAuthRetry: (error) => {
@@ -2920,7 +3159,7 @@ export class ThreadManager {
         // new one re-reads the keychain) and replaying the turn once. Same
         // transient treatment as the other auto-recoveries above.
         thread.status = 'reconnecting';
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'auth_retry', error });
       },
       onAuthRequired: (message) => {
@@ -2928,7 +3167,7 @@ export class ThreadManager {
         // The silent retry failed too. Record the state that drives the
         // in-thread "Sign in to Claude" banner, then settle exactly like any
         // terminal error (the user message stays in the transcript, once).
-        thread.authRequired = { message, at: Date.now() };
+        thread.authRequired = { message, at: this.now() };
         callbacks.onError(new Error(message));
       },
       onVmRouting: (routing, fallbackReason) => {
@@ -2942,12 +3181,12 @@ export class ThreadManager {
           id: crypto.randomUUID(),
           role: 'compact',
           content: '',
-          timestamp: Date.now(),
+          timestamp: this.now(),
           compactTrigger: trigger,
           preTokens,
         };
         thread.messages.push(compactMsg);
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'compact', message: compactMsg });
       },
       onTaskStarted: (taskId, description, skipTranscript, taskType, workflowName, subagentType, parentNativeAgentId, model) => {
@@ -2957,14 +3196,14 @@ export class ThreadManager {
         // if they're still running when the session ends.
         if (skipTranscript) {
           const active = this.activeBgTasks.get(threadId) ?? new Map<string, { description: string; startedAt: number }>();
-          active.set(taskId, { description, startedAt: Date.now() });
+          active.set(taskId, { description, startedAt: this.now() });
           this.activeBgTasks.set(threadId, active);
         }
         if (AgentRunStore.isAgentTask({ skipTranscript, taskType, subagentType })) {
           this.agentRuns.observeStart({
             threadId, harness: harnessAtStart, nativeAgentId: taskId, sessionGeneration: generationAtStart,
             taskId, description, role: subagentType, parentNativeAgentId, model,
-          });
+          }, this.now());
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_started', taskId, description, skipTranscript, taskType, workflowName, subagentType });
@@ -2975,7 +3214,7 @@ export class ThreadManager {
         if (run) {
           if (patch.description) run.description = patch.description;
           const status = patch.status === 'completed' ? 'completed' : patch.status === 'failed' ? 'failed' : patch.status === 'killed' ? 'interrupted' : patch.status === 'pending' ? 'waiting' : 'working';
-          this.agentRuns.observeStatus(threadId, run.harness, taskId, status, undefined, patch.error, Date.now(), generationAtStart);
+          this.agentRuns.observeStatus(threadId, run.harness, taskId, status, undefined, patch.error, this.now(), generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_updated', taskId, ...patch });
@@ -2986,7 +3225,7 @@ export class ThreadManager {
         this.threadActivity.set(threadId, description + suffix);
         const run = this.agentRuns.getByNativeId(threadId, harnessAtStart, taskId, generationAtStart);
         if (run) {
-          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: lastToolName ? 'tool' : 'activity', text: description, toolName: lastToolName, timestamp: Date.now() }, generationAtStart);
+          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: lastToolName ? 'tool' : 'activity', text: description, toolName: lastToolName, timestamp: this.now() }, generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_progress', taskId, description, lastToolName });
@@ -3000,7 +3239,7 @@ export class ThreadManager {
         this.clearPendingBackgroundTask(threadId, taskId);
         const run = this.agentRuns.getByNativeId(threadId, harnessAtStart, taskId, generationAtStart);
         if (run) {
-          this.agentRuns.observeStatus(threadId, run.harness, taskId, status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'interrupted', summary, undefined, Date.now(), generationAtStart);
+          this.agentRuns.observeStatus(threadId, run.harness, taskId, status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'interrupted', summary, undefined, this.now(), generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_notification', taskId, status, summary });
@@ -3013,7 +3252,7 @@ export class ThreadManager {
       onUsage: (usage) => {
         if (!isCurrentGeneration()) return;
         thread.usageSnapshot = usage;
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'usage', usage });
       },
       onActiveModel: (model) => {
@@ -3031,7 +3270,7 @@ export class ThreadManager {
         if (!isCurrentGeneration()) return;
         const run = this.agentRuns.getByNativeId(threadId, harnessAtStart, taskId, generationAtStart);
         if (run) {
-          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: 'activity', text: summary, timestamp: Date.now() }, generationAtStart);
+          this.agentRuns.observeActivity(threadId, run.harness, taskId, { kind: 'activity', text: summary, timestamp: this.now() }, generationAtStart);
           this.persistAgentRuns(thread);
         }
         this.emit(threadId, { type: 'task_progress_summary', taskId, summary });
@@ -3045,13 +3284,13 @@ export class ThreadManager {
         // the reduced-capability state here; the adapter owns the matching
         // app-server settings update so there is one live control request.
         thread.permissionMode = 'plan';
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'permission_mode_changed', mode: 'plan' });
       },
       onPlanApprovalCommitted: () => {
         if (!isCurrentGeneration()) return;
         thread.permissionMode = 'default';
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'permission_mode_changed', mode: 'default' });
         delete thread.pendingPlan;
         this.pendingPlanResolvers.delete(threadId);
@@ -3060,7 +3299,7 @@ export class ThreadManager {
       onPlanTransitionError: (error) => {
         if (!isCurrentGeneration()) return;
         thread.lastError = error.message;
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'plan_transition_error', error });
       },
       onPlanReady: (planText, approve, reject) => {
@@ -3068,7 +3307,7 @@ export class ThreadManager {
         // Persist the plan text so the card can be restored after a reload/crash
         // OR after the user switches threads mid-session.
         thread.pendingPlan = planText;
-        thread.updatedAt = Date.now();
+        this.touch(thread);
         this.emit(threadId, { type: 'pending_plan_changed', planText });
         // Wrap callbacks to clear both the persisted plan and the in-memory
         // resolvers when the user acts on the card.
@@ -3083,14 +3322,14 @@ export class ThreadManager {
             this.setThreadPermissionMode(threadId, 'default');
           }
           delete thread.pendingPlan;
-          thread.updatedAt = Date.now();
+          this.touch(thread);
           this.pendingPlanResolvers.delete(threadId);
           this.emit(threadId, { type: 'pending_plan_changed', planText: undefined });
           approve(editedPlan);
         };
         const wrappedReject = (): boolean => {
           delete thread.pendingPlan;
-          thread.updatedAt = Date.now();
+          this.touch(thread);
           this.pendingPlanResolvers.delete(threadId);
           this.emit(threadId, { type: 'pending_plan_changed', planText: undefined });
           const adapterHadFeedback = reject();
@@ -3189,7 +3428,7 @@ export class ThreadManager {
         tasks.push({ id: event.id, content: event.content, status: status ?? 'pending' });
       }
     }
-    thread.updatedAt = Date.now();
+    this.touch(thread);
   }
 
   /** Skill plugins as HOST paths. VM-routed sessions map these to guest mounts (see skillMounts.ts). */
@@ -3434,7 +3673,10 @@ export class ThreadManager {
     for (const threadId of this.goalContextStates.keys()) this.cancelPendingGoalContext(threadId);
     if (this.sessions.size === 0) return { timedOut: false };
 
-    const busyIds = [...this.sessions.entries()].filter(([, s]) => s.turnInFlight).map(([id]) => id);
+    // A remote turn survives this process, so it is neither interrupted nor waited on.
+    const busyIds = [...this.sessions.entries()]
+      .filter(([id, s]) => s.turnInFlight && !this.threads.get(id)?.remote)
+      .map(([id]) => id);
 
     // Fire interrupt signals in parallel — errors are non-fatal.
     // We deliberately do NOT await these: interrupt() may not resolve until the
@@ -3445,7 +3687,7 @@ export class ThreadManager {
 
     // Poll until every session has settled (no turn in flight) or we hit the deadline.
     const deadline = Date.now() + timeoutMs;
-    const anyBusy = () => [...this.sessions.values()].some((s) => s.turnInFlight);
+    const anyBusy = () => [...this.sessions.entries()].some(([id, s]) => s.turnInFlight && !this.threads.get(id)?.remote);
     while (anyBusy() && Date.now() < deadline) {
       await new Promise<void>((resolve) => setTimeout(resolve, 200));
     }
@@ -3454,18 +3696,30 @@ export class ThreadManager {
 
     // Force-close every session regardless of whether it settled in time —
     // idle sessions never would have drained from the map on their own.
+    // A remote session is only detached: its turn belongs to the daemon and
+    // must outlive this process.
     for (const session of this.sessions.values()) {
-      session.close();
+      this.releaseSession(session);
     }
     this.sessions.clear();
 
     return { timedOut };
   }
 
+  /**
+   * Let go of a session because the HOST is going away (reload, quit). Local
+   * sessions are closed (the child process dies with us anyway); a session that
+   * can `detach()` — a remote one — stops listening and leaves its turn running.
+   */
+  private releaseSession(session: HarnessSession): void {
+    if (typeof session.detach === 'function') session.detach();
+    else session.close();
+  }
+
   destroy(): void {
     for (const threadId of this.goalContextStates.keys()) this.cancelPendingGoalContext(threadId);
     for (const session of this.sessions.values()) {
-      session.close();
+      this.releaseSession(session);
     }
     this.sessions.clear();
     this.releasingPlanFeedback.clear();

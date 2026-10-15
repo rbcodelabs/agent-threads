@@ -298,7 +298,7 @@ describe('WikiSkill public API capabilities', () => {
   });
 
   it('redacts common local path forms in nested multiline trace strings', async () => {
-    const entries = [{ ts: '1', type: 'assistant', event: { message: { content: [{ type: 'text', text: 'one /Users/rick/private.md /root/a /usr/bin/x /workspace/a /data/a /Library/a /Applications/a\ntwo C:\\Users\\rick\\secret.txt C:/bait/x \\\\server\\share\\x\nthree ~/vault/note.md\nfour file:///private/tmp/bait.txt https://example.com/public' }] } } }];
+    const entries = [{ ts: '1', type: 'assistant', event: { message: { content: [{ type: 'text', text: 'one /Users/me/private.md /root/a /usr/bin/x /workspace/a /data/a /Library/a /Applications/a\ntwo C:\\Users\\rick\\secret.txt C:/bait/x \\\\server\\share\\x\nthree ~/vault/note.md\nfour file:///private/tmp/bait.txt https://example.com/public' }] } } }];
     const { service } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Paths' });
     const json = JSON.stringify(await service.api.traces.readChunk(threadId));
     for (const bait of ['/Users/rick', '/root/a', '/usr/bin', '/workspace/a', '/data/a', '/Library/a', '/Applications/a', 'Users\\\\rick', 'C:/bait', 'server\\\\share', '~/vault', 'file:///private']) expect(json).not.toContain(bait);

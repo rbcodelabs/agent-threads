@@ -146,7 +146,14 @@ describe('dist/main.js bundle safety', () => {
     // megabytes, not the few kilobytes covered by this headroom.
     // Raised 20.25 → 23.25 MB when skill sources moved from the git CLI to
     // isomorphic-git (~760 KB of code, ~2.5 MB with its inline source map).
-    expect(sizeKB).toBeLessThan(23.25 * 1024);
+    // Raised 23.25 → 24.75 MB for the remote-daemon client. Measured with an esbuild metafile against origin/main
+    // (main.js 23,578 KB → 24,602 KB, each figure including the inline source map, which roughly triples the code size):
+    // `ws` 124 KB of code (the plugin must use it: Geode's CSP blocks the global WebSocket, see docs/remote-daemon.md),
+    // src/remote 98 KB, src/protocol 13 KB, and about 40 KB across SettingsTab/DispatchInput/ThreadManager. src/tools
+    // (128 KB) is code moved out of ObsidianTools (127 → 10 KB), so it is not growth. No daemon-only code (daemon/*,
+    // the CLI) is in the plugin bundle, and zod, the MCP SDK and the Agent SDK are single copies, unchanged from main.
+    // About 740 KB of headroom remains, so a dependency-inlining accident still fails this check.
+    expect(sizeKB).toBeLessThan(24.75 * 1024);
     console.log(`Bundle size: ${sizeKB.toFixed(0)} KB`);
   });
 });

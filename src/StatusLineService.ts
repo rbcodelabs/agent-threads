@@ -130,6 +130,9 @@ export class StatusLineService {
 
   private cwdFor(threadId: string): string | null {
     const thread = this.manager.getThread(threadId);
+    // A remote thread's cwd is a path on the daemon's machine: running the status command (or git)
+    // against the same string locally would report some unrelated local directory.
+    if (thread?.remote) return null;
     const cwd = thread?.cwd || this.deps.getDefaultCwd?.() || '';
     return cwd || null;
   }
@@ -154,6 +157,7 @@ export class StatusLineService {
 
     const cwds = new Set<string>();
     for (const t of this.manager.getThreads()) {
+      if (t.remote) continue;
       const cwd = t.cwd || this.deps.getDefaultCwd?.() || '';
       if (cwd) cwds.add(cwd);
     }
@@ -203,7 +207,7 @@ export class StatusLineService {
 
   private applyToCwd(cwd: string, tags: ReturnType<typeof parseStatusLine>): void {
     for (const t of this.manager.getThreads()) {
-      if ((t.cwd || this.deps.getDefaultCwd?.() || '') === cwd) {
+      if (!t.remote && (t.cwd || this.deps.getDefaultCwd?.() || '') === cwd) {
         this.manager.applyStatusTags(t.id, tags);
       }
     }

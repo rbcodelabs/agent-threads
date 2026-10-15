@@ -1,0 +1,26 @@
+# Build context for sandbox/Dockerfile.daemon (the whole repository). The Dockerfile copies only what it needs;
+# this keeps everything else, above all secrets and local state, out of the context that is sent to the builder.
+.git
+.github
+.gitignore
+node_modules
+**/node_modules
+dist
+**/*.js.map
+test-results
+playwright-report
+screenshots
+.worktrees
+.claude
+.serena
+.npm-cache
+.pnpm-store
+docs/mockups
+# Never send a real env file or a token to the builder.
+deploy/.env
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+.DS_Store

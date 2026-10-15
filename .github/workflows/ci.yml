@@ -30,6 +30,12 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Daemon core boundary: closure manifest in sync, core compiles with Node
+      # types only (obsidian is a compile error), and the bundle loads in plain
+      # Node. See "Core boundary" in process/architecture.md.
+      - name: Check core boundary
+        run: npm run check:core
+
       # Catch versions.json drift on the PR, not at tag-push time. Failing in
       # the release workflow would mean the tag is already pushed and has to be
       # deleted and re-cut; failing here is just a normal red check.

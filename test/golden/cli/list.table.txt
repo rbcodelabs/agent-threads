@@ -1,0 +1,6 @@
+THREAD     STATE    SEQ  CWD
+d-waiting  waiting  3    /srv/workspaces/api
+c-running  running  7    -
+b-idle     idle     12   /srv/workspaces/api
+a-closed   closed   40   /srv/workspaces/web
+(no threads)

@@ -3,11 +3,21 @@ import fs from 'fs';
 import * as fsp from 'fs/promises';
 import os from 'os';
 import path from 'path';
-vi.mock('obsidian', () => ({ parseYaml: vi.fn((text: string) => JSON.parse(text)) }));
 vi.mock('fs/promises', async importOriginal => ({ ...await importOriginal<typeof import('fs/promises')>() }));
-import { createLocalSkill, updateLocalSkill, resolveLocalSkillsRoot } from '../../src/localSkills';
+import {
+  createLocalSkill as createLocalSkillWith,
+  updateLocalSkill as updateLocalSkillWith,
+  resolveLocalSkillsRoot,
+  type CreateLocalSkillInput,
+  type UpdateLocalSkillInput,
+} from '../../src/localSkills';
+import type { YamlParser } from '../../src/host/YamlParser';
 
-// JSON is valid YAML; the host owns YAML parsing, this suite exercises its contract.
+// JSON is valid YAML; the host owns YAML parsing (src/host/YamlParser), this suite exercises its contract.
+const yaml: YamlParser = { parse: (text) => JSON.parse(text) };
+const createLocalSkill = (root: string, input: CreateLocalSkillInput) => createLocalSkillWith(root, input, yaml);
+const updateLocalSkill = (root: string, input: UpdateLocalSkillInput) => updateLocalSkillWith(root, input, yaml);
+
 const manifest = '---\n{"name":"example","description":"An example skill"}\n---\n# Instructions\n';
 let vault: string;
 let root: string;

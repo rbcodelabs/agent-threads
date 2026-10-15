@@ -405,7 +405,7 @@ export class Scheduler {
   /** Stop all timers (call on plugin unload). */
   destroy(): void {
     for (const id of this.timers.values()) {
-      window.clearTimeout(id);
+      clearTimeout(id);
     }
     this.timers.clear();
     for (const task of this.calendarTasks.values()) task.destroy();
@@ -484,7 +484,7 @@ export class Scheduler {
 
     const cappedDelay = Math.min(Math.max(0, delayMs), MAX_SCHEDULER_TIMEOUT_MS);
     const dueAt = item.nextRun ?? now + cappedDelay;
-    const id = window.setTimeout(() => {
+    const id = setTimeout(() => {
       this.requestFire(item.id, dueAt).catch(console.error);
     }, cappedDelay) as unknown as number;
 
@@ -494,7 +494,7 @@ export class Scheduler {
   private cancelWakeSources(id: string): void {
     const existing = this.timers.get(id);
     if (existing !== undefined) {
-      window.clearTimeout(existing);
+      clearTimeout(existing);
       this.timers.delete(id);
     }
     const task = this.calendarTasks.get(id);
@@ -596,7 +596,7 @@ export class Scheduler {
           // that claimFire's fencing token (nextRun) is tied to.
           const retryMs = Math.min(15_000, (current.schedule.intervalSeconds ?? 60) * 1000);
           const retryItem = current;
-          const id = window.setTimeout(() => {
+          const id = setTimeout(() => {
             this.fire(retryItem).catch(console.error);
           }, retryMs) as unknown as number;
           this.timers.set(item.id, id);

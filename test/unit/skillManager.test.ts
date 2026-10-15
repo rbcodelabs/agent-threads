@@ -36,6 +36,7 @@ vi.mock('obsidian', () => ({
   requestUrl: (...args: unknown[]) => mockRequestUrl(...args),
 }));
 
+import { obsidianHttpFetch } from '../../src/host/obsidianHost';
 import {
   listInstalledSkills,
   uninstallSkillByPath,
@@ -320,7 +321,7 @@ describe('searchMarketplaceSkills', () => {
       { name: 'Bar Skill', skillPath: '/home/.claude/skills/bar-skill' } as never,
     ];
 
-    const results = await searchMarketplaceSkills('foo', 15, installed);
+    const results = await searchMarketplaceSkills('foo', 15, installed, obsidianHttpFetch);
 
     // sorted by installs descending
     expect(results.map((r) => r.name)).toEqual(['Bar Skill', 'Foo Skill']);
@@ -333,14 +334,14 @@ describe('searchMarketplaceSkills', () => {
 
   it('throws on a non-200 response', async () => {
     mockRequestUrl.mockResolvedValue({ status: 500, json: {} });
-    await expect(searchMarketplaceSkills('foo', 15, [])).rejects.toThrow(/HTTP 500/);
+    await expect(searchMarketplaceSkills('foo', 15, [], obsidianHttpFetch)).rejects.toThrow(/HTTP 500/);
   });
 });
 
 describe('getPopularMarketplaceSkills', () => {
   it('delegates to the same search endpoint with the "er" query', async () => {
     mockRequestUrl.mockResolvedValue({ status: 200, json: { skills: [] } });
-    await getPopularMarketplaceSkills([], 30);
+    await getPopularMarketplaceSkills([], 30, obsidianHttpFetch);
     expect(mockRequestUrl).toHaveBeenCalledWith(
       expect.objectContaining({ url: expect.stringContaining('q=er') }),
     );
@@ -351,7 +352,7 @@ describe('getPopularMarketplaceSkills', () => {
 
 describe('getMarketplaceSkillDescription', () => {
   it('returns null immediately when there is no source', async () => {
-    const result = await getMarketplaceSkillDescription('some/slug', '');
+    const result = await getMarketplaceSkillDescription('some/slug', '', obsidianHttpFetch);
     expect(result).toBeNull();
     expect(mockRequestUrl).not.toHaveBeenCalled();
   });
@@ -362,7 +363,7 @@ describe('getMarketplaceSkillDescription', () => {
       text: '---\nname: foo-skill\ndescription: "A quoted description"\n---\n',
     });
 
-    const result = await getMarketplaceSkillDescription('owner/repo/foo-skill', 'owner/repo');
+    const result = await getMarketplaceSkillDescription('owner/repo/foo-skill', 'owner/repo', obsidianHttpFetch);
     expect(result).toBe('A quoted description');
   });
 
@@ -372,14 +373,14 @@ describe('getMarketplaceSkillDescription', () => {
       .mockResolvedValueOnce({ status: 404 })
       .mockResolvedValueOnce({ status: 200, text: '---\nname: foo-skill\ndescription: root layout\n---\n' });
 
-    const result = await getMarketplaceSkillDescription('owner/repo/foo-skill', 'owner/repo');
+    const result = await getMarketplaceSkillDescription('owner/repo/foo-skill', 'owner/repo', obsidianHttpFetch);
     expect(result).toBe('root layout');
     expect(mockRequestUrl).toHaveBeenCalledTimes(3);
   });
 
   it('returns null when no candidate responds with a usable description', async () => {
     mockRequestUrl.mockResolvedValue({ status: 404 });
-    const result = await getMarketplaceSkillDescription('owner/repo/foo-skill', 'owner/repo');
+    const result = await getMarketplaceSkillDescription('owner/repo/foo-skill', 'owner/repo', obsidianHttpFetch);
     expect(result).toBeNull();
   });
 });
@@ -390,7 +391,7 @@ describe('getSkillDetail', () => {
   it('returns installed detail (with content) when the identifier matches an installed skill name', async () => {
     writeVaultSkill('installed-one', 'installed description');
 
-    const result = await getSkillDetail('installed-one');
+    const result = await getSkillDetail('installed-one', undefined, undefined, obsidianHttpFetch);
     expect(result.installed).toBe(true);
     expect(result.description).toBe('installed description');
     expect(result.content).toContain('installed-one');
@@ -402,7 +403,7 @@ describe('getSkillDetail', () => {
   it('reports a home skill as installed but read-only', async () => {
     writeHomeSkill('home-one', 'home description');
 
-    const result = await getSkillDetail('home-one');
+    const result = await getSkillDetail('home-one', undefined, undefined, obsidianHttpFetch);
     expect(result.installed).toBe(true);
     expect(result.origin).toBe('home');
     expect(result.isEditable).toBe(false);
@@ -415,7 +416,7 @@ describe('getSkillDetail', () => {
       text: '---\nname: not-installed\ndescription: from marketplace\n---\n',
     });
 
-    const result = await getSkillDetail('owner/repo/not-installed');
+    const result = await getSkillDetail('owner/repo/not-installed', undefined, undefined, obsidianHttpFetch);
     expect(result.installed).toBe(false);
     expect(result.slug).toBe('owner/repo/not-installed');
     expect(result.source).toBe('owner/repo');
@@ -423,7 +424,7 @@ describe('getSkillDetail', () => {
   });
 
   it('throws when not installed and the identifier is not a marketplace-slug shape', async () => {
-    await expect(getSkillDetail('just-a-name')).rejects.toThrow(/does not look like a marketplace slug/);
+    await expect(getSkillDetail('just-a-name', undefined, undefined, obsidianHttpFetch)).rejects.toThrow(/does not look like a marketplace slug/);
   });
 });
 

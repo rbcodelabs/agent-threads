@@ -1,5 +1,5 @@
 import './obsidian-mock'; // must be first — sets up HTMLElement.prototype
-import { ClaudeThreadsSettingTab, RequestSecretModal } from '../../src/SettingsTab';
+import { ClaudeThreadsSettingTab, RemoteDaemonModal, RequestSecretModal } from '../../src/SettingsTab';
 import { DEFAULT_SETTINGS, type PluginSettings, type Project, type ScheduledItem, type WatchedDocument } from '../../src/types';
 import { mockApp } from './obsidian-mock';
 import { McpRegistrationModal } from '../../src/confirmModal';
@@ -368,3 +368,30 @@ tab.display();
     );
     modal.open();
   });
+
+/**
+ * Opens the Remote daemons edit dialog (remote-thread.spec.ts). `advertise` says what the stand-in daemon
+ * answers to Test connection: its workspaces, or that it is too old to list them.
+ */
+(window as any).__openRemoteDaemonModal = (opts: { advertise?: 'workspaces' | 'old'; saved?: boolean; url?: string } = {}): void => {
+  const advertise = opts.advertise ?? 'workspaces';
+  const existing = {
+    id: 'my-server', name: 'my-server', url: opts.url ?? 'wss://my-server.tailnet-name.ts.net:8443', tokenSecretName: 'T',
+    ...(opts.saved ? { defaultCwdRoot: '/home/user/projects', vaultMapping: { remoteRoot: '/home/user/vault' } } : {}),
+  };
+  new RemoteDaemonModal(mockApp as any, existing, [existing], '/Users/me/Documents/vault', {
+    test: async () => advertise === 'old'
+      ? { tone: 'ok' as const, text: 'Connected: agent-threads 0.1.0, protocol 1', discovery: { unsupported: true as const } }
+      : {
+        tone: 'ok' as const,
+        text: 'Connected: agent-threads 0.1.0, protocol 1',
+        discovery: {
+          list: [
+            { path: '/home/user/projects', name: 'projects', readOnly: false, kind: 'folder' as const, isDefault: true },
+            { path: '/home/user/vault', name: 'vault', readOnly: false, kind: 'vault' as const, isDefault: false },
+          ],
+        },
+      },
+    save: async () => {},
+  }).open();
+};

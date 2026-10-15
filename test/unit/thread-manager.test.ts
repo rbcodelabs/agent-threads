@@ -449,7 +449,7 @@ describe('ThreadManager — backfillLegacyProjectNames', () => {
   it('backfills projectNameOverride from prUrl when cwd cannot resolve a project', () => {
     const staleCwd = path.join(os.tmpdir(), 'tm-backfill-orphan-01');
     const t = manager.createThread('Orphaned PR thread', staleCwd);
-    t.prUrl = 'https://github.com/rickbowman/obsidian-claude-threads/pull/317';
+    t.prUrl = 'https://github.com/example/obsidian-claude-threads/pull/317';
 
     const count = manager.backfillLegacyProjectNames();
 
@@ -496,7 +496,7 @@ describe('ThreadManager — backfillLegacyProjectNames', () => {
   it('is idempotent — a second call backfills nothing further', () => {
     const staleCwd = path.join(os.tmpdir(), 'tm-backfill-idempotent-01');
     const t = manager.createThread('Orphaned thread', staleCwd);
-    t.prUrl = 'https://github.com/rickbowman/obsidian-claude-threads/pull/318';
+    t.prUrl = 'https://github.com/example/obsidian-claude-threads/pull/318';
 
     expect(manager.backfillLegacyProjectNames()).toBe(1);
     expect(manager.backfillLegacyProjectNames()).toBe(0);

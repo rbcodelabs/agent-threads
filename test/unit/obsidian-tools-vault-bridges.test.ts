@@ -95,7 +95,7 @@ describe('obsidian_list_vault_bridges', () => {
       {
         id: 'b1',
         name: 'My Repo',
-        repoPath: '/Users/rick/projects/my-repo',
+        repoPath: '/Users/me/projects/my-repo',
         sourcePath: 'docs',
         vaultPath: 'Notes/My Repo',
         branch: 'main',

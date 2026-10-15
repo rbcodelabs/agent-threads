@@ -90,7 +90,8 @@ const mockScheduler = {
 if (typeof crypto !== 'undefined' && typeof (crypto as { randomUUID?: unknown }).randomUUID !== 'function') {
   (crypto as unknown as { randomUUID: () => string }).randomUUID = () =>
     'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, char => {
-      const random = Math.floor(Math.random() * 16);
+      // getRandomValues is always present where this polyfill is needed (it is only missing randomUUID).
+      const random = crypto.getRandomValues(new Uint8Array(1))[0] & 0xf;
       return (char === 'x' ? random : (random & 0x3) | 0x8).toString(16);
     });
 }
@@ -151,7 +152,25 @@ loginHandoff.start();
 /** The login popup closes itself (window.close()). */
 (window as any).__fireLoginClose = () => (handoffIpc.get('agent-browser-window-close') ?? []).forEach((l) => l({}, 43));
 
+// Remote-thread fixtures: a stand-in daemon registry whose connection state the test drives.
+type FakeConn = { status: string; attempt: number; detail?: string };
+let fakeConn: FakeConn = { status: 'connected', attempt: 0 };
+const fakeConnListeners = new Set<(id: string, s: FakeConn) => void>();
+const fakeDaemonRegistry = {
+  nameOf: (id: string) => (id === 'my-server' ? 'my-server' : id),
+  clientFor: () => ({ connect() {}, get connection() { return fakeConn; } }),
+  stateOf: () => fakeConn,
+  onState: (l: (id: string, s: FakeConn) => void) => { fakeConnListeners.add(l); return () => fakeConnListeners.delete(l); },
+};
+(window as any).__setRemoteState = (state: FakeConn) => { fakeConn = state; fakeConnListeners.forEach((l) => l('my-server', fakeConn)); };
+(window as any).__markRemote = (threadId: string) => {
+  const t = manager.getThread(threadId)!;
+  t.remote = { daemonId: 'my-server', ownership: 'client', remoteCwd: '/srv/workspaces/agent-threads', lastSeq: 0, ownerClientId: 'harness' };
+  t.cwd = '/srv/workspaces/agent-threads';
+};
+
 const mockPlugin = {
+  daemonRegistry: fakeDaemonRegistry,
   app: (mockLeaf as any).app,
   settings,
   discoveredModelsByHarness: { claude: [], codex: [], opencode: [] },
