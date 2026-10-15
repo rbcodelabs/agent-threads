@@ -2,6 +2,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { OutsideVaultLinkModal, outsideVaultLinkPath } from '../../src/OutsideVaultLinkModal';
 import type { App } from 'obsidian';
+import '../setup/obsidian-dom';
 
 describe('outsideVaultLinkPath', () => {
   it('decodes percent escapes', () => {
