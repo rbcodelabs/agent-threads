@@ -169,7 +169,9 @@ export class RemoteHarnessSession implements HarnessSession {
     this.startedCwd = options.cwd;
     this.spec = projectSessionOptions(options, this.thread);
     this.resume = options.resume;
-    await this.prepareHostTools();
+    // A re-attach after a restart shows the turn as running at once, before anything is awaited.
+    if (mode.attachOnly && this.remote.turnPending) this.sendAwaitingState = true;
+    if (this.deps.hostTools) await this.prepareHostTools();
     if (this.spec.appendSystemPrompt) {
       this.spec = { ...this.spec, appendSystemPrompt: applyHostToolsPrompt(this.spec.appendSystemPrompt, this.sentManifest && Object.keys(this.sentManifest).length ? this.deps.hostTools?.summary ?? null : null, this.deps.hostName ?? 'Geode') };
     }

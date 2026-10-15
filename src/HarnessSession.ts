@@ -114,6 +114,12 @@ export interface HarnessSessionOptions {
 export interface ClaudeHarnessOptions {
   mcpServers?: Record<string, McpServerConfig>;
   /**
+   * Remote (daemon-hosted) threads only: external MCP servers already vetted for another machine by
+   * `remote/mcpPartition.ts` (http/sse, reachable, no keychain secret, headers only if allowlisted). The ONLY MCP
+   * servers `projectSessionOptions` puts on the wire; `mcpServers` above never crosses.
+   */
+  remoteMcpServers?: Record<string, import('./protocol').RemoteMcpServerConfig>;
+  /**
    * Host-owned SDK MCP servers used only when the Claude process was actually
    * routed into a sandbox VM. Host fallback must continue using `mcpServers`.
    */

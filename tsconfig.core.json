@@ -87,6 +87,7 @@
     "src/toolNameUtils.ts",
     "src/toolRestrictions.ts",
     "src/toolRouting.ts",
+    "src/tools/cwdTracker.ts",
     "src/tools/toolNames.ts",
     "src/tools/worktree.ts",
     "src/trailingSlashes.ts",

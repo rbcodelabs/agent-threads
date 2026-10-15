@@ -41,12 +41,11 @@ export function projectSessionOptions(options: HarnessSessionOptions, thread: Th
   // Both lists are deny rules, so sending the union can only make the remote session stricter.
   const disallowed = [...new Set([...(options.claude?.disallowedTools ?? []), ...(options.disallowedTools ?? [])])];
 
-  // Only http/sse servers the caller already vetted (mcpPartition.ts) can mean anything on another machine.
+  // Only servers the caller vetted for another machine (mcpPartition.ts) cross; `claude.mcpServers` never does.
   const mcpServers: Record<string, RemoteMcpServerConfig> = {};
-  for (const [name, server] of Object.entries(options.claude?.mcpServers ?? {})) {
-    const s = server as { type?: string; url?: unknown; headers?: unknown };
+  for (const [name, s] of Object.entries(options.claude?.remoteMcpServers ?? {})) {
     if ((s.type === 'http' || s.type === 'sse') && typeof s.url === 'string') {
-      mcpServers[name] = { type: s.type, url: s.url, ...(s.headers ? { headers: s.headers as Record<string, string> } : {}) };
+      mcpServers[name] = { type: s.type, url: s.url, ...(s.headers ? { headers: s.headers } : {}) };
     }
   }
 

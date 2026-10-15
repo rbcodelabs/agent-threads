@@ -324,13 +324,17 @@ describe('mcpPartition', () => {
     for (const u of ['http://localhost/', 'http://a.localhost/', 'http://127.0.0.2/', 'http://[::1]:3/', 'http://0.0.0.0/', 'not a url']) expect(isLoopbackUrl(u), u).toBe(true);
     expect(isLoopbackUrl('https://example.com')).toBe(false);
   });
-  it('projectSessionOptions carries only http/sse servers into the spec', () => {
+  it('projectSessionOptions puts only the vetted remote servers on the wire, never claude.mcpServers', () => {
     const t = { id: 't', remote: { daemonId: 'd', remoteCwd: '/w', lastSeq: 0 } } as unknown as Thread;
     const s = projectSessionOptions({
       cwd: '/w', permissionMode: 'default', extraEnvRaw: 'SECRET=1', callbacks: {} as never,
-      claude: { mcpServers: { a: { type: 'http', url: 'https://x', headers: { h: 'v' } }, b: { type: 'stdio', command: 'x' }, c: { type: 'sdk', name: 'c', instance: {} } } as never },
+      claude: {
+        mcpServers: { a: { type: 'http', url: 'https://leaky.example.com', headers: { h: 'Bearer leak' } }, b: { type: 'stdio', command: 'x' } } as never,
+        remoteMcpServers: { ok: { type: 'http', url: 'https://x', headers: { h: 'v' } } },
+      },
     }, t);
-    expect(s.mcpServers).toEqual({ a: { type: 'http', url: 'https://x', headers: { h: 'v' } } });
+    expect(s.mcpServers).toEqual({ ok: { type: 'http', url: 'https://x', headers: { h: 'v' } } });
+    expect(JSON.stringify(s)).not.toContain('Bearer leak');
     expect(s.extraEnvRaw).toBe('');
   });
 });

@@ -34,6 +34,7 @@ export const ENTRY_FILES = [
   // Host-tool routing and the worktree tools the daemon runs locally (PR 7): pure / Node-only.
   'src/toolRouting.ts',
   'src/tools/worktree.ts',
+  'src/tools/cwdTracker.ts',
 ];
 
 /**

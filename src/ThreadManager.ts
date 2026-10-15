@@ -2754,7 +2754,7 @@ export class ThreadManager {
       claude: {
         disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
         sessionOptions: this.buildSessionOptions(thread, agentProfiles),
-        ...(Object.keys(partition.passthrough).length ? { mcpServers: partition.passthrough as never } : {}),
+        ...(Object.keys(partition.passthrough).length ? { remoteMcpServers: partition.passthrough } : {}),
       },
     };
   }
