@@ -293,21 +293,20 @@ describe('detached grace', () => {
     expect(td.daemon.threads.hostTools.openCalls('t')).toBe(0);
   });
 
-  it('reports hostAttached in the mirrored session state', async () => {
+  it('reports hostAttached in the session state it emits, without emitting state just because a client attached', async () => {
     const td = await track();
     const c = await connect(td);
     await open(c, 't');
+    await send(c, 't', '/tokens 1');
+    await c.waitFor((f) => f.name === 'onDone');
     await sleep(50);
-    const states = c.events().filter((f) => f.name === 'session.state');
-    expect(states.at(-1)!.args.hostAttached).toBe(true);
+    expect(c.events().filter((f) => f.name === 'session.state').at(-1)!.args.hostAttached).toBe(true);
+    const before = td.daemon.threads.journalFor('t')!.lastSeq;
     await c.cmd('session.detach', { threadId: 't' });
     const d = await connect(td);
-    await d.cmd('attach', { ch: 't:t', afterSeq: 0 });
-    await d.cmd('session.detach', { threadId: 't' });
-    await sleep(50);
-    const jr = td.daemon.threads.journalFor('t')!;
-    const all = jr.checkpoint().state?.event;
-    expect(all && all.name === 'session.state' && all.args.hostAttached).toBe(false);
+    await d.cmd('attach', { ch: 't:t', afterSeq: before });
+    await sleep(80);
+    expect(td.daemon.threads.journalFor('t')!.lastSeq).toBe(before); // attach/detach added nothing to the journal
   });
 });
 

@@ -136,7 +136,6 @@ export class ClaudeSessionDriver implements SessionDriver {
   private lastStateKey = '';
   private native: string | undefined;
   private readonly hostServers: HostServers;
-  private readonly offHostChange: (() => void) | undefined;
   /** A worktree tool moved the cwd: the native session belongs to the old directory and must not be remembered. */
   private cwdMoved = false;
   private _lastActivityAt: number;
@@ -150,7 +149,6 @@ export class ClaudeSessionDriver implements SessionDriver {
     this.native = ctx.resume;
     this.harness = deps.createHarness(ctx.spec);
     this.hostServers = buildHostServers({ ...ctx, onCwdChanged: (cwd, origin) => { this.cwdMoved = true; ctx.onCwdChanged?.(cwd, origin); } });
-    this.offHostChange = ctx.hostTools?.onChange(() => this.scheduleState());
     this.emitState();
     const options = specToSessionOptions(ctx.spec, {
       resume: ctx.resume,
@@ -195,7 +193,9 @@ export class ClaudeSessionDriver implements SessionDriver {
       canIdleReap: this.canIdleReap(),
       cwd: this.cwd,
     };
-    const key = JSON.stringify(args);
+    // `hostAttached` rides along but never triggers an event by itself: a client attaching between turns must not
+    // add journal entries after the transcript was saved (the client's ack would then lag its cursor).
+    const key = JSON.stringify({ ...args, hostAttached: undefined });
     if (key === this.lastStateKey) return;
     this.lastStateKey = key;
     this.emit({ name: 'session.state', args });
@@ -397,7 +397,6 @@ export class ClaudeSessionDriver implements SessionDriver {
   close(): void {
     if (this.closed) return;
     this.cancelAllRequests();
-    this.offHostChange?.();
     this.hostServers.dispose();
     this.closed = true;
     try { this.harness.close(); } catch (err) { console.error(`[daemon] harness close failed for ${this.ctx.threadId}:`, err); }

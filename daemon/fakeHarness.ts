@@ -80,7 +80,6 @@ export class FakeHarnessSession implements SessionDriver {
     this.model = ctx.spec.model;
     this.permissionMode = ctx.spec.permissionMode;
     ctx.onNativeSessionId(this.sessionId);
-    ctx.hostTools?.onChange(() => { if (!this.closed) this.emitState(); });
     this.emitState();
   }
 

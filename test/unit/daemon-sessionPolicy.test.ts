@@ -98,3 +98,22 @@ describe('sanitizeExtraEnv', () => {
     expect(sanitizeExtraEnv('PATH=/x\nA=1\nNODE_OPTIONS=--require=/x')).toEqual({ text: 'A=1', dropped: ['PATH', 'NODE_OPTIONS'] });
   });
 });
+
+describe('a not-yet-existing path under a symlinked workspace (worktrees about to be created)', () => {
+  it('is allowed when its nearest existing ancestor is inside the workspace, refused when it escapes', async () => {
+    const { mkdtempSync, mkdirSync, symlinkSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { describePathAccess, realpathLoose } = await import('../../daemon/sessionPolicy');
+    const base = mkdtempSync(join(tmpdir(), 'pol-'));
+    try {
+      mkdirSync(join(base, 'real'));
+      symlinkSync(join(base, 'real'), join(base, 'link'));
+      const policy = { workspaces: [join(base, 'link')], readOnlyWorkspaces: [], allowBypass: false, allowedClientEnv: [] };
+      expect(describePathAccess(join(base, 'link', '.worktrees', 'r', 'b'), policy)).toMatchObject({ allowed: true, exists: false });
+      expect(describePathAccess(join(base, 'real', 'new', 'dir'), policy)).toMatchObject({ allowed: true, exists: false });
+      expect(describePathAccess(join(base, 'link', '..', 'outside', 'x'), policy).allowed).toBe(false);
+      expect(realpathLoose(join(base, 'link', 'a', 'b'))).toBe(join(realpathLoose(base), 'real', 'a', 'b'));
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+});

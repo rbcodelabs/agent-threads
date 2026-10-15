@@ -79,3 +79,22 @@ describe('resolveConfig', () => {
     expect(() => resolveConfig({ env: { DATA_DIR: tmp() }, flags: { port: 70000 } })).toThrow(/invalid port/);
   });
 });
+
+describe('host tool settings', () => {
+  it('defaults to a 60 s grace and a 300 s answer timeout, no worktree root override', () => {
+    const c = resolveConfig({ env: { DATA_DIR: tmp() } });
+    expect(c.hostToolGraceSec).toBe(60);
+    expect(c.hostToolTimeoutSec).toBe(300);
+    expect(c.worktreeRoot).toBeUndefined();
+  });
+  it('reads config.json, then the environment, and rejects nonsense', () => {
+    const dir = tmp();
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ hostToolGraceSec: 5, hostToolTimeoutSec: 20, worktreeRoot: '/srv/wt' }));
+    const c = resolveConfig({ env: { DATA_DIR: dir } });
+    expect([c.hostToolGraceSec, c.hostToolTimeoutSec, c.worktreeRoot]).toEqual([5, 20, '/srv/wt']);
+    const e = resolveConfig({ env: { DATA_DIR: dir, AGENT_THREADS_HOST_TOOL_GRACE_SEC: '0', AGENT_THREADS_WORKTREE_ROOT: '/other' } });
+    expect([e.hostToolGraceSec, e.worktreeRoot]).toEqual([0, '/other']);
+    expect(() => resolveConfig({ env: { DATA_DIR: dir, AGENT_THREADS_HOST_TOOL_GRACE_SEC: '-1' } })).toThrow(/hostToolGraceSec/);
+    expect(() => resolveConfig({ env: { DATA_DIR: dir, AGENT_THREADS_HOST_TOOL_TIMEOUT_SEC: '0' } })).toThrow(/hostToolTimeoutSec/);
+  });
+});
