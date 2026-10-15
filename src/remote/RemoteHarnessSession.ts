@@ -92,7 +92,7 @@ interface OpenRequest {
 interface QueuedSend {
   text: string;
   images?: ImageAttachment[];
-  uuid: string;
+  messageId: string;
 }
 
 /** Callbacks whose first wire argument is a serialized `Error`. */
@@ -360,8 +360,8 @@ export class RemoteHarnessSession implements HarnessSession {
     await this.client.command('session.prepareForSend', { threadId: this.threadId, text, ...wireImages(images) });
   }
 
-  send(text: string, images?: ImageAttachment[], userMessageUuid?: string): void {
-    const item: QueuedSend = { text, images, uuid: userMessageUuid ?? (this.deps.newId ?? (() => randomHex(16)))() };
+  send(text: string, images?: ImageAttachment[], clientMessageId?: string): void {
+    const item: QueuedSend = { text, images, messageId: clientMessageId ?? (this.deps.newId ?? (() => randomHex(16)))() };
     // The daemon refuses a second send while a turn runs (a local ThreadSession would coalesce it);
     // hold it here and send it the moment the turn ends.
     if (this.turnInFlight) {
@@ -383,7 +383,7 @@ export class RemoteHarnessSession implements HarnessSession {
       .then(() => this.client.command('session.send', {
         threadId: this.threadId,
         text: item.text,
-        userMessageUuid: item.uuid,
+        userMessageUuid: item.messageId,
         ...wireImages(item.images),
       }))
       .catch((err: unknown) => {
