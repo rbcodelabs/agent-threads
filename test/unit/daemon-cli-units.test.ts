@@ -41,7 +41,7 @@ describe('systemd units', () => {
     expect(() => unitWord('/a\u0000b', 'x')).toThrow();
   });
   it('tells the operator the credential file must exist', () => {
-    expect(renderUnit({ variant: 'system', node: '/n', bundle: '/b.cjs' })).toMatch(/credential file must exist/);
+    expect(renderUnit({ variant: 'system', node: '/n', bundle: '/b.cjs' })).toMatch(/must still exist/);
   });
   it('system: confines writes', () => {
     const u = renderUnit({ variant: 'system', node: '/n', bundle: '/b.cjs' });
