@@ -28,7 +28,7 @@ type Frame = Record<string, any> & { type: string };
 const MODEL = process.env.LIVE_MODEL ?? 'haiku';
 let n = 0;
 // The daemon caches replies by (token, cmdId) for 10 minutes, so ids must be unique per process.
-const RUN = Math.random().toString(36).slice(2, 8);
+const RUN = globalThis.crypto.getRandomValues(new Uint8Array(4)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 class Conn {

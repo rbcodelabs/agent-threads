@@ -45,6 +45,7 @@ import {
   type ResyncFrame,
   type WelcomeFrame,
 } from '../protocol';
+import { randomHex } from './randomId';
 import { RECONNECT_BACKOFF_MS } from './backoff';
 
 // ── transport seam ──────────────────────────────────────────────────────────
@@ -244,9 +245,7 @@ class ChannelSubscriptionImpl implements ChannelSubscription {
 
 let cmdCounter = 0;
 const newCmdId = (): string => {
-  const rand = typeof globalThis.crypto?.randomUUID === 'function'
-    ? globalThis.crypto.randomUUID()
-    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const rand = randomHex(8);
   return `dc${++cmdCounter}-${rand}`;
 };
 

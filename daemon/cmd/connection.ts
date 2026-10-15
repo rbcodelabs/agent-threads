@@ -27,6 +27,7 @@ import {
 import { DEFAULT_LISTEN, DEFAULT_PORT, isWildcardAddress } from '../config';
 import { DAEMON_VERSION } from '../version';
 import { CliError, EXIT, exitCodeFor } from './exit';
+import { randomHex } from '../../src/remote/randomId';
 
 export const CLI_TOKEN_FILE = 'cli-token';
 
@@ -163,7 +164,7 @@ export interface ConnectOptions {
 }
 
 /** A per-process id: two `agent-threads` processes sharing one token still contend for the seat, as two Geodes would. */
-export const newInstanceId = (): string => `cli-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+export const newInstanceId = (): string => `cli-${randomHex(6)}`;
 
 /**
  * Connect and wait for the daemon's welcome. Rejects with a `CliError` carrying the right exit code

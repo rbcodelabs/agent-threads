@@ -41,6 +41,7 @@ import {
 import type { ImageAttachment, Thread, ThreadRemote } from '../types';
 import type { UsageSnapshot } from '../Usage';
 import { DaemonCommandError, type ChannelSubscription, type DaemonClient } from './DaemonClient';
+import { randomHex } from './randomId';
 import { applyHostToolsPrompt, projectSessionOptions } from './sessionSpec';
 import type { HostManifest, RemoteHostTools } from './hostTools';
 import { HostToolExecutor, HostToolSlots } from './hostToolExecutor';
@@ -360,7 +361,7 @@ export class RemoteHarnessSession implements HarnessSession {
   }
 
   send(text: string, images?: ImageAttachment[], userMessageUuid?: string): void {
-    const item: QueuedSend = { text, images, uuid: userMessageUuid ?? (this.deps.newId ?? (() => crypto.randomUUID()))() };
+    const item: QueuedSend = { text, images, uuid: userMessageUuid ?? (this.deps.newId ?? (() => randomHex(16)))() };
     // The daemon refuses a second send while a turn runs (a local ThreadSession would coalesce it);
     // hold it here and send it the moment the turn ends.
     if (this.turnInFlight) {

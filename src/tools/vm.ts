@@ -12,6 +12,7 @@ import { redactGithubSecrets } from '../githubCredentials';
 import { SandboxVmManager, VM_NETWORK_MODES, VM_WORKDIR, containerNameForThread, isVmNetworkMode, resolveExecTimeoutSeconds, resolveVmImage, resolveVmNetwork, resolveVmMemory, resolveVmCpus, resolveExternalMounts, resolveVaultMount, mergeExtraMounts, VM_EXTERNAL_ROOT, VM_VAULT_MOUNT, type ExternalMountRootInput } from '../sandboxVm';
 import type { ObsidianMcpServerOptions } from '../ObsidianTools';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
+import { randomHex } from '../remote/randomId';
 import type { CwdTracker } from './cwdTracker';
 
 type ToolDef = SdkMcpToolDefinition<any>;
@@ -27,7 +28,7 @@ export function createVmTools(port: VmToolsPort): Record<string, ToolDef> {
   // Sandbox VM container names are derived from the thread ID so a container survives a plugin reload and can
   // still be found. With no thread ID (ad-hoc/test surfaces) fall back to a per-session random ID: two such
   // sessions must not collide on one container.
-  const fallbackVmSessionId = crypto.randomUUID();
+  const fallbackVmSessionId = randomHex(16);
   // ── Sandbox VM tools ────────────────────────────────────────────────────────
   // A sandboxed VM for running COMMANDS only. Read/Write/Edit/Bash keep running
   // on the host, so the thread's working directory is bind-mounted into the

@@ -255,7 +255,13 @@ async function main(): Promise<void> {
 
     // 5. vault path mapping, driven through the real composer
     const mappedCwd = path.join(remoteVault, 'Projects/Alpha');
-    await page.evaluate(`(() => { const p = ${P}; const d = p.settings.remoteDaemons[0]; d.vaultMapping = { remoteRoot: ${JSON.stringify(remoteVault)} }; d.defaultCwdRoot = '/srv/workspaces'; p.settings.defaultCwd = p.manager.vaultRoot + '/Projects/Alpha'; })()`);
+    // Values go in as evaluate() arguments (serialized by Playwright), never spliced into code.
+    await page.evaluate(([pluginId, remoteRoot]) => {
+      const p = (window as any).app.plugins.plugins[pluginId];
+      const d = p.settings.remoteDaemons[0];
+      d.vaultMapping = { remoteRoot }; d.defaultCwdRoot = '/srv/workspaces';
+      p.settings.defaultCwd = p.manager.vaultRoot + '/Projects/Alpha';
+    }, [PLUGIN_ID, remoteVault] as const);
     await page.evaluate(`${P}.activateAgentView()`);
     await until('composer mounted', () => page.evaluate(`!!document.querySelector('.ct-agents-dispatch-btn')`), 15000, 100);
     await page.evaluate(`document.querySelector('.ct-agents-dispatch-btn').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))`);
@@ -285,7 +291,10 @@ async function main(): Promise<void> {
     check('browsing did not change the preselected folder', (await page.evaluate(`document.querySelector('.ct-run-on-folder-select')?.value`)) === mappedCwd);
     await page.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`); // closes the menu
     await page.evaluate(`(() => { const ta = document.querySelector('.ct-agents-dispatch-input'); ta.value = '/tokens 5 burst=5 delay=1'; document.querySelector('.ct-agents-dispatch-btn').click(); })()`);
-    const vaultThreadId: string = await until('vault thread to exist', () => page.evaluate(`(() => { const all = ${P}.manager.getThreads(); const t = all.find(t => t.remote && t.remote.remoteCwd === ${JSON.stringify(mappedCwd)}); return t ? t.id : false; })()`), 15000, 100) as string;
+    const vaultThreadId: string = await until('vault thread to exist', () => page.evaluate(([pluginId, cwd]) => {
+      const t = (window as any).app.plugins.plugins[pluginId].manager.getThreads().find((x: any) => x.remote && x.remote.remoteCwd === cwd);
+      return t ? t.id : false;
+    }, [PLUGIN_ID, mappedCwd] as const), 15000, 100) as string;
     check('thread created from the composer runs at the mapped remote folder', !!vaultThreadId, vaultThreadId);
     await until('vault thread turn', () => page.evaluate(`${P}.manager.getThread('${vaultThreadId}').messages.some(m => m.role === 'assistant') && ${P}.manager.getThread('${vaultThreadId}').status === 'waiting'`), 30000, 100);
     const meta = JSON.parse(readFileSync(path.join(daemonDir, 'sessions', `${vaultThreadId}.json`), 'utf8'));

@@ -16,6 +16,7 @@
 import { DaemonCommandError, type AttachInfo, type ChannelSubscription, type DaemonClient } from '../../src/remote/DaemonClient';
 import type { EventFrame, ResyncFrame } from '../../src/protocol';
 import { cliLine, field, frameLine, oneLine, TextRenderer } from './render';
+import { randomHex } from '../../src/remote/randomId';
 
 export type AnswerMode =
   /** Ask on the terminal (stdin is a TTY). */
@@ -408,7 +409,7 @@ export class Follower {
           await this.opts.client.command('session.interrupt', { threadId });
           break;
         case 'send':
-          await this.opts.client.command('session.send', { threadId, text: String(cmd.text ?? ''), userMessageUuid: typeof cmd.id === 'string' && cmd.id ? cmd.id : `cli-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` });
+          await this.opts.client.command('session.send', { threadId, text: String(cmd.text ?? ''), userMessageUuid: typeof cmd.id === 'string' && cmd.id ? cmd.id : `cli-${randomHex(8)}` });
           break;
         default:
           result = { ok: false, error: `unknown command "${name}"` };

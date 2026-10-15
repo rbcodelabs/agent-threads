@@ -69,6 +69,7 @@
     "src/remote/hostToolExecutor.ts",
     "src/remote/hostTools.ts",
     "src/remote/mcpPartition.ts",
+    "src/remote/randomId.ts",
     "src/remote/sessionSpec.ts",
     "src/remote/vaultMapping.ts",
     "src/resumeFailureRecovery.ts",
