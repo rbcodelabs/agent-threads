@@ -300,9 +300,14 @@ async function main(): Promise<void> {
     check('path.check over the wire: mapped root allowed', okRoot.allowed === true && okRoot.exists === true && okRoot.isDirectory === true, JSON.stringify(okRoot));
     check('path.check over the wire: unrelated folder refused', badRoot.allowed === false, JSON.stringify(badRoot));
 
-    // 7. host tools (PR 7): the daemon's session calls a Geode-only tool and the answer comes from THIS vault
-    const htThreadId: string = await page.evaluate(`${P}.dispatchNewThread('/mcp claude_threads vault_search {"query":"zebrafish"}', undefined, 'e2e host tool', { remote: { daemonId: '${DAEMON_ID}', cwd: '${REMOTE_CWD}' } })`);
+    // 7. host tools (PR 7): the daemon's session calls a Geode-only tool and the answer comes from THIS vault.
+    // They are OFF until the user turns them on for this daemon, and then only the groups they list.
     const lastAssistant = (id: string) => page.evaluate(`(() => { const m = ${P}.manager.getThread('${id}')?.messages.filter(m => m.role === 'assistant'); return m && m.length ? m[m.length - 1].content : null; })()`) as Promise<string | null>;
+    const offThreadId: string = await page.evaluate(`${P}.dispatchNewThread('/mcp-list claude_threads', undefined, 'e2e host tools off', { remote: { daemonId: '${DAEMON_ID}', cwd: '${REMOTE_CWD}' } })`);
+    const offAnswer = await until('tool list with host tools off', () => lastAssistant(offThreadId), 30000, 100);
+    check('host tools are off by default: the daemon session sees only its own worktree tools', offAnswer === 'tools: enter_worktree,exit_worktree,set_working_directory', offAnswer);
+    await page.evaluate(`(() => { const d = ${P}.settings.remoteDaemons[0]; d.hostTools = { enabled: true, routes: { vault: 'host' } }; })()`);
+    const htThreadId: string = await page.evaluate(`${P}.dispatchNewThread('/mcp claude_threads vault_search {"query":"zebrafish"}', undefined, 'e2e host tool', { remote: { daemonId: '${DAEMON_ID}', cwd: '${REMOTE_CWD}' } })`);
     const htAnswer = await until('host tool answer', () => lastAssistant(htThreadId), 30000, 100);
     check('host tool: vault_search ran in Geode against the real vault and the daemon session got the answer',
       htAnswer.startsWith('mcp ok:') && htAnswer.includes('Findings.md'), htAnswer.slice(0, 160));

@@ -162,8 +162,9 @@ describe('binding and authority', () => {
     const td = await track({ hostToolGraceMs: 200, hostToolTimeoutMs: 60_000 });
     const geode = await connect(td, { instanceId: 'geode' });
     await open(geode, 't'); // Geode holds the seat and sent the manifest
-    // `attach --claim` / `run --thread`: same token, no install id, so it is treated as the same client and takes the seat.
-    const cli = await connect(td);
+    // Geode goes away (its manifest stays on the daemon); `attach --claim` / `run --thread` then claims the free seat.
+    await geode.cmd('session.detach', { threadId: 't' });
+    const cli = await connect(td, { instanceId: 'cli-1' });
     const attached = await cli.cmd('attach', { ch: 't:t', afterSeq: 0 });
     expect(attached).toMatchObject({ type: 'ack', result: { controller: true } });
     expect(td.daemon.threads.hostTools.isAttached('t')).toBe(false); // the seat holder never offered these tools
@@ -174,7 +175,6 @@ describe('binding and authority', () => {
     expect(Date.now() - started).toBeLessThan(5000); // grace, not the 60 s answer timeout
     expect(cli.events().some((f) => f.name === 'tool.call')).toBe(false); // never issued to a client that cannot answer
     // Geode takes the seat back by re-attaching and sending its manifest: host tools work again.
-    await geode.cmd('attach', { ch: 't:t', afterSeq: 0 });
     await cli.cmd('session.detach', { threadId: 't' });
     await geode.cmd('attach', { ch: 't:t', afterSeq: 0 });
     await geode.cmd('tool.manifest', { threadId: 't', servers: { claude_threads: [tool('vault_search')] } });

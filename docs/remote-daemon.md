@@ -92,12 +92,16 @@ Whatever you pick, finish with the same three steps: create a token, give the da
 Needs Node 22+ and `curl`. No root.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rbcodelabs/agent-threads/main/deploy/install.sh | bash
-# a specific release:  AGENT_THREADS_VERSION=0.63.0 bash deploy/install.sh
+curl -fsSL https://raw.githubusercontent.com/rbcodelabs/agent-threads/v0.63.0/deploy/install.sh | bash
+# a specific release, from a checkout:  AGENT_THREADS_VERSION=0.63.0 bash deploy/install.sh
 ```
 
-`install.sh` downloads the bundle from the GitHub release, **verifies its SHA-256** (it refuses to continue on a
-mismatch), puts it under `~/.local/share/agent-threads/`, links `~/.local/bin/agent-threads`, and runs
+Pin the script URL to a release tag (replace `v0.63.0` with the release you want) rather than `main`: you then run the
+reviewed file of that release, and a later change on `main` cannot alter what you pipe into your shell.
+
+`install.sh` downloads the bundle from the GitHub release and **verifies its SHA-256** (it refuses to continue on a
+mismatch). The checksum is published next to the bundle in the same release, so it catches a damaged or truncated
+download, not a compromised release or account; trust comes from the tag you pin and HTTPS to github.com. It then puts the bundle under `~/.local/share/agent-threads/`, links `~/.local/bin/agent-threads`, and runs
 `agent-threads install`. That second step is also available on its own (`--dry-run` shows what it would do):
 
 ```bash
@@ -133,7 +137,7 @@ sudo install -d -m 0755 /opt/agent-threads/dist
 sudo install -m 0644 agent-threads.cjs /opt/agent-threads/dist/agent-threads.cjs   # from the release, or your build
 sudo install -d -m 0755 /etc/agent-threads
 sudo install -m 0600 /dev/null /etc/agent-threads/env            # optional: CLAUDE_CODE_OAUTH_TOKEN=..., GH_TOKEN=...
-sudo install -m 0600 /dev/null /etc/agent-threads/claude-token   # the token alone (may stay empty if you sign in with `claude`)
+sudo install -m 0600 /dev/null /etc/agent-threads/claude-token   # REQUIRED to exist (the unit will not start without it); may stay empty if you sign in with `claude`
 sudo install -m 0644 deploy/agent-threads.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now agent-threads
 sudo -u agent-threads env HOME=/var/lib/agent-threads/home DATA_DIR=/var/lib/agent-threads \
@@ -145,9 +149,10 @@ What the unit sets, and why:
 | Setting | Why |
 |---|---|
 | `Restart=on-failure` | comes back after a crash, stays down after `systemctl stop` |
-| `KillMode=control-group` | **critical.** Each live session is a `claude` child process. If the daemon dies by SIGKILL, those children are orphaned (and keep running, spending tokens) unless systemd reaps the whole cgroup. Do not change this to `process`. |
+| `KillMode=mixed` | **critical.** `SIGTERM` goes to the daemon alone, so it can close its sessions and flush its journals; systemd then `SIGKILL`s whatever is left in the unit's cgroup. Each live session is a `claude` child process: if the daemon dies by SIGKILL, those children would be orphaned (and keep running, spending tokens) unless systemd reaps the cgroup. Verified on systemd 259: with `mixed`, both `systemctl stop` and a SIGKILL of the daemon leave no child alive. Do not change this to `process` or `none`. |
 | `EnvironmentFile=-/etc/agent-threads/env` | the Claude token and `GH_TOKEN`, in a file only root and the unit can read (0600) |
-| `LoadCredential=claude-token:...` | the token as a systemd credential (`$CREDENTIALS_DIRECTORY/claude-token`), which the daemon reads itself; the file must exist, and may be empty |
+| `LoadCredential=claude-token:...` | the token as a systemd credential (`$CREDENTIALS_DIRECTORY/claude-token`), which the daemon reads itself. The file **must exist** (it may be empty): systemd refuses to start the unit without it (status `243/CREDENTIALS`) and has no optional form. `agent-threads install` creates it; for the system unit the `install -m 0600 /dev/null /etc/agent-threads/claude-token` line above does |
+| `ExecStart="..."` | every path is quoted and `%` / `$` are escaped (a path with a space or a `%` works); a newline in `--workspace` is refused by `agent-threads install` |
 | `StateDirectory=agent-threads` | `/var/lib/agent-threads` (tokens, journals, raw logs, the `claude` login), created and owned by systemd |
 | `ProtectSystem=strict` + `ReadWritePaths=` | the unit can only write to its state and workspaces. This limits *where* an agent writes, not *what* it runs (it must run builds and install packages); the VM is the real boundary |
 
@@ -177,6 +182,14 @@ Things that differ from a host install:
   device can briefly lock the others out.
 - `docker compose exec agent-threads claude` signs in interactively; the login persists in the data volume. Or set
   `CLAUDE_CODE_OAUTH_TOKEN` in `deploy/.env`.
+- **The Claude CLI lives at `/opt/claude/.local/bin/claude`, outside every volume**, so an image upgrade really upgrades it
+  (under the data volume it would be copied in once and frozen there, or hidden by a bind mount); only the login and the
+  sessions are in the persisted home. Its self-updater is switched off (`DISABLE_AUTOUPDATER=1`): rebuild to update.
+- **The port follows `AGENT_THREADS_PORT`** (default 7433): the daemon, the health check and the published port all use the
+  same value, so setting it in `deploy/.env` changes all three. Compose drops every capability (`cap_drop: [ALL]`) and sets
+  `no-new-privileges`; the daemon runs as a non-root user on a high port and needs neither. A `.dockerignore` keeps
+  `deploy/.env`, `.git`, `node_modules` and local worktrees out of the build context. If you build with Podman, add
+  `--format docker`, or the image format drops the `HEALTHCHECK`.
 - `docker run` users: the entrypoint is `agent-threads serve`, so run other commands with
   `--entrypoint agent-threads` (for example `docker run --rm --entrypoint agent-threads IMAGE doctor`), or use `exec`.
 
@@ -198,7 +211,7 @@ The same `agent-threads` binary is also a client. It uses the daemon's wire prot
 Geode plugin uses), so anything it shows is exactly what Geode would show.
 
 **Connecting.** `--url` > `AGENT_THREADS_URL` > `ws://127.0.0.1:7433` (or the port in the local data directory's
-`config.json`). `--token` > `AGENT_THREADS_TOKEN` > `<data-dir>/cli-token`. The daemon stores only token *hashes*, so
+`config.json`). `--token` > `AGENT_THREADS_TOKEN` > `<data-dir>/cli-token`. A token given with `--token` is visible to other users in `ps` and stays in your shell history: prefer the environment variable or the saved file (`token create --save`, mode 0600). A plain `ws://` address that is not this machine prints a warning (the token and prompts travel in the clear). The daemon stores only token *hashes*, so
 the same-machine default needs a plaintext copy that you ask for once:
 
 ```bash
@@ -231,11 +244,13 @@ answered while you were away is never asked again.
 **run.** `--cwd` is a folder **on the daemon machine** (default: the shell's folder when the daemon is local and
 allows it, else the daemon's default workspace); `--permission-mode` (default `default`, `dontAsk` with
 `--unattended`); `--model`; `--thread <id>` to continue a thread. `--detach` sends the prompt, prints the thread id and
-exits, leaving the turn running on the daemon; `agent-threads attach <id>` replays all of it later. The session is
-ephemeral: when the turn ends, `run` closes the session (stopping its `claude` process); the journal stays for
-`attach` until retention drops it. `--unattended` means nobody is there: a permission, question or plan request fails
-the run at once (the request is refused and the turn interrupted). The same applies with no terminal (stdin not a TTY)
-and no `--json`. Ctrl-C interrupts the turn (a second Ctrl-C leaves it running and detaches).
+exits, leaving the turn running on the daemon; `agent-threads attach <id>` replays all of it later. A session `run` creates
+itself (no `--thread`) is ephemeral: when the turn ends, `run` closes it (stopping its `claude` process); the journal
+stays for `attach` until retention drops it. A session you name with `--thread` is yours and is left open. `--unattended`
+means nobody is there and defaults to the `dontAsk` mode, which **denies** every tool that is not pre-approved (the agent
+is told and carries on; nothing is raised). If a permission, question or plan request is raised anyway (an explicit
+`--permission-mode` that asks), it is refused, the turn is interrupted and the run exits 7. The same applies with no
+terminal (stdin not a TTY) and no `--json`. Ctrl-C interrupts the turn (a second Ctrl-C leaves it running and detaches).
 
 | Exit code | Meaning |
 |---|---|
@@ -278,8 +293,8 @@ nativeSessionId, lastActivityAt`.
 Node 22+; the `claude` CLI; `git`; `gh` and whether it is logged in; `rg`; the listen address (warns on a wildcard or
 non-loopback address); whether the daemon answers `/healthz`; data directory ownership and permissions (0700), token
 and `cli-token` file modes; `tokens.json` readable with at least one active token (and `cli-token` still valid);
-a Claude credential (environment, systemd credential, env file, or an existing `~/.claude` login; values are never
-printed); workspaces exist and are writable; free disk space (warns under 5 GiB, fails under 500 MiB); clock skew
+a Claude credential **as seen from the shell you ran it in** (environment, systemd credential, env file, or an existing `~/.claude` login; values are never
+printed). It cannot see the environment of a service started by systemd or a container: run it as the daemon user, or inside the container, and remember that a finding about the credential describes this shell, not the service; workspaces exist and are writable; free disk space (warns under 5 GiB, fails under 500 MiB); clock skew
 against the daemon's HTTP `Date` header; and Tailscale (installed, running, serving the port). The exit code is 1 if
 anything FAILed (`--strict`: or warned), else 0; SKIP never counts. Run it as the user the daemon runs as, and pass
 `--data-dir` / `--url` when the daemon uses non-default ones. `--json` prints one `{"type":"check",...}` line per check
@@ -380,8 +395,8 @@ Read this before exposing the daemon beyond `127.0.0.1`.
   fixed, rather than crashing or guessing. Starting the daemon with a damaged file fails.
 
 - **Host tools are a remote-control channel in both directions.** `tool.call` / `tool.result` are new, so they have their own threat model.
-  - *A client lying to the daemon* (a stolen `control` token): it can feed the model any text through a `tool.result`, which is no more power than the same token has through `session.send`. It can only answer calls made for a thread it holds the seat of (call ids are random UUIDs bound to one thread, a repeat or another thread's id is refused), its manifest and results are validated and size-capped (500 tools, 2 MB manifest, results cut at 1 MB, only text and bounded images reach the model), and read-scope tokens cannot send either.
-  - *A compromised daemon asking the app to run tools* is the dangerous direction: the app runs your vault, threads, scheduler and browser tools. The app therefore trusts nothing in a `tool.call`. It runs only a tool in the manifest it sent for that thread (exact server and name; anything else is refused and logged), caps input size, calls in flight (8 per thread, 16 overall) and calls per minute (240), and applies the **same approval gate as a local agent** itself (the thread's permission mode and the approval card), whatever the daemon claims happened on its side. The remaining exposure is what you have already allowed: tools your permission mode runs without asking, and always-allow entries, are callable by a hostile daemon exactly as they are by a local agent. Keep the daemon on a machine you trust, turn off groups you do not want it to reach (Settings, Remote daemons, Advanced), and leave `vault` / `threads` / `schedule` off for a daemon you do not fully trust.
+  - *A client lying to the daemon* (a stolen `control` token): it can feed the model any text through a `tool.result`, which is no more power than the same token has through `session.send`. It can only answer calls made for a thread it holds the seat of (call ids are random UUIDs bound to one thread, a repeat or another thread's id is refused), its manifest and results are validated and size-capped (500 tools, 2 MB manifest, results cut at 100K characters, only text and bounded images reach the model), and read-scope tokens cannot send either.
+  - *A compromised daemon asking the app to run tools* is the dangerous direction: the app runs your vault, threads, scheduler and browser tools. The app therefore trusts nothing in a `tool.call`. It runs only a tool in the manifest it sent for that thread (exact server and name; anything else is refused and logged), caps input size, calls in flight (8 per thread, 16 overall) and calls per minute (240), and shows its **own** approval card (with the real input) for any tool that needs one, whatever the daemon claims happened on its side: a card the daemon wrote is never accepted as an approval, input too long to show in full is refused, and nothing remembered locally (always-allow, trusted built-ins) pre-approves a remote thread's request. Host tools are **off by default**, only read-only groups can be switched on (the tools that write, run commands, schedule, install, send or read secrets are never offered), and only the seat holder acts on a call. The remaining exposure is the groups you switched on: a hostile daemon can read what they expose (`vault` is your whole vault, `threads` your other threads' transcripts, `mcp` your Google data) and ask for any read-only tool that does not require approval. Keep the daemon on a machine you trust and switch on only the groups it needs.
   - *What never crosses to the daemon:* keychain values, broker addresses and capability headers, the token, and MCP servers that need a secret or run a program on your computer. Only names, schemas and results do. Results of a host tool are stored in the daemon's journal and raw log like any other tool output (see above).
   - *Never hangs:* with the app disconnected a call waits at most `hostToolGraceSec`, then fails with a readable message; an issued call waits at most `hostToolTimeoutSec`. Both are audited (`audit.ndjson` records server, tool, sizes and outcome, never inputs or results).
 
@@ -395,29 +410,47 @@ deleted and a file past `journalMaxMb` is rotated to `.jsonl.1` (so at most abou
 
 ## Tools on your computer (host tools)
 
-A remote thread keeps the daemon machine's own tools (shell, file read/write, search) and now also reaches the tools that
-only exist in the app on your computer, as long as the app is connected:
+A remote thread keeps the daemon machine's own tools (shell, file read/write, search). It can ALSO reach read-only
+tools that only exist in the app on your computer, while the app is connected, **but only if you turn that on**:
+**host tools are off by default for every daemon**, and when you turn them on nothing is offered until you list a group.
 
 | Runs | Tools |
 |---|---|
-| On the daemon, beside the repo | `enter_worktree`, `exit_worktree`, `set_working_directory` (worktrees go under `<first workspace>/.worktrees`, or `worktreeRoot`) |
-| In the app on your computer (proxied) | `vault_*`, `workspace_*`, `host_*` (command palette, Web Viewer), `threads_*`, `Cron*` / `ScheduleWakeup`, `skills_*`, `browser_*`, `request_secret`, `mcp_register_server`, your Google Workspace and OAuth MCP servers (under their own names, for example `mcp__google-docs__*`) |
-| Not offered | `enter_vm` / `vm_exec` / `exit_vm` (the daemon machine is the sandbox), `host_exec`, `github_*` (the GitHub connection has no credential on the daemon), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |
+| On the daemon, beside the repo | `enter_worktree`, `exit_worktree`, `set_working_directory` (worktrees go under `<first workspace>/.worktrees`, or `worktreeRoot`). These refuse a folder in a read-only workspace, and the repo and git root they work on are checked like the target. |
+| In the app on your computer, opt-in groups (all off until listed) | `vault` (search, backlinks, links, note metadata, file history, list, bridge list), `workspace` (open tabs, active file, watched documents), `threads` (list, current, projects, messages, log, wait), `skills` (list, search, get, sources), `browser` (the in-app browser tools except `browser_eval` and `browser_save_page`), `mcp` (your Google Workspace and OAuth MCP servers, under their own names, for example `mcp__google-docs__*`; or name one server) |
+| Never offered, whatever you set | everything that writes, executes, schedules, installs, sends or reads a secret on your computer: `request_secret`, `mcp_register_server`, `host_execute_command` / `host_list_commands` / `host_open_url`, `workspace_navigate_to_file` / `workspace_insert_at_cursor`, `watch_document`, `vault_restore_file_version`, `vault_add_bridge`, `threads_create` / `threads_send_message` / `threads_archive` / `threads_open` and every `threads_set_*` / project setter, `skills_install` / `create` / `update` / `uninstall` / `check_updates`, `Cron*` / `ScheduleWakeup`, `browser_eval`, `browser_save_page` |
+| Not offered either | `enter_vm` / `vm_exec` / `exit_vm` (the daemon machine is the sandbox), `host_exec`, `github_*` (the GitHub connection has no credential on the daemon), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |
 
-The names are the ones a local thread has (`mcp__claude_threads__vault_search`), so always-allow entries and approval rules
-carry over. The remote session's system prompt lists exactly which tools run on your computer.
+The names are the ones a local thread has (`mcp__claude_threads__vault_search`). The remote session's system prompt lists
+exactly which tools run on your computer (or says none do).
 
-- **Approvals are the same as a local thread.** A tool that needs approval asks you in the app, through the same card and
-  permission mode. If you already allowed that tool on the card the daemon opened, that one allow is reused for one call.
+- **The app's own card is the only approval that counts.** A tool that needs approval asks you in the app with a card
+  that shows the real input. An allow you gave on a card the **daemon** wrote (a `permission_request` it journaled) is never
+  carried over to a host tool call, and nothing remembered on this computer ("Always Allow", trusted built-ins) pre-approves a
+  request that comes from a remote thread; "Always Allow" is not offered on a remote thread's card. The daemon itself lets a
+  proxied host tool through without its own card (it does not ask twice); the app is where you are asked.
+  The card shows up to 4000 characters of the input; a call whose input is longer than that is **refused** (the agent is told
+  to call again with less) rather than run with part of it unseen.
+- **Permission modes.** The approval gate for host tools is the app's card, not the thread's permission mode: the app
+  does not consult `plan`, `dontAsk` or `bypassPermissions` for a host tool, because it does not trust a mode the daemon
+  reports. A tool that requires approval always shows a card. On the daemon side, the mode applies to the daemon's own tools
+  as usual (`plan` cannot edit; `dontAsk` denies what is not pre-approved), and the proxied host tools are pre-approved there.
 - **When the app is not connected** a call waits up to `hostToolGraceSec` (default 60; config `hostToolGraceSec`, env
   `AGENT_THREADS_HOST_TOOL_GRACE_SEC`) for it to reconnect, then the agent is told, in words, that your computer is not
   connected and that the tool needs it, so it carries on instead of looping. The turn is never held longer than that plus
   `hostToolTimeoutSec` (default 300) for a slow answer. When you reopen the app a transcript row says which host tools were
   unavailable. Nothing is queued: the call is not run later.
-- **Choose what is offered.** Settings, Remote daemons, edit, Advanced: turn host tools off for a daemon, or turn off groups
-  (`vault`, `workspace`, `threads`, `schedule`, `skills`, `misc`, `browser`, `mcp`) or single tools. If the daemon holds its
-  own synced copy of the vault you may want `vault` off so the agent uses its file tools on the copy (see "Working in the
-  vault"; the two are different views of the same notes).
+- **Choose what is offered.** Settings, Remote daemons, edit, Advanced: switch on "Tools on this computer" for the daemon,
+  then list the groups to allow under "Tool groups to allow" (`vault`, `workspace`, `threads`, `skills`, `browser`, `mcp`;
+  you can also name one read tool, or one proxied server). Anything unlisted is off. Upgrading from a build where host tools
+  were on by default: they are now off until you do this. If the daemon holds its own synced copy of the vault leave `vault`
+  off so the agent uses its file tools on the copy (see "Working in the vault"; the two are different views of the same notes).
+- **Seat and manifest.** Only the client that holds the thread's read-write seat acts on `tool.call`; a second install or
+  a terminal viewing the thread ignores it. The daemon treats a thread as having host tools only while the seat holder is
+  the connection that sent the current manifest, so after a terminal claims the seat (`attach --claim`, `run --thread`) a
+  call fails after the grace period with the "your computer is not connected" message instead of waiting for an answer
+  that cannot come. Results are cut at 100,000 characters (with a marker), images are bounded, and a large screenshot is
+  dropped rather than allowed to exceed the frame limit.
 - **Your MCP servers.** Servers that start a program on your computer (stdio), use an address on your computer, or need a
   secret from your keychain cannot work on the daemon and are not sent; a server with headers (usually credentials) is sent
   only if you list it under "MCP servers it may receive". Each dropped server is named in a transcript row with the reason.
@@ -570,7 +603,8 @@ actually happened, not "just now". What makes that work:
   at once, a second install using the same token is an observer and gets `conflict` on writes. Installs identify
   themselves with the `remoteClientId` in their settings; an older plugin sends none and is treated as one install per token.
 - "Always allow" on a permission prompt is **not supported** on a daemon session: the answer applies once, and the
-  daemon's acknowledgement says `alwaysAllow: "not_supported"`. Nothing in the journal claims a standing rule.
+  daemon's acknowledgement says `alwaysAllow: "not_supported"`. Nothing in the journal claims a standing rule. The app does
+  not offer it on a remote thread's card either, and an always-allow entry made for a local thread never applies to one.
 - A remote thread cannot be forked (Fork conversation and `/fork` are refused with an explanation): a fork is a local
   thread and would start in the daemon's folder on the wrong machine.
 - A send the daemon answers with a retryable `conflict` (it is running its maximum number of turns) is retried
