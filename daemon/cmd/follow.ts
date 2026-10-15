@@ -110,6 +110,12 @@ export class Follower {
   private sub: ChannelSubscription | null = null;
   private readonly open = new Map<string, OpenRequest>();
   private caughtUp = false;
+  /** The attach reply has been processed. Replayed events can overtake it (it settles on a later microtask), so "caught up" is meaningless before this. */
+  private attachSeen = false;
+  /** Highest seq this follower has PROCESSED (the client's cursor runs ahead of it while early frames are held). */
+  private processedSeq: number;
+  /** Frames that arrived before the attach reply, shown right after it so the `attached` record always comes first. */
+  private early: Array<() => void> = [];
   private targetSeq = 0;
   private turnInFlight = false;
   private seat = false;
@@ -128,6 +134,7 @@ export class Follower {
 
   constructor(private readonly opts: FollowOptions) {
     this.answerMode = opts.answer;
+    this.processedSeq = opts.afterSeq;
     this.renderer = new TextRenderer({ write: (s) => opts.io.out(s) });
     this.finished = new Promise((res) => { this.resolveFinished = res; });
     this.attached = new Promise((res) => { this.resolveAttached = res; });
@@ -135,7 +142,7 @@ export class Follower {
 
   /** This client holds the thread's read-write seat. */
   get controller(): boolean { return this.seat; }
-  get lastSeq(): number { return this.sub?.cursor.lastSeq ?? this.opts.afterSeq; }
+  get lastSeq(): number { return this.processedSeq; }
   get openRequestCount(): number { return this.open.size; }
 
   start(): void {
@@ -143,7 +150,7 @@ export class Follower {
       onEvent: (frame, meta) => this.onEvent(frame, meta),
       onResync: (frame) => this.onResync(frame),
       onAttached: (info) => this.onAttached(info),
-      onRewind: () => { /* the cursor was lowered by the client; replay follows */ },
+      onRewind: (seq) => { this.processedSeq = Math.min(this.processedSeq, seq); },
       onAttachError: (err) => this.stop('failed', err.message),
     }, this.opts.afterSeq, this.opts.epoch, { observe: this.opts.observe });
   }
@@ -184,15 +191,19 @@ export class Follower {
   private onAttached(info: AttachInfo): void {
     this.seat = info.controller === true;
     this.targetSeq = info.lastSeq;
+    this.attachSeen = true;
     this.caughtUp = false;
     if (this.opts.json) {
       this.opts.io.out(`${cliLine('attached', { threadId: this.opts.threadId, controller: this.seat, lastSeq: info.lastSeq, lowWater: info.lowWater, resync: info.resync, epoch: info.epoch })}\n`);
     }
     this.resolveAttached(info);
+    for (const replay of this.early.splice(0)) replay();
     this.checkCaughtUp();
   }
 
   private onResync(frame: ResyncFrame): void {
+    if (!this.attachSeen) { this.early.push(() => this.onResync(frame)); return; }
+    this.processedSeq = frame.checkpoint.seq;
     if (this.opts.json) this.opts.io.out(`${frameLine(frame)}\n`);
     else this.renderer.resync(frame);
     for (const m of frame.checkpoint.openRequests) {
@@ -206,6 +217,8 @@ export class Follower {
 
   private onEvent(frame: EventFrame, meta: { reopen: boolean; replay: boolean }): void {
     if (this.done) return;
+    if (!this.attachSeen) { this.early.push(() => this.onEvent(frame, meta)); return; }
+    if (!meta.reopen) this.processedSeq = Math.max(this.processedSeq, frame.seq);
     const requestKind = REQUEST_EVENTS[frame.name];
     // A reopened request is one already shown before the socket dropped: track it, do not print it twice.
     const quiet = meta.reopen && requestKind !== undefined && this.open.get(String(obj(frame.args).requestId))?.handled === true;
@@ -246,8 +259,8 @@ export class Follower {
   }
 
   private checkCaughtUp(): void {
-    if (this.caughtUp || !this.sub) return;
-    if (this.sub.cursor.lastSeq < this.targetSeq) return;
+    if (this.caughtUp || !this.sub || !this.attachSeen) return;
+    if (this.processedSeq < this.targetSeq) return;
     this.caughtUp = true;
     this.handleOpenRequests();
     this.maybeFinish();
