@@ -41,6 +41,7 @@ import { getVaultBridgesAPI, mapToVaultPath, type BridgeInfo } from './bridgeUti
 import { resolveTagIcon, planFooter, derivePrUrl } from './statusLine';
 import { isWebViewerEnabled } from './SettingsTab';
 import { ContextPanelViewError } from './ContextPanelController';
+import { OutsideVaultLinkModal } from './OutsideVaultLinkModal';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openLocalFileViaHost, openUrlPreferringWebViewer, resolveAbsoluteVaultHref } from './linkUtils';
 import type { StatusTag } from './types';
 import { appendOrchestratorBadge } from './orchestrator-badge';
@@ -1864,6 +1865,33 @@ export class ThreadsView extends ItemView {
     }
   }
 
+  /** Offer (never auto-perform) opening an absolute link that is outside the vault. */
+  private confirmOpenOutsideVaultLink(href: string): void {
+    new OutsideVaultLinkModal(this.app, href, {
+      open: async (path) => {
+        try {
+          if (await openLocalFileViaHost(this.app, path)) return;
+          const { shell } = require('electron') as { shell: { openPath: (p: string) => Promise<string> } };
+          const err = await shell.openPath(path);
+          if (err) new Notice(`Could not open file: ${err}`);
+        } catch (err) {
+          new Notice(`Could not open file: ${(err as Error).message}`);
+        }
+      },
+      reveal: async (path) => {
+        if (!(await this.revealArtifactPath(path))) new Notice('Reveal is not available here.');
+      },
+      copy: async (path) => {
+        try {
+          await navigator.clipboard.writeText(path);
+          new Notice('Path copied.');
+        } catch {
+          new Notice('Could not copy the path.');
+        }
+      },
+    }).open();
+  }
+
   /** Reveals a local path in the OS file manager; false when unsupported. */
   async revealArtifactPath(target: string): Promise<boolean> {
     try {
@@ -2877,7 +2905,7 @@ export class ThreadsView extends ItemView {
         // unresolved link, which can create a stray note named after the
         // path — the same hazard linkifyBridgePaths guards against below.
         if (absolute && !resolved) {
-          new Notice('That link points outside this vault.');
+          this.confirmOpenOutsideVaultLink(href);
           return;
         }
         const target = resolved ?? href;

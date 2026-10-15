@@ -9882,3 +9882,10 @@ button.ct-agent-crumb:focus-visible {
   margin: 8px 0 16px;
 }
 .ct-cli-notice-copy { flex-shrink: 0; }
+
+.ct-outside-link-path {
+  display: block;
+  word-break: break-all;
+  user-select: text;
+  margin-bottom: 12px;
+}
