@@ -200,17 +200,19 @@ export function renderSandboxSettingsPanel(parent: HTMLElement, deps: SandboxSet
 export interface SandboxOfferCardDeps extends SandboxSetupFlowDeps {
   onNotNow(): void;
   onDontAskAgain(): void;
+  /** Setup finished; the thread (parked until the user answers) can launch. */
+  onSetupDone?(): void;
 }
 
 export const SANDBOX_OFFER_TITLE = 'Run this thread in a sandbox?';
-export const SANDBOX_OFFER_BODY = 'Setting it up takes a few minutes and a one-time download.';
-export const SANDBOX_OFFER_DONE =
-  'Sandbox ready. This thread is still running on your Mac; the next time its session starts it will run inside the sandbox.';
+export const SANDBOX_OFFER_BODY =
+  'Setting it up takes a few minutes and a one-time download. Your message is held until you choose.';
+export const SANDBOX_OFFER_DONE = 'Sandbox ready. This thread is starting inside it.';
 
 /**
- * One-time card offering the sandbox when a thread fell back to the host
- * because it isn't set up. The thread keeps running meanwhile; nothing here
- * blocks it. Removes itself on "Not now" / "Don't ask again".
+ * One-time card offering the sandbox before a thread's first session starts
+ * when it isn't set up. The session waits for the user's answer: a finished
+ * setup, "Not now" or "Don't ask again" (each releases it via the deps).
  */
 export function renderSandboxOfferCard(parent: HTMLElement, deps: SandboxOfferCardDeps): HTMLElement {
   const card = parent.createDiv('ct-message ct-sandbox-offer');
@@ -281,6 +283,7 @@ export function renderSandboxOfferCard(parent: HTMLElement, deps: SandboxOfferCa
       case 'done': {
         actions.empty();
         progressEl.setText(SANDBOX_OFFER_DONE);
+        deps.onSetupDone?.();
         const dismiss = actions.createEl('button', { cls: 'ct-sandbox-offer-dismiss', text: 'Dismiss' });
         dismiss.addEventListener('click', () => { card.remove(); deps.onNotNow(); });
         return;

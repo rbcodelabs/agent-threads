@@ -5823,8 +5823,8 @@ export class ThreadsView extends ItemView {
       }
 
       case 'sandbox_setup_offer': {
-        // The thread is running on the host because the sandbox isn't set up.
-        // Offer setup without interrupting it (the card is not modal).
+        // The thread's first session is parked until the user answers: the
+        // sandbox isn't set up. (The card is inline, not modal.)
         if (this.activeThreadId) this.renderSandboxOfferCard(this.activeThreadId);
         break;
       }
@@ -5977,9 +5977,9 @@ export class ThreadsView extends ItemView {
   }
 
   /**
-   * One-time "Run this thread in a sandbox?" card. Setup progress runs inside
-   * the card; a finished setup only affects the thread's NEXT fresh session
-   * start (the running session is deliberately left alone).
+   * One-time "Run this thread in a sandbox?" card. The thread's first session
+   * is held until the user answers; setup progress runs inside the card, and a
+   * finished setup releases the session to start inside the sandbox.
    */
   private renderSandboxOfferCard(threadId: string): void {
     if (!Platform.isDesktopApp) return;
@@ -5990,11 +5990,13 @@ export class ThreadsView extends ItemView {
       run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       onNotNow: () => this.manager.clearSandboxSetupOffer(threadId),
+      onSetupDone: () => this.manager.completeSandboxSetupOffer(threadId),
       onDontAskAgain: () => {
-        this.manager.clearSandboxSetupOffer(threadId);
+        // Persist first so the released session start sees the new setting.
         this.plugin.settings.sandboxSetupPromptDismissed = true;
         this.manager.updateSettings(this.plugin.settings);
         void this.plugin.saveSettings();
+        this.manager.clearSandboxSetupOffer(threadId);
       },
     });
     this.scrollToBottom();

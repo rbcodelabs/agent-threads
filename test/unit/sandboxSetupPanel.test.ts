@@ -254,7 +254,7 @@ describe('renderSandboxOfferCard', () => {
     expect(text(card, '.ct-sandbox-offer-title')).toBe(SANDBOX_OFFER_TITLE);
     expect(SANDBOX_OFFER_TITLE).toBe('Run this thread in a sandbox?');
     expect(text(card, '.ct-sandbox-offer-body')).toBe(SANDBOX_OFFER_BODY);
-    expect(SANDBOX_OFFER_BODY).toBe('Setting it up takes a few minutes and a one-time download.');
+    expect(SANDBOX_OFFER_BODY).toContain('Your message is held until you choose');
     expect([...card.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Set up sandbox', 'Not now', 'Don\'t ask again']);
   });
 
@@ -288,7 +288,7 @@ describe('renderSandboxOfferCard', () => {
     finish(RESULT);
     await flush();
     expect(text(card, '.ct-sandbox-offer-progress')).toBe(SANDBOX_OFFER_DONE);
-    expect(SANDBOX_OFFER_DONE).toContain('next time its session starts');
+    expect(SANDBOX_OFFER_DONE).toContain('starting inside it');
     expect(cb.onNotNow).not.toHaveBeenCalled();
     btn(card, 'Dismiss')!.click();
     expect(cb.onNotNow).toHaveBeenCalledTimes(1);

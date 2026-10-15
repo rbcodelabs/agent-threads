@@ -26,7 +26,7 @@ import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
 import { checkImageHealth } from './sandboxImage';
 import { sweepOrphanedThreadContainers, type OrphanSweepResult } from './sandboxVmSweep';
 import { containerNameForThread, createDefaultVmCommandRunner, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
-import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
+import { DEFAULT_HARNESS_VM_IMAGE, checkHarnessVmCapability, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
 import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
 import type { App } from 'obsidian';
@@ -214,6 +214,8 @@ export class ThreadManager {
   private staleImageWarned = new Set<string>();
   /** Threads that have been offered the card this app session — at most one card each, however many sessions start. */
   private sandboxSetupOffered: Set<string> = new Set();
+  /** Resolvers for first-session starts that are parked on the pre-launch sandbox offer; released by the user's answer. */
+  private sandboxSetupWaiters: Map<string, () => void> = new Map();
   /** Test seam: whether sandbox setup can run on this machine. Production uses the real macOS/arch check. */
   sandboxSetupSupported: () => boolean = () => isRuntimeSupported().supported;
   /**
@@ -950,6 +952,7 @@ export class ThreadManager {
     this.claudeVmRoutingByThread.delete(id);
     this.sandboxSetupOffers.delete(id);
     this.sandboxSetupOffered.delete(id);
+    this.releaseSandboxSetupWaiter(id);
     this.threads.delete(id);
     this.emit(id, { type: 'thread_deleted' });
   }
@@ -2144,6 +2147,18 @@ export class ThreadManager {
 
     if (isNewSession) {
       try {
+        // Offer to set up the sandbox BEFORE launching, and wait for the answer.
+        if ((thread.agentHarness ?? 'claude') === 'claude') {
+          // Only yield when an offer is actually possible, so the common path
+          // reaches session.start() with no extra await.
+          const vm = options.claude?.vm;
+          if (this.mayOfferSandboxSetup(threadId, vm)) await this.awaitSandboxSetupDecision(threadId, vm);
+          // Deleted (or replaced) while parked on the card: don't resurrect it.
+          if (this.sessions.get(threadId) !== session) {
+            if (claimedHandoff) this.releaseHarnessHandoffClaim(threadId);
+            return;
+          }
+        }
         await session.start(options);
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
@@ -2333,21 +2348,55 @@ export class ThreadManager {
   }
 
   /**
-   * Decides whether a host fallback deserves the one-time sandbox-setup card
-   * and, if so, records + announces it. The thread keeps running on the host
-   * regardless; this only adds a card.
+   * Pre-launch gate for a fresh session start: when the sandbox isn't set up
+   * and the user should be asked (see `shouldOfferSandboxSetup`), shows the
+   * "Run this thread in a sandbox?" card and WAITS for the answer — set up
+   * (finished), "Not now", or "Don't ask again" — before the session starts.
+   * The session's own routing resolution then runs afterwards, so a freshly
+   * built sandbox is picked up by this very session.
+   *
+   * Never blocks on a probe failure: any error resolves immediately and the
+   * session starts as it would have without the offer.
    */
-  private maybeOfferSandboxSetup(threadId: string, reason: HarnessVmFallbackReason | undefined): void {
+  /** Synchronous, probe-free gates: can an offer happen for this session start at all? */
+  private mayOfferSandboxSetup(threadId: string, inputs: ClaudeVmRoutingInputs | undefined): inputs is ClaudeVmRoutingInputs {
+    return !!inputs && inputs.mode === 'auto'
+      && !this.sandboxSetupOffered.has(threadId)
+      && this.settings.sandboxSetupPromptDismissed !== true
+      && this.sandboxSetupSupported();
+  }
+
+  private async awaitSandboxSetupDecision(threadId: string, inputs: ClaudeVmRoutingInputs | undefined): Promise<void> {
+    if (!inputs || !this.mayOfferSandboxSetup(threadId, inputs)) return;
+    const dismissed = (): boolean => this.settings.sandboxSetupPromptDismissed === true;
+    let reason: HarnessVmFallbackReason | undefined;
+    try {
+      const capability = await checkHarnessVmCapability({
+        vmManager: inputs.vmManager, image: inputs.image, platform: inputs.platform, arch: inputs.arch,
+      });
+      reason = capability.capable ? undefined : capability.code;
+    } catch (err) {
+      console.warn('[ClaudeThreads] sandbox capability probe failed; skipping the setup offer:', err);
+      return;
+    }
     if (!shouldOfferSandboxSetup({
-      mode: resolveEffectiveHarnessVmMode(this.threads.get(threadId)?.harnessVmMode, this.settings.harnessVmMode),
+      mode: inputs.mode,
       reason,
-      dismissedForever: this.settings.sandboxSetupPromptDismissed === true,
+      dismissedForever: dismissed(),
       alreadyOffered: this.sandboxSetupOffered.has(threadId),
       setupSupported: this.sandboxSetupSupported(),
     })) return;
     this.sandboxSetupOffered.add(threadId);
     this.sandboxSetupOffers.set(threadId, reason!);
+    const answered = new Promise<void>((resolve) => { this.sandboxSetupWaiters.set(threadId, resolve); });
     this.emit(threadId, { type: 'sandbox_setup_offer', reason: reason! });
+    await answered;
+  }
+
+  private releaseSandboxSetupWaiter(threadId: string): void {
+    const waiter = this.sandboxSetupWaiters.get(threadId);
+    this.sandboxSetupWaiters.delete(threadId);
+    waiter?.();
   }
 
   /** The pending sandbox-setup offer for a thread, if its card should be (re)shown. */
@@ -2355,9 +2404,15 @@ export class ThreadManager {
     return this.sandboxSetupOffers.get(threadId);
   }
 
-  /** "Not now" / after setup: hide the card. It is not re-offered this app session. */
+  /** "Not now" / "Don't ask again" / dismissed after setup: hide the card and let the parked session start. */
   clearSandboxSetupOffer(threadId: string): void {
     this.sandboxSetupOffers.delete(threadId);
+    this.releaseSandboxSetupWaiter(threadId);
+  }
+
+  /** Setup finished: let the parked session start now (inside the sandbox); the card stays to confirm. */
+  completeSandboxSetupOffer(threadId: string): void {
+    this.releaseSandboxSetupWaiter(threadId);
   }
 
   /**
@@ -2931,10 +2986,9 @@ export class ThreadManager {
         thread.authRequired = { message, at: Date.now() };
         callbacks.onError(new Error(message));
       },
-      onVmRouting: (routing, fallbackReason) => {
+      onVmRouting: (routing) => {
         if (!isCurrentGeneration()) return;
         this.claudeVmRoutingByThread.set(threadId, routing);
-        if (!routing) this.maybeOfferSandboxSetup(threadId, fallbackReason);
       },
       onCompact: (trigger, preTokens) => {
         if (!isCurrentGeneration()) return;

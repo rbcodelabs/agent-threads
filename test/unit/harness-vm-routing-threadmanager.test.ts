@@ -31,9 +31,10 @@ vi.mock('../../src/HarnessFactory', () => ({
 }));
 
 const resolveClaudeVmRouting = vi.hoisted(() => vi.fn());
+const checkHarnessVmCapability = vi.hoisted(() => vi.fn());
 vi.mock('../../src/harnessVmRouting', async () => {
   const actual = await vi.importActual<typeof import('../../src/harnessVmRouting')>('../../src/harnessVmRouting');
-  return { ...actual, resolveClaudeVmRouting };
+  return { ...actual, resolveClaudeVmRouting, checkHarnessVmCapability };
 });
 
 const { ThreadManager } = await import('../../src/ThreadManager');
@@ -46,7 +47,10 @@ function thread(overrides: Partial<Thread> = {}): Thread {
   };
 }
 
-beforeEach(() => { fake.lastOptions = undefined; resolveClaudeVmRouting.mockReset(); });
+beforeEach(() => {
+  fake.lastOptions = undefined; resolveClaudeVmRouting.mockReset();
+  checkHarnessVmCapability.mockReset().mockResolvedValue({ capable: true });
+});
 
 describe('ThreadManager — ADR-0015 Claude VM routing inputs', () => {
   it('attaches claude.vm for a Claude thread under the default (auto) settings', async () => {
@@ -305,75 +309,108 @@ describe('ThreadManager — containerAuthToken plumbing', () => {
   });
 });
 
-describe('ThreadManager — in-thread "Run this thread in a sandbox?" offer', () => {
-  async function started(settings = DEFAULT_SETTINGS) {
+describe('ThreadManager — pre-launch "Run this thread in a sandbox?" offer', () => {
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  function setup(settings = DEFAULT_SETTINGS, supported = true) {
     const manager = new ThreadManager(settings);
-    manager.sandboxSetupSupported = () => true; // CI is Linux; the real check is exercised in sandboxRuntime tests
+    manager.sandboxSetupSupported = () => supported; // CI is Linux; the real check is exercised in sandboxRuntime tests
     manager.loadThreads([thread({ agentHarness: 'claude' })]);
     const events: Array<{ type: string; reason?: string }> = [];
     manager.subscribe((_id, e) => events.push(e as never));
-    await manager.sendMessage('t1', 'hi');
-    return { manager, events, report: (reason?: string) => fake.lastOptions?.callbacks.onVmRouting?.(null, reason as never) };
+    return { manager, events };
   }
   const offers = (events: Array<{ type: string }>) => events.filter((e) => e.type === 'sandbox_setup_offer');
+  const notReady = (code: string) => checkHarnessVmCapability.mockResolvedValue({ capable: false, code });
 
-  it.each(['runtime-missing', 'runtime-stopped', 'image-missing'])('offers setup when auto mode fell back because of %s', async (reason) => {
-    const { manager, events, report } = await started();
-    report(reason);
+  it.each(['runtime-missing', 'runtime-stopped', 'image-missing'])('holds the session start until answered when the sandbox is not ready (%s)', async (reason) => {
+    notReady(reason);
+    const { manager, events } = setup();
+    const sent = manager.sendMessage('t1', 'hi');
+    await tick();
     expect(offers(events)).toEqual([{ type: 'sandbox_setup_offer', reason }]);
     expect(manager.getSandboxSetupOffer('t1')).toBe(reason);
-  });
+    expect(fake.lastOptions).toBeUndefined(); // session has NOT started
 
-  it.each(['unsupported', 'never', 'start-failed', undefined])('does NOT offer setup for fallback reason %s', async (reason) => {
-    const { manager, events, report } = await started();
-    report(reason);
-    expect(offers(events)).toHaveLength(0);
+    manager.clearSandboxSetupOffer('t1'); // "Not now"
+    await sent;
+    expect(fake.lastOptions).toBeDefined();
     expect(manager.getSandboxSetupOffer('t1')).toBeUndefined();
   });
 
-  it('does not offer when the sandbox routed successfully', async () => {
-    const { events } = await started();
-    fake.lastOptions?.callbacks.onVmRouting?.({ containerName: 'c', containerBinaryPath: '/claude' });
+  it('starts the session once setup completes, keeping the card for confirmation', async () => {
+    notReady('image-missing');
+    const { manager } = setup();
+    const sent = manager.sendMessage('t1', 'hi');
+    await tick();
+    manager.completeSandboxSetupOffer('t1');
+    await sent;
+    expect(fake.lastOptions).toBeDefined();
+    expect(manager.getSandboxSetupOffer('t1')).toBe('image-missing');
+  });
+
+  it.each(['unsupported', 'start-failed'])('does NOT offer or wait for capability code %s', async (reason) => {
+    notReady(reason);
+    const { manager, events } = setup();
+    await manager.sendMessage('t1', 'hi');
+    expect(offers(events)).toHaveLength(0);
+    expect(fake.lastOptions).toBeDefined();
+  });
+
+  it('does not offer when the sandbox is ready', async () => {
+    const { events, manager } = setup();
+    await manager.sendMessage('t1', 'hi');
     expect(offers(events)).toHaveLength(0);
   });
 
-  it('does not offer in "always" mode (that mode errors instead of falling back)', async () => {
-    const { events, report } = await started({ ...DEFAULT_SETTINGS, harnessVmMode: 'always' });
-    report('runtime-missing');
-    expect(offers(events)).toHaveLength(0);
+  it('does not offer in "always" or "never" mode', async () => {
+    for (const harnessVmMode of ['always', 'never'] as const) {
+      notReady('runtime-missing');
+      const { manager, events } = setup({ ...DEFAULT_SETTINGS, harnessVmMode });
+      await manager.sendMessage('t1', 'hi');
+      expect(offers(events)).toHaveLength(0);
+    }
   });
 
   it('does not offer once "Don\'t ask again" was persisted', async () => {
-    const { events, report } = await started({ ...DEFAULT_SETTINGS, sandboxSetupPromptDismissed: true });
-    report('runtime-missing');
+    notReady('runtime-missing');
+    const { manager, events } = setup({ ...DEFAULT_SETTINGS, sandboxSetupPromptDismissed: true });
+    await manager.sendMessage('t1', 'hi');
     expect(offers(events)).toHaveLength(0);
   });
 
   it('does not offer where setup cannot run on this machine', async () => {
-    const manager = new ThreadManager(DEFAULT_SETTINGS);
-    manager.sandboxSetupSupported = () => false;
-    manager.loadThreads([thread({ agentHarness: 'claude' })]);
-    const events: Array<{ type: string }> = [];
-    manager.subscribe((_id, e) => events.push(e));
+    notReady('runtime-missing');
+    const { manager, events } = setup(DEFAULT_SETTINGS, false);
     await manager.sendMessage('t1', 'hi');
-    fake.lastOptions?.callbacks.onVmRouting?.(null, 'runtime-missing');
     expect(offers(events)).toHaveLength(0);
   });
 
-  it('offers at most once per thread per app session, even after "Not now" and further session starts', async () => {
-    const { manager, events, report } = await started();
-    report('runtime-missing');
-    report('runtime-missing');
-    manager.clearSandboxSetupOffer('t1'); // "Not now"
-    report('image-missing');
-    expect(offers(events)).toHaveLength(1);
-    expect(manager.getSandboxSetupOffer('t1')).toBeUndefined();
+  it('never blocks the start when the capability probe throws', async () => {
+    checkHarnessVmCapability.mockRejectedValue(new Error('probe boom'));
+    const { manager, events } = setup();
+    await manager.sendMessage('t1', 'hi');
+    expect(offers(events)).toHaveLength(0);
+    expect(fake.lastOptions).toBeDefined();
   });
 
-  it('forgets a deleted thread\'s offer state', async () => {
-    const { manager, report } = await started();
-    report('runtime-missing');
+  it('offers at most once per thread per app session', async () => {
+    notReady('runtime-missing');
+    const { manager, events } = setup();
+    const first = manager.sendMessage('t1', 'hi');
+    await tick();
+    manager.clearSandboxSetupOffer('t1');
+    await first;
+    expect(offers(events)).toHaveLength(1);
+  });
+
+  it('releases a parked start when the thread is deleted, without starting a session', async () => {
+    notReady('runtime-missing');
+    const { manager } = setup();
+    const sent = manager.sendMessage('t1', 'hi');
+    await tick();
     manager.deleteThread('t1');
+    await sent;
+    expect(fake.lastOptions).toBeUndefined();
     expect(manager.getSandboxSetupOffer('t1')).toBeUndefined();
   });
 });
