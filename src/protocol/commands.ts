@@ -40,8 +40,13 @@ export type ClientCommand =
    * `epoch` is the daemon process epoch the client last saw on this channel. If the daemon has restarted
    * since and lost journal entries the client already applied (a crash before they were flushed, so their
    * seqs were reused), the reply carries `rewind` and replay starts there. Additive within v1.
+   *
+   * `observe: true` attaches as a read-only observer: the connection never claims the thread's read-write
+   * seat, whatever its token scope, so a terminal watching a thread cannot lock Geode out of it. Absent =
+   * the previous behaviour (a control-scope client claims a free seat). Additive within v1: an older daemon
+   * ignores the field and claims the seat as it always did.
    */
-  | { type: 'attach'; ch: Channel; afterSeq: number; epoch?: string }
+  | { type: 'attach'; ch: Channel; afterSeq: number; epoch?: string; observe?: boolean }
   | { type: 'ack'; ch: Channel; seq: number }
   // Turn
   | { type: 'session.send'; threadId: string; text: string; userMessageUuid: string; images?: WireImage[] }

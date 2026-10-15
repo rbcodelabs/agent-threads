@@ -224,6 +224,8 @@ class ChannelSubscriptionImpl implements ChannelSubscription {
     afterSeq: number,
     readonly handlers: ChannelHandlers,
     private readonly owner: DaemonClient,
+    /** Attach read-only: never claim the thread's read-write seat (the CLI's default). */
+    readonly observe = false,
   ) {
     this.cursor = new StreamCursor(afterSeq);
   }
@@ -678,10 +680,10 @@ export class DaemonClient {
    * each connection re-attaches with `afterSeq = cursor.lastSeq`. Replaces any
    * existing subscription for the thread.
    */
-  subscribe(threadId: string, handlers: ChannelHandlers, afterSeq = 0, epoch?: string): ChannelSubscription {
+  subscribe(threadId: string, handlers: ChannelHandlers, afterSeq = 0, epoch?: string, opts: { observe?: boolean } = {}): ChannelSubscription {
     const channel = threadChannel(threadId);
     this.channels.get(channel)?.close();
-    const sub = new ChannelSubscriptionImpl(channel, afterSeq, handlers, this);
+    const sub = new ChannelSubscriptionImpl(channel, afterSeq, handlers, this, opts.observe === true);
     sub.ackSent = afterSeq;
     sub.ackTarget = afterSeq;
     sub.epoch = epoch;
@@ -694,7 +696,7 @@ export class DaemonClient {
   private attach(sub: ChannelSubscriptionImpl): void {
     const gen = this.socketGen;
     // `afterSeq` is read NOW, not at subscribe time: it is the exact point this client has applied.
-    this.request('attach', { ch: sub.channel, afterSeq: sub.cursor.lastSeq, ...(sub.epoch ? { epoch: sub.epoch } : {}) }, {
+    this.request('attach', { ch: sub.channel, afterSeq: sub.cursor.lastSeq, ...(sub.epoch ? { epoch: sub.epoch } : {}), ...(sub.observe ? { observe: true } : {}) }, {
       resend: false,
       timeoutMs: this.opts.commandTimeoutMs,
       onAck: (result) => {

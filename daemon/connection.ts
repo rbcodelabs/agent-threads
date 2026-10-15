@@ -408,7 +408,7 @@ export class Connection {
   private dispatch(frame: ClientFrame, auth: VerifiedToken): unknown {
     const { host } = this.ctx;
     switch (frame.type) {
-      case 'attach': return this.attach(frame.ch, frame.afterSeq, auth, frame.epoch);
+      case 'attach': return this.attach(frame.ch, frame.afterSeq, auth, frame.epoch, frame.observe === true);
       case 'ack': {
         // Only the controlling client's acks bound retention.
         if (frame.ch === 'ctl' || !this.ctx.controllers.isController(frame.ch.slice(2), this.id)) return {};
@@ -496,7 +496,7 @@ export class Connection {
 
   // ── attach: replay then live, one ordered queue ──────────────────────────
 
-  private attach(ch: Channel, requestedAfterSeq: number, auth: VerifiedToken, clientEpoch?: string): unknown {
+  private attach(ch: Channel, requestedAfterSeq: number, auth: VerifiedToken, clientEpoch?: string, observe = false): unknown {
     if (!isChannel(ch)) throw new CommandError('bad_frame', 'invalid channel');
     if (ch === 'ctl') return { lastSeq: 0, lowWater: 0, epoch: this.ctx.epoch };
     const journal: ThreadJournal | null = this.ctx.host.journalFor(ch.slice(2));
@@ -531,7 +531,8 @@ export class Connection {
     this.subs.set(ch, sub);
     // A control-scope client takes (or, with the same token, takes back) the read-write seat;
     // anyone else observes. Mutating commands re-check, so this is advisory for the client UI.
-    const controller = scopeSatisfies(auth.scope, 'control')
+    // An `observe` attach never claims it (a terminal watching a thread must not lock Geode out).
+    const controller = !observe && scopeSatisfies(auth.scope, 'control')
       && this.ctx.controllers.claim(ch.slice(2), this.seat(auth));
     const result = { lastSeq: replay.lastSeq, lowWater: journal.lowWater, epoch: this.ctx.epoch, resync: replay.kind === 'resync', controller, ...(rewind !== null ? { rewind } : {}) };
     // The ack is queued first (control drains before channels) so the client
