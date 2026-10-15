@@ -17,6 +17,9 @@
  *   3b. replay fidelity: quitting Geode mid-turn and reopening after a delay completes the transcript with the
  *      message's ORIGINAL time (the daemon's journal time, not the reopen time), acks the daemon only up to
  *      the persisted cursor, and the daemon compacts the acked turns on disk;
+ *   7. host tools (PR 7): the daemon's scripted session calls vault_search and the answer is computed in
+ *      Geode against the throwaway vault; enter_worktree runs on the daemon beside its repo; with Geode closed
+ *      the call fails after the grace period (2 s here) and the reopened transcript shows the notice;
  *   6. folder discovery: the same composer shows the folders the daemon itself advertises (a dropdown, no
  *      text field to type a path into), the vault-kind folder is detected from its marker directory, the
  *      mapped folder is preselected for the vault thread, and Browse lists subfolders over `path.list`.
@@ -68,6 +71,11 @@ async function until<T>(what: string, fn: () => Promise<T | false | undefined> |
 const freePort = () => new Promise<number>((resolve) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as net.AddressInfo).port; s.close(() => resolve(p)); }); });
 const tokens = (n: number, size = 0) => Array.from({ length: n }, (_, i) => { const b = `t${i}:`; return size > b.length ? b.padEnd(size, 'x') : b; }).join('');
 
+const run = (cmd: string, args: string[], cwd: string) => new Promise<void>((resolve, reject) => {
+  const p = spawn(cmd, args, { cwd, stdio: 'ignore' });
+  p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} ${args.join(' ')} exited ${code}`))));
+});
+
 async function main(): Promise<void> {
   for (const f of ['dist/main.js', 'dist/manifest.json', 'dist/styles.css', 'dist/agent-threads.cjs']) {
     if (!existsSync(path.join(repo, f))) throw new Error(`missing ${f}; run npm run build && npm run build:daemon`);
@@ -82,6 +90,7 @@ async function main(): Promise<void> {
   const plugin = path.join(vault, '.geode/plugins', PLUGIN_ID);
   // The "remote" vault mirror the daemon is allowed to work in, and the matching local vault folder.
   const remoteVault = path.join(base, 'remote-vault');
+  const remoteRepo = path.join(remoteVault, 'repo'); // a git repo on the "daemon machine" for the worktree check
   await Promise.all([fs.mkdir(daemonDir), fs.mkdir(userData), fs.mkdir(plugin, { recursive: true }),
     fs.mkdir(path.join(remoteVault, 'Projects/Alpha'), { recursive: true }), fs.mkdir(path.join(remoteVault, '.obsidian'), { recursive: true }), fs.mkdir(path.join(vault, 'Projects/Alpha'), { recursive: true })]);
 
@@ -91,7 +100,7 @@ async function main(): Promise<void> {
   try {
     // ── daemon ──────────────────────────────────────────────────────────────
     const daemonPort = await freePort();
-    daemon = spawn(process.execPath, [path.join(repo, 'dist/agent-threads.cjs'), 'serve', '--fake-harness', '--data-dir', daemonDir, '--port', String(daemonPort), '--listen', '127.0.0.1', '--workspace', remoteVault, '--workspace', '/srv/workspaces'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    daemon = spawn(process.execPath, [path.join(repo, 'dist/agent-threads.cjs'), 'serve', '--fake-harness', '--data-dir', daemonDir, '--port', String(daemonPort), '--listen', '127.0.0.1', '--workspace', remoteVault, '--workspace', '/srv/workspaces'], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AGENT_THREADS_HOST_TOOL_GRACE_SEC: '2' } });
     daemon.stdout!.on('data', (d) => process.env.E2E_VERBOSE && process.stdout.write(`[daemon] ${d}`));
     daemon.stderr!.on('data', (d) => process.stderr.write(`[daemon:err] ${d}`));
     await until('daemon health', async () => fetch(`http://127.0.0.1:${daemonPort}/healthz`).then((r) => r.ok).catch(() => false), 15000);
@@ -116,6 +125,11 @@ async function main(): Promise<void> {
     }));
     await fs.writeFile(path.join(vault, '.geode/plugins.json'), JSON.stringify([PLUGIN_ID]));
     await fs.writeFile(path.join(vault, 'Welcome.md'), '# e2e vault\n');
+    await fs.writeFile(path.join(vault, 'Projects/Alpha/Findings.md'), '# Findings\nThe zebrafish experiment finished on Tuesday.\n');
+    await fs.mkdir(remoteRepo, { recursive: true });
+    for (const args of [['init', '-q', '-b', 'main'], ['config', 'user.email', 'e2e@example.com'], ['config', 'user.name', 'e2e']]) await run('git', args, remoteRepo);
+    await fs.writeFile(path.join(remoteRepo, 'README.md'), 'repo\n');
+    for (const args of [['add', '.'], ['commit', '-q', '-m', 'init']]) await run('git', args, remoteRepo);
     await fs.writeFile(path.join(userData, 'geode.json'), JSON.stringify({ lastVault: vault, recentVaults: [vault] }));
 
     const launch = () => electron.launch({
@@ -285,6 +299,46 @@ async function main(): Promise<void> {
     const badRoot = await pc('/etc');
     check('path.check over the wire: mapped root allowed', okRoot.allowed === true && okRoot.exists === true && okRoot.isDirectory === true, JSON.stringify(okRoot));
     check('path.check over the wire: unrelated folder refused', badRoot.allowed === false, JSON.stringify(badRoot));
+
+    // 7. host tools (PR 7): the daemon's session calls a Geode-only tool and the answer comes from THIS vault
+    const htThreadId: string = await page.evaluate(`${P}.dispatchNewThread('/mcp claude_threads vault_search {"query":"zebrafish"}', undefined, 'e2e host tool', { remote: { daemonId: '${DAEMON_ID}', cwd: '${REMOTE_CWD}' } })`);
+    const lastAssistant = (id: string) => page.evaluate(`(() => { const m = ${P}.manager.getThread('${id}')?.messages.filter(m => m.role === 'assistant'); return m && m.length ? m[m.length - 1].content : null; })()`) as Promise<string | null>;
+    const htAnswer = await until('host tool answer', () => lastAssistant(htThreadId), 30000, 100);
+    check('host tool: vault_search ran in Geode against the real vault and the daemon session got the answer',
+      htAnswer.startsWith('mcp ok:') && htAnswer.includes('Findings.md'), htAnswer.slice(0, 160));
+    const htMeta = JSON.parse(readFileSync(path.join(daemonDir, 'sessions', `${htThreadId}.json`), 'utf8'));
+    check('host tool: the session was opened with a manifest of host-routed tools only (no worktree/VM/GitHub tools, no secrets)',
+      Array.isArray(htMeta.spec.hostTools) && htMeta.spec.hostTools.some((t: any) => t.name === 'vault_search')
+      && !htMeta.spec.hostTools.some((t: any) => ['enter_worktree', 'enter_vm', 'vm_exec', 'github_list_access', 'host_exec'].includes(t.name))
+      && !JSON.stringify(htMeta).includes(token), `${htMeta.spec.hostTools?.length} tools`);
+    check('host tool: the remote system prompt lists what runs on the user\'s computer',
+      htMeta.spec.appendSystemPrompt.includes('mcp__claude_threads__*') && htMeta.spec.appendSystemPrompt.includes('vault_search') && !htMeta.spec.appendSystemPrompt.includes('{{HOST_TOOLS}}'));
+
+    // enter_worktree runs on the DAEMON, beside its repo (not proxied to Geode)
+    const wtThreadId: string = await page.evaluate(`${P}.dispatchNewThread('/mcp claude_threads enter_worktree {"branch":"e2e/wt"}', undefined, 'e2e worktree', { remote: { daemonId: '${DAEMON_ID}', cwd: ${JSON.stringify(remoteRepo)} } })`);
+    const wtAnswer = await until('worktree answer', () => lastAssistant(wtThreadId), 30000, 100);
+    const wtResult = wtAnswer.startsWith('mcp ok: ') ? JSON.parse(wtAnswer.slice('mcp ok: '.length)) : {};
+    check('host tool: enter_worktree ran on the daemon (a worktree exists beside the repo on the daemon\'s disk)',
+      wtResult.success === true && existsSync(path.join(wtResult.worktreePath ?? '/nonexistent', 'README.md')) && wtResult.worktreePath.startsWith(path.join(await fs.realpath(remoteVault), '.worktrees')), wtAnswer.slice(0, 160));
+    await until('thread cwd mirrors the worktree', () => page.evaluate(`${P}.manager.getThread('${wtThreadId}').remote.remoteCwd === ${JSON.stringify(wtResult.worktreePath ?? '')}`), 10000, 100);
+    check('host tool: Geode mirrored the new working folder from the daemon', true);
+
+    // detach: Geode quits right after sending; the call fails after the (2 s) grace; reopening shows the notice
+    const dtThreadId: string = await page.evaluate(`${P}.dispatchNewThread('/mcp delay=1500 claude_threads vault_search {"query":"zebrafish"}', undefined, 'e2e detach', { remote: { daemonId: '${DAEMON_ID}', cwd: '${REMOTE_CWD}' } })`);
+    await until('detach turn pending persisted', () => dataJson().threads?.find((t: any) => t.id === dtThreadId)?.remote?.turnPending === true, 10000, 50);
+    await app!.close();
+    app = undefined;
+    const dtJournal = path.join(daemonDir, 'journal', `${dtThreadId}.ndjson`);
+    await until('daemon to journal tool.unavailable', () => existsSync(dtJournal) && readFileSync(dtJournal, 'utf8').includes('"tool.unavailable"'), 30000, 200);
+    check('detached: the daemon failed the call after the grace period instead of hanging the turn', readFileSync(dtJournal, 'utf8').includes('"reason":"detached"'));
+    page = await bootPage();
+    const notice = await until('notice row after reopen', async () => {
+      const rows: string[] = await page.evaluate(`${P}.manager.getThread('${dtThreadId}')?.messages.filter(m => m.role === 'notice').map(m => m.content) ?? []`);
+      return rows.find((r) => r.includes('Host tools unavailable')) ?? false;
+    }, 30000, 100);
+    check('detached: an inline "host tools unavailable" notice appears in the transcript after reconnecting', true, notice.slice(0, 120));
+    const dtAnswer = await until('detached answer', () => lastAssistant(dtThreadId), 30000, 100);
+    check('detached: the model was told, in readable words, that Geode was not connected', dtAnswer.includes("The user's Geode is not connected"), dtAnswer.slice(0, 120));
 
     // pill when the daemon becomes unreachable
     await proxy.close();

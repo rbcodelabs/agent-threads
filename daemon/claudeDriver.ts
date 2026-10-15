@@ -28,6 +28,7 @@ import {
   type WireImage,
 } from '../src/protocol';
 import type { PluginSettings, Thread } from '../src/types';
+import { buildHostServers, type HostServers } from './hostServers';
 import type { DriverContext, DriverFactory, RequestKind, SessionDriver } from './sessionDriver';
 
 export interface ClaudeDriverDeps {
@@ -53,7 +54,7 @@ export interface ClaudeDriverDeps {
  */
 export function specToSessionOptions(
   spec: RemoteSessionSpec,
-  parts: { resume?: string; callbacks: SessionCallbacks; secretEnv?: Record<string, string> },
+  parts: { resume?: string; callbacks: SessionCallbacks; secretEnv?: Record<string, string>; hostServers?: HostServers['servers'] },
 ): HarnessSessionOptions {
   const claude: ClaudeHarnessOptions = {};
   if (spec.disallowedTools?.length) claude.disallowedTools = spec.disallowedTools;
@@ -68,13 +69,15 @@ export function specToSessionOptions(
       ...(so.agents && Object.keys(so.agents).length ? { agents: so.agents as never } : {}),
     };
   }
-  if (spec.mcpServers && Object.keys(spec.mcpServers).length) {
-    claude.mcpServers = Object.fromEntries(
-      Object.entries(spec.mcpServers).map(([name, s]) => [
-        name,
-        { type: s.type, url: s.url, ...(s.headers ? { headers: s.headers } : {}) },
-      ]),
-    ) as never;
+  // The daemon's own servers win: a client-supplied http server must not stand in for `claude_threads` (whose
+  // tools the client treats as first-party) or for any server it proxies.
+  const own = parts.hostServers ?? {};
+  const passthrough = Object.entries(spec.mcpServers ?? {}).filter(([name]) => !(name in own) && name !== 'claude_threads' && name !== 'obsidian');
+  if (passthrough.length || Object.keys(own).length) {
+    claude.mcpServers = {
+      ...Object.fromEntries(passthrough.map(([name, s]) => [name, { type: s.type, url: s.url, ...(s.headers ? { headers: s.headers } : {}) }])),
+      ...own,
+    } as never;
   }
   return {
     cwd: spec.cwd,
@@ -132,6 +135,9 @@ export class ClaudeSessionDriver implements SessionDriver {
   private stateScheduled = false;
   private lastStateKey = '';
   private native: string | undefined;
+  private readonly hostServers: HostServers;
+  /** A worktree tool moved the cwd: the native session belongs to the old directory and must not be remembered. */
+  private cwdMoved = false;
   private _lastActivityAt: number;
 
   constructor(
@@ -142,11 +148,13 @@ export class ClaudeSessionDriver implements SessionDriver {
     this._lastActivityAt = this.now();
     this.native = ctx.resume;
     this.harness = deps.createHarness(ctx.spec);
+    this.hostServers = buildHostServers({ ...ctx, onCwdChanged: (cwd, origin) => { this.cwdMoved = true; ctx.onCwdChanged?.(cwd, origin); } });
     this.emitState();
     const options = specToSessionOptions(ctx.spec, {
       resume: ctx.resume,
       callbacks: this.buildCallbacks(),
       secretEnv: deps.secretEnv,
+      hostServers: this.hostServers.servers,
     });
     this.ready = this.harness.start(options).catch((err: unknown) => {
       this.emit({ name: 'onError', args: [toWireArg(err instanceof Error ? err : new Error(String(err)))] } as WireEvent);
@@ -181,11 +189,13 @@ export class ClaudeSessionDriver implements SessionDriver {
     const args = {
       turnInFlight: this.turnInFlight,
       hasPendingPermission: this.hasPendingPermission,
-      hostAttached: false,
+      hostAttached: this.ctx.hostTools?.attached() ?? false,
       canIdleReap: this.canIdleReap(),
       cwd: this.cwd,
     };
-    const key = JSON.stringify(args);
+    // `hostAttached` rides along but never triggers an event by itself: a client attaching between turns must not
+    // add journal entries after the transcript was saved (the client's ack would then lag its cursor).
+    const key = JSON.stringify({ ...args, hostAttached: undefined });
     if (key === this.lastStateKey) return;
     this.lastStateKey = key;
     this.emit({ name: 'session.state', args });
@@ -202,7 +212,7 @@ export class ClaudeSessionDriver implements SessionDriver {
   }
 
   private setNative(id: unknown): void {
-    if (typeof id !== 'string' || !id || id === this.native) return;
+    if (typeof id !== 'string' || !id || id === this.native || this.cwdMoved) return;
     this.native = id;
     this.ctx.onNativeSessionId(id);
   }
@@ -387,6 +397,7 @@ export class ClaudeSessionDriver implements SessionDriver {
   close(): void {
     if (this.closed) return;
     this.cancelAllRequests();
+    this.hostServers.dispose();
     this.closed = true;
     try { this.harness.close(); } catch (err) { console.error(`[daemon] harness close failed for ${this.ctx.threadId}:`, err); }
   }

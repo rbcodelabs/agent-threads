@@ -292,6 +292,24 @@ export interface RemoteDaemonConfig {
    * defaults to the same relative folder under `remoteRoot`.
    */
   vaultMapping?: RemoteVaultMapping;
+  /**
+   * What this daemon may do on THIS computer (vault, workspace, threads, Google, ... tools; design 3.3).
+   * Absent = the defaults: tools on, every `host` route of `toolRouting.ts`, no MCP allowlist.
+   */
+  hostTools?: RemoteHostToolsSettings;
+}
+
+/** Per-daemon choices for tools that run on this computer on a remote thread's behalf. */
+export interface RemoteHostToolsSettings {
+  /** False turns every host tool off for this daemon (its threads keep only the daemon's own tools). Default true. */
+  enabled?: boolean;
+  /** Switch a domain (`vault`, `workspace`, `threads`, `schedule`, `skills`, `misc`, `browser`, `mcp`) or one tool off. */
+  routes?: Record<string, 'host' | 'absent'>;
+  /**
+   * External MCP servers (Settings, MCP) that may be sent to this daemon by name. Unset: servers without headers
+   * that the daemon can reach pass through. Set: only these.
+   */
+  mcpAllowlist?: string[];
 }
 
 /** Which folder on a daemon's machine mirrors the vault (see `src/remote/vaultMapping.ts`). */

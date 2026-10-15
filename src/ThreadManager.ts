@@ -6,6 +6,9 @@ import { createHarnessSession } from './HarnessFactory';
 import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
 import type { RemoteSessionDeps } from './remote/RemoteHarnessSession';
 import { buildRemoteEnvironmentPrompt } from './remote/sessionSpec';
+import type { RemoteHostTools } from './remote/hostTools';
+import { HostToolSlots } from './remote/hostToolExecutor';
+import { describeDroppedMcp, partitionExternalMcpServers } from './remote/mcpPartition';
 import { resolveCodexPermissions, serializableMcpServers, type HarnessContextUsage, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
 import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
 import { NULL_ATTACHMENT_STORE, type AttachmentStore } from './host/AttachmentStore';
@@ -323,6 +326,15 @@ export class ThreadManager {
    * to start with a clear error instead of silently running locally.
    */
   remoteDaemons: RemoteDaemonResolver | undefined = undefined;
+  /**
+   * Builds the host tools (vault, workspace, threads, Google, ...) a remote thread's daemon may call back into,
+   * bound to this thread. Set by the plugin; absent on hosts that cannot serve them.
+   */
+  remoteHostToolsFactory: ((threadId: string, thread: Thread) => RemoteHostTools | undefined) | undefined = undefined;
+  /** Calls in flight across every remote thread (shared cap, see HostToolExecutor). */
+  private readonly hostToolSlots = new HostToolSlots();
+  /** Last dropped-MCP notice shown per thread, so it appears again only when the set changes. */
+  private readonly remoteMcpNoticeSig = new Map<string, string>();
   /**
    * When set, called before each session run to resolve secret env var values from
    * the OS keychain. Returns a plain key-value map that is merged into the session
@@ -995,11 +1007,24 @@ export class ThreadManager {
     return resumed;
   }
 
-  private remoteHooks(thread: Thread): Pick<RemoteSessionDeps, 'onPendingChanged' | 'runAtTime'> | undefined {
+  private remoteHooks(thread: Thread): Pick<RemoteSessionDeps, 'onPendingChanged' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName'> | undefined {
     if (!thread.remote) return undefined;
+    const enabled = this.remoteDaemons?.hostToolsOf?.(thread.remote.daemonId)?.enabled !== false;
+    let hostTools: RemoteHostTools | undefined;
+    try {
+      hostTools = enabled ? this.remoteHostToolsFactory?.(thread.id, thread) : undefined;
+    } catch (err) {
+      console.warn(`[ClaudeThreads] host tools unavailable for "${thread.title}":`, err);
+    }
     return {
       onPendingChanged: () => this.emit(thread.id, { type: 'remote_pending_changed' }),
       runAtTime: (ts, fn) => this.runAtTime(ts, fn),
+      ...(hostTools ? { hostTools } : {}),
+      hostToolSlots: this.hostToolSlots,
+      hostName: this.hostName,
+      onNotice: (status, text) => this.addNoticeMessage(thread.id, status, text),
+      // A worktree tool moved the session on the daemon: mirror the folder (same bookkeeping as a local cwd change).
+      onCwdChanged: (cwd, origin) => this.setThreadCwd(thread.id, cwd, origin),
     };
   }
 
@@ -2682,6 +2707,7 @@ export class ThreadManager {
     const project = thread.projectId ? this.getProject(thread.projectId) : undefined;
     const daemonName = this.remoteDaemons?.nameOf(remote.daemonId) ?? remote.daemonId;
     const vaultMapping = this.remoteDaemons?.vaultMappingOf?.(remote.daemonId);
+    const hostToolsEnabled = !!this.remoteHostToolsFactory && this.remoteDaemons?.hostToolsOf?.(remote.daemonId)?.enabled !== false;
     const goalContext = thread.goal
       ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
         'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
@@ -2695,11 +2721,21 @@ export class ThreadManager {
         vaultMapping
           ? { mapping: vaultMapping, vaultFolder: this.settings.vaultFolder, saveThreadsToVault: this.settings.saveThreadsToVault }
           : undefined,
+        { hostTools: hostToolsEnabled },
       ),
       project?.description?.trim(),
       goalContext,
     ].filter(Boolean).join('\n\n');
     const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
+    // External MCP servers: only what a daemon can use (http/sse it can reach, no secrets) goes along; the rest is
+    // dropped and the user is told once per change.
+    const hostToolSettings = this.remoteDaemons?.hostToolsOf?.(remote.daemonId);
+    const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist);
+    const droppedNote = describeDroppedMcp(partition.dropped, daemonName);
+    if ((this.remoteMcpNoticeSig.get(threadId) ?? '') !== (droppedNote ?? '')) {
+      this.remoteMcpNoticeSig.set(threadId, droppedNote ?? '');
+      if (droppedNote) this.addNoticeMessage(threadId, 'stopped', droppedNote);
+    }
     return {
       cwd: remote.remoteCwd,
       permissionMode: thread.permissionMode ?? this.settings.permissionMode,
@@ -2718,6 +2754,7 @@ export class ThreadManager {
       claude: {
         disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
         sessionOptions: this.buildSessionOptions(thread, agentProfiles),
+        ...(Object.keys(partition.passthrough).length ? { remoteMcpServers: partition.passthrough } : {}),
       },
     };
   }

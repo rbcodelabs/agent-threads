@@ -31,6 +31,10 @@ export const ENTRY_FILES = [
   'src/HarnessFactory.ts',
   // Daemon wire protocol (design section 3): pure TS, must stay Node-safe.
   'src/protocol/index.ts',
+  // Host-tool routing and the worktree tools the daemon runs locally (PR 7): pure / Node-only.
+  'src/toolRouting.ts',
+  'src/tools/worktree.ts',
+  'src/tools/cwdTracker.ts',
 ];
 
 /**

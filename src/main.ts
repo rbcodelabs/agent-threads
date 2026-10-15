@@ -26,6 +26,8 @@ import type { VaultPersistence } from './VaultPersistence';
 import type { InProcessSummarizer } from './InProcessSummarizer';
 import type { WakeLockService } from './WakeLockService';
 import type { createClaudeThreadsMcpServers, CronCreateParams, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
+import { createLoopbackMcpSource } from './remote/hostMcpClient';
+import { RemoteHostTools } from './remote/hostTools';
 import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { GithubCredentialBroker, resolveGithubBridge } from './githubCredentials';
@@ -1030,6 +1032,22 @@ export default class ClaudeThreadsPlugin extends Plugin {
         console.error('[ClaudeThreads] Failed to create built-in MCP servers:', err);
         return {} as Record<string, McpServerConfig>;
       }
+    };
+    // Tools a remote (daemon-hosted) thread may call back into on this computer: the thread's own built-in
+    // vault/workspace/threads/... handlers plus the Google and OAuth brokers, filtered by toolRouting.ts and the
+    // daemon's own settings. Only tool names, schemas and results ever leave; the broker URLs and their capability
+    // headers stay in the sources created here.
+    this.manager.remoteHostToolsFactory = (threadId: string, thread: Thread) => {
+      const daemonSettings = thread.remote ? this.settings.remoteDaemons?.find(d => d.id === thread.remote!.daemonId)?.hostTools : undefined;
+      const builtIn = buildBuiltInMcpServers(threadId, thread.cwd).claude_threads.harnessTools;
+      const brokers: Record<string, { type?: string; url?: string; headers?: Record<string, string> }> = {
+        ...(this.googleWorkspaceMcp?.serversForThread(threadId) ?? {}),
+        ...(this.oauthMcpRegistry?.serversForThread(threadId) ?? {}),
+      } as never;
+      const mcpSources = Object.fromEntries(Object.entries(brokers)
+        .filter(([, c]) => c.type === 'http' && typeof c.url === 'string')
+        .map(([name, c]) => [name, createLoopbackMcpSource(c.url!, c.headers ?? {})]));
+      return new RemoteHostTools({ builtIn, mcpSources, overrides: daemonSettings?.routes, log: m => debugLog(m) });
     };
     // Host-loopback OAuth/Google brokers cannot be reached from Apple's VM.
     // Overlay plugin-owned brokers with in-process SDK bridges. Built-ins use

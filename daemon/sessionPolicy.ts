@@ -7,7 +7,7 @@
  * the operator lists the variable names a client may set (`allowedClientEnv`).
  */
 import { realpathSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { RemoteSessionSpec } from '../src/protocol';
 
 export interface SessionPolicy {
@@ -38,6 +38,24 @@ export class PolicyError extends Error {
 
 export function realOrResolved(p: string): string {
   try { return realpathSync(p); } catch { return resolve(p); }
+}
+
+/**
+ * Like `realpath`, for a path that may not exist yet (a worktree about to be created): the nearest existing ancestor
+ * is resolved through symlinks and the missing tail is appended. Without this, a workspace reached through a symlink
+ * (`/var` -> `/private/var`) would never contain a path that does not exist yet.
+ */
+export function realpathLoose(p: string): string {
+  const abs = resolve(p);
+  const tail: string[] = [];
+  let cur = abs;
+  for (;;) {
+    try { return join(realpathSync(cur), ...tail.reverse()); } catch { /* keep climbing */ }
+    const parent = dirname(cur);
+    if (parent === cur) return abs;
+    tail.push(basename(cur));
+    cur = parent;
+  }
 }
 
 export function isWithin(root: string, target: string): boolean {
@@ -120,8 +138,9 @@ export function describePathAccess(path: string, policy: SessionPolicy): PathAcc
   let real: string;
   try { real = realpathSync(resolved); } catch {
     // Missing: it may still be inside a workspace (a useful answer), judged lexically.
-    const inside = roots.some((r) => isWithin(r, resolved));
-    return inside ? { allowed: true, exists: false, isDirectory: false, readOnly: isReadOnlyPath(resolved, policy) } : none;
+    const loose = realpathLoose(resolved);
+    const inside = roots.some((r) => isWithin(r, loose));
+    return inside ? { allowed: true, exists: false, isDirectory: false, readOnly: isReadOnlyPath(loose, policy) } : none;
   }
   if (!roots.some((r) => isWithin(r, real))) return none;
   let isDirectory = false;
@@ -217,4 +236,11 @@ export function validateSpec(spec: RemoteSessionSpec, policy: SessionPolicy): Re
 export function specIsReadOnly(spec: Pick<RemoteSessionSpec, 'cwd' | 'additionalDirectories'>, policy: SessionPolicy): boolean {
   if (!(policy.readOnlyWorkspaces?.length)) return false;
   return [spec.cwd, ...(spec.additionalDirectories ?? [])].some((d) => isReadOnlyPath(realOrResolved(d), policy));
+}
+
+/** Throws when `path` is not inside a configured workspace (used for cwd changes made by local tools). */
+export function assertCwdAllowed(path: string, policy: SessionPolicy): void {
+  if (!describePathAccess(path, policy).allowed) {
+    throw new Error(`Working directory is outside the folders this daemon allows sessions in: ${path}`);
+  }
 }

@@ -11,6 +11,7 @@
  * silently mis-parsed.
  */
 import { CLIENT_COMMAND_TYPES, validateWireImages, type ClientCommandType } from './commands';
+import { validateManifestServers, validateToolResultPayload } from './hostTools';
 import { validateSpecShape } from './spec';
 import {
   PROTOCOL_VERSION,
@@ -171,6 +172,10 @@ function validateDeep(type: string, obj: Record<string, unknown>): string | null
       return validateWireImages(obj.images);
     case 'session.open':
       return validateSpecShape(obj.spec);
+    case 'tool.manifest':
+      return validateManifestServers(obj.servers);
+    case 'tool.result':
+      return validateToolResultPayload({ text: obj.text, content: obj.content });
     default:
       return null;
   }
