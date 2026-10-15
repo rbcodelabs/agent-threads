@@ -61,19 +61,23 @@ COPY --from=builder /src/bin/agent-threads /opt/agent-threads/bin/agent-threads
 RUN chmod 0755 /opt/agent-threads/bin/agent-threads \
  && ln -s /opt/agent-threads/bin/agent-threads /usr/local/bin/agent-threads
 
+# The port the daemon listens on inside the container. The daemon reads AGENT_THREADS_PORT itself, and the
+# health check below follows whatever the container is actually run with (compose passes the same value through).
+ARG AGENT_THREADS_PORT=7433
 ENV DATA_DIR=/var/lib/agent-threads \
     HOME=/var/lib/agent-threads/home \
     PATH="/var/lib/agent-threads/home/.local/bin:${PATH}" \
-    GIT_TERMINAL_PROMPT=0
+    GIT_TERMINAL_PROMPT=0 \
+    AGENT_THREADS_PORT=${AGENT_THREADS_PORT}
 
 USER agentthreads
 WORKDIR /srv/workspaces
 VOLUME ["/var/lib/agent-threads", "/srv/workspaces"]
-EXPOSE 7433
+EXPOSE ${AGENT_THREADS_PORT}
 
-# /healthz is unauthenticated and answers {"ok":true,"protocol":1}.
+# /healthz is unauthenticated and answers {"ok":true,"protocol":1}. Shell form on purpose: the port is read at run time.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:7433/healthz || exit 1
+    CMD curl -fsS "http://127.0.0.1:${AGENT_THREADS_PORT:-7433}/healthz" || exit 1
 
 ENTRYPOINT ["agent-threads", "serve"]
 # Inside a container the daemon must bind all interfaces for the published port to reach it. Safe only
@@ -81,7 +85,12 @@ ENTRYPOINT ["agent-threads", "serve"]
 CMD ["--listen", "0.0.0.0", "--i-know-this-is-open", "--workspace", "/srv/workspaces"]
 
 FROM ${BASE_IMAGE} AS with-claude
+USER root
+# The Claude CLI goes OUTSIDE every VOLUME path. Under /var/lib/agent-threads/home it would be copied into a named
+# volume once and then frozen there across image upgrades (or hidden entirely by a bind mount). The login and the
+# sessions still live in the persisted HOME; only the program itself is part of the image.
+RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/claude
 USER agentthreads
-# Claude Code, native installer (installs to ~/.local/bin/claude, which is on PATH above). Run as the
-# daemon's own user so its login and sessions live in the persisted HOME.
-RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN curl -fsSL https://claude.ai/install.sh | HOME=/opt/claude bash
+ENV PATH="/opt/claude/.local/bin:${PATH}" \
+    DISABLE_AUTOUPDATER=1

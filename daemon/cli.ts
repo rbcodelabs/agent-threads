@@ -36,7 +36,9 @@ Usage:
 
 Connecting (list, attach, run):
   --url <u>              daemon address (env AGENT_THREADS_URL; default ws://127.0.0.1:7433, or the port in the local config.json)
-  --token <t>            access token (env AGENT_THREADS_TOKEN; default: <data-dir>/cli-token, see "token create --save")
+  --token <t>            access token (env AGENT_THREADS_TOKEN; default: <data-dir>/cli-token, see "token create --save").
+                         A token on the command line is visible to other users in "ps" and stays in shell history; prefer the
+                         environment variable or the saved file.
   --data-dir <dir>       where to look for the local token and config
   --connect-timeout <s>  seconds to wait for the daemon (default 10)
   --json                 NDJSON on stdout, one object per line (stable; see docs/remote-daemon.md)
@@ -51,7 +53,8 @@ run options:
   --model <m>            model for the session
   --thread <id>          continue an existing thread instead of starting a new one
   --detach               send the prompt, print the thread id, exit; the turn keeps running (attach to watch it)
-  --unattended           nobody to answer: fail (exit 7) on any permission/question request
+  --unattended           nobody to answer: dontAsk mode DENIES tools that are not pre-approved; a request that
+                         is raised anyway (explicit --permission-mode) is refused and the run exits 7
   Exit codes: 0 done, 1 error, 2 usage, 3 unreachable, 4 unauthorized, 5 incompatible protocol, 6 interrupted, 7 needed input, 130 Ctrl-C.
   Use "-" as the prompt to read it from stdin.
 
@@ -232,8 +235,8 @@ export async function runCli(argv: string[], io: Io = consoleIo, runtime?: Parti
     if (dataDir) flags.dataDir = dataDir;
     const listen = one(p, 'listen');
     if (listen !== undefined) flags.listen = listen;
-    const port = one(p, 'port');
-    if (port !== undefined) flags.port = Number(port);
+    const port = portFlag(p);
+    if (port !== undefined) flags.port = port;
     const origins = p.flags.get('allow-origin');
     if (origins) flags.allowedOrigins = origins;
     if (p.bools.has('i-know-this-is-open')) flags.acknowledgeOpen = true;
@@ -296,6 +299,15 @@ export async function runCli(argv: string[], io: Io = consoleIo, runtime?: Parti
   return 2;
 }
 
+/** `--port`, validated: a typo must be a usage error, not NaN quietly becoming "the default" or a URL with `NaN` in it. */
+export function portFlag(p: Parsed): number | undefined {
+  const raw = one(p, 'port');
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!/^\d+$/.test(raw.trim()) || !Number.isInteger(n) || n < 0 || n > 65535) throw new CliError(`--port must be a whole number from 0 to 65535 (got "${raw}")`, EXIT.USAGE);
+  return n;
+}
+
 const connFlags = (p: Parsed): { url?: string; token?: string; dataDir?: string; connectTimeoutMs?: number } => {
   const timeout = one(p, 'connect-timeout');
   if (timeout !== undefined && !(Number(timeout) > 0)) throw new CliError('--connect-timeout must be a number of seconds', EXIT.USAGE);
@@ -349,12 +361,12 @@ async function runClientCommand(cmd: string, p: Parsed, io: Io, raw: RawIo, rt: 
     }
     case 'doctor': {
       const probes = realProbes(rt.env);
-      const port = one(p, 'port');
+      const port = portFlag(p);
       const target = resolveDoctorTarget({
         ...(one(p, 'data-dir') ? { dataDir: one(p, 'data-dir') } : {}),
         ...(one(p, 'url') ? { url: one(p, 'url') } : {}),
         ...(one(p, 'listen') ? { listen: one(p, 'listen') } : {}),
-        ...(port !== undefined ? { port: Number(port) } : {}),
+        ...(port !== undefined ? { port } : {}),
         ...(p.flags.get('workspace') ? { workspaces: p.flags.get('workspace') } : {}),
         ...(one(p, 'claude-binary') ? { claudeBinaryPath: one(p, 'claude-binary') } : {}),
       }, probes);
@@ -370,11 +382,11 @@ async function runClientCommand(cmd: string, p: Parsed, io: Io, raw: RawIo, rt: 
     }
     case 'install': {
       const bundle = typeof __filename === 'string' && __filename.endsWith('.cjs') ? __filename : join(process.cwd(), 'dist/agent-threads.cjs');
-      const port = one(p, 'port');
+      const port = portFlag(p);
       runInstall({
         dryRun: p.bools.has('dry-run'), noStart: p.bools.has('no-start'), force: p.bools.has('force'),
         ...(one(p, 'workspace') ? { workspace: one(p, 'workspace') } : {}),
-        ...(port !== undefined ? { port: Number(port) } : {}),
+        ...(port !== undefined ? { port } : {}),
         node: process.execPath, bundle,
       }, realInstallSys(), (l) => io.out(l));
       return EXIT.OK;

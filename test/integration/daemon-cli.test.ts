@@ -83,10 +83,10 @@ describe('list', () => {
     expect(empty).toMatchObject({ code: 0, out: '(no threads)\n' });
     await cli(['run', '--cwd', '/srv/workspaces/x', '--thread', 'demo-1', 'hi']);
     const text = await cli(['list']);
-    expect(text.out).toMatch(/^THREAD\s+STATE\s+SEQ\s+CWD\ndemo-1\s+closed\s+\d+\s+\/srv\/workspaces\/x\n$/);
+    expect(text.out).toMatch(/^THREAD\s+STATE\s+SEQ\s+CWD\ndemo-1\s+idle\s+\d+\s+\/srv\/workspaces\/x\n$/);
     const json = await cli(['list', '--json']);
     const rec = JSON.parse(json.out.trim());
-    expect(rec).toMatchObject({ threadId: 'demo-1', state: 'closed', open: false, cwd: '/srv/workspaces/x' });
+    expect(rec).toMatchObject({ threadId: 'demo-1', state: 'idle', open: true, cwd: '/srv/workspaces/x' });
     expect(Object.keys(rec)).toEqual(['threadId', 'state', 'lastSeq', 'open', 'turnInFlight', 'hasPendingPermission', 'cwd', 'nativeSessionId', 'lastActivityAt']);
   });
 
@@ -151,7 +151,7 @@ describe('run', () => {
     expect(r.out).toContain('"allow":false');
   });
 
-  it('--unattended defaults to dontAsk and fails on a request', async () => {
+  it('--unattended defaults to dontAsk; a request that is raised anyway is refused and ends the run (exit 7)', async () => {
     const r = await cli(['run', '--unattended', '--cwd', '/srv/workspaces/x', '/question']);
     expect(r.code).toBe(7);
     expect(r.err).toContain('permission mode dontAsk');
@@ -202,6 +202,44 @@ describe('run', () => {
     expect(r.code).toBe(130);
     expect(r.out).toContain('[interrupted]');
   });
+});
+
+describe('run and the thread it did not make', () => {
+  it('closes the ephemeral session it created, but leaves a --thread session open', async () => {
+    const live = (id: string): boolean => td.daemon.threads.list().some((t) => t.threadId === id && t.open);
+    const ephemeral = await cli(['run', '--cwd', '/srv/workspaces/x', '--json', 'hello']);
+    expect(ephemeral.code).toBe(0);
+    const started = ephemeral.out.split('\n').map((l) => { try { return JSON.parse(l) as { kind?: string; threadId?: string }; } catch { return {}; } }).find((o) => o.kind === 'started');
+    await until(() => !live(started!.threadId!));
+    const named = await cli(['run', '--cwd', '/srv/workspaces/x', '--thread', 'keep-me', 'hello']);
+    expect(named.code).toBe(0);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(live('keep-me')).toBe(true);
+  });
+});
+
+describe('observer against a daemon that predates the observe flag', () => {
+  it('warns, gives the seat back and exits 5 instead of locking the real client out', async () => {
+    // An older daemon ignores `observe` and hands the seat out: simulate it by stripping the flag on the way out.
+    const stripObserve = (url: string) => {
+      const ws = nodeSocketFactory(url);
+      const send = ws.send.bind(ws);
+      ws.send = (data: string) => send(data.replace(/,?"observe":true/, ''));
+      return ws;
+    };
+    const g = await geode();
+    await g.command('session.open', { threadId: 'old-1', spec: SPEC });
+    await g.command('session.detach', { threadId: 'old-1' }); // the seat is free; the real client is about to come back
+    const r = await cli(['attach', 'old-1', '--until-idle'], { createSocket: stripObserve });
+    expect(r.code).toBe(5);
+    expect(r.err).toMatch(/older than the CLI/);
+    expect(r.err).toMatch(/Detached again/);
+    // The seat is free again: Geode can take it back.
+    let controller: boolean | undefined;
+    g.subscribe('old-1', { onEvent: () => {}, onAttached: (i) => { controller = i.controller; } }, 0);
+    await until(() => controller !== undefined);
+    expect(controller).toBe(true);
+  }, 15000);
 });
 
 describe('detach + attach', () => {

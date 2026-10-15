@@ -1,6 +1,6 @@
 {"type":"cli","kind":"started","threadId":"golden-1","cwd":"/srv/workspaces/x","permissionMode":"default","detach":false}
 {"type":"cli","kind":"attached","threadId":"golden-1","controller":true,"lastSeq":1,"lowWater":0,"resync":false,"epoch":"EPOCH"}
-{"v":1,"ch":"t:golden-1","seq":2,"ts":0,"type":"event","name":"session.state","args":{"turnInFlight":true,"hasPendingPermission":false,"hostAttached":true,"canIdleReap":false,"cwd":"/srv/workspaces/x"}}
+{"v":1,"ch":"t:golden-1","seq":2,"ts":0,"type":"event","name":"session.state","args":{"turnInFlight":true,"hasPendingPermission":false,"hostAttached":false,"canIdleReap":false,"cwd":"/srv/workspaces/x"}}
 {"v":1,"ch":"t:golden-1","seq":3,"ts":0,"type":"event","name":"onToken","args":["t0:"]}
 {"v":1,"ch":"t:golden-1","seq":4,"ts":0,"type":"event","name":"onToken","args":["t1:"]}
 {"v":1,"ch":"t:golden-1","seq":5,"ts":0,"type":"event","name":"onToken","args":["t2:"]}

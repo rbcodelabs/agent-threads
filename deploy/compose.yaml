@@ -18,14 +18,18 @@ services:
     init: true
     restart: unless-stopped
     # Loopback only: reach it from other machines through `tailscale serve` (wss), not by opening the port.
+    # The same value is passed into the container (env_file below), where the daemon and the health check use it.
     ports:
-      - "127.0.0.1:${AGENT_THREADS_PORT:-7433}:7433"
+      - "127.0.0.1:${AGENT_THREADS_PORT:-7433}:${AGENT_THREADS_PORT:-7433}"
     env_file:
       - path: .env
         required: false
     volumes:
       - data:/var/lib/agent-threads      # tokens, journals, raw logs, the Claude login (HOME)
       - workspaces:/srv/workspaces       # repositories and worktrees
+    # The daemon runs as a non-root user on a high port and needs no capability, so drop them all.
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
     # Bound what one runaway agent can take from the host.

@@ -4,8 +4,10 @@
  *
  *   --detach      send, release the thread, print its id and exit; the turn keeps running on the
  *                 daemon and `agent-threads attach <id>` replays everything from the start.
- *   --unattended  nobody is there to answer: defaults to the `dontAsk` permission mode and fails
- *                 (exit 7) the moment a permission/question/plan request is raised.
+ *   --unattended  nobody is there to answer: defaults to the `dontAsk` permission mode, which DENIES every tool
+ *                 that is not pre-approved (the agent is told and carries on; no request is raised). With an
+ *                 explicit --permission-mode that does raise requests, the first permission/question/plan
+ *                 request is refused and the run ends with exit 7.
  *
  * Without a terminal (and without --json) there is also nobody to ask, so a request fails the run
  * the same way instead of waiting for an hour.
@@ -143,9 +145,10 @@ export async function runRun(args: RunArgs, io: RawIo, rt: CliRuntime): Promise<
 
     const result = await follower.finished;
     if (failure) throw failure;
-    // The session is ephemeral: free its claude process. The journal stays for `attach`.
-    // (A second Ctrl-C means "leave it running", so that one is only detached from.)
-    if (result.outcome !== 'stopped') await client.command('session.close', { threadId }).catch(() => undefined);
+    // Free the claude process of a session this run made up (an ephemeral id). A session the user named with
+    // --thread is theirs to keep: it may be a conversation they are continuing, so it is left open.
+    // The journal stays for `attach` either way. (A second Ctrl-C means "leave it running".)
+    if (result.outcome !== 'stopped' && !args.thread) await client.command('session.close', { threadId }).catch(() => undefined);
     let code: number = exitForOutcome(result.outcome);
     if (result.outcome === 'interrupted' && interruptedByUser) code = EXIT.SIGINT;
     if (result.outcome === 'stopped' && interruptedByUser) code = EXIT.SIGINT;

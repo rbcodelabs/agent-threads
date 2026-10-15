@@ -188,7 +188,9 @@ export function checkClockSkew(p: Probes, health: HealthResult | null, ntp: bool
 
 /** Names only, never values. */
 export function checkCredentials(p: Probes, files: string[]): CheckResult {
-  const title = 'Claude credential';
+  // This command looks at ITS OWN environment and files. A service started by systemd or a container reads its own
+  // env file and credential, which this process cannot see; say so instead of implying it verified the service.
+  const title = 'Claude credential (as seen from this shell, not the service)';
   const env = p.env;
   if (env.CLAUDE_CODE_OAUTH_TOKEN) return { id: 'credentials', status: 'pass', title, detail: 'CLAUDE_CODE_OAUTH_TOKEN is set in this environment' };
   if (env.ANTHROPIC_API_KEY) return { id: 'credentials', status: 'pass', title, detail: 'ANTHROPIC_API_KEY is set in this environment' };
@@ -209,7 +211,7 @@ export function checkCredentials(p: Probes, files: string[]): CheckResult {
   if (p.stat(login)) return { id: 'credentials', status: 'pass', title, detail: `an existing Claude login (${login})` };
   return {
     // macOS keeps the login in the Keychain, where this cannot look; a Mac is not a daemon host, so only warn there.
-    id: 'credentials', status: p.platform === 'darwin' ? 'warn' : 'fail', title, detail: 'no Claude credential found for this user',
+    id: 'credentials', status: p.platform === 'darwin' ? 'warn' : 'fail', title, detail: 'no Claude credential found for this user in this environment',
     fix: 'as the daemon user run `claude` once and sign in, or run `claude setup-token` and put the token in the service env file (CLAUDE_CODE_OAUTH_TOKEN=...) or in the claude-token credential file',
   };
 }
@@ -494,7 +496,8 @@ export function resolveDoctorTarget(flags: DoctorFlags, p: Probes): DoctorTarget
     const raw = p.readFile(join(dataDir, 'config.json'));
     if (raw) file = JSON.parse(raw) as typeof file;
   } catch { /* an unreadable config shows up as its own finding when the daemon fails to start */ }
-  const envPort = env.AGENT_THREADS_PORT ? Number(env.AGENT_THREADS_PORT) : undefined;
+  const envPortRaw = env.AGENT_THREADS_PORT ? Number(env.AGENT_THREADS_PORT) : undefined;
+  const envPort = envPortRaw !== undefined && Number.isInteger(envPortRaw) && envPortRaw >= 0 && envPortRaw <= 65535 ? envPortRaw : undefined;
   const port = flags.port ?? envPort ?? (typeof file.port === 'number' ? file.port : DEFAULT_PORT);
   const listen = flags.listen ?? env.AGENT_THREADS_LISTEN ?? (typeof file.listen === 'string' ? file.listen : DEFAULT_LISTEN);
   const envList = (v: string | undefined): string[] | undefined => (v ? v.split(':').filter(Boolean) : undefined);

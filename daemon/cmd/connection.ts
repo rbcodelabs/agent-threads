@@ -134,6 +134,17 @@ export function httpBaseOf(wsUrl: string): string {
   return wsUrl.replace(/^ws/i, 'http').replace(/\/v1\/ws$/, '');
 }
 
+/**
+ * A ws:// address that is not this machine sends the token and every prompt in the clear. Reaching the daemon through a
+ * VPN tunnel is fine; across the internet or an untrusted network it is not. Returns the warning, or undefined.
+ */
+export function plaintextWarning(url: string): string | undefined {
+  let u: URL;
+  try { u = new URL(url); } catch { return undefined; }
+  if (u.protocol !== 'ws:' || isLoopbackUrl(url)) return undefined;
+  return `warning: ${u.host} is reached over plain ws://, so the token and everything you send are readable on the network path. Use wss:// (for example through \`tailscale serve\`), or make sure this runs inside a VPN tunnel.`;
+}
+
 /** `ws` behind the transport-agnostic `DaemonClient` seam. No `Origin` header is sent, which the daemon allows. */
 export const nodeSocketFactory: WebSocketFactory = (url) =>
   new WebSocket(url, { handshakeTimeout: 10_000, perMessageDeflate: false }) as unknown as WebSocketLike;
@@ -144,6 +155,8 @@ export interface ConnectOptions {
   /** Longest wait for the first welcome. */
   connectTimeoutMs?: number;
   createSocket?: WebSocketFactory;
+  /** Where the plain-ws:// warning goes (default: stderr). */
+  warn?: (message: string) => void;
   /** Stable id of this CLI process; the daemon keys the read-write seat on (token, instance). */
   instanceId?: string;
   log?: (message: string) => void;
@@ -163,6 +176,8 @@ export async function connectDaemon(settings: ConnectionSettings, opts: ConnectO
       EXIT.UNAUTHORIZED,
     );
   }
+  const warning = plaintextWarning(settings.url);
+  if (warning) (opts.warn ?? ((m: string) => { process.stderr.write(`[cli] ${m}\n`); }))(warning);
   const client = new DaemonClient({
     url: settings.url,
     getToken: () => settings.token,
