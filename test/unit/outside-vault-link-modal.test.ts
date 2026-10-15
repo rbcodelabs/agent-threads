@@ -21,7 +21,9 @@ describe('outsideVaultLinkPath', () => {
 function openModal() {
   const actions = { open: vi.fn(), reveal: vi.fn(), copy: vi.fn() };
   const modal = new OutsideVaultLinkModal({} as App, '/Users/me/My%20Docs/a.md#h', actions);
-  (modal as unknown as { titleEl: HTMLElement }).titleEl = document.createElement('div');
+  const titleEl = document.createElement('div') as HTMLElement & { setText: (s: string) => void };
+  titleEl.setText = (s) => { titleEl.textContent = s; };
+  (modal as unknown as { titleEl: HTMLElement }).titleEl = titleEl;
   const close = vi.spyOn(modal, 'close');
   modal.onOpen();
   const btn = (label: string) =>
