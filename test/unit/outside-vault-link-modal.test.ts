@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect, vi } from 'vitest';
 import { OutsideVaultLinkModal, outsideVaultLinkPath } from '../../src/OutsideVaultLinkModal';
 import type { App } from 'obsidian';
