@@ -99,8 +99,9 @@ describe('ThreadsView new-conversation mode', () => {
     expect(input.setContext).toHaveBeenLastCalledWith('No project', expect.any(String));
   });
 
-  it('seeds an @[[note]] mention and keeps the existing draft (Chat about this document)', async () => {
+  it('seeds an @[[note]] mention and appends to the draft already being composed (Chat about this document)', async () => {
     const { view, input } = makeView();
+    await view.startNewConversation();
     input.setValue('compare against');
 
     await view.startNewConversation({ mention: 'Weekly Review' });
