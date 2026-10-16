@@ -115,9 +115,9 @@ test.describe('new-conversation mode', () => {
   test('a malformed directive keeps the draft and creates nothing', async ({ page }) => {
     await open(page);
     const before = await threadCount(page);
-    await input(page).fill('/loop');
+    await input(page).fill('/goal');
     await input(page).press('Enter');
-    await expect(input(page)).toHaveValue('/loop');
+    await expect(input(page)).toHaveValue('/goal');
     expect(await threadCount(page)).toBe(before);
     expect((await dispatchCalls(page)).length).toBe(0);
     await expect(page.locator('[data-testid="new-conversation"]')).toBeVisible();

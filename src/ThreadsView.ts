@@ -1402,7 +1402,7 @@ export class ThreadsView extends ItemView {
       const back = empty.createEl('button', {
         cls: 'ct-new-conv-cancel',
         text: `Back to ${returnTo.title}`,
-        attr: { type: 'button', 'aria-label': `Cancel and go back to ${returnTo.title}` },
+        attr: { type: 'button' },
       });
       back.addEventListener('click', () => this.cancelNewConversation());
     }
