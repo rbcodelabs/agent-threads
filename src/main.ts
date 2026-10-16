@@ -1765,10 +1765,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.addCommand({
       id: 'new-claude-thread',
       name: 'New Claude Thread',
-      callback: async () => {
-        await this.activateAgentView();
-        this.getAgentDashboard()?.focusDispatchInput();
-      },
+      callback: () => this.openNewConversation(),
     });
 
     this.addCommand({
@@ -3771,18 +3768,28 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   /**
    * Single handler behind all three "Chat about this document" entry points:
-   * open the Agents List and seed its dispatch composer with an `@[[doc]]`
-   * mention. Submitting the composer is what creates the new thread, so the
-   * user gets to type the actual question first.
+   * open the conversation panel in new-conversation mode with an `@[[doc]]`
+   * mention seeded. Submitting the composer is what creates the new thread, so
+   * the user gets to type the actual question first.
    */
   async startDocumentChat(file: TFile): Promise<void> {
-    await this.activateAgentView();
-    const dashboard = this.getAgentDashboard();
-    if (!dashboard) {
-      new Notice('Could not open the Agents List to chat about this document.');
-      return;
+    if (!(await this.openNewConversation({ mention: file.basename }))) {
+      new Notice('Could not open the conversation panel to chat about this document.');
     }
-    dashboard.seedDocumentChat(file.basename);
+  }
+
+  /**
+   * Reveal the conversation panel in new-conversation mode (the single entry
+   * point behind the "New thread" buttons in the Agents List and Kanban board,
+   * the command palette, and "Chat about this document"). No thread exists
+   * until the first message is sent. Returns false if the panel could not open.
+   */
+  async openNewConversation(opts: { projectId?: string; draft?: string; mention?: string } = {}): Promise<boolean> {
+    await this.activateView();
+    const view = this.getView();
+    if (!view) return false;
+    await view.startNewConversation(opts);
+    return true;
   }
 
   /**
@@ -3810,7 +3817,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   getAgentDashboard(): AgentDashboard | null {
     const leaf = this.app.workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
     const view = leaf?.view;
-    if (!view || typeof (view as any).focusDispatchInput !== 'function') return null;
+    if (!view || typeof (view as any).jumpToLatestUnreviewed !== 'function') return null;
     return view as AgentDashboard;
   }
 
