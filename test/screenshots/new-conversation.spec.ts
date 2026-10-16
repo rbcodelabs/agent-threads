@@ -116,6 +116,7 @@ test.describe('new-conversation mode', () => {
     await open(page);
     const before = await threadCount(page);
     await input(page).fill('/goal');
+    await page.keyboard.press('Escape'); // dismiss the command dropdown so Enter sends
     await input(page).press('Enter');
     await expect(input(page)).toHaveValue('/goal');
     expect(await threadCount(page)).toBe(before);

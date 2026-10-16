@@ -238,7 +238,7 @@ const mockPlugin = {
       throw error;
     }
   },
-  getEffectiveCwd: () => '/Users/mock/projects/my-app',
+  getEffectiveCwd: () => settings.defaultCwd || '/Users/mock/projects/my-app',
   isConversationFirst: () => settings.threadViewPlacement === 'conversation-first',
   contextPanel: {
     openLinkText: async (href: string, sourcePath: string) => { (window as any).__contextLinkCalls.push([href, sourcePath]); },

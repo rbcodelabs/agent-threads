@@ -3381,7 +3381,8 @@ test.describe('Agent Threads UI', () => {
         await expect(newThread).toBeVisible();
         expect(await page.locator('.ct-agents-toolbar').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
         const newThreadBox = await newThread.boundingBox();
-        expect(newThreadBox!.x + newThreadBox!.width).toBeLessThanOrEqual(width);
+        const toolbarBox = await page.locator('.ct-agents-toolbar').boundingBox();
+        expect(newThreadBox!.x + newThreadBox!.width).toBeLessThanOrEqual(toolbarBox!.x + toolbarBox!.width);
         if (width === 320) await shot(page.locator('#app'), 'agent-dashboard-narrow-desktop.png');
       }
     }
