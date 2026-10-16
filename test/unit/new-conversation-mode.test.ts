@@ -267,7 +267,7 @@ describe('New thread buttons', () => {
     ['Kanban board', KanbanView],
   ] as const)('%s has a labelled New thread button that opens new-conversation mode, and no dispatch composer', async (_label, View) => {
     const p = plugin();
-    const view = new View({} as never, p as never);
+    const view = new View({ updateHeader: vi.fn() } as never, p as never);
     (view as unknown as { app: unknown }).app = p.app;
     await view.onOpen();
 

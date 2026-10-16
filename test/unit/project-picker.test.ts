@@ -90,7 +90,6 @@ describe('ProjectPicker', () => {
 
   it('Enter on No Project selects null', () => {
     const { onSelect } = open({ selectedId: 'a' });
-    key('ArrowDown');
     key('ArrowUp');
     expect(highlighted()).toBe('No Project');
     key('Enter');
@@ -139,10 +138,10 @@ describe('ProjectPicker', () => {
 
   it('keeps the filter text when the sort changes', () => {
     open({ sort: 'alphabetical' });
-    type('a');
+    type('ga');
     document.querySelector<HTMLButtonElement>('.ct-project-picker-sort-btn[title="Sort by most recently used"]')!.click();
-    expect(input().value).toBe('a');
-    expect(labels().every((l) => l === 'New Project…' || /a/i.test(l!))).toBe(true);
+    expect(input().value).toBe('ga');
+    expect(labels()).toEqual(['Gamma', 'New Project…']);
   });
 
   it('closes on an outside mousedown but not on one inside', async () => {
