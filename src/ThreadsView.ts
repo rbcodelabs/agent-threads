@@ -5824,7 +5824,15 @@ export class ThreadsView extends ItemView {
 
       case 'sandbox_setup_offer': {
         // The thread's first session is parked until the user answers: the
-        // sandbox isn't set up. (The card is inline, not modal.)
+        // sandbox isn't set up. (The card is inline, not modal.) Nothing is running
+        // yet: drop the working placeholder and Stop state streaming_start set up;
+        // the manager re-emits streaming_start once the session is released.
+        if (this.streamingEl) {
+          this.streamingEl.remove();
+          this.streamingEl = null;
+        }
+        this.clearStreamingState();
+        this.setRunningState(false);
         if (this.activeThreadId) this.renderSandboxOfferCard(this.activeThreadId);
         break;
       }
@@ -6905,6 +6913,7 @@ export class ThreadsView extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
+      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(t.id),
       lastError: t.lastError,
       messageCount: t.messages.length,
       reviewed: t.reviewed,
@@ -6969,7 +6978,7 @@ export class ThreadsView extends ItemView {
           activityText = this.manager.getThreadActivity(thread.id) || 'Working...';
         } else if (state === 'waiting') {
           const next = this.plugin.getPendingWakeups(thread.id)[0];
-          if (!next) activityText = 'Waiting to resume';
+          if (!next) activityText = this.manager.isAwaitingSandboxDecision(thread.id) ? 'Waiting for your sandbox choice' : 'Waiting to resume';
           else {
             const when = formatWakeupCountdown(next.fireAt);
             activityText = next.reason ? `Resumes ${when} — ${next.reason}` : `Resumes ${when}`;

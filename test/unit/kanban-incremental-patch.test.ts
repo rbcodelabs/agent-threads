@@ -56,6 +56,7 @@ function makeManager(threads: Thread[], running: Set<string>) {
     hasPendingPlan: () => false,
     isRunStale: () => false,
     hasActiveBackgroundTasks: () => false,
+    isAwaitingSandboxDecision: () => false,
     getThreadActivity: () => 'Working...',
     getProject: () => undefined,
     subscribe: () => () => {},

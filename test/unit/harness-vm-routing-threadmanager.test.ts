@@ -337,6 +337,41 @@ describe('ThreadManager — pre-launch "Run this thread in a sandbox?" offer', (
     expect(manager.getSandboxSetupOffer('t1')).toBeUndefined();
   });
 
+  it('reports awaiting-decision only while parked, and re-emits streaming_start exactly when released', async () => {
+    notReady('runtime-missing');
+    const { manager, events } = setup();
+    const starts = () => events.filter((e) => e.type === 'streaming_start').length;
+    expect(manager.isAwaitingSandboxDecision('t1')).toBe(false);
+    const sent = manager.sendMessage('t1', 'hi');
+    await tick();
+    expect(manager.isAwaitingSandboxDecision('t1')).toBe(true);
+    const whileParked = starts(); // the synchronous prefix's own streaming_start
+    manager.completeSandboxSetupOffer('t1');
+    await sent;
+    expect(manager.isAwaitingSandboxDecision('t1')).toBe(false); // card lingers, but nothing is parked
+    expect(manager.getSandboxSetupOffer('t1')).toBe('runtime-missing');
+    expect(starts()).toBe(whileParked + 1);
+  });
+
+  it('does not re-emit streaming_start (or park) on the common path', async () => {
+    const { manager, events } = setup(DEFAULT_SETTINGS, false);
+    await manager.sendMessage('t1', 'hi');
+    expect(events.filter((e) => e.type === 'streaming_start')).toHaveLength(1);
+    expect(manager.isAwaitingSandboxDecision('t1')).toBe(false);
+  });
+
+  it('a deleted thread releases the wait without emitting streaming_start again', async () => {
+    notReady('runtime-missing');
+    const { manager, events } = setup();
+    const sent = manager.sendMessage('t1', 'hi');
+    await tick();
+    const before = events.filter((e) => e.type === 'streaming_start').length;
+    manager.deleteThread('t1');
+    await sent;
+    expect(manager.isAwaitingSandboxDecision('t1')).toBe(false);
+    expect(events.filter((e) => e.type === 'streaming_start')).toHaveLength(before);
+  });
+
   it('starts the session once setup completes, keeping the card for confirmation', async () => {
     notReady('image-missing');
     const { manager } = setup();

@@ -15,6 +15,14 @@ function flags(overrides: Partial<ThreadClassificationFlags> = {}): ThreadClassi
 }
 
 describe('classifyThreadRow', () => {
+  it('thread parked on the sandbox offer (not running, has messages) → waiting, not idle', () => {
+    expect(classifyThreadRow(flags({ hasPendingSandboxOffer: true, messageCount: 1 }))).toBe('waiting');
+  });
+
+  it('a running thread stays running even with a lingering sandbox offer flag', () => {
+    expect(classifyThreadRow(flags({ isRunning: true, hasPendingSandboxOffer: true }))).toBe('running');
+  });
+
   // ── The background-task bug this module exists to fix ─────────────────────
 
   it('background-task-only thread (not running, has active bg task) → running', () => {

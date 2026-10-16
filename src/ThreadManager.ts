@@ -2157,12 +2157,15 @@ export class ThreadManager {
           // Only yield when an offer is actually possible, so the common path
           // reaches session.start() with no extra await.
           const vm = options.claude?.vm;
-          if (this.mayOfferSandboxSetup(threadId, vm)) await this.awaitSandboxSetupDecision(threadId, vm);
+          const parked = this.mayOfferSandboxSetup(threadId, vm) && await this.awaitSandboxSetupDecision(threadId, vm);
           // Deleted (or replaced) while parked on the card: don't resurrect it.
           if (this.sessions.get(threadId) !== session) {
             if (claimedHandoff) this.releaseHarnessHandoffClaim(threadId);
             return;
           }
+          // While parked the view dropped its working state (the offer event);
+          // the turn is really starting now, so say so again.
+          if (parked) this.emit(threadId, { type: 'streaming_start' });
         }
         await session.start(options);
       } catch (err) {
@@ -2371,8 +2374,14 @@ export class ThreadManager {
       && this.sandboxSetupSupported();
   }
 
-  private async awaitSandboxSetupDecision(threadId: string, inputs: ClaudeVmRoutingInputs | undefined): Promise<void> {
-    if (!inputs || !this.mayOfferSandboxSetup(threadId, inputs)) return;
+  /** True while a fresh session start is parked on the sandbox offer card (not once setup has finished or the card is merely lingering). */
+  isAwaitingSandboxDecision(threadId: string): boolean {
+    return this.sandboxSetupWaiters.has(threadId);
+  }
+
+  /** Resolves true when the start was parked on the card and has now been released. */
+  private async awaitSandboxSetupDecision(threadId: string, inputs: ClaudeVmRoutingInputs | undefined): Promise<boolean> {
+    if (!inputs || !this.mayOfferSandboxSetup(threadId, inputs)) return false;
     const dismissed = (): boolean => this.settings.sandboxSetupPromptDismissed === true;
     let reason: HarnessVmFallbackReason | undefined;
     try {
@@ -2382,7 +2391,7 @@ export class ThreadManager {
       reason = capability.capable ? undefined : capability.code;
     } catch (err) {
       console.warn('[ClaudeThreads] sandbox capability probe failed; skipping the setup offer:', err);
-      return;
+      return false;
     }
     if (!shouldOfferSandboxSetup({
       mode: inputs.mode,
@@ -2390,12 +2399,13 @@ export class ThreadManager {
       dismissedForever: dismissed(),
       alreadyOffered: this.sandboxSetupOffered.has(threadId),
       setupSupported: this.sandboxSetupSupported(),
-    })) return;
+    })) return false;
     this.sandboxSetupOffered.add(threadId);
     this.sandboxSetupOffers.set(threadId, reason!);
     const answered = new Promise<void>((resolve) => { this.sandboxSetupWaiters.set(threadId, resolve); });
     this.emit(threadId, { type: 'sandbox_setup_offer', reason: reason! });
     await answered;
+    return true;
   }
 
   private releaseSandboxSetupWaiter(threadId: string): void {
