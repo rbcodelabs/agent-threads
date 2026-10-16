@@ -26,6 +26,7 @@ import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
 import { checkImageHealth } from './sandboxImage';
 import { sweepOrphanedThreadContainers, type OrphanSweepResult } from './sandboxVmSweep';
 import { containerNameForThread, createDefaultVmCommandRunner, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
+import type { SandboxSetupFlowDeps } from './sandboxSetupPanel';
 import { DEFAULT_HARNESS_VM_IMAGE, checkHarnessVmCapability, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
 import { isRuntimeSupported } from './sandboxRuntime';
 import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
@@ -218,6 +219,10 @@ export class ThreadManager {
   private sandboxSetupWaiters: Map<string, () => void> = new Map();
   /** Test seam: whether sandbox setup can run on this machine. Production uses the real macOS/arch check. */
   sandboxSetupSupported: () => boolean = () => isRuntimeSupported().supported;
+  /** Test seam (e2e only; unset in production): replaces the capability probe behind the pre-launch sandbox offer. */
+  sandboxCapabilityProbe?: typeof checkHarnessVmCapability;
+  /** Test seam (e2e only; unset in production): replaces the status check and runner behind the offer card's "Set up sandbox". */
+  sandboxSetupRunner?: Pick<SandboxSetupFlowDeps, 'getStatus' | 'run'>;
   /**
    * Initialization context cannot be mutated on a live Claude or Codex
    * adapter. Track the goal revision each adapter was built with and retire it
@@ -2371,7 +2376,7 @@ export class ThreadManager {
     const dismissed = (): boolean => this.settings.sandboxSetupPromptDismissed === true;
     let reason: HarnessVmFallbackReason | undefined;
     try {
-      const capability = await checkHarnessVmCapability({
+      const capability = await (this.sandboxCapabilityProbe ?? checkHarnessVmCapability)({
         vmManager: inputs.vmManager, image: inputs.image, platform: inputs.platform, arch: inputs.arch,
       });
       reason = capability.capable ? undefined : capability.code;

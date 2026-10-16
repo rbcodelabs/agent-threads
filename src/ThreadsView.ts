@@ -5986,8 +5986,8 @@ export class ThreadsView extends ItemView {
     this.messagesEl.querySelector('.ct-sandbox-offer')?.remove();
     const harnessImage = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
     renderSandboxOfferCard(this.messagesEl, {
-      getStatus: () => getSandboxSetupStatus({ harnessImage }),
-      run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
+      getStatus: this.manager.sandboxSetupRunner?.getStatus ?? (() => getSandboxSetupStatus({ harnessImage })),
+      run: this.manager.sandboxSetupRunner?.run ?? (({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal })),
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       onNotNow: () => this.manager.clearSandboxSetupOffer(threadId),
       onSetupDone: () => this.manager.completeSandboxSetupOffer(threadId),
