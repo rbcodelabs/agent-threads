@@ -1,7 +1,7 @@
 import fs from 'fs';
 import * as fsp from 'fs/promises';
 import path from 'path';
-import { parseYaml } from 'obsidian';
+import type { YamlParser } from './host/YamlParser';
 import os from 'os';
 import type { SkillSource } from './types';
 
@@ -65,11 +65,11 @@ export function resolveLocalSkillsRoot(vaultRoot: string, folder = 'Skills', exc
   return root;
 }
 
-function validateManifest(content: string, skillId: string): void {
+function validateManifest(content: string, skillId: string, yaml: YamlParser): void {
   const match = typeof content === 'string' && /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
   if (!match) throw new Error('SKILL.md requires YAML frontmatter');
   let parsed: unknown;
-  try { parsed = parseYaml(match[1]); } catch { throw new Error('Invalid SKILL.md YAML frontmatter'); }
+  try { parsed = yaml.parse(match[1]); } catch { throw new Error('Invalid SKILL.md YAML frontmatter'); }
   const data = parsed as Record<string, unknown> | null;
   if (!data || Array.isArray(data) || typeof data !== 'object' || data.name !== skillId
     || typeof data.description !== 'string' || !data.description.trim()) {
@@ -109,7 +109,7 @@ async function copyPackage(from: string, to: string): Promise<void> {
   }
 }
 
-async function mutate(root: string, input: UpdateLocalSkillInput, creating: boolean): Promise<LocalSkillResult> {
+async function mutate(root: string, input: UpdateLocalSkillInput, creating: boolean, yaml: YamlParser): Promise<LocalSkillResult> {
   if (!root || !path.isAbsolute(root)) throw new Error('A resolved local skills root is required');
   if (typeof input.skillId !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(input.skillId) || input.skillId.length > 64) {
     throw new Error('skillId must be a lowercase slug of at most 64 characters');
@@ -152,7 +152,7 @@ async function mutate(root: string, input: UpdateLocalSkillInput, creating: bool
         await fsp.writeFile(destination, file.bytes);
       }
       for (const name of deletions) await fsp.rm(path.join(payload, name), { recursive: true, force: true });
-      validateManifest(await fsp.readFile(path.join(payload, 'SKILL.md'), 'utf8'), input.skillId);
+      validateManifest(await fsp.readFile(path.join(payload, 'SKILL.md'), 'utf8'), input.skillId, yaml);
       noSymlinks(canonicalRoot, target);
       if (!creating) { await fsp.rename(target, backup); movedOriginal = true; }
       else if (exists(target)) throw new Error('Local skill already exists');
@@ -176,11 +176,11 @@ async function mutate(root: string, input: UpdateLocalSkillInput, creating: bool
   });
 }
 
-export async function createLocalSkill(root: string, input: CreateLocalSkillInput): Promise<LocalSkillResult> {
-  validateManifest(input.skillMd, input.skillId);
-  return mutate(root, { skillId: input.skillId, files: [{ path: 'SKILL.md', encoding: 'utf8', content: input.skillMd }, ...(input.files ?? [])] }, true);
+export async function createLocalSkill(root: string, input: CreateLocalSkillInput, yaml: YamlParser): Promise<LocalSkillResult> {
+  validateManifest(input.skillMd, input.skillId, yaml);
+  return mutate(root, { skillId: input.skillId, files: [{ path: 'SKILL.md', encoding: 'utf8', content: input.skillMd }, ...(input.files ?? [])] }, true, yaml);
 }
 
-export async function updateLocalSkill(root: string, input: UpdateLocalSkillInput): Promise<LocalSkillResult> {
-  return mutate(root, input, false);
+export async function updateLocalSkill(root: string, input: UpdateLocalSkillInput, yaml: YamlParser): Promise<LocalSkillResult> {
+  return mutate(root, input, false, yaml);
 }

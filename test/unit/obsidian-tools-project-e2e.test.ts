@@ -143,14 +143,14 @@ describe('obsidian_create_project — E2E via MCP protocol', () => {
         name: 'HipTrip',
         vaultFolder: 'Projects/HipTrip',
         description: 'Travel curation',
-        cwdOverride: '/Users/rick/projects/hiptrip',
+        cwdOverride: '/Users/me/projects/hiptrip',
       },
     }) as McpCallToolResult;
 
     const { id } = parseToolResult(result) as ProjectSnapshot;
     const stored = manager.getProject(id)!;
     expect(stored.description).toBe('Travel curation');
-    expect(stored.cwdOverride).toBe('/Users/rick/projects/hiptrip');
+    expect(stored.cwdOverride).toBe('/Users/me/projects/hiptrip');
   });
 
   it('creates independent projects on repeated calls', async () => {

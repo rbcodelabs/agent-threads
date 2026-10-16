@@ -9694,6 +9694,177 @@ button.ct-agent-crumb:focus-visible {
   color: var(--text-muted);
 }
 
+
+/* ── Remote threads (daemon): host badge, folder and connection pill ───────── */
+.ct-remote-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 3px 10px;
+  min-height: 26px;
+  flex-shrink: 0;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ct-remote-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.ct-remote-badge-icon {
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+}
+
+.ct-remote-badge-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.ct-remote-cwd {
+  flex: 1 1 80px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-monospace);
+}
+
+.ct-remote-pill {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  border: 1px solid var(--background-modifier-border);
+}
+
+.ct-remote-pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.ct-remote-pill--connected::before { background: var(--color-green, #3fa66b); }
+.ct-remote-pill--connecting::before,
+.ct-remote-pill--reconnecting::before { background: var(--color-yellow, #d9a21b); }
+.ct-remote-pill--reconnecting::before { animation: ct-remote-pulse 1.2s ease-in-out infinite; }
+.ct-remote-pill--unreachable::before,
+.ct-remote-pill--protocol::before,
+.ct-remote-pill--auth::before { background: var(--color-red, #e05252); }
+
+.ct-remote-pill--unreachable,
+.ct-remote-pill--protocol,
+.ct-remote-pill--auth { color: var(--text-error, var(--color-red, #e05252)); }
+
+@keyframes ct-remote-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-remote-pill--reconnecting::before { animation: none; }
+}
+
+/* Dispatch send button when the next thread will run on a daemon */
+.ct-harness-send-btn--remote { box-shadow: inset 0 0 0 1px var(--interactive-accent); }
+
+.ct-run-on-folder {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 9px 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.ct-run-on-folder-input {
+  width: 100%;
+  min-width: 220px;
+  font-family: var(--font-monospace);
+}
+
+.ct-run-on-folder-hint { color: var(--text-faint); }
+.ct-run-on-folder-hint.is-hidden { display: none; }
+
+.ct-run-on-folder-controls { display: flex; gap: 6px; align-items: center; }
+.ct-run-on-folder .ct-run-on-folder-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 340px;
+  font-size: var(--font-ui-smaller);
+  background: var(--background-modifier-form-field);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+.ct-run-on-folder .ct-run-on-browse-btn,
+.ct-run-on-folder .ct-run-on-browser-actions button {
+  flex: 0 0 auto;
+  font-size: var(--font-ui-smaller);
+  background: var(--interactive-normal);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  padding: 2px 8px;
+  height: auto;
+}
+.ct-run-on-folder .ct-run-on-browser-actions button.mod-cta { background: var(--interactive-accent); color: var(--text-on-accent); }
+.ct-run-on-folder .ct-run-on-browser-actions button:disabled { opacity: 0.5; }
+
+.ct-run-on-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+}
+.ct-run-on-browser.is-hidden { display: none; }
+.ct-run-on-browser-path { font-family: var(--font-monospace); color: var(--text-normal); overflow-wrap: anywhere; }
+.ct-run-on-browser-list { display: flex; flex-direction: column; max-height: 140px; overflow-y: auto; }
+.ct-run-on-folder .ct-run-on-browse-item {
+  color: var(--text-normal);
+  text-align: left;
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  padding: 2px 6px;
+  height: auto;
+  font-size: var(--font-ui-smaller);
+}
+.ct-run-on-folder .ct-run-on-browse-item:hover { background: var(--background-modifier-hover); }
+.ct-run-on-browser-actions { display: flex; gap: 6px; justify-content: flex-end; }
+
+/* Settings -> Remote daemons */
+.ct-remote-advanced { margin-top: 8px; }
+.ct-remote-advanced > summary { cursor: pointer; color: var(--text-muted); }
+.ct-remote-folders-hint { margin: 6px 0; }
+.ct-remote-daemon-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  font-size: var(--font-ui-smaller);
+}
+
 /* Settings: detected claude CLI version and stale-install notices */
 .ct-cli-notice-version { margin: 0 0 8px; }
 .ct-cli-notice-row {
@@ -9711,3 +9882,10 @@ button.ct-agent-crumb:focus-visible {
   margin: 8px 0 16px;
 }
 .ct-cli-notice-copy { flex-shrink: 0; }
+
+.ct-outside-link-path {
+  display: block;
+  word-break: break-all;
+  user-select: text;
+  margin-bottom: 12px;
+}

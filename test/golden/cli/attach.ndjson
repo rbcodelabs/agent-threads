@@ -1,0 +1,7 @@
+{"type":"cli","kind":"attached","threadId":"demo","controller":false,"lastSeq":17,"lowWater":0,"resync":false,"epoch":"e1"}
+{"v":1,"ch":"t:demo","seq":1,"ts":1700000000001,"type":"event","name":"session.state","args":{"turnInFlight":true,"hasPendingPermission":false,"hostAttached":false}}
+{"v":1,"ch":"t:demo","seq":2,"ts":1700000000002,"type":"event","name":"onToken","args":["Let me "],"replay":true}
+{"v":1,"ch":"t:demo","seq":3,"ts":1700000000003,"type":"event","name":"onToken","args":["look.\n"]}
+{"v":1,"ch":"t:demo","seq":4,"ts":1700000000004,"type":"event","name":"onMessage","args":["Let me look.\n",[]]}
+{"type":"cli","kind":"command_result","cmd":"resolve.permission","requestId":"r-1","ok":false,"error":"already answered by another client"}
+{"type":"cli","kind":"end","outcome":"done","exitCode":0,"lastSeq":17}

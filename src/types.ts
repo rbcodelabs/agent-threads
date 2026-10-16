@@ -275,6 +275,81 @@ export interface GitDiffInfo {
   ownerRepo?: { owner: string; repo: string };
 }
 
+/** A daemon this Geode can run threads on (Settings -> Remote daemons). */
+export interface RemoteDaemonConfig {
+  /** Stable key referenced by `Thread.remote.daemonId`. */
+  id: string;
+  /** Shown in the thread header badge and the "Run on" picker. */
+  name: string;
+  /** `ws://` or `wss://` base URL of the daemon (no path); `/v1/ws` is appended. */
+  url: string;
+  /** Name of the keychain secret (`app.secretStorage`, via `secretStorageKey`) holding the bearer token. */
+  tokenSecretName: string;
+  /** Default directory offered for new remote threads (a path on the daemon's machine). */
+  defaultCwdRoot?: string;
+  /**
+   * This daemon holds a synced mirror of the vault. A vault thread run there
+   * defaults to the same relative folder under `remoteRoot`.
+   */
+  vaultMapping?: RemoteVaultMapping;
+  /**
+   * What this daemon may do on THIS computer (vault, workspace, threads, Google, ... tools; design 3.3).
+   * Absent = the defaults: OFF. Nothing on this computer is reachable from the daemon until `enabled` is true, and
+   * then only the groups named in `routes`.
+   */
+  hostTools?: RemoteHostToolsSettings;
+}
+
+/** Per-daemon choices for tools that run on this computer on a remote thread's behalf. */
+export interface RemoteHostToolsSettings {
+  /** True offers the groups in `routes` to this daemon's threads. Default false: no host tool is offered. */
+  enabled?: boolean;
+  /**
+   * Opt-in groups (`vault`, `workspace`, `threads`, `skills`, `browser`, `mcp`), a single read tool, or one proxied
+   * server name -> `host`. Unlisted means off. A tool that writes or executes (`toolRouting.ts` `NEVER_OFFERED`) is
+   * never offered whatever is listed.
+   */
+  routes?: Record<string, 'host' | 'absent'>;
+  /**
+   * External MCP servers (Settings, MCP) that may be sent to this daemon by name. Unset: servers without headers
+   * that the daemon can reach pass through. Set: only these.
+   */
+  mcpAllowlist?: string[];
+}
+
+/** Which folder on a daemon's machine mirrors the vault (see `src/remote/vaultMapping.ts`). */
+export interface RemoteVaultMapping {
+  /** Local folder that corresponds to `remoteRoot`. Omitted = this vault's root. Absolute path on this computer. */
+  localRoot?: string;
+  /** Absolute path on the daemon's machine, e.g. /home/user/vault. */
+  remoteRoot: string;
+}
+
+export interface ThreadRemote {
+  daemonId: string;
+  /** Stage 1 is always `'client'`: this plugin owns the transcript (design 4.4). */
+  ownership: 'client' | 'daemon';
+  /** Working directory on the daemon's machine. */
+  remoteCwd: string;
+  /**
+   * Resume cursor for channel `t:<id>`: every event up to here is reflected in
+   * the persisted transcript. Conservative: it stops before an unfinished
+   * assistant message, so a restart replays that message's tokens.
+   */
+  lastSeq: number;
+  /** Daemon process epoch last seen; a change means the daemon restarted. */
+  epoch?: string;
+  /** Harness-native session id on that daemon (valid only there). */
+  nativeSessionId?: string;
+  /** Which Geode instance owns the read-write seat (`PluginSettings.remoteClientId`). */
+  ownerClientId: string;
+  /**
+   * A turn was started and not yet seen to finish. After a restart the plugin
+   * re-attaches such threads so the transcript completes without user action.
+   */
+  turnPending?: boolean;
+}
+
 export interface Thread {
   id: string;
   sessionId?: string;
@@ -285,6 +360,13 @@ export interface Thread {
   sessionGeneration?: number;
   /** Per-thread container-routing override; absent means follow `settings.harnessVmMode`. Claude harness only. */
   harnessVmMode?: HarnessVmMode;
+  /**
+   * Present when this thread's session runs on a remote agent-threads daemon
+   * instead of this machine (daemon design section 4.2). `thread.cwd` mirrors
+   * `remote.remoteCwd` for display; it is a path on the daemon's machine, so
+   * nothing may stat it locally.
+   */
+  remote?: ThreadRemote;
   /** One-time context bridge consumed only by the first successful target turn. */
   pendingHarnessHandoff?: {
     sourceHarness: AgentHarness;
@@ -1036,6 +1118,10 @@ export interface PluginSettings {
    * `harnessVmImage` — see `HarnessVmMode`'s doc comment.
    */
   harnessVmMode: HarnessVmMode;
+  /** Daemons threads can be run on (Settings -> Remote daemons). Tokens live in the keychain, not here. */
+  remoteDaemons?: RemoteDaemonConfig[];
+  /** Random id of this Geode install, stamped on remote threads as `ownerClientId`. */
+  remoteClientId?: string;
   /**
    * Memory ceiling for newly created sandbox containers, `<digits>M|G`
    * (default `'4G'`). Invalid values fall back to the default. Applies only at
@@ -1053,6 +1139,13 @@ export interface PluginSettings {
    * Blank falls back to `claude-threads-harness:1`.
    */
   harnessVmImage: string;
+  /**
+   * Extra AWS profiles (one per line or comma separated) exposed to harness
+   * containers, on top of the AWS_PROFILE from Extra environment variables.
+   * Non-empty enables Container AWS credentials even on the Claude provider.
+   * See containerAws.ts.
+   */
+  containerAwsProfiles: string;
   /**
    * True once the user chose "Don't ask again" on the in-thread "Run this thread in a
    * sandbox?" card. Suppresses that offer for good; Settings → Claude → Set up
@@ -1351,6 +1444,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   sandboxVmMemory: '4G',
   sandboxVmCpus: 4,
   harnessVmImage: 'claude-threads-harness:1',
+  containerAwsProfiles: '',
   sandboxSetupPromptDismissed: false,
   githubConnectionEnabled: true,
   githubCommitEmail: '',

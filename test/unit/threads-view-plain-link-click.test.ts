@@ -6,7 +6,7 @@
  *
  *  Root cause 1: a rendered markdown link whose href is an OS-absolute path
  *  that happens to fall under the vault root (e.g.
- *  `/Users/rick/Documents/Personal/Products/Geode/Runs/foo.md`) was passed
+ *  `/Users/me/Documents/Personal/Products/Geode/Runs/foo.md`) was passed
  *  straight through to ContextPanelController.openLinkText / the classic
  *  openLinkText call, both of which expect vault-relative linktext — so the
  *  lookup silently failed and nothing happened. Fixed by resolving such
@@ -101,7 +101,7 @@ describe('ThreadsView renderMarkdown — plain markdown link clicks (classic pla
   });
 
   it('resolves an OS-absolute path under the vault root before opening', async () => {
-    const abs = '/Users/rickbowman/Library/Mobile Documents/com~apple~CloudDocs/Documents/Personal/Products/Geode/Runs/geode-2026-09-01-architecture-review.md';
+    const abs = '/Users/me/Documents/My Vault/Products/Geode/Runs/geode-2026-09-01-architecture-review.md';
     const harness = makeView({
       conversationFirst: false,
       vaultFiles: ['Products/Geode/Runs/geode-2026-09-01-architecture-review.md'],
@@ -118,14 +118,14 @@ describe('ThreadsView renderMarkdown — plain markdown link clicks (classic pla
   // placement attached no listener at all and the click was inert; staying
   // inert (with a Notice) is the safe equivalent.
   it('does NOT forward an unresolvable OS-absolute path to openLinkText', async () => {
-    const abs = '/Users/rickbowman/elsewhere/note.md';
+    const abs = '/Users/me/elsewhere/note.md';
     const harness = makeView({ conversationFirst: false, vaultFiles: [] });
     await renderAndClick(harness, `[Note](<${abs}>)`);
     expect(harness.workspaceCalls).toEqual([]);
   });
 
   it('does NOT forward an unresolvable OS-absolute path to the companion either', async () => {
-    const abs = '/Users/rickbowman/elsewhere/note.md';
+    const abs = '/Users/me/elsewhere/note.md';
     const harness = makeView({ conversationFirst: true, vaultFiles: [], noteFile: 'Claude/thread.md' });
     await renderAndClick(harness, `[Note](<${abs}>)`);
     expect(harness.contextPanelCalls).toEqual([]);
@@ -141,7 +141,7 @@ describe('ThreadsView renderMarkdown — plain markdown link clicks (classic pla
   });
 
   it('preserves a #heading subpath when resolving an OS-absolute path', async () => {
-    const abs = '/Users/rickbowman/Vault/Products/Geode/Runs/report.md#QA Report';
+    const abs = '/Users/me/Vault/Products/Geode/Runs/report.md#QA Report';
     const harness = makeView({
       conversationFirst: false,
       vaultFiles: ['Products/Geode/Runs/report.md'],
@@ -151,7 +151,7 @@ describe('ThreadsView renderMarkdown — plain markdown link clicks (classic pla
   });
 
   it('preserves a #^block subpath when resolving an OS-absolute path', async () => {
-    const abs = '/Users/rickbowman/Vault/Notes/Plan.md#^abc123';
+    const abs = '/Users/me/Vault/Notes/Plan.md#^abc123';
     const harness = makeView({ conversationFirst: false, vaultFiles: ['Notes/Plan.md'] });
     await renderAndClick(harness, `[Plan](<${abs}>)`);
     expect(harness.workspaceCalls).toEqual(['Notes/Plan.md#^abc123']);
@@ -161,7 +161,7 @@ describe('ThreadsView renderMarkdown — plain markdown link clicks (classic pla
   // to it, so it may only appear after this message rendered. Resolution must
   // therefore happen on click, not at render time.
   it('resolves at click time, so a target that appears after render still opens', async () => {
-    const abs = '/Users/rickbowman/Vault/Products/Geode/Runs/late.md';
+    const abs = '/Users/me/Vault/Products/Geode/Runs/late.md';
     const vaultFiles: string[] = [];
     const harness = makeView({ conversationFirst: false, vaultFiles });
     const el = document.createElement('div');
@@ -189,7 +189,7 @@ describe('ThreadsView renderMarkdown — plain markdown link clicks (classic pla
     // markdown link target containing a literal space. The vault-relative
     // suffix here itself contains the space, so matching only works if the
     // href is decoded before being probed against getAbstractFileByPath.
-    const abs = '/Users/rickbowman/Vault/Products/Geode/Runs/My Report.md';
+    const abs = '/Users/me/Vault/Products/Geode/Runs/My Report.md';
     const harness = makeView({
       conversationFirst: false,
       vaultFiles: ['Products/Geode/Runs/My Report.md'],
@@ -208,7 +208,7 @@ describe('ThreadsView renderMarkdown — plain markdown link clicks (conversatio
   });
 
   it('resolves an OS-absolute path under the vault root before opening', async () => {
-    const abs = '/Users/rickbowman/Library/Mobile Documents/com~apple~CloudDocs/Documents/Personal/Products/Geode/Runs/geode-2026-09-01-architecture-review.md';
+    const abs = '/Users/me/Documents/My Vault/Products/Geode/Runs/geode-2026-09-01-architecture-review.md';
     const harness = makeView({
       conversationFirst: true,
       vaultFiles: ['Products/Geode/Runs/geode-2026-09-01-architecture-review.md'],

@@ -1,0 +1,4 @@
+{"threadId":"d-waiting","state":"waiting","lastSeq":3,"open":true,"turnInFlight":true,"hasPendingPermission":true,"cwd":"/srv/workspaces/api","nativeSessionId":null,"lastActivityAt":null}
+{"threadId":"c-running","state":"running","lastSeq":7,"open":true,"turnInFlight":true,"hasPendingPermission":false,"cwd":null,"nativeSessionId":null,"lastActivityAt":null}
+{"threadId":"b-idle","state":"idle","lastSeq":12,"open":true,"turnInFlight":false,"hasPendingPermission":false,"cwd":"/srv/workspaces/api","nativeSessionId":"n1","lastActivityAt":5}
+{"threadId":"a-closed","state":"closed","lastSeq":40,"open":false,"turnInFlight":false,"hasPendingPermission":false,"cwd":"/srv/workspaces/web","nativeSessionId":null,"lastActivityAt":null}

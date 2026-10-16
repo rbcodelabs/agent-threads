@@ -1,0 +1,42 @@
+# Managed by `agent-threads install` (user unit). Local changes belong in a drop-in: systemctl --user edit agent-threads
+[Unit]
+Description=agent-threads daemon (remote Claude Code sessions)
+Documentation=https://github.com/rbcodelabs/agent-threads/blob/main/docs/remote-daemon.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart="/usr/bin/node" "/opt/agent-threads/dist/agent-threads.cjs" serve --listen 127.0.0.1 --port 7433 --workspace "%h/workspaces"
+WorkingDirectory=%h
+
+# Credentials. With a `claude` login in the daemon user's home neither needs a value, but the credential file
+# below must still exist (an empty file is fine): systemd will not start the unit without it.
+EnvironmentFile=-%E/agent-threads/env
+LoadCredential=claude-token:%E/agent-threads/claude-token
+
+# State: journals, tokens, raw logs.
+StateDirectory=agent-threads
+StateDirectoryMode=0700
+Environment=DATA_DIR=%S/agent-threads
+Environment=HOME=%h
+
+# Come back after a crash; stay down after `systemctl stop`.
+Restart=on-failure
+RestartSec=3
+
+# SIGTERM the daemon alone so it can flush; then SIGKILL the rest of the control group, so a killed daemon
+# cannot leave `claude` processes behind.
+KillMode=mixed
+KillSignal=SIGTERM
+SendSIGKILL=yes
+TimeoutStopSec=30
+
+# Confinement. This limits where the agent can write, not what it can run (see docs/remote-daemon.md).
+NoNewPrivileges=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

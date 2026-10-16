@@ -83,9 +83,9 @@ describe('ThreadsView.openEditedFile', () => {
       const openLocalFileLink = vi.fn().mockResolvedValue('external-resource');
       const { view, openFile } = makeView({ openLocalFileLink });
 
-      await view.openEditedFile('/Users/rick/projects/compass/docs/note.md');
+      await view.openEditedFile('/Users/me/projects/compass/docs/note.md');
 
-      expect(openLocalFileLink).toHaveBeenCalledWith('/Users/rick/projects/compass/docs/note.md');
+      expect(openLocalFileLink).toHaveBeenCalledWith('/Users/me/projects/compass/docs/note.md');
       expect(openFile).not.toHaveBeenCalled();
       // Reaching the OS fallback would fail on `require('electron')` here.
       expect(Notice.messages).toEqual([]);
@@ -94,7 +94,7 @@ describe('ThreadsView.openEditedFile', () => {
     it('treats a host with no local-file routing (Obsidian) as unhandled', async () => {
       const { view } = makeView();
 
-      await view.openEditedFile('/Users/rick/projects/compass/docs/note.md');
+      await view.openEditedFile('/Users/me/projects/compass/docs/note.md');
 
       // No host route, so the OS fallback runs; `electron` is absent under
       // vitest, and the failure is surfaced rather than swallowed silently.
@@ -105,7 +105,7 @@ describe('ThreadsView.openEditedFile', () => {
       const openLocalFileLink = vi.fn().mockResolvedValue('rejected');
       const { view } = makeView({ openLocalFileLink });
 
-      await view.openEditedFile('/Users/rick/projects/compass/docs/note.md');
+      await view.openEditedFile('/Users/me/projects/compass/docs/note.md');
 
       expect(openLocalFileLink).toHaveBeenCalledOnce();
       expect(Notice.messages).toHaveLength(1);

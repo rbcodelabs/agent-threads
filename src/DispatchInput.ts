@@ -1,4 +1,9 @@
-import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, type AgentHarness, type HarnessVmMode } from './types';
+import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, type AgentHarness, type HarnessVmMode, type RemoteDaemonConfig } from './types';
+import { resolveRunOn, runOnSuffix, type RunOnRemote, type RunOnSelection } from './remote/runOn';
+import { suggestRemoteCwd } from './remote/vaultMapping';
+import type { RemoteFolderSource, FolderLoad } from './remote/folderSource';
+import { parentPath, pickDefaultWorkspace, workspaceContaining, workspaceForPath, workspaceLabel } from './remote/workspaceChoice';
+import type { WorkspaceInfo } from './protocol';
 import { App, setIcon, setTooltip, Notice } from 'obsidian';
 import type { ImageAttachment, ImageMediaType } from './types';
 import { MAX_ATTACHMENT_BYTES } from './attachmentUtils';
@@ -26,6 +31,8 @@ export interface DispatchPayload {
    * follow Settings. Only ever set for the Claude harness.
    */
   harnessVmMode?: HarnessVmMode;
+  /** Run the thread on this remote daemon, in this folder on its machine (picked under "Run on"). */
+  remote?: RunOnRemote;
 }
 
 /**
@@ -109,7 +116,24 @@ export interface DispatchInputOptions {
   /** Title tooltip for the send button (default: 'Start task') */
   sendBtnTitle?: string;
   /** Turn the send button into a locally sticky kickoff harness picker. */
-  harnessPicker?: { initialHarness: AgentHarness };
+  harnessPicker?: {
+    initialHarness: AgentHarness;
+    /** Configured remote daemons; when non-empty the menu offers a "Run on" section. */
+    getRemoteDaemons?: () => RemoteDaemonConfig[];
+    /**
+     * Where a thread started now would run on this computer (the selected Project's folder, else
+     * the default folder), and this vault's root. With a daemon's vault mapping they pre-fill the
+     * remote folder: a vault folder maps to the same folder in the daemon's vault mirror.
+     */
+    getLocalCwd?: () => string | undefined;
+    getVaultRoot?: () => string | undefined;
+    /**
+     * Where to ask a daemon which folders it offers (and what is inside them). With it the "Run on"
+     * folder is a dropdown plus Browse instead of a text field; without it, or when a daemon is too
+     * old to answer, the text field is used.
+     */
+    getFolderSource?: () => RemoteFolderSource | undefined;
+  };
   /**
    * Called on every keydown/keyup to retrieve the current push-to-talk hotkey
    * string (e.g. "Alt+Space"). When provided, hold-to-record PTT is enabled.
@@ -141,6 +165,8 @@ export interface ExtraSkillDir {
    */
   prefix?: string;
 }
+
+const OTHER_FOLDER = '__other__';
 
 export class DispatchInput {
   private app: App;
@@ -184,6 +210,13 @@ export class DispatchInput {
   private selectedHarness: AgentHarness | null = null;
   /** Sticky "Run in" override for the next dispatches; undefined follows Settings. */
   private selectedVmMode: RunModeChoice | undefined;
+  /** Sticky "Run on" choice: this computer (undefined) or a remote daemon plus a folder on it. */
+  private selectedRunOn: RunOnSelection = {};
+  /** The user typed in the remote folder field, so the suggestion no longer overwrites it. */
+  private runOnCwdEdited = false;
+  /** Workspaces each daemon advertised, loaded when the menu opens (cleared on every open). */
+  private runOnFolders = new Map<string, FolderLoad<WorkspaceInfo[]>>();
+  private runOnLoadToken = 0;
   private harnessMenu: HTMLElement | null = null;
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressNextSendClick = false;
@@ -511,6 +544,13 @@ export class DispatchInput {
     const images = this.pendingImages.slice();
     if (!text && !attachment && images.length === 0) return;
 
+    // Resolved before anything is cleared: a bad remote folder must leave the draft where it is.
+    const runOn = resolveRunOn(this.effectiveRunOn(), this.remoteDaemons());
+    if (!runOn.ok) {
+      new Notice(runOn.reason);
+      return;
+    }
+
     this.dispatching = true;
     this.inputEl.value = '';
     this.removeCommandPill();
@@ -525,7 +565,8 @@ export class DispatchInput {
         images,
         attachment,
         ...(this.selectedHarness ? { agentHarness: this.selectedHarness } : {}),
-        ...(this.effectiveVmMode() ? { harnessVmMode: this.effectiveVmMode() } : {}),
+        ...(this.effectiveVmMode() && !runOn.remote ? { harnessVmMode: this.effectiveVmMode() } : {}),
+        ...(runOn.remote ? { remote: runOn.remote } : {}),
       });
     } catch (err) {
       // Dispatch can fail after selection state changes (for example, a
@@ -594,9 +635,13 @@ export class DispatchInput {
     const name = agentHarnessLabel(this.selectedHarness);
     this.sendBtn.empty();
     this.createHarnessMark(this.sendBtn, this.selectedHarness);
-    const vmMode = this.effectiveVmMode();
-    this.sendBtn.removeClass('ct-harness-send-btn--container', 'ct-harness-send-btn--host');
-    if (vmMode) {
+    const vmMode = this.effectiveRunOn().daemonId ? undefined : this.effectiveVmMode();
+    this.sendBtn.removeClass('ct-harness-send-btn--container', 'ct-harness-send-btn--host', 'ct-harness-send-btn--remote');
+    if (this.effectiveRunOn().daemonId) {
+      this.sendBtn.addClass('ct-harness-send-btn--remote');
+      const badge = this.sendBtn.createSpan({ cls: 'ct-run-mode-badge', attr: { 'aria-hidden': 'true', 'data-run-mode': 'remote' } });
+      setIcon(badge, 'server');
+    } else if (vmMode) {
       this.sendBtn.addClass(vmMode === 'always' ? 'ct-harness-send-btn--container' : 'ct-harness-send-btn--host');
       const badge = this.sendBtn.createSpan({
         cls: 'ct-run-mode-badge',
@@ -604,7 +649,8 @@ export class DispatchInput {
       });
       setIcon(badge, RUN_MODE_ICONS[vmMode]);
     }
-    const where = vmMode ? ` in ${vmMode === 'always' ? 'a container' : 'the host (no container)'}` : '';
+    const remoteWhere = runOnSuffix(this.effectiveRunOn(), this.remoteDaemons());
+    const where = remoteWhere || (vmMode ? ` in ${vmMode === 'always' ? 'a container' : 'the host (no container)'}` : '');
     const label = `Start task with ${name}${where}; right-click or hold to change agent or where it runs`;
     this.sendBtn.setAttribute('aria-label', label);
     this.sendBtn.setAttribute('aria-haspopup', 'menu');
@@ -617,8 +663,25 @@ export class DispatchInput {
     return this.selectedHarness === 'claude' ? this.selectedVmMode : undefined;
   }
 
+  /** Default remote folder for `daemon`: its mapped vault folder when we are in the vault, else its default folder. */
+  private suggestedRemoteCwd(daemon: RemoteDaemonConfig): { cwd: string; fromVault: boolean } {
+    const picker = this.options.harnessPicker;
+    return suggestRemoteCwd(daemon, picker?.getLocalCwd?.(), picker?.getVaultRoot?.());
+  }
+
+  private remoteDaemons(): RemoteDaemonConfig[] {
+    return this.options.harnessPicker?.getRemoteDaemons?.() ?? [];
+  }
+
+  /** The Run-on choice that applies: only Claude threads can run remotely, and only on a daemon still configured. */
+  private effectiveRunOn(): RunOnSelection {
+    if (this.selectedHarness !== 'claude' || !this.selectedRunOn.daemonId) return {};
+    return this.selectedRunOn;
+  }
+
   private openHarnessMenu(): void {
     if (this.harnessMenu) return;
+    this.runOnFolders.clear();
     const menu = this.rootEl.createDiv({ cls: 'ct-harness-menu', attr: { role: 'menu', 'aria-label': 'Choose agent harness' } });
     this.harnessMenu = menu;
     for (const harness of AGENT_HARNESSES) {
@@ -681,10 +744,192 @@ export class DispatchInput {
         });
       }
     }
+    const daemons = this.remoteDaemons();
+    if (this.selectedHarness === 'claude' && daemons.length > 0) this.renderRunOnSection(menu, daemons);
     this.sendBtn.setAttribute('aria-expanded', 'true');
     document.addEventListener('pointerdown', this.closeHarnessMenuOnPointerDown);
     document.addEventListener('keydown', this.closeHarnessMenuOnEscape);
     menu.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
+  }
+
+  /** "Run on": this computer, or a remote daemon plus the folder to work in on that machine. */
+  private renderRunOnSection(menu: HTMLElement, daemons: RemoteDaemonConfig[]): void {
+    menu.createDiv({ cls: 'ct-harness-menu-separator', attr: { role: 'separator' } });
+    menu.createDiv({ cls: 'ct-harness-menu-heading', text: 'Run on' });
+    // The Project selection may have changed since the menu was last open.
+    const selected = daemons.find((d) => d.id === this.selectedRunOn.daemonId);
+    if (selected && !this.runOnCwdEdited) this.selectedRunOn = { daemonId: selected.id, cwd: this.suggestedRemoteCwd(selected).cwd };
+    const choices: Array<{ id: string | undefined; label: string; icon: string }> = [
+      { id: undefined, label: 'This computer', icon: 'laptop' },
+      ...daemons.map((d) => ({ id: d.id, label: d.name, icon: 'server' })),
+    ];
+    for (const choice of choices) {
+      const item = menu.createEl('button', {
+        cls: 'ct-harness-menu-item ct-run-mode-item ct-run-on-item',
+        attr: {
+          role: 'menuitemradio',
+          'aria-checked': String(this.selectedRunOn.daemonId === choice.id),
+          'data-run-on': choice.id ?? 'local',
+        },
+      });
+      const mark = item.createSpan({ cls: 'ct-run-mode-mark', attr: { 'aria-hidden': 'true' } });
+      setIcon(mark, choice.icon);
+      item.createSpan({ text: choice.label });
+      item.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const daemon = daemons.find((d) => d.id === choice.id);
+        if (!choice.id) this.runOnCwdEdited = false;
+        const cwd = this.runOnCwdEdited && this.selectedRunOn.cwd !== undefined
+          ? this.selectedRunOn.cwd
+          : (daemon ? this.suggestedRemoteCwd(daemon).cwd : '');
+        this.selectedRunOn = choice.id ? { daemonId: choice.id, cwd } : {};
+        if (!choice.id) this.closeHarnessMenu(true);
+        else this.refreshRunOnFolderRow(menu, daemons);
+        this.renderHarnessIdentity();
+        for (const el of Array.from(menu.querySelectorAll<HTMLElement>('.ct-run-on-item'))) {
+          el.setAttribute('aria-checked', String((el.getAttribute('data-run-on') ?? 'local') === (choice.id ?? 'local')));
+        }
+      });
+    }
+    this.refreshRunOnFolderRow(menu, daemons);
+  }
+
+  /**
+   * The folder control under "Run on", present only while a daemon is selected.
+   * With a folder source it is a dropdown of the daemon's own workspaces plus a
+   * Browse panel (no typing); without one, or when the daemon cannot list its
+   * folders, it is the plain text field.
+   */
+  private refreshRunOnFolderRow(menu: HTMLElement, daemons: RemoteDaemonConfig[]): void {
+    menu.querySelector('.ct-run-on-folder')?.remove();
+    const daemon = daemons.find((d) => d.id === this.selectedRunOn.daemonId);
+    if (!daemon) return;
+    const row = menu.createDiv({ cls: 'ct-run-on-folder' });
+    const source = this.options.harnessPicker?.getFolderSource?.();
+    if (!source) { this.renderRunOnFolderText(row, daemon); return; }
+    const loaded = this.runOnFolders.get(daemon.id);
+    if (!loaded) {
+      row.createEl('label', { text: `Folder on ${daemon.name}` });
+      row.createDiv({ cls: 'ct-run-on-folder-hint', attr: { 'data-testid': 'run-on-folder-loading' }, text: 'Loading folders…' });
+      const token = ++this.runOnLoadToken;
+      void source.workspaces(daemon.id).then((result) => {
+        this.runOnFolders.set(daemon.id, result);
+        if (token !== this.runOnLoadToken || !this.harnessMenu || this.selectedRunOn.daemonId !== daemon.id) return;
+        this.refreshRunOnFolderRow(this.harnessMenu, this.remoteDaemons());
+      });
+      return;
+    }
+    if (!loaded.ok || loaded.value.length === 0) {
+      const why = !loaded.ok ? loaded.detail : `${daemon.name} has no folders configured. Start it with --workspace <folder>.`;
+      this.renderRunOnFolderText(row, daemon, `${why} Type a folder instead.`);
+      return;
+    }
+    this.renderRunOnFolderChooser(row, daemon, loaded.value, source);
+  }
+
+  /** Free-text folder field: the fallback for a daemon that cannot list its folders. */
+  private renderRunOnFolderText(row: HTMLElement, daemon: RemoteDaemonConfig, note?: string): void {
+    row.createEl('label', { text: `Folder on ${daemon.name}`, attr: { for: 'ct-run-on-folder-input' } });
+    const input = row.createEl('input', {
+      cls: 'ct-run-on-folder-input',
+      attr: { id: 'ct-run-on-folder-input', type: 'text', placeholder: '/srv/workspaces/project', spellcheck: 'false', 'aria-label': `Folder on ${daemon.name}` },
+    });
+    input.value = this.selectedRunOn.cwd ?? '';
+    const suggestion = this.suggestedRemoteCwd(daemon);
+    const hint = row.createDiv({ cls: 'ct-run-on-folder-hint', attr: { 'data-testid': 'run-on-folder-hint' } });
+    const refreshHint = (): void => {
+      const show = suggestion.fromVault && input.value === suggestion.cwd;
+      hint.toggleClass('is-hidden', !show);
+      hint.setText(show ? `Same folder as in your vault, in ${daemon.name}'s copy of it.` : '');
+    };
+    refreshHint();
+    if (note) row.createDiv({ cls: 'ct-run-on-folder-hint', attr: { 'data-testid': 'run-on-folder-note' }, text: note });
+    input.addEventListener('input', () => {
+      this.runOnCwdEdited = true;
+      this.selectedRunOn = { daemonId: daemon.id, cwd: input.value };
+      refreshHint();
+    });
+    input.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Enter') { event.preventDefault(); this.closeHarnessMenu(true); }
+    });
+    input.focus();
+  }
+
+  private renderRunOnFolderChooser(row: HTMLElement, daemon: RemoteDaemonConfig, workspaces: WorkspaceInfo[], source: RemoteFolderSource): void {
+    // Nothing chosen yet (no mapping, no default folder): start in the daemon's own default workspace.
+    if (!this.selectedRunOn.cwd?.trim()) {
+      const fallback = pickDefaultWorkspace(workspaces);
+      if (fallback) this.selectedRunOn = { daemonId: daemon.id, cwd: fallback.path };
+    }
+    const cwd = this.selectedRunOn.cwd ?? '';
+    row.createEl('label', { text: `Folder on ${daemon.name}`, attr: { for: 'ct-run-on-folder-select' } });
+    const controls = row.createDiv({ cls: 'ct-run-on-folder-controls' });
+    const select = controls.createEl('select', {
+      cls: 'ct-run-on-folder-select dropdown',
+      attr: { id: 'ct-run-on-folder-select', 'aria-label': `Folder on ${daemon.name}` },
+    });
+    for (const w of workspaces) select.createEl('option', { value: w.path, text: workspaceLabel(w) });
+    if (cwd && !workspaceForPath(workspaces, cwd)) select.createEl('option', { value: cwd, text: cwd });
+    select.createEl('option', { value: OTHER_FOLDER, text: 'Other folder…' });
+    select.value = cwd;
+    const browseBtn = controls.createEl('button', { cls: 'ct-run-on-browse-btn', text: 'Browse…', attr: { type: 'button', 'aria-expanded': 'false' } });
+
+    const suggestion = this.suggestedRemoteCwd(daemon);
+    const hint = row.createDiv({ cls: 'ct-run-on-folder-hint', attr: { 'data-testid': 'run-on-folder-hint' } });
+    const refreshHint = (): void => {
+      const show = suggestion.fromVault && (this.selectedRunOn.cwd ?? '') === suggestion.cwd;
+      hint.toggleClass('is-hidden', !show);
+      hint.setText(show ? `Same folder as in your vault, in ${daemon.name}'s copy of it.` : '');
+    };
+    refreshHint();
+    const choose = (path: string): void => {
+      this.runOnCwdEdited = true;
+      this.selectedRunOn = { daemonId: daemon.id, cwd: path };
+      this.refreshRunOnFolderRow(this.harnessMenu ?? row.parentElement as HTMLElement, this.remoteDaemons());
+    };
+    select.addEventListener('keydown', (event) => event.stopPropagation());
+    select.addEventListener('change', () => {
+      if (select.value !== OTHER_FOLDER) { choose(select.value); return; }
+      // "Other folder…": fall back to typing for this daemon.
+      row.empty();
+      this.renderRunOnFolderText(row, daemon);
+    });
+
+    const panel = row.createDiv({ cls: 'ct-run-on-browser is-hidden', attr: { 'data-testid': 'run-on-browser' } });
+    const renderBrowser = async (path: string): Promise<void> => {
+      panel.empty();
+      panel.createDiv({ cls: 'ct-run-on-browser-path', text: path });
+      const listing = panel.createDiv({ cls: 'ct-run-on-browser-list', attr: { role: 'listbox', 'aria-label': 'Subfolders' } });
+      listing.createDiv({ cls: 'ct-run-on-folder-hint', text: 'Loading…' });
+      const actions = panel.createDiv({ cls: 'ct-run-on-browser-actions' });
+      const parent = parentPath(path);
+      const up = actions.createEl('button', { text: 'Up', cls: 'ct-run-on-browse-up', attr: { type: 'button' } });
+      up.disabled = !parent || !workspaceContaining(workspaces, parent);
+      up.addEventListener('click', () => { if (parent) void renderBrowser(parent); });
+      const use = actions.createEl('button', { text: 'Use this folder', cls: 'mod-cta ct-run-on-browse-use', attr: { type: 'button' } });
+      use.addEventListener('click', () => choose(path));
+      const result = await source.subfolders(daemon.id, path);
+      if (!panel.isConnected) return;
+      listing.empty();
+      if (!result.ok) { listing.createDiv({ cls: 'ct-run-on-folder-hint', text: result.detail }); return; }
+      if (!result.value.allowed) { listing.createDiv({ cls: 'ct-run-on-folder-hint', text: 'This folder is not available on the daemon.' }); return; }
+      if (result.value.entries.length === 0) listing.createDiv({ cls: 'ct-run-on-folder-hint', text: 'No subfolders.' });
+      for (const entry of result.value.entries) {
+        const item = listing.createEl('button', { cls: 'ct-run-on-browse-item', text: entry.name, attr: { type: 'button', role: 'option', 'data-path': entry.path } });
+        item.addEventListener('click', () => { void renderBrowser(entry.path); });
+      }
+      if (result.value.truncated) listing.createDiv({ cls: 'ct-run-on-folder-hint', text: 'Only the first folders are shown. Use Other folder… to type a deeper path.' });
+    };
+    browseBtn.addEventListener('click', () => {
+      const open = panel.hasClass('is-hidden');
+      panel.toggleClass('is-hidden', !open);
+      browseBtn.setAttribute('aria-expanded', String(open));
+      if (!open) return;
+      const start = workspaceContaining(workspaces, cwd) ? cwd : (pickDefaultWorkspace(workspaces)?.path ?? workspaces[0].path);
+      void renderBrowser(start);
+    });
   }
 
   private createHarnessMark(container: HTMLElement, harness: AgentHarness): void {

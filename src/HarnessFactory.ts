@@ -5,6 +5,8 @@ import { OpenCodeSession } from './OpenCodeSession';
 import { ReplaySession, parseReplayScript, type ReplayScript } from './ReplaySession';
 import { ThreadSession } from './ThreadSession';
 import type { HarnessSession } from './HarnessSession';
+import { RemoteHarnessSession, type RemoteSessionDeps } from './remote/RemoteHarnessSession';
+import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
 import type { PluginSettings, Thread } from './types';
 
 /**
@@ -30,8 +32,22 @@ function loadDemoScript(file: string): ReplayScript {
 export function createHarnessSession(
   thread: Thread,
   settings: PluginSettings,
+  remoteDaemons?: RemoteDaemonResolver,
+  remoteHooks?: Pick<RemoteSessionDeps, 'onPendingChanged' | 'log' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName'>,
   env: Record<string, string | undefined> = process.env,
 ): HarnessSession {
+  // A remote thread runs on a daemon whatever its harness says.
+  if (thread.remote) {
+    const client = remoteDaemons?.clientFor(thread.remote.daemonId);
+    if (!client) {
+      throw new Error(
+        remoteDaemons
+          ? `The remote daemon "${remoteDaemons.nameOf(thread.remote.daemonId)}" is not configured. Add it under Settings, Remote daemons.`
+          : 'Remote threads are not available on this host.',
+      );
+    }
+    return new RemoteHarnessSession(client, thread, remoteHooks);
+  }
   const demoScript = env[DEMO_SCRIPT_ENV];
   if (demoScript && (thread.agentHarness ?? 'claude') === 'claude') {
     return new ReplaySession(loadDemoScript(demoScript));

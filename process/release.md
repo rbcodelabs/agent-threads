@@ -103,11 +103,18 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
 - Verifies `manifest.json` version matches the tag (fails fast if not)
 - Runs `npm run build`
 - Prepends the new entry to `versions.json`
-- Creates the GitHub release with `dist/main.js`, `dist/styles.css`, `manifest.json`, `versions.json`
+- Builds the daemon bundle (`npm run build:daemon`) and creates the GitHub release with `dist/main.js`, `dist/styles.css`, `manifest.json`, `versions.json`, plus `dist/agent-threads.cjs` and `dist/agent-threads.cjs.sha256` (the headless daemon; `deploy/install.sh` downloads and verifies it)
+
+The same tag also triggers `.github/workflows/publish-daemon-image.yml`, which builds the daemon image
+(`sandbox/Dockerfile.daemon`, `base` stage, `linux/amd64` + `linux/arm64`), smoke-tests it with
+`scripts/smoke-daemon.mts`, and pushes `ghcr.io/rbcodelabs/agent-threads-daemon:X.Y.Z`. It refuses to overwrite an
+existing tag and it does not contain the Claude CLI (no redistribution grant). **Owner step, first publish only:**
+GitHub creates the package private; set its visibility to Public in the package settings or nobody else can pull it.
 
 Verify it appeared:
 ```bash
 gh release view "vX.Y.Z" --repo rbcodelabs/agent-threads
+gh run list --repo rbcodelabs/agent-threads --workflow "Publish daemon image" --limit 1
 ```
 
 ---

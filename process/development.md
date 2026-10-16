@@ -112,7 +112,7 @@ cat ~/Library/Application\ Support/geode/geode.json   # → lastVault
 ls -la "<vault>/.geode/plugins/claude-threads" "<vault>/.obsidian/plugins/claude-threads"
 ```
 
-Also resolve `<vault>` against the real vault root. On the primary machine that is the iCloud path (`~/Library/Mobile Documents/com~apple~CloudDocs/Documents/Personal`); `~/Documents/Personal` is a *different* directory that shadows it, so writes there land somewhere nothing reads.
+Also resolve `<vault>` against the real vault root, not a similarly named directory: the vault may live in a synced folder (iCloud, Dropbox), and a same-named directory elsewhere shadows it, so writes there land somewhere nothing reads.
 
 After copying, verify by grepping the installed bundle for a string unique to the change rather than trusting the copy:
 

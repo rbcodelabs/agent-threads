@@ -94,10 +94,10 @@ function columns(board: HTMLElement): Array<{ label: string; cards: string[] }> 
 
 describe('KanbanView Project grouping identity', () => {
   it('groups an unassigned compass checkout under the configured Compass Project', () => {
-    const compass = makeProject('project-compass', 'Compass', '/Users/rickbowman/projects/compass');
+    const compass = makeProject('project-compass', 'Compass', '/Users/me/projects/compass');
     const board = renderProjectColumns([
-      makeThread('explicit', { projectId: compass.id, cwd: '/Users/rickbowman/projects/compass' }),
-      makeThread('derived', { cwd: '/Users/rickbowman/projects/compass' }),
+      makeThread('explicit', { projectId: compass.id, cwd: '/Users/me/projects/compass' }),
+      makeThread('derived', { cwd: '/Users/me/projects/compass' }),
     ], [compass]);
 
     expect(columns(board)).toEqual([{ label: 'Compass', cards: ['explicit', 'derived'] }]);

@@ -117,14 +117,14 @@ describe('obsidian_create_project', () => {
       name: 'HipTrip',
       vaultFolder: 'Projects/HipTrip',
       description: 'Travel curation app',
-      cwdOverride: '/Users/rick/projects/hiptrip',
+      cwdOverride: '/Users/me/projects/hiptrip',
     });
 
     expect(createProject).toHaveBeenCalledWith(
       'HipTrip',
       'Projects/HipTrip',
       'Travel curation app',
-      '/Users/rick/projects/hiptrip',
+      '/Users/me/projects/hiptrip',
       undefined,
     );
   });

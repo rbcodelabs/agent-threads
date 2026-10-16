@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import { buildHarnessExecArgs, mergeExtraMounts, resolveExternalMounts, resolveVaultMount, VM_WORKDIR, type ExternalMountRootInput } from './sandboxVm';
 import type { HarnessVmMode } from './types';
 import type { SkillMountPlan, VmExtraMount } from './skillMounts';
+import type { ContainerAwsPlan } from './containerAws';
 
 /**
  * Image built from `sandbox/Dockerfile.harness`. Distinct from
@@ -116,6 +117,12 @@ export interface ClaudeVmRoutingInputs {
    * so whichever starts the container first creates it with the right mounts.
    */
   skillMountPlan?: SkillMountPlan;
+  /**
+   * "Container AWS credentials" (see containerAws.ts): read-only SSO token
+   * cache + generated trimmed AWS config. Null/absent when AWS credentials are
+   * not relevant for this thread, which leaves the container exactly as before.
+   */
+  awsMountPlan?: ContainerAwsPlan | null;
   /** Geode-only, optional: connected external roots to mount read-only at /ext/<label>. Any failure means no extras. */
   getExternalMounts?: () => Promise<ExternalMountRootInput[] | null | undefined>;
   /** Host path of the vault, mounted read-write at /vault. Empty/undefined (mobile) skips the mount. */
@@ -207,7 +214,7 @@ export async function resolveClaudeVmRouting(
     memory: inputs.memory,
     cpus: inputs.cpus,
     // Skill mounts win on a guest-path collision (none today: /skills, /home/node vs /ext).
-    extraMounts: mergeExtraMounts(inputs.skillMountPlan?.mounts, externalMounts, vaultMount),
+    extraMounts: mergeExtraMounts(inputs.skillMountPlan?.mounts, inputs.awsMountPlan?.mounts, externalMounts, vaultMount),
   });
   if (!entered.success) {
     if (inputs.mode === 'always') {

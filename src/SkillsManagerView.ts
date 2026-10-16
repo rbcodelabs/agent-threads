@@ -1,4 +1,5 @@
 import { ItemView, WorkspaceLeaf, setIcon, setTooltip, Notice, Menu } from 'obsidian';
+import { obsidianHttpFetch } from './host/obsidianHost';
 import type ClaudeThreadsPlugin from './main';
 import {
   parseFrontmatter,
@@ -1785,7 +1786,7 @@ export class SkillsManagerView extends ItemView {
     this.browseDescLoading.add(skill.slug);
     if (this.selectedBrowse?.slug === skill.slug) this.renderDetail();
 
-    const description = await getMarketplaceSkillDescription(skill.slug, skill.source);
+    const description = await getMarketplaceSkillDescription(skill.slug, skill.source, obsidianHttpFetch);
 
     this.browseDescLoading.delete(skill.slug);
     this.browseDescriptions.set(skill.slug, description);
@@ -1868,7 +1869,7 @@ export class SkillsManagerView extends ItemView {
     }
 
     try {
-      this.browseResults = await searchMarketplaceSkills(this.browseQuery, 15, this.installedSkills);
+      this.browseResults = await searchMarketplaceSkills(this.browseQuery, 15, this.installedSkills, obsidianHttpFetch);
     } catch (err) {
       console.error('[ClaudeThreads] Skills search error:', err);
       this.browseResults = [];
@@ -1884,7 +1885,7 @@ export class SkillsManagerView extends ItemView {
     this.renderList();
 
     try {
-      this.browsePopularResults = await getPopularMarketplaceSkills(this.installedSkills, 30);
+      this.browsePopularResults = await getPopularMarketplaceSkills(this.installedSkills, 30, obsidianHttpFetch);
     } catch (err) {
       console.error('[ClaudeThreads] Skills popular fetch error:', err);
       this.browsePopularResults = [];

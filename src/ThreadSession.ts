@@ -48,6 +48,7 @@ import {
   shouldAutoRetryAuthError,
 } from './claudeAuthRecovery';
 import { isAwsCredentialErrorText } from './awsAuthRecovery';
+import { containerAwsEnv } from './containerAws';
 import { stripHostOnlyGitEnv } from './githubCredentialHelper';
 import { isReportedModelId } from './modelOptions';
 import { mergeUsageSnapshot,normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
@@ -323,6 +324,7 @@ export class ThreadSession {
           await clearPlanMode();
           return { behavior: 'deny' as const, message: 'Plan approved — proceed with implementation.', interrupt: false };
         }
+        if (options.claude?.preApprove?.(toolName)) return { behavior: 'allow' as const, updatedInput: input };
         const detail = buildPermissionDetail(toolName, input, opts);
         const title = opts.title ?? toolName;
         const allowed = await callbacks.onPermissionRequest(title, detail);
@@ -407,7 +409,7 @@ export class ThreadSession {
       // session must never see it: an env CLAUDE_CODE_OAUTH_TOKEN overrides
       // the host's keychain login (see HarnessSessionOptions.containerAuthToken).
       env: vmRouting
-        ? { ...todoToolsEnv, ...(options.containerAuthToken ? { CLAUDE_CODE_OAUTH_TOKEN: options.containerAuthToken } : {}) }
+        ? { ...todoToolsEnv, ...containerAwsEnv(vmRouting.mountedExtra, todoToolsEnv), ...(options.containerAuthToken ? { CLAUDE_CODE_OAUTH_TOKEN: options.containerAuthToken } : {}) }
         : { ...process.env, ...todoToolsEnv },
     };
     if (vmRouting) {

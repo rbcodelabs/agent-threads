@@ -1,6 +1,8 @@
 import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
+import { connectionPill } from './remote/connectionPill';
+import { forkBlockedReason } from './remote/threadLocation';
 import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
@@ -39,11 +41,12 @@ import { getVaultBridgesAPI, mapToVaultPath, type BridgeInfo } from './bridgeUti
 import { resolveTagIcon, planFooter, derivePrUrl } from './statusLine';
 import { isWebViewerEnabled } from './SettingsTab';
 import { ContextPanelViewError } from './ContextPanelController';
+import { OutsideVaultLinkModal } from './OutsideVaultLinkModal';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openLocalFileViaHost, openUrlPreferringWebViewer, resolveAbsoluteVaultHref } from './linkUtils';
 import type { StatusTag } from './types';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { promptConfirm } from './confirmModal';
-import { renderSandboxOfferCard } from './sandboxSetupPanel';
+import { renderSandboxOfferCard, type SandboxSetupFlowDeps } from './sandboxSetupPanel';
 import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
 import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
 import { describeOrchestratorThread, isOrchestratorThread, orchestratorWarning, type OrchestratorContext } from './orchestratorThreads';
@@ -167,6 +170,9 @@ export class ThreadsView extends ItemView {
   private artifactCardEl!: HTMLElement;
   /** Small badge shown in the title bar when the active thread is ephemeral. */
   private ephemeralBadgeEl!: HTMLSpanElement;
+  /** Host badge, remote folder and connection pill, shown only for a remote thread. */
+  private remoteStripEl: HTMLElement | null = null;
+  private remoteStateSubscribed = false;
   /** Models discovered from the active session via supportedModels(). */
   private discoveredModels: import('@anthropic-ai/claude-agent-sdk').ModelInfo[] = [];
   /** Agents discovered from the active session via supportedAgents(). */
@@ -476,7 +482,8 @@ export class ThreadsView extends ItemView {
       // capability allowlist, not a forgeable naming-prefix convention.
       // Requests that cannot be always-allowed (host_exec) skip both shortcuts
       // and are decided on the card every time.
-      if (isPermissionPreApproved(toolName, this.plugin.settings.alwaysAllowedTools)) return Promise.resolve(true);
+      // A remote thread's requests are never pre-approved: the tool name comes from the daemon (see isRemoteThread).
+      if (!this.manager.isRemoteThread(threadId) && isPermissionPreApproved(toolName, this.plugin.settings.alwaysAllowedTools)) return Promise.resolve(true);
 
       return new Promise((resolve) => {
         let resolved = false;
@@ -581,6 +588,10 @@ export class ThreadsView extends ItemView {
         // Once real tokens arrive, clear the sub-agent placeholder label —
         // the token content will replace it when the thread is restored.
         if (buf.subagentLabel) buf.subagentLabel = undefined;
+      } else if (event.type === 'stream_reset') {
+        // Remote resync: the text streamed so far for the unfinished message is stale.
+        const buf = this.streamingBuffers.get(threadId);
+        if (buf) buf.content = '';
       } else if (event.type === 'tool_use') {
         let buf = this.streamingBuffers.get(threadId);
         if (!buf) { buf = { content: '', tools: [] }; this.streamingBuffers.set(threadId, buf); }
@@ -861,6 +872,14 @@ export class ThreadsView extends ItemView {
       if (this.activeThreadId) this.closeThread(this.activeThreadId).catch(console.error);
     });
 
+    // Always visible (unlike the title row, which a native view header hides): which machine this
+    // thread runs on and whether it is reachable.
+    this.remoteStripEl = root.createDiv({ cls: 'ct-remote-strip ct-hidden', attr: { 'data-testid': 'remote-strip' } });
+    if (!this.remoteStateSubscribed && this.plugin.daemonRegistry) {
+      this.remoteStateSubscribed = true;
+      this.register(this.plugin.daemonRegistry.onState(() => this.renderRemoteStrip()));
+    }
+
     this.mainEl = root.createDiv('ct-main');
     this.messagesEl = this.mainEl.createDiv('ct-messages');
     this.messagesEl.addEventListener('scroll', () => {
@@ -1101,6 +1120,7 @@ export class ThreadsView extends ItemView {
     if (this.ephemeralBadgeEl) {
       this.ephemeralBadgeEl.toggleClass('ct-hidden', !thread?.ephemeral);
     }
+    this.renderRemoteStrip();
 
     const threads = this.manager.getThreads();
     const hasRunning = threads.some(t => t.id !== this.activeThreadId && this.manager.isRunning(t.id));
@@ -1120,6 +1140,34 @@ export class ThreadsView extends ItemView {
       this.closeThreadBtn.classList.toggle('ct-hidden', threads.length <= 1);
     }
     this.nativeCloseThreadActionEl?.classList.toggle('ct-hidden', threads.length <= 1);
+  }
+
+  /** Host badge + remote folder + connection pill for the active thread; hidden for local threads. */
+  private renderRemoteStrip(): void {
+    const strip = this.remoteStripEl;
+    if (!strip) return;
+    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
+    const remote = thread?.remote;
+    strip.toggleClass('ct-hidden', !remote);
+    if (!remote) return;
+    const registry = this.plugin.daemonRegistry;
+    const name = registry?.nameOf(remote.daemonId) ?? remote.daemonId;
+    // Viewing a remote thread is enough reason to be connected: it makes the pill truthful and warms the socket.
+    const client = registry?.clientFor(remote.daemonId);
+    client?.connect();
+    const pill = connectionPill(client?.connection, name);
+    strip.empty();
+    const badge = strip.createSpan({ cls: 'ct-remote-badge', attr: { title: `This thread runs on ${name}`, 'data-testid': 'remote-badge' } });
+    const badgeIcon = badge.createSpan({ cls: 'ct-remote-badge-icon' });
+    badgeIcon.setAttribute('aria-hidden', 'true');
+    setIcon(badgeIcon, 'server');
+    badge.createSpan({ cls: 'ct-remote-badge-name', text: name });
+    strip.createSpan({ cls: 'ct-remote-cwd', text: remote.remoteCwd, attr: { title: `${name}:${remote.remoteCwd}` } });
+    strip.createSpan({
+      cls: `ct-remote-pill ct-remote-pill--${pill.kind}`,
+      text: pill.label,
+      attr: { title: pill.title, role: 'status', 'data-testid': 'remote-pill', 'data-state': pill.kind },
+    });
   }
 
   private createNativeHeaderActions(): void {
@@ -1817,6 +1865,33 @@ export class ThreadsView extends ItemView {
     }
   }
 
+  /** Offer (never auto-perform) opening an absolute link that is outside the vault. */
+  private confirmOpenOutsideVaultLink(href: string): void {
+    new OutsideVaultLinkModal(this.app, href, {
+      open: async (path) => {
+        try {
+          if (await openLocalFileViaHost(this.app, path)) return;
+          const { shell } = require('electron') as { shell: { openPath: (p: string) => Promise<string> } };
+          const err = await shell.openPath(path);
+          if (err) new Notice(`Could not open file: ${err}`);
+        } catch (err) {
+          new Notice(`Could not open file: ${(err as Error).message}`);
+        }
+      },
+      reveal: async (path) => {
+        if (!(await this.revealArtifactPath(path))) new Notice('Reveal is not available here.');
+      },
+      copy: async (path) => {
+        try {
+          await navigator.clipboard.writeText(path);
+          new Notice('Path copied.');
+        } catch {
+          new Notice('Could not copy the path.');
+        }
+      },
+    }).open();
+  }
+
   /** Reveals a local path in the OS file manager; false when unsupported. */
   async revealArtifactPath(target: string): Promise<boolean> {
     try {
@@ -1959,6 +2034,12 @@ export class ThreadsView extends ItemView {
     try {
       if (isHttpUrl(filePath)) {
         this.openLink(filePath);
+        return;
+      }
+      // A remote thread's file paths are on the daemon's machine: opening them here would hit (or miss) an unrelated local file.
+      const activeRemote = this.activeThreadId ? this.manager.getThread(this.activeThreadId)?.remote : undefined;
+      if (activeRemote) {
+        new Notice(`This file is on ${this.plugin.daemonRegistry?.nameOf(activeRemote.daemonId) ?? 'the remote machine'}; it cannot be opened from here.`);
         return;
       }
       if (/\.html?$/i.test(filePath) && isWebViewerEnabled(this.app)) {
@@ -2360,12 +2441,15 @@ export class ThreadsView extends ItemView {
         .setIcon('brain-circuit')
         .onClick(() => this.summarizeThread(thread.id))
     );
-    menu.addItem(item =>
-      item
-        .setTitle('Fork conversation')
-        .setIcon('git-branch')
-        .onClick(() => this.forkThread(thread.id))
-    );
+    // A fork is a local thread; for a remote thread it would run on this machine in the daemon's folder.
+    if (!thread.remote) {
+      menu.addItem(item =>
+        item
+          .setTitle('Fork conversation')
+          .setIcon('git-branch')
+          .onClick(() => this.forkThread(thread.id))
+      );
+    }
     // Orchestrator threads are pinned to their scope by ThreadManager.setThreadProject,
     // so offering the move would only ever produce an error notice.
     if (this.canMoveToProject(thread.id)) {
@@ -2821,7 +2905,7 @@ export class ThreadsView extends ItemView {
         // unresolved link, which can create a stray note named after the
         // path — the same hazard linkifyBridgePaths guards against below.
         if (absolute && !resolved) {
-          new Notice('That link points outside this vault.');
+          this.confirmOpenOutsideVaultLink(href);
           return;
         }
         const target = resolved ?? href;
@@ -3116,6 +3200,11 @@ export class ThreadsView extends ItemView {
     const thread = this.manager.getThread(threadId);
     if (!thread || thread.messages.filter(m => m.role !== 'compact' && m.role !== 'notice').length === 0) {
       new Notice('Nothing to fork — thread has no messages yet.');
+      return;
+    }
+    const blocked = forkBlockedReason(thread, (id) => this.plugin.daemonRegistry?.nameOf(id) ?? id);
+    if (blocked) {
+      new Notice(blocked, 8000);
       return;
     }
 
@@ -4312,7 +4401,7 @@ export class ThreadsView extends ItemView {
       .addEventListener('click', () => done(false));
     actions.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
       .addEventListener('click', () => done(true));
-    if (canAlwaysAllow(toolName)) {
+    if (canAlwaysAllow(toolName) && !(this.activeThreadId && this.manager.isRemoteThread(this.activeThreadId))) {
       actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
         .addEventListener('click', async () => {
           this.plugin.settings.alwaysAllowedTools.push(toolName);
@@ -5119,6 +5208,13 @@ export class ThreadsView extends ItemView {
 
       case 'escalated': {
         this.showModelEscalationTip(`⚡ Using ${event.model} for this turn`);
+        break;
+      }
+
+      case 'stream_reset': {
+        // Drop the half-rendered text; the daemon's checkpoint re-streams it as tokens.
+        this.streamingContent = '';
+        this.scheduleStreamingRender();
         break;
       }
 
@@ -5993,9 +6089,10 @@ export class ThreadsView extends ItemView {
     if (!Platform.isDesktopApp) return;
     this.messagesEl.querySelector('.ct-sandbox-offer')?.remove();
     const harnessImage = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
+    const injected = this.manager.sandboxSetupRunner as Pick<SandboxSetupFlowDeps, 'getStatus' | 'run'> | undefined;
     renderSandboxOfferCard(this.messagesEl, {
-      getStatus: this.manager.sandboxSetupRunner?.getStatus ?? (() => getSandboxSetupStatus({ harnessImage })),
-      run: this.manager.sandboxSetupRunner?.run ?? (({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal })),
+      getStatus: injected?.getStatus ?? (() => getSandboxSetupStatus({ harnessImage })),
+      run: injected?.run ?? (({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal })),
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       onNotNow: () => this.manager.clearSandboxSetupOffer(threadId),
       onSetupDone: () => this.manager.completeSandboxSetupOffer(threadId),

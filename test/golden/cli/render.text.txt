@@ -1,0 +1,21 @@
+Let me look.
+[tool] Bash ls -la [31m /srv
+[tool] Bash failed
+[permission r-1] Bash
+    rm -rf build
+    and more
+[question r-2]
+  Env: Which env?
+    1) dev - safe
+    2) prod
+[plan r-3]
+    1. one
+    2. two
+[input r-4] need a value
+[resolved r-1] by tok1 (resolved)
+[denied] Write: denied by mode
+All done, no streaming for this one.
+[error] boom
+[interrupted]
+[done] 3 turns, $0.0123
+[session closed: idle]

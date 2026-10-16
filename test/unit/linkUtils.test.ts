@@ -112,13 +112,13 @@ describe('classifyRenderedMarkdownLink', () => {
 describe('resolveAbsoluteVaultHref', () => {
   it('resolves an OS-absolute unix path to the shortest existing vault-relative suffix', () => {
     const exists = (p: string) => ['Products/Geode/Runs/geode-2026-09-01-architecture-review.md', 'geode-2026-09-01-architecture-review.md'].includes(p);
-    const href = '/Users/rickbowman/Library/Mobile Documents/com~apple~CloudDocs/Documents/Personal/Products/Geode/Runs/geode-2026-09-01-architecture-review.md';
+    const href = '/Users/me/Documents/My Vault/Products/Geode/Runs/geode-2026-09-01-architecture-review.md';
     expect(resolveAbsoluteVaultHref(href, exists)).toBe('Products/Geode/Runs/geode-2026-09-01-architecture-review.md');
   });
 
   it('returns null when no suffix of an absolute path resolves', () => {
     const exists = () => false;
-    expect(resolveAbsoluteVaultHref('/Users/rick/Documents/Personal/nope.md', exists)).toBeNull();
+    expect(resolveAbsoluteVaultHref('/Users/me/Documents/Personal/nope.md', exists)).toBeNull();
   });
 
   it('returns null for an already vault-relative href, even if exists would match', () => {
@@ -133,25 +133,25 @@ describe('resolveAbsoluteVaultHref', () => {
 
   it('returns the longest matching suffix, not just any match', () => {
     const exists = (p: string) => ['Docs/note.md', 'note.md'].includes(p);
-    expect(resolveAbsoluteVaultHref('/Users/rick/Vault/Docs/note.md', exists)).toBe('Docs/note.md');
+    expect(resolveAbsoluteVaultHref('/Users/me/Vault/Docs/note.md', exists)).toBe('Docs/note.md');
   });
 
   // marked percent-encodes hrefs, so a vault path containing a space arrives
   // as "Claude%20Threads" while the vault index holds the literal space.
   it('resolves a percent-encoded space inside the vault-relative portion', () => {
     const exists = (p: string) => p === 'Products/Claude Threads/notes.md';
-    const href = '/Users/rick/Library/Mobile%20Documents/Personal/Products/Claude%20Threads/notes.md';
+    const href = '/Users/me/Library/Mobile%20Documents/Personal/Products/Claude%20Threads/notes.md';
     expect(resolveAbsoluteVaultHref(href, exists)).toBe('Products/Claude Threads/notes.md');
   });
 
   it('prefers a raw match over the decoded one when a filename really contains %20', () => {
     const exists = (p: string) => p === 'Docs/odd%20name.md';
-    expect(resolveAbsoluteVaultHref('/Users/rick/Vault/Docs/odd%20name.md', exists)).toBe('Docs/odd%20name.md');
+    expect(resolveAbsoluteVaultHref('/Users/me/Vault/Docs/odd%20name.md', exists)).toBe('Docs/odd%20name.md');
   });
 
   it('survives a malformed percent-escape without throwing', () => {
     const exists = (p: string) => p === 'Docs/100%.md';
-    expect(resolveAbsoluteVaultHref('/Users/rick/Vault/Docs/100%.md', exists)).toBe('Docs/100%.md');
+    expect(resolveAbsoluteVaultHref('/Users/me/Vault/Docs/100%.md', exists)).toBe('Docs/100%.md');
   });
 
   // A trailing #subpath must be split off before probing: glued onto the final
@@ -159,29 +159,29 @@ describe('resolveAbsoluteVaultHref', () => {
   // index, so the whole link silently fails to resolve.
   it('splits a #heading subpath before probing and reattaches it', () => {
     const exists = (p: string) => p === 'Notes/Plan.md';
-    expect(resolveAbsoluteVaultHref('/Users/rick/Vault/Notes/Plan.md#Decision', exists))
+    expect(resolveAbsoluteVaultHref('/Users/me/Vault/Notes/Plan.md#Decision', exists))
       .toBe('Notes/Plan.md#Decision');
   });
 
   it('splits a #^block subpath before probing and reattaches it', () => {
     const exists = (p: string) => p === 'Daily/Today.md';
-    expect(resolveAbsoluteVaultHref('/Users/rick/Vault/Daily/Today.md#^abc123', exists))
+    expect(resolveAbsoluteVaultHref('/Users/me/Vault/Daily/Today.md#^abc123', exists))
       .toBe('Daily/Today.md#^abc123');
   });
 
   it('handles a subpath alongside a percent-encoded space', () => {
     const exists = (p: string) => p === 'Products/Claude Threads/notes.md';
-    expect(resolveAbsoluteVaultHref('/Users/rick/Mobile%20Documents/Products/Claude%20Threads/notes.md#Section', exists))
+    expect(resolveAbsoluteVaultHref('/Users/me/Mobile%20Documents/Products/Claude%20Threads/notes.md#Section', exists))
       .toBe('Products/Claude Threads/notes.md#Section');
   });
 
   it('returns null when the path resolves nowhere even though it carries a subpath', () => {
-    expect(resolveAbsoluteVaultHref('/Users/rick/elsewhere/gone.md#Heading', () => false)).toBeNull();
+    expect(resolveAbsoluteVaultHref('/Users/me/elsewhere/gone.md#Heading', () => false)).toBeNull();
   });
 });
 
 describe('isOsAbsoluteHref', () => {
-  it.each(['/Users/rick/note.md', '/tmp/x.md', 'C:\\Users\\rick\\note.md', 'C:/Users/rick/note.md'])(
+  it.each(['/Users/me/note.md', '/tmp/x.md', 'C:\\Users\\rick\\note.md', 'C:/Users/me/note.md'])(
     'treats %s as an OS-absolute path',
     (href) => { expect(isOsAbsoluteHref(href)).toBe(true); },
   );

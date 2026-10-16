@@ -1,4 +1,5 @@
 import type { AgentHarness, HarnessVmMode, StorageAllocationOptions } from './types';
+import { saveThenAck } from './remote/persistAck';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { checkClaudeCli, createDefaultCliProbeDeps, describeCliProblems, findMissingKnownModels, type CliInfo, type CliProblem } from './cliVersion';
 import { FALLBACK_RESOLVED } from './modelOptions';
@@ -27,6 +28,8 @@ import type { VaultPersistence } from './VaultPersistence';
 import type { InProcessSummarizer } from './InProcessSummarizer';
 import type { WakeLockService } from './WakeLockService';
 import type { createClaudeThreadsMcpServers, CronCreateParams, ProjectSnapshot, ProjectUpdatePatch } from './ObsidianTools';
+import { createLoopbackMcpSource } from './remote/hostMcpClient';
+import { RemoteHostTools } from './remote/hostTools';
 import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { GithubCredentialBroker, resolveGithubBridge } from './githubCredentials';
@@ -35,6 +38,8 @@ import { setGitAuthProvider } from './gitClient';
 import { createGithubGitAuth } from './skillSourceGithubAuth';
 import { createGithubVmHooks } from './githubVmDelivery';
 import { createRequestUrlFetch } from './requestUrlFetch';
+import { obsidianHttpFetch, obsidianYamlParser } from './host/obsidianHost';
+import { AttachmentWriter } from './AttachmentWriter';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
 import {
   HandoffDebouncer,
@@ -76,6 +81,9 @@ import { RelayClient } from './RelayClient';
 import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
+import { DaemonRegistry } from './remote/DaemonRegistry';
+import { createRemoteFolderSource, type RemoteFolderSource } from './remote/folderSource';
+import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
@@ -262,6 +270,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
   api!: { readonly v1: ClaudeThreadsApiV1 };
   settings!: PluginSettings;
   manager!: ThreadManager;
+  /** Connections to the remote agent-threads daemons (Settings -> Remote daemons). */
+  daemonRegistry: DaemonRegistry | null = null;
+  /** What the Run on picker asks for a daemon's folders (advertised workspaces, subfolders). */
+  remoteFolders: RemoteFolderSource | null = null;
   persistence!: VaultPersistence;
   inProcessSummarizer!: InProcessSummarizer;
   wakeLock!: WakeLockService;
@@ -583,7 +595,25 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Mask stored secret values in every log sink (console, ring, raw JSONL).
     setKnownSecretsProvider(() => this.collectSecretValues());
     this.register(() => setKnownSecretsProvider(null));
-    this.manager = new ThreadManager(this.settings);
+    // Images are externalized through the vault API / Geode bridge (ADR-0003);
+    // core only sees the AttachmentStore interface. App and vaultFolder are read
+    // lazily because settings load and app wiring finish after construction.
+    this.manager = new ThreadManager(
+      this.settings,
+      new AttachmentWriter(() => this.app, () => this.settings.vaultFolder),
+    );
+    // Remote daemons: one client per configured daemon, tokens read from the keychain at each (re)connect.
+    this.daemonRegistry = new DaemonRegistry({
+      getDaemons: () => this.settings.remoteDaemons ?? [],
+      getToken: (daemon) => this.app.secretStorage.getSecret(secretStorageKey(daemon.tokenSecretName)) || undefined,
+      createSocket: createPluginWebSocketFactory(),
+      clientVersion: this.manifest.version,
+      getInstanceId: () => this.settings.remoteClientId,
+      log: (message) => debugLog(message),
+    });
+    this.remoteFolders = createRemoteFolderSource(this.daemonRegistry);
+    this.register(() => { this.daemonRegistry?.disposeAll(); });
+    this.manager.remoteDaemons = this.daemonRegistry;
     this.manager.getExternalMounts = () => this.listExternalMountRoots();
     // Lets the manager detect sessions holding stale Google/OAuth proxy configs (per-send check).
     this.manager.proxyMcpServersForThread = (threadId) => ({
@@ -916,9 +946,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
           },
           onSkillsSearch: async (query, limit) => {
             const installed = await skillManager.listInstalledSkills(this.settings.skillSources ?? [], this.getManagedSkillRoots());
-            return skillManager.searchMarketplaceSkills(query, limit ?? 15, installed);
+            return skillManager.searchMarketplaceSkills(query, limit ?? 15, installed, obsidianHttpFetch);
           },
-          onSkillsGet: (identifier) => skillManager.getSkillDetail(identifier, this.settings.skillSources ?? [], this.getManagedSkillRoots()),
+          onSkillsGet: (identifier) => skillManager.getSkillDetail(identifier, this.settings.skillSources ?? [], this.getManagedSkillRoots(), obsidianHttpFetch),
           onSkillsListSources: () => skillManager.listSkillSources(this.settings.skillSources ?? []),
           onSkillsCheckUpdates: async () => {
             const results = await skillManager.checkAllSourcesForUpdates(this.settings.skillSources ?? []);
@@ -942,11 +972,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
           }),
           onSkillsCreateLocal: params => {
             const { createLocalSkill } = require('./localSkills') as typeof import('./localSkills');
-            return createLocalSkill(this.getLocalSkillsRoot(), params);
+            return createLocalSkill(this.getLocalSkillsRoot(), params, obsidianYamlParser);
           },
           onSkillsUpdateLocal: params => {
             const { updateLocalSkill } = require('./localSkills') as typeof import('./localSkills');
-            return updateLocalSkill(this.getLocalSkillsRoot(), params);
+            return updateLocalSkill(this.getLocalSkillsRoot(), params, obsidianYamlParser);
           },
           onSkillsUninstall: (name) => skillManager.uninstallSkillByName(name, this.settings.skillSources ?? [], this.getManagedSkillRoots()),
           onSkillsUpdate: async (sourceId) => {
@@ -1008,6 +1038,22 @@ export default class ClaudeThreadsPlugin extends Plugin {
         return {} as Record<string, McpServerConfig>;
       }
     };
+    // Tools a remote (daemon-hosted) thread may call back into on this computer: the thread's own built-in
+    // vault/workspace/threads/... handlers plus the Google and OAuth brokers, filtered by toolRouting.ts and the
+    // daemon's own settings. Only tool names, schemas and results ever leave; the broker URLs and their capability
+    // headers stay in the sources created here.
+    this.manager.remoteHostToolsFactory = (threadId: string, thread: Thread) => {
+      const daemonSettings = thread.remote ? this.settings.remoteDaemons?.find(d => d.id === thread.remote!.daemonId)?.hostTools : undefined;
+      const builtIn = buildBuiltInMcpServers(threadId, thread.cwd).claude_threads.harnessTools;
+      const brokers: Record<string, { type?: string; url?: string; headers?: Record<string, string> }> = {
+        ...(this.googleWorkspaceMcp?.serversForThread(threadId) ?? {}),
+        ...(this.oauthMcpRegistry?.serversForThread(threadId) ?? {}),
+      } as never;
+      const mcpSources = Object.fromEntries(Object.entries(brokers)
+        .filter(([, c]) => c.type === 'http' && typeof c.url === 'string')
+        .map(([name, c]) => [name, createLoopbackMcpSource(c.url!, c.headers ?? {})]));
+      return new RemoteHostTools({ builtIn, mcpSources, overrides: daemonSettings?.routes, log: m => debugLog(m) });
+    };
     // Host-loopback OAuth/Google brokers cannot be reached from Apple's VM.
     // Overlay plugin-owned brokers with in-process SDK bridges. Built-ins use
     // the container-specific lifecycle surface; remote servers and stdio configs
@@ -1033,8 +1079,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // intentionally point at a repository outside the vault and must not affect
     // that derivation.
     this.manager.vaultRoot = resolveProjectVaultRoot(this.app.vault.adapter);
-    // App handle for AttachmentWriter (writes image files through the vault API).
-    this.manager.app = this.app;
     // Absolute path to this plugin's installed dist/ dir, used to resolve the
     // bundled thread-orchestrator skill (see ThreadManager.buildSessionOptions()).
     {
@@ -1200,6 +1244,19 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.loadProjects(this.settings.projects ?? []);
     const savedThreads = this.settings.threads ?? [];
     this.manager.loadThreads(savedThreads);
+    // A remote turn that was running when Geode last quit is still running (or finished) on the daemon:
+    // re-attach so its transcript completes without anyone opening the thread.
+    this.app.workspace.onLayoutReady(() => {
+      const resumed = this.manager.resumeRemoteTurns();
+      if (resumed.length > 0) debugLog(`[ClaudeThreads] re-attached ${resumed.length} remote turn(s)`);
+    });
+    // Remote transcripts are persisted as soon as a turn produces something durable, not only when a
+    // view happens to save, and each save tells the daemon how much of its replay buffer can go (ack).
+    this.register(this.manager.subscribe((threadId, event) => {
+      if (event.type !== 'message' && event.type !== 'done' && event.type !== 'error' && event.type !== 'interrupted' && event.type !== 'remote_pending_changed') return;
+      if (!this.manager.getThread(threadId)?.remote) return;
+      saveThenAck(this.manager, threadId, () => this.saveSettings()).catch(console.error);
+    }));
     const repairedOrchestrators = repairStaleProjectOrchestrators(
       this.manager.getProjects(),
       id => this.manager.getThread(id)?.projectId,
@@ -1881,7 +1938,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
           await this.safeReloadPlugin();
           return;
         }
-        const running = this.manager.getRunningThreads();
+        // Running remote turns are not affected by a reload (they detach), so they never block it.
+        const running = this.manager.getRunningThreads().filter((t) => !t.remote);
         if (running.length === 0) {
           await this.safeReloadPlugin();
           return;
@@ -2647,12 +2705,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   createLocalSkill(params: import('./localSkills').CreateLocalSkillInput) {
     const { createLocalSkill } = require('./localSkills') as typeof import('./localSkills');
-    return createLocalSkill(this.getLocalSkillsRoot(), params);
+    return createLocalSkill(this.getLocalSkillsRoot(), params, obsidianYamlParser);
   }
 
   updateLocalSkill(params: import('./localSkills').UpdateLocalSkillInput) {
     const { updateLocalSkill } = require('./localSkills') as typeof import('./localSkills');
-    return updateLocalSkill(this.getLocalSkillsRoot(), params);
+    return updateLocalSkill(this.getLocalSkillsRoot(), params, obsidianYamlParser);
   }
 
   async setLocalSkillsFolder(folder: string): Promise<void> {
@@ -2792,7 +2850,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // starts — but sessions receive their interrupt signal synchronously before
     // that, giving them maximum time to shut down cleanly.
     if (this.manager) {
-      const runningThreads = this.manager.getRunningThreads();
+      // A running REMOTE turn is not interrupted by a reload: gracefulShutdown() detaches from it and
+      // it keeps running on the daemon, so it neither needs the wait nor the notice.
+      const runningThreads = this.manager.getRunningThreads().filter((t) => !t.remote);
       if (runningThreads.length > 0) {
         const names = runningThreads.map((t) => `"${t.title}"`).join(', ');
         const s = runningThreads.length === 1 ? '' : 's';
@@ -2816,6 +2876,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.documentWatch?.stop();
     telemetry.dispose();
     this.manager?.destroy();
+    this.daemonRegistry?.disposeAll();
 
     // Note: pending ScheduleWakeup entries are now durable Scheduler items
     // (schedule.type 'once', origin 'wakeup') persisted to disk — they must
@@ -3557,6 +3618,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       harnessVmMode?: HarnessVmMode;
       /** Project selected by a dispatch surface. Omit for deliberate Unassigned. */
       projectId?: string;
+      /** Run the thread on a remote daemon, in this folder on its machine (Claude only). */
+      remote?: { daemonId: string; cwd: string };
     },
   ): Promise<string> {
     const rawTitle = titleHint ?? text;
@@ -3566,11 +3629,21 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const project = opts?.projectId ? this.manager.getProject(opts.projectId) : undefined;
     if (opts?.projectId && !project) throw new Error(`Project not found: ${opts.projectId}`);
     const cwd = project ? this.manager.getProjectCwd(project) : this.getEffectiveCwd();
-    const thread = this.manager.createThread(title, cwd, project?.id, opts?.agentHarness);
+    if (opts?.remote) {
+      if (!(this.settings.remoteDaemons ?? []).some((d) => d.id === opts.remote!.daemonId)) {
+        throw new Error('That remote daemon is not configured. Add it under Settings, Remote daemons.');
+      }
+      if ((opts.agentHarness ?? this.settings.agentHarness ?? 'claude') !== 'claude') {
+        throw new Error('Remote threads run Claude only for now.');
+      }
+    }
+    const thread = opts?.remote
+      ? this.manager.createRemoteThread(title, { daemonId: opts.remote.daemonId, remoteCwd: opts.remote.cwd, clientId: this.settings.remoteClientId ?? 'unknown' }, project?.id)
+      : this.manager.createThread(title, cwd, project?.id, opts?.agentHarness);
     if (opts?.model) this.manager.setThreadModel(thread.id, opts.model);
     // Container routing exists only for Claude; the picker never offers it for
     // other harnesses, so a mismatched request is ignored rather than fatal.
-    if (opts?.harnessVmMode && (thread.agentHarness ?? 'claude') === 'claude') {
+    if (opts?.harnessVmMode && !thread.remote && (thread.agentHarness ?? 'claude') === 'claude') {
       this.manager.setInitialThreadHarnessVmMode(thread.id, opts.harnessVmMode);
     }
     const goalRevision = opts?.goal ? this.manager.setThreadGoal(thread.id, opts.goal) : undefined;
@@ -3887,6 +3960,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
     // Ensure projects array exists for older data
     this.settings.projects = this.settings.projects ?? [];
+    // Stable id of this install, stamped on remote threads as their owner.
+    this.settings.remoteDaemons = this.settings.remoteDaemons ?? [];
+    this.settings.remoteClientId = this.settings.remoteClientId ?? crypto.randomUUID();
     // Ensure secretEnvKeys array exists for installs predating this feature
     this.settings.secretEnvKeys = this.settings.secretEnvKeys ?? [];
     // Ensure mcpServers map exists for installs predating this feature. There is

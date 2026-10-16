@@ -146,13 +146,13 @@ describe('obsidian_create_project — main.ts wiring', () => {
       name: 'HipTrip',
       vaultFolder: 'Projects/HipTrip',
       description: 'Travel curation',
-      cwdOverride: '/Users/rick/projects/hiptrip',
+      cwdOverride: '/Users/me/projects/hiptrip',
     });
 
     const { id } = parseResult(result) as { id: string };
     const stored = manager.getProject(id)!;
     expect(stored.description).toBe('Travel curation');
-    expect(stored.cwdOverride).toBe('/Users/rick/projects/hiptrip');
+    expect(stored.cwdOverride).toBe('/Users/me/projects/hiptrip');
   });
 
   it('calls saveSettings after creating the project', async () => {

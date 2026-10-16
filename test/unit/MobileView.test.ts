@@ -1222,7 +1222,7 @@ describe('MobileView — visualize markers', () => {
 
   it('offers an Open visualization button when the fragment is in the synced vault', async () => {
     const el = await renderAssistant(
-      'visualize{"path":"/Users/rick/Documents/Personal/Charts/rev.html"}',
+      'visualize{"path":"/Users/me/Documents/Personal/Charts/rev.html"}',
       ['Charts/rev.html'],
     );
     const button = el.querySelector('.ct-visualize-open') as HTMLButtonElement;
@@ -1232,7 +1232,7 @@ describe('MobileView — visualize markers', () => {
 
   it('opens the longest matching vault path when the button is tapped', async () => {
     const el = await renderAssistant(
-      'visualize{"path":"/Users/rick/Documents/Personal/Charts/rev.html"}',
+      'visualize{"path":"/Users/me/Documents/Personal/Charts/rev.html"}',
       ['Charts/rev.html', 'rev.html'],
     );
     (el.querySelector('.ct-visualize-open') as HTMLButtonElement).click();
@@ -1291,7 +1291,7 @@ describe('MobileView — plain markdown links', () => {
   });
 
   it('resolves an OS-absolute path under the synced vault before opening', async () => {
-    const href = '/Users/rick/Vault/Docs/note.md';
+    const href = '/Users/me/Vault/Docs/note.md';
     const { messagesEl, opened } = await renderAssistantWithApp(
       `See <a href="${href}">the doc</a> for details.`,
       ['Docs/note.md'],
@@ -1307,7 +1307,7 @@ describe('MobileView — plain markdown links', () => {
   // unresolved linktext to the host — which can create a stray note named
   // after a desktop path that simply isn't on this device. Withhold instead.
   it('does NOT forward an unresolvable OS-absolute path to openLinkText', async () => {
-    const href = '/Users/rick/elsewhere/note.md';
+    const href = '/Users/me/elsewhere/note.md';
     const { messagesEl, opened } = await renderAssistantWithApp(
       `See <a href="${href}">the doc</a> for details.`,
       [],
@@ -1327,7 +1327,7 @@ describe('MobileView — plain markdown links', () => {
   });
 
   it('preserves a #heading subpath when resolving an OS-absolute path', async () => {
-    const href = '/Users/rick/Vault/Docs/note.md#Section';
+    const href = '/Users/me/Vault/Docs/note.md#Section';
     const { messagesEl, opened } = await renderAssistantWithApp(
       `See <a href="${href}">the doc</a> for details.`,
       ['Docs/note.md'],
@@ -1350,7 +1350,7 @@ describe('MobileView — plain markdown links', () => {
     // In production marked percent-encodes spaces in emitted hrefs; the mocked
     // marked.parse here doesn't, so the %20 is written explicitly to exercise
     // the same decode step MobileView applies before calling resolveVaultCopy.
-    const encodedHref = '/Users/rick/Vault/Products/Geode/Runs/My%20Report.md';
+    const encodedHref = '/Users/me/Vault/Products/Geode/Runs/My%20Report.md';
     const { messagesEl, opened } = await renderAssistantWithApp(
       `See <a href="${encodedHref}">the doc</a> for details.`,
       ['Products/Geode/Runs/My Report.md'],

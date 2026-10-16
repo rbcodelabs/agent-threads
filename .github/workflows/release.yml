@@ -39,6 +39,13 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The headless daemon (docs/remote-daemon.md) ships beside the plugin, version-locked to it, with a
+      # checksum that deploy/install.sh verifies. It is an extra asset: the plugin install (BRAT) ignores it.
+      - name: Build daemon bundle
+        run: |
+          npm run build:daemon
+          (cd dist && sha256sum agent-threads.cjs > agent-threads.cjs.sha256)
+
       - name: Verify versions.json is in sync
         # This used to *mutate* versions.json here and ship the result as an
         # asset without ever committing it back, so the repo copy drifted --
@@ -56,11 +63,15 @@ jobs:
             --notes "Auto-generated release assets." \
             dist/main.js \
             dist/styles.css \
+            dist/agent-threads.cjs \
+            dist/agent-threads.cjs.sha256 \
             manifest.json \
             versions.json \
           || gh release upload "${{ github.ref_name }}" \
             --clobber \
             dist/main.js \
             dist/styles.css \
+            dist/agent-threads.cjs \
+            dist/agent-threads.cjs.sha256 \
             manifest.json \
             versions.json

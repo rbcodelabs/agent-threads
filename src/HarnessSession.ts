@@ -40,7 +40,11 @@ export interface HarnessSession {
   readonly cwd: string | undefined;
   readonly hasPendingPermission: boolean;
   canIdleReap(): boolean;
-  start(options: HarnessSessionOptions): Promise<void>;
+  /**
+   * `startMode.attachOnly` is for remote sessions only: follow a turn that was
+   * running when the host last quit, without making the daemon start anything.
+   */
+  start(options: HarnessSessionOptions, startMode?: { attachOnly?: boolean }): Promise<void>;
   /** Optional harness-specific maintenance before a user turn is submitted. */
   prepareForSend?(text: string, images?: ImageAttachment[]): Promise<void>;
   send(text: string, images?: ImageAttachment[], userMessageUuid?: string): void;
@@ -48,7 +52,22 @@ export interface HarnessSession {
   /** Native child-agent controls. Absent unless a harness exposes a directly verified route. */
   sendAgentMessage?(nativeAgentId: string, text: string): Promise<void>;
   interruptAgent?(nativeAgentId: string): Promise<void>;
+  /** Terminate the session. For a remote session this stops the process on the daemon. */
   close(): void;
+  /**
+   * Stop listening WITHOUT ending the session. Used instead of `close()` when
+   * the host itself is going away (quit, plugin unload): a remote turn must
+   * survive that, so only the client side lets go. Absent for local harnesses,
+   * where closing is the only way to release the child process.
+   */
+  detach?(): void;
+  /**
+   * The host has durably saved everything this session has delivered so far.
+   * A remote session uses it to tell the daemon how much of its replay buffer
+   * can be released (the `ack` command). `seq` is the cursor as it stood when the
+   * save was requested (the live cursor may have moved on since); omitted = current.
+   */
+  notifyPersisted?(seq?: number): void;
   setModel(model: string | undefined): Promise<void>;
   setPermissionMode(mode: HarnessPermissionMode): Promise<void>;
   getContextUsage(): Promise<HarnessContextUsage | null>;
@@ -95,11 +114,23 @@ export interface HarnessSessionOptions {
 export interface ClaudeHarnessOptions {
   mcpServers?: Record<string, McpServerConfig>;
   /**
+   * Remote (daemon-hosted) threads only: external MCP servers already vetted for another machine by
+   * `remote/mcpPartition.ts` (http/sse, reachable, no keychain secret, headers only if allowlisted). The ONLY MCP
+   * servers `projectSessionOptions` puts on the wire; `mcpServers` above never crosses.
+   */
+  remoteMcpServers?: Record<string, import('./protocol').RemoteMcpServerConfig>;
+  /**
    * Host-owned SDK MCP servers used only when the Claude process was actually
    * routed into a sandbox VM. Host fallback must continue using `mcpServers`.
    */
   vmMcpServers?: Record<string, McpServerConfig>;
   disallowedTools?: string[];
+  /**
+   * Tool names (`mcp__server__tool`) this process allows without opening a permission card. The daemon sets it for
+   * the host tools it proxies: the user's own app shows the real card for those (with the real input), so a
+   * second card written here would only be a second, weaker prompt. Never set for a local session.
+   */
+  preApprove?: (toolName: string) => boolean;
   sessionOptions?: {
     thinking?: Options['thinking'];
     effort?: Options['effort'];
@@ -153,6 +184,11 @@ export interface HarnessDynamicTool {
   /** Whether this host operation changes state or needs an explicit user decision. */
   requiresApproval: boolean;
   invoke(args: Record<string, unknown>): Promise<{ success: boolean; text: string }>;
+  /**
+   * Same call, but returning the tool's structured content (images included) instead of flattening it to text.
+   * Used by the remote host-tool proxy so a screenshot reaches the daemon as an image, not a placeholder.
+   */
+  invokeContent?(args: Record<string, unknown>): Promise<{ success: boolean; content: Array<Record<string, unknown>> }>;
 }
 
 /** The shared permission-mode behavior for host-owned dynamic tools. */
