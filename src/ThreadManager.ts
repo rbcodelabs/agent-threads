@@ -2334,9 +2334,15 @@ export class ThreadManager {
       }
     }
 
+    // A resend replays a turn the CLI already recorded under userMsg.id (its
+    // synthetic auth-error reply carries that uuid). Resuming that session and
+    // sending the same command uuid makes the CLI dedupe it: the command is
+    // marked "completed" with no init/request, so the thread hangs silently.
+    // Give the replay a fresh command uuid.
+    const commandUuid = resendMsg ? crypto.randomUUID() : userMsg.id;
     try {
       await session.prepareForSend?.(effectivePrompt, images);
-      session.send(effectivePrompt, images, userMsg.id);
+      session.send(effectivePrompt, images, commandUuid);
     } catch (err) {
       // The ThreadSession's Query had already been torn down (a prior
       // generation errored out, or the channel was otherwise closed) —
@@ -2347,7 +2353,7 @@ export class ThreadManager {
       console.warn('[ClaudeThreads] sendMessage: send() on a closed ThreadSession — restarting:', err);
       try {
         await session.start(options);
-        session.send(effectivePrompt, images, userMsg.id);
+        session.send(effectivePrompt, images, commandUuid);
       } catch (retryError) {
         if (claimedHandoff) this.releaseHarnessHandoffClaim(threadId);
         throw retryError;
