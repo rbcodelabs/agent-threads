@@ -84,7 +84,11 @@ describe('ThreadManager — expired Claude sign-in', () => {
     expect(fake.closes).toBe(1);
     expect(fake.sessionsCreated).toBe(2);
     expect(fake.sends.map(s => s.prompt)).toEqual(['hello', 'hello']);
-    expect(fake.sends[1].uuid).toBe(userMsgId);
+    // Fresh command uuid: the CLI dedupes a resumed command whose uuid it already
+    // recorded, which left the retried thread hanging with no response.
+    expect(fake.sends[0].uuid).toBe(userMsgId);
+    expect(fake.sends[1].uuid).toBeTruthy();
+    expect(fake.sends[1].uuid).not.toBe(userMsgId);
     expect(t.messages.filter(m => m.role === 'user')).toHaveLength(1);
     expect(added).toEqual(['hello']);
     expect(t.authRequired).toBeUndefined();
