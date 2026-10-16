@@ -549,6 +549,7 @@ export class KanbanView extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
+      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(t.id),
       lastError: t.lastError,
       messageCount: t.messages.length,
       reviewed: t.reviewed,
@@ -715,6 +716,7 @@ export class KanbanView extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
+      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(t.id),
       lastError: t.lastError,
       messageCount: t.messages.length,
       reviewed: t.reviewed,
@@ -1104,6 +1106,7 @@ export class KanbanView extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(thread.id) || this.manager.hasPendingQuestion(thread.id) || this.manager.hasPendingPlan(thread.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(thread.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(thread.id),
+      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(thread.id),
       lastError: thread.lastError,
       messageCount: thread.messages.length,
       reviewed: thread.reviewed,
@@ -1207,7 +1210,7 @@ export class KanbanView extends ItemView {
     }
     if (state === 'waiting') {
       const next = this.plugin.getPendingWakeups(thread.id)[0];
-      if (!next) return 'Waiting to resume';
+      if (!next) return this.manager.isAwaitingSandboxDecision(thread.id) ? 'Waiting for your sandbox choice' : 'Waiting to resume';
       const when = formatWakeupCountdown(next.fireAt);
       return next.reason ? `Resumes ${when} — ${next.reason}` : `Resumes ${when}`;
     }

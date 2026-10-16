@@ -21,7 +21,8 @@
  *      bucket per product decision — a thread with no active foreground turn
  *      but an outstanding background task/subagent/workflow is still "doing
  *      something," it just isn't the caller's own turn anymore)
- *   4. hasPendingWakeup     → 'waiting'
+ *   4. hasPendingSandboxOffer / hasPendingWakeup → 'waiting' (the thread is parked on the user's
+ *      sandbox choice, or on a timer; its session has not started so isRunning is false)
  *   5. lastError            → 'error'
  *   6. messageCount > 0     → 'idle-reviewed' if reviewed, else 'idle-new'
  *   7. else                 → 'empty'
@@ -42,6 +43,8 @@ export interface ThreadClassificationFlags {
   hasPendingPermission: boolean;
   hasActiveBackgroundTasks: boolean;
   hasPendingWakeup: boolean;
+  /** The pre-launch "Run this thread in a sandbox?" card is up and the session start is held on it. */
+  hasPendingSandboxOffer?: boolean;
   lastError?: string;
   messageCount: number;
   reviewed?: boolean;
@@ -55,7 +58,7 @@ export function classifyThreadRow(flags: ThreadClassificationFlags): ThreadRowSt
   if (flags.hasActiveBackgroundTasks) {
     return 'running';
   }
-  if (flags.hasPendingWakeup) {
+  if (flags.hasPendingWakeup || flags.hasPendingSandboxOffer) {
     return 'waiting';
   }
   if (flags.lastError) {

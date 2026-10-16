@@ -46,7 +46,7 @@ import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openLocalFileViaHost, o
 import type { StatusTag } from './types';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { promptConfirm } from './confirmModal';
-import { renderSandboxOfferCard } from './sandboxSetupPanel';
+import { renderSandboxOfferCard, type SandboxSetupFlowDeps } from './sandboxSetupPanel';
 import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
 import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
 import { describeOrchestratorThread, isOrchestratorThread, orchestratorWarning, type OrchestratorContext } from './orchestratorThreads';
@@ -5919,8 +5919,16 @@ export class ThreadsView extends ItemView {
       }
 
       case 'sandbox_setup_offer': {
-        // The thread is running on the host because the sandbox isn't set up.
-        // Offer setup without interrupting it (the card is not modal).
+        // The thread's first session is parked until the user answers: the
+        // sandbox isn't set up. (The card is inline, not modal.) Nothing is running
+        // yet: drop the working placeholder and Stop state streaming_start set up;
+        // the manager re-emits streaming_start once the session is released.
+        if (this.streamingEl) {
+          this.streamingEl.remove();
+          this.streamingEl = null;
+        }
+        this.clearStreamingState();
+        this.setRunningState(false);
         if (this.activeThreadId) this.renderSandboxOfferCard(this.activeThreadId);
         break;
       }
@@ -6073,24 +6081,27 @@ export class ThreadsView extends ItemView {
   }
 
   /**
-   * One-time "Run this thread in a sandbox?" card. Setup progress runs inside
-   * the card; a finished setup only affects the thread's NEXT fresh session
-   * start (the running session is deliberately left alone).
+   * One-time "Run this thread in a sandbox?" card. The thread's first session
+   * is held until the user answers; setup progress runs inside the card, and a
+   * finished setup releases the session to start inside the sandbox.
    */
   private renderSandboxOfferCard(threadId: string): void {
     if (!Platform.isDesktopApp) return;
     this.messagesEl.querySelector('.ct-sandbox-offer')?.remove();
     const harnessImage = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
+    const injected = this.manager.sandboxSetupRunner as Pick<SandboxSetupFlowDeps, 'getStatus' | 'run'> | undefined;
     renderSandboxOfferCard(this.messagesEl, {
-      getStatus: () => getSandboxSetupStatus({ harnessImage }),
-      run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
+      getStatus: injected?.getStatus ?? (() => getSandboxSetupStatus({ harnessImage })),
+      run: injected?.run ?? (({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal })),
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       onNotNow: () => this.manager.clearSandboxSetupOffer(threadId),
+      onSetupDone: () => this.manager.completeSandboxSetupOffer(threadId),
       onDontAskAgain: () => {
-        this.manager.clearSandboxSetupOffer(threadId);
+        // Persist first so the released session start sees the new setting.
         this.plugin.settings.sandboxSetupPromptDismissed = true;
         this.manager.updateSettings(this.plugin.settings);
         void this.plugin.saveSettings();
+        this.manager.clearSandboxSetupOffer(threadId);
       },
     });
     this.scrollToBottom();
@@ -6999,6 +7010,7 @@ export class ThreadsView extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
+      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(t.id),
       lastError: t.lastError,
       messageCount: t.messages.length,
       reviewed: t.reviewed,
@@ -7063,7 +7075,7 @@ export class ThreadsView extends ItemView {
           activityText = this.manager.getThreadActivity(thread.id) || 'Working...';
         } else if (state === 'waiting') {
           const next = this.plugin.getPendingWakeups(thread.id)[0];
-          if (!next) activityText = 'Waiting to resume';
+          if (!next) activityText = this.manager.isAwaitingSandboxDecision(thread.id) ? 'Waiting for your sandbox choice' : 'Waiting to resume';
           else {
             const when = formatWakeupCountdown(next.fireAt);
             activityText = next.reason ? `Resumes ${when} — ${next.reason}` : `Resumes ${when}`;

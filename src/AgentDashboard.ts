@@ -559,6 +559,7 @@ export class AgentDashboard extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
+      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(t.id),
       lastError: t.lastError,
       messageCount: t.messages.length,
       reviewed: t.reviewed,
@@ -840,7 +841,7 @@ export class AgentDashboard extends ItemView {
     }
     if (state === 'waiting') {
       const next = this.plugin.getPendingWakeups(thread.id)[0];
-      if (!next) return 'Waiting to resume';
+      if (!next) return this.manager.isAwaitingSandboxDecision(thread.id) ? 'Waiting for your sandbox choice' : 'Waiting to resume';
       const when = formatWakeupCountdown(next.fireAt);
       return next.reason ? `Resumes ${when} — ${next.reason}` : `Resumes ${when}`;
     }
