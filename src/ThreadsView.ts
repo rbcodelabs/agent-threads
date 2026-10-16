@@ -1305,7 +1305,7 @@ export class ThreadsView extends ItemView {
   }
 
   private buildNewConversationComposer(floatingPanel: HTMLElement): void {
-    this.newConvRowEl = floatingPanel.createDiv({ cls: 'ct-new-conv-row', attr: { 'data-testid': 'new-conversation-composer' } });
+    this.newConvRowEl = floatingPanel.createDiv({ cls: 'ct-input-row ct-new-conv-row', attr: { 'data-testid': 'new-conversation-composer' } });
     this.newConvInput = new DispatchInput({
       app: this.app,
       placeholder: 'Describe what you want done…',

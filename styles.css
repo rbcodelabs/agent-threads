@@ -6910,6 +6910,15 @@ textarea.ct-settings-wide-input {
   cursor: pointer;
   white-space: nowrap;
 }
+.ct-agents-toolbar .ct-new-thread-btn,
+.ct-kanban-dispatch .ct-new-thread-btn {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  box-shadow: none;
+}
+.ct-agents-toolbar .ct-new-thread-btn:hover,
+.ct-kanban-dispatch .ct-new-thread-btn:hover { background: var(--interactive-accent-hover); }
 .ct-agents-toolbar .ct-new-thread-btn { flex: 1 1 auto; }
 .ct-new-thread-btn-icon { display: inline-flex; }
 .ct-new-thread-btn-icon svg { width: 15px; height: 15px; }
@@ -9691,14 +9700,14 @@ button.ct-agent-crumb:focus-visible {
    composer; the thread is created by the first send.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-.ct-new-conv-row { display: none; }
+.ct-floating-panel > .ct-new-conv-row { display: none; }
 
-.ct-floating-panel.ct-new-conversation > .ct-input-row,
+.ct-floating-panel.ct-new-conversation > .ct-input-row:not(.ct-new-conv-row),
 .ct-floating-panel.ct-new-conversation > .ct-panel-context,
 .ct-floating-panel.ct-new-conversation > .ct-git-diff-bar,
 .ct-floating-panel.ct-new-conversation > .ct-bc-control-chip { display: none; }
 
-.ct-floating-panel.ct-new-conversation > .ct-new-conv-row { display: block; }
+.ct-floating-panel.ct-new-conversation > .ct-new-conv-row { display: flex; }
 
 /* The Project chip lives in the footer; keep it visible at rest in this mode
    (the footer is hover-only in a normal thread) so the choice is discoverable. */

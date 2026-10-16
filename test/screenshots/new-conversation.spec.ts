@@ -11,6 +11,7 @@ import { shot } from './helpers';
  */
 const harnessUrl = 'file://' + path.resolve('test/harness/index.html');
 
+const threadComposer = (page: Page) => page.locator('.ct-input-row:not(.ct-new-conv-row)');
 const composer = (page: Page) => page.locator('.ct-new-conv-row');
 const input = (page: Page) => composer(page).locator('textarea');
 const chip = (page: Page) => composer(page).locator('.ct-footer-context');
@@ -45,7 +46,7 @@ test.describe('new-conversation mode', () => {
     await expect(page.locator('[data-testid="new-conversation"]')).toBeVisible();
     await expect(page.locator('.ct-title-text')).toHaveText('New conversation');
     await expect(page.locator('.ct-floating-panel')).toHaveClass(/ct-new-conversation/);
-    await expect(page.locator('.ct-input-row')).toBeHidden();
+    await expect(threadComposer(page)).toBeHidden();
     await expect(composer(page)).toBeVisible();
     await expect(input(page)).toBeFocused();
     await expect(chip(page).locator('.ct-footer-context-name')).toHaveText('No project');
@@ -61,7 +62,7 @@ test.describe('new-conversation mode', () => {
     await page.getByRole('button', { name: /Back to Fix auth middleware/ }).click();
     await expect(page.locator('.ct-title-text')).toContainText('Fix auth middleware');
     await expect(page.locator('.ct-floating-panel')).not.toHaveClass(/ct-new-conversation/);
-    await expect(page.locator('.ct-input-row')).toBeVisible();
+    await expect(threadComposer(page)).toBeVisible();
     await expect(composer(page)).toBeHidden();
   });
 
@@ -70,7 +71,7 @@ test.describe('new-conversation mode', () => {
     await page.evaluate(() => (window as any).__view.focusThread('thread-brainstorm'));
     await expect(page.locator('.ct-title-text')).toContainText('HipTrip feature');
     await expect(composer(page)).toBeHidden();
-    await expect(page.locator('.ct-input-row')).toBeVisible();
+    await expect(threadComposer(page)).toBeVisible();
   });
 
   test('offers the dispatch slash commands, not the thread-only ones', async ({ page }) => {
@@ -226,12 +227,12 @@ test.describe('searchable Project picker', () => {
     await page.goto(harnessUrl + '?projects=1');
     await page.waitForSelector('.ct-title-row');
     await page.waitForTimeout(400);
-    await page.locator('.ct-input-row .ct-footer-context').dispatchEvent('click');
+    await threadComposer(page).locator('.ct-footer-context').dispatchEvent('click');
     await page.locator('.menu').getByText('Change project…').click();
     await expect(picker(page)).toBeVisible();
     expect(await pickerLabels(page)).toContain('Golden Wealth');
     await picker(page).getByRole('option', { name: 'Compass' }).click();
-    await expect(page.locator('.ct-input-row .ct-footer-context-name')).toContainText('Compass');
+    await expect(threadComposer(page).locator('.ct-footer-context-name')).toContainText('Compass');
   });
 
   test('fits a 320px pane', async ({ page }) => {
