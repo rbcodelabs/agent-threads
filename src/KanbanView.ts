@@ -212,7 +212,7 @@ export class KanbanView extends ItemView {
     this.boardEl = root.createDiv('ct-agents-list');
 
     // Floating panel — centered at bottom of the board (count, New thread, group/search)
-    const dispatchWrapper = root.createDiv('ct-kanban-dispatch ct-panel-collapsible');
+    const dispatchWrapper = root.createDiv('ct-kanban-dispatch');
 
     // Meta strip: thread count (left) + search button (right)
     const metaRow = dispatchWrapper.createDiv('ct-agents-panel-meta');
@@ -270,7 +270,6 @@ export class KanbanView extends ItemView {
     this.searchInputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.closeSearch();
     });
-
   }
 
   private toggleSearch(): void {
