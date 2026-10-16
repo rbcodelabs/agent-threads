@@ -65,14 +65,18 @@ test.describe('remote thread strip', () => {
 });
 
 test.describe('Run on a daemon: folders come from the daemon', () => {
-  const dashboardUrl = 'file://' + path.resolve('test/harness/kanban.html') + '?dashboard=1&remote=1';
+  // The Run on picker is part of the new-conversation composer in the message panel.
+  const runOnUrl = harnessUrl + '?remote=1';
 
   async function openRunOn(page: Page, daemon: string, ready = '.ct-run-on-folder-select'): Promise<void> {
     await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
     await page.setViewportSize({ width: 420, height: 760 });
-    await page.goto(dashboardUrl);
-    await page.waitForSelector('.ct-agents-dispatch-btn');
-    await page.locator('.ct-agents-dispatch-btn').dispatchEvent('contextmenu');
+    await page.goto(runOnUrl);
+    await page.waitForSelector('.ct-title-row');
+    await page.waitForTimeout(300);
+    await page.getByRole('button', { name: 'New thread' }).first().click();
+    await page.waitForSelector('.ct-new-conv-row .ct-agents-dispatch-btn');
+    await page.locator('.ct-new-conv-row .ct-agents-dispatch-btn').dispatchEvent('contextmenu');
     await page.locator(`.ct-run-on-item[data-run-on="${daemon}"]`).click();
     await page.waitForSelector(ready);
   }

@@ -1,9 +1,13 @@
+/** @vitest-environment jsdom */
+import '../setup/obsidian-dom';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Menu } from 'obsidian';
 import { ThreadsView } from '../../src/ThreadsView';
 
 /**
- * Covers the "Move to Project…" item added to the per-thread ⋯ menu.
+ * Covers the "Move to Project…" item added to the per-thread ⋯ menu. Choosing the
+ * Project uses the searchable ProjectPicker (filter + sort), exercised in
+ * project-picker.test.ts; here we only check the wiring and the move itself.
  *
  * Before this, a thread created outside a Project could never be moved into one:
  * `threads_set_project` rejected it at the coordination layer and ThreadsView only
@@ -51,22 +55,27 @@ function makeView(opts: {
   const saveSettings = vi.fn().mockResolvedValue(undefined);
   const renderComposerContext = vi.fn();
 
+  const manager = {
+    getThread: (id: string) => opts.threads.find(t => t.id === id) ?? null,
+    getThreads: () => opts.threads,
+    getProjects: () => projects,
+    getProject: (id: string) => projects.find(p => p.id === id) ?? null,
+    setThreadProject,
+  };
+
   // Built on the real prototype so the methods under test call each other for real —
   // only collaborators and DOM-bound repaint helpers are stubbed.
   const view = Object.assign(Object.create(ThreadsView.prototype), {
     activeThreadId: opts.activeThreadId,
     compressedView: false,
     escalatedTurnModels: new Map(),
-    manager: {
-      getThread: (id: string) => opts.threads.find(t => t.id === id) ?? null,
-      getProjects: () => projects,
-      getProject: (id: string) => projects.find(p => p.id === id) ?? null,
-      setThreadProject,
-    },
+    manager,
     plugin: {
+      manager,
       settings: { orchestratorThreadId: opts.portfolioOrchestratorThreadId },
       discoveredModelsByHarness: { codex: [] },
       saveSettings,
+      openNewProjectSettings: vi.fn(),
     },
     renderComposerContext,
     // Referenced by the other ⋯ items; never invoked in these tests.
@@ -81,11 +90,17 @@ function makeView(opts: {
 /** Private-by-convention methods; reached through the prototype for testing. */
 const proto = ThreadsView.prototype as unknown as {
   toggleMoreMenu(this: ThreadsView, event: MouseEvent): void;
-  openMoveToProjectMenu(this: ThreadsView, event: MouseEvent, threadId: string): void;
+  openMoveToProjectMenu(this: ThreadsView, anchor: HTMLElement, threadId: string): void;
   moveThreadToProject(this: ThreadsView, threadId: string, projectId: string | null): Promise<void>;
 };
 
 const evt = {} as MouseEvent;
+const anchor = document.createElement('button');
+
+afterEach(() => { document.body.innerHTML = ''; });
+
+const pickerRows = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('.ct-project-picker [role="option"]')];
+const rowByName = (name: string): HTMLElement | undefined => pickerRows().find(r => r.textContent?.includes(name));
 const PROJECTS = [
   { id: 'p1', name: 'Agentic PM Playbook' },
   { id: 'p2', name: 'Golden Wealth', orchestratorThreadId: 'orch-p2' },
@@ -147,48 +162,55 @@ describe('ThreadsView — Move to Project…', () => {
     expect(opened[0]!.titles()).not.toContain('Move to Project…');
   });
 
-  it('lists (No project) plus every Project, checking the thread’s current one', () => {
+  it('lists No Project, every Project and New Project…, checking the thread’s current one', () => {
     const { view } = makeView({
       activeThreadId: 't1',
       threads: [{ id: 't1', projectId: 'p1' }],
       projects: PROJECTS,
     });
 
-    proto.openMoveToProjectMenu.call(view, evt, 't1');
+    proto.openMoveToProjectMenu.call(view, anchor, 't1');
 
-    const menu = opened[0]!;
-    expect(menu.titles()).toEqual(['(No project)', 'Agentic PM Playbook', 'Golden Wealth']);
-    expect(menu.item('Agentic PM Playbook')!.checked).toBe(true);
-    expect(menu.item('(No project)')!.checked).toBe(false);
-    expect(menu.item('Golden Wealth')!.checked).toBe(false);
+    expect(pickerRows().map(r => r.textContent)).toEqual(['No Project', 'Agentic PM Playbook', 'Golden Wealth', 'New Project…']);
+    expect(rowByName('Agentic PM Playbook')!.getAttribute('aria-selected')).toBe('true');
+    expect(rowByName('No Project')!.getAttribute('aria-selected')).toBe('false');
+    expect(rowByName('Golden Wealth')!.getAttribute('aria-selected')).toBe('false');
   });
 
-  it('checks (No project) when the thread has no Project', () => {
+  it('checks No Project when the thread has no Project', () => {
     const { view } = makeView({ activeThreadId: 't1', threads: [{ id: 't1' }], projects: PROJECTS });
 
-    proto.openMoveToProjectMenu.call(view, evt, 't1');
+    proto.openMoveToProjectMenu.call(view, anchor, 't1');
 
-    expect(opened[0]!.item('(No project)')!.checked).toBe(true);
+    expect(rowByName('No Project')!.getAttribute('aria-selected')).toBe('true');
   });
 
   it('selecting a Project calls setThreadProject with alignCwd true and persists', async () => {
     const ctx = makeView({ activeThreadId: 't1', threads: [{ id: 't1' }], projects: PROJECTS });
 
-    proto.openMoveToProjectMenu.call(ctx.view, evt, 't1');
-    await opened[0]!.item('Agentic PM Playbook')!.clickHandler!();
+    proto.openMoveToProjectMenu.call(ctx.view, anchor, 't1');
+    rowByName('Agentic PM Playbook')!.click();
+    await vi.waitFor(() => expect(ctx.setThreadProject).toHaveBeenCalledWith('t1', 'p1', true));
 
-    expect(ctx.setThreadProject).toHaveBeenCalledWith('t1', 'p1', true);
     expect(ctx.saveSettings).toHaveBeenCalled();
     expect(ctx.renderComposerContext).toHaveBeenCalledOnce();
   });
 
-  it('selecting (No project) detaches by passing null', async () => {
+  it('selecting No Project detaches by passing null', async () => {
     const ctx = makeView({ activeThreadId: 't1', threads: [{ id: 't1', projectId: 'p1' }], projects: PROJECTS });
 
-    proto.openMoveToProjectMenu.call(ctx.view, evt, 't1');
-    await opened[0]!.item('(No project)')!.clickHandler!();
+    proto.openMoveToProjectMenu.call(ctx.view, anchor, 't1');
+    rowByName('No Project')!.click();
+    await vi.waitFor(() => expect(ctx.setThreadProject).toHaveBeenCalledWith('t1', null, true));
+  });
 
-    expect(ctx.setThreadProject).toHaveBeenCalledWith('t1', null, true);
+  it('re-selecting the current Project is a no-op', () => {
+    const ctx = makeView({ activeThreadId: 't1', threads: [{ id: 't1', projectId: 'p1' }], projects: PROJECTS });
+
+    proto.openMoveToProjectMenu.call(ctx.view, anchor, 't1');
+    rowByName('Agentic PM Playbook')!.click();
+
+    expect(ctx.setThreadProject).not.toHaveBeenCalled();
   });
 
   it('does not repaint the active-thread chrome when moving a non-active thread', async () => {
