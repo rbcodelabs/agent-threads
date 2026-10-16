@@ -18,6 +18,7 @@ import type { ToolCallRecord, ImageAttachment } from './types';
 import { formatToolName, getToolIcon, groupToolCalls, smoothToolGroups, ACTIVITY_LABELS, type ToolCallGroup } from './toolNameUtils';
 import { splitErrorMessage } from './dashboardUtils';
 import { extractMessageContent } from './MessageContent';
+import { outsideVaultLinkPath } from './OutsideVaultLinkModal';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from './linkUtils';
 import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
 import {
@@ -604,7 +605,7 @@ export class MobileView extends ItemView {
         // linktext; forwarding it risks creating a stray note named after the
         // path. Say so instead — the file genuinely isn't on this device.
         if (absolute && !resolved) {
-          new Notice('That link points to a file that is not in this vault.');
+          new Notice(`That file is not in this vault: ${outsideVaultLinkPath(href)}`);
           return;
         }
         void this.app.workspace.openLinkText(resolved ?? href, '', false);
