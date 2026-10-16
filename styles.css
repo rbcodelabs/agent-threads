@@ -2964,15 +2964,6 @@
   padding: 8px 0;
 }
 
-/* AgentDashboard toolbar: primary "New thread" button + Agent Board toggle */
-.ct-agents-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 8px 0;
-  flex-shrink: 0;
-}
-
 .ct-agents-empty {
   padding: 32px 16px;
   text-align: center;
@@ -5890,30 +5881,6 @@
 
 /* ── Kanban Board ──────────────────────────────────────────────────────── */
 
-.ct-kanban-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  flex-shrink: 0;
-  padding: 0;
-  transition: color 0.15s, background 0.15s;
-}
-.ct-kanban-toggle:hover {
-  color: var(--text-normal);
-  background: var(--background-modifier-hover);
-}
-.ct-kanban-toggle svg {
-  width: 15px;
-  height: 15px;
-}
-
 .ct-kanban-groupby {
   display: flex;
   align-items: center;
@@ -6910,16 +6877,13 @@ textarea.ct-settings-wide-input {
   cursor: pointer;
   white-space: nowrap;
 }
-.ct-agents-toolbar .ct-new-thread-btn,
 .ct-kanban-dispatch .ct-new-thread-btn {
   background: var(--interactive-accent);
   color: var(--text-on-accent);
   border: none;
   box-shadow: none;
 }
-.ct-agents-toolbar .ct-new-thread-btn:hover,
 .ct-kanban-dispatch .ct-new-thread-btn:hover { background: var(--interactive-accent-hover); }
-.ct-agents-toolbar .ct-new-thread-btn { flex: 1 1 auto; }
 .ct-new-thread-btn-icon { display: inline-flex; }
 .ct-new-thread-btn-icon svg { width: 15px; height: 15px; }
 .ct-kanban-dispatch .ct-new-thread-btn {

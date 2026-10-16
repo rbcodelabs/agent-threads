@@ -2997,11 +2997,13 @@ test.describe('Agent Threads UI', () => {
     await page.waitForSelector('.ct-agents-project');
     await expect(page.locator('.ct-agents-root textarea')).toHaveCount(0);
     await expect(page.getByText('Dispatch a task...')).toHaveCount(0);
-    const button = page.getByRole('button', { name: 'New thread' });
+    const button = page.locator('[data-testid="new-thread-button"]');
     await expect(button).toBeVisible();
+    await expect(button).toHaveAttribute('aria-label', 'New thread');
+    await expect(page.locator('.ct-kanban-toggle')).toHaveCount(0);
     await button.click();
     expect(await page.evaluate(() => (window as any).__newConversationCalls.length)).toBe(1);
-    await shot(page.locator('.ct-agents-toolbar'), 'agents-list-new-thread.png');
+    await shot(page.locator('.view-header'), 'agents-list-new-thread.png');
   });
 
   test('kanban board — group by status', async ({ page }) => {
@@ -3127,15 +3129,15 @@ test.describe('Agent Threads UI', () => {
     await page.setViewportSize({ width: 760, height: 820 });
     await page.goto(kanbanUrl + '?dashboard=1');
     await page.waitForSelector('.ct-agents-project');
-    expect(await page.evaluate(() => (window as any).__dashboard.getDisplayText())).toBe('Agents · 14 threads');
+    expect(await page.evaluate(() => (window as any).__dashboard.getDisplayText())).toBe('14 threads');
     expect(await page.evaluate(() => (window as any).__dashboard.getIcon())).toBe('list');
     await expect(page.locator('.view-header')).toBeVisible();
-    await expect(page.locator('.view-header-title')).toHaveText('Agents · 14 threads');
+    await expect(page.locator('.view-header-title')).toHaveText('14 threads');
     await expect(page.locator('.ct-agents-header')).toHaveCount(0);
-    await expect(page.locator('.view-actions .view-action')).toHaveCount(2);
+    await expect(page.locator('.view-actions .view-action')).toHaveCount(3);
     // The dispatch composer moved to the conversation panel: the list has a New thread button, not a floating panel.
     await expect(page.locator('.ct-agents-floating-panel')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'New thread' })).toBeVisible();
+    await expect(page.locator('[data-testid="new-thread-button"]')).toBeVisible();
 
     const projects = await page.locator('.ct-agents-project-name').allInnerTexts();
     expect(projects.slice(0, 2)).toEqual(['acme-api', 'Agent Threads']);
@@ -3209,10 +3211,10 @@ test.describe('Agent Threads UI', () => {
     await expect(search).toBeFocused();
     await search.fill('Mobile layout polish');
     await expect(page.locator('.ct-agents-row')).toHaveCount(1);
-    await expect(page.locator('.view-header-title')).toHaveText('Agents · 1 thread');
+    await expect(page.locator('.view-header-title')).toHaveText('1 thread');
     await page.locator('.search-input-clear-button').click();
     await expect(search).toHaveValue('');
-    await expect(page.locator('.view-header-title')).toHaveText('Agents · 14 threads');
+    await expect(page.locator('.view-header-title')).toHaveText('14 threads');
     await search.fill('Mobile layout polish');
     await search.press('Escape');
     await expect(searchPanel).toBeHidden();
@@ -3221,7 +3223,7 @@ test.describe('Agent Threads UI', () => {
     await search.fill('Kanban');
     await searchButton.click();
     await expect(searchPanel).toBeHidden();
-    await expect(page.locator('.view-header-title')).toHaveText('Agents · 14 threads');
+    await expect(page.locator('.view-header-title')).toHaveText('14 threads');
 
     const groupingButton = page.getByRole('button', { name: 'Group agents' });
     await groupingButton.click();
@@ -3257,7 +3259,7 @@ test.describe('Agent Threads UI', () => {
       await dashboard.onClose();
       await dashboard.onOpen();
     });
-    await expect(page.locator('.view-actions .view-action')).toHaveCount(2);
+    await expect(page.locator('.view-actions .view-action')).toHaveCount(3);
   });
 
   // Non-visual: the archive menu adds no resting-state DOM, so there is nothing
@@ -3370,19 +3372,19 @@ test.describe('Agent Threads UI', () => {
       expect(await list.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       expect(await page.locator('.ct-agents-row').evaluateAll(rows => rows.every(row => row.scrollWidth <= row.clientWidth))).toBe(true);
       expect(await page.locator('.view-header').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-      await expect(page.locator('.view-actions .view-action')).toHaveCount(2);
+      await expect(page.locator('.view-actions .view-action')).toHaveCount(3);
 
       if (width <= 380) {
         await expect(page.locator('.ct-agents-row').first()).toHaveCSS('min-height', '52px');
         await expect(page.locator('.ct-dashboard-agent-count')).toHaveCSS('min-height', '28px');
         await expect(page.locator('.ct-agents-row-cwd').first()).toBeHidden();
 
-        const newThread = page.getByRole('button', { name: 'New thread' });
+        const newThread = page.locator('[data-testid="new-thread-button"]');
         await expect(newThread).toBeVisible();
-        expect(await page.locator('.ct-agents-toolbar').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
         const newThreadBox = await newThread.boundingBox();
-        const toolbarBox = await page.locator('.ct-agents-toolbar').boundingBox();
-        expect(newThreadBox!.x + newThreadBox!.width).toBeLessThanOrEqual(toolbarBox!.x + toolbarBox!.width);
+        const headerBox = await page.locator('.view-header').boundingBox();
+        expect(newThreadBox!.x).toBeGreaterThanOrEqual(headerBox!.x);
+        expect(newThreadBox!.x + newThreadBox!.width).toBeLessThanOrEqual(headerBox!.x + headerBox!.width);
         if (width === 320) await shot(page.locator('#app'), 'agent-dashboard-narrow-desktop.png');
       }
     }
@@ -3412,10 +3414,8 @@ test.describe('Agent Threads UI', () => {
     await page.waitForSelector('.ct-agents-row-plan');
     await expect(page.locator('.ct-agents-permission-actions .ct-permission-btn').first()).toHaveCSS('min-height', '44px');
     await expect(page.locator('.ct-dashboard-agent-count')).toHaveCSS('min-height', '44px');
-    const newThread = page.getByRole('button', { name: 'New thread' });
-    await expect(newThread).toBeVisible();
-    expect((await newThread.boundingBox())?.height).toBeGreaterThanOrEqual(44);
-    expect(await page.locator('.ct-agents-toolbar').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await expect(page.locator('[data-testid="new-thread-button"]')).toBeVisible();
+    expect(await page.locator('.view-header').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     expect(await page.locator('.ct-agents-list').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     await shot(page, 'agent-dashboard-exceptional-mobile.png', { fullPage: true });
   });

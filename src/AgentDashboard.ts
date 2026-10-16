@@ -33,6 +33,7 @@ export class AgentDashboard extends ItemView {
   private listEl!: HTMLElement;
   private searchBarEl!: HTMLElement;
   private searchInputEl!: HTMLInputElement;
+  private newThreadActionEl: HTMLElement | null = null;
   private searchActionEl: HTMLElement | null = null;
   private groupActionEl: HTMLElement | null = null;
   private searchQuery = '';
@@ -69,7 +70,7 @@ export class AgentDashboard extends ItemView {
 
   getViewType(): string { return AGENT_VIEW_TYPE; }
   getDisplayText(): string {
-    return `Agents · ${this.displayedThreadCount} thread${this.displayedThreadCount === 1 ? '' : 's'}`;
+    return `${this.displayedThreadCount} thread${this.displayedThreadCount === 1 ? '' : 's'}`;
   }
   getIcon(): string { return 'list'; }
 
@@ -111,11 +112,6 @@ export class AgentDashboard extends ItemView {
 
     this.ensureHeaderActions();
 
-    // "New thread" opens the conversation panel in new-conversation mode: the
-    // dispatch composer (project picker, slash commands, attachments, harness
-    // picker) lives there now, not in this list.
-    this.buildToolbar(root);
-
     // Search lives in the content area so the host-owned header stays stable.
     this.searchBarEl = root.createDiv('ct-agents-search-bar ct-hidden');
     const search = new SearchComponent(this.searchBarEl)
@@ -133,30 +129,13 @@ export class AgentDashboard extends ItemView {
     this.listEl = root.createDiv('ct-agents-list');
   }
 
-  /** Persistent toolbar under the host header: New thread (primary) + Agent Board. */
-  private buildToolbar(root: HTMLElement): void {
-    const toolbar = root.createDiv('ct-agents-toolbar');
-    const newBtn = toolbar.createEl('button', {
-      cls: 'ct-new-thread-btn mod-cta',
-      attr: { type: 'button', title: 'New thread', 'aria-label': 'New thread', 'data-testid': 'new-thread-button' },
-    });
-    const newIcon = newBtn.createSpan('ct-new-thread-btn-icon');
-    newIcon.setAttribute('aria-hidden', 'true');
-    setIcon(newIcon, 'square-pen');
-    newBtn.createSpan({ cls: 'ct-new-thread-btn-label', text: 'New thread' });
-    newBtn.addEventListener('click', () => { void this.plugin.openNewConversation(); });
-
-    const kanbanBtn = toolbar.createEl('button', {
-      cls: 'ct-kanban-toggle clickable-icon',
-      attr: { type: 'button', title: 'Open Agent Board', 'aria-label': 'Open Agent Board' },
-    });
-    setIcon(kanbanBtn, 'kanban');
-    kanbanBtn.addEventListener('click', () => {
-      void this.plugin.activateKanbanView();
-    });
-  }
-
   private ensureHeaderActions(): void {
+    // "New thread" opens the conversation panel in new-conversation mode: the dispatch
+    // composer (project picker, slash commands, attachments, harness picker) lives there.
+    if (!this.newThreadActionEl) {
+      this.newThreadActionEl = this.addAction('square-pen', 'New thread', () => { void this.plugin.openNewConversation(); });
+      this.newThreadActionEl.setAttribute('data-testid', 'new-thread-button');
+    }
     if (!this.searchActionEl) {
       this.searchActionEl = this.addAction('search', 'Search threads', () => this.toggleSearch());
       this.searchActionEl.setAttribute('aria-expanded', 'false');

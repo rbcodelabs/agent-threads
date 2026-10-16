@@ -314,28 +314,29 @@ describe('New thread buttons', () => {
   });
 
   it.each([
-    ['Agents List', AgentDashboard],
-    ['Kanban board', KanbanView],
-  ] as const)('%s has a labelled New thread button that opens new-conversation mode, and no dispatch composer', async (_label, View) => {
+    ['Agents List', AgentDashboard, 'header'],
+    ['Kanban board', KanbanView, 'panel'],
+  ] as const)('%s has a labelled New thread control that opens new-conversation mode, and no dispatch composer', async (_label, View, where) => {
     const p = plugin();
     const view = new View({ updateHeader: vi.fn() } as never, p as never);
     (view as unknown as { app: unknown }).app = p.app;
     await view.onOpen();
 
-    const button = view.containerEl.querySelector<HTMLButtonElement>('[data-testid="new-thread-button"]')!;
+    const button = view.containerEl.querySelector<HTMLElement>('[data-testid="new-thread-button"]')!;
     expect(button).not.toBeNull();
     expect(button.getAttribute('aria-label')).toBe('New thread');
-    expect(button.textContent).toContain('New thread');
+    if (where === 'panel') expect(button.textContent).toContain('New thread');
+    else expect(button.classList.contains('view-action')).toBe(true);
 
     button.click();
     expect(p.openNewConversation).toHaveBeenCalledOnce();
 
-    // The composer, its project selector and the dispatch placeholder are gone.
     expect(view.containerEl.querySelector('textarea')).toBeNull();
     expect(view.containerEl.querySelector('.ct-dispatch-root')).toBeNull();
     expect(view.containerEl.querySelector('.ct-dispatch-project')).toBeNull();
     expect(view.containerEl.querySelector('select')).toBeNull();
     expect(view.containerEl.textContent).not.toContain('Dispatch');
+    expect(view.containerEl.querySelector('.ct-kanban-toggle')).toBeNull();
     await view.onClose();
   });
 
