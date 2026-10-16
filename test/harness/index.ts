@@ -3,6 +3,7 @@ import { ThreadsView } from '../../src/ThreadsView';
 import { ThreadManager } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS } from '../../src/types';
 import { fixtureThreads, inlineContentMessages, kanbanFixtureProjects } from './fixtures';
+import { fakeRemoteFolders, remoteFixtureDaemons } from './remote-fixtures';
 import { createAgentThreadCallback } from '../../src/agentThreadCreation';
 import { browserFixtureMessages, PRICING_IMAGE, type BrowserFixtureKind } from './browser-fixtures';
 import { LoginHandoffController } from '../../src/agentBrowser/LoginHandoffController';
@@ -41,8 +42,33 @@ if (!new URLSearchParams(window.location.search).has('sticky')) {
 // every one of those baselines whenever the default changes. Tests that need
 // conversation-first mode opt in explicitly via window.__setConversationFirst.
 const settings = { ...DEFAULT_SETTINGS, claudeBinaryPath: '/opt/homebrew/bin/claude', threadViewPlacement: 'classic' as const };
+const harnessParams = new URLSearchParams(window.location.search);
+// More Projects than the Kanban fixture has, so filtering and both sort orders are visible.
+const harnessExtraProjects = [
+  { id: 'proj-compass', name: 'Compass', vaultFolder: 'Projects/Compass', createdAt: 3 },
+  { id: 'proj-golden', name: 'Golden Wealth', vaultFolder: 'Projects/GoldenWealth', createdAt: 2 },
+  { id: 'proj-zebra', name: 'Zebra Notes', vaultFolder: 'Personal/Zebra', createdAt: 1 },
+];
+// `?remote=1`: two daemons (one with a vault mapping) and a default folder inside the fake vault, so
+// the new-conversation composer's "Run on" menu pre-fills the mapped remote folder.
+if (harnessParams.has('remote')) {
+  settings.remoteDaemons = remoteFixtureDaemons;
+  settings.defaultCwd = '/Users/me/Vault/Products/Agent Threads';
+}
+// Explicit picks the Project picker has recorded: Golden Wealth most recent, then Agent Threads.
+if (harnessParams.has('projects') || harnessParams.has('remote')) {
+  settings.projectLastUsed = { 'proj-golden': 3_000, 'proj-threads': 2_000 };
+}
 const manager = new ThreadManager(settings);
+// `?projects=1` (implied by `remote`): Projects for the new-conversation Project picker. Opt-in so the
+// shared conversation baselines keep their no-Project fixture.
+if (harnessParams.has('projects') || harnessParams.has('remote')) {
+  manager.loadProjects([...kanbanFixtureProjects, ...harnessExtraProjects]);
+  if (harnessParams.has('remote')) manager.vaultRoot = '/Users/me/Vault';
+}
 manager.loadThreads(fixtureThreads);
+const dispatchCalls: unknown[][] = [];
+const newProjectRequests: number[] = [];
 
 // Minimal scheduler mock — ThreadsView reads this for the scheduled-activity
 // pill and popover. No fixture thread has
@@ -171,6 +197,15 @@ const fakeDaemonRegistry = {
 
 const mockPlugin = {
   daemonRegistry: fakeDaemonRegistry,
+  remoteFolders: fakeRemoteFolders,
+  // Creates a real thread so the view's switch-to-the-new-thread step has something to render.
+  dispatchNewThread: async (text: string, images: unknown, titleHint: string, opts?: { projectId?: string }) => {
+    dispatchCalls.push([text, images, titleHint, opts]);
+    const project = opts?.projectId ? manager.getProject(opts.projectId) : undefined;
+    const thread = manager.createThread(titleHint || 'New Thread', project ? manager.getProjectCwd(project) : '/Users/mock/projects/my-app', project?.id);
+    return thread.id;
+  },
+  openNewProjectSettings: () => { newProjectRequests.push(Date.now()); },
   app: (mockLeaf as any).app,
   settings,
   discoveredModelsByHarness: { claude: [], codex: [], opencode: [] },
@@ -488,6 +523,8 @@ view.onOpen();
 
 // Expose for Playwright
 (window as any).__view = view;
+(window as any).__dispatchCalls = dispatchCalls;
+(window as any).__newProjectRequests = newProjectRequests;
 (window as any).__manager = manager;
 (window as any).__showInlineContent = async () => {
   const thread = manager.getThread('thread-new')!;

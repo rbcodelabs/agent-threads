@@ -1074,7 +1074,6 @@ export class ThreadsView extends ItemView {
       getPttKey: () => this.plugin.settings.pttKey ?? '',
     });
     this.dispatchInput.mount(this.inputRowEl);
-    this.buildNewConversationComposer(floatingPanel);
 
     this.contextFooterEl = panelContext.createDiv('ct-context-footer ct-hidden');
 
@@ -1249,7 +1248,10 @@ export class ThreadsView extends ItemView {
    * (Chat about this document); `draft` pre-fills the text.
    */
   async startNewConversation(opts: { projectId?: string; draft?: string; mention?: string } = {}): Promise<void> {
-    if (!this.newConvInput) return;
+    // Built on first use so the ordinary thread view carries no second composer in its DOM.
+    if (!this.newConvInput && this.floatingPanelEl) this.buildNewConversationComposer(this.floatingPanelEl);
+    const composer = this.newConvInput;
+    if (!composer) return;
     if (opts.projectId !== undefined) {
       this.newConvProjectId = this.manager.getProject(opts.projectId) ? opts.projectId : '';
     } else if (!this.manager.getProject(this.newConvProjectId)) {
@@ -1275,12 +1277,12 @@ export class ThreadsView extends ItemView {
       await this.renderMessages();
       this.refreshLeafHeader();
     }
-    if (opts.draft) this.newConvInput.setValue(opts.draft);
+    if (opts.draft) composer.setValue(opts.draft);
     if (opts.mention) {
-      this.newConvInput.setValue(seedDocumentChatDraft(this.newConvInput.getValue(), opts.mention));
+      composer.setValue(seedDocumentChatDraft(composer.getValue(), opts.mention));
     }
     this.refreshNewConversationContext();
-    this.newConvInput.focus();
+    composer.focus();
   }
 
   /** Drop new-conversation chrome. Called by setActiveThread() — every selection change funnels through it. */
