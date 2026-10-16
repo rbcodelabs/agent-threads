@@ -3785,9 +3785,16 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * until the first message is sent. Returns false if the panel could not open.
    */
   async openNewConversation(opts: { projectId?: string; draft?: string; mention?: string } = {}): Promise<boolean> {
+    // Right after launch the workspace may not have restored its leaves yet, and a freshly
+    // created view finishes building asynchronously; wait for both rather than failing.
+    await new Promise<void>((resolve) => this.app.workspace.onLayoutReady(() => resolve()));
     await this.activateView();
-    const view = this.getView();
-    if (!view) return false;
+    let view = this.getView();
+    for (let attempt = 0; attempt < 50 && !view?.isReady(); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      view = this.getView();
+    }
+    if (!view?.isReady()) return false;
     await view.startNewConversation(opts);
     return true;
   }

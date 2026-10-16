@@ -23,6 +23,7 @@ import { KanbanView } from '../../src/KanbanView';
 import { ThreadsView } from '../../src/ThreadsView';
 import { ThreadManager } from '../../src/ThreadManager';
 import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
+import { DispatchInput } from '../../src/DispatchInput';
 import { DEFAULT_SETTINGS } from '../../src/types';
 
 type Internals = Record<string, any>;
@@ -40,6 +41,7 @@ function makeView(opts: { activeThreadId?: string | null } = {}) {
     getValue() { return this.value; },
     focus: vi.fn(),
     setContext: vi.fn(),
+    clearAttachments: vi.fn(),
   };
   const plugin = { manager, settings, saveSettings: vi.fn(async () => undefined), getEffectiveCwd: () => '/repo' };
   const view = Object.assign(Object.create(ThreadsView.prototype), {
@@ -104,6 +106,34 @@ describe('ThreadsView new-conversation mode', () => {
     await view.startNewConversation({ mention: 'Weekly Review' });
 
     expect(input.getValue()).toBe('compare against @[[Weekly Review]] ');
+  });
+
+  it('a fresh entry starts with a clean composer and no stale Project, even after an abandoned session', async () => {
+    const { view, alpha, input } = makeView();
+    await view.startNewConversation({ projectId: alpha.id });
+    input.setValue('half typed');
+    await view.setActiveThread(view.newConv.returnTo); // leave without sending
+
+    await view.startNewConversation();
+
+    expect(input.getValue()).toBe('');
+    expect(input.clearAttachments).toHaveBeenCalled();
+    expect(view.newConvProjectId).toBe('');
+  });
+
+  it('re-entering while already composing keeps the draft (a failed-directive restore stays put)', async () => {
+    const { view, input } = makeView();
+    await view.startNewConversation();
+    input.setValue('/goal');
+    await view.startNewConversation();
+    expect(input.getValue()).toBe('/goal');
+  });
+
+  it('a seeded entry (Chat about this document) is clean apart from the seed', async () => {
+    const { view, input } = makeView();
+    input.setValue('stale text');
+    await view.startNewConversation({ mention: 'Spec' });
+    expect(input.getValue()).toBe('@[[Spec]] ');
   });
 
   it('seeds a draft', async () => {
@@ -263,6 +293,26 @@ describe('New thread buttons', () => {
   }
 
   it.each([
+    ['Agents List', AgentDashboard, '.ct-agents-row'],
+    ['Kanban board', KanbanView, '.ct-kanban-card'],
+  ] as const)('%s drops the selected-thread highlight while composing and restores it after', async (_label, View, rowSel) => {
+    const p = plugin();
+    const id = p.manager.getThreads()[0].id;
+    const view = new View({ updateHeader: vi.fn() } as never, p as never);
+    (view as unknown as { app: unknown }).app = p.app;
+    await view.onOpen();
+    const active = () => view.containerEl.querySelectorAll(rowSel + '.ct-agents-row-active').length;
+
+    p.manager.notifyActiveThreadChanged(id);
+    expect(active()).toBe(1);
+    p.manager.notifyActiveThreadCleared();
+    expect(active()).toBe(0);
+    p.manager.notifyActiveThreadChanged(id);
+    expect(active()).toBe(1);
+    await view.onClose();
+  });
+
+  it.each([
     ['Agents List', AgentDashboard],
     ['Kanban board', KanbanView],
   ] as const)('%s has a labelled New thread button that opens new-conversation mode, and no dispatch composer', async (_label, View) => {
@@ -288,6 +338,29 @@ describe('New thread buttons', () => {
     await view.onClose();
   });
 
+});
+
+describe('stale slash-command pill', () => {
+  it('a /goal pill left in the composer is gone on the next fresh entry', async () => {
+    document.body.empty();
+    const { view, plugin } = makeView();
+    Object.assign(plugin, { slashCommands: new SlashCommandRegistry() });
+    view.app = { vault: { getMarkdownFiles: () => [] } };
+    view.manager.vaultRoot = '/vault';
+    view.floatingPanelEl = document.body.createDiv();
+    view.newConvInput = null;
+
+    await view.startNewConversation();
+    const composer = view.newConvInput as unknown as DispatchInput;
+    composer.setValue('/goal ');
+    expect(document.body.querySelector('.ct-command-pill')).not.toBeNull();
+
+    await view.setActiveThread(view.newConv.returnTo);
+    await view.startNewConversation();
+
+    expect(document.body.querySelector('.ct-command-pill')).toBeNull();
+    expect(composer.getValue()).toBe('');
+  });
 });
 
 describe('new-conversation composer construction', () => {

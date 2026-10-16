@@ -234,6 +234,10 @@ export class AgentDashboard extends ItemView {
       this.setActiveRow(threadId);
       return;
     }
+    if (event.type === 'active_thread_cleared') {
+      this.clearActiveRow();
+      return;
+    }
     if (
       event.type === 'permission_request' ||
       event.type === 'permission_resolved' ||
@@ -311,6 +315,14 @@ export class AgentDashboard extends ItemView {
     }
     this.activeThreadId = threadId;
     this.rowEls.get(threadId)?.addClass('ct-agents-row-active');
+  }
+
+  /** New-conversation mode: no thread is active, so no row should look selected. */
+  private clearActiveRow(): void {
+    if (this.activeThreadId) {
+      this.rowEls.get(this.activeThreadId)?.removeClass('ct-agents-row-active');
+    }
+    this.activeThreadId = null;
   }
 
   private scheduleRender(): void {

@@ -1155,6 +1155,11 @@ export class KanbanView extends ItemView {
       this.setActiveCard(threadId);
       return;
     }
+    if (event.type === 'active_thread_cleared') {
+      if (this.activeThreadId) this.rowEls.get(this.activeThreadId)?.removeClass('ct-agents-row-active');
+      this.activeThreadId = null;
+      return;
+    }
     if (
       event.type === 'permission_request' ||
       event.type === 'permission_resolved' ||

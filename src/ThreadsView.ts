@@ -464,6 +464,8 @@ export class ThreadsView extends ItemView {
       (id) => Boolean(this.manager.getThread(id)),
     );
     if (!activeThreadId) return;
+    // A late layout restore must not pull the panel out of a conversation being composed.
+    if (this.newConv) return;
     this.activeThreadId = activeThreadId;
     if (this.rootEl) await this.setActiveThread(activeThreadId);
   }
@@ -1234,6 +1236,11 @@ export class ThreadsView extends ItemView {
   // New-conversation mode
   // ---------------------------------------------------------------------------
 
+  /** True once buildUI has run, i.e. startNewConversation can act. */
+  isReady(): boolean {
+    return Boolean(this.floatingPanelEl && this.titleEl);
+  }
+
   /** True while the panel is composing a conversation that has no thread yet. */
   isNewConversation(): boolean {
     return this.newConv !== null;
@@ -1252,6 +1259,13 @@ export class ThreadsView extends ItemView {
     if (!this.newConvInput && this.floatingPanelEl) this.buildNewConversationComposer(this.floatingPanelEl);
     const composer = this.newConvInput;
     if (!composer) return;
+    if (!this.newConv) {
+      // A fresh entry starts clean: a command pill or draft left from an earlier
+      // session (abandoned, or a failed directive) must not leak into this one.
+      composer.setValue('');
+      composer.clearAttachments();
+      this.newConvProjectId = '';
+    }
     if (opts.projectId !== undefined) {
       this.newConvProjectId = this.manager.getProject(opts.projectId) ? opts.projectId : '';
     } else if (!this.manager.getProject(this.newConvProjectId)) {
@@ -1270,6 +1284,7 @@ export class ThreadsView extends ItemView {
       this.newConv = { returnTo: this.activeThreadId };
       this.activeThreadId = null;
       this.floatingPanelEl?.addClass('ct-new-conversation');
+      this.manager.notifyActiveThreadCleared();
       this.setRunningState(false);
       this.renderTitleBar();
       this.renderManagerNotesPanel();
