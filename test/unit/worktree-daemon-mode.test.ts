@@ -76,10 +76,10 @@ describe('enter_worktree on a daemon', () => {
     const outsideRepo = join(base, 'outside');
     git(['clone', makeRemote(base, 'o'), outsideRepo]);
     const { enter } = tools();
-    const r = await enter({ repoPath: outsideRepo, branch: 'x' });
+    const r = await enter({ repoPath: outsideRepo, branch: 'zz-nope-branch' });
     expect(r.success).toBe(false);
     expect(r.error).toMatch(/outside the folders/);
-    expect(git(['worktree', 'list'], outsideRepo)).not.toContain('x');
+    expect(git(['worktree', 'list'], outsideRepo)).not.toContain('zz-nope-branch');
   });
 
   it('refuses a ../ escape and a symlink that leads out of the workspace', async () => {
