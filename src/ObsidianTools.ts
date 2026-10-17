@@ -23,6 +23,7 @@ import { createScheduleTools } from './tools/schedule';
 import { createSkillsTools } from './tools/skills';
 import { createThreadTools } from './tools/threads';
 import { createVaultTools } from './tools/vault';
+import { createSyncTools } from './tools/sync';
 import { createVmTools } from './tools/vm';
 import { createWorkspaceTools } from './tools/workspace';
 import { createWorktreeTools } from './tools/worktree';
@@ -451,6 +452,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   const domainTools: Record<string, SdkMcpToolDefinition<any>> = {
     ...createWorkspaceTools({ app, options }),
     ...createVaultTools({ app, options }),
+    ...createSyncTools({ app }),
     ...createScheduleTools({ options }),
     ...createWorktreeTools({
       cwd,
@@ -691,6 +693,8 @@ export function toHarnessDynamicTools(
   ];
   const readOnlyToolNames = new Set([
     ...legacyReadOnlyToolNames,
+    // Canonical-only sync tools (no legacy alias); sync_resolve_conflict is deliberately absent: it mutates.
+    'sync_list_conflicts', 'sync_inspect_conflict',
     ...legacyReadOnlyToolNames.map(name => LEGACY_TO_CANONICAL_TOOL_NAMES[name] ?? name),
     // Observing a page is read-only; navigating to one and clicking things is
     // not, so only the inspection half bypasses the prompt.

@@ -65,7 +65,7 @@ export const NEVER_OFFERED: ReadonlySet<string> = new Set([
   'request_secret', 'mcp_register_server', 'host_execute_command', 'host_list_commands', 'host_open_url',
   'workspace_navigate_to_file', 'workspace_insert_at_cursor', 'watch_document', 'unwatch_document',
   // vault writes
-  'vault_restore_file_version', 'vault_add_bridge',
+  'vault_restore_file_version', 'vault_add_bridge', 'sync_resolve_conflict',
   // thread creation, messaging, archiving and every setter
   'threads_create', 'threads_create_project', 'threads_update_project', 'threads_set_project', 'threads_open',
   'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_proposed_reply', 'threads_clear_proposed_reply',

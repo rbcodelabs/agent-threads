@@ -58,7 +58,7 @@ export const TOOL_NAMES_BY_DOMAIN: Readonly<Record<ToolDomain, readonly string[]
   vault: [
     'obsidian_search_vault', 'obsidian_get_backlinks', 'obsidian_get_outgoing_links', 'obsidian_get_note_metadata',
     'vault_list', 'obsidian_get_file_history', 'obsidian_restore_file_version', 'obsidian_list_vault_bridges',
-    'obsidian_add_vault_bridge',
+    'obsidian_add_vault_bridge', 'sync_list_conflicts', 'sync_inspect_conflict', 'sync_resolve_conflict',
   ],
   workspace: [
     'obsidian_get_open_tabs', 'obsidian_get_active_file', 'obsidian_navigate_to_file', 'obsidian_insert_at_cursor',
@@ -99,7 +99,8 @@ export const BUILT_IN_TOOL_ORDER: readonly string[] = Object.freeze([
   'obsidian_open_thread', 'obsidian_get_thread_log', 'obsidian_wait_for_thread', 'obsidian_send_message_to_thread',
   'obsidian_archive_thread', 'obsidian_set_thread_notes', 'obsidian_set_thread_proposed_reply',
   'obsidian_clear_thread_proposed_reply', 'obsidian_list_vault_bridges', 'obsidian_add_vault_bridge',
-  'obsidian_get_file_history', 'obsidian_restore_file_version', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',
+  'obsidian_get_file_history', 'obsidian_restore_file_version', 'sync_list_conflicts',
+  'sync_inspect_conflict', 'sync_resolve_conflict', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',
   'request_secret', 'mcp_register_server', 'skills_list_installed', 'skills_search', 'skills_get',
   'skills_list_sources', 'skills_check_updates', 'skills_install', 'skills_create_local', 'skills_update_local',
   'skills_uninstall', 'skills_update',
