@@ -515,6 +515,7 @@ export class ThreadManager {
    */
   private externalizeMessageImages(threadId: string, message: ChatMessage): void {
     if (!this.attachmentWriter.isDesktop()) return;
+    if (this.threads.get(threadId)?.private) return;
     message.images?.forEach((img, index) => {
       if (img.base64 && !img.path) {
         void this.attachmentWriter
@@ -967,7 +968,7 @@ export class ThreadManager {
     this.emit(thread.id, { type: 'agent_runs_changed', agentRuns: thread.agentRuns });
   }
 
-  createThread(title: string, cwd?: string, projectId?: string, agentHarness?: AgentHarness, metadata?: Pick<Thread, 'origin' | 'externalJobId' | 'ephemeral' | 'background'>): Thread {
+  createThread(title: string, cwd?: string, projectId?: string, agentHarness?: AgentHarness, metadata?: Pick<Thread, 'origin' | 'externalJobId' | 'ephemeral' | 'background' | 'private'>): Thread {
     const thread: Thread = {
       id: crypto.randomUUID(),
       title: title || `Thread ${this.threads.size + 1}`,
@@ -2956,6 +2957,7 @@ export class ThreadManager {
     const callbacks: SessionCallbacks = {
       onRawEvent: (event) => {
         if (!isCurrentGeneration()) return;
+        if (thread.private) return;
         if (!this.settings.saveRawLogs || !this.vaultRoot) return;
         // Record the log path on the thread the first time we write, so the
         // markdown note's `raw_log` frontmatter can link to it.
@@ -3599,7 +3601,7 @@ export class ThreadManager {
     }
 
     // Ephemeral session (thread-level flag)
-    if (thread.ephemeral) {
+    if (thread.ephemeral || thread.private) {
       opts.persistSession = false;
     }
 

@@ -1118,7 +1118,8 @@ export class ThreadsView extends ItemView {
 
     // Show the ephemeral badge when the active thread is marked ephemeral
     if (this.ephemeralBadgeEl) {
-      this.ephemeralBadgeEl.toggleClass('ct-hidden', !thread?.ephemeral);
+      this.ephemeralBadgeEl.toggleClass('ct-hidden', !thread?.ephemeral && !thread?.private);
+      this.ephemeralBadgeEl.setText(thread?.private ? 'private' : 'ephemeral');
     }
     this.renderRemoteStrip();
 

@@ -39,6 +39,8 @@ export class VaultPersistence {
   private saveAgainRequested = new Set<string>();
 
   async saveThread(thread: Thread): Promise<string> {
+    // Private chats never produce a vault note.
+    if (thread.private) return '';
     const key = thread.id;
     const inFlight = this.savePromises.get(key);
     if (inFlight) {
