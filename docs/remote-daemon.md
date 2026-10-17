@@ -284,6 +284,7 @@ token created for that purpose. Nothing is ever put in the URL.
 | `agent-threads list [--json]` | the daemon's threads: id, state (`waiting` for an answer, `running`, `idle`, `closed`), last sequence, folder. Needs a `read` token. |
 | `agent-threads attach <thread> [--from N\|end] [--claim] [--until-idle] [--json]` | follow a thread. Replays the journal after `--from` (default `0`: everything the daemon still holds; `end`: live only), then streams live. A unique id prefix is enough. |
 | `agent-threads run [options] "<prompt>"` | open a new session, send one prompt, stream the answer, exit with a code for how it ended. |
+| `agent-threads creds push <kind> [NAME...] [--stdin] [--ttl T] [--remove]` | send credentials to the daemon (`admin` token). See "Pushing credentials from the CLI". |
 | `agent-threads token create\|list\|revoke` | manage tokens (`--json` for scripts; `create --save` as above). |
 | `agent-threads doctor` | check the machine and the daemon (below). |
 | `agent-threads install` | set up the systemd user service (above). |
@@ -517,6 +518,94 @@ exactly which tools run on your computer (or says none do).
   present update live). `request_secret` stores the value in your keychain; it does not reach the daemon, so the remote
   agent cannot read it. A tool call that was running when the app quit may be re-run after a restart only if the daemon
   still shows it as open.
+
+## MCP servers that need secrets (daemon-side)
+
+Some MCP servers need a key the daemon must hold itself (a hosted docs server, a database tool). List them in the daemon's
+`<data-dir>/config.json` and refer to each secret as `${NAME}`:
+
+```json
+{
+  "mcpServers": {
+    "docs":  { "type": "http", "url": "https://docs.example.com/mcp", "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" } },
+    "tools": { "command": "npx", "args": ["-y", "some-mcp-server"], "env": { "API_KEY": "${TOOLS_KEY}" } }
+  }
+}
+```
+
+`type` is `stdio` (the default, with `command`, `args`, `env`), `http` or `sse`. `claude_threads` and `obsidian` are reserved.
+A daemon-listed server replaces a same-named server sent by the app.
+
+Secret values are sent with the `creds.push` protocol command (`{ kind, ttlSec, fields }`), which needs an **admin** token.
+They are stored on the daemon as `<data-dir>/creds/<kind>.json` (directory 0700, files 0600), never in `config.json` or in a
+thread's saved spec, and masked in the daemon's logs. Push them with `agent-threads creds push` (below) or from any admin
+client on the wire protocol; there is no settings screen for it yet.
+
+A push replaces the whole kind; pushing no fields removes it; `ttlSec` (0 = no expiry) makes it lapse on its own. Placeholders
+are filled when a session starts, so a rotated secret reaches the next session without a daemon restart. A server whose
+secret is missing is not started and shows as **failed** ("missing credential NAME").
+
+### Pushing credentials from the CLI
+
+```bash
+# values come from the environment (not argv), one kind per push; ttl is seconds or 15m / 24h / 7d
+DOCS_TOKEN=... TOOLS_KEY=... agent-threads creds push mcp DOCS_TOKEN TOOLS_KEY --ttl 30d
+
+# or as JSON on standard input
+echo '{"DOCS_TOKEN":"..."}' | agent-threads creds push mcp --stdin
+
+# delete a kind (a push with no fields is never sent by accident)
+agent-threads creds push mcp --remove
+```
+
+Secrets never go on the command line: `NAME=value` arguments are refused (they would show in `ps` and shell history) unless
+you pass `--allow-argv`, which warns. A name with no value in the environment or on stdin is a usage error (exit 2) that
+names the field. The output lists field names and the expiry, never a value (`--json` prints
+`{kind, fields, removed, expiresAt}`). It needs an `admin` token (exit 4 otherwise). A push replaces the whole kind.
+
+Settings, Remote shows each daemon's MCP servers (connected / failed / needs sign-in) as last reported by its sessions;
+a server that dies mid-session turns to failed at the end of the next turn.
+
+## Repositories the daemon keeps cloned
+
+A daemon can hold clones of your repositories, so a thread there can start on code without anyone logging in to the
+machine. List them in Settings, Remote, edit the daemon, **Repositories** (one per line: `<url> [branch] [as name]`), then
+**Save and sync**. Or send `repos.sync` yourself:
+
+```json
+{ "type": "repos.sync", "repos": [{ "name": "agent-threads", "url": "https://github.com/me/agent-threads.git", "branch": "main" }] }
+```
+
+- **Where.** `<data-dir>/workspace/<name>` (`repoRoot` in `config.json` moves it). That folder is always an allowed
+  session folder, whatever `--workspace` says; nothing else under the data directory is (credentials, journals).
+- **Stored.** The list lives in the daemon's `config.json` under `repos` (you can also edit it there; it is read at start).
+  Removing a repository from the list keeps its clone on disk: it may hold unpushed work.
+- **When it syncs.** Immediately on `repos.sync` (the reply says `syncing`; look again with `repos.status`, or pass
+  `"wait": true` to hold the reply), when the daemon starts, and when a session starts inside a clone whose last fetch is
+  over five minutes old. A sync clones what is missing (into a scratch folder that is renamed on success, so a failed clone
+  leaves nothing half-done) and fetches the rest. A clean checkout of the tracked branch is fast-forwarded; a dirty or
+  diverged one is only fetched.
+- **Private repositories.** Push one fine-grained token (contents and pull requests: write) with
+  `GH_TOKEN=... agent-threads creds push github GH_TOKEN`. Git gets it only through the environment of the git process,
+  answered by a generated `GIT_ASKPASS` script (`<data-dir>/repos/askpass.sh`, mode 0700, holds no secret) that replies only
+  for the hosts of your repositories and github.com. It is never on a command line, in a clone URL or in `.git/config`, and a
+  URL that contains credentials is refused. The agent's own process gets the same token as `GH_TOKEN` (for `gh`) plus the
+  askpass settings (so `git push` over https works); nothing else does.
+- **Status** (`repos.status`, `read` scope): `cloned`, `stale` (last good fetch over 24 hours ago, or the last fetch failed),
+  `auth failed` (the remote refused the token, or none is stored), `not cloned yet`, `syncing`, or `failed` (any other git
+  error, scrubbed of the token). Changing the list needs an `admin` token, like `creds.push`; a `control` token can only look.
+- **Local paths.** A repository URL that is a path on the daemon's own disk is refused unless `allowLocalRepoUrls` is true
+  in `config.json` (https and ssh remotes only, otherwise).
+
+**Worktrees.** `enter_worktree` on a daemon takes `repoPath` relative to the repo root (`"repoPath": "agent-threads"`) and
+creates the worktree under `<repo root>/.worktrees/<repo>/<branch>`. The path the agent names and the git root git finds
+for it must both be inside an allowed folder; they are checked before anything is created. A `worktreeRoot` argument from
+the agent is ignored here: where worktrees go is yours to set (`worktreeRoot` in `config.json`). Start new work from
+`origin/<branch>`, which each fetch updates.
+
+**Pruning.** At daemon start, a worktree under the repo root's `.worktrees` (or your `worktreeRoot`) that nothing has touched
+for 14 days (`worktreePruneDays` in `config.json`, `0` = never) is removed with plain `git worktree remove`. Only a worktree
+that is also clean, fully pushed and not locked goes; anything else is left and logged. Branches are never deleted.
 
 ## Connect from Geode
 

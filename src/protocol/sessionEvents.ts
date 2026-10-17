@@ -115,6 +115,7 @@ export const CALLBACK_DISPOSITION: Record<keyof SessionCallbacks, CallbackDispos
   onToolProgress: 'event',
   onMemoryRecall: 'event',
   onCommandsChanged: 'event',
+  onMcpServerStatus: 'event',
   onTaskProgressSummary: 'event',
   onGitOperation: 'event',
   onFileUserModified: 'event',

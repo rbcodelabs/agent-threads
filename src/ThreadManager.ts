@@ -42,6 +42,7 @@ import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { formatHostExecPermissionDetail, type HostExecRequest } from './hostExec';
 import { isAuthErrorTranscriptMessage } from './claudeAuthRecovery';
 import { HOST_EXEC_PERMISSION_TOOL } from './permissionDetail';
+import type { DaemonMcpStatusStore } from './mcpStatus';
 
 type ThreadStateListener = (threadId: string, event: ThreadEvent) => void;
 
@@ -336,6 +337,8 @@ export class ThreadManager {
    * to start with a clear error instead of silently running locally.
    */
   remoteDaemons: RemoteDaemonResolver | undefined = undefined;
+  /** Last MCP server status reported by each daemon's sessions (shown in the daemon's settings). */
+  daemonMcpStatus: DaemonMcpStatusStore | undefined = undefined;
   /**
    * Awaited before a remote thread with no live session sends, so a daemon this app manages (the local container)
    * can be started on first use. A rejection becomes the send's error, shown to the user verbatim.
@@ -3376,6 +3379,10 @@ export class ThreadManager {
       onModelRefusalNoFallback: (refusal) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'model_refusal_no_fallback', ...refusal }); },
       onToolProgress: (toolUseId, toolName, elapsedSeconds) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'tool_progress', toolUseId, toolName, elapsedSeconds }); },
       onMemoryRecall: (paths, mode) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'memory_recall', paths, mode }); },
+      onMcpServerStatus: (servers) => {
+        // A daemon's MCP health is a property of the daemon, shown in its settings; a local session has no such view.
+        if (isCurrentGeneration() && thread.remote) this.daemonMcpStatus?.set(thread.remote.daemonId, servers);
+      },
       onCommandsChanged: (commands) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'commands_changed', commands }); },
       onTaskProgressSummary: (taskId, summary) => {
         if (!isCurrentGeneration()) return;

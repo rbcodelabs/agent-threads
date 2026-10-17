@@ -257,6 +257,8 @@ describe('L. scopes and request ownership', () => {
     'tool.result': { threadId: 'x', callId: 'c', success: true, text: '' },
     'tool.manifest': { threadId: 'x', servers: {} },
     'creds.push': { kind: 'k', ttlSec: 1, fields: {} },
+    'repos.sync': {},
+    'repos.status': {},
   };
 
   it('REQUIRED_SCOPE lists exactly every command except hello, and each sample is a valid frame', () => {

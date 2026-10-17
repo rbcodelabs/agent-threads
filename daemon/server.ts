@@ -6,6 +6,7 @@
  * from the first `hello` frame or an `Authorization: Bearer` header, never the
  * URL, so tokens do not end up in proxy logs.
  */
+import { existsSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { randomUUID } from 'node:crypto';
@@ -14,14 +15,17 @@ import { WebSocketServer } from 'ws';
 import { PROTOCOL_VERSION } from '../src/protocol';
 import { AuditLog } from './auditLog';
 import { CommandCache } from './cmdCache';
-import { isLoopbackAddress, isWildcardAddress, loadOrCreateDaemonId, type DaemonConfig } from './config';
+import { isLoopbackAddress, isWildcardAddress, loadOrCreateDaemonId, updateConfigFile, type DaemonConfig } from './config';
 import { createClaudeDriverFactory, describeCredentialSource, findClaudeBinary, resolveCredentialEnv } from './claudeDriver';
-import { describePathAccess, type SessionPolicy } from './sessionPolicy';
+import { describePathAccess, withRepoRoot, type SessionPolicy } from './sessionPolicy';
+import { ReposManager } from './repos';
+import { pruneIdleWorktrees } from './worktreePrune';
 import { listSubfolders, listWorkspaces } from './workspaces';
 import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, PRE_AUTH_MAX_FRAME_BYTES, capabilitiesFor, type ServerContext, type Timings } from './connection';
 import { ControlRegistry } from './controlRegistry';
 import { fakeHarnessFactory } from './fakeHarness';
 import { FailureThrottle } from './failureThrottle';
+import { CredStore } from './credStore';
 import { ensureDir } from './fsutil';
 import { sweepRawLogs } from './logRetention';
 import type { DriverFactory } from './sessionDriver';
@@ -70,6 +74,10 @@ export interface DaemonHandle {
   readonly url: string;
   readonly tokens: TokenStore;
   readonly threads: ThreadHost;
+  /** The repositories this daemon keeps cloned. */
+  readonly repos: ReposManager;
+  /** Resolves when the start-up worktree prune and first repo sync have finished (they run in the background). */
+  readonly startup: Promise<void>;
   /** Thread ids whose in-flight turn was closed out during startup recovery. */
   readonly recovered: string[];
   /** Graceful: close sockets, flush + fsync journals. */
@@ -104,7 +112,21 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   };
   const logsDir = join(config.dataDir, 'logs');
 
+  const creds = new CredStore(config.dataDir, options.now);
+  ensureDir(creds.dir);
   const real = config.harness === 'claude';
+  // Repositories kept cloned under config.repoRoot. The list lives in config.json (changed by `repos.sync`).
+  let repoList = config.repos;
+  const repos = new ReposManager({
+    dataDir: config.dataDir,
+    root: config.repoRoot,
+    creds,
+    getRepos: () => repoList,
+    setRepos: (next) => { repoList = next; updateConfigFile(config.dataDir, { repos: next }); },
+    allowLocalUrls: config.allowLocalRepoUrls,
+    ...(options.now ? { now: options.now } : {}),
+    log,
+  });
   let driverFactory = options.driverFactory;
   let rawLog: ((threadId: string, event: Record<string, unknown>) => void) | undefined;
   if (real) {
@@ -120,9 +142,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       writer.append(threadId, typeof event.session_id === 'string' ? event.session_id : undefined, type, event);
     };
     const credentialEnv = resolveCredentialEnv(env);
-    setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN].filter((v): v is string => !!v));
+    setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN, ...creds.secretValues()].filter((v): v is string => !!v));
     if (!driverFactory) {
-      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, env, requestTimeoutMs: config.requestTimeoutMinutes * 60_000 });
+      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, env, mcpServers: config.mcpServers, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: () => repos.sessionEnv(), onSessionStart: (cwd) => repos.refreshForCwd(cwd) });
       const binary = findClaudeBinary(config.claudeBinaryPath, env);
       log(binary ? `claude CLI: ${binary}` : 'WARNING: claude CLI not found; session.open will fail until it is installed (or set claudeBinaryPath / AGENT_THREADS_CLAUDE_BINARY)');
       log(`claude credential: ${describeCredentialSource(env)}`);
@@ -130,7 +152,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     log(`workspaces: ${config.workspaces.join(', ') || '(none)'}${config.readOnlyWorkspaces.length ? `; read-only workspaces: ${config.readOnlyWorkspaces.join(', ')}` : ''}; bypassPermissions ${config.allowBypass ? 'ALLOWED' : 'refused'}; maxConcurrentTurns ${config.maxConcurrentTurns}; maxLiveSessions ${config.maxLiveSessions}; client env ${config.allowedClientEnv.length ? `limited to ${config.allowedClientEnv.join(', ')}` : 'ignored'}; idle reap ${config.idleReapMinutes ? `${config.idleReapMinutes} min` : 'off'}`);
   }
 
-  const sessionPolicy: SessionPolicy = { workspaces: config.workspaces, readOnlyWorkspaces: config.readOnlyWorkspaces, allowBypass: config.allowBypass, allowedClientEnv: config.allowedClientEnv };
+  const configuredPolicy: SessionPolicy = { workspaces: config.workspaces, readOnlyWorkspaces: config.readOnlyWorkspaces, allowBypass: config.allowBypass, allowedClientEnv: config.allowedClientEnv };
+  // The repo root is always allowed as a session folder; it is only OFFERED (workspaces.list) once something has been cloned there.
+  const sessionPolicy: SessionPolicy = withRepoRoot(configuredPolicy, config.repoRoot);
   const host = new ThreadHost({
     dataDir: config.dataDir,
     epoch,
@@ -151,6 +175,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     hostToolGraceMs: options.hostToolGraceMs ?? config.hostToolGraceSec * 1000,
     hostToolTimeoutMs: options.hostToolTimeoutMs ?? config.hostToolTimeoutSec * 1000,
     worktreeRoot: config.worktreeRoot ?? defaultWorktreeRoot(config),
+    repoRoot: config.repoRoot,
     audit,
   });
   const controllers = new ControlRegistry();
@@ -168,8 +193,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     epoch,
     capabilities: capabilitiesFor(config.harness),
     controllers,
+    creds,
+    repos,
     checkPath: (path) => describePathAccess(path, sessionPolicy),
-    listWorkspaces: () => listWorkspaces(sessionPolicy),
+    listWorkspaces: () => listWorkspaces(existsSync(config.repoRoot) ? sessionPolicy : configuredPolicy),
     listPath: (path) => listSubfolders(path, sessionPolicy),
     timings: { ...DEFAULT_TIMINGS, ...options.timings },
     maxOutboundBytes: options.maxOutboundBytes ?? MAX_OUTBOUND_BYTES,
@@ -262,6 +289,21 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       : `WARNING: listening on ${hostName} over plain ws://. Traffic is unencrypted outside a Tailscale/VPN tunnel.`);
   }
 
+  // Housekeeping that must never delay or fail startup: drop worktrees idle for a long time, then bring the clones up to date.
+  const startup = (async () => {
+    try {
+      const pruned = await pruneIdleWorktrees({
+        repoRoot: config.repoRoot,
+        worktreeRoots: [join(config.repoRoot, '.worktrees'), ...(config.worktreeRoot ? [config.worktreeRoot] : [])],
+        days: config.worktreePruneDays,
+        ...(options.now ? { now: options.now } : {}),
+        log,
+      });
+      if (pruned.removed.length) log(`pruned ${pruned.removed.length} idle worktree(s)`);
+    } catch (err) { log(`worktree prune failed: ${String(err)}`); }
+    try { await repos.syncAll(); } catch (err) { log(`repo sync failed: ${String(err)}`); }
+  })();
+
   const closeHttp = (srv: Server) => new Promise<void>((resolve) => { srv.close(() => resolve()); srv.closeAllConnections?.(); });
 
   return {
@@ -272,6 +314,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     url,
     tokens,
     threads: host,
+    repos,
+    startup,
     recovered,
     async stop() {
       clearInterval(sweep);

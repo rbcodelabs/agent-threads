@@ -51,6 +51,7 @@ import { isAwsCredentialErrorText } from './awsAuthRecovery';
 import { containerAwsEnv } from './containerAws';
 import { stripHostOnlyGitEnv } from './githubCredentialHelper';
 import { isReportedModelId } from './modelOptions';
+import { parseInitMcpServers } from './mcpStatus';
 import { mergeUsageSnapshot,normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
 import { resolvePlanText, isPlanFilePath } from './planText';
 
@@ -957,6 +958,10 @@ export class ThreadSession {
             switch (sys.subtype) {
               case 'init':
                 if (isReportedModelId(sys.model)) callbacks.onActiveModel?.(sys.model);
+                {
+                  const servers = parseInitMcpServers(sys.mcp_servers);
+                  if (servers) callbacks.onMcpServerStatus?.(servers);
+                }
                 break;
               case 'status':
                 callbacks.onStatus?.(sys.status as 'compacting' | 'requesting' | null);

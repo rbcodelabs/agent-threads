@@ -29,6 +29,16 @@ export interface SessionPolicy {
   allowedClientEnv?: string[];
 }
 
+/**
+ * The policy with the daemon's repository root added to the read-write workspaces (once, de-duplicated). The clones
+ * `repos.sync` makes live there, so sessions must be allowed to run in them whatever `--workspace` says.
+ */
+export function withRepoRoot(policy: SessionPolicy, repoRoot: string): SessionPolicy {
+  const root = resolve(repoRoot);
+  const known = [...policy.workspaces, ...(policy.readOnlyWorkspaces ?? [])].map((p) => resolve(p));
+  return known.includes(root) ? policy : { ...policy, workspaces: [...policy.workspaces, root] };
+}
+
 export class PolicyError extends Error {
   constructor(readonly code: 'forbidden' | 'bad_frame', message: string) {
     super(message);

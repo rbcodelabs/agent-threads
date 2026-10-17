@@ -10,6 +10,7 @@ import {
   doctorExitCode, formatReport, realProbes, resolveDoctorTarget, runChecks, summarize,
 } from './cmd/doctor';
 import { CliError, EXIT, exitCodeFor, messageOf } from './cmd/exit';
+import { formatPush, parseTtl, preparePush, pushCreds } from './cmd/creds';
 import { runInstall, realInstallSys } from './cmd/install';
 import { fetchThreads, formatTable, jsonRecord, sortRows } from './cmd/list';
 import { processRuntime, type CliRuntime, type RawIo } from './cmd/runtime';
@@ -30,6 +31,8 @@ Usage:
   agent-threads token create --name N [--scope read|control|admin] [--save]
   agent-threads token list
   agent-threads token revoke <id|name>
+  agent-threads creds push <kind> [NAME...] [--stdin] [--ttl <s|15m|24h|7d>] [--remove]
+                                          send credentials to a daemon (admin token); values never touch argv
   agent-threads doctor [--strict] [--json]  check this machine and the daemon
   agent-threads install [--dry-run] [--no-start]   set up the systemd user service (Linux)
   agent-threads --version
@@ -77,6 +80,10 @@ serve options:
   --claude-binary <path> path to the claude CLI (env AGENT_THREADS_CLAUDE_BINARY; default: PATH, ~/.npm-global/bin, ~/.local/bin)
   --fake-harness         scripted stand-in instead of Claude (tests and smoke runs only)
 
+creds push: field values are read from standard input as a JSON object (--stdin) or from the environment variable of
+  the same name (NAME). "NAME=value" on the command line is refused unless --allow-argv (it shows in "ps"). With
+  --remove and no fields the kind is deleted. Output lists field names, never values.
+
 The token and doctor commands accept --data-dir too.
 `;
 
@@ -116,7 +123,7 @@ export interface Parsed {
 
 const BOOLEAN_FLAGS = new Set([
   'i-know-this-is-open', 'help', 'version', 'allow-bypass', 'fake-harness',
-  'json', 'detach', 'unattended', 'claim', 'until-idle', 'strict', 'save', 'dry-run', 'no-start', 'force',
+  'json', 'detach', 'unattended', 'claim', 'until-idle', 'strict', 'save', 'dry-run', 'no-start', 'force', 'remove', 'stdin', 'allow-argv',
 ]);
 
 export function parseArgs(argv: string[]): Parsed {
@@ -282,7 +289,7 @@ export async function runCli(argv: string[], io: Io = consoleIo, runtime?: Parti
     return 0;
   }
 
-  if (cmd === 'list' || cmd === 'attach' || cmd === 'run' || cmd === 'doctor' || cmd === 'install') {
+  if (cmd === 'list' || cmd === 'attach' || cmd === 'run' || cmd === 'doctor' || cmd === 'install' || cmd === 'creds') {
     const rt: CliRuntime = { ...processRuntime(), ...runtime };
     const raw = toRawIo(io);
     try {
@@ -379,6 +386,26 @@ async function runClientCommand(cmd: string, p: Parsed, io: Io, raw: RawIo, rt: 
         for (const l of formatReport(results, DAEMON_VERSION)) io.out(l);
       }
       return code;
+    }
+    case 'creds': {
+      if (p.positionals[1] !== 'push') throw new CliError('usage: agent-threads creds push <kind> [NAME...] [--stdin] [--ttl N] [--remove]', EXIT.USAGE);
+      const ttl = one(p, 'ttl');
+      const opts = {
+        kind: p.positionals[2] ?? '', specs: p.positionals.slice(3), ttlSec: ttl === undefined ? 0 : parseTtl(ttl),
+        remove: p.bools.has('remove'), stdinJson: p.bools.has('stdin'), allowArgv: p.bools.has('allow-argv'),
+      };
+      const stdinText = opts.stdinJson ? await readAll(rt.stdin) : undefined;
+      const fields = preparePush(opts, { env: rt.env, ...(stdinText !== undefined ? { stdinText } : {}), warn: (m) => io.err(m) });
+      const flags = connFlags(p);
+      const client = await connectDaemon(resolveConnectionSettings(flags, rt.env), { reconnect: false, connectTimeoutMs: flags.connectTimeoutMs, createSocket: rt.createSocket });
+      try {
+        const reply = await pushCreds(client, opts.kind, opts.remove ? 0 : opts.ttlSec, fields);
+        if (json) io.out(JSON.stringify({ kind: reply.kind, fields: reply.fields, removed: reply.removed, expiresAt: reply.expiresAt ?? null }));
+        else io.out(formatPush(reply));
+        return EXIT.OK;
+      } finally {
+        client.dispose();
+      }
     }
     case 'install': {
       const bundle = typeof __filename === 'string' && __filename.endsWith('.cjs') ? __filename : join(process.cwd(), 'dist/agent-threads.cjs');

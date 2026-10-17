@@ -49,6 +49,7 @@
     "src/logger.ts",
     "src/mcpServerMerge.ts",
     "src/mcpServerStore.ts",
+    "src/mcpStatus.ts",
     "src/modelOptions.ts",
     "src/pathUtils.ts",
     "src/permissionDetail.ts",
