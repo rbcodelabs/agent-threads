@@ -2459,7 +2459,10 @@ export class ThreadsView extends ItemView {
     this.moreBtn.disabled = busy;
     this.moreBtn.toggleClass('ct-summarize-spinning', busy);
     this.moreBtn.querySelector('.ct-si-spinner')?.remove();
-    if (busy) setIcon(this.moreBtn.createSpan('ct-si-spinner'), 'loader');
+    if (busy) {
+      const spinner = this.moreBtn.createSpan('ct-si-spinner');
+      setIcon(spinner, 'loader');
+    }
   }
 
   private popoverHost(): HTMLElement | null {
