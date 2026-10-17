@@ -42,6 +42,7 @@ import {
 } from '../src/protocol';
 import type { CommandCache } from './cmdCache';
 import { CredError, type CredStore } from './credStore';
+import { RepoError, type ReposManager } from './repos';
 import type { PathAccess } from './sessionPolicy';
 import type { ControlRegistry } from './controlRegistry';
 import type { FailureThrottle } from './failureThrottle';
@@ -71,7 +72,7 @@ export function raiseFrameLimit(ws: WebSocket, bytes: number): boolean {
 /** Stop handing frames to the socket once this much is already buffered in it. */
 const SOCKET_HIGH_WATER = 256 * 1024;
 /** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
-export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'host.tools', 'creds.push', 'mcp.status'];
+export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'host.tools', 'creds.push', 'mcp.status', 'repos'];
 export const capabilitiesFor = (harness: string): string[] => [...BASE_CAPABILITIES, `harness.${harness}`];
 
 export interface Timings {
@@ -100,6 +101,8 @@ export interface ServerContext {
   controllers: ControlRegistry;
   /** Credentials pushed by admin clients (`creds.push`). */
   creds: CredStore;
+  /** The repositories the daemon keeps cloned (`repos.sync`, `repos.status`). */
+  repos: ReposManager;
   /** Answers `path.check` from the configured workspaces (set even when the session host is not policed). */
   checkPath(path: string): PathAccess;
   /** Answers `workspaces.list`: the configured roots, with vault detection. */
@@ -140,6 +143,9 @@ export const REQUIRED_SCOPE: Record<string, TokenScope> = {
   'tool.result': 'control',
   'tool.manifest': 'control',
   'creds.push': 'admin',
+  // Changing the list runs git against remotes with the stored token; looking at it only shows names and states.
+  'repos.sync': 'admin',
+  'repos.status': 'read',
 };
 
 /** Commands whose reply must be re-evaluated, not replayed from the idempotency cache. */
@@ -415,6 +421,18 @@ export class Connection {
     }
   }
 
+  private async reposSync(repos: unknown, wait: boolean, auth: VerifiedToken): Promise<unknown> {
+    let reply;
+    try {
+      reply = await this.ctx.repos.sync(repos, wait);
+    } catch (err) {
+      if (err instanceof RepoError) throw new CommandError('bad_frame', err.message);
+      throw err;
+    }
+    this.ctx.audit({ event: 'repos_sync', tokenId: auth.id, repos: reply.repos.map((r) => r.name), replaced: repos !== undefined });
+    return { ...reply };
+  }
+
   private dispatch(frame: ClientFrame, auth: VerifiedToken): unknown {
     const { host } = this.ctx;
     switch (frame.type) {
@@ -516,6 +534,8 @@ export class Connection {
         this.ctx.audit({ event: 'creds_push', tokenId: auth.id, kind: result.kind, fields: result.fields, removed: result.removed });
         return { kind: result.kind, fields: result.fields, removed: result.removed, ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}) };
       }
+      case 'repos.sync': return this.reposSync(frame.repos, frame.wait === true, auth);
+      case 'repos.status': return { ...this.ctx.repos.status() };
       case 'resolve.openTab':
         // OpenNewTab is refused when the harness asks (daemon sessions cannot create Geode threads), so nothing is ever pending.
         throw new CommandError('unknown_command', 'open-tab requests are not supported by this daemon build');

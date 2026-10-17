@@ -24,6 +24,9 @@ const clientSamples: ClientFrame[] = [
   { v: 1, cmdId: 'c10', type: 'workspaces.list' },
   { v: 1, cmdId: 'c11', type: 'path.list', path: '/home/user/vault' },
   { v: 1, cmdId: 'c8', type: 'creds.push', kind: 'claude', ttlSec: 60, fields: { token: 'x' } },
+  { v: 1, cmdId: 'c12', type: 'repos.sync', repos: [{ name: 'proj', url: 'https://github.com/o/proj.git', branch: 'main' }], wait: true },
+  { v: 1, cmdId: 'c13', type: 'repos.sync' },
+  { v: 1, cmdId: 'c14', type: 'repos.status' },
 ];
 
 describe('client frame codec', () => {
@@ -52,6 +55,10 @@ describe('client frame codec', () => {
     ['wrong field type', '{"v":1,"cmdId":"x","type":"ack","ch":"ctl","seq":"7"}', 'field "seq" must be a non-negative integer', { code: 'bad_frame' }],
     ['negative seq', '{"v":1,"cmdId":"x","type":"ack","ch":"ctl","seq":-1}', 'non-negative integer', { code: 'bad_frame' }],
     ['bad channel', '{"v":1,"cmdId":"x","type":"attach","ch":"t:","afterSeq":0}', 'must be a channel', { code: 'bad_frame' }],
+    ['repos not an array', '{"v":1,"cmdId":"x","type":"repos.sync","repos":"nope"}', 'field "repos"', { code: 'bad_frame' }],
+    ['repo with a path name', '{"v":1,"cmdId":"x","type":"repos.sync","repos":[{"name":"../x","url":"https://h/r"}]}', 'repos[0].name', { code: 'bad_frame' }],
+    ['repo url with a space', '{"v":1,"cmdId":"x","type":"repos.sync","repos":[{"name":"x","url":"https://h/r s"}]}', 'repos[0].url', { code: 'bad_frame' }],
+    ['repo name twice', '{"v":1,"cmdId":"x","type":"repos.sync","repos":[{"name":"x","url":"https://h/r"},{"name":"X","url":"https://h/q"}]}', 'used twice', { code: 'bad_frame' }],
     ['null optional', '{"v":1,"cmdId":"x","type":"session.setModel","threadId":"t","model":null}', 'field "model"', { code: 'bad_frame' }],
   ];
   it.each(bad)('rejects %s with a clear error', (_name, text, snippet, expected) => {
@@ -65,7 +72,7 @@ describe('client frame codec', () => {
 
   it('has a validator for every command type (no command is accept-anything)', () => {
     // A frame with only the envelope must be rejected for every command that has required fields.
-    const noFields = new Set(['session.list', 'workspaces.list']);
+    const noFields = new Set(['session.list', 'workspaces.list', 'repos.sync', 'repos.status']);
     for (const type of Object.keys(CLIENT_COMMAND_TYPES)) {
       const r = decodeClientFrame(JSON.stringify({ v: 1, cmdId: 'x', type }));
       expect(r.ok, type).toBe(noFields.has(type));

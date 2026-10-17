@@ -566,6 +566,47 @@ names the field. The output lists field names and the expiry, never a value (`--
 Settings, Remote shows each daemon's MCP servers (connected / failed / needs sign-in) as last reported by its sessions;
 a server that dies mid-session turns to failed at the end of the next turn.
 
+## Repositories the daemon keeps cloned
+
+A daemon can hold clones of your repositories, so a thread there can start on code without anyone logging in to the
+machine. List them in Settings, Remote, edit the daemon, **Repositories** (one per line: `<url> [branch] [as name]`), then
+**Save and sync**. Or send `repos.sync` yourself:
+
+```json
+{ "type": "repos.sync", "repos": [{ "name": "agent-threads", "url": "https://github.com/me/agent-threads.git", "branch": "main" }] }
+```
+
+- **Where.** `<data-dir>/workspace/<name>` (`repoRoot` in `config.json` moves it). That folder is always an allowed
+  session folder, whatever `--workspace` says; nothing else under the data directory is (credentials, journals).
+- **Stored.** The list lives in the daemon's `config.json` under `repos` (you can also edit it there; it is read at start).
+  Removing a repository from the list keeps its clone on disk: it may hold unpushed work.
+- **When it syncs.** Immediately on `repos.sync` (the reply says `syncing`; look again with `repos.status`, or pass
+  `"wait": true` to hold the reply), when the daemon starts, and when a session starts inside a clone whose last fetch is
+  over five minutes old. A sync clones what is missing (into a scratch folder that is renamed on success, so a failed clone
+  leaves nothing half-done) and fetches the rest. A clean checkout of the tracked branch is fast-forwarded; a dirty or
+  diverged one is only fetched.
+- **Private repositories.** Push one fine-grained token (contents and pull requests: write) with
+  `GH_TOKEN=... agent-threads creds push github GH_TOKEN`. Git gets it only through the environment of the git process,
+  answered by a generated `GIT_ASKPASS` script (`<data-dir>/repos/askpass.sh`, mode 0700, holds no secret) that replies only
+  for the hosts of your repositories and github.com. It is never on a command line, in a clone URL or in `.git/config`, and a
+  URL that contains credentials is refused. The agent's own process gets the same token as `GH_TOKEN` (for `gh`) plus the
+  askpass settings (so `git push` over https works); nothing else does.
+- **Status** (`repos.status`, `read` scope): `cloned`, `stale` (last good fetch over 24 hours ago, or the last fetch failed),
+  `auth failed` (the remote refused the token, or none is stored), `not cloned yet`, `syncing`, or `failed` (any other git
+  error, scrubbed of the token). Changing the list needs an `admin` token, like `creds.push`; a `control` token can only look.
+- **Local paths.** A repository URL that is a path on the daemon's own disk is refused unless `allowLocalRepoUrls` is true
+  in `config.json` (https and ssh remotes only, otherwise).
+
+**Worktrees.** `enter_worktree` on a daemon takes `repoPath` relative to the repo root (`"repoPath": "agent-threads"`) and
+creates the worktree under `<repo root>/.worktrees/<repo>/<branch>`. The path the agent names and the git root git finds
+for it must both be inside an allowed folder; they are checked before anything is created. A `worktreeRoot` argument from
+the agent is ignored here: where worktrees go is yours to set (`worktreeRoot` in `config.json`). Start new work from
+`origin/<branch>`, which each fetch updates.
+
+**Pruning.** At daemon start, a worktree under the repo root's `.worktrees` (or your `worktreeRoot`) that nothing has touched
+for 14 days (`worktreePruneDays` in `config.json`, `0` = never) is removed with plain `git worktree remove`. Only a worktree
+that is also clean, fully pushed and not locked goes; anything else is left and logged. Branches are never deleted.
+
 ## Connect from Geode
 
 1. Install the build: copy `dist/main.js`, `dist/manifest.json`, `dist/styles.css` into

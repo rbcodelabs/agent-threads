@@ -9859,6 +9859,16 @@ button.ct-agent-crumb:focus-visible {
 .ct-remote-folders-hint { margin: 6px 0; }
 .ct-remote-mcp-status { margin: 6px 0; }
 .ct-remote-mcp-list { margin: 2px 0 0; padding-left: 18px; font-size: var(--font-ui-smaller); }
+.ct-remote-repos { margin: 12px 0; }
+.ct-remote-repos h3 { margin: 0 0 4px; }
+.ct-remote-repos-list { margin: 6px 0 2px; padding-left: 18px; font-size: var(--font-ui-smaller); }
+.ct-remote-repo-item--ok { color: var(--text-muted); }
+.ct-remote-repo-item--bad { color: var(--text-error); font-weight: var(--font-semibold); overflow-wrap: anywhere; }
+.ct-remote-repos-message { overflow-wrap: anywhere; }
+.ct-remote-repos-input { width: 100%; min-height: 4.5em; font-family: var(--font-monospace); font-size: var(--font-ui-smaller); resize: vertical; }
+@media (max-width: 480px) {
+  .ct-remote-repos .ct-modal-button-row { flex-wrap: wrap; }
+}
 .ct-remote-mcp-item--ok { color: var(--text-muted); }
 .ct-remote-mcp-item--bad { color: var(--text-error); font-weight: var(--font-semibold); overflow-wrap: anywhere; }
 .ct-remote-daemon-status {

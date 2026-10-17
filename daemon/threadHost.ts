@@ -66,6 +66,8 @@ export interface ThreadHostOptions {
   hostToolTimeoutMs?: number;
   /** Where `enter_worktree` puts worktrees (a daemon path inside a workspace). */
   worktreeRoot?: string;
+  /** The daemon's repository root (see `LocalToolsPort.repoRoot`). */
+  repoRoot?: string;
   audit?: (record: Record<string, unknown>) => void;
   /** Raw SDK events for the daemon's own JSONL log. */
   rawLog?: (threadId: string, event: Record<string, unknown>) => void;
@@ -495,6 +497,7 @@ export class ThreadHost {
         localTools: {
           enabled: !(this.cwdPolicy && specIsReadOnly(spec, this.cwdPolicy)),
           ...(this.opts.worktreeRoot ? { worktreeRoot: this.opts.worktreeRoot } : {}),
+          ...(this.opts.repoRoot ? { repoRoot: this.opts.repoRoot } : {}),
           checkCwd: (p) => { if (this.cwdPolicy) assertCwdAllowed(p, this.cwdPolicy); },
         },
         onCwdChanged: (cwd, origin) => { if (rt.gen === gen) this.cwdChanged(rt, cwd, origin); },

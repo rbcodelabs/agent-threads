@@ -10,7 +10,7 @@
  * `unknown_type` (server frames) so the caller can decide, instead of being
  * silently mis-parsed.
  */
-import { CLIENT_COMMAND_TYPES, validateWireImages, type ClientCommandType } from './commands';
+import { CLIENT_COMMAND_TYPES, validateRepoSpecs, validateWireImages, type ClientCommandType } from './commands';
 import { validateManifestServers, validateToolResultPayload } from './hostTools';
 import { validateSpecShape } from './spec';
 import {
@@ -128,6 +128,8 @@ const COMMAND_FIELDS: Record<ClientCommandType, FieldSpec> = {
   'tool.result': { threadId: 'S', callId: 'S', success: 'b', text: 's', content: 'a?' },
   'tool.manifest': { threadId: 'S', servers: 'o' },
   'creds.push': { kind: 'S', ttlSec: 'n', fields: 'o' },
+  'repos.sync': { repos: 'a?', wait: 'b?' },
+  'repos.status': {},
 };
 
 const SERVER_FIELDS: Record<'event' | 'resync' | 'ack' | 'err' | 'welcome', FieldSpec> = {
@@ -172,6 +174,8 @@ function validateDeep(type: string, obj: Record<string, unknown>): string | null
       return validateWireImages(obj.images);
     case 'session.open':
       return validateSpecShape(obj.spec);
+    case 'repos.sync':
+      return validateRepoSpecs(obj.repos);
     case 'tool.manifest':
       return validateManifestServers(obj.servers);
     case 'tool.result':

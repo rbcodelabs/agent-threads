@@ -26,6 +26,8 @@ export interface LocalToolsPort {
   /** False in a read-only workspace: the worktree tools write, so they are not offered. */
   enabled: boolean;
   worktreeRoot?: string;
+  /** The daemon's repository root: a relative `repoPath` resolves against it, worktrees of its clones go under `<root>/.worktrees`. */
+  repoRoot?: string;
   /** Throws when a working directory is outside the daemon's workspaces. */
   checkCwd(path: string): void;
 }

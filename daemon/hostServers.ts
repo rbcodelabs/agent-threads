@@ -31,6 +31,9 @@ export function buildHostServers(ctx: DriverContext): HostServers {
     cwd,
     options: {
       getWorktreeRoot: () => local?.worktreeRoot,
+      // On a daemon the agent does not get to choose where worktrees go, and a relative repoPath means "a clone under the repo root".
+      lockWorktreeRoot: true,
+      ...(local?.repoRoot ? { workspaceRoot: local.repoRoot } : {}),
       validateCwd: local ? (p) => local.checkCwd(p) : undefined,
       onSetCwd: (p, origin) => ctx.onCwdChanged?.(p, origin),
     },

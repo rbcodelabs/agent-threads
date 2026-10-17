@@ -49,6 +49,10 @@ export interface ClaudeDriverDeps {
    * session starts, so a credential pushed since the last session is picked up.
    */
   daemonMcp?: () => ResolvedMcpServers;
+  /** Environment for the agent's own process only (a repository token for `gh` and `git push`); read when a session starts. */
+  sessionEnv?: () => Record<string, string>;
+  /** A session is starting in this folder (lets the daemon refresh a stale clone in the background). */
+  onSessionStart?: (cwd: string) => void;
 }
 
 // ── spec -> options ────────────────────────────────────────────────────────
@@ -186,11 +190,12 @@ export class ClaudeSessionDriver implements SessionDriver {
     const options = specToSessionOptions(ctx.spec, {
       resume: ctx.resume,
       callbacks: this.buildCallbacks(),
-      secretEnv: deps.secretEnv,
+      secretEnv: { ...deps.secretEnv, ...(deps.sessionEnv?.() ?? {}) },
       hostServers: this.hostServers.servers,
       ...(daemonMcp ? { daemonServers: daemonMcp.servers } : {}),
       preApprove: (toolName) => isProxiedHostTool(toolName, ctx.hostTools?.manifest() ?? {}),
     });
+    try { deps.onSessionStart?.(ctx.spec.cwd); } catch { /* a refresh must never stop a session from starting */ }
     this.ready = this.harness.start(options).catch((err: unknown) => {
       this.emit({ name: 'onError', args: [toWireArg(err instanceof Error ? err : new Error(String(err)))] } as WireEvent);
       this.scheduleState();
@@ -536,6 +541,9 @@ export interface ClaudeDriverFactoryOptions {
   /** Operator-configured servers (`config.mcpServers`) and the store their `${NAME}` placeholders resolve from. */
   mcpServers?: DaemonMcpServers;
   creds?: CredStore;
+  /** See `ClaudeDriverDeps.sessionEnv` / `onSessionStart`. */
+  sessionEnv?: () => Record<string, string>;
+  onSessionStart?: (cwd: string) => void;
 }
 
 export function createClaudeDriverFactory(opts: ClaudeDriverFactoryOptions = {}): DriverFactory {
@@ -555,5 +563,5 @@ export function createClaudeDriverFactory(opts: ClaudeDriverFactoryOptions = {})
   const daemonMcp = Object.keys(configured).length
     ? () => resolveDaemonMcpServers(configured, (name) => opts.creds?.lookup(name))
     : undefined;
-  return (ctx) => new ClaudeSessionDriver(ctx, { createHarness, secretEnv, requestTimeoutMs: opts.requestTimeoutMs, ...(daemonMcp ? { daemonMcp } : {}) }, opts.now);
+  return (ctx) => new ClaudeSessionDriver(ctx, { createHarness, secretEnv, requestTimeoutMs: opts.requestTimeoutMs, ...(daemonMcp ? { daemonMcp } : {}), ...(opts.sessionEnv ? { sessionEnv: opts.sessionEnv } : {}), ...(opts.onSessionStart ? { onSessionStart: opts.onSessionStart } : {}) }, opts.now);
 }

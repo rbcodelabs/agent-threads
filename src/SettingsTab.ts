@@ -39,6 +39,7 @@ import { checkAwsCredentialsNow, reauthenticateAws, resolveSignInProfile } from 
 import { promptConfirm } from './confirmModal';
 import { formatToolName } from './toolNameUtils';
 import { describeMcpServer } from './mcpStatus';
+import { describeRepo, formatRepoLines, parseRepoLines, type RemoteReposSource } from './remote/repos';
 import type { McpServerStatusEntry } from './ClaudeSession';
 
 // View-type string constants, mirrored as local literals (see main.ts) so referencing
@@ -552,6 +553,8 @@ export function renderMcpServerStatus(el: HTMLElement, servers: readonly McpServ
  * data.json; leaving the token blank while editing keeps the stored one.
  */
 export class RemoteDaemonModal extends Modal {
+  private readonly onCloseCallbacks: Array<() => void> = [];
+
   constructor(
     app: App,
     private readonly existing: RemoteDaemonConfig | null,
@@ -562,9 +565,66 @@ export class RemoteDaemonModal extends Modal {
       save(config: RemoteDaemonConfig, token: string): Promise<void>;
       /** Last MCP server status this daemon's sessions reported (absent until a session has started on it). */
       mcpStatus?(daemonId: string): McpServerStatusEntry[] | undefined;
+      /** Repositories the daemon keeps cloned; absent when the plugin has no live connection layer. */
+      repos?: RemoteReposSource;
     },
   ) {
     super(app);
+  }
+
+  /**
+   * The repositories this daemon keeps cloned: one per line, saved to the daemon (which clones them under its
+   * workspace root and uses the GitHub token stored there). Needs an admin token to change; anyone can look.
+   */
+  private renderRepos(parent: HTMLElement, daemonId: string, source: RemoteReposSource): void {
+    const el = parent.createDiv({ cls: 'ct-remote-repos' });
+    el.createEl('h3', { text: 'Repositories' });
+    el.createDiv({ cls: 'setting-item-description', text: 'Repos this daemon keeps cloned so threads there can work on them. One per line: <url> [branch] [as name]. Private repos use the GitHub token stored on the daemon (`agent-threads creds push github GH_TOKEN`).' });
+    const list = el.createEl('ul', { cls: 'ct-remote-repos-list', attr: { 'aria-label': 'Repository status' } });
+    const message = el.createDiv({ cls: 'setting-item-description ct-remote-repos-message', attr: { role: 'status' } });
+    let text = '';
+    let edited = false;
+    let poll: number | undefined;
+    const show = (load: Awaited<ReturnType<RemoteReposSource['status']>>): void => {
+      list.empty();
+      if (!load.ok) {
+        message.setText(load.detail);
+        message.addClass('mod-warning');
+        return;
+      }
+      message.setText(load.value.root ? `Cloned under ${load.value.root} on the daemon.` : '');
+      message.removeClass('mod-warning');
+      for (const r of load.value.repos) {
+        const d = describeRepo(r);
+        list.createEl('li', { cls: `ct-remote-repo-item ${d.ok ? 'ct-remote-repo-item--ok' : 'ct-remote-repo-item--bad mod-warning'}`, text: d.text });
+      }
+      if (!edited) { text = formatRepoLines(load.value.repos); input.value = text; }
+      // A sync in progress finishes in the background: look again until nothing is syncing.
+      window.clearTimeout(poll);
+      if (load.value.repos.some((r) => r.state === 'syncing')) poll = window.setTimeout(() => { void source.status(daemonId).then(show); }, 2000);
+    };
+    const input = el.createEl('textarea', {
+      cls: 'ct-remote-repos-input',
+      attr: { rows: '4', 'aria-label': 'Repositories', placeholder: 'https://github.com/owner/repo.git main', spellcheck: 'false' },
+    });
+    input.addEventListener('input', () => { text = input.value; edited = true; });
+    const row = el.createDiv('ct-modal-button-row');
+    const saveBtn = row.createEl('button', { text: 'Save and sync' });
+    saveBtn.addEventListener('click', async () => {
+      const parsed = parseRepoLines(text);
+      if (parsed.errors.length) { message.setText(parsed.errors.join(' ')); message.addClass('mod-warning'); return; }
+      saveBtn.disabled = true;
+      message.setText('Saving…');
+      message.removeClass('mod-warning');
+      const load = await source.sync(daemonId, parsed.repos);
+      saveBtn.disabled = false;
+      if (load.ok) edited = false;
+      show(load);
+    });
+    const refreshBtn = row.createEl('button', { text: 'Refresh' });
+    refreshBtn.addEventListener('click', () => { void source.status(daemonId).then(show); });
+    this.onCloseCallbacks.push(() => window.clearTimeout(poll));
+    void source.status(daemonId).then(show);
   }
 
   onOpen(): void {
@@ -599,6 +659,8 @@ export class RemoteDaemonModal extends Modal {
     // What the daemon's sessions report about their MCP servers; a server that is down shows as failed.
     const mcpServers = this.existing ? this.actions.mcpStatus?.(this.existing.id) : undefined;
     if (mcpServers) renderMcpServerStatus(contentEl.createDiv({ cls: 'ct-remote-mcp-status' }), mcpServers);
+
+    if (this.existing && this.actions.repos) this.renderRepos(contentEl, this.existing.id, this.actions.repos);
 
     // Folders: chosen from what the daemon offers once a test has succeeded; typed paths live under Advanced.
     const foldersEl = contentEl.createDiv({ cls: 'ct-remote-folders' });
@@ -728,6 +790,7 @@ export class RemoteDaemonModal extends Modal {
   }
 
   onClose(): void {
+    for (const cb of this.onCloseCallbacks.splice(0)) cb();
     this.contentEl.empty();
   }
 }
@@ -3374,6 +3437,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     new RemoteDaemonModal(this.app, existing, this.plugin.settings.remoteDaemons ?? [], this.plugin.manager.vaultRoot ?? '', {
       test: (candidate, token) => this.testDaemon(candidate, token),
       mcpStatus: (id) => this.plugin.daemonMcpStatus.get(id)?.servers,
+      ...(this.plugin.remoteRepos ? { repos: this.plugin.remoteRepos } : {}),
       save: async (config, token) => {
         const list = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
         const index = list.findIndex((d) => d.id === config.id);

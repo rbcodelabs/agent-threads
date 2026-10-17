@@ -8,6 +8,8 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writeFileAtomic } from './fsutil';
 import { parseDaemonMcpServers, type DaemonMcpServers } from './mcpServers';
+import type { RepoSpec } from '../src/protocol';
+import { sanitizeConfiguredRepos } from './repos';
 
 export const DEFAULT_PORT = 7433;
 export const DEFAULT_LISTEN = '127.0.0.1';
@@ -68,6 +70,14 @@ export interface DaemonConfig {
    * credentials pushed with `creds.push` when a session starts.
    */
   mcpServers: DaemonMcpServers;
+  /** Repositories the daemon keeps cloned under `repoRoot` (changed by `repos.sync`, stored in config.json). */
+  repos: RepoSpec[];
+  /** Where the clones live; always allowlisted for sessions. Default `<dataDir>/workspace`. */
+  repoRoot: string;
+  /** Worktrees idle this many days are removed at daemon start (0 = never). */
+  worktreePruneDays: number;
+  /** Allow `repos` URLs that are paths on this machine (off by default: only https/ssh remotes). */
+  allowLocalRepoUrls: boolean;
 }
 
 export type HarnessKind = 'claude' | 'fake';
@@ -82,6 +92,7 @@ export const DEFAULT_MAX_LIVE_SESSIONS = 8;
 export const DEFAULT_REQUEST_TIMEOUT_MINUTES = 60;
 export const DEFAULT_HOST_TOOL_GRACE_SEC = 60;
 export const DEFAULT_HOST_TOOL_TIMEOUT_SEC = 300;
+export const DEFAULT_WORKTREE_PRUNE_DAYS = 14;
 
 export interface ConfigInputs {
   flags?: Partial<{
@@ -126,6 +137,10 @@ interface ConfigFile {
   hostToolTimeoutSec?: number;
   worktreeRoot?: string;
   mcpServers?: unknown;
+  repos?: unknown;
+  repoRoot?: string;
+  worktreePruneDays?: number;
+  allowLocalRepoUrls?: boolean;
 }
 
 /** `~` and `~/x` mean the daemon user's home; everything else must already be absolute. */
@@ -158,6 +173,12 @@ export function loadOrCreateDaemonId(dataDir: string): string {
   const daemonId = randomUUID();
   writeFileAtomic(join(dataDir, 'config.json'), `${JSON.stringify({ ...cfg, daemonId }, null, 2)}\n`);
   return daemonId;
+}
+
+/** Merge `patch` into config.json (other keys untouched), atomically. */
+export function updateConfigFile(dataDir: string, patch: Record<string, unknown>): void {
+  const cfg = readConfigFile(dataDir);
+  writeFileAtomic(join(dataDir, 'config.json'), `${JSON.stringify({ ...cfg, ...patch }, null, 2)}\n`);
 }
 
 export function isWildcardAddress(host: string): boolean {
@@ -213,6 +234,8 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
   const worktreeRoot = worktreeRootRaw ? resolve(expandHome(worktreeRootRaw)) : undefined;
   if (worktreeRoot && !isAbsolute(worktreeRoot)) throw new Error(`worktreeRoot "${worktreeRoot}" must be an absolute path`);
   const claudeBinaryPath = flags.claudeBinaryPath ?? (env.AGENT_THREADS_CLAUDE_BINARY || undefined) ?? file.claudeBinaryPath;
+  const repoRoot = resolve(expandHome(file.repoRoot ?? join(dataDir, 'workspace')));
+  if (!isAbsolute(repoRoot)) throw new Error(`repoRoot "${repoRoot}" must be an absolute path`);
   return {
     dataDir,
     listen,
@@ -234,6 +257,10 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     hostToolGraceSec: positiveInt('hostToolGraceSec', flags.hostToolGraceSec ?? envInt(env.AGENT_THREADS_HOST_TOOL_GRACE_SEC) ?? file.hostToolGraceSec ?? DEFAULT_HOST_TOOL_GRACE_SEC, 0),
     hostToolTimeoutSec: positiveInt('hostToolTimeoutSec', flags.hostToolTimeoutSec ?? envInt(env.AGENT_THREADS_HOST_TOOL_TIMEOUT_SEC) ?? file.hostToolTimeoutSec ?? DEFAULT_HOST_TOOL_TIMEOUT_SEC, 1),
     mcpServers: parseDaemonMcpServers(file.mcpServers),
+    repos: sanitizeConfiguredRepos(file.repos),
+    repoRoot,
+    worktreePruneDays: positiveInt('worktreePruneDays', file.worktreePruneDays ?? DEFAULT_WORKTREE_PRUNE_DAYS, 0),
+    allowLocalRepoUrls: file.allowLocalRepoUrls === true,
     ...(worktreeRoot ? { worktreeRoot } : {}),
     ...(claudeBinaryPath ? { claudeBinaryPath } : {}),
   };
