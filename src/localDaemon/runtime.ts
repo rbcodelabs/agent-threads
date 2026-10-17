@@ -16,7 +16,7 @@ import {
   type RuntimeProgress,
   type RuntimeStatus,
 } from '../sandboxRuntime';
-import { VmUnavailableError } from '../sandboxVm';
+import { VmUnavailableError } from '../containerCli';
 import { LocalDaemonAbortedError, LocalDaemonError } from './provision';
 
 /** The runtime operations, injectable so tests need no macOS 26 and no download. */

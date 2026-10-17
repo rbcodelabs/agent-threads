@@ -11,8 +11,7 @@
  *                additionalDirectories (dropped: the vault root is a Mac path),
  *                appendSystemPrompt (caller rebuilds it without the Mac vault root),
  *                claude.sessionOptions (plain JSON subset)
- *   omitted      callbacks, secretEnv, containerAuthToken, claude.mcpServers / vmMcpServers /
- *                vm, codex, opencode
+ *   omitted      callbacks, secretEnv, claude.mcpServers, codex, opencode
  *
  * Host tools (`hostTools`) are added by the session once it has built the manifest; the http/sse external MCP servers
  * that survive `mcpPartition.ts` ride in `mcpServers`. Skills and the secret allowlist arrive in PR 9.

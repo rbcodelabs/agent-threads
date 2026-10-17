@@ -6,7 +6,7 @@
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createDefaultVmCommandRunner } from '../../src/sandboxVm';
+import { createDefaultVmCommandRunner } from '../../src/containerCli';
 import { LocalDaemonController, type LocalDaemonDeps } from '../../src/localDaemon/controller';
 import type { RuntimeApi } from '../../src/localDaemon/runtime';
 import { LOCAL_DAEMON_TOKEN_SECRET } from '../../src/localDaemon/registration';

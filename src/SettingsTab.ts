@@ -31,10 +31,6 @@ import { mcpRegistrationSchema, listMcpServers, deleteMcpServer, findUnresolvedP
 import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
 import type { OAuthMcpPreset } from './oauthMcpPresets';
 import { classifyScheduledItems, describeScheduledExecution, formatNextOccurrence } from './scheduledWorkView';
-import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
-import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY, MAX_VM_CPUS, resolveVmCpus, resolveVmMemory } from './sandboxVm';
-import { describeReset, getSandboxSetupStatus, resetSandbox, runSandboxSetup } from './sandboxSetup';
-import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
 import { checkAwsCredentialsNow, reauthenticateAws, resolveSignInProfile } from './awsReauth';
 import { promptConfirm } from './confirmModal';
 import { formatToolName } from './toolNameUtils';
@@ -1799,85 +1795,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl)
-      .setName('Sandbox VM image')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Container image enter_vm starts. Requires Apple\'s container runtime (macOS 26+, Apple silicon). '
-        + 'Use "Set up sandbox" below to install the runtime and fetch this image automatically. Advanced fallback: '
-        + 'build it yourself with `container build --tag claude-threads-coding:1 sandbox/`. '
-        + 'Leave empty for claude-threads-coding:1.',
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder('claude-threads-coding:1')
-          .setValue(this.plugin.settings.vmImage ?? '')
-          .onChange(async (value) => {
-            this.plugin.settings.vmImage = value.trim();
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Sandbox VM network')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Network isolation enter_vm uses when a call does not pass one. '
-        + 'Full egress is the default so npm install, git remotes and web access work.',
-      )
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('default', 'Full egress (default)')
-          .addOption('internal', 'Internal — host only, no internet')
-          .addOption('none', 'None — no network at all')
-          .setValue(this.plugin.settings.vmDefaultNetwork ?? 'default')
-          .onChange(async (value) => {
-            this.plugin.settings.vmDefaultNetwork = value as PluginSettings['vmDefaultNetwork'];
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    const resourceHelp = 'Applies only to newly created containers. To pick up a change for an existing one, remove it '
-      + '(`container rm --force claude-threads-vm-<thread-id>`); it is recreated on next use.';
-    new Setting(containerEl)
-      .setName('Sandbox VM memory')
-      .setClass('ct-sandbox-setting')
-      .setDesc(`Memory limit per sandbox container, e.g. 4G or 2048M (default 4G). Invalid values fall back to 4G. ${resourceHelp}`)
-      .addText((text) =>
-        text
-          .setPlaceholder(DEFAULT_VM_MEMORY)
-          .setValue(this.plugin.settings.sandboxVmMemory ?? DEFAULT_VM_MEMORY)
-          .onChange(async (value) => {
-            this.plugin.settings.sandboxVmMemory = resolveVmMemory(value);
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Sandbox VM CPUs')
-      .setClass('ct-sandbox-setting')
-      .setDesc(`CPU count per sandbox container, a whole number from 1 to ${MAX_VM_CPUS} (default ${DEFAULT_VM_CPUS}). ${resourceHelp}`)
-      .addText((text) =>
-        text
-          .setPlaceholder(String(DEFAULT_VM_CPUS))
-          .setValue(String(this.plugin.settings.sandboxVmCpus ?? DEFAULT_VM_CPUS))
-          .onChange(async (value) => {
-            this.plugin.settings.sandboxVmCpus = resolveVmCpus(/^\s*\d+\s*$/.test(value) ? Number(value) : undefined);
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
     // GitHub connection (Geode >= 0.25 only; hidden elsewhere so Obsidian is unchanged).
     if (this.plugin.githubBroker?.available) {
       new Setting(containerEl)
         .setName('Use Geode GitHub connection')
         .setDesc(
           'Let threads use the GitHub account connected in Geode (Settings → GitHub) for git over HTTPS, the gh CLI and '
-          + 'the GitHub API — on the host and in the sandbox VM — with no personal access token. The token is handed to a '
+          + 'the GitHub API with no personal access token. The token is handed to a '
           + 'credential helper via a short-lived private file, never put in prompts, logs or environment variables, and '
           + 'it reaches every repository the Geode GitHub App is installed on. Your own GH_TOKEN, gh login and git '
           + 'credential helpers always take priority.',
@@ -1889,7 +1813,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               this.plugin.settings.githubConnectionEnabled = value;
               this.plugin.manager.updateSettings(this.plugin.settings);
               await this.plugin.saveSettings();
-              // Apply to the host runtime dir now; VM hooks read the setting lazily.
+              // Apply to the host runtime dir now.
               if (value) void this.plugin.githubHost?.start();
               else void this.plugin.githubHost?.stop();
             }),
@@ -1912,65 +1836,6 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             }),
         );
-    }
-
-    new Setting(containerEl)
-      .setName('Run harness inside sandbox VM')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Runs a thread\'s Claude CLI process inside its sandbox container instead of on the host (ADR-0015). '
-        + '"Auto" only routes into the VM when the container runtime, a probe, and the harness image are all '
-        + 'ready — until you run "Set up sandbox" (below), threads keep running on your Mac and offer to set it up. "Always" forces VM '
-        + 'routing and errors clearly instead of silently falling back if anything is missing. "Never" is '
-        + 'today\'s host-local spawn, unchanged.',
-      )
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('auto', 'Auto (default)')
-          .addOption('always', 'Always — error if unavailable')
-          .addOption('never', 'Never — host-local spawn only')
-          .setValue(this.plugin.settings.harnessVmMode ?? 'auto')
-          .onChange(async (value) => {
-            this.plugin.settings.harnessVmMode = value as PluginSettings['harnessVmMode'];
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-            this.display();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Harness VM image')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Container image the harness routes into — a separate image tag from the sandbox VM image above, by design '
-        + '(ADR-0015 §7). "Set up sandbox" below builds it for you. Advanced fallback: '
-        + '`container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`. '
-        + 'Leave empty for claude-threads-harness:1.',
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder('claude-threads-harness:1')
-          .setValue(this.plugin.settings.harnessVmImage ?? '')
-          .onChange(async (value) => {
-            this.plugin.settings.harnessVmImage = value.trim();
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    if ((this.plugin.settings.harnessVmMode ?? 'auto') !== 'never') {
-      const sandboxSetting = new Setting(containerEl)
-        .setName('Sandbox setup')
-        .setClass('ct-sandbox-setting');
-      const harnessImage = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
-      renderSandboxSettingsPanel(sandboxSetting.descEl, {
-        isMobile: Platform.isMobile,
-        getStatus: () => getSandboxSetupStatus({ harnessImage }),
-        run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
-        reset: ({ onProgress, signal }) => resetSandbox({ harnessImage, onProgress, signal }),
-        resetMessage: describeReset(harnessImage),
-        confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
-      });
     }
 
     new Setting(containerEl)
@@ -2057,26 +1922,6 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         awsStatus.setText(res.expired ? "Not signed in (SSO session expired or missing)." : res.error);
       }
     };
-    // Containers are desktop-only, so is this.
-    if (!Platform.isMobile) new Setting(containerEl)
-      .setName('AWS profiles exposed to containers')
-      .setDesc(
-        'One profile per line. Sandbox containers get a read-only copy of the AWS SSO token cache and a trimmed AWS config '
-        + 'containing only these profiles, plus the AWS_PROFILE from Extra environment variables. Takes effect for containers '
-        + 'created afterwards (a running thread keeps its container). Leave empty to expose nothing extra. '
-        + 'Note: the whole SSO token cache directory is mounted, not just these profiles\' tokens — see docs/sandbox-vms.md.',
-      )
-      .addTextArea((ta) =>
-        ta
-          .setPlaceholder('my-deploy-profile')
-          .setValue(this.plugin.settings.containerAwsProfiles ?? '')
-          .onChange(async (value) => {
-            this.plugin.settings.containerAwsProfiles = value;
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
     awsCredsSetting
       .addButton((btn) => btn.setButtonText("Check").onClick(() => void runAwsCheck()))
       .addButton((btn) =>

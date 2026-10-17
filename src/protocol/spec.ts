@@ -112,7 +112,6 @@ export const SESSION_OPTION_DISPOSITION: Record<keyof HarnessSessionOptions, Spe
   appendSystemPrompt: 'transformed',
   resumeFallbackHistory: 'carried',
   secretEnv: 'omitted',
-  containerAuthToken: 'omitted',
   claude: 'transformed',
   codex: 'transformed',
   opencode: 'transformed',

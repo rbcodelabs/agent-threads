@@ -9,8 +9,8 @@ describe('randomHex', () => {
     expect(ids.size).toBe(200);
     for (const id of ids) expect(id).toMatch(/^[0-9a-f]{16}$/);
   });
-  it('ids that name commands, messages, instances and VM sessions never use Math.random', () => {
-    for (const f of ['src/remote/DaemonClient.ts', 'src/remote/RemoteHarnessSession.ts', 'src/tools/vm.ts', 'daemon/cmd/connection.ts', 'daemon/cmd/follow.ts']) {
+  it('ids that name commands, messages and instances never use Math.random', () => {
+    for (const f of ['src/remote/DaemonClient.ts', 'src/remote/RemoteHarnessSession.ts', 'daemon/cmd/connection.ts', 'daemon/cmd/follow.ts']) {
       expect(readFileSync(resolve(__dirname, '../..', f), 'utf8'), f).not.toContain('Math.random');
     }
   });

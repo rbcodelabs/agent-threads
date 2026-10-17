@@ -37,9 +37,7 @@ const CANONICAL_TOOLS = [
   'CronList',
   'CronUpdate',
   'ScheduleWakeup',
-  'enter_vm',
   'enter_worktree',
-  'exit_vm',
   'exit_worktree',
   'github_check_repo',
   'github_list_access',
@@ -86,7 +84,6 @@ const CANONICAL_TOOLS = [
   'vault_list_bridges',
   'vault_restore_file_version',
   'vault_search',
-  'vm_exec',
   'watch_document',
   'workspace_get_active_file',
   'workspace_get_open_tabs',
@@ -101,9 +98,7 @@ const LEGACY_TOOLS = [
   'CronList',
   'CronUpdate',
   'ScheduleWakeup',
-  'enter_vm',
   'enter_worktree',
-  'exit_vm',
   'exit_worktree',
   'github_check_repo',
   'github_list_access',
@@ -154,7 +149,6 @@ const LEGACY_TOOLS = [
   'threads_create',
   'unwatch_document',
   'vault_list',
-  'vm_exec',
   'watch_document',
 ];
 
@@ -165,9 +159,7 @@ const HARNESS_TOOLS = [
   'CronList',
   'CronUpdate',
   'ScheduleWakeup',
-  'enter_vm',
   'enter_worktree',
-  'exit_vm',
   'exit_worktree',
   'github_check_repo',
   'github_list_access',
@@ -214,7 +206,6 @@ const HARNESS_TOOLS = [
   'vault_list_bridges',
   'vault_restore_file_version',
   'vault_search',
-  'vm_exec',
   'watch_document',
   'workspace_get_active_file',
   'workspace_get_open_tabs',
@@ -292,33 +283,6 @@ describe('MCP tool surface is pinned on all three paths', () => {
     }
     expect(canonical.tools.length).toBe(legacy.tools.length);
     expect(canonical.tools.length).toBe(canonical.harnessTools.length);
-  });
-});
-
-/**
- * host_exec is opt-in per session (VM-routed desktop threads only): absent
- * from the default surface pinned above, present on the canonical and harness
- * paths only when hooks are supplied, and never on the deprecated alias.
- */
-describe('host_exec exposure', () => {
-  const hooks = { isInteractive: () => true, requestApproval: async () => false };
-  const withHostExec = () => createClaudeThreadsMcpServers(app, { hostExec: hooks }) as unknown as {
-    claude_threads: Surface;
-    obsidian: Surface;
-  };
-
-  it('is absent by default on every path', () => {
-    const s = surfaces();
-    expect(s.claude_threads.tools.map(t => t.name)).not.toContain('host_exec');
-    expect(s.obsidian.tools.map(t => t.name)).not.toContain('host_exec');
-    expect(s.claude_threads.harnessTools.map(t => t.name)).not.toContain('host_exec');
-  });
-
-  it('adds exactly host_exec to the canonical surface when hooks are supplied', () => {
-    const s = withHostExec();
-    expect(s.claude_threads.tools.map(t => t.name).sort()).toEqual([...CANONICAL_TOOLS, 'host_exec'].sort());
-    expect(s.obsidian.tools.map(t => t.name).sort()).toEqual(LEGACY_TOOLS);
-    expect(s.claude_threads.harnessTools.find(t => t.name === 'host_exec')?.requiresApproval).toBe(true);
   });
 });
 

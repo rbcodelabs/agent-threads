@@ -1,10 +1,10 @@
-import type { AgentHarness, HarnessVmMode } from './types';
+import type { AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, setIcon, Notice, Platform } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread, TaskItem } from './types';
 import { formatToolName } from './ClaudeSession';
-import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
+import { summarizePermissionDetail } from './permissionDetail';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
@@ -293,12 +293,11 @@ export class KanbanView extends ItemView {
         },
         getVaultRoot: () => this.manager.vaultRoot,
       },
-      onSend: async ({ text, images, attachment, agentHarness, harnessVmMode, remote }) => {
+      onSend: async ({ text, images, attachment, agentHarness, remote }) => {
         // Intercept contributed commands, then core model/goal/loop directives.
         // Apply directives instead of sending command text to the agent verbatim.
-        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; harnessVmMode?: HarnessVmMode; projectId?: string; remote?: { daemonId: string; cwd: string } } = {
+        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; projectId?: string; remote?: { daemonId: string; cwd: string } } = {
           agentHarness,
-          harnessVmMode,
           remote,
           projectId: this.selectedProjectId || undefined,
         };
@@ -549,7 +548,6 @@ export class KanbanView extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
-      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(t.id),
       lastError: t.lastError,
       messageCount: t.messages.length,
       reviewed: t.reviewed,
@@ -716,7 +714,6 @@ export class KanbanView extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
-      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(t.id),
       lastError: t.lastError,
       messageCount: t.messages.length,
       reviewed: t.reviewed,
@@ -989,7 +986,7 @@ export class KanbanView extends ItemView {
       deny.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, false); });
       const allow = btns.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
       allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, true); });
-      if ((!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) && !this.manager.isRemoteThread(thread.id)) {
+      if (!this.manager.isRemoteThread(thread.id)) {
         const always = btns.createEl('button', { text: 'Always', cls: 'ct-permission-btn ct-permission-always' });
         always.addEventListener('click', async (e) => {
           e.stopPropagation();
@@ -1106,7 +1103,6 @@ export class KanbanView extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(thread.id) || this.manager.hasPendingQuestion(thread.id) || this.manager.hasPendingPlan(thread.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(thread.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(thread.id),
-      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(thread.id),
       lastError: thread.lastError,
       messageCount: thread.messages.length,
       reviewed: thread.reviewed,
@@ -1210,7 +1206,7 @@ export class KanbanView extends ItemView {
     }
     if (state === 'waiting') {
       const next = this.plugin.getPendingWakeups(thread.id)[0];
-      if (!next) return this.manager.isAwaitingSandboxDecision(thread.id) ? 'Waiting for your sandbox choice' : 'Waiting to resume';
+      if (!next) return 'Waiting to resume';
       const when = formatWakeupCountdown(next.fireAt);
       return next.reason ? `Resumes ${when} — ${next.reason}` : `Resumes ${when}`;
     }

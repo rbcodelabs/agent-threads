@@ -1,4 +1,4 @@
-import type { AgentHarness, HarnessVmMode, StorageAllocationOptions } from './types';
+import type { AgentHarness, StorageAllocationOptions } from './types';
 import { saveThenAck } from './remote/persistAck';
 import { DaemonMcpStatusStore } from './mcpStatus';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
@@ -37,7 +37,6 @@ import { GithubCredentialBroker, resolveGithubBridge } from './githubCredentials
 import { GithubHostDelivery } from './githubHostDelivery';
 import { setGitAuthProvider } from './gitClient';
 import { createGithubGitAuth } from './skillSourceGithubAuth';
-import { createGithubVmHooks } from './githubVmDelivery';
 import { createRequestUrlFetch } from './requestUrlFetch';
 import { obsidianHttpFetch, obsidianYamlParser } from './host/obsidianHost';
 import { AttachmentWriter } from './AttachmentWriter';
@@ -49,11 +48,9 @@ import {
   type HandoffHost,
 } from './compassHandoff';
 import { isWatchableDocument, watchMenuLabel } from './documentWatch';
-import { mergeMcpServers, overlayMatchingMcpServers } from './mcpServerMerge';
+import { mergeMcpServers } from './mcpServerMerge';
 import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
-import type { HostExecHooks } from './hostExec';
-import { canAlwaysAllow } from './permissionDetail';
 import { redactGithubSecrets } from './githubCredentials';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
@@ -72,6 +69,7 @@ import {
   type Thread,
 } from './types';
 import { serializeThreadForSave } from './imageExternalization';
+import { stripLegacySandboxSettings } from './legacySandboxVm';
 import { selectIdleThreadsForArchive } from './autoArchive';
 import { createDeferredThreadArchiver } from './deferredThreadArchive';
 import { getVaultBridgesAPI, findBridgesForFiles, type BridgeInfo } from './bridgeUtils';
@@ -89,7 +87,6 @@ import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
-import { CONTAINER_AUTH_TOKEN_SECRET } from './claudeContainerAuthCli';
 import { scheduleVaultThreadRecovery } from './vaultThreadRecovery';
 import { resolveProjectVaultRoot } from './projectPaths';
 import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, repairStaleProjectOrchestrators, resolveCoordinationRole } from './coordinationScope';
@@ -407,14 +404,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
   /** How long to wait between background task poll attempts. */
   private static readonly BG_TASK_POLL_INTERVAL_MS = 30_000;
 
-  /** Geode-only: connected external roots. Undefined on Obsidian / older Geode -> no extras. */
-  private async listExternalMountRoots() {
-    const host = (this.app as unknown as {
-      host?: { externalRoots?: { listMountRoots?: () => Promise<Array<{ rootId: string; label: string; path: string; projectId?: string }>> } };
-    }).host;
-    return host?.externalRoots?.listMountRoots?.();
-  }
-
   async onload(): Promise<void> {
     // Claim persistence before any awaited startup work. Obsidian may construct
     // this generation before the prior instance's async onunload has finished.
@@ -625,7 +614,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.remoteDaemons = this.daemonRegistry;
     this.manager.daemonMcpStatus = this.daemonMcpStatus;
     this.setUpLocalDaemon();
-    this.manager.getExternalMounts = () => this.listExternalMountRoots();
     // Lets the manager detect sessions holding stale Google/OAuth proxy configs (per-send check).
     this.manager.proxyMcpServersForThread = (threadId) => ({
       ...(this.googleWorkspaceMcp?.serversForThread(threadId) ?? {}),
@@ -679,14 +667,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
         catch (error) { this.mcpRegistrationModals.delete(modal); reject(error); }
       }),
     });
-    const vmBuiltInServers = new WeakMap<object, ReturnType<typeof createClaudeThreadsMcpServers>>();
-    // Shared by the ordinary roster and the VM-routed overlay below; `hostExec`
-    // is passed only by the overlay, so host_exec exists only after routing
-    // into the sandbox container has actually succeeded.
-    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks, harnessInVm = false) =>
+    const buildBuiltInMcpServers = (threadId: string, initialCwd: string) =>
         createClaudeThreadsMcpServers(this.app, {
-          harnessInVm,
-          ...(hostExec ? { hostExec } : {}),
           // Contributed agent tools, bound to this thread here — the host does
           // the binding so a peer never reaches the factory (ADR-0008). Built-in
           // Design arrives through this list like any other contribution; there
@@ -711,9 +693,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // is checked here rather than inside the tools so an unsupported host
           // costs nothing per turn instead of advertising tools that only refuse.
           browser: this.agentBrowser?.capable ? this.createThreadBrowser(threadId) : undefined,
-          // Host-side browser tools run on the Mac; for a thread with a sandbox
-          // container, `localhost` must be forwarded into it (vmPortForward.ts).
-          resolveSandboxUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
           openContextualFile: async (file) => {
             if (!this.isConversationFirst()) return false;
             await this.contextPanel.openFile(file);
@@ -734,22 +713,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // Read lazily so changing the setting takes effect on the next
           // enter_worktree call rather than requiring a session restart.
           getWorktreeRoot: () => this.settings.worktreeRoot,
-          // Same lazy-read rationale as getWorktreeRoot: changing the image or
-          // network setting takes effect on the next enter_vm call rather than
-          // needing a session restart.
-          getVmImage: () => this.settings.vmImage,
-          getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
-          getVmMemory: () => this.settings.sandboxVmMemory,
-          getVmCpus: () => this.settings.sandboxVmCpus,
-          // Geode-only, optional: connected external roots to mount read-only
-          // at /ext/<label>. Undefined on Obsidian / older Geode -> no extras.
-          getExternalMounts: () => this.listExternalMountRoots(),
-          getVaultPath: () => this.manager.vaultRoot,
-          // ADR-0015 §3: share the same per-thread SandboxVmManager this
-          // thread's Claude harness routes into, so enter_vm/vm_exec/exit_vm
-          // see the container's real origin instead of each side tracking it
-          // separately against the same deterministic container name.
-          sandboxVmManager: this.manager.getSandboxVmManager(threadId),
           githubBroker: this.githubBroker,
           isGithubConnectionEnabled: () => this.settings.githubConnectionEnabled !== false,
           getGithubCommitEmail: () => this.settings.githubCommitEmail,
@@ -839,7 +802,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
               scheduledItemId: t.scheduledItemId,
               scheduledItemName: t.scheduledItemName,
               updatedAt: t.updatedAt,
-              harnessVmMode: t.harnessVmMode,
               messageCount: nonCompact.length,
               rawLogPath: t.rawLogPath,
               managerNotes: t.managerNotes,
@@ -880,7 +842,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
               scheduledItemId: t.scheduledItemId,
               scheduledItemName: t.scheduledItemName,
               updatedAt: t.updatedAt,
-              harnessVmMode: (t as typeof t & { harnessVmMode?: string }).harnessVmMode,
               messageCount,
               rawLogPath: t.rawLogPath,
               managerNotes: t.managerNotes,
@@ -1007,7 +968,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
       try {
         const mcpServers = buildBuiltInMcpServers(threadId, initialCwd);
-        vmBuiltInServers.set(mcpServers.claude_threads, buildBuiltInMcpServers(threadId, initialCwd, undefined, true));
         const mcpDebug = Object.fromEntries(Object.entries(mcpServers).map(([key, server]) => [key, {
           type: (server as unknown as Record<string, unknown>).type,
           name: (server as unknown as Record<string, unknown>).name,
@@ -1065,27 +1025,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
         .map(([name, c]) => [name, createLoopbackMcpSource(c.url!, c.headers ?? {})]));
       return new RemoteHostTools({ builtIn, mcpSources, overrides: daemonSettings?.routes, log: m => debugLog(m) });
     };
-    // Host-loopback OAuth/Google brokers cannot be reached from Apple's VM.
-    // Overlay plugin-owned brokers with in-process SDK bridges. Built-ins use
-    // the container-specific lifecycle surface; remote servers and stdio configs
-    // retain the ordinary roster. ThreadSession chooses this view only after
-    // routing succeeds, so automatic host fallback retains HTTP configs.
-    this.manager.vmMcpServerFactory = (threadId, ordinaryServers) => {
-      const vmBuiltIns = ordinaryServers.claude_threads
-        ? vmBuiltInServers.get(ordinaryServers.claude_threads)
-        : undefined;
-      const servers = vmBuiltIns ? { ...ordinaryServers, ...vmBuiltIns } : ordinaryServers;
-      const googleHosts = this.googleWorkspaceMcp?.serversForThread(threadId) ?? {};
-      const oauthHosts = this.oauthMcpRegistry?.serversForThread(threadId) ?? {};
-      const googleMcps = this.googleWorkspaceMcp?.vmServersForThread(threadId) ?? {};
-      const oauthMcps = this.oauthMcpRegistry?.vmServersForThread(threadId) ?? {};
-      const overlaid = overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(
-        overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(servers, googleHosts, googleMcps),
-        oauthHosts,
-        oauthMcps,
-      );
-      return this.withHostExec(threadId, overlaid, (id, cwd, hostExec) => buildBuiltInMcpServers(id, cwd, hostExec, true));
-    };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect
     // that derivation.
@@ -1109,9 +1048,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }
       return result;
     };
-    // In-container Claude sign-in token — VM-routed sessions only (see persistContainerAuthToken).
-    this.manager.containerAuthTokenResolver = () =>
-      this.app.secretStorage.getSecret(secretStorageKey(CONTAINER_AUTH_TOKEN_SECRET)) || undefined;
     this.setUpGithubConnection();
     this.persistence = new VaultPersistence(this.app, this.settings.vaultFolder);
     this.inProcessSummarizer = new InProcessSummarizer();
@@ -1275,18 +1211,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.settings.orchestratorThreadId,
     );
     if (repairedOrchestrators) this.manager.loadProjects(this.manager.getProjects());
-
-    // Reclaim sandbox containers leaked by thread deletes that never tore them
-    // down. Desktop only, delayed so vault thread recovery and startup work
-    // finish first, and fire-and-forget so it can never block load.
-    if (!Platform.isMobile) {
-      const orphanSweepTimer = window.setTimeout(() => {
-        void this.manager.sweepOrphanedSandboxContainers().catch((err) => {
-          console.error('[ClaudeThreads] Orphan sandbox sweep failed:', err);
-        });
-      }, 60_000);
-      this.register(() => window.clearTimeout(orphanSweepTimer));
-    }
 
     // Initialize the built-in scheduler
     this.scheduler = new Scheduler({
@@ -2319,8 +2243,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
     // 3.11 — When mobile sends Always Allow, persist the tool name to settings.
     this.relayClient.onAlwaysAllowTool = (toolName: string) => {
-      // Defence in depth: a forged resolve_permission must not persist host_exec.
-      if (canAlwaysAllow(toolName) && !this.settings.alwaysAllowedTools.includes(toolName)) {
+      if (!this.settings.alwaysAllowedTools.includes(toolName)) {
         this.settings.alwaysAllowedTools.push(toolName);
         this.saveSettings().catch(console.error);
       }
@@ -2542,35 +2465,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   /**
-   * Adds `host_exec` to a VM-routed session's roster by swapping in a built-in
-   * `claude_threads` server that includes it. Called only from the VM overlay
-   * (i.e. after routing succeeded), never on desktop-less hosts.
-   *
-   * The approval prompt is the thread's in-chat permission card, requested
-   * directly by the tool (not through the harness permission path), so
-   * bypassPermissions / dontAsk / auto-approve / always-allow cannot skip it.
-   */
-  private withHostExec<T>(
-    threadId: string,
-    servers: Record<string, T>,
-    build: (threadId: string, cwd: string, hostExec: HostExecHooks) => Record<string, T>,
-  ): Record<string, T> {
-    if (Platform.isMobile || !servers.claude_threads) return servers;
-    const thread = this.manager.getThread(threadId);
-    if (!thread) return servers;
-    const hostExec: HostExecHooks = {
-      isInteractive: () => this.mcpRegistrationAvailable && !this.manager.getThread(threadId)?.scheduledItemId,
-      requestApproval: async request => {
-        if (!this.mcpRegistrationAvailable) throw new Error('Host unavailable');
-        return this.manager.requestHostExecApproval(threadId, request);
-      },
-      redact: redactGithubSecrets,
-    };
-    const rebuilt = build(threadId, thread.cwd, hostExec);
-    return rebuilt.claude_threads ? { ...servers, claude_threads: rebuilt.claude_threads } : servers;
-  }
-
-  /**
    * The single MCP-server registration dispatcher, shared by the agent-facing
    * `mcp_register_server` tool (via `onRegisterMcpServer` in the per-thread MCP
    * factory) and the peer-plugin `api.v1.mcp.register` method. Both callers pass
@@ -2701,27 +2595,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.register(() => { controller.cancel(); });
   }
 
-  /**
-   * ADR-0015 container sign-in: after `signInToClaudeInContainer()` succeeds,
-   * store the resulting long-lived OAuth token and restart the thread's
-   * session so it is picked up.
-   *
-   * Stored under its OWN secret key (`CONTAINER_AUTH_TOKEN_SECRET`), NOT as a
-   * `CLAUDE_CODE_OAUTH_TOKEN` entry in `secretEnvKeys`. `secretEnv` reaches
-   * every session including host-spawned ones, and an env
-   * `CLAUDE_CODE_OAUTH_TOKEN` overrides the host keychain login — so a
-   * container-only credential there would break (or, once stale, poison)
-   * every host thread. `ThreadSession` injects this token ONLY into a
-   * VM-routed session's container `--env` (see `containerAuthTokenResolver`).
-   * It is global rather than project-scoped: it is the user's own Claude
-   * login, so one sign-in serves every container-routed thread and survives
-   * containers being recreated.
-   */
-  async persistContainerAuthToken(threadId: string, token: string): Promise<void> {
-    this.app.secretStorage.setSecret(secretStorageKey(CONTAINER_AUTH_TOKEN_SECRET), token);
-    this.manager.requestSessionRestart(threadId);
-  }
-
   getPluginSkillsRoot(): string {
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) return '';
@@ -2840,13 +2713,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       broker: this.githubBroker,
       isEnabled: () => this.settings.githubConnectionEnabled !== false,
     }));
-    // Harness threads create their container through ThreadManager's shared VM manager, not the
-    // enter_vm tool, so it needs the same credential/identity hooks (no-ops while unavailable).
-    this.manager.sandboxVmHooks = createGithubVmHooks({
-      broker: this.githubBroker,
-      isEnabled: () => this.settings.githubConnectionEnabled !== false,
-      getEmailOverride: () => this.settings.githubCommitEmail,
-    });
     if (!bridge || !Platform.isDesktop) return;
     this.githubHost = new GithubHostDelivery({
       broker: this.githubBroker,
@@ -3297,12 +3163,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private claudeCliProbe: { path: string; promise: Promise<void> } | undefined;
 
   /**
-   * Probes the configured claude binary (desktop only; skipped when threads are
-   * forced into the sandbox VM, where the host binary is not used). Never throws.
+   * Probes the configured claude binary (desktop only). Never throws.
    */
   refreshClaudeCliInfo(): Promise<void> {
     const path = this.settings.claudeBinaryPath;
-    if (Platform.isMobile || !path || this.settings.harnessVmMode === 'always') {
+    if (Platform.isMobile || !path) {
       this.claudeCliInfo = undefined;
       return Promise.resolve();
     }
@@ -3318,7 +3183,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   /** Problems to surface in Settings and the model menu; empty when healthy or not applicable. */
   getClaudeCliProblems(): CliProblem[] {
-    if (Platform.isMobile || this.settings.harnessVmMode === 'always') return [];
+    if (Platform.isMobile) return [];
     const info = this.claudeCliInfo?.binaryPath === this.settings.claudeBinaryPath ? this.claudeCliInfo : undefined;
     const missing = findMissingKnownModels(this.discoveredModelsByHarness.claude, Object.values(FALLBACK_RESOLVED));
     return describeCliProblems(info, missing);
@@ -3455,7 +3320,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       threadId,
       pool: this.agentBrowser,
       getSecrets: () => this.collectSecretValues(),
-      resolveUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
       // Read lazily so toggling the setting applies to the next browser_eval call.
       isEvalEnabled: () => this.settings.enableAgentBrowserEval ?? false,
       getUrlPolicy: () => ({ allowPrivateNetwork: this.settings.agentBrowserAllowPrivateNetwork ?? false }),
@@ -3658,8 +3522,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       loop?: { intervalSeconds: number };
       /** Harness override selected at kickoff; does not change Settings. */
       agentHarness?: AgentHarness;
-      /** Container/host override selected at kickoff (Claude only); omit to follow Settings. */
-      harnessVmMode?: HarnessVmMode;
       /** Project selected by a dispatch surface. Omit for deliberate Unassigned. */
       projectId?: string;
       /** Run the thread on a remote daemon, in this folder on its machine (Claude only). */
@@ -3685,11 +3547,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       ? this.manager.createRemoteThread(title, { daemonId: opts.remote.daemonId, remoteCwd: opts.remote.cwd, clientId: this.settings.remoteClientId ?? 'unknown' }, project?.id)
       : this.manager.createThread(title, cwd, project?.id, opts?.agentHarness);
     if (opts?.model) this.manager.setThreadModel(thread.id, opts.model);
-    // Container routing exists only for Claude; the picker never offers it for
-    // other harnesses, so a mismatched request is ignored rather than fatal.
-    if (opts?.harnessVmMode && !thread.remote && (thread.agentHarness ?? 'claude') === 'claude') {
-      this.manager.setInitialThreadHarnessVmMode(thread.id, opts.harnessVmMode);
-    }
     const goalRevision = opts?.goal ? this.manager.setThreadGoal(thread.id, opts.goal) : undefined;
     if (opts?.loop) {
       await this.scheduler.createItem({
@@ -3996,6 +3853,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // No saved data at all = a genuinely new install (gates the Chief of Staff first run).
     this.isFreshInstall = isFreshInstallData(data);
     this.settings = mergePersistedSettings(DEFAULT_SETTINGS, data);
+    // Per-thread sandbox VMs were removed; their settings are inert and leave data.json on the next save.
+    stripLegacySandboxSettings(this.settings);
     const { sanitizeConversationCompanionSettings } = require('./conversationFirstPlacement') as typeof import('./conversationFirstPlacement');
     sanitizeConversationCompanionSettings(this.settings as unknown as Record<string, unknown>);
     // Migrate old WebLLM model IDs to claude alias

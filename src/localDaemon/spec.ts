@@ -7,8 +7,7 @@
  * (`core-files.json`); a unit test pins that.
  */
 
-import { buildImagePullArgs } from '../sandboxImage';
-import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY } from '../sandboxVm';
+import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY } from '../containerCli';
 
 // ── Names, labels, ports ─────────────────────────────────────────────────────
 
@@ -192,7 +191,8 @@ export function labelsFor(spec: LocalDaemonSpec): Record<string, string> {
 // ── argv builders ────────────────────────────────────────────────────────────
 
 export function pullArgs(version: string): string[] {
-  return buildImagePullArgs(publishedImageRef(version));
+  // Pinned: a bare pull of a multi-platform tag unpacks every platform (observed on 1.3.1).
+  return ['image', 'pull', '--platform', 'linux/arm64', publishedImageRef(version)];
 }
 
 export function buildThinImageArgs(opts: { version: string; dockerfilePath: string; contextDir: string }): string[] {

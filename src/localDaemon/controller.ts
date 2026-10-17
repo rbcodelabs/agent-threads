@@ -11,7 +11,7 @@
 import type { LocalDaemonSettings, RemoteDaemonConfig } from '../types';
 import type { ProbeResult } from '../remote/DaemonClient';
 import { CONTAINER_AUTH_TOKEN_SECRET, type ContainerSignInResult } from '../claudeContainerAuthCli';
-import type { VmCommandRunner } from '../sandboxVm';
+import type { VmCommandRunner } from '../containerCli';
 import {
   assess,
   assessDaemonVersion,

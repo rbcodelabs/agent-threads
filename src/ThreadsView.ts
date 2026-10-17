@@ -1,4 +1,4 @@
-import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
+import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import { connectionPill } from './remote/connectionPill';
@@ -13,7 +13,7 @@ import {
   type SettingsPopoverModel,
 } from './composerPopovers';
 import { forkBlockedReason } from './remote/threadLocation';
-import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
+import { parsePermissionDetail } from './permissionDetail';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
 import { splitTextWithUrls, isHttpUrl, urlChipLabel } from './urlLinks';
@@ -44,8 +44,6 @@ import { reauthenticateAws } from './awsReauth';
 import { isAwsSignInExpiredError } from './awsAuthRecovery';
 import { isSignInExpiredError } from './claudeAuthRecovery';
 import { signInToClaude, type SpawnLike } from './claudeAuthCli';
-import { signInToClaudeInContainer, type SpawnLike as ContainerSpawnLike } from './claudeContainerAuthCli';
-import { runnerEnv as hostRunnerEnv } from './sandboxVm';
 import { renderClaudeSignInBanner } from './claudeSignInBanner';
 import { getVaultBridgesAPI, mapToVaultPath, type BridgeInfo } from './bridgeUtils';
 import { resolveTagIcon, planFooter, derivePrUrl } from './statusLine';
@@ -56,9 +54,6 @@ import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openLocalFileViaHost, o
 import type { StatusTag } from './types';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { promptConfirm } from './confirmModal';
-import { renderSandboxOfferCard, type SandboxSetupFlowDeps } from './sandboxSetupPanel';
-import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
-import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
 import { describeOrchestratorThread, isOrchestratorThread, orchestratorWarning, type OrchestratorContext } from './orchestratorThreads';
 import { partitionThreads } from './threadRowState';
 import { agentLabel, buildAgentBreadcrumbs, summarizeAgentTeam } from './agentRuns/agentTreeModel';
@@ -497,8 +492,6 @@ export class ThreadsView extends ItemView {
     this.manager.permissionHandler = (threadId, toolName, detail) => {
       // First-party host tools are always trusted; classification is an explicit
       // capability allowlist, not a forgeable naming-prefix convention.
-      // Requests that cannot be always-allowed (host_exec) skip both shortcuts
-      // and are decided on the card every time.
       // A remote thread's requests are never pre-approved: the tool name comes from the daemon (see isRemoteThread).
       if (!this.manager.isRemoteThread(threadId) && isPermissionPreApproved(toolName, this.plugin.settings.alwaysAllowedTools)) return Promise.resolve(true);
 
@@ -2449,8 +2442,6 @@ export class ThreadsView extends ItemView {
       harness: thread?.agentHarness,
       model: escalated ?? thread?.model ?? undefined,
       activeModel: escalated ? undefined : thread?.activeModel,
-      vmMode: thread?.harnessVmMode,
-      settingsVmMode: this.plugin.settings.harnessVmMode,
       remote: remote ? { daemonName, connection } : undefined,
     });
   }
@@ -2541,7 +2532,7 @@ export class ThreadsView extends ItemView {
     }
     if (thread.activeModel) modelNotes.push(`Running: ${activeModelLabel(thread.activeModel)}`);
 
-    const harnessValue = `${agentHarnessLabel(thread.agentHarness)}${harness === 'claude' && thread.harnessVmMode ? ` \u00b7 ${harnessVmModeLabel(thread.harnessVmMode)}` : ''}${thread.remote ? ' \u00b7 Remote' : ''}`;
+    const harnessValue = `${agentHarnessLabel(thread.agentHarness)}${thread.remote ? ' \u00b7 Remote' : ''}`;
     const harnessGroups: PopoverOptionGroup[] = [{
       options: AGENT_HARNESSES.map((value) => ({
         label: value !== harness && blocked ? `${agentHarnessLabel(value)} \u2014 ${blocked}` : agentHarnessLabel(value),
@@ -2551,23 +2542,6 @@ export class ThreadsView extends ItemView {
         onSelect: () => { if (value !== harness) void this.requestHarnessSwitch(threadId, value); },
       })),
     }];
-    if (harness === 'claude') {
-      const modes: Array<HarnessVmMode | undefined> = ['always', 'never', undefined];
-      harnessGroups.push({
-        title: 'Run in',
-        options: modes.map((mode) => {
-          const selected = thread.harnessVmMode === mode;
-          return {
-            label: !selected && blocked ? `${harnessVmModeLabel(mode)} \u2014 ${blocked}` : harnessVmModeLabel(mode),
-            checked: selected,
-            disabled: !selected && !!blocked,
-            closeOnSelect: true,
-            onSelect: () => { if (!selected) void this.requestHarnessVmModeChange(threadId, mode); },
-          };
-        }),
-      });
-    }
-
     const currentPermission = thread.permissionMode ?? undefined;
     const settings: PopoverSetting[] = [
       {
@@ -2753,35 +2727,6 @@ export class ThreadsView extends ItemView {
     this.manager.setThreadPermissionMode(threadId, mode);
     await this.plugin.saveSettings();
     this.renderThreadInfo();
-  }
-
-  private async requestHarnessVmModeChange(threadId: string, mode: HarnessVmMode | undefined): Promise<void> {
-    const thread = this.manager.getThread(threadId);
-    if (!thread) return;
-    const hadConversation = thread.messages.some(message => message.role === 'user' || message.role === 'assistant');
-    // A native Claude session cannot be resumed across host <-> container, so a
-    // containerized <-> host flip resets it (the conversation continues from a
-    // summary). Only confirm when that will actually happen.
-    const wasContainerized = resolveEffectiveHarnessVmMode(thread.harnessVmMode, this.plugin.settings.harnessVmMode) !== 'never';
-    const nowContainerized = resolveEffectiveHarnessVmMode(mode, this.plugin.settings.harnessVmMode) !== 'never';
-    if (hadConversation && thread.sessionId && wasContainerized !== nowContainerized) {
-      const confirmed = await promptConfirm(this.app, {
-        message: `Run this thread ${nowContainerized ? 'in a container' : 'on the host (no container)'}? The conversation stays here, but the native Claude session resets and continues from a summary and transcript references.`,
-        confirmLabel: 'Change',
-        danger: false,
-      });
-      if (!confirmed) return;
-    }
-    try {
-      await this.manager.setThreadHarnessVmMode(threadId, mode, () => this.plugin.saveSettings());
-      if (threadId === this.activeThreadId) {
-        this.renderThreadInfo();
-        this.setRunningState(false);
-      }
-      new Notice(`This thread will run in: ${harnessVmModeLabel(mode)}.`);
-    } catch (error) {
-      new Notice(error instanceof Error ? error.message : String(error));
-    }
   }
 
   private async requestHarnessSwitch(threadId: string, targetHarness: AgentHarness): Promise<void> {
@@ -3534,12 +3479,6 @@ export class ThreadsView extends ItemView {
     // (live 'error' cards are not persisted, but this state is).
     if (thread.authRequired && !this.manager.isRunning(this.activeThreadId)) {
       this.renderClaudeSignInCard(this.activeThreadId, thread.authRequired.message);
-    }
-
-    // Restore a still-pending "Run this thread in a sandbox?" offer (its
-    // state lives in the manager, so switching threads doesn't lose it).
-    if (this.manager.getSandboxSetupOffer(this.activeThreadId)) {
-      this.renderSandboxOfferCard(this.activeThreadId);
     }
 
     this.applyPendingMainScroll();
@@ -4454,7 +4393,7 @@ export class ThreadsView extends ItemView {
       .addEventListener('click', () => done(false));
     actions.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
       .addEventListener('click', () => done(true));
-    if (canAlwaysAllow(toolName) && !(this.activeThreadId && this.manager.isRemoteThread(this.activeThreadId))) {
+    if (!(this.activeThreadId && this.manager.isRemoteThread(this.activeThreadId))) {
       actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
         .addEventListener('click', async () => {
           this.plugin.settings.alwaysAllowedTools.push(toolName);
@@ -5971,21 +5910,6 @@ export class ThreadsView extends ItemView {
         break;
       }
 
-      case 'sandbox_setup_offer': {
-        // The thread's first session is parked until the user answers: the
-        // sandbox isn't set up. (The card is inline, not modal.) Nothing is running
-        // yet: drop the working placeholder and Stop state streaming_start set up;
-        // the manager re-emits streaming_start once the session is released.
-        if (this.streamingEl) {
-          this.streamingEl.remove();
-          this.streamingEl = null;
-        }
-        this.clearStreamingState();
-        this.setRunningState(false);
-        if (this.activeThreadId) this.renderSandboxOfferCard(this.activeThreadId);
-        break;
-      }
-
       case 'auth_retry': {
         // Expired Claude sign-in: ThreadSession is restarting the CLI process
         // (the fresh one re-reads the keychain) and replaying the turn once.
@@ -6053,18 +5977,7 @@ export class ThreadsView extends ItemView {
    * "Sign in to Claude" card for a turn whose silent fresh-process retry
    * still failed to authenticate (see claudeAuthRecovery.ts). Desktop only.
    *
-   * Two flows, chosen by `ThreadManager.getClaudeVmRouting()` — the ACTUAL
-   * routing decision this thread's last session start made, not a re-derived
-   * capability check (ADR-0015 follow-up):
-   * - Host-spawned (routing absent/null): `claude auth login` on the host,
-   *   same as before this ADR.
-   * - Container-routed: the container's own `claude setup-token`, since the
-   *   host's keychain sign-in never reaches a process running inside the
-   *   sandbox container. Runs through `/usr/bin/expect` over a plain
-   *   `child_process` pipe (no pty needed on this side — see
-   *   claudeContainerAuthCli.ts's doc comment for why `node-pty` was ruled
-   *   out: this plugin's release workflow never ships `node_modules/`, so a
-   *   native module's compiled binary could never reach a real install).
+   * Runs `claude auth login` on the host.
    */
   private renderClaudeSignInCard(threadId: string, message: string): void {
     this.messagesEl.querySelector('.ct-auth-required')?.remove();
@@ -6072,53 +5985,20 @@ export class ThreadsView extends ItemView {
       message,
       canSignIn: Platform.isDesktopApp,
       flavor: isAwsSignInExpiredError(message) ? 'aws' : 'claude',
-      // The flow is chosen when the button is CLICKED, not when the card is
-      // rendered: this card is also rebuilt from persisted `authRequired` state
-      // after a plugin reload, before any session has started, when the
-      // recorded routing is still empty. Rendering-time selection silently
-      // picked the host flow there — which can never authenticate a
-      // containerized session.
-      signIn: async (onProgress, onUrl, onCodePrompt) => {
+      signIn: async (onProgress, onUrl) => {
         // Bedrock credential failure: native AWS SSO device-flow sign-in on the
         // host (opens the browser itself; the URL is the manual fallback).
         if (isAwsSignInExpiredError(message)) {
           return reauthenticateAws(this.plugin.settings, message, { onProgress, onUrl });
         }
-        const routing = await this.manager.resolveClaudeVmRoutingForSignIn(threadId);
-        if (!routing) {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { spawn } = require('child_process') as typeof import('child_process');
-          return signInToClaude(this.plugin.settings.claudeBinaryPath || 'claude', {
-            spawn: spawn as unknown as SpawnLike,
-            env: execEnv(),
-            onProgress,
-            onUrl,
-          });
-        }
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { spawn } = require('child_process') as typeof import('child_process');
-        onProgress('Signing in inside the sandbox container…');
-        const result = await signInToClaudeInContainer({
-          spawn: spawn as unknown as ContainerSpawnLike,
-          hostEnv: hostRunnerEnv() as NodeJS.ProcessEnv,
-          containerName: routing.containerName,
-          containerBinaryPath: routing.containerBinaryPath,
+        return signInToClaude(this.plugin.settings.claudeBinaryPath || 'claude', {
+          spawn: spawn as unknown as SpawnLike,
+          env: execEnv(),
           onProgress,
-          onUrl: (url) => {
-            onUrl(url);
-            // The CLI runs inside the container and cannot launch a host
-            // browser; the fallback link stays for a blocked pop-up.
-            try { window.open(url, '_blank'); } catch { /* link is the fallback */ }
-          },
-          onCodePrompt,
+          onUrl,
         });
-        if (!result.ok) return result;
-        try {
-          await this.plugin.persistContainerAuthToken(threadId, result.token);
-        } catch (err) {
-          return { ok: false as const, error: `Signed in, but saving the token failed: ${err instanceof Error ? err.message : String(err)}` };
-        }
-        return { ok: true as const };
       },
       retry: async () => {
         try {
@@ -6128,33 +6008,6 @@ export class ThreadsView extends ItemView {
           new Notice(`Retry failed: ${(err as Error).message}`);
           return false;
         }
-      },
-    });
-    this.scrollToBottom();
-  }
-
-  /**
-   * One-time "Run this thread in a sandbox?" card. The thread's first session
-   * is held until the user answers; setup progress runs inside the card, and a
-   * finished setup releases the session to start inside the sandbox.
-   */
-  private renderSandboxOfferCard(threadId: string): void {
-    if (!Platform.isDesktopApp) return;
-    this.messagesEl.querySelector('.ct-sandbox-offer')?.remove();
-    const harnessImage = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
-    const injected = this.manager.sandboxSetupRunner as Pick<SandboxSetupFlowDeps, 'getStatus' | 'run'> | undefined;
-    renderSandboxOfferCard(this.messagesEl, {
-      getStatus: injected?.getStatus ?? (() => getSandboxSetupStatus({ harnessImage })),
-      run: injected?.run ?? (({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal })),
-      confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
-      onNotNow: () => this.manager.clearSandboxSetupOffer(threadId),
-      onSetupDone: () => this.manager.completeSandboxSetupOffer(threadId),
-      onDontAskAgain: () => {
-        // Persist first so the released session start sees the new setting.
-        this.plugin.settings.sandboxSetupPromptDismissed = true;
-        this.manager.updateSettings(this.plugin.settings);
-        void this.plugin.saveSettings();
-        this.manager.clearSandboxSetupOffer(threadId);
       },
     });
     this.scrollToBottom();
@@ -7063,7 +6916,6 @@ export class ThreadsView extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
-      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(t.id),
       lastError: t.lastError,
       messageCount: t.messages.length,
       reviewed: t.reviewed,
@@ -7128,7 +6980,7 @@ export class ThreadsView extends ItemView {
           activityText = this.manager.getThreadActivity(thread.id) || 'Working...';
         } else if (state === 'waiting') {
           const next = this.plugin.getPendingWakeups(thread.id)[0];
-          if (!next) activityText = this.manager.isAwaitingSandboxDecision(thread.id) ? 'Waiting for your sandbox choice' : 'Waiting to resume';
+          if (!next) activityText = 'Waiting to resume';
           else {
             const when = formatWakeupCountdown(next.fireAt);
             activityText = next.reason ? `Resumes ${when} — ${next.reason}` : `Resumes ${when}`;

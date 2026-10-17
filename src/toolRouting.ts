@@ -26,7 +26,7 @@ export const TOOL_DOMAINS: readonly ToolDomain[] = Object.freeze(Object.keys(TOO
 
 /**
  * Default route of each domain. Nothing that reaches back into the user's computer is on by default: the
- * domains the user can OPT IN to (`OPT_IN_GROUPS`) default to `absent`, and the rest (`schedule`, `misc`, `vm`) are
+ * domains the user can OPT IN to (`OPT_IN_GROUPS`) default to `absent`, and the rest (`schedule`, `misc`) are
  * never offered at all.
  */
 export const DEFAULT_DOMAIN_ROUTES: Readonly<Record<ToolDomain, ToolRoute>> = Object.freeze({
@@ -37,7 +37,6 @@ export const DEFAULT_DOMAIN_ROUTES: Readonly<Record<ToolDomain, ToolRoute>> = Ob
   schedule: 'absent',
   skills: 'absent',
   misc: 'absent',
-  vm: 'absent',
   browser: 'absent',
 });
 
@@ -53,14 +52,13 @@ export const MCP_GROUP = 'mcp';
 
 /**
  * Per-tool exceptions (canonical names), never offered to a remote session and not promotable by any setting:
- *   host_exec        exists only inside a sandbox VM, which a daemon session never is
  *   github_*         discovery of the Geode GitHub connection, which has no credential on the daemon
  * plus every tool that writes, executes, schedules, installs, sends or reads a secret on THIS computer. A daemon
  * (or a model steered by something it read) must not be able to reach them even when the user turned the
  * surrounding group on, and even if the user approves a card it is not the daemon's place to ask.
  */
 export const NEVER_OFFERED: ReadonlySet<string> = new Set([
-  'host_exec', 'github_list_access', 'github_check_repo',
+  'github_list_access', 'github_check_repo',
   // secrets, MCP registration, commands, URLs, editor and UI state
   'request_secret', 'mcp_register_server', 'host_execute_command', 'host_list_commands', 'host_open_url',
   'workspace_navigate_to_file', 'workspace_insert_at_cursor', 'watch_document', 'unwatch_document',

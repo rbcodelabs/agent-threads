@@ -58,10 +58,8 @@ export interface ClaudeDriverDeps {
 // ── spec -> options ────────────────────────────────────────────────────────
 
 /**
- * Project a `RemoteSessionSpec` back onto `HarnessSessionOptions`. VM routing
- * (`claude.vm`) is never set, which is `harnessVmMode: 'never'`: the daemon is
- * already the sandbox. `secretEnv`/`containerAuthToken` are never taken from
- * the client.
+ * Project a `RemoteSessionSpec` back onto `HarnessSessionOptions`. `secretEnv`
+ * is never taken from the client.
  */
 export function specToSessionOptions(
   spec: RemoteSessionSpec,
