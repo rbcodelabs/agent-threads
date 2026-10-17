@@ -153,6 +153,7 @@ export function describeSetup(snap: LocalDaemonSnapshot): string {
     + `${masked === 'no config folders' ? '' : `${masked} are mounted read-only so an agent cannot change plugins or settings. `}`
     + sharedNote
     + externalNote
+    + 'Tools that write, schedule or touch secrets on this Mac stay off for its threads unless you switch a group on in Settings (each call then asks you first). '
     + 'The VM has full outbound network access. If you use Geode\'s GitHub connection, a short-lived GitHub token (refreshed while Geode is open, expiring after 15 minutes) is copied into the VM so git and gh work there. Continue?';
 }
 

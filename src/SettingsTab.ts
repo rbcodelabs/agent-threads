@@ -3266,7 +3266,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       return result;
     };
     // Resources apply when the container is (re)created: the status then offers Update.
-    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[] }): Promise<void> => {
+    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; optionalTools?: string[] }): Promise<void> => {
       const current = this.plugin.settings.localDaemon ?? { enabled: false, port: 7433 };
       this.plugin.settings.localDaemon = { ...current, ...patch };
       await this.plugin.saveSettings();
@@ -3288,6 +3288,29 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           const folders = value.split('\n').map((l) => l.trim()).filter(Boolean);
           await saveResources({ folders: folders.length ? folders : undefined });
         }));
+    // Tools that write, schedule or touch secrets on this Mac, which every daemon is denied by default.
+    const optionalSettings: Setting[] = [];
+    {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const opt = require('./localDaemon/optionalTools') as typeof import('./localDaemon/optionalTools');
+      const head = new Setting(containerEl).setName('Local daemon: tools that act on this Mac').setDesc(`Off by default. ${opt.OPTIONAL_TOOLS_WARNING} Takes effect for the next thread session you open.`);
+      head.settingEl.addClass('ct-local-daemon-optional-head');
+      optionalSettings.push(head);
+      for (const group of opt.OPTIONAL_TOOL_GROUPS) {
+        const row = new Setting(containerEl)
+          .setName(group.label)
+          .setDesc(`Lets a thread on the daemon ${group.description}. (${group.tools.join(', ')})`)
+          .addToggle((toggle) => toggle
+            .setValue(opt.normalizeOptionalGroups(this.plugin.settings.localDaemon?.optionalTools).includes(group.id))
+            .onChange(async (on) => {
+              const current = new Set(opt.normalizeOptionalGroups(this.plugin.settings.localDaemon?.optionalTools));
+              if (on) current.add(group.id); else current.delete(group.id);
+              await saveResources({ optionalTools: opt.normalizeOptionalGroups([...current]) });
+            }));
+        row.settingEl.addClass('ct-local-daemon-optional-row');
+        optionalSettings.push(row);
+      }
+    }
     const cpusSetting = new Setting(containerEl)
       .setName('Local daemon CPUs')
       .setDesc('CPU count of the local daemon container, a whole number from 1 to 64 (default 4). Applies when the container is next created.')
@@ -3300,7 +3323,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       pluginVersion: this.plugin.manifest.version,
       snapshot: () => controller.snapshot(),
       subscribe: (listener) => controller.subscribe(listener),
-      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, foldersSetting]) s.settingEl.style.display = visible ? '' : 'none'; },
+      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       cancel: () => controller.cancel(),
       openUrl: (url) => { try { window.open(url, '_blank'); } catch { /* the panel keeps a link */ } },

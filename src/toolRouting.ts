@@ -118,11 +118,17 @@ export function isClassified(toolName: string): boolean {
  * tool of a domain that cannot be opted into stay `absent` whatever the settings say. An override naming a tool
  * (canonical or legacy) beats one naming its domain, so a group can be on with one tool off.
  */
-export function routeFor(toolName: string, overrides?: RouteOverrides): ToolRoute {
+export function routeFor(toolName: string, overrides?: RouteOverrides, optional?: ReadonlySet<string>): ToolRoute {
   const domain = DOMAIN_OF.get(toolName);
   if (!domain) return 'absent';
   if (DEFAULT_DOMAIN_ROUTES[domain] === 'local') return 'local';
-  if (NEVER_OFFERED.has(canonicalToolName(toolName)) || !OPT_IN_GROUPS.includes(domain)) return 'absent';
+  const canonical = canonicalToolName(toolName);
+  if (NEVER_OFFERED.has(canonical) || !OPT_IN_GROUPS.includes(domain)) {
+    // The one way past NEVER_OFFERED: the managed local daemon's explicit, per-group opt-in (localDaemon/optionalTools.ts).
+    // The tool must be named in `optional` AND routed 'host' by name; a domain or group switch never reaches it.
+    if (optional?.has(canonical) && NEVER_OFFERED.has(canonical) && (overrides?.[canonical] ?? overrides?.[toolName]) === 'host') return 'host';
+    return 'absent';
+  }
   const chosen = overrides?.[canonicalToolName(toolName)] ?? overrides?.[toolName] ?? overrides?.[domain];
   return chosen === 'host' ? 'host' : 'absent';
 }

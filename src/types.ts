@@ -283,6 +283,11 @@ export interface LocalDaemonSettings {
    * container is created.
    */
   folders?: string[];
+  /**
+   * Ids of the optional tool groups (`localDaemon/optionalTools.ts`) offered to the daemon's threads: tools that write,
+   * schedule or touch secrets on this Mac. Off by default; every call still needs an approval card.
+   */
+  optionalTools?: string[];
   /** Memory ceiling of the container, `<digits>M|G` (default `4G`). Applied when the container is created (Update). */
   memory?: string;
   /** CPUs of the container, a whole number 1-64 (default 4). Applied when the container is created (Update). */

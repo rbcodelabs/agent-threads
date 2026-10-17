@@ -1081,7 +1081,18 @@ export default class ClaudeThreadsPlugin extends Plugin {
       const mcpSources = Object.fromEntries(Object.entries(brokers)
         .filter(([, c]) => c.type === 'http' && typeof c.url === 'string')
         .map(([name, c]) => [name, createLoopbackMcpSource(c.url!, c.headers ?? {})]));
-      return new RemoteHostTools({ builtIn, mcpSources, overrides: daemonSettings?.routes, log: m => debugLog(m) });
+      // The managed local daemon can opt in to tools that write, schedule or touch secrets (off by default). Read
+      // here, so a change in Settings applies to the next session that is opened.
+      const optionalIds = daemonConfig?.managed === 'local-container' ? this.settings.localDaemon?.optionalTools : undefined;
+      let routes = daemonSettings?.routes;
+      let optionalTools: ReadonlySet<string> | undefined;
+      if (optionalIds?.length) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const opt = require('./localDaemon/optionalTools') as typeof import('./localDaemon/optionalTools');
+        routes = opt.withOptionalRoutes(routes, optionalIds);
+        optionalTools = opt.optionalToolsFor(optionalIds);
+      }
+      return new RemoteHostTools({ builtIn, mcpSources, overrides: routes, ...(optionalTools ? { optionalTools } : {}), log: m => debugLog(m) });
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect
