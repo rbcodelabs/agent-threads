@@ -12,6 +12,9 @@ import { connectionPill } from './remote/connectionPill';
 import { checkDaemonInput, checkVaultMappingInput, describeTest, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
 import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel } from './remote/workspaceChoice';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
+import { renderLocalDaemonPanel } from './localDaemon/localDaemonPanel';
+import { visibleDaemons } from './localDaemon/registration';
+import { DESCRIBE_REMOVE } from './localDaemon/view';
 import { serializeKey } from './stt';
 import { debugLog, setDebugLogging } from './logger';
 import { telemetry } from './telemetry';
@@ -1972,6 +1975,26 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         awsStatus.setText(res.expired ? "Not signed in (SSO session expired or missing)." : res.error);
       }
     };
+    // Containers are desktop-only, so is this.
+    if (!Platform.isMobile) new Setting(containerEl)
+      .setName('AWS profiles exposed to containers')
+      .setDesc(
+        'One profile per line. Sandbox containers get a read-only copy of the AWS SSO token cache and a trimmed AWS config '
+        + 'containing only these profiles, plus the AWS_PROFILE from Extra environment variables. Takes effect for containers '
+        + 'created afterwards (a running thread keeps its container). Leave empty to expose nothing extra. '
+        + 'Note: the whole SSO token cache directory is mounted, not just these profiles\' tokens — see docs/sandbox-vms.md.',
+      )
+      .addTextArea((ta) =>
+        ta
+          .setPlaceholder('my-deploy-profile')
+          .setValue(this.plugin.settings.containerAwsProfiles ?? '')
+          .onChange(async (value) => {
+            this.plugin.settings.containerAwsProfiles = value;
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
     awsCredsSetting
       .addButton((btn) => btn.setButtonText("Check").onClick(() => void runAwsCheck()))
       .addButton((btn) =>
@@ -3229,13 +3252,17 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       cls: 'setting-item-description',
       text: 'Run threads on an agent-threads daemon on another machine (for example a homelab box). They keep running there when this app is closed, and reconnect to the live stream when you return. Reach the daemon over Tailscale; see docs/remote-daemon.md.',
     });
+    this.renderLocalDaemonBlock(containerEl);
     const daemons = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
-    for (const daemon of daemons) {
+    for (const daemon of visibleDaemons(daemons, Platform.isMobile)) {
       const state = this.plugin.daemonRegistry?.stateOf(daemon.id);
       const pill = connectionPill(state, daemon.name);
+      const managed = daemon.managed === 'local-container';
       const row = new Setting(containerEl)
         .setName(daemon.name)
-        .setDesc(`${daemon.url}${daemon.defaultCwdRoot ? ` · default folder ${daemon.defaultCwdRoot}` : ''}`);
+        .setDesc(managed
+          ? `${daemon.url} · managed by Agent Threads (Local daemon above)`
+          : `${daemon.url}${daemon.defaultCwdRoot ? ` · default folder ${daemon.defaultCwdRoot}` : ''}`);
       row.nameEl.createSpan({ cls: `ct-remote-pill ct-remote-pill--${pill.kind} ct-remote-daemon-status`, text: pill.label, attr: { title: pill.title } });
       row.addButton((btn) => btn.setButtonText('Test').onClick(async () => {
         btn.setDisabled(true).setButtonText('Testing…');
@@ -3243,8 +3270,17 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         btn.setDisabled(false).setButtonText('Test');
         new Notice(outcome.text, outcome.tone === 'ok' ? 4000 : 9000);
       }));
-      row.addButton((btn) => btn.setButtonText('Edit').onClick(() => this.openDaemonModal(daemon)));
+      // A managed entry's address and token belong to the Local daemon block; editing them here would break it.
+      if (!managed) row.addButton((btn) => btn.setButtonText('Edit').onClick(() => this.openDaemonModal(daemon)));
       row.addButton((btn) => btn.setButtonText('Remove').setWarning().onClick(async () => {
+        if (managed) {
+          const controller = this.plugin.localDaemon;
+          if (!controller) return;
+          if (!await promptConfirm(this.app, { message: DESCRIBE_REMOVE, confirmLabel: 'Remove', danger: true })) return;
+          try { await controller.remove({ removeData: true }); } catch (err) { new Notice(`Could not remove the local daemon: ${err instanceof Error ? err.message : String(err)}`, 9000); }
+          this.display();
+          return;
+        }
         const inUse = this.plugin.manager.getThreads().filter((t) => t.remote?.daemonId === daemon.id && t.status !== 'archived').length;
         if (inUse > 0 && !window.confirm(`${inUse} thread${inUse === 1 ? '' : 's'} run on "${daemon.name}". They stay in your list but cannot continue until a daemon with this id is configured again. Remove it?`)) return;
         this.plugin.settings.remoteDaemons = daemons.filter((d) => d.id !== daemon.id);
@@ -3259,6 +3295,41 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       .setDesc('You need the daemon address (wss://… through `tailscale serve`) and a token from `agent-threads token create` on that machine.')
       .addButton((btn) => btn.setButtonText('Add daemon').setCta().onClick(() => this.openDaemonModal(null)));
     applySecretStorageCopy(this.app, containerEl.createEl('p', { cls: 'setting-item-description' }), (storage) => `${storage} The token never appears in data.json.`);
+  }
+
+  /** Settings -> Remote -> Local daemon: one-click managed daemon in a container on this Mac. Desktop only. */
+  private renderLocalDaemonBlock(containerEl: HTMLElement): void {
+    const controller = this.plugin.localDaemon;
+    if (Platform.isMobile || !controller) return;
+    const setting = new Setting(containerEl).setName('Local daemon').setClass('ct-local-daemon-setting');
+    const showAfter = (fn: () => Promise<unknown>) => async (): Promise<unknown> => {
+      const result = await fn();
+      // Set up / Remove / Update change the Remote daemons list below; redraw it.
+      this.display();
+      return result;
+    };
+    renderLocalDaemonPanel(setting.descEl, {
+      isMobile: Platform.isMobile,
+      pluginVersion: this.plugin.manifest.version,
+      snapshot: () => controller.snapshot(),
+      subscribe: (listener) => controller.subscribe(listener),
+      setVisible: (visible) => { setting.settingEl.style.display = visible ? '' : 'none'; },
+      confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
+      cancel: () => controller.cancel(),
+      openUrl: (url) => { try { window.open(url, '_blank'); } catch { /* the panel keeps a link */ } },
+      signIn: (handlers) => controller.signIn(handlers),
+      run: (id, opts) => {
+        switch (id) {
+          case 'setup': return showAfter(() => controller.setUp(opts))();
+          case 'start': return controller.start(opts);
+          case 'stop': return controller.stop(opts);
+          case 'restart': return controller.restart(opts);
+          case 'update': return showAfter(() => controller.update(opts))();
+          case 'reset': return controller.reset(opts);
+          case 'remove': return showAfter(() => controller.remove({ ...opts, removeData: true }))();
+        }
+      },
+    });
   }
 
   private async testDaemon(daemon: RemoteDaemonConfig, typedToken: string | undefined): Promise<DaemonTestOutcome> {

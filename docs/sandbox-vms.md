@@ -4,6 +4,11 @@
 on macOS 26 or later with Apple silicon. Both Claude and Codex can use these tools.
 They require Apple's `container` runtime; they are unavailable on mobile.
 
+Looking for threads that **survive quitting Geode**? That is a different feature: the managed
+[Local daemon](remote-daemon.md#local-daemon-this-mac-in-a-container) (Settings -> Remote), one shared container per vault
+that you run threads on with "Run on: This Mac (container)". It reuses this page's runtime install but is otherwise
+separate: sandbox VMs are per thread and end with Geode.
+
 ## Setup (one click)
 
 Open **Settings → Claude → Sandbox setup** and press **Set up sandbox**. Agent Threads then:
@@ -259,6 +264,38 @@ unchanged: built-in SDK servers stay in process, remote HTTP/SSE servers use the
 VM's network, and stdio servers run inside Linux with `/work` as the workspace.
 Consequently `network: none` still permits the host-owned SDK-relayed brokers but
 does not give the guest a general path to the host network.
+
+### Container AWS credentials (Amazon Bedrock, deploys)
+
+A routed container is built without the host's environment or files, so it has no AWS credentials. Geode's own AWS SSO sign-in writes the token cache to the host's `~/.aws/sso/cache`, which the container cannot see. This feature carries that login in, read-only.
+
+**When it applies.** The thread is routed into a harness container, and either the provider is Amazon Bedrock or **Settings → AWS profiles exposed to containers** is non-empty. Everyone else sees no change.
+
+**What is mounted** (both read-only, at container creation):
+
+| Host | Container | Purpose |
+|---|---|---|
+| `~/.aws/sso/cache` | `/aws/sso-cache` | SSO tokens. The AWS SDK always reads tokens from `$HOME/.aws/sso/cache`, so the image symlinks that path here. |
+| `<plugin folder>/container-aws/config` | `/aws/config` | A generated AWS config. |
+
+Geode also sets `AWS_CONFIG_FILE=/aws/config` (and `AWS_EC2_METADATA_DISABLED=true`) on the Claude process, through the same per-exec `--env` path as the Bedrock variables. `AWS_PROFILE` and `AWS_REGION` still come from Extra environment variables.
+
+**Which profiles.** The profile named by `AWS_PROFILE` in Extra environment variables, plus any you list in the setting (one per line, for example a deploy profile). The generated config contains only those profiles, any `source_profile` they chain to, and the `sso-session` blocks they use, and only an allowlist of keys (region, SSO and role fields). Access keys, session tokens, `credential_process` and `mfa_serial` are never copied. The file is rewritten each time a container is resolved.
+
+**Exposure, plainly.** The token cache is mounted as a whole directory, so the container can read the access token for every SSO session on the host, not only the listed profiles' sessions. Mounting individual token files does not work: the host replaces a token by rename on refresh, so a file mount would keep serving the old token, and a token that does not exist yet (not signed in) cannot be mounted at all. The listed profiles limit what the container is *configured* to use, not what it could read. Code running in the container (including anything the agent installs) can read those tokens. The mount is read-only, so a container can use a token but never refresh or overwrite it. Refresh happens on the host, through Geode's AWS sign-in.
+
+**Existing containers.** Mounts are fixed when a container is created and recorded in its `claude-threads.mounts` label. A thread whose container already exists keeps it (removing it would discard its saved Claude session), so it does **not** gain the AWS mounts when you change the setting or switch to Bedrock. Geode reads the mounts from the label and sets `AWS_CONFIG_FILE` only when `/aws/config` is really there. To pick the feature up, remove the thread's container (`container rm -f claude-threads-vm-<thread id>`, the thread starts a new one on its next message; its Claude session history lives in the container, so expect a fresh conversation) or start a new thread. Changing the *profile list* needs no new container, since the config file is rewritten in place.
+
+**Failure mode.** Without usable credentials, the Claude CLI on Bedrock used to retry silently for many minutes ("Request timed out") because the SDK probes the EC2 metadata service, which does not exist on a container network, and only a "Could not load AWS credentials" error triggers Geode's sign-in card. Setting `AWS_EC2_METADATA_DISABLED=true` makes the same situation fail immediately with that error, so the card appears.
+
+**The image.** The AWS tooling is an opt-in layer on top of the harness image (AWS CLI v2, pnpm, SST, OpenNext, Playwright Chromium; no account IDs or SSO URLs inside):
+
+```bash
+container build --tag claude-threads-harness-aws:1 \
+  -f sandbox/Dockerfile.harness-aws sandbox/
+```
+
+Then set **Harness VM image** to `claude-threads-harness-aws:1`. Use this image (or add the same symlink, `~/.aws/sso/cache` to `/aws/sso-cache`, to your own): without the symlink the SDK cannot find the mounted tokens.
 
 ### Signing in to Claude inside the container
 

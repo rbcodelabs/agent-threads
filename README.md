@@ -8,7 +8,7 @@ Direct child-agent messaging and single-agent interruption are capability-gated.
 
 A native Obsidian and Geode plugin for running multiple Claude Code sessions in parallel — with streaming markdown responses, tab management, and deep vault integration.
 
-![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.63.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
+![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.65.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
 
 <p align="center">
   <img src="docs/screenshot-main.png" width="800" alt="Main view: conversation panel with tool calls and Agents List showing thread summaries" />
@@ -33,6 +33,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 **Key features:**
 
 - **Multi-tab sessions** — open as many Claude threads as you need, switch between them instantly
+- **Local daemon (this Mac, in a container)** — one click in Settings → Remote runs the agent-threads daemon in an Apple container VM on your Mac, with no tokens to paste. Threads you start with "Run on: This Mac (container)" keep running when Geode quits and re-attach when you return. Your vault is mounted read-write with `.geode` and `.obsidian` read-only; the daemon is published on `127.0.0.1` only and starts on first use. Updates are prompt-only. Desktop only, Apple silicon with macOS 26+. See [Local daemon](docs/remote-daemon.md#local-daemon-this-mac-in-a-container).
 - **Opt-in sandbox VMs** — Claude and Codex can run explicit coding commands in a Linux VM through Apple Container on Apple-silicon Macs with macOS 26+. New containers mount the working directory at `/work` and the vault read-write at `/vault`; guest code can modify notes. Existing harness containers retain their mounts and native history across restarts. Ordinary host tools remain outside the VM; VM-routed Claude threads can request individually approved host commands through `host_exec`. See the [setup and safety guide](docs/sandbox-vms.md).
 - **Streaming responses** — tokens stream in with live markdown rendering (code blocks, tables, lists, etc.)
 - **Responsive conversation width** — wide conversation panes center the complete timeline and composer in a readable-width column, while narrow panes remain full width

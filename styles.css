@@ -10106,3 +10106,9 @@ button.ct-agent-crumb:focus-visible {
 .ct-root.ct-mobile .ct-sp-item { min-height: 44px; }
 .ct-root.ct-mobile .ct-pp-filter { height: 36px; }
 .ct-root.ct-mobile .ct-pp-sort-btn { height: 34px; }
+.ct-outside-link-path {
+  display: block;
+  word-break: break-all;
+  user-select: text;
+  margin-bottom: 12px;
+}

@@ -298,6 +298,27 @@ export interface RemoteDaemonConfig {
    * then only the groups named in `routes`.
    */
   hostTools?: RemoteHostToolsSettings;
+  /**
+   * Set when Agent Threads created and manages this daemon (the "Local daemon" block in Settings -> Remote). URL and
+   * token are owned by that feature: the entry's Edit locks them and Remove stops and deletes the container.
+   * Desktop only: hidden on mobile, where loopback means nothing.
+   */
+  managed?: 'local-container';
+}
+
+/**
+ * Persisted intent for the managed local daemon (a container on this Mac). No secrets: the control token and the
+ * Claude sign-in live in the keychain. Everything else about the daemon is observed, not stored.
+ */
+export interface LocalDaemonSettings {
+  /** True once Set up has run; cleared by Remove. */
+  enabled: boolean;
+  /** Host loopback port the container is published on. */
+  port: number;
+  /** The daemon-side id of the control token this plugin minted (to revoke it later). */
+  tokenId?: string;
+  /** The Claude credential file was written into the data volume (last known; the volume persists). */
+  credentialWritten?: boolean;
 }
 
 /** Per-daemon choices for tools that run on this computer on a remote thread's behalf. */
@@ -1120,6 +1141,8 @@ export interface PluginSettings {
   harnessVmMode: HarnessVmMode;
   /** Daemons threads can be run on (Settings -> Remote daemons). Tokens live in the keychain, not here. */
   remoteDaemons?: RemoteDaemonConfig[];
+  /** The managed local daemon (a container on this Mac); see src/localDaemon/. */
+  localDaemon?: LocalDaemonSettings;
   /** Random id of this Geode install, stamped on remote threads as `ownerClientId`. */
   remoteClientId?: string;
   /**
@@ -1139,6 +1162,13 @@ export interface PluginSettings {
    * Blank falls back to `claude-threads-harness:1`.
    */
   harnessVmImage: string;
+  /**
+   * Extra AWS profiles (one per line or comma separated) exposed to harness
+   * containers, on top of the AWS_PROFILE from Extra environment variables.
+   * Non-empty enables Container AWS credentials even on the Claude provider.
+   * See containerAws.ts.
+   */
+  containerAwsProfiles: string;
   /**
    * True once the user chose "Don't ask again" on the in-thread "Run this thread in a
    * sandbox?" card. Suppresses that offer for good; Settings → Claude → Set up
@@ -1437,6 +1467,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   sandboxVmMemory: '4G',
   sandboxVmCpus: 4,
   harnessVmImage: 'claude-threads-harness:1',
+  containerAwsProfiles: '',
   sandboxSetupPromptDismissed: false,
   githubConnectionEnabled: true,
   githubCommitEmail: '',

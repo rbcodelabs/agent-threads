@@ -39,6 +39,62 @@ use another HTTPS port (8443) rather than touching it.
 Recommended: `wss://<machine>.<tailnet>.ts.net:8443` (TLS from Tailscale). Fallback: `ws://<machine>:7598`
 via `tailscale serve --tcp` (plain, but inside the WireGuard tunnel).
 
+## Local daemon: this Mac, in a container
+
+Settings -> Remote -> **Local daemon** runs the daemon on the Mac you are sitting at, inside Apple's `container`
+runtime, with one click and no token pasting. It is an ordinary entry in "Remote daemons" (named *This Mac
+(container)*, marked managed), so everything above applies: threads keep running when Geode quits, and reopening
+Geode re-attaches. It is desktop-only and the whole block is hidden on mobile and on a Mac that cannot run the runtime
+(Intel, macOS older than 26). Design and decisions: [`local-daemon-design.md`](local-daemon-design.md).
+
+This is **not** "Run in: Container" ([Sandbox VMs](sandbox-vms.md)). That starts a throwaway container per thread and ends
+with Geode. The local daemon is one shared VM per vault, started once and left running.
+
+**What Set up does** (after a confirmation that names the downloads, the vault path and "read-write"):
+
+1. installs and starts the container runtime if needed (shared with Sandbox setup);
+2. pulls `ghcr.io/rbcodelabs/agent-threads-daemon:<plugin version>` and builds a thin local layer that adds the Claude CLI
+   from Anthropic (the published image has no CLI: no redistribution grant);
+3. creates two named volumes (data and workspaces) and fixes their ownership with a one-shot (named volumes start
+   root-owned; the daemon runs as uid 10001);
+4. starts the container, publishing `127.0.0.1:<port>` only (7433, or the next free port) and waits for `/healthz`;
+5. creates a `control` token **inside** the container, stores it in the OS keychain (never in `data.json`, argv or logs),
+   and adds the Remote daemons entry with the vault mapped to `/vault`.
+
+Every step is skipped when already satisfied and a failure resumes from the real state, so Set up can be re-run safely.
+The VM is started lazily: nothing runs until you use it or press Start, and sending a message in a thread that runs
+there starts it for you. Quitting Geode leaves it running.
+
+**Folders.** The vault is mounted read-write at `/vault` (the daemon's `--workspace`), with `<vault>/.geode` and
+`<vault>/.obsidian` mounted **read-only on top** so a process in the VM cannot rewrite plugin code that Geode would
+later load. Notes are fully writable: keep vault backups or sync history. Paths containing `:` cannot be mounted and are
+refused. The VM has full outbound network access, like the sandbox.
+
+**Claude sign-in.** If you already signed in for container threads ("Sign in to Claude" inside a sandbox thread), that
+token is reused with no prompt. Otherwise the status reads *Running, needs Claude sign-in*; **Sign in to Claude** runs the
+same in-container `claude setup-token` flow once (open a page, paste back a code). The token is kept in the keychain
+under the shared container sign-in secret and written into the data volume through stdin (not argv or the environment),
+where the daemon reads it at start. A daemon only reads it at start, so applying a new sign-in restarts the daemon.
+
+**Buttons.** Set up, Start, Stop, Restart, **Update available** (prompt only, never automatic: it downloads hundreds of MB
+and interrupts running turns), **Reset daemon data** (wipes the volumes and token, sets up again) and **Remove** (deletes
+the container, volumes and token and the Remote daemons entry; your Claude sign-in is kept). Updating replaces the
+container but keeps the volumes, so the token, sessions and journals survive. The daemon image version always equals the
+plugin version; if that image is not published yet you are told so and the running version keeps working.
+
+**Failures say what to do.** A package that is not public ("not publicly pullable": the maintainer must set the GHCR package
+to Public), an image not published yet, no network, no disk space, a port in use (the next one is used and remembered),
+a container with our name that Agent Threads did not create (left alone), a daemon that never answers (with the log tail),
+and a token the daemon rejected (a new one is created) each have their own message.
+
+**Not in this version:** extra project folders beyond the vault (the folder list), exposing the daemon to other devices,
+stop-on-idle, and routing a Claude auth failure inside the daemon to this sign-in (use the Local daemon block's sign-in
+button meanwhile). Codex and OpenCode threads do not run on a daemon.
+
+Troubleshooting: the runtime ships with the plugin and is not on your `PATH`; the CLI is at
+`~/Library/Application Support/claude-threads/runtime/<version>/bin/container` (`container ls -a` shows
+`agent-threads-local-<id>`). Unit tests use a fake `container` binary (`test/helpers/fake-container.mjs`).
+
 ## Install on the daemon machine
 
 Build from a checkout of this repository, at the release or commit you intend to run (the daemon and the plugin
