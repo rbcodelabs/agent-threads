@@ -276,7 +276,10 @@ export class ComposerProjectPopover extends PopoverBase {
     const bar = root.createDiv('ct-pp-bar');
     const input = bar.createEl('input', {
       cls: 'ct-pp-filter',
-      attr: { type: 'text', placeholder: 'Filter projects', 'aria-label': 'Filter projects', 'data-ct-nav': '', spellcheck: 'false' },
+      // No aria-label: the host renders aria-labels as a tooltip on focus, and this input is
+      // autofocused on open, so the tooltip would sit over the first project row. The
+      // placeholder is the accessible name.
+      attr: { type: 'text', placeholder: 'Filter projects', 'data-ct-nav': '', spellcheck: 'false' },
     });
     input.value = this.query;
     input.addEventListener('input', () => { this.query = input.value; this.renderList(); });
