@@ -13,6 +13,9 @@ import {
   localImageRef,
   mountsFor,
   resolveExternalRoots,
+  resolveWorkFolders,
+  resolveDaemonCpus,
+  resolveDaemonMemory,
   prepareArgs,
   prepareScript,
   publishedImageRef,
@@ -128,6 +131,23 @@ describe('golden argv', () => {
     expect(mountsFor(withRoots).filter((m) => !m.readOnly)).toEqual([{ host: '/Users/user/Vault', guest: '/vault', readOnly: false }]);
   });
 
+  it('shared folders: read-write mounts at /work/<name> plus read-write workspaces', () => {
+    const withFolders = { ...spec, workFolders: [{ host: '/Users/user/projects/repo', name: 'repo' }] };
+    const args = runArgs(withFolders);
+    expect(args.join(' ')).toContain('--volume /Users/user/projects/repo:/work/repo ');
+    expect(args.join(' ')).not.toContain('/work/repo:ro');
+    const cmd = args.slice(args.indexOf('--listen'));
+    expect(cmd.join(' ')).toContain('--workspace /work/repo');
+    expect(specSignature(withFolders)).not.toBe(specSignature(spec));
+  });
+
+  it('resolveWorkFolders vets the user\'s list: existing absolute directories, never / or the vault', () => {
+    const exists = new Set(['/p/repo', '/q/repo', '/Users/user/Vault', '/Users/user/Vault/sub', '/Users/user']);
+    const got = resolveWorkFolders(['/p/repo', '/q/repo', '/', '', '  ', 'relative', '/Users/user/Vault', '/Users/user/Vault/sub', '/Users/user', '/nope', '/a:b'], { vaultPath: '/Users/user/Vault', isDirectory: (p) => exists.has(p) });
+    expect(got).toEqual([{ host: '/p/repo', name: 'repo' }, { host: '/q/repo', name: 'repo-2' }]);
+    expect(resolveWorkFolders(undefined, { vaultPath: '/v', isDirectory: () => true })).toEqual([]);
+  });
+
   it('resolveExternalRoots vets what the host reports', () => {
     const exists = new Set(['/a/Docs', '/b/Docs', '/c/data', '/Users/user/Vault/sub']);
     const got = resolveExternalRoots([
@@ -147,6 +167,17 @@ describe('golden argv', () => {
       { host: '/c/data', name: 'odd-label-with-chars' },
     ]);
     expect(resolveExternalRoots(undefined, { vaultPath: '/v', isDirectory: () => true })).toEqual([]);
+  });
+
+  it('resource limits: validated before they reach argv, defaults on anything invalid', () => {
+    expect(resolveDaemonMemory('8g')).toBe('8G');
+    expect(resolveDaemonMemory(' 2048M ')).toBe('2048M');
+    for (const bad of [undefined, null, '', '0G', '4', '4GB', 'lots', '-1G', '4G --privileged']) expect(resolveDaemonMemory(bad as never), String(bad)).toBe('4G');
+    expect(resolveDaemonCpus(8)).toBe(8);
+    expect(resolveDaemonCpus(500)).toBe(64);
+    for (const bad of [undefined, null, 0, -2, 1.5, Number.NaN, '4' as never]) expect(resolveDaemonCpus(bad as never), String(bad)).toBe(4);
+    const args = runArgs({ ...spec, memory: resolveDaemonMemory('6G'), cpus: resolveDaemonCpus(6) });
+    expect(args).toEqual(expect.arrayContaining(['--memory', '6G', '--cpus', '6']));
   });
 
   it('refuses a vault path the runtime would mis-parse', () => {

@@ -277,6 +277,16 @@ export interface LocalDaemonSettings {
   tokenId?: string;
   /** The Claude credential file was written into the data volume (last known; the volume persists). */
   credentialWritten?: boolean;
+  /**
+   * Host folders shared READ-WRITE with the daemon, at `/work/<name>` (one path per entry). A thread can then run in a
+   * repository outside the vault, which is what the removed sandbox VM's `/work` mount was for. Applied when the
+   * container is created.
+   */
+  folders?: string[];
+  /** Memory ceiling of the container, `<digits>M|G` (default `4G`). Applied when the container is created (Update). */
+  memory?: string;
+  /** CPUs of the container, a whole number 1-64 (default 4). Applied when the container is created (Update). */
+  cpus?: number;
 }
 
 /** Per-daemon choices for tools that run on this computer on a remote thread's behalf. */

@@ -48,9 +48,9 @@ import { installRuntime, readRuntime, startRuntimeService, type RuntimeApi } fro
 import {
   DEFAULT_HOST_PORT,
   HOST_PORT_SEARCH_LIMIT,
-  LOCAL_DAEMON_CPUS,
   LOCAL_DAEMON_ID,
-  LOCAL_DAEMON_MEMORY,
+  resolveDaemonCpus,
+  resolveDaemonMemory,
   LABEL_SPEC,
   LABEL_VERSION,
   MASKED_VAULT_DIRS,
@@ -61,6 +61,7 @@ import {
   mountsFor,
   specSignature,
   resolveExternalRoots,
+  resolveWorkFolders,
   type ExternalRootInput,
   type ExternalRootMount,
   assertMountablePath,
@@ -282,8 +283,10 @@ export class LocalDaemonController {
 
   /** Vetted external roots as of the last {@link refreshExternalRoots}. */
   private extRoots: ExternalRootMount[] = [];
+  private workFolders: ExternalRootMount[] = [];
 
   private async refreshExternalRoots(vaultPath: string | null): Promise<void> {
+    this.workFolders = vaultPath ? resolveWorkFolders(this.settings().folders, { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) }) : [];
     if (!vaultPath || !this.deps.externalRoots) { this.extRoots = []; return; }
     try {
       this.extRoots = resolveExternalRoots(await this.deps.externalRoots(), { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) });
@@ -293,7 +296,7 @@ export class LocalDaemonController {
   }
 
   private specFor(vaultPath: string, version: string, port: number): LocalDaemonSpec {
-    return { vaultPath, version, hostPort: port, maskedDirs: this.maskedDirs(vaultPath), externalRoots: this.extRoots, memory: LOCAL_DAEMON_MEMORY, cpus: LOCAL_DAEMON_CPUS };
+    return { vaultPath, version, hostPort: port, maskedDirs: this.maskedDirs(vaultPath), externalRoots: this.extRoots, workFolders: this.workFolders, memory: resolveDaemonMemory(this.settings().memory), cpus: resolveDaemonCpus(this.settings().cpus) };
   }
 
   private emptyObserved(partial: Partial<Observed>): Observed {
@@ -393,7 +396,7 @@ export class LocalDaemonController {
       pluginVersion: this.deps.pluginVersion,
       port: o.port,
       ...(o.vaultPath ? { vaultPath: o.vaultPath } : {}),
-      mounts: o.vaultPath ? mountsFor({ vaultPath: o.vaultPath, maskedDirs: this.maskedDirs(o.vaultPath), externalRoots: this.extRoots }) : [],
+      mounts: o.vaultPath ? mountsFor({ vaultPath: o.vaultPath, maskedDirs: this.maskedDirs(o.vaultPath), externalRoots: this.extRoots, workFolders: this.workFolders }) : [],
       busy: this.getBusy(),
       lastError: this.lastError,
     };

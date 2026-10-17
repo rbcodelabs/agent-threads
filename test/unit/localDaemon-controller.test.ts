@@ -361,6 +361,37 @@ describe('sign in', () => {
   });
 });
 
+describe('resource settings', () => {
+  it('the container is created with the configured memory and cpus, and a change shows as drift', async () => {
+    const h = makeHarness({ settings: { enabled: false, port: 7433, memory: '8g', cpus: 6 } });
+    await h.controller.setUp();
+    const c = h.readState().containers[h.name];
+    expect(c.cmd.join(' ')).toBeDefined();
+    expect(h.calls().find((a) => a.includes('--memory'))).toMatch(/--memory 8G --cpus 6/);
+    expect((await h.controller.snapshot()).assessment.drift).toBe(false);
+    h.deps.saveSettings({ ...(h.deps.loadSettings() as object), enabled: true, port: 7433, memory: '2G', cpus: 6 } as never);
+    expect((await h.controller.snapshot()).assessment.drift).toBe(true);
+  });
+
+  it('invalid values fall back to the defaults', async () => {
+    const h = makeHarness({ settings: { enabled: false, port: 7433, memory: 'banana', cpus: 0 } });
+    await h.controller.setUp();
+    expect(h.calls().find((a) => a.includes('--memory'))).toMatch(/--memory 4G --cpus 4/);
+  });
+});
+
+describe('shared folders', () => {
+  it('mounts the user\'s folders read-write at /work and offers them as workspaces', async () => {
+    const h = makeHarness({ existingDirs: ['/Users/me/projects/repo'], settings: { enabled: false, port: 7433, folders: ['/Users/me/projects/repo', '/missing/dir'] } });
+    await h.controller.setUp();
+    const c = h.readState().containers[h.name];
+    expect(c.volumes).toContain('/Users/me/projects/repo:/work/repo');
+    expect(c.volumes.some((v) => v.includes('/missing/dir'))).toBe(false);
+    expect(c.cmd.join(' ')).toContain('--workspace /work/repo');
+    expect((await h.controller.snapshot()).mounts).toContainEqual({ host: '/Users/me/projects/repo', guest: '/work/repo', readOnly: false });
+  });
+});
+
 describe('external roots', () => {
   it('mounts Geode external roots read-only at /ext and makes them read-only workspaces', async () => {
     const h = makeHarness({ existingDirs: ['/Users/me/Docs'], externalRoots: () => [{ label: 'Docs', path: '/Users/me/Docs' }] });

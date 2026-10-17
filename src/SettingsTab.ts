@@ -1454,6 +1454,11 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   private selectedProjectId: string | null = null;
   private selectedSecretName: string | null = null;
 
+  /** Switch the (single-pane) settings to a section before it is opened. */
+  showSection(id: SettingsTabId): void {
+    this.activeTab = id;
+  }
+
   showNewProject(): void {
     this.activeTab = 'projects';
     this.selectedProjectId = '';
@@ -3260,12 +3265,42 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       this.display();
       return result;
     };
+    // Resources apply when the container is (re)created: the status then offers Update.
+    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[] }): Promise<void> => {
+      const current = this.plugin.settings.localDaemon ?? { enabled: false, port: 7433 };
+      this.plugin.settings.localDaemon = { ...current, ...patch };
+      await this.plugin.saveSettings();
+    };
+    const memorySetting = new Setting(containerEl)
+      .setName('Local daemon memory')
+      .setDesc('Memory limit of the local daemon container, e.g. 4G or 2048M (default 4G). Invalid values fall back to 4G. Applies when the container is next created: choose Update in the block above.')
+      .addText((text) => text
+        .setPlaceholder('4G')
+        .setValue(this.plugin.settings.localDaemon?.memory ?? '')
+        .onChange(async (value) => { await saveResources({ memory: value.trim() || undefined }); }));
+    const foldersSetting = new Setting(containerEl)
+      .setName('Local daemon shared folders')
+      .setDesc('Folders on this Mac to share READ-WRITE with the local daemon, one absolute path per line (for example a repository outside your vault). They appear in the daemon at /work/<folder name>; pick one under "Run on" when you start a thread. An agent there can edit or delete anything in them. Applies when the container is next created: choose Update in the block above.')
+      .addTextArea((ta) => ta
+        .setPlaceholder('/Users/me/projects/my-repo')
+        .setValue((this.plugin.settings.localDaemon?.folders ?? []).join('\n'))
+        .onChange(async (value) => {
+          const folders = value.split('\n').map((l) => l.trim()).filter(Boolean);
+          await saveResources({ folders: folders.length ? folders : undefined });
+        }));
+    const cpusSetting = new Setting(containerEl)
+      .setName('Local daemon CPUs')
+      .setDesc('CPU count of the local daemon container, a whole number from 1 to 64 (default 4). Applies when the container is next created.')
+      .addText((text) => text
+        .setPlaceholder('4')
+        .setValue(this.plugin.settings.localDaemon?.cpus ? String(this.plugin.settings.localDaemon.cpus) : '')
+        .onChange(async (value) => { await saveResources({ cpus: /^\s*\d+\s*$/.test(value) ? Number(value) : undefined }); }));
     renderLocalDaemonPanel(setting.descEl, {
       isMobile: Platform.isMobile,
       pluginVersion: this.plugin.manifest.version,
       snapshot: () => controller.snapshot(),
       subscribe: (listener) => controller.subscribe(listener),
-      setVisible: (visible) => { setting.settingEl.style.display = visible ? '' : 'none'; },
+      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, foldersSetting]) s.settingEl.style.display = visible ? '' : 'none'; },
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       cancel: () => controller.cancel(),
       openUrl: (url) => { try { window.open(url, '_blank'); } catch { /* the panel keeps a link */ } },

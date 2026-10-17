@@ -74,6 +74,25 @@ export const LOCAL_DAEMON_NAME = 'This Mac (container)';
 
 export const LOCAL_DAEMON_MEMORY = DEFAULT_VM_MEMORY;
 export const LOCAL_DAEMON_CPUS = DEFAULT_VM_CPUS;
+export const MAX_DAEMON_CPUS = 64;
+
+const MEMORY_PATTERN = /^\d+[MG]$/i;
+
+/**
+ * Validates a memory limit before it reaches the `container run` argv: `<digits>M|G` with a non-zero amount (Apple's
+ * 1 GiB default OOM-kills pnpm/tsc/tests once the agent is resident); anything else falls back to the default.
+ */
+export function resolveDaemonMemory(value?: string | null): string {
+  const v = typeof value === 'string' ? value.trim() : '';
+  if (!MEMORY_PATTERN.test(v) || Number.parseInt(v, 10) <= 0) return LOCAL_DAEMON_MEMORY;
+  return v.toUpperCase();
+}
+
+/** A whole number in [1, 64]; invalid values fall back to the default, large ones clamp. */
+export function resolveDaemonCpus(value?: number | null): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) return LOCAL_DAEMON_CPUS;
+  return Math.min(value, MAX_DAEMON_CPUS);
+}
 
 /**
  * Oldest daemon this plugin will keep talking to. Bump ONLY when the plugin
@@ -165,12 +184,17 @@ export interface LocalDaemonSpec {
   maskedDirs: readonly string[];
   /** Vetted Geode external roots, mounted READ-ONLY at `/ext/<name>` and offered as read-only workspaces. */
   externalRoots?: ReadonlyArray<ExternalRootMount>;
+  /** Vetted host folders the user shared read-write, mounted at `/work/<name>` and offered as workspaces. */
+  workFolders?: ReadonlyArray<ExternalRootMount>;
   memory: string;
   cpus: number;
 }
 
 /** One vetted external root: an existing absolute host directory and its unique path segment under /ext. */
 export interface ExternalRootMount { host: string; name: string }
+
+/** Parent of the read-write bind mounts for the folders the user shares with the daemon. */
+export const WORK_GUEST_ROOT = '/work';
 
 /** Parent of the read-only bind mounts for connected Geode external roots (same convention as the old sandbox VM). */
 export const EXTERNAL_GUEST_ROOT = '/ext';
@@ -186,6 +210,18 @@ export function sanitizeMountLabel(raw: string): string {
     .replace(/^[-.]+|[-.]+$/g, '')
     .slice(0, 48);
   return cleaned || 'root';
+}
+
+/**
+ * Vets the user's shared folders (settings): absolute existing directories, no ':' / NUL / '..', not '/', and not the
+ * vault or a folder containing it (the vault is mounted already). Same naming and ordering as external roots.
+ */
+export function resolveWorkFolders(
+  folders: readonly string[] | undefined,
+  opts: { vaultPath: string; isDirectory: (hostPath: string) => boolean },
+): ExternalRootMount[] {
+  const entries = (folders ?? []).filter((p) => typeof p === 'string' && p.trim() !== '' && p.trim() !== '/').map((p) => ({ path: p.trim(), label: p.trim().split('/').filter(Boolean).pop() ?? '' }));
+  return resolveExternalRoots(entries, opts);
 }
 
 /**
@@ -240,11 +276,12 @@ export function assertMountablePath(path: string): void {
 }
 
 /** The mounts, in `run` order: the vault read-write, then each existing config directory read-only on top. */
-export function mountsFor(spec: Pick<LocalDaemonSpec, 'vaultPath' | 'maskedDirs' | 'externalRoots'>): Array<{ host: string; guest: string; readOnly: boolean }> {
+export function mountsFor(spec: Pick<LocalDaemonSpec, 'vaultPath' | 'maskedDirs' | 'externalRoots' | 'workFolders'>): Array<{ host: string; guest: string; readOnly: boolean }> {
   const root = spec.vaultPath.replace(/\/+$/, '');
   return [
     { host: root, guest: VAULT_GUEST_PATH, readOnly: false },
     ...spec.maskedDirs.map((d) => ({ host: `${root}/${d}`, guest: `${VAULT_GUEST_PATH}/${d}`, readOnly: true })),
+    ...(spec.workFolders ?? []).map((r) => ({ host: r.host, guest: `${WORK_GUEST_ROOT}/${r.name}`, readOnly: false })),
     ...(spec.externalRoots ?? []).map((r) => ({ host: r.host, guest: `${EXTERNAL_GUEST_ROOT}/${r.name}`, readOnly: true })),
   ];
 }
@@ -262,9 +299,10 @@ export function specSignature(spec: LocalDaemonSpec): string {
 }
 
 /** The replaced `CMD`. It must repeat the image defaults (`--listen 0.0.0.0 --i-know-this-is-open`). */
-export function serveCommand(spec: Pick<LocalDaemonSpec, 'externalRoots'> = {}): string[] {
+export function serveCommand(spec: Pick<LocalDaemonSpec, 'externalRoots' | 'workFolders'> = {}): string[] {
   return [
     '--listen', '0.0.0.0', '--i-know-this-is-open', '--workspace', WORKSPACES_MOUNT, '--workspace', VAULT_GUEST_PATH,
+    ...(spec.workFolders ?? []).flatMap((r) => ['--workspace', `${WORK_GUEST_ROOT}/${r.name}`]),
     // Read-only workspaces: a session may start there but the harness cannot edit (the daemon denies the edit tools).
     ...(spec.externalRoots ?? []).flatMap((r) => ['--readonly-workspace', `${EXTERNAL_GUEST_ROOT}/${r.name}`]),
   ];

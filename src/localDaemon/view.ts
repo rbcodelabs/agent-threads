@@ -141,12 +141,17 @@ export function describeSetup(snap: LocalDaemonSnapshot): string {
   const vault = snap.vaultPath ?? 'your vault';
   const masked = maskedList(snap);
   const external = snap.mounts.filter((m) => m.guest.startsWith('/ext/'));
+  const shared = snap.mounts.filter((m) => m.guest.startsWith('/work/'));
+  const sharedNote = shared.length > 0
+    ? `The folders you share (${shared.map((m) => m.host).join(', ')}) are mounted READ-WRITE at ${shared.map((m) => m.guest).join(', ')}: an agent there can edit or delete anything in them. `
+    : '';
   const externalNote = external.length > 0
     ? `Your connected folders ${external.map((m) => m.host).join(', ')} are mounted READ-ONLY at ${external.map((m) => m.guest).join(', ')}. `
     : '';
   return `${download}It then starts a VM on this Mac that runs the agent-threads daemon, reachable only from this Mac (127.0.0.1). `
     + `Your vault ${vault} is mounted READ-WRITE, so an agent in the VM can edit or delete any note: keep vault backups or sync history. `
     + `${masked === 'no config folders' ? '' : `${masked} are mounted read-only so an agent cannot change plugins or settings. `}`
+    + sharedNote
     + externalNote
     + 'The VM has full outbound network access. If you use Geode\'s GitHub connection, a short-lived GitHub token (refreshed while Geode is open, expiring after 15 minutes) is copied into the VM so git and gh work there. Continue?';
 }

@@ -102,6 +102,11 @@ export interface DispatchInputOptions {
     /** Configured remote daemons; when non-empty the menu offers a "Run on" section. */
     getRemoteDaemons?: () => RemoteDaemonConfig[];
     /**
+     * The managed local daemon ("This Mac (container)") can run here but is not set up: the "Run on" section then
+     * offers a set-up entry that opens its settings.
+     */
+    localDaemonOffer?: { available: () => boolean; onSetUp: () => void };
+    /**
      * Where a thread started now would run on this computer (the selected Project's folder, else
      * the default folder), and this vault's root. With a daemon's vault mapping they pre-fill the
      * remote folder: a vault folder maps to the same folder in the daemon's vault mirror.
@@ -677,7 +682,8 @@ export class DispatchInput {
       });
     }
     const daemons = this.remoteDaemons();
-    if (this.selectedHarness === 'claude' && daemons.length > 0) this.renderRunOnSection(menu, daemons);
+    const offerSetUp = this.options.harnessPicker?.localDaemonOffer?.available() === true;
+    if (this.selectedHarness === 'claude' && (daemons.length > 0 || offerSetUp)) this.renderRunOnSection(menu, daemons, offerSetUp);
     this.sendBtn.setAttribute('aria-expanded', 'true');
     document.addEventListener('pointerdown', this.closeHarnessMenuOnPointerDown);
     document.addEventListener('keydown', this.closeHarnessMenuOnEscape);
@@ -685,7 +691,7 @@ export class DispatchInput {
   }
 
   /** "Run on": this computer, or a remote daemon plus the folder to work in on that machine. */
-  private renderRunOnSection(menu: HTMLElement, daemons: RemoteDaemonConfig[]): void {
+  private renderRunOnSection(menu: HTMLElement, daemons: RemoteDaemonConfig[], offerSetUp = false): void {
     menu.createDiv({ cls: 'ct-harness-menu-separator', attr: { role: 'separator' } });
     menu.createDiv({ cls: 'ct-harness-menu-heading', text: 'Run on' });
     // The Project selection may have changed since the menu was last open.
@@ -722,6 +728,21 @@ export class DispatchInput {
         for (const el of Array.from(menu.querySelectorAll<HTMLElement>('.ct-run-on-item'))) {
           el.setAttribute('aria-checked', String((el.getAttribute('data-run-on') ?? 'local') === (choice.id ?? 'local')));
         }
+      });
+    }
+    if (offerSetUp) {
+      const item = menu.createEl('button', {
+        cls: 'ct-harness-menu-item ct-run-mode-item ct-run-on-item',
+        attr: { role: 'menuitem', 'data-run-on': 'setup-local', title: 'Runs the agent-threads daemon in a container on this Mac. Opens Settings, Remote, Local daemon.' },
+      });
+      const mark = item.createSpan({ cls: 'ct-run-mode-mark', attr: { 'aria-hidden': 'true' } });
+      setIcon(mark, 'box');
+      item.createSpan({ text: 'This Mac (container) \u2014 set up\u2026' });
+      item.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeHarnessMenu(true);
+        this.options.harnessPicker?.localDaemonOffer?.onSetUp();
       });
     }
     this.refreshRunOnFolderRow(menu, daemons);

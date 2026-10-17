@@ -267,6 +267,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private settingTab?: ClaudeThreadsSettingTab;
   private settingSectionTabs = new Map<SettingsTabId, ClaudeThreadsSettingTab>();
   private projectsSectionId?: string;
+  private remoteSectionId?: string;
   /** Stable peer-plugin entry point. Its v1 generation is revoked on unload. */
   api!: { readonly v1: ClaudeThreadsApiV1 };
   settings!: PluginSettings;
@@ -521,6 +522,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         const tabId = host.addSettingSection({ id: section.id, name: section.label, tab });
         this.settingSectionTabs.set(section.id, tab);
         if (section.id === 'projects') this.projectsSectionId = tabId;
+        if (section.id === 'remote') this.remoteSectionId = tabId;
       }
     } else {
       this.settingTab = new ClaudeThreadsSettingTab(this.app, this);
@@ -3583,6 +3585,30 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
     if (open) await this.openThreadInChatView(threadId);
     return threadId;
+  }
+
+  /**
+   * True when "Run on: This Mac (container)" can be offered but is not set up yet: a desktop app, a Mac that can run
+   * the container runtime, and no managed daemon registered. The kickoff picker then shows a set-up entry (what the
+   * removed sandbox VM's in-thread "Run this thread in a sandbox?" card was for).
+   */
+  isLocalDaemonSetupOffered(): boolean {
+    if (!Platform.isDesktopApp || !this.localDaemon) return false;
+    if ((this.settings.remoteDaemons ?? []).some((d) => d.managed === 'local-container')) return false;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      return (require('./sandboxRuntime') as typeof import('./sandboxRuntime')).isRuntimeSupported().supported;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Open Settings → Remote, where the Local daemon block (consent text, progress, sign-in) lives. */
+  openLocalDaemonSettings(): void {
+    (this.settingSectionTabs.get('remote') ?? this.settingTab)?.showSection('remote');
+    const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
+    setting?.open();
+    setting?.openTabById(this.remoteSectionId || this.manifest.id);
   }
 
   /** Open Settings → Projects with a blank new-project draft. */

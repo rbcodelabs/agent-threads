@@ -471,6 +471,34 @@ describe('DispatchInput — no local container run mode', () => {
   });
 });
 
+describe('DispatchInput — set up the local daemon from the picker', () => {
+  function mountOffer(available: boolean) {
+    const onSetUp = vi.fn();
+    const di = new DispatchInput({ app: makeApp(), onSend: vi.fn(), harnessPicker: { initialHarness: 'claude', localDaemonOffer: { available: () => available, onSetUp } } });
+    const container = makeContainer();
+    document.body.appendChild(container);
+    const root = di.mount(container);
+    const sendButton = root.querySelector<HTMLButtonElement>('.ct-send-btn')!;
+    sendButton.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    return { root, onSetUp };
+  }
+
+  it('offers "This Mac (container) - set up" when the daemon can run here but is not set up, and opens its settings', () => {
+    const { root, onSetUp } = mountOffer(true);
+    const item = root.querySelector<HTMLButtonElement>('[data-run-on="setup-local"]');
+    expect(item?.textContent).toContain('This Mac (container)');
+    item!.click();
+    expect(onSetUp).toHaveBeenCalledTimes(1);
+    expect(root.querySelector('.ct-harness-menu')).toBeNull();
+  });
+
+  it('shows nothing extra when it is already set up or cannot run on this machine', () => {
+    const { root } = mountOffer(false);
+    expect(root.querySelector('[data-run-on="setup-local"]')).toBeNull();
+    expect(root.textContent).not.toContain('Run on');
+  });
+});
+
 describe('DispatchInput — Run on a remote daemon: vault folder suggestion', () => {
   const VAULT = '/Users/me/Documents/My Vault';
   const box = { id: 'box', name: 'my-server', url: 'wss://x', tokenSecretName: 'T', defaultCwdRoot: '/home/user/projects', vaultMapping: { remoteRoot: '/home/user/vault' } };
