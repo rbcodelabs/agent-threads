@@ -1,5 +1,6 @@
 import type { AgentHarness, HarnessVmMode, StorageAllocationOptions } from './types';
 import { saveThenAck } from './remote/persistAck';
+import { DaemonMcpStatusStore } from './mcpStatus';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { checkClaudeCli, createDefaultCliProbeDeps, describeCliProblems, findMissingKnownModels, type CliInfo, type CliProblem } from './cliVersion';
 import { FALLBACK_RESOLVED } from './modelOptions';
@@ -272,6 +273,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
   manager!: ThreadManager;
   /** Connections to the remote agent-threads daemons (Settings -> Remote daemons). */
   daemonRegistry: DaemonRegistry | null = null;
+  /** Last MCP server status each remote daemon reported (shown in Settings, Remote). */
+  readonly daemonMcpStatus = new DaemonMcpStatusStore();
   /** The managed daemon in a container on this Mac (desktop only; see src/localDaemon/). */
   localDaemon: import('./localDaemon/controller').LocalDaemonController | null = null;
   /** What the Run on picker asks for a daemon's folders (advertised workspaces, subfolders). */
@@ -616,6 +619,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.remoteFolders = createRemoteFolderSource(this.daemonRegistry);
     this.register(() => { this.daemonRegistry?.disposeAll(); });
     this.manager.remoteDaemons = this.daemonRegistry;
+    this.manager.daemonMcpStatus = this.daemonMcpStatus;
     this.setUpLocalDaemon();
     this.manager.getExternalMounts = () => this.listExternalMountRoots();
     // Lets the manager detect sessions holding stale Google/OAuth proxy configs (per-send check).

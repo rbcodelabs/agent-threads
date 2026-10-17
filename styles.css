@@ -9857,6 +9857,10 @@ button.ct-agent-crumb:focus-visible {
 .ct-remote-advanced { margin-top: 8px; }
 .ct-remote-advanced > summary { cursor: pointer; color: var(--text-muted); }
 .ct-remote-folders-hint { margin: 6px 0; }
+.ct-remote-mcp-status { margin: 6px 0; }
+.ct-remote-mcp-list { margin: 2px 0 0; padding-left: 18px; font-size: var(--font-ui-smaller); }
+.ct-remote-mcp-item--ok { color: var(--text-muted); }
+.ct-remote-mcp-item--bad { color: var(--text-error); font-weight: var(--font-semibold); overflow-wrap: anywhere; }
 .ct-remote-daemon-status {
   display: inline-flex;
   align-items: center;

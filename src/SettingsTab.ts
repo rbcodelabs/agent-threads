@@ -38,6 +38,8 @@ import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
 import { checkAwsCredentialsNow, reauthenticateAws, resolveSignInProfile } from './awsReauth';
 import { promptConfirm } from './confirmModal';
 import { formatToolName } from './toolNameUtils';
+import { describeMcpServer } from './mcpStatus';
+import type { McpServerStatusEntry } from './ClaudeSession';
 
 // View-type string constants, mirrored as local literals (see main.ts) so referencing
 // them never triggers a static import of the desktop-only KanbanView/AgentDashboard
@@ -533,6 +535,17 @@ class OpenAiKeyModal extends Modal {
   }
 }
 
+/** One line per MCP server; anything not connected is flagged so a dead server is visible without opening a thread. */
+export function renderMcpServerStatus(el: HTMLElement, servers: readonly McpServerStatusEntry[]): void {
+  el.empty();
+  el.createDiv({ cls: 'setting-item-description ct-remote-mcp-heading', text: servers.length ? 'MCP servers (from the latest session)' : 'No MCP servers in the latest session' });
+  const list = el.createEl('ul', { cls: 'ct-remote-mcp-list', attr: { 'aria-label': 'MCP server status' } });
+  for (const server of servers) {
+    const d = describeMcpServer(server);
+    list.createEl('li', { cls: `ct-remote-mcp-item ${d.ok ? 'ct-remote-mcp-item--ok' : 'ct-remote-mcp-item--bad mod-warning'}`, text: d.text });
+  }
+}
+
 /**
  * Add / edit one remote daemon. The token is written to the keychain
  * (`app.secretStorage`) under a name derived from the daemon id and never to
@@ -547,6 +560,8 @@ export class RemoteDaemonModal extends Modal {
     private readonly actions: {
       test(candidate: RemoteDaemonConfig, typedToken: string): Promise<DaemonTestOutcome>;
       save(config: RemoteDaemonConfig, token: string): Promise<void>;
+      /** Last MCP server status this daemon's sessions reported (absent until a session has started on it). */
+      mcpStatus?(daemonId: string): McpServerStatusEntry[] | undefined;
     },
   ) {
     super(app);
@@ -580,6 +595,10 @@ export class RemoteDaemonModal extends Modal {
     showTransportWarning();
     new Setting(contentEl).setName('Access token').setDesc(this.existing ? 'Leave blank to keep the stored token.' : 'From `agent-threads token create --scope control` on the daemon machine.')
       .addText((t) => { t.inputEl.type = 'password'; t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { token = v; }); });
+
+    // What the daemon's sessions report about their MCP servers; a server that is down shows as failed.
+    const mcpServers = this.existing ? this.actions.mcpStatus?.(this.existing.id) : undefined;
+    if (mcpServers) renderMcpServerStatus(contentEl.createDiv({ cls: 'ct-remote-mcp-status' }), mcpServers);
 
     // Folders: chosen from what the daemon offers once a test has succeeded; typed paths live under Advanced.
     const foldersEl = contentEl.createDiv({ cls: 'ct-remote-folders' });
@@ -3263,6 +3282,8 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         .setDesc(managed
           ? `${daemon.url} · managed by Agent Threads (Local daemon above)`
           : `${daemon.url}${daemon.defaultCwdRoot ? ` · default folder ${daemon.defaultCwdRoot}` : ''}`);
+      const reported = this.plugin.daemonMcpStatus.get(daemon.id)?.servers;
+      if (reported) renderMcpServerStatus(row.descEl.createDiv({ cls: 'ct-remote-mcp-status' }), reported);
       row.nameEl.createSpan({ cls: `ct-remote-pill ct-remote-pill--${pill.kind} ct-remote-daemon-status`, text: pill.label, attr: { title: pill.title } });
       row.addButton((btn) => btn.setButtonText('Test').onClick(async () => {
         btn.setDisabled(true).setButtonText('Testing…');
@@ -3352,6 +3373,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   private openDaemonModal(existing: RemoteDaemonConfig | null): void {
     new RemoteDaemonModal(this.app, existing, this.plugin.settings.remoteDaemons ?? [], this.plugin.manager.vaultRoot ?? '', {
       test: (candidate, token) => this.testDaemon(candidate, token),
+      mcpStatus: (id) => this.plugin.daemonMcpStatus.get(id)?.servers,
       save: async (config, token) => {
         const list = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
         const index = list.findIndex((d) => d.id === config.id);
