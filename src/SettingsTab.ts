@@ -1257,7 +1257,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     }
 
     if (this.fixedSection) {
-      this.renderActiveTab(containerEl.createDiv({ cls: 'ct-settings-tab-body' }));
+      this.renderActiveTab(containerEl.createDiv({ cls: 'ct-settings-tab-body is-hosted' }));
       return;
     }
 

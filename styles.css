@@ -6501,6 +6501,13 @@
 .ct-settings-tab-body.is-compact { display: flex; flex-direction: column; height: calc(100vh - 32px); min-height: 380px; }
 .ct-settings-tab-body.is-compact .ct-settings-manager { flex: 1; height: auto; min-height: 0; max-height: none; }
 .ct-settings-tab-body.is-compact .ct-secret-storage-notice { margin-bottom: 8px; padding: 6px 10px; }
+/* Sidebar-hosted sections: denser setting rows; long help text clamps to two lines until hovered/focused. */
+.ct-settings-tab-body.is-hosted .setting-item { padding: 8px 0; }
+.ct-settings-tab-body.is-hosted .setting-item-description { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; font-size: var(--font-ui-smaller); line-height: 1.35; }
+.ct-settings-tab-body.is-hosted .setting-item:hover .setting-item-description, .ct-settings-tab-body.is-hosted .setting-item:focus-within .setting-item-description { -webkit-line-clamp: unset; line-clamp: unset; }
+.ct-settings-tab-body.is-hosted .setting-item-heading { padding-top: 14px; }
+.ct-settings-tab-body.is-hosted h1 { font-size: 1.3rem; margin: 0 0 8px; }
+.ct-settings-tab-body.is-hosted h2 { font-size: 1.05rem; margin: 12px 0 6px; }
 .ct-manager-list-toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
 .ct-manager-list-toolbar > input { flex: 1; min-width: 0; background: var(--background-modifier-form-field); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); color: var(--text-normal); font-size: var(--font-ui-small); padding: 5px 8px; }
 .ct-manager-list-toolbar .ct-manager-add { width: 30px; padding: 0; font-size: 1.2em; line-height: 1; border: 0; border-radius: var(--radius-s); background: var(--interactive-accent); color: var(--text-on-accent); cursor: pointer; }
