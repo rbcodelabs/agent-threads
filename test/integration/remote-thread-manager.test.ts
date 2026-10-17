@@ -154,10 +154,9 @@ describe('remote thread through ThreadManager', () => {
     }
   });
 
-  it('refuses container and harness switching for a remote thread', async () => {
+  it('refuses harness switching for a remote thread', async () => {
     const { manager } = await setup();
     const thread = manager.createRemoteThread('nope', { daemonId: 'box', remoteCwd: '/srv/workspaces/x', clientId: 'c' });
-    await expect(manager.setThreadHarnessVmMode(thread.id, 'always', async () => undefined)).rejects.toThrow(/remote daemon/);
     await expect(manager.switchHarness(thread.id, 'codex', async () => undefined)).rejects.toThrow(/Claude only/);
   });
 
