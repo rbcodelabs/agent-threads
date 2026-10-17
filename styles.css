@@ -7827,11 +7827,13 @@ body.ct-skills-resizing {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 6px 3px 8px;
+  padding: 2px 6px 2px 8px;
   margin-top: 6px;
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-  border-radius: 6px;
+  /* Quiet Rail: a ghost pill on the composer's 8px radius, not a solid accent block. */
+  background: var(--background-modifier-hover);
+  color: var(--interactive-accent);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
   font-size: var(--font-ui-smaller);
   font-weight: 600;
   white-space: nowrap;
@@ -9882,3 +9884,225 @@ button.ct-agent-crumb:focus-visible {
   margin: 8px 0 16px;
 }
 .ct-cli-notice-copy { flex-shrink: 0; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Composer "Quiet Rail": settings indicator, settings popover, project popover.
+   Theme variables only, so Geode/Obsidian light + dark and mobile all work.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* The popover-anchored footer must not collapse while a popover is open. */
+.ct-panel-collapsible.ct-popover-open .ct-input-footer {
+  max-height: 50px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ct-more-btn.ct-settings-indicator {
+  width: auto;
+  min-width: 34px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-family: var(--font-interface);
+}
+
+.ct-si-body {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ct-si-glyph {
+  position: relative;
+  display: inline-flex;
+  color: var(--text-muted);
+}
+
+.ct-more-btn.ct-settings-indicator .ct-si-glyph svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* Model glyph is tinted by tier; unknown models stay neutral. */
+.ct-si-model[data-tier="haiku"] { color: var(--color-green, var(--text-muted)); }
+.ct-si-model[data-tier="sonnet"] { color: var(--color-blue, var(--text-muted)); }
+.ct-si-model[data-tier="opus"] { color: var(--color-purple, var(--text-muted)); }
+.ct-si-model[data-tier="fable"] { color: var(--color-orange, var(--text-muted)); }
+
+.ct-more-btn.ct-settings-indicator .ct-si-chevron svg {
+  width: 11px;
+  height: 11px;
+}
+
+.ct-si-chevron {
+  display: inline-flex;
+  opacity: 0.7;
+}
+
+.ct-settings-indicator[aria-expanded="true"] .ct-si-chevron { transform: rotate(180deg); }
+.ct-settings-indicator[aria-expanded="true"] { background: var(--background-modifier-hover); }
+
+.ct-settings-indicator:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
+.ct-si-marker {
+  position: absolute;
+  right: -3px;
+  top: -3px;
+  box-sizing: border-box;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--background-primary);
+  font-size: 6px;
+  font-weight: 800;
+  line-height: 5px;
+  text-align: center;
+  color: var(--background-primary);
+}
+.ct-si-marker--connected { background: var(--color-green, #3fb950); }
+.ct-si-marker--unreachable { background: var(--color-yellow, #d29922); width: 9px; height: 9px; line-height: 7px; right: -4px; top: -4px; }
+
+.ct-settings-indicator .ct-si-spinner { display: inline-flex; }
+.ct-settings-indicator.ct-summarize-spinning .ct-si-body { display: none; }
+
+/* — Popovers (anchored above the composer, inside .ct-panel-wrapper) ─────── */
+.ct-settings-popover,
+.ct-project-popover {
+  position: absolute;
+  bottom: 100%;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(300px, calc(100% - 20px));
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-small);
+}
+.ct-settings-popover { right: 10px; }
+.ct-project-popover { left: 10px; }
+
+.ct-sp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ct-sp-item:hover,
+.ct-sp-item:focus-visible { background: var(--background-modifier-hover); }
+.ct-sp-item:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+.ct-sp-item:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.ct-sp-icon,
+.ct-sp-chevron,
+.ct-sp-check { display: inline-flex; flex-shrink: 0; color: var(--text-muted); }
+.ct-sp-icon svg,
+.ct-sp-chevron svg,
+.ct-sp-check svg { width: 14px; height: 14px; }
+.ct-sp-check { width: 14px; color: var(--interactive-accent); }
+
+.ct-sp-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-sp-row .ct-sp-label { flex: 0 0 auto; }
+.ct-sp-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--text-muted);
+}
+
+.ct-sp-options {
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 4px 14px;
+  padding-left: 6px;
+  border-left: 1px solid var(--background-modifier-border);
+}
+.ct-sp-option .ct-sp-label { white-space: normal; }
+.ct-sp-group-title {
+  padding: 6px 8px 2px;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ct-sp-note {
+  padding: 4px 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  white-space: pre-line;
+}
+.ct-sp-divider { height: 1px; margin: 4px 2px; background: var(--background-modifier-border); }
+
+/* Project popover */
+.ct-pp-info { padding: 4px 8px 6px; }
+.ct-pp-info-label { color: var(--text-faint); font-size: var(--font-ui-smaller); }
+.ct-pp-cwd {
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ct-pp-bar { display: flex; align-items: center; gap: 6px; padding: 2px 4px 6px; }
+.ct-pp-filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: var(--font-ui-smaller);
+}
+.ct-pp-sort {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.ct-pp-sort-btn {
+  height: 24px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+}
+.ct-pp-sort-btn[aria-pressed="true"] { background: var(--background-modifier-hover); color: var(--text-normal); }
+.ct-pp-sort-btn:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+.ct-pp-list { display: flex; flex-direction: column; }
+
+/* Narrow panes and the mobile layout: full-width, bottom-sheet-like list. */
+@media (max-width: 480px) {
+  .ct-settings-popover,
+  .ct-project-popover { left: 6px; right: 6px; width: auto; max-height: min(70vh, 480px); }
+}
+.ct-root.ct-mobile .ct-settings-popover,
+.ct-root.ct-mobile .ct-project-popover { left: 6px; right: 6px; width: auto; max-height: min(70vh, 480px); }
+.ct-root.ct-mobile .ct-sp-item { min-height: 44px; }
+.ct-root.ct-mobile .ct-pp-filter { height: 36px; }
+.ct-root.ct-mobile .ct-pp-sort-btn { height: 34px; }
