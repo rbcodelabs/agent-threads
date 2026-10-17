@@ -6498,6 +6498,9 @@
 .ct-settings-page-header button.mod-cta, .ct-manager-detail button.mod-cta { background: var(--interactive-accent); border-color: transparent; color: var(--text-on-accent); }
 .ct-manager-detail button.mod-warning { color: var(--color-red); }
 .ct-settings-manager { display: grid; grid-template-columns: minmax(190px, .78fr) minmax(300px, 1.35fr); border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; min-height: 360px; height: clamp(360px, calc(100vh - 150px), 640px); }
+.vertical-tab-content-container:has(.ct-settings-tab-body.is-compact) { display: flex; flex-direction: column; overflow: hidden; }
+.vertical-tab-content-container:has(.ct-settings-tab-body.is-compact) > .vertical-tab-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.vertical-tab-content-container:has(.ct-settings-tab-body.is-compact) .ct-settings-tab-body.is-compact { flex: 1; height: auto; min-height: 0; }
 .ct-settings-tab-body.is-compact { display: flex; flex-direction: column; height: calc(100vh - 32px); min-height: 380px; }
 .ct-settings-tab-body.is-compact .ct-settings-manager { flex: 1; height: auto; min-height: 0; max-height: none; }
 .ct-settings-tab-body.is-compact .ct-secret-storage-notice { margin-bottom: 8px; padding: 6px 10px; }
