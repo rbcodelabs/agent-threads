@@ -79,6 +79,7 @@ describe('describeSetup (the consent text)', () => {
   it('says nothing needs downloading when everything is present', () => {
     expect(describeSetup(snap())).toContain('Nothing needs downloading');
     expect(describeSetup(snap())).toContain('GitHub token');
+    expect(describeSetup({ ...snap(), mounts: [{ host: '/Users/me/Docs', guest: '/ext/Docs', readOnly: true }] })).toContain('connected folders /Users/me/Docs are mounted READ-ONLY at /ext/Docs');
     expect(describeSetup(snap())).not.toContain('sandbox');
   });
 });

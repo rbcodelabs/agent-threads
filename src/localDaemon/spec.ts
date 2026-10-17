@@ -148,8 +148,66 @@ export interface LocalDaemonSpec {
   hostPort: number;
   /** Host-side config directories that exist and are masked read-only (see {@link MASKED_VAULT_DIRS}). */
   maskedDirs: readonly string[];
+  /** Vetted Geode external roots, mounted READ-ONLY at `/ext/<name>` and offered as read-only workspaces. */
+  externalRoots?: ReadonlyArray<ExternalRootMount>;
   memory: string;
   cpus: number;
+}
+
+/** One vetted external root: an existing absolute host directory and its unique path segment under /ext. */
+export interface ExternalRootMount { host: string; name: string }
+
+/** Parent of the read-only bind mounts for connected Geode external roots (same convention as the old sandbox VM). */
+export const EXTERNAL_GUEST_ROOT = '/ext';
+
+/** A Geode external root as reported by the host's `externalRoots.listMountRoots()`. */
+export interface ExternalRootInput { rootId?: string; label?: string; path?: string; projectId?: string }
+
+/** Like a container name but keeps case and `.`/`_`/`-`; never '.', '..' or empty. */
+export function sanitizeMountLabel(raw: string): string {
+  const cleaned = (raw ?? '')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 48);
+  return cleaned || 'root';
+}
+
+/**
+ * Turns host-reported external roots into vetted read-only mounts. The host is treated as untrusted-ish input: an
+ * entry whose path is not absolute, contains ':', NUL or '..', is not an existing directory, or equals or lies inside
+ * the vault (already mounted) is dropped, as are duplicate paths. Colliding labels get -2, -3 suffixes. Sorted by
+ * path so the same set always gives the same spec signature.
+ */
+export function resolveExternalRoots(
+  entries: readonly ExternalRootInput[] | null | undefined,
+  opts: { vaultPath: string; isDirectory: (hostPath: string) => boolean },
+): ExternalRootMount[] {
+  if (!Array.isArray(entries)) return [];
+  const trim = (p: string) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
+  const vault = trim(opts.vaultPath);
+  const usedNames = new Set<string>();
+  const usedPaths = new Set<string>();
+  const out: ExternalRootMount[] = [];
+  const sorted = [...entries].sort((a, b) => String(a?.path ?? '').localeCompare(String(b?.path ?? '')));
+  for (const entry of sorted) {
+    const raw = entry?.path;
+    if (typeof raw !== 'string' || !raw.startsWith('/')) continue;
+    if (raw.includes(':') || /[\0\n\r]/.test(raw) || raw.split('/').includes('..')) continue;
+    const host = trim(raw);
+    if (host === vault || host.startsWith(`${vault}/`) || vault.startsWith(`${host}/`)) continue;
+    if (usedPaths.has(host)) continue;
+    let isDir = false;
+    try { isDir = opts.isDirectory(host); } catch { isDir = false; }
+    if (!isDir) continue;
+    const base = sanitizeMountLabel(typeof entry.label === 'string' ? entry.label : '');
+    let name = base;
+    for (let n = 2; usedNames.has(name.toLowerCase()); n++) name = `${base}-${n}`;
+    usedNames.add(name.toLowerCase());
+    usedPaths.add(host);
+    out.push({ host, name });
+  }
+  return out;
 }
 
 export class SpecError extends Error {
@@ -167,11 +225,12 @@ export function assertMountablePath(path: string): void {
 }
 
 /** The mounts, in `run` order: the vault read-write, then each existing config directory read-only on top. */
-export function mountsFor(spec: Pick<LocalDaemonSpec, 'vaultPath' | 'maskedDirs'>): Array<{ host: string; guest: string; readOnly: boolean }> {
+export function mountsFor(spec: Pick<LocalDaemonSpec, 'vaultPath' | 'maskedDirs' | 'externalRoots'>): Array<{ host: string; guest: string; readOnly: boolean }> {
   const root = spec.vaultPath.replace(/\/+$/, '');
   return [
     { host: root, guest: VAULT_GUEST_PATH, readOnly: false },
     ...spec.maskedDirs.map((d) => ({ host: `${root}/${d}`, guest: `${VAULT_GUEST_PATH}/${d}`, readOnly: true })),
+    ...(spec.externalRoots ?? []).map((r) => ({ host: r.host, guest: `${EXTERNAL_GUEST_ROOT}/${r.name}`, readOnly: true })),
   ];
 }
 
@@ -183,13 +242,17 @@ export function specSignature(spec: LocalDaemonSpec): string {
     mounts: mountsFor(spec),
     memory: spec.memory,
     cpus: spec.cpus,
-    command: serveCommand(),
+    command: serveCommand(spec),
   })).slice(0, 16);
 }
 
 /** The replaced `CMD`. It must repeat the image defaults (`--listen 0.0.0.0 --i-know-this-is-open`). */
-export function serveCommand(): string[] {
-  return ['--listen', '0.0.0.0', '--i-know-this-is-open', '--workspace', WORKSPACES_MOUNT, '--workspace', VAULT_GUEST_PATH];
+export function serveCommand(spec: Pick<LocalDaemonSpec, 'externalRoots'> = {}): string[] {
+  return [
+    '--listen', '0.0.0.0', '--i-know-this-is-open', '--workspace', WORKSPACES_MOUNT, '--workspace', VAULT_GUEST_PATH,
+    // Read-only workspaces: a session may start there but the harness cannot edit (the daemon denies the edit tools).
+    ...(spec.externalRoots ?? []).flatMap((r) => ['--readonly-workspace', `${EXTERNAL_GUEST_ROOT}/${r.name}`]),
+  ];
 }
 
 export function labelsFor(spec: LocalDaemonSpec): Record<string, string> {
@@ -296,7 +359,7 @@ export function runArgs(spec: LocalDaemonSpec): string[] {
     // A path, not a secret: where the daemon looks for `claude-token` (read once, at start).
     '--env', `CREDENTIALS_DIRECTORY=${CREDENTIALS_DIR}`,
     localImageRef(spec.version),
-    ...serveCommand(),
+    ...serveCommand(spec),
   ];
 }
 

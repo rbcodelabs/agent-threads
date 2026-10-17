@@ -60,6 +60,9 @@ import {
   localImageRef,
   mountsFor,
   specSignature,
+  resolveExternalRoots,
+  type ExternalRootInput,
+  type ExternalRootMount,
   assertMountablePath,
   SpecError,
   type LocalDaemonSpec,
@@ -95,6 +98,8 @@ export interface LocalDaemonDeps {
   getRegistered(): RemoteDaemonConfig | undefined;
   register(config: RemoteDaemonConfig): Promise<void>;
   unregister(): Promise<void>;
+  /** Geode's connected external roots (`externalRoots.listMountRoots()`), mounted read-only; absent on Obsidian / older Geode. */
+  externalRoots?(): Promise<ExternalRootInput[] | null | undefined>;
   /** Runs the in-container `claude setup-token` flow. Absent where it cannot run (the sign-in then reports so). */
   signInRunner?(opts: { containerName: string; containerBinaryPath: string } & SignInHandlers): Promise<ContainerSignInResult>;
   /** State changed: a UI should re-read {@link LocalDaemonController.getBusy} / take a new snapshot. */
@@ -275,8 +280,20 @@ export class LocalDaemonController {
     return MASKED_VAULT_DIRS.filter((d) => this.deps.isDirectory(`${vaultPath.replace(/\/+$/, '')}/${d}`));
   }
 
+  /** Vetted external roots as of the last {@link refreshExternalRoots}. */
+  private extRoots: ExternalRootMount[] = [];
+
+  private async refreshExternalRoots(vaultPath: string | null): Promise<void> {
+    if (!vaultPath || !this.deps.externalRoots) { this.extRoots = []; return; }
+    try {
+      this.extRoots = resolveExternalRoots(await this.deps.externalRoots(), { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) });
+    } catch {
+      this.extRoots = []; // an unreadable host answer means no extra mounts, never a failed operation
+    }
+  }
+
   private specFor(vaultPath: string, version: string, port: number): LocalDaemonSpec {
-    return { vaultPath, version, hostPort: port, maskedDirs: this.maskedDirs(vaultPath), memory: LOCAL_DAEMON_MEMORY, cpus: LOCAL_DAEMON_CPUS };
+    return { vaultPath, version, hostPort: port, maskedDirs: this.maskedDirs(vaultPath), externalRoots: this.extRoots, memory: LOCAL_DAEMON_MEMORY, cpus: LOCAL_DAEMON_CPUS };
   }
 
   private emptyObserved(partial: Partial<Observed>): Observed {
@@ -290,6 +307,7 @@ export class LocalDaemonController {
   /** Read-only: facts about the world plus the assessment. Never mutates anything. */
   async observe(signal?: AbortSignal): Promise<{ observed: Observed; desired: Desired; assessment: Assessment; version: string; port: number; vaultPath: string | null; daemonVersion?: string }> {
     const vaultPath = this.deps.vaultPath();
+    await this.refreshExternalRoots(vaultPath);
     const settings = this.settings();
     const port = settings.port || DEFAULT_HOST_PORT;
     const pluginVersion = this.deps.pluginVersion;
@@ -375,7 +393,7 @@ export class LocalDaemonController {
       pluginVersion: this.deps.pluginVersion,
       port: o.port,
       ...(o.vaultPath ? { vaultPath: o.vaultPath } : {}),
-      mounts: o.vaultPath ? mountsFor({ vaultPath: o.vaultPath, maskedDirs: this.maskedDirs(o.vaultPath) }) : [],
+      mounts: o.vaultPath ? mountsFor({ vaultPath: o.vaultPath, maskedDirs: this.maskedDirs(o.vaultPath), externalRoots: this.extRoots }) : [],
       busy: this.getBusy(),
       lastError: this.lastError,
     };

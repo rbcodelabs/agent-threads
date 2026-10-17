@@ -12,6 +12,7 @@ import {
   labelsFor,
   localImageRef,
   mountsFor,
+  resolveExternalRoots,
   prepareArgs,
   prepareScript,
   publishedImageRef,
@@ -112,6 +113,40 @@ describe('golden argv', () => {
     expect(args.join(' ')).not.toContain('.geode');
     expect(args.join(' ')).toContain('/Users/user/Vault/.obsidian:/vault/.obsidian:ro');
     expect(mountsFor({ vaultPath: '/v/', maskedDirs: [] })).toEqual([{ host: '/v', guest: '/vault', readOnly: false }]);
+  });
+
+  it('external roots: read-only mounts at /ext/<name> plus read-only workspaces, part of the spec signature', () => {
+    const withRoots = { ...spec, externalRoots: [{ host: '/Users/user/Docs', name: 'Docs' }, { host: '/data/shared', name: 'shared' }] };
+    const args = runArgs(withRoots);
+    expect(args.join(' ')).toContain('--volume /Users/user/Docs:/ext/Docs:ro');
+    expect(args.join(' ')).toContain('--volume /data/shared:/ext/shared:ro');
+    const cmd = args.slice(args.indexOf('--listen'));
+    expect(cmd).toEqual(expect.arrayContaining(['--readonly-workspace', '/ext/Docs', '/ext/shared']));
+    expect(specSignature(withRoots)).not.toBe(specSignature(spec));
+    expect(specSignature({ ...withRoots })).toBe(specSignature(withRoots));
+    // Nothing writable besides the vault and the workspaces volume.
+    expect(mountsFor(withRoots).filter((m) => !m.readOnly)).toEqual([{ host: '/Users/user/Vault', guest: '/vault', readOnly: false }]);
+  });
+
+  it('resolveExternalRoots vets what the host reports', () => {
+    const exists = new Set(['/a/Docs', '/b/Docs', '/c/data', '/Users/user/Vault/sub']);
+    const got = resolveExternalRoots([
+      { label: 'Docs', path: '/b/Docs' },
+      { label: 'Docs', path: '/a/Docs' },
+      { label: 'dup', path: '/a/Docs' },
+      { label: 'rel', path: 'relative/dir' },
+      { label: 'colon', path: '/x:y' },
+      { label: 'dots', path: '/a/../etc' },
+      { label: 'missing', path: '/nope' },
+      { label: 'insideVault', path: '/Users/user/Vault/sub' },
+      { label: 'odd label/with*chars', path: '/c/data/' },
+    ], { vaultPath: '/Users/user/Vault', isDirectory: (p) => exists.has(p) });
+    expect(got).toEqual([
+      { host: '/a/Docs', name: 'Docs' },
+      { host: '/b/Docs', name: 'Docs-2' },
+      { host: '/c/data', name: 'odd-label-with-chars' },
+    ]);
+    expect(resolveExternalRoots(undefined, { vaultPath: '/v', isDirectory: () => true })).toEqual([]);
   });
 
   it('refuses a vault path the runtime would mis-parse', () => {

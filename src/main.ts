@@ -406,6 +406,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
   /** How long to wait between background task poll attempts. */
   private static readonly BG_TASK_POLL_INTERVAL_MS = 30_000;
 
+  /** Geode-only: connected external roots. Undefined on Obsidian / older Geode -> no extras. */
+  private async listExternalMountRoots() {
+    const host = (this.app as unknown as {
+      host?: { externalRoots?: { listMountRoots?: () => Promise<Array<{ rootId: string; label: string; path: string; projectId?: string }>> } };
+    }).host;
+    return host?.externalRoots?.listMountRoots?.();
+  }
+
   async onload(): Promise<void> {
     // Claim persistence before any awaited startup work. Obsidian may construct
     // this generation before the prior instance's async onunload has finished.
@@ -2585,6 +2593,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       setRemoteDaemons: (next) => { this.settings.remoteDaemons = next; },
       saveSettings: () => this.saveSettings(),
       onRegistryChanged: () => this.daemonRegistry?.refresh(),
+      externalRoots: () => this.listExternalMountRoots(),
       createSocket: createPluginWebSocketFactory(),
       log: (message) => debugLog(message),
     });

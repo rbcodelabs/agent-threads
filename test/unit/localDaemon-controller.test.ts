@@ -361,6 +361,36 @@ describe('sign in', () => {
   });
 });
 
+describe('external roots', () => {
+  it('mounts Geode external roots read-only at /ext and makes them read-only workspaces', async () => {
+    const h = makeHarness({ existingDirs: ['/Users/me/Docs'], externalRoots: () => [{ label: 'Docs', path: '/Users/me/Docs' }] });
+    await h.controller.setUp();
+    const c = h.readState().containers[h.name];
+    expect(c.volumes).toContain('/Users/me/Docs:/ext/Docs:ro');
+    expect(c.cmd).toEqual(expect.arrayContaining(['--readonly-workspace', '/ext/Docs']));
+    expect((await h.controller.snapshot()).mounts).toContainEqual({ host: '/Users/me/Docs', guest: '/ext/Docs', readOnly: true });
+  });
+
+  it('a changed set of roots shows as drift and is applied when the container is recreated', async () => {
+    let roots: Array<{ label: string; path: string }> = [];
+    const h = makeHarness({ existingDirs: ['/Users/me/Docs'], externalRoots: () => roots });
+    await h.controller.setUp();
+    expect((await h.controller.snapshot()).assessment.drift).toBe(false);
+    roots = [{ label: 'Docs', path: '/Users/me/Docs' }];
+    expect((await h.controller.snapshot()).assessment.drift).toBe(true);
+    await h.controller.stop();
+    await h.controller.start();
+    expect(h.readState().containers[h.name].volumes).toContain('/Users/me/Docs:/ext/Docs:ro');
+    expect((await h.controller.snapshot()).assessment.drift).toBe(false);
+  });
+
+  it('an unreadable host answer means no extra mounts, never a failed operation', async () => {
+    const h = makeHarness({ externalRoots: () => { throw new Error('host bridge exploded'); } });
+    await h.controller.setUp();
+    expect(h.readState().containers[h.name].volumes.some((v) => v.includes('/ext/'))).toBe(false);
+  });
+});
+
 describe('update, reset, remove', () => {
   it('update replaces the container at the plugin version but keeps the volumes and token', async () => {
     const h = makeHarness({ pluginVersion: '0.64.0', secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE } });

@@ -13,7 +13,7 @@ import { LocalDaemonController, type LocalDaemonDeps } from './controller';
 import { LocalDaemonGithubDelivery, type LocalDaemonGithubDeps } from './githubDelivery';
 import { createDefaultRuntimeApi } from './runtime';
 import { parseHealthz } from './parse';
-import { LOCAL_DAEMON_ID } from './spec';
+import { LOCAL_DAEMON_ID, type ExternalRootInput } from './spec';
 
 export interface LocalDaemonHost {
   /** Absolute vault path on disk, or null (mobile / non-filesystem vault). */
@@ -29,6 +29,8 @@ export interface LocalDaemonHost {
   saveSettings(): Promise<void>;
   /** The Remote daemons list changed: connection clients must be refreshed. */
   onRegistryChanged(): void;
+  /** Geode's connected external roots; absent on Obsidian / older Geode. */
+  externalRoots?(): Promise<ExternalRootInput[] | null | undefined>;
   createSocket: WebSocketFactory;
   log?(message: string): void;
 }
@@ -133,6 +135,7 @@ export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonC
         onCodePrompt: opts.onCodePrompt,
       });
     },
+    ...(host.externalRoots ? { externalRoots: () => host.externalRoots!() } : {}),
     log: host.log,
   };
   return new LocalDaemonController(deps);
