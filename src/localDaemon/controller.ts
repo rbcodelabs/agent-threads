@@ -663,13 +663,14 @@ export class LocalDaemonController {
   }
 
   /**
-   * Claude sign-in for the daemon. Reuses an existing container sign-in (no prompt) when the keychain has one;
-   * otherwise runs the in-container `claude setup-token` flow once, stores the token, and writes it to the daemon.
+   * Claude sign-in for the daemon. Reuses an existing container sign-in (no prompt) when the keychain has one
+   * (unless `force`, used when that token has expired); otherwise runs the in-container `claude setup-token` flow once, stores the token, and writes it to the daemon.
    */
-  signIn(handlers: SignInHandlers, opts: RunOptions = {}): Promise<{ ok: true } | { ok: false; error: string }> {
+  signIn(handlers: SignInHandlers, opts: RunOptions & { force?: boolean } = {}): Promise<{ ok: true } | { ok: false; error: string }> {
     return this.runOp('sign-in', opts, async (ctx) => {
       this.requireEnabled();
-      if (this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET)) {
+      // `force`: the stored token no longer works (expired or revoked), so run the flow again instead of reusing it.
+      if (!opts.force && this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET)) {
         await this.reconcile(ctx);
         return { ok: true as const };
       }
@@ -685,6 +686,11 @@ export class LocalDaemonController {
         return { ok: false as const, error: `Signed in, but saving the token failed: ${err instanceof Error ? err.message : String(err)}` };
       }
       ctx.emit({ label: ACTION_LABEL['apply-credential'] });
+      if (opts.force) {
+        // The volume already holds a credential (the stale one), so the plan would never rewrite it: do it explicitly.
+        const o = await this.observe(ctx.signal);
+        await this.execute(['apply-credential'], o, ctx);
+      }
       await this.reconcile(ctx);
       return { ok: true as const };
     });

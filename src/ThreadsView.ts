@@ -5977,7 +5977,8 @@ export class ThreadsView extends ItemView {
    * "Sign in to Claude" card for a turn whose silent fresh-process retry
    * still failed to authenticate (see claudeAuthRecovery.ts). Desktop only.
    *
-   * Runs `claude auth login` on the host.
+   * Host threads run `claude auth login` on the host. A thread on the managed local daemon signs in INSIDE the daemon
+   * container (`claude setup-token`, paste back a login code) and forces a fresh token: the stored one just failed.
    */
   private renderClaudeSignInCard(threadId: string, message: string): void {
     this.messagesEl.querySelector('.ct-auth-required')?.remove();
@@ -5985,11 +5986,28 @@ export class ThreadsView extends ItemView {
       message,
       canSignIn: Platform.isDesktopApp,
       flavor: isAwsSignInExpiredError(message) ? 'aws' : 'claude',
-      signIn: async (onProgress, onUrl) => {
+      signIn: async (onProgress, onUrl, onCodePrompt) => {
         // Bedrock credential failure: native AWS SSO device-flow sign-in on the
         // host (opens the browser itself; the URL is the manual fallback).
         if (isAwsSignInExpiredError(message)) {
           return reauthenticateAws(this.plugin.settings, message, { onProgress, onUrl });
+        }
+        // The flow is chosen when the button is clicked: this card is also rebuilt from saved state after a reload.
+        const remote = this.manager.getThread(threadId)?.remote;
+        const daemon = remote ? (this.plugin.settings.remoteDaemons ?? []).find((d) => d.id === remote.daemonId) : undefined;
+        if (daemon?.managed === 'local-container') {
+          const controller = this.plugin.localDaemon;
+          if (!controller) return { ok: false as const, error: 'The local daemon is not available on this platform.' };
+          onProgress('Signing in inside the local daemon…');
+          return controller.signIn({
+            onProgress,
+            onUrl: (url) => {
+              onUrl(url);
+              // The CLI runs inside the container and cannot launch a host browser; the link stays as the fallback.
+              try { window.open(url, '_blank'); } catch { /* link is the fallback */ }
+            },
+            onCodePrompt,
+          }, { force: true });
         }
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { spawn } = require('child_process') as typeof import('child_process');

@@ -320,6 +320,30 @@ describe('sign in', () => {
     expect(h.calls().join('\n')).not.toContain(CLAUDE);
   });
 
+  it('force re-runs the flow although a token exists, and rewrites the credential in the volume', async () => {
+    const NEW = 'sk-ant-oat01-' + 'n'.repeat(40);
+    const signIn = vi.fn(async () => ({ ok: true as const, token: NEW }));
+    const h = makeHarness({ secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE }, signIn });
+    await h.controller.setUp();
+    expect(h.readState().volumes[dataVolumeFor(h.vaultPath)]?.credential).toBe(CLAUDE);
+    const r = await h.controller.signIn({ onProgress: vi.fn(), onUrl: vi.fn(), onCodePrompt: async () => 'code' }, { force: true });
+    expect(r).toEqual({ ok: true });
+    expect(signIn).toHaveBeenCalledTimes(1);
+    expect(h.claude()).toBe(NEW);
+    expect(h.readState().volumes[dataVolumeFor(h.vaultPath)]?.credential).toBe(NEW);
+    expect((await h.controller.snapshot()).assessment.status).toBe('running');
+    expect(h.calls().join('\n')).not.toContain(NEW);
+  });
+
+  it('a failed forced sign-in keeps the old credential', async () => {
+    const h = makeHarness({ secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE }, signIn: async () => ({ ok: false as const, error: 'cancelled' }) });
+    await h.controller.setUp();
+    const r = await h.controller.signIn({ onProgress: vi.fn(), onUrl: vi.fn(), onCodePrompt: async () => null }, { force: true });
+    expect(r).toEqual({ ok: false, error: 'cancelled' });
+    expect(h.claude()).toBe(CLAUDE);
+    expect(h.readState().volumes[dataVolumeFor(h.vaultPath)]?.credential).toBe(CLAUDE);
+  });
+
   it('a failed or cancelled sign-in changes nothing', async () => {
     const h = makeHarness({ signIn: async () => ({ ok: false as const, error: 'Sign-in timed out' }) });
     await h.controller.setUp();
