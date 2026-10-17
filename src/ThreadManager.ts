@@ -770,6 +770,65 @@ export class ThreadManager {
     }
   }
 
+  /**
+   * Moves a Claude thread between this computer and a daemon (the managed local daemon, or any configured one), the
+   * way the removed per-thread sandbox VM's "Run in" switch did: the conversation stays, and because a native Claude
+   * session cannot be resumed across machines it is dropped and a same-harness handoff (summary plus transcript
+   * references) carries the conversation to the new place. Takes effect on the next message.
+   */
+  async moveThreadExecution(
+    id: string,
+    target: { kind: 'daemon'; daemonId: string; remoteCwd: string; clientId: string } | { kind: 'host'; cwd: string },
+    persist: () => Promise<void>,
+  ): Promise<void> {
+    const thread = this.threads.get(id);
+    if (!thread) throw new Error(`Thread not found: ${id}`);
+    if ((thread.agentHarness ?? 'claude') !== 'claude') throw new Error('Only Claude threads can run on a daemon.');
+    if (target.kind === 'daemon' && thread.remote?.daemonId === target.daemonId) return;
+    if (target.kind === 'host' && !thread.remote) return;
+    const blocked = this.getHarnessSwitchBlockReason(id);
+    if (blocked) throw new Error(blocked);
+
+    const snapshot = {
+      remote: thread.remote, cwd: thread.cwd, originRepoPath: thread.originRepoPath, sessionGeneration: thread.sessionGeneration,
+      sessionId: thread.sessionId, pendingHarnessHandoff: thread.pendingHarnessHandoff, updatedAt: thread.updatedAt,
+    };
+    this.harnessSwitches.add(id);
+    try {
+      if (target.kind === 'daemon') {
+        thread.remote = { daemonId: target.daemonId, ownership: 'client', remoteCwd: target.remoteCwd, lastSeq: 0, ownerClientId: target.clientId };
+        thread.cwd = target.remoteCwd;
+      } else {
+        delete thread.remote;
+        thread.cwd = target.cwd;
+      }
+      delete thread.sessionId;
+      delete thread.originRepoPath;
+      thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
+      thread.pendingHarnessHandoff = createHarnessHandoff(thread, 'claude', 'claude');
+      thread.updatedAt = Date.now();
+      await persist();
+      if (this.threads.get(id) !== thread) throw new Error('Thread was deleted while the move was being saved.');
+      const oldSession = this.sessions.get(id);
+      if (oldSession) oldSession.close();
+      this.sessions.delete(id);
+      this.selectedAgentRuns.delete(id);
+      this.emit(id, { type: 'harness_changed', sourceHarness: 'claude', targetHarness: 'claude' });
+    } catch (error) {
+      if (this.threads.get(id) === thread) {
+        Object.assign(thread, snapshot);
+        if (snapshot.remote === undefined) delete thread.remote;
+        if (snapshot.sessionId === undefined) delete thread.sessionId;
+        if (snapshot.originRepoPath === undefined) delete thread.originRepoPath;
+        if (snapshot.pendingHarnessHandoff === undefined) delete thread.pendingHarnessHandoff;
+      }
+      throw error;
+    } finally {
+      this.harnessSwitches.delete(id);
+      if (this.threads.has(id)) await this.flushQueuedMessages(id);
+    }
+  }
+
   private claimHarnessHandoff(id: string): Thread['pendingHarnessHandoff'] {
     const thread = this.threads.get(id);
     if (!thread?.pendingHarnessHandoff || this.claimedHarnessHandoffs.has(id)) return undefined;
@@ -2643,7 +2702,7 @@ export class ThreadManager {
         // same generation per ADR-0002 §2) has now been answered. Nothing to
         // roll back, just stop tracking them.
         this.pendingUserMessageIds.delete(threadId);
-        if (thread.pendingHarnessHandoff && thread.sessionId) delete thread.pendingHarnessHandoff;
+        if (thread.pendingHarnessHandoff && (thread.sessionId || thread.remote?.nativeSessionId)) delete thread.pendingHarnessHandoff;
         this.releaseHarnessHandoffClaim(threadId);
 
         // Safety net: if a pending plan somehow survived to onDone (e.g. the

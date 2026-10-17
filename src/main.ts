@@ -70,7 +70,7 @@ import {
 } from './types';
 import { serializeThreadForSave } from './imageExternalization';
 import type { HostExecHooks } from './hostExec';
-import { mapRemoteToLocal } from './remote/vaultMapping';
+import { mapLocalToRemote, mapRemoteToLocal } from './remote/vaultMapping';
 import { stripLegacySandboxSettings } from './legacySandboxVm';
 import { selectIdleThreadsForArchive } from './autoArchive';
 import { createDeferredThreadArchiver } from './deferredThreadArchive';
@@ -3601,6 +3601,51 @@ export default class ClaudeThreadsPlugin extends Plugin {
     } catch {
       return false;
     }
+  }
+
+  /** The managed daemon's shared folders (Settings) that exist, as host folder -> /work/<name>. */
+  private sharedFolderMounts(): Array<{ host: string; name: string }> {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter) || Platform.isMobile) return [];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { resolveWorkFolders } = require('./localDaemon/spec') as typeof import('./localDaemon/spec');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    return resolveWorkFolders(this.settings.localDaemon?.folders, {
+      vaultPath: adapter.getBasePath(),
+      isDirectory: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
+    });
+  }
+
+  /**
+   * Where `localCwd` (a folder on this computer) is on a daemon: under its vault mapping, or (the managed daemon) under
+   * a shared folder at /work/<name>. Undefined when the daemon cannot see that folder.
+   */
+  mapCwdToDaemon(daemonId: string, localCwd: string): string | undefined {
+    const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
+    if (!daemon) return undefined;
+    const viaVault = daemon.vaultMapping ? mapLocalToRemote(daemon.vaultMapping, this.manager.vaultRoot, localCwd) : undefined;
+    if (viaVault) return viaVault;
+    if (daemon.managed !== 'local-container') return undefined;
+    const base = localCwd.replace(/\/+$/, '');
+    for (const m of this.sharedFolderMounts()) {
+      if (base === m.host) return `/work/${m.name}`;
+      if (base.startsWith(`${m.host}/`)) return `/work/${m.name}${base.slice(m.host.length)}`;
+    }
+    return undefined;
+  }
+
+  /** The folder on this computer that a daemon path corresponds to; falls back to the vault root. */
+  mapCwdFromDaemon(daemonId: string, remoteCwd: string): string | undefined {
+    const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
+    const viaVault = daemon?.vaultMapping ? mapRemoteToLocal(daemon.vaultMapping, this.manager.vaultRoot, remoteCwd) : undefined;
+    if (viaVault) return viaVault;
+    for (const m of this.sharedFolderMounts()) {
+      const root = `/work/${m.name}`;
+      if (remoteCwd === root) return m.host;
+      if (remoteCwd.startsWith(`${root}/`)) return `${m.host}${remoteCwd.slice(root.length)}`;
+    }
+    return this.manager.vaultRoot || this.getEffectiveCwd();
   }
 
   /** Open Settings → Remote, where the Local daemon block (consent text, progress, sign-in) lives. */

@@ -2542,6 +2542,32 @@ export class ThreadsView extends ItemView {
         onSelect: () => { if (value !== harness) void this.requestHarnessSwitch(threadId, value); },
       })),
     }];
+    // Where this thread runs: this computer, or a daemon that can see its folder (the managed local daemon is
+    // "This Mac (container)"). Moving resets the native session; the conversation continues from a summary.
+    const daemons = this.plugin.settings.remoteDaemons ?? [];
+    if (harness === 'claude' && !Platform.isMobile && daemons.length > 0) {
+      const here = thread.remote?.daemonId;
+      const options: PopoverOptionGroup['options'] = [{
+        label: !!blocked && !!here ? `This computer \u2014 ${blocked}` : 'This computer',
+        checked: !here,
+        disabled: !!here && !!blocked,
+        closeOnSelect: true,
+        onSelect: () => { if (here) void this.requestMoveExecution(threadId, undefined); },
+      }];
+      for (const d of daemons) {
+        const target = thread.remote ? undefined : this.plugin.mapCwdToDaemon(d.id, thread.cwd);
+        const selected = here === d.id;
+        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : target ? undefined : 'its folder is not shared with this daemon');
+        options.push({
+          label: reason ? `${d.name} \u2014 ${reason}` : d.name,
+          checked: selected,
+          disabled: !selected && !!reason,
+          closeOnSelect: true,
+          onSelect: () => { if (!selected && target) void this.requestMoveExecution(threadId, { daemonId: d.id, remoteCwd: target }); },
+        });
+      }
+      harnessGroups.push({ title: 'Run on', options });
+    }
     const currentPermission = thread.permissionMode ?? undefined;
     const settings: PopoverSetting[] = [
       {
@@ -2727,6 +2753,35 @@ export class ThreadsView extends ItemView {
     this.manager.setThreadPermissionMode(threadId, mode);
     await this.plugin.saveSettings();
     this.renderThreadInfo();
+  }
+
+  private async requestMoveExecution(threadId: string, to: { daemonId: string; remoteCwd: string } | undefined): Promise<void> {
+    const thread = this.manager.getThread(threadId);
+    if (!thread) return;
+    const hadConversation = thread.messages.some((message) => message.role === 'user' || message.role === 'assistant');
+    const where = to ? (this.plugin.settings.remoteDaemons ?? []).find((d) => d.id === to.daemonId)?.name ?? 'the daemon' : 'this computer';
+    if (hadConversation) {
+      const confirmed = await promptConfirm(this.app, {
+        message: `Run this thread on ${where}? The conversation stays here, but the native Claude session resets and continues from a summary and transcript references.`,
+        confirmLabel: 'Move',
+        danger: false,
+      });
+      if (!confirmed) return;
+    }
+    try {
+      const target = to
+        ? { kind: 'daemon' as const, daemonId: to.daemonId, remoteCwd: to.remoteCwd, clientId: this.plugin.settings.remoteClientId ?? 'unknown' }
+        : { kind: 'host' as const, cwd: this.plugin.mapCwdFromDaemon(thread.remote?.daemonId ?? '', thread.remote?.remoteCwd ?? '') ?? this.plugin.getEffectiveCwd() };
+      await this.manager.moveThreadExecution(threadId, target, () => this.plugin.saveSettings());
+      if (threadId === this.activeThreadId) {
+        this.renderThreadInfo();
+        this.applyComposerPlaceholder();
+        this.setRunningState(false);
+      }
+      new Notice(`This thread will run on ${where}.`);
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : String(error));
+    }
   }
 
   private async requestHarnessSwitch(threadId: string, targetHarness: AgentHarness): Promise<void> {
