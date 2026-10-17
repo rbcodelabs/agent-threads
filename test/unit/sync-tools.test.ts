@@ -64,4 +64,46 @@ describe('sync conflict tools', () => {
     expect((await tools.sync_resolve_conflict.handler({ id: '2', resolution: 'keep-local', mergedContent: 'x' })).isError).toBe(true);
     expect(resolveConflict).not.toHaveBeenCalled();
   });
+
+  describe('history conflicts', () => {
+    const hid = JSON.stringify(['ent', ['r1', 'r2']]);
+    function withHistory() {
+      const resolveHistoryConflict = vi.fn(async () => {});
+      const app: any = {
+        sync: {
+          listConflicts: async () => [{ id: hid, path: 'h.md', conflictPath: '' }],
+          resolveConflict: vi.fn(),
+          describeHistoryConflict: async () => ({ comparable: true, heads: [{ recordId: 'r1' }, { recordId: 'r2', deleted: true }] }),
+          readHistoryConflictText: async (_e: string, c: any) => (c.kind === 'current' ? 'a\nb' : 'a\nc'),
+          resolveHistoryConflict,
+        },
+        vault: { adapter: {} },
+      };
+      return { tools: createSyncTools({ app }) as Record<string, any>, resolveHistoryConflict };
+    }
+
+    it('inspects with per-version text and diff', async () => {
+      const { tools } = withHistory();
+      const out = parse(await tools.sync_inspect_conflict.handler({ id: hid }));
+      expect(out.kind).toBe('history');
+      expect(out.local).toBe('a\nb');
+      expect(out.versions[0].diffFromLocal).toContain('+ c');
+      expect(out.versions[1].text).toBeNull();
+    });
+
+    it('resolves keep-local as current and accept-remote as an explicit version', async () => {
+      const { tools, resolveHistoryConflict } = withHistory();
+      await tools.sync_resolve_conflict.handler({ id: hid, resolution: 'keep-local' });
+      expect(resolveHistoryConflict).toHaveBeenLastCalledWith({ entityId: 'ent', heads: ['r1', 'r2'], choice: { kind: 'current' } });
+      await tools.sync_resolve_conflict.handler({ id: hid, resolution: 'accept-remote', recordId: 'r1' });
+      expect(resolveHistoryConflict).toHaveBeenLastCalledWith({ entityId: 'ent', heads: ['r1', 'r2'], choice: { kind: 'version', recordId: 'r1' } });
+    });
+
+    it('refuses accept-remote without a valid recordId', async () => {
+      const { tools, resolveHistoryConflict } = withHistory();
+      expect((await tools.sync_resolve_conflict.handler({ id: hid, resolution: 'accept-remote' })).isError).toBe(true);
+      expect((await tools.sync_resolve_conflict.handler({ id: hid, resolution: 'accept-remote', recordId: 'zzz' })).isError).toBe(true);
+      expect(resolveHistoryConflict).not.toHaveBeenCalled();
+    });
+  });
 });

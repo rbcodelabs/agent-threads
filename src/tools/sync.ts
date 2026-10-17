@@ -23,6 +23,24 @@ export interface SyncConflictRecord {
 export interface GeodeSyncApi {
   listConflicts(): Promise<SyncConflictRecord[]>;
   resolveConflict(id: string, resolution: 'keep-local' | 'accept-remote'): Promise<void>;
+  /** Append-only providers only (Geode plugin-sync-api). */
+  describeHistoryConflict?(entityId: string): Promise<unknown>;
+  readHistoryConflictText?(entityId: string, choice: { kind: 'current' } | { kind: 'version'; recordId: string }): Promise<string>;
+  resolveHistoryConflict?(resolution: {
+    entityId: string;
+    heads: string[];
+    choice: { kind: 'current' } | { kind: 'version'; recordId: string };
+  }): Promise<unknown>;
+}
+
+/** History conflict ids are JSON.stringify([entityId, heads]). */
+function parseHistoryId(id: string): { entityId: string; heads: string[] } | null {
+  try {
+    const [entityId, heads] = JSON.parse(id) as [unknown, unknown];
+    return typeof entityId === 'string' && Array.isArray(heads) ? { entityId, heads: heads as string[] } : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface SyncToolsPort {
@@ -105,10 +123,30 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
         const conflict = (await sync.listConflicts()).find((c) => c.id === args.id);
         if (!conflict) return fail(`Conflict not found: ${args.id}`);
         if (!conflict.conflictPath) {
+          const hid = parseHistoryId(conflict.id);
+          if (!hid || !sync.describeHistoryConflict) {
+            return ok({ kind: 'history', conflict, note: 'This Geode build cannot describe history conflicts; the user resolves it in Settings → Sync.' });
+          }
+          const comparison = (await sync.describeHistoryConflict(hid.entityId)) as {
+            comparable?: boolean;
+            heads?: Array<{ recordId: string; deleted?: boolean }>;
+          };
+          let local: string | null = null;
+          const versions: Array<{ recordId: string; text: string | null }> = [];
+          if (comparison.comparable && sync.readHistoryConflictText) {
+            local = clip(await sync.readHistoryConflictText(hid.entityId, { kind: 'current' }).catch(() => null));
+            for (const h of comparison.heads ?? []) {
+              const text = h.deleted ? null : await sync.readHistoryConflictText(hid.entityId, { kind: 'version', recordId: h.recordId }).catch(() => null);
+              versions.push({ recordId: h.recordId, text: clip(text) });
+            }
+          }
           return ok({
             kind: 'history',
             conflict,
-            note: 'History conflict: only head metadata is available. Propose a resolution to the user; they resolve it in Settings → Sync.',
+            comparison,
+            local,
+            versions: versions.map((v) => ({ ...v, diffFromLocal: local !== null && v.text !== null ? lineDiff(local, v.text) : null })),
+            note: 'To resolve: keep-local, or pass recordId of one displayed version with accept-remote.',
           });
         }
         const local = await readIfExists(conflict.path);
@@ -135,6 +173,7 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
     {
       id: z.string().describe('Conflict id from sync_list_conflicts'),
       resolution: z.enum(['keep-local', 'accept-remote']).describe('Which side wins (ignored in favour of keep-local when mergedContent is given)'),
+      recordId: z.string().optional().describe('History conflicts: the record id of the version to accept (from sync_inspect_conflict)'),
       mergedContent: z.string().optional().describe('Full merged file content to write before resolving as keep-local'),
     },
     async (args) => {
@@ -143,6 +182,19 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
         if (!sync) return fail(NO_SYNC);
         const conflict = (await sync.listConflicts()).find((c) => c.id === args.id);
         if (!conflict) return fail(`Conflict not found: ${args.id}`);
+        if (!conflict.conflictPath) {
+          const hid = parseHistoryId(conflict.id);
+          if (!hid || !sync.resolveHistoryConflict) return fail('This Geode build cannot resolve history conflicts; resolve it in Settings → Sync.');
+          if (args.mergedContent !== undefined) return fail('mergedContent is only supported for sibling conflicts.');
+          if (args.resolution === 'accept-remote' && !args.recordId) return fail('History conflicts need recordId to accept a version (see sync_inspect_conflict).');
+          if (args.recordId && !hid.heads.includes(args.recordId)) return fail('recordId is not one of this conflict\'s versions.');
+          await sync.resolveHistoryConflict({
+            entityId: hid.entityId,
+            heads: hid.heads,
+            choice: args.resolution === 'accept-remote' ? { kind: 'version', recordId: args.recordId! } : { kind: 'current' },
+          });
+          return ok({ resolved: true, id: args.id, resolution: args.resolution, recordId: args.recordId ?? null });
+        }
         let resolution = args.resolution;
         if (args.mergedContent !== undefined) {
           if (!conflict.conflictPath) return fail('mergedContent is only supported for sibling conflicts.');
