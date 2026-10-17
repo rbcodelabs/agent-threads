@@ -6503,8 +6503,13 @@
 .ct-settings-tab-body.is-compact .ct-secret-storage-notice { margin-bottom: 8px; padding: 6px 10px; }
 /* Sidebar-hosted sections: denser setting rows; long help text clamps to two lines until hovered/focused. */
 .ct-settings-tab-body.is-hosted .setting-item { padding: 8px 0; }
-.ct-settings-tab-body.is-hosted .setting-item-description { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; font-size: var(--font-ui-smaller); line-height: 1.35; }
-.ct-settings-tab-body.is-hosted .setting-item:hover .setting-item-description, .ct-settings-tab-body.is-hosted .setting-item:focus-within .setting-item-description { -webkit-line-clamp: unset; line-clamp: unset; }
+.ct-settings-tab-body.is-hosted .setting-item-description { font-size: var(--font-ui-smaller); line-height: 1.35; }
+.ct-settings-tab-body.is-hosted:not(.is-help-visible) .setting-item:not(.is-help-open) .setting-item-description:not(:has(a, button, input, select, textarea)) { display: none; }
+.ct-settings-tab-body.is-hosted.is-help-visible .ct-help-icon { display: none; }
+.ct-help-icon { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 6px; padding: 0; border: 1px solid var(--text-faint); border-radius: 50%; background: transparent; box-shadow: none; color: var(--text-muted); font: italic 600 10px/1 serif; cursor: help; vertical-align: middle; }
+.ct-help-icon:hover, .ct-help-icon:focus-visible, .ct-help-icon[aria-expanded="true"] { color: var(--text-on-accent); background: var(--interactive-accent); border-color: transparent; }
+.ct-help-toggle { display: flex; justify-content: flex-end; margin-bottom: 4px; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.ct-help-toggle label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .ct-settings-tab-body.is-hosted .setting-item-heading { padding-top: 14px; }
 .ct-settings-tab-body.is-hosted h1 { font-size: 1.3rem; margin: 0 0 8px; }
 .ct-settings-tab-body.is-hosted h2 { font-size: 1.05rem; margin: 12px 0 6px; }

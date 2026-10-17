@@ -1257,7 +1257,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     }
 
     if (this.fixedSection) {
-      this.renderActiveTab(containerEl.createDiv({ cls: 'ct-settings-tab-body is-hosted' }));
+      const hostedBody = containerEl.createDiv({ cls: 'ct-settings-tab-body is-hosted' });
+      this.renderActiveTab(hostedBody);
+      this.applyHelpTextMode(hostedBody);
       return;
     }
 
@@ -1280,6 +1282,48 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     });
 
     this.renderActiveTab(shell.createDiv({ cls: 'ct-settings-tab-body' }));
+  }
+
+  private static readonly HELP_PREF_KEY = 'claude-threads:settings-show-help';
+
+  /**
+   * Sidebar-hosted sections: setting descriptions collapse behind an (i) button
+   * beside each title, with one global "Show help text" toggle. Descriptions
+   * holding links or controls stay inline so nothing interactive is hidden.
+   */
+  private applyHelpTextMode(body: HTMLElement): void {
+    const items = Array.from(body.querySelectorAll<HTMLElement>('.setting-item')).filter(item => {
+      const desc = item.querySelector<HTMLElement>('.setting-item-description');
+      return !!desc && desc.textContent?.trim() && !desc.querySelector('a, button, input, select, textarea');
+    });
+    if (items.length === 0) return;
+    let showHelp = false;
+    try { showHelp = window.localStorage.getItem(ClaudeThreadsSettingTab.HELP_PREF_KEY) === '1'; } catch { /* storage unavailable */ }
+    body.toggleClass('is-help-visible', showHelp);
+
+    const toggle = body.createDiv({ cls: 'ct-help-toggle' });
+    const label = toggle.createEl('label');
+    const box = label.createEl('input', { type: 'checkbox', attr: { 'aria-label': 'Show help text' } });
+    box.checked = showHelp;
+    label.createSpan({ text: 'Show help text' });
+    box.addEventListener('change', () => {
+      try { window.localStorage.setItem(ClaudeThreadsSettingTab.HELP_PREF_KEY, box.checked ? '1' : '0'); } catch { /* ignore */ }
+      body.toggleClass('is-help-visible', box.checked);
+    });
+    body.prepend(toggle);
+
+    for (const item of items) {
+      const desc = item.querySelector<HTMLElement>('.setting-item-description')!;
+      const name = item.querySelector<HTMLElement>('.setting-item-name');
+      if (!name) continue;
+      const text = desc.textContent!.trim();
+      const icon = name.createEl('button', { cls: 'ct-help-icon', text: 'i', attr: { type: 'button', title: text, 'aria-label': `Help: ${text}`, 'aria-expanded': 'false' } });
+      icon.addEventListener('click', (event) => {
+        event.preventDefault();
+        item.toggleClass('is-help-open', !item.hasClass('is-help-open'));
+        icon.setAttribute('aria-expanded', String(item.hasClass('is-help-open')));
+      });
+    }
   }
 
   private renderActiveTab(body: HTMLElement): void {
