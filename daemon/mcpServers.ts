@@ -79,7 +79,7 @@ export function resolveDaemonMcpServers(servers: DaemonMcpServers, lookup: (name
   for (const [name, server] of Object.entries(servers)) {
     const missing = new Set<string>();
     let next: HarnessMcpServerConfig;
-    if (server.type === 'http' || server.type === 'sse') {
+    if ('url' in server) {
       const headers = fillMap(server.headers, lookup, missing);
       next = { type: server.type, url: fill(server.url, lookup, missing), ...(headers ? { headers } : {}) };
     } else {
