@@ -411,6 +411,30 @@ export default class ClaudeThreadsPlugin extends Plugin {
   /** How long to wait between background task poll attempts. */
   private static readonly BG_TASK_POLL_INTERVAL_MS = 30_000;
 
+  /** Forwards the managed daemon container's loopback ports to this Mac, for the browser tools (desktop only). */
+  private daemonPortForwarder: import('./localDaemon/portForward').DaemonPortForwarder | null = null;
+
+  private async resolveDaemonLoopbackUrl(threadId: string, url: string): Promise<import('./loopbackUrl').DaemonUrlResolution> {
+    const remote = this.manager.getThread(threadId)?.remote;
+    const daemon = remote ? (this.settings.remoteDaemons ?? []).find((d) => d.id === remote.daemonId) : undefined;
+    const adapter = this.app.vault.adapter;
+    if (daemon?.managed !== 'local-container' || Platform.isMobile || !(adapter instanceof FileSystemAdapter)) return { kind: 'passthrough' };
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { parseLoopbackHttpUrl } = require('./loopbackUrl') as typeof import('./loopbackUrl');
+    if (!parseLoopbackHttpUrl(url)) return { kind: 'passthrough' };
+    if (!this.daemonPortForwarder) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createDaemonPortForwarder } = require('./localDaemon/portForward') as typeof import('./localDaemon/portForward');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { containerNameFor } = require('./localDaemon/spec') as typeof import('./localDaemon/spec');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createDefaultVmCommandRunner } = require('./containerCli') as typeof import('./containerCli');
+      const base = adapter.getBasePath();
+      this.daemonPortForwarder = createDaemonPortForwarder({ containerName: () => containerNameFor(base), runner: () => createDefaultVmCommandRunner() });
+    }
+    return this.daemonPortForwarder.resolve(url);
+  }
+
   /** Geode-only: connected external roots. Undefined on Obsidian / older Geode -> no extras. */
   private async listExternalMountRoots() {
     const host = (this.app as unknown as {
@@ -2798,6 +2822,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Delete the published GitHub token file immediately; never wait on the shutdown poll below.
     void this.githubHost?.stop();
     void this.localDaemonGithub?.stop();
+    this.daemonPortForwarder?.close();
     // Revoke peer references before asynchronous shutdown begins. Obsidian does
     // not await plugin onunload hooks, so delaying this would leave a stale
     // generation callable while sessions are draining.
@@ -3389,6 +3414,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       threadId,
       pool: this.agentBrowser,
       getSecrets: () => this.collectSecretValues(),
+      // A thread on the managed local daemon: `localhost` means the container, so forward it (localDaemon/portForward.ts).
+      resolveUrl: (url) => this.resolveDaemonLoopbackUrl(threadId, url),
       // Read lazily so toggling the setting applies to the next browser_eval call.
       isEvalEnabled: () => this.settings.enableAgentBrowserEval ?? false,
       getUrlPolicy: () => ({ allowPrivateNetwork: this.settings.agentBrowserAllowPrivateNetwork ?? false }),
