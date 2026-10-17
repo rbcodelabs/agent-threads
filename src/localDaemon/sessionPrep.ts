@@ -22,7 +22,8 @@ import { planAwsCopy, daemonAwsEnv, type AwsCopyFs } from './awsCopy';
 import {
   copyFilesToContainer,
   listDirArgs,
-  readTree,
+  loadTree,
+  scanTree,
   removeDirArgs,
   shortHash,
   type FsLike,
@@ -156,14 +157,14 @@ export class LocalDaemonSessionPrep {
       try { real = this.deps.fs.realpath(plugin.path); } catch { continue; }
       if (seen.has(real)) continue;
       seen.add(real);
-      const tree = readTree(this.deps.fs, real);
-      if (tree.files.length === 0) continue;
+      const tree = scanTree(this.deps.fs, real);
+      if (tree.entries.length === 0) continue;
       const base = real.split('/').filter(Boolean).slice(-2).join('-').replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 48) || 'skills';
       // The fingerprint is part of the name: an existing directory of that name is already up to date.
       const dir = `${base}-${shortHash(`${real}\n${tree.fingerprint}`)}`;
       const dest = `${SKILLS_DIR}/${dir}`;
       if (!existing.has(dir) && !this.skillDirs.has(dir)) {
-        await copyFilesToContainer(run, name, dest, tree.files, { clean: true });
+        await copyFilesToContainer(run, name, dest, loadTree(this.deps.fs, tree), { clean: true });
         this.skillDirs.add(dir);
       }
       pluginPaths.push(dest);
@@ -177,10 +178,10 @@ export class LocalDaemonSessionPrep {
   private async syncUserDir(kind: 'skills' | 'agents', hostDir: string, name: string, run: VmCommandRunner): Promise<void> {
     let real: string;
     try { real = this.deps.fs.realpath(hostDir); } catch { return; }
-    const tree = readTree(this.deps.fs, real);
-    if (tree.files.length === 0) return;
+    const tree = scanTree(this.deps.fs, real);
+    if (tree.entries.length === 0) return;
     if (this.userSkills.get(kind) === tree.fingerprint) return;
-    await copyFilesToContainer(run, name, `${CLAUDE_HOME_DIR}/${kind}`, tree.files, { clean: true });
+    await copyFilesToContainer(run, name, `${CLAUDE_HOME_DIR}/${kind}`, loadTree(this.deps.fs, tree), { clean: true });
     this.userSkills.set(kind, tree.fingerprint);
   }
 

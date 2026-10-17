@@ -12,8 +12,10 @@ import {
   copyFilesArgs,
   copyFilesToContainer,
   listDirArgs,
+  loadTree,
   nodeFs,
   readTree,
+  scanTree,
   removeDirArgs,
   shortHash,
   type FsLike,
@@ -67,6 +69,21 @@ describe('readTree (real filesystem)', () => {
     expect(readTree(nodeFs(), r).fingerprint).toBe(a);
     writeFileSync(join(r, 'f'), 'longer content');
     expect(readTree(nodeFs(), r).fingerprint).not.toBe(a);
+  });
+
+  it('scanTree reads no file contents (cheap before every message); loadTree reads them afterwards', () => {
+    const r = tmp();
+    writeFileSync(join(r, 'a'), 'AAAA');
+    writeFileSync(join(r, 'b'), 'BB');
+    const real = nodeFs();
+    const reads: string[] = [];
+    const spy: FsLike = { ...real, readBase64: (p) => { reads.push(p); return real.readBase64(p); } };
+    const scan = scanTree(spy, r);
+    expect(reads).toEqual([]);
+    expect(scan.entries.map((e) => [e.p, e.size])).toEqual([['a', 4], ['b', 2]]);
+    expect(scan.fingerprint).toBe(readTree(real, r).fingerprint);
+    expect(loadTree(spy, scan).map((f) => f.p)).toEqual(['a', 'b']);
+    expect(reads).toHaveLength(2);
   });
 
   it('works over an injected filesystem and survives unreadable entries', () => {

@@ -92,6 +92,13 @@ export const DEFAULT_TREE_LIMITS: TreeLimits = { maxFiles: 2000, maxBytes: 20 * 
 /** Directory names never copied: VCS data and dependency caches (large, and not part of a skill). */
 const SKIPPED_DIRS = new Set(['.git', 'node_modules', '.DS_Store']);
 
+/** A tree's files and fingerprint WITHOUT their contents: cheap enough to run before every message. */
+export interface TreeScan {
+  entries: Array<{ abs: string; p: string; m: number; size: number; mtimeMs: number }>;
+  fingerprint: string;
+  skipped: string[];
+}
+
 export interface TreeResult {
   files: FileToCopy[];
   /** Cheap change detector: names, sizes and mtimes. Equal fingerprints mean nothing to copy. */
@@ -100,15 +107,14 @@ export interface TreeResult {
 }
 
 /**
- * Reads a directory tree into copyable files, following symlinks (a skills folder is often a tree of links into
+ * Scans a directory tree, following symlinks (a skills folder is often a tree of links into
  * `~/.agents/...`), within `limits`. Cycles are cut by real path. Executable bits are kept. Anything over a limit is
  * skipped and listed, never an error: a skill that is too big is better missing than blocking a message.
  */
-export function readTree(fs: FsLike, root: string, limits: TreeLimits = DEFAULT_TREE_LIMITS): TreeResult {
-  const files: FileToCopy[] = [];
+export function scanTree(fs: FsLike, root: string, limits: TreeLimits = DEFAULT_TREE_LIMITS): TreeScan {
+  const entries: TreeScan['entries'] = [];
   const skipped: string[] = [];
   const seen = new Set<string>();
-  const fpParts: string[] = [];
   let bytes = 0;
   const walk = (dir: string, rel: string, depth: number): void => {
     let real: string;
@@ -125,16 +131,28 @@ export function readTree(fs: FsLike, root: string, limits: TreeLimits = DEFAULT_
       if (!st) continue;
       if (st.dir) { walk(abs, relPath, depth + 1); continue; }
       if (!st.file) continue;
-      if (files.length >= limits.maxFiles || bytes + st.size > limits.maxBytes) { skipped.push(relPath); continue; }
-      let b: string;
-      try { b = fs.readBase64(abs); } catch { continue; }
+      if (entries.length >= limits.maxFiles || bytes + st.size > limits.maxBytes) { skipped.push(relPath); continue; }
       bytes += st.size;
-      files.push({ p: relPath, b, m: st.mode & 0o111 ? 0o700 : 0o600 });
-      fpParts.push(`${relPath}:${st.size}:${Math.floor(st.mtimeMs)}`);
+      entries.push({ abs, p: relPath, m: st.mode & 0o111 ? 0o700 : 0o600, size: st.size, mtimeMs: st.mtimeMs });
     }
   };
   walk(root, '', 0);
-  return { files, fingerprint: fpParts.join('|'), skipped };
+  return { entries, fingerprint: entries.map((e) => `${e.p}:${e.size}:${Math.floor(e.mtimeMs)}`).join('|'), skipped };
+}
+
+/** Reads the contents of a {@link scanTree} result; an entry that cannot be read is left out. */
+export function loadTree(fs: FsLike, scan: TreeScan): FileToCopy[] {
+  const files: FileToCopy[] = [];
+  for (const e of scan.entries) {
+    try { files.push({ p: e.p, b: fs.readBase64(e.abs), m: e.m }); } catch { /* unreadable: skipped */ }
+  }
+  return files;
+}
+
+/** Scan and load in one go (see {@link scanTree}). */
+export function readTree(fs: FsLike, root: string, limits: TreeLimits = DEFAULT_TREE_LIMITS): TreeResult {
+  const scan = scanTree(fs, root, limits);
+  return { files: loadTree(fs, scan), fingerprint: scan.fingerprint, skipped: scan.skipped };
 }
 
 /** Short stable hash (not security): names a destination directory after its source path and fingerprint. */
