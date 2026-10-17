@@ -518,6 +518,35 @@ exactly which tools run on your computer (or says none do).
   agent cannot read it. A tool call that was running when the app quit may be re-run after a restart only if the daemon
   still shows it as open.
 
+## MCP servers that need secrets (daemon-side)
+
+Some MCP servers need a key the daemon must hold itself (a hosted docs server, a database tool). List them in the daemon's
+`<data-dir>/config.json` and refer to each secret as `${NAME}`:
+
+```json
+{
+  "mcpServers": {
+    "docs":  { "type": "http", "url": "https://docs.example.com/mcp", "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" } },
+    "tools": { "command": "npx", "args": ["-y", "some-mcp-server"], "env": { "API_KEY": "${TOOLS_KEY}" } }
+  }
+}
+```
+
+`type` is `stdio` (the default, with `command`, `args`, `env`), `http` or `sse`. `claude_threads` and `obsidian` are reserved.
+A daemon-listed server replaces a same-named server sent by the app.
+
+Secret values are sent with the `creds.push` protocol command (`{ kind, ttlSec, fields }`), which needs an **admin** token.
+They are stored on the daemon as `<data-dir>/creds/<kind>.json` (directory 0700, files 0600), never in `config.json` or in a
+thread's saved spec, and masked in the daemon's logs. There is no `agent-threads` subcommand or settings screen for pushing
+yet; the command is available to any admin client on the wire protocol.
+
+A push replaces the whole kind; pushing no fields removes it; `ttlSec` (0 = no expiry) makes it lapse on its own. Placeholders
+are filled when a session starts, so a rotated secret reaches the next session without a daemon restart. A server whose
+secret is missing is not started and shows as **failed** ("missing credential NAME").
+
+Settings, Remote shows each daemon's MCP servers (connected / failed / needs sign-in) as last reported by its sessions;
+a server that dies mid-session turns to failed at the end of the next turn.
+
 ## Connect from Geode
 
 1. Install the build: copy `dist/main.js`, `dist/manifest.json`, `dist/styles.css` into

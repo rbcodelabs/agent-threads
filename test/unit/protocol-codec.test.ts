@@ -80,6 +80,7 @@ describe('server frame codec', () => {
 
   const serverSamples: ServerFrame[] = [
     { v: 1, ch: 't:abc', seq: 3, ts: 9, type: 'event', name: 'onToken', args: ['x'] },
+    { v: 1, ch: 't:abc', seq: 5, ts: 9, type: 'event', name: 'onMcpServerStatus', args: [[{ name: 'docs', status: 'failed', error: 'boom' }]] },
     { v: 1, ch: 't:abc', seq: 4, ts: 9, type: 'event', name: 'permission_request', args: { requestId: 'R', toolName: 'Bash', detail: 'ls' } },
     { v: 1, ch: 'ctl', seq: 1, ts: 9, type: 'event', name: 'session.state', args: { turnInFlight: false, hasPendingPermission: false, hostAttached: true } },
     { v: 1, ch: 't:abc', seq: checkpoint.seq, ts: 9, type: 'resync', checkpoint },

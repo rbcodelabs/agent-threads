@@ -22,6 +22,7 @@ import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, PRE_AUTH_MAX_FRAME_BYT
 import { ControlRegistry } from './controlRegistry';
 import { fakeHarnessFactory } from './fakeHarness';
 import { FailureThrottle } from './failureThrottle';
+import { CredStore } from './credStore';
 import { ensureDir } from './fsutil';
 import { sweepRawLogs } from './logRetention';
 import type { DriverFactory } from './sessionDriver';
@@ -104,6 +105,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   };
   const logsDir = join(config.dataDir, 'logs');
 
+  const creds = new CredStore(config.dataDir, options.now);
+  ensureDir(creds.dir);
   const real = config.harness === 'claude';
   let driverFactory = options.driverFactory;
   let rawLog: ((threadId: string, event: Record<string, unknown>) => void) | undefined;
@@ -120,9 +123,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       writer.append(threadId, typeof event.session_id === 'string' ? event.session_id : undefined, type, event);
     };
     const credentialEnv = resolveCredentialEnv(env);
-    setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN].filter((v): v is string => !!v));
+    setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN, ...creds.secretValues()].filter((v): v is string => !!v));
     if (!driverFactory) {
-      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, env, requestTimeoutMs: config.requestTimeoutMinutes * 60_000 });
+      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, env, mcpServers: config.mcpServers, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000 });
       const binary = findClaudeBinary(config.claudeBinaryPath, env);
       log(binary ? `claude CLI: ${binary}` : 'WARNING: claude CLI not found; session.open will fail until it is installed (or set claudeBinaryPath / AGENT_THREADS_CLAUDE_BINARY)');
       log(`claude credential: ${describeCredentialSource(env)}`);
@@ -168,6 +171,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     epoch,
     capabilities: capabilitiesFor(config.harness),
     controllers,
+    creds,
     checkPath: (path) => describePathAccess(path, sessionPolicy),
     listWorkspaces: () => listWorkspaces(sessionPolicy),
     listPath: (path) => listSubfolders(path, sessionPolicy),

@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writeFileAtomic } from './fsutil';
+import { parseDaemonMcpServers, type DaemonMcpServers } from './mcpServers';
 
 export const DEFAULT_PORT = 7433;
 export const DEFAULT_LISTEN = '127.0.0.1';
@@ -62,6 +63,11 @@ export interface DaemonConfig {
    * session to resume there). Default: `.worktrees` inside the first read-write workspace.
    */
   worktreeRoot?: string;
+  /**
+   * MCP servers the daemon starts for every session (config.json only). `${NAME}` placeholders are filled from the
+   * credentials pushed with `creds.push` when a session starts.
+   */
+  mcpServers: DaemonMcpServers;
 }
 
 export type HarnessKind = 'claude' | 'fake';
@@ -119,6 +125,7 @@ interface ConfigFile {
   hostToolGraceSec?: number;
   hostToolTimeoutSec?: number;
   worktreeRoot?: string;
+  mcpServers?: unknown;
 }
 
 /** `~` and `~/x` mean the daemon user's home; everything else must already be absolute. */
@@ -226,6 +233,7 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     allowedClientEnv: allowedClientEnv(flags.allowedClientEnv ?? envList(env.AGENT_THREADS_ALLOWED_CLIENT_ENV) ?? file.allowedClientEnv ?? []),
     hostToolGraceSec: positiveInt('hostToolGraceSec', flags.hostToolGraceSec ?? envInt(env.AGENT_THREADS_HOST_TOOL_GRACE_SEC) ?? file.hostToolGraceSec ?? DEFAULT_HOST_TOOL_GRACE_SEC, 0),
     hostToolTimeoutSec: positiveInt('hostToolTimeoutSec', flags.hostToolTimeoutSec ?? envInt(env.AGENT_THREADS_HOST_TOOL_TIMEOUT_SEC) ?? file.hostToolTimeoutSec ?? DEFAULT_HOST_TOOL_TIMEOUT_SEC, 1),
+    mcpServers: parseDaemonMcpServers(file.mcpServers),
     ...(worktreeRoot ? { worktreeRoot } : {}),
     ...(claudeBinaryPath ? { claudeBinaryPath } : {}),
   };

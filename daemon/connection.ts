@@ -41,6 +41,7 @@ import {
   type WorkspaceInfo,
 } from '../src/protocol';
 import type { CommandCache } from './cmdCache';
+import { CredError, type CredStore } from './credStore';
 import type { PathAccess } from './sessionPolicy';
 import type { ControlRegistry } from './controlRegistry';
 import type { FailureThrottle } from './failureThrottle';
@@ -70,7 +71,7 @@ export function raiseFrameLimit(ws: WebSocket, bytes: number): boolean {
 /** Stop handing frames to the socket once this much is already buffered in it. */
 const SOCKET_HIGH_WATER = 256 * 1024;
 /** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
-export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'host.tools'];
+export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'host.tools', 'creds.push', 'mcp.status'];
 export const capabilitiesFor = (harness: string): string[] => [...BASE_CAPABILITIES, `harness.${harness}`];
 
 export interface Timings {
@@ -97,6 +98,8 @@ export interface ServerContext {
   /** Advertised in `welcome`. */
   capabilities: string[];
   controllers: ControlRegistry;
+  /** Credentials pushed by admin clients (`creds.push`). */
+  creds: CredStore;
   /** Answers `path.check` from the configured workspaces (set even when the session host is not policed). */
   checkPath(path: string): PathAccess;
   /** Answers `workspaces.list`: the configured roots, with vault detection. */
@@ -501,6 +504,18 @@ export class Connection {
         this.requireSeat(frame.threadId);
         host.toolResult(frame.threadId, frame.callId, { success: frame.success, text: frame.text, content: frame.content }, auth.id);
         return {};
+      case 'creds.push': {
+        let result;
+        try {
+          result = this.ctx.creds.push(frame.kind, frame.ttlSec, frame.fields);
+        } catch (err) {
+          if (err instanceof CredError) throw new CommandError('bad_frame', err.message);
+          throw err;
+        }
+        // Who changed which credential, never the values.
+        this.ctx.audit({ event: 'creds_push', tokenId: auth.id, kind: result.kind, fields: result.fields, removed: result.removed });
+        return { kind: result.kind, fields: result.fields, removed: result.removed, ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}) };
+      }
       case 'resolve.openTab':
         // OpenNewTab is refused when the harness asks (daemon sessions cannot create Geode threads), so nothing is ever pending.
         throw new CommandError('unknown_command', 'open-tab requests are not supported by this daemon build');
