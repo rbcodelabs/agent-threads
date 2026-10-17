@@ -4,6 +4,11 @@
 on macOS 26 or later with Apple silicon. Both Claude and Codex can use these tools.
 They require Apple's `container` runtime; they are unavailable on mobile.
 
+Looking for threads that **survive quitting Geode**? That is a different feature: the managed
+[Local daemon](remote-daemon.md#local-daemon-this-mac-in-a-container) (Settings -> Remote), one shared container per vault
+that you run threads on with "Run on: This Mac (container)". It reuses this page's runtime install but is otherwise
+separate: sandbox VMs are per thread and end with Geode.
+
 ## Setup (one click)
 
 Open **Settings → Claude → Sandbox setup** and press **Set up sandbox**. Agent Threads then:

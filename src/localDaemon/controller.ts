@@ -182,6 +182,21 @@ export class LocalDaemonController {
 
   // ── single-flight ──────────────────────────────────────────────────────────
 
+  private readonly listeners = new Set<() => void>();
+
+  /** Subscribe to progress and state changes (a settings panel). Returns the unsubscribe. */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  private notify(): void {
+    this.deps.onChange?.();
+    for (const l of [...this.listeners]) {
+      try { l(); } catch { /* a UI callback must not break the run */ }
+    }
+  }
+
   getBusy(): LocalDaemonProgress | null {
     return this.op?.last ?? null;
   }
@@ -212,7 +227,7 @@ export class LocalDaemonController {
       for (const l of [...op.listeners]) {
         try { l(op.last); } catch { /* a UI callback must not break the run */ }
       }
-      this.deps.onChange?.();
+      this.notify();
     };
     this.op = op;
     op.promise = (async () => {
@@ -229,11 +244,11 @@ export class LocalDaemonController {
         throw err;
       } finally {
         if (this.op === op) this.op = null;
-        this.deps.onChange?.();
+        this.notify();
       }
     })();
     op.promise.catch(() => undefined);
-    this.deps.onChange?.();
+    this.notify();
     return this.attach(op, opts) as Promise<T>;
   }
 
@@ -539,7 +554,8 @@ export class LocalDaemonController {
    */
   async ensureRunning(opts: RunOptions = {}): Promise<void> {
     const settings = this.settings();
-    if (settings.enabled && !this.op && this.deps.secrets.get(LOCAL_DAEMON_TOKEN_SECRET) && await this.deps.healthz(settings.port || DEFAULT_HOST_PORT)) return;
+    const signedIn = settings.credentialWritten === true || !!this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET);
+    if (settings.enabled && signedIn && !this.op && this.deps.secrets.get(LOCAL_DAEMON_TOKEN_SECRET) && await this.deps.healthz(settings.port || DEFAULT_HOST_PORT)) return;
     const a = await this.start(opts);
     if (a.status === 'needs-sign-in' || a.needsSignIn) {
       throw new LocalDaemonError('needs-sign-in', 'The local daemon has no Claude sign-in yet. Open Settings, Remote, Local daemon and choose "Sign in to Claude".');

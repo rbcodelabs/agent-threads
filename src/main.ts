@@ -272,6 +272,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
   manager!: ThreadManager;
   /** Connections to the remote agent-threads daemons (Settings -> Remote daemons). */
   daemonRegistry: DaemonRegistry | null = null;
+  /** The managed daemon in a container on this Mac (desktop only; see src/localDaemon/). */
+  localDaemon: import('./localDaemon/controller').LocalDaemonController | null = null;
   /** What the Run on picker asks for a daemon's folders (advertised workspaces, subfolders). */
   remoteFolders: RemoteFolderSource | null = null;
   persistence!: VaultPersistence;
@@ -614,6 +616,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.remoteFolders = createRemoteFolderSource(this.daemonRegistry);
     this.register(() => { this.daemonRegistry?.disposeAll(); });
     this.manager.remoteDaemons = this.daemonRegistry;
+    this.setUpLocalDaemon();
     this.manager.getExternalMounts = () => this.listExternalMountRoots();
     // Lets the manager detect sessions holding stale Google/OAuth proxy configs (per-send check).
     this.manager.proxyMcpServersForThread = (threadId) => ({
@@ -2655,6 +2658,39 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const saved = await this.requestSecretFromUser(secretName, reason, force);
     if (saved) this.manager.requestSessionRestart(threadId);
     return saved;
+  }
+
+  /**
+   * The managed local daemon (a container on this Mac). Desktop with a filesystem vault only. The container is
+   * deliberately left running on unload and quit: surviving Geode is the point. An in-flight Set up is cancelled and
+   * resumes idempotently the next time it is run.
+   */
+  private setUpLocalDaemon(): void {
+    if (!Platform.isDesktopApp) return;
+    const adapter = this.app.vault.adapter;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { createLocalDaemonController } = require('./localDaemon/wiring') as typeof import('./localDaemon/wiring');
+    this.localDaemon = createLocalDaemonController({
+      vaultBasePath: () => (adapter instanceof FileSystemAdapter ? adapter.getBasePath() : null),
+      pluginVersion: this.manifest.version,
+      getSecret: (name) => this.app.secretStorage.getSecret(secretStorageKey(name)) || undefined,
+      setSecret: (name, value) => { this.app.secretStorage.setSecret(secretStorageKey(name), value); },
+      getLocalDaemonSettings: () => this.settings.localDaemon,
+      setLocalDaemonSettings: (next) => { this.settings.localDaemon = next; },
+      getRemoteDaemons: () => this.settings.remoteDaemons ?? [],
+      setRemoteDaemons: (next) => { this.settings.remoteDaemons = next; },
+      saveSettings: () => this.saveSettings(),
+      onRegistryChanged: () => this.daemonRegistry?.refresh(),
+      createSocket: createPluginWebSocketFactory(),
+      log: (message) => debugLog(message),
+    });
+    const controller = this.localDaemon;
+    // Lazy start: a thread that runs on the managed daemon starts it on first use.
+    this.manager.beforeRemoteSend = async (daemonId) => {
+      const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
+      if (daemon?.managed === 'local-container') await controller.ensureRunning();
+    };
+    this.register(() => { controller.cancel(); });
   }
 
   /**

@@ -337,6 +337,11 @@ export class ThreadManager {
    */
   remoteDaemons: RemoteDaemonResolver | undefined = undefined;
   /**
+   * Awaited before a remote thread with no live session sends, so a daemon this app manages (the local container)
+   * can be started on first use. A rejection becomes the send's error, shown to the user verbatim.
+   */
+  beforeRemoteSend: ((daemonId: string) => Promise<void>) | undefined = undefined;
+  /**
    * Builds the host tools (vault, workspace, threads, Google, ...) a remote thread's daemon may call back into,
    * bound to this thread. Set by the plugin; absent on hosts that cannot serve them.
    */
@@ -2155,6 +2160,11 @@ export class ThreadManager {
   async sendMessage(threadId: string, userText: string, images?: ImageAttachment[], resend = false): Promise<void> {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error(`Thread not found: ${threadId}`);
+
+    // Before any state changes: a remote thread with no live session may need its (managed) daemon started first.
+    if (thread.remote && this.beforeRemoteSend && !this.sessions.has(threadId)) {
+      await this.beforeRemoteSend(thread.remote.daemonId);
+    }
 
     // A completed plan is a real lifecycle gate, not merely a card rendered
     // over an otherwise-sendable session. Keep fresh user input out of the
