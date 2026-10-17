@@ -70,13 +70,56 @@ there starts it for you. Quitting Geode leaves it running.
 later load. Notes are fully writable: keep vault backups or sync history. Paths containing `:` cannot be mounted and are
 refused. The VM has full outbound network access.
 
+**More folders.** Besides the vault: **Settings, Remote, Local daemon shared folders** lists host folders to share
+READ-WRITE at `/work/<folder name>` (for example a repository outside the vault; they appear under "Run on" as
+workspaces), and Geode's connected external roots are mounted READ-ONLY at `/ext/<name>` and offered as read-only
+workspaces (the daemon denies the edit tools there). Mounts are fixed when the container is created, so a change shows as
+"settings changed" and is applied by **Update** (or the next start of a stopped container). The consent text lists every
+mount. Memory and CPUs (**Local daemon memory** / **CPUs**, defaults 4G and 4) work the same way.
+
+**Environment and keychain secrets.** The daemon never receives your keychain or shell. Before each message to a thread on
+it, Agent Threads pushes that project's **Extra environment variables** (`AWS_PROFILE`, `CLAUDE_CODE_USE_BEDROCK`, ...) and
+keychain secrets as a credential kind `sessenv-<project>` (`agent-threads creds push`, over stdin, 24 hour expiry,
+refreshed on every send). The session spec carries only the kind's name; the daemon reads the values when the session
+starts, so they are never in a spec, a journal, `config.json` or a log, and the daemon redacts them from its output.
+Variables that describe this Mac's shell (`PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `DYLD_*`/`LD_*`, ...) are not
+sent. A spec cannot name any other credential kind as its environment.
+
+**Skills.** The skill plugin directories a host thread would load and `~/.claude/skills` / `~/.claude/agents` are copied
+into the daemon's data volume (`<data>/skills/<name>-<hash>`, `<data>/home/.claude/...`) before a session starts, by a
+small script run inside the container; unchanged directories are not copied again, and the session spec carries the guest
+paths (the daemon keeps only paths under its skills folder). Trees are followed through symlinks, skip `.git` and
+`node_modules`, and are capped (2000 files, 20 MiB). The agent can read them.
+
+**AWS (Amazon Bedrock, deploys).** For a Bedrock thread, or when **AWS profiles for the local daemon** is set, a trimmed
+`~/.aws/config` (only those profiles, their `source_profile` chain and their `sso-session` blocks, allowlisted keys only,
+never keys, session tokens or `credential_process`) and the single SSO token file of each profile's session are copied into
+the daemon user's home before each message, so a fresh `aws sso login` on this Mac reaches the daemon within minutes.
+`AWS_EC2_METADATA_DISABLED=true` is sent so a missing login fails fast with "Could not load AWS credentials" (which shows the
+AWS sign-in card) instead of retrying for minutes. Narrower than the removed sandbox VM, which mounted the whole token cache.
+
+**Tools that run on this Mac.** A new local daemon entry starts with the read groups (`vault`, `workspace`, `threads`,
+`skills`, `browser`), your Google and OAuth MCP servers (`mcp`) and `host_exec` turned on (Settings, Remote, edit daemon
+changes any of it; later edits are kept). `host_exec` runs ONE command on this Mac after an Allow once / Deny card for every
+call (never "Always allow", whatever the permission mode); its directory defaults to the thread's folder on the Mac. Tools
+that write, schedule or touch secrets stay off for every daemon (see "Tools on your computer (host tools)" below).
+`browser_navigate` forwards `localhost` URLs of a server the agent started in the container to a loopback port on this
+Mac (relay through `container exec`, loopback only), so the page opens; start such servers in the background.
+
+**Run on, and moving a thread.** The kickoff picker's **Run on** section lists "This Mac (container)"; before it is set up
+it shows "This Mac (container) - set up..." which opens this block. A Claude thread's menu (Harness, **Run on**) moves it
+between this computer and a daemon that can see its folder (vault or a shared folder); the native session cannot move, so the
+conversation continues from a summary and transcript references.
+
 **GitHub.** If you use Geode's GitHub connection, a short-lived GitHub token (15 minute expiry, refreshed while Geode is
 open) is pushed into the daemon so `git` over HTTPS and `gh` work there, along with your commit identity. How it works
 and what it can reach: [GitHub via Geode](github-integration.md#local-daemon).
 
 **Claude sign-in.** If the keychain already holds a container sign-in, that token is reused with no prompt. Otherwise the
 status reads *Running, needs Claude sign-in*; **Sign in to Claude** runs the
-same in-container `claude setup-token` flow once (open a page, paste back a code). The token is kept in the keychain
+same in-container `claude setup-token` flow once (open a page, paste back a code). When a token expires, the thread's
+"Sign in to Claude" card (threads on the daemon only) runs the same flow with a forced fresh token and then retries the
+message. The token is kept in the keychain
 under the shared container sign-in secret and written into the data volume through stdin (not argv or the environment),
 where the daemon reads it at start. A daemon only reads it at start, so applying a new sign-in restarts the daemon.
 
@@ -91,9 +134,9 @@ to Public), an image not published yet, no network, no disk space, a port in use
 a container with our name that Agent Threads did not create (left alone), a daemon that never answers (with the log tail),
 and a token the daemon rejected (a new one is created) each have their own message.
 
-**Not in this version:** extra project folders beyond the vault (the folder list), exposing the daemon to other devices,
-stop-on-idle, and routing a Claude auth failure inside the daemon to this sign-in (use the Local daemon block's sign-in
-button meanwhile). Codex and OpenCode threads do not run on a daemon.
+**Not in this version:** exposing the daemon to other devices, stop-on-idle, network isolation modes (the agent inside needs
+the network to reach Claude), and write/scheduling host tools for daemon threads (policy, see above). Codex and OpenCode
+threads do not run on a daemon.
 
 Troubleshooting: the runtime ships with the plugin and is not on your `PATH`; the CLI is at
 `~/Library/Application Support/claude-threads/runtime/<version>/bin/container` (`container ls -a` shows
@@ -473,12 +516,14 @@ deleted and a file past `journalMaxMb` is rotated to `.jsonl.1` (so at most abou
 
 A remote thread keeps the daemon machine's own tools (shell, file read/write, search). It can ALSO reach read-only
 tools that only exist in the app on your computer, while the app is connected, **but only if you turn that on**:
-**host tools are off by default for every daemon**, and when you turn them on nothing is offered until you list a group.
+**host tools are off by default for every daemon you add yourself**, and when you turn them on nothing is offered until you list a group. (The managed local daemon, a container on this Mac, starts with the read groups, `mcp` and `exec` listed.)
 
 | Runs | Tools |
 |---|---|
 | On the daemon, beside the repo | `enter_worktree`, `exit_worktree`, `set_working_directory` (worktrees go under `<first workspace>/.worktrees`, or `worktreeRoot`). These refuse a folder in a read-only workspace, and the repo and git root they work on are checked like the target. |
 | In the app on your computer, opt-in groups (all off until listed) | `vault` (search, backlinks, links, note metadata, file history, list, bridge list), `workspace` (open tabs, active file, watched documents), `threads` (list, current, projects, messages, log, wait), `skills` (list, search, get, sources), `browser` (the in-app browser tools except `browser_eval` and `browser_save_page`), `mcp` (your Google Workspace and OAuth MCP servers, under their own names, for example `mcp__google-docs__*`; or name one server) |
+| One command on your computer, opt-in group `exec` | `host_exec`: runs ONE shell command on your computer; every call shows an Allow once / Deny card with the exact command, folder and reason, no permission mode or remembered answer skips it, and its environment is scrubbed (no credentials). On for the managed local daemon only by default. |
+| One command on your computer, opt-in group `exec` | `host_exec`: runs ONE shell command on your computer; every call shows an Allow once / Deny card with the exact command, folder and reason, no permission mode or remembered answer skips it, and its environment is scrubbed (no credentials). On for the managed local daemon only by default. |
 | Never offered, whatever you set | everything that writes, executes, schedules, installs, sends or reads a secret on your computer: `request_secret`, `mcp_register_server`, `host_execute_command` / `host_list_commands` / `host_open_url`, `workspace_navigate_to_file` / `workspace_insert_at_cursor`, `watch_document`, `vault_restore_file_version`, `vault_add_bridge`, `threads_create` / `threads_send_message` / `threads_archive` / `threads_open` and every `threads_set_*` / project setter, `skills_install` / `create` / `update` / `uninstall` / `check_updates`, `Cron*` / `ScheduleWakeup`, `browser_eval`, `browser_save_page` |
 | Not offered either | `github_*` (the discovery tools run against Geode's connection; the daemon gets the token itself, not the tools), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |
 

@@ -91,3 +91,23 @@ describe('ThreadManager.moveThreadExecution', () => {
     expect(thread.sessionGeneration).toBeUndefined();
   });
 });
+
+describe('session extras for a thread on the managed daemon', () => {
+  it('reach the session options as the credential kind name and plugin paths, and beforeRemoteSend gets the thread id', async () => {
+    const { manager, thread } = setup();
+    await manager.moveThreadExecution(thread.id, toDaemon, async () => undefined);
+    const seen: Array<[string, string]> = [];
+    manager.beforeRemoteSend = async (daemonId, threadId) => { seen.push([daemonId, threadId]); };
+    manager.remoteSessionExtras = (id) => (id === thread.id ? { envKind: 'sessenv-p1', pluginPaths: ['/var/lib/agent-threads/skills/a-1'] } : undefined);
+    const options = (manager as unknown as { buildRemoteSessionOptions(id: string, t: Thread, m: undefined, l: boolean): { claude?: { remoteEnvKind?: string; remotePluginPaths?: string[] } } })
+      .buildRemoteSessionOptions(thread.id, thread, undefined, false);
+    expect(options.claude).toMatchObject({ remoteEnvKind: 'sessenv-p1', remotePluginPaths: ['/var/lib/agent-threads/skills/a-1'] });
+    // No extras: nothing is added.
+    manager.remoteSessionExtras = undefined;
+    const bare = (manager as unknown as { buildRemoteSessionOptions(id: string, t: Thread, m: undefined, l: boolean): { claude?: Record<string, unknown> } })
+      .buildRemoteSessionOptions(thread.id, thread, undefined, false);
+    expect(bare.claude).not.toHaveProperty('remoteEnvKind');
+    expect(bare.claude).not.toHaveProperty('remotePluginPaths');
+    void seen;
+  });
+});
