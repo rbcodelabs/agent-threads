@@ -2,7 +2,7 @@
 
 Status: proposed (design only, no code). Audience: whoever implements the PRs in section 12.
 Baseline: v0.64.0 (`f2d6daa`; the commit that contains #776). Written against `git archive f2d6daa`, because the
-worktree path `/Users/rickbowman/.geode/worktrees/agent-threads/feat-local-daemon` is not mounted in the sandbox
+worktree path `/Users/user/.geode/worktrees/agent-threads/feat-local-daemon` is not mounted in the sandbox
 this was written from, and `/work` is a checkout of `main` at v0.63.0. Move this file into the worktree when you
 commit it.
 
@@ -311,7 +311,7 @@ Two ways to expose a Mac folder at a path the daemon uses:
 
 | Option | Pros | Cons |
 |---|---|---|
-| **Identity mounts** (recommended): mount `/Users/rick/Vault` at `/Users/rick/Vault` | Paths in transcripts, tool output and git worktree pointers are valid on both sides; file links keep working; `vaultMapping` is `localRoot = remoteRoot` | Creating mount points under `/Users/...` in the guest is [U]; paths with `:` refused |
+| **Identity mounts** (recommended): mount `/Users/user/Vault` at `/Users/user/Vault` | Paths in transcripts, tool output and git worktree pointers are valid on both sides; file links keep working; `vaultMapping` is `localRoot = remoteRoot` | Creating mount points under `/Users/...` in the guest is [U]; paths with `:` refused |
 | Neutral mounts (`/srv/vault`, `/srv/mounts/<slug>`) | Predictable, matches docs for Linux daemons | Every path the agent prints is wrong on the Mac; existing `vaultMapping` supports only one vault mapping [C types.ts], so extra folders need a new mapping feature |
 
 Registration sets `vaultMapping { remoteRoot: <vault path> }`; `workspaces.list` marks it `kind: vault` because it has a

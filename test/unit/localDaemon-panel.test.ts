@@ -65,7 +65,7 @@ describe('renderLocalDaemonPanel', () => {
     expect(d.confirm).toHaveBeenCalledOnce();
     const message = d.confirm.mock.calls[0]![0] as string;
     expect(message).toContain('READ-WRITE');
-    expect(message).toContain('/Users/rick/Vault');
+    expect(message).toContain('/Users/user/Vault');
     expect(d.run).toHaveBeenCalledWith('setup', expect.anything());
   });
 

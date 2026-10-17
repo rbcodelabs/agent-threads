@@ -66,7 +66,7 @@ describe('buildLocalDaemonView', () => {
 describe('describeSetup (the consent text)', () => {
   it('names the vault path, read-write, the read-only config folders, loopback and the downloads', () => {
     const text = describeSetup(snap({ container: 'absent', runtimeInstalled: false, runtimeRunning: false, imageReady: false, volumesPresent: false, health: 'na', welcome: undefined }, {}, false));
-    expect(text).toContain('/Users/rick/Vault');
+    expect(text).toContain('/Users/user/Vault');
     expect(text).toContain('READ-WRITE');
     expect(text).toContain('.geode and .obsidian');
     expect(text).toContain('read-only');

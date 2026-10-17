@@ -26,7 +26,7 @@ import {
 
 const root = resolve(__dirname, '../..');
 const spec: LocalDaemonSpec = {
-  vaultPath: '/Users/rick/Vault',
+  vaultPath: '/Users/user/Vault',
   version: '0.65.0',
   hostPort: 7433,
   maskedDirs: ['.geode', '.obsidian'],
@@ -36,13 +36,13 @@ const spec: LocalDaemonSpec = {
 
 describe('names', () => {
   it('derives stable, per-vault names', () => {
-    const h = vaultHash('/Users/rick/Vault');
+    const h = vaultHash('/Users/user/Vault');
     expect(h).toMatch(/^[0-9a-f]{8}$/);
-    expect(vaultHash('/Users/rick/Vault/')).toBe(h);
-    expect(vaultHash('/Users/rick/Other')).not.toBe(h);
-    expect(containerNameFor('/Users/rick/Vault')).toBe(`agent-threads-local-${h}`);
-    expect(dataVolumeFor('/Users/rick/Vault')).toBe(`agent-threads-local-${h}-data`);
-    expect(workspacesVolumeFor('/Users/rick/Vault')).toBe(`agent-threads-local-${h}-workspaces`);
+    expect(vaultHash('/Users/user/Vault/')).toBe(h);
+    expect(vaultHash('/Users/user/Other')).not.toBe(h);
+    expect(containerNameFor('/Users/user/Vault')).toBe(`agent-threads-local-${h}`);
+    expect(dataVolumeFor('/Users/user/Vault')).toBe(`agent-threads-local-${h}-data`);
+    expect(workspacesVolumeFor('/Users/user/Vault')).toBe(`agent-threads-local-${h}-workspaces`);
   });
 });
 
@@ -85,9 +85,9 @@ describe('golden argv', () => {
     expect(vols).toEqual([
       `${dataVolumeFor(spec.vaultPath)}:/var/lib/agent-threads`,
       `${workspacesVolumeFor(spec.vaultPath)}:/srv/workspaces`,
-      '/Users/rick/Vault:/vault',
-      '/Users/rick/Vault/.geode:/vault/.geode:ro',
-      '/Users/rick/Vault/.obsidian:/vault/.obsidian:ro',
+      '/Users/user/Vault:/vault',
+      '/Users/user/Vault/.geode:/vault/.geode:ro',
+      '/Users/user/Vault/.obsidian:/vault/.obsidian:ro',
     ]);
     expect(args).toContain('--memory');
     expect(args[args.indexOf('--memory') + 1]).toBe('4G');
@@ -110,12 +110,12 @@ describe('golden argv', () => {
   it('run: skips masked mounts for config dirs that do not exist', () => {
     const args = runArgs({ ...spec, maskedDirs: ['.obsidian'] });
     expect(args.join(' ')).not.toContain('.geode');
-    expect(args.join(' ')).toContain('/Users/rick/Vault/.obsidian:/vault/.obsidian:ro');
+    expect(args.join(' ')).toContain('/Users/user/Vault/.obsidian:/vault/.obsidian:ro');
     expect(mountsFor({ vaultPath: '/v/', maskedDirs: [] })).toEqual([{ host: '/v', guest: '/vault', readOnly: false }]);
   });
 
   it('refuses a vault path the runtime would mis-parse', () => {
-    expect(() => runArgs({ ...spec, vaultPath: '/Users/rick/My:Vault' })).toThrow(SpecError);
+    expect(() => runArgs({ ...spec, vaultPath: '/Users/user/My:Vault' })).toThrow(SpecError);
     expect(() => runArgs({ ...spec, vaultPath: 'relative/vault' })).toThrow(SpecError);
     expect(() => runArgs({ ...spec, vaultPath: '/a/../b' })).toThrow(SpecError);
     expect(() => runArgs({ ...spec, hostPort: 0 })).toThrow(SpecError);
@@ -153,7 +153,7 @@ describe('golden argv', () => {
 describe('specSignature', () => {
   it('is stable and changes with anything fixed at run', () => {
     expect(specSignature(spec)).toBe(specSignature({ ...spec }));
-    for (const change of [{ hostPort: 7434 }, { version: '0.66.0' }, { maskedDirs: ['.geode'] }, { memory: '8G' }, { cpus: 2 }, { vaultPath: '/Users/rick/Other' }]) {
+    for (const change of [{ hostPort: 7434 }, { version: '0.66.0' }, { maskedDirs: ['.geode'] }, { memory: '8G' }, { cpus: 2 }, { vaultPath: '/Users/user/Other' }]) {
       expect(specSignature({ ...spec, ...change })).not.toBe(specSignature(spec));
     }
   });
