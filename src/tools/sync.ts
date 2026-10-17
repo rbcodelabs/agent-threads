@@ -158,8 +158,8 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
   );
 
   return {
-    sync_list_conflicts: listTool,
-    sync_inspect_conflict: inspectTool,
-    sync_resolve_conflict: resolveTool,
+    sync_list_conflicts: listTool as ToolDef,
+    sync_inspect_conflict: inspectTool as unknown as ToolDef,
+    sync_resolve_conflict: resolveTool as unknown as ToolDef,
   };
 }
