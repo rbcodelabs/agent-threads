@@ -284,6 +284,7 @@ token created for that purpose. Nothing is ever put in the URL.
 | `agent-threads list [--json]` | the daemon's threads: id, state (`waiting` for an answer, `running`, `idle`, `closed`), last sequence, folder. Needs a `read` token. |
 | `agent-threads attach <thread> [--from N\|end] [--claim] [--until-idle] [--json]` | follow a thread. Replays the journal after `--from` (default `0`: everything the daemon still holds; `end`: live only), then streams live. A unique id prefix is enough. |
 | `agent-threads run [options] "<prompt>"` | open a new session, send one prompt, stream the answer, exit with a code for how it ended. |
+| `agent-threads creds push <kind> [NAME...] [--stdin] [--ttl T] [--remove]` | send credentials to the daemon (`admin` token). See "Pushing credentials from the CLI". |
 | `agent-threads token create\|list\|revoke` | manage tokens (`--json` for scripts; `create --save` as above). |
 | `agent-threads doctor` | check the machine and the daemon (below). |
 | `agent-threads install` | set up the systemd user service (above). |
@@ -537,12 +538,30 @@ A daemon-listed server replaces a same-named server sent by the app.
 
 Secret values are sent with the `creds.push` protocol command (`{ kind, ttlSec, fields }`), which needs an **admin** token.
 They are stored on the daemon as `<data-dir>/creds/<kind>.json` (directory 0700, files 0600), never in `config.json` or in a
-thread's saved spec, and masked in the daemon's logs. There is no `agent-threads` subcommand or settings screen for pushing
-yet; the command is available to any admin client on the wire protocol.
+thread's saved spec, and masked in the daemon's logs. Push them with `agent-threads creds push` (below) or from any admin
+client on the wire protocol; there is no settings screen for it yet.
 
 A push replaces the whole kind; pushing no fields removes it; `ttlSec` (0 = no expiry) makes it lapse on its own. Placeholders
 are filled when a session starts, so a rotated secret reaches the next session without a daemon restart. A server whose
 secret is missing is not started and shows as **failed** ("missing credential NAME").
+
+### Pushing credentials from the CLI
+
+```bash
+# values come from the environment (not argv), one kind per push; ttl is seconds or 15m / 24h / 7d
+DOCS_TOKEN=... TOOLS_KEY=... agent-threads creds push mcp DOCS_TOKEN TOOLS_KEY --ttl 30d
+
+# or as JSON on standard input
+echo '{"DOCS_TOKEN":"..."}' | agent-threads creds push mcp --stdin
+
+# delete a kind (a push with no fields is never sent by accident)
+agent-threads creds push mcp --remove
+```
+
+Secrets never go on the command line: `NAME=value` arguments are refused (they would show in `ps` and shell history) unless
+you pass `--allow-argv`, which warns. A name with no value in the environment or on stdin is a usage error (exit 2) that
+names the field. The output lists field names and the expiry, never a value (`--json` prints
+`{kind, fields, removed, expiresAt}`). It needs an `admin` token (exit 4 otherwise). A push replaces the whole kind.
 
 Settings, Remote shows each daemon's MCP servers (connected / failed / needs sign-in) as last reported by its sessions;
 a server that dies mid-session turns to failed at the end of the next turn.
