@@ -140,7 +140,7 @@ describe('set up failures', () => {
   });
 
   it('refuses an unsupported Mac before touching anything', async () => {
-    const h = makeHarness({ runtime: { supported: false, reason: 'Sandboxed VMs require macOS 26 or later' } });
+    const h = makeHarness({ runtime: { supported: false, reason: 'The container runtime requires macOS 26 or later' } });
     const err = await expectCode(h.controller.setUp(), 'unsupported');
     expect(err.message).toMatch(/macOS 26/);
     expect(h.calls()).toEqual([]);

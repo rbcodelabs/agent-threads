@@ -43,6 +43,7 @@
     "src/gitClient.ts",
     "src/host/AttachmentStore.ts",
     "src/imageExternalization.ts",
+    "src/legacySandboxVm.ts",
     "src/localSkills.ts",
     "src/logger.ts",
     "src/mcpServerMerge.ts",

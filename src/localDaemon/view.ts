@@ -37,8 +37,7 @@ export interface LocalDaemonView {
 
 export const POSITIONING_NOTE =
   'Runs a daemon in an Apple container VM on this Mac. Threads you start with "Run on: This Mac (container)" keep running '
-  + 'when Geode quits and re-attach when you return. This is separate from "Run in: Container", which starts a throwaway '
-  + 'container per thread and ends with Geode.';
+  + 'when Geode quits and re-attach when you return, inside a VM boundary.';
 
 const DEGRADED_TEXT: Record<DegradedReason, { label: string; hint: string }> = {
   'health-down': { label: 'Not answering', hint: 'The container is up but the daemon does not answer. Restart it.' },
@@ -144,7 +143,7 @@ export function describeSetup(snap: LocalDaemonSnapshot): string {
   return `${download}It then starts a VM on this Mac that runs the agent-threads daemon, reachable only from this Mac (127.0.0.1). `
     + `Your vault ${vault} is mounted READ-WRITE, so an agent in the VM can edit or delete any note: keep vault backups or sync history. `
     + `${masked === 'no config folders' ? '' : `${masked} are mounted read-only so an agent cannot change plugins or settings. `}`
-    + 'The VM has full outbound network access, like the sandbox. Continue?';
+    + 'The VM has full outbound network access. If you use Geode\'s GitHub connection, a short-lived GitHub token (refreshed while Geode is open, expiring after 15 minutes) is copied into the VM so git and gh work there. Continue?';
 }
 
 export const DESCRIBE_RESET =

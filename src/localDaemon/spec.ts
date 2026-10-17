@@ -31,7 +31,7 @@ export const DATA_MOUNT = '/var/lib/agent-threads';
 export const WORKSPACES_MOUNT = '/srv/workspaces';
 export const CREDENTIALS_DIR = `${DATA_MOUNT}/creds`;
 export const CREDENTIAL_FILE = `${CREDENTIALS_DIR}/claude-token`;
-/** Where the vault appears inside the daemon container (same convention as the per-thread sandbox). */
+/** Where the vault appears inside the daemon container (and where `/vault` sits for the agent). */
 export const VAULT_GUEST_PATH = '/vault';
 /** Config directories masked read-only inside the vault mount: a writable copy would be code execution on the Mac. */
 export const MASKED_VAULT_DIRS: readonly string[] = ['.geode', '.obsidian'];
@@ -41,6 +41,19 @@ export const CLAUDE_BINARY_IN_IMAGE = '/opt/claude/.local/bin/claude';
 
 /** Name of the control token this plugin mints inside the daemon. */
 export const LOCAL_TOKEN_NAME = 'geode-local';
+/**
+ * Name of the admin token behind `creds.push` (the only admin command). It never leaves the container: it is
+ * saved as `cli-token` in the data directory, which `agent-threads creds push` reads by itself.
+ */
+export const CREDS_TOKEN_NAME = 'geode-creds';
+export const CLI_TOKEN_FILE = `${DATA_MOUNT}/cli-token`;
+/** `creds.push` kind and field the daemon reads GitHub access from (daemon/repos.ts). */
+export const GITHUB_CREDS_KIND = 'github';
+export const GITHUB_TOKEN_FIELD = 'GH_TOKEN';
+/** A pushed GitHub token is honoured this long, so a quit Geode cannot leave one behind for long. */
+export const GITHUB_CREDS_TTL_SEC = 15 * 60;
+/** The daemon user's global git config (HOME lives in the data volume, so it survives container recreation). */
+export const GITCONFIG_FILE = `${DATA_MOUNT}/home/.gitconfig`;
 export const LOCAL_DAEMON_ID = 'this-mac-container';
 export const LOCAL_DAEMON_NAME = 'This Mac (container)';
 
@@ -53,7 +66,7 @@ export const LOCAL_DAEMON_CPUS = DEFAULT_VM_CPUS;
  */
 export const MIN_LOCAL_DAEMON_VERSION = '0.64.0';
 
-/** Pull/build are far longer than the 120 s lifecycle cap; same budgets as the sandbox image pipeline. */
+/** Pull/build are far longer than the 120 s lifecycle cap; image pulls and builds are slow. */
 export const PULL_TIMEOUT_MS = 30 * 60_000;
 export const BUILD_TIMEOUT_MS = 20 * 60_000;
 export const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -314,6 +327,31 @@ export function tokenListArgs(name: string): string[] {
 export function tokenRevokeArgs(name: string, tokenId: string): string[] {
   return [...EXEC_AS_DAEMON(name), 'token', 'revoke', tokenId, '--data-dir', DATA_MOUNT];
 }
+/** Exit 0 iff the saved admin token for `creds push` exists and is non-empty inside the running container. */
+export function cliTokenPresentArgs(name: string): string[] {
+  return ['exec', '--user', String(DAEMON_UID), name, 'test', '-s', CLI_TOKEN_FILE];
+}
+/** Mints the admin token and saves it (not printed) as `cli-token`; `token create --save --json` prints only its path. */
+export function cliTokenCreateArgs(name: string): string[] {
+  return [...EXEC_AS_DAEMON(name), 'token', 'create', '--name', CREDS_TOKEN_NAME, '--scope', 'admin', '--save', '--json', '--data-dir', DATA_MOUNT];
+}
+const CREDS_PUSH_BASE = (name: string, kind: string): string[] => [
+  'exec', '-i', '--user', String(DAEMON_UID), name, 'agent-threads', 'creds', 'push', kind,
+  '--url', `ws://127.0.0.1:${DAEMON_INTERNAL_PORT}`, '--data-dir', DATA_MOUNT,
+];
+/** Pushes a credential kind from a JSON object of NAME -> value on stdin, so no secret is ever in argv. */
+export function credsPushArgs(name: string, kind: string, ttlSec: number): string[] {
+  return [...CREDS_PUSH_BASE(name, kind), '--stdin', '--ttl', String(ttlSec)];
+}
+/** Deletes a pushed credential kind. */
+export function credsRemoveArgs(name: string, kind: string): string[] {
+  return [...CREDS_PUSH_BASE(name, kind), '--remove'];
+}
+/** Sets one key in the daemon user's global git config (a repository's own config still wins). */
+export function gitConfigSetArgs(name: string, key: string, value: string): string[] {
+  return ['exec', '--user', String(DAEMON_UID), name, 'git', 'config', '--file', GITCONFIG_FILE, key, value];
+}
+
 /** Exit 0 iff the credential file exists and is non-empty inside the running container. */
 export function credentialPresentArgs(name: string): string[] {
   return ['exec', '--user', String(DAEMON_UID), name, 'test', '-s', CREDENTIAL_FILE];

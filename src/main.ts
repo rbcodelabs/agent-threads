@@ -275,6 +275,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
   readonly daemonMcpStatus = new DaemonMcpStatusStore();
   /** The managed daemon in a container on this Mac (desktop only; see src/localDaemon/). */
   localDaemon: import('./localDaemon/controller').LocalDaemonController | null = null;
+  /** Delivers the Geode GitHub connection to the managed daemon (desktop with a Geode GitHub bridge only). */
+  localDaemonGithub: import('./localDaemon/githubDelivery').LocalDaemonGithubDelivery | null = null;
   /** What the Run on picker asks for a daemon's folders (advertised workspaces, subfolders). */
   remoteFolders: RemoteFolderSource | null = null;
   /** Repositories each remote daemon keeps cloned (Settings, Remote, edit daemon). */
@@ -2590,7 +2592,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Lazy start: a thread that runs on the managed daemon starts it on first use.
     this.manager.beforeRemoteSend = async (daemonId) => {
       const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
-      if (daemon?.managed === 'local-container') await controller.ensureRunning();
+      if (daemon?.managed !== 'local-container') return;
+      await controller.ensureRunning();
+      // Before the session opens: the daemon reads pushed credentials when a session starts. Never throws.
+      await this.localDaemonGithub?.ensureFresh();
     };
     this.register(() => { controller.cancel(); });
   }
@@ -2714,6 +2719,17 @@ export default class ClaudeThreadsPlugin extends Plugin {
       isEnabled: () => this.settings.githubConnectionEnabled !== false,
     }));
     if (!bridge || !Platform.isDesktop) return;
+    // The managed local daemon gets the same connection (git + gh inside its container).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { createLocalDaemonGithubDelivery } = require('./localDaemon/wiring') as typeof import('./localDaemon/wiring');
+    const vaultAdapter = this.app.vault.adapter;
+    this.localDaemonGithub = createLocalDaemonGithubDelivery({
+      broker: this.githubBroker,
+      isEnabled: () => this.settings.githubConnectionEnabled !== false,
+      getEmailOverride: () => this.settings.githubCommitEmail,
+      vaultBasePath: () => (vaultAdapter instanceof FileSystemAdapter ? vaultAdapter.getBasePath() : null),
+      log: (message) => debugLog(message),
+    });
     this.githubHost = new GithubHostDelivery({
       broker: this.githubBroker,
       isEnabled: () => this.settings.githubConnectionEnabled !== false,
@@ -2729,6 +2745,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     setGitAuthProvider(undefined);
     // Delete the published GitHub token file immediately; never wait on the shutdown poll below.
     void this.githubHost?.stop();
+    void this.localDaemonGithub?.stop();
     // Revoke peer references before asynchronous shutdown begins. Obsidian does
     // not await plugin onunload hooks, so delaying this would leave a stale
     // generation callable while sessions are draining.

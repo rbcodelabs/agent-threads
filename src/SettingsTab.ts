@@ -1815,7 +1815,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
               // Apply to the host runtime dir now.
               if (value) void this.plugin.githubHost?.start();
-              else void this.plugin.githubHost?.stop();
+              else {
+                void this.plugin.githubHost?.stop();
+                void this.plugin.localDaemonGithub?.stop();
+              }
             }),
         );
 

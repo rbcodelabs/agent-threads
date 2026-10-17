@@ -113,7 +113,7 @@ export function runnerEnv(
 /**
  * Real runner. `child_process` is required inside the returned closure so that
  * building a runner — which happens for every session, on every platform — is
- * inert until a VM tool is actually called.
+ * inert until the CLI is actually called.
  */
 export function createDefaultVmCommandRunner(binary: string = VM_BINARY): VmCommandRunner {
   return (args, opts) =>

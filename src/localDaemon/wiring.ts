@@ -10,6 +10,7 @@ import { daemonWsUrl, probeDaemon, type WebSocketFactory } from '../remote/Daemo
 import { signInToClaudeInContainer, type SpawnLike } from '../claudeContainerAuthCli';
 import { runnerEnv, createDefaultVmCommandRunner } from '../containerCli';
 import { LocalDaemonController, type LocalDaemonDeps } from './controller';
+import { LocalDaemonGithubDelivery, type LocalDaemonGithubDeps } from './githubDelivery';
 import { createDefaultRuntimeApi } from './runtime';
 import { parseHealthz } from './parse';
 import { LOCAL_DAEMON_ID } from './spec';
@@ -135,4 +136,18 @@ export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonC
     log: host.log,
   };
   return new LocalDaemonController(deps);
+}
+
+/** Delivers the Geode GitHub connection to the managed daemon (see githubDelivery.ts). Geode-only, like the rest of this file. */
+export function createLocalDaemonGithubDelivery(
+  host: Pick<LocalDaemonGithubDeps, 'broker' | 'isEnabled' | 'getEmailOverride' | 'log'> & { vaultBasePath(): string | null },
+): LocalDaemonGithubDelivery {
+  return new LocalDaemonGithubDelivery({
+    broker: host.broker,
+    isEnabled: host.isEnabled,
+    vaultPath: () => host.vaultBasePath(),
+    runner: () => createDefaultVmCommandRunner(),
+    ...(host.getEmailOverride ? { getEmailOverride: host.getEmailOverride } : {}),
+    ...(host.log ? { log: host.log } : {}),
+  });
 }

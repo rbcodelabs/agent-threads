@@ -47,12 +47,12 @@ runtime, with one click and no token pasting. It is an ordinary entry in "Remote
 Geode re-attaches. It is desktop-only and the whole block is hidden on mobile and on a Mac that cannot run the runtime
 (Intel, macOS older than 26). Design and decisions: [`local-daemon-design.md`](local-daemon-design.md).
 
-This is **not** "Run in: Container" ([Sandbox VMs](sandbox-vms.md)). That starts a throwaway container per thread and ends
-with Geode. The local daemon is one shared VM per vault, started once and left running.
+It is one shared VM per vault, started once and left running. (Earlier versions could also start a throwaway container
+per thread, "Run in: Container"; that was removed in favour of this.)
 
 **What Set up does** (after a confirmation that names the downloads, the vault path and "read-write"):
 
-1. installs and starts the container runtime if needed (shared with Sandbox setup);
+1. installs and starts the container runtime if needed (a pinned, checksum-verified copy kept outside the vault);
 2. pulls `ghcr.io/rbcodelabs/agent-threads-daemon:<plugin version>` and builds a thin local layer that adds the Claude CLI
    from Anthropic (the published image has no CLI: no redistribution grant);
 3. creates two named volumes (data and workspaces) and fixes their ownership with a one-shot (named volumes start
@@ -68,10 +68,14 @@ there starts it for you. Quitting Geode leaves it running.
 **Folders.** The vault is mounted read-write at `/vault` (the daemon's `--workspace`), with `<vault>/.geode` and
 `<vault>/.obsidian` mounted **read-only on top** so a process in the VM cannot rewrite plugin code that Geode would
 later load. Notes are fully writable: keep vault backups or sync history. Paths containing `:` cannot be mounted and are
-refused. The VM has full outbound network access, like the sandbox.
+refused. The VM has full outbound network access.
 
-**Claude sign-in.** If you already signed in for container threads ("Sign in to Claude" inside a sandbox thread), that
-token is reused with no prompt. Otherwise the status reads *Running, needs Claude sign-in*; **Sign in to Claude** runs the
+**GitHub.** If you use Geode's GitHub connection, a short-lived GitHub token (15 minute expiry, refreshed while Geode is
+open) is pushed into the daemon so `git` over HTTPS and `gh` work there, along with your commit identity. How it works
+and what it can reach: [GitHub via Geode](github-integration.md#local-daemon).
+
+**Claude sign-in.** If the keychain already holds a container sign-in, that token is reused with no prompt. Otherwise the
+status reads *Running, needs Claude sign-in*; **Sign in to Claude** runs the
 same in-container `claude setup-token` flow once (open a page, paste back a code). The token is kept in the keychain
 under the shared container sign-in secret and written into the data volume through stdin (not argv or the environment),
 where the daemon reads it at start. A daemon only reads it at start, so applying a new sign-in restarts the daemon.
@@ -476,7 +480,7 @@ tools that only exist in the app on your computer, while the app is connected, *
 | On the daemon, beside the repo | `enter_worktree`, `exit_worktree`, `set_working_directory` (worktrees go under `<first workspace>/.worktrees`, or `worktreeRoot`). These refuse a folder in a read-only workspace, and the repo and git root they work on are checked like the target. |
 | In the app on your computer, opt-in groups (all off until listed) | `vault` (search, backlinks, links, note metadata, file history, list, bridge list), `workspace` (open tabs, active file, watched documents), `threads` (list, current, projects, messages, log, wait), `skills` (list, search, get, sources), `browser` (the in-app browser tools except `browser_eval` and `browser_save_page`), `mcp` (your Google Workspace and OAuth MCP servers, under their own names, for example `mcp__google-docs__*`; or name one server) |
 | Never offered, whatever you set | everything that writes, executes, schedules, installs, sends or reads a secret on your computer: `request_secret`, `mcp_register_server`, `host_execute_command` / `host_list_commands` / `host_open_url`, `workspace_navigate_to_file` / `workspace_insert_at_cursor`, `watch_document`, `vault_restore_file_version`, `vault_add_bridge`, `threads_create` / `threads_send_message` / `threads_archive` / `threads_open` and every `threads_set_*` / project setter, `skills_install` / `create` / `update` / `uninstall` / `check_updates`, `Cron*` / `ScheduleWakeup`, `browser_eval`, `browser_save_page` |
-| Not offered either | `enter_vm` / `vm_exec` / `exit_vm` (the daemon machine is the sandbox), `host_exec`, `github_*` (the GitHub connection has no credential on the daemon), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |
+| Not offered either | `github_*` (the discovery tools run against Geode's connection; the daemon gets the token itself, not the tools), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |
 
 The names are the ones a local thread has (`mcp__claude_threads__vault_search`). The remote session's system prompt lists
 exactly which tools run on your computer (or says none do).

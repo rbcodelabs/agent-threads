@@ -191,7 +191,7 @@ export function buildHostGitEnv(opts: {
   return out;
 }
 
-/** Removes the env additions {@link buildHostGitEnv} makes, for sessions that run inside the sandbox VM. */
+/** Removes the env additions {@link buildHostGitEnv} makes, for sessions that run inside a container. */
 export function stripHostOnlyGitEnv(env: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
