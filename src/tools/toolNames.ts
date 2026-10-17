@@ -10,7 +10,7 @@
  */
 
 export type ToolDomain =
-  | 'worktree' | 'vault' | 'workspace' | 'threads' | 'schedule' | 'skills' | 'misc' | 'browser';
+  | 'worktree' | 'vault' | 'workspace' | 'threads' | 'schedule' | 'skills' | 'misc' | 'exec' | 'browser';
 
 export const LEGACY_TO_CANONICAL_TOOL_NAMES: Readonly<Record<string, string>> = Object.freeze({
   obsidian_search_vault: 'vault_search',
@@ -78,6 +78,8 @@ export const TOOL_NAMES_BY_DOMAIN: Readonly<Record<ToolDomain, readonly string[]
     'skills_install', 'skills_create_local', 'skills_update_local', 'skills_uninstall', 'skills_update',
   ],
   misc: ['github_list_access', 'github_check_repo', 'request_secret', 'mcp_register_server'],
+  /** Runs a command on the user's computer after a per-call approval card; offered only to the managed local daemon. */
+  exec: ['host_exec'],
   browser: BROWSER_TOOL_NAMES,
 });
 
@@ -91,7 +93,7 @@ export const BUILT_IN_TOOL_ORDER: readonly string[] = Object.freeze([
   'obsidian_get_open_tabs', 'obsidian_get_active_file', 'obsidian_navigate_to_file', 'obsidian_search_vault',
   'obsidian_get_backlinks', 'obsidian_get_outgoing_links', 'obsidian_insert_at_cursor', 'obsidian_get_note_metadata',
   'vault_list', 'set_working_directory', 'ScheduleWakeup', 'watch_document', 'unwatch_document',
-  'list_watched_documents', 'enter_worktree', 'exit_worktree',
+  'list_watched_documents', 'enter_worktree', 'exit_worktree', 'host_exec',
   'github_list_access', 'github_check_repo', 'obsidian_list_commands', 'obsidian_execute_command',
   'threads_create', 'obsidian_get_current_thread', 'obsidian_list_threads', 'obsidian_list_projects',
   'obsidian_create_project', 'obsidian_update_project', 'obsidian_set_thread_project', 'obsidian_get_thread_messages',

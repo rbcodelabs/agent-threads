@@ -44,7 +44,11 @@ describe('domain factories return exactly their domain', () => {
   it('threads', () => expect(sorted(createThreadTools({ options: {} }))).toEqual(domain('threads')));
   it('schedule', () => expect(sorted(createScheduleTools({ options: {} }))).toEqual(domain('schedule')));
   it('skills', () => expect(sorted(createSkillsTools({ options: {} }))).toEqual(domain('skills')));
-  it('misc', () => expect(sorted(createMiscTools({ app, cwd: createCwdTracker(), options: {} }))).toEqual(domain('misc')));
+  it('misc (host_exec, its own exec domain, only with its hook)', () => {
+    expect(sorted(createMiscTools({ app, cwd: createCwdTracker(), options: {} }))).toEqual(domain('misc'));
+    expect(sorted(createMiscTools({ app, cwd: createCwdTracker(), options: { hostExec: { isInteractive: () => true, requestApproval: async () => true } } })))
+      .toEqual([...domain('misc'), ...domain('exec')].sort());
+  });
 });
 
 describe('degrade cleanly without their callbacks', () => {

@@ -127,6 +127,15 @@ describe('toolRouting routes', () => {
     for (const t of dangerous) expect(routeFor(t, everything), t).toBe('absent');
   });
 
+  it('host_exec is its own opt-in group: absent by default, on by group or by tool, never by another group', () => {
+    expect(routeFor('host_exec')).toBe('absent');
+    expect(routeFor('host_exec', { exec: 'host' })).toBe('host');
+    expect(routeFor('host_exec', { host_exec: 'host' })).toBe('host');
+    expect(routeFor('host_exec', { vault: 'host', misc: 'host', threads: 'host' })).toBe('absent');
+    expect(routeFor('host_exec', { exec: 'host', host_exec: 'absent' })).toBe('absent');
+    expect(toolsRouted('host', { exec: 'host' })).toEqual(['host_exec']);
+  });
+
   it('cannot turn on what has no backing on the daemon (the GitHub connection)', () => {
     expect(routeFor('github_list_access', { github_list_access: 'host', misc: 'host' })).toBe('absent');
   });

@@ -131,6 +131,7 @@ export function getToolIcon(raw: string): string {
     case 'get_backlinks':        return 'link-2';
     case 'get_outgoing_links':   return 'external-link';
     case 'set_working_directory': return 'folder-symlink';
+    case 'host_exec':            return 'square-terminal';
     case 'enter_worktree':       return 'git-branch-plus';
     case 'exit_worktree':        return 'git-branch';
     case 'get_open_tabs':        return 'layout-panel-top';

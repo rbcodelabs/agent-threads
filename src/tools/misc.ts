@@ -1,5 +1,5 @@
 /**
- * GitHub discovery, `mcp_register_server` and `request_secret`.
+ * GitHub discovery, `mcp_register_server`, `host_exec` and `request_secret`.
  * Moved verbatim out of ObsidianTools.ts (one factory over a narrow port); see toolRouting.ts for where each runs.
  */
 
@@ -8,6 +8,7 @@ import { tool } from '@anthropic-ai/claude-agent-sdk/browser';
 import { mcpRegistrationSchema, type McpRegistrationResult } from '../mcpServerStore';
 import { secretStorageKey } from '../secretUtils';
 import { GithubConnectionError, isValidRepoFullName, summarizeAccess } from '../githubCredentials';
+import { createHostExecHandler } from '../hostExec';
 import type { ObsidianMcpServerOptions } from '../ObsidianTools';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { App } from 'obsidian';
@@ -18,7 +19,7 @@ type ToolDef = SdkMcpToolDefinition<any>;
 export interface MiscToolsPort {
   app: Pick<App, 'secretStorage'>;
   cwd: CwdTracker;
-  options: Pick<ObsidianMcpServerOptions, 'githubBroker' | 'isGithubConnectionEnabled' | 'onRegisterMcpServer' | 'onRequestSecret'>;
+  options: Pick<ObsidianMcpServerOptions, 'githubBroker' | 'hostExec' | 'isGithubConnectionEnabled' | 'onRegisterMcpServer' | 'onRequestSecret'>;
 }
 
 
@@ -107,6 +108,31 @@ export function createMiscTools(port: MiscToolsPort): Record<string, ToolDef> {
     { alwaysLoad: true },
   );
 
+  const boundHostExec = options.hostExec ? tool(
+    'host_exec',
+    [
+      'Runs ONE shell command on the real host machine (the user\'s Mac, outside the local daemon container this session runs in), only after the user explicitly approves it.',
+      'Every call shows the user the exact command, working directory and your reason, and they choose Allow once or Deny; this prompt cannot be skipped by any permission mode.',
+      'Use only when the task truly needs the host (host-only tools, files outside the mounted workspaces); prefer commands in your own container for everything else.',
+      'The working directory defaults to the user\'s vault folder on the Mac; a path under the vault mount in this container is mapped to the same folder on the Mac.',
+      'Scheduled or non-interactive threads cannot prompt, so the call is denied.',
+      'Runs via /bin/sh -c with a minimal environment (no credentials or API tokens). Returns exit code, stdout and stderr; a non-zero exit is a normal result. Long output is truncated with an explicit marker.',
+    ].join(' '),
+    {
+      command: z.string().min(1).describe('Shell command to run on the host via /bin/sh -c.'),
+      cwd: z.string().optional().describe('Absolute host directory to run in. Defaults to the thread\'s working directory on the host. Must already exist.'),
+      reason: z.string().min(1).describe('Why this must run on the host. Shown to the user in the approval prompt.'),
+      timeoutSeconds: z.number().optional().describe('Deadline in seconds (SIGTERM, then SIGKILL after a short grace). Defaults to 300, capped at 3600.'),
+    },
+    async (args) => {
+      const result = await createHostExecHandler(options.hostExec!, () => cwd.get() || undefined)(args);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        ...(!result.success ? { isError: true } : {}),
+      };
+    },
+  ) : undefined;
+
   const boundRequestSecret = tool(
     'request_secret',
     [
@@ -170,12 +196,14 @@ export function createMiscTools(port: MiscToolsPort): Record<string, ToolDef> {
     boundGithubListAccess as ToolDef | undefined,
     boundGithubCheckRepo as ToolDef | undefined,
     boundRegisterMcpServer as ToolDef | undefined,
+    boundHostExec as ToolDef | undefined,
     boundRequestSecret as ToolDef | undefined,
   ];
   const toolNames = [
     'github_list_access',
     'github_check_repo',
     'mcp_register_server',
+    'host_exec',
     'request_secret',
   ];
   return Object.fromEntries(toolNames.flatMap((name, i): Array<[string, ToolDef]> => (toolDefs[i] ? [[name, toolDefs[i]!]] : [])));

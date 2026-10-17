@@ -23,6 +23,7 @@ import { createThreadTools } from './tools/threads';
 import { createVaultTools } from './tools/vault';
 import { createWorkspaceTools } from './tools/workspace';
 import { createWorktreeTools } from './tools/worktree';
+import { type HostExecHooks } from './hostExec';
 import { BUILT_IN_TOOL_ORDER, LEGACY_TO_CANONICAL_TOOL_NAMES } from './tools/toolNames';
 
 // ── Thread-state snapshot types ───────────────────────────────────────────────
@@ -146,6 +147,11 @@ export interface ProjectUpdatePatch {
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 export interface ObsidianMcpServerOptions {
+  /**
+   * Enables the `host_exec` tool. Supplied ONLY for a thread on the managed local daemon (desktop); omitted
+   * everywhere else, in which case the tool is not registered at all.
+   */
+  hostExec?: HostExecHooks;
   /**
    * Agent tools contributed by peers through `extensions.registerAgentTool`,
    * already bound to this thread by the host (ADR-0008).
@@ -462,7 +468,11 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     .map(binding => binding.name);
 
   const exposedTools = tools;
-  const legacyTools = exposedTools.map(toDeprecatedLegacyToolDefinition);
+  // host_exec is newer than the deprecated `obsidian` alias server, which is frozen at its legacy roster: exposing a
+  // host-command tool under two names would only double the approval surface.
+  const legacyTools = exposedTools
+    .filter(definition => definition.name !== 'host_exec')
+    .map(toDeprecatedLegacyToolDefinition);
   const legacyServer = createSdkMcpServer({
     name: 'obsidian',
     tools: legacyTools,

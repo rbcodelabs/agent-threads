@@ -69,6 +69,8 @@ import {
   type Thread,
 } from './types';
 import { serializeThreadForSave } from './imageExternalization';
+import type { HostExecHooks } from './hostExec';
+import { mapRemoteToLocal } from './remote/vaultMapping';
 import { stripLegacySandboxSettings } from './legacySandboxVm';
 import { selectIdleThreadsForArchive } from './autoArchive';
 import { createDeferredThreadArchiver } from './deferredThreadArchive';
@@ -680,8 +682,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
         catch (error) { this.mcpRegistrationModals.delete(modal); reject(error); }
       }),
     });
-    const buildBuiltInMcpServers = (threadId: string, initialCwd: string) =>
+    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks) =>
         createClaudeThreadsMcpServers(this.app, {
+          ...(hostExec ? { hostExec } : {}),
           // Contributed agent tools, bound to this thread here — the host does
           // the binding so a peer never reaches the factory (ADR-0008). Built-in
           // Design arrives through this list like any other contribution; there
@@ -1028,7 +1031,23 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // headers stay in the sources created here.
     this.manager.remoteHostToolsFactory = (threadId: string, thread: Thread) => {
       const daemonSettings = thread.remote ? this.settings.remoteDaemons?.find(d => d.id === thread.remote!.daemonId)?.hostTools : undefined;
-      const builtIn = buildBuiltInMcpServers(threadId, thread.cwd).claude_threads.harnessTools;
+      const daemonConfig = thread.remote ? this.settings.remoteDaemons?.find(d => d.id === thread.remote!.daemonId) : undefined;
+      // host_exec exists only for the managed local daemon (a container on this Mac). The app shows its Allow once / Deny
+      // card before ANY proxied call that needs approval, so the handler's own prompt is satisfied by that card.
+      let hostExec: HostExecHooks | undefined;
+      let builtInCwd = thread.cwd;
+      if (daemonConfig?.managed === 'local-container' && !Platform.isMobile) {
+        hostExec = {
+          isInteractive: () => this.mcpRegistrationAvailable && !this.manager.getThread(threadId)?.scheduledItemId,
+          requestApproval: async () => true,
+          redact: redactGithubSecrets,
+        };
+        // The thread's cwd is a path in the container; its default on the Mac is the same folder under the vault.
+        const mapping = daemonConfig.vaultMapping;
+        builtInCwd = (mapping && thread.remote ? mapRemoteToLocal(mapping, this.manager.vaultRoot, thread.remote.remoteCwd) : undefined)
+          ?? this.manager.vaultRoot ?? thread.cwd;
+      }
+      const builtIn = buildBuiltInMcpServers(threadId, builtInCwd, hostExec).claude_threads.harnessTools;
       const brokers: Record<string, { type?: string; url?: string; headers?: Record<string, string> }> = {
         ...(this.googleWorkspaceMcp?.serversForThread(threadId) ?? {}),
         ...(this.oauthMcpRegistry?.serversForThread(threadId) ?? {}),

@@ -37,15 +37,17 @@ export const DEFAULT_DOMAIN_ROUTES: Readonly<Record<ToolDomain, ToolRoute>> = Ob
   schedule: 'absent',
   skills: 'absent',
   misc: 'absent',
+  exec: 'absent',
   browser: 'absent',
 });
 
 /**
  * Groups the user can switch on per daemon (`routes: { vault: 'host' }`). Each switches on only the READ tools of
- * its domain: anything that creates or changes state outside the vault read is in `NEVER_OFFERED`. The proxied
+ * its domain, except `exec` (`host_exec`: one command on this computer, which the app only runs after a per-call
+ * Allow once / Deny card that no permission mode and no remembered answer can skip; the managed local daemon has it on): anything that creates or changes state outside the vault read is in `NEVER_OFFERED`. The proxied
  * Google/OAuth servers are a further group, `mcp` (see `remote/hostTools.ts`).
  */
-export const OPT_IN_GROUPS: readonly ToolDomain[] = Object.freeze(['vault', 'workspace', 'threads', 'skills', 'browser'] as ToolDomain[]);
+export const OPT_IN_GROUPS: readonly ToolDomain[] = Object.freeze(['vault', 'workspace', 'threads', 'skills', 'browser', 'exec'] as ToolDomain[]);
 
 /** The `mcp` group key (proxied Google Workspace and OAuth MCP servers). */
 export const MCP_GROUP = 'mcp';
