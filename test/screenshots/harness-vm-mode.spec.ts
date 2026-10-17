@@ -3,7 +3,7 @@ import path from 'path';
 import { shot } from './helpers';
 
 /**
- * Per-thread "Run in" (Container / Host / Default) section of the harness menu.
+ * Per-thread "Run in" (Container / Host / Default) section of the harness row in the composer settings popover.
  *
  * States covered: the section for a Claude thread in each selected state, the
  * "Harness: Claude · <mode>" label on the parent menu row, the host <-> container
@@ -38,15 +38,15 @@ async function setThread(page: Page, patch: { mode?: Mode; harness?: string; ses
   }, { id: THREAD, patch });
 }
 
-/** More menu -> "Harness: ..." row. Returns the text of the more-menu harness row. */
+/** Settings popover -> Harness row. Returns the text of the collapsed harness row ("Harness<value>"). */
 async function openHarnessMenu(page: Page): Promise<string> {
   await page.hover('.ct-floating-panel');
   await page.click('.ct-thread-more-btn');
-  await page.waitForSelector('.menu');
-  const row = page.locator('.menu .menu-item', { hasText: /^\s*Harness:/ });
+  await page.waitForSelector('.ct-settings-popover');
+  const row = page.locator('[data-ct-key="row:harness"]');
   const label = (await row.textContent()) ?? '';
   await row.click();
-  await page.waitForSelector('.menu .menu-item:has-text("Run in")');
+  await page.waitForSelector('.ct-sp-option');
   return label;
 }
 
@@ -54,11 +54,11 @@ async function openHarnessMenu(page: Page): Promise<string> {
 async function expectMenuInsideViewport(page: Page): Promise<void> {
   const problems = await page.evaluate(() => {
     const out: string[] = [];
-    const menu = document.querySelector<HTMLElement>('.menu')!;
+    const menu = document.querySelector<HTMLElement>('.ct-settings-popover')!;
     const r = menu.getBoundingClientRect();
     if (r.left < 0 || r.right > window.innerWidth + 0.5) out.push(`menu x-range ${r.left}..${r.right} vs ${window.innerWidth}`);
     if (r.top < 0 || r.bottom > window.innerHeight + 0.5) out.push(`menu y-range ${r.top}..${r.bottom} vs ${window.innerHeight}`);
-    for (const el of menu.querySelectorAll<HTMLElement>('.menu-item')) {
+    for (const el of menu.querySelectorAll<HTMLElement>('.ct-sp-item')) {
       if (el.scrollWidth > el.clientWidth + 1) out.push(`row clipped: ${el.textContent}`);
     }
     return out;
@@ -68,9 +68,9 @@ async function expectMenuInsideViewport(page: Page): Promise<void> {
 
 test.describe('Harness menu: Run in', () => {
   const states: Array<{ name: string; mode: Mode; checked: string; headerLabel: RegExp }> = [
-    { name: 'default', mode: undefined, checked: 'Default (follows settings)', headerLabel: /^Harness: Claude$/ },
-    { name: 'container', mode: 'always', checked: 'Container', headerLabel: /Harness: Claude · Container$/ },
-    { name: 'host', mode: 'never', checked: 'Host (no container)', headerLabel: /Harness: Claude · Host \(no container\)$/ },
+    { name: 'default', mode: undefined, checked: 'Default (follows settings)', headerLabel: /^Harness\s*Claude$/ },
+    { name: 'container', mode: 'always', checked: 'Container', headerLabel: /Claude · Container$/ },
+    { name: 'host', mode: 'never', checked: 'Host (no container)', headerLabel: /Claude · Host \(no container\)$/ },
   ];
 
   for (const s of states) {
@@ -79,12 +79,12 @@ test.describe('Harness menu: Run in', () => {
       await setThread(page, { mode: s.mode });
       const label = await openHarnessMenu(page);
       expect(label.trim()).toMatch(s.headerLabel);
-      const items = await page.locator('.menu .menu-item').allTextContents();
-      expect(items.map((t) => t.replace(/^✓ /, ''))).toEqual(
-        expect.arrayContaining(['Run in', 'Container', 'Host (no container)', 'Default (follows settings)']),
+      const items = await page.locator('.ct-settings-popover .ct-sp-option').allTextContents();
+      expect(items.map((t) => t.trim())).toEqual(
+        expect.arrayContaining(['Container', 'Host (no container)', 'Default (follows settings)']),
       );
-      await expect(page.locator('.menu .menu-item.is-checked', { hasText: s.checked })).toHaveCount(1);
-      await expect(page.locator('.menu .menu-item[aria-disabled="true"]', { hasText: 'Run in' })).toHaveCount(1);
+      await expect(page.locator('.ct-settings-popover .ct-sp-group-title', { hasText: 'Run in' })).toHaveCount(1);
+      await expect(page.locator('.ct-settings-popover .ct-sp-option[aria-checked="true"]', { hasText: s.checked })).toHaveCount(1);
       await expectMenuInsideViewport(page);
       await shot(page, `harness-run-in-${s.name}.png`, { fullPage: true });
     });
@@ -95,8 +95,8 @@ test.describe('Harness menu: Run in', () => {
     await setThread(page, { mode: 'always' });
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await page.waitForSelector('.menu');
-    await expect(page.locator('.menu .menu-item', { hasText: 'Harness: Claude · Container' })).toHaveCount(1);
+    await page.waitForSelector('.ct-settings-popover');
+    await expect(page.locator('[data-ct-key="row:harness"]')).toContainText('Claude · Container');
     await shot(page, 'harness-run-in-header-label.png', { fullPage: true });
   });
 
@@ -104,7 +104,7 @@ test.describe('Harness menu: Run in', () => {
     await open(page, 420, 740);
     await setThread(page, { mode: 'always', sessionId: 'sess-1' });
     await openHarnessMenu(page);
-    await page.locator('.menu .menu-item', { hasText: 'Host (no container)' }).click();
+    await page.locator('.ct-settings-popover .ct-sp-option', { hasText: 'Host (no container)' }).click();
     const modal = page.locator('.modal-container');
     await expect(modal).toContainText('Run this thread on the host (no container)?');
     await expect(modal).toContainText('native Claude session resets');
@@ -117,7 +117,7 @@ test.describe('Harness menu: Run in', () => {
     await open(page, 420, 740);
     await setThread(page, { mode: 'always', sessionId: 'sess-1' });
     await openHarnessMenu(page);
-    await page.locator('.menu .menu-item', { hasText: 'Host (no container)' }).click();
+    await page.locator('.ct-settings-popover .ct-sp-option', { hasText: 'Host (no container)' }).click();
     await page.locator('.modal-container').getByRole('button', { name: /cancel/i }).click();
     expect(await page.evaluate((id) => (window as any).__manager.getThread(id).harnessVmMode, THREAD)).toBe('always');
   });
@@ -126,7 +126,7 @@ test.describe('Harness menu: Run in', () => {
     await open(page, 420, 740);
     await setThread(page, { mode: undefined, sessionId: 'sess-1' });
     await openHarnessMenu(page);
-    await page.locator('.menu .menu-item', { hasText: /^Container$/ }).click();
+    await page.locator('.ct-settings-popover .ct-sp-option', { hasText: /^\s*Container$/ }).click();
     await expect(page.locator('.modal-container')).toHaveCount(0);
     expect(await page.evaluate((id) => (window as any).__manager.getThread(id).harnessVmMode, THREAD)).toBe('always');
   });
@@ -136,11 +136,11 @@ test.describe('Harness menu: Run in', () => {
     await setThread(page, { harness: 'codex' });
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await page.waitForSelector('.menu');
-    await page.locator('.menu .menu-item', { hasText: /^\s*Harness:/ }).click();
-    await page.waitForSelector('.menu .menu-item');
-    await expect(page.locator('.menu .menu-item', { hasText: 'Run in' })).toHaveCount(0);
-    await expect(page.locator('.menu .menu-item', { hasText: 'Container' })).toHaveCount(0);
+    await page.waitForSelector('.ct-settings-popover');
+    await page.locator('[data-ct-key="row:harness"]').click();
+    await page.waitForSelector('.ct-sp-option');
+    await expect(page.locator('.ct-settings-popover .ct-sp-group-title', { hasText: 'Run in' })).toHaveCount(0);
+    await expect(page.locator('.ct-settings-popover .ct-sp-option', { hasText: 'Container' })).toHaveCount(0);
     await shot(page, 'harness-run-in-codex.png', { fullPage: true });
   });
 

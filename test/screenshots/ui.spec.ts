@@ -1330,7 +1330,7 @@ test.describe('Agent Threads UI', () => {
     // Open the more menu
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await page.waitForSelector('.menu');
+    await page.waitForSelector('.ct-settings-popover');
     await shot(page, 'fork-menu.png', { fullPage: true });
   });
 
@@ -1342,10 +1342,12 @@ test.describe('Agent Threads UI', () => {
     await page.waitForTimeout(500);
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await page.waitForSelector('.menu');
-    await expect(page.locator('.menu')).toContainText('Model: Default');
-    await expect(page.locator('.menu')).toContainText('Permissions: Global default');
-    await expect(page.locator('.menu')).toContainText('Harness: Claude');
+    await page.waitForSelector('.ct-settings-popover');
+    const popover = page.locator('.ct-settings-popover');
+    await expect(popover.locator('[data-ct-key="row:model"]')).toContainText('Default');
+    await expect(popover.locator('[data-ct-key="row:permissions"]')).toContainText('Global default');
+    await expect(popover.locator('[data-ct-key="row:harness"]')).toContainText('Claude');
+    await expect(page.locator('.ct-settings-indicator')).toHaveAttribute('aria-label', /^Composer settings: Default, Claude, /);
     await expect(page.locator('.ct-model-btn')).toHaveCount(0);
     await expect(page.locator('.ct-permission-mode-btn')).toHaveCount(0);
     // Move mouse away so no menu item is in hover state
@@ -1359,10 +1361,10 @@ test.describe('Agent Threads UI', () => {
     await page.waitForSelector('.ct-title-row');
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await page.getByText('Harness: Claude', { exact: true }).click();
-    await expect(page.locator('.menu')).toContainText('Claude');
-    await expect(page.locator('.menu')).toContainText('Codex');
-    await expect(page.locator('.menu')).toContainText('OpenCode');
+    await page.locator('[data-ct-key="row:harness"]').click();
+    await expect(page.locator('.ct-settings-popover')).toContainText('Claude');
+    await expect(page.locator('.ct-settings-popover')).toContainText('Codex');
+    await expect(page.locator('.ct-settings-popover')).toContainText('OpenCode');
     await shot(page, 'harness-switcher-menu.png', { fullPage: true });
   });
 
@@ -1372,16 +1374,57 @@ test.describe('Agent Threads UI', () => {
 
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await page.getByText('Model: Default').click();
-    await page.getByText(/^Sonnet \d+(\.\d+)? \(latest\)$/).click();
+    await page.locator('[data-ct-key="row:model"]').click();
+    await page.locator('.ct-sp-option', { hasText: /^Sonnet \d+(\.\d+)? \(latest\)$/ }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__manager.getThread('thread-fix-auth').model)).toBe('sonnet');
 
+    // The popover stays open after a choice and the row shows the new value at once.
+    await expect(page.locator('[data-ct-key="row:model"]')).toContainText(/Sonnet \d+(\.\d+)? \(latest\)/);
+    await expect(page.locator('.ct-settings-indicator')).toHaveAttribute('aria-label', /^Composer settings: Sonnet, Claude, /);
+    await page.locator('[data-ct-key="row:permissions"]').click();
+    await page.locator('.ct-sp-option', { hasText: 'Plan only (read & propose, no execute)' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__manager.getThread('thread-fix-auth').permissionMode)).toBe('plan');
+  });
+
+  test('composer settings indicator: collapsed rail and open popover', async ({ page }) => {
+    await page.setViewportSize({ width: 420, height: 740 });
+    await page.goto(harnessUrl);
+    await page.waitForSelector('.ct-title-row');
+    await page.waitForTimeout(500);
+    await page.hover('.ct-floating-panel');
+    const indicator = page.locator('.ct-settings-indicator');
+    // Three glyphs (model, provider, location) plus a chevron, in one compact button.
+    await expect(indicator.locator('.ct-si-glyph')).toHaveCount(3);
+    await expect(indicator).toHaveAttribute('aria-expanded', 'false');
+    await page.mouse.move(0, 0);
+    await page.hover('.ct-floating-panel');
+    await shot(page.locator('.ct-input-footer'), 'composer-indicator-collapsed.png');
+
+    await indicator.click();
+    await expect(indicator).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('.ct-settings-popover')).toHaveAttribute('role', 'menu');
+    await page.locator('[data-ct-key="row:model"]').click();
+    await page.mouse.move(0, 0);
+    await shot(page, 'composer-settings-popover.png', { fullPage: true });
+
+    // Keyboard: Escape closes and returns focus to the indicator.
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.ct-settings-popover')).toHaveCount(0);
+    await expect(indicator).toBeFocused();
+  });
+
+  test('composer settings popover stays inside a narrow viewport', async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 640 });
+    await page.goto(harnessUrl);
+    await page.waitForSelector('.ct-title-row');
+    await page.waitForTimeout(500);
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await expect(page.locator('.menu')).toContainText(/Model: Sonnet \d+(\.\d+)? \(latest\)/);
-    await page.getByText('Permissions: Global default').click();
-    await page.getByText('Plan only (read & propose, no execute)', { exact: true }).click();
-    await expect.poll(() => page.evaluate(() => (window as any).__manager.getThread('thread-fix-auth').permissionMode)).toBe('plan');
+    const box = await page.locator('.ct-settings-popover').boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+    await page.mouse.move(0, 0);
+    await shot(page, 'composer-settings-popover-narrow.png', { fullPage: true });
   });
 
   test('composer menu shows a temporary model escalation', async ({ page }) => {
@@ -1390,7 +1433,7 @@ test.describe('Agent Threads UI', () => {
     await page.evaluate(() => (window as any).__view['escalatedTurnModels'].set('thread-fix-auth', 'opus'));
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await expect(page.locator('.menu')).toContainText(/Model: Opus \d+(\.\d+)? \(latest\) \(this turn\)/);
+    await expect(page.locator('[data-ct-key="row:model"]')).toContainText(/Opus \d+(\.\d+)? \(latest\) \(this turn\)/);
   });
 
   test('unified context truncates without overlapping footer actions', async ({ page }) => {
@@ -1417,7 +1460,7 @@ test.describe('Agent Threads UI', () => {
     await page.waitForTimeout(500);
     // Open the more menu and click Fork
     await page.click('.ct-thread-more-btn');
-    await page.waitForSelector('.menu');
+    await page.waitForSelector('.ct-settings-popover');
     await page.getByText('Fork conversation').click();
     await page.waitForSelector('.modal-container');
     await shot(page, 'fork-modal-initial.png', { fullPage: true });
@@ -1432,7 +1475,7 @@ test.describe('Agent Threads UI', () => {
     await page.waitForTimeout(500);
     // Open fork modal
     await page.click('.ct-thread-more-btn');
-    await page.waitForSelector('.menu');
+    await page.waitForSelector('.ct-settings-popover');
     await page.getByText('Fork conversation').click();
     await page.waitForSelector('.modal-container');
     // Click generate
@@ -1539,9 +1582,14 @@ test.describe('Agent Threads UI', () => {
 
     await page.hover('.ct-floating-panel');
     await page.click('.ct-footer-context');
-    await expect(page.locator('.menu')).toContainText('Working directory: /Users/mock/projects/hip-trip');
-    await expect(page.locator('.menu')).toContainText('Project: No project');
-    await expect(page.locator('.menu')).toContainText('Change project…');
+    const projectPopover = page.locator('.ct-project-popover');
+    await expect(projectPopover).toContainText('/Users/mock/projects/hip-trip');
+    await expect(projectPopover.locator('.ct-pp-filter')).toBeFocused();
+    await expect(projectPopover.locator('[data-ct-key="project:none"]')).toHaveAttribute('aria-checked', 'true');
+    await expect(projectPopover).toContainText('New Project…');
+    await page.keyboard.press('Escape');
+    await expect(projectPopover).toHaveCount(0);
+    await expect(page.locator('.ct-footer-context')).toBeFocused();
   });
 
   // Agent Dashboard is not instantiated or exposed in the test harness (index.ts only
@@ -1590,7 +1638,7 @@ test.describe('Agent Threads UI', () => {
     await page.waitForTimeout(200);
     // Open the more menu — "Compress view" should be the first item
     await page.click('.ct-thread-more-btn');
-    await page.waitForSelector('.menu');
+    await page.waitForSelector('.ct-settings-popover');
     // Move mouse away so no menu item is in hover state
     await page.mouse.move(0, 0);
     await shot(page, 'compress-view-menu.png', { fullPage: true });
@@ -1607,7 +1655,7 @@ test.describe('Agent Threads UI', () => {
     await page.waitForTimeout(200);
     // Toggle compress view via the more menu
     await page.click('.ct-thread-more-btn');
-    await page.waitForSelector('.menu');
+    await page.waitForSelector('.ct-settings-popover');
     await page.getByText('Compress view').click();
     // Wait for the compressed layout to render (3 consecutive assistant msgs → grouped block)
     await page.waitForSelector('.ct-message-compressed');
@@ -1626,7 +1674,7 @@ test.describe('Agent Threads UI', () => {
     await page.waitForTimeout(200);
     // Activate compress view
     await page.click('.ct-thread-more-btn');
-    await page.waitForSelector('.menu');
+    await page.waitForSelector('.ct-settings-popover');
     await page.getByText('Compress view').click();
     await page.waitForSelector('.ct-message-compressed');
     await page.waitForTimeout(200);
@@ -2100,9 +2148,9 @@ test.describe('Agent Threads UI', () => {
     await page.waitForSelector('.ct-title-row');
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await page.getByText('Model: Default').click();
-    await expect(page.locator('.menu')).toContainText('Claude CLI out of date: brew upgrade claude-code');
-    await shot(page.locator('.menu'), 'model-menu-cli-stale.png');
+    await page.locator('[data-ct-key="row:model"]').click();
+    await expect(page.locator('.ct-settings-popover')).toContainText('Claude CLI out of date: brew upgrade claude-code');
+    await shot(page.locator('.ct-settings-popover'), 'model-menu-cli-stale.png');
   });
 
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }, { width: 375, height: 667 }]) {
@@ -3745,8 +3793,9 @@ test.describe('Agent Threads UI', () => {
       manager['emit'](view['activeThreadId'], { type: 'escalated', model: 'opus' });
     });
     await page.hover('.ct-floating-panel');
+    await expect(page.locator('.ct-settings-indicator')).toHaveAttribute('aria-label', /^Composer settings: Opus, /);
     await page.click('.ct-thread-more-btn');
-    await expect(page.locator('.menu')).toContainText(/Model: Opus \d+(\.\d+)? \(latest\) \(this turn\)/);
+    await expect(page.locator('[data-ct-key="row:model"]')).toContainText(/Opus \d+(\.\d+)? \(latest\) \(this turn\)/);
     await page.waitForTimeout(100);
     await shot(page, 'model-escalation-turn-button.png', { fullPage: true });
     await page.mouse.click(0, 0);
@@ -3758,8 +3807,8 @@ test.describe('Agent Threads UI', () => {
     });
     await page.hover('.ct-floating-panel');
     await page.click('.ct-thread-more-btn');
-    await expect(page.locator('.menu')).toContainText('Model: Default');
-    await expect(page.locator('.menu')).not.toContainText('(this turn)');
+    await expect(page.locator('[data-ct-key="row:model"]')).toContainText('Default');
+    await expect(page.locator('.ct-settings-popover')).not.toContainText('(this turn)');
   });
 
   // ─── SDK alignment gap features (Group 4 + 5) ────────────────────────────
