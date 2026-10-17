@@ -41,7 +41,6 @@ const LEGACY_DATA = {
   harnessVmImage: 'claude-threads-harness:1',
   sandboxVmMemory: '8G',
   sandboxVmCpus: 8,
-  containerAwsProfiles: 'prod\nstaging',
   sandboxSetupPromptDismissed: true,
 };
 
@@ -56,7 +55,7 @@ describe('legacy sandbox VM settings', () => {
     expect(merged.vaultFolder).toBe('Agent Threads');
     expect(merged.defaultModel).toBe('opus');
     // JSON round trip (what the next save writes) no longer mentions the feature.
-    expect(JSON.stringify(merged)).not.toMatch(/harnessVm|sandboxVm|vmImage|containerAws/);
+    expect(JSON.stringify(merged)).not.toMatch(/harnessVm|sandboxVm|vmImage/);
   });
 
   it('is idempotent and reports whether it changed anything', () => {

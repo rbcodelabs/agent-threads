@@ -21,7 +21,6 @@ export const LEGACY_SANDBOX_SETTING_KEYS: readonly string[] = [
   'harnessVmImage',
   'sandboxVmMemory',
   'sandboxVmCpus',
-  'containerAwsProfiles',
   'sandboxSetupPromptDismissed',
 ];
 

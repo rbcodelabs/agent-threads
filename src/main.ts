@@ -277,6 +277,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
   localDaemon: import('./localDaemon/controller').LocalDaemonController | null = null;
   /** Delivers the Geode GitHub connection to the managed daemon (desktop with a Geode GitHub bridge only). */
   localDaemonGithub: import('./localDaemon/githubDelivery').LocalDaemonGithubDelivery | null = null;
+  /** Environment, skills and AWS credentials for threads on the managed daemon (see localDaemon/sessionPrep.ts). */
+  localDaemonPrep: import('./localDaemon/sessionPrep').LocalDaemonSessionPrep | null = null;
+  private readonly localDaemonExtras = new Map<string, { envKind?: string; pluginPaths?: string[] }>();
   /** What the Run on picker asks for a daemon's folders (advertised workspaces, subfolders). */
   remoteFolders: RemoteFolderSource | null = null;
   /** Repositories each remote daemon keeps cloned (Settings, Remote, edit daemon). */
@@ -2599,13 +2602,34 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
     const controller = this.localDaemon;
     // Lazy start: a thread that runs on the managed daemon starts it on first use.
-    this.manager.beforeRemoteSend = async (daemonId) => {
+    this.manager.beforeRemoteSend = async (daemonId, threadId) => {
       const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
       if (daemon?.managed !== 'local-container') return;
       await controller.ensureRunning();
-      // Before the session opens: the daemon reads pushed credentials when a session starts. Never throws.
+      // Before the session opens: the daemon reads what is pushed to it when a session starts. Neither call throws.
       await this.localDaemonGithub?.ensureFresh();
+      if (this.localDaemonPrep) {
+        const extras = await this.localDaemonPrep.prepare(this.manager.getThread(threadId)?.projectId);
+        this.localDaemonExtras.set(threadId, { ...(extras.envKind ? { envKind: extras.envKind } : {}), pluginPaths: extras.pluginPaths });
+      }
     };
+    this.manager.remoteSessionExtras = (threadId) => this.localDaemonExtras.get(threadId);
+    {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createLocalDaemonSessionPrep } = require('./localDaemon/wiring') as typeof import('./localDaemon/wiring');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { resolveDaemonAwsProfiles } = require('./localDaemon/awsCopy') as typeof import('./localDaemon/awsCopy');
+      this.localDaemonPrep = createLocalDaemonSessionPrep({
+        vaultBasePath: () => (adapter instanceof FileSystemAdapter ? adapter.getBasePath() : null),
+        // What a host session would get: Extra environment variables, then the keychain secrets visible to the project.
+        resolveEnv: (projectId) => ({ ...parseExtraEnv(effectiveExtraEnv(this.settings)), ...(this.manager.secretEnvResolver?.(projectId) ?? {}) }),
+        skillPlugins: () => this.manager.buildHostSkillPlugins(),
+        awsProfiles: () => resolveDaemonAwsProfiles({ provider: this.settings.provider, settingValue: this.settings.containerAwsProfiles, extraEnv: effectiveExtraEnv(this.settings) }),
+        hostAwsConfigPath: () => process.env.AWS_CONFIG_FILE,
+        log: (message) => debugLog(message),
+      });
+      this.register(() => { void this.localDaemonPrep?.stop(); });
+    }
     this.register(() => { controller.cancel(); });
   }
 

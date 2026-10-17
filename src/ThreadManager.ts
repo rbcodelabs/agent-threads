@@ -287,7 +287,12 @@ export class ThreadManager {
    * Awaited before a remote thread with no live session sends, so a daemon this app manages (the local container)
    * can be started on first use. A rejection becomes the send's error, shown to the user verbatim.
    */
-  beforeRemoteSend: ((daemonId: string) => Promise<void>) | undefined = undefined;
+  beforeRemoteSend: ((daemonId: string, threadId: string) => Promise<void>) | undefined = undefined;
+  /**
+   * What the managed local daemon was prepared with for this thread's next session (`beforeRemoteSend` computes it):
+   * the credential kind holding the session environment and the skill plugin directories copied there.
+   */
+  remoteSessionExtras: ((threadId: string) => { envKind?: string; pluginPaths?: string[] } | undefined) | undefined = undefined;
   /**
    * Builds the host tools (vault, workspace, threads, Google, ...) a remote thread's daemon may call back into,
    * bound to this thread. Set by the plugin; absent on hosts that cannot serve them.
@@ -1982,7 +1987,7 @@ export class ThreadManager {
 
     // Before any state changes: a remote thread with no live session may need its (managed) daemon started first.
     if (thread.remote && this.beforeRemoteSend && !this.sessions.has(threadId)) {
-      await this.beforeRemoteSend(thread.remote.daemonId);
+      await this.beforeRemoteSend(thread.remote.daemonId, threadId);
     }
 
     // A completed plan is a real lifecycle gate, not merely a card rendered
@@ -2429,6 +2434,7 @@ export class ThreadManager {
       this.remoteMcpNoticeSig.set(threadId, droppedNote ?? '');
       if (droppedNote) this.addNoticeMessage(threadId, 'stopped', droppedNote);
     }
+    const extras = this.remoteSessionExtras?.(threadId);
     return {
       cwd: remote.remoteCwd,
       permissionMode: thread.permissionMode ?? this.settings.permissionMode,
@@ -2448,6 +2454,8 @@ export class ThreadManager {
         disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
         sessionOptions: this.buildSessionOptions(thread, agentProfiles),
         ...(Object.keys(partition.passthrough).length ? { remoteMcpServers: partition.passthrough } : {}),
+        ...(extras?.envKind ? { remoteEnvKind: extras.envKind } : {}),
+        ...(extras?.pluginPaths?.length ? { remotePluginPaths: extras.pluginPaths } : {}),
       },
     };
   }
@@ -3104,7 +3112,7 @@ export class ThreadManager {
   }
 
   /** Skill plugins as host paths. */
-  private buildHostSkillPlugins(): Array<{ type: 'local'; path: string }> {
+  buildHostSkillPlugins(): Array<{ type: 'local'; path: string }> {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const path = require('path') as typeof import('path');
     return buildSkillPlugins({

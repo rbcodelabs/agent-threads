@@ -110,6 +110,10 @@ export interface ClaudeHarnessOptions {
    */
   remoteMcpServers?: Record<string, import('./protocol').RemoteMcpServerConfig>;
   disallowedTools?: string[];
+  /** Remote threads on the managed local daemon: name of the credential kind holding this session's environment. */
+  remoteEnvKind?: string;
+  /** Remote threads on the managed local daemon: guest paths of the skill plugin directories copied there. */
+  remotePluginPaths?: string[];
   /**
    * Tool names (`mcp__server__tool`) this process allows without opening a permission card. The daemon sets it for
    * the host tools it proxies: the user's own app shows the real card for those (with the real input), so a

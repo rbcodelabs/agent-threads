@@ -47,6 +47,21 @@ export const LOCAL_TOKEN_NAME = 'geode-local';
  */
 export const CREDS_TOKEN_NAME = 'geode-creds';
 export const CLI_TOKEN_FILE = `${DATA_MOUNT}/cli-token`;
+/** Where the plugin copies skill plugin directories (guest paths go in the session spec; the daemon validates them). */
+export const SKILLS_DIR = `${DATA_MOUNT}/skills`;
+/** The daemon user's home (HOME in the image): the CLI reads `~/.claude`, the AWS SDK `~/.aws`. */
+export const HOME_DIR = `${DATA_MOUNT}/home`;
+export const CLAUDE_HOME_DIR = `${HOME_DIR}/.claude`;
+export const AWS_HOME_DIR = `${HOME_DIR}/.aws`;
+/** Credential kinds holding a session's environment: `sessenv-<project id>`; the session spec carries only the name. */
+export const SESSION_ENV_KIND_PREFIX = 'sessenv-';
+/** The environment is read when a session (re)starts, which can be long after it was pushed; refreshed on every send. */
+export const SESSION_ENV_TTL_SEC = 24 * 60 * 60;
+export function sessionEnvKind(projectId: string | undefined): string {
+  const id = (projectId ?? 'none').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+/, '').slice(0, 48) || 'none';
+  return `${SESSION_ENV_KIND_PREFIX}${id}`;
+}
+
 /** `creds.push` kind and field the daemon reads GitHub access from (daemon/repos.ts). */
 export const GITHUB_CREDS_KIND = 'github';
 export const GITHUB_TOKEN_FIELD = 'GH_TOKEN';

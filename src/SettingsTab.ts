@@ -1925,6 +1925,26 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         awsStatus.setText(res.expired ? "Not signed in (SSO session expired or missing)." : res.error);
       }
     };
+    // The local daemon is desktop-only, so is this.
+    if (!Platform.isMobile) new Setting(containerEl)
+      .setName('AWS profiles for the local daemon')
+      .setDesc(
+        'One profile per line. Threads that run on the local daemon (Run on: This Mac (container)) get a trimmed AWS config '
+        + 'containing only these profiles, plus the AWS_PROFILE from Extra environment variables, and the SSO token of each '
+        + 'profile\'s session (only that session\'s token file). Copied before each message, so a fresh sign-in on this Mac '
+        + 'reaches the daemon. Amazon Bedrock threads always get their AWS_PROFILE. Leave empty to share nothing extra.',
+      )
+      .addTextArea((ta) =>
+        ta
+          .setPlaceholder('my-deploy-profile')
+          .setValue(this.plugin.settings.containerAwsProfiles ?? '')
+          .onChange(async (value) => {
+            this.plugin.settings.containerAwsProfiles = value;
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
     awsCredsSetting
       .addButton((btn) => btn.setButtonText("Check").onClick(() => void runAwsCheck()))
       .addButton((btn) =>

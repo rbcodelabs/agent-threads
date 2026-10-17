@@ -57,7 +57,22 @@ export interface RemoteSessionSpec {
   mcpServers?: Record<string, RemoteMcpServerConfig>;
   /** SkillSource ids, never paths: the daemon resolves its own checkouts. */
   skills?: string[];
+  /**
+   * NAME of a credential kind (`sessenv-<project>`, pushed with `creds.push`) holding environment variables for the
+   * agent's process: Extra environment variables and keychain secrets from the user's computer. Only the name crosses
+   * here; the daemon reads the values itself when the session starts, so they are never in a spec, a journal or a log.
+   * Ignored unless the name starts with `sessenv-`.
+   */
+  envKind?: string;
+  /**
+   * Skill plugin directories the managed local daemon's plugin copied into the daemon's data volume
+   * (`<data dir>/skills/...`). The daemon keeps only paths under that folder.
+   */
+  pluginPaths?: string[];
 }
+
+/** Credential kinds a spec may name as its environment. */
+export const SESSION_ENV_KIND_PATTERN = /^sessenv-[a-z0-9_-]{1,56}$/;
 
 const CREDENTIAL_PARAM = /(^|[_-])(token|access|auth|authorization|key|apikey|api[_-]?key|secret|password|passwd|pwd|sig|signature|credential|bearer|session)([_-]|$)/i;
 const TOKENISH_VALUE = /^(?=.*[0-9])(?=.*[A-Za-z])[A-Za-z0-9._~+/=-]{24,}$/;
@@ -152,8 +167,10 @@ export function validateSpecShape(spec: unknown): string | null {
   }
   let problem = stringList(spec.disallowedTools, 'spec.disallowedTools', 500, 200)
     ?? stringList(spec.additionalDirectories, 'spec.additionalDirectories', 100, 4096)
-    ?? stringList(spec.skills, 'spec.skills', 200, 200);
+    ?? stringList(spec.skills, 'spec.skills', 200, 200)
+    ?? stringList(spec.pluginPaths, 'spec.pluginPaths', 100, 4096);
   if (problem) return problem;
+  if (spec.envKind !== undefined && (typeof spec.envKind !== 'string' || !SESSION_ENV_KIND_PATTERN.test(spec.envKind))) return 'spec.envKind must be a session environment credential name (sessenv-...)';
 
   const so = spec.sessionOptions;
   if (so !== undefined) {

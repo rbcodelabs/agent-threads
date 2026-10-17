@@ -1080,6 +1080,12 @@ export interface PluginSettings {
   /** Random id of this Geode install, stamped on remote threads as `ownerClientId`. */
   remoteClientId?: string;
   /**
+   * Extra AWS profiles (one per line or comma separated) copied to the managed local daemon, on top of the AWS_PROFILE
+   * from Extra environment variables. Non-empty enables AWS delivery even on the Claude provider (Bedrock always does).
+   * See src/localDaemon/awsCopy.ts.
+   */
+  containerAwsProfiles: string;
+  /**
    * Use Geode's GitHub connection (Settings → GitHub) for git, gh and the GitHub
    * API in threads. Only has an effect in Geode ≥ 0.25.0;
    * manually configured credentials (GH_TOKEN, gh auth, git helpers) always win.
@@ -1365,6 +1371,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   opencodeBinaryPath: 'opencode',
   codexComputerUseEnabled: false,
   worktreeRoot: '',
+  containerAwsProfiles: '',
   githubConnectionEnabled: true,
   githubCommitEmail: '',
   defaultCwd: '',

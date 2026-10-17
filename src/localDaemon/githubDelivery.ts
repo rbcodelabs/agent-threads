@@ -31,28 +31,14 @@
 import {
   GithubConnectionError,
   GithubTokenPublisher,
-  redactGithubSecrets,
   resolveCommitIdentity,
   type GithubCredentialBroker,
   type PublishState,
   type TokenSink,
 } from '../githubCredentials';
 import type { VmCommandRunner } from '../containerCli';
-import { parseTokenList, tail } from './parse';
-import {
-  CREDS_TOKEN_NAME,
-  GITHUB_CREDS_KIND,
-  GITHUB_CREDS_TTL_SEC,
-  GITHUB_TOKEN_FIELD,
-  cliTokenCreateArgs,
-  cliTokenPresentArgs,
-  containerNameFor,
-  credsPushArgs,
-  credsRemoveArgs,
-  gitConfigSetArgs,
-  tokenListArgs,
-  tokenRevokeArgs,
-} from './spec';
+import { CredsPusher } from './credsPusher';
+import { GITHUB_CREDS_KIND, GITHUB_CREDS_TTL_SEC, GITHUB_TOKEN_FIELD, gitConfigSetArgs } from './spec';
 
 const EXEC_TIMEOUT_MS = 30_000;
 
@@ -79,11 +65,12 @@ export class LocalDaemonGithubDelivery {
   private publisher: GithubTokenPublisher | null = null;
   /** Something is stored in the daemon that `stop()` must remove. */
   private wrote = false;
-  /** Containers whose admin token for `creds push` is known to exist. */
-  private readonly cliTokenReady = new Set<string>();
   private lastIdentity = '';
+  private readonly pusher: CredsPusher;
 
-  constructor(private readonly deps: LocalDaemonGithubDeps) {}
+  constructor(private readonly deps: LocalDaemonGithubDeps) {
+    this.pusher = new CredsPusher({ vaultPath: deps.vaultPath, runner: deps.runner, onFreshVolume: () => { this.lastIdentity = ''; } });
+  }
 
   private get active(): boolean {
     return this.deps.broker.available && this.deps.isEnabled() && this.deps.vaultPath() !== null;
@@ -138,64 +125,16 @@ export class LocalDaemonGithubDelivery {
     };
   }
 
-  private containerName(): string {
-    const vault = this.deps.vaultPath();
-    if (!vault) throw new Error('No vault folder, so there is no local daemon.');
-    return containerNameFor(vault);
-  }
-
   private async push(token: string): Promise<void> {
-    const name = this.containerName();
-    const run = this.deps.runner();
-    for (let attempt = 0; ; attempt++) {
-      await this.ensureCliToken(name);
-      const r = await run(credsPushArgs(name, GITHUB_CREDS_KIND, GITHUB_CREDS_TTL_SEC), {
-        timeoutMs: EXEC_TIMEOUT_MS,
-        input: JSON.stringify({ [GITHUB_TOKEN_FIELD]: token }),
-      });
-      if (r.exitCode === 0) break;
-      // The data volume may have been reset, taking cli-token with it: mint a new one and retry once.
-      this.cliTokenReady.delete(name);
-      if (attempt >= 1) {
-        const detail = redactGithubSecrets(tail(`${r.stderr}\n${r.stdout}`.trim()), [token]);
-        throw new Error(`pushing the token to the local daemon failed (exit ${r.exitCode}): ${detail}`);
-      }
-    }
+    await this.pusher.push(GITHUB_CREDS_KIND, { [GITHUB_TOKEN_FIELD]: token }, GITHUB_CREDS_TTL_SEC);
     this.wrote = true;
-    await this.applyIdentity(name);
+    await this.applyIdentity(this.pusher.containerName());
   }
 
   private async removeCredential(): Promise<void> {
     if (!this.wrote) return;
     this.wrote = false;
-    try {
-      const name = this.containerName();
-      await this.deps.runner()(credsRemoveArgs(name, GITHUB_CREDS_KIND), { timeoutMs: EXEC_TIMEOUT_MS });
-    } catch { /* the daemon may be stopped: the 15 minute expiry covers it */ }
-  }
-
-  /** Mints and saves the admin token `creds push` authenticates with. Idempotent. */
-  private async ensureCliToken(name: string): Promise<void> {
-    if (this.cliTokenReady.has(name)) return;
-    const run = this.deps.runner();
-    if ((await run(cliTokenPresentArgs(name), { timeoutMs: EXEC_TIMEOUT_MS })).exitCode === 0) {
-      this.cliTokenReady.add(name);
-      return;
-    }
-    // No saved token means a fresh or reset data volume: its git config is gone too.
-    this.lastIdentity = '';
-    // Revoke any earlier token of ours (its plaintext copy is gone) before minting the replacement.
-    const list = await run(tokenListArgs(name), { timeoutMs: EXEC_TIMEOUT_MS });
-    if (list.exitCode !== 0) throw new Error('The local daemon container is not running.');
-    for (const t of parseTokenList(list.stdout)) {
-      if (t.name === CREDS_TOKEN_NAME && !t.revoked) await run(tokenRevokeArgs(name, t.id), { timeoutMs: EXEC_TIMEOUT_MS });
-    }
-    const create = await run(cliTokenCreateArgs(name), { timeoutMs: EXEC_TIMEOUT_MS });
-    if (create.exitCode !== 0) {
-      // `--save` prints no token, but stay safe: show only the tail of stderr.
-      throw new Error(`creating the daemon's credential-push token failed (exit ${create.exitCode}): ${tail(create.stderr)}`);
-    }
-    this.cliTokenReady.add(name);
+    await this.pusher.remove(GITHUB_CREDS_KIND);
   }
 
   /** Writes the connected account's commit identity to the daemon user's global git config, once per change. */

@@ -11,6 +11,9 @@ import { signInToClaudeInContainer, type SpawnLike } from '../claudeContainerAut
 import { runnerEnv, createDefaultVmCommandRunner } from '../containerCli';
 import { LocalDaemonController, type LocalDaemonDeps } from './controller';
 import { LocalDaemonGithubDelivery, type LocalDaemonGithubDeps } from './githubDelivery';
+import { LocalDaemonSessionPrep, type SessionPrepDeps } from './sessionPrep';
+import { nodeFs } from './containerFiles';
+import { nodeAwsCopyFs } from './awsCopy';
 import { createDefaultRuntimeApi } from './runtime';
 import { parseHealthz } from './parse';
 import { LOCAL_DAEMON_ID, type ExternalRootInput } from './spec';
@@ -151,6 +154,25 @@ export function createLocalDaemonGithubDelivery(
     vaultPath: () => host.vaultBasePath(),
     runner: () => createDefaultVmCommandRunner(),
     ...(host.getEmailOverride ? { getEmailOverride: host.getEmailOverride } : {}),
+    ...(host.log ? { log: host.log } : {}),
+  });
+}
+
+/** Prepares the managed daemon for a session: environment, skills, AWS (see sessionPrep.ts). Geode-only, like the rest of this file. */
+export function createLocalDaemonSessionPrep(
+  host: Pick<SessionPrepDeps, 'resolveEnv' | 'skillPlugins' | 'awsProfiles' | 'hostAwsConfigPath' | 'log'> & { vaultBasePath(): string | null },
+): LocalDaemonSessionPrep {
+  return new LocalDaemonSessionPrep({
+    vaultPath: () => host.vaultBasePath(),
+    runner: () => createDefaultVmCommandRunner(),
+    resolveEnv: host.resolveEnv,
+    skillPlugins: host.skillPlugins,
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    homeDir: () => (require('os') as typeof import('os')).homedir(),
+    awsProfiles: host.awsProfiles,
+    ...(host.hostAwsConfigPath ? { hostAwsConfigPath: host.hostAwsConfigPath } : {}),
+    fs: nodeFs(),
+    awsFs: nodeAwsCopyFs(),
     ...(host.log ? { log: host.log } : {}),
   });
 }
