@@ -1260,6 +1260,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       const hostedBody = containerEl.createDiv({ cls: 'ct-settings-tab-body is-hosted' });
       this.renderActiveTab(hostedBody);
       this.applyHelpTextMode(hostedBody);
+      this.groupSectionsCollapsible(hostedBody);
       return;
     }
 
@@ -1323,6 +1324,38 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         item.toggleClass('is-help-open', !item.hasClass('is-help-open'));
         icon.setAttribute('aria-expanded', String(item.hasClass('is-help-open')));
       });
+    }
+  }
+
+  /**
+   * Sidebar-hosted sections: fold each heading and the rows under it into a
+   * collapsible group so long tabs (Agent, MCP) don't need scrolling. The first
+   * group starts open; open/closed state is remembered per heading.
+   */
+  private groupSectionsCollapsible(body: HTMLElement): void {
+    const isHeading = (el: Element) => el.matches('.setting-item-heading, h3');
+    const kids = Array.from(body.children);
+    if (kids.filter(isHeading).length < 2) return;
+    const store = (() => { try { return window.localStorage; } catch { return null; } })();
+    let group: HTMLDetailsElement | null = null;
+    let index = 0;
+    for (const el of kids) {
+      if (isHeading(el)) {
+        const nameEl = el.querySelector('.setting-item-name');
+        const title = (nameEl?.firstChild?.textContent ?? el.textContent ?? '').trim() || `group-${index}`;
+        const key = `claude-threads:settings-group:${this.activeTab}:${title}`;
+        const saved = store?.getItem(key);
+        group = body.createEl('details', { cls: 'ct-settings-group' });
+        group.open = saved === null || saved === undefined ? index === 0 : saved === '1';
+        el.before(group);
+        const summary = group.createEl('summary');
+        summary.appendChild(el);
+        const g = group;
+        g.addEventListener('toggle', () => { try { store?.setItem(key, g.open ? '1' : '0'); } catch { /* ignore */ } });
+        index++;
+      } else if (group && !el.matches('.ct-help-toggle')) {
+        group.appendChild(el);
+      }
     }
   }
 
@@ -1497,6 +1530,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   // ── Agent harness ───────────────────────────────────────────────────────
 
   private renderClaudeTab(containerEl: HTMLElement): void {
+    if (this.fixedSection) new Setting(containerEl).setName('Harness & sandbox').setHeading();
     new Setting(containerEl)
       .setName('Agent harness')
       .setDesc('New threads use this local coding agent. Existing threads retain the harness that created them.')
@@ -1747,6 +1781,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       });
     }
 
+    if (this.fixedSection) new Setting(containerEl).setName('Claude').setHeading();
     new Setting(containerEl)
       .setName('Claude binary path')
       .setDesc('Path to the claude executable. Leave empty to find it on $PATH.')
