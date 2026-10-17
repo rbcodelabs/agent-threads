@@ -23,7 +23,6 @@ import { createScheduleTools } from './tools/schedule';
 import { createSkillsTools } from './tools/skills';
 import { createThreadTools } from './tools/threads';
 import { createVaultTools } from './tools/vault';
-import { createSyncTools } from './tools/sync';
 import { createVmTools } from './tools/vm';
 import { createWorkspaceTools } from './tools/workspace';
 import { createWorktreeTools } from './tools/worktree';
@@ -452,7 +451,6 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   const domainTools: Record<string, SdkMcpToolDefinition<any>> = {
     ...createWorkspaceTools({ app, options }),
     ...createVaultTools({ app, options }),
-    ...createSyncTools({ app }),
     ...createScheduleTools({ options }),
     ...createWorktreeTools({
       cwd,

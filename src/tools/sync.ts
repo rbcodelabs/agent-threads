@@ -60,7 +60,6 @@ export function lineDiff(local: string, remote: string): string {
 
 export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
   const { app } = port;
-  const adapter = app.vault.adapter;
 
   const getSync = (): GeodeSyncApi | null => {
     const sync = (app as unknown as { sync?: Partial<GeodeSyncApi> }).sync;
@@ -72,6 +71,7 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
 
   const readIfExists = async (p: string): Promise<string | null> => {
     const np = normalizePath(p);
+    const adapter = app.vault.adapter;
     return (await adapter.exists(np)) ? adapter.read(np) : null;
   };
   const clip = (s: string | null) =>
@@ -146,7 +146,7 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
         let resolution = args.resolution;
         if (args.mergedContent !== undefined) {
           if (!conflict.conflictPath) return fail('mergedContent is only supported for sibling conflicts.');
-          await adapter.write(normalizePath(conflict.path), args.mergedContent);
+          await app.vault.adapter.write(normalizePath(conflict.path), args.mergedContent);
           resolution = 'keep-local';
         }
         await sync.resolveConflict(args.id, resolution);
