@@ -2664,6 +2664,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       setRemoteDaemons: (next) => { this.settings.remoteDaemons = next; },
       saveSettings: () => this.saveSettings(),
       onRegistryChanged: () => this.daemonRegistry?.refresh(),
+      projectFolders: () => this.projectWorkFolders(),
       externalRoots: () => this.listExternalMountRoots(),
       createSocket: createPluginWebSocketFactory(),
       log: (message) => debugLog(message),
@@ -3626,15 +3627,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
   }
 
+  /** Each Project's working folder (its folder override, or its vault folder); the daemon vets and drops the ones it already mounts. */
+  private projectWorkFolders(): string[] {
+    return this.manager.getProjects().map((p) => this.manager.getProjectCwd(p));
+  }
+
   /** The managed daemon's shared folders (Settings) that exist, as host folder -> /work/<name>. */
   private sharedFolderMounts(): Array<{ host: string; name: string }> {
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter) || Platform.isMobile) return [];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { resolveWorkFolders } = require('./localDaemon/spec') as typeof import('./localDaemon/spec');
+    const { resolveWorkFolders, sharedFolderList } = require('./localDaemon/spec') as typeof import('./localDaemon/spec');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
-    return resolveWorkFolders(this.settings.localDaemon?.folders, {
+    return resolveWorkFolders(sharedFolderList(this.settings.localDaemon, () => this.projectWorkFolders()), {
       vaultPath: adapter.getBasePath(),
       isDirectory: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
     });

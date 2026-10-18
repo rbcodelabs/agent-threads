@@ -3368,7 +3368,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       return result;
     };
     // Resources apply when the container is (re)created: the status then offers Update.
-    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; optionalTools?: string[] }): Promise<void> => {
+    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; shareProjectFolders?: boolean; optionalTools?: string[] }): Promise<void> => {
       const current = this.plugin.settings.localDaemon ?? { enabled: false, port: 7433 };
       this.plugin.settings.localDaemon = { ...current, ...patch };
       await this.plugin.saveSettings();
@@ -3380,6 +3380,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         .setPlaceholder('4G')
         .setValue(this.plugin.settings.localDaemon?.memory ?? '')
         .onChange(async (value) => { await saveResources({ memory: value.trim() || undefined }); }));
+    const projectFoldersSetting = new Setting(containerEl)
+      .setName('Local daemon: share all Project folders')
+      .setDesc('Automatically share READ-WRITE every Project\'s working folder that is outside your vault (the folder set in the Project\'s settings), at /work/<folder name>, so you do not have to list them below. New Projects are included. An agent there can edit or delete anything in them. Applies when the container is next created: choose Update in the block above.')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.localDaemon?.shareProjectFolders === true)
+        .onChange(async (on) => { await saveResources({ shareProjectFolders: on || undefined }); }));
     const foldersSetting = new Setting(containerEl)
       .setName('Local daemon shared folders')
       .setDesc('Folders on this Mac to share READ-WRITE with the local daemon, one absolute path per line (for example a repository outside your vault). They appear in the daemon at /work/<folder name>; pick one under "Run on" when you start a thread. An agent there can edit or delete anything in them. Applies when the container is next created: choose Update in the block above.')
@@ -3425,7 +3431,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       pluginVersion: this.plugin.manifest.version,
       snapshot: () => controller.snapshot(),
       subscribe: (listener) => controller.subscribe(listener),
-      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
+      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, projectFoldersSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       cancel: () => controller.cancel(),
       openUrl: (url) => { try { window.open(url, '_blank'); } catch { /* the panel keeps a link */ } },
