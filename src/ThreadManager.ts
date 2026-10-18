@@ -106,6 +106,8 @@ export type ThreadEvent =
   /** A remote resync: whatever the view accumulated for the unfinished assistant message is stale; text re-streams after this. */
   | { type: 'stream_reset' }
   | { type: 'active_thread_changed' }
+  /** The conversation panel is composing a new conversation: no thread is active. */
+  | { type: 'active_thread_cleared' }
   | { type: 'user_message_added'; message: ChatMessage }
   | { type: 'summary_updated' }
   | { type: 'tool_result_images'; images: Array<{ mediaType: string; data: string }> }
@@ -3298,6 +3300,10 @@ export class ThreadManager {
 
   notifyActiveThreadChanged(threadId: string): void {
     this.emit(threadId, { type: 'active_thread_changed' });
+  }
+
+  notifyActiveThreadCleared(): void {
+    this.emit('', { type: 'active_thread_cleared' });
   }
 
   notifySummaryUpdated(threadId: string): void {

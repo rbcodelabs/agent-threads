@@ -1,21 +1,15 @@
-import type { AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, setIcon, Notice, Platform, Menu, SearchComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread } from './types';
-import { buildMessageWithAttachment, deriveDispatchTitle } from './attachmentUtils';
 import { formatToolName } from './ClaudeSession';
 import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
-import { DispatchInput } from './DispatchInput';
-import { seedDocumentChatDraft } from './documentChat';
-import { DISPATCH_BUILTIN_COMMANDS, DISPATCH_ARG_COMPLETIONS, parseDispatchDirective, goalKickoffMessage, escalationCommand } from './slashCommands';
 import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { partitionThreads } from './threadRowState';
 import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
-import { handleContributedDispatch } from './slashCommandRouting';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
 import { remoteGroup, threadCwdLabel } from './remote/threadLocation';
 import { parsePrUrlRepo } from './gitDiffUtils';
@@ -39,14 +33,11 @@ export class AgentDashboard extends ItemView {
   private listEl!: HTMLElement;
   private searchBarEl!: HTMLElement;
   private searchInputEl!: HTMLInputElement;
+  private newThreadActionEl: HTMLElement | null = null;
   private searchActionEl: HTMLElement | null = null;
   private groupActionEl: HTMLElement | null = null;
   private searchQuery = '';
   private displayedThreadCount = 0;
-  private dispatchComponent!: DispatchInput;
-  private selectedProjectId = '';
-  private projectButtonEl!: HTMLButtonElement;
-  private projectButtonNameEl!: HTMLElement;
 
   // Per-row activity text elements for live update without full re-render
   private activityEls: Map<string, HTMLElement> = new Map();
@@ -79,7 +70,7 @@ export class AgentDashboard extends ItemView {
 
   getViewType(): string { return AGENT_VIEW_TYPE; }
   getDisplayText(): string {
-    return `Agents · ${this.displayedThreadCount} thread${this.displayedThreadCount === 1 ? '' : 's'}`;
+    return `${this.displayedThreadCount} thread${this.displayedThreadCount === 1 ? '' : 's'}`;
   }
   getIcon(): string { return 'list'; }
 
@@ -99,7 +90,6 @@ export class AgentDashboard extends ItemView {
     if (this.activityTimer) clearTimeout(this.activityTimer);
     if (this.timeInterval) clearInterval(this.timeInterval);
     if (this.staleInterval) clearInterval(this.staleInterval);
-    this.dispatchComponent?.destroy();
   }
 
   /**
@@ -135,135 +125,17 @@ export class AgentDashboard extends ItemView {
       if (e.key === 'Escape') this.closeSearch();
     });
 
-    // Scrollable thread list — padding-bottom leaves clearance for the floating panel
+    // Scrollable thread list
     this.listEl = root.createDiv('ct-agents-list');
-
-    // Floating panel anchored at the bottom (matches ThreadsView pattern)
-    const panel = root.createDiv('ct-floating-panel ct-agents-floating-panel ct-panel-collapsible');
-
-    // Meta strip: dispatch Project (left) + Kanban action (right)
-    const metaRow = panel.createDiv('ct-agents-panel-meta');
-    this.addProjectSelector(metaRow);
-    const metaActions = metaRow.createDiv('ct-agents-panel-actions');
-
-    const kanbanBtn = metaActions.createEl('button', {
-      cls: 'ct-kanban-toggle clickable-icon',
-      attr: { title: 'Open Agent Board', 'aria-label': 'Open Agent Board' },
-    });
-    setIcon(kanbanBtn, 'kanban');
-    kanbanBtn.addEventListener('click', () => {
-      this.plugin.activateKanbanView();
-    });
-
-    // Dispatch input — mounted inside the floating panel
-    const dispatchEl = panel.createDiv();
-    this.dispatchComponent = new DispatchInput({
-      app: this.app,
-      placeholder: 'Dispatch a task...',
-      builtinCommands: () => {
-        const esc = escalationCommand(this.plugin.settings, true);
-        const commands = [...DISPATCH_BUILTIN_COMMANDS, ...(this.plugin.slashCommands?.list('dispatch') ?? [])];
-        return esc ? [...commands, esc] : commands;
-      },
-      subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
-      argCompletions: DISPATCH_ARG_COMPLETIONS,
-      peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
-      harnessPicker: {
-        initialHarness: this.plugin.settings.agentHarness ?? 'claude',
-        getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
-        localDaemonOffer: { available: () => this.plugin.isLocalDaemonSetupOffered(), onSetUp: () => this.plugin.openLocalDaemonSettings() },
-        getFolderSource: () => this.plugin.remoteFolders ?? undefined,
-        getLocalCwd: () => {
-          const project = this.manager.getProject(this.selectedProjectId);
-          return project ? this.manager.getProjectCwd(project) : this.plugin.getEffectiveCwd();
-        },
-        getVaultRoot: () => this.manager.vaultRoot,
-      },
-      onSend: async ({ text, images, attachment, agentHarness, remote }) => {
-        // Intercept contributed commands, then core model/goal/loop directives.
-        // Apply directives instead of sending command text to the agent verbatim.
-        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; projectId?: string; remote?: { daemonId: string; cwd: string } } = {
-          agentHarness,
-          remote,
-          projectId: this.selectedProjectId || undefined,
-        };
-        let titleText = text;
-        if (await handleContributedDispatch({
-          registry: this.plugin.slashCommands, text, images, attachment, agentHarness,
-          projectId: dispatchOpts.projectId, input: this.dispatchComponent,
-        })) return;
-        const directive = parseDispatchDirective(
-          text,
-          this.plugin.settings.escalationEnabled ? this.plugin.settings.escalationKeyword : undefined,
-        );
-        if (directive) {
-          if (directive.error) {
-            new Notice(directive.error);
-            this.dispatchComponent.setValue(text);
-            return;
-          }
-          if (directive.kind === 'model') {
-            if (!directive.rest && images.length === 0 && !attachment) {
-              new Notice('Include a prompt after /model — e.g. "/model opus fix the login bug"');
-              this.dispatchComponent.setValue(text);
-              return;
-            }
-            dispatchOpts = { ...dispatchOpts, model: directive.model };
-            text = titleText = directive.rest;
-          } else if (directive.kind === 'goal') {
-            dispatchOpts = { ...dispatchOpts, goal: directive.goal };
-            text = goalKickoffMessage(directive.goal);
-            titleText = directive.goal;
-          } else if (directive.kind === 'loop') {
-            dispatchOpts = { ...dispatchOpts, loop: { intervalSeconds: directive.intervalSeconds } };
-            text = titleText = directive.prompt;
-          }
-          // 'escalate' directives always carry `error` (handled above) — no
-          // success case, so nothing to do here; fall through to dispatch
-          // the raw text as-is via the ThreadManager keyword path.
-        }
-
-        let messageText = buildMessageWithAttachment(text, attachment);
-
-        // Resolve @[[basename]] file mentions — append each file's content as context
-        const mentionRegex = /@\[\[([^\]]+)\]\]/g;
-        const mentions = [...messageText.matchAll(mentionRegex)].map(m => m[1]);
-        if (mentions.length > 0) {
-          const fileContextParts: string[] = [];
-          for (const basename of mentions) {
-            const file = this.app.vault.getMarkdownFiles().find(f => f.basename === basename);
-            if (file) {
-              try {
-                const content = await this.app.vault.cachedRead(file);
-                fileContextParts.push(`**File: ${file.path}**\n\`\`\`\n${content}\n\`\`\``);
-              } catch { /* skip */ }
-            }
-          }
-          if (fileContextParts.length > 0) {
-            messageText = messageText + '\n\n---\nReferenced files:\n\n' + fileContextParts.join('\n\n');
-          }
-        }
-
-        const titleHint = deriveDispatchTitle(titleText, attachment, images.length);
-        const threadId = await this.plugin.dispatchNewThread(
-          messageText,
-          images.length > 0 ? images : undefined,
-          titleHint,
-          dispatchOpts,
-        );
-        await this.plugin.openThreadInChatView(threadId);
-        this.render();
-      },
-      getPttKey: () => this.plugin.settings.pttKey ?? '',
-      captureLongPaste: true,
-      // Empty callback forces needsFooter=true so attach+mic land in the footer
-      // row (matching the conversation panel layout). No "more" button needed here.
-      appendFooterActions: () => {},
-    });
-    this.dispatchComponent.mount(dispatchEl);
   }
 
   private ensureHeaderActions(): void {
+    // "New thread" opens the conversation panel in new-conversation mode: the dispatch
+    // composer (project picker, slash commands, attachments, harness picker) lives there.
+    if (!this.newThreadActionEl) {
+      this.newThreadActionEl = this.addAction('square-pen', 'New thread', () => { void this.plugin.openNewConversation(); });
+      this.newThreadActionEl.setAttribute('data-testid', 'new-thread-button');
+    }
     if (!this.searchActionEl) {
       this.searchActionEl = this.addAction('search', 'Search threads', () => this.toggleSearch());
       this.searchActionEl.setAttribute('aria-expanded', 'false');
@@ -311,57 +183,6 @@ export class AgentDashboard extends ItemView {
     await this.plugin.saveSettings();
   }
 
-  private addProjectSelector(container: HTMLElement): void {
-    this.projectButtonEl = container.createEl('button', {
-      cls: 'ct-dispatch-project ct-agents-project-trigger ct-footer-context',
-      attr: { type: 'button', 'aria-haspopup': 'menu' },
-    });
-    const projectIcon = this.projectButtonEl.createSpan('ct-footer-context-icon');
-    setIcon(projectIcon, 'folder');
-    this.projectButtonNameEl = this.projectButtonEl.createSpan('ct-footer-context-name');
-    const projectChevron = this.projectButtonEl.createSpan('ct-footer-context-chevron');
-    setIcon(projectChevron, 'chevron-down');
-    this.projectButtonEl.addEventListener('click', (event) => this.openProjectMenu(event));
-    this.refreshProjectSelector();
-  }
-
-  private refreshProjectSelector(): void {
-    const selectionStillExists = !this.selectedProjectId || this.manager.getProject(this.selectedProjectId);
-    if (!selectionStillExists) this.selectedProjectId = '';
-    const projectName = this.manager.getProject(this.selectedProjectId)?.name ?? 'No Project';
-    this.projectButtonNameEl.textContent = projectName;
-    this.projectButtonEl.setAttribute('aria-label', `Dispatch Project: ${projectName}`);
-    this.projectButtonEl.setAttribute('title', `Dispatch Project: ${projectName}`);
-  }
-
-  private openProjectMenu(event: MouseEvent): void {
-    this.refreshProjectSelector();
-    const menu = new Menu();
-    menu.addItem(item => item
-      .setTitle('No Project')
-      .setIcon('folder-minus')
-      .setChecked(!this.selectedProjectId)
-      .onClick(() => this.selectProject('')));
-    for (const project of this.manager.getProjects()) {
-      menu.addItem(item => item
-        .setTitle(project.name)
-        .setIcon('folder')
-        .setChecked(this.selectedProjectId === project.id)
-        .onClick(() => this.selectProject(project.id)));
-    }
-    menu.addSeparator();
-    menu.addItem(item => item
-      .setTitle('New Project…')
-      .setIcon('folder-plus')
-      .onClick(() => this.plugin.openNewProjectSettings()));
-    menu.showAtMouseEvent(event);
-  }
-
-  private selectProject(projectId: string): void {
-    this.selectedProjectId = projectId;
-    this.refreshProjectSelector();
-  }
-
   /** Adapter for the shared archive context menu (see threadArchiveMenu.ts). */
   private archiveMenuDeps(): ArchiveMenuDeps {
     return this.archiveDeps ??= {
@@ -381,7 +202,6 @@ export class AgentDashboard extends ItemView {
 
   private handleEvent(threadId: string, event: ThreadEvent): void {
     if (event.type === 'projects_changed') {
-      if (this.projectButtonEl) this.refreshProjectSelector();
       this.scheduleRender();
       return;
     }
@@ -391,6 +211,10 @@ export class AgentDashboard extends ItemView {
     }
     if (event.type === 'active_thread_changed') {
       this.setActiveRow(threadId);
+      return;
+    }
+    if (event.type === 'active_thread_cleared') {
+      this.clearActiveRow();
       return;
     }
     if (
@@ -472,6 +296,14 @@ export class AgentDashboard extends ItemView {
     this.rowEls.get(threadId)?.addClass('ct-agents-row-active');
   }
 
+  /** New-conversation mode: no thread is active, so no row should look selected. */
+  private clearActiveRow(): void {
+    if (this.activeThreadId) {
+      this.rowEls.get(this.activeThreadId)?.removeClass('ct-agents-row-active');
+    }
+    this.activeThreadId = null;
+  }
+
   private scheduleRender(): void {
     if (this.renderPending) return;
     this.renderPending = true;
@@ -520,7 +352,7 @@ export class AgentDashboard extends ItemView {
         emptyEl.createDiv({ text: 'No threads match your search.' });
       } else {
         emptyEl.createDiv({ text: 'No threads yet.' });
-        emptyEl.createDiv({ cls: 'ct-agents-empty-sub', text: 'Use the dispatch input below to start a task.' });
+        emptyEl.createDiv({ cls: 'ct-agents-empty-sub', text: 'Use New thread above to start a task.' });
       }
     }
 
@@ -881,27 +713,6 @@ export class AgentDashboard extends ItemView {
     thread.reviewed = true;
     this.plugin.saveSettings();
     this.scheduleRender();
-  }
-
-  /** Focus the dispatch input so the user can type a task immediately. */
-  public focusDispatchInput(): void {
-    this.dispatchComponent?.focus();
-  }
-
-  /**
-   * Seed the dispatch composer with a `@[[basename]]` mention for a document
-   * and focus it — the "Chat about this document" entry points land here.
-   *
-   * Only the draft is seeded: the thread is created when the user submits, so
-   * this always starts a *new* thread and never appends to an open one. The
-   * mention is resolved to the file's content by the dispatch handler's
-   * existing resolver.
-   */
-  public seedDocumentChat(basename: string): void {
-    if (!this.dispatchComponent) return;
-    this.dispatchComponent.setValueAndFocus(
-      seedDocumentChatDraft(this.dispatchComponent.getValue(), basename),
-    );
   }
 
   /** Open the most recently completed unreviewed thread and mark it reviewed.

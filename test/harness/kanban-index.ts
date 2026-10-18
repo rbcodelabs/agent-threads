@@ -23,16 +23,6 @@ const settings = { ...DEFAULT_SETTINGS, claudeBinaryPath: '/opt/homebrew/bin/cla
 const dashboardMode = new URLSearchParams(window.location.search).has('dashboard');
 if (new URLSearchParams(window.location.search).has('mobile')) Platform.isMobile = true;
 const manager = new ThreadManager(settings);
-// `?remote=1`: one daemon with a vault mapping, and a default folder inside the (fake) vault, so the
-// dispatch "Run on" menu pre-fills the mapped remote folder (test/screenshots/remote-thread.spec.ts).
-if (new URLSearchParams(window.location.search).has('remote')) {
-  settings.remoteDaemons = [
-    { id: 'my-server', name: 'my-server', url: 'wss://my-server.tailnet-name.ts.net:8443', tokenSecretName: 'T', defaultCwdRoot: '/home/user/projects', vaultMapping: { remoteRoot: '/home/user/vault' } },
-    { id: 'plain-box', name: 'plain-box', url: 'wss://plain.example.ts.net:8443', tokenSecretName: 'U', defaultCwdRoot: '/srv/workspaces' },
-  ];
-  settings.defaultCwd = '/Users/me/Vault/Products/Agent Threads';
-  manager.vaultRoot = '/Users/me/Vault';
-}
 manager.loadProjects(kanbanFixtureProjects);
 const agentFixtureThread = kanbanFixtureThreads.find(thread => thread.id === kanbanRunningThreadId);
 if (dashboardMode && agentFixtureThread) {
@@ -96,39 +86,14 @@ m.lastActivityAt.set(kanbanAwaitingThreadId, Date.now());
 // the pendingWakeups map in test/harness/index.ts.
 const pendingWakeups = new Map<string, { timerId: number; fireAt: number; reason: string }[]>();
 pendingWakeups.set(kanbanWaitingThreadId, [{ timerId: 0, fireAt: kanbanWaitingFireAt, reason: kanbanWaitingReason }]);
-const dispatchCalls: unknown[][] = [];
+/** Times a "New thread" button asked the plugin to open the conversation panel in new-conversation mode. */
+const newConversationCalls: unknown[][] = [];
 const openedAgentTeams: string[] = [];
 /** Threads archived via the right-click menu, in order — asserted by ui.spec.ts. */
 const archivedThreadIds: string[] = [];
 let saveSettingsCalls = 0;
 
-// What the Run on picker would get from a real daemon (`workspaces.list` / `path.list`). `plain-box`
-// stands for a daemon too old to advertise folders, so it keeps the plain text field.
-const folderTree: Record<string, string[]> = {
-  '/home/user/projects': ['app', 'site', 'tools'],
-  '/home/user/vault': ['Daily', 'Products', 'Projects'],
-  '/home/user/vault/Products': ['Agent Threads', 'Other Product'],
-  '/home/user/vault/Products/Agent Threads': [],
-  '/home/user/vault/Products/Other Product': ['Notes', 'Specs'],
-};
-const fakeRemoteFolders = {
-  workspaces: async (daemonId: string) => daemonId === 'plain-box'
-    ? { ok: false as const, reason: 'unsupported' as const, detail: 'This daemon is too old to list its folders.' }
-    : {
-      ok: true as const,
-      value: [
-        { path: '/home/user/projects', name: 'projects', readOnly: false, kind: 'folder' as const, isDefault: true },
-        { path: '/home/user/vault', name: 'vault', readOnly: false, kind: 'vault' as const, isDefault: false },
-      ],
-    },
-  subfolders: async (_daemonId: string, path: string) => ({
-    ok: true as const,
-    value: { allowed: path in folderTree, entries: (folderTree[path] ?? []).map((name) => ({ name, path: `${path}/${name}` })), truncated: false },
-  }),
-};
-
 const mockPlugin = {
-  remoteFolders: fakeRemoteFolders,
   app: (mockLeaf as any).app,
   settings,
   manager,
@@ -138,10 +103,11 @@ const mockPlugin = {
   getActiveThreadId: () => null,
   openThreadInChatView: async () => {},
   openAgentTeamInChatView: async (threadId: string) => { openedAgentTeams.push(threadId); },
-  dispatchNewThread: async (...args: unknown[]) => {
-    dispatchCalls.push(args);
-    return 'new-thread';
+  openNewConversation: async (...args: unknown[]) => {
+    newConversationCalls.push(args);
+    return true;
   },
+  activateKanbanView: async () => {},
   getPendingWakeups: (threadId: string) =>
     [...(pendingWakeups.get(threadId) ?? [])].sort((a, b) => a.fireAt - b.fireAt),
   hasPendingWakeup: (threadId: string) => (pendingWakeups.get(threadId)?.length ?? 0) > 0,
@@ -176,7 +142,7 @@ void view.onOpen();
 (window as any).__kanban = view;
 (window as any).__dashboard = view;
 (window as any).__manager = manager;
-(window as any).__dispatchCalls = dispatchCalls;
+(window as any).__newConversationCalls = newConversationCalls;
 (window as any).__openedAgentTeams = openedAgentTeams;
 (window as any).__archivedThreadIds = archivedThreadIds;
 (window as any).__getSaveSettingsCalls = () => saveSettingsCalls;

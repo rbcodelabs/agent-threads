@@ -1171,6 +1171,10 @@ export interface PluginSettings {
   layoutDensity: LayoutDensity;
   /** Primary grouping shown in the Agents List. Missing values use project-status. */
   agentsGroupBy?: 'project' | 'status' | 'project-status';
+  /** Sort order of the searchable Project picker: most recently used (default) or alphabetical. */
+  projectPickerSort?: 'recent' | 'alphabetical';
+  /** Project id -> last time it was chosen in the Project picker (ms). Combined with thread activity for the 'recent' sort. */
+  projectLastUsed?: Record<string, number>;
   /**
    * Shell command for the context footer bar. Receives JSON on stdin with
    * {cwd, workspace:{current_dir}, branch} describing the thread. stdout may be
