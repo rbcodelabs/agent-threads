@@ -592,6 +592,13 @@ export interface Thread {
    */
   ephemeral?: boolean;
   /**
+   * Private chat: nothing about this thread is written to disk. Not saved to
+   * data.json, the vault note, the raw JSONL log, or attachment files, and the
+   * SDK session is not persisted. Set at creation only and never toggled, so
+   * history can't leak by flipping it mid-chat. Lost on reload or archive.
+   */
+  private?: boolean;
+  /**
    * Per-thread permission mode override. When set, takes precedence over the
    * global settings.permissionMode for sessions in this thread.
    */
