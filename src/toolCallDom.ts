@@ -113,7 +113,7 @@ export function renderToolGroupShell(
   headerRow.createSpan({ cls: 'ct-compressed-summary', text });
   headerRow.createSpan({
     cls: 'ct-tool-group-count',
-    text: summary.countInLabel && !opts.hasPending ? String(tools.length) : `${tools.length}×`,
+    text: String(tools.length),
     attr: { 'data-count-in-label': String(summary.countInLabel && !opts.hasPending) },
   });
   if (opts.hasPending) headerRow.createSpan({ cls: 'ct-tool-group-running', text: 'running' });
