@@ -79,7 +79,7 @@ test.describe('Codex-native tool-call rendering', () => {
 
   test('renders commandExecution as an Exploring group with terminal icons and readable labels', async ({ page }) => {
     const group = page.locator('.ct-tool-group').first();
-    await expect(group.locator('.ct-compressed-summary')).toHaveText('Exploring (3)');
+    await expect(group.locator('.ct-compressed-summary')).toHaveText('Ran 3 commands');
     await expect(group.locator('.ct-tool-group-header .lucide-terminal')).toHaveCount(1);
 
     await group.locator('.ct-expand-btn').click();
@@ -265,14 +265,15 @@ test.describe('Live tool-call grouping', () => {
     await expect(page.locator('.ct-tools > *')).toHaveCount(1);
     const group = page.locator('.ct-tool-group').first();
     await expect(group).toBeVisible();
-    await expect(group.locator('.ct-compressed-summary')).toHaveText('Exploring (50)');
+    await expect(group.locator('.ct-compressed-summary')).toHaveText('Exploring');
+    await expect(group.locator('.ct-tool-group-count')).toHaveText('50');
     // "Still running" affordance on the header — every child is still pending.
     await expect(group.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-active/);
-    // Collapsed by default — a long run of pending (not erroring) calls must
-    // NOT force-expand just because it's live.
-    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'true');
+    // A RUNNING group stays open so live progress is visible.
+    await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
 
-    await shot(page, 'tool-call-grouping-live-collapsed.png', { fullPage: true });
+    await shot(page, 'tool-call-grouping-live-running.png', { fullPage: true });
   });
 
   test('the in-flight tool still shows its own active indicator alongside resolved siblings', async ({ page }) => {
@@ -300,8 +301,8 @@ test.describe('Live tool-call grouping', () => {
     });
     await page.waitForTimeout(300);
 
+    // The group still has a pending member, so it is already open.
     const group = page.locator('.ct-tool-group').first();
-    await group.locator('.ct-expand-btn').click();
     await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
 
     const pills = group.locator('.ct-full-content .ct-tool-pill');
@@ -310,7 +311,7 @@ test.describe('Live tool-call grouping', () => {
     await expect(pills.nth(1)).toHaveClass(/ct-tool-active/);
   });
 
-  test('a group expanded mid-turn stays expanded as more same-kind calls arrive (stable liveToolGroupKey)', async ({ page }) => {
+  test('a group the user collapsed mid-turn stays collapsed as more same-kind calls arrive (stable liveToolGroupKey)', async ({ page }) => {
     await page.evaluate(() => {
       const emit = (window as any).__emitEvent;
       const threadId = 'thread-live-tool-grouping';
@@ -321,9 +322,12 @@ test.describe('Live tool-call grouping', () => {
     });
     await page.waitForTimeout(300);
 
+    // Running groups default open; the user collapses this one.
     const group = page.locator('.ct-tool-group').first();
-    await group.locator('.ct-expand-btn').click();
     await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
+    await group.locator('.ct-tool-group-header').click();
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'false');
 
     // More same-kind calls arrive — the group rebuilds from scratch (fresh DOM
     // nodes every debounced render), but since it's keyed by the first call's
@@ -340,8 +344,10 @@ test.describe('Live tool-call grouping', () => {
     await page.waitForTimeout(300);
 
     const groupAfter = page.locator('.ct-tool-group').first();
-    await expect(groupAfter.locator('.ct-compressed-summary')).toHaveText('Exploring (8)');
-    await expect(groupAfter.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
+    await expect(groupAfter.locator('.ct-compressed-summary')).toHaveText('Exploring');
+    await expect(groupAfter.locator('.ct-tool-group-count')).toHaveText('8');
+    // The user's collapse of the running group survives the live rebuild.
+    await expect(groupAfter.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
   });
 
   test('switching away and back mid-turn restores the same grouped view, not a flat replay', async ({ page }) => {
@@ -373,7 +379,7 @@ test.describe('Live tool-call grouping', () => {
     // no flat per-tool-pill replay.
     await expect(page.locator('.ct-tools > *')).toHaveCount(1);
     const group = page.locator('.ct-tool-group').first();
-    await expect(group.locator('.ct-compressed-summary')).toHaveText('Exploring (6)');
+    await expect(group.locator('.ct-compressed-summary')).toHaveText('Exploring');
   });
 
   // Regression guard for the actual bug shape: post-7b7d4fb, each tool-only
@@ -414,7 +420,7 @@ test.describe('Live tool-call grouping', () => {
     await expect(page.locator('.ct-message')).toHaveCount(2); // seeded user bubble + 1 merged assistant row
     const group = page.locator('.ct-tool-group').first();
     await expect(group).toBeVisible();
-    await expect(group.locator('.ct-compressed-summary')).toHaveText('Exploring (2)');
+    await expect(group.locator('.ct-compressed-summary')).toHaveText('Read 2 files');
 
     // Expand the group mid-run.
     await group.locator('.ct-expand-btn').click();
@@ -436,7 +442,7 @@ test.describe('Live tool-call grouping', () => {
     // The group expanded mid-sequence must STILL be expanded after the run
     // extended further — regression guard for R4 (liveToolGroupKey keying).
     const groupAfter = page.locator('.ct-tool-group').first();
-    await expect(groupAfter.locator('.ct-compressed-summary')).toHaveText('Exploring (5)');
+    await expect(groupAfter.locator('.ct-compressed-summary')).toHaveText('Read 3 files, searched 1 pattern, ran 1 command');
     await expect(groupAfter.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
 
     await shot(page, 'tool-call-grouping-fragmented-live-merged.png', { fullPage: true });

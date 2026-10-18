@@ -1500,7 +1500,6 @@
   width: 14px;
   height: 14px;
   opacity: 0.7;
-  pointer-events: none;
 }
 .ct-tools .ct-tool-group-header:hover .ct-expand-btn { opacity: 1; background: none; }
 .ct-tools .ct-tool-group-header .ct-expand-btn svg { width: 14px; height: 14px; transition: transform 0.15s; }
