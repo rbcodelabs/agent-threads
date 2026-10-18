@@ -47,6 +47,8 @@ test.describe('Tool call styles', () => {
     test(`${style}: finished groups collapsed, headers are buttons, failures red and open`, async ({ page }) => {
       await page.evaluate(() => (window as any).__view.focusThread('thread-tool-grouping'));
       await page.waitForSelector('.ct-tool-group');
+      // Let async footer chrome (edited-files chips) settle so layout is stable.
+      await page.waitForTimeout(800);
       await setStyle(page, style);
       await page.waitForTimeout(150);
 
