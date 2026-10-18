@@ -1650,6 +1650,11 @@
   font-size: 11.5px;
 }
 .ct-tools-cards .ct-tool-group-header .ct-tool-group-count[data-count-in-label="true"] { }
+/* Narrow viewports: a group never outgrows its column, and the mobile header is a 44px tap target. */
+.ct-tools-tree .ct-tool-group,
+.ct-tools-cards .ct-tool-group { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.ct-tools .ct-tool-group > .ct-full-content { min-width: 0; overflow: hidden; }
+.ct-mobile-root .ct-tools .ct-tool-group-header { min-height: 44px; }
 .ct-tools-cards .ct-tool-group-header[aria-expanded="true"] .ct-expand-btn svg { transform: rotate(180deg); }
 .ct-tools-cards .ct-tool-group > .ct-full-content { border-top: 1px solid var(--background-modifier-border); }
 .ct-tools-cards .ct-tool-group .ct-tool-pill {

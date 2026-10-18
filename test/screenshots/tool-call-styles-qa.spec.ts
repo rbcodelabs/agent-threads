@@ -348,11 +348,8 @@ for (const vp of MOBILE_VIEWPORTS) {
         test.info().annotations.push({ type: 'row-heights', description: rows.map(Math.round).join(',') });
       });
 
-      // KNOWN BUG (QA 2026-10-18): at 375px an EXPANDED tree/cards group runs
-      // 2-4px past the right edge (group/header/rows span x 12..377/379 in a
-      // 375px viewport; cards loses its right border). Fine at 390px; chips fine.
-      test(`${style}: expanded group fits the ${vp.name} viewport${vp.width === 375 && style !== 'chips' ? ' (KNOWN BUG, expected to fail)' : ''}`, async ({ page }) => {
-        if (vp.width === 375 && style !== 'chips') test.fail();
+      // Regression: at 375px an expanded tree/cards group used to run past the right edge.
+      test(`${style}: expanded group fits the ${vp.name} viewport`, async ({ page }) => {
         await openThread(page, FINISHED);
         await setMobileStyle(page, style);
         await page.waitForSelector('.ct-tool-group');
@@ -361,12 +358,8 @@ for (const vp of MOBILE_VIEWPORTS) {
         expect(await horizontalOverflow(page, '.ct-mobile-messages')).toEqual([]);
       });
 
-      // KNOWN BUG (QA 2026-10-18): the mobile group header is 24px (tree), 26px
-      // (chips) and 42px (cards) tall; main already had min-height 28px. The PR
-      // guidelines require 44px. test.fail() keeps CI green while the bug exists
-      // and turns RED the moment it is fixed, prompting removal of the marker.
-      test(`${style}: group header is a >= 44px tap target (KNOWN BUG, expected to fail)`, async ({ page }) => {
-        test.fail();
+      // Regression: the mobile group header must be a 44px tap target (PR guidelines).
+      test(`${style}: group header is a >= 44px tap target`, async ({ page }) => {
         await openThread(page, FINISHED);
         await setMobileStyle(page, style);
         await page.waitForSelector('.ct-tool-group');
