@@ -35,7 +35,7 @@ import type ClaudeThreadsPlugin from './main';
 import { isDefaultThreadTitle } from './thread-title-utils';
 import { formatToolName, getToolIcon } from './ClaudeSession';
 import { isPermissionPreApproved, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
-import { applyToolCallStyleClass, renderToolGroupShell, renderToolRow } from './toolCallDom';
+import { applyToolCallStyleClass, refreshToolRowByUseId, renderToolGroupShell, renderToolRow } from './toolCallDom';
 import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, smoothToolGroups, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
 import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
@@ -5419,11 +5419,6 @@ export class ThreadsView extends ItemView {
         // bleed into another thread if the user later stops a different thread.
         if (this.activeThreadId) this.lastSentTexts.delete(this.activeThreadId);
         this.setRunningState(false);
-        // Rows committed mid-turn were drawn while their call was still
-        // pending and are never rebuilt when the result lands (the record is
-        // mutated in place, the DOM is not). Redraw once the turn is over so
-        // nothing keeps spinning.
-        if (this.messagesEl?.querySelector('.ct-tool-state-pending')) void this.renderMessages();
         break;
       }
 
@@ -5870,6 +5865,9 @@ export class ThreadsView extends ItemView {
         // debounced rebuild so the live pill/group picks it up — no manual
         // DOM class-swap needed.
         if (this.streamingEl) this.scheduleLiveToolsRender();
+        // Rows committed mid-turn were drawn while pending and are not rebuilt;
+        // repaint them (and their group) in place from the mutated record.
+        refreshToolRowByUseId(this.messagesEl, event.toolUseId);
         // Rows already committed to the transcript hold the SAME mutated
         // records; a browser card must show the result (url, ok/failed).
         this.scheduleBrowserRefresh();

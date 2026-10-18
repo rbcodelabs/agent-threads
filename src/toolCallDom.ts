@@ -39,6 +39,40 @@ function statusIcon(parent: HTMLElement, cls: string, state: ToolState): HTMLEle
   return el;
 }
 
+
+const rowRecords = new WeakMap<HTMLElement, ToolCallRecord>();
+const groupRefreshers = new WeakMap<HTMLElement, () => void>();
+
+function paintRowClasses(pill: HTMLElement, tool: ToolCallRecord, state: ToolState): void {
+  pill.classList.toggle('ct-tool-error', state === 'error');
+  pill.classList.toggle('ct-tool-success', state === 'success' && tool.status === 'success');
+  pill.classList.toggle('ct-tool-active', state === 'pending');
+}
+
+/**
+ * A result landed for `toolUseId`: repaint that row (and its group) in place.
+ * Records are mutated in place by the session, so this just re-reads them;
+ * it covers rows committed mid-turn, whose DOM would otherwise stay "running".
+ */
+export function refreshToolRowByUseId(root: ParentNode, toolUseId: string): void {
+  const sel = `.ct-tool-pill[data-tool-use-id="${toolUseId.replace(/["\\]/g, '')}"]`;
+  root.querySelectorAll<HTMLElement>(sel).forEach((pill) => {
+    const tool = rowRecords.get(pill);
+    if (!tool) return;
+    const state: ToolState = tool.status ?? 'success';
+    paintRowClasses(pill, tool, state);
+    const old = pill.querySelector<HTMLElement>('.ct-tool-status');
+    if (old) {
+      old.className = `ct-tool-status ct-tool-state-${state}`;
+      old.setAttribute('aria-label', state === 'pending' ? 'running' : state === 'error' ? 'failed' : 'done');
+      old.empty();
+      setIcon(old, STATE_ICON[state]);
+    }
+    const group = pill.closest<HTMLElement>('.ct-tool-group');
+    if (group) groupRefreshers.get(group)?.();
+  });
+}
+
 /**
  * One tool call row. `forcePending` is for mobile, whose records carry no
  * status: the live view marks every row running.
@@ -51,9 +85,9 @@ export function renderToolRow(
   const state: ToolState = opts.forcePending ? 'pending' : (tool.status ?? 'success');
   const pill = wrapper.createDiv('ct-tool-pill');
   pill.setAttribute('tabindex', '0');
-  if (state === 'error') pill.addClass('ct-tool-error');
-  else if (state === 'success' && tool.status === 'success') pill.addClass('ct-tool-success');
-  else if (state === 'pending') pill.addClass('ct-tool-active');
+  if (tool.toolUseId) pill.dataset.toolUseId = tool.toolUseId;
+  rowRecords.set(pill, tool);
+  paintRowClasses(pill, tool, state);
 
   statusIcon(pill, 'ct-tool-status', state);
   const iconEl = pill.createSpan({ cls: 'ct-tool-pill-icon' });
@@ -92,46 +126,69 @@ export function renderToolGroupShell(
     onToggle: (expanded: boolean) => void;
   },
 ): { groupEl: HTMLElement; headerRow: HTMLElement; body: HTMLElement } {
-  const summary = summarizeToolGroup(activityKind, tools);
-  const state: ToolState = opts.hasError ? 'error' : opts.hasPending ? 'pending' : 'success';
-
   const groupEl = wrapper.createDiv('ct-tool-group');
-  groupEl.addClass(`ct-tool-group-${state}`);
   const headerRow = groupEl.createEl('button', {
     cls: 'ct-tool-group-header ct-compressed-row',
-    attr: { type: 'button', 'aria-expanded': String(opts.expanded) },
+    attr: { type: 'button' },
   });
-  // Flag on the header so the error / running tints (styles.css) apply.
-  if (opts.hasError) headerRow.addClass('ct-tool-error');
-  if (opts.hasPending) headerRow.addClass('ct-tool-active');
-
-  statusIcon(headerRow, 'ct-tool-group-status', state);
-  const iconEl = headerRow.createSpan({ cls: 'ct-tool-pill-icon ct-tool-group-icon' });
-  setIcon(iconEl, getToolIcon(tools[0].name));
-  // Running groups show the live activity name ("Working") with the count in a badge; finished groups get the one-line summary.
-  const text = opts.hasPending ? ACTIVITY_LABELS[activityKind] : summary.label;
-  headerRow.createSpan({ cls: 'ct-compressed-summary', text });
-  headerRow.createSpan({
-    cls: 'ct-tool-group-count',
-    text: String(tools.length),
-    attr: { 'data-count-in-label': String(summary.countInLabel && !opts.hasPending) },
-  });
-  if (opts.hasPending) headerRow.createSpan({ cls: 'ct-tool-group-running', text: 'running' });
-  const chevron = headerRow.createSpan({ cls: 'ct-expand-btn', attr: { 'aria-hidden': 'true' } });
-
   const body = groupEl.createDiv('ct-full-content');
   let expanded = opts.expanded;
-  const sync = (): void => {
+  let userToggled = false;
+  const wasRunning = opts.hasPending;
+  // Mobile records carry no status: the caller says "running" and no result will ever land.
+  const forcedPending = opts.hasPending && !tools.some(t => t.status === 'pending');
+
+  const paintExpanded = (): void => {
     body.toggleClass('ct-hidden', !expanded);
     headerRow.setAttribute('aria-expanded', String(expanded));
     groupEl.toggleClass('ct-tool-group-open', expanded);
+  };
+
+  // Header content is derived from the (live-mutated) records, so it can be
+  // repainted whenever a call's result lands.
+  const paintHeader = (): void => {
+    const hasError = tools.some(t => t.status === 'error');
+    const hasPending = forcedPending || tools.some(t => t.status === 'pending');
+    const state: ToolState = hasError ? 'error' : hasPending ? 'pending' : 'success';
+    const summary = summarizeToolGroup(activityKind, tools);
+    groupEl.className = `ct-tool-group ct-tool-group-${state}${expanded ? ' ct-tool-group-open' : ''}`;
+    headerRow.empty();
+    headerRow.classList.toggle('ct-tool-error', hasError);
+    // Flag on the header so the error / running tints (styles.css) apply.
+    headerRow.classList.toggle('ct-tool-active', hasPending);
+    statusIcon(headerRow, 'ct-tool-group-status', state);
+    const iconEl = headerRow.createSpan({ cls: 'ct-tool-pill-icon ct-tool-group-icon' });
+    setIcon(iconEl, getToolIcon(tools[0].name));
+    // Running groups show the live activity name ("Working") with the count in a badge; finished groups get the one-line summary.
+    headerRow.createSpan({ cls: 'ct-compressed-summary', text: hasPending ? ACTIVITY_LABELS[activityKind] : summary.label });
+    headerRow.createSpan({
+      cls: 'ct-tool-group-count',
+      text: String(tools.length),
+      attr: { 'data-count-in-label': String(summary.countInLabel && !hasPending) },
+    });
+    if (hasPending) headerRow.createSpan({ cls: 'ct-tool-group-running', text: 'running' });
+    const chevron = headerRow.createSpan({ cls: 'ct-expand-btn', attr: { 'aria-hidden': 'true' } });
     // One glyph; each style rotates it via CSS (aria-expanded).
     setIcon(chevron, 'chevron-down');
   };
-  sync();
+
+  paintHeader();
+  paintExpanded();
+  groupRefreshers.set(groupEl, () => {
+    const done = !forcedPending && !tools.some(t => t.status === 'pending');
+    const failed = tools.some(t => t.status === 'error');
+    // A group that opened because it was running folds itself away once it
+    // finishes cleanly, unless the user has taken over the toggle.
+    if (done && !failed && wasRunning && !userToggled) expanded = false;
+    if (failed) expanded = true;
+    paintHeader();
+    paintExpanded();
+  });
   headerRow.addEventListener('click', () => {
     expanded = !expanded;
-    sync();
+    userToggled = true;
+    paintHeader();
+    paintExpanded();
     opts.onToggle(expanded);
   });
   return { groupEl, headerRow, body };
