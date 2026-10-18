@@ -327,7 +327,8 @@ const mockPlugin = {
   },
 };
 
-const tab = new ClaudeThreadsSettingTab(mockApp as any, mockPlugin as any);
+const fixedSection = new URLSearchParams(location.search).get('section') as any;
+const tab = new ClaudeThreadsSettingTab(mockApp as any, mockPlugin as any, fixedSection || undefined);
 const container = document.getElementById('app')!;
 if (new URLSearchParams(location.search).get('host') === 'geode') {
   document.body.classList.add('geode-settings-host');

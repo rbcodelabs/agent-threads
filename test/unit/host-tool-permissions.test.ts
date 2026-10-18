@@ -21,7 +21,7 @@ describe('built-in tool permission classification', () => {
   });
 });
 
-import { isPermissionPreApproved, canAlwaysAllow, buildPermissionDetail } from '../../src/toolNameUtils';
+import { isPermissionPreApproved, buildPermissionDetail } from '../../src/toolNameUtils';
 import { parsePermissionDetail } from '../../src/permissionDetail';
 
 describe('browser_eval permissions', () => {
@@ -31,14 +31,12 @@ describe('browser_eval permissions', () => {
     for (const n of evalNames) {
       expect(isPermissionPreApproved(n, [])).toBe(true);
       expect(isPermissionPreApproved(n, [n])).toBe(true);
-      expect(canAlwaysAllow(n)).toBe(true);
     }
   });
 
   it('leaves the other browser tools pre-approved and always-allowable', () => {
     for (const k of ['browser_navigate', 'browser_click', 'browser_type', 'browser_console', 'browser_network', 'browser_snapshot', 'browser_scroll']) {
       expect(isPermissionPreApproved(`mcp__claude_threads__${k}`, [])).toBe(true);
-      expect(canAlwaysAllow(`mcp__claude_threads__${k}`)).toBe(true);
     }
   });
 

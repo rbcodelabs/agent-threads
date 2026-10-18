@@ -70,7 +70,68 @@ export type ClientCommand =
   | { type: 'tool.result'; threadId: string; callId: string; success: boolean; text: string; content?: unknown[] }
   | { type: 'tool.manifest'; threadId: string; servers: Record<string, RemoteHostToolSpec[]> }
   // Credentials (PR 17)
-  | { type: 'creds.push'; kind: string; ttlSec: number; fields: Record<string, string> };
+  | { type: 'creds.push'; kind: string; ttlSec: number; fields: Record<string, string> }
+  // Repositories (admin to change, read to look): the daemon keeps a clone of each under its workspace root
+  /**
+   * Replace the daemon's repository list (when `repos` is present) and bring every repository up to date: clone
+   * what is missing, fetch the rest. Replies at once with the current status (`syncing` for work in progress);
+   * `wait: true` holds the reply until the sync finished. Needs an admin token. Additive within v1.
+   */
+  | { type: 'repos.sync'; repos?: RepoSpec[]; wait?: boolean }
+  /** The state of each configured repository. Additive within v1. */
+  | { type: 'repos.status' };
+
+/** One repository the daemon keeps cloned. The authentication token comes from the daemon's `creds/`, never from here. */
+export interface RepoSpec {
+  /** Directory name under the daemon's workspace root. */
+  name: string;
+  /** Clone URL. No credentials in it; a private repository authenticates with the pushed token. */
+  url: string;
+  /** Branch to clone; absent = the remote's default. */
+  branch?: string;
+}
+
+/** `cloned`: present and fetched recently. `stale`: present, but the last fetch is old or failed. `auth_failed`: the remote refused the token. */
+export type RepoState = 'not_cloned' | 'syncing' | 'cloned' | 'stale' | 'auth_failed' | 'error';
+
+export interface RepoStatus extends RepoSpec {
+  state: RepoState;
+  /** Absolute path of the clone on the daemon. */
+  path: string;
+  /** Epoch ms of the last successful clone/fetch. */
+  syncedAt?: number;
+  /** Why the last attempt failed (never contains a credential). */
+  error?: string;
+}
+
+/** Reply to `repos.sync` and `repos.status`. */
+export interface ReposReply {
+  repos: RepoStatus[];
+  /** Absolute workspace root the clones live under. */
+  root: string;
+}
+
+export const REPO_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const MAX_REPOS = 64;
+
+/** Check the `repos` of a `repos.sync`. Returns a message naming the first problem, or null. */
+export function validateRepoSpecs(repos: unknown): string | null {
+  if (repos === undefined) return null;
+  if (!Array.isArray(repos)) return 'repos must be an array';
+  if (repos.length > MAX_REPOS) return `at most ${MAX_REPOS} repos`;
+  const seen = new Set<string>();
+  for (let i = 0; i < repos.length; i++) {
+    const r: unknown = repos[i];
+    if (typeof r !== 'object' || r === null || Array.isArray(r)) return `repos[${i}] must be an object`;
+    const { name, url, branch } = r as Record<string, unknown>;
+    if (typeof name !== 'string' || !REPO_NAME.test(name) || name.endsWith('.') || name === '.git') return `repos[${i}].name must be 1-64 characters of letters, digits, ".", "_" or "-", not starting with one of the last three`;
+    if (seen.has(name.toLowerCase())) return `repos[${i}].name "${name}" is used twice`;
+    seen.add(name.toLowerCase());
+    if (typeof url !== 'string' || url.length === 0 || url.length > 2048 || /[\s\u0000-\u001f]/.test(url)) return `repos[${i}].url must be a clone URL without spaces`;
+    if (branch !== undefined && (typeof branch !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(branch) || branch.includes('..'))) return `repos[${i}].branch is not a valid branch name`;
+  }
+  return null;
+}
 
 /**
  * Reply to `path.check`. A path outside every workspace reports only
@@ -193,4 +254,6 @@ export const CLIENT_COMMAND_TYPES: Record<ClientCommandType, true> = {
   'tool.result': true,
   'tool.manifest': true,
   'creds.push': true,
+  'repos.sync': true,
+  'repos.status': true,
 };

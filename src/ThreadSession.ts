@@ -22,15 +22,6 @@ export { formatToolName, getToolIcon };
 export type { SessionCallbacks, TaskTrackerEvent };
 import type { HarnessContextUsage, HarnessSessionOptions } from './HarnessSession';
 import {
-  buildHarnessSpawnArgs,
-  redactSecretsInArgv,
-  resolveClaudeVmRouting,
-  type HarnessVmFallbackReason,
-  type ResolvedClaudeVmRouting,
-} from './harnessVmRouting';
-import { runnerEnv as hostRunnerEnv, VM_BINARY } from './sandboxVm';
-import { rewritePluginsForGuest } from './skillMounts';
-import {
   isTransportClosedError,
   shouldAutoRetryTransportError,
   TRANSPORT_ERROR_CONTINUATION_PROMPT,
@@ -48,9 +39,8 @@ import {
   shouldAutoRetryAuthError,
 } from './claudeAuthRecovery';
 import { isAwsCredentialErrorText } from './awsAuthRecovery';
-import { containerAwsEnv } from './containerAws';
-import { stripHostOnlyGitEnv } from './githubCredentialHelper';
 import { isReportedModelId } from './modelOptions';
+import { parseInitMcpServers } from './mcpStatus';
 import { mergeUsageSnapshot,normalizeClaudeRateLimit, normalizeClaudeResult, normalizeClaudeUsageResponse, timestampMs, type UsageSnapshot } from './Usage';
 import { resolvePlanText, isPlanFilePath } from './planText';
 
@@ -345,55 +335,10 @@ export class ThreadSession {
       }
     };
 
-    // ADR-0015: resolve VM routing once, before opening the Query — never
-    // re-evaluated mid-session (a mode change or freshly-built image takes
-    // effect on this thread's NEXT fresh session start, not the running one).
-    // Absent `options.claude?.vm` or a resolved `{ routed: false }` both mean
-    // "spawn on the host", today's behavior, unchanged.
-    let vmRouting: ResolvedClaudeVmRouting | null = null;
-    let vmFallbackReason: HarnessVmFallbackReason | undefined =
-      options.claude?.vm?.mode === 'never' ? 'never' : undefined;
-    if (options.claude?.vm && options.claude.vm.mode !== 'never') {
-      try {
-        const decision = await resolveClaudeVmRouting(options.claude.vm);
-        if (decision.routed) vmRouting = decision.routing;
-        else vmFallbackReason = decision.reason;
-      } catch (vmErr) {
-        // 'always' mode's explicit no-silent-fallback contract: surface the
-        // error instead of quietly spawning on the host.
-        console.error('[ClaudeThreads] ThreadSession VM routing failed:', vmErr);
-        this.channelEnded = true;
-        callbacks.onError(vmErr instanceof Error ? vmErr : new Error(String(vmErr)));
-        return;
-      }
-    }
-    // Report the actual decision — null for a host-local spawn — so the UI
-    // (the "Sign in to Claude" card) can pick the right sign-in flow from
-    // what's really running rather than re-deriving a possibly-stale
-    // capability check (ADR-0015 follow-up, see SessionCallbacks.onVmRouting).
-    if (vmRouting) {
-      callbacks.onVmRouting?.({ containerName: vmRouting.containerName, containerBinaryPath: vmRouting.containerBinaryPath });
-    } else if (vmFallbackReason) {
-      callbacks.onVmRouting?.(null, vmFallbackReason);
-    } else {
-      callbacks.onVmRouting?.(null);
-    }
-
-    // Minimal, explicit env for the containerized case — deliberately NOT a
-    // `...process.env` spread (ADR-0015 §4's hard requirement: forwarding the
-    // full host environment into the container would leak unrelated host
-    // secrets to anything else that runs there, including a `vm_exec` call in
-    // this same shared container). The host-spawn path keeps process.env
-    // exactly as before.
-    // The host GitHub wiring (GIT_CONFIG_* naming a host temp-dir credential helper, and a
-    // host `gh` wrapper dir prepended to PATH) is meaningless inside the VM and would make
-    // git point at a helper that does not exist there (breaking push). The VM hooks install
-    // their own in-container helper, so drop these from a routed session's env.
-    const secretEnv = vmRouting ? stripHostOnlyGitEnv(options.secretEnv ?? {}) : (options.secretEnv ?? {});
-    const todoToolsEnv = { CLAUDE_CODE_ENABLE_TODO_TOOLS: '1', ...parseExtraEnv(options.extraEnvRaw), ...secretEnv };
+    const todoToolsEnv = { CLAUDE_CODE_ENABLE_TODO_TOOLS: '1', ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) };
 
     const sdkOptions: Options = {
-      pathToClaudeCodeExecutable: vmRouting ? vmRouting.containerBinaryPath : this.claudePath,
+      pathToClaudeCodeExecutable: this.claudePath,
       permissionMode: options.permissionMode,
       cwd: options.cwd,
       includePartialMessages: true,
@@ -404,38 +349,14 @@ export class ThreadSession {
       // and newer models unless opted back in. The plugin's dashboard depends on them.
       // Placed after process.env (so a stray inherited value can't disable a core
       // feature) but before extra/secret env (so explicit plugin config still wins).
-      // The container sign-in token rides ONLY the VM-routed env, and is
-      // spread LAST so it wins over any same-named user secret. A host
-      // session must never see it: an env CLAUDE_CODE_OAUTH_TOKEN overrides
-      // the host's keychain login (see HarnessSessionOptions.containerAuthToken).
-      env: vmRouting
-        ? { ...todoToolsEnv, ...containerAwsEnv(vmRouting.mountedExtra, todoToolsEnv), ...(options.containerAuthToken ? { CLAUDE_CODE_OAUTH_TOKEN: options.containerAuthToken } : {}) }
-        : { ...process.env, ...todoToolsEnv },
+      env: { ...process.env, ...todoToolsEnv },
     };
-    if (vmRouting) {
-      const containerName = vmRouting.containerName;
-      sdkOptions.spawnClaudeCodeProcess = ({ command, args, env, signal }) => {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { spawn } = require('child_process') as typeof import('child_process');
-        const execArgs = buildHarnessSpawnArgs({ containerName, command, args, env });
-        debugLog(
-          '[ClaudeThreads] spawning containerized Claude:',
-          JSON.stringify(redactSecretsInArgv([VM_BINARY, ...execArgs], Object.values(env))),
-        );
-        // `hostRunnerEnv()` is the HOST-side env for the `container` binary
-        // itself (PATH additions so a Homebrew install resolves) — distinct
-        // from `env`, which rides `--env` flags into the container process
-        // only (see buildHarnessSpawnArgs). Never conflate the two: the host
-        // spawn env must never carry the secrets meant for the container.
-        return spawn(VM_BINARY, execArgs, { env: hostRunnerEnv(), signal });
-      };
-    }
     if (options.resume) sdkOptions.resume = options.resume;
     if (options.additionalDirectories?.length) sdkOptions.additionalDirectories = options.additionalDirectories;
     if (options.model) sdkOptions.model = options.model;
     if (options.appendSystemPrompt) sdkOptions.extraArgs = { 'append-system-prompt': options.appendSystemPrompt };
     const claude = options.claude;
-    const activeMcpServers = vmRouting ? (claude?.vmMcpServers ?? claude?.mcpServers) : claude?.mcpServers;
+    const activeMcpServers = claude?.mcpServers;
     if (activeMcpServers && Object.keys(activeMcpServers).length) {
       sdkOptions.mcpServers = activeMcpServers;
       const mcpDebug = Object.entries(activeMcpServers).map(([k, v]) => ({
@@ -454,17 +375,7 @@ export class ThreadSession {
     if (claude?.sessionOptions?.betas?.length) sdkOptions.betas = claude.sessionOptions.betas;
     if (claude?.sessionOptions?.persistSession === false) sdkOptions.persistSession = false;
     if (claude?.sessionOptions?.plugins?.length) {
-      // A containerized CLI cannot see host paths, so VM-routed sessions get
-      // guest paths (and lose plugins that are not mounted). Host-local
-      // sessions keep the host paths untouched.
-      const plugins = vmRouting && claude.vm?.skillMountPlan
-        ? rewritePluginsForGuest(
-            claude.sessionOptions.plugins as Array<{ type: 'local'; path: string }>,
-            claude.vm.skillMountPlan,
-            vmRouting.mountedExtra,
-          )
-        : claude.sessionOptions.plugins;
-      if (plugins.length) sdkOptions.plugins = plugins;
+      sdkOptions.plugins = claude.sessionOptions.plugins;
     }
     if (claude?.sessionOptions?.agents && Object.keys(claude.sessionOptions.agents).length > 0) {
       sdkOptions.agents = { ...sdkOptions.agents, ...claude.sessionOptions.agents };
@@ -475,11 +386,6 @@ export class ThreadSession {
     sdkOptions.toolAliases = {
       EnterWorktree: 'mcp__claude_threads__enter_worktree',
       ExitWorktree: 'mcp__claude_threads__exit_worktree',
-      VmExec: 'mcp__claude_threads__vm_exec',
-      ...(!vmRouting ? {
-        EnterVm: 'mcp__claude_threads__enter_vm',
-        ExitVm: 'mcp__claude_threads__exit_vm',
-      } : {}),
     };
 
     debugLog('[ClaudeThreads] opening thread session', {
@@ -957,6 +863,10 @@ export class ThreadSession {
             switch (sys.subtype) {
               case 'init':
                 if (isReportedModelId(sys.model)) callbacks.onActiveModel?.(sys.model);
+                {
+                  const servers = parseInitMcpServers(sys.mcp_servers);
+                  if (servers) callbacks.onMcpServerStatus?.(servers);
+                }
                 break;
               case 'status':
                 callbacks.onStatus?.(sys.status as 'compacting' | 'requesting' | null);

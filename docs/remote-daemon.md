@@ -39,6 +39,109 @@ use another HTTPS port (8443) rather than touching it.
 Recommended: `wss://<machine>.<tailnet>.ts.net:8443` (TLS from Tailscale). Fallback: `ws://<machine>:7598`
 via `tailscale serve --tcp` (plain, but inside the WireGuard tunnel).
 
+## Local daemon: this Mac, in a container
+
+Settings -> Remote -> **Local daemon** runs the daemon on the Mac you are sitting at, inside Apple's `container`
+runtime, with one click and no token pasting. It is an ordinary entry in "Remote daemons" (named *This Mac
+(container)*, marked managed), so everything above applies: threads keep running when Geode quits, and reopening
+Geode re-attaches. It is desktop-only and the whole block is hidden on mobile and on a Mac that cannot run the runtime
+(Intel, macOS older than 26). Design and decisions: [`local-daemon-design.md`](local-daemon-design.md).
+
+It is one shared VM per vault, started once and left running. (Earlier versions could also start a throwaway container
+per thread, "Run in: Container"; that was removed in favour of this.)
+
+**What Set up does** (after a confirmation that names the downloads, the vault path and "read-write"):
+
+1. installs and starts the container runtime if needed (a pinned, checksum-verified copy kept outside the vault);
+2. pulls `ghcr.io/rbcodelabs/agent-threads-daemon:<plugin version>` and builds a thin local layer that adds the Claude CLI
+   from Anthropic (the published image has no CLI: no redistribution grant);
+3. creates two named volumes (data and workspaces) and fixes their ownership with a one-shot (named volumes start
+   root-owned; the daemon runs as uid 10001);
+4. starts the container, publishing `127.0.0.1:<port>` only (7433, or the next free port) and waits for `/healthz`;
+5. creates a `control` token **inside** the container, stores it in the OS keychain (never in `data.json`, argv or logs),
+   and adds the Remote daemons entry with the vault mapped to `/vault`.
+
+Every step is skipped when already satisfied and a failure resumes from the real state, so Set up can be re-run safely.
+The VM is started lazily: nothing runs until you use it or press Start, and sending a message in a thread that runs
+there starts it for you. Quitting Geode leaves it running.
+
+**Folders.** The vault is mounted read-write at `/vault` (the daemon's `--workspace`), with `<vault>/.geode` and
+`<vault>/.obsidian` mounted **read-only on top** so a process in the VM cannot rewrite plugin code that Geode would
+later load. Notes are fully writable: keep vault backups or sync history. Paths containing `:` cannot be mounted and are
+refused. The VM has full outbound network access.
+
+**More folders.** Besides the vault: **Settings, Remote, Local daemon shared folders** lists host folders to share
+READ-WRITE at `/work/<folder name>` (for example a repository outside the vault; they appear under "Run on" as
+workspaces), and Geode's connected external roots are mounted READ-ONLY at `/ext/<name>` and offered as read-only
+workspaces (the daemon denies the edit tools there). A folder that is both a shared folder and an external root (or one inside the other) is mounted once, read-write, at `/work`: a folder cannot be shared with two modes at the same time. Mounts are fixed when the container is created, so a change shows as
+"settings changed" and is applied by **Update** (or the next start of a stopped container). The consent text lists every
+mount. Memory and CPUs (**Local daemon memory** / **CPUs**, defaults 4G and 4) work the same way.
+
+**Environment and keychain secrets.** The daemon never receives your keychain or shell. Before each message to a thread on
+it, Agent Threads pushes that project's **Extra environment variables** (`AWS_PROFILE`, `CLAUDE_CODE_USE_BEDROCK`, ...) and
+keychain secrets as a credential kind `sessenv-<project>` (`agent-threads creds push`, over stdin, 24 hour expiry,
+refreshed on every send). The session spec carries only the kind's name; the daemon reads the values when the session
+starts, so they are never in a spec, a journal, `config.json` or a log, and the daemon redacts them from its output.
+Variables that describe this Mac's shell (`PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `DYLD_*`/`LD_*`, ...) are not
+sent. A spec cannot name any other credential kind as its environment.
+
+**Skills.** The skill plugin directories a host thread would load and `~/.claude/skills` / `~/.claude/agents` are copied
+into the daemon's data volume (`<data>/skills/<name>-<hash>`, `<data>/home/.claude/...`) before a session starts, by a
+small script run inside the container; unchanged directories are not copied again, and the session spec carries the guest
+paths (the daemon keeps only paths under its skills folder). Trees are followed through symlinks, skip `.git` and
+`node_modules`, and are capped (2000 files, 20 MiB). The agent can read them.
+
+**AWS (Amazon Bedrock, deploys).** For a Bedrock thread, or when **AWS profiles for the local daemon** is set, a trimmed
+`~/.aws/config` (only those profiles, their `source_profile` chain and their `sso-session` blocks, allowlisted keys only,
+never keys, session tokens or `credential_process`) and the single SSO token file of each profile's session are copied into
+the daemon user's home before each message, so a fresh `aws sso login` on this Mac reaches the daemon within minutes.
+`AWS_EC2_METADATA_DISABLED=true` is sent so a missing login fails fast with "Could not load AWS credentials" (which shows the
+AWS sign-in card) instead of retrying for minutes. Narrower than the removed sandbox VM, which mounted the whole token cache.
+
+**Tools that run on this Mac.** A new local daemon entry starts with the read groups (`vault`, `workspace`, `threads`,
+`skills`, `browser`), your Google and OAuth MCP servers (`mcp`) and `host_exec` turned on (Settings, Remote, edit daemon
+changes any of it; later edits are kept). `host_exec` runs ONE command on this Mac after an Allow once / Deny card for every
+call (never "Always allow", whatever the permission mode); its directory defaults to the thread's folder on the Mac. Tools
+that write, schedule or touch secrets are off for every daemon unless you switch a group on for THIS daemon (Settings, Remote, **Local daemon: tools that act on this Mac**: threads, schedule, secrets and MCP registration, skills, vault history, app commands and editor, browser scripts, GitHub discovery). Off by default; every call still asks you in the app first. **They act on this Mac with your account, not in the container**: an agent that read untrusted text could be steered into calling them, so leave a group off unless you need it. A change applies to the next thread session you open (see "Tools on your computer (host tools)" below).
+`browser_navigate` forwards `localhost` URLs of a server the agent started in the container to a loopback port on this
+Mac (relay through `container exec`, loopback only), so the page opens; start such servers in the background.
+
+**Run on, and moving a thread.** The kickoff picker's **Run on** section lists "This Mac (container)"; before it is set up
+it shows "This Mac (container) - set up..." which opens this block. A Claude thread's menu (Harness, **Run on**) moves it
+between this computer and a daemon that can see its folder (vault or a shared folder); the native session cannot move, so the
+conversation continues from a summary and transcript references.
+
+**GitHub.** If you use Geode's GitHub connection, a short-lived GitHub token (15 minute expiry, refreshed while Geode is
+open) is pushed into the daemon so `git` over HTTPS and `gh` work there, along with your commit identity. How it works
+and what it can reach: [GitHub via Geode](github-integration.md#local-daemon).
+
+**Claude sign-in.** If the keychain already holds a container sign-in, that token is reused with no prompt. Otherwise the
+status reads *Running, needs Claude sign-in*; **Sign in to Claude** runs the
+same in-container `claude setup-token` flow once (open a page, paste back a code). When a token expires, the thread's
+"Sign in to Claude" card (threads on the daemon only) runs the same flow with a forced fresh token and then retries the
+message. The token is kept in the keychain
+under the shared container sign-in secret and written into the data volume through stdin (not argv or the environment),
+where the daemon reads it at start. A daemon only reads it at start, so applying a new sign-in restarts the daemon.
+
+**Buttons.** Set up, Start, Stop, Restart, **Update available** (prompt only, never automatic: it downloads hundreds of MB
+and interrupts running turns), **Reset daemon data** (wipes the volumes and token, sets up again) and **Remove** (deletes
+the container, volumes and token and the Remote daemons entry; your Claude sign-in is kept). Updating replaces the
+container but keeps the volumes, so the token, sessions and journals survive. The daemon image version always equals the
+plugin version; if that image is not published yet you are told so and the running version keeps working.
+
+**Failures say what to do.** A package that is not public ("not publicly pullable": the maintainer must set the GHCR package
+to Public), an image not published yet, no network, no disk space, a port in use (the next one is used and remembered),
+a container with our name that Agent Threads did not create (left alone), a daemon that never answers (with the log tail),
+and a token the daemon rejected (a new one is created) each have their own message.
+
+**Not in this version:** exposing the daemon to other devices, stop-on-idle, network isolation modes (the agent inside needs
+the network to reach Claude), and write/scheduling host tools for daemon threads (policy, see above). Codex and OpenCode
+threads do not run on a daemon.
+
+Troubleshooting: the runtime ships with the plugin and is not on your `PATH`; the CLI is at
+`~/Library/Application Support/claude-threads/runtime/<version>/bin/container` (`container ls -a` shows
+`agent-threads-local-<id>`). Unit tests use a fake `container` binary (`test/helpers/fake-container.mjs`).
+
 ## Install on the daemon machine
 
 Build from a checkout of this repository, at the release or commit you intend to run (the daemon and the plugin
@@ -228,6 +331,7 @@ token created for that purpose. Nothing is ever put in the URL.
 | `agent-threads list [--json]` | the daemon's threads: id, state (`waiting` for an answer, `running`, `idle`, `closed`), last sequence, folder. Needs a `read` token. |
 | `agent-threads attach <thread> [--from N\|end] [--claim] [--until-idle] [--json]` | follow a thread. Replays the journal after `--from` (default `0`: everything the daemon still holds; `end`: live only), then streams live. A unique id prefix is enough. |
 | `agent-threads run [options] "<prompt>"` | open a new session, send one prompt, stream the answer, exit with a code for how it ended. |
+| `agent-threads creds push <kind> [NAME...] [--stdin] [--ttl T] [--remove]` | send credentials to the daemon (`admin` token). See "Pushing credentials from the CLI". |
 | `agent-threads token create\|list\|revoke` | manage tokens (`--json` for scripts; `create --save` as above). |
 | `agent-threads doctor` | check the machine and the daemon (below). |
 | `agent-threads install` | set up the systemd user service (above). |
@@ -412,14 +516,16 @@ deleted and a file past `journalMaxMb` is rotated to `.jsonl.1` (so at most abou
 
 A remote thread keeps the daemon machine's own tools (shell, file read/write, search). It can ALSO reach read-only
 tools that only exist in the app on your computer, while the app is connected, **but only if you turn that on**:
-**host tools are off by default for every daemon**, and when you turn them on nothing is offered until you list a group.
+**host tools are off by default for every daemon you add yourself**, and when you turn them on nothing is offered until you list a group. (The managed local daemon, a container on this Mac, starts with the read groups, `mcp` and `exec` listed.)
 
 | Runs | Tools |
 |---|---|
 | On the daemon, beside the repo | `enter_worktree`, `exit_worktree`, `set_working_directory` (worktrees go under `<first workspace>/.worktrees`, or `worktreeRoot`). These refuse a folder in a read-only workspace, and the repo and git root they work on are checked like the target. |
 | In the app on your computer, opt-in groups (all off until listed) | `vault` (search, backlinks, links, note metadata, file history, list, bridge list), `workspace` (open tabs, active file, watched documents), `threads` (list, current, projects, messages, log, wait), `skills` (list, search, get, sources), `browser` (the in-app browser tools except `browser_eval` and `browser_save_page`), `mcp` (your Google Workspace and OAuth MCP servers, under their own names, for example `mcp__google-docs__*`; or name one server) |
-| Never offered, whatever you set | everything that writes, executes, schedules, installs, sends or reads a secret on your computer: `request_secret`, `mcp_register_server`, `host_execute_command` / `host_list_commands` / `host_open_url`, `workspace_navigate_to_file` / `workspace_insert_at_cursor`, `watch_document`, `vault_restore_file_version`, `vault_add_bridge`, `threads_create` / `threads_send_message` / `threads_archive` / `threads_open` and every `threads_set_*` / project setter, `skills_install` / `create` / `update` / `uninstall` / `check_updates`, `Cron*` / `ScheduleWakeup`, `browser_eval`, `browser_save_page` |
-| Not offered either | `enter_vm` / `vm_exec` / `exit_vm` (the daemon machine is the sandbox), `host_exec`, `github_*` (the GitHub connection has no credential on the daemon), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |
+| One command on your computer, opt-in group `exec` | `host_exec`: runs ONE shell command on your computer; every call shows an Allow once / Deny card with the exact command, folder and reason, no permission mode or remembered answer skips it, and its environment is scrubbed (no credentials). On for the managed local daemon only by default. |
+| Never offered to a daemon you add yourself; the managed local daemon can opt in per group | (same list) |
+| Never offered, whatever you set | everything that writes, executes, schedules, installs, sends or reads a secret on your computer: `request_secret`, `mcp_register_server`, `host_execute_command` / `host_list_commands` / `host_open_url`, `workspace_navigate_to_file` / `workspace_insert_at_cursor`, `watch_document`, `vault_restore_file_version`, `vault_add_bridge`, `sync_resolve_conflict`, `threads_create` / `threads_send_message` / `threads_archive` / `threads_open` and every `threads_set_*` / project setter, `skills_install` / `create` / `update` / `uninstall` / `check_updates`, `Cron*` / `ScheduleWakeup`, `browser_eval`, `browser_save_page` |
+| Not offered either | `github_*` (the discovery tools run against Geode's connection; the daemon gets the token itself, not the tools), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |
 
 The names are the ones a local thread has (`mcp__claude_threads__vault_search`). The remote session's system prompt lists
 exactly which tools run on your computer (or says none do).
@@ -461,6 +567,94 @@ exactly which tools run on your computer (or says none do).
   present update live). `request_secret` stores the value in your keychain; it does not reach the daemon, so the remote
   agent cannot read it. A tool call that was running when the app quit may be re-run after a restart only if the daemon
   still shows it as open.
+
+## MCP servers that need secrets (daemon-side)
+
+Some MCP servers need a key the daemon must hold itself (a hosted docs server, a database tool). List them in the daemon's
+`<data-dir>/config.json` and refer to each secret as `${NAME}`:
+
+```json
+{
+  "mcpServers": {
+    "docs":  { "type": "http", "url": "https://docs.example.com/mcp", "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" } },
+    "tools": { "command": "npx", "args": ["-y", "some-mcp-server"], "env": { "API_KEY": "${TOOLS_KEY}" } }
+  }
+}
+```
+
+`type` is `stdio` (the default, with `command`, `args`, `env`), `http` or `sse`. `claude_threads` and `obsidian` are reserved.
+A daemon-listed server replaces a same-named server sent by the app.
+
+Secret values are sent with the `creds.push` protocol command (`{ kind, ttlSec, fields }`), which needs an **admin** token.
+They are stored on the daemon as `<data-dir>/creds/<kind>.json` (directory 0700, files 0600), never in `config.json` or in a
+thread's saved spec, and masked in the daemon's logs. Push them with `agent-threads creds push` (below) or from any admin
+client on the wire protocol; there is no settings screen for it yet.
+
+A push replaces the whole kind; pushing no fields removes it; `ttlSec` (0 = no expiry) makes it lapse on its own. Placeholders
+are filled when a session starts, so a rotated secret reaches the next session without a daemon restart. A server whose
+secret is missing is not started and shows as **failed** ("missing credential NAME").
+
+### Pushing credentials from the CLI
+
+```bash
+# values come from the environment (not argv), one kind per push; ttl is seconds or 15m / 24h / 7d
+DOCS_TOKEN=... TOOLS_KEY=... agent-threads creds push mcp DOCS_TOKEN TOOLS_KEY --ttl 30d
+
+# or as JSON on standard input
+echo '{"DOCS_TOKEN":"..."}' | agent-threads creds push mcp --stdin
+
+# delete a kind (a push with no fields is never sent by accident)
+agent-threads creds push mcp --remove
+```
+
+Secrets never go on the command line: `NAME=value` arguments are refused (they would show in `ps` and shell history) unless
+you pass `--allow-argv`, which warns. A name with no value in the environment or on stdin is a usage error (exit 2) that
+names the field. The output lists field names and the expiry, never a value (`--json` prints
+`{kind, fields, removed, expiresAt}`). It needs an `admin` token (exit 4 otherwise). A push replaces the whole kind.
+
+Settings, Remote shows each daemon's MCP servers (connected / failed / needs sign-in) as last reported by its sessions;
+a server that dies mid-session turns to failed at the end of the next turn.
+
+## Repositories the daemon keeps cloned
+
+A daemon can hold clones of your repositories, so a thread there can start on code without anyone logging in to the
+machine. List them in Settings, Remote, edit the daemon, **Repositories** (one per line: `<url> [branch] [as name]`), then
+**Save and sync**. Or send `repos.sync` yourself:
+
+```json
+{ "type": "repos.sync", "repos": [{ "name": "agent-threads", "url": "https://github.com/me/agent-threads.git", "branch": "main" }] }
+```
+
+- **Where.** `<data-dir>/workspace/<name>` (`repoRoot` in `config.json` moves it). That folder is always an allowed
+  session folder, whatever `--workspace` says; nothing else under the data directory is (credentials, journals).
+- **Stored.** The list lives in the daemon's `config.json` under `repos` (you can also edit it there; it is read at start).
+  Removing a repository from the list keeps its clone on disk: it may hold unpushed work.
+- **When it syncs.** Immediately on `repos.sync` (the reply says `syncing`; look again with `repos.status`, or pass
+  `"wait": true` to hold the reply), when the daemon starts, and when a session starts inside a clone whose last fetch is
+  over five minutes old. A sync clones what is missing (into a scratch folder that is renamed on success, so a failed clone
+  leaves nothing half-done) and fetches the rest. A clean checkout of the tracked branch is fast-forwarded; a dirty or
+  diverged one is only fetched.
+- **Private repositories.** Push one fine-grained token (contents and pull requests: write) with
+  `GH_TOKEN=... agent-threads creds push github GH_TOKEN`. Git gets it only through the environment of the git process,
+  answered by a generated `GIT_ASKPASS` script (`<data-dir>/repos/askpass.sh`, mode 0700, holds no secret) that replies only
+  for the hosts of your repositories and github.com. It is never on a command line, in a clone URL or in `.git/config`, and a
+  URL that contains credentials is refused. The agent's own process gets the same token as `GH_TOKEN` (for `gh`) plus the
+  askpass settings (so `git push` over https works); nothing else does.
+- **Status** (`repos.status`, `read` scope): `cloned`, `stale` (last good fetch over 24 hours ago, or the last fetch failed),
+  `auth failed` (the remote refused the token, or none is stored), `not cloned yet`, `syncing`, or `failed` (any other git
+  error, scrubbed of the token). Changing the list needs an `admin` token, like `creds.push`; a `control` token can only look.
+- **Local paths.** A repository URL that is a path on the daemon's own disk is refused unless `allowLocalRepoUrls` is true
+  in `config.json` (https and ssh remotes only, otherwise).
+
+**Worktrees.** `enter_worktree` on a daemon takes `repoPath` relative to the repo root (`"repoPath": "agent-threads"`) and
+creates the worktree under `<repo root>/.worktrees/<repo>/<branch>`. The path the agent names and the git root git finds
+for it must both be inside an allowed folder; they are checked before anything is created. A `worktreeRoot` argument from
+the agent is ignored here: where worktrees go is yours to set (`worktreeRoot` in `config.json`). Start new work from
+`origin/<branch>`, which each fetch updates.
+
+**Pruning.** At daemon start, a worktree under the repo root's `.worktrees` (or your `worktreeRoot`) that nothing has touched
+for 14 days (`worktreePruneDays` in `config.json`, `0` = never) is removed with plain `git worktree remove`. Only a worktree
+that is also clean, fully pushed and not locked goes; anything else is left and logged. Branches are never deleted.
 
 ## Connect from Geode
 

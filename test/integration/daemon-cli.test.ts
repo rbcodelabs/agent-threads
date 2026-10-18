@@ -2,6 +2,9 @@
  * The CLI against a REAL daemon (fake harness): list, run, detach + attach replay, answering requests
  * from the terminal, and the one-writer seat with a second client instance standing in for Geode.
  */
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runCli, type Io } from '../../daemon/cli';
 import { nodeSocketFactory } from '../../daemon/cmd/connection';
@@ -359,4 +362,41 @@ describe('the read-write seat', () => {
     expect(r.err).toMatch(/answered elsewhere/);
     expect(r.code).toBe(0);
   }, 15000);
+});
+
+describe('creds push', () => {
+  const dataDirOf = () => td.dataDir;
+
+  it('pushes env fields without argv values, never prints them, and removes the kind', async () => {
+    const adminToken = td.adminToken;
+    const pushed = await cli(['creds', 'push', 'mcp', 'DOCS_TOKEN', '--ttl', '1h'], { env: { AGENT_THREADS_URL: td.daemon.url, AGENT_THREADS_TOKEN: adminToken, DOCS_TOKEN: 'cli-secret-value' } }, adminToken);
+    expect(pushed.code).toBe(0);
+    expect(pushed.out).toContain('pushed 1 field to "mcp": DOCS_TOKEN');
+    expect(pushed.out + pushed.err).not.toContain('cli-secret-value');
+    expect(JSON.parse(readFileSync(join(dataDirOf(), 'creds', 'mcp.json'), 'utf8'))).toMatchObject({ fields: { DOCS_TOKEN: 'cli-secret-value' } });
+    expect(JSON.parse(readFileSync(join(dataDirOf(), 'creds', 'mcp.json'), 'utf8')).expiresAt).toBeGreaterThan(Date.now());
+
+    const removed = await cli(['creds', 'push', 'mcp', '--remove', '--json'], {}, adminToken);
+    expect(removed.code).toBe(0);
+    expect(JSON.parse(removed.out)).toMatchObject({ kind: 'mcp', removed: true });
+    expect(existsSync(join(dataDirOf(), 'creds', 'mcp.json'))).toBe(false);
+  });
+
+  it('reads a JSON object from stdin', async () => {
+    const adminToken = td.adminToken;
+    const stdin = Readable.from([JSON.stringify({ A: 'stdin-secret', B: 'b' })]);
+    const r = await cli(['creds', 'push', 'k', '--stdin', '--json'], { stdin: stdin as unknown as NodeJS.ReadableStream }, adminToken);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ kind: 'k', fields: ['A', 'B'] });
+    expect(r.out + r.err).not.toContain('stdin-secret');
+  });
+
+  it('refuses NAME=value in argv (exit 2) and a non-admin token (exit 4)', async () => {
+    const argv = await cli(['creds', 'push', 'k', 'A=topsecret'], {}, td.adminToken);
+    expect(argv.code).toBe(2);
+    expect(argv.err).not.toContain('topsecret');
+    expect(existsSync(join(dataDirOf(), 'creds', 'k.json'))).toBe(false);
+    const denied = await cli(['creds', 'push', 'k', 'A'], { env: { AGENT_THREADS_URL: td.daemon.url, AGENT_THREADS_TOKEN: controlToken, A: 'x' } });
+    expect(denied.code).toBe(4);
+  });
 });

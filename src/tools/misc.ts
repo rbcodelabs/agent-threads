@@ -46,7 +46,7 @@ export function createMiscTools(port: MiscToolsPort): Record<string, ToolDef> {
     [
       'Lists the GitHub repositories the connected Geode GitHub App can access (grouped by account/installation).',
       'Repository names only; no credentials are returned. Once a repo is listed, git over HTTPS and the gh CLI work against it',
-      '(in the sandbox VM and on the host) with no personal access token.',
+      'with no personal access token.',
       'Fails with an actionable message if GitHub is not connected, authorization expired, or Geode is not the host.',
     ].join(' '),
     {},
@@ -111,15 +111,16 @@ export function createMiscTools(port: MiscToolsPort): Record<string, ToolDef> {
   const boundHostExec = options.hostExec ? tool(
     'host_exec',
     [
-      'Runs ONE shell command on the real host machine (outside this sandbox VM), only after the user explicitly approves it.',
+      'Runs ONE shell command on the real host machine (the user\'s Mac, outside the local daemon container this session runs in), only after the user explicitly approves it.',
       'Every call shows the user the exact command, working directory and your reason, and they choose Allow once or Deny; this prompt cannot be skipped by any permission mode.',
-      'Use only when the task truly needs the host (host-only tools, files outside the mounted workspace); prefer vm_exec for everything else.',
+      'Use only when the task truly needs the host (host-only tools, files outside the mounted workspaces); prefer commands in your own container for everything else.',
+      'The working directory defaults to the user\'s vault folder on the Mac; a path under the vault mount in this container is mapped to the same folder on the Mac.',
       'Scheduled or non-interactive threads cannot prompt, so the call is denied.',
       'Runs via /bin/sh -c with a minimal environment (no credentials or API tokens). Returns exit code, stdout and stderr; a non-zero exit is a normal result. Long output is truncated with an explicit marker.',
     ].join(' '),
     {
       command: z.string().min(1).describe('Shell command to run on the host via /bin/sh -c.'),
-      cwd: z.string().optional().describe('Absolute host directory to run in. Defaults to the thread\'s current working directory. Must already exist.'),
+      cwd: z.string().optional().describe('Absolute host directory to run in. Defaults to the thread\'s working directory on the host. Must already exist.'),
       reason: z.string().min(1).describe('Why this must run on the host. Shown to the user in the approval prompt.'),
       timeoutSeconds: z.number().optional().describe('Deadline in seconds (SIGTERM, then SIGKILL after a short grace). Defaults to 300, capped at 3600.'),
     },

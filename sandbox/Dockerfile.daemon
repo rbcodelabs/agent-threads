@@ -10,8 +10,7 @@
 #   with-claude  base + Claude Code's native installer. The DEFAULT target (last stage), so a plain
 #                `docker build` gives a ready-to-run image.
 #
-# The image published to ghcr.io is the `base` stage only: Claude Code has no redistribution grant (the
-# same rule as the sandbox image, see .github/workflows/publish-sandbox-image.yml). Add the CLI on your
+# The image published to ghcr.io is the `base` stage only: Claude Code has no redistribution grant. Add the CLI on your
 # own machine, which is exactly what installing it yourself is:
 #   docker build -f sandbox/Dockerfile.daemon --build-arg BASE_IMAGE=ghcr.io/<owner>/agent-threads-daemon:<version> -t agent-threads-daemon .
 #

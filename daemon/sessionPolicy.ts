@@ -9,6 +9,7 @@
 import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { RemoteSessionSpec } from '../src/protocol';
+import { SESSION_ENV_KIND_PATTERN } from '../src/protocol/spec';
 
 export interface SessionPolicy {
   /** Folders sessions may run in (read-write). */
@@ -27,6 +28,18 @@ export interface SessionPolicy {
    * BASH_ENV, GIT_SSH_COMMAND, CLAUDE_CODE_USE_*, ANTHROPIC_*_BASE_URL, ...).
    */
   allowedClientEnv?: string[];
+  /** Where the managed local daemon's plugin copies skill plugin directories (`<dataDir>/skills`); absent = none are accepted. */
+  pluginRoot?: string;
+}
+
+/**
+ * The policy with the daemon's repository root added to the read-write workspaces (once, de-duplicated). The clones
+ * `repos.sync` makes live there, so sessions must be allowed to run in them whatever `--workspace` says.
+ */
+export function withRepoRoot(policy: SessionPolicy, repoRoot: string): SessionPolicy {
+  const root = resolve(repoRoot);
+  const known = [...policy.workspaces, ...(policy.readOnlyWorkspaces ?? [])].map((p) => resolve(p));
+  return known.includes(root) ? policy : { ...policy, workspaces: [...policy.workspaces, root] };
 }
 
 export class PolicyError extends Error {
@@ -214,6 +227,13 @@ export function filterClientEnv(raw: string, allowed: readonly string[] | undefi
   return { text: kept.join('\n'), dropped };
 }
 
+/** The entries that resolve strictly inside `root` (no `..`, no sibling prefix); [] -> undefined. */
+function keepUnder(paths: string[] | undefined, root: string): string[] | undefined {
+  const base = resolve(root);
+  const kept = (paths ?? []).filter((p) => typeof p === 'string' && isAbsolute(p) && !p.split('/').includes('..') && resolve(p).startsWith(`${base}/`));
+  return kept.length ? kept : undefined;
+}
+
 /** Throws `PolicyError`; returns the spec to run (extra env sanitised, paths resolved). */
 export function validateSpec(spec: RemoteSessionSpec, policy: SessionPolicy): RemoteSessionSpec {
   if (!spec || typeof spec !== 'object') throw new PolicyError('bad_frame', 'spec is required');
@@ -236,6 +256,8 @@ export function validateSpec(spec: RemoteSessionSpec, policy: SessionPolicy): Re
     ...(disallowedTools ? { disallowedTools } : {}),
     ...(additionalDirectories.length ? { additionalDirectories } : { additionalDirectories: undefined }),
     extraEnvRaw: filterClientEnv(spec.extraEnvRaw ?? '', policy.allowedClientEnv).text,
+    pluginPaths: policy.pluginRoot ? keepUnder(spec.pluginPaths, policy.pluginRoot) : undefined,
+    envKind: typeof spec.envKind === 'string' && SESSION_ENV_KIND_PATTERN.test(spec.envKind) ? spec.envKind : undefined,
   };
 }
 

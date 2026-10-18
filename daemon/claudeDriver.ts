@@ -28,7 +28,10 @@ import {
   type WireImage,
 } from '../src/protocol';
 import type { PluginSettings, Thread } from '../src/types';
+import type { CredStore } from './credStore';
+import { SESSION_ENV_KIND_PATTERN } from '../src/protocol/spec';
 import { buildHostServers, type HostServers } from './hostServers';
+import { RESERVED_MCP_NAMES, resolveDaemonMcpServers, type DaemonMcpServers, type ResolvedMcpServers } from './mcpServers';
 import type { DriverContext, DriverFactory, RequestKind, SessionDriver } from './sessionDriver';
 
 export interface ClaudeDriverDeps {
@@ -42,19 +45,26 @@ export interface ClaudeDriverDeps {
    * 0 or absent = wait indefinitely.
    */
   requestTimeoutMs?: number;
+  /**
+   * The daemon's own MCP servers with their `${NAME}` placeholders filled from the credential store. Called when a
+   * session starts, so a credential pushed since the last session is picked up.
+   */
+  daemonMcp?: () => ResolvedMcpServers;
+  /** Environment for the agent's own process only (a repository token for `gh` and `git push`); read when a session starts. */
+  sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
+  /** A session is starting in this folder (lets the daemon refresh a stale clone in the background). */
+  onSessionStart?: (cwd: string) => void;
 }
 
 // ── spec -> options ────────────────────────────────────────────────────────
 
 /**
- * Project a `RemoteSessionSpec` back onto `HarnessSessionOptions`. VM routing
- * (`claude.vm`) is never set, which is `harnessVmMode: 'never'`: the daemon is
- * already the sandbox. `secretEnv`/`containerAuthToken` are never taken from
- * the client.
+ * Project a `RemoteSessionSpec` back onto `HarnessSessionOptions`. `secretEnv`
+ * is never taken from the client.
  */
 export function specToSessionOptions(
   spec: RemoteSessionSpec,
-  parts: { resume?: string; callbacks: SessionCallbacks; secretEnv?: Record<string, string>; hostServers?: HostServers['servers']; preApprove?: (toolName: string) => boolean },
+  parts: { resume?: string; callbacks: SessionCallbacks; secretEnv?: Record<string, string>; hostServers?: HostServers['servers']; daemonServers?: DaemonMcpServers; preApprove?: (toolName: string) => boolean },
 ): HarnessSessionOptions {
   const claude: ClaudeHarnessOptions = {};
   if (parts.preApprove) claude.preApprove = parts.preApprove;
@@ -70,13 +80,22 @@ export function specToSessionOptions(
       ...(so.agents && Object.keys(so.agents).length ? { agents: so.agents as never } : {}),
     };
   }
+  // Skill plugin directories the plugin copied into this daemon (already restricted to its skills folder by policy).
+  if (spec.pluginPaths?.length) {
+    claude.sessionOptions = { ...(claude.sessionOptions ?? {}), plugins: spec.pluginPaths.map((path) => ({ type: 'local' as const, path })) };
+  }
   // The daemon's own servers win: a client-supplied http server must not stand in for `claude_threads` (whose
-  // tools the client treats as first-party) or for any server it proxies.
+  // tools the client treats as first-party) or for any server it proxies, nor for an operator-configured server
+  // (which carries the operator's credentials). `claude_threads` / `obsidian` stay reserved even if neither side
+  // currently defines them.
   const own = parts.hostServers ?? {};
-  const passthrough = Object.entries(spec.mcpServers ?? {}).filter(([name]) => !(name in own) && name !== 'claude_threads' && name !== 'obsidian');
-  if (passthrough.length || Object.keys(own).length) {
+  const configured = Object.fromEntries(Object.entries(parts.daemonServers ?? {}).filter(([name]) => !RESERVED_MCP_NAMES.includes(name) && !(name in own)));
+  const passthrough = Object.entries(spec.mcpServers ?? {})
+    .filter(([name]) => !(name in own) && !(name in configured) && !RESERVED_MCP_NAMES.includes(name));
+  if (passthrough.length || Object.keys(own).length || Object.keys(configured).length) {
     claude.mcpServers = {
       ...Object.fromEntries(passthrough.map(([name, s]) => [name, { type: s.type, url: s.url, ...(s.headers ? { headers: s.headers } : {}) }])),
+      ...configured,
       ...own,
     } as never;
   }
@@ -94,6 +113,16 @@ export function specToSessionOptions(
     ...(parts.secretEnv && Object.keys(parts.secretEnv).length ? { secretEnv: parts.secretEnv } : {}),
     claude,
   };
+}
+
+/**
+ * Environment from the credential kind a spec names (`sessenv-...`, pushed by the user's app with `creds.push`): Extra
+ * environment variables and keychain secrets. Read when a session starts, so a rotated value reaches the next one.
+ */
+export function sessionEnvFromCreds(creds: CredStore | undefined, spec: RemoteSessionSpec): Record<string, string> {
+  const kind = spec.envKind;
+  if (!creds || typeof kind !== 'string' || !SESSION_ENV_KIND_PATTERN.test(kind)) return {};
+  return creds.get(kind) ?? {};
 }
 
 /**
@@ -154,6 +183,9 @@ export class ClaudeSessionDriver implements SessionDriver {
   private readonly hostServers: HostServers;
   /** A worktree tool moved the cwd: the native session belongs to the old directory and must not be remembered. */
   private cwdMoved = false;
+  /** Daemon-configured servers left out of this session (missing credential), reported as failed in the status event. */
+  private unresolvedMcp: ResolvedMcpServers['unresolved'] = [];
+  private lastMcpStatusKey = '';
   private _lastActivityAt: number;
 
   constructor(
@@ -166,13 +198,17 @@ export class ClaudeSessionDriver implements SessionDriver {
     this.harness = deps.createHarness(ctx.spec);
     this.hostServers = buildHostServers({ ...ctx, onCwdChanged: (cwd, origin) => { this.cwdMoved = true; ctx.onCwdChanged?.(cwd, origin); } });
     this.emitState();
+    const daemonMcp = deps.daemonMcp?.();
+    this.unresolvedMcp = daemonMcp?.unresolved ?? [];
     const options = specToSessionOptions(ctx.spec, {
       resume: ctx.resume,
       callbacks: this.buildCallbacks(),
-      secretEnv: deps.secretEnv,
+      secretEnv: { ...deps.secretEnv, ...(deps.sessionEnv?.(ctx.spec) ?? {}) },
       hostServers: this.hostServers.servers,
+      ...(daemonMcp ? { daemonServers: daemonMcp.servers } : {}),
       preApprove: (toolName) => isProxiedHostTool(toolName, ctx.hostTools?.manifest() ?? {}),
     });
+    try { deps.onSessionStart?.(ctx.spec.cwd); } catch { /* a refresh must never stop a session from starting */ }
     this.ready = this.harness.start(options).catch((err: unknown) => {
       this.emit({ name: 'onError', args: [toWireArg(err instanceof Error ? err : new Error(String(err)))] } as WireEvent);
       this.scheduleState();
@@ -234,6 +270,31 @@ export class ClaudeSessionDriver implements SessionDriver {
     this.ctx.onNativeSessionId(id);
   }
 
+  // ── MCP status ───────────────────────────────────────────────────────────
+
+  /** Journal the per-server status once per change; configured servers we could not start show as failed. */
+  private emitMcpStatus(reported: Array<{ name: string; status: string; error?: string }>): void {
+    const known = new Set(reported.map((s) => s.name));
+    const servers = [
+      ...reported,
+      ...this.unresolvedMcp
+        .filter((u) => !known.has(u.name))
+        .map((u) => ({ name: u.name, status: 'failed', error: `missing credential ${u.missing.join(', ')}` })),
+    ];
+    const key = JSON.stringify(servers);
+    if (key === this.lastMcpStatusKey) return;
+    this.lastMcpStatusKey = key;
+    this.emit({ name: 'onMcpServerStatus', args: [servers] } as WireEvent);
+  }
+
+  private async refreshMcpStatus(): Promise<void> {
+    if (this.closed || !this.harness.mcpServerStatus) return;
+    try {
+      const live = await this.harness.mcpServerStatus();
+      if (!this.closed && live.length) this.emitMcpStatus(live);
+    } catch { /* a status poll must never disturb the turn */ }
+  }
+
   // ── callbacks ────────────────────────────────────────────────────────────
 
   private buildCallbacks(): SessionCallbacks {
@@ -243,7 +304,13 @@ export class ClaudeSessionDriver implements SessionDriver {
       cb[key] = (...args: unknown[]) => {
         this.touch();
         if ((key === 'onDone' || key === 'onInterrupted') && typeof args[0] === 'string') this.setNative(args[0]);
+        if (key === 'onMcpServerStatus') {
+          this.emitMcpStatus(args[0] as Array<{ name: string; status: string; error?: string }>);
+          return;
+        }
         this.emit({ name: key, args: args.map(toWireArg) } as WireEvent);
+        // A server can die after the session started (the init report is only the first word): re-read at turn end.
+        if (key === 'onDone') void this.refreshMcpStatus();
         if (key === 'onAskUserQuestionCanceled') this.cancelKind('question');
         this.scheduleState();
       };
@@ -484,6 +551,12 @@ export interface ClaudeDriverFactoryOptions {
   now?: () => number;
   /** See `ClaudeDriverDeps.requestTimeoutMs`. */
   requestTimeoutMs?: number;
+  /** Operator-configured servers (`config.mcpServers`) and the store their `${NAME}` placeholders resolve from. */
+  mcpServers?: DaemonMcpServers;
+  creds?: CredStore;
+  /** See `ClaudeDriverDeps.sessionEnv` / `onSessionStart`. */
+  sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
+  onSessionStart?: (cwd: string) => void;
 }
 
 export function createClaudeDriverFactory(opts: ClaudeDriverFactoryOptions = {}): DriverFactory {
@@ -499,5 +572,9 @@ export function createClaudeDriverFactory(opts: ClaudeDriverFactoryOptions = {})
       return createHarnessSession({ agentHarness: 'claude' } as Thread, { claudeBinaryPath: binary } as PluginSettings);
     };
   })();
-  return (ctx) => new ClaudeSessionDriver(ctx, { createHarness, secretEnv, requestTimeoutMs: opts.requestTimeoutMs }, opts.now);
+  const configured = opts.mcpServers ?? {};
+  const daemonMcp = Object.keys(configured).length
+    ? () => resolveDaemonMcpServers(configured, (name) => opts.creds?.lookup(name))
+    : undefined;
+  return (ctx) => new ClaudeSessionDriver(ctx, { createHarness, secretEnv, requestTimeoutMs: opts.requestTimeoutMs, ...(daemonMcp ? { daemonMcp } : {}), ...(opts.sessionEnv ? { sessionEnv: opts.sessionEnv } : {}), ...(opts.onSessionStart ? { onSessionStart: opts.onSessionStart } : {}) }, opts.now);
 }

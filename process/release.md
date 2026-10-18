@@ -110,6 +110,9 @@ The same tag also triggers `.github/workflows/publish-daemon-image.yml`, which b
 `scripts/smoke-daemon.mts`, and pushes `ghcr.io/rbcodelabs/agent-threads-daemon:X.Y.Z`. It refuses to overwrite an
 existing tag and it does not contain the Claude CLI (no redistribution grant). **Owner step, first publish only:**
 GitHub creates the package private; set its visibility to Public in the package settings or nobody else can pull it.
+The in-app **Local daemon** (Settings -> Remote) pulls this image unauthenticated and pins the plugin's exact version, so
+the image must exist (and be public) shortly after the plugin release or users see "not published yet". After a release that
+touches the local daemon, run through the manual steps in `docs/remote-daemon.md` ("Local daemon") on a supported Mac.
 
 Verify it appeared:
 ```bash

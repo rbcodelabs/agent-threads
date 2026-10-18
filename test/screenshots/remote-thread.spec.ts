@@ -185,3 +185,33 @@ test.describe('Remote daemon dialog: folders are chosen from what the daemon adv
     await expect(modal.locator('input[placeholder="/home/user/vault"]')).toBeVisible();
   });
 });
+
+test.describe('Run on: set up the local daemon from the picker', () => {
+  const offerUrl = 'file://' + path.resolve('test/harness/kanban.html') + '?dashboard=1&daemonoffer=1';
+
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+  test(`offers "This Mac (container) - set up" before the daemon exists, and opens its settings at ${viewport.width}`, async ({ page }) => {
+    await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
+    await page.setViewportSize(viewport);
+    await page.goto(offerUrl);
+    await page.waitForSelector('.ct-agents-dispatch-btn');
+    await page.locator('.ct-agents-dispatch-btn').dispatchEvent('contextmenu');
+    const item = page.locator('.ct-run-on-item[data-run-on="setup-local"]');
+    await expect(item).toBeVisible();
+    await expect(item).toContainText('This Mac (container)');
+    await settleView(page);
+    await expect(page.locator('.ct-harness-menu')).toHaveScreenshot(`run-on-setup-local-offer-${viewport.width}.png`);
+    await item.click();
+    expect(await page.evaluate(() => (window as any).__localDaemonSettingsOpened)).toBe(true);
+    await expect(page.locator('.ct-harness-menu')).toHaveCount(0);
+  });
+  }
+
+  test('shows no Run on section when the daemon is not offered', async ({ page }) => {
+    await page.setViewportSize({ width: 420, height: 760 });
+    await page.goto('file://' + path.resolve('test/harness/kanban.html') + '?dashboard=1');
+    await page.waitForSelector('.ct-agents-dispatch-btn');
+    await page.locator('.ct-agents-dispatch-btn').dispatchEvent('contextmenu');
+    await expect(page.locator('.ct-run-on-item')).toHaveCount(0);
+  });
+});

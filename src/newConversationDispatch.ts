@@ -1,6 +1,6 @@
 import type { App } from 'obsidian';
 import { Notice } from 'obsidian';
-import type { AgentHarness, HarnessVmMode, ImageAttachment } from './types';
+import type { AgentHarness, ImageAttachment } from './types';
 import type { DispatchInput, DispatchPayload } from './DispatchInput';
 import type { SlashCommandRegistry } from './SlashCommandContributions';
 import type { PluginSettings } from './types';
@@ -14,7 +14,6 @@ export interface DispatchNewThreadOptions {
   goal?: string;
   loop?: { intervalSeconds: number };
   agentHarness?: AgentHarness;
-  harnessVmMode?: HarnessVmMode;
   projectId?: string;
   remote?: { daemonId: string; cwd: string };
 }
@@ -49,11 +48,10 @@ export async function dispatchNewConversation(
   deps: NewConversationDispatchDeps,
   payload: DispatchPayload,
 ): Promise<string | null> {
-  const { images, attachment, agentHarness, harnessVmMode, remote } = payload;
+  const { images, attachment, agentHarness, remote } = payload;
   let text = payload.text;
   let opts: DispatchNewThreadOptions = {
     agentHarness,
-    harnessVmMode,
     remote,
     projectId: deps.projectId || undefined,
   };
