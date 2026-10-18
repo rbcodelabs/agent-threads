@@ -5419,6 +5419,11 @@ export class ThreadsView extends ItemView {
         // bleed into another thread if the user later stops a different thread.
         if (this.activeThreadId) this.lastSentTexts.delete(this.activeThreadId);
         this.setRunningState(false);
+        // Rows committed mid-turn were drawn while their call was still
+        // pending and are never rebuilt when the result lands (the record is
+        // mutated in place, the DOM is not). Redraw once the turn is over so
+        // nothing keeps spinning.
+        if (this.messagesEl?.querySelector('.ct-tool-state-pending')) void this.renderMessages();
         break;
       }
 
