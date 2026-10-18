@@ -4,17 +4,15 @@ import { shot } from './helpers';
 
 const harnessUrl = 'file://' + path.resolve('test/harness/index.html');
 
-// Fixture: 'thread-tool-grouping' (test/harness/fixtures.ts) — a single
-// assistant message with 15 tool calls spanning exploring/editing/planning/
-// researching/searching activity kinds, including one failed Edit (so the
-// editing group auto-expands) and three isolated calls (WebFetch, Write, a
-// trailing Read) that fall outside any group.
+// Grouping model (src/toolNameUtils.ts groupToolRuns): every unbroken run of
+// non-browser tool calls is ONE group, whatever the commands are; a lone call
+// is a group of one. Groups are COLLAPSED by default whether running, finished
+// or failed — a failure only turns the header red. A group stays open only
+// when the user opened it.
 //
-// Group order in the fixture (0-indexed among .ct-tool-group elements):
-//   0 = exploring (Read,Read,Read,Grep,Bash) — collapsed by default, no error
-//   1 = editing (Edit,Edit,Edit) — has an error, auto-expanded
-//   2 = planning (TaskCreate,TaskUpdate) — collapsed by default, no error
-//   3 = searching (ToolSearch,Agent) — collapsed by default, no error
+// Fixture: 'thread-tool-grouping' (test/harness/fixtures.ts) — a single
+// assistant message with 15 mixed-kind tool calls (one failed Edit). Unbroken,
+// so it renders as exactly ONE collapsed group.
 
 test.describe('Tool-call grouping', () => {
   test.beforeEach(async ({ page }) => {
@@ -29,41 +27,40 @@ test.describe('Tool-call grouping', () => {
     await page.waitForTimeout(200);
   });
 
-  test('groups render collapsed by default, except the group containing an error', async ({ page }) => {
-    // Non-error groups start collapsed (.ct-full-content has .ct-hidden)
-    const exploringGroup = page.locator('.ct-tool-group').nth(0);
-    await expect(exploringGroup.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
-
-    // The editing group contains a failed Edit and should already be expanded
-    const editingGroup = page.locator('.ct-tool-group').nth(1);
-    await expect(editingGroup.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
-
+  test('an unbroken mixed-kind run is ONE group, collapsed by default', async ({ page }) => {
+    await expect(page.locator('.ct-tool-group')).toHaveCount(1);
+    const group = page.locator('.ct-tool-group').first();
+    await expect(group.locator('.ct-tool-group-count')).toHaveText('15');
+    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'false');
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
     await shot(page, 'tool-call-grouping-collapsed.png', { fullPage: true });
   });
 
   test('clicking a group header expands it', async ({ page }) => {
-    const exploringGroup = page.locator('.ct-tool-group').nth(0);
-    await exploringGroup.locator('.ct-expand-btn').click();
-    await expect(exploringGroup.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
+    const group = page.locator('.ct-tool-group').first();
+    await group.locator('.ct-tool-group-header').click();
+    await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
+    await expect(group.locator('.ct-full-content .ct-tool-pill')).toHaveCount(15);
     await page.waitForTimeout(200);
     await shot(page, 'tool-call-grouping-expanded.png', { fullPage: true });
   });
 
-  test('error group auto-expands and is visually flagged', async ({ page }) => {
-    const editingGroup = page.locator('.ct-tool-group').nth(1);
-    await expect(editingGroup.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
-    await expect(editingGroup.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-error/);
-    // At least one pill inside the group carries the error tint class.
-    await expect(editingGroup.locator('.ct-tool-pill.ct-tool-error')).toHaveCount(1);
-    await shot(editingGroup, 'tool-call-grouping-error-expanded.png');
+  test('a failed call flags the header red but does NOT open the group', async ({ page }) => {
+    const group = page.locator('.ct-tool-group').first();
+    await expect(group.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-error/);
+    await expect(group.locator('.ct-tool-group-status.ct-tool-state-error')).toHaveCount(1);
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await shot(group, 'tool-call-grouping-error-collapsed.png');
+
+    // Opening it reveals exactly one red row.
+    await group.locator('.ct-tool-group-header').click();
+    await expect(group.locator('.ct-tool-pill.ct-tool-error')).toHaveCount(1);
   });
 
-  test('isolated calls still render as plain ungrouped pills', async ({ page }) => {
-    // Direct .ct-tool-pill children of .ct-tools are the isolated (non-grouped)
-    // calls — WebFetch, Write, and the trailing Read in this fixture.
-    const isolatedPills = page.locator('.ct-tools > .ct-tool-pill');
-    await expect(isolatedPills).toHaveCount(3);
-    await shot(isolatedPills.first(), 'tool-call-grouping-isolated-pill.png');
+  test('there are no bare tool rows: every call lives inside a group', async ({ page }) => {
+    await expect(page.locator('.ct-tools > .ct-tool-pill')).toHaveCount(0);
+    await expect(page.locator('.ct-tools > .ct-tool-group')).toHaveCount(1);
+    await expect(page.locator('.ct-tool-outer-wrap')).toHaveCount(0);
   });
 });
 
@@ -90,21 +87,15 @@ test.describe('Codex-native tool-call rendering', () => {
   });
 });
 
-// ─── Outer-wrap tier (post-smoothing entry count > OUTER_WRAP_ENTRY_THRESHOLD) ──
-// Fixture: 'thread-outer-wrap-tool-calls' (test/harness/fixtures.ts) — TWO
-// assistant messages, each with enough tool calls that
-// groupToolCalls()+smoothToolGroups() puts them comfortably above the
-// threshold (7), so ThreadsView.renderOuterToolWrap wraps each one in its
-// own second collapsible tier:
-//   - msg-t8-2 (22 raw -> 10 entries, no error) -> .ct-tool-outer-wrap nth(0)
-//   - msg-t8-3 (13 raw -> 8 entries, one buried error) -> nth(1)
-// Split into two messages deliberately — see the fixture's own doc comment
-// for why "collapsed by default" and "auto-expands due to a buried error"
-// can't both be demonstrated from a single tool list (hasError is computed
-// over the WHOLE flat list passed to the outer wrap, same rule
-// renderToolGroup already applies one level up).
+// ─── Long mixed runs (formerly the "outer wrap" tier) ───────────────────────
+// Fixture: 'thread-outer-wrap-tool-calls' — TWO assistant messages with 22 and
+// 13 tool calls spanning many kinds. There is no second collapsible tier any
+// more: each message's unbroken run is ONE collapsed group whose header
+// summarizes per kind.
+//   - msg-t8-2 (22 calls, no error) -> .ct-tool-group nth(0)
+//   - msg-t8-3 (13 calls, one buried error) -> nth(1); red header, still collapsed
 
-test.describe('Outer-wrap tool-call grouping (finalized)', () => {
+test.describe('Long mixed runs (finalized)', () => {
   test.beforeEach(async ({ page }) => {
     await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
     await page.setViewportSize({ width: 420, height: 740 });
@@ -113,52 +104,36 @@ test.describe('Outer-wrap tool-call grouping (finalized)', () => {
     await page.waitForSelector('.ct-messages');
     await page.waitForTimeout(500);
     await page.evaluate(() => (window as any).__view.focusThread('thread-outer-wrap-tool-calls'));
-    await page.waitForSelector('.ct-tool-outer-wrap');
+    await page.waitForSelector('.ct-tool-group');
     await page.waitForTimeout(200);
   });
 
-  test('outer wrap is collapsed by default (no error)', async ({ page }) => {
-    const outerWraps = page.locator('.ct-tool-outer-wrap');
-    await expect(outerWraps).toHaveCount(2);
-    const outerWrap = outerWraps.nth(0); // msg-t8-2 — no error
-    await expect(outerWrap.locator(':scope > .ct-full-content')).toHaveClass(/ct-hidden/);
-    await expect(outerWrap.locator('.ct-tool-outer-wrap-header .ct-compressed-summary')).toHaveText('22 tool calls, 10 steps');
-    await shot(page, 'tool-call-grouping-outer-wrap-collapsed.png', { fullPage: true });
+  test('each message is one collapsed group; the obsolete outer wrap is gone', async ({ page }) => {
+    await expect(page.locator('.ct-tool-outer-wrap')).toHaveCount(0);
+    const groups = page.locator('.ct-tool-group');
+    await expect(groups).toHaveCount(2);
+    const first = groups.nth(0);
+    await expect(first.locator('.ct-tool-group-count')).toHaveText('22');
+    await expect(first.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'false');
+    await expect(first.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await shot(page, 'tool-call-grouping-long-run-collapsed.png', { fullPage: true });
   });
 
-  test('clicking the outer expand button reveals content structurally identical to the flat path', async ({ page }) => {
-    const outerWrap = page.locator('.ct-tool-outer-wrap').nth(0); // msg-t8-2 — no error
-    await outerWrap.locator(':scope > .ct-tool-outer-wrap-header > .ct-expand-btn').click();
-    await expect(outerWrap.locator(':scope > .ct-full-content')).not.toHaveClass(/ct-hidden/);
-
-    // 10 post-smoothing entries: 7 groups, 3 isolated singles rendered
-    // directly as .ct-tool-pill children of .ct-full-content — exactly what
-    // the flat (non-wrapped) render path produces for the identical
-    // post-smoothing entry list (see renderGroupedEntries, shared by both).
-    const fullContent = outerWrap.locator(':scope > .ct-full-content');
-    await expect(fullContent.locator(':scope > .ct-tool-group')).toHaveCount(7);
-    await expect(fullContent.locator(':scope > .ct-tool-pill')).toHaveCount(3);
-
+  test('expanding shows every call as a plain row in the one group', async ({ page }) => {
+    const first = page.locator('.ct-tool-group').nth(0);
+    await first.locator('.ct-tool-group-header').click();
+    await expect(first.locator('.ct-full-content > .ct-tool-pill')).toHaveCount(22);
     await page.waitForTimeout(200);
-    await shot(page, 'tool-call-grouping-outer-wrap-expanded.png', { fullPage: true });
+    await shot(page, 'tool-call-grouping-long-run-expanded.png', { fullPage: true });
   });
 
-  test('a buried error auto-expands BOTH the outer wrap and the inner group containing it', async ({ page }) => {
-    const outerWrap = page.locator('.ct-tool-outer-wrap').nth(1); // msg-t8-3 — buried error
-    // No click needed — hasError on the full flat tool list forces both tiers open.
-    await expect(outerWrap.locator(':scope > .ct-tool-outer-wrap-header')).toHaveClass(/ct-tool-error/);
-    await expect(outerWrap.locator(':scope > .ct-full-content')).not.toHaveClass(/ct-hidden/);
-
-    // The editing group (buried error) is the 2nd .ct-tool-group in DOM order
-    // — see the fixture's doc comment for msg-t8-3: entry 0 (exploring,2) is
-    // a group, entry 1 (TaskCreate) is a single, entry 2 (editing,3, has the
-    // error) is the next group.
-    const editingGroup = outerWrap.locator('.ct-tool-group').nth(1);
-    await expect(editingGroup.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-error/);
-    await expect(editingGroup.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
-    await expect(editingGroup.locator('.ct-tool-pill.ct-tool-error')).toHaveCount(1);
-
-    await shot(page, 'tool-call-grouping-outer-wrap-error-auto-expanded.png', { fullPage: true });
+  test('a buried error turns the header red but leaves the group collapsed', async ({ page }) => {
+    const second = page.locator('.ct-tool-group').nth(1);
+    await expect(second.locator('.ct-tool-group-count')).toHaveText('13');
+    await expect(second.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-error/);
+    await expect(second.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'false');
+    await expect(second.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await shot(page, 'tool-call-grouping-long-run-error-collapsed.png', { fullPage: true });
   });
 });
 
@@ -169,7 +144,7 @@ test.describe('Outer-wrap tool-call grouping (finalized)', () => {
 // persisted shape after 7b7d4fb ("fix: persist tool-only assistant messages
 // instead of silently dropping them"). Before mergeAdjacentToolOnlyMessages,
 // this rendered as 5 separate full-height `.ct-message` rows — one per raw
-// persisted turn — instead of a couple of collapsible activity groups.
+// persisted turn — instead of a single collapsible activity group.
 
 test.describe('Fragmented tool-only messages (view-layer merge)', () => {
   test.beforeEach(async ({ page }) => {
@@ -181,21 +156,19 @@ test.describe('Fragmented tool-only messages (view-layer merge)', () => {
     await page.waitForTimeout(500);
   });
 
-  test('renderMessages() merges 5 separate tool-only ChatMessages into a compact grouped view, not one row per message', async ({ page }) => {
+  test('renderMessages() merges 5 separate tool-only ChatMessages into ONE collapsed group, not one row per message', async ({ page }) => {
     await page.evaluate(() => (window as any).__view.focusThread('thread-fragmented-tool-calls'));
     await page.waitForSelector('.ct-tool-group');
     await page.waitForTimeout(200);
 
-    // Fixture has 1 user message + 5 separate tool-only assistant messages.
-    // Post-merge (mergeAdjacentToolOnlyMessages) those 5 collapse into ONE
-    // assistant row, so the total `.ct-message` count must be far below the
-    // 6 raw fixture messages — specifically 1 user bubble + 1 merged row.
+    // 1 user bubble + 1 merged assistant row (not the 6 raw fixture messages).
     await expect(page.locator('.ct-message')).toHaveCount(2);
 
-    // Read+Grep (both 'exploring') and Edit+Edit (both 'editing') each form a
-    // group; the trailing Bash is isolated (not adjacent to another
-    // 'exploring' call in the concatenated tool list) — 2 groups total.
-    await expect(page.locator('.ct-tool-group')).toHaveCount(2);
+    // Read, Grep, Edit, Edit, Bash is one unbroken run: a single group.
+    await expect(page.locator('.ct-tool-group')).toHaveCount(1);
+    const group = page.locator('.ct-tool-group').first();
+    await expect(group.locator('.ct-tool-group-count')).toHaveText('5');
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
 
     await shot(page, 'tool-call-grouping-fragmented-merged.png', { fullPage: true });
   });
@@ -269,9 +242,10 @@ test.describe('Live tool-call grouping', () => {
     await expect(group.locator('.ct-tool-group-count')).toHaveText('50');
     // "Still running" affordance on the header — every child is still pending.
     await expect(group.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-active/);
-    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'true');
-    // A RUNNING group stays open so live progress is visible.
-    await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
+    // Collapsed by default even while running; the header carries the live progress.
+    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'false');
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await expect(group.locator('.ct-tool-group-status.ct-tool-state-pending')).toHaveCount(1);
 
     await shot(page, 'tool-call-grouping-live-running.png', { fullPage: true });
   });
@@ -301,8 +275,11 @@ test.describe('Live tool-call grouping', () => {
     });
     await page.waitForTimeout(300);
 
-    // The group still has a pending member, so it is already open.
+    // The group still has a pending member but is collapsed; open it to inspect rows.
     const group = page.locator('.ct-tool-group').first();
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await expect(group.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-active/);
+    await group.locator('.ct-tool-group-header').click();
     await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
 
     const pills = group.locator('.ct-full-content .ct-tool-pill');
@@ -311,7 +288,7 @@ test.describe('Live tool-call grouping', () => {
     await expect(pills.nth(1)).toHaveClass(/ct-tool-active/);
   });
 
-  test('a group the user collapsed mid-turn stays collapsed as more same-kind calls arrive (stable liveToolGroupKey)', async ({ page }) => {
+  test('a group the user opened mid-turn stays open as more calls arrive (stable liveToolGroupKey)', async ({ page }) => {
     await page.evaluate(() => {
       const emit = (window as any).__emitEvent;
       const threadId = 'thread-live-tool-grouping';
@@ -322,18 +299,16 @@ test.describe('Live tool-call grouping', () => {
     });
     await page.waitForTimeout(300);
 
-    // Running groups default open; the user collapses this one.
+    // Running groups are collapsed by default; the user opens this one.
     const group = page.locator('.ct-tool-group').first();
-    await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
-    await group.locator('.ct-tool-group-header').click();
     await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
-    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'false');
+    await group.locator('.ct-tool-group-header').click();
+    await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
+    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'true');
 
-    // More same-kind calls arrive — the group rebuilds from scratch (fresh DOM
-    // nodes every debounced render), but since it's keyed by the first call's
-    // toolUseId + activity kind (liveToolGroupKey), the SAME group identity
-    // persists across rebuilds and the freshly-built header/full-content
-    // still read as "expanded".
+    // More calls arrive — the group rebuilds from scratch (fresh DOM nodes every
+    // debounced render), but it is keyed by the first call's toolUseId
+    // (liveToolGroupKey), so the freshly-built group still reads as opened.
     await page.evaluate(() => {
       const emit = (window as any).__emitEvent;
       const threadId = 'thread-live-tool-grouping';
@@ -346,8 +321,7 @@ test.describe('Live tool-call grouping', () => {
     const groupAfter = page.locator('.ct-tool-group').first();
     await expect(groupAfter.locator('.ct-compressed-summary')).toHaveText('Exploring');
     await expect(groupAfter.locator('.ct-tool-group-count')).toHaveText('8');
-    // The user's collapse of the running group survives the live rebuild.
-    await expect(groupAfter.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await expect(groupAfter.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
   });
 
   test('switching away and back mid-turn restores the same grouped view, not a flat replay', async ({ page }) => {
@@ -448,22 +422,15 @@ test.describe('Live tool-call grouping', () => {
     await shot(page, 'tool-call-grouping-fragmented-live-merged.png', { fullPage: true });
   });
 
-  // ─── Outer-wrap tier while LIVE — the live-updating "current tool" header ──
-  // Fires 8 alternating-activity-kind tool_use events (each its own isolated
-  // 'single' entry post-groupToolCalls/smoothToolGroups — alternating kinds
-  // never merge, so this is a direct, simple way to push the post-smoothing
-  // entry count past OUTER_WRAP_ENTRY_THRESHOLD without needing same-kind
-  // runs) so the LIVE outer wrap kicks in, then proves its header text
-  // actually tracks pickCurrentTool as new calls arrive — not just a
-  // snapshot taken once at initial render.
-  test('the outer wrap shows a live-updating current-tool header while calls are still pending, past the threshold', async ({ page }) => {
+  // ─── Mixed-kind runs, live and finalized ───────────────────────────────────
+  // Alternating activity kinds used to split into many entries (and trip the
+  // outer wrap). They are now ONE group: "Working" while running, a per-kind
+  // summary once finished.
+  test('alternating-kind live calls stay ONE collapsed group labelled Working', async ({ page }) => {
     await page.evaluate(() => {
       const emit = (window as any).__emitEvent;
       const threadId = 'thread-live-tool-grouping';
       emit(threadId, { type: 'streaming_start' });
-      // 8 raw calls, each a different activity kind from its predecessor ->
-      // 8 isolated 'single' entries, all still pending (no group entries to
-      // sandwich, so smoothToolGroups is a no-op here) -> 8 > 7 -> wraps.
       const names = ['Read', 'Edit', 'TaskCreate', 'WebFetch', 'ToolSearch', 'Skill', 'Read', 'Edit'];
       names.forEach((name, i) => {
         emit(threadId, {
@@ -475,18 +442,15 @@ test.describe('Live tool-call grouping', () => {
     await page.waitForTimeout(300);
 
     await expect(page.locator('.ct-tools > *')).toHaveCount(1);
-    const outerWrap = page.locator('.ct-tool-outer-wrap').first();
-    await expect(outerWrap).toBeVisible();
-    const header = outerWrap.locator('.ct-tool-outer-wrap-header');
-    await expect(header).toHaveClass(/ct-tool-active/);
-    // Last call (index 7) is 'Edit' and still pending -> pickCurrentTool picks it.
-    await expect(header.locator('.ct-tool-outer-wrap-live-summary .ct-tool-pill-name')).toHaveText('Edit');
-    await expect(header.locator('.ct-tool-outer-wrap-live-summary .ct-tool-pill-text')).toHaveText('call #7');
+    await expect(page.locator('.ct-tool-outer-wrap')).toHaveCount(0);
+    const group = page.locator('.ct-tool-group').first();
+    await expect(group.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-active/);
+    await expect(group.locator('.ct-compressed-summary')).toHaveText('Working');
+    await expect(group.locator('.ct-tool-group-count')).toHaveText('8');
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await shot(page, 'tool-call-grouping-live-mixed-running.png', { fullPage: true });
 
-    await shot(page, 'tool-call-grouping-outer-wrap-live-current-command.png', { fullPage: true });
-
-    // Fire one more tool_use event for a DIFFERENT tool — concrete proof the
-    // header live-updates rather than freezing at its first render.
+    // One more call of yet another kind grows the same group.
     await page.evaluate(() => {
       (window as any).__emitEvent('thread-live-tool-grouping', {
         type: 'tool_use',
@@ -494,19 +458,100 @@ test.describe('Live tool-call grouping', () => {
       });
     });
     await page.waitForTimeout(300);
-
-    const headerAfter = page.locator('.ct-tool-outer-wrap-header').first();
-    await expect(headerAfter.locator('.ct-tool-outer-wrap-live-summary .ct-tool-pill-name')).toHaveText('Bash');
-    await expect(headerAfter.locator('.ct-tool-outer-wrap-live-summary .ct-tool-pill-text')).toHaveText('call #8');
+    await expect(page.locator('.ct-tool-group')).toHaveCount(1);
+    await expect(page.locator('.ct-tool-group-count')).toHaveText('9');
   });
 
-  // Proves the live outer-wrap header cleanly reverts to the static
-  // "N tool calls, M steps" format once the turn finalizes — no stale
-  // "currently running" text or duplicated header left behind. Mirrors the
-  // "per-turn 'message' events" test above's finalization pattern: push a
-  // real ChatMessage onto thread.messages and fire a 'message' event, which
-  // is what actually settles a live run into the finalized render path.
-  test('the outer wrap header reverts to the static format with no stale text after the turn finalizes', async ({ page }) => {
+  test('a finalized mixed-kind run is ONE collapsed group summarised per kind', async ({ page }) => {
+    await page.evaluate(() => {
+      const manager = (window as any).__manager;
+      const threadId = 'thread-live-tool-grouping';
+      const message = {
+        id: 'mixed-msg',
+        role: 'assistant',
+        content: '',
+        timestamp: Date.now(),
+        toolCalls: [
+          { name: 'Read', summary: 'a.ts', toolUseId: 'mix-1', status: 'success' },
+          { name: 'Read', summary: 'b.ts', toolUseId: 'mix-2', status: 'success' },
+          { name: 'Edit', summary: 'a.ts', toolUseId: 'mix-3', status: 'success' },
+        ],
+      };
+      manager.getThread(threadId).messages.push(message);
+      (window as any).__emitEvent(threadId, { type: 'message', message });
+    });
+    await page.waitForTimeout(300);
+
+    await expect(page.locator('.ct-tool-group')).toHaveCount(1);
+    const group = page.locator('.ct-tool-group').first();
+    await expect(group.locator('.ct-compressed-summary')).toHaveText('Read 2 files, edited 1 file');
+    await expect(group.locator('.ct-tool-group-count')).toHaveText('3');
+    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'false');
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await shot(page, 'tool-call-grouping-mixed-kind-collapsed.png', { fullPage: true });
+  });
+
+  test('a group already on screen repaints IN PLACE when a result lands (no rebuild)', async ({ page }) => {
+    // A row committed while a call is still pending: its DOM is drawn as running
+    // and is NOT rebuilt when the result arrives.
+    await page.evaluate(() => {
+      const manager = (window as any).__manager;
+      const threadId = 'thread-live-tool-grouping';
+      const message = {
+        id: 'inplace-msg',
+        role: 'assistant',
+        content: '',
+        timestamp: Date.now(),
+        toolCalls: [
+          { name: 'Read', summary: 'a.ts', toolUseId: 'ip-1', status: 'success' },
+          { name: 'Bash', summary: 'npm test', toolUseId: 'ip-2', status: 'pending' },
+        ],
+      };
+      manager.getThread(threadId).messages.push(message);
+      (window as any).__emitEvent(threadId, { type: 'message', message });
+    });
+    await page.waitForTimeout(300);
+
+    const group = page.locator('.ct-tool-group').first();
+    await expect(group.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-active/);
+    await expect(group.locator('.ct-tool-group-status.ct-tool-state-pending')).toHaveCount(1);
+    await expect(group.locator('.ct-tool-group-running')).toHaveCount(1);
+    // Tag the live element so we can prove it was repainted, not replaced.
+    await group.evaluate((el) => el.setAttribute('data-keep', 'same-node'));
+
+    // The session mutates the record in place, then emits the status event.
+    await page.evaluate(() => {
+      const manager = (window as any).__manager;
+      const threadId = 'thread-live-tool-grouping';
+      const msg = manager.getThread(threadId).messages.find((m: any) => m.id === 'inplace-msg');
+      msg.toolCalls[1].status = 'success';
+      (window as any).__emitEvent(threadId, { type: 'tool_result_status', toolUseId: 'ip-2', status: 'success' });
+    });
+    await page.waitForTimeout(300);
+
+    const same = page.locator('.ct-tool-group[data-keep="same-node"]');
+    await expect(same).toHaveCount(1);
+    await expect(same.locator('.ct-tool-group-header')).not.toHaveClass(/ct-tool-active/);
+    await expect(same.locator('.ct-tool-group-status.ct-tool-state-success')).toHaveCount(1);
+    await expect(same.locator('.ct-tool-group-status.ct-tool-state-pending')).toHaveCount(0);
+    await expect(same.locator('.ct-tool-group-running')).toHaveCount(0);
+    await expect(same.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await expect(same.locator('.ct-compressed-summary')).toHaveText('Read 1 file, ran 1 command');
+
+    // And a failing result turns the header red without opening the group.
+    await page.evaluate(() => {
+      const manager = (window as any).__manager;
+      const threadId = 'thread-live-tool-grouping';
+      const msg = manager.getThread(threadId).messages.find((m: any) => m.id === 'inplace-msg');
+      msg.toolCalls[1].status = 'error';
+      (window as any).__emitEvent(threadId, { type: 'tool_result_status', toolUseId: 'ip-2', status: 'error' });
+    });
+    await expect(same.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-error/);
+    await expect(same.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await shot(page, 'tool-call-grouping-inplace-failed.png', { fullPage: true });
+  });
+
+  test('the live group header reverts to the static summary with no stale text after the turn finalizes', async ({ page }) => {
     const names = ['Read', 'Edit', 'TaskCreate', 'WebFetch', 'ToolSearch', 'Skill', 'Read', 'Edit', 'Bash'];
     await page.evaluate((names) => {
       const emit = (window as any).__emitEvent;
@@ -520,8 +565,8 @@ test.describe('Live tool-call grouping', () => {
       });
     }, names);
     await page.waitForTimeout(300);
-    await expect(page.locator('.ct-tool-outer-wrap-header')).toHaveCount(1);
-    await expect(page.locator('.ct-tool-outer-wrap-header')).toHaveClass(/ct-tool-active/);
+    await expect(page.locator('.ct-tool-group-header')).toHaveCount(1);
+    await expect(page.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-active/);
 
     await page.evaluate((names) => {
       const manager = (window as any).__manager;
@@ -543,13 +588,12 @@ test.describe('Live tool-call grouping', () => {
     }, names);
     await page.waitForTimeout(300);
 
-    // Exactly one outer-wrap header survives finalization — no duplicate from
-    // the live view lingering alongside the newly-appended finalized row.
-    const headers = page.locator('.ct-tool-outer-wrap-header');
+    // Exactly one group survives finalization — no duplicate from the live view.
+    const headers = page.locator('.ct-tool-group-header');
     await expect(headers).toHaveCount(1);
     await expect(headers).not.toHaveClass(/ct-tool-active/);
-    // 9 raw calls, all isolated singles (alternating kinds) -> 9 entries, 9 steps.
-    await expect(headers.locator('.ct-compressed-summary')).toHaveText('9 tool calls, 9 steps');
-    await expect(headers.locator('.ct-tool-outer-wrap-live-summary')).toHaveCount(0);
+    await expect(headers.locator('.ct-tool-group-running')).toHaveCount(0);
+    await expect(headers.locator('.ct-tool-group-count')).toHaveText('9');
+    await expect(headers.locator('.ct-compressed-summary')).not.toHaveText('Working');
   });
 });

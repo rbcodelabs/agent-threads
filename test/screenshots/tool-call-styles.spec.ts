@@ -5,9 +5,9 @@ import { shot } from './helpers';
 const harnessUrl = 'file://' + path.resolve('test/harness/index.html');
 const STYLES = ['chips', 'tree', 'cards'] as const;
 
-// Fixture 'thread-tool-grouping': a finished exploring group, a failed editing
-// group (auto-expanded) and isolated calls. Fixture 'thread-live-tool-grouping'
-// is driven live for the running-group state.
+// Fixture 'thread-tool-grouping': one finished group of 15 mixed calls with a
+// failed Edit (red header, still collapsed). Fixture 'thread-live-tool-grouping'
+// is driven live for the running-group state (also collapsed by default).
 
 async function setStyle(page: import('@playwright/test').Page, style: (typeof STYLES)[number]) {
   await page.evaluate((s) => {
@@ -44,7 +44,7 @@ test.describe('Tool call styles', () => {
   });
 
   for (const style of STYLES) {
-    test(`${style}: finished groups collapsed, headers are buttons, failures red and open`, async ({ page }) => {
+    test(`${style}: finished group collapsed, header is a button, failure red but still collapsed`, async ({ page }) => {
       await page.evaluate(() => (window as any).__view.focusThread('thread-tool-grouping'));
       await page.waitForSelector('.ct-tool-group');
       // Let async footer chrome (edited-files chips) settle so layout is stable.
@@ -52,28 +52,27 @@ test.describe('Tool call styles', () => {
       await setStyle(page, style);
       await page.waitForTimeout(150);
 
-      const exploring = page.locator('.ct-tool-group').nth(0);
-      const header = exploring.locator('.ct-tool-group-header');
+      await expect(page.locator('.ct-tool-group')).toHaveCount(1);
+      const group = page.locator('.ct-tool-group').first();
+      const header = group.locator('.ct-tool-group-header');
       expect(await header.evaluate((el) => el.tagName)).toBe('BUTTON');
       await expect(header).toHaveAttribute('aria-expanded', 'false');
-      await expect(exploring.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
-      await expect(exploring.locator('.ct-compressed-summary')).toHaveText(/^(Read|Ran|Searched)/);
-
-      const editing = page.locator('.ct-tool-group').nth(1);
-      await expect(editing.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'true');
-      await expect(editing.locator('.ct-tool-group-status.ct-tool-state-error')).toHaveCount(1);
-      await expect(editing.locator('.ct-tool-pill.ct-tool-error .ct-tool-status.ct-tool-state-error')).toHaveCount(1);
+      await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+      // The failure flags the header (red status dot) but does not open the group.
+      await expect(group.locator('.ct-tool-group-status.ct-tool-state-error')).toHaveCount(1);
+      await expect(header).toHaveClass(/ct-tool-error/);
 
       await shot(page, `tool-call-style-${style}-finished.png`, { fullPage: true });
 
       await header.focus();
       await page.keyboard.press('Enter');
       await expect(header).toHaveAttribute('aria-expanded', 'true');
+      await expect(group.locator('.ct-tool-pill.ct-tool-error .ct-tool-status.ct-tool-state-error')).toHaveCount(1);
       await page.waitForTimeout(150);
       await shot(page, `tool-call-style-${style}-expanded.png`, { fullPage: true });
     });
 
-    test(`${style}: running group stays open with a running indicator`, async ({ page }) => {
+    test(`${style}: running group is collapsed with a running indicator; opening shows rows`, async ({ page }) => {
       await page.evaluate(() => (window as any).__view.focusThread('thread-live-tool-grouping'));
       await page.waitForTimeout(200);
       await page.evaluate(() => {
@@ -97,10 +96,15 @@ test.describe('Tool call styles', () => {
       await page.waitForTimeout(150);
 
       const group = page.locator('.ct-tool-group').first();
-      await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'true');
+      await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'false');
       await expect(group.locator('.ct-tool-group-status.ct-tool-state-pending')).toHaveCount(1);
-      await expect(group.locator('.ct-tool-pill')).toHaveCount(3);
+      await expect(group.locator('.ct-tool-group-running')).toHaveCount(1);
       await shot(page, `tool-call-style-${style}-running.png`, { fullPage: true });
+
+      await group.locator('.ct-tool-group-header').click();
+      await expect(group.locator('.ct-tool-pill')).toHaveCount(3);
+      await page.waitForTimeout(150);
+      await shot(page, `tool-call-style-${style}-running-open.png`, { fullPage: true });
     });
   }
 });

@@ -397,8 +397,10 @@ test.describe('Mobile View', () => {
     await expect(group).toBeVisible();
     await expect(group.locator('.ct-compressed-summary')).toHaveText('Exploring');
     await expect(group.locator('.ct-tool-group-count')).toHaveText('50');
-    // The live view counts as running (mobile has no per-tool status), so the group is open.
-    await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
+    // The live view counts as running (mobile has no per-tool status) but, like
+    // desktop, a running group is collapsed until the user opens it.
+    await expect(group.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-active/);
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
 
     await shot(page, 'mobile-live-tool-call-grouping.png', { fullPage: true });
   });
@@ -419,9 +421,11 @@ test.describe('Mobile View', () => {
     await page.waitForTimeout(200);
 
     const group = page.locator('.ct-mobile-streaming .ct-tool-group').first();
-    // Live groups are already open; the header is a real button.
+    // Live groups start collapsed; the header is a real button that opens them.
+    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'false');
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await group.locator('.ct-tool-group-header').click();
     await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'true');
-    await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
     await expect(group.locator('.ct-full-content .ct-tool-pill')).toHaveCount(5);
   });
 

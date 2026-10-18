@@ -852,9 +852,12 @@ test.describe('Agent Threads UI', () => {
     // addIcon override produces) and share the tool rows' leading column.
     const geometry = await page.evaluate(() => {
       const box = (el: Element) => el.getBoundingClientRect();
-      // The tool rows' leading column: the pill's left edge + its left padding.
-      const pill = document.querySelector('.ct-tools > .ct-tool-pill, .ct-tool-pill')!;
-      const toolIcon = { left: box(pill).left + parseFloat(getComputedStyle(pill).paddingLeft), width: 12 };
+      // The tool block's leading column. Every call now lives in a (collapsed)
+      // group whose leading glyph is style-dependent (tree chevron, chip,
+      // card), so anchor on what .ct-notice-row documents: the .ct-tools
+      // block's left edge plus the 6px row inset.
+      const tools = document.querySelector('.ct-tools')!;
+      const toolIcon = { left: box(tools).left + 6, width: 12 };
       const noticeIcons = Array.from(document.querySelectorAll('.ct-notice-icon svg')).map((svg) => {
         const r = box(svg);
         return { left: r.left, width: r.width, height: r.height, viewBox: svg.getAttribute('viewBox') };
