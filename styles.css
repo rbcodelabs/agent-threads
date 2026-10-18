@@ -1549,7 +1549,7 @@
 .ct-tools-tree .ct-tool-pill { position: relative; margin-left: -6px; }
 .ct-tools-tree .ct-tools > .ct-tool-pill { margin-left: 0; }
 .ct-tools-tree .ct-tool-pill:hover { background: var(--background-modifier-hover); }
-.ct-tools-tree .ct-tool-pill .ct-tool-state-success { display: none; }
+.ct-tools-tree .ct-tool-pill .ct-tool-state-success { visibility: hidden; }
 .ct-tools-tree .ct-tool-pill .ct-tool-pill-name { min-width: 64px; }
 .ct-tools-tree .ct-tool-pill .ct-tool-pill-ts { opacity: 0; transition: opacity 0.12s; margin-left: auto; }
 .ct-tools-tree .ct-tool-pill:hover .ct-tool-pill-ts,
@@ -1593,7 +1593,7 @@
   padding: 2px 0 2px 14px;
   border-left: 1px solid var(--background-modifier-border);
 }
-.ct-tools-chips .ct-tool-pill .ct-tool-state-success { display: none; }
+.ct-tools-chips .ct-tool-pill .ct-tool-state-success { visibility: hidden; }
 .ct-tools-chips .ct-tool-pill .ct-tool-pill-name {
   font-family: inherit;
   font-size: inherit;
@@ -1847,16 +1847,16 @@
 
 /* Background-task completion notice — a subtle left-aligned row in the
    transcript, shown instead of a global toast when a background task finishes
-   on an idle thread. It shares the tool rows' leading-icon column: 8px of left
-   padding stands in for .ct-tool-pill's 2px border + 6px padding, and the
-   12px icon and 6px gap match .ct-tool-pill-icon, so the status icon and text
-   line up with the tool icons and tool names above it. */
+   on an idle thread. It shares the tool rows' leading column: 6px of left
+   padding matches .ct-tool-pill's 6px padding (rows have no left border now),
+   and the 12px icon and 6px gap match the row's status icon, so the status
+   icon and text line up with the tool rows above it. */
 .ct-notice-row {
   display: flex;
   align-items: flex-start;
   gap: 6px;
   margin: 8px 0;
-  padding-left: 8px;
+  padding-left: 6px;
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   line-height: 1.5;
