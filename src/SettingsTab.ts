@@ -1528,7 +1528,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     }
 
     if (this.fixedSection) {
-      this.renderActiveTab(containerEl.createDiv({ cls: 'ct-settings-tab-body' }));
+      const hostedBody = containerEl.createDiv({ cls: 'ct-settings-tab-body is-hosted' });
+      this.renderActiveTab(hostedBody);
+      this.applyHelpTextMode(hostedBody);
+      this.groupSectionsCollapsible(hostedBody);
       return;
     }
 
@@ -1551,6 +1554,80 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     });
 
     this.renderActiveTab(shell.createDiv({ cls: 'ct-settings-tab-body' }));
+  }
+
+  private static readonly HELP_PREF_KEY = 'claude-threads:settings-show-help';
+
+  /**
+   * Sidebar-hosted sections: setting descriptions collapse behind an (i) button
+   * beside each title, with one global "Show help text" toggle. Descriptions
+   * holding links or controls stay inline so nothing interactive is hidden.
+   */
+  private applyHelpTextMode(body: HTMLElement): void {
+    const items = Array.from(body.querySelectorAll<HTMLElement>('.setting-item')).filter(item => {
+      const desc = item.querySelector<HTMLElement>('.setting-item-description');
+      return !!desc && desc.textContent?.trim() && !desc.querySelector('a, button, input, select, textarea');
+    });
+    if (items.length === 0) return;
+    let showHelp = false;
+    try { showHelp = window.localStorage.getItem(ClaudeThreadsSettingTab.HELP_PREF_KEY) === '1'; } catch { /* storage unavailable */ }
+    body.toggleClass('is-help-visible', showHelp);
+
+    const toggle = body.createDiv({ cls: 'ct-help-toggle' });
+    const label = toggle.createEl('label');
+    const box = label.createEl('input', { type: 'checkbox', attr: { 'aria-label': 'Show help text' } });
+    box.checked = showHelp;
+    label.createSpan({ text: 'Show help text' });
+    box.addEventListener('change', () => {
+      try { window.localStorage.setItem(ClaudeThreadsSettingTab.HELP_PREF_KEY, box.checked ? '1' : '0'); } catch { /* ignore */ }
+      body.toggleClass('is-help-visible', box.checked);
+    });
+    body.prepend(toggle);
+
+    for (const item of items) {
+      const desc = item.querySelector<HTMLElement>('.setting-item-description')!;
+      const name = item.querySelector<HTMLElement>('.setting-item-name');
+      if (!name) continue;
+      const text = desc.textContent!.trim();
+      const icon = name.createEl('button', { cls: 'ct-help-icon', text: 'i', attr: { type: 'button', title: text, 'aria-label': `Help: ${text}`, 'aria-expanded': 'false' } });
+      icon.addEventListener('click', (event) => {
+        event.preventDefault();
+        item.toggleClass('is-help-open', !item.hasClass('is-help-open'));
+        icon.setAttribute('aria-expanded', String(item.hasClass('is-help-open')));
+      });
+    }
+  }
+
+  /**
+   * Sidebar-hosted sections: fold each heading and the rows under it into a
+   * collapsible group so long tabs (Agent, MCP) don't need scrolling. The first
+   * group starts open; open/closed state is remembered per heading.
+   */
+  private groupSectionsCollapsible(body: HTMLElement): void {
+    const isHeading = (el: Element) => el.matches('.setting-item-heading, h3');
+    const kids = Array.from(body.children);
+    if (kids.filter(isHeading).length < 2) return;
+    const store = (() => { try { return window.localStorage; } catch { return null; } })();
+    let group: HTMLDetailsElement | null = null;
+    let index = 0;
+    for (const el of kids) {
+      if (isHeading(el)) {
+        const nameEl = el.querySelector('.setting-item-name');
+        const title = (nameEl?.firstChild?.textContent ?? el.textContent ?? '').trim() || `group-${index}`;
+        const key = `claude-threads:settings-group:${this.activeTab}:${title}`;
+        const saved = store?.getItem(key);
+        group = body.createEl('details', { cls: 'ct-settings-group' });
+        group.open = saved === null || saved === undefined ? index === 0 : saved === '1';
+        el.before(group);
+        const summary = group.createEl('summary');
+        summary.appendChild(el);
+        const g = group;
+        g.addEventListener('toggle', () => { try { store?.setItem(key, g.open ? '1' : '0'); } catch { /* ignore */ } });
+        index++;
+      } else if (group && !el.matches('.ct-help-toggle')) {
+        group.appendChild(el);
+      }
+    }
   }
 
   private renderActiveTab(body: HTMLElement): void {
@@ -1724,6 +1801,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   // ── Agent harness ───────────────────────────────────────────────────────
 
   private renderClaudeTab(containerEl: HTMLElement): void {
+    if (this.fixedSection) new Setting(containerEl).setName('Harness & sandbox').setHeading();
     new Setting(containerEl)
       .setName('Agent harness')
       .setDesc('New threads use this local coding agent. Existing threads retain the harness that created them.')
@@ -1846,6 +1924,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         );
     }
 
+    if (this.fixedSection) new Setting(containerEl).setName('Claude').setHeading();
     new Setting(containerEl)
       .setName('Claude binary path')
       .setDesc('Path to the claude executable. Leave empty to find it on $PATH.')
@@ -2424,13 +2503,36 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
   }
 
+  /** Primary action for the current manager tab when the page header is folded into the host sidebar. */
+  private managerAction: { label: string; onAction: () => void } | null = null;
+
   private renderManagerHeader(container: HTMLElement, title: string, description: string, actionLabel: string, onAction: () => void): void {
+    // Hosted in a sidebar that already names the section: skip the big header
+    // and surface the action as a compact button beside the list search.
+    if (this.fixedSection) {
+      this.managerAction = { label: actionLabel, onAction };
+      container.addClass('is-compact');
+      return;
+    }
+    this.managerAction = null;
     const header = container.createDiv({ cls: 'ct-settings-page-header' });
     const copy = header.createDiv();
     copy.createEl('h1', { text: title });
     copy.createEl('p', { text: description });
     const action = header.createEl('button', { text: actionLabel, cls: 'mod-cta', attr: { type: 'button' } });
     action.addEventListener('click', onAction);
+  }
+
+  /** Search box for a manager list, with the tab's primary action as a "+" button when the header is folded away. */
+  private createManagerListToolbar(list: HTMLElement, label: string, placeholder: string): HTMLInputElement {
+    const toolbar = list.createDiv({ cls: 'ct-manager-list-toolbar' });
+    const search = toolbar.createEl('input', { type: 'search', placeholder, attr: { 'aria-label': label } });
+    const action = this.managerAction;
+    if (action) {
+      const add = toolbar.createEl('button', { text: '+', cls: 'mod-cta ct-manager-add', attr: { type: 'button', 'aria-label': action.label, title: action.label } });
+      add.addEventListener('click', action.onAction);
+    }
+    return search;
   }
 
   private createManagerField(
@@ -2442,12 +2544,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const field = container.createEl('label', { cls: 'ct-manager-field' });
     field.createSpan({ text: label, cls: 'ct-manager-field-label' });
     const input = options.textarea
-      ? field.createEl('textarea', { attr: { rows: '6', 'aria-label': label } })
+      ? field.createEl('textarea', { attr: { rows: '4', 'aria-label': label } })
       : field.createEl('input', { type: options.type ?? 'text', attr: { 'aria-label': label } });
     input.value = value;
     if (options.placeholder) input.setAttribute('placeholder', options.placeholder);
     if (options.disabled && input instanceof HTMLInputElement) input.disabled = true;
-    if (options.description) field.createEl('small', { text: options.description });
+    if (options.description) field.createEl('small', { text: options.description, attr: { title: options.description } });
     return input;
   }
 
@@ -2500,7 +2602,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     }
     const manager = containerEl.createDiv({ cls: 'ct-settings-manager' });
     const list = manager.createEl('section', { cls: 'ct-manager-list', attr: { 'aria-label': 'Projects' } });
-    const search = list.createEl('input', { type: 'search', placeholder: 'Search projects', attr: { 'aria-label': 'Search projects' } });
+    const search = this.createManagerListToolbar(list, 'Search projects', 'Search projects');
     const rows = list.createDiv({ cls: 'ct-manager-list-rows' });
     const renderRows = () => {
       rows.empty();
@@ -2596,7 +2698,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     if (this.selectedSecretName === null || (this.selectedSecretName && !keys.includes(this.selectedSecretName))) this.selectedSecretName = keys[0] ?? '';
     const manager = containerEl.createDiv({ cls: 'ct-settings-manager' });
     const list = manager.createEl('section', { cls: 'ct-manager-list', attr: { 'aria-label': 'Secrets' } });
-    const search = list.createEl('input', { type: 'search', placeholder: 'Search secrets', attr: { 'aria-label': 'Search secrets' } });
+    const search = this.createManagerListToolbar(list, 'Search secrets', 'Search secrets');
     const rows = list.createDiv({ cls: 'ct-manager-list-rows' });
     const mask = (value: string | null) => !value ? 'No value stored' : value.length <= 8 ? '••••••••' : `${value.slice(0, 4)}••••${value.slice(-4)}`;
     const renderRows = () => {
