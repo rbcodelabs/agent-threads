@@ -3,6 +3,7 @@ import {
   DEFAULT_TOOL_CALL_STYLE,
   formatToolPath,
   formatToolRowSummary,
+  groupToolRuns,
   normalizeToolCallStyle,
   summarizeToolGroup,
   toolCallStyleClass,
@@ -96,5 +97,25 @@ describe('summarizeToolGroup', () => {
     expect(summarizeToolGroup('editing', [tool('Edit'), tool('Write')]).label).toBe('Edited 2 files');
     expect(summarizeToolGroup('editing', [tool('Write'), tool('Write')]).label).toBe('Wrote 2 files');
     expect(summarizeToolGroup('planning', [tool('TaskCreate'), tool('TaskUpdate')]).label).toBe('Updated the plan (2 steps)');
+  });
+});
+
+describe('groupToolRuns (sequential grouping)', () => {
+  it('folds an unbroken run of mixed tools into one group', () => {
+    const g = groupToolRuns([tool('Read'), tool('Edit'), tool('mcp__x__vault_list'), tool('Read')]);
+    expect(g).toHaveLength(1);
+    expect(g[0]).toMatchObject({ kind: 'group', activityKind: 'working' });
+  });
+  it('makes a lone call a group of one, keeping its own kind', () => {
+    const g = groupToolRuns([tool('Read')]);
+    expect(g).toEqual([{ kind: 'group', activityKind: 'exploring', tools: [expect.anything()] }]);
+  });
+  it('keeps browser sessions as their own entry between two runs', () => {
+    const g = groupToolRuns([tool('Read'), tool('mcp__x__browser_navigate'), tool('mcp__x__browser_close'), tool('Edit')]);
+    expect(g.map(e => e.kind)).toEqual(['group', 'browser', 'group']);
+  });
+  it('summarizes a mixed run per kind in order', () => {
+    const tools = [tool('Read'), tool('Read'), tool('Edit')];
+    expect(summarizeToolGroup('working', tools).label).toBe('Read 2 files, edited 1 file');
   });
 });

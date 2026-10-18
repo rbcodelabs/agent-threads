@@ -381,6 +381,30 @@ export function groupToolCalls(tools: import('./types').ToolCallRecord[]): ToolC
 }
 
 /**
+ * Sequential grouping: every unbroken run of non-browser tool calls becomes ONE
+ * group, whatever the commands are (a lone call is a group of one, so every
+ * run reads the same). Browser sessions keep their own card. The group's
+ * activity kind is the shared kind when uniform, otherwise 'working'.
+ * Replaces the same-kind chunking + smoothing for rendering.
+ */
+export function groupToolRuns(tools: import('./types').ToolCallRecord[]): ToolCallGroup[] {
+  const out: ToolCallGroup[] = [];
+  let run: import('./types').ToolCallRecord[] = [];
+  const flush = (): void => {
+    if (run.length === 0) return;
+    const kinds = new Set(run.map(t => getActivityKind(t.name)));
+    out.push({ kind: 'group', activityKind: kinds.size === 1 ? [...kinds][0] : 'working', tools: run });
+    run = [];
+  };
+  for (const entry of groupToolCalls(tools)) {
+    if (entry.kind === 'browser') { flush(); out.push(entry); }
+    else run.push(...(entry.kind === 'single' ? [entry.tool] : entry.tools));
+  }
+  flush();
+  return out;
+}
+
+/**
  * Deterministic key for a LIVE (in-progress) tool-call group's expand/collapse
  * state — used by ThreadsView's renderLiveToolCalls/renderToolGroup so a group
  * a user expands mid-turn stays expanded as more same-kind calls arrive and
@@ -689,6 +713,18 @@ export function summarizeToolGroup(
   const count = (pred: (k: string) => boolean) => keys.filter(pred).length;
   const n = tools.length;
   const inLabel = (label: string): ToolGroupSummary => ({ label, countInLabel: true });
+  // Mixed run (e.g. reads then edits then MCP calls): summarize each kind in
+  // order of first appearance, "Read 2 files, edited 1 file".
+  const byKind = new Map<ActivityKind, import('./types').ToolCallRecord[]>();
+  for (const t of tools) {
+    const k = getActivityKind(t.name);
+    byKind.set(k, [...(byKind.get(k) ?? []), t]);
+  }
+  if (byKind.size > 1) {
+    if (byKind.size > 3) return inLabel(`Ran ${plural(n, 'tool', 'tools')}`);
+    const parts = [...byKind.entries()].map(([k, ts]) => summarizeToolGroup(k, ts).label);
+    return inLabel(parts.map((p, i) => (i === 0 ? p : p.charAt(0).toLowerCase() + p.slice(1))).join(', '));
+  }
   const bare = (label: string): ToolGroupSummary => ({ label, countInLabel: false });
 
   switch (activityKind) {

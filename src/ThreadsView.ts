@@ -36,7 +36,7 @@ import { isDefaultThreadTitle } from './thread-title-utils';
 import { formatToolName, getToolIcon } from './ClaudeSession';
 import { isPermissionPreApproved, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
 import { applyToolCallStyleClass, refreshToolRowByUseId, renderToolGroupShell, renderToolRow } from './toolCallDom';
-import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, smoothToolGroups, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
+import { groupToolRuns, liveToolGroupKey, mergeAdjacentToolOnlyMessages, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
 import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
 import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, execEnv, splitErrorMessage } from './dashboardUtils';
@@ -4160,7 +4160,7 @@ export class ThreadsView extends ItemView {
     tools: ToolCallRecord[],
     opts: { live: boolean; onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void },
   ): void {
-    const grouped = smoothToolGroups(groupToolCalls(tools));
+    const grouped = groupToolRuns(tools);
     if (shouldWrapOuter(grouped)) {
       this.renderOuterToolWrap(wrapper, tools, grouped, opts);
     } else {

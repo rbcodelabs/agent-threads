@@ -15,7 +15,7 @@ import type { RelayClient } from './RelayClient';
 import type { MobileThreadStore } from './MobileThreadStore';
 import type { SerializedThread, SerializedMessage, PendingPermission, PendingQuestion } from './relay-protocol';
 import type { ToolCallRecord, ImageAttachment } from './types';
-import { formatToolName, getToolIcon, groupToolCalls, smoothToolGroups, normalizeToolCallStyle, type ToolCallGroup, type ToolCallStyle } from './toolNameUtils';
+import { formatToolName, getToolIcon, groupToolRuns, normalizeToolCallStyle, type ToolCallGroup, type ToolCallStyle } from './toolNameUtils';
 import { applyToolCallStyleClass, renderToolGroupShell, renderToolRow } from './toolCallDom';
 import { splitErrorMessage } from './dashboardUtils';
 import { extractMessageContent } from './MessageContent';
@@ -869,7 +869,7 @@ export class MobileView extends ItemView {
     // no pending state to key a live header off, and this view's positional
     // `${startIndex}:${activityKind}` expand-key isn't a stable enough
     // identity for the outer-wrap's live-identity requirement.
-    for (const entry of smoothToolGroups(groupToolCalls(tools))) {
+    for (const entry of groupToolRuns(tools)) {
       if (entry.kind === 'single') {
         this.renderToolPill(wrapper, entry.tool, active);
         index += 1;
