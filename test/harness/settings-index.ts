@@ -314,6 +314,7 @@ const mockPlugin = {
   saveSettings: async () => {},
   ensureProjectOrchestratorThread: async () => {},
   deleteProject: async (id: string) => { settings.projects = settings.projects.filter(project => project.id !== id); },
+  offerDaemonUpdateIfMountsChanged: async () => {},
   getView: () => null,
   getEffectiveCwd: () => '/Users/mock/vault',
   dispatchNewThread: async (prompt: string, _images: unknown, title: string | undefined) => {
