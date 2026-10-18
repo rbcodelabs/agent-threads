@@ -212,6 +212,18 @@ export function sanitizeMountLabel(raw: string): string {
   return cleaned || 'root';
 }
 
+/** The user's listed shared folders plus, when `shareProjectFolders` is on, the Projects' working folders. */
+export function sharedFolderList(
+  settings: { folders?: readonly string[]; shareProjectFolders?: boolean } | undefined,
+  projectFolders?: () => readonly string[],
+): string[] {
+  const listed = [...(settings?.folders ?? [])];
+  if (!settings?.shareProjectFolders || !projectFolders) return listed;
+  let projects: readonly string[] = [];
+  try { projects = projectFolders(); } catch { projects = []; }
+  return [...listed, ...projects];
+}
+
 /**
  * Vets the user's shared folders (settings): absolute existing directories, no ':' / NUL / '..', not '/', and not the
  * vault or a folder containing it (the vault is mounted already). Same naming and ordering as external roots.

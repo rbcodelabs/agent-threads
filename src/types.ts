@@ -284,6 +284,11 @@ export interface LocalDaemonSettings {
    */
   folders?: string[];
   /**
+   * Also share READ-WRITE every Project's working folder that lies outside the vault (a Project's folder override), so
+   * nothing has to be listed by hand. Follows Projects as they are added or changed. Applied when the container is created.
+   */
+  shareProjectFolders?: boolean;
+  /**
    * Ids of the optional tool groups (`localDaemon/optionalTools.ts`) offered to the daemon's threads: tools that write,
    * schedule or touch secrets on this Mac. Off by default; every call still needs an approval card.
    */

@@ -63,6 +63,7 @@ import {
   dropOverlappingRoots,
   resolveExternalRoots,
   resolveWorkFolders,
+  sharedFolderList,
   type ExternalRootInput,
   type ExternalRootMount,
   assertMountablePath,
@@ -100,6 +101,8 @@ export interface LocalDaemonDeps {
   getRegistered(): RemoteDaemonConfig | undefined;
   register(config: RemoteDaemonConfig): Promise<void>;
   unregister(): Promise<void>;
+  /** Working folders of the user's Projects (absolute paths); shared read-write when `shareProjectFolders` is on. */
+  projectFolders?(): string[];
   /** Geode's connected external roots (`externalRoots.listMountRoots()`), mounted read-only; absent on Obsidian / older Geode. */
   externalRoots?(): Promise<ExternalRootInput[] | null | undefined>;
   /** Runs the in-container `claude setup-token` flow. Absent where it cannot run (the sign-in then reports so). */
@@ -287,7 +290,7 @@ export class LocalDaemonController {
   private workFolders: ExternalRootMount[] = [];
 
   private async refreshExternalRoots(vaultPath: string | null): Promise<void> {
-    this.workFolders = vaultPath ? resolveWorkFolders(this.settings().folders, { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) }) : [];
+    this.workFolders = vaultPath ? resolveWorkFolders(sharedFolderList(this.settings(), this.deps.projectFolders), { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) }) : [];
     if (!vaultPath || !this.deps.externalRoots) { this.extRoots = []; return; }
     try {
       this.extRoots = dropOverlappingRoots(resolveExternalRoots(await this.deps.externalRoots(), { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) }), this.workFolders);
