@@ -913,7 +913,7 @@ export class MobileView extends ItemView {
     const { body } = renderToolGroupShell(wrapper, activityKind, tools, {
       hasError: false,
       hasPending: active,
-      expanded: this.expandedToolGroups.has(groupKey) || (active && !this.userCollapsedToolGroups.has(groupKey)),
+      expanded: this.expandedToolGroups.has(groupKey),
       onToggle: (open) => {
         if (open) {
           this.expandedToolGroups.add(groupKey);
