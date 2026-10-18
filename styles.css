@@ -1546,7 +1546,7 @@
   padding: 2px 0 2px 14px;
   border-left: 1px solid var(--background-modifier-border);
 }
-.ct-tools-tree .ct-tool-pill { position: relative; margin-left: -6px; }
+.ct-tools-tree .ct-tool-pill { position: relative; margin-left: -6px; max-width: calc(100% + 6px); box-sizing: border-box; }
 .ct-tools-tree .ct-tools > .ct-tool-pill { margin-left: 0; }
 .ct-tools-tree .ct-tool-pill:hover { background: var(--background-modifier-hover); }
 .ct-tools-tree .ct-tool-pill .ct-tool-state-success { visibility: hidden; }
@@ -1655,6 +1655,8 @@
 .ct-tools-cards .ct-tool-group { min-width: 0; max-width: 100%; box-sizing: border-box; }
 .ct-tools .ct-tool-group > .ct-full-content { min-width: 0; overflow: hidden; }
 .ct-mobile-root .ct-tools .ct-tool-group-header { min-height: 44px; }
+/* The message is a shrink-to-fit flex column: let the tool list fill it so nowrap rows truncate instead of widening past the screen. */
+.ct-mobile-message > .ct-tools { align-self: stretch; min-width: 0; }
 .ct-tools-cards .ct-tool-group-header[aria-expanded="true"] .ct-expand-btn svg { transform: rotate(180deg); }
 .ct-tools-cards .ct-tool-group > .ct-full-content { border-top: 1px solid var(--background-modifier-border); }
 .ct-tools-cards .ct-tool-group .ct-tool-pill {
