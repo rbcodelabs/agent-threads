@@ -15,6 +15,7 @@ import {
   dropOverlappingRoots,
   resolveExternalRoots,
   resolveWorkFolders,
+  sharedFolderList,
   resolveDaemonCpus,
   resolveDaemonMemory,
   prepareArgs,
@@ -147,6 +148,16 @@ describe('golden argv', () => {
     const got = resolveWorkFolders(['/p/repo', '/q/repo', '/', '', '  ', 'relative', '/Users/user/Vault', '/Users/user/Vault/sub', '/Users/user', '/nope', '/a:b'], { vaultPath: '/Users/user/Vault', isDirectory: (p) => exists.has(p) });
     expect(got).toEqual([{ host: '/p/repo', name: 'repo' }, { host: '/q/repo', name: 'repo-2' }]);
     expect(resolveWorkFolders(undefined, { vaultPath: '/v', isDirectory: () => true })).toEqual([]);
+  });
+
+  it('sharedFolderList adds Project folders only when shareProjectFolders is on, and still vets them', () => {
+    const projects = () => ['/p/repo', '/Users/user/Vault/Projects/a', '/nope'];
+    expect(sharedFolderList({ folders: ['/q/x'] }, projects)).toEqual(['/q/x']);
+    expect(sharedFolderList({ folders: ['/q/x'], shareProjectFolders: true }, projects)).toEqual(['/q/x', '/p/repo', '/Users/user/Vault/Projects/a', '/nope']);
+    expect(sharedFolderList({ shareProjectFolders: true }, () => { throw new Error('boom'); })).toEqual([]);
+    const exists = new Set(['/q/x', '/p/repo', '/Users/user/Vault/Projects/a']);
+    const got = resolveWorkFolders(sharedFolderList({ folders: ['/q/x'], shareProjectFolders: true }, projects), { vaultPath: '/Users/user/Vault', isDirectory: (p) => exists.has(p) });
+    expect(got).toEqual([{ host: '/p/repo', name: 'repo' }, { host: '/q/x', name: 'x' }]);
   });
 
   it('resolveExternalRoots vets what the host reports', () => {

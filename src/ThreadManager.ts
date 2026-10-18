@@ -106,6 +106,8 @@ export type ThreadEvent =
   /** A remote resync: whatever the view accumulated for the unfinished assistant message is stale; text re-streams after this. */
   | { type: 'stream_reset' }
   | { type: 'active_thread_changed' }
+  /** The conversation panel is composing a new conversation: no thread is active. */
+  | { type: 'active_thread_cleared' }
   | { type: 'user_message_added'; message: ChatMessage }
   | { type: 'summary_updated' }
   | { type: 'tool_result_images'; images: Array<{ mediaType: string; data: string }> }
@@ -2379,6 +2381,18 @@ export class ThreadManager {
       : {};
     const resolvedSecretEnv = { ...githubEnv, ...(this.secretEnvResolver ? this.secretEnvResolver(project?.id) : {}) };
     const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
+    // One skill-root list for every harness that discovers by parent directory
+    // (Codex via skills/extraRoots/set, OpenCode via its native skills.paths).
+    const skillRoots = codexSkillRoots(
+      this.settings.skillSources ?? [],
+      this.pluginResourceDir
+        ? require('path').join(this.pluginResourceDir, 'resources', 'skills')
+        : undefined,
+      // Vault-installed skills. These harnesses discover by parent root, so they get
+      // the skills dir itself rather than the generated plugin root Claude uses.
+      pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
+      this.localSkillsRoot(),
+    );
 
     return {
       cwd: thread.cwd,
@@ -2428,16 +2442,7 @@ export class ThreadManager {
         ...(this.settings.codexEffort && this.settings.codexEffort !== 'default'
           ? { effort: this.settings.codexEffort }
           : {}),
-        skillRoots: codexSkillRoots(
-          this.settings.skillSources ?? [],
-          this.pluginResourceDir
-            ? require('path').join(this.pluginResourceDir, 'resources', 'skills')
-            : undefined,
-          // Vault-installed skills. Codex discovers by parent root, so it gets
-          // the skills dir itself rather than the generated plugin root Claude uses.
-          pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
-          this.localSkillsRoot(),
-        ),
+        skillRoots,
         dynamicTools: codexDynamicTools,
         mcpServers: codexMcpServers,
         agentProfiles,
@@ -2445,6 +2450,7 @@ export class ThreadManager {
       opencode: {
         dynamicTools: codexDynamicTools,
         mcpServers: codexMcpServers,
+        skillRoots,
       },
     };
   }
@@ -3298,6 +3304,10 @@ export class ThreadManager {
 
   notifyActiveThreadChanged(threadId: string): void {
     this.emit(threadId, { type: 'active_thread_changed' });
+  }
+
+  notifyActiveThreadCleared(): void {
+    this.emit('', { type: 'active_thread_cleared' });
   }
 
   notifySummaryUpdated(threadId: string): void {

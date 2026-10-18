@@ -286,6 +286,11 @@ export interface LocalDaemonSettings {
    */
   folders?: string[];
   /**
+   * Also share READ-WRITE every Project's working folder that lies outside the vault (a Project's folder override), so
+   * nothing has to be listed by hand. Follows Projects as they are added or changed. Applied when the container is created.
+   */
+  shareProjectFolders?: boolean;
+  /**
    * Ids of the optional tool groups (`localDaemon/optionalTools.ts`) offered to the daemon's threads: tools that write,
    * schedule or touch secrets on this Mac. Off by default; every call still needs an approval card.
    */
@@ -1175,6 +1180,10 @@ export interface PluginSettings {
   toolCallStyle?: ToolCallStyle;
   /** Primary grouping shown in the Agents List. Missing values use project-status. */
   agentsGroupBy?: 'project' | 'status' | 'project-status';
+  /** Sort order of the searchable Project picker: most recently used (default) or alphabetical. */
+  projectPickerSort?: 'recent' | 'alphabetical';
+  /** Project id -> last time it was chosen in the Project picker (ms). Combined with thread activity for the 'recent' sort. */
+  projectLastUsed?: Record<string, number>;
   /**
    * Shell command for the context footer bar. Receives JSON on stdin with
    * {cwd, workspace:{current_dir}, branch} describing the thread. stdout may be

@@ -33,6 +33,7 @@ export interface LocalDaemonHost {
   /** The Remote daemons list changed: connection clients must be refreshed. */
   onRegistryChanged(): void;
   /** Geode's connected external roots; absent on Obsidian / older Geode. */
+  projectFolders?(): string[];
   externalRoots?(): Promise<ExternalRootInput[] | null | undefined>;
   createSocket: WebSocketFactory;
   log?(message: string): void;
@@ -138,6 +139,7 @@ export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonC
         onCodePrompt: opts.onCodePrompt,
       });
     },
+    ...(host.projectFolders ? { projectFolders: () => host.projectFolders!() } : {}),
     ...(host.externalRoots ? { externalRoots: () => host.externalRoots!() } : {}),
     log: host.log,
   };

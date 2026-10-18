@@ -1,4 +1,3 @@
-import type { AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, setIcon, Notice, Platform } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
@@ -11,13 +10,9 @@ import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
 import { remoteGroup, threadCwdLabel } from './remote/threadLocation';
 import { parsePrUrlRepo } from './gitDiffUtils';
 import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks';
-import { DispatchInput } from './DispatchInput';
-import { DISPATCH_BUILTIN_COMMANDS, DISPATCH_ARG_COMPLETIONS, parseDispatchDirective, goalKickoffMessage, escalationCommand } from './slashCommands';
-import { buildMessageWithAttachment, deriveDispatchTitle } from './attachmentUtils';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { partitionThreads, classifyThreadRow, type ThreadRowState } from './threadRowState';
 import { telemetry } from './telemetry';
-import { handleContributedDispatch } from './slashCommandRouting';
 import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps } from './threadArchiveMenu';
 import { promptConfirm } from './confirmModal';
 import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
@@ -80,7 +75,6 @@ const PROJECT_SECTION_MAP: Record<ThreadRowState, { label: string; state: RowSta
   empty:           { label: 'Ready', state: 'empty' },
 };
 
-const NEW_PROJECT_VALUE = '__new_project__';
 
 export class KanbanView extends ItemView {
   private plugin: ClaudeThreadsPlugin;
@@ -120,9 +114,6 @@ export class KanbanView extends ItemView {
   // Lightweight sweep to pause spinners of wedged ("stale") running cards
   // within ~15s — see AgentDashboard.refreshStale for rationale.
   private staleInterval: ReturnType<typeof setInterval> | null = null;
-  private dispatchInput!: DispatchInput;
-  private selectedProjectId = '';
-  private projectSelectEl!: HTMLSelectElement;
 
   /**
    * Keys of currently-expanded scheduled-job stacks, formatted
@@ -167,7 +158,6 @@ export class KanbanView extends ItemView {
     this.activityTimers.clear();
     if (this.timeInterval) clearInterval(this.timeInterval);
     if (this.staleInterval) clearInterval(this.staleInterval);
-    this.dispatchInput?.destroy();
     this._restorePanels();
   }
 
@@ -221,14 +211,24 @@ export class KanbanView extends ItemView {
 
     this.boardEl = root.createDiv('ct-agents-list');
 
-    // Floating dispatch panel — centered at bottom of the board
-    const dispatchWrapper = root.createDiv('ct-kanban-dispatch ct-panel-collapsible');
+    // Floating panel — centered at bottom of the board (count, New thread, group/search)
+    const dispatchWrapper = root.createDiv('ct-kanban-dispatch');
 
     // Meta strip: thread count (left) + search button (right)
     const metaRow = dispatchWrapper.createDiv('ct-agents-panel-meta');
     this.headerCountEl = metaRow.createDiv('ct-agents-count');
-    this.addProjectSelector(metaRow);
     const metaActions = metaRow.createDiv('ct-agents-panel-actions');
+
+    // The dispatch composer lives in the conversation panel now; this just opens it.
+    const newThreadBtn = metaActions.createEl('button', {
+      cls: 'ct-new-thread-btn mod-cta',
+      attr: { type: 'button', title: 'New thread', 'aria-label': 'New thread', 'data-testid': 'new-thread-button' },
+    });
+    const newThreadIcon = newThreadBtn.createSpan('ct-new-thread-btn-icon');
+    newThreadIcon.setAttribute('aria-hidden', 'true');
+    setIcon(newThreadIcon, 'square-pen');
+    newThreadBtn.createSpan({ cls: 'ct-new-thread-btn-label', text: 'New thread' });
+    newThreadBtn.addEventListener('click', () => { void this.plugin.openNewConversation(); });
 
     this.groupByBtn = metaActions.createEl('button', {
       cls: 'ct-kanban-groupby clickable-icon',
@@ -270,135 +270,6 @@ export class KanbanView extends ItemView {
     this.searchInputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.closeSearch();
     });
-
-    this.dispatchInput = new DispatchInput({
-      app: this.app,
-      placeholder: 'Dispatch a new task',
-      inlineLayout: true,
-      builtinCommands: () => {
-        const esc = escalationCommand(this.plugin.settings, true);
-        const commands = [...DISPATCH_BUILTIN_COMMANDS, ...(this.plugin.slashCommands?.list('dispatch') ?? [])];
-        return esc ? [...commands, esc] : commands;
-      },
-      subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
-      argCompletions: DISPATCH_ARG_COMPLETIONS,
-      peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
-      harnessPicker: {
-        initialHarness: this.plugin.settings.agentHarness ?? 'claude',
-        getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
-        localDaemonOffer: { available: () => this.plugin.isLocalDaemonSetupOffered(), onSetUp: () => this.plugin.openLocalDaemonSettings() },
-        getFolderSource: () => this.plugin.remoteFolders ?? undefined,
-        getLocalCwd: () => {
-          const project = this.manager.getProject(this.selectedProjectId);
-          return project ? this.manager.getProjectCwd(project) : this.plugin.getEffectiveCwd();
-        },
-        getVaultRoot: () => this.manager.vaultRoot,
-      },
-      onSend: async ({ text, images, attachment, agentHarness, remote }) => {
-        // Intercept contributed commands, then core model/goal/loop directives.
-        // Apply directives instead of sending command text to the agent verbatim.
-        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; projectId?: string; remote?: { daemonId: string; cwd: string } } = {
-          agentHarness,
-          remote,
-          projectId: this.selectedProjectId || undefined,
-        };
-        let titleText = text;
-        if (await handleContributedDispatch({
-          registry: this.plugin.slashCommands, text, images, attachment, agentHarness,
-          projectId: dispatchOpts.projectId, input: this.dispatchInput,
-        })) return;
-        const directive = parseDispatchDirective(
-          text,
-          this.plugin.settings.escalationEnabled ? this.plugin.settings.escalationKeyword : undefined,
-        );
-        if (directive) {
-          if (directive.error) {
-            new Notice(directive.error);
-            this.dispatchInput.setValue(text);
-            return;
-          }
-          if (directive.kind === 'model') {
-            if (!directive.rest && images.length === 0 && !attachment) {
-              new Notice('Include a prompt after /model — e.g. "/model opus fix the login bug"');
-              this.dispatchInput.setValue(text);
-              return;
-            }
-            dispatchOpts = { ...dispatchOpts, model: directive.model };
-            text = titleText = directive.rest;
-          } else if (directive.kind === 'goal') {
-            dispatchOpts = { ...dispatchOpts, goal: directive.goal };
-            text = goalKickoffMessage(directive.goal);
-            titleText = directive.goal;
-          } else if (directive.kind === 'loop') {
-            dispatchOpts = { ...dispatchOpts, loop: { intervalSeconds: directive.intervalSeconds } };
-            text = titleText = directive.prompt;
-          }
-          // 'escalate' directives always carry `error` (handled above) — no
-          // success case, so nothing to do here; fall through to dispatch
-          // the raw text as-is via the ThreadManager keyword path.
-        }
-
-        let messageText = buildMessageWithAttachment(text, attachment);
-
-        // Resolve @[[basename]] file mentions — append each file's content as context
-        const mentionRegex = /@\[\[([^\]]+)\]\]/g;
-        const mentions = [...messageText.matchAll(mentionRegex)].map(m => m[1]);
-        if (mentions.length > 0) {
-          const fileContextParts: string[] = [];
-          for (const basename of mentions) {
-            const file = this.app.vault.getMarkdownFiles().find(f => f.basename === basename);
-            if (file) {
-              try {
-                const content = await this.app.vault.cachedRead(file);
-                fileContextParts.push(`**File: ${file.path}**\n\`\`\`\n${content}\n\`\`\``);
-              } catch { /* skip */ }
-            }
-          }
-          if (fileContextParts.length > 0) {
-            messageText = messageText + '\n\n---\nReferenced files:\n\n' + fileContextParts.join('\n\n');
-          }
-        }
-
-        const titleHint = deriveDispatchTitle(titleText, attachment, images.length);
-        const threadId = await this.plugin.dispatchNewThread(
-          messageText,
-          images.length > 0 ? images : undefined,
-          titleHint,
-          dispatchOpts,
-        );
-        await this.plugin.openThreadInChatView(threadId);
-      },
-      getPttKey: () => this.plugin.settings.pttKey ?? '',
-    });
-    this.dispatchInput.mount(dispatchWrapper);
-  }
-
-  private addProjectSelector(container: HTMLElement): void {
-    const label = container.createEl('label', { cls: 'ct-dispatch-project' });
-    label.createSpan({ text: 'Project', cls: 'ct-dispatch-project-label' });
-    this.projectSelectEl = label.createEl('select', { attr: { 'aria-label': 'Dispatch Project' } });
-    this.projectSelectEl.addEventListener('change', () => {
-      if (this.projectSelectEl.value === NEW_PROJECT_VALUE) {
-        this.projectSelectEl.value = this.selectedProjectId;
-        this.plugin.openNewProjectSettings();
-        return;
-      }
-      this.selectedProjectId = this.projectSelectEl.value;
-    });
-    this.refreshProjectSelector();
-  }
-
-  private refreshProjectSelector(): void {
-    const select = this.projectSelectEl;
-    select.empty();
-    select.createEl('option', { text: 'Unassigned', attr: { value: '' } });
-    for (const project of this.manager.getProjects()) {
-      select.createEl('option', { text: project.name, attr: { value: project.id } });
-    }
-    select.createEl('option', { text: 'New Project…', attr: { value: NEW_PROJECT_VALUE } });
-    const selectionStillExists = !this.selectedProjectId || this.manager.getProject(this.selectedProjectId);
-    if (!selectionStillExists) this.selectedProjectId = '';
-    select.value = this.selectedProjectId;
   }
 
   private toggleSearch(): void {
@@ -491,7 +362,7 @@ export class KanbanView extends ItemView {
         emptyEl.createDiv({ text: 'No threads match your search.' });
       } else {
         emptyEl.createDiv({ text: 'No threads yet.' });
-        emptyEl.createDiv({ cls: 'ct-agents-empty-sub', text: 'Use the dispatch input below to start a task.' });
+        emptyEl.createDiv({ cls: 'ct-agents-empty-sub', text: 'Use New thread to start a task.' });
       }
       this.updateHeader(0, 0);
       return;
@@ -1273,7 +1144,6 @@ export class KanbanView extends ItemView {
 
   private handleEvent(threadId: string, event: ThreadEvent): void {
     if (event.type === 'projects_changed') {
-      if (this.projectSelectEl) this.refreshProjectSelector();
       this.scheduleRender();
       return;
     }
@@ -1283,6 +1153,11 @@ export class KanbanView extends ItemView {
     }
     if (event.type === 'active_thread_changed') {
       this.setActiveCard(threadId);
+      return;
+    }
+    if (event.type === 'active_thread_cleared') {
+      if (this.activeThreadId) this.rowEls.get(this.activeThreadId)?.removeClass('ct-agents-row-active');
+      this.activeThreadId = null;
       return;
     }
     if (

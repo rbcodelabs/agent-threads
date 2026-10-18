@@ -3235,11 +3235,6 @@
   padding: 8px 0;
 }
 
-/* AgentDashboard root — extra bottom clearance so the floating panel doesn't hide content */
-.ct-dashboard-root .ct-agents-list {
-  padding-bottom: 180px;
-}
-
 .ct-agents-empty {
   padding: 32px 16px;
   text-align: center;
@@ -3543,15 +3538,7 @@
     gap: 4px 8px;
   }
   .ct-agents-panel-meta > .ct-agents-count { flex: 1 1 auto; min-width: 0; }
-  .ct-dispatch-project { flex: 1 1 120px; min-width: 0; }
-  .ct-dispatch-project select { flex: 1 1 auto; min-width: 0; max-width: 100%; }
-  .ct-agents-project-trigger { max-width: 100%; }
   .ct-agents-panel-actions { margin-left: auto; flex: 0 0 auto; }
-
-  .ct-dashboard-root .ct-agents-floating-panel.ct-panel-collapsible:hover .ct-agents-panel-meta,
-  .ct-dashboard-root .ct-agents-floating-panel.ct-panel-collapsible:focus-within .ct-agents-panel-meta {
-    max-height: 112px;
-  }
 }
 
 .ct-agents-root.ct-mobile .ct-dashboard-agent-count,
@@ -3598,29 +3585,6 @@
   align-items: stretch;
   transition: background 0.1s ease, border-top-color 0.1s ease;
 }
-
-.ct-dispatch-project {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-}
-
-.ct-dispatch-project select {
-  max-width: 150px;
-  min-height: 28px;
-  padding: 2px 24px 2px 7px;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-normal);
-  background: var(--background-primary-alt, var(--background-primary));
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-}
-
-.ct-agents-root.ct-mobile .ct-dispatch-project-label { display: none; }
-.ct-agents-root.ct-mobile .ct-dispatch-project select { max-width: 140px; min-height: 44px; }
 
 /* Image chip strip inside the dispatch area */
 .ct-agents-dispatch-chips {
@@ -6188,30 +6152,6 @@
 
 /* ── Kanban Board ──────────────────────────────────────────────────────── */
 
-.ct-kanban-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  flex-shrink: 0;
-  padding: 0;
-  transition: color 0.15s, background 0.15s;
-}
-.ct-kanban-toggle:hover {
-  color: var(--text-normal);
-  background: var(--background-modifier-hover);
-}
-.ct-kanban-toggle svg {
-  width: 15px;
-  height: 15px;
-}
-
 .ct-kanban-groupby {
   display: flex;
   align-items: center;
@@ -7197,81 +7137,16 @@ textarea.ct-settings-wide-input {
   border-color: var(--background-modifier-border-hover, var(--interactive-accent));
 }
 
-/* The dispatch-root inside the panel gets the agents-dispatch padding */
-.ct-kanban-dispatch .ct-dispatch-root {
-  padding: 8px 10px;
-}
-
-/* Strip Obsidian's theme button chrome (border, background, shadow) for all
-   buttons inside the kanban dispatch panel — same reset as .ct-root button. */
-.ct-kanban-dispatch button {
+/* Panel buttons: strip the theme's button chrome (the New thread button re-applies its accent). */
+.ct-kanban-dispatch button:not(.ct-new-thread-btn) {
   box-shadow: none;
   background: transparent;
   border: none;
 }
 
-/* Re-apply the send button's accent — it needs to stay prominent. */
-.ct-kanban-dispatch .ct-send-btn {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-}
-.ct-kanban-dispatch .ct-send-btn:hover {
-  background: var(--interactive-accent-hover);
-}
-/* Stop button shares this panel and its own (0,1,1) `button` reset, but has no
-   2-class context rule the way send-btn does, so re-assert its fill here. */
-.ct-kanban-dispatch .ct-stop-btn {
-  background: var(--color-red, #e05252);
-  color: white;
-}
-
-/* ── Inline layout (used by Kanban dispatch) ───────────────────────────────── */
-
-/* Single row: [left-actions] [textarea] [right-actions] */
-.ct-dispatch-inline-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-/* Left-side button group (attach + mic) */
-.ct-dispatch-left-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-/* Inline textarea: borderless + transparent — the panel is the visual container */
-.ct-kanban-dispatch .ct-agents-dispatch-input {
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  padding: 6px 4px;
-  min-height: 34px;
-  max-height: 120px;
-  overflow-y: auto;
-}
-
-.ct-kanban-dispatch .ct-agents-dispatch-input:focus {
-  outline: none;
-  box-shadow: none;
-}
-
-/* Right-side actions column in inline mode: just send/stop */
-.ct-dispatch-inline-row .ct-input-actions {
-  padding-left: 2px;
-}
-
-/* Extra bottom padding on the board so cards don't hide under the panel (meta strip + dispatch) */
+/* Extra bottom padding on the board so cards don't hide under the floating action panel */
 .ct-kanban-board {
-  padding-bottom: 130px;
-}
-
-/* Drag-over highlight for the kanban dispatch panel */
-.ct-kanban-dispatch .ct-drag-over {
-  border-color: var(--interactive-accent);
-  background: color-mix(in srgb, var(--interactive-accent) 8%, var(--background-secondary));
+  padding-bottom: 76px;
 }
 
 /* ── Shared panel meta strip (AgentDashboard + KanbanView) ─────────────── */
@@ -7292,80 +7167,39 @@ textarea.ct-settings-wide-input {
   gap: 2px;
 }
 
-/* ── AgentDashboard floating panel (ct-floating-panel + ct-agents-floating-panel) ── */
+/* ── "New thread" button (AgentDashboard toolbar + Kanban panel) ───────────── */
 
-/* Give the panel breathing room from the sidebar walls (mirrors ct-panel-wrapper padding) */
-.ct-agents-floating-panel {
-  margin: 0 8px 8px;
+.ct-new-thread-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 12px;
+  border-radius: 8px;
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium, 500);
+  cursor: pointer;
+  white-space: nowrap;
 }
-
-/* Button chrome reset — floating panel provides the visual container */
-.ct-agents-floating-panel button {
-  box-shadow: none;
-  background: transparent;
-  border: none;
-}
-
-/* Dashboard Project picker mirrors the compact context pill in Chat. The
-   compound selector restores its chrome after the panel's button reset. */
-.ct-agents-floating-panel button.ct-agents-project-trigger {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: min(65%, 240px);
-  min-height: 28px;
-  padding: 2px 7px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 9px;
-  background: transparent;
-  color: var(--text-muted);
-}
-
-.ct-agents-floating-panel button.ct-agents-project-trigger:hover {
-  color: var(--text-normal);
-  background: var(--background-modifier-hover);
-}
-
-.ct-agents-root.ct-mobile .ct-agents-floating-panel button.ct-agents-project-trigger {
-  min-height: 44px;
-  max-width: min(70%, 240px);
-}
-
-/* Re-apply accent for send button */
-.ct-agents-floating-panel .ct-send-btn {
+.ct-kanban-dispatch .ct-new-thread-btn {
   background: var(--interactive-accent);
   color: var(--text-on-accent);
-}
-
-.ct-agents-floating-panel .ct-send-btn:hover {
-  background: var(--interactive-accent-hover);
-}
-
-/* Re-apply red for stop button (no 2-class context rule otherwise). */
-.ct-agents-floating-panel .ct-stop-btn {
-  background: var(--color-red, #e05252);
-  color: white;
-}
-
-/* Padding for the dispatch input section within the floating panel */
-.ct-agents-floating-panel .ct-dispatch-root {
-  padding: 6px 8px 8px;
-}
-
-/* Borderless + transparent textarea — the floating panel is the visual container */
-.ct-agents-floating-panel .ct-agents-dispatch-input {
-  background: transparent;
   border: none;
-  border-radius: 0;
-  padding: 6px 4px;
-  min-height: 34px;
-  max-height: 120px;
-  overflow-y: auto;
-}
-
-.ct-agents-floating-panel .ct-agents-dispatch-input:focus {
-  outline: none;
   box-shadow: none;
 }
+.ct-kanban-dispatch .ct-new-thread-btn:hover { background: var(--interactive-accent-hover); }
+.ct-new-thread-btn-icon { display: inline-flex; }
+.ct-new-thread-btn-icon svg { width: 15px; height: 15px; }
+.ct-kanban-dispatch .ct-new-thread-btn {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  box-shadow: none;
+  margin-right: 4px;
+}
+.ct-kanban-dispatch .ct-new-thread-btn:hover { background: var(--interactive-accent-hover); }
+.ct-agents-root.ct-mobile .ct-new-thread-btn { min-height: 44px; }
 
 /* ── Skills Manager ────────────────────────────────────────────────────────── */
 
@@ -8324,43 +8158,6 @@ body.ct-skills-resizing {
   transition: max-height 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
 }
 
-/* — Left actions in inline layout (KanbanView: attach + mic) ────────────── */
-.ct-kanban-dispatch.ct-panel-collapsible .ct-dispatch-left-actions {
-  max-width: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transition: max-width 0.2s ease, opacity 0.16s ease;
-}
-
-.ct-kanban-dispatch.ct-panel-collapsible:hover .ct-dispatch-left-actions,
-.ct-kanban-dispatch.ct-panel-collapsible:focus-within .ct-dispatch-left-actions {
-  max-width: 80px;
-  opacity: 1;
-  pointer-events: auto;
-  transition: max-width 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
-}
-
-/* — Attach + mic in inputActions column (AgentDashboard: no-footer path) ── */
-.ct-agents-floating-panel.ct-panel-collapsible .ct-input-actions .ct-agents-dispatch-attach-btn,
-.ct-agents-floating-panel.ct-panel-collapsible .ct-input-actions .ct-mic-btn {
-  max-height: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transition: max-height 0.2s ease, opacity 0.16s ease;
-}
-
-.ct-agents-floating-panel.ct-panel-collapsible:hover .ct-input-actions .ct-agents-dispatch-attach-btn,
-.ct-agents-floating-panel.ct-panel-collapsible:hover .ct-input-actions .ct-mic-btn,
-.ct-agents-floating-panel.ct-panel-collapsible:focus-within .ct-input-actions .ct-agents-dispatch-attach-btn,
-.ct-agents-floating-panel.ct-panel-collapsible:focus-within .ct-input-actions .ct-mic-btn {
-  max-height: 30px;
-  opacity: 1;
-  pointer-events: auto;
-  transition: max-height 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
-}
-
 /* — Status rail (ThreadsView: active-work / tool status pills) ──────────── */
 .ct-floating-panel.ct-panel-collapsible .ct-status-rail {
   max-height: 0;
@@ -8456,46 +8253,17 @@ body.ct-skills-resizing {
   transition: max-height 0.25s ease 0.05s, min-height 0.25s ease 0.05s, padding 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
 }
 
-/* — Meta strip (KanbanView + AgentDashboard: thread count + search/actions) ─ */
-/* Zero padding AND border-width (color alone still leaves a 1px gap)          */
-.ct-kanban-dispatch.ct-panel-collapsible .ct-agents-panel-meta,
-.ct-agents-floating-panel.ct-panel-collapsible .ct-agents-panel-meta {
-  max-height: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  border-bottom-width: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transition: max-height 0.2s ease, padding 0.2s ease, border-width 0.2s ease, opacity 0.16s ease;
-}
-
-.ct-kanban-dispatch.ct-panel-collapsible:hover .ct-agents-panel-meta,
-.ct-kanban-dispatch.ct-panel-collapsible:focus-within .ct-agents-panel-meta,
-.ct-agents-floating-panel.ct-panel-collapsible:hover .ct-agents-panel-meta,
-.ct-agents-floating-panel.ct-panel-collapsible:focus-within .ct-agents-panel-meta {
-  max-height: 50px;
-  padding-top: 6px;
-  padding-bottom: 6px;
-  border-bottom-width: 1px;
-  opacity: 1;
-  pointer-events: auto;
-  transition: max-height 0.25s ease 0.05s, padding 0.25s ease 0.05s, border-width 0.2s ease 0.05s, opacity 0.2s ease 0.07s;
-}
-
-/* True mobile panels cannot rely on hover to reveal the Project selector. */
-.ct-agents-root.ct-mobile .ct-kanban-dispatch.ct-panel-collapsible .ct-agents-panel-meta,
-.ct-agents-root.ct-mobile .ct-agents-floating-panel.ct-panel-collapsible .ct-agents-panel-meta {
-    max-height: 112px;
+/* — Meta strip (KanbanView: thread count + New thread / group / search) ──── */
+/* The Kanban panel holds only this strip now, so it is always visible (no hover reveal). */
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-agents-panel-meta {
     padding-top: 6px;
     padding-bottom: 6px;
-    border-bottom-width: 1px;
-    opacity: 1;
-    pointer-events: auto;
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 4px 8px;
 }
+.ct-kanban-dispatch .ct-agents-panel-meta { border-bottom-width: 0; }
+.ct-kanban-dispatch .ct-agents-search-bar:not(.ct-hidden) { border-top: 1px solid var(--background-modifier-border); }
 
 .ct-agents-root.ct-mobile .ct-agents-panel-meta > .ct-agents-count { display: block; }
 
@@ -10350,4 +10118,164 @@ button.ct-agent-crumb:focus-visible {
   word-break: break-all;
   user-select: text;
   margin-bottom: 12px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   New-conversation mode (ThreadsView)
+   The thread composer and its status chrome are swapped for the dispatch
+   composer; the thread is created by the first send.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.ct-floating-panel > .ct-new-conv-row { display: none; }
+
+.ct-floating-panel.ct-new-conversation > .ct-input-row:not(.ct-new-conv-row),
+.ct-floating-panel.ct-new-conversation > .ct-panel-context,
+.ct-floating-panel.ct-new-conversation > .ct-git-diff-bar,
+.ct-floating-panel.ct-new-conversation > .ct-bc-control-chip { display: none; }
+
+.ct-floating-panel.ct-new-conversation > .ct-new-conv-row { display: flex; }
+
+/* The Project chip lives in the footer; keep it visible at rest in this mode
+   (the footer is hover-only in a normal thread) so the choice is discoverable. */
+.ct-floating-panel.ct-new-conversation .ct-input-footer {
+  max-height: 50px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ct-new-conv-empty .ct-new-conv-sub { max-width: 34ch; text-align: center; }
+
+.ct-new-conv-cancel {
+  margin-top: 14px;
+  padding: 4px 12px;
+  border-radius: 8px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ct-new-conv-cancel:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Project picker (ProjectPicker.ts) — filter box, sort toggle, listbox
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.ct-project-picker {
+  position: fixed;
+  z-index: var(--layer-menu, 65);
+  max-width: calc(100vw - 16px);
+  display: flex;
+  flex-direction: column;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+}
+
+.ct-project-picker-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ct-project-picker-search {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.ct-project-picker-search-icon {
+  position: absolute;
+  left: 8px;
+  display: inline-flex;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+.ct-project-picker-search-icon svg { width: 14px; height: 14px; }
+
+.ct-project-picker .ct-project-picker-input {
+  width: 100%;
+  min-height: 28px;
+  padding: 3px 8px 3px 28px;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: none;
+}
+.ct-project-picker .ct-project-picker-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 25%, transparent);
+}
+
+.ct-project-picker-sort {
+  flex: 0 0 auto;
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--background-modifier-hover);
+  border-radius: 7px;
+}
+
+.ct-project-picker .ct-project-picker-sort-btn {
+  min-height: 24px;
+  padding: 1px 8px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  box-shadow: none;
+  cursor: pointer;
+}
+.ct-project-picker .ct-project-picker-sort-btn.is-active {
+  color: var(--text-normal);
+  background: var(--background-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.ct-project-picker-list {
+  max-height: min(320px, 50vh);
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.ct-project-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+.ct-project-picker-row.is-highlighted { background: var(--background-modifier-hover); }
+.ct-project-picker-row-icon { display: inline-flex; color: var(--text-muted); flex: 0 0 auto; }
+.ct-project-picker-row-icon svg { width: 15px; height: 15px; }
+.ct-project-picker-row-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-project-picker-row-check { display: inline-flex; color: var(--interactive-accent); flex: 0 0 auto; }
+.ct-project-picker-row-check svg { width: 14px; height: 14px; }
+.ct-project-picker-row-new { color: var(--text-muted); }
+
+.ct-project-picker-sep { height: 1px; margin: 4px 2px; background: var(--background-modifier-border); }
+.ct-project-picker-empty { padding: 10px 8px; font-size: var(--font-ui-smaller); color: var(--text-muted); text-align: center; }
+
+@media (pointer: coarse) {
+  .ct-project-picker-row { min-height: 44px; }
+  .ct-project-picker .ct-project-picker-sort-btn { min-height: 36px; }
+  .ct-project-picker .ct-project-picker-input { min-height: 40px; }
 }

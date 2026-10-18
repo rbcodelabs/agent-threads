@@ -20,7 +20,7 @@ import { splitTextWithUrls, isHttpUrl, urlChipLabel } from './urlLinks';
 import { effectiveExtraEnv } from './types';
 import { parseLoopArgs, formatLoopInterval } from './loopUtils';
 import { buildClaudeModelOptions, aliasLabel, activeModelLabel, formatModelId, type ModelOption } from './modelOptions';
-import { THREAD_BUILTIN_COMMANDS, THREAD_ARG_COMPLETIONS, MODEL_ALIASES, goalKickoffMessage, resolveCreatePrMessage, escalationCommand } from './slashCommands';
+import { THREAD_BUILTIN_COMMANDS, THREAD_ARG_COMPLETIONS, DISPATCH_BUILTIN_COMMANDS, DISPATCH_ARG_COMPLETIONS, MODEL_ALIASES, goalKickoffMessage, resolveCreatePrMessage, escalationCommand } from './slashCommands';
 import { isSetAsGoalEligible } from './goalContext';
 import { isRetryEligible } from './retryMessage';
 import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo } from './gitDiffUtils';
@@ -38,7 +38,7 @@ import { isPermissionPreApproved, normalizeToolCallStyle, type ToolPathContext }
 import { applyToolCallStyleClass, refreshToolRowByUseId, renderToolGroupShell, renderToolRow } from './toolCallDom';
 import { groupToolRuns, liveToolGroupKey, mergeAdjacentToolOnlyMessages, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
-import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
+import { DispatchInput, type DispatchPayload, type ExtraSkillDir } from './DispatchInput';
 import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, execEnv, splitErrorMessage } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
 import { reauthenticateAws } from './awsReauth';
@@ -71,6 +71,10 @@ import { VisualizeMountManager, resolveVisualizeTokens, toFileUrl, type Visualiz
 import { deleteScheduledActivity, scheduledActivityForThread, scheduledActivitySummary, type ScheduledActivity } from './scheduledActivity';
 import { ConversationViewPlacementState, resolveHostRestoredActiveThread } from './conversationFirstPlacement';
 import { pickStickyUserIndex, truncateStickyText } from './stickyUserMessage';
+import { openProjectPicker } from './projectPickerHost';
+import type { ProjectPicker } from './ProjectPicker';
+import { dispatchNewConversation } from './newConversationDispatch';
+import { seedDocumentChatDraft } from './documentChat';
 
 export const VIEW_TYPE = 'claude-threads:chat';
 
@@ -137,6 +141,17 @@ export class ThreadsView extends ItemView {
   private mainEl!: HTMLElement;
   private messagesEl!: HTMLElement;
   private inputRowEl!: HTMLElement;
+  /**
+   * New-conversation mode: no thread exists yet. The thread composer is swapped for
+   * `newConvInput` (project chip, dispatch slash commands, harness / run-on picker) and
+   * the thread is created by the first send. `returnTo` is the thread to go back to on Cancel.
+   */
+  private newConv: { returnTo: string | null } | null = null;
+  /** Project chosen for the next new conversation ('' = none). Survives leaving the mode so a half-typed draft keeps its project. */
+  private newConvProjectId = '';
+  private newConvInput: DispatchInput | null = null;
+  private newConvRowEl: HTMLElement | null = null;
+  private projectPicker: ProjectPicker | null = null;
 
   // ── Sub-agent surfaces ────────────────────────────────────────────────────
   /** Always-visible status pill in the composer footer; hidden when no agents exist. */
@@ -422,6 +437,7 @@ export class ThreadsView extends ItemView {
   }
 
   getDisplayText(): string {
+    if (this.newConv) return 'New conversation';
     if (this.activeThreadId) {
       const thread = this.manager.getThread(this.activeThreadId);
       if (thread) return thread.title;
@@ -463,6 +479,8 @@ export class ThreadsView extends ItemView {
       (id) => Boolean(this.manager.getThread(id)),
     );
     if (!activeThreadId) return;
+    // A late layout restore must not pull the panel out of a conversation being composed.
+    if (this.newConv) return;
     this.activeThreadId = activeThreadId;
     if (this.rootEl) await this.setActiveThread(activeThreadId);
   }
@@ -751,7 +769,10 @@ export class ThreadsView extends ItemView {
   private handleThreadListEvent(threadId: string, event: ThreadEvent): void {
     if (event.type === 'threads_loaded' || event.type === 'projects_changed') {
       this.renderProjectBar();
-      if (event.type === 'projects_changed') this.renderComposerContext();
+      if (event.type === 'projects_changed') {
+        this.renderComposerContext();
+        this.refreshNewConversationContext();
+      }
     }
     if (event.type === 'thread_deleted') this.repairSelectionAfterDelete(threadId);
   }
@@ -812,6 +833,10 @@ export class ThreadsView extends ItemView {
     this.closeAgentPopover();
     this.closeSchedulePopover();
     this.closeTaskPopover();
+    this.projectPicker?.close(false);
+    this.projectPicker = null;
+    this.newConvInput?.destroy();
+    this.newConvInput = null;
     this.agentScroll.clear();
     this.dispatchInput?.destroy();
     // Leaves an IntersectionObserver and a window-level message listener
@@ -1132,7 +1157,7 @@ export class ThreadsView extends ItemView {
   private renderTitleBar(): void {
     if (!this.titleTextEl) return;
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    this.titleTextEl.textContent = thread?.title ?? 'Agent Threads';
+    this.titleTextEl.textContent = this.newConv ? 'New conversation' : (thread?.title ?? 'Agent Threads');
 
     // Show the ephemeral badge when the active thread is marked ephemeral
     if (this.ephemeralBadgeEl) {
@@ -1226,6 +1251,198 @@ export class ThreadsView extends ItemView {
   }
 
 
+  // ---------------------------------------------------------------------------
+  // New-conversation mode
+  // ---------------------------------------------------------------------------
+
+  /** True once buildUI has run, i.e. startNewConversation can act. */
+  isReady(): boolean {
+    return Boolean(this.floatingPanelEl && this.titleEl);
+  }
+
+  /** True while the panel is composing a conversation that has no thread yet. */
+  isNewConversation(): boolean {
+    return this.newConv !== null;
+  }
+
+  /**
+   * Swap the panel into new-conversation mode: the composer gets a Project chip,
+   * the dispatch slash commands and the harness / run-on picker, and the thread
+   * is created by the first send (so abandoning the mode leaves nothing behind).
+   *
+   * `projectId` preselects a Project; `mention` seeds an `@[[note]]` mention
+   * (Chat about this document); `draft` pre-fills the text.
+   */
+  async startNewConversation(opts: { projectId?: string; draft?: string; mention?: string } = {}): Promise<void> {
+    // Built on first use so the ordinary thread view carries no second composer in its DOM.
+    if (!this.newConvInput && this.floatingPanelEl) this.buildNewConversationComposer(this.floatingPanelEl);
+    const composer = this.newConvInput;
+    if (!composer) return;
+    if (!this.newConv) {
+      // A fresh entry starts clean: a command pill or draft left from an earlier
+      // session (abandoned, or a failed directive) must not leak into this one.
+      composer.setValue('');
+      composer.clearAttachments();
+      this.newConvProjectId = '';
+    }
+    if (opts.projectId !== undefined) {
+      this.newConvProjectId = this.manager.getProject(opts.projectId) ? opts.projectId : '';
+    } else if (!this.manager.getProject(this.newConvProjectId)) {
+      this.newConvProjectId = '';
+    }
+    if (!this.newConv) {
+      this.messageContentController?.abort();
+      this.messageContentManager?.reset();
+      this.closeSwitcherPanel();
+      this.closeAgentPopover();
+      this.closeSchedulePopover();
+      this.closeTaskPopover();
+      this.rememberAgentScroll();
+      // Keep the thread we are leaving: its unsent draft is saved and Cancel returns to it.
+      this.saveDraftToThread(this.activeThreadId);
+      this.newConv = { returnTo: this.activeThreadId };
+      this.activeThreadId = null;
+      this.floatingPanelEl?.addClass('ct-new-conversation');
+      this.manager.notifyActiveThreadCleared();
+      this.setRunningState(false);
+      this.renderTitleBar();
+      this.renderManagerNotesPanel();
+      this.renderGitDiffBar();
+      await this.renderMessages();
+      this.refreshLeafHeader();
+    }
+    if (opts.draft) composer.setValue(opts.draft);
+    if (opts.mention) {
+      composer.setValue(seedDocumentChatDraft(composer.getValue(), opts.mention));
+    }
+    this.refreshNewConversationContext();
+    composer.focus();
+  }
+
+  /** Drop new-conversation chrome. Called by setActiveThread() — every selection change funnels through it. */
+  private leaveNewConversationUi(): void {
+    if (!this.newConv) return;
+    this.newConv = null;
+    this.projectPicker?.close(false);
+    this.projectPicker = null;
+    this.floatingPanelEl?.removeClass('ct-new-conversation');
+  }
+
+  private cancelNewConversation(): void {
+    const target = this.newConv?.returnTo;
+    if (target && this.manager.getThread(target)) {
+      void this.setActiveThread(target);
+      return;
+    }
+    const fallback = this.manager.getThreads()[0];
+    if (fallback) void this.setActiveThread(fallback.id);
+  }
+
+  private buildNewConversationComposer(floatingPanel: HTMLElement): void {
+    this.newConvRowEl = floatingPanel.createDiv({ cls: 'ct-input-row ct-new-conv-row', attr: { 'data-testid': 'new-conversation-composer' } });
+    this.newConvInput = new DispatchInput({
+      app: this.app,
+      placeholder: 'Describe what you want done…',
+      inputCls: 'ct-input',
+      sendBtnText: '↵',
+      sendBtnTitle: 'Start conversation',
+      showThisMention: true,
+      showContextChip: true,
+      onContextClick: (event) => this.openNewConversationProjectPicker(event),
+      captureLongPaste: true,
+      builtinCommands: () => {
+        const esc = escalationCommand(this.plugin.settings, true);
+        const commands = [...DISPATCH_BUILTIN_COMMANDS, ...(this.plugin.slashCommands?.list('dispatch') ?? [])];
+        return esc ? [...commands, esc] : commands;
+      },
+      subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
+      argCompletions: DISPATCH_ARG_COMPLETIONS,
+      peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
+      harnessPicker: {
+        initialHarness: this.plugin.settings.agentHarness ?? 'claude',
+        getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
+        localDaemonOffer: { available: () => this.plugin.isLocalDaemonSetupOffered(), onSetUp: () => this.plugin.openLocalDaemonSettings() },
+        getFolderSource: () => this.plugin.remoteFolders ?? undefined,
+        getLocalCwd: () => {
+          const project = this.manager.getProject(this.newConvProjectId);
+          return project ? this.manager.getProjectCwd(project) : this.plugin.getEffectiveCwd();
+        },
+        getVaultRoot: () => this.manager.vaultRoot,
+      },
+      onSend: (payload) => this.sendNewConversation(payload),
+      getPttKey: () => this.plugin.settings.pttKey ?? '',
+    });
+    this.newConvInput.mount(this.newConvRowEl);
+    this.refreshNewConversationContext();
+  }
+
+  private refreshNewConversationContext(): void {
+    if (!this.newConvInput) return;
+    if (!this.manager.getProject(this.newConvProjectId)) this.newConvProjectId = '';
+    const project = this.manager.getProject(this.newConvProjectId);
+    const name = project?.name ?? 'No project';
+    this.newConvInput.setContext(name, `Project: ${name}. Click to change.`);
+  }
+
+  private openNewConversationProjectPicker(event: MouseEvent): void {
+    const anchor = this.pickerAnchor(event);
+    if (this.projectPicker?.isOpen) {
+      this.projectPicker.close(false);
+      this.projectPicker = null;
+      return;
+    }
+    this.projectPicker = openProjectPicker(this.plugin, {
+      anchor,
+      selectedId: this.newConvProjectId || null,
+      noneLabel: 'No Project',
+      onSelect: (projectId) => {
+        this.newConvProjectId = projectId ?? '';
+        this.refreshNewConversationContext();
+        this.newConvInput?.focus();
+      },
+    });
+  }
+
+  private async sendNewConversation(payload: DispatchPayload): Promise<void> {
+    const conv = this.newConv;
+    const input = this.newConvInput;
+    if (!conv || !input) return;
+    const threadId = await dispatchNewConversation({
+      app: this.app,
+      settings: this.plugin.settings,
+      slashCommands: this.plugin.slashCommands,
+      dispatchNewThread: (text, images, titleHint, opts) => this.plugin.dispatchNewThread(text, images, titleHint, opts),
+      input,
+      projectId: this.newConvProjectId,
+    }, payload);
+    if (!threadId) return;
+    this.newConvProjectId = '';
+    // A contributed command may already have navigated elsewhere; only switch if we are still composing.
+    if (this.newConv === conv) await this.setActiveThread(threadId);
+    this.refreshNewConversationContext();
+  }
+
+  private renderNewConversationEmptyState(): void {
+    const empty = this.messagesEl.createDiv({ cls: 'ct-empty ct-new-conv-empty', attr: { 'data-testid': 'new-conversation' } });
+    const iconEl = empty.createDiv('ct-empty-icon');
+    setIcon(iconEl, 'square-pen');
+    empty.createEl('p', { cls: 'ct-empty-title', text: 'New conversation' });
+    empty.createEl('p', {
+      cls: 'ct-empty-sub ct-new-conv-sub',
+      text: 'Pick a project below, then describe the task. The thread is created when you send.',
+    });
+    empty.createEl('p', { cls: 'ct-empty-hint', text: 'Enter to send · Shift+Enter for newline · / for commands' });
+    const returnTo = this.newConv?.returnTo ? this.manager.getThread(this.newConv.returnTo) : undefined;
+    if (returnTo) {
+      const back = empty.createEl('button', {
+        cls: 'ct-new-conv-cancel',
+        text: `Back to ${returnTo.title}`,
+        attr: { type: 'button' },
+      });
+      back.addEventListener('click', () => this.cancelNewConversation());
+    }
+  }
+
   focusThread(id: string): Promise<void> {
     return this.setActiveThread(id);
   }
@@ -1312,7 +1529,8 @@ export class ThreadsView extends ItemView {
     this.closeSchedulePopover();
     this.closeTaskPopover();
     this.rememberAgentScroll();
-    const previousId = this.activeThreadId;
+    const previousId = this.activeThreadId ?? this.newConv?.returnTo ?? null;
+    this.leaveNewConversationUi();
 
     // Mark the thread as reviewed when the user explicitly opens it.
     // This covers all entry paths: switcher dropdown clicks, focusThread()
@@ -2679,6 +2897,12 @@ export class ThreadsView extends ItemView {
     return !isOrchestratorThread(threadId, this.orchestratorContext());
   }
 
+  /** The element to anchor a popover to: the control that was clicked, else the composer. */
+  private pickerAnchor(event: MouseEvent): HTMLElement {
+    const target = event.currentTarget ?? event.target;
+    return target instanceof HTMLElement ? target : (this.moreBtn ?? this.inputRowEl);
+  }
+
   /**
    * Applies a Project move from the ⋯ menu. Uses alignCwd so the thread lands in the
    * Project's working directory, which also starts a fresh session — announced in the
@@ -3430,6 +3654,10 @@ export class ThreadsView extends ItemView {
     this.browserRowEls.clear();
     this.browser?.resetForRebuild();
 
+    if (this.newConv) {
+      this.renderNewConversationEmptyState();
+      return;
+    }
     if (!this.activeThreadId) return;
     const thread = this.manager.getThread(this.activeThreadId);
     if (!thread) return;
@@ -7139,47 +7367,13 @@ export class ThreadsView extends ItemView {
     return `${Math.floor(diff / 86_400_000)}d ago`;
   }
 
-  async openNewThread(event?: MouseEvent): Promise<void> {
-    const projects = this.manager.getProjects();
-
-    if (projects.length === 0) {
-      await this.createThreadWithProject(null);
-      return;
-    }
-
-    const menu = new Menu();
-    menu.addItem(item =>
-      item.setTitle('New chat')
-        .setIcon('square-pen')
-        .onClick(() => this.createThreadWithProject(null)),
-    );
-    menu.addSeparator();
-    for (const project of projects) {
-      menu.addItem(item =>
-        item.setTitle(project.name)
-          .setIcon('folder')
-          .onClick(() => this.createThreadWithProject(project.id)),
-      );
-    }
-
-    if (event) menu.showAtMouseEvent(event);
-    else menu.showAtPosition({ x: 0, y: 0 });
-  }
-
-  private async createThreadWithProject(projectId: string | null): Promise<void> {
-    let cwd = this.plugin.getEffectiveCwd();
-    if (projectId) {
-      const project = this.manager.getProject(projectId);
-      if (project) cwd = this.manager.getProjectCwd(project);
-    }
-    const thread = this.manager.createThread(
-      `Thread ${this.manager.getThreads().length + 1}`,
-      cwd,
-      projectId ?? undefined,
-    );
-    await this.plugin.saveSettings();
-    this.renderProjectBar(); // update thread count badges
-    void this.setActiveThread(thread.id);
+  /**
+   * "New thread" entry point (header button, switcher footer, Agents List, Kanban,
+   * command palette). Opens new-conversation mode; no thread is created until the
+   * first message is sent.
+   */
+  async openNewThread(_event?: MouseEvent): Promise<void> {
+    await this.startNewConversation();
   }
 
   navigateTab(direction: 1 | -1): void {

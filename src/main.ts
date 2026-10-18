@@ -1780,10 +1780,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.addCommand({
       id: 'new-claude-thread',
       name: 'New Claude Thread',
-      callback: async () => {
-        await this.activateAgentView();
-        this.getAgentDashboard()?.focusDispatchInput();
-      },
+      callback: () => this.openNewConversation(),
     });
 
     this.addCommand({
@@ -2664,6 +2661,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       setRemoteDaemons: (next) => { this.settings.remoteDaemons = next; },
       saveSettings: () => this.saveSettings(),
       onRegistryChanged: () => this.daemonRegistry?.refresh(),
+      projectFolders: () => this.projectWorkFolders(),
       externalRoots: () => this.listExternalMountRoots(),
       createSocket: createPluginWebSocketFactory(),
       log: (message) => debugLog(message),
@@ -3626,15 +3624,51 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
   }
 
+  private daemonUpdateNotice: Notice | null = null;
+
+  /**
+   * After a Project is saved: if the managed daemon's mounts no longer match what would be created now (a new
+   * external-folder Project under "share all Project folders"), offer a one-click Update. Never automatic, because
+   * Update recreates the container under any thread running on it.
+   */
+  async offerDaemonUpdateIfMountsChanged(): Promise<void> {
+    if (!Platform.isDesktopApp || !this.localDaemon || !this.settings.localDaemon?.enabled || this.daemonUpdateNotice) return;
+    try {
+      const snap = await this.localDaemon.snapshot();
+      if (!snap.assessment.drift) return;
+      const controller = this.localDaemon;
+      const frag = document.createDocumentFragment();
+      frag.createDiv({ text: 'The local daemon needs an update to share this Project\'s folder. Updating restarts it, which interrupts threads running on it.' });
+      const notice = new Notice(frag, 0);
+      this.daemonUpdateNotice = notice;
+      const dismiss = () => { notice.hide(); this.daemonUpdateNotice = null; };
+      const row = frag.createDiv();
+      const go = row.createEl('button', { text: 'Update daemon', cls: 'mod-cta' });
+      go.addEventListener('click', () => {
+        dismiss();
+        const progress = new Notice('Updating the local daemon…', 0);
+        controller.update().then(() => new Notice('Local daemon updated.'), (err: unknown) => new Notice(`Local daemon update failed: ${err instanceof Error ? err.message : String(err)}`)).finally(() => progress.hide());
+      });
+      row.createEl('button', { text: 'Later' }).addEventListener('click', dismiss);
+    } catch {
+      // Advisory only: Settings → Remote → Local daemon still shows the drift hint.
+    }
+  }
+
+  /** Each Project's working folder (its folder override, or its vault folder); the daemon vets and drops the ones it already mounts. */
+  private projectWorkFolders(): string[] {
+    return this.manager.getProjects().map((p) => this.manager.getProjectCwd(p));
+  }
+
   /** The managed daemon's shared folders (Settings) that exist, as host folder -> /work/<name>. */
   private sharedFolderMounts(): Array<{ host: string; name: string }> {
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter) || Platform.isMobile) return [];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { resolveWorkFolders } = require('./localDaemon/spec') as typeof import('./localDaemon/spec');
+    const { resolveWorkFolders, sharedFolderList } = require('./localDaemon/spec') as typeof import('./localDaemon/spec');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
-    return resolveWorkFolders(this.settings.localDaemon?.folders, {
+    return resolveWorkFolders(sharedFolderList(this.settings.localDaemon, () => this.projectWorkFolders()), {
       vaultPath: adapter.getBasePath(),
       isDirectory: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
     });
@@ -3873,18 +3907,35 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   /**
    * Single handler behind all three "Chat about this document" entry points:
-   * open the Agents List and seed its dispatch composer with an `@[[doc]]`
-   * mention. Submitting the composer is what creates the new thread, so the
-   * user gets to type the actual question first.
+   * open the conversation panel in new-conversation mode with an `@[[doc]]`
+   * mention seeded. Submitting the composer is what creates the new thread, so
+   * the user gets to type the actual question first.
    */
   async startDocumentChat(file: TFile): Promise<void> {
-    await this.activateAgentView();
-    const dashboard = this.getAgentDashboard();
-    if (!dashboard) {
-      new Notice('Could not open the Agents List to chat about this document.');
-      return;
+    if (!(await this.openNewConversation({ mention: file.basename }))) {
+      new Notice('Could not open the conversation panel to chat about this document.');
     }
-    dashboard.seedDocumentChat(file.basename);
+  }
+
+  /**
+   * Reveal the conversation panel in new-conversation mode (the single entry
+   * point behind the "New thread" buttons in the Agents List and Kanban board,
+   * the command palette, and "Chat about this document"). No thread exists
+   * until the first message is sent. Returns false if the panel could not open.
+   */
+  async openNewConversation(opts: { projectId?: string; draft?: string; mention?: string } = {}): Promise<boolean> {
+    // Right after launch the workspace may not have restored its leaves yet, and a freshly
+    // created view finishes building asynchronously; wait for both rather than failing.
+    await new Promise<void>((resolve) => this.app.workspace.onLayoutReady(() => resolve()));
+    await this.activateView();
+    let view = this.getView();
+    for (let attempt = 0; attempt < 50 && !view?.isReady(); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      view = this.getView();
+    }
+    if (!view?.isReady()) return false;
+    await view.startNewConversation(opts);
+    return true;
   }
 
   /**
@@ -3912,7 +3963,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   getAgentDashboard(): AgentDashboard | null {
     const leaf = this.app.workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
     const view = leaf?.view;
-    if (!view || typeof (view as any).focusDispatchInput !== 'function') return null;
+    if (!view || typeof (view as any).jumpToLatestUnreviewed !== 'function') return null;
     return view as AgentDashboard;
   }
 

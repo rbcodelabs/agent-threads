@@ -25,9 +25,7 @@ vi.mock('../../src/ClaudeSession', () => ({
 }));
 vi.mock('../../src/SettingsTab', () => ({ isWebViewerEnabled: () => false }));
 
-import { AgentDashboard } from '../../src/AgentDashboard';
 import { DispatchInput } from '../../src/DispatchInput';
-import { KanbanView } from '../../src/KanbanView';
 import { ThreadManager } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS, type ImageAttachment } from '../../src/types';
 import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
@@ -63,7 +61,6 @@ function makeFixture() {
     getPendingWakeups: () => [],
     hasPendingWakeup: () => false,
     saveSettings: vi.fn(async () => undefined),
-    activateKanbanView: vi.fn(),
     openThreadInChatView: vi.fn(async () => undefined),
     dispatchNewThread: vi.fn(async () => 'ordinary-thread'),
     dispatchNewDesignThread: vi.fn(async (_brief: string, _harness?: 'claude' | 'codex') => 'design-thread'),
@@ -133,44 +130,64 @@ describe('thread composer contributed command routing', () => {
   });
 });
 
-describe.each([
-  ['Agent Dashboard', AgentDashboard],
-  ['Kanban', KanbanView],
-] as const)('%s new-thread design routing', (_label, View) => {
+/**
+ * The dispatch composer now lives in ThreadsView's new-conversation mode (it used to be
+ * duplicated in the Agents List and the Kanban board). These drive the real shipped
+ * `sendNewConversation` through a real `DispatchInput`, with only DOM-bound repaint
+ * helpers stubbed.
+ */
+describe('new-conversation composer design routing', () => {
   beforeEach(() => { document.body.empty(); });
   afterEach(() => { vi.restoreAllMocks(); });
 
-  function getDispatchInput(view: InstanceType<typeof View>): DispatchInput {
-    const internals = view as unknown as {
-      dispatchComponent?: DispatchInput;
-      dispatchInput?: DispatchInput;
-    };
-    return internals.dispatchComponent ?? internals.dispatchInput!;
+  const sendNewConversation = (ThreadsView.prototype as unknown as {
+    sendNewConversation(this: unknown, payload: unknown): Promise<void>;
+  }).sendNewConversation;
+
+  function composer(projectId = '') {
+    const { app, plugin, service } = makeFixture();
+    const setActiveThread = vi.fn(async () => undefined);
+    const view: Record<string, unknown> = Object.assign(Object.create(ThreadsView.prototype), {
+      app, plugin,
+      newConv: { returnTo: null },
+      newConvProjectId: projectId,
+      setActiveThread,
+      refreshNewConversationContext: vi.fn(),
+    });
+    const input = new DispatchInput({
+      app: app as never,
+      harnessPicker: { initialHarness: 'claude' },
+      onSend: (payload) => sendNewConversation.call(view, payload),
+    });
+    input.mount(document.body.createDiv());
+    view.newConvInput = input;
+    return { input, plugin, service, setActiveThread };
   }
 
   it('routes a live peer command with captured dispatch context and never falls through on failure', async () => {
-    const { app, plugin, service } = makeFixture();
-    const view = new View({} as never, plugin as never);
-    (view as unknown as { app: unknown }).app = app;
-    await view.onOpen();
+    const { input, plugin, service } = composer();
     const invoke = vi.fn(async (_context: unknown) => ({ status: 'error' as const, message: 'Retry later' }));
     service.api.extensions.registerSlashCommand({ pluginId: 'peer' }, { name: 'board', dispatch: { description: 'Board', invoke } });
-    const input = getDispatchInput(view);
     input.setValue('/board first\nsecond');
     input.triggerSend();
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce());
     expect(invoke.mock.calls[0]?.[0]).toMatchObject({ surface: 'dispatch', args: 'first\nsecond', agentHarness: 'claude', hasImages: false, hasAttachment: false });
     expect(plugin.dispatchNewThread).not.toHaveBeenCalled();
     expect(input.getValue()).toBe('/board first\nsecond');
-    await view.onClose();
+  });
+
+  it('passes the chosen Project to a peer command', async () => {
+    const { input, service } = composer('proj-1');
+    const invoke = vi.fn(async (_context: unknown) => ({ status: 'ok' as const }));
+    service.api.extensions.registerSlashCommand({ pluginId: 'peer' }, { name: 'board', dispatch: { description: 'Board', invoke } });
+    input.setValue('/board x');
+    input.triggerSend();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+    expect(invoke.mock.calls[0]?.[0]).toMatchObject({ surface: 'dispatch', projectId: 'proj-1' });
   });
 
   it('uses the native design dispatcher and never the ordinary prompt dispatcher', async () => {
-    const { app, plugin } = makeFixture();
-    const view = new View({} as never, plugin as never);
-    (view as unknown as { app: unknown }).app = app;
-    await view.onOpen();
-    const input = getDispatchInput(view);
+    const { input, plugin, setActiveThread } = composer();
 
     input.setValue('/design create a simple responsive settings card');
     input.triggerSend();
@@ -179,15 +196,12 @@ describe.each([
       'create a simple responsive settings card', 'claude',
     ));
     expect(plugin.dispatchNewThread).not.toHaveBeenCalled();
-    await view.onClose();
+    // The design flow surfaces its own thread; the composer must not also switch to one.
+    expect(setActiveThread).not.toHaveBeenCalled();
   });
 
   it('preserves image and text attachments when design dispatch rejects them', async () => {
-    const { app, plugin } = makeFixture();
-    const view = new View({} as never, plugin as never);
-    (view as unknown as { app: unknown }).app = app;
-    await view.onOpen();
-    const input = getDispatchInput(view);
+    const { input, plugin } = composer();
     const image: ImageAttachment = {
       base64: 'aGVsbG8=', mediaType: 'image/png', name: 'settings.png',
     };
@@ -202,16 +216,11 @@ describe.each([
     expect(input.getPendingAttachment()).toBe('Reference copy');
     expect(plugin.dispatchNewDesignThread).not.toHaveBeenCalled();
     expect(plugin.dispatchNewThread).not.toHaveBeenCalled();
-    await view.onClose();
   });
 
   it('restores a retryable design draft when design setup or navigation fails', async () => {
-    const { app, plugin } = makeFixture();
+    const { input, plugin } = composer();
     plugin.dispatchNewDesignThread.mockRejectedValueOnce(new Error('preview unavailable'));
-    const view = new View({} as never, plugin as never);
-    (view as unknown as { app: unknown }).app = app;
-    await view.onOpen();
-    const input = getDispatchInput(view);
 
     input.setValue('/design settings card');
     input.triggerSend();
@@ -219,6 +228,5 @@ describe.each([
     await vi.waitFor(() => expect(input.getValue()).toBe('/design settings card'));
     expect(plugin.dispatchNewDesignThread).toHaveBeenCalledOnce();
     expect(plugin.dispatchNewThread).not.toHaveBeenCalled();
-    await view.onClose();
   });
 });

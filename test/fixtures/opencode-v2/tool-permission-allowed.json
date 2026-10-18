@@ -1,0 +1,448 @@
+[
+ {
+  "type": "session.created",
+  "created": 1792294024889,
+  "data": {
+   "sessionID": "ses_root",
+   "slug": "lucky-garden",
+   "version": "2.0.32",
+   "projectID": "1f29ea24da1fefbbe9ecde894f13a08a7f35d6db",
+   "location": {
+    "directory": "/tmp/ocprobe/work"
+   },
+   "subpath": "../../../../tmp/ocprobe/work",
+   "title": "probe",
+   "agent": "build",
+   "model": {
+    "id": "qwen3.8:27b",
+    "providerID": "llm-server"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.inbox.enqueued",
+  "created": 1792294024908,
+  "data": {
+   "inboxID": "msg_14d0c76cb001Pq0FjBnEVa1rkp",
+   "sessionID": "ses_root",
+   "item": {
+    "type": "user",
+    "payload": {
+     "text": "Run the shell command: echo hello. Then reply done."
+    },
+    "delivery": "steer"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.execution.started",
+  "created": 1792294024910,
+  "data": {
+   "sessionID": "ses_root"
+  }
+ },
+ {
+  "type": "session.inbox.delivered",
+  "created": 1792294024926,
+  "data": {
+   "sessionID": "ses_root",
+   "inboxID": "msg_14d0c76cb001Pq0FjBnEVa1rkp"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.step.started",
+  "created": 1792294025253,
+  "data": {
+   "sessionID": "ses_root",
+   "agent": "build",
+   "model": {
+    "id": "qwen3.8:27b",
+    "providerID": "llm-server",
+    "variant": "default"
+   },
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "started": 1792294024937
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.reasoning.started",
+  "created": 1792294025256,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "ordinal": 0,
+   "state": {
+    "reasoningField": "reasoning"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.reasoning.delta",
+  "created": 1792294025359,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "ordinal": 0,
+   "delta": "The"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.reasoning.delta",
+  "created": 1792294025574,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "ordinal": 0,
+   "delta": " user wants to"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.tool.input.started",
+  "created": 1792294026850,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "id": "call_nwd2iu9x",
+   "name": "shell"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.reasoning.ended",
+  "created": 1792294026853,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "ordinal": 0,
+   "text": "The user wants to run `echo hello` and then respond with \"done\".",
+   "state": {
+    "reasoningField": "reasoning"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.tool.input.ended",
+  "created": 1792294026854,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "id": "call_nwd2iu9x",
+   "text": "{\"command\":\"echo hello\"}"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.tool.called",
+  "created": 1792294026854,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "id": "call_nwd2iu9x",
+   "input": {
+    "command": "echo hello"
+   },
+   "executed": false
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.step.streamed",
+  "created": 1792294026855,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "permission.asked",
+  "created": 1792294026862,
+  "data": {
+   "id": "per_14d0c7e6e001ZfwMnqibTV5txQ",
+   "sessionID": "ses_root",
+   "action": "shell",
+   "resources": [
+    "echo hello"
+   ],
+   "save": [
+    "echo *"
+   ],
+   "source": {
+    "type": "tool",
+    "messageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+    "id": "call_nwd2iu9x"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "permission.replied",
+  "created": 1792294026864,
+  "data": {
+   "sessionID": "ses_root",
+   "requestID": "per_14d0c7e6e001ZfwMnqibTV5txQ",
+   "reply": "once"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.tool.progress",
+  "created": 1792294026870,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "id": "call_nwd2iu9x",
+   "metadata": {
+    "shellID": "sh_14d0c7e71001ovIrfBhGq7pBSq"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.tool.success",
+  "created": 1792294026874,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "id": "call_nwd2iu9x",
+   "content": [
+    {
+     "type": "text",
+     "text": "hello\n"
+    }
+   ],
+   "metadata": {
+    "status": "completed",
+    "truncated": false,
+    "exit": 0
+   },
+   "executed": false
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.step.ended",
+  "created": 1792294026875,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c76e2001uFdFIm1Z0g5Hvy",
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 4,
+    "output": 46,
+    "reasoning": 0,
+    "cache": {
+     "read": 8457,
+     "write": 0
+    }
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.usage.updated",
+  "created": 1792294026878,
+  "data": {
+   "sessionID": "ses_root",
+   "cost": 0,
+   "tokens": {
+    "input": 4,
+    "output": 46,
+    "reasoning": 0,
+    "cache": {
+     "read": 8457,
+     "write": 0
+    }
+   }
+  }
+ },
+ {
+  "type": "session.step.started",
+  "created": 1792294027603,
+  "data": {
+   "sessionID": "ses_root",
+   "agent": "build",
+   "model": {
+    "id": "qwen3.8:27b",
+    "providerID": "llm-server",
+    "variant": "default"
+   },
+   "assistantMessageID": "msg_14d0c7e83001gUqzpeOAUe9tBR",
+   "started": 1792294026887
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.reasoning.started",
+  "created": 1792294027605,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c7e83001gUqzpeOAUe9tBR",
+   "ordinal": 0,
+   "state": {
+    "reasoningField": "reasoning"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.text.started",
+  "created": 1792294028630,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c7e83001gUqzpeOAUe9tBR",
+   "ordinal": 0
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.text.delta",
+  "created": 1792294028732,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c7e83001gUqzpeOAUe9tBR",
+   "ordinal": 0,
+   "delta": "done"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.reasoning.ended",
+  "created": 1792294028771,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c7e83001gUqzpeOAUe9tBR",
+   "ordinal": 0,
+   "text": "Command has been executed successfully. Next, I'll reply with \"Completed.\"",
+   "state": {
+    "reasoningField": "reasoning"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.text.ended",
+  "created": 1792294028773,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c7e83001gUqzpeOAUe9tBR",
+   "ordinal": 0,
+   "text": "done"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.step.streamed",
+  "created": 1792294028774,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c7e83001gUqzpeOAUe9tBR"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.step.ended",
+  "created": 1792294028775,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d0c7e83001gUqzpeOAUe9tBR",
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0,
+   "tokens": {
+    "input": 16,
+    "output": 20,
+    "reasoning": 0,
+    "cache": {
+     "read": 8507,
+     "write": 0
+    }
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.usage.updated",
+  "created": 1792294028776,
+  "data": {
+   "sessionID": "ses_root",
+   "cost": 0,
+   "tokens": {
+    "input": 20,
+    "output": 66,
+    "reasoning": 0,
+    "cache": {
+     "read": 16964,
+     "write": 0
+    }
+   }
+  }
+ },
+ {
+  "type": "session.execution.succeeded",
+  "created": 1792294028776,
+  "data": {
+   "sessionID": "ses_root"
+  }
+ }
+]

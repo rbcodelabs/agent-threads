@@ -22,7 +22,9 @@
 | `src/SkillsManagerView.ts` | Skills Manager panel UI — delegates all list/search/install/uninstall/update logic to `src/skillManager.ts` |
 | `src/VaultPersistence.ts` | Vault note save/load/archive |
 | `src/types.ts` | Shared TypeScript types (`Thread`, `ThreadStatus`, etc.) |
-| `src/DispatchInput.ts` | Reusable dispatch textarea component used across all panels |
+| `src/DispatchInput.ts` | Reusable dispatch textarea component. Used by the `ThreadsView` thread composer and by its new-conversation composer (the Agents List and Kanban no longer host one) |
+| `src/ProjectPicker.ts` / `src/projectPickerLogic.ts` / `src/projectPickerHost.ts` | Searchable Project picker: filter box (autofocused), Recent / A-Z sort (`settings.projectPickerSort`; recency = newest thread `updatedAt` per Project merged with picks stamped in `settings.projectLastUsed`), listbox keyboard nav, "No Project" and "New Project…" rows. Pure filter/sort/highlight logic is in `projectPickerLogic.ts`; `openProjectPicker(plugin, …)` wires it to settings. Used for the new-conversation chip and "Change project…" |
+| `src/newConversationDispatch.ts` | First-send path of a new conversation: contributed peer commands, `/model` `/goal` `/loop` directives, `@[[file]]` expansion, then `dispatchNewThread` |
 | `src/slashCommands.ts` | Single source of truth for built-in slash commands, model aliases, and dispatch directive parsing |
 | `src/Scheduler.ts` | Built-in scheduler for cron items and `/loop` recurrences, persisted in `settings.scheduledItems` |
 | `src/statusLine.ts` | Pure parser for `statusLineCommand` output (JSON tags or legacy plaintext → `StatusTag[]`) + `derivePrUrl`/`resolveTagIcon`/`planFooter`. No Obsidian/Node deps |
@@ -117,12 +119,16 @@ When adding a field to `Thread`:
 
 ---
 
+## New-conversation mode
+
+"New thread" (title button, switcher footer, command palette, the Agents List / Kanban "New thread" buttons, "Chat about this document") calls `plugin.openNewConversation()` → `ThreadsView.startNewConversation({projectId?, draft?, mention?})`. The view sets `activeThreadId = null`, remembers `newConv.returnTo`, adds `.ct-new-conversation` to the floating panel and shows a second, lazily-built `DispatchInput` (project chip, dispatch slash commands, harness / Run in / Run on picker). **No thread exists until the first send**: `sendNewConversation` → `dispatchNewConversation` → `plugin.dispatchNewThread`, then `setActiveThread(newId)`, which also ends the mode (every selection change funnels through `setActiveThread`, which calls `leaveNewConversationUi`). Peer commands that create and surface their own thread (e.g. `/design`) leave the mode through that same path.
+
 ## Dispatch Command Directives
 
-The dashboard/kanban dispatch boxes intercept leading `/model`, `/goal`, and `/loop` commands before creating a thread. The flow:
+The new-conversation composer intercepts leading `/model`, `/goal`, and `/loop` commands before creating a thread. The flow:
 
 1. `parseDispatchDirective(text)` in `slashCommands.ts` returns a discriminated union (`kind: 'model' | 'goal' | 'loop'`, or `null` for plain prompts). A set `error` field means "recognized command, bad args" — the views show a Notice, restore the draft via `DispatchInput.setValue`, and create nothing.
-2. Both views map the directive to `dispatchNewThread(text, images, titleHint, opts)` where `opts` is `{ model?, goal?, loop? }`.
+2. `dispatchNewConversation` maps the directive to `dispatchNewThread(text, images, titleHint, opts)` where `opts` is `{ model?, goal?, loop? }`.
 3. `dispatchNewThread` applies the option **before** the first `sendMessage`: `setThreadModel` / `setThreadGoal` / `scheduler.createItem({ targetThreadId })`. For loops, the dispatch itself is iteration 1 — the scheduler's first fire is `now + interval`.
 
 Invariants to preserve:

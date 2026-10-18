@@ -65,14 +65,18 @@ test.describe('remote thread strip', () => {
 });
 
 test.describe('Run on a daemon: folders come from the daemon', () => {
-  const dashboardUrl = 'file://' + path.resolve('test/harness/kanban.html') + '?dashboard=1&remote=1';
+  // The Run on picker is part of the new-conversation composer in the message panel.
+  const runOnUrl = harnessUrl + '?remote=1';
 
   async function openRunOn(page: Page, daemon: string, ready = '.ct-run-on-folder-select'): Promise<void> {
     await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
     await page.setViewportSize({ width: 420, height: 760 });
-    await page.goto(dashboardUrl);
-    await page.waitForSelector('.ct-agents-dispatch-btn');
-    await page.locator('.ct-agents-dispatch-btn').dispatchEvent('contextmenu');
+    await page.goto(runOnUrl);
+    await page.waitForSelector('.ct-title-row');
+    await page.waitForTimeout(300);
+    await page.getByRole('button', { name: 'New thread' }).first().click();
+    await page.waitForSelector('.ct-new-conv-row .ct-agents-dispatch-btn');
+    await page.locator('.ct-new-conv-row .ct-agents-dispatch-btn').dispatchEvent('contextmenu');
     await page.locator(`.ct-run-on-item[data-run-on="${daemon}"]`).click();
     await page.waitForSelector(ready);
   }
@@ -183,15 +187,23 @@ test.describe('Remote daemon dialog: folders are chosen from what the daemon adv
 });
 
 test.describe('Run on: set up the local daemon from the picker', () => {
-  const offerUrl = 'file://' + path.resolve('test/harness/kanban.html') + '?dashboard=1&daemonoffer=1';
+  const offerUrl = 'file://' + path.resolve('test/harness/index.html') + '?projects=1&daemonoffer=1';
+  const plainUrl = 'file://' + path.resolve('test/harness/index.html') + '?projects=1';
+
+  async function openNewConversationPicker(page: Page, url: string, viewport: { width: number; height: number }): Promise<void> {
+    await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
+    await page.setViewportSize(viewport);
+    await page.goto(url);
+    await page.waitForSelector('.ct-title-row');
+    await page.waitForTimeout(300);
+    await page.getByRole('button', { name: 'New thread' }).first().click();
+    await page.waitForSelector('.ct-new-conv-row .ct-agents-dispatch-btn');
+    await page.locator('.ct-new-conv-row .ct-agents-dispatch-btn').dispatchEvent('contextmenu');
+  }
 
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test(`offers "This Mac (container) - set up" before the daemon exists, and opens its settings at ${viewport.width}`, async ({ page }) => {
-    await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
-    await page.setViewportSize(viewport);
-    await page.goto(offerUrl);
-    await page.waitForSelector('.ct-agents-dispatch-btn');
-    await page.locator('.ct-agents-dispatch-btn').dispatchEvent('contextmenu');
+    await openNewConversationPicker(page, offerUrl, viewport);
     const item = page.locator('.ct-run-on-item[data-run-on="setup-local"]');
     await expect(item).toBeVisible();
     await expect(item).toContainText('This Mac (container)');
@@ -204,10 +216,8 @@ test.describe('Run on: set up the local daemon from the picker', () => {
   }
 
   test('shows no Run on section when the daemon is not offered', async ({ page }) => {
-    await page.setViewportSize({ width: 420, height: 760 });
-    await page.goto('file://' + path.resolve('test/harness/kanban.html') + '?dashboard=1');
-    await page.waitForSelector('.ct-agents-dispatch-btn');
-    await page.locator('.ct-agents-dispatch-btn').dispatchEvent('contextmenu');
+    await openNewConversationPicker(page, plainUrl, { width: 420, height: 760 });
+    await expect(page.locator('.ct-harness-menu')).toBeVisible();
     await expect(page.locator('.ct-run-on-item')).toHaveCount(0);
   });
 });

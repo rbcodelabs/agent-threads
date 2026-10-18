@@ -147,6 +147,15 @@ const busy = { type: 'session.status', properties: { sessionID: SID, status: { t
 const idle = { type: 'session.idle', properties: { sessionID: SID } };
 
 describe('OpenCodeSession lifecycle', () => {
+  it('passes skill roots to the server as skills.paths', async () => {
+    const h = harness();
+    await h.session.start({ ...h.baseOptions, opencode: { skillRoots: ['/vault/skill-sources/cos/skills'] } });
+    expect(h.launchConfig()).toMatchObject({ skills: { paths: ['/vault/skill-sources/cos/skills'] } });
+    const bare = harness();
+    await bare.session.start(bare.baseOptions);
+    expect(bare.launchConfig()).not.toHaveProperty('skills');
+  });
+
   it('creates a session and sends a prompt with agent, model, system prompt and images', async () => {
     const h = harness();
     await h.session.start(h.baseOptions);
