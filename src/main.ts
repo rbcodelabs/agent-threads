@@ -2270,7 +2270,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
     this.registerView(
       MOBILE_VIEW_TYPE,
-      (leaf) => new MobileView(leaf, this.relayClient, this.mobileStore),
+      (leaf) => new MobileView(leaf, this.relayClient, this.mobileStore, () => this.settings.toolCallStyle),
     );
 
     this.addRibbonIcon('smartphone', 'Agent Threads (Mobile)', () => {
@@ -3878,6 +3878,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   getActiveThreadId(): string | null {
     return this.getView()?.getActiveThreadId() ?? null;
+  }
+
+  /** Re-apply the tool-call style class on every open view (desktop + mobile), no reload needed. */
+  applyToolCallStyle(): void {
+    this.getView()?.applyToolCallStyle();
+    for (const leaf of this.app.workspace.getLeavesOfType(MOBILE_VIEW_TYPE)) {
+      if (leaf.view instanceof MobileView) leaf.view.applyToolCallStyle();
+    }
   }
 
   getView(): ThreadsView | null {

@@ -1404,6 +1404,277 @@
   }
 }
 
+/* ═══ Tool call styles (setting: Tool call style) ═══════════════════════════
+   One shared DOM (src/toolCallDom.ts); the root carries ct-tools-chips |
+   ct-tools-tree | ct-tools-cards. Everything below is scoped to .ct-tools so
+   task pills / other .ct-tool-pill users elsewhere are untouched. */
+
+/* ── Shared ─────────────────────────────────────────────────────────────── */
+.ct-tools .ct-tool-pill {
+  border-left: 0;
+  background: transparent;
+  padding: 2px 6px;
+  gap: 8px;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+.ct-tools .ct-tool-pill:focus-visible,
+.ct-tools .ct-tool-group-header:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+.ct-tools .ct-tool-pill .ct-tool-pill-icon { display: none; }
+.ct-tools .ct-tool-pill .ct-tool-pill-name {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0;
+}
+.ct-tools .ct-tool-pill .ct-tool-pill-name::before { content: none; }
+.ct-tools .ct-tool-pill.ct-tool-error .ct-tool-pill-name { color: var(--color-red); }
+.ct-tools .ct-tool-pill-text { color: var(--text-muted); }
+.ct-tools .ct-tool-pill-text-path { display: flex; min-width: 0; }
+.ct-tools .ct-tool-path-dir {
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.ct-tools .ct-tool-path-file {
+  color: var(--text-normal);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ct-tools .ct-tool-pill-ts { font-size: 11px; color: var(--text-faint); }
+
+.ct-tools .ct-tool-status,
+.ct-tools .ct-tool-group-status {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--text-faint);
+}
+.ct-tools .ct-tool-status svg,
+.ct-tools .ct-tool-group-status svg { width: 12px; height: 12px; }
+.ct-tools .ct-tool-state-success { color: var(--color-green); }
+.ct-tools .ct-tool-state-pending { color: var(--color-yellow); }
+.ct-tools .ct-tool-state-error { color: var(--color-red); }
+@media (prefers-reduced-motion: no-preference) {
+  .ct-tools .ct-tool-state-pending svg { animation: ct-tool-spin 1s linear infinite; }
+}
+@keyframes ct-tool-spin { to { transform: rotate(360deg); } }
+@keyframes ct-tool-bar-slide { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+
+.ct-tools .ct-tool-group-header {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-left: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: none;
+}
+.ct-tools .ct-tool-group-header .ct-compressed-summary {
+  flex: 0 1 auto;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  font-size: var(--font-ui-small);
+}
+.ct-tools .ct-tool-group-header .ct-compressed-summary::before { content: none; }
+.ct-tools .ct-tool-group-header .ct-expand-btn {
+  width: 14px;
+  height: 14px;
+  opacity: 0.7;
+}
+.ct-tools .ct-tool-group-header:hover .ct-expand-btn { opacity: 1; background: none; }
+.ct-tools .ct-tool-group-header .ct-expand-btn svg { width: 14px; height: 14px; transition: transform 0.15s; }
+.ct-tools .ct-tool-group-header .ct-tool-group-running {
+  font-size: 11.5px;
+  color: var(--color-yellow);
+}
+.ct-tools .ct-tool-group-count { font-size: 11px; color: var(--text-faint); flex: none; }
+.ct-tools .ct-tool-group > .ct-full-content { margin: 0; }
+
+/* ── Tree (default) ─────────────────────────────────────────────────────── */
+.ct-tools-tree .ct-tool-group { margin-bottom: 4px; }
+.ct-tools-tree .ct-tool-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px 3px 2px;
+  min-height: 24px;
+  border-radius: 4px;
+}
+.ct-tools-tree .ct-tool-group-header:hover { background: var(--background-modifier-hover); }
+.ct-tools-tree .ct-tool-group-header .ct-expand-btn { order: -2; }
+.ct-tools-tree .ct-tool-group-header .ct-expand-btn svg { transform: rotate(-90deg); }
+.ct-tools-tree .ct-tool-group-header[aria-expanded="true"] .ct-expand-btn svg { transform: none; }
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-status { order: -1; }
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-status svg { display: none; }
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  margin: 2.5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ct-tools-tree .ct-tool-group-header .ct-tool-state-pending::before { animation: ct-dot-pulse 1.2s ease-in-out infinite; }
+}
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-icon,
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-running,
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-count[data-count-in-label="true"] { display: none; }
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-count::before { content: '\00b7  '; }
+.ct-tools-tree .ct-tool-group > .ct-full-content {
+  margin: 0 0 0 8px;
+  padding: 2px 0 2px 14px;
+  border-left: 1px solid var(--background-modifier-border);
+}
+.ct-tools-tree .ct-tool-pill { position: relative; margin-left: -6px; max-width: calc(100% + 6px); box-sizing: border-box; }
+.ct-tools-tree .ct-tools > .ct-tool-pill { margin-left: 0; }
+.ct-tools-tree .ct-tool-pill:hover { background: var(--background-modifier-hover); }
+.ct-tools-tree .ct-tool-pill .ct-tool-state-success { visibility: hidden; }
+.ct-tools-tree .ct-tool-pill .ct-tool-pill-name { min-width: 64px; }
+.ct-tools-tree .ct-tool-pill .ct-tool-pill-ts { opacity: 0; transition: opacity 0.12s; margin-left: auto; }
+.ct-tools-tree .ct-tool-pill:hover .ct-tool-pill-ts,
+.ct-tools-tree .ct-tool-pill:focus-within .ct-tool-pill-ts,
+.ct-tools-tree .ct-tool-pill:focus .ct-tool-pill-ts { opacity: 1; }
+@media (hover: none) {
+  .ct-tools-tree .ct-tool-pill .ct-tool-pill-ts { opacity: 0.7; }
+}
+.ct-tools-tree .ct-tool-pill.ct-tool-active .ct-tool-pill-name { color: var(--color-yellow); }
+
+/* ── Chips ──────────────────────────────────────────────────────────────── */
+.ct-tools-chips .ct-tool-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-bottom: 6px;
+}
+.ct-tools-chips .ct-tool-group-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: auto;
+  max-width: 100%;
+  min-height: 0;
+  padding: 3px 11px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: var(--background-secondary);
+}
+.ct-tools-chips .ct-tool-group-header:hover { border-color: var(--background-modifier-border-hover); color: var(--text-normal); }
+.ct-tools-chips .ct-tool-group-header .ct-compressed-summary { color: var(--text-normal); font-size: 12.5px; }
+.ct-tools-chips .ct-tool-group-header .ct-tool-group-icon,
+.ct-tools-chips .ct-tool-group-header .ct-tool-group-running,
+.ct-tools-chips .ct-tool-group-header .ct-tool-group-count[data-count-in-label="true"] { display: none; }
+.ct-tools-chips .ct-tool-group-header .ct-tool-group-count { color: var(--text-muted); }
+.ct-tools-chips .ct-tool-group-header .ct-tool-group-count::after { content: '\00d7'; }
+.ct-tools-chips .ct-tool-group-header[aria-expanded="true"] .ct-expand-btn svg { transform: rotate(180deg); }
+.ct-tools-chips .ct-tool-group > .ct-full-content {
+  align-self: stretch;
+  margin: 6px 0 0 6px;
+  padding: 2px 0 2px 14px;
+  border-left: 1px solid var(--background-modifier-border);
+}
+.ct-tools-chips .ct-tool-pill .ct-tool-state-success { visibility: hidden; }
+.ct-tools-chips .ct-tool-pill .ct-tool-pill-name {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 500;
+  color: var(--text-normal);
+}
+.ct-tools-chips .ct-tool-pill .ct-tool-pill-ts { margin-left: auto; }
+
+/* ── Cards ──────────────────────────────────────────────────────────────── */
+.ct-tools-cards .ct-tool-group {
+  position: relative;
+  margin: 0 36px 8px 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+  overflow: hidden;
+}
+.ct-tools-cards .ct-tool-group-pending::before {
+  content: '';
+  display: block;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--color-yellow), transparent) no-repeat;
+  background-size: 40% 100%;
+  background-position: 40% 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ct-tools-cards .ct-tool-group-pending::before { animation: ct-tool-bar-slide 1.4s linear infinite; }
+}
+.ct-tools-cards .ct-tool-group-error { border-color: color-mix(in srgb, var(--color-red) 55%, var(--background-modifier-border)); }
+.ct-tools-cards .ct-tool-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+}
+.ct-tools-cards .ct-tool-group-header .ct-tool-group-status { display: none; }
+.ct-tools-cards .ct-tool-group-header .ct-tool-group-icon {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+}
+.ct-tools-cards .ct-tool-group-header.ct-tool-error .ct-tool-group-icon { color: var(--color-red); }
+.ct-tools-cards .ct-tool-group-header .ct-compressed-summary { font-weight: 500; color: var(--text-normal); }
+.ct-tools-cards .ct-tool-group-header .ct-tool-group-count {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+.ct-tools-cards .ct-tool-group-header .ct-tool-group-count[data-count-in-label="true"] { }
+/* Narrow viewports: a group never outgrows its column, and the mobile header is a 44px tap target. */
+.ct-tools-tree .ct-tool-group,
+.ct-tools-cards .ct-tool-group { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.ct-tools .ct-tool-group > .ct-full-content { min-width: 0; overflow: hidden; }
+.ct-mobile-root .ct-tools .ct-tool-group-header { min-height: 44px; }
+/* The message is a shrink-to-fit flex column: let the tool list fill it so nowrap rows truncate instead of widening past the screen. */
+.ct-mobile-message > .ct-tools { align-self: stretch; min-width: 0; }
+.ct-tools-cards .ct-tool-group-header[aria-expanded="true"] .ct-expand-btn svg { transform: rotate(180deg); }
+.ct-tools-cards .ct-tool-group > .ct-full-content { border-top: 1px solid var(--background-modifier-border); }
+.ct-tools-cards .ct-tool-group .ct-tool-pill {
+  padding: 7px 12px;
+  border-radius: 0;
+  font-size: var(--font-ui-small);
+}
+.ct-tools-cards .ct-tool-group .ct-tool-pill + .ct-tool-pill { border-top: 1px solid var(--background-modifier-border); }
+.ct-tools-cards .ct-tool-pill .ct-tool-pill-ts { margin-left: auto; }
+.ct-tools-cards .ct-tools > .ct-tool-pill { padding: 3px 6px; }
+
+/* The two-tier outer wrap's live header keeps its own look but loses the yellow chip. */
+.ct-tool-outer-wrap-live-summary .ct-tool-pill-name {
+  background: none;
+  padding: 0;
+  color: var(--text-muted);
+}
+
 /* ── Workflow progress block ─────────────────────────────────────────────── */
 
 .ct-workflow-block {
@@ -1583,16 +1854,16 @@
 
 /* Background-task completion notice — a subtle left-aligned row in the
    transcript, shown instead of a global toast when a background task finishes
-   on an idle thread. It shares the tool rows' leading-icon column: 8px of left
-   padding stands in for .ct-tool-pill's 2px border + 6px padding, and the
-   12px icon and 6px gap match .ct-tool-pill-icon, so the status icon and text
-   line up with the tool icons and tool names above it. */
+   on an idle thread. It shares the tool rows' leading column: 6px of left
+   padding matches .ct-tool-pill's 6px padding (rows have no left border now),
+   and the 12px icon and 6px gap match the row's status icon, so the status
+   icon and text line up with the tool rows above it. */
 .ct-notice-row {
   display: flex;
   align-items: flex-start;
   gap: 6px;
   margin: 8px 0;
-  padding-left: 8px;
+  padding-left: 6px;
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   line-height: 1.5;

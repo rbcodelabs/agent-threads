@@ -1,5 +1,6 @@
 import { isValidOverviewPath } from './projectOverview';
 import { isAgentHarness } from './types';
+import { normalizeToolCallStyle } from './toolNameUtils';
 import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type { ButtonComponent, TextComponent } from 'obsidian';
@@ -1689,6 +1690,22 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             this.plugin.settings.layoutDensity = value as LayoutDensity;
             await this.plugin.saveSettings();
             this.plugin.getView()?.applyDensity();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Tool call style')
+      .setDesc('How tool calls ("Working", "Exploring", ...) look in the conversation. Applies immediately.')
+      .addDropdown((drop) =>
+        drop
+          .addOption('chips', 'Chips')
+          .addOption('tree', 'Tree (default)')
+          .addOption('cards', 'Cards')
+          .setValue(normalizeToolCallStyle(this.plugin.settings.toolCallStyle))
+          .onChange(async (value) => {
+            this.plugin.settings.toolCallStyle = normalizeToolCallStyle(value);
+            await this.plugin.saveSettings();
+            this.plugin.applyToolCallStyle();
           }),
       );
 
