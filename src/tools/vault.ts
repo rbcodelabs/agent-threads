@@ -8,6 +8,7 @@ import { tool } from '@anthropic-ai/claude-agent-sdk/browser';
 import { TFile, normalizePath } from 'obsidian';
 import path from 'path';
 import { tokenizeQuery, findBestExcerpt } from '../searchUtils';
+import { createSyncTools } from './sync';
 import { listVault, vaultListSource } from '../vaultList';
 import type { ObsidianMcpServerOptions } from '../ObsidianTools';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
@@ -663,5 +664,8 @@ export function createVaultTools(port: VaultToolsPort): Record<string, ToolDef> 
     'obsidian_list_vault_bridges',
     'obsidian_add_vault_bridge',
   ];
-  return Object.fromEntries(toolNames.flatMap((name, i): Array<[string, ToolDef]> => (toolDefs[i] ? [[name, toolDefs[i]!]] : [])));
+  return {
+    ...Object.fromEntries(toolNames.flatMap((name, i): Array<[string, ToolDef]> => (toolDefs[i] ? [[name, toolDefs[i]!]] : []))),
+    ...createSyncTools({ app }),
+  };
 }

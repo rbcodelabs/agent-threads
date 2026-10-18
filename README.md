@@ -919,6 +919,9 @@ Read and search your vault from within any thread.
 | `vault_get_outgoing_links` | `path` | Returns all wikilinks and Markdown links a note makes to other files, with display text and resolved vault paths. |
 | `vault_get_file_history` | `path` | Returns the Obsidian Sync version history for a file. Each entry includes a `uid` (for `vault_restore_file_version`), ISO timestamp, size in bytes, and the device that saved it. Requires Obsidian Sync to be active and the file synced. |
 | `vault_restore_file_version` | `path`, `uid` | Restores a version from Obsidian Sync history, overwriting the current content — the current content is preserved in sync history first. Use `vault_get_file_history` to find the `uid`. Requires Obsidian Sync to be active. |
+| `sync_list_conflicts` | — | Lists unresolved Geode sync conflicts, each tagged `sibling` (a `.sync-conflict-<timestamp>` copy sits next to the file) or `history` (concurrent heads in append-only sync). Read-only. |
+| `sync_inspect_conflict` | `id` | Sibling: local and remote content plus a line diff. History: each head's record ID, device, size and deleted flag, and (for Markdown) each version's text with a diff against local. Read-only. |
+| `sync_resolve_conflict` | `id`, `resolution` (`keep-local`/`accept-remote`), `recordId?`, `mergedContent?` | Resolves a conflict. **Asks for your approval on every call** and cannot be set to Always Allow. History conflicts need `recordId` to accept a version; `mergedContent` (sibling only) is written to the file first, then resolved as keep-local. Needs a Geode build that exposes `app.sync`; history inspect/resolve needs the history-conflict methods on `SyncApi`. |
 
 ### Workspace and host tools
 

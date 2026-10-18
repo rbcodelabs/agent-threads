@@ -691,6 +691,8 @@ export function toHarnessDynamicTools(
   ];
   const readOnlyToolNames = new Set([
     ...legacyReadOnlyToolNames,
+    // Canonical-only sync tools (no legacy alias); sync_resolve_conflict is deliberately absent: it mutates.
+    'sync_list_conflicts', 'sync_inspect_conflict',
     ...legacyReadOnlyToolNames.map(name => LEGACY_TO_CANONICAL_TOOL_NAMES[name] ?? name),
     // Observing a page is read-only; navigating to one and clicking things is
     // not, so only the inspection half bypasses the prompt.
