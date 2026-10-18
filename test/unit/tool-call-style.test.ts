@@ -11,7 +11,7 @@ import { applyToolCallStyleClass } from '../../src/toolCallDom';
 import { DEFAULT_SETTINGS } from '../../src/types';
 import type { ToolCallRecord } from '../../src/types';
 
-const ctx = { vaultRoot: '/Users/rick/Vault', home: '/Users/rick' };
+const ctx = { vaultRoot: '/Users/alex/Vault', home: '/Users/alex' };
 const tool = (name: string, summary = ''): ToolCallRecord => ({ name, summary });
 
 describe('tool call style setting', () => {
@@ -44,29 +44,29 @@ describe('tool call style setting', () => {
 
 describe('formatToolPath', () => {
   it('makes in-vault paths vault-relative with dim dir + bright file', () => {
-    expect(formatToolPath('/Users/rick/Vault/Agent How-Tos/Vault Conventions.md', ctx)).toEqual({
+    expect(formatToolPath('/Users/alex/Vault/Agent How-Tos/Vault Conventions.md', ctx)).toEqual({
       dir: 'Agent How-Tos/',
       file: 'Vault Conventions.md',
     });
   });
   it('makes paths outside the vault home-relative', () => {
-    expect(formatToolPath('/Users/rick/projects/app/src/a.ts', ctx)).toEqual({ dir: '~/projects/app/src/', file: 'a.ts' });
+    expect(formatToolPath('/Users/alex/projects/app/src/a.ts', ctx)).toEqual({ dir: '~/projects/app/src/', file: 'a.ts' });
   });
   it('leaves other absolute paths and bare names alone', () => {
     expect(formatToolPath('/etc/hosts', ctx)).toEqual({ dir: '/etc/', file: 'hosts' });
     expect(formatToolPath('README.md', ctx)).toEqual({ dir: '', file: 'README.md' });
   });
   it('does not treat a sibling prefix as inside the vault', () => {
-    expect(formatToolPath('/Users/rick/Vault2/x.md', ctx).dir).toBe('~/Vault2/');
+    expect(formatToolPath('/Users/alex/Vault2/x.md', ctx).dir).toBe('~/Vault2/');
   });
   it('tolerates trailing slashes on the roots', () => {
-    expect(formatToolPath('/Users/rick/Vault/a.md', { vaultRoot: '/Users/rick/Vault/' })).toEqual({ dir: '', file: 'a.md' });
+    expect(formatToolPath('/Users/alex/Vault/a.md', { vaultRoot: '/Users/alex/Vault/' })).toEqual({ dir: '', file: 'a.md' });
   });
 });
 
 describe('formatToolRowSummary', () => {
   it('formats path tools as paths', () => {
-    expect(formatToolRowSummary('Read', '/Users/rick/Vault/Notes/a.md', ctx)).toEqual({ isPath: true, dir: 'Notes/', main: 'a.md' });
+    expect(formatToolRowSummary('Read', '/Users/alex/Vault/Notes/a.md', ctx)).toEqual({ isPath: true, dir: 'Notes/', main: 'a.md' });
     expect(formatToolRowSummary('mcp__claude_threads__vault_get_backlinks', 'Notes/a.md', ctx).isPath).toBe(true);
   });
   it('passes queries and commands through untouched', () => {
@@ -76,7 +76,7 @@ describe('formatToolRowSummary', () => {
     expect(formatToolRowSummary('Bash', 'git status', ctx).isPath).toBe(false);
   });
   it('treats an absolute-looking summary from any tool as a path', () => {
-    expect(formatToolRowSummary('Grep', '/Users/rick/projects/x', ctx)).toEqual({ isPath: true, dir: '~/projects/', main: 'x' });
+    expect(formatToolRowSummary('Grep', '/Users/alex/projects/x', ctx)).toEqual({ isPath: true, dir: '~/projects/', main: 'x' });
   });
 });
 
