@@ -3638,7 +3638,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const viaVault = daemon.vaultMapping ? mapLocalToRemote(daemon.vaultMapping, this.manager.vaultRoot, localCwd) : undefined;
     if (viaVault) return viaVault;
     if (daemon.managed !== 'local-container') return undefined;
-    const base = localCwd.replace(/\/+$/, '');
+    // Linear trim (a `/\/+$/` regex is quadratic on a long run of slashes).
+    let end = localCwd.length;
+    while (end > 0 && localCwd.charCodeAt(end - 1) === 47) end--;
+    const base = localCwd.slice(0, end);
     for (const m of this.sharedFolderMounts()) {
       if (base === m.host) return `/work/${m.name}`;
       if (base.startsWith(`${m.host}/`)) return `/work/${m.name}${base.slice(m.host.length)}`;
