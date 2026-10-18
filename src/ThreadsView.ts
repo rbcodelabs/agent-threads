@@ -13,7 +13,7 @@ import {
   type SettingsPopoverModel,
 } from './composerPopovers';
 import { forkBlockedReason } from './remote/threadLocation';
-import { parsePermissionDetail } from './permissionDetail';
+import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
 import { splitTextWithUrls, isHttpUrl, urlChipLabel } from './urlLinks';
@@ -1132,7 +1132,8 @@ export class ThreadsView extends ItemView {
 
     // Show the ephemeral badge when the active thread is marked ephemeral
     if (this.ephemeralBadgeEl) {
-      this.ephemeralBadgeEl.toggleClass('ct-hidden', !thread?.ephemeral);
+      this.ephemeralBadgeEl.toggleClass('ct-hidden', !thread?.ephemeral && !thread?.private);
+      this.ephemeralBadgeEl.setText(thread?.private ? 'private' : 'ephemeral');
     }
     this.renderRemoteStrip();
 
@@ -4448,7 +4449,7 @@ export class ThreadsView extends ItemView {
       .addEventListener('click', () => done(false));
     actions.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
       .addEventListener('click', () => done(true));
-    if (!(this.activeThreadId && this.manager.isRemoteThread(this.activeThreadId))) {
+    if (canAlwaysAllow(toolName) && !(this.activeThreadId && this.manager.isRemoteThread(this.activeThreadId))) {
       actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
         .addEventListener('click', async () => {
           this.plugin.settings.alwaysAllowedTools.push(toolName);

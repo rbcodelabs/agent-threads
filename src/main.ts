@@ -52,6 +52,7 @@ import { mergeMcpServers } from './mcpServerMerge';
 import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
 import { redactGithubSecrets } from './githubCredentials';
+import { canAlwaysAllow } from './permissionDetail';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
@@ -1743,6 +1744,16 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: 'new-private-chat',
+      name: 'New private chat (not saved)',
+      callback: () => {
+        const thread = this.manager.createThread('Private chat', this.getEffectiveCwd(), undefined, undefined, { private: true });
+        thread.titleUserSet = true;
+        void this.openThreadInChatView(thread.id);
+      },
+    });
+
+    this.addCommand({
       id: 'open-agent-dashboard',
       name: 'Open Agents List',
       callback: () => this.activateAgentView(),
@@ -2312,7 +2323,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
     // 3.11 — When mobile sends Always Allow, persist the tool name to settings.
     this.relayClient.onAlwaysAllowTool = (toolName: string) => {
-      if (!this.settings.alwaysAllowedTools.includes(toolName)) {
+      // Defence in depth: a forged resolve_permission must not persist a per-call approval.
+      if (canAlwaysAllow(toolName) && !this.settings.alwaysAllowedTools.includes(toolName)) {
         this.settings.alwaysAllowedTools.push(toolName);
         this.saveSettings().catch(console.error);
       }
@@ -3097,7 +3109,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.orchestratorWakeup?.invalidateBucket(`project:${project.id}`);
     }
     const shouldPersist = !onlyIfHasMessages || thread.messages.some(message => message.role !== 'compact' && message.role !== 'notice');
-    const persistedArchive = shouldPersist && this.settings.saveThreadsToVault && this.persistence;
+    const persistedArchive = shouldPersist && !thread.private && this.settings.saveThreadsToVault && this.persistence;
     if (persistedArchive) {
       try {
         await this.persistence!.saveThread({ ...originalSnapshot, status: 'archived' });
@@ -4163,7 +4175,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // Produce data.json-safe copies: strip ephemeral statusTags (re-derived
           // each poll) and drop base64/data from any image already externalized to
           // a `path` file. The live in-memory threads are never mutated.
-          this.settings.threads = this.manager.getThreads().map(serializeThreadForSave);
+          this.settings.threads = this.manager.getThreads().filter(t => !t.private).map(serializeThreadForSave);
         }
         await this.saveDataAtomic();
         // Telemetry: an actual disk write (measures coalescing effectiveness vs.

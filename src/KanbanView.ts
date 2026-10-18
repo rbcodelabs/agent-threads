@@ -4,7 +4,7 @@ import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread, TaskItem } from './types';
 import { formatToolName } from './ClaudeSession';
-import { summarizePermissionDetail } from './permissionDetail';
+import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
@@ -987,7 +987,7 @@ export class KanbanView extends ItemView {
       deny.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, false); });
       const allow = btns.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
       allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, true); });
-      if (!this.manager.isRemoteThread(thread.id)) {
+      if ((!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) && !this.manager.isRemoteThread(thread.id)) {
         const always = btns.createEl('button', { text: 'Always', cls: 'ct-permission-btn ct-permission-always' });
         always.addEventListener('click', async (e) => {
           e.stopPropagation();

@@ -111,6 +111,7 @@ describe('toolRouting routes', () => {
       'skills_get', 'skills_list_installed', 'skills_list_sources', 'skills_search',
       'threads_get_current', 'threads_get_log', 'threads_get_messages', 'threads_list', 'threads_list_projects', 'threads_wait',
       'vault_get_backlinks', 'vault_get_file_history', 'vault_get_note_metadata', 'vault_get_outgoing_links', 'vault_list', 'vault_list_bridges', 'vault_search',
+      'sync_inspect_conflict', 'sync_list_conflicts',
       'workspace_get_active_file', 'workspace_get_open_tabs',
     ].sort());
   });
@@ -118,7 +119,7 @@ describe('toolRouting routes', () => {
   it('never offers a tool that writes, executes, schedules, installs, sends or reads a secret, however it is configured', () => {
     const dangerous = ['request_secret', 'mcp_register_server', 'host_execute_command', 'obsidian_execute_command', 'host_list_commands',
       'host_open_url', 'workspace_navigate_to_file', 'workspace_insert_at_cursor', 'watch_document', 'unwatch_document',
-      'vault_restore_file_version', 'vault_add_bridge', 'threads_create', 'threads_create_project', 'threads_update_project',
+      'vault_restore_file_version', 'vault_add_bridge', 'sync_resolve_conflict', 'threads_create', 'threads_create_project', 'threads_update_project',
       'threads_set_project', 'threads_open', 'threads_send_message', 'threads_archive', 'threads_set_notes',
       'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'skills_install', 'skills_create_local', 'skills_update_local',
       'skills_uninstall', 'skills_update', 'skills_check_updates', 'ScheduleWakeup', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',

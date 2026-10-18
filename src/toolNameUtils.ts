@@ -170,6 +170,7 @@ const LEGACY_BUILT_IN_TOOLS = new Set([
 const CANONICAL_BUILT_IN_TOOLS = new Set([
   'vault_search', 'vault_list', 'vault_get_note_metadata', 'vault_get_backlinks', 'vault_get_outgoing_links',
   'vault_get_file_history', 'vault_restore_file_version', 'vault_list_bridges', 'vault_add_bridge',
+  'sync_list_conflicts', 'sync_inspect_conflict',
   'workspace_get_active_file', 'workspace_get_open_tabs', 'workspace_navigate_to_file',
   'workspace_insert_at_cursor', 'host_list_commands', 'host_execute_command', 'host_open_url',
   'threads_get_current', 'threads_list', 'threads_create', 'threads_list_projects', 'threads_create_project', 'threads_update_project',
@@ -201,11 +202,19 @@ export function isTrustedBuiltInTool(raw: string): boolean {
  * the user should be able to read it. It is otherwise permissioned like any
  * other tool, including Always Allow.
  */
+/** The host_exec permission request of the managed local daemon's tool group: decided per call, never remembered. */
+export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
+
 const FULL_INPUT_DETAIL_TOOL_KEYS: ReadonlySet<string> = new Set(['browser_eval']);
 
 /** True when the card should show the tool's full input. */
 function showsFullInput(toolName: string): boolean {
   return FULL_INPUT_DETAIL_TOOL_KEYS.has(toolKey(toolName));
+}
+
+/** False for requests that must be decided afresh every time (never "Always Allow"). */
+export function canAlwaysAllow(toolName: string): boolean {
+  return toolName !== HOST_EXEC_PERMISSION_TOOL && toolKey(toolName) !== 'sync_resolve_conflict';
 }
 
 /**
@@ -227,6 +236,7 @@ export function buildPermissionDetail(
  * first-party tools or a persisted "Always Allow".
  */
 export function isPermissionPreApproved(toolName: string, alwaysAllowedTools: readonly string[]): boolean {
+  if (!canAlwaysAllow(toolName)) return false;
   return isTrustedBuiltInTool(toolName) || alwaysAllowedTools.includes(toolName);
 }
 

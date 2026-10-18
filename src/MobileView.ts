@@ -20,7 +20,7 @@ import { splitErrorMessage } from './dashboardUtils';
 import { extractMessageContent } from './MessageContent';
 import { outsideVaultLinkPath } from './OutsideVaultLinkModal';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from './linkUtils';
-import { summarizePermissionDetail } from './permissionDetail';
+import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
 import {
   VISUALIZE_SLOT_ATTR,
   VISUALIZE_SLOT_CLASS,
@@ -1073,8 +1073,8 @@ export class MobileView extends ItemView {
       });
     });
 
-    // 3.11 — Always Allow button
-    {
+    // 3.11 — Always Allow button (never offered for per-call approvals)
+    if (canAlwaysAllow(permission.toolName)) {
       const alwaysBtn = actions.createEl('button', {
         cls: 'ct-mobile-permission-btn ct-mobile-permission-always',
         text: 'Always Allow',

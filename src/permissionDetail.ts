@@ -77,3 +77,5 @@ export function parsePermissionDetail(detail: string): ParsedPermissionDetail {
 export function summarizePermissionDetail(detail: string): string {
   return parsePermissionDetail(detail).summary;
 }
+
+export { HOST_EXEC_PERMISSION_TOOL, canAlwaysAllow } from './toolNameUtils';

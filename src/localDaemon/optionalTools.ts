@@ -34,8 +34,8 @@ export const OPTIONAL_TOOL_GROUPS: readonly OptionalToolGroup[] = Object.freeze(
   { id: 'skills', label: 'Install and change skills', description: 'install, create, update and uninstall skills on this Mac', tools: [
     'skills_install', 'skills_create_local', 'skills_update_local', 'skills_uninstall', 'skills_update', 'skills_check_updates',
   ] },
-  { id: 'vault', label: 'Vault history and bridges', description: 'restore earlier versions of vault files and add vault bridges', tools: [
-    'vault_restore_file_version', 'vault_add_bridge',
+  { id: 'vault', label: 'Vault history and bridges', description: 'restore earlier versions of vault files, add vault bridges and resolve sync conflicts', tools: [
+    'vault_restore_file_version', 'vault_add_bridge', 'sync_resolve_conflict',
   ] },
   { id: 'workspace', label: 'Run app commands and drive the editor', description: 'run any app command, open files and URLs, insert text and watch documents', tools: [
     'host_execute_command', 'host_list_commands', 'host_open_url', 'workspace_navigate_to_file', 'workspace_insert_at_cursor',
