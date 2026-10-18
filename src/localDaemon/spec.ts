@@ -261,6 +261,16 @@ export function resolveExternalRoots(
   return out;
 }
 
+/**
+ * External roots (read-only at /ext) that are the same folder as, inside, or around a shared folder (read-write at
+ * /work). Mounting one host folder twice with different modes makes the share fail for writes (virtiofs), so the
+ * shared folder, which the user asked for explicitly, wins and the root is dropped; it is still reachable at /work.
+ */
+export function dropOverlappingRoots(roots: readonly ExternalRootMount[], work: readonly ExternalRootMount[]): ExternalRootMount[] {
+  const overlaps = (a: string, b: string) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+  return roots.filter((r) => !work.some((w) => overlaps(r.host, w.host)));
+}
+
 export class SpecError extends Error {
   constructor(message: string) {
     super(message);

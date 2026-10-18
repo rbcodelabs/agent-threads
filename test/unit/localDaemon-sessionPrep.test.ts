@@ -282,3 +282,22 @@ describe('failure handling', () => {
     expect(pushes(f.calls)).toHaveLength(1);
   });
 });
+
+describe('a data volume that is reset while the app stays open', () => {
+  it('has everything delivered again on the next session (the in-memory caches are dropped)', async () => {
+    const over = { env: { K: 'v' }, files: { '/s/p/SKILL.md': '#' }, plugins: ['/s/p'], awsProfiles: [] as string[], cliTokenPresent: true, existingSkillDirs: [] as string[] };
+    const f = fixture(over);
+    await f.prep.prepare(undefined);
+    const firstPushes = pushes(f.calls).length;
+    const firstCopies = copies(f.calls).length;
+    expect(firstPushes).toBe(1);
+    // Unchanged volume: nothing is sent twice.
+    await f.prep.prepare(undefined);
+    expect(pushes(f.calls)).toHaveLength(firstPushes);
+    // Reset: the saved admin token (and with it everything else) is gone.
+    over.cliTokenPresent = false;
+    await f.prep.prepare(undefined);
+    expect(pushes(f.calls).length).toBeGreaterThan(firstPushes);
+    expect(copies(f.calls).length).toBeGreaterThan(firstCopies);
+  });
+});

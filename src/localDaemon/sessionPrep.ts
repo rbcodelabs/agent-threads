@@ -108,6 +108,7 @@ export class LocalDaemonSessionPrep {
         this.deps.log?.(`[local-daemon] ${what} not delivered: ${message}`);
       }
     };
+    await attempt('data volume check', () => this.pusher.verifyVolume());
     await attempt('session environment', async () => { extras.envKind = await this.deliverEnv(projectId); });
     await attempt('skills', async () => { extras.pluginPaths = await this.deliverSkills(); });
     await attempt('AWS credentials', async () => { await this.deliverAws(extras.warnings); });

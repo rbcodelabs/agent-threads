@@ -73,7 +73,7 @@ refused. The VM has full outbound network access.
 **More folders.** Besides the vault: **Settings, Remote, Local daemon shared folders** lists host folders to share
 READ-WRITE at `/work/<folder name>` (for example a repository outside the vault; they appear under "Run on" as
 workspaces), and Geode's connected external roots are mounted READ-ONLY at `/ext/<name>` and offered as read-only
-workspaces (the daemon denies the edit tools there). Mounts are fixed when the container is created, so a change shows as
+workspaces (the daemon denies the edit tools there). A folder that is both a shared folder and an external root (or one inside the other) is mounted once, read-write, at `/work`: a folder cannot be shared with two modes at the same time. Mounts are fixed when the container is created, so a change shows as
 "settings changed" and is applied by **Update** (or the next start of a stopped container). The consent text lists every
 mount. Memory and CPUs (**Local daemon memory** / **CPUs**, defaults 4G and 4) work the same way.
 

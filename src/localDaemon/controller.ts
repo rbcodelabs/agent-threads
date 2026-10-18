@@ -60,6 +60,7 @@ import {
   localImageRef,
   mountsFor,
   specSignature,
+  dropOverlappingRoots,
   resolveExternalRoots,
   resolveWorkFolders,
   type ExternalRootInput,
@@ -289,7 +290,7 @@ export class LocalDaemonController {
     this.workFolders = vaultPath ? resolveWorkFolders(this.settings().folders, { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) }) : [];
     if (!vaultPath || !this.deps.externalRoots) { this.extRoots = []; return; }
     try {
-      this.extRoots = resolveExternalRoots(await this.deps.externalRoots(), { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) });
+      this.extRoots = dropOverlappingRoots(resolveExternalRoots(await this.deps.externalRoots(), { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) }), this.workFolders);
     } catch {
       this.extRoots = []; // an unreadable host answer means no extra mounts, never a failed operation
     }

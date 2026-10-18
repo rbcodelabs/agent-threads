@@ -74,6 +74,19 @@ export class CredsPusher {
     } catch { /* see above */ }
   }
 
+  /**
+   * Is the data volume still the one we delivered to? Called before each session's delivery: a volume that was reset
+   * while the app stayed open has lost the saved admin token along with everything we pushed or copied, so the
+   * dependants' caches must go (otherwise they would skip re-delivering what is no longer there).
+   */
+  async verifyVolume(): Promise<void> {
+    const name = this.containerName();
+    const r = await this.deps.runner()(cliTokenPresentArgs(name), { timeoutMs: CREDS_EXEC_TIMEOUT_MS });
+    if (r.exitCode === 0) return;
+    this.cliTokenReady.delete(name);
+    this.deps.onFreshVolume?.();
+  }
+
   /** Mints and saves the admin token `creds push` authenticates with. Idempotent. */
   private async ensureCliToken(name: string): Promise<void> {
     if (this.cliTokenReady.has(name)) return;

@@ -12,6 +12,7 @@ import {
   labelsFor,
   localImageRef,
   mountsFor,
+  dropOverlappingRoots,
   resolveExternalRoots,
   resolveWorkFolders,
   resolveDaemonCpus,
@@ -167,6 +168,15 @@ describe('golden argv', () => {
       { host: '/c/data', name: 'odd-label-with-chars' },
     ]);
     expect(resolveExternalRoots(undefined, { vaultPath: '/v', isDirectory: () => true })).toEqual([]);
+  });
+
+  it('a folder shared read-write and also an external root is mounted once, read-write (no conflicting double mount)', () => {
+    const work = [{ host: '/a/Docs', name: 'Docs' }];
+    const roots = [{ host: '/a/Docs', name: 'Docs' }, { host: '/a/Docs/sub', name: 'sub' }, { host: '/a', name: 'a' }, { host: '/b/Other', name: 'Other' }];
+    expect(dropOverlappingRoots(roots, work)).toEqual([{ host: '/b/Other', name: 'Other' }]);
+    expect(dropOverlappingRoots(roots, [])).toEqual(roots);
+    const mounts = mountsFor({ vaultPath: '/v', maskedDirs: [], workFolders: work, externalRoots: dropOverlappingRoots(roots, work) });
+    expect(mounts.filter((m) => m.host === '/a/Docs')).toEqual([{ host: '/a/Docs', guest: '/work/Docs', readOnly: false }]);
   });
 
   it('resource limits: validated before they reach argv, defaults on anything invalid', () => {
