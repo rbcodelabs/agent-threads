@@ -47,6 +47,20 @@ export interface SyncToolsPort {
   app: Pick<App, 'vault'>;
 }
 
+interface AdapterLike {
+  exists(p: string): Promise<boolean> | boolean;
+  read?(p: string): Promise<string>;
+  write?(p: string, data: string): Promise<void>;
+  getBasePath?(): string;
+  basePath?: string;
+}
+
+function fullPath(adapter: AdapterLike, p: string): string {
+  const base = adapter.getBasePath?.() ?? adapter.basePath;
+  if (!base) throw new Error('Cannot read vault files: adapter has no read() and no base path.');
+  return `${base}/${p}`;
+}
+
 const MAX_CONTENT_CHARS = 100_000;
 
 const ok = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] });
@@ -89,8 +103,24 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
 
   const readIfExists = async (p: string): Promise<string | null> => {
     const np = normalizePath(p);
-    const adapter = app.vault.adapter;
-    return (await adapter.exists(np)) ? adapter.read(np) : null;
+    const adapter = app.vault.adapter as unknown as AdapterLike;
+    if (!(await adapter.exists(np))) return null;
+    // Geode's adapter has exists()/getBasePath() but no read(): go through the filesystem.
+    if (typeof adapter.read === 'function') return adapter.read(np);
+    return (require('fs') as typeof import('fs')).promises.readFile(fullPath(adapter, np), 'utf8');
+  };
+  const writeLocal = async (p: string, content: string): Promise<void> => {
+    const np = normalizePath(p);
+    const vault = app.vault as unknown as {
+      getAbstractFileByPath?: (path: string) => unknown;
+      modify?: (file: unknown, data: string) => Promise<void>;
+    };
+    const file = vault.getAbstractFileByPath?.(np);
+    // The local file is indexed, so modify() lets the sync engine see an ordinary local edit.
+    if (file && typeof vault.modify === 'function') return vault.modify(file, content);
+    const adapter = app.vault.adapter as unknown as AdapterLike;
+    if (typeof adapter.write === 'function') return adapter.write(np, content);
+    await (require('fs') as typeof import('fs')).promises.writeFile(fullPath(adapter, np), content, 'utf8');
   };
   const clip = (s: string | null) =>
     s !== null && s.length > MAX_CONTENT_CHARS ? `${s.slice(0, MAX_CONTENT_CHARS)}\n…[truncated]` : s;
@@ -198,7 +228,7 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
         let resolution = args.resolution;
         if (args.mergedContent !== undefined) {
           if (!conflict.conflictPath) return fail('mergedContent is only supported for sibling conflicts.');
-          await app.vault.adapter.write(normalizePath(conflict.path), args.mergedContent);
+          await writeLocal(conflict.path, args.mergedContent);
           resolution = 'keep-local';
         }
         await sync.resolveConflict(args.id, resolution);
