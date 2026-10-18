@@ -2381,6 +2381,18 @@ export class ThreadManager {
       : {};
     const resolvedSecretEnv = { ...githubEnv, ...(this.secretEnvResolver ? this.secretEnvResolver(project?.id) : {}) };
     const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
+    // One skill-root list for every harness that discovers by parent directory
+    // (Codex via skills/extraRoots/set, OpenCode via its native skills.paths).
+    const skillRoots = codexSkillRoots(
+      this.settings.skillSources ?? [],
+      this.pluginResourceDir
+        ? require('path').join(this.pluginResourceDir, 'resources', 'skills')
+        : undefined,
+      // Vault-installed skills. These harnesses discover by parent root, so they get
+      // the skills dir itself rather than the generated plugin root Claude uses.
+      pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
+      this.localSkillsRoot(),
+    );
 
     return {
       cwd: thread.cwd,
@@ -2430,16 +2442,7 @@ export class ThreadManager {
         ...(this.settings.codexEffort && this.settings.codexEffort !== 'default'
           ? { effort: this.settings.codexEffort }
           : {}),
-        skillRoots: codexSkillRoots(
-          this.settings.skillSources ?? [],
-          this.pluginResourceDir
-            ? require('path').join(this.pluginResourceDir, 'resources', 'skills')
-            : undefined,
-          // Vault-installed skills. Codex discovers by parent root, so it gets
-          // the skills dir itself rather than the generated plugin root Claude uses.
-          pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
-          this.localSkillsRoot(),
-        ),
+        skillRoots,
         dynamicTools: codexDynamicTools,
         mcpServers: codexMcpServers,
         agentProfiles,
@@ -2447,6 +2450,7 @@ export class ThreadManager {
       opencode: {
         dynamicTools: codexDynamicTools,
         mcpServers: codexMcpServers,
+        skillRoots,
       },
     };
   }

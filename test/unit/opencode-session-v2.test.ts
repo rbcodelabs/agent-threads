@@ -7,6 +7,7 @@ import {
   OpenCodeV2EventAdapter,
   openCodeAuthHeader,
   openCodeConfigV2,
+  openCodeSkillsConfig,
   openCodeGenerationFromVersion,
   openCodePermissionRules,
   openCodeSseData,
@@ -82,6 +83,13 @@ describe('OpenCode v2 launch helpers', () => {
       off: { type: 'remote', url: 'http://x', disabled: true },
     } });
     expect(openCodeConfigV2(undefined, {})).not.toHaveProperty('mcp');
+  });
+
+  it('registers skill roots through the native skills.paths key, deduplicated, and omits it when empty', () => {
+    expect(openCodeSkillsConfig(['/a/skills', '/b/skills', '/a/skills', ''])).toEqual({ skills: { paths: ['/a/skills', '/b/skills'] } });
+    expect(openCodeSkillsConfig([])).toEqual({});
+    expect(openCodeConfigV2(undefined, {}, ['/a/skills']).skills).toEqual({ paths: ['/a/skills'] });
+    expect(openCodeConfigV2(undefined, {})).not.toHaveProperty('skills');
   });
 
   it('names v2 tools for the shared renderer', () => {
@@ -183,6 +191,12 @@ function harness(options: { resumeStatus?: number } = {}) {
 }
 
 describe('OpenCodeSession against the v2 API', () => {
+  it('passes skill roots to the v2 server as skills.paths', async () => {
+    const h = harness();
+    await h.session.start({ ...h.baseOptions, opencode: { skillRoots: ['/vault/skill-sources/cos/skills'] } });
+    expect(h.launched()?.configV2).toMatchObject({ skills: { paths: ['/vault/skill-sources/cos/skills'] } });
+  });
+
   it('launches with the v2 config, creates a located session and discovers models', async () => {
     const h = harness();
     await h.session.start({ ...h.baseOptions, disallowedTools: ['Bash'] });

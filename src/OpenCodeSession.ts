@@ -169,10 +169,21 @@ export function openCodeMcpServersV2(mcp: Record<string, unknown>): Record<strin
   return result;
 }
 
+/**
+ * OpenCode's native skill discovery: `skills.paths` lists directories that are
+ * scanned for `<name>/SKILL.md` (same key in the v1 and v2 config schemas), so
+ * no files are copied or symlinked. Empty when there is nothing to register.
+ */
+export function openCodeSkillsConfig(skillRoots: readonly string[]): { skills?: { paths: string[] } } {
+  const paths = [...new Set(skillRoots.filter((root) => root.length > 0))];
+  return paths.length > 0 ? { skills: { paths } } : {};
+}
+
 /** The full `OPENCODE_CONFIG_CONTENT` for a v2 server. */
-export function openCodeConfigV2(disallowedTools: readonly string[] | undefined, mcp: Record<string, unknown>): Record<string, unknown> {
+export function openCodeConfigV2(disallowedTools: readonly string[] | undefined, mcp: Record<string, unknown>, skillRoots: readonly string[] = []): Record<string, unknown> {
   return {
     permissions: openCodePermissionRules(disallowedTools),
+    ...openCodeSkillsConfig(skillRoots),
     ...(Object.keys(mcp).length > 0 ? { mcp: { servers: openCodeMcpServersV2(mcp) } } : {}),
   };
 }
@@ -649,9 +660,10 @@ export class OpenCodeSession {
         env: { ...process.env, ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) },
         config: {
           permission: openCodePermissionConfig(options.disallowedTools),
+          ...openCodeSkillsConfig(options.opencode?.skillRoots ?? []),
           ...(Object.keys(mcp).length > 0 ? { mcp } : {}),
         },
-        configV2: openCodeConfigV2(options.disallowedTools, mcp),
+        configV2: openCodeConfigV2(options.disallowedTools, mcp, options.opencode?.skillRoots),
       });
       this.generation = this.transport.generation ?? 'v1';
     } catch (error) {
