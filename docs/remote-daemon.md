@@ -6,8 +6,8 @@ completes. This is stage 1 of the daemon design: Geode still owns the transcript
 process and a replay journal.
 
 What a remote thread has today: the **daemon machine's own tools** (shell, file read/write, search, git worktrees) and
-its own `claude` login, plus the tools of your computer proxied back to the app while it is connected ("Tools on your
-computer" below). It does not have skills or keychain secrets (later PRs). Claude only. A message sent while a turn is running is held by the
+its own `claude`, `codex` or `opencode` login, plus the tools of your computer proxied back to the app while it is connected ("Tools on your
+computer" below). It does not have skills or keychain secrets (later PRs). Which harness a thread uses is chosen per session (see "Harnesses" below). A message sent while a turn is running is held by the
 plugin and sent when the turn ends.
 
 ## ws:// vs wss:// from Geode (spike findings)
@@ -519,6 +519,63 @@ exactly which tools run on your computer (or says none do).
   agent cannot read it. A tool call that was running when the app quit may be re-run after a restart only if the daemon
   still shows it as open.
 
+## Harnesses: Claude, Codex, OpenCode
+
+The daemon hosts all three harnesses side by side. The harness is chosen per session from `spec.harness` (`agent-threads
+run --harness codex "..."`; the app sends the thread's harness), and the daemon starts that harness's own CLI for the
+session.
+
+| Setting | Meaning |
+|---|---|
+| `harnesses` (`--harnesses claude,codex`, env `AGENT_THREADS_HARNESSES`, config.json) | Harnesses a client may request. Default: all three. A session for any other harness is refused (`bad_frame`) before anything starts. |
+| `harness` (`--harness`, env `AGENT_THREADS_HARNESS`) | The default for `agent-threads run`. Given alone it also restricts the daemon to that one harness (so an old `AGENT_THREADS_HARNESS=claude` keeps meaning Claude only). `--fake-harness` is the scripted test stand-in and ignores the set. |
+| `claudeBinaryPath`, `codexBinaryPath`, `opencodeBinaryPath` (`--claude-binary`, `--codex-binary`, `--opencode-binary`; env `AGENT_THREADS_CLAUDE_BINARY`, `_CODEX_BINARY`, `_OPENCODE_BINARY`) | Explicit CLI path. Otherwise PATH, `~/.npm-global/bin`, `~/.local/bin` and `/usr/local/bin` are searched. |
+
+A harness whose CLI is missing does not stop the daemon: startup logs a warning and each `session.open` for it fails with
+`<cli> CLI not found: ... set <configKey> / <ENV_VAR>` while the other harnesses keep working. `welcome.capabilities` lists
+`harness.<kind>` for every enabled harness plus `harness.<kind>.<feature>` for what it supports (`set_model`,
+`set_permission_mode`, `usage`, `context_usage`, `host_tools`, and for Claude `mcp_status` and `session_options`). It lists
+what the daemon is configured for, not which CLIs are installed.
+
+**Credentials.** Like Claude, Codex and OpenCode inherit the daemon's environment and HOME and reuse a login made once as
+the daemon user. The startup log says which source each harness will use (never the value).
+
+| Harness | Login (as the daemon user) | Environment |
+|---|---|---|
+| Claude | `claude` | `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`, or the `claude-token` systemd credential |
+| Codex | `codex login` (`~/.codex/auth.json`, or `$CODEX_HOME`) | `CODEX_API_KEY` or `OPENAI_API_KEY` |
+| OpenCode | `opencode auth login` (`~/.local/share/opencode/auth.json`, plus config in `~/.config/opencode`) | the provider's key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, ...) |
+
+Put keys in the service environment file (`/etc/agent-threads/env` or `~/.config/agent-threads/env`). Only the Claude token
+has a systemd `LoadCredential=` form; the others are read from the environment. A Claude token that comes from the
+`claude-token` credential file is passed only to Claude sessions, but a key set in the service environment is inherited by
+every harness process and by the shell commands they run, so list only keys you are happy for all of them to see. A client cannot set `CODEX_HOME`,
+`OPENAI_*`, `CODEX_API_KEY`, `OPENCODE_CONFIG*`, `XDG_CONFIG_HOME` or `XDG_DATA_HOME` through `extraEnvRaw`, even if the
+operator lists them in `allowedClientEnv`. The CLIs are not installed by the packaging: install them for the daemon
+user (`npm i -g @openai/codex opencode-ai`), or add a layer to the image the same way the Claude CLI is added.
+
+**Daemon tools on every harness.** The daemon's own `claude_threads` tools (the worktree tools) and the tools your app
+proxies are offered to each harness in the form it understands: Claude gets in-process MCP servers that follow the live tool
+list; Codex gets dynamic tools and OpenCode gets them through its loopback MCP bridge, with the list fixed when the session
+starts (a tool that first appears in a later manifest needs a new session). Outside `claude_threads`, a proxied tool is named
+`<server>__<tool>` for Codex and OpenCode (they have no per-server namespace of their own). The reserved names
+`claude_threads` and `obsidian`, the names of proxied servers, and operator-configured `mcpServers` cannot be taken over by
+a client-supplied server on any harness (for OpenCode its bridge name `agent-threads` is reserved too). Operator-configured
+and client-supplied MCP servers are mirrored into each harness's own config (Codex `mcp_servers`, OpenCode `mcp`).
+
+**What differs by harness.** Claude honours all of `spec.sessionOptions` (thinking, effort, agents, betas). Codex honours
+`effort` only; the rest is dropped. OpenCode honours none of it. Neither has native child-agent controls
+(`session.sendAgentMessage` / `interruptAgent` are refused for them, as they are today for Claude's local sessions) nor
+MCP server status. The Codex goal/skills/agent-profile extras a local Codex thread gets are not set on a daemon session.
+
+**Read-only workspaces per harness.** Edit-tool names differ, so each harness is restricted in its own way: Claude gets
+the `Edit`/`MultiEdit`/`Write`/`NotebookEdit` denylist; OpenCode turns that denylist into its native `edit` permission
+(`deny`, which covers edit, write and patch); Codex has no per-tool denylist, so its **sandbox is pinned to `read-only`
+for the life of the session** (even across a later permission-mode change). That is stronger than for the other two,
+because Codex's sandbox also stops shell commands from writing, but it also means Codex cannot write temp files in the
+workspace there. For Claude and OpenCode, shell commands are still not blocked. The worktree tools are not offered in a
+read-only workspace on any harness. `acceptEdits`, `auto` and `bypassPermissions` are refused there for all three.
+
 ## MCP servers that need secrets (daemon-side)
 
 Some MCP servers need a key the daemon must hold itself (a hosted docs server, a database tool). List them in the daemon's
@@ -534,7 +591,7 @@ Some MCP servers need a key the daemon must hold itself (a hosted docs server, a
 ```
 
 `type` is `stdio` (the default, with `command`, `args`, `env`), `http` or `sse`. `claude_threads` and `obsidian` are reserved.
-A daemon-listed server replaces a same-named server sent by the app.
+A daemon-listed server replaces a same-named server sent by the app. They are started for every harness (Claude, Codex, OpenCode).
 
 Secret values are sent with the `creds.push` protocol command (`{ kind, ttlSec, fields }`), which needs an **admin** token.
 They are stored on the daemon as `<data-dir>/creds/<kind>.json` (directory 0700, files 0600), never in `config.json` or in a
@@ -687,7 +744,7 @@ a link *inside* the vault that points outside it is refused as a cwd.
 
 **Optional: read-only.** `--readonly-workspace /home/user/vault` (env `AGENT_THREADS_READONLY_WORKSPACES`,
 config `readOnlyWorkspaces`) allows sessions there but denies the harness's edit tools (`Edit`, `MultiEdit`,
-`Write`, `NotebookEdit`) and refuses the `acceptEdits`, `auto` and `bypassPermissions` modes (Geode's default setting
+`Write`, `NotebookEdit`; see "Harnesses" for how Codex and OpenCode map this) and refuses the `acceptEdits`, `auto` and `bypassPermissions` modes (Geode's default setting
 is `acceptEdits`, so such a thread must use the default or plan permission mode). This is a guard rail, not a sandbox: shell commands
 (`Bash`) are not blocked. Use it together with `--workspace` for other folders (a read-write workspace nested
 inside a read-only one stays writable).

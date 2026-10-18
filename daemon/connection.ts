@@ -46,6 +46,7 @@ import { RepoError, type ReposManager } from './repos';
 import type { PathAccess } from './sessionPolicy';
 import type { ControlRegistry } from './controlRegistry';
 import type { FailureThrottle } from './failureThrottle';
+import { harnessCapabilities, isRealHarness, type RealHarness } from './harnesses';
 import { HostError, type ThreadHost, type ThreadJournal } from './threadHost';
 import { scopeSatisfies, type TokenScope, type TokenStore, type VerifiedToken } from './tokenStore';
 import { DAEMON_VERSION, MIN_CLIENT_VERSION } from './version';
@@ -73,7 +74,12 @@ export function raiseFrameLimit(ws: WebSocket, bytes: number): boolean {
 const SOCKET_HIGH_WATER = 256 * 1024;
 /** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
 export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'host.tools', 'creds.push', 'mcp.status', 'repos'];
-export const capabilitiesFor = (harness: string): string[] => [...BASE_CAPABILITIES, `harness.${harness}`];
+/**
+ * `harness.<kind>` for each harness a client may request, plus `harness.<kind>.<feature>` for what that harness
+ * supports (see `HARNESS_FEATURES`). The scripted fake advertises only `harness.fake`.
+ */
+export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = []): string[] =>
+  harness === 'fake' ? [...BASE_CAPABILITIES, 'harness.fake'] : [...BASE_CAPABILITIES, ...harnessCapabilities(enabled.length ? enabled : isRealHarness(harness) ? [harness] : [])];
 
 export interface Timings {
   helloTimeoutMs: number;

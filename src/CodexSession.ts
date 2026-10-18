@@ -257,7 +257,7 @@ export class CodexSession {
           model: options.model ?? null,
           effort: options.codex?.effort ?? null,
           approvalPolicy: options.codex?.approvalPolicy ?? resolveCodexPermissions(options.permissionMode).approvalPolicy,
-          sandbox: options.codex?.sandbox ?? resolveCodexPermissions(options.permissionMode).sandbox,
+          sandbox: options.codex?.enforceReadOnly ? 'read-only' : options.codex?.sandbox ?? resolveCodexPermissions(options.permissionMode).sandbox,
           config: threadConfig,
           ...codexResumeInstructions(options),
         });
@@ -273,7 +273,7 @@ export class CodexSession {
         model: options.model ?? null,
         effort: options.codex?.effort ?? null,
         approvalPolicy: options.codex?.approvalPolicy ?? resolveCodexPermissions(options.permissionMode).approvalPolicy,
-        sandbox: options.codex?.sandbox ?? resolveCodexPermissions(options.permissionMode).sandbox,
+        sandbox: options.codex?.enforceReadOnly ? 'read-only' : options.codex?.sandbox ?? resolveCodexPermissions(options.permissionMode).sandbox,
         developerInstructions: codexDeveloperInstructions(options),
         config: threadConfig,
         dynamicTools: codexDynamicToolDefinitions(options.codex?.dynamicTools),
@@ -380,6 +380,7 @@ export class CodexSession {
       return;
     }
     const permissions = resolveCodexPermissions(mode);
+    if (this.options?.codex?.enforceReadOnly) permissions.sandbox = 'read-only';
     await this.request('thread/settings/update', {
       threadId: this.codexThreadId,
       collaborationMode: this.collaborationMode(mode === 'plan' ? 'plan' : 'default'),

@@ -16,7 +16,8 @@ import { PROTOCOL_VERSION } from '../src/protocol';
 import { AuditLog } from './auditLog';
 import { CommandCache } from './cmdCache';
 import { isLoopbackAddress, isWildcardAddress, loadOrCreateDaemonId, updateConfigFile, type DaemonConfig } from './config';
-import { createClaudeDriverFactory, describeCredentialSource, findClaudeBinary, resolveCredentialEnv } from './claudeDriver';
+import { createClaudeDriverFactory, describeCredentialSource, resolveCredentialEnv } from './claudeDriver';
+import { HARNESS_BINARY, HARNESS_SECRET_ENV, describeHarnessCredential, findHarnessBinary, harnessCapabilities, type RealHarness } from './harnesses';
 import { describePathAccess, withRepoRoot, type SessionPolicy } from './sessionPolicy';
 import { ReposManager } from './repos';
 import { pruneIdleWorktrees } from './worktreePrune';
@@ -114,7 +115,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
 
   const creds = new CredStore(config.dataDir, options.now);
   ensureDir(creds.dir);
-  const real = config.harness === 'claude';
+  const real = config.harness !== 'fake';
   // Repositories kept cloned under config.repoRoot. The list lives in config.json (changed by `repos.sync`).
   let repoList = config.repos;
   const repos = new ReposManager({
@@ -142,17 +143,21 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       writer.append(threadId, typeof event.session_id === 'string' ? event.session_id : undefined, type, event);
     };
     const credentialEnv = resolveCredentialEnv(env);
-    setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN, ...creds.secretValues()].filter((v): v is string => !!v));
+    setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN, ...HARNESS_SECRET_ENV.map((k) => env[k]), ...creds.secretValues()].filter((v): v is string => !!v));
     if (!driverFactory) {
-      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, env, mcpServers: config.mcpServers, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: () => repos.sessionEnv(), onSessionStart: (cwd) => repos.refreshForCwd(cwd) });
-      const binary = findClaudeBinary(config.claudeBinaryPath, env);
-      log(binary ? `claude CLI: ${binary}` : 'WARNING: claude CLI not found; session.open will fail until it is installed (or set claudeBinaryPath / AGENT_THREADS_CLAUDE_BINARY)');
-      log(`claude credential: ${describeCredentialSource(env)}`);
+      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, codexBinaryPath: config.codexBinaryPath, opencodeBinaryPath: config.opencodeBinaryPath, env, mcpServers: config.mcpServers, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: () => repos.sessionEnv(), onSessionStart: (cwd) => repos.refreshForCwd(cwd) });
+      const explicit: Record<RealHarness, string | undefined> = { claude: config.claudeBinaryPath, codex: config.codexBinaryPath, opencode: config.opencodeBinaryPath };
+      for (const kind of config.harnesses) {
+        const b = HARNESS_BINARY[kind];
+        const binary = findHarnessBinary(kind, explicit[kind], env);
+        log(binary ? `${b.exe} CLI: ${binary}` : `WARNING: ${b.exe} CLI not found; ${kind} sessions will fail until it is installed (or set ${b.configKey} / ${b.envVar})`);
+        log(`${kind} credential: ${kind === 'claude' ? describeCredentialSource(env) : describeHarnessCredential(kind, env)}`);
+      }
     }
-    log(`workspaces: ${config.workspaces.join(', ') || '(none)'}${config.readOnlyWorkspaces.length ? `; read-only workspaces: ${config.readOnlyWorkspaces.join(', ')}` : ''}; bypassPermissions ${config.allowBypass ? 'ALLOWED' : 'refused'}; maxConcurrentTurns ${config.maxConcurrentTurns}; maxLiveSessions ${config.maxLiveSessions}; client env ${config.allowedClientEnv.length ? `limited to ${config.allowedClientEnv.join(', ')}` : 'ignored'}; idle reap ${config.idleReapMinutes ? `${config.idleReapMinutes} min` : 'off'}`);
+    log(`harnesses: ${config.harnesses.join(', ')} (default ${config.harness}); workspaces: ${config.workspaces.join(', ') || '(none)'}${config.readOnlyWorkspaces.length ? `; read-only workspaces: ${config.readOnlyWorkspaces.join(', ')}` : ''}; bypassPermissions ${config.allowBypass ? 'ALLOWED' : 'refused'}; maxConcurrentTurns ${config.maxConcurrentTurns}; maxLiveSessions ${config.maxLiveSessions}; client env ${config.allowedClientEnv.length ? `limited to ${config.allowedClientEnv.join(', ')}` : 'ignored'}; idle reap ${config.idleReapMinutes ? `${config.idleReapMinutes} min` : 'off'}`);
   }
 
-  const configuredPolicy: SessionPolicy = { workspaces: config.workspaces, readOnlyWorkspaces: config.readOnlyWorkspaces, allowBypass: config.allowBypass, allowedClientEnv: config.allowedClientEnv };
+  const configuredPolicy: SessionPolicy = { workspaces: config.workspaces, readOnlyWorkspaces: config.readOnlyWorkspaces, allowBypass: config.allowBypass, allowedClientEnv: config.allowedClientEnv, harnesses: config.harnesses };
   // The repo root is always allowed as a session folder; it is only OFFERED (workspaces.list) once something has been cloned there.
   const sessionPolicy: SessionPolicy = withRepoRoot(configuredPolicy, config.repoRoot);
   const host = new ThreadHost({
@@ -191,7 +196,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     cmdCache: new CommandCache(),
     daemonId,
     epoch,
-    capabilities: capabilitiesFor(config.harness),
+    capabilities: capabilitiesFor(config.harness, config.harnesses),
     controllers,
     creds,
     repos,

@@ -54,6 +54,7 @@ run options:
   --cwd <dir>            folder ON THE DAEMON MACHINE (default: the shell's folder for a local daemon, else the daemon's default workspace)
   --permission-mode <m>  default | acceptEdits | plan | dontAsk | auto | bypassPermissions (default: default; dontAsk with --unattended)
   --model <m>            model for the session
+  --harness <kind>       claude (default), codex or opencode; the daemon must have it enabled
   --thread <id>          continue an existing thread instead of starting a new one
   --detach               send the prompt, print the thread id, exit; the turn keeps running (attach to watch it)
   --unattended           nobody to answer: dontAsk mode DENIES tools that are not pre-approved; a request that
@@ -77,7 +78,11 @@ serve options:
   --max-connections <n>        sockets accepted at once (default 64)
   --max-live-sessions <n>      sessions with a live claude process at once (default 8)
   --request-timeout-minutes <n>  cancel a permission/question nobody answers after this long (default 60, 0 = never)
+  --harness <kind>       default harness: claude, codex or opencode (env AGENT_THREADS_HARNESS). Alone it also restricts the daemon to that one
+  --harnesses <a,b,..>   harnesses a client may request (env AGENT_THREADS_HARNESSES, comma separated; config.json harnesses; default: all three)
   --claude-binary <path> path to the claude CLI (env AGENT_THREADS_CLAUDE_BINARY; default: PATH, ~/.npm-global/bin, ~/.local/bin)
+  --codex-binary <path>  path to the codex CLI (env AGENT_THREADS_CODEX_BINARY; same default dirs)
+  --opencode-binary <path>  path to the opencode CLI (env AGENT_THREADS_OPENCODE_BINARY; same default dirs)
   --fake-harness         scripted stand-in instead of Claude (tests and smoke runs only)
 
 creds push: field values are read from standard input as a JSON object (--stdin) or from the environment variable of
@@ -252,6 +257,10 @@ export async function runCli(argv: string[], io: Io = consoleIo, runtime?: Parti
     const readOnlyWorkspaces = p.flags.get('readonly-workspace');
     if (readOnlyWorkspaces) flags.readOnlyWorkspaces = readOnlyWorkspaces;
     if (p.bools.has('allow-bypass')) flags.allowBypass = true;
+    const harness = one(p, 'harness');
+    if (harness) flags.harness = harness as NonNullable<ConfigInputs['flags']>['harness'];
+    const harnesses = p.flags.get('harnesses');
+    if (harnesses) flags.harnesses = harnesses.flatMap((v) => v.split(',')).map((v) => v.trim()).filter(Boolean) as NonNullable<ConfigInputs['flags']>['harnesses'];
     if (p.bools.has('fake-harness')) flags.harness = 'fake';
     const maxTurns = one(p, 'max-concurrent-turns');
     if (maxTurns !== undefined) flags.maxConcurrentTurns = Number(maxTurns);
@@ -269,6 +278,10 @@ export async function runCli(argv: string[], io: Io = consoleIo, runtime?: Parti
     if (requestTimeout !== undefined) flags.requestTimeoutMinutes = Number(requestTimeout);
     const claudeBinary = one(p, 'claude-binary');
     if (claudeBinary) flags.claudeBinaryPath = claudeBinary;
+    const codexBinary = one(p, 'codex-binary');
+    if (codexBinary) flags.codexBinaryPath = codexBinary;
+    const opencodeBinary = one(p, 'opencode-binary');
+    if (opencodeBinary) flags.opencodeBinaryPath = opencodeBinary;
 
     let config;
     try { config = resolveConfig({ flags }); } catch (e) { io.err((e as Error).message); return 2; }
@@ -277,7 +290,7 @@ export async function runCli(argv: string[], io: Io = consoleIo, runtime?: Parti
     if (!daemon.tokens.hasActiveTokens) {
       io.out(`No tokens exist yet. Create one with: agent-threads token create --name <name> --scope admin --data-dir ${config.dataDir}`);
     }
-    io.out(config.harness === 'fake' ? 'Session host: scripted fake harness (--fake-harness).' : 'Session host: Claude (ThreadSession).');
+    io.out(config.harness === 'fake' ? 'Session host: scripted fake harness (--fake-harness).' : `Session host: ${config.harnesses.join(', ')} (default ${config.harness}).`);
     await new Promise<void>((resolve) => {
       const shutdown = (sig: string) => {
         io.out(`${sig} received, shutting down`);
@@ -362,6 +375,7 @@ async function runClientCommand(cmd: string, p: Parsed, io: Io, raw: RawIo, rt: 
         ...(one(p, 'cwd') ? { cwd: one(p, 'cwd') } : {}),
         ...(one(p, 'permission-mode') ? { permissionMode: one(p, 'permission-mode') } : {}),
         ...(one(p, 'model') ? { model: one(p, 'model') } : {}),
+        ...(one(p, 'harness') ? { harness: one(p, 'harness') } : {}),
         ...(one(p, 'thread') ? { thread: one(p, 'thread') } : {}),
         detach: p.bools.has('detach'), unattended: p.bools.has('unattended'),
       }, raw, rt);

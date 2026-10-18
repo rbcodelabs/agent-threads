@@ -1,14 +1,15 @@
 /**
  * What the daemon refuses to run, decided before any process is spawned
  * (design 5.2): the cwd must sit under an allowlisted workspace root,
- * `bypassPermissions` needs an explicit operator opt-in, only the Claude
- * harness exists yet, the permission mode must be one the daemon knows, and a
+ * `bypassPermissions` needs an explicit operator opt-in, the harness must be one
+ * the operator enabled (`harnesses`), the permission mode must be one the daemon knows, and a
  * client cannot choose the agent's environment: `extraEnvRaw` is ignored unless
  * the operator lists the variable names a client may set (`allowedClientEnv`).
  */
 import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { RemoteSessionSpec } from '../src/protocol';
+import { REAL_HARNESSES, isRealHarness } from './harnesses';
 
 export interface SessionPolicy {
   /** Folders sessions may run in (read-write). */
@@ -20,6 +21,8 @@ export interface SessionPolicy {
    */
   readOnlyWorkspaces?: string[];
   allowBypass: boolean;
+  /** Harnesses a client may request (`spec.harness`). Absent = Claude only, the behaviour before Codex and OpenCode. */
+  harnesses?: readonly string[];
   /**
    * Variable names a client may set through `extraEnvRaw`. Empty or absent (the default) = the client's
    * environment is ignored. An allowlist is the only safe shape: a denylist cannot enumerate every
@@ -112,8 +115,17 @@ export function allWorkspaceRoots(policy: SessionPolicy): string[] {
  * `plan` cannot edit, `dontAsk` denies anything not pre-approved.
  */
 export const READ_ONLY_PERMISSION_MODES: ReadonlySet<string> = new Set(['default', 'plan', 'dontAsk']);
-/** The harness's file-editing tools, denied in a read-only workspace. Shell commands are NOT covered (see docs). */
+/**
+ * The harness's file-editing tools, denied in a read-only workspace. Shell commands are NOT covered (see docs).
+ * These are Claude's tool names; each adapter translates them (OpenCode denies its `edit` permission, which
+ * covers edit/write/patch; Codex gets a read-only sandbox instead, see `isReadOnlyDenylist`).
+ */
 export const READ_ONLY_DENIED_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'] as const;
+
+/** Does this denylist carry every edit tool, i.e. was it produced for a read-only workspace? */
+export function isReadOnlyDenylist(disallowedTools: readonly string[] | undefined): boolean {
+  return READ_ONLY_DENIED_TOOLS.every((t) => (disallowedTools ?? []).includes(t));
+}
 
 /**
  * Is `realPath` (already symlink-resolved) read-only under `policy`? The most
@@ -187,6 +199,8 @@ export function assertPermissionModeAllowed(mode: string, policy: SessionPolicy,
 const PROTECTED_ENV = new Set([
   'HOME', 'PATH', 'USER', 'SHELL', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN',
   'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+  'CODEX_HOME', 'CODEX_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID',
+  'OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG_CONTENT', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME',
   'NODE_OPTIONS', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES',
 ]);
 
@@ -227,8 +241,12 @@ export function filterClientEnv(raw: string, allowed: readonly string[] | undefi
 /** Throws `PolicyError`; returns the spec to run (extra env sanitised, paths resolved). */
 export function validateSpec(spec: RemoteSessionSpec, policy: SessionPolicy): RemoteSessionSpec {
   if (!spec || typeof spec !== 'object') throw new PolicyError('bad_frame', 'spec is required');
-  if (spec.harness !== 'claude') {
-    throw new PolicyError('bad_frame', `harness "${String(spec.harness)}" is not supported by this daemon build (claude only)`);
+  const enabled = policy.harnesses ?? ['claude'];
+  if (!isRealHarness(spec.harness)) {
+    throw new PolicyError('bad_frame', `harness ${JSON.stringify(String(spec.harness).slice(0, 40))} is not supported by this daemon (expected one of ${REAL_HARNESSES.join(', ')})`);
+  }
+  if (!enabled.includes(spec.harness)) {
+    throw new PolicyError('bad_frame', `harness "${spec.harness}" is not enabled on this daemon (enabled: ${enabled.join(', ') || 'none'}; set harnesses in config.json)`);
   }
   const roots = allWorkspaceRoots(policy);
   const cwd = assertWithinWorkspaces(spec.cwd, roots, 'cwd');
