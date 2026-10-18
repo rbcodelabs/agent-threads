@@ -24,10 +24,10 @@ export interface FileToCopy {
 }
 
 export const COPY_SCRIPT = `
-const fs = require('fs'); const path = require('path');
-const root = process.argv[1];
-let raw = '';
-process.stdin.on('data', (c) => { raw += c; }).on('end', () => {
+  const fs = require('fs'); const path = require('path');
+  const root = process.argv[1];
+  let raw = '';
+  process.stdin.on('data', (c) => { raw += c; }).on('end', () => {
   const { dest, clean, files } = JSON.parse(raw);
   const d = path.resolve(dest);
   if (!d.startsWith(root + '/') || d.split('/').includes('..')) { console.error('destination outside the data directory'); process.exit(2); }
