@@ -31,10 +31,6 @@ import { mcpRegistrationSchema, listMcpServers, deleteMcpServer, findUnresolvedP
 import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
 import type { OAuthMcpPreset } from './oauthMcpPresets';
 import { classifyScheduledItems, describeScheduledExecution, formatNextOccurrence } from './scheduledWorkView';
-import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
-import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY, MAX_VM_CPUS, resolveVmCpus, resolveVmMemory } from './sandboxVm';
-import { describeReset, getSandboxSetupStatus, resetSandbox, runSandboxSetup } from './sandboxSetup';
-import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
 import { checkAwsCredentialsNow, reauthenticateAws, resolveSignInProfile } from './awsReauth';
 import { promptConfirm } from './confirmModal';
 import { formatToolName } from './toolNameUtils';
@@ -1458,6 +1454,11 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   private selectedProjectId: string | null = null;
   private selectedSecretName: string | null = null;
 
+  /** Switch the (single-pane) settings to a section before it is opened. */
+  showSection(id: SettingsTabId): void {
+    this.activeTab = id;
+  }
+
   showNewProject(): void {
     this.activeTab = 'projects';
     this.selectedProjectId = '';
@@ -1877,85 +1878,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl)
-      .setName('Sandbox VM image')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Container image enter_vm starts. Requires Apple\'s container runtime (macOS 26+, Apple silicon). '
-        + 'Use "Set up sandbox" below to install the runtime and fetch this image automatically. Advanced fallback: '
-        + 'build it yourself with `container build --tag claude-threads-coding:1 sandbox/`. '
-        + 'Leave empty for claude-threads-coding:1.',
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder('claude-threads-coding:1')
-          .setValue(this.plugin.settings.vmImage ?? '')
-          .onChange(async (value) => {
-            this.plugin.settings.vmImage = value.trim();
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Sandbox VM network')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Network isolation enter_vm uses when a call does not pass one. '
-        + 'Full egress is the default so npm install, git remotes and web access work.',
-      )
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('default', 'Full egress (default)')
-          .addOption('internal', 'Internal — host only, no internet')
-          .addOption('none', 'None — no network at all')
-          .setValue(this.plugin.settings.vmDefaultNetwork ?? 'default')
-          .onChange(async (value) => {
-            this.plugin.settings.vmDefaultNetwork = value as PluginSettings['vmDefaultNetwork'];
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    const resourceHelp = 'Applies only to newly created containers. To pick up a change for an existing one, remove it '
-      + '(`container rm --force claude-threads-vm-<thread-id>`); it is recreated on next use.';
-    new Setting(containerEl)
-      .setName('Sandbox VM memory')
-      .setClass('ct-sandbox-setting')
-      .setDesc(`Memory limit per sandbox container, e.g. 4G or 2048M (default 4G). Invalid values fall back to 4G. ${resourceHelp}`)
-      .addText((text) =>
-        text
-          .setPlaceholder(DEFAULT_VM_MEMORY)
-          .setValue(this.plugin.settings.sandboxVmMemory ?? DEFAULT_VM_MEMORY)
-          .onChange(async (value) => {
-            this.plugin.settings.sandboxVmMemory = resolveVmMemory(value);
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Sandbox VM CPUs')
-      .setClass('ct-sandbox-setting')
-      .setDesc(`CPU count per sandbox container, a whole number from 1 to ${MAX_VM_CPUS} (default ${DEFAULT_VM_CPUS}). ${resourceHelp}`)
-      .addText((text) =>
-        text
-          .setPlaceholder(String(DEFAULT_VM_CPUS))
-          .setValue(String(this.plugin.settings.sandboxVmCpus ?? DEFAULT_VM_CPUS))
-          .onChange(async (value) => {
-            this.plugin.settings.sandboxVmCpus = resolveVmCpus(/^\s*\d+\s*$/.test(value) ? Number(value) : undefined);
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
     // GitHub connection (Geode >= 0.25 only; hidden elsewhere so Obsidian is unchanged).
     if (this.plugin.githubBroker?.available) {
       new Setting(containerEl)
         .setName('Use Geode GitHub connection')
         .setDesc(
           'Let threads use the GitHub account connected in Geode (Settings → GitHub) for git over HTTPS, the gh CLI and '
-          + 'the GitHub API — on the host and in the sandbox VM — with no personal access token. The token is handed to a '
+          + 'the GitHub API with no personal access token. The token is handed to a '
           + 'credential helper via a short-lived private file, never put in prompts, logs or environment variables, and '
           + 'it reaches every repository the Geode GitHub App is installed on. Your own GH_TOKEN, gh login and git '
           + 'credential helpers always take priority.',
@@ -1967,9 +1896,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               this.plugin.settings.githubConnectionEnabled = value;
               this.plugin.manager.updateSettings(this.plugin.settings);
               await this.plugin.saveSettings();
-              // Apply to the host runtime dir now; VM hooks read the setting lazily.
+              // Apply to the host runtime dir now.
               if (value) void this.plugin.githubHost?.start();
-              else void this.plugin.githubHost?.stop();
+              else {
+                void this.plugin.githubHost?.stop();
+                void this.plugin.localDaemonGithub?.stop();
+              }
             }),
         );
 
@@ -1990,65 +1922,6 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             }),
         );
-    }
-
-    new Setting(containerEl)
-      .setName('Run harness inside sandbox VM')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Runs a thread\'s Claude CLI process inside its sandbox container instead of on the host (ADR-0015). '
-        + '"Auto" only routes into the VM when the container runtime, a probe, and the harness image are all '
-        + 'ready — until you run "Set up sandbox" (below), threads keep running on your Mac and offer to set it up. "Always" forces VM '
-        + 'routing and errors clearly instead of silently falling back if anything is missing. "Never" is '
-        + 'today\'s host-local spawn, unchanged.',
-      )
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('auto', 'Auto (default)')
-          .addOption('always', 'Always — error if unavailable')
-          .addOption('never', 'Never — host-local spawn only')
-          .setValue(this.plugin.settings.harnessVmMode ?? 'auto')
-          .onChange(async (value) => {
-            this.plugin.settings.harnessVmMode = value as PluginSettings['harnessVmMode'];
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-            this.display();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Harness VM image')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Container image the harness routes into — a separate image tag from the sandbox VM image above, by design '
-        + '(ADR-0015 §7). "Set up sandbox" below builds it for you. Advanced fallback: '
-        + '`container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`. '
-        + 'Leave empty for claude-threads-harness:1.',
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder('claude-threads-harness:1')
-          .setValue(this.plugin.settings.harnessVmImage ?? '')
-          .onChange(async (value) => {
-            this.plugin.settings.harnessVmImage = value.trim();
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    if ((this.plugin.settings.harnessVmMode ?? 'auto') !== 'never') {
-      const sandboxSetting = new Setting(containerEl)
-        .setName('Sandbox setup')
-        .setClass('ct-sandbox-setting');
-      const harnessImage = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
-      renderSandboxSettingsPanel(sandboxSetting.descEl, {
-        isMobile: Platform.isMobile,
-        getStatus: () => getSandboxSetupStatus({ harnessImage }),
-        run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
-        reset: ({ onProgress, signal }) => resetSandbox({ harnessImage, onProgress, signal }),
-        resetMessage: describeReset(harnessImage),
-        confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
-      });
     }
 
     if (this.fixedSection) new Setting(containerEl).setName('Claude').setHeading();
@@ -2136,14 +2009,14 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         awsStatus.setText(res.expired ? "Not signed in (SSO session expired or missing)." : res.error);
       }
     };
-    // Containers are desktop-only, so is this.
+    // The local daemon is desktop-only, so is this.
     if (!Platform.isMobile) new Setting(containerEl)
-      .setName('AWS profiles exposed to containers')
+      .setName('AWS profiles for the local daemon')
       .setDesc(
-        'One profile per line. Sandbox containers get a read-only copy of the AWS SSO token cache and a trimmed AWS config '
-        + 'containing only these profiles, plus the AWS_PROFILE from Extra environment variables. Takes effect for containers '
-        + 'created afterwards (a running thread keeps its container). Leave empty to expose nothing extra. '
-        + 'Note: the whole SSO token cache directory is mounted, not just these profiles\' tokens — see docs/sandbox-vms.md.',
+        'One profile per line. Threads that run on the local daemon (Run on: This Mac (container)) get a trimmed AWS config '
+        + 'containing only these profiles, plus the AWS_PROFILE from Extra environment variables, and the SSO token of each '
+        + 'profile\'s session (only that session\'s token file). Copied before each message, so a fresh sign-in on this Mac '
+        + 'reaches the daemon. Amazon Bedrock threads always get their AWS_PROFILE. Leave empty to share nothing extra.',
       )
       .addTextArea((ta) =>
         ta
@@ -3494,12 +3367,65 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       this.display();
       return result;
     };
+    // Resources apply when the container is (re)created: the status then offers Update.
+    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; optionalTools?: string[] }): Promise<void> => {
+      const current = this.plugin.settings.localDaemon ?? { enabled: false, port: 7433 };
+      this.plugin.settings.localDaemon = { ...current, ...patch };
+      await this.plugin.saveSettings();
+    };
+    const memorySetting = new Setting(containerEl)
+      .setName('Local daemon memory')
+      .setDesc('Memory limit of the local daemon container, e.g. 4G or 2048M (default 4G). Invalid values fall back to 4G. Applies when the container is next created: choose Update in the block above.')
+      .addText((text) => text
+        .setPlaceholder('4G')
+        .setValue(this.plugin.settings.localDaemon?.memory ?? '')
+        .onChange(async (value) => { await saveResources({ memory: value.trim() || undefined }); }));
+    const foldersSetting = new Setting(containerEl)
+      .setName('Local daemon shared folders')
+      .setDesc('Folders on this Mac to share READ-WRITE with the local daemon, one absolute path per line (for example a repository outside your vault). They appear in the daemon at /work/<folder name>; pick one under "Run on" when you start a thread. An agent there can edit or delete anything in them. Applies when the container is next created: choose Update in the block above.')
+      .addTextArea((ta) => ta
+        .setPlaceholder('/Users/me/projects/my-repo')
+        .setValue((this.plugin.settings.localDaemon?.folders ?? []).join('\n'))
+        .onChange(async (value) => {
+          const folders = value.split('\n').map((l) => l.trim()).filter(Boolean);
+          await saveResources({ folders: folders.length ? folders : undefined });
+        }));
+    // Tools that write, schedule or touch secrets on this Mac, which every daemon is denied by default.
+    const optionalSettings: Setting[] = [];
+    {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const opt = require('./localDaemon/optionalTools') as typeof import('./localDaemon/optionalTools');
+      const head = new Setting(containerEl).setName('Local daemon: tools that act on this Mac').setDesc(`Off by default. ${opt.OPTIONAL_TOOLS_WARNING} Takes effect for the next thread session you open.`);
+      head.settingEl.addClass('ct-local-daemon-optional-head');
+      optionalSettings.push(head);
+      for (const group of opt.OPTIONAL_TOOL_GROUPS) {
+        const row = new Setting(containerEl)
+          .setName(group.label)
+          .setDesc(`Lets a thread on the daemon ${group.description}. (${group.tools.join(', ')})`)
+          .addToggle((toggle) => toggle
+            .setValue(opt.normalizeOptionalGroups(this.plugin.settings.localDaemon?.optionalTools).includes(group.id))
+            .onChange(async (on) => {
+              const current = new Set(opt.normalizeOptionalGroups(this.plugin.settings.localDaemon?.optionalTools));
+              if (on) current.add(group.id); else current.delete(group.id);
+              await saveResources({ optionalTools: opt.normalizeOptionalGroups([...current]) });
+            }));
+        row.settingEl.addClass('ct-local-daemon-optional-row');
+        optionalSettings.push(row);
+      }
+    }
+    const cpusSetting = new Setting(containerEl)
+      .setName('Local daemon CPUs')
+      .setDesc('CPU count of the local daemon container, a whole number from 1 to 64 (default 4). Applies when the container is next created.')
+      .addText((text) => text
+        .setPlaceholder('4')
+        .setValue(this.plugin.settings.localDaemon?.cpus ? String(this.plugin.settings.localDaemon.cpus) : '')
+        .onChange(async (value) => { await saveResources({ cpus: /^\s*\d+\s*$/.test(value) ? Number(value) : undefined }); }));
     renderLocalDaemonPanel(setting.descEl, {
       isMobile: Platform.isMobile,
       pluginVersion: this.plugin.manifest.version,
       snapshot: () => controller.snapshot(),
       subscribe: (listener) => controller.subscribe(listener),
-      setVisible: (visible) => { setting.settingEl.style.display = visible ? '' : 'none'; },
+      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       cancel: () => controller.cancel(),
       openUrl: (url) => { try { window.open(url, '_blank'); } catch { /* the panel keeps a link */ } },

@@ -131,12 +131,9 @@ export function getToolIcon(raw: string): string {
     case 'get_backlinks':        return 'link-2';
     case 'get_outgoing_links':   return 'external-link';
     case 'set_working_directory': return 'folder-symlink';
+    case 'host_exec':            return 'square-terminal';
     case 'enter_worktree':       return 'git-branch-plus';
     case 'exit_worktree':        return 'git-branch';
-    case 'enter_vm':             return 'box';
-    case 'vm_exec':              return 'terminal';
-    case 'host_exec':            return 'square-terminal';
-    case 'exit_vm':              return 'square-x';
     case 'get_open_tabs':        return 'layout-panel-top';
     case 'ScheduleWakeup':       return 'alarm-clock';
     case 'browser_navigate':     return 'globe';
@@ -200,18 +197,14 @@ export function isTrustedBuiltInTool(raw: string): boolean {
 }
 
 /**
- * Tool name `host_exec` uses on the permission card. Cards for this name are
- * always shown (permission mode, auto-approve, trusted-tool and persisted
- * "Always Allow" shortcuts are all ignored) and offer Allow once / Deny only.
- */
-export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
-
-/**
  * Tools whose permission card shows their complete input (the SDK description
  * would hide the expression). `browser_eval` runs agent-authored JavaScript, so
  * the user should be able to read it. It is otherwise permissioned like any
  * other tool, including Always Allow.
  */
+/** The host_exec permission request of the managed local daemon's tool group: decided per call, never remembered. */
+export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
+
 const FULL_INPUT_DETAIL_TOOL_KEYS: ReadonlySet<string> = new Set(['browser_eval']);
 
 /** True when the card should show the tool's full input. */
@@ -219,7 +212,7 @@ function showsFullInput(toolName: string): boolean {
   return FULL_INPUT_DETAIL_TOOL_KEYS.has(toolKey(toolName));
 }
 
-/** False for requests that must be decided afresh every time. */
+/** False for requests that must be decided afresh every time (never "Always Allow"). */
 export function canAlwaysAllow(toolName: string): boolean {
   return toolName !== HOST_EXEC_PERMISSION_TOOL && toolKey(toolName) !== 'sync_resolve_conflict';
 }
@@ -240,8 +233,7 @@ export function buildPermissionDetail(
 
 /**
  * True when a permission request may be resolved without showing a card:
- * first-party tools or a persisted "Always Allow". Requests that cannot be
- * always-allowed (host_exec) are never pre-approved, whatever the lists say.
+ * first-party tools or a persisted "Always Allow".
  */
 export function isPermissionPreApproved(toolName: string, alwaysAllowedTools: readonly string[]): boolean {
   if (!canAlwaysAllow(toolName)) return false;

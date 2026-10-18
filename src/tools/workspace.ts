@@ -7,7 +7,6 @@ import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk/browser';
 import { TFile, normalizePath } from 'obsidian';
 import path from 'path';
-import { VmLoopbackError } from '../vmPortForward';
 import type { ObsidianMcpServerOptions } from '../ObsidianTools';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { App } from 'obsidian';
@@ -16,7 +15,7 @@ type ToolDef = SdkMcpToolDefinition<any>;
 
 export interface WorkspaceToolsPort {
   app: Pick<App, 'vault' | 'workspace'>;
-  options: Pick<ObsidianMcpServerOptions, 'onListWatchedDocuments' | 'onUnwatchDocument' | 'onWatchDocument' | 'openContextualFile' | 'openContextualUrl' | 'resolveSandboxUrl'>;
+  options: Pick<ObsidianMcpServerOptions, 'onListWatchedDocuments' | 'onUnwatchDocument' | 'onWatchDocument' | 'openContextualFile' | 'openContextualUrl'>;
 }
 
 const navigateToFileSchema = {
@@ -312,7 +311,6 @@ export function createWorkspaceTools(port: WorkspaceToolsPort): Record<string, T
       'Opens a URL in the Obsidian Web Viewer panel.',
       'Reuses an existing webviewer tab if one is open; otherwise opens the URL in a new tab.',
       'Use this to open local dev servers (e.g. http://localhost:8765/), web pages, or HTML files served over HTTP.',
-      'If this thread runs in a sandbox VM, a localhost / 127.0.0.1 URL that names a server started inside the VM is forwarded automatically to a loopback port on this Mac and the returned url shows the rewritten address; if nothing is listening there you get an error with a hint.',
       'Falls back to the system browser if the Web Viewer core plugin is not available.',
     ].join(' '),
     {
@@ -321,22 +319,14 @@ export function createWorkspaceTools(port: WorkspaceToolsPort): Record<string, T
     },
     async (args, _extra) => {
       try {
-        const { url: requestedUrl, newTab = false } = args;
-
-        // A thread running in a sandbox container: `localhost` in the URL means
-        // the container, but this viewer runs on the host. Forward + rewrite.
-        const resolution = await options.resolveSandboxUrl?.(requestedUrl) ?? { kind: 'passthrough' as const };
-        const url = resolution.kind === 'forwarded' ? resolution.url : requestedUrl;
-        const forwardedInfo = resolution.kind === 'forwarded'
-          ? { requestedUrl, note: resolution.note }
-          : {};
+        const { url, newTab = false } = args;
 
         const contextualResult = await options.openContextualUrl?.(url, newTab) ?? false;
         if (contextualResult) {
           return {
             content: [{
               type: 'text' as const,
-              text: JSON.stringify({ success: true, url, ...forwardedInfo, reusedTab: contextualResult.reusedTab }, null, 2),
+              text: JSON.stringify({ success: true, url, reusedTab: contextualResult.reusedTab }, null, 2),
             }],
           };
         }
@@ -363,7 +353,7 @@ export function createWorkspaceTools(port: WorkspaceToolsPort): Record<string, T
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ success: true, url, ...forwardedInfo, reusedTab: !newTab && existing.length > 0 }, null, 2),
+            text: JSON.stringify({ success: true, url, reusedTab: !newTab && existing.length > 0 }, null, 2),
           }],
         };
       } catch (err: unknown) {
@@ -372,7 +362,6 @@ export function createWorkspaceTools(port: WorkspaceToolsPort): Record<string, T
           content: [{ type: 'text' as const, text: JSON.stringify({
             success: false,
             error: msg,
-            ...(err instanceof VmLoopbackError ? { hint: err.hint } : {}),
           }, null, 2) }],
           isError: true,
         };

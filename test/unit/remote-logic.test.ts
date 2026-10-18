@@ -36,11 +36,9 @@ describe('projectSessionOptions', () => {
     appendSystemPrompt: 'remote prompt',
     resumeFallbackHistory: 'history',
     secretEnv: { GH_TOKEN: 'ghp_secret' },
-    containerAuthToken: 'container-token',
     disallowedTools: ['Bash(rm:*)'],
     claude: {
       mcpServers: { local: { type: 'http', url: 'http://127.0.0.1:9/mcp', headers: { Authorization: 'Bearer leak' } } as never },
-      vmMcpServers: {},
       disallowedTools: ['WebSearch', 'Bash(rm:*)'],
       sessionOptions: { effort: 'high', betas: ['b1' as never], persistSession: true, plugins: [{ type: 'local', path: '/Users/me/p' } as never], agents: { reviewer: { description: 'd', prompt: 'p' } as never } },
       vm: { mode: 'always' } as never,

@@ -6,7 +6,7 @@
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createDefaultVmCommandRunner } from '../../src/sandboxVm';
+import { createDefaultVmCommandRunner } from '../../src/containerCli';
 import { LocalDaemonController, type LocalDaemonDeps } from '../../src/localDaemon/controller';
 import type { RuntimeApi } from '../../src/localDaemon/runtime';
 import { LOCAL_DAEMON_TOKEN_SECRET } from '../../src/localDaemon/registration';
@@ -33,6 +33,10 @@ export interface HarnessOptions {
   settings?: LocalDaemonSettings;
   secrets?: Record<string, string>;
   maskedDirs?: string[];
+  /** What Geode's `externalRoots.listMountRoots()` reports (a function so a test can change it between calls). */
+  externalRoots?: () => Array<{ rootId?: string; label?: string; path?: string }>;
+  /** Extra directories that exist on the (fake) host, besides the vault's config dirs. */
+  existingDirs?: string[];
   signIn?: LocalDaemonDeps['signInRunner'];
   existingRegistration?: RemoteDaemonConfig;
 }
@@ -82,7 +86,8 @@ export function makeHarness(opts: HarnessOptions = {}) {
   const deps: LocalDaemonDeps = {
     vaultPath: () => vaultPath,
     pluginVersion,
-    isDirectory: (p) => (opts.maskedDirs ?? ['.geode', '.obsidian']).some((d) => p.endsWith(`/${d}`)),
+    isDirectory: (p) => (opts.existingDirs ?? []).includes(p) || (opts.maskedDirs ?? ['.geode', '.obsidian']).some((d) => p.endsWith(`/${d}`)),
+    ...(opts.externalRoots ? { externalRoots: async () => opts.externalRoots!() } : {}),
     runtime,
     createRunner: () => createDefaultVmCommandRunner(wrapper),
     healthz: async (port) => healthy(port),

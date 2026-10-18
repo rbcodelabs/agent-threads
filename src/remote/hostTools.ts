@@ -38,6 +38,8 @@ export interface RemoteHostToolsDeps {
   mcpSources?: Readonly<Record<string, HostMcpSource>>;
   /** The user's per-daemon choices (domain or tool -> host | absent). */
   overrides?: RouteOverrides;
+  /** Tools of `NEVER_OFFERED` the user switched on for this (managed local) daemon; see localDaemon/optionalTools.ts. */
+  optionalTools?: ReadonlySet<string>;
   log?: (message: string) => void;
 }
 
@@ -78,7 +80,7 @@ export class RemoteHostTools {
     const key = (server: string, tool: string): string => `${server}\u0000${tool}`;
 
     for (const t of this.deps.builtIn ?? []) {
-      if (routeFor(t.name, this.deps.overrides) !== 'host') continue;
+      if (routeFor(t.name, this.deps.overrides, this.deps.optionalTools) !== 'host') continue;
       const spec: RemoteHostToolSpec = {
         name: t.name, description: t.description, inputSchema: t.inputSchema,
         requiresApproval: t.requiresApproval, server: CLAUDE_THREADS_SERVER,

@@ -1,6 +1,6 @@
 /**
  * sandboxRuntime.ts — detect, install and start Apple's open-source `container`
- * runtime so sandboxed VMs need ZERO manual setup (no `brew install container`).
+ * runtime so the local daemon needs ZERO manual setup (no `brew install container`).
  *
  * ## Shape
  *
@@ -31,7 +31,7 @@
  *
  * ## Node builtins are required lazily
  *
- * Same convention as `sandboxVm.ts`: nothing is loaded at module scope, so
+ * Same convention as `containerCli.ts`: nothing is loaded at module scope, so
  * importing this on mobile is inert.
  */
 
@@ -364,17 +364,17 @@ export function isRuntimeSupported(deps: RuntimeDeps = createDefaultRuntimeDeps(
   try {
     platform = deps.platform(); arch = deps.arch(); release = deps.osRelease();
   } catch {
-    return { supported: false, reason: 'Sandboxed VMs are desktop-only and are not available on mobile.' };
+    return { supported: false, reason: 'The container runtime is desktop-only and is not available on mobile.' };
   }
   if (platform !== 'darwin') {
-    return { supported: false, reason: `Sandboxed VMs require macOS (this is ${platform}).` };
+    return { supported: false, reason: `The container runtime requires macOS (this is ${platform}).` };
   }
   if (arch !== 'arm64') {
-    return { supported: false, reason: `Sandboxed VMs require Apple silicon (this Mac is ${arch}).` };
+    return { supported: false, reason: `The container runtime requires Apple silicon (this Mac is ${arch}).` };
   }
   const major = parseInt(release.split('.')[0] ?? '', 10);
   if (!Number.isFinite(major) || major < MIN_DARWIN_MAJOR) {
-    return { supported: false, reason: `Sandboxed VMs require macOS 26 or later (Darwin ${release} is older).` };
+    return { supported: false, reason: `The container runtime requires macOS 26 or later (Darwin ${release} is older).` };
   }
   return { supported: true };
 }

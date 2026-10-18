@@ -29,6 +29,7 @@ import {
 } from '../src/protocol';
 import type { PluginSettings, Thread } from '../src/types';
 import type { CredStore } from './credStore';
+import { SESSION_ENV_KIND_PATTERN } from '../src/protocol/spec';
 import { buildHostServers, type HostServers } from './hostServers';
 import { RESERVED_MCP_NAMES, resolveDaemonMcpServers, type DaemonMcpServers, type ResolvedMcpServers } from './mcpServers';
 import type { DriverContext, DriverFactory, RequestKind, SessionDriver } from './sessionDriver';
@@ -50,7 +51,7 @@ export interface ClaudeDriverDeps {
    */
   daemonMcp?: () => ResolvedMcpServers;
   /** Environment for the agent's own process only (a repository token for `gh` and `git push`); read when a session starts. */
-  sessionEnv?: () => Record<string, string>;
+  sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
   /** A session is starting in this folder (lets the daemon refresh a stale clone in the background). */
   onSessionStart?: (cwd: string) => void;
 }
@@ -58,10 +59,8 @@ export interface ClaudeDriverDeps {
 // ── spec -> options ────────────────────────────────────────────────────────
 
 /**
- * Project a `RemoteSessionSpec` back onto `HarnessSessionOptions`. VM routing
- * (`claude.vm`) is never set, which is `harnessVmMode: 'never'`: the daemon is
- * already the sandbox. `secretEnv`/`containerAuthToken` are never taken from
- * the client.
+ * Project a `RemoteSessionSpec` back onto `HarnessSessionOptions`. `secretEnv`
+ * is never taken from the client.
  */
 export function specToSessionOptions(
   spec: RemoteSessionSpec,
@@ -80,6 +79,10 @@ export function specToSessionOptions(
       ...(so.persistSession !== undefined ? { persistSession: so.persistSession } : {}),
       ...(so.agents && Object.keys(so.agents).length ? { agents: so.agents as never } : {}),
     };
+  }
+  // Skill plugin directories the plugin copied into this daemon (already restricted to its skills folder by policy).
+  if (spec.pluginPaths?.length) {
+    claude.sessionOptions = { ...(claude.sessionOptions ?? {}), plugins: spec.pluginPaths.map((path) => ({ type: 'local' as const, path })) };
   }
   // The daemon's own servers win: a client-supplied http server must not stand in for `claude_threads` (whose
   // tools the client treats as first-party) or for any server it proxies, nor for an operator-configured server
@@ -110,6 +113,16 @@ export function specToSessionOptions(
     ...(parts.secretEnv && Object.keys(parts.secretEnv).length ? { secretEnv: parts.secretEnv } : {}),
     claude,
   };
+}
+
+/**
+ * Environment from the credential kind a spec names (`sessenv-...`, pushed by the user's app with `creds.push`): Extra
+ * environment variables and keychain secrets. Read when a session starts, so a rotated value reaches the next one.
+ */
+export function sessionEnvFromCreds(creds: CredStore | undefined, spec: RemoteSessionSpec): Record<string, string> {
+  const kind = spec.envKind;
+  if (!creds || typeof kind !== 'string' || !SESSION_ENV_KIND_PATTERN.test(kind)) return {};
+  return creds.get(kind) ?? {};
 }
 
 /**
@@ -190,7 +203,7 @@ export class ClaudeSessionDriver implements SessionDriver {
     const options = specToSessionOptions(ctx.spec, {
       resume: ctx.resume,
       callbacks: this.buildCallbacks(),
-      secretEnv: { ...deps.secretEnv, ...(deps.sessionEnv?.() ?? {}) },
+      secretEnv: { ...deps.secretEnv, ...(deps.sessionEnv?.(ctx.spec) ?? {}) },
       hostServers: this.hostServers.servers,
       ...(daemonMcp ? { daemonServers: daemonMcp.servers } : {}),
       preApprove: (toolName) => isProxiedHostTool(toolName, ctx.hostTools?.manifest() ?? {}),
@@ -542,7 +555,7 @@ export interface ClaudeDriverFactoryOptions {
   mcpServers?: DaemonMcpServers;
   creds?: CredStore;
   /** See `ClaudeDriverDeps.sessionEnv` / `onSessionStart`. */
-  sessionEnv?: () => Record<string, string>;
+  sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
   onSessionStart?: (cwd: string) => void;
 }
 

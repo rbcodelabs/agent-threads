@@ -140,7 +140,7 @@ describe('set up failures', () => {
   });
 
   it('refuses an unsupported Mac before touching anything', async () => {
-    const h = makeHarness({ runtime: { supported: false, reason: 'Sandboxed VMs require macOS 26 or later' } });
+    const h = makeHarness({ runtime: { supported: false, reason: 'The container runtime requires macOS 26 or later' } });
     const err = await expectCode(h.controller.setUp(), 'unsupported');
     expect(err.message).toMatch(/macOS 26/);
     expect(h.calls()).toEqual([]);
@@ -320,6 +320,30 @@ describe('sign in', () => {
     expect(h.calls().join('\n')).not.toContain(CLAUDE);
   });
 
+  it('force re-runs the flow although a token exists, and rewrites the credential in the volume', async () => {
+    const NEW = 'sk-ant-oat01-' + 'n'.repeat(40);
+    const signIn = vi.fn(async () => ({ ok: true as const, token: NEW }));
+    const h = makeHarness({ secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE }, signIn });
+    await h.controller.setUp();
+    expect(h.readState().volumes[dataVolumeFor(h.vaultPath)]?.credential).toBe(CLAUDE);
+    const r = await h.controller.signIn({ onProgress: vi.fn(), onUrl: vi.fn(), onCodePrompt: async () => 'code' }, { force: true });
+    expect(r).toEqual({ ok: true });
+    expect(signIn).toHaveBeenCalledTimes(1);
+    expect(h.claude()).toBe(NEW);
+    expect(h.readState().volumes[dataVolumeFor(h.vaultPath)]?.credential).toBe(NEW);
+    expect((await h.controller.snapshot()).assessment.status).toBe('running');
+    expect(h.calls().join('\n')).not.toContain(NEW);
+  });
+
+  it('a failed forced sign-in keeps the old credential', async () => {
+    const h = makeHarness({ secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE }, signIn: async () => ({ ok: false as const, error: 'cancelled' }) });
+    await h.controller.setUp();
+    const r = await h.controller.signIn({ onProgress: vi.fn(), onUrl: vi.fn(), onCodePrompt: async () => null }, { force: true });
+    expect(r).toEqual({ ok: false, error: 'cancelled' });
+    expect(h.claude()).toBe(CLAUDE);
+    expect(h.readState().volumes[dataVolumeFor(h.vaultPath)]?.credential).toBe(CLAUDE);
+  });
+
   it('a failed or cancelled sign-in changes nothing', async () => {
     const h = makeHarness({ signIn: async () => ({ ok: false as const, error: 'Sign-in timed out' }) });
     await h.controller.setUp();
@@ -334,6 +358,67 @@ describe('sign in', () => {
     h.deps.secrets.set = (() => { throw new Error('locked'); }) as never;
     const r = await h.controller.signIn({ onProgress: vi.fn(), onUrl: vi.fn(), onCodePrompt: async () => 'c' });
     expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/saving the token failed/) });
+  });
+});
+
+describe('resource settings', () => {
+  it('the container is created with the configured memory and cpus, and a change shows as drift', async () => {
+    const h = makeHarness({ settings: { enabled: false, port: 7433, memory: '8g', cpus: 6 } });
+    await h.controller.setUp();
+    const c = h.readState().containers[h.name];
+    expect(c.cmd.join(' ')).toBeDefined();
+    expect(h.calls().find((a) => a.includes('--memory'))).toMatch(/--memory 8G --cpus 6/);
+    expect((await h.controller.snapshot()).assessment.drift).toBe(false);
+    h.deps.saveSettings({ ...(h.deps.loadSettings() as object), enabled: true, port: 7433, memory: '2G', cpus: 6 } as never);
+    expect((await h.controller.snapshot()).assessment.drift).toBe(true);
+  });
+
+  it('invalid values fall back to the defaults', async () => {
+    const h = makeHarness({ settings: { enabled: false, port: 7433, memory: 'banana', cpus: 0 } });
+    await h.controller.setUp();
+    expect(h.calls().find((a) => a.includes('--memory'))).toMatch(/--memory 4G --cpus 4/);
+  });
+});
+
+describe('shared folders', () => {
+  it('mounts the user\'s folders read-write at /work and offers them as workspaces', async () => {
+    const h = makeHarness({ existingDirs: ['/Users/me/projects/repo'], settings: { enabled: false, port: 7433, folders: ['/Users/me/projects/repo', '/missing/dir'] } });
+    await h.controller.setUp();
+    const c = h.readState().containers[h.name];
+    expect(c.volumes).toContain('/Users/me/projects/repo:/work/repo');
+    expect(c.volumes.some((v) => v.includes('/missing/dir'))).toBe(false);
+    expect(c.cmd.join(' ')).toContain('--workspace /work/repo');
+    expect((await h.controller.snapshot()).mounts).toContainEqual({ host: '/Users/me/projects/repo', guest: '/work/repo', readOnly: false });
+  });
+});
+
+describe('external roots', () => {
+  it('mounts Geode external roots read-only at /ext and makes them read-only workspaces', async () => {
+    const h = makeHarness({ existingDirs: ['/Users/me/Docs'], externalRoots: () => [{ label: 'Docs', path: '/Users/me/Docs' }] });
+    await h.controller.setUp();
+    const c = h.readState().containers[h.name];
+    expect(c.volumes).toContain('/Users/me/Docs:/ext/Docs:ro');
+    expect(c.cmd).toEqual(expect.arrayContaining(['--readonly-workspace', '/ext/Docs']));
+    expect((await h.controller.snapshot()).mounts).toContainEqual({ host: '/Users/me/Docs', guest: '/ext/Docs', readOnly: true });
+  });
+
+  it('a changed set of roots shows as drift and is applied when the container is recreated', async () => {
+    let roots: Array<{ label: string; path: string }> = [];
+    const h = makeHarness({ existingDirs: ['/Users/me/Docs'], externalRoots: () => roots });
+    await h.controller.setUp();
+    expect((await h.controller.snapshot()).assessment.drift).toBe(false);
+    roots = [{ label: 'Docs', path: '/Users/me/Docs' }];
+    expect((await h.controller.snapshot()).assessment.drift).toBe(true);
+    await h.controller.stop();
+    await h.controller.start();
+    expect(h.readState().containers[h.name].volumes).toContain('/Users/me/Docs:/ext/Docs:ro');
+    expect((await h.controller.snapshot()).assessment.drift).toBe(false);
+  });
+
+  it('an unreadable host answer means no extra mounts, never a failed operation', async () => {
+    const h = makeHarness({ externalRoots: () => { throw new Error('host bridge exploded'); } });
+    await h.controller.setUp();
+    expect(h.readState().containers[h.name].volumes.some((v) => v.includes('/ext/'))).toBe(false);
   });
 });
 
