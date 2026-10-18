@@ -1,4 +1,4 @@
-import type { AgentHarness, HarnessVmMode } from './types';
+import type { AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, setIcon, Notice, Platform, Menu, SearchComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
@@ -171,6 +171,7 @@ export class AgentDashboard extends ItemView {
       harnessPicker: {
         initialHarness: this.plugin.settings.agentHarness ?? 'claude',
         getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
+        localDaemonOffer: { available: () => this.plugin.isLocalDaemonSetupOffered(), onSetUp: () => this.plugin.openLocalDaemonSettings() },
         getFolderSource: () => this.plugin.remoteFolders ?? undefined,
         getLocalCwd: () => {
           const project = this.manager.getProject(this.selectedProjectId);
@@ -178,12 +179,11 @@ export class AgentDashboard extends ItemView {
         },
         getVaultRoot: () => this.manager.vaultRoot,
       },
-      onSend: async ({ text, images, attachment, agentHarness, harnessVmMode, remote }) => {
+      onSend: async ({ text, images, attachment, agentHarness, remote }) => {
         // Intercept contributed commands, then core model/goal/loop directives.
         // Apply directives instead of sending command text to the agent verbatim.
-        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; harnessVmMode?: HarnessVmMode; projectId?: string; remote?: { daemonId: string; cwd: string } } = {
+        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; projectId?: string; remote?: { daemonId: string; cwd: string } } = {
           agentHarness,
-          harnessVmMode,
           remote,
           projectId: this.selectedProjectId || undefined,
         };
@@ -559,7 +559,6 @@ export class AgentDashboard extends ItemView {
       hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
       hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
-      hasPendingSandboxOffer: this.manager.isAwaitingSandboxDecision(t.id),
       lastError: t.lastError,
       messageCount: t.messages.length,
       reviewed: t.reviewed,
@@ -841,7 +840,7 @@ export class AgentDashboard extends ItemView {
     }
     if (state === 'waiting') {
       const next = this.plugin.getPendingWakeups(thread.id)[0];
-      if (!next) return this.manager.isAwaitingSandboxDecision(thread.id) ? 'Waiting for your sandbox choice' : 'Waiting to resume';
+      if (!next) return 'Waiting to resume';
       const when = formatWakeupCountdown(next.fireAt);
       return next.reason ? `Resumes ${when} — ${next.reason}` : `Resumes ${when}`;
     }

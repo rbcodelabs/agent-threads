@@ -1,7 +1,7 @@
 /**
  * Local daemon: the Settings -> Remote block. DOM only; every side effect comes
  * from injected deps, so it is tested in jsdom with no runtime, no Obsidian
- * `Modal` and no network (the `sandboxSetupPanel.ts` pattern).
+ * `Modal` and no network.
  *
  * Mobile renders nothing at all (not even a heading): a loopback daemon on this
  * Mac is meaningless there.

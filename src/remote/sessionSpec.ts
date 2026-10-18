@@ -11,8 +11,9 @@
  *                additionalDirectories (dropped: the vault root is a Mac path),
  *                appendSystemPrompt (caller rebuilds it without the Mac vault root),
  *                claude.sessionOptions (plain JSON subset)
- *   omitted      callbacks, secretEnv, containerAuthToken, claude.mcpServers / vmMcpServers /
- *                vm, codex, opencode
+ *   omitted      callbacks, secretEnv, claude.mcpServers, codex, opencode
+ *   by name      claude.remoteEnvKind (the NAME of a credential kind pushed to the daemon; never values) and
+ *                claude.remotePluginPaths (guest paths of skills the plugin copied into the daemon's data volume)
  *
  * Host tools (`hostTools`) are added by the session once it has built the manifest; the http/sse external MCP servers
  * that survive `mcpPartition.ts` ride in `mcpServers`. Skills and the secret allowlist arrive in PR 9.
@@ -63,6 +64,8 @@ export function projectSessionOptions(options: HarnessSessionOptions, thread: Th
     extraEnvRaw: '',
     ...(Object.keys(sessionOptions).length > 0 ? { sessionOptions } : {}),
     ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+    ...(options.claude?.remoteEnvKind ? { envKind: options.claude.remoteEnvKind } : {}),
+    ...(options.claude?.remotePluginPaths?.length ? { pluginPaths: [...options.claude.remotePluginPaths] } : {}),
   };
 }
 

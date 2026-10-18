@@ -1064,7 +1064,7 @@ export class MobileView extends ItemView {
       });
     });
 
-    // 3.11 — Always Allow button (never offered for per-call approvals like host_exec)
+    // 3.11 — Always Allow button (never offered for per-call approvals)
     if (canAlwaysAllow(permission.toolName)) {
       const alwaysBtn = actions.createEl('button', {
         cls: 'ct-mobile-permission-btn ct-mobile-permission-always',

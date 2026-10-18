@@ -2155,27 +2155,6 @@ test.describe('Agent Threads UI', () => {
     await shot(page.locator('.ct-settings-popover'), 'model-menu-cli-stale.png');
   });
 
-  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }, { width: 375, height: 667 }]) {
-    test(`settings — sandbox VM controls ${viewport.width}`, async ({ page }) => {
-      await page.setViewportSize(viewport);
-      await page.goto('file://' + path.resolve('test/harness/settings.html'));
-      await page.getByLabel('Settings section').selectOption('claude');
-      const imageRow = page.locator('.setting-item').filter({ has: page.getByText('Sandbox VM image', { exact: true }) });
-      const networkRow = page.locator('.setting-item').filter({ has: page.getByText('Sandbox VM network', { exact: true }) });
-      await imageRow.scrollIntoViewIfNeeded();
-      await expect(imageRow.locator('input')).toHaveValue('claude-threads-coding:1');
-      await networkRow.locator('select').selectOption('none');
-      await expect(networkRow.locator('select')).toHaveValue('none');
-      await networkRow.scrollIntoViewIfNeeded();
-      const bounds = await networkRow.locator('select').boundingBox();
-      expect(bounds).not.toBeNull();
-      expect(bounds!.x).toBeGreaterThanOrEqual(0);
-      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
-      if (viewport.width < 480) expect(bounds!.height).toBeGreaterThanOrEqual(44);
-      await shot(page, `settings-sandbox-vm-${viewport.width}.png`);
-    });
-  }
-
   test('settings — switching harness reveals Codex Ultra effort without overwriting Claude effort', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
@@ -3092,29 +3071,6 @@ test.describe('Agent Threads UI', () => {
     await expect(harnessButton.locator('.ct-harness-mark-opencode')).toHaveAttribute('data-icon', 'opencode-mark');
     expect(await page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(0);
     await shot(page.locator('.ct-kanban-dispatch'), 'kanban-harness-picker-opencode.png');
-  });
-
-  test('kanban kickoff picker offers Run in (container/host) for Claude and badges the button', async ({ page }) => {
-    await page.setViewportSize({ width: 1240, height: 820 });
-    await page.goto(kanbanUrl);
-    await page.waitForSelector('.ct-kanban-board');
-
-    const harnessButton = page.locator('.ct-kanban-dispatch .ct-harness-send-btn');
-    await harnessButton.click({ button: 'right' });
-    const menu = page.locator('.ct-harness-menu');
-    await expect(menu.locator('.ct-run-mode-item')).toHaveCount(3);
-    const box = await page.locator('.ct-kanban-dispatch').boundingBox();
-    await shot(page, 'kanban-run-mode-menu.png', { clip: { x: 620, y: Math.max(0, box!.y - 300), width: 620, height: 300 + box!.height } });
-    await menu.locator('.ct-run-mode-item[data-run-mode="always"]').click();
-    await expect(menu).toHaveCount(0);
-    await expect(harnessButton).toHaveAttribute('aria-label', /in a container/);
-    await expect(harnessButton.locator('.ct-run-mode-badge')).toHaveCount(1);
-    await shot(page.locator('.ct-kanban-dispatch'), 'kanban-run-mode-badge.png');
-
-    await harnessButton.click({ button: 'right' });
-    await menu.getByRole('menuitemradio', { name: 'Codex' }).click();
-    await expect(harnessButton.locator('.ct-run-mode-badge')).toHaveCount(0);
-    expect(await page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(0);
   });
 
   test('kanban kickoff harness picker selects without dispatching', async ({ page }) => {

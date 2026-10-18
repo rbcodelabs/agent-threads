@@ -88,7 +88,6 @@ export const CALLBACK_DISPOSITION: Record<keyof SessionCallbacks, CallbackDispos
   onRateLimitRetry: 'event',
   onAuthRetry: 'event',
   onAuthRequired: 'event',
-  onVmRouting: 'event',
   onPermissionRequest: 'request',
   onAskUserQuestion: 'request',
   onAskUserQuestionCanceled: 'event',

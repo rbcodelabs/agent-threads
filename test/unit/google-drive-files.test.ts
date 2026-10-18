@@ -108,12 +108,6 @@ describe('resolveInRoots', () => {
     await expect(resolveInRoots('.obsidian/plugins/x/data.json', [root])).rejects.toThrow(/not allowed/);
     await expect(resolveInRoots('sub/.git/config', [root])).rejects.toThrow(/not allowed/);
   });
-  it('maps the VM guest /work alias onto the working directory', async () => {
-    expect(await resolveInRoots('/work/out/file.bin', [root])).toBe(join(require('fs').realpathSync(root), 'out', 'file.bin'));
-    expect(await resolveInRoots('/work', [root])).toBe(require('fs').realpathSync(root));
-    // Only the exact /work prefix is an alias.
-    await expect(resolveInRoots('/workshop/x', [root])).rejects.toThrow(/outside the allowed/);
-  });
   it('fails clearly when the thread has no usable directory', async () => {
     await expect(resolveInRoots('x', [])).rejects.toThrow(/No local directory/);
     await expect(resolveInRoots('x', [join(root, 'missing')])).rejects.toThrow(/No local directory/);
@@ -460,13 +454,6 @@ describe('/drive-files route on the loopback proxy', () => {
     await f.proxy.configure({ drive: false, docs: true });
     expect((await rpc(files, { jsonrpc: '2.0', id: 1, method: 'ping' })).status).toBe(409);
     expect(f.upstream).not.toHaveBeenCalled();
-  });
-  it('is bridged into VM sessions alongside the vendor Drive server', async () => {
-    const f = setup(fakeDrive());
-    await f.proxy.configure({ drive: true });
-    const vm = f.proxy.vmServersForThread('t');
-    expect(Object.keys(vm)).toEqual(['google-drive', 'google-drive-files']);
-    expect(vm['google-drive-files']).toMatchObject({ type: 'sdk', name: 'google-drive-files' });
   });
 });
 

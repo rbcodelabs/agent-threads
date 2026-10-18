@@ -22,11 +22,10 @@ const app = {
   metadataCache: { on: () => {} },
 } as unknown as App;
 
-/** The richest roster the factory can produce: host_exec, open_url, the browser tools. */
+/** The richest roster the factory can produce: open_url, the browser tools. */
 function fullRoster(): string[] {
   const names = (server: unknown): string[] => ((server as { tools: Array<{ name: string }> }).tools).map((t) => t.name);
   const { claude_threads, obsidian } = createClaudeThreadsMcpServers(app, {
-    hostExec: { confirm: async () => ({ allowed: false }), run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) } as never,
     enableOpenUrl: true,
     // The browser tools only close over the browser; none is called here.
     browser: { canSavePages: true } as never,
@@ -39,7 +38,6 @@ describe('toolRouting drift guard', () => {
     const produced = fullRoster();
     expect(produced.length).toBeGreaterThan(50);
     for (const name of AGENT_BROWSER_TOOL_NAMES) expect(produced).toContain(name);
-    expect(produced).toContain('host_exec');
     expect(produced).toContain('host_open_url');
     const unclassified = produced.filter((name) => !isClassified(name));
     expect(unclassified).toEqual([]);
@@ -76,7 +74,7 @@ describe('toolRouting drift guard', () => {
   });
 });
 
-const ALL_GROUPS = { vault: 'host', workspace: 'host', threads: 'host', skills: 'host', browser: 'host', schedule: 'host', misc: 'host', vm: 'host' } as const;
+const ALL_GROUPS = { vault: 'host', workspace: 'host', threads: 'host', skills: 'host', browser: 'host', schedule: 'host', misc: 'host' } as const;
 
 describe('toolRouting routes', () => {
   it('runs the worktree tools on the daemon and offers nothing else by default', () => {
@@ -86,7 +84,7 @@ describe('toolRouting routes', () => {
       'ScheduleWakeup', 'skills_search', 'browser_navigate', 'request_secret', 'mcp_register_server', 'watch_document', 'threads_get_log']) {
       expect(routeFor(t), t).toBe('absent');
     }
-    for (const t of ['enter_vm', 'vm_exec', 'exit_vm', 'host_exec', 'github_list_access', 'github_check_repo']) expect(routeFor(t), t).toBe('absent');
+    for (const t of ['github_list_access', 'github_check_repo']) expect(routeFor(t), t).toBe('absent');
   });
 
   it('legacy and canonical names route the same way, with and without groups on', () => {
@@ -113,6 +111,7 @@ describe('toolRouting routes', () => {
       'skills_get', 'skills_list_installed', 'skills_list_sources', 'skills_search',
       'threads_get_current', 'threads_get_log', 'threads_get_messages', 'threads_list', 'threads_list_projects', 'threads_wait',
       'vault_get_backlinks', 'vault_get_file_history', 'vault_get_note_metadata', 'vault_get_outgoing_links', 'vault_list', 'vault_list_bridges', 'vault_search',
+      'sync_inspect_conflict', 'sync_list_conflicts',
       'workspace_get_active_file', 'workspace_get_open_tabs',
     ].sort());
   });
@@ -120,17 +119,25 @@ describe('toolRouting routes', () => {
   it('never offers a tool that writes, executes, schedules, installs, sends or reads a secret, however it is configured', () => {
     const dangerous = ['request_secret', 'mcp_register_server', 'host_execute_command', 'obsidian_execute_command', 'host_list_commands',
       'host_open_url', 'workspace_navigate_to_file', 'workspace_insert_at_cursor', 'watch_document', 'unwatch_document',
-      'vault_restore_file_version', 'vault_add_bridge', 'threads_create', 'threads_create_project', 'threads_update_project',
+      'vault_restore_file_version', 'vault_add_bridge', 'sync_resolve_conflict', 'threads_create', 'threads_create_project', 'threads_update_project',
       'threads_set_project', 'threads_open', 'threads_send_message', 'threads_archive', 'threads_set_notes',
       'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'skills_install', 'skills_create_local', 'skills_update_local',
       'skills_uninstall', 'skills_update', 'skills_check_updates', 'ScheduleWakeup', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',
-      'browser_eval', 'browser_save_page', 'host_exec'];
+      'browser_eval', 'browser_save_page'];
     const everything = { ...ALL_GROUPS, ...Object.fromEntries(dangerous.map((t) => [t, 'host'])) } as Record<string, 'host'>;
     for (const t of dangerous) expect(routeFor(t, everything), t).toBe('absent');
   });
 
-  it('cannot turn on what has no backing on the daemon (VM tools, the GitHub connection)', () => {
-    expect(routeFor('vm_exec', { vm: 'host', vm_exec: 'host' })).toBe('absent');
+  it('host_exec is its own opt-in group: absent by default, on by group or by tool, never by another group', () => {
+    expect(routeFor('host_exec')).toBe('absent');
+    expect(routeFor('host_exec', { exec: 'host' })).toBe('host');
+    expect(routeFor('host_exec', { host_exec: 'host' })).toBe('host');
+    expect(routeFor('host_exec', { vault: 'host', misc: 'host', threads: 'host' })).toBe('absent');
+    expect(routeFor('host_exec', { exec: 'host', host_exec: 'absent' })).toBe('absent');
+    expect(toolsRouted('host', { exec: 'host' })).toEqual(['host_exec']);
+  });
+
+  it('cannot turn on what has no backing on the daemon (the GitHub connection)', () => {
     expect(routeFor('github_list_access', { github_list_access: 'host', misc: 'host' })).toBe('absent');
   });
 

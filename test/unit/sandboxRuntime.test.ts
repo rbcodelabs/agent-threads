@@ -31,7 +31,7 @@ import {
   type RuntimeDeps,
   type RuntimePin,
 } from '../../src/sandboxRuntime';
-import { runnerEnv } from '../../src/sandboxVm';
+import { runnerEnv } from '../../src/containerCli';
 
 const ok = (stdout = ''): ExecResult => ({ exitCode: 0, stdout, stderr: '' });
 const fail = (stderr = 'boom'): ExecResult => ({ exitCode: 1, stdout: '', stderr });

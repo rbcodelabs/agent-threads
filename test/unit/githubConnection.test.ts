@@ -2,7 +2,7 @@
  * Geode GitHub connection → threads.
  *
  * Covers: the broker's error mapping, commit identity, token publishing and
- * refresh, host delivery, container delivery through the sandbox VM hooks, and
+ * refresh, host delivery, and
  * compatibility with credentials the user configured themselves.
  *
  * The generated helper scripts are EXECUTED (sh/bash + real `git credential
@@ -41,12 +41,6 @@ import {
   GIT_HELPER_NAME,
 } from '../../src/githubCredentialHelper';
 import { GithubHostDelivery } from '../../src/githubHostDelivery';
-import { createGithubVmHooks } from '../../src/githubVmDelivery';
-import {
-  SandboxVmManager,
-  type VmCommandResult,
-  type VmCommandRunner,
-} from '../../src/sandboxVm';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -667,172 +661,5 @@ describe('GithubHostDelivery', () => {
     expect(await d.start()).toBeNull();
     expect(d.running).toBe(false);
     expect(d.resolveEnv('/repo', { PATH: '/x' })).toEqual({});
-  });
-});
-
-// ── Container delivery through the sandbox VM ─────────────────────────────────
-
-describe('sandbox VM GitHub delivery', () => {
-  type Call = { args: string[]; input?: string };
-
-  function vm(over: { enabled?: boolean; bridge?: ReturnType<typeof fakeBridge>; execExit?: Record<string, number> } = {}) {
-    const fb = over.bridge ?? fakeBridge();
-    const broker = new GithubCredentialBroker({ bridge: fb.bridge, fetchProfile: async () => PROFILE });
-    const calls: Call[] = [];
-    const run: VmCommandRunner = async (args, opts): Promise<VmCommandResult> => {
-      calls.push({ args: [...args], input: opts.input });
-      const joined = args.join(' ');
-      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'not found' };
-      let exitCode = 0;
-      for (const [needle, code] of Object.entries(over.execExit ?? {})) if (joined.includes(needle)) exitCode = code;
-      return { exitCode, stdout: '', stderr: '' };
-    };
-    let tick: (() => void) | null = null;
-    let enabled = over.enabled ?? true;
-    const hooks = createGithubVmHooks({
-      broker,
-      isEnabled: () => enabled,
-      now: () => 0,
-      setInterval: (fn) => { tick = fn; return 'vm-timer'; },
-      clearInterval: () => undefined,
-    });
-    const manager = new SandboxVmManager({ containerName: () => 'claude-threads-vm-t1', run, hooks });
-    return { manager, calls, fb, tick: () => tick!(), setEnabled: (v: boolean) => { enabled = v; } };
-  }
-  const bash = (c: Call) => c.args.at(-1) ?? '';
-  const enterArgs = { image: 'img:2', mountPath: '/host/wt', network: 'default' as const };
-
-  it('enter installs helper/config with commit identity and publishes the token over stdin only', async () => {
-    const { manager, calls } = vm();
-    const res = await manager.enter(enterArgs);
-    expect(res.success).toBe(true);
-    if (!res.success) return;
-    expect(res.notes?.join('\n')).toContain('GitHub connected as octo-user');
-
-    const installs = calls.filter((c) => bash(c).includes('git-credential-claude-threads') && bash(c).includes('umask 077'));
-    expect(installs.length).toBeGreaterThan(0);
-    expect(bash(installs[0]!)).toContain('4242+octo-user@users.noreply.github.com');
-    expect(bash(installs[0]!)).toContain('Octo User');
-
-    const writes = calls.filter((c) => c.input !== undefined);
-    expect(writes).toHaveLength(1);
-    expect(writes[0]!.input).toBe(TOKEN_1);
-    expect(writes[0]!.args).toContain('--interactive'); // stdin attached
-    // The token never appears in any argv, anywhere.
-    expect(JSON.stringify(calls.map((c) => c.args))).not.toContain(TOKEN_1);
-    // …and nothing is written under /work.
-    expect(JSON.stringify(calls.map((c) => c.args))).not.toMatch(/\/work\/(token|\.gh)/);
-  });
-
-  it('the run command does not carry credentials (no --env, no token)', async () => {
-    const { manager, calls } = vm();
-    await manager.enter(enterArgs);
-    const run = calls.find((c) => c.args[0] === 'run')!;
-    expect(run.args.join(' ')).not.toMatch(/--env|GH_TOKEN|GITHUB_TOKEN|ghu_/);
-  });
-
-  it('refreshes the rotated token before a command and again on the timer (long-running threads)', async () => {
-    const { manager, calls, fb, tick } = vm();
-    await manager.enter(enterArgs);
-    fb.state.token = TOKEN_2;
-    tick(); // background refresh while a long command runs
-    await vi.waitFor(() => expect(calls.filter((c) => c.input === TOKEN_2)).toHaveLength(1));
-    fb.state.token = 'ghu_' + 'c'.repeat(36);
-    // Fake clock is frozen at 0, so use the tick path; ensureFresh's fast path is covered in the publisher tests.
-    tick();
-    await vi.waitFor(() => expect(calls.filter((c) => c.input?.startsWith('ghu_c'))).toHaveLength(1));
-    const exec = await manager.execCommand({ command: 'git push', timeoutSeconds: 30 });
-    expect(exec.success).toBe(true);
-  });
-
-  it('when disconnected: enter still succeeds, a note explains how to fix it, and the token file is deleted', async () => {
-    const fb = fakeBridge();
-    const { manager, calls } = vm({ bridge: fb });
-    await manager.enter(enterArgs);
-    fb.state.token = null;
-    fb.state.status = { state: 'disconnected', encryptionAvailable: true };
-    const before = calls.length;
-    const first = await manager.execCommand({ command: 'git fetch', timeoutSeconds: 30 });
-    const second = await manager.execCommand({ command: 'git fetch', timeoutSeconds: 30 });
-    expect(first.success && first.notes?.join('\n')).toContain('Settings → GitHub');
-    expect(second.success && second.notes).toBeUndefined(); // reported once, not on every command
-    const cleared = calls.slice(before).filter((c) => bash(c).includes('rm -f'));
-    expect(cleared.length).toBeGreaterThan(0);
-    expect(first.success && first.exitCode).toBe(0); // the command itself still ran
-  });
-
-  it('enter on a not-connected account gives an actionable note instead of failing the VM', async () => {
-    const { manager } = vm({ bridge: fakeBridge({ token: null, status: { state: 'reauth_required', message: 'x' } }) });
-    const res = await manager.enter(enterArgs);
-    expect(res.success).toBe(true);
-    expect(res.success && res.notes?.join('\n')).toMatch(/expired or was revoked/);
-  });
-
-  it('warns (git still works) when the image has no gh', async () => {
-    const { manager } = vm({ execExit: { 'command -v gh': 1 } });
-    const res = await manager.enter(enterArgs);
-    expect(res.success && res.notes?.join('\n')).toContain('claude-threads-coding:1');
-  });
-
-  it('exit deletes the token before the container is stopped and removed', async () => {
-    const { manager, calls } = vm();
-    await manager.enter(enterArgs);
-    await manager.exit();
-    const order = calls.map((c) => (bash(c).includes('rm -f') ? 'clear' : c.args[0]));
-    const clearIdx = order.lastIndexOf('clear');
-    expect(clearIdx).toBeGreaterThan(-1);
-    expect(clearIdx).toBeLessThan(order.indexOf('stop'));
-    expect(clearIdx).toBeLessThan(order.indexOf('rm'));
-  });
-
-  it('adopts a container after a reload: re-installs, re-publishes, then runs the command', async () => {
-    const { calls, fb } = vm();
-    const broker = new GithubCredentialBroker({ bridge: fb.bridge, fetchProfile: async () => PROFILE });
-    const run: VmCommandRunner = async (args, opts) => {
-      calls.push({ args: [...args], input: opts.input });
-      const joined = args.join(' ');
-      if (args[0] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' };
-      if (joined.includes('[ -x')) return { exitCode: 1, stdout: '', stderr: '' }; // helper missing → install
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
-    const manager = new SandboxVmManager({
-      containerName: () => 'claude-threads-vm-t1',
-      run,
-      hooks: createGithubVmHooks({ broker, isEnabled: () => true, setInterval: () => 't', clearInterval: () => undefined }),
-    });
-    const res = await manager.execCommand({ command: 'gh pr list', timeoutSeconds: 30 });
-    expect(res.success).toBe(true);
-    expect(calls.some((c) => bash(c).includes('umask 077') && bash(c).includes('git config --global'))).toBe(true);
-    expect(calls.filter((c) => c.input === TOKEN_1)).toHaveLength(1);
-  });
-
-  it('is fully inert when disabled or on a host without the connection (existing behavior preserved)', async () => {
-    const off = vm({ enabled: false });
-    const res = await off.manager.enter(enterArgs);
-    expect(res.success && res.notes).toBeUndefined();
-    expect(off.calls.every((c) => c.input === undefined && !bash(c).includes('claude-threads-github'))).toBe(true);
-
-    const noBridge = new GithubCredentialBroker({ bridge: undefined });
-    const calls: string[] = [];
-    const manager = new SandboxVmManager({
-      containerName: () => 'claude-threads-vm-t2',
-      run: async (args) => { calls.push(args.join(' ')); return args[0] === 'inspect' ? { exitCode: 1, stdout: '', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' }; },
-      hooks: createGithubVmHooks({ broker: noBridge, isEnabled: () => true }),
-    });
-    const r = await manager.enter(enterArgs);
-    expect(r.success && r.notes).toBeUndefined();
-    expect(calls.join('\n')).not.toContain('claude-threads-github');
-  });
-
-  it('a manager built with no hooks behaves exactly as before', async () => {
-    const calls: string[] = [];
-    const manager = new SandboxVmManager({
-      containerName: () => 'claude-threads-vm-t3',
-      run: async (args) => { calls.push(args.join(' ')); return args[0] === 'inspect' ? { exitCode: 1, stdout: '', stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' }; },
-    });
-    const r = await manager.enter(enterArgs);
-    expect(r.success && r.notes).toBeUndefined();
-    const e = await manager.execCommand({ command: 'echo hi', timeoutSeconds: 5 });
-    expect(e.success && e.notes).toBeUndefined();
   });
 });

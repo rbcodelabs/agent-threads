@@ -12,6 +12,11 @@ import {
   labelsFor,
   localImageRef,
   mountsFor,
+  dropOverlappingRoots,
+  resolveExternalRoots,
+  resolveWorkFolders,
+  resolveDaemonCpus,
+  resolveDaemonMemory,
   prepareArgs,
   prepareScript,
   publishedImageRef,
@@ -112,6 +117,77 @@ describe('golden argv', () => {
     expect(args.join(' ')).not.toContain('.geode');
     expect(args.join(' ')).toContain('/Users/user/Vault/.obsidian:/vault/.obsidian:ro');
     expect(mountsFor({ vaultPath: '/v/', maskedDirs: [] })).toEqual([{ host: '/v', guest: '/vault', readOnly: false }]);
+  });
+
+  it('external roots: read-only mounts at /ext/<name> plus read-only workspaces, part of the spec signature', () => {
+    const withRoots = { ...spec, externalRoots: [{ host: '/Users/user/Docs', name: 'Docs' }, { host: '/data/shared', name: 'shared' }] };
+    const args = runArgs(withRoots);
+    expect(args.join(' ')).toContain('--volume /Users/user/Docs:/ext/Docs:ro');
+    expect(args.join(' ')).toContain('--volume /data/shared:/ext/shared:ro');
+    const cmd = args.slice(args.indexOf('--listen'));
+    expect(cmd).toEqual(expect.arrayContaining(['--readonly-workspace', '/ext/Docs', '/ext/shared']));
+    expect(specSignature(withRoots)).not.toBe(specSignature(spec));
+    expect(specSignature({ ...withRoots })).toBe(specSignature(withRoots));
+    // Nothing writable besides the vault and the workspaces volume.
+    expect(mountsFor(withRoots).filter((m) => !m.readOnly)).toEqual([{ host: '/Users/user/Vault', guest: '/vault', readOnly: false }]);
+  });
+
+  it('shared folders: read-write mounts at /work/<name> plus read-write workspaces', () => {
+    const withFolders = { ...spec, workFolders: [{ host: '/Users/user/projects/repo', name: 'repo' }] };
+    const args = runArgs(withFolders);
+    expect(args.join(' ')).toContain('--volume /Users/user/projects/repo:/work/repo ');
+    expect(args.join(' ')).not.toContain('/work/repo:ro');
+    const cmd = args.slice(args.indexOf('--listen'));
+    expect(cmd.join(' ')).toContain('--workspace /work/repo');
+    expect(specSignature(withFolders)).not.toBe(specSignature(spec));
+  });
+
+  it('resolveWorkFolders vets the user\'s list: existing absolute directories, never / or the vault', () => {
+    const exists = new Set(['/p/repo', '/q/repo', '/Users/user/Vault', '/Users/user/Vault/sub', '/Users/user']);
+    const got = resolveWorkFolders(['/p/repo', '/q/repo', '/', '', '  ', 'relative', '/Users/user/Vault', '/Users/user/Vault/sub', '/Users/user', '/nope', '/a:b'], { vaultPath: '/Users/user/Vault', isDirectory: (p) => exists.has(p) });
+    expect(got).toEqual([{ host: '/p/repo', name: 'repo' }, { host: '/q/repo', name: 'repo-2' }]);
+    expect(resolveWorkFolders(undefined, { vaultPath: '/v', isDirectory: () => true })).toEqual([]);
+  });
+
+  it('resolveExternalRoots vets what the host reports', () => {
+    const exists = new Set(['/a/Docs', '/b/Docs', '/c/data', '/Users/user/Vault/sub']);
+    const got = resolveExternalRoots([
+      { label: 'Docs', path: '/b/Docs' },
+      { label: 'Docs', path: '/a/Docs' },
+      { label: 'dup', path: '/a/Docs' },
+      { label: 'rel', path: 'relative/dir' },
+      { label: 'colon', path: '/x:y' },
+      { label: 'dots', path: '/a/../etc' },
+      { label: 'missing', path: '/nope' },
+      { label: 'insideVault', path: '/Users/user/Vault/sub' },
+      { label: 'odd label/with*chars', path: '/c/data/' },
+    ], { vaultPath: '/Users/user/Vault', isDirectory: (p) => exists.has(p) });
+    expect(got).toEqual([
+      { host: '/a/Docs', name: 'Docs' },
+      { host: '/b/Docs', name: 'Docs-2' },
+      { host: '/c/data', name: 'odd-label-with-chars' },
+    ]);
+    expect(resolveExternalRoots(undefined, { vaultPath: '/v', isDirectory: () => true })).toEqual([]);
+  });
+
+  it('a folder shared read-write and also an external root is mounted once, read-write (no conflicting double mount)', () => {
+    const work = [{ host: '/a/Docs', name: 'Docs' }];
+    const roots = [{ host: '/a/Docs', name: 'Docs' }, { host: '/a/Docs/sub', name: 'sub' }, { host: '/a', name: 'a' }, { host: '/b/Other', name: 'Other' }];
+    expect(dropOverlappingRoots(roots, work)).toEqual([{ host: '/b/Other', name: 'Other' }]);
+    expect(dropOverlappingRoots(roots, [])).toEqual(roots);
+    const mounts = mountsFor({ vaultPath: '/v', maskedDirs: [], workFolders: work, externalRoots: dropOverlappingRoots(roots, work) });
+    expect(mounts.filter((m) => m.host === '/a/Docs')).toEqual([{ host: '/a/Docs', guest: '/work/Docs', readOnly: false }]);
+  });
+
+  it('resource limits: validated before they reach argv, defaults on anything invalid', () => {
+    expect(resolveDaemonMemory('8g')).toBe('8G');
+    expect(resolveDaemonMemory(' 2048M ')).toBe('2048M');
+    for (const bad of [undefined, null, '', '0G', '4', '4GB', 'lots', '-1G', '4G --privileged']) expect(resolveDaemonMemory(bad as never), String(bad)).toBe('4G');
+    expect(resolveDaemonCpus(8)).toBe(8);
+    expect(resolveDaemonCpus(500)).toBe(64);
+    for (const bad of [undefined, null, 0, -2, 1.5, Number.NaN, '4' as never]) expect(resolveDaemonCpus(bad as never), String(bad)).toBe(4);
+    const args = runArgs({ ...spec, memory: resolveDaemonMemory('6G'), cpus: resolveDaemonCpus(6) });
+    expect(args).toEqual(expect.arrayContaining(['--memory', '6G', '--cpus', '6']));
   });
 
   it('refuses a vault path the runtime would mis-parse', () => {

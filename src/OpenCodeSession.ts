@@ -224,7 +224,7 @@ export const launchOpenCodeServer: OpenCodeLauncher = async ({ binaryPath, cwd, 
     }, SERVER_START_TIMEOUT_MS);
     child.stdout?.on('data', (chunk: Buffer) => {
       output += chunk.toString();
-      const match = output.match(/opencode server listening on (https?:\/\/\S+)/);
+      const match = output.match(/(?:opencode )?server listening on (https?:\/\/\S+)/);
       if (match) { clearTimeout(timer); resolve(match[1]); }
     });
     child.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString(); });

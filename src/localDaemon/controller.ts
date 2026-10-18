@@ -11,7 +11,7 @@
 import type { LocalDaemonSettings, RemoteDaemonConfig } from '../types';
 import type { ProbeResult } from '../remote/DaemonClient';
 import { CONTAINER_AUTH_TOKEN_SECRET, type ContainerSignInResult } from '../claudeContainerAuthCli';
-import type { VmCommandRunner } from '../sandboxVm';
+import type { VmCommandRunner } from '../containerCli';
 import {
   assess,
   assessDaemonVersion,
@@ -48,9 +48,9 @@ import { installRuntime, readRuntime, startRuntimeService, type RuntimeApi } fro
 import {
   DEFAULT_HOST_PORT,
   HOST_PORT_SEARCH_LIMIT,
-  LOCAL_DAEMON_CPUS,
   LOCAL_DAEMON_ID,
-  LOCAL_DAEMON_MEMORY,
+  resolveDaemonCpus,
+  resolveDaemonMemory,
   LABEL_SPEC,
   LABEL_VERSION,
   MASKED_VAULT_DIRS,
@@ -60,6 +60,11 @@ import {
   localImageRef,
   mountsFor,
   specSignature,
+  dropOverlappingRoots,
+  resolveExternalRoots,
+  resolveWorkFolders,
+  type ExternalRootInput,
+  type ExternalRootMount,
   assertMountablePath,
   SpecError,
   type LocalDaemonSpec,
@@ -95,6 +100,8 @@ export interface LocalDaemonDeps {
   getRegistered(): RemoteDaemonConfig | undefined;
   register(config: RemoteDaemonConfig): Promise<void>;
   unregister(): Promise<void>;
+  /** Geode's connected external roots (`externalRoots.listMountRoots()`), mounted read-only; absent on Obsidian / older Geode. */
+  externalRoots?(): Promise<ExternalRootInput[] | null | undefined>;
   /** Runs the in-container `claude setup-token` flow. Absent where it cannot run (the sign-in then reports so). */
   signInRunner?(opts: { containerName: string; containerBinaryPath: string } & SignInHandlers): Promise<ContainerSignInResult>;
   /** State changed: a UI should re-read {@link LocalDaemonController.getBusy} / take a new snapshot. */
@@ -275,8 +282,22 @@ export class LocalDaemonController {
     return MASKED_VAULT_DIRS.filter((d) => this.deps.isDirectory(`${vaultPath.replace(/\/+$/, '')}/${d}`));
   }
 
+  /** Vetted external roots as of the last {@link refreshExternalRoots}. */
+  private extRoots: ExternalRootMount[] = [];
+  private workFolders: ExternalRootMount[] = [];
+
+  private async refreshExternalRoots(vaultPath: string | null): Promise<void> {
+    this.workFolders = vaultPath ? resolveWorkFolders(this.settings().folders, { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) }) : [];
+    if (!vaultPath || !this.deps.externalRoots) { this.extRoots = []; return; }
+    try {
+      this.extRoots = dropOverlappingRoots(resolveExternalRoots(await this.deps.externalRoots(), { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) }), this.workFolders);
+    } catch {
+      this.extRoots = []; // an unreadable host answer means no extra mounts, never a failed operation
+    }
+  }
+
   private specFor(vaultPath: string, version: string, port: number): LocalDaemonSpec {
-    return { vaultPath, version, hostPort: port, maskedDirs: this.maskedDirs(vaultPath), memory: LOCAL_DAEMON_MEMORY, cpus: LOCAL_DAEMON_CPUS };
+    return { vaultPath, version, hostPort: port, maskedDirs: this.maskedDirs(vaultPath), externalRoots: this.extRoots, workFolders: this.workFolders, memory: resolveDaemonMemory(this.settings().memory), cpus: resolveDaemonCpus(this.settings().cpus) };
   }
 
   private emptyObserved(partial: Partial<Observed>): Observed {
@@ -290,6 +311,7 @@ export class LocalDaemonController {
   /** Read-only: facts about the world plus the assessment. Never mutates anything. */
   async observe(signal?: AbortSignal): Promise<{ observed: Observed; desired: Desired; assessment: Assessment; version: string; port: number; vaultPath: string | null; daemonVersion?: string }> {
     const vaultPath = this.deps.vaultPath();
+    await this.refreshExternalRoots(vaultPath);
     const settings = this.settings();
     const port = settings.port || DEFAULT_HOST_PORT;
     const pluginVersion = this.deps.pluginVersion;
@@ -375,7 +397,7 @@ export class LocalDaemonController {
       pluginVersion: this.deps.pluginVersion,
       port: o.port,
       ...(o.vaultPath ? { vaultPath: o.vaultPath } : {}),
-      mounts: o.vaultPath ? mountsFor({ vaultPath: o.vaultPath, maskedDirs: this.maskedDirs(o.vaultPath) }) : [],
+      mounts: o.vaultPath ? mountsFor({ vaultPath: o.vaultPath, maskedDirs: this.maskedDirs(o.vaultPath), externalRoots: this.extRoots, workFolders: this.workFolders }) : [],
       busy: this.getBusy(),
       lastError: this.lastError,
     };
@@ -663,13 +685,14 @@ export class LocalDaemonController {
   }
 
   /**
-   * Claude sign-in for the daemon. Reuses an existing container sign-in (no prompt) when the keychain has one;
-   * otherwise runs the in-container `claude setup-token` flow once, stores the token, and writes it to the daemon.
+   * Claude sign-in for the daemon. Reuses an existing container sign-in (no prompt) when the keychain has one
+   * (unless `force`, used when that token has expired); otherwise runs the in-container `claude setup-token` flow once, stores the token, and writes it to the daemon.
    */
-  signIn(handlers: SignInHandlers, opts: RunOptions = {}): Promise<{ ok: true } | { ok: false; error: string }> {
+  signIn(handlers: SignInHandlers, opts: RunOptions & { force?: boolean } = {}): Promise<{ ok: true } | { ok: false; error: string }> {
     return this.runOp('sign-in', opts, async (ctx) => {
       this.requireEnabled();
-      if (this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET)) {
+      // `force`: the stored token no longer works (expired or revoked), so run the flow again instead of reusing it.
+      if (!opts.force && this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET)) {
         await this.reconcile(ctx);
         return { ok: true as const };
       }
@@ -685,6 +708,11 @@ export class LocalDaemonController {
         return { ok: false as const, error: `Signed in, but saving the token failed: ${err instanceof Error ? err.message : String(err)}` };
       }
       ctx.emit({ label: ACTION_LABEL['apply-credential'] });
+      if (opts.force) {
+        // The volume already holds a credential (the stale one), so the plan would never rewrite it: do it explicitly.
+        const o = await this.observe(ctx.signal);
+        await this.execute(['apply-credential'], o, ctx);
+      }
       await this.reconcile(ctx);
       return { ok: true as const };
     });

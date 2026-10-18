@@ -154,6 +154,9 @@ const mockPlugin = {
   },
   cancelWakeups: (threadId: string) => { pendingWakeups.delete(threadId); },
   getEffectiveCwd: () => settings.defaultCwd || '',
+  // `?daemonoffer=1`: the managed local daemon can run here but is not set up (the picker offers to set it up).
+  isLocalDaemonSetupOffered: () => new URLSearchParams(window.location.search).has('daemonoffer'),
+  openLocalDaemonSettings: () => { (window as any).__localDaemonSettingsOpened = true; },
 };
 
 mockPlugin.slashCommands.register({ pluginId: 'agent-threads.design' }, createDesignSlashCommand({
