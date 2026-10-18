@@ -156,6 +156,11 @@ export interface OpenCodeHarnessOptions {
   dynamicTools?: HarnessDynamicTool[];
   /** Serializable external MCP servers mirrored into OpenCode's `mcp` config. */
   mcpServers?: Record<string, HarnessMcpServerConfig>;
+  /**
+   * Skill roots (directories whose subfolders hold SKILL.md), the same list Codex
+   * gets. Written to OpenCode's native `skills.paths` config key.
+   */
+  skillRoots?: string[];
 }
 
 /** A host-owned capability exposed through a harness's native tool protocol. */
