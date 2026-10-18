@@ -88,7 +88,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 - Or [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) installed and authenticated
   - Select **OpenAI Codex** in Settings → Agent → Agent harness. The plugin launches Codex's local app-server, so its threads retain Codex session history, streaming output, tool visibility, interruption, and approval prompts.
 - Or [OpenCode](https://opencode.ai) installed (desktop only), with at least one provider configured in OpenCode (for example `OPENAI_API_KEY` in your environment or Extra Environment Variables, or `opencode auth login`)
-  - Select **OpenCode** in Settings → Agent → Agent harness. Each OpenCode thread runs its own local `opencode serve`, so any provider OpenCode supports can drive a thread. Usage is billed by that provider to your API key.
+  - Select **OpenCode** in Settings → Agent → Agent harness. Each OpenCode thread runs its own local `opencode serve`, so any provider OpenCode supports can drive a thread. Both the 1.x and 2.x OpenCode servers are supported (verified against 1.18.32 and 2.0.32); the plugin detects which one is installed. On 2.x, OpenCode's todo list is not surfaced in the thread because the 2.x server does not emit todo events. Usage is billed by that provider to your API key.
 
 ## Roadmap
 
