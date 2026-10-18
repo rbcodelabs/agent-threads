@@ -200,11 +200,11 @@ describe('ThreadsView new-conversation mode', () => {
     view.app = plugin.app;
     await view.startNewConversation({ projectId: alpha.id });
 
-    await view.sendNewConversation({ text: 'Fix the login bug', images: [], attachment: null, agentHarness: 'codex', harnessVmMode: 'never' });
+    await view.sendNewConversation({ text: 'Fix the login bug', images: [], attachment: null, agentHarness: 'codex' });
 
     expect(dispatchNewThread).toHaveBeenCalledWith(
       'Fix the login bug', undefined, 'Fix the login bug',
-      expect.objectContaining({ projectId: alpha.id, agentHarness: 'codex', harnessVmMode: 'never' }),
+      expect.objectContaining({ projectId: alpha.id, agentHarness: 'codex' }),
     );
     expect(view.setActiveThread).toHaveBeenCalledWith('created-thread');
     expect(view.isNewConversation()).toBe(false);

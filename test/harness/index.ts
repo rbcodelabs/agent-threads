@@ -206,6 +206,9 @@ const mockPlugin = {
     return thread.id;
   },
   openNewProjectSettings: () => { newProjectRequests.push(Date.now()); },
+  // `?daemonoffer=1`: the managed local daemon can run here but is not set up (the picker offers to set it up).
+  isLocalDaemonSetupOffered: () => new URLSearchParams(window.location.search).has('daemonoffer'),
+  openLocalDaemonSettings: () => { (window as any).__localDaemonSettingsOpened = true; },
   app: (mockLeaf as any).app,
   settings,
   discoveredModelsByHarness: { claude: [], codex: [], opencode: [] },

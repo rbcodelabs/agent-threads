@@ -6,7 +6,7 @@ import { shot } from './helpers';
  * New-conversation mode: the dispatch composer that used to sit in the Agents List and the
  * Kanban board now lives in the message panel. "New thread" swaps the thread composer for it;
  * the thread is only created by the first send. Includes the searchable Project picker
- * (filter + most-recent / alphabetical sort) and the kickoff harness / Run in picker that
+ * (filter + most-recent / alphabetical sort) and the kickoff harness / Run on picker that
  * moved with the composer.
  */
 const harnessUrl = 'file://' + path.resolve('test/harness/index.html');
@@ -221,20 +221,6 @@ test.describe('searchable Project picker', () => {
     await expect(picker(page)).toHaveCount(0);
   });
 
-  test('Change project… on an existing thread uses the same picker', async ({ page }) => {
-    await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
-    await page.setViewportSize({ width: 520, height: 760 });
-    await page.goto(harnessUrl + '?projects=1');
-    await page.waitForSelector('.ct-title-row');
-    await page.waitForTimeout(400);
-    await threadComposer(page).locator('.ct-footer-context').dispatchEvent('click');
-    await page.locator('.menu').getByText('Change project…').click();
-    await expect(picker(page)).toBeVisible();
-    expect(await pickerLabels(page)).toContain('Golden Wealth');
-    await picker(page).getByRole('option', { name: 'Compass' }).click();
-    await expect(threadComposer(page).locator('.ct-footer-context-name')).toContainText('Compass');
-  });
-
   test('fits a 320px pane', async ({ page }) => {
     await open(page, '?projects=1', 320, 640);
     await chip(page).click();
@@ -262,22 +248,14 @@ test.describe('kickoff harness picker (moved from the Kanban dispatch box)', () 
     await shot(composer(page), 'new-conversation-harness-picker-opencode.png');
   });
 
-  test('offers Run in (container/host) for Claude and badges the button', async ({ page }) => {
+  test('offers no per-thread "Run in" section (sandbox VMs were removed)', async ({ page }) => {
     await open(page, '?projects=1', 900, 760);
     await sendBtn(page).click({ button: 'right' });
     const menu = page.locator('.ct-harness-menu');
-    await expect(menu.locator('.ct-run-mode-item')).toHaveCount(3);
-    await shot(menu, 'new-conversation-run-mode-menu.png');
-    await menu.locator('.ct-run-mode-item[data-run-mode="always"]').click();
-    await expect(menu).toHaveCount(0);
-    await expect(sendBtn(page)).toHaveAttribute('aria-label', /in a container/);
-    await expect(sendBtn(page).locator('.ct-run-mode-badge')).toHaveCount(1);
-    await shot(composer(page), 'new-conversation-run-mode-badge.png');
-
-    await sendBtn(page).click({ button: 'right' });
-    await menu.getByRole('menuitemradio', { name: 'Codex' }).click();
+    await expect(menu.getByRole('menuitemradio', { name: 'Claude' })).toBeVisible();
+    await expect(menu.locator('.ct-run-mode-item[data-run-mode]')).toHaveCount(0);
+    await expect(menu.getByText('Run in', { exact: true })).toHaveCount(0);
     await expect(sendBtn(page).locator('.ct-run-mode-badge')).toHaveCount(0);
-    expect((await dispatchCalls(page)).length).toBe(0);
   });
 
   test('the chosen harness and run mode travel with the first send', async ({ page }) => {
