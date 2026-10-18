@@ -4243,9 +4243,9 @@ export class ThreadsView extends ItemView {
     const expandedSet = opts?.expandedSet ?? this.expandedToolGroups;
     const groupKey = opts?.keyOverride ?? this.toolGroupKey(tools);
 
-    // Collapsed by default, running or finished; only a failure (so it isn't
-    // hidden) or a group the user opened stays open.
-    const expanded = hasError || expandedSet.has(groupKey);
+    // Collapsed by default, running, failed or finished; the red header icon
+    // flags a failure. Only a group the user opened stays open.
+    const expanded = expandedSet.has(groupKey);
     const { body } = renderToolGroupShell(wrapper, activityKind, tools, {
       hasError,
       hasPending,

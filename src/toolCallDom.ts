@@ -176,11 +176,9 @@ export function renderToolGroupShell(
   paintExpanded();
   groupRefreshers.set(groupEl, () => {
     const done = !forcedPending && !tools.some(t => t.status === 'pending');
-    const failed = tools.some(t => t.status === 'error');
     // A group that opened because it was running folds itself away once it
-    // finishes cleanly, unless the user has taken over the toggle.
-    if (done && !failed && wasRunning && !userToggled) expanded = false;
-    if (failed) expanded = true;
+    // finishes, unless the user has taken over the toggle.
+    if (done && wasRunning && !userToggled) expanded = false;
     paintHeader();
     paintExpanded();
   });
