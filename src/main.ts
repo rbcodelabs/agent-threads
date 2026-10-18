@@ -3800,8 +3800,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   applyToolCallStyle(): void {
     this.getView()?.applyToolCallStyle();
     for (const leaf of this.app.workspace.getLeavesOfType(MOBILE_VIEW_TYPE)) {
-      const view = leaf.view as Partial<MobileView>;
-      if (typeof view.applyToolCallStyle === 'function') view.applyToolCallStyle();
+      if (leaf.view instanceof MobileView) leaf.view.applyToolCallStyle();
     }
   }
 
