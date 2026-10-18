@@ -64,6 +64,8 @@ export function agentHarnessLabel(harness: AgentHarness | undefined): string {
 export type ThreadStatus = 'waiting' | 'active' | 'error' | 'archived' | 'reconnecting';
 
 export type LayoutDensity = 'compact' | 'comfortable' | 'spacious';
+/** How tool-call groups render in the chat. See toolNameUtils.ToolCallStyle. */
+export type ToolCallStyle = 'chips' | 'tree' | 'cards';
 
 export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
 
@@ -1237,6 +1239,8 @@ export interface PluginSettings {
   projects: Project[];
   wakeLockEnabled: boolean;
   layoutDensity: LayoutDensity;
+  /** Tool-call display style (chips | tree | cards). Missing values use tree. */
+  toolCallStyle?: ToolCallStyle;
   /** Primary grouping shown in the Agents List. Missing values use project-status. */
   agentsGroupBy?: 'project' | 'status' | 'project-status';
   /**
@@ -1498,6 +1502,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   projects: [],
   wakeLockEnabled: true,
   layoutDensity: 'comfortable',
+  toolCallStyle: 'tree',
   agentsGroupBy: 'project-status',
   statusLineCommand: 'bash $HOME/claude-config/bin/statusline-command.sh',
   statusLineIntervalMs: 30_000,

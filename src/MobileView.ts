@@ -15,7 +15,8 @@ import type { RelayClient } from './RelayClient';
 import type { MobileThreadStore } from './MobileThreadStore';
 import type { SerializedThread, SerializedMessage, PendingPermission, PendingQuestion } from './relay-protocol';
 import type { ToolCallRecord, ImageAttachment } from './types';
-import { formatToolName, getToolIcon, groupToolCalls, smoothToolGroups, ACTIVITY_LABELS, type ToolCallGroup } from './toolNameUtils';
+import { formatToolName, getToolIcon, groupToolCalls, smoothToolGroups, normalizeToolCallStyle, type ToolCallGroup, type ToolCallStyle } from './toolNameUtils';
+import { applyToolCallStyleClass, renderToolGroupShell, renderToolRow } from './toolCallDom';
 import { splitErrorMessage } from './dashboardUtils';
 import { extractMessageContent } from './MessageContent';
 import { outsideVaultLinkPath } from './OutsideVaultLinkModal';
@@ -88,6 +89,9 @@ export class MobileView extends ItemView {
   // state on mobile (no per-tool status/toolUseId either); only the finalized
   // per-message render benefits from this persisting.
   private expandedToolGroups: Set<string> = new Set();
+  // Live groups the user collapsed (live groups default open).
+  private userCollapsedToolGroups: Set<string> = new Set();
+  private getToolCallStyle?: () => ToolCallStyle | undefined;
 
   // Context summary banner (mirrors desktop behaviour)
   private summaryBannerEl: HTMLElement | null = null;
@@ -109,10 +113,17 @@ export class MobileView extends ItemView {
     leaf: WorkspaceLeaf,
     relayClient: RelayClient | null,
     store: MobileThreadStore | null,
+    getToolCallStyle?: () => ToolCallStyle | undefined,
   ) {
     super(leaf);
+    this.getToolCallStyle = getToolCallStyle;
     this.relayClient = relayClient;
     this.store = store;
+  }
+
+  /** Apply the "Tool call style" setting live (class swap on the root). */
+  applyToolCallStyle(): void {
+    applyToolCallStyleClass(this.rootEl, normalizeToolCallStyle(this.getToolCallStyle?.()));
   }
 
   getViewType(): string {
@@ -174,6 +185,7 @@ export class MobileView extends ItemView {
     this.rootEl = root;
     root.empty();
     root.addClass('ct-mobile-root');
+    this.applyToolCallStyle();
 
     // ── List panel ────────────────────────────────────────────────────
     this.listPanelEl = root.createDiv('ct-mobile-list-panel');
@@ -492,6 +504,7 @@ export class MobileView extends ItemView {
     this.streamingEl = null;
     this.messagesEl.empty();
     this.expandedToolGroups.clear();
+    this.userCollapsedToolGroups.clear();
 
     if (!activeId || !this.store) {
       this.messagesEl.createDiv({ cls: 'ct-mobile-empty', text: 'Send a message to start.' });
@@ -874,12 +887,7 @@ export class MobileView extends ItemView {
 
   /** Renders a single tool call as a `.ct-tool-pill`. Shared by the flat path and renderToolGroup's body. */
   private renderToolPill(wrapper: HTMLElement, tool: ToolCallRecord, active: boolean): void {
-    const pill = wrapper.createDiv(active ? 'ct-tool-pill ct-tool-active' : 'ct-tool-pill');
-    // 3.8 — Tool pill icons (matches desktop renderToolCalls pattern)
-    const iconEl = pill.createSpan({ cls: 'ct-tool-pill-icon' });
-    setIcon(iconEl, getToolIcon(tool.name));
-    pill.createSpan({ cls: 'ct-tool-pill-name', text: formatToolName(tool.name) });
-    if (tool.summary) pill.createSpan({ cls: 'ct-tool-pill-text', text: tool.summary });
+    renderToolRow(wrapper, tool, { forcePending: active });
   }
 
   /**
@@ -900,40 +908,23 @@ export class MobileView extends ItemView {
   ): void {
     const { activityKind, tools } = entry;
     const groupKey = `${startIndex}:${activityKind}`;
-
-    const groupEl = wrapper.createDiv('ct-tool-group');
-    const headerRow = groupEl.createDiv('ct-tool-group-header ct-compressed-row');
-
-    const iconEl = headerRow.createSpan({ cls: 'ct-tool-pill-icon' });
-    setIcon(iconEl, getToolIcon(tools[0].name));
-
-    headerRow.createSpan({
-      cls: 'ct-compressed-summary',
-      text: `${ACTIVITY_LABELS[activityKind]} (${tools.length})`,
+    // Mobile records carry no status: the live view (active) counts as running,
+    // which keeps the group open; finished groups default collapsed.
+    const { body } = renderToolGroupShell(wrapper, activityKind, tools, {
+      hasError: false,
+      hasPending: active,
+      expanded: this.expandedToolGroups.has(groupKey) || (active && !this.userCollapsedToolGroups.has(groupKey)),
+      onToggle: (open) => {
+        if (open) {
+          this.expandedToolGroups.add(groupKey);
+          this.userCollapsedToolGroups.delete(groupKey);
+        } else {
+          this.expandedToolGroups.delete(groupKey);
+          this.userCollapsedToolGroups.add(groupKey);
+        }
+      },
     });
-
-    const expandBtn = headerRow.createEl('button', { cls: 'ct-expand-btn', attr: { title: 'Expand' } });
-
-    const fullContent = groupEl.createDiv('ct-full-content');
-    for (const tool of tools) {
-      this.renderToolPill(fullContent, tool, active);
-    }
-
-    let expanded = this.expandedToolGroups.has(groupKey);
-    if (!expanded) fullContent.addClass('ct-hidden');
-    setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
-
-    expandBtn.addEventListener('click', () => {
-      expanded = !expanded;
-      if (expanded) {
-        fullContent.removeClass('ct-hidden');
-        this.expandedToolGroups.add(groupKey);
-      } else {
-        fullContent.addClass('ct-hidden');
-        this.expandedToolGroups.delete(groupKey);
-      }
-      setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
-    });
+    for (const tool of tools) this.renderToolPill(body, tool, active);
   }
 
   /**

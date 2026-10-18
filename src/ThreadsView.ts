@@ -34,8 +34,9 @@ import * as fsp from 'fs/promises';
 import type ClaudeThreadsPlugin from './main';
 import { isDefaultThreadTitle } from './thread-title-utils';
 import { formatToolName, getToolIcon } from './ClaudeSession';
-import { isPermissionPreApproved } from './toolNameUtils';
-import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, ACTIVITY_LABELS, smoothToolGroups, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
+import { isPermissionPreApproved, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
+import { applyToolCallStyleClass, renderToolGroupShell, renderToolRow } from './toolCallDom';
+import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, smoothToolGroups, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
 import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
 import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, execEnv, splitErrorMessage } from './dashboardUtils';
@@ -306,6 +307,8 @@ export class ThreadsView extends ItemView {
   // ':'-joined toolUseId/timestamp of the group's tools. In-memory only —
   // cleared alongside groupSummaryCache so state doesn't leak across threads.
   private expandedToolGroups: Set<string> = new Set();
+  // Keys of RUNNING groups the user collapsed (running groups default open).
+  private userCollapsedToolGroups: Set<string> = new Set();
   // Expand/collapse state for LIVE (in-progress) tool-call groups, keyed by
   // liveToolGroupKey (firstToolUseId:activityKind) rather than toolGroupKey's
   // full toolUseId list — a live group's tool list keeps growing as more calls
@@ -854,6 +857,7 @@ export class ThreadsView extends ItemView {
     root.addClass('ct-root');
     root.toggleClass('ct-mobile', Platform.isMobile);
     root.setAttribute('data-density', this.plugin.settings.layoutDensity ?? 'comfortable');
+    applyToolCallStyleClass(root, normalizeToolCallStyle(this.plugin.settings.toolCallStyle));
 
     const titleRow = root.createDiv('ct-title-row');
     this.titleRowEl = titleRow;
@@ -1339,6 +1343,7 @@ export class ThreadsView extends ItemView {
     this.summaryGeneration++; // cancel any queued summary jobs from the previous thread
     this.groupSummaryCache.clear();
     this.expandedToolGroups.clear();
+    this.userCollapsedToolGroups.clear();
     this.liveExpandedToolGroups.clear();
     this.expandedOuterToolWrap.clear();
     this.liveExpandedOuterToolWrap.clear();
@@ -2815,6 +2820,7 @@ export class ThreadsView extends ItemView {
     this.summaryTextEls.clear();
     this.groupSummaryCache.clear();
     this.expandedToolGroups.clear();
+    this.userCollapsedToolGroups.clear();
     this.liveExpandedToolGroups.clear();
     this.expandedOuterToolWrap.clear();
     this.liveExpandedOuterToolWrap.clear();
@@ -3981,18 +3987,22 @@ export class ThreadsView extends ItemView {
    * heartbeat updates.
    */
   private renderToolPill(wrapper: HTMLElement, tool: ToolCallRecord): HTMLElement {
-    const pill = wrapper.createDiv('ct-tool-pill');
-    if (tool.status === 'error') pill.addClass('ct-tool-error');
-    else if (tool.status === 'success') pill.addClass('ct-tool-success');
-    else if (tool.status === 'pending') pill.addClass('ct-tool-active');
-    const iconEl = pill.createSpan({ cls: 'ct-tool-pill-icon' });
-    setIcon(iconEl, getToolIcon(tool.name));
-    pill.createSpan({ cls: 'ct-tool-pill-name', text: formatToolName(tool.name) });
-    if (tool.summary) pill.createSpan({ cls: 'ct-tool-pill-text', text: tool.summary });
-    if (tool.timestamp) {
-      pill.createSpan({ cls: 'ct-tool-pill-ts', text: this.formatShortTime(tool.timestamp) });
-    }
-    return pill;
+    return renderToolRow(wrapper, tool, {
+      pathCtx: this.toolPathContext(),
+      time: tool.timestamp ? this.formatShortTime(tool.timestamp) : undefined,
+    });
+  }
+
+  /** Vault root + home dir, so tool-call paths render vault-relative / ~-relative. */
+  private toolPathContext(): ToolPathContext {
+    const adapter = this.app.vault.adapter as { basePath?: string };
+    const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+    return { vaultRoot: adapter.basePath || undefined, home: proc?.env?.HOME || undefined };
+  }
+
+  /** Apply the "Tool call style" setting live by swapping the root's ct-tools-* class. */
+  applyToolCallStyle(): void {
+    applyToolCallStyleClass(this.rootEl, normalizeToolCallStyle(this.plugin.settings.toolCallStyle));
   }
 
   /** Deterministic key for a FINALIZED tool-call group's expand/collapse state. */
@@ -4233,49 +4243,29 @@ export class ThreadsView extends ItemView {
     const expandedSet = opts?.expandedSet ?? this.expandedToolGroups;
     const groupKey = opts?.keyOverride ?? this.toolGroupKey(tools);
 
-    const groupEl = wrapper.createDiv('ct-tool-group');
-    const headerRow = groupEl.createDiv('ct-tool-group-header ct-compressed-row');
-    // Flag on the header (which owns the border-left) so ct-tool-error's
-    // border-left-color override and icon-tint rule both take visible effect.
-    if (hasError) headerRow.addClass('ct-tool-error');
-    // "Still running" affordance — reuses the same ct-tool-active convention
-    // as an individual pending pill (pulsing left border + icon tint; the
-    // group-header-specific pulsing dot on .ct-compressed-summary is added in
-    // styles.css). Does NOT force-expand — only an error does that — so a
-    // long run of successful same-kind calls stays collapsed while live.
-    if (hasPending) headerRow.addClass('ct-tool-active');
-
-    const iconEl = headerRow.createSpan({ cls: 'ct-tool-pill-icon' });
-    setIcon(iconEl, getToolIcon(tools[0].name));
-
-    headerRow.createSpan({
-      cls: 'ct-compressed-summary',
-      text: `${ACTIVITY_LABELS[activityKind]} (${tools.length})`,
+    // Open while running or failed (so neither is hidden); a finished group
+    // defaults collapsed to its one-line summary. A user who collapses a
+    // running group is remembered so the next live rebuild doesn't reopen it.
+    const expanded =
+      hasError || expandedSet.has(groupKey) || (hasPending && !this.userCollapsedToolGroups.has(groupKey));
+    const { body } = renderToolGroupShell(wrapper, activityKind, tools, {
+      hasError,
+      hasPending,
+      expanded,
+      onToggle: (open) => {
+        if (open) {
+          expandedSet.add(groupKey);
+          this.userCollapsedToolGroups.delete(groupKey);
+        } else {
+          expandedSet.delete(groupKey);
+          this.userCollapsedToolGroups.add(groupKey);
+        }
+      },
     });
-
-    const expandBtn = headerRow.createEl('button', { cls: 'ct-expand-btn', attr: { title: 'Expand' } });
-
-    const fullContent = groupEl.createDiv('ct-full-content');
     for (const tool of tools) {
-      const pill = this.renderToolPill(fullContent, tool);
+      const pill = this.renderToolPill(body, tool);
       opts?.onPillRendered?.(tool, pill);
     }
-
-    let expanded = hasError || expandedSet.has(groupKey);
-    if (!expanded) fullContent.addClass('ct-hidden');
-    setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
-
-    expandBtn.addEventListener('click', () => {
-      expanded = !expanded;
-      if (expanded) {
-        fullContent.removeClass('ct-hidden');
-        expandedSet.add(groupKey);
-      } else {
-        fullContent.addClass('ct-hidden');
-        expandedSet.delete(groupKey);
-      }
-      setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
-    });
   }
 
   /**
