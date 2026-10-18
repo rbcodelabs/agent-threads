@@ -592,3 +592,141 @@ export function mergeAdjacentToolOnlyMessages(
   }
   return result;
 }
+
+// ─── Tool-call display style + row/group formatting ──────────────────────────
+// Pure helpers behind the "Tool call style" setting (chips | tree | cards).
+// The DOM is shared by all three styles; these functions only decide TEXT.
+
+export type ToolCallStyle = 'chips' | 'tree' | 'cards';
+export const TOOL_CALL_STYLES: readonly ToolCallStyle[] = ['chips', 'tree', 'cards'];
+export const DEFAULT_TOOL_CALL_STYLE: ToolCallStyle = 'tree';
+
+/** Coerce an arbitrary persisted value to a valid style (default: tree). */
+export function normalizeToolCallStyle(value: unknown): ToolCallStyle {
+  return (TOOL_CALL_STYLES as readonly unknown[]).includes(value) ? (value as ToolCallStyle) : DEFAULT_TOOL_CALL_STYLE;
+}
+
+/** Root-element class for a style: `ct-tools-chips|tree|cards`. */
+export function toolCallStyleClass(style: ToolCallStyle): string {
+  return `ct-tools-${style}`;
+}
+
+export interface ToolPathContext {
+  /** Absolute vault root (no trailing slash needed). Paths under it become vault-relative. */
+  vaultRoot?: string;
+  /** Home directory. Absolute paths under it (but outside the vault) become `~/...`. */
+  home?: string;
+}
+
+export interface FormattedToolPath {
+  /** Directory part including trailing slash ('' for a bare filename). Rendered dim. */
+  dir: string;
+  /** Filename (or last segment). Rendered bright. */
+  file: string;
+}
+
+function stripTrailingSlash(p: string): string {
+  return p.length > 1 ? p.replace(/\/+$/, '') : p;
+}
+
+/** Vault-relative when inside the vault, `~/...` when elsewhere under home, else unchanged. */
+export function formatToolPath(raw: string, ctx: ToolPathContext = {}): FormattedToolPath {
+  let p = raw.trim();
+  const vault = ctx.vaultRoot ? stripTrailingSlash(ctx.vaultRoot) : '';
+  const home = ctx.home ? stripTrailingSlash(ctx.home) : '';
+  if (vault && (p === vault || p.startsWith(vault + '/'))) {
+    p = p === vault ? '/' : p.slice(vault.length + 1);
+  } else if (home && (p === home || p.startsWith(home + '/'))) {
+    p = '~' + p.slice(home.length);
+  }
+  const idx = p.lastIndexOf('/');
+  if (idx < 0) return { dir: '', file: p };
+  return { dir: p.slice(0, idx + 1), file: p.slice(idx + 1) };
+}
+
+const PATH_TOOL_KEYS: ReadonlySet<string> = new Set([
+  'Read', 'Edit', 'Write', 'NotebookEdit', 'navigate_to_file', 'workspace_navigate_to_file',
+  'get_backlinks', 'get_outgoing_links', 'get_note_metadata', 'vault_get_backlinks',
+  'vault_get_outgoing_links', 'vault_get_note_metadata', 'set_working_directory',
+]);
+
+export interface ToolRowSummary {
+  /** True when `dir`/`file` should render as a path (dim dir + bright file). */
+  isPath: boolean;
+  dir: string;
+  /** Filename for paths, otherwise the full plain text. */
+  main: string;
+}
+
+/** Splits a tool call's summary into dim/bright parts. Non-path summaries pass through untouched. */
+export function formatToolRowSummary(toolName: string, summary: string, ctx: ToolPathContext = {}): ToolRowSummary {
+  const text = summary ?? '';
+  const looksAbsolute = /^(\/|~\/)\S*$/.test(text.trim());
+  if (text && (PATH_TOOL_KEYS.has(toolKey(toolName)) || looksAbsolute) && !/\n/.test(text)) {
+    const { dir, file } = formatToolPath(text, ctx);
+    return { isPath: true, dir, main: file };
+  }
+  return { isPath: false, dir: '', main: text };
+}
+
+export interface ToolGroupSummary {
+  /** One-line label, e.g. "Read 3 files". */
+  label: string;
+  /** True when `label` already states the count (so chips must not append "3×"). */
+  countInLabel: boolean;
+}
+
+function plural(n: number, one: string, many: string): string {
+  return n === 1 ? `${n} ${one}` : `${n} ${many}`;
+}
+
+/** One-line summary of a finished group, derived from its member tools. */
+export function summarizeToolGroup(
+  activityKind: ActivityKind,
+  tools: import('./types').ToolCallRecord[],
+): ToolGroupSummary {
+  const keys = tools.map(t => toolKey(t.name));
+  const count = (pred: (k: string) => boolean) => keys.filter(pred).length;
+  const n = tools.length;
+  const inLabel = (label: string): ToolGroupSummary => ({ label, countInLabel: true });
+  const bare = (label: string): ToolGroupSummary => ({ label, countInLabel: false });
+
+  switch (activityKind) {
+    case 'exploring': {
+      const reads = count(k => k === 'Read' || k === 'ImageView');
+      const searches = count(k => k === 'Grep' || k === 'Glob');
+      const cmds = count(k => k === 'Bash');
+      const parts: string[] = [];
+      if (reads) parts.push(`read ${plural(reads, 'file', 'files')}`);
+      if (searches) parts.push(`searched ${plural(searches, 'pattern', 'patterns')}`);
+      if (cmds) parts.push(`ran ${plural(cmds, 'command', 'commands')}`);
+      const joined = parts.join(', ');
+      return inLabel(joined.charAt(0).toUpperCase() + joined.slice(1));
+    }
+    case 'editing': {
+      const gen = count(k => k === 'ImageGeneration');
+      if (gen === n) return inLabel(`Generated ${plural(n, 'image', 'images')}`);
+      const wrote = count(k => k === 'Write');
+      if (wrote === n) return inLabel(`Wrote ${plural(n, 'file', 'files')}`);
+      return inLabel(`Edited ${plural(n, 'file', 'files')}`);
+    }
+    case 'planning':
+      return inLabel(`Updated the plan (${plural(n, 'step', 'steps')})`);
+    case 'researching': {
+      const browser = count(k => k.startsWith('browser_'));
+      if (browser === n) return inLabel(`Browsed ${plural(n, 'page', 'pages')}`);
+      const web = count(k => k === 'WebSearch');
+      if (web === n) return inLabel(`Searched the web ${n}×`);
+      return inLabel(`Researched online (${plural(n, 'call', 'calls')})`);
+    }
+    case 'searching':
+      return inLabel(`Looked up ${plural(n, 'tool', 'tools')}`);
+    default: {
+      const searchKeys = new Set(['search_vault', 'vault_search']);
+      if (keys.every(k => searchKeys.has(k))) return bare('Searched the vault');
+      const first = keys[0];
+      if (keys.every(k => k === first)) return bare(formatToolName(tools[0].name).replace(/^./, c => c.toUpperCase()));
+      return inLabel(`Ran ${plural(n, 'tool', 'tools')}`);
+    }
+  }
+}
