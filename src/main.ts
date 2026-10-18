@@ -3627,6 +3627,37 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
   }
 
+  private daemonUpdateNotice: Notice | null = null;
+
+  /**
+   * After a Project is saved: if the managed daemon's mounts no longer match what would be created now (a new
+   * external-folder Project under "share all Project folders"), offer a one-click Update. Never automatic, because
+   * Update recreates the container under any thread running on it.
+   */
+  async offerDaemonUpdateIfMountsChanged(): Promise<void> {
+    if (!Platform.isDesktopApp || !this.localDaemon || !this.settings.localDaemon?.enabled || this.daemonUpdateNotice) return;
+    try {
+      const snap = await this.localDaemon.snapshot();
+      if (!snap.assessment.drift) return;
+      const controller = this.localDaemon;
+      const frag = document.createDocumentFragment();
+      frag.createDiv({ text: 'The local daemon needs an update to share this Project\'s folder. Updating restarts it, which interrupts threads running on it.' });
+      const notice = new Notice(frag, 0);
+      this.daemonUpdateNotice = notice;
+      const dismiss = () => { notice.hide(); this.daemonUpdateNotice = null; };
+      const row = frag.createDiv();
+      const go = row.createEl('button', { text: 'Update daemon', cls: 'mod-cta' });
+      go.addEventListener('click', () => {
+        dismiss();
+        const progress = new Notice('Updating the local daemon…', 0);
+        controller.update().then(() => new Notice('Local daemon updated.'), (err: unknown) => new Notice(`Local daemon update failed: ${err instanceof Error ? err.message : String(err)}`)).finally(() => progress.hide());
+      });
+      row.createEl('button', { text: 'Later' }).addEventListener('click', dismiss);
+    } catch {
+      // Advisory only: Settings → Remote → Local daemon still shows the drift hint.
+    }
+  }
+
   /** Each Project's working folder (its folder override, or its vault folder); the daemon vets and drops the ones it already mounts. */
   private projectWorkFolders(): string[] {
     return this.manager.getProjects().map((p) => this.manager.getProjectCwd(p));

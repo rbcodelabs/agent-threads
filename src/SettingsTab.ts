@@ -2681,6 +2681,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       if (project) this.plugin.manager.updateProject(project.id, { name: projectName, vaultFolder, cwdOverride: cwd.value.trim() || undefined, overviewPath: overview.value.trim() || undefined, description: description.value });
       else this.selectedProjectId = this.plugin.manager.createProject(projectName, vaultFolder, description.value, cwd.value.trim() || undefined, overview.value.trim() || undefined).id;
       await this.plugin.saveSettings();
+      void this.plugin.offerDaemonUpdateIfMountsChanged();
       this.display();
     });
   }
