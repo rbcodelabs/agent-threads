@@ -2471,6 +2471,7 @@ export class ThreadManager {
     const project = thread.projectId ? this.getProject(thread.projectId) : undefined;
     const daemonName = this.remoteDaemons?.nameOf(remote.daemonId) ?? remote.daemonId;
     const vaultMapping = this.remoteDaemons?.vaultMappingOf?.(remote.daemonId);
+    const mounts = this.remoteDaemons?.mountsOf?.(remote.daemonId);
     const hostToolsEnabled = !!this.remoteHostToolsFactory && this.remoteDaemons?.hostToolsOf?.(remote.daemonId)?.enabled === true;
     const goalContext = thread.goal
       ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
@@ -2485,7 +2486,7 @@ export class ThreadManager {
         vaultMapping
           ? { mapping: vaultMapping, vaultFolder: this.settings.vaultFolder, saveThreadsToVault: this.settings.saveThreadsToVault }
           : undefined,
-        { hostTools: hostToolsEnabled },
+        { hostTools: hostToolsEnabled, ...(mounts?.length ? { mounts } : {}) },
       ),
       project?.description?.trim(),
       goalContext,

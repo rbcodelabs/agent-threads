@@ -390,6 +390,15 @@ export class LocalDaemonController {
     return finish(observed, version, welcome?.daemonVersion ?? containerVersion);
   }
 
+  /**
+   * The mounts the daemon is (or will next be) created with, from the last observed folder lists. Synchronous so a
+   * session prompt can use it; empty when there is no vault path.
+   */
+  currentMounts(): Array<{ host: string; guest: string; readOnly: boolean }> {
+    const vaultPath = this.deps.vaultPath();
+    return vaultPath ? mountsFor({ vaultPath, maskedDirs: this.maskedDirs(vaultPath), externalRoots: this.extRoots, workFolders: this.workFolders }) : [];
+  }
+
   /** What a UI renders. Cheap enough to call when a panel opens; never mutates. */
   async snapshot(): Promise<LocalDaemonSnapshot> {
     const o = await this.observe();
@@ -400,7 +409,7 @@ export class LocalDaemonController {
       pluginVersion: this.deps.pluginVersion,
       port: o.port,
       ...(o.vaultPath ? { vaultPath: o.vaultPath } : {}),
-      mounts: o.vaultPath ? mountsFor({ vaultPath: o.vaultPath, maskedDirs: this.maskedDirs(o.vaultPath), externalRoots: this.extRoots, workFolders: this.workFolders }) : [],
+      mounts: o.vaultPath ? this.currentMounts() : [],
       busy: this.getBusy(),
       lastError: this.lastError,
     };
