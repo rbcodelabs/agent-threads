@@ -61,7 +61,10 @@ export function renderToolRow(
   pill.createSpan({ cls: 'ct-tool-pill-name', text: formatToolName(tool.name) });
   if (tool.summary) {
     const row = formatToolRowSummary(tool.name, tool.summary, opts.pathCtx);
-    const text = pill.createSpan({ cls: 'ct-tool-pill-text', attr: { title: tool.summary } });
+    const text = pill.createSpan({
+      cls: row.isPath ? 'ct-tool-pill-text ct-tool-pill-text-path' : 'ct-tool-pill-text',
+      attr: { title: tool.summary },
+    });
     if (row.isPath) {
       if (row.dir) text.createSpan({ cls: 'ct-tool-path-dir', text: row.dir });
       text.createSpan({ cls: 'ct-tool-path-file', text: row.main });
@@ -122,7 +125,8 @@ export function renderToolGroupShell(
     body.toggleClass('ct-hidden', !expanded);
     headerRow.setAttribute('aria-expanded', String(expanded));
     groupEl.toggleClass('ct-tool-group-open', expanded);
-    setIcon(chevron, expanded ? 'chevron-up' : 'chevron-down');
+    // One glyph; each style rotates it via CSS (aria-expanded).
+    setIcon(chevron, 'chevron-down');
   };
   sync();
   headerRow.addEventListener('click', () => {
