@@ -41,9 +41,7 @@ export function renderHostToolsAvailability(parent: HTMLElement, host: Availabil
       };
       box.addEventListener('change', () => set(box.checked));
       if (!on) {
-        line.createSpan({ cls: 'ct-mcp-available-missing', text: `Not available on ${d.name}.` });
-        line.createEl('button', { cls: 'ct-mcp-runson-action', text: 'Turn on', attr: { 'aria-label': `Turn on ${server} for ${d.name}` } })
-          .addEventListener('click', () => set(true));
+        line.createSpan({ cls: 'ct-mcp-available-missing', text: `Not available on ${d.name}. Tick to turn on.` });
       } else {
         line.createSpan({ cls: 'ct-mcp-runson-chip ct-mcp-runson-chip--ok', text: 'Available' });
       }

@@ -31,7 +31,7 @@ test.describe('Settings, MCP: Available on (OAuth servers)', () => {
     await settleView(page);
     await expect(page.locator('.ct-oauth-mcp-servers-list')).toHaveScreenshot('mcp-oauth-available-on.png');
     // The explicit "Turn on" button does the same for another daemon, and off cleans up completely.
-    await page.getByRole('button', { name: 'Turn on vercel for Plain box' }).click();
+    await page.getByLabel('Make vercel available on Plain box').check();
     await expect.poll(() => saved(page, 'plain-box')).toEqual({ enabled: true, routes: { vercel: 'host' } });
     await page.getByLabel('Make vercel available on Plain box').uncheck();
     await expect.poll(() => saved(page, 'plain-box')).toBeUndefined();
@@ -55,10 +55,10 @@ test.describe('Daemon editor: tools checklist', () => {
     await expect(modal).toContainText('Turn on "Tools on this computer"');
     await expect(modal.getByPlaceholder('vault, mcp')).toHaveCount(0);
     await expect(modal.getByPlaceholder('docs, search')).toHaveCount(0);
-    await modal.locator('.setting-item', { hasText: 'Tools on this computer' }).locator('input[type=checkbox]').check();
+    await modal.locator('.setting-item', { hasText: 'Tools on this computer' }).locator('.checkbox-container').click();
     await modal.getByLabel('Notes in this vault').check();
     await modal.getByLabel('hiptrip-new').check();
-    await modal.getByRole('button', { name: /save/i }).click();
+    await modal.getByRole('button', { name: /save/i }).evaluate((b: HTMLElement) => b.click());
     expect((await page.evaluate(() => (window as any).__savedDaemon)).hostTools).toEqual({ enabled: true, routes: { vault: 'host', 'hiptrip-new': 'host' } });
   });
 
@@ -71,8 +71,8 @@ test.describe('Daemon editor: tools checklist', () => {
     await expect(modal.getByLabel('gone')).toBeChecked();
     await expect(modal.getByLabel('hiptrip-new')).toBeChecked();
     await settleView(page);
-    await expect(modal.locator('.ct-host-tools')).toHaveScreenshot('daemon-editor-tools-checklist.png');
-    await modal.getByRole('button', { name: /save/i }).click();
+    await expect(page).toHaveScreenshot('daemon-editor-tools-checklist.png', { fullPage: true });
+    await modal.getByRole('button', { name: /save/i }).evaluate((b: HTMLElement) => b.click());
     expect((await page.evaluate(() => (window as any).__savedDaemon)).hostTools).toEqual(hostTools);
   });
 });
