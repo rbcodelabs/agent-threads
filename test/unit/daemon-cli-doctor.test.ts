@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  checkClaude, checkClockSkew, checkCredentials, checkDataDir, checkDisk, checkListen, checkNode, checkTailscale, checkTokens,
+  checkClaude, checkHarnessCli, checkClockSkew, checkCredentials, checkDataDir, checkDisk, checkListen, checkNode, checkTailscale, checkTokens,
   checkWorkspaces, doctorExitCode, formatReport, resolveDoctorTarget, runChecks, summarize, type CheckResult, type CommandResult, type HealthResult, type Probes,
 } from '../../daemon/cmd/doctor';
 import { sha256Hex } from '../../daemon/tokenStore';
@@ -19,6 +19,7 @@ function probes(over: Partial<Probes> & { files?: Record<string, string>; cmds?:
     disk: () => ({ freeBytes: 50 * GIB, totalBytes: 100 * GIB }),
     canWrite: () => true,
     findClaude: () => '/home/user/.local/bin/claude',
+    findHarness: (h) => `/home/user/.local/bin/${h}`,
     health: async () => ({ reachable: true, status: 200, body: '{"ok":true,"protocol":1}', serverTime: 1_000_000 }),
     ...rest,
   };
@@ -38,6 +39,35 @@ describe('doctor checks', () => {
     expect(missing.fix).toMatch(/claude\.ai\/install\.sh/);
     expect((await checkClaude(probes())).status).toBe('warn');
     expect(await checkClaude(probes({ cmds: { '/home/user/.local/bin/claude --version': ok('2.1.0 (Claude Code)\n') } }))).toMatchObject({ status: 'pass', detail: expect.stringContaining('2.1.0') });
+  });
+
+  it('codex / opencode: a missing CLI is a warning with an install hint, never a failure', async () => {
+    for (const h of ['codex', 'opencode'] as const) {
+      const missing = await checkHarnessCli(probes({ findHarness: () => null }), h);
+      expect(missing).toMatchObject({ id: h, status: 'warn' });
+      expect(missing.fix).toMatch(new RegExp(`${h}.*(npm i -g|installed)`));
+      expect(missing.fix).toContain(`--${h}-binary`);
+      expect((await checkHarnessCli(probes({ findHarness: () => null }), h, '/x/nope')).detail).toMatch(/is not an executable/);
+      expect((await checkHarnessCli(probes(), h)).status).toBe('warn'); // present, --version fails
+      expect(await checkHarnessCli(probes({ cmds: { [`/home/user/.local/bin/${h} --version`]: ok('1.2.3\n') } }), h)).toMatchObject({ status: 'pass', detail: expect.stringContaining('1.2.3') });
+    }
+  });
+
+  it('runChecks only checks the harnesses in the allowed set', async () => {
+    const target = (harnesses?: Array<'claude' | 'codex' | 'opencode'>) => ({ dataDir: '/d', listen: '127.0.0.1', port: 7433, baseUrl: 'http://127.0.0.1:7433', workspaces: ['/srv/w'], credentialFiles: [], ...(harnesses ? { harnesses } : {}) });
+    const ids = async (h?: Array<'claude' | 'codex' | 'opencode'>) => (await runChecks(probes(), target(h))).map((r) => r.id).filter((id) => ['claude', 'codex', 'opencode'].includes(id));
+    expect(await ids()).toEqual(['claude', 'codex', 'opencode']);
+    expect(await ids(['codex'])).toEqual(['codex']);
+    expect(await ids(['claude', 'opencode'])).toEqual(['claude', 'opencode']);
+  });
+
+  it('resolveDoctorTarget reads the harness set and binary paths like serve does', () => {
+    const t = (env: NodeJS.ProcessEnv, files: Record<string, string> = {}) => resolveDoctorTarget({ dataDir: '/d' }, probes({ env, files }));
+    expect(t({}).harnesses).toEqual(['claude', 'codex', 'opencode']);
+    expect(t({ AGENT_THREADS_HARNESS: 'codex' }).harnesses).toEqual(['codex']);
+    expect(t({ AGENT_THREADS_HARNESSES: 'opencode,claude' }).harnesses).toEqual(['opencode', 'claude']);
+    expect(t({}, { '/d/config.json': JSON.stringify({ harnesses: ['codex'], codexBinaryPath: '/opt/codex' }) })).toMatchObject({ harnesses: ['codex'], codexBinaryPath: '/opt/codex' });
+    expect(t({ AGENT_THREADS_OPENCODE_BINARY: '/o/oc' }).opencodeBinaryPath).toBe('/o/oc');
   });
 
   it('disk: warns under 5 GiB and fails under 500 MiB', () => {

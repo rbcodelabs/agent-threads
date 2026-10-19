@@ -33,7 +33,7 @@ import type { ChildProcess } from 'child_process';
 import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
 import type { AgentHarness, AskQuestion, ImageAttachment, TaskItemStatus } from './types';
 import { parseExtraEnv } from './types';
-import { isShellDenied } from './toolRestrictions';
+import { isEditDenied, isShellDenied } from './toolRestrictions';
 import type { SessionCallbacks } from './ClaudeSession';
 import type {
   HarnessContextUsage,
@@ -72,6 +72,8 @@ export function openCodePermissionConfig(disallowedTools?: readonly string[]): R
   // Per-thread denylist (restriction-only): OpenCode's native `deny` refuses
   // the shell tool outright, before any prompt.
   if (isShellDenied(disallowedTools)) config.bash = 'deny';
+  // Same for file edits (a daemon read-only workspace): the `edit` permission covers edit, write and patch.
+  if (isEditDenied(disallowedTools)) config.edit = 'deny';
   return config;
 }
 
@@ -1109,9 +1111,10 @@ export class OpenCodeSession {
         });
       void request?.catch((error) => console.warn('[ClaudeThreads] Could not answer OpenCode permission:', error));
     };
-    // Defence in depth for the per-thread denylist: refuse the shell even if the
-    // launch config was not honoured. v2 renamed the `bash` action to `shell`.
-    const decision = (permission === 'bash' || permission === 'shell') && isShellDenied(this.options?.disallowedTools)
+    // Defence in depth for the per-thread denylist: refuse the shell (v2 renamed the `bash` action to `shell`) and file
+    // edits even if the launch config was not honoured.
+    const decision = ((permission === 'bash' || permission === 'shell') && isShellDenied(this.options?.disallowedTools))
+      || (permission === 'edit' && isEditDenied(this.options?.disallowedTools))
       ? 'deny'
       : permission.startsWith(`${OPENCODE_HOST_TOOLS_SERVER}_`)
         ? 'allow' // bridged host tools are approved by the MCP bridge itself

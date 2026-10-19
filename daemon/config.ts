@@ -10,6 +10,7 @@ import { writeFileAtomic } from './fsutil';
 import { parseDaemonMcpServers, type DaemonMcpServers } from './mcpServers';
 import type { RepoSpec } from '../src/protocol';
 import { sanitizeConfiguredRepos } from './repos';
+import { REAL_HARNESSES, isRealHarness, type RealHarness } from './harnesses';
 
 export const DEFAULT_PORT = 7433;
 export const DEFAULT_LISTEN = '127.0.0.1';
@@ -23,8 +24,17 @@ export interface DaemonConfig {
   allowedOrigins: string[];
   /** Required to bind a wildcard address. */
   acknowledgeOpen: boolean;
-  /** Which session host runs behind `session.open`. 'fake' is the scripted harness used by tests and smoke runs. */
+  /**
+   * The default harness (what `agent-threads run` uses without `--harness`). 'fake' is the scripted harness used by
+   * tests and smoke runs: it replaces the real session host and ignores `harnesses`.
+   */
   harness: HarnessKind;
+  /**
+   * Harnesses a client may request in `session.open` (`spec.harness`); any other is refused. Unset everywhere: all
+   * three (a harness whose CLI is not installed fails its own sessions with a clear error). An explicit `harness`
+   * without `harnesses` restricts the daemon to that one, as before.
+   */
+  harnesses: RealHarness[];
   /** Absolute directories a session's cwd (and additionalDirectories) must sit under. */
   workspaces: string[];
   /** Folders sessions may run in but whose files the harness's edit tools may not change (also allowed as cwd). */
@@ -37,6 +47,10 @@ export interface DaemonConfig {
   idleReapMinutes: number;
   /** Explicit path to the `claude` CLI; otherwise discovered on PATH and in the usual install dirs. */
   claudeBinaryPath?: string;
+  /** Explicit path to the `codex` CLI; otherwise discovered like `claudeBinaryPath`. */
+  codexBinaryPath?: string;
+  /** Explicit path to the `opencode` CLI; otherwise discovered like `claudeBinaryPath`. */
+  opencodeBinaryPath?: string;
   /** A journal entry older than this is dropped (a client that was away longer gets a `resync`). 0 = keep forever. */
   journalTtlDays: number;
   /** Cap on one thread's retained journal (approximate JSON bytes); oldest entries go first. 0 = no cap. */
@@ -80,7 +94,7 @@ export interface DaemonConfig {
   allowLocalRepoUrls: boolean;
 }
 
-export type HarnessKind = 'claude' | 'fake';
+export type HarnessKind = RealHarness | 'fake';
 
 export const DEFAULT_WORKSPACES = ['/srv/workspaces'];
 export const DEFAULT_MAX_CONCURRENT_TURNS = 3;
@@ -97,8 +111,8 @@ export const DEFAULT_WORKTREE_PRUNE_DAYS = 14;
 export interface ConfigInputs {
   flags?: Partial<{
     dataDir: string; listen: string; port: number; allowedOrigins: string[]; acknowledgeOpen: boolean;
-    harness: HarnessKind; workspaces: string[]; readOnlyWorkspaces: string[]; allowBypass: boolean; maxConcurrentTurns: number;
-    idleReapMinutes: number; claudeBinaryPath: string; journalTtlDays: number; journalMaxMb: number;
+    harness: HarnessKind; harnesses: RealHarness[]; workspaces: string[]; readOnlyWorkspaces: string[]; allowBypass: boolean; maxConcurrentTurns: number;
+    idleReapMinutes: number; claudeBinaryPath: string; codexBinaryPath: string; opencodeBinaryPath: string; journalTtlDays: number; journalMaxMb: number;
     maxConnections: number; maxLiveSessions: number; requestTimeoutMinutes: number; allowedClientEnv: string[];
     hostToolGraceSec: number; hostToolTimeoutSec: number; worktreeRoot: string;
   }>;
@@ -127,6 +141,10 @@ interface ConfigFile {
   maxConcurrentTurns?: number;
   idleReapMinutes?: number;
   claudeBinaryPath?: string;
+  codexBinaryPath?: string;
+  opencodeBinaryPath?: string;
+  harness?: string;
+  harnesses?: string[];
   journalTtlDays?: number;
   journalMaxMb?: number;
   maxConnections?: number;
@@ -227,13 +245,24 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
   for (const w of readOnlyWorkspaces) {
     if (!isAbsolute(w)) throw new Error(`read-only workspace "${w}" must be an absolute path`);
   }
-  const harness = flags.harness ?? (env.AGENT_THREADS_HARNESS as HarnessKind | undefined) ?? 'claude';
-  if (harness !== 'claude' && harness !== 'fake') throw new Error(`invalid harness: ${String(harness)}`);
+  const explicitHarness = flags.harness ?? (env.AGENT_THREADS_HARNESS || undefined) ?? file.harness;
+  if (explicitHarness !== undefined && explicitHarness !== 'fake' && !isRealHarness(explicitHarness)) throw new Error(`invalid harness: ${String(explicitHarness)} (expected ${[...REAL_HARNESSES, 'fake'].join(', ')})`);
+  const rawHarnesses = flags.harnesses ?? envList(env.AGENT_THREADS_HARNESSES?.replace(/,/g, ':')) ?? file.harnesses;
+  for (const h of rawHarnesses ?? []) {
+    if (!isRealHarness(h)) throw new Error(`invalid harness in harnesses: ${String(h)} (expected ${REAL_HARNESSES.join(', ')})`);
+  }
+  const harnesses: RealHarness[] = rawHarnesses?.length
+    ? [...new Set(rawHarnesses as RealHarness[])]
+    : explicitHarness && explicitHarness !== 'fake' ? [explicitHarness] : [...REAL_HARNESSES];
+  const harness: HarnessKind = explicitHarness ?? harnesses[0];
+  if (harness !== 'fake' && !harnesses.includes(harness)) throw new Error(`default harness ${harness} is not among the enabled harnesses (${harnesses.join(', ')})`);
   const envInt = (v: string | undefined) => (v !== undefined && v !== '' ? Number(v) : undefined);
   const worktreeRootRaw = flags.worktreeRoot ?? (env.AGENT_THREADS_WORKTREE_ROOT || undefined) ?? file.worktreeRoot;
   const worktreeRoot = worktreeRootRaw ? resolve(expandHome(worktreeRootRaw)) : undefined;
   if (worktreeRoot && !isAbsolute(worktreeRoot)) throw new Error(`worktreeRoot "${worktreeRoot}" must be an absolute path`);
   const claudeBinaryPath = flags.claudeBinaryPath ?? (env.AGENT_THREADS_CLAUDE_BINARY || undefined) ?? file.claudeBinaryPath;
+  const codexBinaryPath = flags.codexBinaryPath ?? (env.AGENT_THREADS_CODEX_BINARY || undefined) ?? file.codexBinaryPath;
+  const opencodeBinaryPath = flags.opencodeBinaryPath ?? (env.AGENT_THREADS_OPENCODE_BINARY || undefined) ?? file.opencodeBinaryPath;
   const repoRoot = resolve(expandHome(file.repoRoot ?? join(dataDir, 'workspace')));
   if (!isAbsolute(repoRoot)) throw new Error(`repoRoot "${repoRoot}" must be an absolute path`);
   return {
@@ -243,6 +272,7 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     allowedOrigins: flags.allowedOrigins ?? envOrigins ?? file.allowedOrigins ?? [],
     acknowledgeOpen,
     harness,
+    harnesses,
     workspaces: [...new Set(workspaces.map((w) => resolve(w)))],
     readOnlyWorkspaces: [...new Set(readOnlyWorkspaces.map((w) => resolve(w)))],
     allowBypass: flags.allowBypass ?? (env.AGENT_THREADS_ALLOW_BYPASS === '1' || file.allowBypass === true),
@@ -263,5 +293,7 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     allowLocalRepoUrls: file.allowLocalRepoUrls === true,
     ...(worktreeRoot ? { worktreeRoot } : {}),
     ...(claudeBinaryPath ? { claudeBinaryPath } : {}),
+    ...(codexBinaryPath ? { codexBinaryPath } : {}),
+    ...(opencodeBinaryPath ? { opencodeBinaryPath } : {}),
   };
 }

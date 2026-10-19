@@ -61,6 +61,11 @@ export const ENV_TEMPLATE = `# agent-threads daemon environment (systemd Environ
 #CLAUDE_CODE_OAUTH_TOKEN=
 #ANTHROPIC_API_KEY=
 #
+# Codex and OpenCode credentials (only if you use those harnesses). Or sign in once as this user (\`codex login\`,
+# \`opencode auth login\`). Each key is passed to every session's environment, so list only what you want available.
+#CODEX_API_KEY=
+#OPENAI_API_KEY=
+#
 # GitHub, for pushes and pull requests from agent sessions (a fine-grained token scoped to the repos you want):
 #GH_TOKEN=
 `;
