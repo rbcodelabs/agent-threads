@@ -759,7 +759,7 @@ describe('DispatchInput — Run on a remote daemon: the daemon offers its own fo
 describe('DispatchInput — remote threads with any harness, gated on the daemon\'s capabilities', () => {
   const VAULT = '/Users/me/Vault';
   const modern = { id: 'modern', name: 'modern-box', url: 'wss://a', tokenSecretName: 'T', defaultCwdRoot: '/srv/workspaces' };
-  const claudeOnly = { id: 'claude-only', name: 'claude-box', url: 'wss://b', tokenSecretName: 'U', defaultCwdRoot: '/srv/workspaces' };
+  const claudeOnly = { id: 'claude-only', name: 'lite-box', url: 'wss://b', tokenSecretName: 'U', defaultCwdRoot: '/srv/workspaces' };
   const old = { id: 'old', name: 'old-box', url: 'wss://c', tokenSecretName: 'V', defaultCwdRoot: '/srv/workspaces' };
   const fresh = { id: 'fresh', name: 'fresh-box', url: 'wss://d', tokenSecretName: 'W', defaultCwdRoot: '/srv/workspaces' };
   const CAPS: Record<string, string[] | undefined> = {
@@ -820,7 +820,7 @@ describe('DispatchInput — remote threads with any harness, gated on the daemon
     expect(co.disabled).toBe(true);
     expect(co.title).toContain('not set up for Codex');
     expect(co.title).toContain('offers: Claude');
-    expect(co.querySelector('.ct-harness-menu-note')?.textContent).toContain('claude-box is not set up for Codex');
+    expect(co.querySelector('.ct-harness-menu-note')?.textContent).toContain('lite-box is not set up for Codex');
     co.click();
     expect(root.querySelector('.ct-run-on-folder')).toBeNull(); // nothing got selected
   });
@@ -859,7 +859,7 @@ describe('DispatchInput — remote threads with any harness, gated on the daemon
     expect(harness(root, 'claude').disabled).toBe(false);
     expect(harness(root, 'codex').disabled).toBe(true);
     expect(harness(root, 'opencode').disabled).toBe(true);
-    expect(harness(root, 'codex').title).toContain('claude-box is not set up for Codex');
+    expect(harness(root, 'codex').title).toContain('lite-box is not set up for Codex');
     runOn(root, 'modern').click();
     expect(harness(root, 'codex').disabled).toBe(false);
     expect(harness(root, 'opencode').disabled).toBe(false);
