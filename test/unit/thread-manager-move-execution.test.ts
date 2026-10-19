@@ -61,7 +61,7 @@ describe('ThreadManager.moveThreadExecution', () => {
     expect(thread.pendingHarnessHandoff).toBeDefined();
   });
 
-  it('is a no-op when it is already there, and refuses a non-Claude thread', async () => {
+  it('is a no-op when it is already there', async () => {
     const { manager, thread } = setup();
     const persist = vi.fn(async () => undefined);
     await manager.moveThreadExecution(thread.id, { kind: 'host', cwd: '/x' }, persist);
@@ -69,9 +69,35 @@ describe('ThreadManager.moveThreadExecution', () => {
     await manager.moveThreadExecution(thread.id, toDaemon, persist);
     await manager.moveThreadExecution(thread.id, toDaemon, persist);
     expect(persist).toHaveBeenCalledTimes(1);
+  });
 
-    const codex = setup({ agentHarness: 'codex' });
-    await expect(codex.manager.moveThreadExecution(codex.thread.id, toDaemon, persist)).rejects.toThrow(/Only Claude threads/);
+  it.each(['codex', 'opencode'] as const)('moves a %s thread too, keeping its harness for the handoff', async (agentHarness) => {
+    const { manager, thread } = setup({ agentHarness });
+    const events: Array<{ type: string; sourceHarness?: string; targetHarness?: string }> = [];
+    manager.subscribe((_id, e) => events.push(e as never));
+    await manager.moveThreadExecution(thread.id, toDaemon, async () => undefined);
+    expect(thread.agentHarness).toBe(agentHarness);
+    expect(thread.remote).toMatchObject({ daemonId: 'this-mac-container', remoteCwd: '/vault/Projects/x' });
+    expect(thread.sessionId).toBeUndefined();
+    expect(thread.pendingHarnessHandoff).toBeDefined();
+    expect(events.find((e) => e.type === 'harness_changed')).toMatchObject({ sourceHarness: agentHarness, targetHarness: agentHarness });
+    await manager.moveThreadExecution(thread.id, { kind: 'host', cwd: '/x' }, async () => undefined); // and back
+    expect(thread.remote).toBeUndefined();
+  });
+
+  it('refuses a daemon known not to offer the thread\'s harness (older daemons run Claude only), leaving the thread untouched', async () => {
+    const { manager, thread } = setup({ agentHarness: 'codex' });
+    manager.remoteDaemons = { clientFor: () => undefined, nameOf: () => 'This Mac', capabilitiesOf: () => ['host.tools', 'harness.claude'] };
+    const persist = vi.fn(async () => undefined);
+    await expect(manager.moveThreadExecution(thread.id, toDaemon, persist)).rejects.toThrow('This Mac is not set up for Codex');
+    expect(persist).not.toHaveBeenCalled();
+    expect(thread.remote).toBeUndefined();
+    expect(thread.sessionId).toBe('native-host-session');
+    // a Claude thread still moves there
+    const claude = setup();
+    claude.manager.remoteDaemons = manager.remoteDaemons;
+    await claude.manager.moveThreadExecution(claude.thread.id, toDaemon, async () => undefined);
+    expect(claude.thread.remote).toBeTruthy();
   });
 
   it('refuses while a turn is running or messages are queued', async () => {

@@ -717,3 +717,126 @@ describe('DispatchInput — Run on a remote daemon: the daemon offers its own fo
     expect(select(root)).toBeNull();
   });
 });
+
+describe('DispatchInput — remote threads with any harness, gated on the daemon\'s capabilities', () => {
+  const VAULT = '/Users/me/Vault';
+  const modern = { id: 'modern', name: 'modern-box', url: 'wss://a', tokenSecretName: 'T', defaultCwdRoot: '/srv/workspaces' };
+  const claudeOnly = { id: 'claude-only', name: 'lite-box', url: 'wss://b', tokenSecretName: 'U', defaultCwdRoot: '/srv/workspaces' };
+  const old = { id: 'old', name: 'old-box', url: 'wss://c', tokenSecretName: 'V', defaultCwdRoot: '/srv/workspaces' };
+  const fresh = { id: 'fresh', name: 'fresh-box', url: 'wss://d', tokenSecretName: 'W', defaultCwdRoot: '/srv/workspaces' };
+  const CAPS: Record<string, string[] | undefined> = {
+    modern: ['host.tools', 'harness.claude', 'harness.codex', 'harness.opencode', 'harness.codex.set_model'],
+    'claude-only': ['host.tools', 'harness.claude', 'harness.claude.set_model'],
+    old: ['host.tools', 'creds.push'], // advertises no harness.*: an older daemon
+    fresh: undefined, // never reached
+  };
+
+  function mount(initialHarness: 'claude' | 'codex' | 'opencode', extra: { warm?: (id: string) => Promise<void>; caps?: typeof CAPS } = {}) {
+    const onSend = vi.fn();
+    const caps = extra.caps ?? CAPS;
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend,
+      harnessPicker: {
+        initialHarness,
+        getRemoteDaemons: () => [modern, claudeOnly, old, fresh],
+        getLocalCwd: () => `${VAULT}/x`,
+        getVaultRoot: () => VAULT,
+        getDaemonCapabilities: (id) => caps[id],
+        ...(extra.warm ? { warmDaemon: extra.warm } : {}),
+      },
+    });
+    const container = makeContainer();
+    document.body.appendChild(container);
+    const root = di.mount(container);
+    return { root, onSend, textarea: root.querySelector('textarea')!, sendButton: root.querySelector<HTMLButtonElement>('.ct-send-btn')! };
+  }
+  const openMenu = (btn: HTMLElement) => btn.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  const runOn = (root: HTMLElement, id: string) => root.querySelector<HTMLButtonElement>(`.ct-run-on-item[data-run-on="${id}"]`)!;
+  const harness = (root: HTMLElement, h: string) => root.querySelector<HTMLButtonElement>(`[data-harness="${h}"]`)!;
+
+  it('offers Run on for Codex and OpenCode, not only Claude', () => {
+    for (const h of ['claude', 'codex', 'opencode'] as const) {
+      const { root, sendButton } = mount(h);
+      openMenu(sendButton);
+      expect(runOn(root, 'modern'), h).toBeTruthy();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+  });
+
+  it('a Codex task on a daemon that offers Codex is sent as remote with the Codex harness', async () => {
+    const { root, sendButton, textarea, onSend } = mount('codex');
+    openMenu(sendButton);
+    runOn(root, 'modern').click();
+    textarea.value = 'go';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ agentHarness: 'codex', remote: { daemonId: 'modern', cwd: '/srv/workspaces' } }));
+  });
+
+  it('disables, with the reason, a daemon that does not offer the selected harness', () => {
+    const { root, sendButton } = mount('codex');
+    openMenu(sendButton);
+    expect(runOn(root, 'modern').disabled).toBe(false);
+    const co = runOn(root, 'claude-only');
+    expect(co.disabled).toBe(true);
+    expect(co.title).toContain('not set up for Codex');
+    expect(co.title).toContain('offers: Claude');
+    expect(co.querySelector('.ct-harness-menu-note')?.textContent).toContain('lite-box is not set up for Codex');
+    co.click();
+    expect(root.querySelector('.ct-run-on-folder')).toBeNull(); // nothing got selected
+  });
+
+  it('treats a daemon that advertises no harness.* as Claude only (older daemon)', () => {
+    const codex = mount('codex');
+    openMenu(codex.sendButton);
+    expect(runOn(codex.root, 'old').disabled).toBe(true);
+    expect(runOn(codex.root, 'old').title).toContain('older daemon that only runs Claude');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    const claude = mount('claude');
+    openMenu(claude.sendButton);
+    expect(runOn(claude.root, 'old').disabled).toBe(false);
+  });
+
+  it('does not block a daemon whose capabilities are not known yet, and learns them once it is reached', async () => {
+    const caps: typeof CAPS = { ...CAPS };
+    let release!: () => void;
+    const warm = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    const { root, sendButton } = mount('opencode', { caps, warm });
+    openMenu(sendButton);
+    expect(warm).toHaveBeenCalledWith('fresh');
+    expect(warm).not.toHaveBeenCalledWith('modern'); // known already
+    expect(runOn(root, 'fresh').disabled).toBe(false);
+    caps.fresh = ['harness.claude'];
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(runOn(root, 'fresh').disabled).toBe(true);
+    expect(runOn(root, 'fresh').title).toContain('not set up for OpenCode');
+  });
+
+  it('with a daemon selected, the harnesses it does not offer are disabled in the harness list', () => {
+    const { root, sendButton } = mount('claude');
+    openMenu(sendButton);
+    runOn(root, 'claude-only').click();
+    expect(harness(root, 'claude').disabled).toBe(false);
+    expect(harness(root, 'codex').disabled).toBe(true);
+    expect(harness(root, 'opencode').disabled).toBe(true);
+    expect(harness(root, 'codex').title).toContain('lite-box is not set up for Codex');
+    runOn(root, 'modern').click();
+    expect(harness(root, 'codex').disabled).toBe(false);
+    expect(harness(root, 'opencode').disabled).toBe(false);
+  });
+
+  it('refuses to send when the daemon stopped offering the harness after it was chosen, keeping the draft', async () => {
+    const caps: typeof CAPS = { ...CAPS };
+    const { root, sendButton, textarea, onSend } = mount('codex', { caps });
+    openMenu(sendButton);
+    runOn(root, 'modern').click();
+    caps.modern = ['harness.claude']; // e.g. the daemon was replaced by one that only runs Claude
+    textarea.value = 'keep me';
+    sendButton.click();
+    await Promise.resolve();
+    expect(onSend).not.toHaveBeenCalled();
+    expect(textarea.value).toBe('keep me');
+  });
+});

@@ -2,6 +2,11 @@
  * Projection of `HarnessSessionOptions` onto the `RemoteSessionSpec` that
  * crosses the wire in `session.open` (design 3.5).
  *
+ * The wire harness is the thread's (`claude`, `codex` or `opencode`); the per-harness option blocks are projected as
+ * the daemon's `specToSessionOptions` reads them back: Claude's `sessionOptions` in full, Codex's `effort` only,
+ * vetted http/sse MCP servers for all three. Everything the daemon derives itself (Codex approval policy and sandbox
+ * from `permissionMode`, OpenCode permissions) is NOT sent.
+ *
  * Deliberately conservative for stage 1 ("daemon-local tools only"): anything
  * that names a local path, carries a local secret, or is a live object is left
  * behind. The rest of `SESSION_OPTION_DISPOSITION` is the typed checklist:
@@ -21,14 +26,19 @@
 import type { HarnessSessionOptions } from '../HarnessSession';
 import type { RemoteMcpServerConfig, RemoteSessionSpec } from '../protocol';
 import { describeHostToolsForPrompt, type HostToolsSummary } from './hostTools';
-import type { RemoteVaultMapping, Thread } from '../types';
+import type { AgentHarness, RemoteVaultMapping, Thread } from '../types';
 import { isUnderRemoteRoot, normalizePosixPath, relativeWithin } from './vaultMapping';
 
 export function projectSessionOptions(options: HarnessSessionOptions, thread: Thread): RemoteSessionSpec {
   const remote = thread.remote;
   if (!remote) throw new Error('projectSessionOptions: thread is not a remote thread');
 
-  const so = options.claude?.sessionOptions;
+  const harness: AgentHarness = thread.agentHarness ?? 'claude';
+  // Claude carries the full session options; Codex only its reasoning effort (what the daemon's `specToSessionOptions`
+  // reads for it); OpenCode has none. Claude-only options (thinking, betas, agents) never ride a non-Claude spec.
+  const so = harness === 'claude'
+    ? options.claude?.sessionOptions
+    : harness === 'codex' && options.codex?.effort ? { effort: options.codex.effort as never } : undefined;
   const sessionOptions: NonNullable<RemoteSessionSpec['sessionOptions']> = {};
   if (so) {
     if (so.thinking !== undefined) sessionOptions.thinking = so.thinking;
@@ -40,19 +50,22 @@ export function projectSessionOptions(options: HarnessSessionOptions, thread: Th
   }
 
   // Both lists are deny rules, so sending the union can only make the remote session stricter.
-  const disallowed = [...new Set([...(options.claude?.disallowedTools ?? []), ...(options.disallowedTools ?? [])])];
+  const disallowed = [...new Set([...(harness === 'claude' ? options.claude?.disallowedTools ?? [] : []), ...(options.disallowedTools ?? [])])];
 
   // Only servers the caller vetted for another machine (mcpPartition.ts) cross; `claude.mcpServers` never does.
   const mcpServers: Record<string, RemoteMcpServerConfig> = {};
-  for (const [name, s] of Object.entries(options.claude?.remoteMcpServers ?? {})) {
+  const vetted: Record<string, { type?: string; url?: string; headers?: Record<string, string> }> = harness === 'claude'
+    ? options.claude?.remoteMcpServers ?? {}
+    : (harness === 'codex' ? options.codex?.mcpServers : options.opencode?.mcpServers) ?? {};
+  for (const [name, s] of Object.entries(vetted)) {
     if ((s.type === 'http' || s.type === 'sse') && typeof s.url === 'string') {
       mcpServers[name] = { type: s.type, url: s.url, ...(s.headers ? { headers: s.headers } : {}) };
     }
   }
 
   return {
-    // Only the Claude harness runs on the daemon today (the fake harness ignores it).
-    harness: 'claude',
+    // The thread's own harness; the daemon starts that CLI (the fake harness ignores it).
+    harness,
     cwd: remote.remoteCwd,
     permissionMode: options.permissionMode,
     ...(options.model ? { model: options.model } : {}),
@@ -146,9 +159,9 @@ export const HOST_TOOLS_PLACEHOLDER = '{{HOST_TOOLS}}';
  * Fill in (or fall back from) the host-tools paragraph once the manifest is known. `summary` null means this
  * thread has no host tools, which is also what an older plugin build said unconditionally.
  */
-export function applyHostToolsPrompt(prompt: string, summary: HostToolsSummary | null, hostName: string): string {
+export function applyHostToolsPrompt(prompt: string, summary: HostToolsSummary | null, hostName: string, harness: AgentHarness = 'claude'): string {
   if (!prompt.includes(HOST_TOOLS_PLACEHOLDER)) return prompt;
-  return prompt.replace(HOST_TOOLS_PLACEHOLDER, describeHostToolsForPrompt(summary, hostName).join('\n'));
+  return prompt.replace(HOST_TOOLS_PLACEHOLDER, describeHostToolsForPrompt(summary, hostName, harness).join('\n'));
 }
 
 /** Lines appended to the remote environment prompt for a session working in the mirrored vault. */

@@ -7,6 +7,7 @@ import { createHarnessSession } from './HarnessFactory';
 import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
 import type { RemoteSessionDeps } from './remote/RemoteHarnessSession';
 import { buildRemoteEnvironmentPrompt } from './remote/sessionSpec';
+import { gateHarness } from './remote/harnessSupport';
 import type { RemoteHostTools } from './remote/hostTools';
 import { HostToolSlots } from './remote/hostToolExecutor';
 import { describeDroppedMcp, partitionExternalMcpServers } from './remote/mcpPartition';
@@ -695,7 +696,9 @@ export class ThreadManager {
     if (!thread) throw new Error(`Thread not found: ${id}`);
     const sourceHarness = thread.agentHarness ?? 'claude';
     if (sourceHarness === targetHarness) return;
-    if (thread.remote) throw new Error('Remote threads run Claude only for now.');
+    // A remote thread hands off like a local one: the daemon closes the old harness's session and the next send opens
+    // the new harness's on the same daemon. Only a harness the daemon offers can be chosen.
+    if (thread.remote) this.assertDaemonOffersHarness(thread.remote.daemonId, targetHarness);
     const blocked = this.getHarnessSwitchBlockReason(id);
     if (blocked) throw new Error(blocked);
 
@@ -774,10 +777,11 @@ export class ThreadManager {
   }
 
   /**
-   * Moves a Claude thread between this computer and a daemon (the managed local daemon, or any configured one), the
-   * way the removed per-thread sandbox VM's "Run in" switch did: the conversation stays, and because a native Claude
-   * session cannot be resumed across machines it is dropped and a same-harness handoff (summary plus transcript
-   * references) carries the conversation to the new place. Takes effect on the next message.
+   * Moves a thread between this computer and a daemon (the managed local daemon, or any configured one), the
+   * way the removed per-thread sandbox VM's "Run in" switch did: the conversation stays, and because a native session
+   * cannot be resumed across machines it is dropped and a same-harness handoff (summary plus transcript
+   * references) carries the conversation to the new place. Works for every harness (the thread keeps its own);
+   * a daemon is refused when it is known not to offer that harness. Takes effect on the next message.
    */
   async moveThreadExecution(
     id: string,
@@ -786,7 +790,8 @@ export class ThreadManager {
   ): Promise<void> {
     const thread = this.threads.get(id);
     if (!thread) throw new Error(`Thread not found: ${id}`);
-    if ((thread.agentHarness ?? 'claude') !== 'claude') throw new Error('Only Claude threads can run on a daemon.');
+    const harness: AgentHarness = thread.agentHarness ?? 'claude';
+    if (target.kind === 'daemon') this.assertDaemonOffersHarness(target.daemonId, harness);
     if (target.kind === 'daemon' && thread.remote?.daemonId === target.daemonId) return;
     if (target.kind === 'host' && !thread.remote) return;
     const blocked = this.getHarnessSwitchBlockReason(id);
@@ -808,7 +813,7 @@ export class ThreadManager {
       delete thread.sessionId;
       delete thread.originRepoPath;
       thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
-      thread.pendingHarnessHandoff = createHarnessHandoff(thread, 'claude', 'claude');
+      thread.pendingHarnessHandoff = createHarnessHandoff(thread, harness, harness);
       thread.updatedAt = Date.now();
       await persist();
       if (this.threads.get(id) !== thread) throw new Error('Thread was deleted while the move was being saved.');
@@ -816,7 +821,7 @@ export class ThreadManager {
       if (oldSession) oldSession.close();
       this.sessions.delete(id);
       this.selectedAgentRuns.delete(id);
-      this.emit(id, { type: 'harness_changed', sourceHarness: 'claude', targetHarness: 'claude' });
+      this.emit(id, { type: 'harness_changed', sourceHarness: harness, targetHarness: harness });
     } catch (error) {
       if (this.threads.get(id) === thread) {
         Object.assign(thread, snapshot);
@@ -910,15 +915,18 @@ export class ThreadManager {
 
   /**
    * A thread whose session runs on the daemon `daemonId`, in `remoteCwd` on that
-   * machine. Claude only (the daemon hosts nothing else yet); `thread.cwd`
+   * machine, with the user's chosen harness (Claude when none is given); `thread.cwd`
    * mirrors the remote path for display and is never touched on this disk.
+   * Throws when the daemon is known not to offer that harness.
    */
   createRemoteThread(
     title: string,
-    remote: { daemonId: string; remoteCwd: string; clientId: string },
+    remote: { daemonId: string; remoteCwd: string; clientId: string; agentHarness?: AgentHarness },
     projectId?: string,
   ): Thread {
-    const thread = this.createThread(title, remote.remoteCwd, projectId, 'claude');
+    const harness = remote.agentHarness ?? 'claude';
+    this.assertDaemonOffersHarness(remote.daemonId, harness);
+    const thread = this.createThread(title, remote.remoteCwd, projectId, harness);
     thread.remote = {
       daemonId: remote.daemonId,
       ownership: 'client',
@@ -927,6 +935,15 @@ export class ThreadManager {
       ownerClientId: remote.clientId,
     };
     return thread;
+  }
+
+  /**
+   * Refuse a harness the daemon has told us it does not offer (an older daemon offers Claude only). A daemon whose
+   * capabilities are not known yet is not blocked on a guess: `session.open` reports a refusal clearly.
+   */
+  assertDaemonOffersHarness(daemonId: string, harness: AgentHarness): void {
+    const gate = gateHarness(harness, this.remoteDaemons?.capabilitiesOf?.(daemonId), this.remoteDaemons?.nameOf(daemonId) ?? daemonId);
+    if (!gate.ok) throw new Error(gate.reason);
   }
 
   /**
@@ -2473,6 +2490,7 @@ export class ThreadManager {
     const vaultMapping = this.remoteDaemons?.vaultMappingOf?.(remote.daemonId);
     const mounts = this.remoteDaemons?.mountsOf?.(remote.daemonId);
     const hostToolsEnabled = !!this.remoteHostToolsFactory && this.remoteDaemons?.hostToolsOf?.(remote.daemonId)?.enabled === true;
+    const harness: AgentHarness = thread.agentHarness ?? 'claude';
     const goalContext = thread.goal
       ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
         'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
@@ -2501,29 +2519,57 @@ export class ThreadManager {
       this.remoteMcpNoticeSig.set(threadId, droppedNote ?? '');
       if (droppedNote) this.addNoticeMessage(threadId, 'stopped', droppedNote);
     }
+    const resume = thread.sessionId;
     const extras = this.remoteSessionExtras?.(threadId);
-    return {
+    const common = {
       cwd: remote.remoteCwd,
       permissionMode: thread.permissionMode ?? this.settings.permissionMode,
-      ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
       extraEnvRaw: '',
-      resume: thread.sessionId,
+      resume,
       callbacks: this.buildSessionCallbacks(threadId, thread),
-      model: modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
       appendSystemPrompt,
-      resumeFallbackHistory: thread.sessionId
+      resumeFallbackHistory: resume
         ? buildHistoryPreamble(
             latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
             remote.remoteCwd,
           )
         : undefined,
-      claude: {
-        disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
-        sessionOptions: this.buildSessionOptions(thread, agentProfiles),
-        ...(Object.keys(partition.passthrough).length ? { remoteMcpServers: partition.passthrough } : {}),
-        ...(extras?.envKind ? { remoteEnvKind: extras.envKind } : {}),
-        ...(extras?.pluginPaths?.length ? { remotePluginPaths: extras.pluginPaths } : {}),
-      },
+    };
+    const passthrough = Object.keys(partition.passthrough).length ? partition.passthrough : undefined;
+    if (harness === 'claude') {
+      return {
+        ...common,
+        ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
+        model: modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
+        claude: {
+          disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
+          sessionOptions: this.buildSessionOptions(thread, agentProfiles),
+          ...(passthrough ? { remoteMcpServers: passthrough } : {}),
+          ...(extras?.envKind ? { remoteEnvKind: extras.envKind } : {}),
+          ...(extras?.pluginPaths?.length ? { remotePluginPaths: extras.pluginPaths } : {}),
+        },
+      };
+    }
+    // Codex and OpenCode: Claude's model aliases mean nothing to them (as for a local thread), the denylist is the
+    // top-level one (Claude's tool names are ignored by the daemon's adapters except Bash), and the vetted MCP servers
+    // go in the harness's own block, which `projectSessionOptions` reads back.
+    const disallowed = mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools);
+    return {
+      ...common,
+      ...(disallowed.length ? { disallowedTools: disallowed } : {}),
+      model: modelOverride ?? thread.model ?? undefined,
+      ...(harness === 'codex'
+        ? {
+            codex: {
+              ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
+              ...(this.settings.codexEffort && this.settings.codexEffort !== 'default' ? { effort: this.settings.codexEffort } : {}),
+              ...(passthrough ? { mcpServers: passthrough } : {}),
+            },
+          }
+        : { opencode: { ...(passthrough ? { mcpServers: passthrough } : {}) } }),
+      // The session environment (Extra env, keychain secrets) reaches every harness through the daemon's credential
+      // kind; skill plugin paths are Claude plugins and are not sent to Codex or OpenCode.
+      ...(extras?.envKind ? { claude: { remoteEnvKind: extras.envKind } } : {}),
     };
   }
 

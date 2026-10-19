@@ -3763,7 +3763,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       agentHarness?: AgentHarness;
       /** Project selected by a dispatch surface. Omit for deliberate Unassigned. */
       projectId?: string;
-      /** Run the thread on a remote daemon, in this folder on its machine (Claude only). */
+      /** Run the thread on a remote daemon, in this folder on its machine, with `agentHarness` (the daemon must offer it). */
       remote?: { daemonId: string; cwd: string };
     },
   ): Promise<string> {
@@ -3778,12 +3778,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
       if (!(this.settings.remoteDaemons ?? []).some((d) => d.id === opts.remote!.daemonId)) {
         throw new Error('That remote daemon is not configured. Add it under Settings, Remote daemons.');
       }
-      if ((opts.agentHarness ?? this.settings.agentHarness ?? 'claude') !== 'claude') {
-        throw new Error('Remote threads run Claude only for now.');
-      }
     }
+    // A remote thread carries the harness the user chose (Settings' default when the picker left it alone).
     const thread = opts?.remote
-      ? this.manager.createRemoteThread(title, { daemonId: opts.remote.daemonId, remoteCwd: opts.remote.cwd, clientId: this.settings.remoteClientId ?? 'unknown' }, project?.id)
+      ? this.manager.createRemoteThread(title, { daemonId: opts.remote.daemonId, remoteCwd: opts.remote.cwd, clientId: this.settings.remoteClientId ?? 'unknown', agentHarness: opts.agentHarness ?? this.settings.agentHarness ?? 'claude' }, project?.id)
       : this.manager.createThread(title, cwd, project?.id, opts?.agentHarness);
     if (opts?.model) this.manager.setThreadModel(thread.id, opts.model);
     const goalRevision = opts?.goal ? this.manager.setThreadGoal(thread.id, opts.goal) : undefined;

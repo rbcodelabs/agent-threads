@@ -174,12 +174,6 @@ describe('remote thread through ThreadManager', () => {
     }
   });
 
-  it('refuses harness switching for a remote thread', async () => {
-    const { manager } = await setup();
-    const thread = manager.createRemoteThread('nope', { daemonId: 'box', remoteCwd: '/srv/workspaces/x', clientId: 'c' });
-    await expect(manager.switchHarness(thread.id, 'codex', async () => undefined)).rejects.toThrow(/Claude only/);
-  });
-
   it('fails clearly when the daemon was removed from settings', async () => {
     const { manager, cfg } = await setup();
     const thread = manager.createRemoteThread('orphan', { daemonId: 'gone', remoteCwd: '/srv/workspaces/x', clientId: 'c' });

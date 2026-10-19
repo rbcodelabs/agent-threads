@@ -325,3 +325,28 @@ describe('live commands reach the harness that owns the thread', () => {
     expect(made[0].harness.modes).toEqual(['plan']);
   });
 });
+
+describe('hand-off between harnesses on one thread', () => {
+  it('a native session id is resumed only by the harness that made it', async () => {
+    const td = await daemon();
+    const c = await client(td);
+    await open(c, 't', { harness: 'claude' });
+    await started(0);
+    // The first harness learns its native id from its raw events (ScriptedHarness stamps session_id on start).
+    expect((await c.cmd('session.send', { threadId: 't', text: 'hi', userMessageUuid: 'u1' })).type).toBe('ack');
+    made[0].harness.finish('done');
+    await c.cmd('session.close', { threadId: 't' });
+
+    // Handed to Codex: the stored Claude session id must not be handed to it.
+    expect((await open(c, 't', { harness: 'codex' })).type).toBe('ack');
+    const codexOptions = await started(1);
+    expect(codexOptions.codex).toBeTruthy();
+    expect(codexOptions.resume).toBeUndefined();
+
+    // Same harness again: the daemon's own id is still used.
+    await c.cmd('session.close', { threadId: 't' });
+    expect((await open(c, 't', { harness: 'codex' })).type).toBe('ack');
+    const again = await started(2);
+    expect(again.resume).toBe(made[1].harness.sessionId);
+  });
+});

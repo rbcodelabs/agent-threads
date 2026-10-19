@@ -1,3 +1,4 @@
+import { gateHarness } from './remote/harnessSupport';
 import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
@@ -1362,6 +1363,8 @@ export class ThreadsView extends ItemView {
       harnessPicker: {
         initialHarness: this.plugin.settings.agentHarness ?? 'claude',
         getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
+        getDaemonCapabilities: (id) => this.plugin.daemonRegistry?.capabilitiesOf(id),
+        warmDaemon: (id) => this.plugin.daemonRegistry?.warm(id) ?? Promise.resolve(),
         localDaemonOffer: { available: () => this.plugin.isLocalDaemonSetupOffered(), onSetUp: () => this.plugin.openLocalDaemonSettings() },
         getFolderSource: () => this.plugin.remoteFolders ?? undefined,
         getLocalCwd: () => {
@@ -2758,11 +2761,17 @@ export class ThreadsView extends ItemView {
     if (thread.activeModel) modelNotes.push(`Running: ${activeModelLabel(thread.activeModel)}`);
 
     const harnessValue = `${agentHarnessLabel(thread.agentHarness)}${thread.remote ? ' \u00b7 Remote' : ''}`;
+    // A remote thread can only hand off to a harness its daemon offers (older daemons: Claude only).
+    const remoteGate = (value: AgentHarness): string | undefined => {
+      if (!thread.remote) return undefined;
+      const g = gateHarness(value, this.plugin.daemonRegistry?.capabilitiesOf(thread.remote.daemonId), this.plugin.daemonRegistry?.nameOf(thread.remote.daemonId) ?? 'the daemon');
+      return g.ok ? undefined : g.reason;
+    };
     const harnessGroups: PopoverOptionGroup[] = [{
       options: AGENT_HARNESSES.map((value) => ({
-        label: value !== harness && blocked ? `${agentHarnessLabel(value)} \u2014 ${blocked}` : agentHarnessLabel(value),
+        label: value !== harness && (blocked ?? remoteGate(value)) ? `${agentHarnessLabel(value)} \u2014 ${blocked ?? remoteGate(value)}` : agentHarnessLabel(value),
         checked: value === harness,
-        disabled: value !== harness && !!blocked,
+        disabled: value !== harness && !!(blocked ?? remoteGate(value)),
         closeOnSelect: true,
         onSelect: () => { if (value !== harness) void this.requestHarnessSwitch(threadId, value); },
       })),
@@ -2770,7 +2779,7 @@ export class ThreadsView extends ItemView {
     // Where this thread runs: this computer, or a daemon that can see its folder (the managed local daemon is
     // "This Mac (container)"). Moving resets the native session; the conversation continues from a summary.
     const daemons = this.plugin.settings.remoteDaemons ?? [];
-    if (harness === 'claude' && !Platform.isMobile && daemons.length > 0) {
+    if (!Platform.isMobile && daemons.length > 0) {
       const here = thread.remote?.daemonId;
       const options: PopoverOptionGroup['options'] = [{
         label: !!blocked && !!here ? `This computer \u2014 ${blocked}` : 'This computer',
@@ -2782,7 +2791,8 @@ export class ThreadsView extends ItemView {
       for (const d of daemons) {
         const target = thread.remote ? undefined : this.plugin.mapCwdToDaemon(d.id, thread.cwd);
         const selected = here === d.id;
-        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : target ? undefined : 'its folder is not shared with this daemon');
+        const offered = gateHarness(harness, this.plugin.daemonRegistry?.capabilitiesOf(d.id), d.name);
+        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : !offered.ok ? `no ${agentHarnessLabel(harness)} on it` : target ? undefined : 'its folder is not shared with this daemon');
         options.push({
           label: reason ? `${d.name} \u2014 ${reason}` : d.name,
           checked: selected,
@@ -2993,7 +3003,7 @@ export class ThreadsView extends ItemView {
     const where = to ? (this.plugin.settings.remoteDaemons ?? []).find((d) => d.id === to.daemonId)?.name ?? 'the daemon' : 'this computer';
     if (hadConversation) {
       const confirmed = await promptConfirm(this.app, {
-        message: `Run this thread on ${where}? The conversation stays here, but the native Claude session resets and continues from a summary and transcript references.`,
+        message: `Run this thread on ${where}? The conversation stays here, but the native ${agentHarnessLabel(thread.agentHarness)} session resets and continues from a summary and transcript references.`,
         confirmLabel: 'Move',
         danger: false,
       });
