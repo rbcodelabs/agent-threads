@@ -1,10 +1,10 @@
 import { CLAUDE_SIGN_IN_TIMEOUT_MS } from './claudeAuthCli';
-import { VM_BINARY } from './sandboxVm';
+import { VM_BINARY } from './containerCli';
 
 /**
- * Drives Claude sign-in **inside** a thread's sandbox container, for the case
- * where the harness itself runs there too (ADR-0015) and there is no host
- * `claude` install to sign in with `claudeAuthCli.ts`'s `claude auth login`.
+ * Drives Claude sign-in **inside** the local daemon's container, where the
+ * harness runs and there is no host `claude` install to sign in with
+ * `claudeAuthCli.ts`'s `claude auth login`.
  *
  * `claude setup-token` has no headless/no-browser flag (checked live against
  * `claude auth login --help` / `claude setup-token --help` in the built
@@ -51,7 +51,7 @@ export type SpawnLike = (
 
 export interface ContainerSignInOptions {
   spawn: SpawnLike;
-  /** Host-side env for the `expect`/`container` binaries themselves — see `runnerEnv()` in sandboxVm.ts. Never the container's own secrets. */
+  /** Host-side env for the `expect`/`container` binaries themselves — see `runnerEnv()` in containerCli.ts. Never the container's own secrets. */
   hostEnv: NodeJS.ProcessEnv;
   containerName: string;
   containerBinaryPath: string;
@@ -96,7 +96,7 @@ export const EXPECT_BINARY = '/usr/bin/expect';
 /**
  * Secret-storage name (see `secretStorageKey`) for the token this sign-in
  * mints. Intentionally NOT `CLAUDE_CODE_OAUTH_TOKEN` and never listed in
- * `secretEnvKeys`: `ThreadSession` injects it only into VM-routed sessions.
+ * `secretEnvKeys`: the local daemon controller injects it into the daemon container only.
  */
 export const CONTAINER_AUTH_TOKEN_SECRET = 'CLAUDE_THREADS_CONTAINER_OAUTH_TOKEN';
 
@@ -196,7 +196,7 @@ export function extractToken(output: string): string | undefined {
   return undefined;
 }
 
-/** Content-match redaction (never positional) — same convention as `redactSecretsInArgv` in harnessVmRouting.ts. */
+/** Content-match redaction (never positional). */
 function redactToken(text: string, token: string | undefined): string {
   if (!token) return text;
   return text.split(token).join('<redacted>');

@@ -163,10 +163,10 @@ describe('first run — live QA fixes', () => {
   });
 
   it('names the harness reason in the fallback notice', async () => {
-    const { plugin } = makePlugin({ resolvable: ['opencode'] });
+    const { plugin } = makePlugin({ resolvable: [] });
     plugin.settings.agentHarness = 'opencode';
     await plugin.firstRunSetup(true);
-    expect(Notice.messages.map(n => n.message)).toContain('Chief of Staff setup couldn\u2019t finish: no Claude Code or Codex found. Check the guide to get started.');
+    expect(Notice.messages.map(n => n.message)).toContain('Chief of Staff setup couldn\u2019t finish: no agent harness (Claude Code, Codex or OpenCode) found. Check the guide to get started.');
   });
 
   it('keeps the plain welcome notice when the offer is off', async () => {
@@ -206,23 +206,23 @@ describe('first run — review fixes', () => {
     expect(plugin.settings.hasSeenWelcome).toBe(true);
   });
 
-  it('creates the thread on Claude when OpenCode is the selected harness', async () => {
+  it('creates the thread on OpenCode when it is the selected harness', async () => {
     const { plugin } = makePlugin();
     plugin.settings.agentHarness = 'opencode';
     await plugin.firstRunSetup(true);
     const [thread] = plugin.manager.getThreads();
-    expect(thread!.agentHarness).toBe('claude');
+    expect(thread!.agentHarness).toBe('opencode');
   });
 
-  it('uses Codex when OpenCode is selected and Claude is not installed', async () => {
+  it('uses Codex when Claude is selected but not installed', async () => {
     const { plugin } = makePlugin({ resolvable: ['codex', 'opencode'] });
-    plugin.settings.agentHarness = 'opencode';
+    plugin.settings.agentHarness = 'claude';
     await plugin.firstRunSetup(true);
     expect(plugin.manager.getThreads()[0]!.agentHarness).toBe('codex');
   });
 
-  it('falls back to the static guide when only OpenCode is available', async () => {
-    const { plugin, created } = makePlugin({ resolvable: ['opencode'] });
+  it('falls back to the static guide when no harness is installed', async () => {
+    const { plugin, created } = makePlugin({ resolvable: [] });
     plugin.settings.agentHarness = 'opencode';
     await plugin.firstRunSetup(true);
     expect(plugin.manager.getThreads().map(t => t.title)).toEqual(['Thread 1']); // no Chief of Staff thread; Chat's auto-created one only
@@ -299,12 +299,12 @@ describe('"Set up Chief of Staff" command', () => {
     expect(Notice.messages.map(n => n.message)).toContain('Chief of Staff skills added. The thread restarts on your next message so they load.');
   });
 
-  it('explains via Notice when only OpenCode is available', async () => {
-    const { plugin } = makePlugin({ resolvable: ['opencode'] });
+  it('explains via Notice when no harness is installed', async () => {
+    const { plugin } = makePlugin({ resolvable: [] });
     plugin.settings.agentHarness = 'opencode';
     await plugin.runChiefOfStaffCommand();
     expect(plugin.manager.getThreads()).toHaveLength(0);
-    expect(Notice.messages.map(n => n.message)).toContain('Couldn\u2019t set up Chief of Staff: no Claude Code or Codex found.');
+    expect(Notice.messages.map(n => n.message)).toContain('Couldn\u2019t set up Chief of Staff: no agent harness (Claude Code, Codex or OpenCode) found.');
   });
 
   it('works for an existing user who already has the source and other threads', async () => {

@@ -159,7 +159,7 @@ describe('callbacks stamp with now()', () => {
     const from = text.indexOf('private buildSessionCallbacks(');
     const to = text.indexOf('private emitRunStateSettledWhenIdle');
     expect(from).toBeGreaterThan(0);
-    const body = text.slice(from, to) + text.slice(text.indexOf('private applyTaskEvent('), text.indexOf('/** Skill plugins as HOST paths'));
+    const body = text.slice(from, to) + text.slice(text.indexOf('private applyTaskEvent('), text.indexOf('/** Skill plugins as host paths.'));
     expect(body).not.toMatch(/Date\.now\(\)/);
     const clearFrom = text.indexOf('private clearReconnectingStatus(');
     expect(text.slice(clearFrom, clearFrom + 400)).not.toMatch(/Date\.now\(\)/);

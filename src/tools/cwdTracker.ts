@@ -1,5 +1,5 @@
 /**
- * In-session working-directory state shared by the worktree, VM and host_exec
+ * In-session working-directory state shared by the worktree
  * tools. The Claude subprocess's own cwd is frozen at spawn, so the tools keep
  * the effective cwd here and `set_working_directory` / `enter_worktree` update
  * it immediately, within the same turn.

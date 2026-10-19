@@ -26,7 +26,7 @@ export const TOOL_DOMAINS: readonly ToolDomain[] = Object.freeze(Object.keys(TOO
 
 /**
  * Default route of each domain. Nothing that reaches back into the user's computer is on by default: the
- * domains the user can OPT IN to (`OPT_IN_GROUPS`) default to `absent`, and the rest (`schedule`, `misc`, `vm`) are
+ * domains the user can OPT IN to (`OPT_IN_GROUPS`) default to `absent`, and the rest (`schedule`, `misc`) are
  * never offered at all.
  */
 export const DEFAULT_DOMAIN_ROUTES: Readonly<Record<ToolDomain, ToolRoute>> = Object.freeze({
@@ -37,30 +37,30 @@ export const DEFAULT_DOMAIN_ROUTES: Readonly<Record<ToolDomain, ToolRoute>> = Ob
   schedule: 'absent',
   skills: 'absent',
   misc: 'absent',
-  vm: 'absent',
+  exec: 'absent',
   browser: 'absent',
 });
 
 /**
  * Groups the user can switch on per daemon (`routes: { vault: 'host' }`). Each switches on only the READ tools of
- * its domain: anything that creates or changes state outside the vault read is in `NEVER_OFFERED`. The proxied
+ * its domain, except `exec` (`host_exec`: one command on this computer, which the app only runs after a per-call
+ * Allow once / Deny card that no permission mode and no remembered answer can skip; the managed local daemon has it on): anything that creates or changes state outside the vault read is in `NEVER_OFFERED`. The proxied
  * Google/OAuth servers are a further group, `mcp` (see `remote/hostTools.ts`).
  */
-export const OPT_IN_GROUPS: readonly ToolDomain[] = Object.freeze(['vault', 'workspace', 'threads', 'skills', 'browser'] as ToolDomain[]);
+export const OPT_IN_GROUPS: readonly ToolDomain[] = Object.freeze(['vault', 'workspace', 'threads', 'skills', 'browser', 'exec'] as ToolDomain[]);
 
 /** The `mcp` group key (proxied Google Workspace and OAuth MCP servers). */
 export const MCP_GROUP = 'mcp';
 
 /**
  * Per-tool exceptions (canonical names), never offered to a remote session and not promotable by any setting:
- *   host_exec        exists only inside a sandbox VM, which a daemon session never is
  *   github_*         discovery of the Geode GitHub connection, which has no credential on the daemon
  * plus every tool that writes, executes, schedules, installs, sends or reads a secret on THIS computer. A daemon
  * (or a model steered by something it read) must not be able to reach them even when the user turned the
  * surrounding group on, and even if the user approves a card it is not the daemon's place to ask.
  */
 export const NEVER_OFFERED: ReadonlySet<string> = new Set([
-  'host_exec', 'github_list_access', 'github_check_repo',
+  'github_list_access', 'github_check_repo',
   // secrets, MCP registration, commands, URLs, editor and UI state
   'request_secret', 'mcp_register_server', 'host_execute_command', 'host_list_commands', 'host_open_url',
   'workspace_navigate_to_file', 'workspace_insert_at_cursor', 'watch_document', 'unwatch_document',
@@ -118,11 +118,17 @@ export function isClassified(toolName: string): boolean {
  * tool of a domain that cannot be opted into stay `absent` whatever the settings say. An override naming a tool
  * (canonical or legacy) beats one naming its domain, so a group can be on with one tool off.
  */
-export function routeFor(toolName: string, overrides?: RouteOverrides): ToolRoute {
+export function routeFor(toolName: string, overrides?: RouteOverrides, optional?: ReadonlySet<string>): ToolRoute {
   const domain = DOMAIN_OF.get(toolName);
   if (!domain) return 'absent';
   if (DEFAULT_DOMAIN_ROUTES[domain] === 'local') return 'local';
-  if (NEVER_OFFERED.has(canonicalToolName(toolName)) || !OPT_IN_GROUPS.includes(domain)) return 'absent';
+  const canonical = canonicalToolName(toolName);
+  if (NEVER_OFFERED.has(canonical) || !OPT_IN_GROUPS.includes(domain)) {
+    // The one way past NEVER_OFFERED: the managed local daemon's explicit, per-group opt-in (localDaemon/optionalTools.ts).
+    // The tool must be named in `optional` AND routed 'host' by name; a domain or group switch never reaches it.
+    if (optional?.has(canonical) && NEVER_OFFERED.has(canonical) && (overrides?.[canonical] ?? overrides?.[toolName]) === 'host') return 'host';
+    return 'absent';
+  }
   const chosen = overrides?.[canonicalToolName(toolName)] ?? overrides?.[toolName] ?? overrides?.[domain];
   return chosen === 'host' ? 'host' : 'absent';
 }

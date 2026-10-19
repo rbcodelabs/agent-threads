@@ -95,16 +95,6 @@ export interface HarnessSessionOptions {
   /** Canonical transcript replayed on the first turn only if native resume fails. */
   resumeFallbackHistory?: string;
   secretEnv?: Record<string, string>;
-  /**
-   * Long-lived Claude OAuth token minted by the in-container sign-in
-   * (`claudeContainerAuthCli.ts`). Deliberately NOT part of `secretEnv`:
-   * `secretEnv` reaches every session including host-spawned ones, and an
-   * env `CLAUDE_CODE_OAUTH_TOKEN` overrides the host keychain login — so a
-   * container-only credential there would break (or, if stale, poison) every
-   * host thread. `ThreadSession` injects this ONLY into a VM-routed session's
-   * container `--env`.
-   */
-  containerAuthToken?: string;
   claude?: ClaudeHarnessOptions;
   codex?: CodexHarnessOptions;
   opencode?: OpenCodeHarnessOptions;
@@ -119,12 +109,11 @@ export interface ClaudeHarnessOptions {
    * servers `projectSessionOptions` puts on the wire; `mcpServers` above never crosses.
    */
   remoteMcpServers?: Record<string, import('./protocol').RemoteMcpServerConfig>;
-  /**
-   * Host-owned SDK MCP servers used only when the Claude process was actually
-   * routed into a sandbox VM. Host fallback must continue using `mcpServers`.
-   */
-  vmMcpServers?: Record<string, McpServerConfig>;
   disallowedTools?: string[];
+  /** Remote threads on the managed local daemon: name of the credential kind holding this session's environment. */
+  remoteEnvKind?: string;
+  /** Remote threads on the managed local daemon: guest paths of the skill plugin directories copied there. */
+  remotePluginPaths?: string[];
   /**
    * Tool names (`mcp__server__tool`) this process allows without opening a permission card. The daemon sets it for
    * the host tools it proxies: the user's own app shows the real card for those (with the real input), so a
@@ -140,13 +129,6 @@ export interface ClaudeHarnessOptions {
     plugins?: import('@anthropic-ai/claude-agent-sdk').SdkPluginConfig[];
     agents?: Record<string, import('@anthropic-ai/claude-agent-sdk').AgentDefinition>;
   };
-  /**
-   * ADR-0015: inputs `ThreadSession.start()` uses to decide, once per session
-   * start, whether this thread's Claude CLI process runs inside its sandbox
-   * container instead of on the host. Absent or `mode: 'never'` means
-   * host-local spawn — today's behavior, unchanged.
-   */
-  vm?: import('./harnessVmRouting').ClaudeVmRoutingInputs;
 }
 
 /** Codex-specific transport settings; kept separate as its app-server grows. */
@@ -179,6 +161,11 @@ export interface OpenCodeHarnessOptions {
   dynamicTools?: HarnessDynamicTool[];
   /** Serializable external MCP servers mirrored into OpenCode's `mcp` config. */
   mcpServers?: Record<string, HarnessMcpServerConfig>;
+  /**
+   * Skill roots (directories whose subfolders hold SKILL.md), the same list Codex
+   * gets. Written to OpenCode's native `skills.paths` config key.
+   */
+  skillRoots?: string[];
 }
 
 /** A host-owned capability exposed through a harness's native tool protocol. */

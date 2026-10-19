@@ -126,9 +126,7 @@ describe('spec -> HarnessSessionOptions', () => {
       sessionOptions: { effort: 'low', persistSession: true },
       mcpServers: { docs: { type: 'http', url: 'https://example.test/mcp', headers: { a: 'b' } } },
     });
-    expect(o.claude?.vm).toBeUndefined();
     expect(o.secretEnv).toBeUndefined();
-    expect(o.containerAuthToken).toBeUndefined();
     expect(o.resume).toBeUndefined(); // brand-new thread
   });
 

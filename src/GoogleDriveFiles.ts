@@ -30,7 +30,6 @@ export const DRIVE_FILES_SERVER = 'google-drive-files';
 const API = 'https://www.googleapis.com';
 const UPLOAD_CHUNK = 8 * 1024 * 1024; // must be a multiple of 256 KiB
 const MAX_RETRIES = 5;
-const VM_WORKDIR = '/work';
 const IDLE_TIMEOUT_MS = 120_000;
 const BLOCKED_SEGMENTS = new Set(['.obsidian', '.git', '.claude', '.ssh', '.aws', '.gnupg', '.mcp.json']);
 /** Case-insensitive: macOS and Windows filesystems fold case, so `.GIT` is `.git`. */
@@ -111,9 +110,7 @@ export async function resolveInRoots(input: string, roots: string[]): Promise<st
   const realRoots: string[] = [];
   for (const root of roots) { try { realRoots.push(await fsp.realpath(root)); } catch { /* skip missing roots */ } }
   if (!realRoots.length) throw new Error('No local directory is available for this thread.');
-  // Threads in a sandbox VM see their working directory mounted at /work.
-  const guest = input === VM_WORKDIR || input.startsWith(VM_WORKDIR + '/');
-  const absolute = resolve(roots[0], guest ? '.' + input.slice(VM_WORKDIR.length) : input);
+  const absolute = resolve(roots[0], input);
   // lstat (not stat) so a dangling symlink counts as present and is rejected below, never "absent".
   let existing = absolute;
   while (!(await statOrNull(existing, false))) {

@@ -23,7 +23,6 @@ import { OAuthTokenStore, type SecretStorageLike, type TokenSet } from './OAuthT
 import { createRequestUrlFetch } from './requestUrlFetch';
 import type { McpRegistrationResult } from './mcpServerStore';
 import type { OAuthMcpState, StoredOAuthMcpServer } from './types';
-import { HostMcpSdkBridge } from './HostMcpSdkBridge';
 
 /** Flattened `mcp_register_server` input for an `oauth`-type entry (see `mcpRegistrationSchema`'s oauth variant). */
 export interface OAuthRegistrationEntry {
@@ -128,7 +127,6 @@ function revocationEndpointOf(asMetadata: OAuthASMetadata): string | undefined {
 
 export class OAuthMcpRegistry {
   private connections = new Map<string, Connection>();
-  private vmBridges = new Map<string, Map<string, HostMcpSdkBridge>>();
   /**
    * Servers whose stored token is known to be dead: a renewal attempt failed, or
    * the provider rejected a freshly renewed one. In-memory only — `configure()`
@@ -357,35 +355,9 @@ export class OAuthMcpRegistry {
     return result;
   }
 
-  /** Host-side SDK bridges for Claude sessions that actually start inside a VM. */
-  vmServersForThread(threadId: string): Record<string, McpServerConfig> {
-    const hostServers = this.serversForThread(threadId);
-    let bridges = this.vmBridges.get(threadId);
-    if (!bridges) {
-      bridges = new Map();
-      this.vmBridges.set(threadId, bridges);
-    }
-    const result: Record<string, McpServerConfig> = {};
-    for (const [name, config] of Object.entries(hostServers)) {
-      if (config.type !== 'http') continue;
-      let bridge = bridges.get(name);
-      if (!bridge) {
-        bridge = new HostMcpSdkBridge(name, new URL(config.url), config.headers ?? {});
-        bridges.set(name, bridge);
-      }
-      result[name] = bridge.config;
-    }
-    return result;
-  }
-
   /** Cleanup sweep, called from the same manager-event subscription that drives `GoogleWorkspaceMcp.retainThreads`. */
   retainThreads(activeThreadIds: Set<string>): void {
     for (const conn of this.connections.values()) conn.proxy.retainThreads(activeThreadIds);
-    for (const [threadId, bridges] of this.vmBridges) {
-      if (activeThreadIds.has(threadId)) continue;
-      this.vmBridges.delete(threadId);
-      for (const bridge of bridges.values()) void bridge.close();
-    }
   }
 
   /**
@@ -587,17 +559,13 @@ export class OAuthMcpRegistry {
       return { success: false, status: 'failed', message: `OAuth registration for "${entry.name}" could not be saved: ${errorMessage(err)}` };
     }
 
-    // A re-authorization replaces a live connection: retire the old proxy and its
-    // VM bridges (they point at the old port) and silence its refresh timer so it
+    // A re-authorization replaces a live connection: retire the old proxy and
+    // silence its refresh timer so it
     // cannot renew the superseded grant over the tokens just stored.
     const previous = this.connections.get(entry.name);
     if (previous) {
       previous.tokenStore.cancelScheduledRefresh(entry.name);
       void previous.proxy.stop().catch((err: unknown) => console.error(`[OAuthMcpRegistry] Could not stop the superseded proxy for "${entry.name}":`, err));
-      for (const bridges of this.vmBridges.values()) {
-        const bridge = bridges.get(entry.name);
-        if (bridge) { bridges.delete(entry.name); void bridge.close(); }
-      }
     }
     this.reauthReasons.delete(entry.name);
     this.connections.set(entry.name, { flow, tokenStore, proxy, asMetadata });
@@ -668,10 +636,6 @@ export class OAuthMcpRegistry {
     delete settings.oauthMcpServers[name];
     delete settings.oauthMcpState[name];
     this.reauthReasons.delete(name);
-    for (const bridges of this.vmBridges.values()) {
-      const bridge = bridges.get(name);
-      if (bridge) { bridges.delete(name); void bridge.close(); }
-    }
     await this.host.save();
   }
 
@@ -709,7 +673,5 @@ export class OAuthMcpRegistry {
   close(): void {
     for (const conn of this.connections.values()) void conn.proxy.stop();
     this.connections.clear();
-    for (const bridges of this.vmBridges.values()) for (const bridge of bridges.values()) void bridge.close();
-    this.vmBridges.clear();
   }
 }

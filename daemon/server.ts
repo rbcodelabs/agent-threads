@@ -16,7 +16,7 @@ import { PROTOCOL_VERSION } from '../src/protocol';
 import { AuditLog } from './auditLog';
 import { CommandCache } from './cmdCache';
 import { isLoopbackAddress, isWildcardAddress, loadOrCreateDaemonId, updateConfigFile, type DaemonConfig } from './config';
-import { createClaudeDriverFactory, describeCredentialSource, resolveCredentialEnv } from './claudeDriver';
+import { createClaudeDriverFactory, describeCredentialSource, resolveCredentialEnv, sessionEnvFromCreds } from './claudeDriver';
 import { HARNESS_BINARY, HARNESS_SECRET_ENV, describeHarnessCredential, findHarnessBinary, harnessCapabilities, type RealHarness } from './harnesses';
 import { describePathAccess, withRepoRoot, type SessionPolicy } from './sessionPolicy';
 import { ReposManager } from './repos';
@@ -145,7 +145,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     const credentialEnv = resolveCredentialEnv(env);
     setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN, ...HARNESS_SECRET_ENV.map((k) => env[k]), ...creds.secretValues()].filter((v): v is string => !!v));
     if (!driverFactory) {
-      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, codexBinaryPath: config.codexBinaryPath, opencodeBinaryPath: config.opencodeBinaryPath, env, mcpServers: config.mcpServers, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: () => repos.sessionEnv(), onSessionStart: (cwd) => repos.refreshForCwd(cwd) });
+      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, codexBinaryPath: config.codexBinaryPath, opencodeBinaryPath: config.opencodeBinaryPath, env, mcpServers: config.mcpServers, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: (spec) => ({ ...repos.sessionEnv(), ...sessionEnvFromCreds(creds, spec) }), onSessionStart: (cwd) => repos.refreshForCwd(cwd) });
       const explicit: Record<RealHarness, string | undefined> = { claude: config.claudeBinaryPath, codex: config.codexBinaryPath, opencode: config.opencodeBinaryPath };
       for (const kind of config.harnesses) {
         const b = HARNESS_BINARY[kind];
@@ -157,7 +157,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     log(`harnesses: ${config.harnesses.join(', ')} (default ${config.harness}); workspaces: ${config.workspaces.join(', ') || '(none)'}${config.readOnlyWorkspaces.length ? `; read-only workspaces: ${config.readOnlyWorkspaces.join(', ')}` : ''}; bypassPermissions ${config.allowBypass ? 'ALLOWED' : 'refused'}; maxConcurrentTurns ${config.maxConcurrentTurns}; maxLiveSessions ${config.maxLiveSessions}; client env ${config.allowedClientEnv.length ? `limited to ${config.allowedClientEnv.join(', ')}` : 'ignored'}; idle reap ${config.idleReapMinutes ? `${config.idleReapMinutes} min` : 'off'}`);
   }
 
-  const configuredPolicy: SessionPolicy = { workspaces: config.workspaces, readOnlyWorkspaces: config.readOnlyWorkspaces, allowBypass: config.allowBypass, allowedClientEnv: config.allowedClientEnv, harnesses: config.harnesses };
+  const configuredPolicy: SessionPolicy = { workspaces: config.workspaces, readOnlyWorkspaces: config.readOnlyWorkspaces, allowBypass: config.allowBypass, allowedClientEnv: config.allowedClientEnv, harnesses: config.harnesses, pluginRoot: join(config.dataDir, 'skills') };
   // The repo root is always allowed as a session folder; it is only OFFERED (workspaces.list) once something has been cloned there.
   const sessionPolicy: SessionPolicy = withRepoRoot(configuredPolicy, config.repoRoot);
   const host = new ThreadHost({

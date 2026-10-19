@@ -38,6 +38,12 @@ export interface HostToolExecutorDeps {
   invoke(server: string, tool: string, input: Record<string, unknown>, signal: AbortSignal): Promise<HostToolOutput>;
   /** The thread's normal permission prompt (pre-approvals, permission mode and the card all live behind it). */
   requestPermission(toolName: string, detail: string): Promise<boolean>;
+  /**
+   * A standing approval the USER granted for this exact call (today only a saved host_exec command prefix). Asked
+   * after the input is known to fit on the card, so what is skipped is always a card the user could have read.
+   * Nothing the daemon sends can make it true; it throws or returns false to fall back to the card.
+   */
+  isPreApproved?(server: string, tool: string, input: Record<string, unknown>): boolean;
   sendResult(callId: string, result: { success: boolean; text: string; content?: unknown[] }): Promise<void>;
   slots: HostToolSlots;
   now?: () => number;
@@ -142,7 +148,9 @@ export class HostToolExecutor {
           return;
         }
         const detail = card.detail;
-        const allowed = await this.deps.requestPermission(name, detail).catch(() => false);
+        let preApproved = false;
+        try { preApproved = this.deps.isPreApproved?.(spec.server, spec.name, input) === true; } catch { preApproved = false; }
+        const allowed = preApproved || await this.deps.requestPermission(name, detail).catch(() => false);
         if (!allowed) { this.finish(callId, refusal('The user denied this tool call.')); return; }
       }
       if (abort.signal.aborted) { this.finish(callId, refusal(`The host tool "${spec.name}" was canceled before it finished.`)); return; }

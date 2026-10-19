@@ -5,7 +5,7 @@
 #
 # What is (and is not) in the image: sandbox/Dockerfile.daemon's `base` stage: Node 22, git, gh, ripgrep, jq,
 # build-essential and the daemon bundle. The Claude CLI is deliberately NOT included: Claude Code has no
-# redistribution grant (same rule as publish-sandbox-image.yml). Users add it on their own machine with the
+# redistribution grant. Users add it on their own machine with the
 # `with-claude` stage (see the Dockerfile header and docs/remote-daemon.md), or build the whole thing from the
 # repository, which installs it at build time.
 #

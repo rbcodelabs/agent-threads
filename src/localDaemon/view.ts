@@ -37,8 +37,7 @@ export interface LocalDaemonView {
 
 export const POSITIONING_NOTE =
   'Runs a daemon in an Apple container VM on this Mac. Threads you start with "Run on: This Mac (container)" keep running '
-  + 'when Geode quits and re-attach when you return. This is separate from "Run in: Container", which starts a throwaway '
-  + 'container per thread and ends with Geode.';
+  + 'when Geode quits and re-attach when you return, inside a VM boundary.';
 
 const DEGRADED_TEXT: Record<DegradedReason, { label: string; hint: string }> = {
   'health-down': { label: 'Not answering', hint: 'The container is up but the daemon does not answer. Restart it.' },
@@ -126,7 +125,7 @@ export function buildLocalDaemonView(snap: LocalDaemonSnapshot): LocalDaemonView
 }
 
 function maskedList(snap: LocalDaemonSnapshot): string {
-  const masked = snap.mounts.filter((m) => m.readOnly).map((m) => m.guest.slice(VAULT_GUEST_PATH.length + 1));
+  const masked = snap.mounts.filter((m) => m.readOnly && m.guest.startsWith(`${VAULT_GUEST_PATH}/`)).map((m) => m.guest.slice(VAULT_GUEST_PATH.length + 1));
   return masked.length > 0 ? masked.join(' and ') : 'no config folders';
 }
 
@@ -141,10 +140,21 @@ export function describeSetup(snap: LocalDaemonSnapshot): string {
   const download = items.length > 0 ? `This downloads ${items.join(' and ')}. ` : 'Nothing needs downloading. ';
   const vault = snap.vaultPath ?? 'your vault';
   const masked = maskedList(snap);
+  const external = snap.mounts.filter((m) => m.guest.startsWith('/ext/'));
+  const shared = snap.mounts.filter((m) => m.guest.startsWith('/work/'));
+  const sharedNote = shared.length > 0
+    ? `The folders you share (${shared.map((m) => m.host).join(', ')}) are mounted READ-WRITE at ${shared.map((m) => m.guest).join(', ')}: an agent there can edit or delete anything in them. `
+    : '';
+  const externalNote = external.length > 0
+    ? `Your connected folders ${external.map((m) => m.host).join(', ')} are mounted READ-ONLY at ${external.map((m) => m.guest).join(', ')}. `
+    : '';
   return `${download}It then starts a VM on this Mac that runs the agent-threads daemon, reachable only from this Mac (127.0.0.1). `
     + `Your vault ${vault} is mounted READ-WRITE, so an agent in the VM can edit or delete any note: keep vault backups or sync history. `
     + `${masked === 'no config folders' ? '' : `${masked} are mounted read-only so an agent cannot change plugins or settings. `}`
-    + 'The VM has full outbound network access, like the sandbox. Continue?';
+    + sharedNote
+    + externalNote
+    + 'Tools that write, schedule or touch secrets on this Mac stay off for its threads unless you switch a group on in Settings (each call then asks you first). '
+    + 'The VM has full outbound network access. If you use Geode\'s GitHub connection, a short-lived GitHub token (refreshed while Geode is open, expiring after 15 minutes) is copied into the VM so git and gh work there. Continue?';
 }
 
 export const DESCRIBE_RESET =

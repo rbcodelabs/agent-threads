@@ -1,8 +1,4 @@
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
-// Type-only: sandboxVm.ts has no module-scope side effects and no top-level
-// Node requires, and `import type` is erased at build time, so this stays safe
-// for the mobile bundle.
-import type { VmNetworkMode } from './sandboxVm';
 
 export type MessageRole = 'user' | 'assistant' | 'compact' | 'notice';
 
@@ -12,44 +8,6 @@ export const AGENT_HARNESSES: readonly AgentHarness[] = ['claude', 'codex', 'ope
 
 export function isAgentHarness(value: unknown): value is AgentHarness {
   return typeof value === 'string' && (AGENT_HARNESSES as readonly string[]).includes(value);
-}
-
-/**
- * ADR-0015: whether a thread's harness CLI process runs inside its sandbox
- * container instead of being spawned on the host. Claude-only for now.
- *
- * - `'auto'` (default) — routes into the VM only when the platform supports
- *   it, `SandboxVmManager.probe()` succeeds, and the harness image
- *   (`harnessVmImage`) actually exists. Any current user for whom that image
- *   doesn't exist yet sees no behavior change at all.
- * - `'always'` — forces VM routing; surfaces a clear thrown error (no silent
- *   host fallback) if any prerequisite is missing.
- * - `'never'` — exactly today's host-local spawn behavior. The rollback lever.
- */
-export type HarnessVmMode = 'auto' | 'always' | 'never';
-export const HARNESS_VM_MODES: readonly HarnessVmMode[] = ['auto', 'always', 'never'];
-
-export function isHarnessVmMode(value: unknown): value is HarnessVmMode {
-  return typeof value === 'string' && (HARNESS_VM_MODES as readonly string[]).includes(value);
-}
-
-/**
- * Effective container-routing mode for a thread: the per-thread override (set
- * from the chat's harness menu) wins over the global setting, which defaults
- * to 'auto'.
- */
-export function resolveEffectiveHarnessVmMode(
-  threadMode: HarnessVmMode | undefined,
-  settingsMode: HarnessVmMode | undefined,
-): HarnessVmMode {
-  return threadMode ?? settingsMode ?? 'auto';
-}
-
-/** Menu/info label for a per-thread execution override (undefined = follows settings). */
-export function harnessVmModeLabel(mode: HarnessVmMode | undefined): string {
-  if (mode === 'always') return 'Container';
-  if (mode === 'never') return 'Host (no container)';
-  return 'Default (follows settings)';
 }
 
 /** Short user-facing name for a harness (undefined means a legacy Claude thread). */
@@ -64,6 +22,8 @@ export function agentHarnessLabel(harness: AgentHarness | undefined): string {
 export type ThreadStatus = 'waiting' | 'active' | 'error' | 'archived' | 'reconnecting';
 
 export type LayoutDensity = 'compact' | 'comfortable' | 'spacious';
+/** How tool-call groups render in the chat. See toolNameUtils.ToolCallStyle. */
+export type ToolCallStyle = 'chips' | 'tree' | 'cards';
 
 export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
 
@@ -319,6 +279,26 @@ export interface LocalDaemonSettings {
   tokenId?: string;
   /** The Claude credential file was written into the data volume (last known; the volume persists). */
   credentialWritten?: boolean;
+  /**
+   * Host folders shared READ-WRITE with the daemon, at `/work/<name>` (one path per entry). A thread can then run in a
+   * repository outside the vault, which is what the removed sandbox VM's `/work` mount was for. Applied when the
+   * container is created.
+   */
+  folders?: string[];
+  /**
+   * Also share READ-WRITE every Project's working folder that lies outside the vault (a Project's folder override), so
+   * nothing has to be listed by hand. Follows Projects as they are added or changed. Applied when the container is created.
+   */
+  shareProjectFolders?: boolean;
+  /**
+   * Ids of the optional tool groups (`localDaemon/optionalTools.ts`) offered to the daemon's threads: tools that write,
+   * schedule or touch secrets on this Mac. Off by default; every call still needs an approval card.
+   */
+  optionalTools?: string[];
+  /** Memory ceiling of the container, `<digits>M|G` (default `4G`). Applied when the container is created (Update). */
+  memory?: string;
+  /** CPUs of the container, a whole number 1-64 (default 4). Applied when the container is created (Update). */
+  cpus?: number;
 }
 
 /** Per-daemon choices for tools that run on this computer on a remote thread's behalf. */
@@ -379,8 +359,6 @@ export interface Thread {
   agentHarness?: AgentHarness;
   /** Monotonic fence for callbacks from retired harness adapters. */
   sessionGeneration?: number;
-  /** Per-thread container-routing override; absent means follow `settings.harnessVmMode`. Claude harness only. */
-  harnessVmMode?: HarnessVmMode;
   /**
    * Present when this thread's session runs on a remote agent-threads daemon
    * instead of this machine (daemon design section 4.2). `thread.cwd` mirrors
@@ -1124,28 +1102,6 @@ export interface PluginSettings {
    * on reboot — silently destroying any uncommitted work inside them.
    */
   worktreeRoot: string;
-  /**
-   * Container image `enter_vm` starts. Built from `sandbox/Dockerfile`
-   * (`container build --tag claude-threads-coding:1 sandbox/`).
-   *
-   * Blank falls back to `claude-threads-coding:1`.
-   */
-  vmImage: string;
-  /**
-   * Network isolation `enter_vm` uses when the call does not specify one.
-   *
-   * Defaults to `'default'` — FULL EGRESS — by explicit product decision: a
-   * sandbox where `npm install` and git remotes fail is one nobody uses.
-   * `'internal'` (host-only) and `'none'` (no route) remain first-class.
-   */
-  vmDefaultNetwork: VmNetworkMode;
-  /**
-   * ADR-0015: whether a thread's Claude harness process runs inside its
-   * sandbox container instead of being spawned on the host. Defaults to
-   * `'auto'`, which is a no-op for any user who hasn't built
-   * `harnessVmImage` — see `HarnessVmMode`'s doc comment.
-   */
-  harnessVmMode: HarnessVmMode;
   /** Daemons threads can be run on (Settings -> Remote daemons). Tokens live in the keychain, not here. */
   remoteDaemons?: RemoteDaemonConfig[];
   /** The managed local daemon (a container on this Mac); see src/localDaemon/. */
@@ -1153,38 +1109,14 @@ export interface PluginSettings {
   /** Random id of this Geode install, stamped on remote threads as `ownerClientId`. */
   remoteClientId?: string;
   /**
-   * Memory ceiling for newly created sandbox containers, `<digits>M|G`
-   * (default `'4G'`). Invalid values fall back to the default. Applies only at
-   * `container run`; existing containers keep their old limit.
-   */
-  sandboxVmMemory: string;
-  /** CPU count for newly created sandbox containers (positive integer, default 4, max 64). */
-  sandboxVmCpus: number;
-  /**
-   * Container image the harness routes into. Built from
-   * `sandbox/Dockerfile.harness` (`container build --tag
-   * claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`) —
-   * deliberately a different tag than `vmImage`'s `claude-threads-coding:1`.
-   *
-   * Blank falls back to `claude-threads-harness:1`.
-   */
-  harnessVmImage: string;
-  /**
-   * Extra AWS profiles (one per line or comma separated) exposed to harness
-   * containers, on top of the AWS_PROFILE from Extra environment variables.
-   * Non-empty enables Container AWS credentials even on the Claude provider.
-   * See containerAws.ts.
+   * Extra AWS profiles (one per line or comma separated) copied to the managed local daemon, on top of the AWS_PROFILE
+   * from Extra environment variables. Non-empty enables AWS delivery even on the Claude provider (Bedrock always does).
+   * See src/localDaemon/awsCopy.ts.
    */
   containerAwsProfiles: string;
   /**
-   * True once the user chose "Don't ask again" on the in-thread "Run this thread in a
-   * sandbox?" card. Suppresses that offer for good; Settings → Claude → Set up
-   * sandbox still works.
-   */
-  sandboxSetupPromptDismissed: boolean;
-  /**
    * Use Geode's GitHub connection (Settings → GitHub) for git, gh and the GitHub
-   * API in threads and the sandbox VM. Only has an effect in Geode ≥ 0.25.0;
+   * API in threads. Only has an effect in Geode ≥ 0.25.0;
    * manually configured credentials (GH_TOKEN, gh auth, git helpers) always win.
    */
   githubConnectionEnabled: boolean;
@@ -1239,13 +1171,24 @@ export interface PluginSettings {
   /** Model alias the escalation keyword routes to (fable, opus, sonnet, haiku). */
   escalationModel: string;
   alwaysAllowedTools: string[];
+  /**
+   * Command prefixes (`git status`, `npm test`) the user always-allowed on a `host_exec` card.
+   * Separate from alwaysAllowedTools, which never holds host_exec. See hostExecPrefix.ts.
+   */
+  hostExecAlwaysAllowedPrefixes: string[];
   disallowedTools: string[];
   threads: Thread[];
   projects: Project[];
   wakeLockEnabled: boolean;
   layoutDensity: LayoutDensity;
+  /** Tool-call display style (chips | tree | cards). Missing values use tree. */
+  toolCallStyle?: ToolCallStyle;
   /** Primary grouping shown in the Agents List. Missing values use project-status. */
   agentsGroupBy?: 'project' | 'status' | 'project-status';
+  /** Sort order of the searchable Project picker: most recently used (default) or alphabetical. */
+  projectPickerSort?: 'recent' | 'alphabetical';
+  /** Project id -> last time it was chosen in the Project picker (ms). Combined with thread activity for the 'recent' sort. */
+  projectLastUsed?: Record<string, number>;
   /**
    * Shell command for the context footer bar. Receives JSON on stdin with
    * {cwd, workspace:{current_dir}, branch} describing the thread. stdout may be
@@ -1468,14 +1411,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   opencodeBinaryPath: 'opencode',
   codexComputerUseEnabled: false,
   worktreeRoot: '',
-  vmImage: 'claude-threads-coding:1',
-  vmDefaultNetwork: 'default',
-  harnessVmMode: 'auto',
-  sandboxVmMemory: '4G',
-  sandboxVmCpus: 4,
-  harnessVmImage: 'claude-threads-harness:1',
   containerAwsProfiles: '',
-  sandboxSetupPromptDismissed: false,
   githubConnectionEnabled: true,
   githubCommitEmail: '',
   defaultCwd: '',
@@ -1500,11 +1436,13 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   escalationKeyword: '/escalate',
   escalationModel: 'opus',
   alwaysAllowedTools: [],
+  hostExecAlwaysAllowedPrefixes: [],
   disallowedTools: ['CronCreate', 'CronDelete', 'CronList', 'CronUpdate'],
   threads: [],
   projects: [],
   wakeLockEnabled: true,
   layoutDensity: 'comfortable',
+  toolCallStyle: 'tree',
   agentsGroupBy: 'project-status',
   statusLineCommand: 'bash $HOME/claude-config/bin/statusline-command.sh',
   statusLineIntervalMs: 30_000,
