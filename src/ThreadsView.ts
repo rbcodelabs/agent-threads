@@ -4412,6 +4412,21 @@ export class ThreadsView extends ItemView {
     onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void,
   ): void {
     const existing = rowEl.querySelector(':scope > .ct-tools');
+    // A row first drawn from the finalized message keys its groups by member
+    // hash; the rebuild below keys them by first call (stable as the run
+    // grows). Carry a group the user opened across that change by position.
+    if (existing && toolCalls.length > 0) {
+      const groupEls = [...existing.querySelectorAll(':scope > .ct-tool-group')];
+      const entries = groupToolRuns(toolCalls);
+      if (groupEls.length > 0 && entries.every((e) => e.kind === 'group') && groupEls.length <= entries.length) {
+        groupEls.forEach((el, i) => {
+          const entry = entries[i];
+          if (el.classList.contains('ct-tool-group-open') && entry.kind === 'group') {
+            this.liveExpandedToolGroups.add(liveToolGroupKey(entry.tools));
+          }
+        });
+      }
+    }
     existing?.remove();
     if (row) rowEl.querySelectorAll(':scope > .ct-tool-result-images').forEach((n) => n.remove());
     if (!toolCalls || toolCalls.length === 0) return;
