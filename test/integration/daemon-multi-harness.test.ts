@@ -133,7 +133,8 @@ describe('a missing CLI fails that session with a clear error', () => {
 
   it('finds an explicitly configured executable for the requested harness only', async () => {
     const bin = join(workspace, 'fake-codex');
-    writeFileSync(bin, '#!/bin/sh\nexit 0\n');
+    // Stays alive and silent (a script that exits at once races the adapter's first stdin write: EPIPE). Closing the session kills it.
+    writeFileSync(bin, '#!/bin/sh\nexec sleep 60\n');
     chmodSync(bin, 0o755);
     const td = await startTestDaemon({
       config: { harness: 'claude', harnesses: ['claude', 'codex'], workspaces: [workspace] },
