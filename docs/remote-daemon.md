@@ -609,10 +609,11 @@ exactly which tools run on your computer (or says none do).
   call fails after the grace period with the "your computer is not connected" message instead of waiting for an answer
   that cannot come. Results are cut at 100,000 characters (with a marker), images are bounded, and a large screenshot is
   dropped rather than allowed to exceed the frame limit.
-- **Your MCP servers.** Servers that start a program on your computer (stdio), use an address on your computer, or need a
-  secret from your keychain cannot work on the daemon and are not sent; a server with headers (usually credentials) is sent
-  only if you list it under "MCP servers it may receive". Each dropped server is named in a transcript row with the reason.
-  Other http/sse servers the daemon can reach are passed through.
+- **Your MCP servers.** By default servers that start a program on your computer (stdio), use an address on your computer, or
+  need a secret from your keychain cannot work on the daemon and are not sent; a server with headers (usually credentials) is
+  sent only if you list it under "MCP servers it may receive". Each dropped server is named in a transcript row with the
+  reason. Other http/sse servers the daemon can reach are passed through. To run one of your Settings servers ON the daemon
+  (including a stdio server with a keychain secret), opt it in per daemon: see "MCP servers synced from the app".
 - **Secrets stay here.** Only tool names, descriptions, schemas and tool *results* cross to the daemon. Keychain values, the
   loopback addresses and capability headers of your Google and OAuth brokers, and the token never do.
 - **Limits.** A new proxied server that first appears after a session started needs a new session (tools of servers already
@@ -705,7 +706,7 @@ Some MCP servers need a key the daemon must hold itself (a hosted docs server, a
 ```
 
 `type` is `stdio` (the default, with `command`, `args`, `env`), `http` or `sse`. `claude_threads` and `obsidian` are reserved.
-A daemon-listed server replaces a same-named server sent by the app. They are started for every harness (Claude, Codex, OpenCode).
+A daemon-listed server replaces a same-named server sent by the app (and a same-named synced server; see "MCP servers synced from the app"). They are started for every harness (Claude, Codex, OpenCode).
 
 Secret values are sent with the `creds.push` protocol command (`{ kind, ttlSec, fields }`), which needs an **admin** token.
 They are stored on the daemon as `<data-dir>/creds/<kind>.json` (directory 0700, files 0600), never in `config.json` or in a
@@ -736,6 +737,61 @@ names the field. The output lists field names and the expiry, never a value (`--
 
 Settings, Remote shows each daemon's MCP servers (connected / failed / needs sign-in) as last reported by its sessions;
 a server that dies mid-session turns to failed at the end of the next turn.
+
+## MCP servers synced from the app
+
+Settings, MCP lists a **Runs on** line under each Custom MCP server: This computer, plus a checkbox per remote daemon. Ticking
+one runs that server on the daemon for every thread there (Claude, Codex and OpenCode alike: the daemon hands one resolved
+server map to whichever harness a session uses). Nothing is synced until you tick it.
+
+**What you are asked first.** The first time (and after any later change to the command, arguments, environment, URL or headers)
+a dialog shows the exact command and arguments (or the URL), the *names* of environment variables and headers, the daemon, and
+the names of the keychain secrets whose values will leave this Mac. A definition you have not confirmed in its current form is
+not synced, and the old copy is removed from the daemon.
+
+**What is sent.**
+
+- The definition, over `mcp.sync`, with `${NAME}` placeholders rewritten to `${mcpsync-<project>.NAME}` and left unresolved.
+- Exactly the keychain secrets those definitions reference (no others are even read), over `creds.push`, as credential kind
+  `mcpsync-global` (or `mcpsync-p-<project>` when the secret is limited to one project). They get a 30 day lifetime, renewed
+  when the daemon connects, when a thread starts there more than 12 hours after the last sync, and on every Settings edit. Rotating a secret in Settings reaches the
+  daemon's next session. Turning a server off, or removing it, re-syncs the smaller set and deletes a kind that is no longer used.
+- Never: oauth servers, anything pointing at an address on this computer (this includes the Google and OAuth proxies), a
+  placeholder that is not a stored keychain secret (environment variables of this Mac are never sent), a literal credential
+  typed into a header or `*_KEY`/`*_TOKEN` variable (move it to Settings, Secrets), and secrets limited to *different* projects
+  in one server (a daemon cannot tell projects apart; a secret limited to one project is allowed, with a warning in the dialog).
+
+**When a toggle is disabled** the reason is shown: the daemon is too old (no `mcp.sync` capability), needs an admin token (the
+token stored for a daemon you added must have scope `admin`; the managed local daemon needs nothing, its admin token lives in
+its container), the daemon does not accept programs from the app (stdio), the server is OAuth, loopback-only, or uses a secret
+that is not stored. With a daemon that is too old nothing changes: dropped servers are dropped with the usual reason.
+
+**Status.** Each ticked daemon shows a chip from what its sessions report (Connected, Needs sign-in, Failed with the daemon's
+message). A server whose credential lapsed or was never delivered shows `Failed: missing credential ...` with **Push now**.
+`Shadowed by config.json` means the daemon's operator defines a server of the same name, which wins.
+
+**Operator side.**
+
+- `mcp.sync` needs an admin token and replaces the whole synced set. `agent-threads mcp sync --stdin [--clear] [--strict]` does the
+  same from a shell: standard input is a JSON object of `name -> definition` (the `mcpServers` shape above) and the output lists
+  names and reasons, never a value. Once the app syncs to a daemon it owns that set, so a set made with the CLI is replaced.
+- Definitions are stored in `<data-dir>/synced-mcp.json` (0600) with, per server, the id of the token that synced it and a hash.
+  They are never copied into a thread's saved spec (`sessions/<id>.json`). Audit entry: `mcp_sync` with names only.
+- `allowSyncedStdio` (config.json, flag-free; env `AGENT_THREADS_ALLOW_SYNCED_STDIO=1`; default **false**) lets stdio definitions
+  in: they start a program on this machine as the daemon user. `syncedCommandAllowlist` (bare command names, which match only a
+  bare command, or absolute paths, which match only that command) narrows it; note that an allowlisted `npx` can still run any
+  package. With the flag off stdio definitions are rejected with a named reason and http/sse are accepted. The daemon advertises
+  `mcp.sync` always and `mcp.sync.stdio` when the flag is on. The policy is applied again when a session starts.
+- A synced definition may only refer to credentials as `${mcpsync-<project>.NAME}`. A bare `${NAME}` searches every stored kind and
+  would let an admin token read the GitHub token or another project's secrets back through a server URL it chooses; the
+  daemon refuses such a definition, and a `${...}` inside a stdio `command` (it would bypass the allowlist). `config.json` servers
+  keep the bare form: they are operator-trusted.
+- Precedence when a session starts, lowest to highest: servers in the session spec, synced servers, `config.json` servers, the
+  daemon's own host servers (`claude_threads` and `obsidian` are reserved). A missing or lapsed credential means the server is not
+  started and shows as `failed (missing credential mcpsync-<project>.NAME)`.
+- The managed local daemon: the app syncs through the container (`agent-threads mcp sync` and `creds push` run inside it with its
+  own admin token). Stdio servers need Settings, Remote, "Local daemon: allow MCP servers that start programs", then Update to
+  recreate the container.
 
 ## Repositories the daemon keeps cloned
 
