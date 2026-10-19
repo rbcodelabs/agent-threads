@@ -1,14 +1,14 @@
 # ADR: Deliver Threads-controlled skills to remote agent-threads daemons
 
 **Date:** 2026-10-19
-**Status:** Proposed
+**Status:** Accepted. Implemented in `feat/remote-skills-sync`. Open questions resolved: no first-sync confirmation (help text only); 14 days / 256 MiB; Off does not delete (prune handles it); existing `admin` scope; generic "update the daemon" warning without a version; failures show a thread notice. Implementation notes: a limit rejection uses `bad_frame` with a `limit:` message (no new error code); an over-limit tree is skipped whole, and a single file over 8 MiB also skips the tree (one file per frame).
 **Number:** unassigned. `CLAUDE.md` says ADRs live in Compass, so this file is a repo-side draft to migrate there (under the Architecture Decision Records parent), leaving a pointer here.
 
 ## Context
 
 Skills reach only the managed local-container daemon today. `beforeRemoteSend` (`src/main.ts`) returns early unless `daemon.managed === 'local-container'`. Otherwise it calls `localDaemonPrep.prepare()`, whose `deliverSkills` copies each plugin tree with `container exec` (`src/localDaemon/containerFiles.ts`) into `<data>/skills/<name>-<hash>`. The paths go through `extras.pluginPaths`, ThreadManager `remotePluginPaths` and `RemoteSessionSpec.pluginPaths`. The daemon then applies `keepUnder(pluginRoot = <dataDir>/skills)` in `daemon/sessionPolicy.ts` and passes `plugins:[{type:'local',path}]` to the SDK (`daemon/claudeDriver.ts`).
 
-A plain remote daemon (for example claude-box) has no `container exec`. Its only channel is `/v1/ws`. The `pluginPaths` + `keepUnder` half already works on every daemon. Only delivery is missing, and `docs/remote-daemon.md` (lines ~10 and ~828) wrongly says skills are not forwarded.
+A plain remote daemon (for example a headless Linux box) has no `container exec`. Its only channel is `/v1/ws`. The `pluginPaths` + `keepUnder` half already works on every daemon. Only delivery is missing, and `docs/remote-daemon.md` (lines ~10 and ~828) wrongly says skills are not forwarded.
 
 `creds.push` (admin-scoped command, audited, value-free audit trail) is the precedent for pushing data to a daemon over the WebSocket.
 

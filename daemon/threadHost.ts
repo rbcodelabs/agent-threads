@@ -196,6 +196,11 @@ export class ThreadHost {
     }));
   }
 
+  /** Plugin paths of sessions with a running driver; the skill store never prunes trees these name. */
+  pluginPathsInUse(): string[] {
+    return [...this.threads.values()].flatMap((rt) => (rt.driver ? rt.meta?.spec.pluginPaths ?? [] : []));
+  }
+
   /** Turns running right now across all sessions (what `maxConcurrentTurns` bounds). */
   turnsInFlight(): number {
     let n = 0;

@@ -10,6 +10,7 @@ import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifa
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig } from './types';
 import { daemonWsUrl, probeDaemon, type ProbeWorkspaces } from './remote/DaemonClient';
 import { connectionPill } from './remote/connectionPill';
+import { resolveSkillsSyncMode } from './remote/skillsSync';
 import { checkDaemonInput, checkVaultMappingInput, describeTest, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
 import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel } from './remote/workspaceChoice';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
@@ -689,6 +690,18 @@ export class RemoteDaemonModal extends Modal {
       .setDesc('Names of your external MCP servers (Settings, MCP) to send to this daemon. Blank: servers without headers that the daemon can reach. Servers that start a program here, use a local address or a secret are never sent.')
       .addText((t) => t.setPlaceholder('docs, search').setValue(mcpAllow).onChange((v) => { mcpAllow = v; }));
 
+    // Skill folders Threads controls are copied to the daemon automatically. Not for the managed local daemon (own path).
+    let skillsSync: string | undefined = this.existing?.skillsSync;
+    if (this.existing?.managed !== 'local-container') {
+      new Setting(advanced).setName('Skills')
+        .setDesc('Automatic: your installed, local and GitHub skills are copied to this daemon\'s data directory when a thread starts there, and only Agent Threads sessions on it use them. Nothing is written to ~/.claude on that machine. Skills are instructions the agent follows and may contain secrets, so use Off for a daemon you do not fully trust. Turning this off does not delete what was already copied; the daemon removes unused skills after 14 days.')
+        .addDropdown((d) => d
+          .addOption('auto', 'Automatic')
+          .addOption('off', 'Off')
+          .setValue(resolveSkillsSyncMode({ skillsSync }) === 'auto' ? 'auto' : 'off')
+          .onChange((v) => { skillsSync = v; }));
+    }
+
     const setVault = (v: string): void => { vaultRemote = v; vaultTouched = true; vaultText?.setValue(v); };
     const setFolder = (v: string): void => { folder = v; folderTouched = true; folderText?.setValue(v); };
 
@@ -751,6 +764,7 @@ export class RemoteDaemonModal extends Modal {
           ...(folder.trim() ? { defaultCwdRoot: folder.trim() } : {}),
           ...(mapping.mapping ? { vaultMapping: mapping.mapping } : {}),
           ...hostToolsSettingsFrom(hostToolsOn, allowedGroups, mcpAllow),
+          ...(skillsSync !== undefined && skillsSync !== 'auto' ? { skillsSync: skillsSync as 'off' } : {}),
         },
       };
     };

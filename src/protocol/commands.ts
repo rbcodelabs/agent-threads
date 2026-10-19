@@ -7,6 +7,7 @@
  */
 import type { HarnessPermissionMode } from '../HarnessSession';
 import type { Channel } from './envelope';
+import type { SkillTreeManifest, SkillWireFile } from './skills';
 import type { RemoteHostToolSpec, RemoteSessionSpec } from './spec';
 
 export type ClientKind = 'geode-plugin' | 'cli';
@@ -79,7 +80,14 @@ export type ClientCommand =
    */
   | { type: 'repos.sync'; repos?: RepoSpec[]; wait?: boolean }
   /** The state of each configured repository. Additive within v1. */
-  | { type: 'repos.status' };
+  | { type: 'repos.status' }
+  // Skill delivery (admin: it writes to the daemon's disk). See ./skills.ts. Additive within v1.
+  /** Manifest of the skill trees the client wants present. Replies `{ root, have, missing }`. */
+  | { type: 'skills.sync'; trees: SkillTreeManifest[] }
+  /** One chunk of a missing tree, staged under `.incoming/<upload>`. */
+  | { type: 'skills.put'; upload: string; dir: string; seq: number; files: SkillWireFile[] }
+  /** Verify the staged tree against `hash` and move it into place. Idempotent. */
+  | { type: 'skills.commit'; upload: string; dir: string; hash: string; files: number; bytes: number };
 
 /** One repository the daemon keeps cloned. The authentication token comes from the daemon's `creds/`, never from here. */
 export interface RepoSpec {
@@ -256,4 +264,7 @@ export const CLIENT_COMMAND_TYPES: Record<ClientCommandType, true> = {
   'creds.push': true,
   'repos.sync': true,
   'repos.status': true,
+  'skills.sync': true,
+  'skills.put': true,
+  'skills.commit': true,
 };

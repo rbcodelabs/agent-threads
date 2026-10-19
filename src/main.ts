@@ -1,4 +1,4 @@
-import type { AgentHarness, StorageAllocationOptions } from './types';
+import type { AgentHarness, RemoteDaemonConfig, StorageAllocationOptions } from './types';
 import { saveThenAck } from './remote/persistAck';
 import { DaemonMcpStatusStore } from './mcpStatus';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
@@ -88,6 +88,7 @@ import { DaemonRegistry } from './remote/DaemonRegistry';
 import { LOCAL_DAEMON_ID } from './localDaemon/spec';
 import { createRemoteFolderSource, type RemoteFolderSource } from './remote/folderSource';
 import { createRemoteReposSource, type RemoteReposSource } from './remote/repos';
+import { RemoteSkillsSync, resolveSkillsSyncMode } from './remote/skillsSync';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
@@ -285,6 +286,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   localDaemonGithub: import('./localDaemon/githubDelivery').LocalDaemonGithubDelivery | null = null;
   /** Environment, skills and AWS credentials for threads on the managed daemon (see localDaemon/sessionPrep.ts). */
   localDaemonPrep: import('./localDaemon/sessionPrep').LocalDaemonSessionPrep | null = null;
+  private remoteSkillsSync: RemoteSkillsSync | null = null;
   private readonly localDaemonExtras = new Map<string, { envKind?: string; pluginPaths?: string[] }>();
   /** What the Run on picker asks for a daemon's folders (advertised workspaces, subfolders). */
   remoteFolders: RemoteFolderSource | null = null;
@@ -2682,7 +2684,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Lazy start: a thread that runs on the managed daemon starts it on first use.
     this.manager.beforeRemoteSend = async (daemonId, threadId) => {
       const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
-      if (daemon?.managed !== 'local-container') return;
+      if (daemon?.managed !== 'local-container') {
+        await this.syncSkillsToRemoteDaemon(daemon, threadId);
+        return;
+      }
       await controller.ensureRunning();
       // Before the session opens: the daemon reads what is pushed to it when a session starts. Neither call throws.
       await this.localDaemonGithub?.ensureFresh();
@@ -2709,6 +2714,40 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.register(() => { void this.localDaemonPrep?.stop(); });
     }
     this.register(() => { controller.cancel(); });
+  }
+
+  /**
+   * A plain remote daemon: copy the skill folders Threads controls to its data directory (src/remote/skillsSync.ts) and
+   * hand the resulting paths to the session spec. Never throws; a problem becomes a notice in the thread and the
+   * session starts without those skills.
+   */
+  private async syncSkillsToRemoteDaemon(daemon: RemoteDaemonConfig | undefined, threadId: string): Promise<void> {
+    try {
+      if (!this.daemonRegistry || resolveSkillsSyncMode(daemon) !== 'auto') {
+        this.localDaemonExtras.delete(threadId);
+        return;
+      }
+      if (!this.remoteSkillsSync) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const nodeFs = (require('./localDaemon/containerFiles') as typeof import('./localDaemon/containerFiles')).nodeFs();
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const crypto = require('crypto') as typeof import('crypto');
+        this.remoteSkillsSync = new RemoteSkillsSync({
+          resolver: this.daemonRegistry,
+          skillPlugins: () => this.manager.buildHostSkillPlugins(),
+          fs: nodeFs,
+          sha256: () => crypto.createHash('sha256'),
+          log: (message) => debugLog(message),
+        });
+      }
+      const result = await this.remoteSkillsSync.prepare(daemon);
+      for (const notice of result.notices) this.manager.addNoticeMessage(threadId, 'stopped', notice);
+      if (result.pluginPaths.length) this.localDaemonExtras.set(threadId, { pluginPaths: result.pluginPaths });
+      else this.localDaemonExtras.delete(threadId);
+    } catch (err) {
+      this.localDaemonExtras.delete(threadId);
+      debugLog(`[skills-sync] ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   getPluginSkillsRoot(): string {

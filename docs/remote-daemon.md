@@ -7,7 +7,7 @@ process and a replay journal.
 
 What a remote thread has today: the **daemon machine's own tools** (shell, file read/write, search, git worktrees) and
 its own `claude`, `codex` or `opencode` login, plus the tools of your computer proxied back to the app while it is connected ("Tools on your
-computer" below). It does not have skills or keychain secrets (later PRs). Which harness a thread uses is chosen per session (see "Harnesses" below). A message sent while a turn is running is held by the
+computer" below). The skill folders Agent Threads controls (installed, local and GitHub skills) are copied to the daemon automatically unless its **Skills** setting is Off ("Skills the daemon receives" below); nothing from `~/.claude` is copied. Keychain secrets are not forwarded, except the ones you push yourself ("Pushing credentials from the CLI"). Which harness a thread uses is chosen per session (see "Harnesses" below). A message sent while a turn is running is held by the
 plugin and sent when the turn ends.
 
 ## ws:// vs wss:// from Geode (spike findings)
@@ -777,6 +777,44 @@ the agent is ignored here: where worktrees go is yours to set (`worktreeRoot` in
 for 14 days (`worktreePruneDays` in `config.json`, `0` = never) is removed with plain `git worktree remove`. Only a worktree
 that is also clean, fully pushed and not locked goes; anything else is left and logged. Branches are never deleted.
 
+## Skills the daemon receives
+
+When a thread starts on a plain remote daemon (not the managed local one, which has its own copy path), Agent Threads
+copies the skill folders it controls to the daemon over the same WebSocket: skills installed in the vault, local skills
+and GitHub or local skill sources from the Skills manager. They land in `<dataDir>/skills/<name>-<hash>` and are handed to
+the session as plugin directories, so only Agent Threads sessions on that daemon see them. **Nothing is written under
+`~/.claude`** on the daemon machine, and your own `~/.claude/skills` and `~/.claude/agents` are not copied.
+
+- **Setting.** Settings, Remote, edit the daemon, Advanced, **Skills**: *Automatic* (the default; a daemon saved before
+  this existed is Automatic) or *Off*. `skillsSync` in the daemon's settings holds `"auto"` or `"off"`; any other value is
+  treated as Off. Off sends nothing and does not delete what was copied earlier.
+- **Trust.** Skills are instructions the agent follows, and a skill folder can contain secrets (for example an `.env`).
+  Automatic puts every installed skill, including third-party GitHub ones, on a machine where the agent has a shell and its
+  own login. Use Off for a daemon you do not fully trust.
+- **Token.** Needs an **admin** token (it writes to the daemon's disk), like `creds.push`. With a lower scope the thread
+  shows a notice and starts without the skills.
+- **Failures never block a send.** If the daemon is offline, too old (it does not advertise the `skills.sync`
+  capability: update the daemon), refuses the token, or a skill folder is over the limits, the thread shows a
+  "Skills not synced to <daemon>: ..." notice and the session starts with whatever did arrive. After a copy the thread
+  says how many skill folders were synced. Changes show up the next time a session starts, not mid-turn.
+- **Limits.** Per skill folder: 2000 files, 20 MiB, 12 levels deep (symlinks are followed on your computer and sent as
+  regular files; `.git` and `node_modules` are skipped). At most 32 folders per sync and 256 MiB in total on the daemon.
+- **Pruning.** The daemon deletes a synced folder that nothing has used for 14 days and that no running session names (at
+  start and after each copy), and trims the least recently used ones when over 256 MiB.
+
+Protocol (additive within v1, all `admin` scope, advertised as capability `skills.sync`):
+
+| Command | Purpose |
+|---|---|
+| `skills.sync { trees: [{ dir, hash, files, bytes }] }` | Manifest. `dir` is `<name>-<first 12 hex of hash>`, `hash` a sha256 over the sorted (path, mode, content). Replies `{ root, have, missing }`; `root` is the absolute `<dataDir>/skills`. |
+| `skills.put { upload, dir, seq, files: [{ p, m, b64 }] }` | One chunk (about 1 MiB) of a missing folder, staged under `skills/.incoming/<upload>`. Re-sending identical content is accepted. |
+| `skills.commit { upload, dir, hash, files, bytes }` | The daemon recomputes the hash and counts from disk, then renames the staging folder into place. A repeat is a no-op. A mismatch deletes the staging folder and answers `bad_frame`. |
+
+The daemon treats every field as untrusted: `p` must be a relative path with no `..`, empty or `.` segment, backslash or
+NUL; files are created exclusively, links are never created or followed, modes are reduced to 0644 or 0755, and the caps
+above are enforced again. The session's `pluginPaths` still has to resolve under `<dataDir>/skills` to be used at all.
+Audit entries (`skills_sync`, `skills_commit`) hold folder names and sizes, never content.
+
 ## Connect from Geode
 
 1. Install the build: copy `dist/main.js`, `dist/manifest.json`, `dist/styles.css` into
@@ -930,7 +968,7 @@ actually happened, not "just now". What makes that work:
 - A journal line that is damaged in the middle of the file is skipped and logged, and the entries after it are kept (the
   file is rewritten without it); only a damaged *tail* is dropped.
 
-- Skills and keychain secrets are not forwarded (PR 9). Host tools need the app connected (see above); there is no queue for tools that were unavailable.
+- Keychain secrets are not forwarded automatically (push the ones a daemon needs with `creds push`), and user-level skills and agents (`~/.claude/skills`, `~/.claude/agents`) are never copied to a plain remote daemon. Host tools need the app connected (see above); there is no queue for tools that were unavailable.
 - The CLI is a client of the same protocol: `attach` is read-only unless `--claim`, and `--claim` cannot take a seat another client holds.
 - A `resync` (Geode was away longer than the daemon keeps history) restores the last 20 finished messages
   only; anything older that was missed is in the daemon's raw log (`<data-dir>/logs/<thread>.jsonl`), not in

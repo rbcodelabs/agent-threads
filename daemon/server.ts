@@ -20,6 +20,7 @@ import { createClaudeDriverFactory, describeCredentialSource, resolveCredentialE
 import { HARNESS_BINARY, HARNESS_SECRET_ENV, describeHarnessCredential, findHarnessBinary, harnessCapabilities, type RealHarness } from './harnesses';
 import { describePathAccess, withRepoRoot, type SessionPolicy } from './sessionPolicy';
 import { ReposManager } from './repos';
+import { SkillStore } from './skillStore';
 import { pruneIdleWorktrees } from './worktreePrune';
 import { listSubfolders, listWorkspaces } from './workspaces';
 import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, PRE_AUTH_MAX_FRAME_BYTES, capabilitiesFor, type ServerContext, type Timings } from './connection';
@@ -183,6 +184,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     repoRoot: config.repoRoot,
     audit,
   });
+  const skills = new SkillStore(config.dataDir, { inUse: () => host.pluginPathsInUse(), ...(options.now ? { now: options.now } : {}) });
   const controllers = new ControlRegistry();
   controllers.onChange((threadId, owner) => host.setSeatHolder(threadId, owner?.id));
   const recovered = host.recover();
@@ -200,6 +202,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     controllers,
     creds,
     repos,
+    skills,
     checkPath: (path) => describePathAccess(path, sessionPolicy),
     listWorkspaces: () => listWorkspaces(existsSync(config.repoRoot) ? sessionPolicy : configuredPolicy),
     listPath: (path) => listSubfolders(path, sessionPolicy),
@@ -306,6 +309,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       });
       if (pruned.removed.length) log(`pruned ${pruned.removed.length} idle worktree(s)`);
     } catch (err) { log(`worktree prune failed: ${String(err)}`); }
+    try { skills.prune(); } catch (err) { log(`skill prune failed: ${String(err)}`); }
     try { await repos.syncAll(); } catch (err) { log(`repo sync failed: ${String(err)}`); }
   })();
 

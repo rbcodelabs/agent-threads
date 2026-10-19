@@ -10,6 +10,7 @@
  * `unknown_type` (server frames) so the caller can decide, instead of being
  * silently mis-parsed.
  */
+import { validateSkillManifest, validateSkillWireFiles } from './skills';
 import { CLIENT_COMMAND_TYPES, validateRepoSpecs, validateWireImages, type ClientCommandType } from './commands';
 import { validateManifestServers, validateToolResultPayload } from './hostTools';
 import { validateSpecShape } from './spec';
@@ -130,6 +131,9 @@ const COMMAND_FIELDS: Record<ClientCommandType, FieldSpec> = {
   'creds.push': { kind: 'S', ttlSec: 'n', fields: 'o' },
   'repos.sync': { repos: 'a?', wait: 'b?' },
   'repos.status': {},
+  'skills.sync': { trees: 'a' },
+  'skills.put': { upload: 'S', dir: 'S', seq: 'i', files: 'a' },
+  'skills.commit': { upload: 'S', dir: 'S', hash: 'S', files: 'i', bytes: 'i' },
 };
 
 const SERVER_FIELDS: Record<'event' | 'resync' | 'ack' | 'err' | 'welcome', FieldSpec> = {
@@ -176,6 +180,10 @@ function validateDeep(type: string, obj: Record<string, unknown>): string | null
       return validateSpecShape(obj.spec);
     case 'repos.sync':
       return validateRepoSpecs(obj.repos);
+    case 'skills.sync':
+      return validateSkillManifest(obj.trees);
+    case 'skills.put':
+      return validateSkillWireFiles(obj.files);
     case 'tool.manifest':
       return validateManifestServers(obj.servers);
     case 'tool.result':

@@ -13,3 +13,4 @@ export * from './envelope';
 export * from './journal';
 export * from './journalPolicy';
 export * from './codec';
+export * from './skills';

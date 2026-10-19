@@ -59,6 +59,7 @@
     "src/protocol/journalPolicy.ts",
     "src/protocol/relayTypes.ts",
     "src/protocol/sessionEvents.ts",
+    "src/protocol/skills.ts",
     "src/protocol/spec.ts",
     "src/rateLimitRecovery.ts",
     "src/remote/DaemonClient.ts",
