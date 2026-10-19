@@ -81,11 +81,13 @@ export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idem
  * `harness.<kind>` for each harness a client may request, plus `harness.<kind>.<feature>` for what that harness
  * supports (see `HARNESS_FEATURES`). The scripted fake advertises only `harness.fake`.
  */
-export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = [], syncedStdio = false): string[] => [
+export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = [], syncedStdio = false, autoUpdate = false): string[] => [
   ...BASE_CAPABILITIES,
   // Tells the app, before it syncs anything, that stdio definitions will not be refused by policy.
   ...(syncedStdio ? [MCP_SYNC_STDIO_CAPABILITY] : []),
   ...(harness === 'fake' ? ['harness.fake'] : harnessCapabilities(enabled.length ? enabled : isRealHarness(harness) ? [harness] : [])),
+  // Additive: this daemon replaces its own bundle and restarts when idle, so a version change can appear between sessions.
+  ...(autoUpdate ? ['update.auto'] : []),
 ];
 
 export interface Timings {

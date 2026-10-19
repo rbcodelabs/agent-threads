@@ -37,6 +37,8 @@ import { RawLogWriter } from '../src/RawLogWriter';
 import { setKnownSecretsProvider } from '../src/secretRedaction';
 import { TokenStore } from './tokenStore';
 import { DAEMON_VERSION } from './version';
+import { createAutoUpdater, type AutoUpdateOverrides } from './update';
+import type { AutoUpdater } from './update/autoUpdater';
 
 export interface DaemonOptions {
   config: DaemonConfig;
@@ -66,6 +68,10 @@ export interface DaemonOptions {
   throttleLoopback?: boolean;
   /** Test seam: audit log tuning. */
   audit?: ConstructorParameters<typeof AuditLog>[1];
+  /** Test seams for the auto-updater (network, install detection, timings). Production leaves this unset. */
+  autoUpdate?: AutoUpdateOverrides;
+  /** The updater wants the daemon to stop so its supervisor starts the new bundle. The CLI exits 75 from here. */
+  onRestartRequested?: (info: { to: string }) => void;
   log?: (line: string) => void;
 }
 
@@ -83,6 +89,8 @@ export interface DaemonHandle {
   readonly startup: Promise<void>;
   /** Thread ids whose in-flight turn was closed out during startup recovery. */
   readonly recovered: string[];
+  /** The auto-updater (always present; inert unless enabled or an `update --apply` request arrives). */
+  readonly updater: AutoUpdater;
   /** Graceful: close sockets, flush + fsync journals. */
   stop(): Promise<void>;
   /** Test hook: behave like SIGKILL; unflushed journal data is lost. */
@@ -192,6 +200,16 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   sweepRawLogs(logsDir, rawLogLimits, options.now?.());
   for (const id of recovered) log(`recovered thread ${id}: closed in-flight turn as daemon_restarted`);
 
+  const updater = await createAutoUpdater({
+    config,
+    activity: host,
+    audit,
+    log,
+    onRestart: (info) => (options.onRestartRequested ?? ((i) => log(`update to ${i.to} installed; restart this daemon to run it`)))(info),
+    ...(options.now ? { now: options.now } : {}),
+    ...(options.autoUpdate ? { overrides: options.autoUpdate } : {}),
+  });
+
   const ctx: ServerContext = {
     host,
     tokens,
@@ -199,7 +217,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     cmdCache: new CommandCache(),
     daemonId,
     epoch,
-    capabilities: capabilitiesFor(config.harness, config.harnesses, config.allowSyncedStdio),
+    capabilities: capabilitiesFor(config.harness, config.harnesses, config.allowSyncedStdio, updater.autoEnabled),
     controllers,
     creds,
     repos,
@@ -299,6 +317,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       : `WARNING: listening on ${hostName} over plain ws://. Traffic is unencrypted outside a Tailscale/VPN tunnel.`);
   }
 
+  updater.start();
+
   // Housekeeping that must never delay or fail startup: drop worktrees idle for a long time, then bring the clones up to date.
   const startup = (async () => {
     try {
@@ -327,7 +347,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     repos,
     startup,
     recovered,
+    updater,
     async stop() {
+      updater.stop();
       clearInterval(sweep);
       clearInterval(maintenance);
       if (reaper) clearInterval(reaper);
@@ -338,6 +360,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       await closeHttp(http);
     },
     async crash() {
+      updater.stop();
       clearInterval(sweep);
       clearInterval(maintenance);
       if (reaper) clearInterval(reaper);
