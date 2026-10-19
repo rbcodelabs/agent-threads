@@ -390,6 +390,8 @@ async function runClientCommand(cmd: string, p: Parsed, io: Io, raw: RawIo, rt: 
         ...(port !== undefined ? { port } : {}),
         ...(p.flags.get('workspace') ? { workspaces: p.flags.get('workspace') } : {}),
         ...(one(p, 'claude-binary') ? { claudeBinaryPath: one(p, 'claude-binary') } : {}),
+        ...(one(p, 'codex-binary') ? { codexBinaryPath: one(p, 'codex-binary') } : {}),
+        ...(one(p, 'opencode-binary') ? { opencodeBinaryPath: one(p, 'opencode-binary') } : {}),
       }, probes);
       const results = await runChecks(probes, target);
       const code = doctorExitCode(results, p.bools.has('strict'));

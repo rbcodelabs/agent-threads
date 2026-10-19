@@ -258,7 +258,15 @@ docker build -f sandbox/Dockerfile.daemon \
   --build-arg BASE_IMAGE=ghcr.io/rbcodelabs/agent-threads-daemon:0.63.0 -t agent-threads-daemon:0.63.0 .
 ```
 
-(Building the Dockerfile without `BASE_IMAGE` builds everything from the checkout, with the CLI.) The package is
+(Building the Dockerfile without `BASE_IMAGE` builds everything from the checkout, with the CLI.)
+
+**Codex and OpenCode in the image.** Off by default, so the default image is the same as before. Opt in on your own build
+with `--build-arg INSTALL_CODEX=1` (npm `@openai/codex`, `CODEX_VERSION`, default `latest`) and/or
+`--build-arg INSTALL_OPENCODE=1` (npm `opencode-ai`, `OPENCODE_VERSION`, default the version the adapter is verified
+against). They install into `/opt/harnesses` outside the volumes, like the Claude CLI; their logins and config live in the
+persisted HOME (`~/.codex`, `~/.local/share/opencode`) or come from env keys. These args work on top of a published `base`
+too (`--build-arg BASE_IMAGE=...`). The published image never contains any of the three CLIs: the workflow builds the
+`base` stage only and passes no build args. The package is
 private until the repository owner sets its visibility to Public once, after the first publish.
 
 ## CLI
@@ -531,7 +539,7 @@ session.
 | `harness` (`--harness`, env `AGENT_THREADS_HARNESS`) | The default for `agent-threads run`. Given alone it also restricts the daemon to that one harness (so an old `AGENT_THREADS_HARNESS=claude` keeps meaning Claude only). `--fake-harness` is the scripted test stand-in and ignores the set. |
 | `claudeBinaryPath`, `codexBinaryPath`, `opencodeBinaryPath` (`--claude-binary`, `--codex-binary`, `--opencode-binary`; env `AGENT_THREADS_CLAUDE_BINARY`, `_CODEX_BINARY`, `_OPENCODE_BINARY`) | Explicit CLI path. Otherwise PATH, `~/.npm-global/bin`, `~/.local/bin` and `/usr/local/bin` are searched. |
 
-A harness whose CLI is missing does not stop the daemon: startup logs a warning and each `session.open` for it fails with
+`agent-threads doctor` checks the Codex and OpenCode CLIs for the harnesses in the allowed set (a missing one is a warning). A harness whose CLI is missing does not stop the daemon: startup logs a warning and each `session.open` for it fails with
 `<cli> CLI not found: ... set <configKey> / <ENV_VAR>` while the other harnesses keep working. `welcome.capabilities` lists
 `harness.<kind>` for every enabled harness plus `harness.<kind>.<feature>` for what it supports (`set_model`,
 `set_permission_mode`, `usage`, `context_usage`, `host_tools`, and for Claude `mcp_status` and `session_options`). It lists
