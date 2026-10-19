@@ -383,6 +383,7 @@ token created for that purpose. Nothing is ever put in the URL.
 | `agent-threads attach <thread> [--from N\|end] [--claim] [--until-idle] [--json]` | follow a thread. Replays the journal after `--from` (default `0`: everything the daemon still holds; `end`: live only), then streams live. A unique id prefix is enough. |
 | `agent-threads run [options] "<prompt>"` | open a new session, send one prompt, stream the answer, exit with a code for how it ended. |
 | `agent-threads creds push <kind> [NAME...] [--stdin] [--ttl T] [--remove]` | send credentials to the daemon (`admin` token). See "Pushing credentials from the CLI". |
+| `agent-threads mcp sync --stdin [--clear] [--strict]` | replace the MCP servers synced to the daemon (`admin` token): JSON `name -> definition` on stdin. See "MCP servers synced from the app". |
 | `agent-threads token create\|list\|revoke` | manage tokens (`--json` for scripts; `create --save` as above). |
 | `agent-threads doctor` | check the machine and the daemon (below). |
 | `agent-threads install` | set up the systemd user service (above). |
