@@ -8,7 +8,7 @@
  */
 import type { HarnessMcpServerConfig } from '../HarnessSession';
 
-/** The server map carried by `mcp.sync` (full replace: a name that is absent is removed). */
+/** The server map carried by `mcp.sync` (full replace of the accepted servers: a name that is absent is removed). */
 export type SyncedMcpServers = Record<string, HarnessMcpServerConfig>;
 
 export interface McpSyncRejection { name: string; reason: string }
@@ -22,6 +22,12 @@ export interface McpSyncReply {
   requiredCreds: string[];
   /** Accepted names that a same-named server in the daemon's config.json overrides. */
   shadowed: string[];
+  /**
+   * True when the request named servers but the daemon accepted none of them: the previously synced set was left
+   * exactly as it was (nothing rewritten, nothing removed) and `rejected` says why. Absent otherwise, so a client
+   * that predates the field reads the reply as before. Clients must not treat a kept reply as a successful sync.
+   */
+  kept?: boolean;
 }
 
 export const MAX_SYNCED_MCP_SERVERS = 64;
@@ -36,9 +42,10 @@ export const MCP_SYNC_CAPABILITY = 'mcp.sync';
 export const MCP_SYNC_STDIO_CAPABILITY = 'mcp.sync.stdio';
 
 /** Check the `servers` of an `mcp.sync`. Returns a message naming the first problem, or null. */
-export function validateSyncedMcpShape(servers: unknown): string | null {
+export function validateSyncedMcpShape(servers: unknown, clear = false): string | null {
   if (typeof servers !== 'object' || servers === null || Array.isArray(servers)) return 'servers must be an object of name -> definition';
   const entries = Object.entries(servers);
+  if (clear && entries.length > 0) return 'clear removes every synced server, so servers must be empty';
   if (entries.length > MAX_SYNCED_MCP_SERVERS) return `at most ${MAX_SYNCED_MCP_SERVERS} servers`;
   for (const [name, def] of entries) {
     if (typeof def !== 'object' || def === null || Array.isArray(def)) return `servers.${name.slice(0, 40)} must be an object`;

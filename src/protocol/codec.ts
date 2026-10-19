@@ -131,7 +131,7 @@ const COMMAND_FIELDS: Record<ClientCommandType, FieldSpec> = {
   'creds.push': { kind: 'S', ttlSec: 'n', fields: 'o' },
   'repos.sync': { repos: 'a?', wait: 'b?' },
   'repos.status': {},
-  'mcp.sync': { servers: 'o', wait: 'b?' },
+  'mcp.sync': { servers: 'o', clear: 'b?', wait: 'b?' },
 };
 
 const SERVER_FIELDS: Record<'event' | 'resync' | 'ack' | 'err' | 'welcome', FieldSpec> = {
@@ -179,7 +179,7 @@ function validateDeep(type: string, obj: Record<string, unknown>): string | null
     case 'repos.sync':
       return validateRepoSpecs(obj.repos);
     case 'mcp.sync':
-      return validateSyncedMcpShape(obj.servers);
+      return validateSyncedMcpShape(obj.servers, obj.clear === true);
     case 'tool.manifest':
       return validateManifestServers(obj.servers);
     case 'tool.result':

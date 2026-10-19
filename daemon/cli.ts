@@ -93,7 +93,8 @@ creds push: field values are read from standard input as a JSON object (--stdin)
   --remove and no fields the kind is deleted. Output lists field names, never values.
 
 mcp sync: standard input is a JSON object of name -> MCP server definition (config.json's mcpServers shape). It replaces
-  the whole synced set; an empty object needs --clear. Credentials are referenced as \${mcpsync-<project>.NAME} and pushed
+  the whole synced set; an empty object needs --clear. If servers are given but none is accepted, the previous set is kept and
+  the command exits 1. Credentials are referenced as \${mcpsync-<project>.NAME} and pushed
   separately with "creds push mcpsync-<project>". Output lists server names and reasons, never a value; --strict exits 1
   when any definition was rejected.
 
@@ -442,7 +443,7 @@ async function runClientCommand(cmd: string, p: Parsed, io: Io, raw: RawIo, rt: 
         const reply = await syncMcp(client, servers);
         if (json) io.out(JSON.stringify(reply));
         else for (const line of formatSync(reply)) io.out(line);
-        return p.bools.has('strict') && reply.rejected.length ? EXIT.FAILED : EXIT.OK;
+        return reply.kept || (p.bools.has('strict') && reply.rejected.length) ? EXIT.FAILED : EXIT.OK;
       } finally {
         client.dispose();
       }

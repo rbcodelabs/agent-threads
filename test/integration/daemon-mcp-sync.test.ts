@@ -101,6 +101,56 @@ describe('mcp.sync command', () => {
     expect(await c.cmd('mcp.sync', { servers: {} })).toMatchObject({ type: 'ack', result: { accepted: [] } });
   });
 
+  it('keeps the previous set when every server is rejected: file untouched, flagged reply, names-only audit', async () => {
+    const td = await daemon();
+    const c = await client(td);
+    await c.cmd('mcp.sync', { servers: { docs: DOCS, tool: TOOL } });
+    const file = join(dataDir, 'synced-mcp.json');
+    const before = readFileSync(file, 'utf8');
+    const reply = await c.cmd('mcp.sync', { servers: { docs: { type: 'http', url: 'https://secret-host.example.test', headers: { A: '${bare}' } }, tool: { command: 'x', env: { K: '${bare2}' } } } });
+    expect(reply).toMatchObject({ type: 'ack', result: { accepted: [], kept: true, rejected: [{ name: 'docs' }, { name: 'tool' }] } });
+    expect(readFileSync(file, 'utf8')).toBe(before);
+    await td.cleanup();
+    const records = readFileSync(join(dataDir, 'audit.ndjson'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    expect(records.filter((r) => r.event === 'mcp_sync')).toHaveLength(1); // the first sync only: no 'removed' entry
+    expect(records.find((r) => r.event === 'mcp_sync_rejected')).toMatchObject({ rejected: ['docs', 'tool'] });
+    expect(JSON.stringify(records)).not.toContain('secret-host');
+  });
+
+  it('keeps a synced stdio server when the operator turns allowSyncedStdio off and the app re-sends only it', async () => {
+    const td = await daemon({ allowStdio: true });
+    await (await client(td)).cmd('mcp.sync', { servers: { tool: TOOL } });
+    await td.cleanup();
+    const strict = await daemon({ allowStdio: false });
+    const reply = await (await client(strict)).cmd('mcp.sync', { servers: { tool: TOOL } });
+    expect(reply).toMatchObject({ result: { accepted: [], kept: true, rejected: [{ name: 'tool', reason: expect.stringContaining('allowSyncedStdio') }] } });
+    expect(Object.keys(JSON.parse(readFileSync(join(dataDir, 'synced-mcp.json'), 'utf8')).servers)).toEqual(['tool']);
+  });
+
+  it('partial rejection replaces the set with the accepted servers and drops a now-rejected one', async () => {
+    const td = await daemon({ allowStdio: false });
+    const c = await client(td);
+    await c.cmd('mcp.sync', { servers: { docs: DOCS } });
+    const reply = await c.cmd('mcp.sync', { servers: { other: DOCS, docs: { type: 'http' } } });
+    expect(reply).toMatchObject({ result: { accepted: ['other'], rejected: [{ name: 'docs' }] } });
+    expect((reply as any).result.kept).toBeUndefined();
+    expect(Object.keys(JSON.parse(readFileSync(join(dataDir, 'synced-mcp.json'), 'utf8')).servers)).toEqual(['other']);
+  });
+
+  it('an explicit clear (and, for older clients, an empty set) removes everything and audits the removal; clear with servers is a bad frame', async () => {
+    const td = await daemon();
+    const c = await client(td);
+    await c.cmd('mcp.sync', { servers: { docs: DOCS, tool: TOOL } });
+    expect(await c.cmd('mcp.sync', { servers: {}, clear: true })).toMatchObject({ type: 'ack', result: { accepted: [] } });
+    expect(JSON.parse(readFileSync(join(dataDir, 'synced-mcp.json'), 'utf8')).servers).toEqual({});
+    await c.cmd('mcp.sync', { servers: { docs: DOCS } });
+    expect(await c.cmd('mcp.sync', { servers: {} })).toMatchObject({ type: 'ack', result: { accepted: [] } });
+    expect(await c.cmd('mcp.sync', { servers: { docs: DOCS }, clear: true })).toMatchObject({ type: 'err', code: 'bad_frame' });
+    await td.cleanup();
+    const removed = readFileSync(join(dataDir, 'audit.ndjson'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.event === 'mcp_sync' && r.removed.length);
+    expect(removed.map((r) => r.removed.sort())).toEqual([['docs', 'tool'], ['docs']]);
+  });
+
   it('refuses control and read tokens, and malformed frames', async () => {
     const td = await daemon();
     for (const scope of ['read', 'control'] as const) {
