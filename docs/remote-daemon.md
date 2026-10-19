@@ -53,8 +53,9 @@ per thread, "Run in: Container"; that was removed in favour of this.)
 **What Set up does** (after a confirmation that names the downloads, the vault path and "read-write"):
 
 1. installs and starts the container runtime if needed (a pinned, checksum-verified copy kept outside the vault);
-2. pulls `ghcr.io/rbcodelabs/agent-threads-daemon:<plugin version>` and builds a thin local layer that adds the Claude CLI
-   from Anthropic (the published image has no CLI: no redistribution grant);
+2. pulls `ghcr.io/rbcodelabs/agent-threads-daemon:<plugin version>` and builds a thin local layer that adds the CLIs of the
+   harnesses you turned on (Claude from Anthropic; Codex and OpenCode from npm). The published image has none of them
+   (no redistribution grant), so they are installed on your machine, at build time;
 3. creates two named volumes (data and workspaces) and fixes their ownership with a one-shot (named volumes start
    root-owned; the daemon runs as uid 10001);
 4. starts the container, publishing `127.0.0.1:<port>` only (7433, or the next free port) and waits for `/healthz`;
@@ -69,6 +70,28 @@ there starts it for you. Quitting Geode leaves it running.
 `<vault>/.obsidian` mounted **read-only on top** so a process in the VM cannot rewrite plugin code that Geode would
 later load. Notes are fully writable: keep vault backups or sync history. Paths containing `:` cannot be mounted and are
 refused. The VM has full outbound network access.
+
+**Harnesses (Claude, Codex, OpenCode).** The block has a toggle per harness; **Claude is on by default**. Each toggle adds
+that CLI to the image layer (npm into `/opt/harnesses`, outside the volumes, like the Claude CLI) and the daemon in the
+container is started with `AGENT_THREADS_HARNESSES` set to the same list, so a session for a harness you left off is refused
+at the door. Changing a toggle only stores the choice: the daemon shows it as pending, and **Apply changes** (or
+Start, when stopped) rebuilds the layer under its own image tag (`agent-threads-daemon-local:<version>-claude-codex`) and
+replaces the container, keeping the volumes, token and sessions. At least one harness stays on. Under each toggle the panel
+shows whether the CLI is in the image and whether it is signed in (checked while the daemon runs; "unknown" otherwise).
+
+- **Claude:** the sign-in below (a token in the keychain, written into the data volume).
+- **Codex:** **Sign in to Codex** runs `codex login --device-auth` inside the container: the panel shows the page and a
+  one-time code, you approve in your browser, nothing is pasted back. The login is written by the CLI into the daemon's
+  HOME in the data volume (`~/.codex/auth.json` under `/var/lib/agent-threads/home`), so it survives restarts and updates,
+  and Geode never sees, stores or logs it. This flow was written against the CLI's documented behaviour and is covered by
+  tests with a fake process; if it does not work on your Mac the panel shows the CLI's error and the exact command below.
+- **OpenCode:** `opencode auth login` is an interactive provider picker with no headless mode, so the panel does not run
+  it. It shows the exact line instead, with the managed `container` path quoted:
+  `'<...>/runtime/<version>/bin/container' exec -it --user 10001 agent-threads-local-<id> /opt/harnesses/bin/opencode auth login`.
+  Any failure to sign in also prints the matching command; none fails silently.
+
+Only the Claude token is a secret this plugin holds (the keychain, as before). Codex and OpenCode logins live only in
+the data volume, and the `localDaemon` settings carry just the toggles. **Reset daemon data** removes them with the volume.
 
 **More folders.** Besides the vault: **Settings, Remote, Local daemon shared folders** lists host folders to share
 READ-WRITE at `/work/<folder name>` (for example a repository outside the vault; they appear under "Run on" as
@@ -151,8 +174,10 @@ a container with our name that Agent Threads did not create (left alone), a daem
 and a token the daemon rejected (a new one is created) each have their own message.
 
 **Not in this version:** exposing the daemon to other devices, stop-on-idle, network isolation modes (the agent inside needs
-the network to reach Claude), and write/scheduling host tools for daemon threads (policy, see above). Codex and OpenCode
-threads do not run on a daemon.
+the network to reach Claude), and write/scheduling host tools for daemon threads (policy, see above).
+Old per-toggle image tags are not garbage-collected until Remove (they only cost disk). The harness CLIs are installed from npm without a lockfile (`CODEX_VERSION` defaults to `latest`, `OPENCODE_VERSION` to the
+version the adapter is verified against); the OpenCode install explicitly allows only `opencode-ai`'s postinstall for npm
+versions that block install scripts, and the build fails if either CLI is not runnable.
 
 Troubleshooting: the runtime ships with the plugin and is not on your `PATH`; the CLI is at
 `~/Library/Application Support/claude-threads/runtime/<version>/bin/container` (`container ls -a` shows

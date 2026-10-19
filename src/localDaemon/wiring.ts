@@ -10,6 +10,7 @@ import { daemonWsUrl, probeDaemon, type WebSocketFactory } from '../remote/Daemo
 import { signInToClaudeInContainer, type SpawnLike } from '../claudeContainerAuthCli';
 import { runnerEnv, createDefaultVmCommandRunner } from '../containerCli';
 import { LocalDaemonController, type LocalDaemonDeps } from './controller';
+import { signInToCodexInContainer } from './harnessLogin';
 import { LocalDaemonGithubDelivery, type LocalDaemonGithubDeps } from './githubDelivery';
 import { LocalDaemonSessionPrep, type SessionPrepDeps } from './sessionPrep';
 import { nodeFs } from './containerFiles';
@@ -137,6 +138,17 @@ export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonC
         onProgress: opts.onProgress,
         onUrl: opts.onUrl,
         onCodePrompt: opts.onCodePrompt,
+      });
+    },
+    harnessSignInRunner: (opts) => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { spawn } = require('child_process') as typeof import('child_process');
+      return signInToCodexInContainer({
+        spawn: spawn as unknown as SpawnLike,
+        hostEnv: runnerEnv() as NodeJS.ProcessEnv,
+        containerName: opts.containerName,
+        onProgress: opts.onProgress,
+        onUrl: opts.onUrl,
       });
     },
     ...(host.projectFolders ? { projectFolders: () => host.projectFolders!() } : {}),

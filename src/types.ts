@@ -280,6 +280,12 @@ export interface LocalDaemonSettings {
   /** The Claude credential file was written into the data volume (last known; the volume persists). */
   credentialWritten?: boolean;
   /**
+   * Which agent CLIs the daemon image carries and the daemon accepts sessions for. Absent = Claude only. Changing it
+   * changes the container's spec signature, so Update / Apply rebuilds the image layer. Contains no secrets: logins
+   * for Codex and OpenCode live inside the daemon's data volume, never here.
+   */
+  harnesses?: Array<'claude' | 'codex' | 'opencode'>;
+  /**
    * Host folders shared READ-WRITE with the daemon, at `/work/<name>` (one path per entry). A thread can then run in a
    * repository outside the vault, which is what the removed sandbox VM's `/work` mount was for. Applied when the
    * container is created.

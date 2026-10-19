@@ -17,7 +17,9 @@ import {
   PULL_TIMEOUT_MS,
   LOCAL_TOKEN_NAME,
   VERIFY_OK_MARKER,
-  THIN_DOCKERFILE,
+  thinDockerfileFor,
+  harnessProbeArgs,
+  normalizeHarnesses,
   LABEL_OWNER,
   buildThinImageArgs,
   containerNameFor,
@@ -50,6 +52,8 @@ import {
   describePullFailure,
   parseInspectedContainer,
   parseTokenCreate,
+  parseHarnessProbe,
+  type HarnessProbeResult,
   parseTokenList,
   redactSecrets,
   tail,
@@ -138,12 +142,22 @@ export async function inspectOurContainer(d: StepDeps, vaultPath: string): Promi
   return parsed.labels[LABEL_OWNER] === '1' ? parsed : 'foreign';
 }
 
+/**
+ * Which harness CLIs the running container has and which logins exist in its persisted HOME (see
+ * `HARNESS_PROBE_SCRIPT`). Null when the probe could not run or printed nothing recognisable: callers show
+ * "unknown", never a guess.
+ */
+export async function probeHarnesses(d: StepDeps, vaultPath: string): Promise<HarnessProbeResult | null> {
+  const r = await run(d, harnessProbeArgs(containerNameFor(vaultPath)), SHORT_TIMEOUT_MS);
+  return r.exitCode === 0 ? parseHarnessProbe(r.stdout) : null;
+}
+
 /** Probes whether the credential file is present inside the running container. */
 export async function credentialFilePresent(d: StepDeps, vaultPath: string): Promise<boolean> {
   return (await run(d, credentialPresentArgs(containerNameFor(vaultPath)), SHORT_TIMEOUT_MS)).exitCode === 0;
 }
 
-// ── Image: pull, build the thin Claude layer, verify ─────────────────────────
+// ── Image: pull, build the thin harness layer, verify ─────────────────────────
 
 export async function pullDaemonImage(d: StepDeps, version: string): Promise<void> {
   const ref = publishedImageRef(version);
@@ -157,8 +171,18 @@ export async function pullDaemonImage(d: StepDeps, version: string): Promise<voi
   throw new LocalDaemonError(code, kind === 'unknown' ? `${describePullFailure(kind, ref, version)}\n${detail}` : describePullFailure(kind, ref, version), detail);
 }
 
-export async function buildThinImage(d: StepDeps, version: string): Promise<void> {
-  d.report?.(`Building ${localImageRef(version)} (installs the Claude CLI from Anthropic)`);
+function installNote(harnesses?: readonly string[]): string {
+  const set = normalizeHarnesses(harnesses);
+  const parts = [
+    ...(set.includes('claude') ? ['the Claude CLI from Anthropic'] : []),
+    ...(set.includes('codex') ? ['the Codex CLI (npm @openai/codex)'] : []),
+    ...(set.includes('opencode') ? ['the OpenCode CLI (npm opencode-ai)'] : []),
+  ];
+  return `installs ${parts.join(', ')}`;
+}
+
+export async function buildThinImage(d: StepDeps, version: string, harnesses?: readonly string[]): Promise<void> {
+  d.report?.(`Building ${localImageRef(version, harnesses)} (${installNote(harnesses)})`);
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const fs = require('fs/promises') as typeof import('fs/promises');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -169,33 +193,33 @@ export async function buildThinImage(d: StepDeps, version: string): Promise<void
   try {
     try {
       dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-threads-daemon-build-'));
-      await fs.writeFile(path.join(dir, 'Dockerfile'), THIN_DOCKERFILE, 'utf8');
+      await fs.writeFile(path.join(dir, 'Dockerfile'), thinDockerfileFor(harnesses), 'utf8');
     } catch (err) {
       throw new LocalDaemonError('build', `Writing the daemon Dockerfile failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const r = await run(d, buildThinImageArgs({ version, dockerfilePath: path.join(dir, 'Dockerfile'), contextDir: dir }), BUILD_TIMEOUT_MS, { chatty: true });
+    const r = await run(d, buildThinImageArgs({ version, dockerfilePath: path.join(dir, 'Dockerfile'), contextDir: dir, harnesses }), BUILD_TIMEOUT_MS, { chatty: true });
     if (r.exitCode !== 0) {
       const kind = classifyPullError(text(r));
       if (kind === 'disk') throw new LocalDaemonError('disk', describePullFailure('disk', publishedImageRef(version), version), tail(text(r)));
-      throw failed('build', 'Installing the Claude CLI into the daemon image', r);
+      throw failed('build', `Adding the agent CLIs to the daemon image (${installNote(harnesses)})`, r);
     }
   } finally {
     if (dir) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
-export async function verifyThinImage(d: StepDeps, version: string): Promise<void> {
-  const r = await run(d, verifyImageArgs(version), 60_000);
+export async function verifyThinImage(d: StepDeps, version: string, harnesses?: readonly string[]): Promise<void> {
+  const r = await run(d, verifyImageArgs(version, harnesses), 60_000);
   if (r.exitCode !== 0 || !r.stdout.includes(VERIFY_OK_MARKER)) {
-    throw failed('verify', `${localImageRef(version)} was built but is missing claude, agent-threads or git;`, r);
+    throw failed('verify', `${localImageRef(version, harnesses)} was built but is missing ${[...normalizeHarnesses(harnesses), 'agent-threads', 'git'].join(', ')};`, r);
   }
 }
 
 /** Pull + build + verify. */
-export async function ensureImage(d: StepDeps, version: string): Promise<void> {
+export async function ensureImage(d: StepDeps, version: string, harnesses?: readonly string[]): Promise<void> {
   await pullDaemonImage(d, version);
-  await buildThinImage(d, version);
-  await verifyThinImage(d, version);
+  await buildThinImage(d, version, harnesses);
+  await verifyThinImage(d, version, harnesses);
 }
 
 // ── Volumes ──────────────────────────────────────────────────────────────────
@@ -226,13 +250,13 @@ export async function removeVolumes(d: StepDeps, vaultPath: string): Promise<voi
  */
 export async function prepareVolumes(
   d: StepDeps,
-  opts: { vaultPath: string; version: string; credential?: string },
+  opts: { vaultPath: string; version: string; credential?: string; harnesses?: readonly string[] },
 ): Promise<void> {
   const withCredential = !!opts.credential;
   d.report?.(withCredential ? 'Preparing the data volume and writing the Claude credential' : 'Preparing the data volume');
   const r = await run(
     d,
-    prepareArgs({ vaultPath: opts.vaultPath, version: opts.version, withCredential }),
+    prepareArgs({ vaultPath: opts.vaultPath, version: opts.version, withCredential, harnesses: opts.harnesses }),
     VM_LIFECYCLE_TIMEOUT_MS,
     withCredential ? { input: opts.credential } : {},
   );
@@ -279,8 +303,8 @@ export async function removeContainer(d: StepDeps, vaultPath: string): Promise<v
   throw failed('remove', 'Removing the daemon container', r);
 }
 
-export async function removeImage(d: StepDeps, version: string): Promise<void> {
-  const ref = localImageRef(version);
+export async function removeImage(d: StepDeps, version: string, harnesses?: readonly string[]): Promise<void> {
+  const ref = localImageRef(version, harnesses);
   if (!(await imagePresent(d, ref))) return;
   // Best effort: an image still used by a container is simply kept.
   await run(d, imageRemoveArgs(ref), VM_LIFECYCLE_TIMEOUT_MS);

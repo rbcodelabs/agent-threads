@@ -38,6 +38,7 @@ export interface HarnessOptions {
   /** Extra directories that exist on the (fake) host, besides the vault's config dirs. */
   existingDirs?: string[];
   signIn?: LocalDaemonDeps['signInRunner'];
+  harnessSignIn?: LocalDaemonDeps['harnessSignInRunner'];
   existingRegistration?: RemoteDaemonConfig;
 }
 
@@ -109,6 +110,7 @@ export function makeHarness(opts: HarnessOptions = {}) {
     register: async (c) => { registered = c; },
     unregister: async () => { registered = undefined; },
     ...(opts.signIn ? { signInRunner: opts.signIn } : {}),
+    ...(opts.harnessSignIn ? { harnessSignInRunner: opts.harnessSignIn } : {}),
     healthAttempts: 3,
     healthDelayMs: 0,
   };

@@ -10,7 +10,8 @@
 
 import { PROTOCOL_VERSION } from '../protocol/envelope';
 import { compareVersions } from '../remote/DaemonClient';
-import { MIN_LOCAL_DAEMON_VERSION } from './spec';
+import type { HarnessProbeResult } from './parse';
+import { MIN_LOCAL_DAEMON_VERSION, normalizeHarnesses, type LocalHarness } from './spec';
 
 export type ContainerPresence = 'absent' | 'foreign' | 'stopped' | 'running';
 
@@ -51,6 +52,10 @@ export interface Observed {
   credentialInVolume: boolean;
   /** The Remote daemons entry exists and points at the current port and token secret. */
   registered: boolean;
+  /** Harnesses the user turned on (absent = Claude only). */
+  harnesses?: LocalHarness[];
+  /** From a probe of the running container: which CLIs are in the image and which logins exist. Absent when not running or unknown. */
+  harnessProbe?: HarnessProbeResult;
 }
 
 export interface Desired {
@@ -115,8 +120,13 @@ export function assessDaemonVersion(pluginVersion: string, daemonVersion: string
   return compareVersions(daemonVersion, pluginVersion) === 0 ? 'none' : 'available';
 }
 
+function claudeEnabled(o: Observed): boolean {
+  return normalizeHarnesses(o.harnesses).includes('claude');
+}
+
+/** Only the Claude credential gates the status line; Codex and OpenCode sign-in state is shown per harness, never blocking. */
 function needsSignIn(o: Observed): boolean {
-  return !o.credentialInKeychain && !o.credentialInVolume;
+  return claudeEnabled(o) && !o.credentialInKeychain && !o.credentialInVolume;
 }
 
 function needsToken(o: Observed): boolean {
@@ -182,7 +192,7 @@ export function assess(o: Observed, d: Desired): Assessment {
   if (needsToken(o)) {
     return { ...common, status: 'degraded', degraded: 'token-rejected', plan: [...tokenStep, ...registerStep] };
   }
-  if (!o.credentialInVolume && o.credentialInKeychain) {
+  if (claudeEnabled(o) && !o.credentialInVolume && o.credentialInKeychain) {
     return { ...common, status: 'degraded', degraded: 'credential-not-applied', plan: ['apply-credential', ...registerStep] };
   }
   if (needsSignIn(o)) return { ...common, status: 'needs-sign-in', plan: registerStep };

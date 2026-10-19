@@ -124,3 +124,44 @@ export function tail(text: string, lines = 15): string {
   if (!t) return '(no output)';
   return t.split('\n').slice(-lines).join('\n');
 }
+
+// ── Per-harness probe and device-code login output ───────────────────────────
+
+export interface HarnessProbe {
+  /** The CLI is in the image. */
+  cli: boolean;
+  /** A login left a credential file in the persisted HOME (Claude is not probed here: see `credentialInVolume`). */
+  signedIn: boolean;
+}
+
+export type HarnessProbeResult = Partial<Record<'claude' | 'codex' | 'opencode', HarnessProbe>>;
+
+/** Parse `HARNESS_PROBE_SCRIPT` output. Unknown lines are ignored; null when nothing was recognised. */
+export function parseHarnessProbe(stdout: string): HarnessProbeResult | null {
+  const out: HarnessProbeResult = {};
+  let seen = false;
+  for (const line of stdout.split('\n')) {
+    const m = /^(claude|codex|opencode)\.(cli|auth)=([01])\s*$/.exec(line.trim());
+    if (!m) continue;
+    seen = true;
+    const h = m[1] as 'claude' | 'codex' | 'opencode';
+    const entry = out[h] ?? { cli: false, signedIn: false };
+    if (m[2] === 'cli') entry.cli = m[3] === '1'; else entry.signedIn = m[3] === '1';
+    out[h] = entry;
+  }
+  return seen ? out : null;
+}
+
+// eslint-disable-next-line no-control-regex
+const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g;
+
+/**
+ * What `codex login --device-auth` prints: a verification URL and a one-time code (`ABCD-12345`). Either may be
+ * absent while the CLI is still starting; the caller keeps feeding output until both are found.
+ */
+export function parseDeviceLogin(output: string): { url?: string; code?: string } {
+  const text = output.replace(ANSI, '');
+  const url = /https:\/\/[^\s)'"]+/.exec(text)?.[0];
+  const code = /\b[A-Z0-9]{4,}-[A-Z0-9]{4,}\b/.exec(text)?.[0];
+  return { ...(url ? { url } : {}), ...(code ? { code } : {}) };
+}
