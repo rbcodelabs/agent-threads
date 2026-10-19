@@ -319,6 +319,12 @@ export interface LocalDaemonSettings {
   tokenId?: string;
   /** The Claude credential file was written into the data volume (last known; the volume persists). */
   credentialWritten?: boolean;
+  /**
+   * Which agent CLIs the daemon image carries and the daemon accepts sessions for. Absent = Claude only. Changing it
+   * changes the container's spec signature, so Update / Apply rebuilds the image layer. Contains no secrets: logins
+   * for Codex and OpenCode live inside the daemon's data volume, never here.
+   */
+  harnesses?: Array<'claude' | 'codex' | 'opencode'>;
 }
 
 /** Per-daemon choices for tools that run on this computer on a remote thread's behalf. */

@@ -8,6 +8,7 @@
  */
 
 import type { LocalDaemonProgress, LocalDaemonSnapshot, SignInHandlers } from './controller';
+import type { LocalHarness } from './spec';
 import { LocalDaemonAbortedError } from './provision';
 import {
   DESCRIBE_REMOVE,
@@ -31,6 +32,10 @@ export interface LocalDaemonPanelDeps {
   confirm(message: string): Promise<boolean>;
   run(id: Exclude<LocalDaemonButtonId, 'sign-in'>, opts: { onProgress: (p: LocalDaemonProgress) => void }): Promise<unknown>;
   signIn(handlers: SignInHandlers): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Codex device-code login inside the container (URL and one-time code; nothing to paste back). */
+  signInHarness?(harness: 'codex', handlers: Pick<SignInHandlers, 'onProgress' | 'onUrl'>): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Store the enabled harnesses (applied to the container by Apply changes / Start). */
+  setHarnesses?(harnesses: LocalHarness[]): Promise<unknown>;
   cancel(): void;
   /** Hide or show the whole block (the Setting row around it). Hidden on a Mac that cannot run the runtime. */
   setVisible?(visible: boolean): void;
@@ -52,6 +57,7 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
   root.createDiv({ cls: 'ct-local-daemon-note setting-item-description', text: POSITIONING_NOTE });
   const statusEl = root.createDiv('ct-local-daemon-status');
   const linesEl = root.createDiv('ct-local-daemon-lines');
+  const harnessEl = root.createDiv('ct-local-daemon-harnesses');
   const hintEl = root.createDiv('ct-local-daemon-hint setting-item-description');
   const errorEl = root.createDiv('ct-local-daemon-error');
   const progressEl = root.createDiv('ct-local-daemon-progress');
@@ -79,6 +85,7 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
       row.createSpan({ cls: 'ct-local-daemon-label', text: `${l.label}: ` });
       row.createSpan({ cls: 'ct-local-daemon-value', text: l.value });
     }
+    renderHarnesses(view);
     hintEl.setText(view.hint ?? '');
     const shownError = localError ?? view.error ?? '';
     errorEl.setText(shownError);
@@ -96,6 +103,34 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
         text: b.label,
       });
       btn.addEventListener('click', () => { void act(b.id, snap); });
+    }
+  };
+
+  const renderHarnesses = (view: ReturnType<typeof buildLocalDaemonView>): void => {
+    harnessEl.empty();
+    if (view.harnessRows.length === 0) return;
+    harnessEl.createDiv({ cls: 'ct-local-daemon-harness-title', text: 'Agent harnesses' });
+    for (const r of view.harnessRows) {
+      const row = harnessEl.createDiv(`ct-local-daemon-harness ct-local-daemon-harness-${r.id}`);
+      const label = row.createEl('label', { cls: 'ct-local-daemon-harness-toggle' });
+      const box = label.createEl('input', { type: 'checkbox' });
+      box.checked = r.enabled;
+      box.disabled = r.locked || !deps.setHarnesses;
+      label.createSpan({ cls: 'ct-local-daemon-harness-name', text: ` ${r.label}` });
+      row.createSpan({ cls: `ct-local-daemon-harness-status ct-local-daemon-tone-${r.tone}`, text: ` ${r.status}` });
+      box.addEventListener('change', () => {
+        const next = view.harnessRows.filter((x) => (x.id === r.id ? box.checked : x.enabled)).map((x) => x.id);
+        localError = null;
+        void (async () => {
+          try { await deps.setHarnesses?.(next); } catch (err) { localError = err instanceof Error ? err.message : String(err); }
+          await refresh();
+        })();
+      });
+      if (r.signIn && deps.signInHarness) {
+        const btn = row.createEl('button', { cls: 'ct-local-daemon-btn ct-local-daemon-btn-sign-in-codex', text: `Sign in to ${r.label}` });
+        btn.addEventListener('click', () => { void signInHarness(r.signIn!); });
+      }
+      if (r.command) row.createEl('code', { cls: 'ct-local-daemon-harness-command', text: r.command });
     }
   };
 
@@ -124,7 +159,7 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
   const confirmFor = (id: LocalDaemonButtonId, snap: LocalDaemonSnapshot): string | null => {
     switch (id) {
       case 'setup': return describeSetup(snap);
-      case 'update': return describeUpdate(deps.pluginVersion);
+      case 'update': return describeUpdate(deps.pluginVersion, snap.harnesses);
       case 'reset': return DESCRIBE_RESET;
       case 'remove': return DESCRIBE_REMOVE;
       case 'restart': return snap.assessment.status === 'running' ? describeRestart() : null;
@@ -143,6 +178,24 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
       // A cancel is not a failure; a real failure is also kept on the controller (lastError) for the next render.
       if (!(err instanceof LocalDaemonAbortedError)) localError = err instanceof Error ? err.message : String(err);
     }
+    await refresh();
+  };
+
+  const signInHarness = async (harness: 'codex'): Promise<void> => {
+    localError = null;
+    signInEl.empty();
+    const link = signInEl.createDiv('ct-local-daemon-signin-link');
+    const status = signInEl.createDiv('ct-local-daemon-signin-status');
+    const result = await deps.signInHarness!(harness, {
+      onProgress: (text) => status.setText(text),
+      onUrl: (url) => {
+        link.empty();
+        link.createEl('a', { text: 'Browser didn’t open? Open the sign-in page', href: url, attr: { target: '_blank', rel: 'noopener' } });
+        try { deps.openUrl?.(url); } catch { /* the link is the fallback */ }
+      },
+    });
+    signInEl.empty();
+    if (!result.ok) localError = result.error;
     await refresh();
   };
 

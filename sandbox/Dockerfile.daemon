@@ -108,11 +108,16 @@ ARG OPENCODE_VERSION=1.18.32
 USER root
 RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/harnesses
 USER agentthreads
+# opencode-ai fetches/links its platform binary in a postinstall script. npm 11 blocks dependency install scripts by
+# default (a silent skip leaves a launcher with no binary), so that one package is explicitly allowed; older npm
+# ignores the flag. The `--version` calls fail the build if either CLI did not end up runnable.
 RUN set -eu; \
     pkgs=""; \
     if [ "$INSTALL_CODEX" = "1" ]; then pkgs="$pkgs @openai/codex@${CODEX_VERSION}"; fi; \
     if [ "$INSTALL_OPENCODE" = "1" ]; then pkgs="$pkgs opencode-ai@${OPENCODE_VERSION}"; fi; \
-    if [ -n "$pkgs" ]; then npm install --global --no-audit --no-fund --prefix /opt/harnesses $pkgs; fi
+    if [ -n "$pkgs" ]; then npm install --global --no-audit --no-fund --allow-scripts=opencode-ai --prefix /opt/harnesses $pkgs; fi; \
+    if [ "$INSTALL_CODEX" = "1" ]; then /opt/harnesses/bin/codex --version; fi; \
+    if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi
 ENV PATH="/opt/harnesses/bin:${PATH}"
 
 FROM ${BASE_IMAGE} AS with-claude

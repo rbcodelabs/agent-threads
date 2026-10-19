@@ -3504,6 +3504,8 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       cancel: () => controller.cancel(),
       openUrl: (url) => { try { window.open(url, '_blank'); } catch { /* the panel keeps a link */ } },
       signIn: (handlers) => controller.signIn(handlers),
+      signInHarness: (harness, handlers) => controller.signInHarness(harness, handlers),
+      setHarnesses: (harnesses) => controller.setHarnesses(harnesses),
       run: (id, opts) => {
         switch (id) {
           case 'setup': return showAfter(() => controller.setUp(opts))();

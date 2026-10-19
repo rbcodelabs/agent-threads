@@ -7,7 +7,7 @@
 import { RUNTIME_PKG_BYTES } from '../sandboxRuntime';
 import type { LocalDaemonSnapshot } from './controller';
 import type { DegradedReason } from './assess';
-import { VAULT_GUEST_PATH } from './spec';
+import { HARNESS_LABEL, LOCAL_HARNESSES, VAULT_GUEST_PATH, manualLoginCommand, normalizeHarnesses, type LocalHarness } from './spec';
 
 export type LocalDaemonButtonId =
   | 'setup' | 'start' | 'stop' | 'restart' | 'reset' | 'update' | 'sign-in' | 'remove';
@@ -21,11 +21,29 @@ export interface LocalDaemonButton {
 
 export type LocalDaemonTone = 'ok' | 'warn' | 'error' | 'muted';
 
+/** One harness toggle with its observed state. Never carries a credential, only whether one exists. */
+export interface HarnessRow {
+  id: LocalHarness;
+  label: string;
+  enabled: boolean;
+  /** The last enabled harness cannot be turned off (the daemon needs at least one). */
+  locked: boolean;
+  /** Plain-language CLI / sign-in state. */
+  status: string;
+  tone: LocalDaemonTone;
+  /** The exact terminal line to run for a login that cannot be done from Settings. */
+  command?: string;
+  /** A Sign in button is offered (Codex device login from Settings). */
+  signIn?: 'codex';
+}
+
 export interface LocalDaemonView {
   statusLabel: string;
   tone: LocalDaemonTone;
   /** Label/value rows under the status. */
   lines: Array<{ label: string; value: string }>;
+  /** Per-harness toggles and state (empty while busy or on an unsupported Mac). */
+  harnessRows: HarnessRow[];
   buttons: LocalDaemonButton[];
   /** A short explanation of what to do about a problem, when there is one. */
   hint?: string;
@@ -57,7 +75,38 @@ export function formatProgress(p: { label: string; percent?: number; line?: stri
   return `${p.label}${pct}${p.line ? `: ${p.line}` : ''}`;
 }
 
+/** CLI and sign-in state per harness, from what was observed (a probe of the running container plus the Claude credential). */
+export function buildHarnessRows(snap: LocalDaemonSnapshot): HarnessRow[] {
+  const o = snap.observed;
+  const enabled = normalizeHarnesses(snap.harnesses);
+  const running = snap.assessment.status === 'running' || snap.assessment.status === 'needs-sign-in' || snap.assessment.status === 'degraded';
+  return LOCAL_HARNESSES.map((id): HarnessRow => {
+    const on = enabled.includes(id);
+    const base = { id, label: HARNESS_LABEL[id], enabled: on, locked: on && enabled.length === 1 };
+    if (!on) return { ...base, status: 'Off', tone: 'muted' };
+    const probe = o.harnessProbe?.[id];
+    const claudeSignedIn = o.credentialInKeychain || o.credentialInVolume;
+    const signedIn = id === 'claude' ? claudeSignedIn : probe?.signedIn;
+    if (!running || !probe) {
+      const known = id === 'claude' ? (claudeSignedIn ? ', signed in' : ', not signed in yet') : '';
+      return { ...base, status: running ? `CLI state unknown${known}` : `On; checked while the daemon runs${known}`, tone: 'muted' };
+    }
+    if (!probe.cli) return { ...base, status: 'CLI is not in the daemon image yet. Apply changes to rebuild it.', tone: 'warn' };
+    if (signedIn) return { ...base, status: 'CLI installed, signed in', tone: 'ok' };
+    if (id === 'claude') return { ...base, status: 'CLI installed, needs sign-in', tone: 'warn' };
+    const command = manualLoginCommand(id, snap.containerName ?? 'agent-threads-local', snap.containerBinary);
+    if (id === 'codex') return { ...base, status: 'CLI installed, not signed in', tone: 'warn', signIn: 'codex', command };
+    return { ...base, status: 'CLI installed, not signed in. OpenCode\'s login is an interactive provider picker, so run this in a terminal:', tone: 'warn', command };
+  });
+}
+
 export function buildLocalDaemonView(snap: LocalDaemonSnapshot): LocalDaemonView {
+  const view = buildViewCore(snap);
+  const hide = view.busy || snap.assessment.status === 'unsupported' || snap.assessment.status === 'conflict';
+  return { ...view, harnessRows: hide ? [] : buildHarnessRows(snap) };
+}
+
+function buildViewCore(snap: LocalDaemonSnapshot): Omit<LocalDaemonView, 'harnessRows'> & { harnessRows?: HarnessRow[] } {
   const { assessment: a, observed: o } = snap;
   const error = snap.lastError ? shorten(snap.lastError.message) : undefined;
   const lines: LocalDaemonView['lines'] = [];
@@ -99,8 +148,8 @@ export function buildLocalDaemonView(snap: LocalDaemonSnapshot): LocalDaemonView
     case 'running':
       return {
         ...base, statusLabel: 'Running', tone: 'ok', busy: false,
-        buttons: [{ id: 'stop', label: 'Stop' }, { id: 'restart', label: 'Restart' }, ...(update ? [update] : []), ...tail],
-        ...(a.drift ? { hint: 'Its settings changed since it was created. Restart does not apply them; Update does.' } : {}),
+        buttons: [{ id: 'stop', label: 'Stop' }, { id: 'restart', label: 'Restart' }, ...(update ? [update] : a.drift ? [{ id: 'update' as const, label: 'Apply changes', cta: true }] : []), ...tail],
+        ...(a.drift ? { hint: 'Its settings (for example the harnesses) changed since it was created. Restart does not apply them; Apply changes does, and rebuilds the image if a CLI was added.' } : {}),
         ...(updateHint ? { hint: updateHint } : {}),
       };
     case 'needs-sign-in':
@@ -132,12 +181,23 @@ function maskedList(snap: LocalDaemonSnapshot): string {
 
 // ── Confirmation text ────────────────────────────────────────────────────────
 
+/** What the image build downloads for an enabled set, in words. */
+export function agentClis(harnesses?: readonly string[]): string {
+  const set = normalizeHarnesses(harnesses);
+  const parts = [
+    ...(set.includes('claude') ? ['the Claude CLI from Anthropic'] : []),
+    ...(set.includes('codex') ? ['the Codex CLI from npm (@openai/codex)'] : []),
+    ...(set.includes('opencode') ? ['the OpenCode CLI from npm (opencode-ai)'] : []),
+  ];
+  return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0];
+}
+
 /** Disclosure shown before Set up: what is downloaded, what is mounted and how, and what the VM can reach. */
 export function describeSetup(snap: LocalDaemonSnapshot): string {
   const o = snap.observed;
   const items: string[] = [];
   if (!o.runtimeInstalled) items.push(`the container runtime (about ${Math.round(RUNTIME_PKG_BYTES / 1e6)} MB) and a Linux kernel`);
-  if (!o.imageReady) items.push('the daemon image from ghcr.io (several hundred MB) and, while building the final layer, the Claude CLI from Anthropic');
+  if (!o.imageReady) items.push(`the daemon image from ghcr.io (several hundred MB) and, while building the final layer, ${agentClis(snap.harnesses)}`);
   const download = items.length > 0 ? `This downloads ${items.join(' and ')}. ` : 'Nothing needs downloading. ';
   const vault = snap.vaultPath ?? 'your vault';
   const masked = maskedList(snap);
@@ -155,8 +215,8 @@ export const DESCRIBE_REMOVE =
   'This stops and deletes the local daemon, its data and its access token, and removes it from Remote daemons. Threads that ran '
   + 'there stay in your list but cannot continue. Your Claude sign-in is kept. Continue?';
 
-export function describeUpdate(pluginVersion: string): string {
-  return `This downloads the daemon image for v${pluginVersion}, rebuilds the Claude layer, and replaces the container. Its data and access token are kept. `
+export function describeUpdate(pluginVersion: string, harnesses?: readonly string[]): string {
+  return `This downloads the daemon image for v${pluginVersion}, rebuilds the layer that adds ${agentClis(harnesses)}, and replaces the container. Its data and access token are kept. `
     + 'Any turn running right now is interrupted and resumes on your next message. Continue?';
 }
 

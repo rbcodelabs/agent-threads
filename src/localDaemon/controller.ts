@@ -11,6 +11,7 @@
 import type { LocalDaemonSettings, RemoteDaemonConfig } from '../types';
 import type { ProbeResult } from '../remote/DaemonClient';
 import { CONTAINER_AUTH_TOKEN_SECRET, type ContainerSignInResult } from '../claudeContainerAuthCli';
+import type { HarnessLoginResult } from './harnessLogin';
 import type { VmCommandRunner } from '../sandboxVm';
 import {
   assess,
@@ -32,6 +33,7 @@ import {
   logTail,
   mintControlToken,
   prepareVolumes,
+  probeHarnesses,
   pullDaemonImage,
   removeContainer,
   removeImage,
@@ -60,7 +62,10 @@ import {
   localImageRef,
   mountsFor,
   specSignature,
+  normalizeHarnesses,
+  manualLoginCommand,
   assertMountablePath,
+  type LocalHarness,
   SpecError,
   type LocalDaemonSpec,
 } from './spec';
@@ -97,6 +102,8 @@ export interface LocalDaemonDeps {
   unregister(): Promise<void>;
   /** Runs the in-container `claude setup-token` flow. Absent where it cannot run (the sign-in then reports so). */
   signInRunner?(opts: { containerName: string; containerBinaryPath: string } & SignInHandlers): Promise<ContainerSignInResult>;
+  /** Runs `codex login --device-auth` in the container. Absent where it cannot run (the panel then shows the manual command). */
+  harnessSignInRunner?(opts: { harness: 'codex'; containerName: string; onProgress: (text: string) => void; onUrl: (url: string) => void }): Promise<HarnessLoginResult>;
   /** State changed: a UI should re-read {@link LocalDaemonController.getBusy} / take a new snapshot. */
   onChange?(): void;
   log?(message: string): void;
@@ -126,6 +133,11 @@ export interface LocalDaemonSnapshot {
   vaultPath?: string;
   /** For disclosure text: what is mounted, and how. */
   mounts: Array<{ host: string; guest: string; readOnly: boolean }>;
+  /** The harnesses the user turned on (Claude is the default). */
+  harnesses: LocalHarness[];
+  /** The daemon container's name and the managed `container` CLI, for the exact manual commands the panel shows. */
+  containerName?: string;
+  containerBinary?: string;
   busy: LocalDaemonProgress | null;
   lastError: { code: string; message: string } | null;
 }
@@ -150,7 +162,7 @@ const ACTION_LABEL: Partial<Record<PlanAction, string>> = {
   'install-runtime': 'Installing the container runtime',
   'start-runtime': 'Starting the container runtime',
   'pull-image': 'Downloading the daemon image',
-  'build-image': 'Adding the Claude CLI to the image',
+  'build-image': 'Adding the agent CLIs to the image',
   'create-volumes': 'Creating storage',
   'prepare-volumes': 'Preparing storage',
   'remove-container': 'Replacing the container',
@@ -275,15 +287,19 @@ export class LocalDaemonController {
     return MASKED_VAULT_DIRS.filter((d) => this.deps.isDirectory(`${vaultPath.replace(/\/+$/, '')}/${d}`));
   }
 
+  private harnesses(): LocalHarness[] {
+    return normalizeHarnesses(this.settings().harnesses);
+  }
+
   private specFor(vaultPath: string, version: string, port: number): LocalDaemonSpec {
-    return { vaultPath, version, hostPort: port, maskedDirs: this.maskedDirs(vaultPath), memory: LOCAL_DAEMON_MEMORY, cpus: LOCAL_DAEMON_CPUS };
+    return { vaultPath, version, hostPort: port, maskedDirs: this.maskedDirs(vaultPath), memory: LOCAL_DAEMON_MEMORY, cpus: LOCAL_DAEMON_CPUS, harnesses: this.harnesses() };
   }
 
   private emptyObserved(partial: Partial<Observed>): Observed {
     return {
       supported: true, runtimeInstalled: false, runtimeRunning: false, imageReady: false, volumesPresent: false,
       container: 'absent', health: 'na', tokenInKeychain: false, tokenAccepted: 'unknown',
-      credentialInKeychain: false, credentialInVolume: false, registered: false, ...partial,
+      credentialInKeychain: false, credentialInVolume: false, registered: false, harnesses: this.harnesses(), ...partial,
     };
   }
 
@@ -345,11 +361,13 @@ export class LocalDaemonController {
       }
     }
     const credentialInVolume = running ? await credentialFilePresent(d, vaultPath) : settings.credentialWritten === true;
+    const harnesses = this.harnesses();
+    const harnessProbe = running && health === 'ok' ? await probeHarnesses(d, vaultPath) : null;
     const observed: Observed = {
       supported: true,
       runtimeInstalled: true,
       runtimeRunning: true,
-      imageReady: await imagePresent(d, localImageRef(version)),
+      imageReady: await imagePresent(d, localImageRef(version, harnesses)),
       volumesPresent: await volumesPresent(d, vaultPath),
       container: ours === 'absent' ? 'absent' : ours === 'foreign' ? 'foreign' : running ? 'running' : 'stopped',
       ...(containerVersion ? { containerVersion } : {}),
@@ -361,6 +379,8 @@ export class LocalDaemonController {
       credentialInKeychain,
       credentialInVolume,
       registered: isRegistrationCurrent(this.deps.getRegistered(), vaultPath, port),
+      harnesses,
+      ...(harnessProbe ? { harnessProbe } : {}),
     };
     return finish(observed, version, welcome?.daemonVersion ?? containerVersion);
   }
@@ -368,6 +388,7 @@ export class LocalDaemonController {
   /** What a UI renders. Cheap enough to call when a panel opens; never mutates. */
   async snapshot(): Promise<LocalDaemonSnapshot> {
     const o = await this.observe();
+    const binary = o.observed.supported ? (await readRuntime(this.deps.runtime)).binary : undefined;
     return {
       assessment: o.assessment,
       observed: o.observed,
@@ -376,6 +397,9 @@ export class LocalDaemonController {
       port: o.port,
       ...(o.vaultPath ? { vaultPath: o.vaultPath } : {}),
       mounts: o.vaultPath ? mountsFor({ vaultPath: o.vaultPath, maskedDirs: this.maskedDirs(o.vaultPath) }) : [],
+      harnesses: this.harnesses(),
+      ...(o.vaultPath ? { containerName: containerNameFor(o.vaultPath) } : {}),
+      ...(binary ? { containerBinary: binary } : {}),
       busy: this.getBusy(),
       lastError: this.lastError,
     };
@@ -442,15 +466,15 @@ export class LocalDaemonController {
           await pullDaemonImage(step(), o.version);
           break;
         case 'build-image':
-          await buildThinImage(step(), o.version);
-          await verifyThinImage(step(), o.version);
+          await buildThinImage(step(), o.version, this.harnesses());
+          await verifyThinImage(step(), o.version, this.harnesses());
           break;
         case 'create-volumes':
           await createVolumes(step(), vaultPath);
           break;
         case 'prepare-volumes': {
           const credential = this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET);
-          await prepareVolumes(step(), { vaultPath, version: o.version, ...(credential ? { credential } : {}) });
+          await prepareVolumes(step(), { vaultPath, version: o.version, harnesses: this.harnesses(), ...(credential ? { credential } : {}) });
           await this.patchSettings({ credentialWritten: !!credential });
           break;
         }
@@ -474,7 +498,7 @@ export class LocalDaemonController {
           const credential = this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET);
           if (!credential) throw new LocalDaemonError('credential', 'There is no Claude sign-in to apply.');
           await stopContainer(step(), vaultPath);
-          await prepareVolumes(step(), { vaultPath, version: o.version, credential });
+          await prepareVolumes(step(), { vaultPath, version: o.version, harnesses: this.harnesses(), credential });
           await this.patchSettings({ credentialWritten: true });
           await this.runAndAwaitHealthy(step(), vaultPath, () => startContainer(step(), vaultPath), port, ctx);
           break;
@@ -554,7 +578,8 @@ export class LocalDaemonController {
    */
   async ensureRunning(opts: RunOptions = {}): Promise<void> {
     const settings = this.settings();
-    const signedIn = settings.credentialWritten === true || !!this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET);
+    // Only Claude has a credential this plugin manages; with Claude off there is nothing to wait for here.
+    const signedIn = !this.harnesses().includes('claude') || settings.credentialWritten === true || !!this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET);
     if (settings.enabled && signedIn && !this.op && this.deps.secrets.get(LOCAL_DAEMON_TOKEN_SECRET) && await this.deps.healthz(settings.port || DEFAULT_HOST_PORT)) return;
     const a = await this.start(opts);
     if (a.status === 'needs-sign-in' || a.needsSignIn) {
@@ -595,11 +620,12 @@ export class LocalDaemonController {
       if (!before.observed.runtimeRunning) await this.reconcileRuntimeOnly(ctx);
       const d: StepDeps = { runner: this.deps.createRunner(), signal: ctx.signal, report: (line) => ctx.emit({ line, ...percentOf(line) }) };
       ctx.emit({ label: ACTION_LABEL['pull-image'] });
-      if (!(await imagePresent(d, localImageRef(version)))) {
+      const harnesses = this.harnesses();
+      if (!(await imagePresent(d, localImageRef(version, harnesses)))) {
         await pullDaemonImage(d, version);
         ctx.emit({ label: ACTION_LABEL['build-image'] });
-        await buildThinImage(d, version);
-        await verifyThinImage(d, version);
+        await buildThinImage(d, version, harnesses);
+        await verifyThinImage(d, version, harnesses);
       }
       ctx.emit({ label: 'Replacing the daemon' });
       const oldVersion = before.observed.containerVersion;
@@ -607,7 +633,7 @@ export class LocalDaemonController {
       await removeContainer(d, vaultPath);
       await createVolumes(d, vaultPath);
       const credential = this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET);
-      await prepareVolumes(d, { vaultPath, version, ...(credential ? { credential } : {}) });
+      await prepareVolumes(d, { vaultPath, version, harnesses, ...(credential ? { credential } : {}) });
       await this.patchSettings({ credentialWritten: credential ? true : this.settings().credentialWritten === true });
       const port = await this.choosePort(this.settings().port || DEFAULT_HOST_PORT);
       await this.patchSettings({ port });
@@ -616,7 +642,7 @@ export class LocalDaemonController {
       if (result.update !== 'none' && result.status !== 'degraded') {
         throw new LocalDaemonError('incompatible', `The daemon still reports a different version than v${version} after updating.`);
       }
-      if (oldVersion && oldVersion !== version) await removeImage(d, oldVersion);
+      if (oldVersion && oldVersion !== version) await removeImage(d, oldVersion, harnesses);
       return result;
     });
   }
@@ -652,7 +678,7 @@ export class LocalDaemonController {
           await stopContainer(d, vaultPath);
           await removeContainer(d, vaultPath);
           const v = state.labels[LABEL_VERSION];
-          if (v) await removeImage(d, v);
+          if (v) await removeImage(d, v, this.harnesses());
         }
         if (opts.removeData !== false) await removeVolumes(d, vaultPath);
       }
@@ -669,6 +695,7 @@ export class LocalDaemonController {
   signIn(handlers: SignInHandlers, opts: RunOptions = {}): Promise<{ ok: true } | { ok: false; error: string }> {
     return this.runOp('sign-in', opts, async (ctx) => {
       this.requireEnabled();
+      if (!this.harnesses().includes('claude')) return { ok: false as const, error: 'Claude is turned off for the local daemon. Turn it on first.' };
       if (this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET)) {
         await this.reconcile(ctx);
         return { ok: true as const };
@@ -686,6 +713,49 @@ export class LocalDaemonController {
       }
       ctx.emit({ label: ACTION_LABEL['apply-credential'] });
       await this.reconcile(ctx);
+      return { ok: true as const };
+    });
+  }
+
+  /**
+   * Turn harnesses on or off. Stored in settings only: the container and image are changed by the next Start /
+   * Apply changes (the spec signature differs, so the daemon shows the change as pending until then). Never empty.
+   */
+  async setHarnesses(next: readonly string[]): Promise<LocalHarness[]> {
+    if (this.op) throw new LocalDaemonError('busy', `${OP_LABEL[this.op.kind]} is still running. Wait for it to finish before changing harnesses.`);
+    const normalized = normalizeHarnesses(next);
+    await this.patchSettings({ harnesses: normalized });
+    this.notify();
+    return normalized;
+  }
+
+  /**
+   * Codex sign-in for the daemon: `codex login --device-auth` inside the container (URL + one-time code, nothing to
+   * paste back). The credential is created by the CLI in the daemon's data volume; this plugin never sees or stores it.
+   * OpenCode has no non-interactive login, so it is refused here with the exact command to run (`manualLoginCommand`).
+   */
+  signInHarness(harness: Exclude<LocalHarness, 'claude'>, handlers: Pick<SignInHandlers, 'onProgress' | 'onUrl'>, opts: RunOptions = {}): Promise<{ ok: true } | { ok: false; error: string }> {
+    return this.runOp('sign-in', opts, async (ctx) => {
+      this.requireEnabled();
+      const vaultPath = this.requireVault();
+      const manual = async (): Promise<string> => manualLoginCommand(harness, containerNameFor(vaultPath), (await readRuntime(this.deps.runtime)).binary ?? undefined);
+      if (!this.harnesses().includes(harness)) return { ok: false as const, error: `${harness} is turned off for the local daemon. Turn it on and apply the change first.` };
+      if (harness !== 'codex' || !this.deps.harnessSignInRunner) {
+        return { ok: false as const, error: `${harness} cannot be signed in from Settings. Run this in a terminal:\n${await manual()}` };
+      }
+      ctx.emit({ label: 'Signing in to Codex' });
+      await this.reconcile(ctx);
+      const d: StepDeps = { runner: this.deps.createRunner(), signal: ctx.signal };
+      const before = await probeHarnesses(d, vaultPath);
+      if (before && before.codex?.cli === false) {
+        return { ok: false as const, error: 'The Codex CLI is not in the daemon image. Apply the harness change (Update) so the image is rebuilt with it.' };
+      }
+      const result = await this.deps.harnessSignInRunner({ harness: 'codex', containerName: containerNameFor(vaultPath), ...handlers });
+      if (!result.ok) return { ok: false as const, error: `${result.error}\nOr run this in a terminal:\n${await manual()}` };
+      const after = await probeHarnesses(d, vaultPath);
+      if (after && after.codex?.signedIn === false) {
+        return { ok: false as const, error: `Codex reported success but no login was found in the daemon. Run this in a terminal:\n${await manual()}` };
+      }
       return { ok: true as const };
     });
   }

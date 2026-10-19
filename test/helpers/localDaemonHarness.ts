@@ -34,6 +34,7 @@ export interface HarnessOptions {
   secrets?: Record<string, string>;
   maskedDirs?: string[];
   signIn?: LocalDaemonDeps['signInRunner'];
+  harnessSignIn?: LocalDaemonDeps['harnessSignInRunner'];
   existingRegistration?: RemoteDaemonConfig;
 }
 
@@ -104,6 +105,7 @@ export function makeHarness(opts: HarnessOptions = {}) {
     register: async (c) => { registered = c; },
     unregister: async () => { registered = undefined; },
     ...(opts.signIn ? { signInRunner: opts.signIn } : {}),
+    ...(opts.harnessSignIn ? { harnessSignInRunner: opts.harnessSignIn } : {}),
     healthAttempts: 3,
     healthDelayMs: 0,
   };
