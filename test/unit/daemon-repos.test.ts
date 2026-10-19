@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 const manager = (extra: Partial<ConstructorParameters<typeof ReposManager>[0]> = {}): ReposManager => new ReposManager({
-  dataDir, root, creds: new CredStore(dataDir), getRepos: () => stored, setRepos: (r) => { stored = r; }, allowLocalUrls: true, ...extra,
+  dataDir, root, creds: new CredStore(dataDir), env: { PATH: process.env.PATH, HOME: process.env.HOME }, getRepos: () => stored, setRepos: (r) => { stored = r; }, allowLocalUrls: true, ...extra,
 });
 
 describe('repoUrlProblem', () => {
@@ -254,5 +254,36 @@ describe('ReposManager authentication', () => {
     const creds = withToken();
     creds.push('github', 0, {});
     expect(manager({ creds }).sessionEnv()).toEqual({});
+  });
+
+  describe('daemon environment fallback', () => {
+    it('uses GH_TOKEN, then GITHUB_TOKEN, from the daemon environment when nothing is pushed', () => {
+      expect(manager({ env: { GH_TOKEN: 'env-gh', GITHUB_TOKEN: 'env-github' } }).sessionEnv().GH_TOKEN).toBe('env-gh');
+      const env = manager({ env: { GITHUB_TOKEN: 'env-github' } }).sessionEnv();
+      expect(env).toMatchObject({ GH_TOKEN: 'env-github', AGENT_THREADS_GIT_PASSWORD: 'env-github' });
+      expect(env.GIT_ASKPASS).toBeTruthy();
+    });
+    it('a pushed credential keeps precedence, and the env token takes over once it expires', () => {
+      const creds = withToken();
+      const m = manager({ creds, env: { GH_TOKEN: 'env-gh' } });
+      expect(m.sessionEnv().GH_TOKEN).toBe(TOKEN);
+      creds.push('github', 0, {});
+      expect(m.sessionEnv().GH_TOKEN).toBe('env-gh');
+      expect(m.hasToken()).toBe(true);
+    });
+    it('hasToken is false with neither, and blank env values are ignored', () => {
+      expect(manager({ env: { GH_TOKEN: '  ' } }).hasToken()).toBe(false);
+    });
+    it('exposes the env token values for the redactor', () => {
+      expect(manager({ env: { GH_TOKEN: 'a', GITHUB_TOKEN: 'b' } }).envSecretValues()).toEqual(['a', 'b']);
+      expect(manager({ env: {} }).envSecretValues()).toEqual([]);
+    });
+    it('the env token is scrubbed from a failed sync message', async () => {
+      const runner: GitRunner = async () => { throw new Error('fatal: Authentication failed for env-secret-tok'); };
+      const m = manager({ git: runner, env: { GH_TOKEN: 'env-secret-tok' } });
+      stored = [{ name: 'p', url: 'https://github.com/o/p.git' }];
+      const r = (await m.sync(undefined, true)).repos[0];
+      expect(r.error).not.toContain('env-secret-tok');
+    });
   });
 });

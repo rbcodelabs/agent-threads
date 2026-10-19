@@ -132,3 +132,13 @@ git clone https://github.com/<owner>/<repo>.git && cd <repo> && git log -1 --for
 # On the local daemon: the credential the plugin pushed (field names only, never the value)
 container exec --user 10001 <agent-threads-local-…> ls /var/lib/agent-threads/creds
 ```
+
+**Fallback when pushes stop.** The pushed credential expires after 15 minutes
+(`GITHUB_CREDS_TTL_SEC`), so a sleeping host or a failed refresh would otherwise leave the
+daemon with no token. The daemon then falls back to its own `GH_TOKEN` / `GITHUB_TOKEN`
+environment (set it in the service `EnvironmentFile` or `deploy/compose.env`); a valid
+pushed credential still takes precedence. If neither exists and `gh auth status` fails, new
+sessions show a one-time notice: "GitHub auth unavailable in the daemon: push/PR commands
+will fail." Note the environment is read when a session starts, so an already-running
+session does not pick up a token that appears later.
+

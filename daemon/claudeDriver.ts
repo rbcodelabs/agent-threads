@@ -68,6 +68,8 @@ export interface ClaudeDriverDeps {
   sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
   /** A session is starting in this folder (lets the daemon refresh a stale clone in the background). */
   onSessionStart?: (cwd: string) => void;
+  /** Resolves to a warning to show in the thread (once per session), or null. Never awaited by session start. */
+  authPreflight?: () => Promise<string | null>;
 }
 
 // ── spec -> options ────────────────────────────────────────────────────────
@@ -283,10 +285,20 @@ export class HarnessSessionDriver implements SessionDriver {
       preApprove: (toolName) => isProxiedHostTool(toolName, ctx.hostTools?.manifest() ?? {}),
     });
     try { deps.onSessionStart?.(ctx.spec.cwd); } catch { /* a refresh must never stop a session from starting */ }
+    void this.runAuthPreflight();
     this.ready = this.harness.start(options).catch((err: unknown) => {
       this.emit({ name: 'onError', args: [toWireArg(err instanceof Error ? err : new Error(String(err)))] } as WireEvent);
       this.scheduleState();
     });
+  }
+
+  /** One-time-per-session notice when GitHub auth is missing. Fire-and-forget: it must never delay or fail a session. */
+  private async runAuthPreflight(): Promise<void> {
+    if (!this.deps.authPreflight) return;
+    try {
+      const notice = await this.deps.authPreflight();
+      if (notice && !this.closed) this.emit({ name: 'onNotification', args: [notice, 'high'] } as WireEvent);
+    } catch { /* advisory only */ }
   }
 
   // ── state ────────────────────────────────────────────────────────────────
@@ -611,6 +623,7 @@ export interface ClaudeDriverFactoryOptions {
   /** See `ClaudeDriverDeps.sessionEnv` / `onSessionStart`. */
   sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
   onSessionStart?: (cwd: string) => void;
+  authPreflight?: () => Promise<string | null>;
 }
 
 /**
@@ -641,7 +654,7 @@ export function createClaudeDriverFactory(opts: ClaudeDriverFactoryOptions = {})
   const daemonMcp = Object.keys(configured).length
     ? () => resolveDaemonMcpServers(configured, (name) => opts.creds?.lookup(name))
     : undefined;
-  return (ctx) => new HarnessSessionDriver(ctx, { createHarness, secretEnv, requestTimeoutMs: opts.requestTimeoutMs, ...(daemonMcp ? { daemonMcp } : {}), ...(opts.sessionEnv ? { sessionEnv: opts.sessionEnv } : {}), ...(opts.onSessionStart ? { onSessionStart: opts.onSessionStart } : {}) }, opts.now);
+  return (ctx) => new HarnessSessionDriver(ctx, { createHarness, secretEnv, requestTimeoutMs: opts.requestTimeoutMs, ...(daemonMcp ? { daemonMcp } : {}), ...(opts.sessionEnv ? { sessionEnv: opts.sessionEnv } : {}), ...(opts.onSessionStart ? { onSessionStart: opts.onSessionStart } : {}), ...(opts.authPreflight ? { authPreflight: opts.authPreflight } : {}) }, opts.now);
 }
 
 /** Neutral names for the generalized driver; the Claude-named exports stay for existing callers. */

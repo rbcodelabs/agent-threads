@@ -160,4 +160,28 @@ describe('the agent\'s process environment', () => {
     expect(leaks).toEqual([]);
     rmSync(workspace, { recursive: true, force: true });
   });
+
+  it.each([
+    ['a notice when the preflight reports missing GitHub auth', 'GitHub auth unavailable', true],
+    ['no notice when the preflight is satisfied', null, false],
+  ])('journals %s, without delaying the session start', async (_name, notice, expected) => {
+    const made: ScriptedHarness[] = [];
+    const workspace = tempDir('repos-ws-');
+    mkdirSync(join(workspace, 'proj'));
+    const td = await startTestDaemon({
+      dataDir,
+      config: { harness: 'claude', workspaces: [workspace] },
+      driverFactory: createClaudeDriverFactory({ createHarness: scriptedFactory(made), env: {}, authPreflight: async () => notice }),
+    });
+    cleanups.push(() => td.cleanup());
+    const c = await client(td);
+    await c.cmd('session.open', { threadId: 't', spec: { harness: 'claude', cwd: join(workspace, 'proj'), permissionMode: 'default', extraEnvRaw: '' } });
+    await c.cmd('attach', { ch: 't:t', afterSeq: 0 });
+    for (let i = 0; i < 100 && !made[0]?.options; i++) await sleep(5);
+    await sleep(50);
+    const notices = c.events().filter((f) => f.name === 'onNotification');
+    expect(notices.length).toBe(expected ? 1 : 0);
+    if (expected) expect(JSON.stringify(notices[0])).toContain('GitHub auth unavailable');
+    rmSync(workspace, { recursive: true, force: true });
+  });
 });
