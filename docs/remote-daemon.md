@@ -761,6 +761,12 @@ machine. List them in Settings, Remote, edit the daemon, **Repositories** (one p
   for the hosts of your repositories and github.com. It is never on a command line, in a clone URL or in `.git/config`, and a
   URL that contains credentials is refused. The agent's own process gets the same token as `GH_TOKEN` (for `gh`) plus the
   askpass settings (so `git push` over https works); nothing else does.
+  **Durable fallback:** if no pushed credential is live (never pushed, or its TTL lapsed because the host stopped
+  refreshing it), the daemon uses its own `GH_TOKEN` / `GITHUB_TOKEN` environment (for example from the systemd
+  `EnvironmentFile` or `deploy/compose.env`). A pushed credential always wins while it is valid. The environment token is
+  scrubbed from logs and transcripts like any other secret. When neither exists and `gh auth status` fails, a session
+  start shows a one-time "GitHub auth unavailable in the daemon" notice in the thread (the probe is cached for 60 s and
+  never delays the session).
 - **Status** (`repos.status`, `read` scope): `cloned`, `stale` (last good fetch over 24 hours ago, or the last fetch failed),
   `auth failed` (the remote refused the token, or none is stored), `not cloned yet`, `syncing`, or `failed` (any other git
   error, scrubbed of the token). Changing the list needs an `admin` token, like `creds.push`; a `control` token can only look.
