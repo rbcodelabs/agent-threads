@@ -10385,3 +10385,8 @@ button.ct-agent-crumb:focus-visible {
   .ct-project-picker .ct-project-picker-sort-btn { min-height: 36px; }
   .ct-project-picker .ct-project-picker-input { min-height: 40px; }
 }
+
+/* Inline images from a remote thread (fetched with file.read). */
+.ct-message-assistant .ct-message-content img.ct-remote-img { max-width: 100%; border-radius: 4px; }
+.ct-message-assistant .ct-message-content img.ct-remote-img.is-loading { min-height: 48px; min-width: 48px; background: var(--background-modifier-hover); }
+.ct-remote-img-unavailable { color: var(--text-muted); font-style: italic; font-size: var(--font-ui-smaller); }

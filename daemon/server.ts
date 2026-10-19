@@ -24,6 +24,7 @@ import { ReposManager } from './repos';
 import { SyncedMcpStore } from './syncedMcp';
 import { pruneIdleWorktrees } from './worktreePrune';
 import { listSubfolders, listWorkspaces } from './workspaces';
+import { readImageFile } from './fileRead';
 import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, PRE_AUTH_MAX_FRAME_BYTES, capabilitiesFor, type ServerContext, type Timings } from './connection';
 import { ControlRegistry } from './controlRegistry';
 import { fakeHarnessFactory } from './fakeHarness';
@@ -208,6 +209,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     checkPath: (path) => describePathAccess(path, sessionPolicy),
     listWorkspaces: () => listWorkspaces(existsSync(config.repoRoot) ? sessionPolicy : configuredPolicy),
     listPath: (path) => listSubfolders(path, sessionPolicy),
+    readFile: (path) => readImageFile(path, sessionPolicy),
     timings: { ...DEFAULT_TIMINGS, ...options.timings },
     maxOutboundBytes: options.maxOutboundBytes ?? MAX_OUTBOUND_BYTES,
     audit,
