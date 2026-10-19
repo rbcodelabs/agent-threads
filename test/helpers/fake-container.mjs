@@ -57,12 +57,19 @@ if (a === 'image' && b === 'rm') {
 
 if (a === 'build') {
   if (fails.has('build')) { err('curl: (6) Could not resolve host: claude.ai'); done(1); }
-  const ba = flag('--build-arg').split('=');
-  const base = ba[1];
+  const buildArgs = Object.fromEntries(flagAll('--build-arg').map((a) => { const i = a.indexOf('='); return [a.slice(0, i), a.slice(i + 1)]; }));
+  const base = buildArgs.BASE_IMAGE;
+  const dockerfileText = readFileSync(flag('-f'), 'utf8');
+  // The CLIs the built image carries: Claude if its layer is in the Dockerfile, Codex/OpenCode if the build arg is 1.
+  const harnesses = [
+    ...(dockerfileText.includes('claude.ai/install.sh') ? ['claude'] : []),
+    ...(buildArgs.INSTALL_CODEX === '1' && dockerfileText.includes('with-harnesses') ? ['codex'] : []),
+    ...(buildArgs.INSTALL_OPENCODE === '1' && dockerfileText.includes('with-harnesses') ? ['opencode'] : []),
+  ];
   if (!state.images[base]) { err(`base image ${base} not found`); done(1); }
   const dockerfile = readFileSync(flag('-f'), 'utf8');
   if (!dockerfile.includes('FROM ${BASE_IMAGE}')) { err('Dockerfile does not use BASE_IMAGE'); done(1); }
-  state.images[flag('--tag')] = { built: true, label: flag('--label') };
+  state.images[flag('--tag')] = { built: true, label: flag('--label'), harnesses, buildArgs };
   out('build done');
   done(0);
 }
@@ -86,6 +93,8 @@ if (a === 'run') {
     // one-shot: verify or prepare
     const script = args[args.indexOf('-c') + 1] ?? '';
     if (script.includes('LOCAL_DAEMON_IMAGE_OK')) {
+      const missing = ['claude', 'codex', 'opencode'].filter((h) => script.includes(`command -v ${h} `) && !(state.images[image]?.harnesses ?? ['claude']).includes(h));
+      if (missing.length) { err(`${missing[0]}: not found`); done(1); }
       if (state.images[image]?.built) { out('/opt/claude/.local/bin/claude\n/usr/local/bin/agent-threads\n/usr/bin/git\nLOCAL_DAEMON_IMAGE_OK'); done(0); }
       err('claude: not found'); done(1);
     }
@@ -163,6 +172,15 @@ if (a === 'exec') {
   const c = state.containers[name];
   if (!c || c.state !== 'running') { err(`container ${name} is not running`); done(1); }
   const cmd = afterUser.slice(1);
+  if (cmd[0] === 'sh' && cmd[1] === '-c' && String(cmd[2]).includes('codex.auth')) {
+    // The harness probe: CLIs from the image the container runs, logins from the data volume (state.volumes[v].auth).
+    const dataVol = c.volumes.map((v) => v.split(':')[0]).find((v) => v.endsWith('-data'));
+    const have = state.images[c.image]?.harnesses ?? ['claude'];
+    if (fails.has('exec:probe')) { err('probe failed'); done(1); }
+    for (const h of ['claude', 'codex', 'opencode']) out(`${h}.cli=${have.includes(h) ? 1 : 0}`);
+    for (const h of ['codex', 'opencode']) out(`${h}.auth=${state.volumes[dataVol]?.auth?.[h] ? 1 : 0}`);
+    done(0);
+  }
   if (cmd[0] === 'test' && cmd[1] === '-s') {
     const dataVol = c.volumes.map((v) => v.split(':')[0]).find((v) => v.endsWith('-data'));
     done(state.volumes[dataVol]?.credential ? 0 : 1);

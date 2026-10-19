@@ -69,6 +69,26 @@ describe('remote thread through ThreadManager', () => {
     manager.destroy();
   });
 
+  it('adds the mounted-folders block only when the registry reports mounts for the daemon', async () => {
+    const { td, manager, registry } = await setup();
+    const promptOf = (id: string): string => (JSON.parse(readFileSync(join(td.dataDir, 'sessions', `${id}.json`), 'utf8')) as { spec: { appendSystemPrompt?: string } }).spec.appendSystemPrompt ?? '';
+    const run = async (label: string): Promise<string> => {
+      const t = manager.createRemoteThread(label, { daemonId: 'box', remoteCwd: '/srv/workspaces/x', clientId: 'c' });
+      await manager.sendMessage(t.id, '/tokens 3 burst=3 delay=1');
+      await until(() => t.status === 'waiting' && t.messages.some((m) => m.role === 'assistant'), `${label} turn`);
+      return promptOf(t.id);
+    };
+
+    expect(await run('none')).not.toContain('Mounted folders');
+
+    registry.mountsOf = () => [];
+    expect(await run('empty')).not.toContain('Mounted folders');
+
+    registry.mountsOf = () => [{ host: '/Users/me/projects/compass', guest: '/work/compass', readOnly: false }];
+    expect(await run('mounted')).toContain('/work/compass (read-write) <- /Users/me/projects/compass');
+    manager.destroy();
+  });
+
   it('sends the vault-mirror addendum only for a thread whose remote cwd is inside the daemon\'s vault root', async () => {
     const { td, manager } = await setup({ vaultMapping: { remoteRoot: '/home/user/vault' } });
     const promptOf = (id: string): string => (JSON.parse(readFileSync(join(td.dataDir, 'sessions', `${id}.json`), 'utf8')) as { spec: { appendSystemPrompt?: string } }).spec.appendSystemPrompt ?? '';
@@ -152,12 +172,6 @@ describe('remote thread through ThreadManager', () => {
       manager.setThreadProject(thread.id, project.id, true);
       expect(thread.cwd).toBe('/srv/workspaces/b');
     }
-  });
-
-  it('refuses harness switching for a remote thread', async () => {
-    const { manager } = await setup();
-    const thread = manager.createRemoteThread('nope', { daemonId: 'box', remoteCwd: '/srv/workspaces/x', clientId: 'c' });
-    await expect(manager.switchHarness(thread.id, 'codex', async () => undefined)).rejects.toThrow(/Claude only/);
   });
 
   it('fails clearly when the daemon was removed from settings', async () => {

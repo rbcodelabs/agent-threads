@@ -52,6 +52,7 @@ import { mergeMcpServers } from './mcpServerMerge';
 import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
 import { redactGithubSecrets } from './githubCredentials';
+import { matchesHostExecPrefix } from './hostExecPrefix';
 import { canAlwaysAllow } from './permissionDetail';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
@@ -84,6 +85,8 @@ import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
 import { DaemonRegistry } from './remote/DaemonRegistry';
+import { McpSyncEngine, normalizeDaemonMcpSync, wireTransport, type McpSyncTransport } from './remote/mcpSync';
+import { LOCAL_DAEMON_ID } from './localDaemon/spec';
 import { createRemoteFolderSource, type RemoteFolderSource } from './remote/folderSource';
 import { createRemoteReposSource, type RemoteReposSource } from './remote/repos';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
@@ -277,6 +280,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
   daemonRegistry: DaemonRegistry | null = null;
   /** Last MCP server status each remote daemon reported (shown in Settings, Remote). */
   readonly daemonMcpStatus = new DaemonMcpStatusStore();
+  /** Syncs the Settings MCP servers the user opted in for each remote daemon (see remote/mcpSync.ts). */
+  mcpSync: McpSyncEngine | null = null;
+  private localMcpTransport: McpSyncTransport | null = null;
   /** The managed daemon in a container on this Mac (desktop only; see src/localDaemon/). */
   localDaemon: import('./localDaemon/controller').LocalDaemonController | null = null;
   /** Delivers the Geode GitHub connection to the managed daemon (desktop with a Geode GitHub bridge only). */
@@ -648,6 +654,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       createSocket: createPluginWebSocketFactory(),
       clientVersion: this.manifest.version,
       getInstanceId: () => this.settings.remoteClientId,
+      getMounts: (daemonId) => (this.localDaemon && daemonId === LOCAL_DAEMON_ID ? this.localDaemon.currentMounts() : undefined),
+      getMcpSync: (daemonId) => (this.mcpSync ? { synced: this.mcpSync.syncedNamesOf(daemonId), reasonFor: (name) => this.mcpSync?.unsyncedReasonOf(daemonId, name) } : undefined),
       log: (message) => debugLog(message),
     });
     this.remoteFolders = createRemoteFolderSource(this.daemonRegistry);
@@ -656,6 +664,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.remoteDaemons = this.daemonRegistry;
     this.manager.daemonMcpStatus = this.daemonMcpStatus;
     this.setUpLocalDaemon();
+    this.setUpMcpSync();
     // Lets the manager detect sessions holding stale Google/OAuth proxy configs (per-send check).
     this.manager.proxyMcpServersForThread = (threadId) => ({
       ...(this.googleWorkspaceMcp?.serversForThread(threadId) ?? {}),
@@ -1062,6 +1071,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       // host_exec exists only for the managed local daemon (a container on this Mac). The app shows its Allow once / Deny
       // card before ANY proxied call that needs approval, so the handler's own prompt is satisfied by that card.
       let hostExec: HostExecHooks | undefined;
+      let preApprove: ((tool: string, input: Record<string, unknown>) => boolean) | undefined;
       let builtInCwd = thread.cwd;
       if (daemonConfig?.managed === 'local-container' && !Platform.isMobile) {
         hostExec = {
@@ -1069,6 +1079,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
           requestApproval: async () => true,
           redact: redactGithubSecrets,
         };
+        // Scoped standing approval, the only one host_exec has (never alwaysAllowedTools): a saved command prefix
+        // matched on whole tokens of a plain command. Read per call so a revoke in Settings applies at once; scheduled
+        // or headless threads get none. The executor asks this only for a call it is about to show a card for.
+        preApprove = (tool, input) =>
+          tool === 'host_exec'
+          && !this.manager.getThread(threadId)?.scheduledItemId
+          && typeof input.command === 'string'
+          && matchesHostExecPrefix(input.command, this.settings.hostExecAlwaysAllowedPrefixes ?? []);
         // The thread's cwd is a path in the container; its default on the Mac is the same folder under the vault.
         const mapping = daemonConfig.vaultMapping;
         builtInCwd = (mapping && thread.remote ? mapRemoteToLocal(mapping, this.manager.vaultRoot, thread.remote.remoteCwd) : undefined)
@@ -1093,7 +1111,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         routes = opt.withOptionalRoutes(routes, optionalIds);
         optionalTools = opt.optionalToolsFor(optionalIds);
       }
-      return new RemoteHostTools({ builtIn, mcpSources, overrides: routes, ...(optionalTools ? { optionalTools } : {}), log: m => debugLog(m) });
+      return new RemoteHostTools({ builtIn, mcpSources, overrides: routes, ...(optionalTools ? { optionalTools } : {}), ...(preApprove ? { preApprove } : {}), log: m => debugLog(m) });
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect
@@ -2641,6 +2659,65 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   /**
+   * Settings MCP servers on remote daemons: opt-ins live in `remoteDaemons[].mcpSync`; the engine pushes the
+   * definitions and exactly the secrets they reference (see remote/mcpSync.ts). Triggers: toggling or editing a
+   * server (Settings calls `onMcpSyncInputsChanged`), a daemon (re)connecting, and a thread about to start there.
+   */
+  private setUpMcpSync(): void {
+    const registry = this.daemonRegistry;
+    if (!registry) return;
+    const engine = new McpSyncEngine({
+      daemons: () => this.settings.remoteDaemons ?? [],
+      settings: () => this.settings,
+      readSecret: (name) => this.app.secretStorage.getSecret(secretStorageKey(name)) || undefined,
+      capabilitiesOf: (id) => registry.capabilitiesOf(id),
+      transportFor: (daemon) => {
+        if (daemon.managed === 'local-container') {
+          if (!Platform.isDesktopApp) return undefined;
+          const adapter = this.app.vault.adapter;
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { createLocalDaemonMcpTransport } = require('./localDaemon/wiring') as typeof import('./localDaemon/wiring');
+          this.localMcpTransport ??= createLocalDaemonMcpTransport({ vaultBasePath: () => (adapter instanceof FileSystemAdapter ? adapter.getBasePath() : null) });
+          return this.localMcpTransport;
+        }
+        const client = registry.clientFor(daemon.id);
+        return client ? wireTransport(client) : undefined;
+      },
+      saveSettings: () => this.saveSettings(),
+      log: (message) => debugLog(message),
+    });
+    this.mcpSync = engine;
+    normalizeDaemonMcpSync(this.settings.remoteDaemons ?? [], new Set(Object.keys(this.settings.mcpServers ?? {})));
+    const connected = new Set<string>();
+    this.register(registry.onState((daemonId, state) => {
+      if (state.status === 'connected') {
+        if (!connected.has(daemonId)) { connected.add(daemonId); engine.onConnected(daemonId); }
+      } else {
+        connected.delete(daemonId);
+      }
+    }));
+    // A daemon nothing else touches would never connect: wake the ones with opt-ins so their servers are in place.
+    this.app.workspace.onLayoutReady(() => {
+      for (const d of this.settings.remoteDaemons ?? []) {
+        if (Object.values(d.mcpSync ?? {}).some((e) => e.enabled) || (d.mcpSyncKinds?.length ?? 0) > 0) void registry.warm(d.id);
+      }
+    });
+    const prior = this.manager.beforeRemoteSend;
+    this.manager.beforeRemoteSend = async (daemonId, threadId) => {
+      await prior?.(daemonId, threadId);
+      await engine.ensureFresh(daemonId);
+    };
+    this.register(() => { this.mcpSync = null; });
+  }
+
+  /** Settings changed what would be synced (a server or secret added, edited, removed, re-scoped): re-evaluate every daemon. */
+  onMcpSyncInputsChanged(): void {
+    const names = new Set(Object.keys(this.settings.mcpServers ?? {}));
+    normalizeDaemonMcpSync(this.settings.remoteDaemons ?? [], names);
+    this.mcpSync?.onSettingsChanged();
+  }
+
+  /**
    * The managed local daemon (a container on this Mac). Desktop with a filesystem vault only. The container is
    * deliberately left running on unload and quit: surviving Geode is the point. An in-flight Set up is cancelled and
    * resumes idempotently the next time it is run.
@@ -3751,7 +3828,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       agentHarness?: AgentHarness;
       /** Project selected by a dispatch surface. Omit for deliberate Unassigned. */
       projectId?: string;
-      /** Run the thread on a remote daemon, in this folder on its machine (Claude only). */
+      /** Run the thread on a remote daemon, in this folder on its machine, with `agentHarness` (the daemon must offer it). */
       remote?: { daemonId: string; cwd: string };
     },
   ): Promise<string> {
@@ -3766,12 +3843,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
       if (!(this.settings.remoteDaemons ?? []).some((d) => d.id === opts.remote!.daemonId)) {
         throw new Error('That remote daemon is not configured. Add it under Settings, Remote daemons.');
       }
-      if ((opts.agentHarness ?? this.settings.agentHarness ?? 'claude') !== 'claude') {
-        throw new Error('Remote threads run Claude only for now.');
-      }
     }
+    // A remote thread carries the harness the user chose (Settings' default when the picker left it alone).
     const thread = opts?.remote
-      ? this.manager.createRemoteThread(title, { daemonId: opts.remote.daemonId, remoteCwd: opts.remote.cwd, clientId: this.settings.remoteClientId ?? 'unknown' }, project?.id)
+      ? this.manager.createRemoteThread(title, { daemonId: opts.remote.daemonId, remoteCwd: opts.remote.cwd, clientId: this.settings.remoteClientId ?? 'unknown', agentHarness: opts.agentHarness ?? this.settings.agentHarness ?? 'claude' }, project?.id)
       : this.manager.createThread(title, cwd, project?.id, opts?.agentHarness);
     if (opts?.model) this.manager.setThreadModel(thread.id, opts.model);
     const goalRevision = opts?.goal ? this.manager.setThreadGoal(thread.id, opts.goal) : undefined;

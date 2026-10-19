@@ -484,3 +484,29 @@ describe('update, reset, remove', () => {
     expect(h.readState().containers[h.name]).toBeTruthy();
   });
 });
+
+describe('currentMounts without a prior observe', () => {
+  it('includes shared folders on a brand-new controller', () => {
+    const h = makeHarness({ existingDirs: ['/Users/me/projects/repo'], settings: { enabled: false, port: 7433, folders: ['/Users/me/projects/repo'] } });
+    expect(h.controller.currentMounts()).toContainEqual({ host: '/Users/me/projects/repo', guest: '/work/repo', readOnly: false });
+  });
+
+  it('fires one background external-roots refresh, then serves the cached roots', async () => {
+    const roots = vi.fn(() => [{ label: 'Docs', path: '/Users/me/Docs' }]);
+    const h = makeHarness({ existingDirs: ['/Users/me/Docs'], externalRoots: roots });
+    expect(h.controller.currentMounts().some((m) => m.guest.startsWith('/ext/'))).toBe(false);
+    h.controller.currentMounts(); // second call before the first refresh settles must not start another
+    await vi.waitFor(() => expect(h.controller.currentMounts().some((m) => m.guest === '/ext/Docs')).toBe(true));
+    expect(roots).toHaveBeenCalledTimes(1);
+  });
+
+  it('survives a failing host bridge without an unhandled rejection', async () => {
+    const roots = vi.fn(() => { throw new Error('boom'); });
+    const h = makeHarness({ externalRoots: roots });
+    h.controller.currentMounts();
+    await vi.waitFor(() => expect(roots).toHaveBeenCalledTimes(1));
+    h.controller.currentMounts();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(roots).toHaveBeenCalledTimes(1);
+  });
+});

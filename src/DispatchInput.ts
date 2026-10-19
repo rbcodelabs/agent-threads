@@ -1,3 +1,4 @@
+import { gateHarness, type HarnessGate } from './remote/harnessSupport';
 import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness, type RemoteDaemonConfig } from './types';
 import { resolveRunOn, runOnSuffix, type RunOnRemote, type RunOnSelection } from './remote/runOn';
 import { suggestRemoteCwd } from './remote/vaultMapping';
@@ -103,6 +104,13 @@ export interface DispatchInputOptions {
     initialHarness: AgentHarness;
     /** Configured remote daemons; when non-empty the menu offers a "Run on" section. */
     getRemoteDaemons?: () => RemoteDaemonConfig[];
+    /**
+     * `welcome.capabilities` of a daemon as last seen, or undefined while it has not been reached. The menu uses them
+     * to disable a harness a selected daemon does not offer (no `harness.*` capability at all = an older daemon = Claude only).
+     */
+    getDaemonCapabilities?: (daemonId: string) => string[] | undefined;
+    /** Connect to a daemon so its capabilities become known; resolves when they are, or when it gives up. */
+    warmDaemon?: (daemonId: string) => Promise<void>;
     /**
      * The managed local daemon ("This Mac (container)") can run here but is not set up: the "Run on" section then
      * offers a set-up entry that opens its settings.
@@ -532,6 +540,16 @@ export class DispatchInput {
       new Notice(runOn.reason);
       return;
     }
+    // The menu already disables a harness the daemon does not offer; this catches a daemon that changed since
+    // (an older daemon after a reconnect) so the failure is a clear message here, not a refusal at session.open.
+    if (runOn.remote && this.selectedHarness) {
+      const daemon = this.remoteDaemons().find((d) => d.id === runOn.remote!.daemonId);
+      const gate = daemon ? this.gateHarnessOn(this.selectedHarness, daemon) : { ok: true as const };
+      if (!gate.ok) {
+        new Notice(gate.reason);
+        return;
+      }
+    }
 
     this.dispatching = true;
     this.inputEl.value = '';
@@ -626,10 +644,40 @@ export class DispatchInput {
     return this.options.harnessPicker?.getRemoteDaemons?.() ?? [];
   }
 
-  /** The Run-on choice that applies: only Claude threads can run remotely, and only on a daemon still configured. */
+  /** The Run-on choice that applies. Any harness can run remotely; whether the daemon offers it is checked by {@link gateHarnessOn}. */
   private effectiveRunOn(): RunOnSelection {
-    if (this.selectedHarness !== 'claude' || !this.selectedRunOn.daemonId) return {};
-    return this.selectedRunOn;
+    return this.selectedRunOn.daemonId ? this.selectedRunOn : {};
+  }
+
+  /** Can `daemon` host `harness`, going by what it advertised? Unknown capabilities do not block. */
+  private gateHarnessOn(harness: AgentHarness, daemon: RemoteDaemonConfig): HarnessGate {
+    return gateHarness(harness, this.options.harnessPicker?.getDaemonCapabilities?.(daemon.id), daemon.name);
+  }
+
+  /**
+   * Disable, with the reason beside it, every harness the selected daemon does not offer and every daemon that does
+   * not offer the selected harness. Re-run when capabilities arrive or the selection changes.
+   */
+  private applyRunOnGating(menu: HTMLElement): void {
+    const daemons = this.remoteDaemons();
+    const mark = (el: HTMLButtonElement, gate: HarnessGate): void => {
+      el.disabled = !gate.ok;
+      el.toggleClass('is-unavailable', !gate.ok);
+      el.setAttribute('aria-disabled', String(!gate.ok));
+      el.querySelector('.ct-harness-menu-note')?.remove();
+      if (gate.ok) { el.removeAttribute('title'); return; }
+      el.title = gate.reason;
+      el.createSpan({ cls: 'ct-harness-menu-note', text: gate.reason });
+    };
+    const selected = daemons.find((d) => d.id === this.selectedRunOn.daemonId);
+    for (const el of Array.from(menu.querySelectorAll<HTMLButtonElement>('[data-harness]'))) {
+      const harness = el.getAttribute('data-harness') as AgentHarness;
+      mark(el, selected ? this.gateHarnessOn(harness, selected) : { ok: true, known: true });
+    }
+    for (const el of Array.from(menu.querySelectorAll<HTMLButtonElement>('.ct-run-on-item[data-run-on]'))) {
+      const daemon = daemons.find((d) => d.id === el.getAttribute('data-run-on'));
+      mark(el, daemon && this.selectedHarness ? this.gateHarnessOn(this.selectedHarness, daemon) : { ok: true, known: true });
+    }
   }
 
   private openHarnessMenu(): void {
@@ -666,7 +714,7 @@ export class DispatchInput {
     }
     const daemons = this.remoteDaemons();
     const offerSetUp = this.options.harnessPicker?.localDaemonOffer?.available() === true;
-    if (this.selectedHarness === 'claude' && (daemons.length > 0 || offerSetUp)) this.renderRunOnSection(menu, daemons, offerSetUp);
+    if (daemons.length > 0 || offerSetUp) this.renderRunOnSection(menu, daemons, offerSetUp);
     this.settingsBtn?.setAttribute('aria-expanded', 'true');
     document.addEventListener('pointerdown', this.closeHarnessMenuOnPointerDown);
     document.addEventListener('keydown', this.closeHarnessMenuOnEscape);
@@ -711,6 +759,7 @@ export class DispatchInput {
         for (const el of Array.from(menu.querySelectorAll<HTMLElement>('.ct-run-on-item'))) {
           el.setAttribute('aria-checked', String((el.getAttribute('data-run-on') ?? 'local') === (choice.id ?? 'local')));
         }
+        this.applyRunOnGating(menu);
       });
     }
     if (offerSetUp) {
@@ -729,6 +778,15 @@ export class DispatchInput {
       });
     }
     this.refreshRunOnFolderRow(menu, daemons);
+    this.applyRunOnGating(menu);
+    // A daemon not reached yet has no capabilities: connect so the gating can say what it offers.
+    const picker = this.options.harnessPicker;
+    if (picker?.warmDaemon) {
+      for (const d of daemons) {
+        if (picker.getDaemonCapabilities?.(d.id)) continue;
+        void picker.warmDaemon(d.id).then(() => { if (this.harnessMenu === menu) this.applyRunOnGating(menu); });
+      }
+    }
   }
 
   /**

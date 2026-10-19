@@ -1,6 +1,8 @@
 /**
  * Real session host: a `SessionDriver` over a live `HarnessSession` (Claude's
- * long-lived `ThreadSession`, built through the existing `HarnessFactory`).
+ * long-lived `ThreadSession`, Codex's app-server session or an OpenCode server session, built through the
+ * existing `HarnessFactory` per `spec.harness`). The file keeps its historical name; nothing in it is Claude-only
+ * except the `claude` option block and the Claude credential.
  *
  * The harness is handed a `SessionCallbacks` object generated from
  * `CALLBACK_DISPOSITION`, so the wire event set cannot drift from the
@@ -14,12 +16,21 @@
  *   - `onRawEvent` goes to the daemon's own JSONL log and is never on the wire.
  */
 import { randomUUID } from 'node:crypto';
-import { accessSync, constants, readFileSync } from 'node:fs';
+import { accessSync, constants } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
 import type { SessionCallbacks } from '../src/ClaudeSession';
 import { createHarnessSession } from '../src/HarnessFactory';
-import type { ClaudeHarnessOptions, HarnessSession, HarnessSessionOptions } from '../src/HarnessSession';
+import { OPENCODE_HOST_TOOLS_SERVER } from '../src/OpenCodeHostTools';
+import {
+  resolveCodexPermissions,
+  type ClaudeHarnessOptions,
+  type CodexHarnessOptions,
+  type HarnessDynamicTool,
+  type HarnessMcpServerConfig,
+  type HarnessSession,
+  type HarnessSessionOptions,
+} from '../src/HarnessSession';
 import {
   CALLBACK_DISPOSITION,
   toWireArg,
@@ -29,15 +40,19 @@ import {
 } from '../src/protocol';
 import type { PluginSettings, Thread } from '../src/types';
 import type { CredStore } from './credStore';
+import { buildHostDynamicTools } from './hostDynamicTools';
+import { findHarnessBinary, isRealHarness, missingBinaryMessage, readClaudeCredentialFile, type RealHarness } from './harnesses';
+import { CLAUDE_THREADS_SERVER, buildHostServers, type HostServers } from './hostServers';
 import { SESSION_ENV_KIND_PATTERN } from '../src/protocol/spec';
-import { buildHostServers, type HostServers } from './hostServers';
+import { mergeDaemonMcpServers, type SyncedMcpStore } from './syncedMcp';
 import { RESERVED_MCP_NAMES, resolveDaemonMcpServers, type DaemonMcpServers, type ResolvedMcpServers } from './mcpServers';
+import { isReadOnlyDenylist } from './sessionPolicy';
 import type { DriverContext, DriverFactory, RequestKind, SessionDriver } from './sessionDriver';
 
 export interface ClaudeDriverDeps {
   /** Build the harness for a spec. Tests inject a scripted one. */
   createHarness(spec: RemoteSessionSpec): HarnessSession;
-  /** Extra env for the Claude process (e.g. a token read from `$CREDENTIALS_DIRECTORY`). */
+  /** Extra env for the Claude process only (e.g. a token read from `$CREDENTIALS_DIRECTORY`); other harnesses never get it. */
   secretEnv?: Record<string, string>;
   /**
    * A permission/question/plan/elicitation request nobody answers within this many ms is canceled
@@ -54,18 +69,89 @@ export interface ClaudeDriverDeps {
   sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
   /** A session is starting in this folder (lets the daemon refresh a stale clone in the background). */
   onSessionStart?: (cwd: string) => void;
+  /** Resolves to a warning to show in the thread (once per session), or null. Never awaited by session start. */
+  authPreflight?: () => Promise<string | null>;
 }
 
 // ── spec -> options ────────────────────────────────────────────────────────
 
+/** Codex efforts a client may ask for through `spec.sessionOptions.effort`; anything else is left to the model default. */
+const CODEX_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+
+export interface SessionOptionParts {
+  resume?: string;
+  callbacks: SessionCallbacks;
+  secretEnv?: Record<string, string>;
+  /** Claude only: the daemon's in-process MCP servers (`claude_threads` and the proxy servers). */
+  hostServers?: HostServers['servers'];
+  /** Codex and OpenCode: the same tools as plain definitions. */
+  dynamicTools?: HarnessDynamicTool[];
+  /** Server names the host tools use, for the reserved-name rule when `hostServers` is not set (Codex, OpenCode). */
+  hostServerNames?: string[];
+  daemonServers?: DaemonMcpServers;
+  preApprove?: (toolName: string) => boolean;
+}
+
 /**
- * Project a `RemoteSessionSpec` back onto `HarnessSessionOptions`. `secretEnv`
- * is never taken from the client.
+ * Project a `RemoteSessionSpec` back onto `HarnessSessionOptions`. VM routing
+ * (`claude.vm`) is never set, which is `harnessVmMode: 'never'`: the daemon is
+ * already the sandbox. `secretEnv`/`containerAuthToken` are never taken from
+ * the client. Only the option block of `spec.harness` is filled:
+ *   claude    sessionOptions (thinking, effort, agents, betas, ...), the SDK MCP servers, `preApprove`
+ *   codex     approval policy + sandbox from the permission mode (a read-only workspace pins the sandbox to
+ *             read-only for the life of the session), `sessionOptions.effort`, dynamic tools, external MCP servers
+ *   opencode  dynamic tools (served through its loopback bridge), external MCP servers
+ * Claude-specific `sessionOptions` (thinking, betas, agents, ...) have no equivalent elsewhere and are dropped.
  */
-export function specToSessionOptions(
-  spec: RemoteSessionSpec,
-  parts: { resume?: string; callbacks: SessionCallbacks; secretEnv?: Record<string, string>; hostServers?: HostServers['servers']; daemonServers?: DaemonMcpServers; preApprove?: (toolName: string) => boolean },
-): HarnessSessionOptions {
+export function specToSessionOptions(spec: RemoteSessionSpec, parts: SessionOptionParts): HarnessSessionOptions {
+  // The daemon's own servers win: a client-supplied http server must not stand in for `claude_threads` (whose
+  // tools the client treats as first-party) or for any server it proxies, nor for an operator-configured server
+  // (which carries the operator's credentials). `claude_threads` / `obsidian` stay reserved even if neither side
+  // currently defines them. The rule is the same for every harness.
+  const ownNames = new Set([...Object.keys(parts.hostServers ?? {}), ...(parts.hostServerNames ?? [])]);
+  const configured = Object.fromEntries(Object.entries(parts.daemonServers ?? {}).filter(([name]) => !RESERVED_MCP_NAMES.includes(name) && !ownNames.has(name)));
+  const passthrough = Object.entries(spec.mcpServers ?? {})
+    .filter(([name]) => !ownNames.has(name) && !(name in configured) && !RESERVED_MCP_NAMES.includes(name));
+  const external = (): Record<string, HarnessMcpServerConfig> => ({
+    ...Object.fromEntries(passthrough.map(([name, s]) => [name, { type: s.type, url: s.url, ...(s.headers ? { headers: s.headers } : {}) } as HarnessMcpServerConfig])),
+    ...configured,
+  });
+
+  const base: HarnessSessionOptions = {
+    cwd: spec.cwd,
+    permissionMode: spec.permissionMode,
+    extraEnvRaw: spec.extraEnvRaw ?? '',
+    callbacks: parts.callbacks,
+    ...(spec.disallowedTools?.length ? { disallowedTools: spec.disallowedTools } : {}),
+    ...(parts.resume ? { resume: parts.resume } : {}),
+    ...(spec.additionalDirectories?.length ? { additionalDirectories: spec.additionalDirectories } : {}),
+    ...(spec.model ? { model: spec.model } : {}),
+    ...(spec.appendSystemPrompt ? { appendSystemPrompt: spec.appendSystemPrompt } : {}),
+    ...(spec.resumeFallbackHistory ? { resumeFallbackHistory: spec.resumeFallbackHistory } : {}),
+    ...(parts.secretEnv && Object.keys(parts.secretEnv).length ? { secretEnv: parts.secretEnv } : {}),
+  };
+
+  if (spec.harness === 'codex') {
+    const codex: CodexHarnessOptions = {
+      ...resolveCodexPermissions(spec.permissionMode),
+      ...(isReadOnlyDenylist(spec.disallowedTools) ? { sandbox: 'read-only' as const, enforceReadOnly: true } : {}),
+    };
+    const effort = spec.sessionOptions?.effort;
+    if (effort && CODEX_EFFORTS.has(effort)) codex.effort = effort as NonNullable<CodexHarnessOptions['effort']>;
+    if (parts.dynamicTools?.length) codex.dynamicTools = parts.dynamicTools;
+    const mcp = external();
+    if (Object.keys(mcp).length) codex.mcpServers = mcp;
+    return { ...base, codex };
+  }
+
+  if (spec.harness === 'opencode') {
+    const opencode: NonNullable<HarnessSessionOptions['opencode']> = {};
+    if (parts.dynamicTools?.length) opencode.dynamicTools = parts.dynamicTools;
+    const mcp = external();
+    if (Object.keys(mcp).length) opencode.mcpServers = mcp;
+    return { ...base, opencode };
+  }
+
   const claude: ClaudeHarnessOptions = {};
   if (parts.preApprove) claude.preApprove = parts.preApprove;
   if (spec.disallowedTools?.length) claude.disallowedTools = spec.disallowedTools;
@@ -84,35 +170,11 @@ export function specToSessionOptions(
   if (spec.pluginPaths?.length) {
     claude.sessionOptions = { ...(claude.sessionOptions ?? {}), plugins: spec.pluginPaths.map((path) => ({ type: 'local' as const, path })) };
   }
-  // The daemon's own servers win: a client-supplied http server must not stand in for `claude_threads` (whose
-  // tools the client treats as first-party) or for any server it proxies, nor for an operator-configured server
-  // (which carries the operator's credentials). `claude_threads` / `obsidian` stay reserved even if neither side
-  // currently defines them.
   const own = parts.hostServers ?? {};
-  const configured = Object.fromEntries(Object.entries(parts.daemonServers ?? {}).filter(([name]) => !RESERVED_MCP_NAMES.includes(name) && !(name in own)));
-  const passthrough = Object.entries(spec.mcpServers ?? {})
-    .filter(([name]) => !(name in own) && !(name in configured) && !RESERVED_MCP_NAMES.includes(name));
   if (passthrough.length || Object.keys(own).length || Object.keys(configured).length) {
-    claude.mcpServers = {
-      ...Object.fromEntries(passthrough.map(([name, s]) => [name, { type: s.type, url: s.url, ...(s.headers ? { headers: s.headers } : {}) }])),
-      ...configured,
-      ...own,
-    } as never;
+    claude.mcpServers = { ...external(), ...own } as never;
   }
-  return {
-    cwd: spec.cwd,
-    permissionMode: spec.permissionMode,
-    extraEnvRaw: spec.extraEnvRaw ?? '',
-    callbacks: parts.callbacks,
-    ...(spec.disallowedTools?.length ? { disallowedTools: spec.disallowedTools } : {}),
-    ...(parts.resume ? { resume: parts.resume } : {}),
-    ...(spec.additionalDirectories?.length ? { additionalDirectories: spec.additionalDirectories } : {}),
-    ...(spec.model ? { model: spec.model } : {}),
-    ...(spec.appendSystemPrompt ? { appendSystemPrompt: spec.appendSystemPrompt } : {}),
-    ...(spec.resumeFallbackHistory ? { resumeFallbackHistory: spec.resumeFallbackHistory } : {}),
-    ...(parts.secretEnv && Object.keys(parts.secretEnv).length ? { secretEnv: parts.secretEnv } : {}),
-    claude,
-  };
+  return { ...base, claude };
 }
 
 /**
@@ -170,7 +232,16 @@ function toAttachments(images: unknown): Array<{ base64: string; mediaType: Wire
   return out;
 }
 
-export class ClaudeSessionDriver implements SessionDriver {
+/** The MCP server names the daemon's own tools occupy in this session (what a client's server must not take over). */
+function hostServerNames(ctx: DriverContext, hasLocalOrProxied: boolean): string[] {
+  const names = new Set(Object.keys(ctx.hostTools?.manifest() ?? {}));
+  if (hasLocalOrProxied && ctx.localTools?.enabled !== false) names.add(CLAUDE_THREADS_SERVER);
+  // OpenCode's loopback bridge for these tools is registered under this name; a client server must not take it.
+  if (ctx.spec.harness === 'opencode') names.add(OPENCODE_HOST_TOOLS_SERVER);
+  return [...names];
+}
+
+export class HarnessSessionDriver implements SessionDriver {
   private readonly harness: HarnessSession;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly ready: Promise<void>;
@@ -196,23 +267,39 @@ export class ClaudeSessionDriver implements SessionDriver {
     this._lastActivityAt = this.now();
     this.native = ctx.resume;
     this.harness = deps.createHarness(ctx.spec);
-    this.hostServers = buildHostServers({ ...ctx, onCwdChanged: (cwd, origin) => { this.cwdMoved = true; ctx.onCwdChanged?.(cwd, origin); } });
+    const hostCtx = { ...ctx, onCwdChanged: (cwd: string, origin?: string | null) => { this.cwdMoved = true; ctx.onCwdChanged?.(cwd, origin); } };
+    const harnessKind = ctx.spec.harness;
+    // Claude gets the host tools as in-process MCP servers (which follow the live manifest); Codex and OpenCode
+    // take plain tool definitions, fixed when the session starts.
+    this.hostServers = harnessKind === 'claude' ? buildHostServers(hostCtx) : { servers: {}, dispose: () => {} };
+    const dynamicTools = harnessKind === 'claude' ? [] : buildHostDynamicTools(hostCtx);
     this.emitState();
     const daemonMcp = deps.daemonMcp?.();
     this.unresolvedMcp = daemonMcp?.unresolved ?? [];
     const options = specToSessionOptions(ctx.spec, {
       resume: ctx.resume,
       callbacks: this.buildCallbacks(),
-      secretEnv: { ...deps.secretEnv, ...(deps.sessionEnv?.(ctx.spec) ?? {}) },
+      secretEnv: { ...(harnessKind === 'claude' ? deps.secretEnv : {}), ...(deps.sessionEnv?.(ctx.spec) ?? {}) },
       hostServers: this.hostServers.servers,
+      ...(harnessKind === 'claude' ? {} : { dynamicTools, hostServerNames: hostServerNames(ctx, dynamicTools.length > 0) }),
       ...(daemonMcp ? { daemonServers: daemonMcp.servers } : {}),
       preApprove: (toolName) => isProxiedHostTool(toolName, ctx.hostTools?.manifest() ?? {}),
     });
     try { deps.onSessionStart?.(ctx.spec.cwd); } catch { /* a refresh must never stop a session from starting */ }
+    void this.runAuthPreflight();
     this.ready = this.harness.start(options).catch((err: unknown) => {
       this.emit({ name: 'onError', args: [toWireArg(err instanceof Error ? err : new Error(String(err)))] } as WireEvent);
       this.scheduleState();
     });
+  }
+
+  /** One-time-per-session notice when GitHub auth is missing. Fire-and-forget: it must never delay or fail a session. */
+  private async runAuthPreflight(): Promise<void> {
+    if (!this.deps.authPreflight) return;
+    try {
+      const notice = await this.deps.authPreflight();
+      if (notice && !this.closed) this.emit({ name: 'onNotification', args: [notice, 'high'] } as WireEvent);
+    } catch { /* advisory only */ }
   }
 
   // ── state ────────────────────────────────────────────────────────────────
@@ -489,25 +576,9 @@ export class ClaudeSessionDriver implements SessionDriver {
 
 // ── factory + environment discovery ────────────────────────────────────────
 
-/** Where an operator's `claude` usually lives, after PATH. */
-function candidateBinaries(env: NodeJS.ProcessEnv, home: string): string[] {
-  const onPath = (env.PATH ?? '').split(delimiter).filter(Boolean).map((d) => join(d, 'claude'));
-  return [
-    ...onPath,
-    join(home, '.npm-global/bin/claude'),
-    join(home, '.local/bin/claude'),
-    join(home, '.claude/local/claude'),
-    '/usr/local/bin/claude',
-    '/usr/bin/claude',
-  ];
-}
-
+/** Kept for existing callers (doctor, tests); the discovery rules live in `harnesses.ts`. */
 export function findClaudeBinary(explicit?: string, env: NodeJS.ProcessEnv = process.env, home = homedir()): string | null {
-  const executable = (p: string): boolean => {
-    try { accessSync(p, constants.X_OK); return true; } catch { return false; }
-  };
-  if (explicit) return executable(explicit) ? explicit : null;
-  return candidateBinaries(env, home).find(executable) ?? null;
+  return findHarnessBinary('claude', explicit, env, home);
 }
 
 /**
@@ -519,14 +590,8 @@ export function findClaudeBinary(explicit?: string, env: NodeJS.ProcessEnv = pro
  */
 export function resolveCredentialEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   if (env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY) return {};
-  const dir = env.CREDENTIALS_DIRECTORY;
-  if (!dir) return {};
-  try {
-    const token = readFileSync(join(dir, 'claude-token'), 'utf8').trim();
-    return token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : {};
-  } catch {
-    return {};
-  }
+  const token = readClaudeCredentialFile(env.CREDENTIALS_DIRECTORY);
+  return token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : {};
 }
 
 /** Which credential the Claude process will use, for the startup log (never the value). */
@@ -544,37 +609,60 @@ export function describeCredentialSource(env: NodeJS.ProcessEnv = process.env, h
 }
 
 export interface ClaudeDriverFactoryOptions {
-  /** Test seam; the default builds a real `ThreadSession` through `HarnessFactory`. */
+  /** Test seam; the default builds a real session for `spec.harness` through `HarnessFactory`. */
   createHarness?: (spec: RemoteSessionSpec) => HarnessSession;
   claudeBinaryPath?: string;
+  codexBinaryPath?: string;
+  opencodeBinaryPath?: string;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   /** See `ClaudeDriverDeps.requestTimeoutMs`. */
   requestTimeoutMs?: number;
   /** Operator-configured servers (`config.mcpServers`) and the store their `${NAME}` placeholders resolve from. */
   mcpServers?: DaemonMcpServers;
+  /** Definitions synced by the app (`mcp.sync`): merged beneath `mcpServers`, which wins a name clash. */
+  syncedMcp?: SyncedMcpStore;
   creds?: CredStore;
   /** See `ClaudeDriverDeps.sessionEnv` / `onSessionStart`. */
   sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
   onSessionStart?: (cwd: string) => void;
+  authPreflight?: () => Promise<string | null>;
+}
+
+/**
+ * Build the real harness for a spec: find that harness's CLI (explicit path, then PATH and the usual install dirs)
+ * and construct its session through `HarnessFactory`. A missing CLI throws a clear error, which `session.open`
+ * reports to the client; it never takes the daemon down.
+ */
+export function createRealHarness(
+  spec: RemoteSessionSpec,
+  binaries: Partial<Record<RealHarness, string>>,
+  env: NodeJS.ProcessEnv = process.env,
+): HarnessSession {
+  const kind = spec.harness;
+  if (!isRealHarness(kind)) throw new Error(`harness "${String(kind)}" cannot be started by this daemon`);
+  const binary = findHarnessBinary(kind, binaries[kind], env);
+  if (!binary) throw new Error(missingBinaryMessage(kind));
+  // Same construction point ThreadManager uses; only the fields it reads are populated.
+  const settings = { claudeBinaryPath: '', codexBinaryPath: '', opencodeBinaryPath: '', [`${kind}BinaryPath`]: binary } as unknown as PluginSettings;
+  return createHarnessSession({ agentHarness: kind } as Thread, settings);
 }
 
 export function createClaudeDriverFactory(opts: ClaudeDriverFactoryOptions = {}): DriverFactory {
   const env = opts.env ?? process.env;
   const secretEnv = resolveCredentialEnv(env);
-  const createHarness = opts.createHarness ?? ((): ((spec: RemoteSessionSpec) => HarnessSession) => {
-    return () => {
-      const binary = findClaudeBinary(opts.claudeBinaryPath, env);
-      if (!binary) {
-        throw new Error('claude CLI not found: install Claude Code for the daemon user or set claudeBinaryPath / AGENT_THREADS_CLAUDE_BINARY');
-      }
-      // Same construction point ThreadManager uses; only the fields it reads are populated.
-      return createHarnessSession({ agentHarness: 'claude' } as Thread, { claudeBinaryPath: binary } as PluginSettings);
-    };
-  })();
+  const binaries = { claude: opts.claudeBinaryPath, codex: opts.codexBinaryPath, opencode: opts.opencodeBinaryPath };
+  const createHarness = opts.createHarness ?? ((spec: RemoteSessionSpec) => createRealHarness(spec, binaries, env));
   const configured = opts.mcpServers ?? {};
-  const daemonMcp = Object.keys(configured).length
-    ? () => resolveDaemonMcpServers(configured, (name) => opts.creds?.lookup(name))
+  // Precedence, low to high: spec passthrough, synced, config.json (applied in `specToSessionOptions`: it drops a
+  // passthrough server whose name is in `daemonServers`). Read per session so a sync or a rotated credential reaches
+  // the next session without a restart.
+  const synced = opts.syncedMcp;
+  const daemonMcp = Object.keys(configured).length || synced
+    ? () => resolveDaemonMcpServers(mergeDaemonMcpServers(synced?.active() ?? {}, configured).servers, (name) => opts.creds?.lookup(name))
     : undefined;
-  return (ctx) => new ClaudeSessionDriver(ctx, { createHarness, secretEnv, requestTimeoutMs: opts.requestTimeoutMs, ...(daemonMcp ? { daemonMcp } : {}), ...(opts.sessionEnv ? { sessionEnv: opts.sessionEnv } : {}), ...(opts.onSessionStart ? { onSessionStart: opts.onSessionStart } : {}) }, opts.now);
+  return (ctx) => new HarnessSessionDriver(ctx, { createHarness, secretEnv, requestTimeoutMs: opts.requestTimeoutMs, ...(daemonMcp ? { daemonMcp } : {}), ...(opts.sessionEnv ? { sessionEnv: opts.sessionEnv } : {}), ...(opts.onSessionStart ? { onSessionStart: opts.onSessionStart } : {}), ...(opts.authPreflight ? { authPreflight: opts.authPreflight } : {}) }, opts.now);
 }
+
+/** Neutral names for the generalized driver; the Claude-named exports stay for existing callers. */
+export { HarnessSessionDriver as ClaudeSessionDriver, createClaudeDriverFactory as createDriverFactory };

@@ -137,6 +137,11 @@ export interface CodexHarnessOptions {
   computerUseEnabled?: boolean;
   approvalPolicy: 'untrusted' | 'on-request' | 'never';
   sandbox: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /**
+   * Keep the sandbox read-only whatever the permission mode says, including after a live `setPermissionMode`.
+   * Set by the daemon for a session in a read-only workspace; the user's own threads never set it.
+   */
+  enforceReadOnly?: boolean;
   /** Omitted to use the app-server/model default. Ultra enables proactive native agents where supported. */
   effort?: Exclude<import('./types').PluginSettings['codexEffort'], 'default'>;
   /** Standalone skill roots registered for this app-server process. */

@@ -33,7 +33,7 @@ Non-goals (v1):
 
 - Exposing the local daemon to other devices (Tailscale, LAN). It binds the Mac's loopback only.
 - Replacing user-managed remote daemons. A local daemon is one more entry in "Remote daemons", marked managed.
-- Codex/OpenCode. The daemon is Claude only today [C docs/remote-daemon.md].
+- Codex/OpenCode were out of scope for v1 (the daemon was Claude only). They are now optional per-harness toggles: section 4.5.
 - GitHub credentials, skills and keychain secrets inside the daemon. Same gaps as any remote daemon today [C].
 - Stop-on-idle by timer (section 5.3).
 - Intel Macs, macOS < 26, Linux, Windows, mobile.
@@ -171,6 +171,8 @@ product decision [C docs/sandbox-vms.md]).
 
 ### 4.4 Image pipeline
 
+(Harness toggles, section 4.5, make the layer below depend on the enabled set; Claude only is exactly what is described here.)
+
 ```mermaid
 flowchart LR
   P["pull ghcr.io/rbcodelabs/agent-threads-daemon:V\n(--platform linux/arm64)"] --> B["build thin layer\nBASE_IMAGE=ghcr...:V\ntag agent-threads-daemon-local:V\nlabel daemon-version=V"]
@@ -189,6 +191,44 @@ flowchart LR
   no CLI (no redistribution grant) [C]. The confirmation dialog says so, as the sandbox one does.
 - Pull/build are long, chatty and abortable: reuse the runner options `onOutput`, `signal`, `maxBufferBytes`, timeouts
   `SANDBOX_PULL_TIMEOUT_MS` / `SANDBOX_BUILD_TIMEOUT_MS` [C].
+
+### 4.5 Harness toggles (Claude, Codex, OpenCode)
+
+`LocalDaemonSettings.harnesses` (absent = `['claude']`) holds which agent CLIs the user turned on. It drives four things:
+
+- **Image.** `thinDockerfileFor(set)` composes the layer: `ARG BASE_IMAGE` / `FROM`, then the `with-harnesses` stage body of
+  `sandbox/Dockerfile.daemon` if Codex or OpenCode is on (build args `INSTALL_CODEX=1` / `INSTALL_OPENCODE=1`; npm into
+  `/opt/harnesses`, outside the volumes; `--allow-scripts=opencode-ai` because npm 11 blocks dependency install scripts and
+  `opencode-ai`'s postinstall links its binary; `--version` calls fail the build if a CLI is not runnable), then the `with-claude`
+  body if Claude is on. Claude only is byte for byte the old `THIN_DOCKERFILE`. **Pin test:** both stage bodies are embedded
+  verbatim and compared with the real file (`WITH_CLAUDE_STAGE_BODY` as before, plus `WITH_HARNESSES_STAGE_BODY`); the Dockerfile
+  keeps `with-harnesses` before `with-claude` so the default target and the Claude body are untouched.
+- **Image tag.** `localImageRef(version, set)` keeps `agent-threads-daemon-local:<version>` for Claude only and appends the set
+  (`-claude-codex`) otherwise, so changing a toggle can never reuse a stale layer and the existing tag is unchanged for current users.
+- **Spec signature (drift).** `specSignature` hashes the image ref and, for a non-default set only, the set. A Claude-only
+  container made before this existed therefore does not read as drifted after an upgrade. A toggle makes the signature differ:
+  stopped, `assess` plans `remove-container`, `pull-image`/`build-image` (new tag not built yet), `prepare-volumes`,
+  `create-container`; running, it reports `drift` and the panel offers **Apply changes** (the existing `update` operation, which
+  builds the image for the current set and replaces the container, keeping the volumes). The version rule (section 8) is unchanged.
+- **Daemon allowed set.** `--env AGENT_THREADS_HARNESSES=<set>` on `run`, so a session for a harness that is off is refused by
+  the daemon's policy. With Claude off nothing waits for a Claude credential (`needsSignIn` and `credential-not-applied` apply
+  only when Claude is on).
+
+State is observed, not stored: while the container runs, one `exec` (`HARNESS_PROBE_SCRIPT`) reports `<h>.cli=0|1` (executable in
+the image) and `codex.auth` / `opencode.auth` (a non-empty login file in the persisted HOME; sizes only, never contents).
+Claude's sign-in stays the existing credential file / keychain signal. The panel renders the probe per harness and says
+"unknown" when there is no probe (stopped, or the probe failed).
+
+**Logins (extends 6.2).** Codex: `codex login --device-auth` via `container exec` (`harnessLogin.ts`): it prints a URL and a
+one-time code, polls until approved and writes `~/.codex/auth.json` itself, so there is no paste-back and no pty; Geode relays
+the URL/code, then re-probes to confirm a login really landed (a "success" with no login is reported as a failure). The
+credential lives only in the data volume (the daemon user's HOME), so it persists across restarts, updates and container
+replacement, is removed by Reset, and never touches settings, the keychain, argv or logs; errors are token-redacted. OpenCode:
+`opencode auth login` is an interactive provider picker, so the panel shows the exact `container exec -it ...` line (managed
+`container` path quoted) instead. Every failure path includes the matching manual command. **Unverified [U]:** the device flow
+over a non-tty `container exec` and the exact CLI output format were not run live (no Mac runtime or Docker on the build host);
+the parser (`parseDeviceLogin`) is tolerant and the failure path degrades to the manual command. The Dockerfile stage was also
+not built here.
 
 ## 5. State machine and lifecycle
 
@@ -380,12 +420,13 @@ without `MIN_LOCAL_DAEMON_VERSION`, or a breaking additive-protocol change has n
 | Not enough disk | free-space check [C `RUNTIME_MIN_FREE_BYTES`], pull/build error text | Names the step | Free space, Retry |
 | Pull denied or 404, package private | Classify stderr: `denied|unauthorized|403` vs `not found|manifest unknown|404` | "Image is not publicly pullable" vs "image for vX is not published yet" | Maintainer sets package Public (release checklist item, already noted in `Dockerfile.daemon`/workflow summary [C]); user can retry later. No registry credentials in v1 (open question 7) |
 | Pull network failure | exit code + tail | "Could not reach ghcr.io" | Retry; partial layers are cached |
-| Build fails (Claude installer download) | build exit, tail | "Installing the Claude CLI failed" | Retry; verify step asserts `claude` exists [C pattern] |
+| Build fails (CLI download: Claude installer, npm for Codex/OpenCode) | build exit, tail | "Adding the agent CLIs to the daemon image (installs ...)" | Retry; verify step asserts every enabled CLI exists; the Dockerfile stage fails if `codex`/`opencode` is not runnable |
 | Port in use | `probeHostLoopbackPort` [C vmPortForward.ts] before `run`, and `run` error text | Auto-picks the next free port and tells the user; if the occupant is our own labelled container, adopt it | Stored in settings; recreate to apply |
 | Name conflict / stale container | `container ls -a` by label | none (handled) | Labelled + same spec: adopt/start. Labelled + different spec: recreate. Unlabelled with our name: refuse, never delete a container we did not create |
 | Volume `EACCES` (chown skipped or wrong uid) | daemon exits; `logs` tail | "The daemon cannot write its data folder" | Re-run prepare one-shot; Reset data |
 | Health never ok | bounded `/healthz` poll after `run`, then `container logs` tail | Failed with the log tail | Retry / Reset |
 | Token rejected | `DaemonClient` state `unauthorized` | "Reconnecting with a new token" | Rotate token automatically; if that fails, Reset data |
+| Codex / OpenCode not signed in, or CLI missing from the image | harness probe (`exec`) | Per-harness row: "not signed in" with a Sign in button (Codex) or the exact command (OpenCode); "CLI is not in the image yet. Apply changes" | Sign in / run the command / Apply changes |
 | No Claude credential | status `NeedsSignIn`; `doctor --json` in the container as a hint [C doctor.ts; sees the exec environment, so a hint only] | "Sign in to Claude" | Sign-in flow |
 | Daemon older/newer than plugin | section 8 | Banner: Update / update the plugin | Update |
 | Runtime service dies while running | next observation: runner fails or `health down` | Degraded | Start runtime, restart container |
@@ -423,6 +464,7 @@ Layers, cheapest first:
 3. **Real daemon without a container**: start `node dist/agent-threads.cjs serve --fake-harness` on a free port in a temp data dir and run the controller's token-mint and registration against it via a fake-container `exec` that shells to that bundle. Checks the real `--json` output shape and `DaemonClient` connection and the version rule against a real `welcome` (extends the pattern in `scripts/e2e-geode-remote.mts` [C]).
 4. **Panel tests** (jsdom, injected deps, like `sandboxSetupPanel.test.ts`): every status renders the right buttons; confirm text lists the mounts and "read-write"; mobile renders nothing; progress and cancel.
 5. **Boundary checks in CI**: `npm run check:core` and `daemon-boundary` stay green with zero manifest change; a test asserts no file under `src/localDaemon/` is in `core-files.json` and no closure file imports it.
+   Harness toggles are covered the same way: `localDaemon-harnesses.test.ts` (spec, Dockerfile pin, signature, probe and login parsing, assess plans, view rows, controller against the fake container with `AGENT_THREADS_HARNESSES`, image tags, apply/start rebuilds, sign-in paths) and `localDaemon-panel-harnesses.test.ts` (jsdom).
 6. **Screenshot tests** for the Settings block states (Linux baselines via the dev-builder remote runner, per CLAUDE.md; a Mac render is a visual QA artifact only).
 7. **Opt-in smoke on a supported Mac** (`scripts/smoke-local-daemon.mts`, like `smoke-sandbox-vm.mjs` [C]): real setup against the real runtime using a dev-only `harness: 'fake'` spec option (`--fake-harness`) so no tokens are spent and no sign-in is needed; asserts healthz, wrong-token rejection, ordered stream (reusing `scripts/smoke-daemon.mts`), stop/start/adopt, update path with two versions if available. Linux CI cannot run this (no runtime), so it is a release-checklist item.
 8. **Headless Geode e2e on the Mac** (`GEODE_HEADLESS=1`, throwaway `--user-data-dir`, `npm run e2e:kill` afterwards, per CLAUDE.md): click Set up in the real settings UI with the fake harness, start a remote thread on "This Mac (container)", quit Geode mid-turn, reopen, transcript completes. This is the acceptance test for the whole feature.

@@ -7,6 +7,8 @@
  * change is picked up at the next reconnect because `getToken` is read then.
  */
 import type { RemoteDaemonConfig, RemoteHostToolsSettings, RemoteVaultMapping } from '../types';
+import type { McpSyncView } from './mcpPartition';
+import type { RemoteMount } from './sessionSpec';
 import { DaemonClient, daemonWsUrl, type ConnectionState, type WebSocketFactory } from './DaemonClient';
 
 /** What `HarnessFactory` / `ThreadManager` need; implemented by `DaemonRegistry`. */
@@ -16,8 +18,16 @@ export interface RemoteDaemonResolver {
   nameOf(daemonId: string): string;
   /** Where the vault is mirrored on that daemon, if configured. */
   vaultMappingOf?(daemonId: string): RemoteVaultMapping | undefined;
+  /** Host folders mounted into that daemon's machine (local daemon only); undefined = none known. */
+  mountsOf?(daemonId: string): readonly RemoteMount[] | undefined;
   /** What the daemon may do on this computer (host tools, MCP allowlist); undefined = defaults. */
   hostToolsOf?(daemonId: string): RemoteHostToolsSettings | undefined;
+  /** Which Settings MCP servers the daemon runs from the app's sync (and why the others are not); undefined = none known. */
+  mcpSyncOf?(daemonId: string): McpSyncView | undefined;
+  /** `welcome.capabilities` of the last connection, or undefined while the daemon has not been reached yet. */
+  capabilitiesOf?(daemonId: string): string[] | undefined;
+  /** Start connecting (if not already) and resolve once connected, failed for good, or `timeoutMs` passed. Never rejects. */
+  warm?(daemonId: string, timeoutMs?: number): Promise<void>;
 }
 
 export interface DaemonRegistryOptions {
@@ -28,6 +38,10 @@ export interface DaemonRegistryOptions {
   clientVersion: string;
   /** This install's stable id, sent in `hello` so the daemon can tell installs sharing a token apart. */
   getInstanceId?: () => string | undefined;
+  /** Mounts of a managed daemon, if this host knows them (the local daemon's controller). */
+  getMounts?: (daemonId: string) => readonly RemoteMount[] | undefined;
+  /** MCP servers synced to a daemon (see `mcpSync.ts`). */
+  getMcpSync?: (daemonId: string) => McpSyncView | undefined;
   log?: (message: string) => void;
 }
 
@@ -56,8 +70,35 @@ export class DaemonRegistry implements RemoteDaemonResolver {
     return this.config(daemonId)?.vaultMapping;
   }
 
+  mountsOf(daemonId: string): readonly RemoteMount[] | undefined {
+    return this.opts.getMounts?.(daemonId);
+  }
+
   hostToolsOf(daemonId: string): RemoteHostToolsSettings | undefined {
     return this.config(daemonId)?.hostTools;
+  }
+
+  mcpSyncOf(daemonId: string): McpSyncView | undefined {
+    return this.opts.getMcpSync?.(daemonId);
+  }
+
+  capabilitiesOf(daemonId: string): string[] | undefined {
+    return this.entries.get(daemonId)?.client.daemonInfo?.capabilities;
+  }
+
+  warm(daemonId: string, timeoutMs = 4000): Promise<void> {
+    const client = this.clientFor(daemonId);
+    if (!client) return Promise.resolve();
+    if (client.daemonInfo) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let off: (() => void) | undefined;
+      const done = (): void => { clearTimeout(timer); off?.(); resolve(); };
+      const timer = setTimeout(done, timeoutMs);
+      off = client.onState((s) => {
+        if (s.info || s.status === 'unreachable' || s.status === 'unauthorized' || s.status === 'incompatible' || s.status === 'closed') done();
+      });
+      client.connect();
+    });
   }
 
   clientFor(daemonId: string): DaemonClient | undefined {

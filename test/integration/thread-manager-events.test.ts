@@ -583,6 +583,28 @@ describe('tool use events', () => {
   });
 });
 
+describe('tool result settling (remote sessions replay wire events)', () => {
+  it('settles the streamed copy AND the committed message copy of a record', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    const events: ThreadEvent[] = [];
+    manager.subscribe((_, e) => events.push(e));
+
+    await manager.sendMessage(thread.id, 'Do something');
+    const streamed = { name: 'Read', summary: 'Read: a.ts', timestamp: 1, toolUseId: 'tu-1', status: 'pending' as const };
+    // Remote: onMessage carries a separately-deserialized copy.
+    const committed = { ...streamed };
+    mock.callbacks!.onToolUse(streamed);
+    mock.callbacks!.onMessage('', [committed]);
+    mock.callbacks!.onToolResult!('tu-1', 'success', 42);
+
+    expect(streamed.status).toBe('success');
+    expect(committed.status).toBe('success');
+    expect(thread.messages.at(-1)!.toolCalls![0]).toMatchObject({ status: 'success', durationMs: 42 });
+    expect(events.some(e => e.type === 'tool_result_status')).toBe(true);
+  });
+});
+
 describe('recap events', () => {
   it('stores recap on thread and emits recap event', async () => {
     const manager = makeManager();

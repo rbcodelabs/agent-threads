@@ -38,6 +38,34 @@ export const MASKED_VAULT_DIRS: readonly string[] = ['.geode', '.obsidian'];
 export const DAEMON_UID = 10001;
 /** Where the `with-claude` layer puts the CLI (outside every VOLUME path). */
 export const CLAUDE_BINARY_IN_IMAGE = '/opt/claude/.local/bin/claude';
+/** Where the `with-harnesses` layer puts the Codex and OpenCode CLIs (outside every VOLUME path). */
+export const HARNESS_BIN_DIR = '/opt/harnesses/bin';
+export const CODEX_BINARY_IN_IMAGE = `${HARNESS_BIN_DIR}/codex`;
+export const OPENCODE_BINARY_IN_IMAGE = `${HARNESS_BIN_DIR}/opencode`;
+/** The daemon user's HOME inside the container: in the data volume, so logins survive restarts and updates. */
+export const DAEMON_HOME = `${DATA_MOUNT}/home`;
+/** Where `codex login` and `opencode auth login` leave their credentials (inside {@link DAEMON_HOME}). */
+export const CODEX_AUTH_FILE = `${DAEMON_HOME}/.codex/auth.json`;
+export const OPENCODE_AUTH_FILE = `${DAEMON_HOME}/.local/share/opencode/auth.json`;
+
+// ── Harnesses ────────────────────────────────────────────────────────────────
+
+export type LocalHarness = 'claude' | 'codex' | 'opencode';
+/** Canonical order: also the order of the daemon's allowed set and of the image tag. */
+export const LOCAL_HARNESSES: readonly LocalHarness[] = ['claude', 'codex', 'opencode'];
+export const DEFAULT_LOCAL_HARNESSES: readonly LocalHarness[] = ['claude'];
+export const HARNESS_LABEL: Record<LocalHarness, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
+
+/** The enabled set from settings: known names only, canonical order, never empty (Claude, the default). */
+export function normalizeHarnesses(raw: readonly string[] | undefined): LocalHarness[] {
+  const picked = LOCAL_HARNESSES.filter((h) => (raw ?? []).includes(h));
+  return picked.length > 0 ? picked : [...DEFAULT_LOCAL_HARNESSES];
+}
+
+export function isDefaultHarnessSet(harnesses: readonly string[] | undefined): boolean {
+  const n = normalizeHarnesses(harnesses);
+  return n.length === 1 && n[0] === 'claude';
+}
 
 /** Name of the control token this plugin mints inside the daemon. */
 export const LOCAL_TOKEN_NAME = 'geode-local';
@@ -145,8 +173,14 @@ export function workspacesVolumeFor(vaultPath: string): string {
 export function publishedImageRef(version: string): string {
   return `${DAEMON_IMAGE_REPOSITORY}:${version}`;
 }
-export function localImageRef(version: string): string {
-  return `${LOCAL_IMAGE_REPOSITORY}:${version}`;
+/**
+ * The locally built image. Claude-only (the default) keeps the plain `<version>` tag it always had; any other set
+ * gets its own tag (`<version>-claude-codex`), so changing the toggles builds a new layer and never reuses a stale one.
+ */
+export function localImageRef(version: string, harnesses?: readonly string[]): string {
+  return isDefaultHarnessSet(harnesses)
+    ? `${LOCAL_IMAGE_REPOSITORY}:${version}`
+    : `${LOCAL_IMAGE_REPOSITORY}:${version}-${normalizeHarnesses(harnesses).join('-')}`;
 }
 
 // ── The thin Claude layer ────────────────────────────────────────────────────
@@ -168,11 +202,54 @@ ENV PATH="/opt/claude/.local/bin:\${PATH}" \\
     DISABLE_AUTOUPDATER=1
 `;
 
-export const THIN_DOCKERFILE = `# agent-threads local daemon: adds the Claude Code CLI on top of the published daemon image.
+/**
+ * Body of the `with-harnesses` stage of `sandbox/Dockerfile.daemon`, verbatim (everything after its `FROM` line, up to
+ * the next stage). Pinned to the real file by a unit test, like {@link WITH_CLAUDE_STAGE_BODY}. It installs nothing
+ * unless `INSTALL_CODEX` / `INSTALL_OPENCODE` are `1`, which {@link buildThinImageArgs} passes.
+ */
+export const WITH_HARNESSES_STAGE_BODY = `ARG INSTALL_CODEX=0
+ARG INSTALL_OPENCODE=0
+ARG CODEX_VERSION=latest
+ARG OPENCODE_VERSION=1.18.32
+USER root
+RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/harnesses
+USER agentthreads
+# opencode-ai fetches/links its platform binary in a postinstall script. npm 11 blocks dependency install scripts by
+# default (a silent skip leaves a launcher with no binary), so that one package is explicitly allowed; older npm
+# ignores the flag. The \`--version\` calls fail the build if either CLI did not end up runnable.
+RUN set -eu; \\
+    pkgs=""; \\
+    if [ "$INSTALL_CODEX" = "1" ]; then pkgs="$pkgs @openai/codex@\${CODEX_VERSION}"; fi; \\
+    if [ "$INSTALL_OPENCODE" = "1" ]; then pkgs="$pkgs opencode-ai@\${OPENCODE_VERSION}"; fi; \\
+    if [ -n "$pkgs" ]; then npm install --global --no-audit --no-fund --allow-scripts=opencode-ai --prefix /opt/harnesses $pkgs; fi; \\
+    if [ "$INSTALL_CODEX" = "1" ]; then /opt/harnesses/bin/codex --version; fi; \\
+    if [ "$INSTALL_OPENCODE" = "1" ]; then /opt/harnesses/bin/opencode --version; fi
+ENV PATH="/opt/harnesses/bin:\${PATH}"
+`;
+
+/**
+ * The thin layer for an enabled set: the published base, then the Codex/OpenCode CLIs if either is on, then the
+ * Claude CLI if it is on. Claude-only is byte for byte what it was before harness toggles existed.
+ */
+export function thinDockerfileFor(harnesses?: readonly string[]): string {
+  const set = normalizeHarnesses(harnesses);
+  const names = set.map((h) => HARNESS_LABEL[h]).join(', ');
+  const others = set.includes('codex') || set.includes('opencode');
+  if (!others) {
+    return `# agent-threads local daemon: adds the Claude Code CLI on top of the published daemon image.
 # Generated by the plugin from the \`with-claude\` stage of sandbox/Dockerfile.daemon.
 ARG BASE_IMAGE
 FROM \${BASE_IMAGE}
 ${WITH_CLAUDE_STAGE_BODY}`;
+  }
+  return `# agent-threads local daemon: adds the ${names} CLI${set.length > 1 ? 's' : ''} on top of the published daemon image.
+# Generated by the plugin from the \`with-harnesses\` and \`with-claude\` stages of sandbox/Dockerfile.daemon.
+ARG BASE_IMAGE
+FROM \${BASE_IMAGE}
+${WITH_HARNESSES_STAGE_BODY}${set.includes('claude') ? WITH_CLAUDE_STAGE_BODY : ''}`;
+}
+
+export const THIN_DOCKERFILE = thinDockerfileFor(DEFAULT_LOCAL_HARNESSES);
 
 // ── Container spec ───────────────────────────────────────────────────────────
 
@@ -188,6 +265,10 @@ export interface LocalDaemonSpec {
   workFolders?: ReadonlyArray<ExternalRootMount>;
   memory: string;
   cpus: number;
+  /** Enabled harnesses; absent = Claude only. */
+  harnesses?: readonly LocalHarness[];
+  /** Let the daemon accept stdio MCP servers synced from Settings (`allowSyncedStdio`); absent = no. */
+  allowSyncedStdio?: boolean;
 }
 
 /** One vetted external root: an existing absolute host directory and its unique path segment under /ext. */
@@ -311,12 +392,17 @@ export function mountsFor(spec: Pick<LocalDaemonSpec, 'vaultPath' | 'maskedDirs'
 /** Hash of everything fixed at `run`. A container whose label differs needs recreating to apply a change. */
 export function specSignature(spec: LocalDaemonSpec): string {
   return hashHex(JSON.stringify({
-    image: localImageRef(spec.version),
+    image: localImageRef(spec.version, spec.harnesses),
     port: spec.hostPort,
     mounts: mountsFor(spec),
     memory: spec.memory,
     cpus: spec.cpus,
     command: serveCommand(spec),
+    // Only a non-default set is hashed, so a Claude-only container made before harness toggles existed does not
+    // read as drifted after an upgrade.
+    ...(isDefaultHarnessSet(spec.harnesses) ? {} : { harnesses: normalizeHarnesses(spec.harnesses) }),
+    // Same rule: only the non-default value is hashed.
+    ...(spec.allowSyncedStdio ? { allowSyncedStdio: true } : {}),
   })).slice(0, 16);
 }
 
@@ -346,11 +432,14 @@ export function pullArgs(version: string): string[] {
   return ['image', 'pull', '--platform', 'linux/arm64', publishedImageRef(version)];
 }
 
-export function buildThinImageArgs(opts: { version: string; dockerfilePath: string; contextDir: string }): string[] {
+export function buildThinImageArgs(opts: { version: string; dockerfilePath: string; contextDir: string; harnesses?: readonly string[] }): string[] {
+  const set = normalizeHarnesses(opts.harnesses);
   return [
     'build',
-    '--tag', localImageRef(opts.version),
+    '--tag', localImageRef(opts.version, set),
     '--build-arg', `BASE_IMAGE=${publishedImageRef(opts.version)}`,
+    ...(set.includes('codex') ? ['--build-arg', 'INSTALL_CODEX=1'] : []),
+    ...(set.includes('opencode') ? ['--build-arg', 'INSTALL_OPENCODE=1'] : []),
     '--label', `${LABEL_IMAGE_VERSION}=${opts.version}`,
     '--progress', 'plain',
     '-f', opts.dockerfilePath,
@@ -359,9 +448,10 @@ export function buildThinImageArgs(opts: { version: string; dockerfilePath: stri
 }
 
 /** Runs the built image and asserts the tools the daemon needs exist; prints OK on success. */
-export function verifyImageArgs(version: string): string[] {
-  return ['run', '--rm', '--entrypoint', 'sh', localImageRef(version), '-c',
-    'command -v claude && command -v agent-threads && command -v git && echo LOCAL_DAEMON_IMAGE_OK'];
+export function verifyImageArgs(version: string, harnesses?: readonly string[]): string[] {
+  const set = normalizeHarnesses(harnesses);
+  const checks = [...set.map((h) => `command -v ${h}`), 'command -v agent-threads', 'command -v git'];
+  return ['run', '--rm', '--entrypoint', 'sh', localImageRef(version, set), '-c', `${checks.join(' && ')} && echo LOCAL_DAEMON_IMAGE_OK`];
 }
 export const VERIFY_OK_MARKER = 'LOCAL_DAEMON_IMAGE_OK';
 
@@ -404,13 +494,13 @@ export function prepareScript(withCredential: boolean): string {
   return lines.join('\n');
 }
 
-export function prepareArgs(opts: { vaultPath: string; version: string; withCredential: boolean }): string[] {
+export function prepareArgs(opts: { vaultPath: string; version: string; withCredential: boolean; harnesses?: readonly string[] }): string[] {
   return [
     'run', '--rm', ...(opts.withCredential ? ['-i'] : []),
     '-u', '0', '--entrypoint', 'sh',
     '--volume', `${dataVolumeFor(opts.vaultPath)}:${DATA_MOUNT}`,
     '--volume', `${workspacesVolumeFor(opts.vaultPath)}:${WORKSPACES_MOUNT}`,
-    localImageRef(opts.version),
+    localImageRef(opts.version, opts.harnesses),
     '-c', prepareScript(opts.withCredential),
   ];
 }
@@ -433,7 +523,11 @@ export function runArgs(spec: LocalDaemonSpec): string[] {
     '--cpus', String(spec.cpus),
     // A path, not a secret: where the daemon looks for `claude-token` (read once, at start).
     '--env', `CREDENTIALS_DIRECTORY=${CREDENTIALS_DIR}`,
-    localImageRef(spec.version),
+    // The daemon's allowed set follows the toggles: a session for a harness that is off is refused at the door.
+    '--env', `AGENT_THREADS_HARNESSES=${normalizeHarnesses(spec.harnesses).join(',')}`,
+    // The container is this Mac's own sandbox, so the user decides here whether synced stdio servers may run in it.
+    ...(spec.allowSyncedStdio ? ['--env', 'AGENT_THREADS_ALLOW_SYNCED_STDIO=1'] : []),
+    localImageRef(spec.version, spec.harnesses),
     ...serveCommand(spec),
   ];
 }
@@ -485,6 +579,16 @@ export function credsPushArgs(name: string, kind: string, ttlSec: number): strin
 export function credsRemoveArgs(name: string, kind: string): string[] {
   return [...CREDS_PUSH_BASE(name, kind), '--remove'];
 }
+/**
+ * Replaces the daemon's synced MCP servers from a JSON object of name -> definition on stdin (`agent-threads mcp sync`).
+ * Definitions hold `${mcpsync-<project>.NAME}` placeholders only; the values go separately with `credsPushArgs`.
+ */
+export function mcpSyncArgs(name: string): string[] {
+  return [
+    'exec', '-i', '--user', String(DAEMON_UID), name, 'agent-threads', 'mcp', 'sync', '--stdin', '--clear', '--json',
+    '--url', `ws://127.0.0.1:${DAEMON_INTERNAL_PORT}`, '--data-dir', DATA_MOUNT,
+  ];
+}
 /** Sets one key in the daemon user's global git config (a repository's own config still wins). */
 export function gitConfigSetArgs(name: string, key: string, value: string): string[] {
   return ['exec', '--user', String(DAEMON_UID), name, 'git', 'config', '--file', GITCONFIG_FILE, key, value];
@@ -497,3 +601,41 @@ export function credentialPresentArgs(name: string): string[] {
 
 /** The Claude sign-in runs `setup-token` in the daemon container as the daemon user. */
 export const SIGN_IN_CONTAINER_BINARY = CLAUDE_BINARY_IN_IMAGE;
+
+// ── Per-harness CLI and sign-in state ────────────────────────────────────────
+
+const AS_DAEMON = (name: string): string[] => ['exec', '--user', String(DAEMON_UID), name];
+
+/**
+ * One `exec` in the running container that prints `<harness>.cli=0|1` (is the CLI in the image) and
+ * `codex.auth=0|1` / `opencode.auth=0|1` (did a login leave a non-empty credential file in the persisted HOME).
+ * Claude's sign-in is the existing credential file / keychain token, not probed here. Reads file SIZES only: the
+ * credentials are never printed.
+ */
+export const HARNESS_PROBE_SCRIPT = [
+  `for p in claude:${CLAUDE_BINARY_IN_IMAGE} codex:${CODEX_BINARY_IN_IMAGE} opencode:${OPENCODE_BINARY_IN_IMAGE}; do`,
+  '  n="${p%%:*}"; f="${p#*:}"',
+  '  if [ -x "$f" ]; then echo "$n.cli=1"; else echo "$n.cli=0"; fi',
+  'done',
+  `if [ -s ${CODEX_AUTH_FILE} ]; then echo codex.auth=1; else echo codex.auth=0; fi`,
+  `if [ -s ${OPENCODE_AUTH_FILE} ]; then echo opencode.auth=1; else echo opencode.auth=0; fi`,
+].join('\n');
+
+export function harnessProbeArgs(name: string): string[] {
+  return [...AS_DAEMON(name), 'sh', '-c', HARNESS_PROBE_SCRIPT];
+}
+
+/** `codex login --device-auth`: prints a URL and a one-time code, then waits until the page is approved. No pasting back. */
+export function codexLoginArgs(name: string): string[] {
+  return [...AS_DAEMON(name), CODEX_BINARY_IN_IMAGE, 'login', '--device-auth'];
+}
+
+/**
+ * The exact line to run by hand for a login that cannot be driven from Settings (OpenCode's `auth login` is an
+ * interactive provider picker). `containerBinary` is the managed `container` CLI, which is not on PATH.
+ */
+export function manualLoginCommand(harness: Exclude<LocalHarness, 'claude'>, containerName: string, containerBinary = 'container'): string {
+  const bin = /[^A-Za-z0-9_./-]/.test(containerBinary) ? `'${containerBinary.replace(/'/g, `'\\''`)}'` : containerBinary;
+  const cli = harness === 'codex' ? `${CODEX_BINARY_IN_IMAGE} login --device-auth` : `${OPENCODE_BINARY_IN_IMAGE} auth login`;
+  return `${bin} exec -it --user ${DAEMON_UID} ${containerName} ${cli}`;
+}

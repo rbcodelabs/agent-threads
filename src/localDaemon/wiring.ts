@@ -10,7 +10,10 @@ import { daemonWsUrl, probeDaemon, type WebSocketFactory } from '../remote/Daemo
 import { signInToClaudeInContainer, type SpawnLike } from '../claudeContainerAuthCli';
 import { runnerEnv, createDefaultVmCommandRunner } from '../containerCli';
 import { LocalDaemonController, type LocalDaemonDeps } from './controller';
+import { signInToCodexInContainer } from './harnessLogin';
 import { LocalDaemonGithubDelivery, type LocalDaemonGithubDeps } from './githubDelivery';
+import { CredsPusher } from './credsPusher';
+import type { McpSyncTransport } from '../remote/mcpSync';
 import { LocalDaemonSessionPrep, type SessionPrepDeps } from './sessionPrep';
 import { nodeFs } from './containerFiles';
 import { nodeAwsCopyFs } from './awsCopy';
@@ -139,6 +142,17 @@ export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonC
         onCodePrompt: opts.onCodePrompt,
       });
     },
+    harnessSignInRunner: (opts) => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { spawn } = require('child_process') as typeof import('child_process');
+      return signInToCodexInContainer({
+        spawn: spawn as unknown as SpawnLike,
+        hostEnv: runnerEnv() as NodeJS.ProcessEnv,
+        containerName: opts.containerName,
+        onProgress: opts.onProgress,
+        onUrl: opts.onUrl,
+      });
+    },
     ...(host.projectFolders ? { projectFolders: () => host.projectFolders!() } : {}),
     ...(host.externalRoots ? { externalRoots: () => host.externalRoots!() } : {}),
     log: host.log,
@@ -177,4 +191,14 @@ export function createLocalDaemonSessionPrep(
     awsFs: nodeAwsCopyFs(),
     ...(host.log ? { log: host.log } : {}),
   });
+}
+
+/** How the managed daemon receives synced MCP servers and their credentials: through its container, admin token in there (see credsPusher.ts). */
+export function createLocalDaemonMcpTransport(host: { vaultBasePath(): string | null }): McpSyncTransport {
+  const pusher = new CredsPusher({ vaultPath: () => host.vaultBasePath(), runner: () => createDefaultVmCommandRunner() });
+  return {
+    // An empty field set deletes the kind (`creds push` refuses to send one by accident, so removal has its own command).
+    pushCreds: (kind, fields, ttlSec) => (Object.keys(fields).length ? pusher.push(kind, fields, ttlSec) : pusher.remove(kind)),
+    syncServers: (servers) => pusher.syncMcp(servers),
+  };
 }

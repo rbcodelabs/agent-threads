@@ -116,6 +116,8 @@ export class ThreadHost {
   private readonly metaStore: SessionMetaStore;
   private readonly now: () => number;
   private compactTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Last time a client command that changes a session (open, send, answer, interrupt, close) arrived. */
+  private lastCommandAt: number;
   /** Proxies Geode-only tools (design 3.3); one per daemon, state keyed by thread. */
   readonly hostTools: HostToolBroker;
   private get cwdPolicy(): SessionPolicy | undefined { return this.opts.cwdPolicy ?? this.opts.policy; }
@@ -129,6 +131,7 @@ export class ThreadHost {
     });
     this.journalDir = join(opts.dataDir, 'journal');
     this.now = opts.now ?? (() => Date.now());
+    this.lastCommandAt = this.now();
     ensureDir(this.journalDir);
     this.metaStore = new SessionMetaStore(opts.dataDir);
   }
@@ -196,6 +199,23 @@ export class ThreadHost {
     }));
   }
 
+  /**
+   * What the auto-updater needs to decide whether a restart would interrupt anyone: threads with a turn in flight,
+   * a request waiting on a human, or a host-tool call in flight (`busy`), and the last time anything happened
+   * (a driver callback or a client command). Read-only.
+   */
+  activity(): { busy: string[]; lastActivityAt: number } {
+    const busy: string[] = [];
+    let last = this.lastCommandAt;
+    for (const [id, rt] of this.threads) {
+      const d = rt.driver;
+      if (d) last = Math.max(last, d.lastActivityAt);
+      if (d && (d.turnInFlight || d.hasPendingPermission || !d.canIdleReap())) busy.push(id);
+      else if (this.hostTools.openCalls(id) > 0) busy.push(id);
+    }
+    return { busy, lastActivityAt: last };
+  }
+
   /** Turns running right now across all sessions (what `maxConcurrentTurns` bounds). */
   turnsInFlight(): number {
     let n = 0;
@@ -213,12 +233,16 @@ export class ThreadHost {
    */
   open(threadId: string, spec: RemoteSessionSpec, resume?: string, owner?: number): { created: boolean; lastSeq: number; nativeSessionId?: string } {
     if (!isSafeThreadId(threadId)) throw new HostError('bad_frame', `invalid threadId "${threadId}"`);
+    this.lastCommandAt = this.now();
     const rt = this.runtime(threadId);
     if (rt.driver) return { created: false, lastSeq: rt.journal.lastSeq, nativeSessionId: rt.meta?.nativeSessionId };
     const valid = this.validate(spec);
     if (valid.hostTools) this.hostTools.setManifest(threadId, manifestFromSpecs(valid.hostTools), owner);
     const previous = rt.meta;
-    const nativeSessionId = previous?.nativeSessionId ?? resume ?? valid.resume;
+    // The stored native id belongs to the harness that made it: a client that handed the thread to another harness
+    // (close, then open with a new `spec.harness`) must not have a Claude session id resumed by Codex, or the reverse.
+    const sameHarness = !previous || previous.spec.harness === valid.harness;
+    const nativeSessionId = (sameHarness ? previous?.nativeSessionId : undefined) ?? resume ?? valid.resume;
     rt.meta = { threadId, spec: valid, ...(nativeSessionId ? { nativeSessionId } : {}), updatedAt: this.now() };
     this.metaStore.save(rt.meta);
     try {
@@ -234,6 +258,7 @@ export class ThreadHost {
 
   send(threadId: string, text: string, userMessageUuid: string, images?: WireImage[]): void {
     const rt = this.requireThread(threadId);
+    this.lastCommandAt = this.now();
     // A client that never saw our ack (timeout, dropped socket) sends the same message again under a new
     // cmdId. The message id is the idempotency key: accept it once, acknowledge repeats without running them.
     if (rt.seenSends.includes(userMessageUuid)) return;
@@ -255,6 +280,7 @@ export class ThreadHost {
 
   async interrupt(threadId: string): Promise<void> {
     const rt = this.requireThread(threadId);
+    this.lastCommandAt = this.now();
     // In-flight host-tool calls end with the turn.
     this.hostTools.cancelThread(threadId);
     // No live session means no turn to stop (reaped, or lost in a restart).
@@ -341,6 +367,7 @@ export class ThreadHost {
     payload: Record<string, unknown>,
     by: string,
   ): void {
+    this.lastCommandAt = this.now();
     const rt = this.threads.get(threadId);
     if (!rt?.driver) throw new HostError('not_found', `session ${threadId} is not open`);
     if (!rt.driver.resolve(kind, requestId, payload)) {

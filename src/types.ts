@@ -264,6 +264,22 @@ export interface RemoteDaemonConfig {
    * Desktop only: hidden on mobile, where loopback means nothing.
    */
   managed?: 'local-container';
+  /**
+   * Settings MCP servers the user chose to run on this daemon (key = server name). Absent = none. A server is synced
+   * only while `enabled` AND `confirmedHash` equals the hash of its current definition (see `src/remote/mcpSync.ts`).
+   */
+  mcpSync?: Record<string, DaemonMcpSyncEntry>;
+  /** Credential kinds (`mcpsync-<project>`) this install has pushed to the daemon for synced servers. Names only. */
+  mcpSyncKinds?: string[];
+  /** Server names the daemon last accepted from this install, so removing the last one still re-syncs (empty). Names only. */
+  mcpSyncNames?: string[];
+}
+
+/** One server's opt-in for one daemon. No definition and no secret is stored here. */
+export interface DaemonMcpSyncEntry {
+  enabled: boolean;
+  /** Hash of the exact definition (command, args, env, url, headers, credential scope) the user confirmed for this daemon. */
+  confirmedHash?: string;
 }
 
 /**
@@ -280,6 +296,12 @@ export interface LocalDaemonSettings {
   /** The Claude credential file was written into the data volume (last known; the volume persists). */
   credentialWritten?: boolean;
   /**
+   * Which agent CLIs the daemon image carries and the daemon accepts sessions for. Absent = Claude only. Changing it
+   * changes the container's spec signature, so Update / Apply rebuilds the image layer. Contains no secrets: logins
+   * for Codex and OpenCode live inside the daemon's data volume, never here.
+   */
+  harnesses?: Array<'claude' | 'codex' | 'opencode'>;
+  /**
    * Host folders shared READ-WRITE with the daemon, at `/work/<name>` (one path per entry). A thread can then run in a
    * repository outside the vault, which is what the removed sandbox VM's `/work` mount was for. Applied when the
    * container is created.
@@ -290,6 +312,11 @@ export interface LocalDaemonSettings {
    * nothing has to be listed by hand. Follows Projects as they are added or changed. Applied when the container is created.
    */
   shareProjectFolders?: boolean;
+  /**
+   * Let the daemon run stdio MCP servers synced from Settings, MCP (they start a program inside the container as the
+   * daemon user). Off by default. Applied when the container is created (it sets the daemon's `allowSyncedStdio`).
+   */
+  allowSyncedStdio?: boolean;
   /**
    * Ids of the optional tool groups (`localDaemon/optionalTools.ts`) offered to the daemon's threads: tools that write,
    * schedule or touch secrets on this Mac. Off by default; every call still needs an approval card.
@@ -1171,6 +1198,11 @@ export interface PluginSettings {
   /** Model alias the escalation keyword routes to (fable, opus, sonnet, haiku). */
   escalationModel: string;
   alwaysAllowedTools: string[];
+  /**
+   * Command prefixes (`git status`, `npm test`) the user always-allowed on a `host_exec` card.
+   * Separate from alwaysAllowedTools, which never holds host_exec. See hostExecPrefix.ts.
+   */
+  hostExecAlwaysAllowedPrefixes: string[];
   disallowedTools: string[];
   threads: Thread[];
   projects: Project[];
@@ -1431,6 +1463,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   escalationKeyword: '/escalate',
   escalationModel: 'opus',
   alwaysAllowedTools: [],
+  hostExecAlwaysAllowedPrefixes: [],
   disallowedTools: ['CronCreate', 'CronDelete', 'CronList', 'CronUpdate'],
   threads: [],
   projects: [],

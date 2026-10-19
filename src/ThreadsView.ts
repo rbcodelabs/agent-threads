@@ -1,3 +1,4 @@
+import { gateHarness } from './remote/harnessSupport';
 import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
@@ -34,7 +35,8 @@ import * as fsp from 'fs/promises';
 import type ClaudeThreadsPlugin from './main';
 import { isDefaultThreadTitle } from './thread-title-utils';
 import { formatToolName, getToolIcon } from './ClaudeSession';
-import { isPermissionPreApproved, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
+import { isPermissionPreApproved, isHostExecPermission, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
+import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
 import { applyToolCallStyleClass, refreshToolRowByUseId, renderToolGroupShell, renderToolRow } from './toolCallDom';
 import { groupToolRuns, liveToolGroupKey, mergeAdjacentToolOnlyMessages, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
@@ -1361,6 +1363,8 @@ export class ThreadsView extends ItemView {
       harnessPicker: {
         initialHarness: this.plugin.settings.agentHarness ?? 'claude',
         getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
+        getDaemonCapabilities: (id) => this.plugin.daemonRegistry?.capabilitiesOf(id),
+        warmDaemon: (id) => this.plugin.daemonRegistry?.warm(id) ?? Promise.resolve(),
         localDaemonOffer: { available: () => this.plugin.isLocalDaemonSetupOffered(), onSetUp: () => this.plugin.openLocalDaemonSettings() },
         getFolderSource: () => this.plugin.remoteFolders ?? undefined,
         getLocalCwd: () => {
@@ -2757,11 +2761,17 @@ export class ThreadsView extends ItemView {
     if (thread.activeModel) modelNotes.push(`Running: ${activeModelLabel(thread.activeModel)}`);
 
     const harnessValue = `${agentHarnessLabel(thread.agentHarness)}${thread.remote ? ' \u00b7 Remote' : ''}`;
+    // A remote thread can only hand off to a harness its daemon offers (older daemons: Claude only).
+    const remoteGate = (value: AgentHarness): string | undefined => {
+      if (!thread.remote) return undefined;
+      const g = gateHarness(value, this.plugin.daemonRegistry?.capabilitiesOf(thread.remote.daemonId), this.plugin.daemonRegistry?.nameOf(thread.remote.daemonId) ?? 'the daemon');
+      return g.ok ? undefined : g.reason;
+    };
     const harnessGroups: PopoverOptionGroup[] = [{
       options: AGENT_HARNESSES.map((value) => ({
-        label: value !== harness && blocked ? `${agentHarnessLabel(value)} \u2014 ${blocked}` : agentHarnessLabel(value),
+        label: value !== harness && (blocked ?? remoteGate(value)) ? `${agentHarnessLabel(value)} \u2014 ${blocked ?? remoteGate(value)}` : agentHarnessLabel(value),
         checked: value === harness,
-        disabled: value !== harness && !!blocked,
+        disabled: value !== harness && !!(blocked ?? remoteGate(value)),
         closeOnSelect: true,
         onSelect: () => { if (value !== harness) void this.requestHarnessSwitch(threadId, value); },
       })),
@@ -2769,7 +2779,7 @@ export class ThreadsView extends ItemView {
     // Where this thread runs: this computer, or a daemon that can see its folder (the managed local daemon is
     // "This Mac (container)"). Moving resets the native session; the conversation continues from a summary.
     const daemons = this.plugin.settings.remoteDaemons ?? [];
-    if (harness === 'claude' && !Platform.isMobile && daemons.length > 0) {
+    if (!Platform.isMobile && daemons.length > 0) {
       const here = thread.remote?.daemonId;
       const options: PopoverOptionGroup['options'] = [{
         label: !!blocked && !!here ? `This computer \u2014 ${blocked}` : 'This computer',
@@ -2781,7 +2791,8 @@ export class ThreadsView extends ItemView {
       for (const d of daemons) {
         const target = thread.remote ? undefined : this.plugin.mapCwdToDaemon(d.id, thread.cwd);
         const selected = here === d.id;
-        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : target ? undefined : 'its folder is not shared with this daemon');
+        const offered = gateHarness(harness, this.plugin.daemonRegistry?.capabilitiesOf(d.id), d.name);
+        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : !offered.ok ? `no ${agentHarnessLabel(harness)} on it` : target ? undefined : 'its folder is not shared with this daemon');
         options.push({
           label: reason ? `${d.name} \u2014 ${reason}` : d.name,
           checked: selected,
@@ -2992,7 +3003,7 @@ export class ThreadsView extends ItemView {
     const where = to ? (this.plugin.settings.remoteDaemons ?? []).find((d) => d.id === to.daemonId)?.name ?? 'the daemon' : 'this computer';
     if (hadConversation) {
       const confirmed = await promptConfirm(this.app, {
-        message: `Run this thread on ${where}? The conversation stays here, but the native Claude session resets and continues from a summary and transcript references.`,
+        message: `Run this thread on ${where}? The conversation stays here, but the native ${agentHarnessLabel(thread.agentHarness)} session resets and continues from a summary and transcript references.`,
         confirmLabel: 'Move',
         danger: false,
       });
@@ -4262,9 +4273,13 @@ export class ThreadsView extends ItemView {
    *   pass `live: true` — first-time append of a settled row and the full
    *   renderMessages() rebuild both keep the default (stable) keying.
    */
-  private renderToolCalls(parent: HTMLElement, tools: ToolCallRecord[], opts?: { live?: boolean }): HTMLElement {
+  private renderToolCalls(
+    parent: HTMLElement,
+    tools: ToolCallRecord[],
+    opts?: { live?: boolean; onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void },
+  ): HTMLElement {
     const wrapper = parent.createDiv('ct-tools');
-    this.populateToolCallsWrapper(wrapper, tools, { live: opts?.live ?? false });
+    this.populateToolCallsWrapper(wrapper, tools, { live: opts?.live ?? false, onPillRendered: opts?.onPillRendered });
     return wrapper;
   }
 
@@ -4400,12 +4415,32 @@ export class ThreadsView extends ItemView {
    * on every step). Passes `{ live: true }` so a group the user expanded
    * mid-run stays expanded as it grows (see renderToolCalls' doc comment).
    */
-  private rebuildRowToolsInPlace(rowEl: HTMLElement, toolCalls: ToolCallRecord[], row?: ChatMessage): void {
+  private rebuildRowToolsInPlace(
+    rowEl: HTMLElement,
+    toolCalls: ToolCallRecord[],
+    row?: ChatMessage,
+    onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void,
+  ): void {
     const existing = rowEl.querySelector(':scope > .ct-tools');
+    // A row first drawn from the finalized message keys its groups by member
+    // hash; the rebuild below keys them by first call (stable as the run
+    // grows). Carry a group the user opened across that change by position.
+    if (existing && toolCalls.length > 0) {
+      const groupEls = [...existing.querySelectorAll(':scope > .ct-tool-group')];
+      const entries = groupToolRuns(toolCalls);
+      if (groupEls.length > 0 && entries.every((e) => e.kind === 'group') && groupEls.length <= entries.length) {
+        groupEls.forEach((el, i) => {
+          const entry = entries[i];
+          if (el.classList.contains('ct-tool-group-open') && entry.kind === 'group') {
+            this.liveExpandedToolGroups.add(liveToolGroupKey(entry.tools));
+          }
+        });
+      }
+    }
     existing?.remove();
     if (row) rowEl.querySelectorAll(':scope > .ct-tool-result-images').forEach((n) => n.remove());
     if (!toolCalls || toolCalls.length === 0) return;
-    const wrapper = this.renderToolCalls(rowEl, toolCalls, { live: true });
+    const wrapper = this.renderToolCalls(rowEl, toolCalls, { live: true, onPillRendered });
     // renderToolCalls appends via createDiv (last child) — move it to the
     // front so tools stay above the message content, matching the layout
     // appendMessage produces when a row is first created.
@@ -4518,16 +4553,32 @@ export class ThreadsView extends ItemView {
       }
       return;
     }
+    const onPillRendered = (tool: ToolCallRecord, pill: HTMLElement): void => {
+      if (tool.status === 'pending' && tool.toolUseId) {
+        this.toolPillsByUseId.set(tool.toolUseId, pill);
+      }
+    };
+    // The previous step's tool-only row is still the tail of the transcript:
+    // extend it in place so this step's calls join its group instead of
+    // showing a second group until the step's 'message' event lands.
+    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : undefined;
+    const tail = thread ? mergeAdjacentToolOnlyMessages(thread.messages).at(-1) : undefined;
+    if (
+      tail && tail.role === 'assistant' && tail.content === '' &&
+      (tail.toolCalls?.length ?? 0) > 0 &&
+      tail.id === this.lastAppendedRowId &&
+      this.lastAppendedRowEl?.isConnected
+    ) {
+      if (this.streamingToolsEl) {
+        this.streamingToolsEl.remove();
+        this.streamingToolsEl = null;
+      }
+      this.rebuildRowToolsInPlace(this.lastAppendedRowEl, [...tail.toolCalls!, ...visible], tail, onPillRendered);
+      return;
+    }
     const wrapper = this.ensureStreamingToolsEl();
     wrapper.empty();
-    this.populateToolCallsWrapper(wrapper, visible, {
-      live: true,
-      onPillRendered: (tool, pill) => {
-        if (tool.status === 'pending' && tool.toolUseId) {
-          this.toolPillsByUseId.set(tool.toolUseId, pill);
-        }
-      },
-    });
+    this.populateToolCallsWrapper(wrapper, visible, { live: true, onPillRendered });
   }
 
   /**
@@ -4661,10 +4712,19 @@ export class ThreadsView extends ItemView {
     this.renderPermissionDetail(body, detail);
 
     const actions = card.createDiv('ct-permission-actions');
+    const hostExecPrefix = hostExecAlwaysAllowOffer({ toolName, detail });
     actions.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' })
       .addEventListener('click', () => done(false));
-    actions.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
+    actions.createEl('button', { text: isHostExecPermission(toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
       .addEventListener('click', () => done(true));
+    if (hostExecPrefix) {
+      // Scoped to a command prefix; never adds host_exec to alwaysAllowedTools.
+      actions.createEl('button', { text: `Always allow \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' })
+        .addEventListener('click', async () => {
+          if (addHostExecPrefix(this.plugin.settings, hostExecPrefix)) await this.plugin.saveSettings();
+          done(true);
+        });
+    }
     if (canAlwaysAllow(toolName) && !(this.activeThreadId && this.manager.isRemoteThread(this.activeThreadId))) {
       actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
         .addEventListener('click', async () => {

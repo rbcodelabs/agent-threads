@@ -15,6 +15,7 @@ import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel }
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { renderLocalDaemonPanel } from './localDaemon/localDaemonPanel';
 import { visibleDaemons } from './localDaemon/registration';
+import { renderMcpRunsOn, type RunsOnHost } from './mcpRunsOn';
 import { DESCRIBE_REMOVE } from './localDaemon/view';
 import { serializeKey } from './stt';
 import { debugLog, setDebugLogging } from './logger';
@@ -1112,6 +1113,7 @@ export class McpServerModal extends Modal {
       const result = saveMcpServer(this.plugin.settings, server, this.existing?.name);
       if (!result.ok) { showError(result.error); return; }
       void this.plugin.saveSettings();
+      this.plugin.onMcpSyncInputsChanged?.();
 
       new Notice(`Saved MCP server "${name}".`);
       this.close();
@@ -1190,6 +1192,7 @@ export class McpServerModal extends Modal {
       const result = saveMcpServer(this.plugin.settings, server, this.existing?.name);
       if (!result.ok) { showError(result.error); return; }
       void this.plugin.saveSettings();
+      this.plugin.onMcpSyncInputsChanged?.();
 
       new Notice(`Saved MCP server "${name}".`);
       this.close();
@@ -1454,6 +1457,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   private activeTab: SettingsTabId = 'general';
   private selectedProjectId: string | null = null;
   private selectedSecretName: string | null = null;
+  private mcpSyncUnsub: (() => void) | null = null;
 
   /** Switch the (single-pane) settings to a section before it is opened. */
   showSection(id: SettingsTabId): void {
@@ -2447,6 +2451,34 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       );
     containerEl.appendChild(allowedList);
     renderAllowedTools();
+
+    // — Always-allowed host commands (host_exec prefixes) —
+    new Setting(containerEl)
+      .setName('Always-allowed host commands')
+      .setDesc('Command prefixes you chose "Always allow" for on a host_exec card. Calls that start with one of these run on the host without a prompt (simple commands only; never for scheduled or headless threads). Remove an entry to be asked again.')
+      .setHeading();
+    const prefixList = containerEl.createDiv({ cls: 'ct-allowed-tools-list' });
+    const renderPrefixes = () => {
+      prefixList.empty();
+      const prefixes = this.plugin.settings.hostExecAlwaysAllowedPrefixes ?? [];
+      if (prefixes.length === 0) {
+        prefixList.createEl('p', { text: 'No host command prefixes always allowed yet.', cls: 'ct-settings-empty' });
+        return;
+      }
+      for (const prefix of prefixes) {
+        new Setting(prefixList)
+          .setName(prefix)
+          .addButton((btn) =>
+            btn.setButtonText('Remove').setWarning().onClick(async () => {
+              this.plugin.settings.hostExecAlwaysAllowedPrefixes =
+                this.plugin.settings.hostExecAlwaysAllowedPrefixes.filter((p) => p !== prefix);
+              await this.plugin.saveSettings();
+              renderPrefixes();
+            }),
+          );
+      }
+    };
+    renderPrefixes();
   }
 
   // ── Vault ───────────────────────────────────────────────────────────────
@@ -2793,7 +2825,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         this.plugin.app.secretStorage.setSecret(secretStorageKey(secretName), '');
         this.plugin.settings.secretEnvKeys = keys.filter(key => key !== secretName);
         if (this.plugin.settings.secretEnvScopes) delete this.plugin.settings.secretEnvScopes[secretName];
-        await this.plugin.saveSettings(); this.selectedSecretName = null; this.display();
+        await this.plugin.saveSettings(); this.plugin.onMcpSyncInputsChanged?.(); this.selectedSecretName = null; this.display();
       });
     }
     const actions = detail.createEl('footer', { cls: 'ct-manager-actions' });
@@ -2812,7 +2844,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       if (isNew) this.plugin.settings.secretEnvKeys = [...keys, resolvedName];
       const scopes = this.plugin.settings.secretEnvScopes ?? (this.plugin.settings.secretEnvScopes = {});
       if (selectedRadio.checked) scopes[resolvedName] = [...chosen]; else delete scopes[resolvedName];
-      await this.plugin.saveSettings(); this.selectedSecretName = resolvedName; this.display();
+      await this.plugin.saveSettings(); this.plugin.onMcpSyncInputsChanged?.(); this.selectedSecretName = resolvedName; this.display();
     });
   }
 
@@ -3386,7 +3418,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       return result;
     };
     // Resources apply when the container is (re)created: the status then offers Update.
-    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; shareProjectFolders?: boolean; optionalTools?: string[] }): Promise<void> => {
+    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; shareProjectFolders?: boolean; optionalTools?: string[]; allowSyncedStdio?: boolean }): Promise<void> => {
       const current = this.plugin.settings.localDaemon ?? { enabled: false, port: 7433 };
       this.plugin.settings.localDaemon = { ...current, ...patch };
       await this.plugin.saveSettings();
@@ -3414,6 +3446,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           const folders = value.split('\n').map((l) => l.trim()).filter(Boolean);
           await saveResources({ folders: folders.length ? folders : undefined });
         }));
+    const syncedStdioSetting = new Setting(containerEl)
+      .setName('Local daemon: allow MCP servers that start programs')
+      .setDesc('Lets you run a Settings MCP server that starts a program (stdio) inside the local daemon container (Settings, MCP, "Runs on"). The program runs as the daemon user with access to everything the daemon can see. Off by default; http and sse servers do not need it. Applies when the container is next created: choose Update in the block above.')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.localDaemon?.allowSyncedStdio === true)
+        .onChange(async (on) => { await saveResources({ allowSyncedStdio: on || undefined }); }));
     // Tools that write, schedule or touch secrets on this Mac, which every daemon is denied by default.
     const optionalSettings: Setting[] = [];
     {
@@ -3449,11 +3487,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       pluginVersion: this.plugin.manifest.version,
       snapshot: () => controller.snapshot(),
       subscribe: (listener) => controller.subscribe(listener),
-      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, projectFoldersSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
+      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, projectFoldersSetting, syncedStdioSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       cancel: () => controller.cancel(),
       openUrl: (url) => { try { window.open(url, '_blank'); } catch { /* the panel keeps a link */ } },
       signIn: (handlers) => controller.signIn(handlers),
+      signInHarness: (harness, handlers) => controller.signInHarness(harness, handlers),
+      setHarnesses: (harnesses) => controller.setHarnesses(harnesses),
       run: (id, opts) => {
         switch (id) {
           case 'setup': return showAfter(() => controller.setUp(opts))();
@@ -3598,6 +3638,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         if (state && state.status !== 'connected' && state.errorMessage) {
           row.descEl.createDiv({ cls: 'ct-mcp-server-warning', text: state.errorMessage });
         }
+        // Shown only where daemons can receive servers: an OAuth server signs in through this computer, so it never leaves it.
+        if (this.plugin.mcpSync && visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile).length > 0) {
+          row.descEl.createDiv({ cls: 'ct-mcp-runson-reason', text: 'Runs on this computer only: it signs in through this computer, so it cannot run on a daemon.' });
+        }
         row.addButton((btn) => {
           btn.setButtonText('Re-authorize').onClick(() =>
             reauthorizeFromSettings(this.plugin.oauthMcpRegistry, name, btn, 'Re-authorize', refreshOAuth));
@@ -3694,6 +3738,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     for (const key of this.plugin.settings.secretEnvKeys ?? []) knownEnv[key] = 'set';
 
     const listEl = containerEl.createDiv({ cls: 'ct-mcp-servers-list' });
+    const runsOnHost: RunsOnHost | null = this.plugin.mcpSync ? {
+      app: this.app,
+      engine: this.plugin.mcpSync,
+      daemons: () => visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile),
+      reported: (id) => this.plugin.daemonMcpStatus?.get(id)?.servers,
+      rerender: () => renderList(),
+    } : null;
     const renderList = () => {
       listEl.empty();
       const { servers, invalid } = listMcpServers(this.plugin.settings);
@@ -3735,6 +3786,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
         );
 
+        // Where else this server may run: the remote daemons the user can opt it in for.
+        const syncEngine = this.plugin.mcpSync;
+        if (syncEngine) {
+          const ev = syncEngine.evaluate(server.name);
+          if (ev) {
+            row.settingEl.addClass('ct-mcp-has-runson');
+            if (runsOnHost) renderMcpRunsOn(row.settingEl, runsOnHost, ev);
+          }
+        }
+
         row.addButton((btn) =>
           btn.setButtonText('Remove').setWarning().onClick(() => {
             const result = deleteMcpServer(this.plugin.settings, server.name);
@@ -3743,6 +3804,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               return;
             }
             void this.plugin.saveSettings();
+            this.plugin.onMcpSyncInputsChanged?.();
             new Notice(`Removed MCP server "${server.name}".`);
             renderList();
           }),
@@ -3770,6 +3832,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       }
     };
     renderList();
+    // The engine reports progress (synced, failed, needs an admin token) as it learns it; redraw the list when it does.
+    this.mcpSyncUnsub?.();
+    this.mcpSyncUnsub = this.plugin.mcpSync?.onChange(() => { if (listEl.isConnected) renderList(); }) ?? null;
+    // Which daemons need an admin token is learned by asking (harmlessly) once each is connected.
+    if (this.plugin.mcpSync) {
+      for (const d of visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile)) void this.plugin.mcpSync.probeAdmin(d.id);
+    }
 
     new Setting(containerEl)
       .addButton((btn) =>
