@@ -218,7 +218,10 @@ export class ThreadHost {
     const valid = this.validate(spec);
     if (valid.hostTools) this.hostTools.setManifest(threadId, manifestFromSpecs(valid.hostTools), owner);
     const previous = rt.meta;
-    const nativeSessionId = previous?.nativeSessionId ?? resume ?? valid.resume;
+    // The stored native id belongs to the harness that made it: a client that handed the thread to another harness
+    // (close, then open with a new `spec.harness`) must not have a Claude session id resumed by Codex, or the reverse.
+    const sameHarness = !previous || previous.spec.harness === valid.harness;
+    const nativeSessionId = (sameHarness ? previous?.nativeSessionId : undefined) ?? resume ?? valid.resume;
     rt.meta = { threadId, spec: valid, ...(nativeSessionId ? { nativeSessionId } : {}), updatedAt: this.now() };
     this.metaStore.save(rt.meta);
     try {

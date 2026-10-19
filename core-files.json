@@ -70,6 +70,7 @@
     "src/remote/DaemonClient.ts",
     "src/remote/RemoteHarnessSession.ts",
     "src/remote/backoff.ts",
+    "src/remote/harnessSupport.ts",
     "src/remote/hostToolExecutor.ts",
     "src/remote/hostTools.ts",
     "src/remote/mcpPartition.ts",

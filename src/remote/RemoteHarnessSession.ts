@@ -180,7 +180,7 @@ export class RemoteHarnessSession implements HarnessSession {
     if (mode.attachOnly && this.remote.turnPending) this.sendAwaitingState = true;
     if (this.deps.hostTools) await this.prepareHostTools();
     if (this.spec.appendSystemPrompt) {
-      this.spec = { ...this.spec, appendSystemPrompt: applyHostToolsPrompt(this.spec.appendSystemPrompt, this.sentManifest && Object.keys(this.sentManifest).length ? this.deps.hostTools?.summary ?? null : null, this.deps.hostName ?? 'Geode') };
+      this.spec = { ...this.spec, appendSystemPrompt: applyHostToolsPrompt(this.spec.appendSystemPrompt, this.sentManifest && Object.keys(this.sentManifest).length ? this.deps.hostTools?.summary ?? null : null, this.deps.hostName ?? 'Geode', this.thread.agentHarness ?? 'claude') };
     }
     if (mode.attachOnly) {
       // A turn was running when the host quit: show it as running until the replay says otherwise.

@@ -18,6 +18,10 @@ export interface RemoteDaemonResolver {
   vaultMappingOf?(daemonId: string): RemoteVaultMapping | undefined;
   /** What the daemon may do on this computer (host tools, MCP allowlist); undefined = defaults. */
   hostToolsOf?(daemonId: string): RemoteHostToolsSettings | undefined;
+  /** `welcome.capabilities` of the last connection, or undefined while the daemon has not been reached yet. */
+  capabilitiesOf?(daemonId: string): string[] | undefined;
+  /** Start connecting (if not already) and resolve once connected, failed for good, or `timeoutMs` passed. Never rejects. */
+  warm?(daemonId: string, timeoutMs?: number): Promise<void>;
 }
 
 export interface DaemonRegistryOptions {
@@ -58,6 +62,25 @@ export class DaemonRegistry implements RemoteDaemonResolver {
 
   hostToolsOf(daemonId: string): RemoteHostToolsSettings | undefined {
     return this.config(daemonId)?.hostTools;
+  }
+
+  capabilitiesOf(daemonId: string): string[] | undefined {
+    return this.entries.get(daemonId)?.client.daemonInfo?.capabilities;
+  }
+
+  warm(daemonId: string, timeoutMs = 4000): Promise<void> {
+    const client = this.clientFor(daemonId);
+    if (!client) return Promise.resolve();
+    if (client.daemonInfo) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let off: (() => void) | undefined;
+      const done = (): void => { clearTimeout(timer); off?.(); resolve(); };
+      const timer = setTimeout(done, timeoutMs);
+      off = client.onState((s) => {
+        if (s.info || s.status === 'unreachable' || s.status === 'unauthorized' || s.status === 'incompatible' || s.status === 'closed') done();
+      });
+      client.connect();
+    });
   }
 
   clientFor(daemonId: string): DaemonClient | undefined {

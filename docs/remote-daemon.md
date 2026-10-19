@@ -599,6 +599,19 @@ starts (a tool that first appears in a later manifest needs a new session). Outs
 a client-supplied server on any harness (for OpenCode its bridge name `agent-threads` is reserved too). Operator-configured
 and client-supplied MCP servers are mirrored into each harness's own config (Codex `mcp_servers`, OpenCode `mcp`).
 
+**Choosing the harness from Geode.** A remote thread carries the harness picked on the send button (Claude, Codex or
+OpenCode); "Run on" is offered for all three. The choice is checked against the daemon's `welcome.capabilities`: a daemon
+that does not advertise `harness.<kind>` is shown disabled with the reason (and the harnesses it lacks are disabled once it
+is selected), instead of failing at `session.open`. A daemon that advertises no `harness.*` at all is an older one and is
+treated as Claude only. A daemon not reached yet is not blocked on a guess: opening the menu connects to it so the
+capabilities arrive, and a refusal at open is still reported. The session spec carries `harness` and the per-harness
+options the daemon reads (Claude: all of `sessionOptions`; Codex: `effort` from Settings' Codex effort; OpenCode: none;
+vetted http/sse MCP servers for all). Claude's default model alias is not sent to Codex or OpenCode. Host-tools text in
+the system prompt uses the names the harness sees (`vault_search`, `google-docs__create_doc` for Codex and OpenCode;
+`mcp__claude_threads__*` for Claude). Switching harness on a remote thread (hand-off) works like a local one: the old
+session is closed on the daemon, the next message opens the new harness there with the conversation summary, and the
+daemon never resumes one harness's native session with another.
+
 **What differs by harness.** Claude honours all of `spec.sessionOptions` (thinking, effort, agents, betas). Codex honours
 `effort` only; the rest is dropped. OpenCode honours none of it. Neither has native child-agent controls
 (`session.sendAgentMessage` / `interruptAgent` are refused for them, as they are today for Claude's local sessions) nor

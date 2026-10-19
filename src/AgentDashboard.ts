@@ -171,6 +171,8 @@ export class AgentDashboard extends ItemView {
       harnessPicker: {
         initialHarness: this.plugin.settings.agentHarness ?? 'claude',
         getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
+        getDaemonCapabilities: (id) => this.plugin.daemonRegistry?.capabilitiesOf(id),
+        warmDaemon: (id) => this.plugin.daemonRegistry?.warm(id) ?? Promise.resolve(),
         getFolderSource: () => this.plugin.remoteFolders ?? undefined,
         getLocalCwd: () => {
           const project = this.manager.getProject(this.selectedProjectId);
