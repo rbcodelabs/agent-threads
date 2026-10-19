@@ -342,10 +342,11 @@ export class DispatchInput {
 
         const footerActionsEl = inputFooter.createDiv('ct-input-footer-actions');
         this.options.appendFooterActions?.(footerActionsEl);
+        // Same order as an existing thread: settings indicator, then attach, then mic.
+        if (this.selectedHarness) this.configureHarnessPicker(footerActionsEl);
         // Attach + mic live in the footer bottom row (keeps input area compact)
         footerActionsEl.appendChild(attachBtn);
         footerActionsEl.appendChild(micBtn);
-        if (this.selectedHarness) this.configureHarnessPicker(footerActionsEl);
       } else {
         this.contextChipNameEl = null;
         this.contextChipEl = null;
