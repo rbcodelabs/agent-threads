@@ -3,7 +3,6 @@ import '../setup/obsidian-dom';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { describe, expect, it, vi } from 'vitest';
-import * as obsidian from 'obsidian';
 
 vi.mock('../../src/ClaudeSession', () => ({ formatToolName: (name: string) => name }));
 vi.mock('../../src/DispatchInput', () => ({
@@ -26,28 +25,19 @@ describe('Agent Board product metadata', () => {
     expect(KANBAN_VIEW_TYPE).toBe('claude-threads:kanban');
   });
 
-  it('labels and icons the Agents List toolbar button as Agent Board', () => {
-    const setIcon = vi.spyOn(obsidian, 'setIcon');
-    const root = document.createElement('div');
-    const containerEl = document.createElement('div');
-    containerEl.append(document.createElement('div'), root);
-    const view = Object.assign(Object.create(AgentDashboard.prototype), {
-      containerEl,
-      plugin: {
-        settings: {},
-        manager: { getThreads: () => [] },
-        activateKanbanView: vi.fn(),
-      },
-      manager: { getThreads: () => [] },
-      addProjectSelector: vi.fn(),
-    }) as AgentDashboard;
+  it('the Agents List no longer carries an Agent Board button; the board stays reachable by command', () => {
+    const dashboardSource = readFileSync(resolve(__dirname, '../../src/AgentDashboard.ts'), 'utf8');
+    expect(dashboardSource).not.toContain('activateKanbanView');
+    expect(dashboardSource).not.toContain('Open Agent Board');
+    const mainSource = readFileSync(resolve(__dirname, '../../src/main.ts'), 'utf8');
+    expect(mainSource).toMatch(/id: 'open-kanban-board',\s+name: 'Open Agent Board'/);
+  });
 
-    (view as unknown as { buildUI(): void }).buildUI();
-
-    const button = root.querySelector<HTMLButtonElement>('.ct-kanban-toggle');
-    expect(button?.title).toBe('Open Agent Board');
-    expect(button?.getAttribute('aria-label')).toBe('Open Agent Board');
-    expect(setIcon).toHaveBeenCalledWith(button, 'kanban');
+  it('titles the Agents List by thread count only', () => {
+    const view = Object.assign(Object.create(AgentDashboard.prototype), { displayedThreadCount: 14 }) as AgentDashboard;
+    expect(view.getDisplayText()).toBe('14 threads');
+    Object.assign(view, { displayedThreadCount: 1 });
+    expect(view.getDisplayText()).toBe('1 thread');
   });
 
   it('uses the product name in user-visible diagnostics without renaming the internal counter', () => {

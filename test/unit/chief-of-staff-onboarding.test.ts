@@ -114,10 +114,12 @@ describe('chooseChiefOfStaffHarness', () => {
     expect(chooseChiefOfStaffHarness('codex', only('claude', 'codex'))).toBe('codex');
   });
 
-  it('never picks OpenCode (its sessions do not receive skill sources), preferring Claude then Codex', () => {
-    expect(chooseChiefOfStaffHarness('opencode', only('opencode', 'claude', 'codex'))).toBe('claude');
-    expect(chooseChiefOfStaffHarness('opencode', only('opencode', 'codex'))).toBe('codex');
-    expect(chooseChiefOfStaffHarness('opencode', only('opencode'))).toBeUndefined();
+  it('uses OpenCode when selected, and as the last fallback after Claude then Codex', () => {
+    expect(chooseChiefOfStaffHarness('opencode', only('opencode', 'claude', 'codex'))).toBe('opencode');
+    expect(chooseChiefOfStaffHarness('claude', only('opencode', 'codex'))).toBe('codex');
+    expect(chooseChiefOfStaffHarness('claude', only('opencode'))).toBe('opencode');
+    expect(chooseChiefOfStaffHarness('opencode', only('codex', 'claude'))).toBe('claude');
+    expect(chooseChiefOfStaffHarness('opencode', only())).toBeUndefined();
   });
 
   it('falls through to another skill-capable harness when the selected one is missing', () => {
@@ -208,7 +210,7 @@ describe('describeChiefOfStaffFailure', () => {
   });
 
   it('maps the other reasons', () => {
-    expect(describeChiefOfStaffFailure('harness-unavailable', 'x')).toBe('no Claude Code or Codex found');
+    expect(describeChiefOfStaffFailure('harness-unavailable', 'x')).toBe('no agent harness (Claude Code, Codex or OpenCode) found');
     expect(describeChiefOfStaffFailure('thread-failed', 'Error: boom\n    at foo (/x/y.js:1:2)')).toBe('couldn\u2019t start the thread');
     expect(describeChiefOfStaffFailure('unexpected', 'TypeError: x')).toBe('something went wrong during setup');
   });

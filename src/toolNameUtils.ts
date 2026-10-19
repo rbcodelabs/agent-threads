@@ -131,12 +131,9 @@ export function getToolIcon(raw: string): string {
     case 'get_backlinks':        return 'link-2';
     case 'get_outgoing_links':   return 'external-link';
     case 'set_working_directory': return 'folder-symlink';
+    case 'host_exec':            return 'square-terminal';
     case 'enter_worktree':       return 'git-branch-plus';
     case 'exit_worktree':        return 'git-branch';
-    case 'enter_vm':             return 'box';
-    case 'vm_exec':              return 'terminal';
-    case 'host_exec':            return 'square-terminal';
-    case 'exit_vm':              return 'square-x';
     case 'get_open_tabs':        return 'layout-panel-top';
     case 'ScheduleWakeup':       return 'alarm-clock';
     case 'browser_navigate':     return 'globe';
@@ -200,18 +197,22 @@ export function isTrustedBuiltInTool(raw: string): boolean {
 }
 
 /**
- * Tool name `host_exec` uses on the permission card. Cards for this name are
- * always shown (permission mode, auto-approve, trusted-tool and persisted
- * "Always Allow" shortcuts are all ignored) and offer Allow once / Deny only.
- */
-export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
-
-/**
  * Tools whose permission card shows their complete input (the SDK description
  * would hide the expression). `browser_eval` runs agent-authored JavaScript, so
  * the user should be able to read it. It is otherwise permissioned like any
  * other tool, including Always Allow.
  */
+/**
+ * The host_exec permission request of the managed local daemon's tool group: decided per call, never remembered by
+ * the generic Always Allow. The only standing approval is the scoped command-prefix allowlist (`hostExecPrefix.ts`).
+ */
+export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
+
+/** True for a host_exec permission card under either name (`host_exec` or the daemon's `mcp__claude_threads__host_exec`). */
+export function isHostExecPermission(toolName: string): boolean {
+  return toolKey(toolName) === HOST_EXEC_PERMISSION_TOOL;
+}
+
 const FULL_INPUT_DETAIL_TOOL_KEYS: ReadonlySet<string> = new Set(['browser_eval']);
 
 /** True when the card should show the tool's full input. */
@@ -219,9 +220,11 @@ function showsFullInput(toolName: string): boolean {
   return FULL_INPUT_DETAIL_TOOL_KEYS.has(toolKey(toolName));
 }
 
-/** False for requests that must be decided afresh every time. */
+/** False for requests that must be decided afresh every time (never "Always Allow"). */
 export function canAlwaysAllow(toolName: string): boolean {
-  return toolName !== HOST_EXEC_PERMISSION_TOOL && toolKey(toolName) !== 'sync_resolve_conflict';
+  // By bare key: the managed local daemon's card is named `mcp__claude_threads__host_exec`, not `host_exec`.
+  const key = toolKey(toolName);
+  return key !== HOST_EXEC_PERMISSION_TOOL && key !== 'sync_resolve_conflict';
 }
 
 /**
@@ -240,8 +243,7 @@ export function buildPermissionDetail(
 
 /**
  * True when a permission request may be resolved without showing a card:
- * first-party tools or a persisted "Always Allow". Requests that cannot be
- * always-allowed (host_exec) are never pre-approved, whatever the lists say.
+ * first-party tools or a persisted "Always Allow".
  */
 export function isPermissionPreApproved(toolName: string, alwaysAllowedTools: readonly string[]): boolean {
   if (!canAlwaysAllow(toolName)) return false;
@@ -379,6 +381,30 @@ export function groupToolCalls(tools: import('./types').ToolCallRecord[]): ToolC
     i = j;
   }
   return result;
+}
+
+/**
+ * Sequential grouping: every unbroken run of non-browser tool calls becomes ONE
+ * group, whatever the commands are (a lone call is a group of one, so every
+ * run reads the same). Browser sessions keep their own card. The group's
+ * activity kind is the shared kind when uniform, otherwise 'working'.
+ * Replaces the same-kind chunking + smoothing for rendering.
+ */
+export function groupToolRuns(tools: import('./types').ToolCallRecord[]): ToolCallGroup[] {
+  const out: ToolCallGroup[] = [];
+  let run: import('./types').ToolCallRecord[] = [];
+  const flush = (): void => {
+    if (run.length === 0) return;
+    const kinds = new Set(run.map(t => getActivityKind(t.name)));
+    out.push({ kind: 'group', activityKind: kinds.size === 1 ? [...kinds][0] : 'working', tools: run });
+    run = [];
+  };
+  for (const entry of groupToolCalls(tools)) {
+    if (entry.kind === 'browser') { flush(); out.push(entry); }
+    else run.push(...(entry.kind === 'single' ? [entry.tool] : entry.tools));
+  }
+  flush();
+  return out;
 }
 
 /**
@@ -592,4 +618,154 @@ export function mergeAdjacentToolOnlyMessages(
     i = j;
   }
   return result;
+}
+
+// ─── Tool-call display style + row/group formatting ──────────────────────────
+// Pure helpers behind the "Tool call style" setting (chips | tree | cards).
+// The DOM is shared by all three styles; these functions only decide TEXT.
+
+export type ToolCallStyle = 'chips' | 'tree' | 'cards';
+export const TOOL_CALL_STYLES: readonly ToolCallStyle[] = ['chips', 'tree', 'cards'];
+export const DEFAULT_TOOL_CALL_STYLE: ToolCallStyle = 'tree';
+
+/** Coerce an arbitrary persisted value to a valid style (default: tree). */
+export function normalizeToolCallStyle(value: unknown): ToolCallStyle {
+  return (TOOL_CALL_STYLES as readonly unknown[]).includes(value) ? (value as ToolCallStyle) : DEFAULT_TOOL_CALL_STYLE;
+}
+
+/** Root-element class for a style: `ct-tools-chips|tree|cards`. */
+export function toolCallStyleClass(style: ToolCallStyle): string {
+  return `ct-tools-${style}`;
+}
+
+export interface ToolPathContext {
+  /** Absolute vault root (no trailing slash needed). Paths under it become vault-relative. */
+  vaultRoot?: string;
+  /** Home directory. Absolute paths under it (but outside the vault) become `~/...`. */
+  home?: string;
+}
+
+export interface FormattedToolPath {
+  /** Directory part including trailing slash ('' for a bare filename). Rendered dim. */
+  dir: string;
+  /** Filename (or last segment). Rendered bright. */
+  file: string;
+}
+
+function stripTrailingSlash(p: string): string {
+  return p.length > 1 ? p.replace(/\/+$/, '') : p;
+}
+
+/** Vault-relative when inside the vault, `~/...` when elsewhere under home, else unchanged. */
+export function formatToolPath(raw: string, ctx: ToolPathContext = {}): FormattedToolPath {
+  let p = raw.trim();
+  const vault = ctx.vaultRoot ? stripTrailingSlash(ctx.vaultRoot) : '';
+  const home = ctx.home ? stripTrailingSlash(ctx.home) : '';
+  if (vault && (p === vault || p.startsWith(vault + '/'))) {
+    p = p === vault ? '/' : p.slice(vault.length + 1);
+  } else if (home && (p === home || p.startsWith(home + '/'))) {
+    p = '~' + p.slice(home.length);
+  }
+  const idx = p.lastIndexOf('/');
+  if (idx < 0) return { dir: '', file: p };
+  return { dir: p.slice(0, idx + 1), file: p.slice(idx + 1) };
+}
+
+const PATH_TOOL_KEYS: ReadonlySet<string> = new Set([
+  'Read', 'Edit', 'Write', 'NotebookEdit', 'navigate_to_file', 'workspace_navigate_to_file',
+  'get_backlinks', 'get_outgoing_links', 'get_note_metadata', 'vault_get_backlinks',
+  'vault_get_outgoing_links', 'vault_get_note_metadata', 'set_working_directory',
+]);
+
+export interface ToolRowSummary {
+  /** True when `dir`/`file` should render as a path (dim dir + bright file). */
+  isPath: boolean;
+  dir: string;
+  /** Filename for paths, otherwise the full plain text. */
+  main: string;
+}
+
+/** Splits a tool call's summary into dim/bright parts. Non-path summaries pass through untouched. */
+export function formatToolRowSummary(toolName: string, summary: string, ctx: ToolPathContext = {}): ToolRowSummary {
+  const text = summary ?? '';
+  const looksAbsolute = /^(\/|~\/)\S*$/.test(text.trim());
+  if (text && (PATH_TOOL_KEYS.has(toolKey(toolName)) || looksAbsolute) && !/\n/.test(text)) {
+    const { dir, file } = formatToolPath(text, ctx);
+    return { isPath: true, dir, main: file };
+  }
+  return { isPath: false, dir: '', main: text };
+}
+
+export interface ToolGroupSummary {
+  /** One-line label, e.g. "Read 3 files". */
+  label: string;
+  /** True when `label` already states the count (so chips must not append "3×"). */
+  countInLabel: boolean;
+}
+
+function plural(n: number, one: string, many: string): string {
+  return n === 1 ? `${n} ${one}` : `${n} ${many}`;
+}
+
+/** One-line summary of a finished group, derived from its member tools. */
+export function summarizeToolGroup(
+  activityKind: ActivityKind,
+  tools: import('./types').ToolCallRecord[],
+): ToolGroupSummary {
+  const keys = tools.map(t => toolKey(t.name));
+  const count = (pred: (k: string) => boolean) => keys.filter(pred).length;
+  const n = tools.length;
+  const inLabel = (label: string): ToolGroupSummary => ({ label, countInLabel: true });
+  // Mixed run (e.g. reads then edits then MCP calls): summarize each kind in
+  // order of first appearance, "Read 2 files, edited 1 file".
+  const byKind = new Map<ActivityKind, import('./types').ToolCallRecord[]>();
+  for (const t of tools) {
+    const k = getActivityKind(t.name);
+    byKind.set(k, [...(byKind.get(k) ?? []), t]);
+  }
+  if (byKind.size > 1) {
+    if (byKind.size > 3) return inLabel(`Ran ${plural(n, 'tool', 'tools')}`);
+    const parts = [...byKind.entries()].map(([k, ts]) => summarizeToolGroup(k, ts).label);
+    return inLabel(parts.map((p, i) => (i === 0 ? p : p.charAt(0).toLowerCase() + p.slice(1))).join(', '));
+  }
+  const bare = (label: string): ToolGroupSummary => ({ label, countInLabel: false });
+
+  switch (activityKind) {
+    case 'exploring': {
+      const reads = count(k => k === 'Read' || k === 'ImageView');
+      const searches = count(k => k === 'Grep' || k === 'Glob');
+      const cmds = count(k => k === 'Bash');
+      const parts: string[] = [];
+      if (reads) parts.push(`read ${plural(reads, 'file', 'files')}`);
+      if (searches) parts.push(`searched ${plural(searches, 'pattern', 'patterns')}`);
+      if (cmds) parts.push(`ran ${plural(cmds, 'command', 'commands')}`);
+      const joined = parts.join(', ');
+      return inLabel(joined.charAt(0).toUpperCase() + joined.slice(1));
+    }
+    case 'editing': {
+      const gen = count(k => k === 'ImageGeneration');
+      if (gen === n) return inLabel(`Generated ${plural(n, 'image', 'images')}`);
+      const wrote = count(k => k === 'Write');
+      if (wrote === n) return inLabel(`Wrote ${plural(n, 'file', 'files')}`);
+      return inLabel(`Edited ${plural(n, 'file', 'files')}`);
+    }
+    case 'planning':
+      return inLabel(`Updated the plan (${plural(n, 'step', 'steps')})`);
+    case 'researching': {
+      const browser = count(k => k.startsWith('browser_'));
+      if (browser === n) return inLabel(`Browsed ${plural(n, 'page', 'pages')}`);
+      const web = count(k => k === 'WebSearch');
+      if (web === n) return inLabel(`Searched the web ${n}×`);
+      return inLabel(`Researched online (${plural(n, 'call', 'calls')})`);
+    }
+    case 'searching':
+      return inLabel(`Looked up ${plural(n, 'tool', 'tools')}`);
+    default: {
+      const searchKeys = new Set(['search_vault', 'vault_search']);
+      if (keys.every(k => searchKeys.has(k))) return bare('Searched the vault');
+      const first = keys[0];
+      if (keys.every(k => k === first)) return bare(formatToolName(tools[0].name).replace(/^./, c => c.toUpperCase()));
+      return inLabel(`Ran ${plural(n, 'tool', 'tools')}`);
+    }
+  }
 }

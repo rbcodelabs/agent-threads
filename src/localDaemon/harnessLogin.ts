@@ -12,7 +12,7 @@
  */
 
 import { stripAnsi, type SpawnLike } from '../claudeContainerAuthCli';
-import { VM_BINARY } from '../sandboxVm';
+import { VM_BINARY } from '../containerCli';
 import { parseDeviceLogin } from './parse';
 import { codexLoginArgs } from './spec';
 

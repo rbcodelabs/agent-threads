@@ -28,6 +28,6 @@ Full step-by-step guides live in `process/` (also available as an Obsidian vault
 
 **Prefer SDK-native patterns over timers.** For thread lifecycle / state-tracking bugs (stuck "working", lingering sessions, missed edge events), don't add another timer, backstop delay or heuristic. First look for a native Claude Agent SDK mechanism (e.g. a long-lived streaming query per thread) that removes the need to guess; only fall back to a timer if none exists, and say so explicitly.
 
-**Bundled container runtime.** The Apple `container` CLI ships with the plugin (`src/sandboxRuntime.ts`) at `~/Library/Application Support/claude-threads/runtime/<ver>/bin/container` (v1.5.0 at time of writing), not on PATH. An empty `which container` is expected; check that dir and `container ls -a` before claiming the runtime is missing.
+**Bundled container runtime.** The Apple `container` CLI ships with the plugin (`src/sandboxRuntime.ts`; its only consumer is the local daemon in `src/localDaemon/`, the per-thread sandbox VMs are gone) at `~/Library/Application Support/claude-threads/runtime/<ver>/bin/container` (v1.5.0 at time of writing), not on PATH. An empty `which container` is expected; check that dir and `container ls -a` before claiming the runtime is missing.
 
 **Plugin type:** Obsidian desktop + mobile. Build with `npm run build`. Artifacts in `dist/`. Released via GitHub Actions on tag push — do not manually upload artifacts.

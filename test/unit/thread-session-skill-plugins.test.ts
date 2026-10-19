@@ -1,6 +1,6 @@
 /**
- * ThreadSession.start(): skill plugin paths are rewritten to guest paths only
- * when the session is VM-routed; host-local sessions keep host paths untouched.
+ * ThreadSession.start(): skill plugin paths are host paths and are passed to the
+ * SDK untouched.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SessionCallbacks } from '../../src/ClaudeSession';
@@ -19,12 +19,6 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   }),
 }));
 
-const resolveClaudeVmRouting = vi.fn();
-vi.mock('../../src/harnessVmRouting', async () => {
-  const actual = await vi.importActual<typeof import('../../src/harnessVmRouting')>('../../src/harnessVmRouting');
-  return { ...actual, resolveClaudeVmRouting };
-});
-
 const { ThreadSession } = await import('../../src/ThreadSession');
 
 function callbacks(): SessionCallbacks {
@@ -36,11 +30,6 @@ function callbacks(): SessionCallbacks {
   };
 }
 
-const plan = {
-  mounts: [{ hostPath: '/h/a', guestPath: '/skills/a-1' }],
-  pluginGuestPaths: { '/h/a': '/skills/a-1', '/h/b': '/skills/b-2' },
-};
-const vm = { mode: 'auto', image: 'img', vmManager: {} as never, mountPath: '/work', skillMountPlan: plan };
 const hostPlugins = [{ type: 'local', path: '/h/a' }, { type: 'local', path: '/h/b' }];
 
 function start(claude: object) {
@@ -50,25 +39,16 @@ function start(claude: object) {
 }
 
 describe('ThreadSession.start() — skill plugin paths', () => {
-  beforeEach(() => { resolveClaudeVmRouting.mockReset(); queryCalls.length = 0; });
+  beforeEach(() => { queryCalls.length = 0; });
 
-  it('rewrites to guest paths and drops unmounted plugins when VM-routed', async () => {
-    resolveClaudeVmRouting.mockResolvedValue({
-      routed: true,
-      routing: { containerName: 'c', containerBinaryPath: '/x/claude', mountedExtra: plan.mounts },
-    });
-    await start({ vm, sessionOptions: { plugins: hostPlugins } });
-    expect(queryCalls[0].options.plugins).toEqual([{ type: 'local', path: '/skills/a-1' }]);
-  });
-
-  it('leaves host paths untouched on a host-local fallback', async () => {
-    resolveClaudeVmRouting.mockResolvedValue({ routed: false, reason: 'runtime-missing' });
-    await start({ vm, sessionOptions: { plugins: hostPlugins } });
-    expect(queryCalls[0].options.plugins).toEqual(hostPlugins);
-  });
-
-  it('leaves host paths untouched when no VM routing inputs exist at all', async () => {
+  it('passes host plugin paths to the SDK untouched', async () => {
     await start({ sessionOptions: { plugins: hostPlugins } });
     expect(queryCalls[0].options.plugins).toEqual(hostPlugins);
+  });
+
+  it('ignores a leftover legacy claude.vm routing input from older callers', async () => {
+    await start({ vm: { mode: 'always', image: 'img' }, sessionOptions: { plugins: hostPlugins } });
+    expect(queryCalls[0].options.plugins).toEqual(hostPlugins);
+    expect(queryCalls[0].options).not.toHaveProperty('spawnClaudeCodeProcess');
   });
 });

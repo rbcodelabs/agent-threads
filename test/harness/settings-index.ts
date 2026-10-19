@@ -300,12 +300,21 @@ const mockPlugin = {
     },
   },
   wakeLock: { setEnabled: () => {} },
+  // Minimal stand-in for the managed local daemon controller (Settings -> Remote -> Local daemon block, desktop only).
+  // No container runtime exists in the harness, so its status snapshot is a rejection the block must tolerate.
+  localDaemon: {
+    snapshot: async () => { throw new Error('harness: no container runtime'); },
+    subscribe: () => () => {},
+    cancel: () => {},
+    signIn: async () => {},
+  },
   relayClient: null,
   initDesktopRelayClient: () => {},
   initMobileRelayClient: () => {},
   saveSettings: async () => {},
   ensureProjectOrchestratorThread: async () => {},
   deleteProject: async (id: string) => { settings.projects = settings.projects.filter(project => project.id !== id); },
+  offerDaemonUpdateIfMountsChanged: async () => {},
   getView: () => null,
   getEffectiveCwd: () => '/Users/mock/vault',
   dispatchNewThread: async (prompt: string, _images: unknown, title: string | undefined) => {

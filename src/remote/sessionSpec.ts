@@ -16,8 +16,9 @@
  *                additionalDirectories (dropped: the vault root is a Mac path),
  *                appendSystemPrompt (caller rebuilds it without the Mac vault root),
  *                claude.sessionOptions (plain JSON subset)
- *   omitted      callbacks, secretEnv, containerAuthToken, claude.mcpServers / vmMcpServers /
- *                vm, codex, opencode
+ *   omitted      callbacks, secretEnv, claude.mcpServers, codex, opencode
+ *   by name      claude.remoteEnvKind (the NAME of a credential kind pushed to the daemon; never values) and
+ *                claude.remotePluginPaths (guest paths of skills the plugin copied into the daemon's data volume)
  *
  * Host tools (`hostTools`) are added by the session once it has built the manifest; the http/sse external MCP servers
  * that survive `mcpPartition.ts` ride in `mcpServers`. Skills and the secret allowlist arrive in PR 9.
@@ -76,6 +77,8 @@ export function projectSessionOptions(options: HarnessSessionOptions, thread: Th
     extraEnvRaw: '',
     ...(Object.keys(sessionOptions).length > 0 ? { sessionOptions } : {}),
     ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+    ...(options.claude?.remoteEnvKind ? { envKind: options.claude.remoteEnvKind } : {}),
+    ...(options.claude?.remotePluginPaths?.length ? { pluginPaths: [...options.claude.remotePluginPaths] } : {}),
   };
 }
 
@@ -85,6 +88,36 @@ export interface RemoteVaultContext {
   /** Vault-relative folder where completed threads are saved as notes (`settings.vaultFolder`). */
   vaultFolder?: string;
   saveThreadsToVault?: boolean;
+}
+
+/**
+ * Where the local daemon mounts the vault. Duplicates `VAULT_GUEST_PATH` (localDaemon/spec.ts) because this file is
+ * core and must not import the Node-only local daemon; a unit test keeps the two equal.
+ */
+export const LOCAL_VAULT_GUEST_PATH = '/vault';
+
+/** A host folder bind-mounted into the daemon's machine (the local Apple-container VM). */
+export interface RemoteMount {
+  host: string;
+  guest: string;
+  readOnly: boolean;
+}
+
+/**
+ * The "Mounted folders" block: how host paths the user (or a doc) mentions map to paths on this machine. The vault
+ * mount and its read-only masked sub-mounts are left out because the vault addendum covers them. Empty when nothing
+ * else is mounted, so the prompt of a daemon without extra mounts is unchanged.
+ */
+export function buildMountedFoldersBlock(mounts: readonly RemoteMount[] | undefined, vaultGuestPath: string = LOCAL_VAULT_GUEST_PATH): string[] {
+  const vaultRoot = vaultGuestPath.replace(/\/+$/, '');
+  const shown = (mounts ?? []).filter((m) => m.guest !== vaultRoot && !m.guest.startsWith(`${vaultRoot}/`));
+  if (shown.length === 0) return [];
+  return [
+    '',
+    'Mounted folders (host path -> path on this machine):',
+    ...shown.map((m) => `- ${m.guest} (${m.readOnly ? 'read-only' : 'read-write'}) <- ${m.host}`),
+    '- If the user or a document gives a path that starts with a host path listed above, use the corresponding path on this machine instead. Check this list before concluding a repo or folder is missing.',
+  ];
 }
 
 /**
@@ -102,7 +135,7 @@ export function buildRemoteEnvironmentPrompt(
   hostName: 'Geode' | 'Obsidian' = 'Obsidian',
   vault?: RemoteVaultContext,
   /** `hostTools: true` leaves a placeholder for the tools paragraph; the session fills it once it knows what is offered. */
-  options: { hostTools?: boolean } = {},
+  options: { hostTools?: boolean; mounts?: readonly RemoteMount[] } = {},
 ): string {
   const lines = [
     `You are running on the remote machine "${daemonName}", driven from the ${hostName} Agent Threads plugin on the user's computer.`,
@@ -116,7 +149,7 @@ export function buildRemoteEnvironmentPrompt(
     '- All paths are paths on this remote machine.',
   ];
   const addendum = vault && isUnderRemoteRoot(vault.mapping, cwd) ? buildRemoteVaultAddendum(cwd, vault) : [];
-  return [...lines, ...addendum].join('\n');
+  return [...lines, ...addendum, ...buildMountedFoldersBlock(options.mounts)].join('\n');
 }
 
 /** Where the host-tools paragraph goes in the remote environment prompt; replaced by `applyHostToolsPrompt`. */

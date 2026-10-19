@@ -47,7 +47,7 @@ function makeView(opts: {
       getHarnessSwitchBlockReason: () => undefined,
     },
     plugin: {
-      settings: { orchestratorThreadId: opts.portfolioOrchestratorThreadId, harnessVmMode: undefined },
+      settings: { orchestratorThreadId: opts.portfolioOrchestratorThreadId },
       discoveredModelsByHarness: { claude: [], codex: [], opencode: [] },
       getClaudeCliProblems: () => [],
       saveSettings,

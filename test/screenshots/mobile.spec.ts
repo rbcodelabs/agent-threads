@@ -395,9 +395,11 @@ test.describe('Mobile View', () => {
     await expect(liveTools.locator('> *')).toHaveCount(1);
     const group = liveTools.locator('.ct-tool-group').first();
     await expect(group).toBeVisible();
-    await expect(group.locator('.ct-compressed-summary')).toHaveText('Exploring (50)');
-    // Collapsed by default (mobile has no per-tool status, so there's no
-    // error-triggered auto-expand to worry about either).
+    await expect(group.locator('.ct-compressed-summary')).toHaveText('Exploring');
+    await expect(group.locator('.ct-tool-group-count')).toHaveText('50');
+    // The live view counts as running (mobile has no per-tool status) but, like
+    // desktop, a running group is collapsed until the user opens it.
+    await expect(group.locator('.ct-tool-group-header')).toHaveClass(/ct-tool-active/);
     await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
 
     await shot(page, 'mobile-live-tool-call-grouping.png', { fullPage: true });
@@ -419,8 +421,11 @@ test.describe('Mobile View', () => {
     await page.waitForTimeout(200);
 
     const group = page.locator('.ct-mobile-streaming .ct-tool-group').first();
-    await group.locator('.ct-expand-btn').click();
-    await expect(group.locator('.ct-full-content')).not.toHaveClass(/ct-hidden/);
+    // Live groups start collapsed; the header is a real button that opens them.
+    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'false');
+    await expect(group.locator('.ct-full-content')).toHaveClass(/ct-hidden/);
+    await group.locator('.ct-tool-group-header').click();
+    await expect(group.locator('.ct-tool-group-header')).toHaveAttribute('aria-expanded', 'true');
     await expect(group.locator('.ct-full-content .ct-tool-pill')).toHaveCount(5);
   });
 
@@ -434,7 +439,7 @@ test.describe('Mobile View', () => {
       await page.waitForSelector('.ct-mobile-conv-panel');
 
       const group = page.locator('.ct-mobile-messages .ct-tool-group').first();
-      await expect(group.locator('.ct-compressed-summary')).toHaveText('Exploring (3)');
+      await expect(group.locator('.ct-compressed-summary')).toHaveText('Ran 3 commands');
       await expect(group.locator('.ct-tool-group-header .lucide-terminal')).toHaveCount(1);
       await group.locator('.ct-expand-btn').click();
       await expect(group.locator('.ct-tool-pill-name')).toHaveText(['Bash', 'Bash', 'Bash']);

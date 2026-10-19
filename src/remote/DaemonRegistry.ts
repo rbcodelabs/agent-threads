@@ -7,6 +7,7 @@
  * change is picked up at the next reconnect because `getToken` is read then.
  */
 import type { RemoteDaemonConfig, RemoteHostToolsSettings, RemoteVaultMapping } from '../types';
+import type { RemoteMount } from './sessionSpec';
 import { DaemonClient, daemonWsUrl, type ConnectionState, type WebSocketFactory } from './DaemonClient';
 
 /** What `HarnessFactory` / `ThreadManager` need; implemented by `DaemonRegistry`. */
@@ -16,6 +17,8 @@ export interface RemoteDaemonResolver {
   nameOf(daemonId: string): string;
   /** Where the vault is mirrored on that daemon, if configured. */
   vaultMappingOf?(daemonId: string): RemoteVaultMapping | undefined;
+  /** Host folders mounted into that daemon's machine (local daemon only); undefined = none known. */
+  mountsOf?(daemonId: string): readonly RemoteMount[] | undefined;
   /** What the daemon may do on this computer (host tools, MCP allowlist); undefined = defaults. */
   hostToolsOf?(daemonId: string): RemoteHostToolsSettings | undefined;
   /** `welcome.capabilities` of the last connection, or undefined while the daemon has not been reached yet. */
@@ -32,6 +35,8 @@ export interface DaemonRegistryOptions {
   clientVersion: string;
   /** This install's stable id, sent in `hello` so the daemon can tell installs sharing a token apart. */
   getInstanceId?: () => string | undefined;
+  /** Mounts of a managed daemon, if this host knows them (the local daemon's controller). */
+  getMounts?: (daemonId: string) => readonly RemoteMount[] | undefined;
   log?: (message: string) => void;
 }
 
@@ -58,6 +63,10 @@ export class DaemonRegistry implements RemoteDaemonResolver {
 
   vaultMappingOf(daemonId: string): RemoteVaultMapping | undefined {
     return this.config(daemonId)?.vaultMapping;
+  }
+
+  mountsOf(daemonId: string): readonly RemoteMount[] | undefined {
+    return this.opts.getMounts?.(daemonId);
   }
 
   hostToolsOf(daemonId: string): RemoteHostToolsSettings | undefined {

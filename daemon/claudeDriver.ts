@@ -43,6 +43,7 @@ import type { CredStore } from './credStore';
 import { buildHostDynamicTools } from './hostDynamicTools';
 import { findHarnessBinary, isRealHarness, missingBinaryMessage, readClaudeCredentialFile, type RealHarness } from './harnesses';
 import { CLAUDE_THREADS_SERVER, buildHostServers, type HostServers } from './hostServers';
+import { SESSION_ENV_KIND_PATTERN } from '../src/protocol/spec';
 import { RESERVED_MCP_NAMES, resolveDaemonMcpServers, type DaemonMcpServers, type ResolvedMcpServers } from './mcpServers';
 import { isReadOnlyDenylist } from './sessionPolicy';
 import type { DriverContext, DriverFactory, RequestKind, SessionDriver } from './sessionDriver';
@@ -64,7 +65,7 @@ export interface ClaudeDriverDeps {
    */
   daemonMcp?: () => ResolvedMcpServers;
   /** Environment for the agent's own process only (a repository token for `gh` and `git push`); read when a session starts. */
-  sessionEnv?: () => Record<string, string>;
+  sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
   /** A session is starting in this folder (lets the daemon refresh a stale clone in the background). */
   onSessionStart?: (cwd: string) => void;
 }
@@ -162,11 +163,25 @@ export function specToSessionOptions(spec: RemoteSessionSpec, parts: SessionOpti
       ...(so.agents && Object.keys(so.agents).length ? { agents: so.agents as never } : {}),
     };
   }
+  // Skill plugin directories the plugin copied into this daemon (already restricted to its skills folder by policy).
+  if (spec.pluginPaths?.length) {
+    claude.sessionOptions = { ...(claude.sessionOptions ?? {}), plugins: spec.pluginPaths.map((path) => ({ type: 'local' as const, path })) };
+  }
   const own = parts.hostServers ?? {};
   if (passthrough.length || Object.keys(own).length || Object.keys(configured).length) {
     claude.mcpServers = { ...external(), ...own } as never;
   }
   return { ...base, claude };
+}
+
+/**
+ * Environment from the credential kind a spec names (`sessenv-...`, pushed by the user's app with `creds.push`): Extra
+ * environment variables and keychain secrets. Read when a session starts, so a rotated value reaches the next one.
+ */
+export function sessionEnvFromCreds(creds: CredStore | undefined, spec: RemoteSessionSpec): Record<string, string> {
+  const kind = spec.envKind;
+  if (!creds || typeof kind !== 'string' || !SESSION_ENV_KIND_PATTERN.test(kind)) return {};
+  return creds.get(kind) ?? {};
 }
 
 /**
@@ -261,7 +276,7 @@ export class HarnessSessionDriver implements SessionDriver {
     const options = specToSessionOptions(ctx.spec, {
       resume: ctx.resume,
       callbacks: this.buildCallbacks(),
-      secretEnv: { ...(harnessKind === 'claude' ? deps.secretEnv : {}), ...(deps.sessionEnv?.() ?? {}) },
+      secretEnv: { ...(harnessKind === 'claude' ? deps.secretEnv : {}), ...(deps.sessionEnv?.(ctx.spec) ?? {}) },
       hostServers: this.hostServers.servers,
       ...(harnessKind === 'claude' ? {} : { dynamicTools, hostServerNames: hostServerNames(ctx, dynamicTools.length > 0) }),
       ...(daemonMcp ? { daemonServers: daemonMcp.servers } : {}),
@@ -594,7 +609,7 @@ export interface ClaudeDriverFactoryOptions {
   mcpServers?: DaemonMcpServers;
   creds?: CredStore;
   /** See `ClaudeDriverDeps.sessionEnv` / `onSessionStart`. */
-  sessionEnv?: () => Record<string, string>;
+  sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
   onSessionStart?: (cwd: string) => void;
 }
 

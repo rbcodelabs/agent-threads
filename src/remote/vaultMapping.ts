@@ -87,6 +87,24 @@ export function mapLocalToRemote(
   return joinUnder(remoteRoot, rel);
 }
 
+/**
+ * Map a path under the daemon's root back to the corresponding local path. Undefined when the path is outside the
+ * mapped remote root or either root is unusable.
+ */
+export function mapRemoteToLocal(
+  mapping: RemoteVaultMapping,
+  vaultRoot: string | undefined,
+  remotePath: string | undefined,
+): string | undefined {
+  if (!remotePath) return undefined;
+  const localRoot = effectiveLocalRoot(mapping, vaultRoot);
+  const remoteRoot = normalizePosixPath(mapping.remoteRoot);
+  if (localRoot === undefined || remoteRoot === undefined) return undefined;
+  const rel = relativeWithin(remoteRoot, remotePath);
+  if (rel === undefined) return undefined;
+  return joinUnder(localRoot, rel);
+}
+
 /** True when a remote path is the mapped remote root or below it. */
 export function isUnderRemoteRoot(mapping: RemoteVaultMapping | undefined, remotePath: string | undefined): boolean {
   if (!mapping || !remotePath) return false;

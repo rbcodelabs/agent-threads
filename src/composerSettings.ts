@@ -3,7 +3,7 @@
  * (the Quiet Rail button) and the project popover's list helpers. No DOM here:
  * `composerGlyphs.ts` draws the glyph ids, `composerSettingsPopover.ts` the UI.
  */
-import { agentHarnessLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
+import { agentHarnessLabel, type AgentHarness } from './types';
 
 export type ModelTier = 'haiku' | 'sonnet' | 'opus' | 'fable' | 'unknown';
 export type ModelGlyph = 'chip' | 'chip-1' | 'chip-2' | 'chip-3' | 'sparkle';
@@ -17,10 +17,6 @@ export interface ComposerSettingsInput {
   model: string | undefined;
   /** Exact model the provider last reported. */
   activeModel: string | undefined;
-  /** Per-thread container override. */
-  vmMode: HarnessVmMode | undefined;
-  /** Global container routing setting. */
-  settingsVmMode: HarnessVmMode | undefined;
   remote?: { daemonName: string; connection: RemoteConnection };
 }
 
@@ -66,9 +62,6 @@ export function describeComposerSettings(input: ComposerSettingsInput): Composer
       : input.remote.connection === 'unreachable' ? 'unreachable' : undefined;
     location = { glyph: 'cloud', label: 'remote', ...(marker ? { marker } : {}) };
     locationAria = `remote on ${input.remote.daemonName}${marker ? ` (${marker})` : ''}`;
-  } else if (harness === 'claude' && resolveEffectiveHarnessVmMode(input.vmMode, input.settingsVmMode) !== 'never') {
-    location = { glyph: 'cube', label: 'container' };
-    locationAria = 'container';
   } else {
     location = { glyph: 'laptop', label: 'host' };
     locationAria = 'host';

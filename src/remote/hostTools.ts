@@ -38,6 +38,13 @@ export interface RemoteHostToolsDeps {
   mcpSources?: Readonly<Record<string, HostMcpSource>>;
   /** The user's per-daemon choices (domain or tool -> host | absent). */
   overrides?: RouteOverrides;
+  /** Tools of `NEVER_OFFERED` the user switched on for this (managed local) daemon; see localDaemon/optionalTools.ts. */
+  optionalTools?: ReadonlySet<string>;
+  /**
+   * The user's standing approval for a built-in `claude_threads` tool call (a saved host_exec command prefix), or
+   * false. Never consulted for proxied servers. The executor asks it only for a tool in the manifest that needs approval.
+   */
+  preApprove?: (tool: string, input: Record<string, unknown>) => boolean;
   log?: (message: string) => void;
 }
 
@@ -70,6 +77,13 @@ export class RemoteHostTools {
 
   get summary(): HostToolsSummary { return this.lastSummary; }
 
+  /** See {@link RemoteHostToolsDeps.preApprove}. Only a built-in tool of the thread's own `claude_threads` server qualifies. */
+  isPreApproved(server: string, tool: string, input: Record<string, unknown>): boolean {
+    if (server !== CLAUDE_THREADS_SERVER || !this.deps.preApprove) return false;
+    if (!(this.deps.builtIn ?? []).some((t) => t.name === tool)) return false;
+    return this.deps.preApprove(tool, input) === true;
+  }
+
   /** Build the manifest now (proxied servers are listed over the network, so this is async). */
   async manifest(): Promise<HostManifest> {
     const servers: HostManifest = {};
@@ -78,7 +92,7 @@ export class RemoteHostTools {
     const key = (server: string, tool: string): string => `${server}\u0000${tool}`;
 
     for (const t of this.deps.builtIn ?? []) {
-      if (routeFor(t.name, this.deps.overrides) !== 'host') continue;
+      if (routeFor(t.name, this.deps.overrides, this.deps.optionalTools) !== 'host') continue;
       const spec: RemoteHostToolSpec = {
         name: t.name, description: t.description, inputSchema: t.inputSchema,
         requiresApproval: t.requiresApproval, server: CLAUDE_THREADS_SERVER,

@@ -8,13 +8,16 @@
 import type { LocalDaemonSettings, RemoteDaemonConfig } from '../types';
 import { daemonWsUrl, probeDaemon, type WebSocketFactory } from '../remote/DaemonClient';
 import { signInToClaudeInContainer, type SpawnLike } from '../claudeContainerAuthCli';
-import { runnerEnv, createDefaultVmCommandRunner } from '../sandboxVm';
-import { probeHostLoopbackPort } from '../vmPortForward';
+import { runnerEnv, createDefaultVmCommandRunner } from '../containerCli';
 import { LocalDaemonController, type LocalDaemonDeps } from './controller';
 import { signInToCodexInContainer } from './harnessLogin';
+import { LocalDaemonGithubDelivery, type LocalDaemonGithubDeps } from './githubDelivery';
+import { LocalDaemonSessionPrep, type SessionPrepDeps } from './sessionPrep';
+import { nodeFs } from './containerFiles';
+import { nodeAwsCopyFs } from './awsCopy';
 import { createDefaultRuntimeApi } from './runtime';
 import { parseHealthz } from './parse';
-import { LOCAL_DAEMON_ID } from './spec';
+import { LOCAL_DAEMON_ID, type ExternalRootInput } from './spec';
 
 export interface LocalDaemonHost {
   /** Absolute vault path on disk, or null (mobile / non-filesystem vault). */
@@ -30,6 +33,9 @@ export interface LocalDaemonHost {
   saveSettings(): Promise<void>;
   /** The Remote daemons list changed: connection clients must be refreshed. */
   onRegistryChanged(): void;
+  /** Geode's connected external roots; absent on Obsidian / older Geode. */
+  projectFolders?(): string[];
+  externalRoots?(): Promise<ExternalRootInput[] | null | undefined>;
   createSocket: WebSocketFactory;
   log?(message: string): void;
 }
@@ -64,6 +70,26 @@ function isDirectorySync(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** True when something accepts a TCP connection on host 127.0.0.1:port (500 ms budget). */
+function probeHostLoopbackPort(port: number, timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    let net: typeof import('net');
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      net = require('net') as typeof import('net');
+    } catch {
+      resolve(false);
+      return;
+    }
+    if (!net?.connect) { resolve(false); return; }
+    const socket = net.connect({ port, host: '127.0.0.1' });
+    const done = (ok: boolean) => { socket.destroy(); resolve(ok); };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
 }
 
 export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonController {
@@ -125,7 +151,42 @@ export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonC
         onUrl: opts.onUrl,
       });
     },
+    ...(host.projectFolders ? { projectFolders: () => host.projectFolders!() } : {}),
+    ...(host.externalRoots ? { externalRoots: () => host.externalRoots!() } : {}),
     log: host.log,
   };
   return new LocalDaemonController(deps);
+}
+
+/** Delivers the Geode GitHub connection to the managed daemon (see githubDelivery.ts). Geode-only, like the rest of this file. */
+export function createLocalDaemonGithubDelivery(
+  host: Pick<LocalDaemonGithubDeps, 'broker' | 'isEnabled' | 'getEmailOverride' | 'log'> & { vaultBasePath(): string | null },
+): LocalDaemonGithubDelivery {
+  return new LocalDaemonGithubDelivery({
+    broker: host.broker,
+    isEnabled: host.isEnabled,
+    vaultPath: () => host.vaultBasePath(),
+    runner: () => createDefaultVmCommandRunner(),
+    ...(host.getEmailOverride ? { getEmailOverride: host.getEmailOverride } : {}),
+    ...(host.log ? { log: host.log } : {}),
+  });
+}
+
+/** Prepares the managed daemon for a session: environment, skills, AWS (see sessionPrep.ts). Geode-only, like the rest of this file. */
+export function createLocalDaemonSessionPrep(
+  host: Pick<SessionPrepDeps, 'resolveEnv' | 'skillPlugins' | 'awsProfiles' | 'hostAwsConfigPath' | 'log'> & { vaultBasePath(): string | null },
+): LocalDaemonSessionPrep {
+  return new LocalDaemonSessionPrep({
+    vaultPath: () => host.vaultBasePath(),
+    runner: () => createDefaultVmCommandRunner(),
+    resolveEnv: host.resolveEnv,
+    skillPlugins: host.skillPlugins,
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    homeDir: () => (require('os') as typeof import('os')).homedir(),
+    awsProfiles: host.awsProfiles,
+    ...(host.hostAwsConfigPath ? { hostAwsConfigPath: host.hostAwsConfigPath } : {}),
+    fs: nodeFs(),
+    awsFs: nodeAwsCopyFs(),
+    ...(host.log ? { log: host.log } : {}),
+  });
 }

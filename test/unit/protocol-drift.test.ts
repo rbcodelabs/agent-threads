@@ -77,9 +77,9 @@ describe('RemoteSessionSpec drift', () => {
     expect(optionKeys.sort()).toEqual(Object.keys(SESSION_OPTION_DISPOSITION).sort());
   });
 
-  it('never carries callbacks, VM routing credentials or secret values', () => {
+  it('never carries callbacks or secret values', () => {
     const omitted = Object.entries(SESSION_OPTION_DISPOSITION).filter(([, d]) => d === 'omitted').map(([k]) => k).sort();
-    expect(omitted).toEqual(['callbacks', 'containerAuthToken', 'secretEnv']);
+    expect(omitted).toEqual(['callbacks', 'secretEnv']);
   });
 });
 

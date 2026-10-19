@@ -1,5 +1,5 @@
 import { gateHarness, type HarnessGate } from './remote/harnessSupport';
-import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, type AgentHarness, type HarnessVmMode, type RemoteDaemonConfig } from './types';
+import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness, type RemoteDaemonConfig } from './types';
 import { resolveRunOn, runOnSuffix, type RunOnRemote, type RunOnSelection } from './remote/runOn';
 import { suggestRemoteCwd } from './remote/vaultMapping';
 import type { RemoteFolderSource, FolderLoad } from './remote/folderSource';
@@ -26,28 +26,9 @@ export interface DispatchPayload {
   attachment: string | null;
   /** Harness selected by a kickoff picker, when that picker is enabled. */
   agentHarness?: AgentHarness;
-  /**
-   * Per-thread container-routing override chosen in the kickoff picker's
-   * "Run in" section (`'always'` = container, `'never'` = host). Absent means
-   * follow Settings. Only ever set for the Claude harness.
-   */
-  harnessVmMode?: HarnessVmMode;
   /** Run the thread on this remote daemon, in this folder on its machine (picked under "Run on"). */
   remote?: RunOnRemote;
 }
-
-/**
- * Run-in choices offered by the kickoff picker; `undefined` = Default (follow
- * Settings). Only explicit overrides are offered — `auto` is reachable through
- * Default plus the global setting.
- */
-type RunModeChoice = Exclude<HarnessVmMode, 'auto'>;
-const RUN_MODE_OPTIONS: ReadonlyArray<RunModeChoice | undefined> = ['always', 'never', undefined];
-
-const RUN_MODE_ICONS: Record<RunModeChoice, string> = {
-  always: 'box',
-  never: 'laptop',
-};
 
 export interface DispatchInputOptions {
   app: App;
@@ -128,6 +109,11 @@ export interface DispatchInputOptions {
     getDaemonCapabilities?: (daemonId: string) => string[] | undefined;
     /** Connect to a daemon so its capabilities become known; resolves when they are, or when it gives up. */
     warmDaemon?: (daemonId: string) => Promise<void>;
+    /**
+     * The managed local daemon ("This Mac (container)") can run here but is not set up: the "Run on" section then
+     * offers a set-up entry that opens its settings.
+     */
+    localDaemonOffer?: { available: () => boolean; onSetUp: () => void };
     /**
      * Where a thread started now would run on this computer (the selected Project's folder, else
      * the default folder), and this vault's root. With a daemon's vault mapping they pre-fill the
@@ -216,8 +202,6 @@ export class DispatchInput {
   private sttController: SttController | null = null;
   private dispatching = false;
   private selectedHarness: AgentHarness | null = null;
-  /** Sticky "Run in" override for the next dispatches; undefined follows Settings. */
-  private selectedVmMode: RunModeChoice | undefined;
   /** Sticky "Run on" choice: this computer (undefined) or a remote daemon plus a folder on it. */
   private selectedRunOn: RunOnSelection = {};
   /** The user typed in the remote folder field, so the suggestion no longer overwrites it. */
@@ -583,7 +567,6 @@ export class DispatchInput {
         images,
         attachment,
         ...(this.selectedHarness ? { agentHarness: this.selectedHarness } : {}),
-        ...(this.effectiveVmMode() && !runOn.remote ? { harnessVmMode: this.effectiveVmMode() } : {}),
         ...(runOn.remote ? { remote: runOn.remote } : {}),
       });
     } catch (err) {
@@ -653,32 +636,19 @@ export class DispatchInput {
     const name = agentHarnessLabel(this.selectedHarness);
     this.sendBtn.empty();
     this.createHarnessMark(this.sendBtn, this.selectedHarness);
-    const vmMode = this.effectiveRunOn().daemonId ? undefined : this.effectiveVmMode();
-    this.sendBtn.removeClass('ct-harness-send-btn--container', 'ct-harness-send-btn--host', 'ct-harness-send-btn--remote');
+    this.sendBtn.removeClass('ct-harness-send-btn--remote');
     if (this.effectiveRunOn().daemonId) {
       this.sendBtn.addClass('ct-harness-send-btn--remote');
       const badge = this.sendBtn.createSpan({ cls: 'ct-run-mode-badge', attr: { 'aria-hidden': 'true', 'data-run-mode': 'remote' } });
       setIcon(badge, 'server');
-    } else if (vmMode) {
-      this.sendBtn.addClass(vmMode === 'always' ? 'ct-harness-send-btn--container' : 'ct-harness-send-btn--host');
-      const badge = this.sendBtn.createSpan({
-        cls: 'ct-run-mode-badge',
-        attr: { 'aria-hidden': 'true', 'data-run-mode': vmMode },
-      });
-      setIcon(badge, RUN_MODE_ICONS[vmMode]);
     }
     const remoteWhere = runOnSuffix(this.effectiveRunOn(), this.remoteDaemons());
-    const where = remoteWhere || (vmMode ? ` in ${vmMode === 'always' ? 'a container' : 'the host (no container)'}` : '');
+    const where = remoteWhere;
     const label = `Start task with ${name}${where}; right-click or hold to change agent or where it runs`;
     this.sendBtn.setAttribute('aria-label', label);
     this.sendBtn.setAttribute('aria-haspopup', 'menu');
     this.sendBtn.setAttribute('aria-expanded', this.harnessMenu ? 'true' : 'false');
     this.sendBtn.title = label;
-  }
-
-  /** The run-mode override to apply, or undefined. Container routing exists only for Claude. */
-  private effectiveVmMode(): RunModeChoice | undefined {
-    return this.selectedHarness === 'claude' ? this.selectedVmMode : undefined;
   }
 
   /** Default remote folder for `daemon`: its mapped vault folder when we are in the vault, else its default folder. */
@@ -759,41 +729,9 @@ export class DispatchInput {
         items[(items.indexOf(item) + offset + items.length) % items.length]?.focus();
       });
     }
-    if (this.selectedHarness === 'claude') {
-      menu.createDiv({ cls: 'ct-harness-menu-separator', attr: { role: 'separator' } });
-      menu.createDiv({ cls: 'ct-harness-menu-heading', text: 'Run in' });
-      for (const mode of RUN_MODE_OPTIONS) {
-        const item = menu.createEl('button', {
-          cls: 'ct-harness-menu-item ct-run-mode-item',
-          attr: {
-            role: 'menuitemradio',
-            'aria-checked': String(this.selectedVmMode === mode),
-            'data-run-mode': mode ?? 'default',
-          },
-        });
-        if (mode) {
-          const mark = item.createSpan({ cls: 'ct-run-mode-mark', attr: { 'aria-hidden': 'true' } });
-          setIcon(mark, RUN_MODE_ICONS[mode]);
-        }
-        item.createSpan({ text: harnessVmModeLabel(mode) });
-        item.addEventListener('click', (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          this.selectedVmMode = mode;
-          this.closeHarnessMenu(true);
-          this.renderHarnessIdentity();
-        });
-        item.addEventListener('keydown', (event) => {
-          if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-          event.preventDefault();
-          const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'));
-          const offset = event.key === 'ArrowDown' ? 1 : -1;
-          items[(items.indexOf(item) + offset + items.length) % items.length]?.focus();
-        });
-      }
-    }
     const daemons = this.remoteDaemons();
-    if (daemons.length > 0) this.renderRunOnSection(menu, daemons);
+    const offerSetUp = this.options.harnessPicker?.localDaemonOffer?.available() === true;
+    if (daemons.length > 0 || offerSetUp) this.renderRunOnSection(menu, daemons, offerSetUp);
     this.sendBtn.setAttribute('aria-expanded', 'true');
     document.addEventListener('pointerdown', this.closeHarnessMenuOnPointerDown);
     document.addEventListener('keydown', this.closeHarnessMenuOnEscape);
@@ -801,7 +739,7 @@ export class DispatchInput {
   }
 
   /** "Run on": this computer, or a remote daemon plus the folder to work in on that machine. */
-  private renderRunOnSection(menu: HTMLElement, daemons: RemoteDaemonConfig[]): void {
+  private renderRunOnSection(menu: HTMLElement, daemons: RemoteDaemonConfig[], offerSetUp = false): void {
     menu.createDiv({ cls: 'ct-harness-menu-separator', attr: { role: 'separator' } });
     menu.createDiv({ cls: 'ct-harness-menu-heading', text: 'Run on' });
     // The Project selection may have changed since the menu was last open.
@@ -839,6 +777,21 @@ export class DispatchInput {
           el.setAttribute('aria-checked', String((el.getAttribute('data-run-on') ?? 'local') === (choice.id ?? 'local')));
         }
         this.applyRunOnGating(menu);
+      });
+    }
+    if (offerSetUp) {
+      const item = menu.createEl('button', {
+        cls: 'ct-harness-menu-item ct-run-mode-item ct-run-on-item',
+        attr: { role: 'menuitem', 'data-run-on': 'setup-local', title: 'Runs the agent-threads daemon in a container on this Mac. Opens Settings, Remote, Local daemon.' },
+      });
+      const mark = item.createSpan({ cls: 'ct-run-mode-mark', attr: { 'aria-hidden': 'true' } });
+      setIcon(mark, 'box');
+      item.createSpan({ text: 'This Mac (container) \u2014 set up\u2026' });
+      item.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeHarnessMenu(true);
+        this.options.harnessPicker?.localDaemonOffer?.onSetUp();
       });
     }
     this.refreshRunOnFolderRow(menu, daemons);

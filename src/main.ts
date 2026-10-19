@@ -1,4 +1,4 @@
-import type { AgentHarness, HarnessVmMode, StorageAllocationOptions } from './types';
+import type { AgentHarness, StorageAllocationOptions } from './types';
 import { saveThenAck } from './remote/persistAck';
 import { DaemonMcpStatusStore } from './mcpStatus';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
@@ -37,7 +37,6 @@ import { GithubCredentialBroker, resolveGithubBridge } from './githubCredentials
 import { GithubHostDelivery } from './githubHostDelivery';
 import { setGitAuthProvider } from './gitClient';
 import { createGithubGitAuth } from './skillSourceGithubAuth';
-import { createGithubVmHooks } from './githubVmDelivery';
 import { createRequestUrlFetch } from './requestUrlFetch';
 import { obsidianHttpFetch, obsidianYamlParser } from './host/obsidianHost';
 import { AttachmentWriter } from './AttachmentWriter';
@@ -49,12 +48,12 @@ import {
   type HandoffHost,
 } from './compassHandoff';
 import { isWatchableDocument, watchMenuLabel } from './documentWatch';
-import { mergeMcpServers, overlayMatchingMcpServers } from './mcpServerMerge';
+import { mergeMcpServers } from './mcpServerMerge';
 import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
-import type { HostExecHooks } from './hostExec';
-import { canAlwaysAllow } from './permissionDetail';
 import { redactGithubSecrets } from './githubCredentials';
+import { matchesHostExecPrefix } from './hostExecPrefix';
+import { canAlwaysAllow } from './permissionDetail';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
@@ -72,6 +71,9 @@ import {
   type Thread,
 } from './types';
 import { serializeThreadForSave } from './imageExternalization';
+import type { HostExecHooks } from './hostExec';
+import { mapLocalToRemote, mapRemoteToLocal } from './remote/vaultMapping';
+import { stripLegacySandboxSettings } from './legacySandboxVm';
 import { selectIdleThreadsForArchive } from './autoArchive';
 import { createDeferredThreadArchiver } from './deferredThreadArchive';
 import { getVaultBridgesAPI, findBridgesForFiles, type BridgeInfo } from './bridgeUtils';
@@ -83,13 +85,13 @@ import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
 import { DaemonRegistry } from './remote/DaemonRegistry';
+import { LOCAL_DAEMON_ID } from './localDaemon/spec';
 import { createRemoteFolderSource, type RemoteFolderSource } from './remote/folderSource';
 import { createRemoteReposSource, type RemoteReposSource } from './remote/repos';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { setKnownSecretsProvider } from './secretRedaction';
 import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './telemetry';
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
-import { CONTAINER_AUTH_TOKEN_SECRET } from './claudeContainerAuthCli';
 import { scheduleVaultThreadRecovery } from './vaultThreadRecovery';
 import { resolveProjectVaultRoot } from './projectPaths';
 import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, repairStaleProjectOrchestrators, resolveCoordinationRole } from './coordinationScope';
@@ -268,6 +270,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private settingTab?: ClaudeThreadsSettingTab;
   private settingSectionTabs = new Map<SettingsTabId, ClaudeThreadsSettingTab>();
   private projectsSectionId?: string;
+  private remoteSectionId?: string;
   /** Stable peer-plugin entry point. Its v1 generation is revoked on unload. */
   api!: { readonly v1: ClaudeThreadsApiV1 };
   settings!: PluginSettings;
@@ -278,6 +281,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
   readonly daemonMcpStatus = new DaemonMcpStatusStore();
   /** The managed daemon in a container on this Mac (desktop only; see src/localDaemon/). */
   localDaemon: import('./localDaemon/controller').LocalDaemonController | null = null;
+  /** Delivers the Geode GitHub connection to the managed daemon (desktop with a Geode GitHub bridge only). */
+  localDaemonGithub: import('./localDaemon/githubDelivery').LocalDaemonGithubDelivery | null = null;
+  /** Environment, skills and AWS credentials for threads on the managed daemon (see localDaemon/sessionPrep.ts). */
+  localDaemonPrep: import('./localDaemon/sessionPrep').LocalDaemonSessionPrep | null = null;
+  private readonly localDaemonExtras = new Map<string, { envKind?: string; pluginPaths?: string[] }>();
   /** What the Run on picker asks for a daemon's folders (advertised workspaces, subfolders). */
   remoteFolders: RemoteFolderSource | null = null;
   /** Repositories each remote daemon keeps cloned (Settings, Remote, edit daemon). */
@@ -407,6 +415,30 @@ export default class ClaudeThreadsPlugin extends Plugin {
   /** How long to wait between background task poll attempts. */
   private static readonly BG_TASK_POLL_INTERVAL_MS = 30_000;
 
+  /** Forwards the managed daemon container's loopback ports to this Mac, for the browser tools (desktop only). */
+  private daemonPortForwarder: import('./localDaemon/portForward').DaemonPortForwarder | null = null;
+
+  private async resolveDaemonLoopbackUrl(threadId: string, url: string): Promise<import('./loopbackUrl').DaemonUrlResolution> {
+    const remote = this.manager.getThread(threadId)?.remote;
+    const daemon = remote ? (this.settings.remoteDaemons ?? []).find((d) => d.id === remote.daemonId) : undefined;
+    const adapter = this.app.vault.adapter;
+    if (daemon?.managed !== 'local-container' || Platform.isMobile || !(adapter instanceof FileSystemAdapter)) return { kind: 'passthrough' };
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { parseLoopbackHttpUrl } = require('./loopbackUrl') as typeof import('./loopbackUrl');
+    if (!parseLoopbackHttpUrl(url)) return { kind: 'passthrough' };
+    if (!this.daemonPortForwarder) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createDaemonPortForwarder } = require('./localDaemon/portForward') as typeof import('./localDaemon/portForward');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { containerNameFor } = require('./localDaemon/spec') as typeof import('./localDaemon/spec');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createDefaultVmCommandRunner } = require('./containerCli') as typeof import('./containerCli');
+      const base = adapter.getBasePath();
+      this.daemonPortForwarder = createDaemonPortForwarder({ containerName: () => containerNameFor(base), runner: () => createDefaultVmCommandRunner() });
+    }
+    return this.daemonPortForwarder.resolve(url);
+  }
+
   /** Geode-only: connected external roots. Undefined on Obsidian / older Geode -> no extras. */
   private async listExternalMountRoots() {
     const host = (this.app as unknown as {
@@ -493,6 +525,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         const tabId = host.addSettingSection({ id: section.id, name: section.label, tab });
         this.settingSectionTabs.set(section.id, tab);
         if (section.id === 'projects') this.projectsSectionId = tabId;
+        if (section.id === 'remote') this.remoteSectionId = tabId;
       }
     } else {
       this.settingTab = new ClaudeThreadsSettingTab(this.app, this);
@@ -617,6 +650,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       createSocket: createPluginWebSocketFactory(),
       clientVersion: this.manifest.version,
       getInstanceId: () => this.settings.remoteClientId,
+      getMounts: (daemonId) => (this.localDaemon && daemonId === LOCAL_DAEMON_ID ? this.localDaemon.currentMounts() : undefined),
       log: (message) => debugLog(message),
     });
     this.remoteFolders = createRemoteFolderSource(this.daemonRegistry);
@@ -625,7 +659,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.remoteDaemons = this.daemonRegistry;
     this.manager.daemonMcpStatus = this.daemonMcpStatus;
     this.setUpLocalDaemon();
-    this.manager.getExternalMounts = () => this.listExternalMountRoots();
     // Lets the manager detect sessions holding stale Google/OAuth proxy configs (per-send check).
     this.manager.proxyMcpServersForThread = (threadId) => ({
       ...(this.googleWorkspaceMcp?.serversForThread(threadId) ?? {}),
@@ -679,13 +712,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
         catch (error) { this.mcpRegistrationModals.delete(modal); reject(error); }
       }),
     });
-    const vmBuiltInServers = new WeakMap<object, ReturnType<typeof createClaudeThreadsMcpServers>>();
-    // Shared by the ordinary roster and the VM-routed overlay below; `hostExec`
-    // is passed only by the overlay, so host_exec exists only after routing
-    // into the sandbox container has actually succeeded.
-    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks, harnessInVm = false) =>
+    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks) =>
         createClaudeThreadsMcpServers(this.app, {
-          harnessInVm,
           ...(hostExec ? { hostExec } : {}),
           // Contributed agent tools, bound to this thread here — the host does
           // the binding so a peer never reaches the factory (ADR-0008). Built-in
@@ -711,9 +739,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // is checked here rather than inside the tools so an unsupported host
           // costs nothing per turn instead of advertising tools that only refuse.
           browser: this.agentBrowser?.capable ? this.createThreadBrowser(threadId) : undefined,
-          // Host-side browser tools run on the Mac; for a thread with a sandbox
-          // container, `localhost` must be forwarded into it (vmPortForward.ts).
-          resolveSandboxUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
           openContextualFile: async (file) => {
             if (!this.isConversationFirst()) return false;
             await this.contextPanel.openFile(file);
@@ -734,22 +759,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // Read lazily so changing the setting takes effect on the next
           // enter_worktree call rather than requiring a session restart.
           getWorktreeRoot: () => this.settings.worktreeRoot,
-          // Same lazy-read rationale as getWorktreeRoot: changing the image or
-          // network setting takes effect on the next enter_vm call rather than
-          // needing a session restart.
-          getVmImage: () => this.settings.vmImage,
-          getVmDefaultNetwork: () => this.settings.vmDefaultNetwork,
-          getVmMemory: () => this.settings.sandboxVmMemory,
-          getVmCpus: () => this.settings.sandboxVmCpus,
-          // Geode-only, optional: connected external roots to mount read-only
-          // at /ext/<label>. Undefined on Obsidian / older Geode -> no extras.
-          getExternalMounts: () => this.listExternalMountRoots(),
-          getVaultPath: () => this.manager.vaultRoot,
-          // ADR-0015 §3: share the same per-thread SandboxVmManager this
-          // thread's Claude harness routes into, so enter_vm/vm_exec/exit_vm
-          // see the container's real origin instead of each side tracking it
-          // separately against the same deterministic container name.
-          sandboxVmManager: this.manager.getSandboxVmManager(threadId),
           githubBroker: this.githubBroker,
           isGithubConnectionEnabled: () => this.settings.githubConnectionEnabled !== false,
           getGithubCommitEmail: () => this.settings.githubCommitEmail,
@@ -839,7 +848,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
               scheduledItemId: t.scheduledItemId,
               scheduledItemName: t.scheduledItemName,
               updatedAt: t.updatedAt,
-              harnessVmMode: t.harnessVmMode,
               messageCount: nonCompact.length,
               rawLogPath: t.rawLogPath,
               managerNotes: t.managerNotes,
@@ -880,7 +888,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
               scheduledItemId: t.scheduledItemId,
               scheduledItemName: t.scheduledItemName,
               updatedAt: t.updatedAt,
-              harnessVmMode: (t as typeof t & { harnessVmMode?: string }).harnessVmMode,
               messageCount,
               rawLogPath: t.rawLogPath,
               managerNotes: t.managerNotes,
@@ -1007,7 +1014,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
       try {
         const mcpServers = buildBuiltInMcpServers(threadId, initialCwd);
-        vmBuiltInServers.set(mcpServers.claude_threads, buildBuiltInMcpServers(threadId, initialCwd, undefined, true));
         const mcpDebug = Object.fromEntries(Object.entries(mcpServers).map(([key, server]) => [key, {
           type: (server as unknown as Record<string, unknown>).type,
           name: (server as unknown as Record<string, unknown>).name,
@@ -1055,7 +1061,32 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // headers stay in the sources created here.
     this.manager.remoteHostToolsFactory = (threadId: string, thread: Thread) => {
       const daemonSettings = thread.remote ? this.settings.remoteDaemons?.find(d => d.id === thread.remote!.daemonId)?.hostTools : undefined;
-      const builtIn = buildBuiltInMcpServers(threadId, thread.cwd).claude_threads.harnessTools;
+      const daemonConfig = thread.remote ? this.settings.remoteDaemons?.find(d => d.id === thread.remote!.daemonId) : undefined;
+      // host_exec exists only for the managed local daemon (a container on this Mac). The app shows its Allow once / Deny
+      // card before ANY proxied call that needs approval, so the handler's own prompt is satisfied by that card.
+      let hostExec: HostExecHooks | undefined;
+      let preApprove: ((tool: string, input: Record<string, unknown>) => boolean) | undefined;
+      let builtInCwd = thread.cwd;
+      if (daemonConfig?.managed === 'local-container' && !Platform.isMobile) {
+        hostExec = {
+          isInteractive: () => this.mcpRegistrationAvailable && !this.manager.getThread(threadId)?.scheduledItemId,
+          requestApproval: async () => true,
+          redact: redactGithubSecrets,
+        };
+        // Scoped standing approval, the only one host_exec has (never alwaysAllowedTools): a saved command prefix
+        // matched on whole tokens of a plain command. Read per call so a revoke in Settings applies at once; scheduled
+        // or headless threads get none. The executor asks this only for a call it is about to show a card for.
+        preApprove = (tool, input) =>
+          tool === 'host_exec'
+          && !this.manager.getThread(threadId)?.scheduledItemId
+          && typeof input.command === 'string'
+          && matchesHostExecPrefix(input.command, this.settings.hostExecAlwaysAllowedPrefixes ?? []);
+        // The thread's cwd is a path in the container; its default on the Mac is the same folder under the vault.
+        const mapping = daemonConfig.vaultMapping;
+        builtInCwd = (mapping && thread.remote ? mapRemoteToLocal(mapping, this.manager.vaultRoot, thread.remote.remoteCwd) : undefined)
+          ?? this.manager.vaultRoot ?? thread.cwd;
+      }
+      const builtIn = buildBuiltInMcpServers(threadId, builtInCwd, hostExec).claude_threads.harnessTools;
       const brokers: Record<string, { type?: string; url?: string; headers?: Record<string, string> }> = {
         ...(this.googleWorkspaceMcp?.serversForThread(threadId) ?? {}),
         ...(this.oauthMcpRegistry?.serversForThread(threadId) ?? {}),
@@ -1063,28 +1094,18 @@ export default class ClaudeThreadsPlugin extends Plugin {
       const mcpSources = Object.fromEntries(Object.entries(brokers)
         .filter(([, c]) => c.type === 'http' && typeof c.url === 'string')
         .map(([name, c]) => [name, createLoopbackMcpSource(c.url!, c.headers ?? {})]));
-      return new RemoteHostTools({ builtIn, mcpSources, overrides: daemonSettings?.routes, log: m => debugLog(m) });
-    };
-    // Host-loopback OAuth/Google brokers cannot be reached from Apple's VM.
-    // Overlay plugin-owned brokers with in-process SDK bridges. Built-ins use
-    // the container-specific lifecycle surface; remote servers and stdio configs
-    // retain the ordinary roster. ThreadSession chooses this view only after
-    // routing succeeds, so automatic host fallback retains HTTP configs.
-    this.manager.vmMcpServerFactory = (threadId, ordinaryServers) => {
-      const vmBuiltIns = ordinaryServers.claude_threads
-        ? vmBuiltInServers.get(ordinaryServers.claude_threads)
-        : undefined;
-      const servers = vmBuiltIns ? { ...ordinaryServers, ...vmBuiltIns } : ordinaryServers;
-      const googleHosts = this.googleWorkspaceMcp?.serversForThread(threadId) ?? {};
-      const oauthHosts = this.oauthMcpRegistry?.serversForThread(threadId) ?? {};
-      const googleMcps = this.googleWorkspaceMcp?.vmServersForThread(threadId) ?? {};
-      const oauthMcps = this.oauthMcpRegistry?.vmServersForThread(threadId) ?? {};
-      const overlaid = overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(
-        overlayMatchingMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(servers, googleHosts, googleMcps),
-        oauthHosts,
-        oauthMcps,
-      );
-      return this.withHostExec(threadId, overlaid, (id, cwd, hostExec) => buildBuiltInMcpServers(id, cwd, hostExec, true));
+      // The managed local daemon can opt in to tools that write, schedule or touch secrets (off by default). Read
+      // here, so a change in Settings applies to the next session that is opened.
+      const optionalIds = daemonConfig?.managed === 'local-container' ? this.settings.localDaemon?.optionalTools : undefined;
+      let routes = daemonSettings?.routes;
+      let optionalTools: ReadonlySet<string> | undefined;
+      if (optionalIds?.length) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const opt = require('./localDaemon/optionalTools') as typeof import('./localDaemon/optionalTools');
+        routes = opt.withOptionalRoutes(routes, optionalIds);
+        optionalTools = opt.optionalToolsFor(optionalIds);
+      }
+      return new RemoteHostTools({ builtIn, mcpSources, overrides: routes, ...(optionalTools ? { optionalTools } : {}), ...(preApprove ? { preApprove } : {}), log: m => debugLog(m) });
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect
@@ -1109,9 +1130,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }
       return result;
     };
-    // In-container Claude sign-in token — VM-routed sessions only (see persistContainerAuthToken).
-    this.manager.containerAuthTokenResolver = () =>
-      this.app.secretStorage.getSecret(secretStorageKey(CONTAINER_AUTH_TOKEN_SECRET)) || undefined;
     this.setUpGithubConnection();
     this.persistence = new VaultPersistence(this.app, this.settings.vaultFolder);
     this.inProcessSummarizer = new InProcessSummarizer();
@@ -1275,18 +1293,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.settings.orchestratorThreadId,
     );
     if (repairedOrchestrators) this.manager.loadProjects(this.manager.getProjects());
-
-    // Reclaim sandbox containers leaked by thread deletes that never tore them
-    // down. Desktop only, delayed so vault thread recovery and startup work
-    // finish first, and fire-and-forget so it can never block load.
-    if (!Platform.isMobile) {
-      const orphanSweepTimer = window.setTimeout(() => {
-        void this.manager.sweepOrphanedSandboxContainers().catch((err) => {
-          console.error('[ClaudeThreads] Orphan sandbox sweep failed:', err);
-        });
-      }, 60_000);
-      this.register(() => window.clearTimeout(orphanSweepTimer));
-    }
 
     // Initialize the built-in scheduler
     this.scheduler = new Scheduler({
@@ -1786,10 +1792,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.addCommand({
       id: 'new-claude-thread',
       name: 'New Claude Thread',
-      callback: async () => {
-        await this.activateAgentView();
-        this.getAgentDashboard()?.focusDispatchInput();
-      },
+      callback: () => this.openNewConversation(),
     });
 
     this.addCommand({
@@ -2279,7 +2282,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
     this.registerView(
       MOBILE_VIEW_TYPE,
-      (leaf) => new MobileView(leaf, this.relayClient, this.mobileStore),
+      (leaf) => new MobileView(leaf, this.relayClient, this.mobileStore, () => this.settings.toolCallStyle),
     );
 
     this.addRibbonIcon('smartphone', 'Agent Threads (Mobile)', () => {
@@ -2329,7 +2332,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
     // 3.11 — When mobile sends Always Allow, persist the tool name to settings.
     this.relayClient.onAlwaysAllowTool = (toolName: string) => {
-      // Defence in depth: a forged resolve_permission must not persist host_exec.
+      // Defence in depth: a forged resolve_permission must not persist a per-call approval.
       if (canAlwaysAllow(toolName) && !this.settings.alwaysAllowedTools.includes(toolName)) {
         this.settings.alwaysAllowedTools.push(toolName);
         this.saveSettings().catch(console.error);
@@ -2552,35 +2555,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   /**
-   * Adds `host_exec` to a VM-routed session's roster by swapping in a built-in
-   * `claude_threads` server that includes it. Called only from the VM overlay
-   * (i.e. after routing succeeded), never on desktop-less hosts.
-   *
-   * The approval prompt is the thread's in-chat permission card, requested
-   * directly by the tool (not through the harness permission path), so
-   * bypassPermissions / dontAsk / auto-approve / always-allow cannot skip it.
-   */
-  private withHostExec<T>(
-    threadId: string,
-    servers: Record<string, T>,
-    build: (threadId: string, cwd: string, hostExec: HostExecHooks) => Record<string, T>,
-  ): Record<string, T> {
-    if (Platform.isMobile || !servers.claude_threads) return servers;
-    const thread = this.manager.getThread(threadId);
-    if (!thread) return servers;
-    const hostExec: HostExecHooks = {
-      isInteractive: () => this.mcpRegistrationAvailable && !this.manager.getThread(threadId)?.scheduledItemId,
-      requestApproval: async request => {
-        if (!this.mcpRegistrationAvailable) throw new Error('Host unavailable');
-        return this.manager.requestHostExecApproval(threadId, request);
-      },
-      redact: redactGithubSecrets,
-    };
-    const rebuilt = build(threadId, thread.cwd, hostExec);
-    return rebuilt.claude_threads ? { ...servers, claude_threads: rebuilt.claude_threads } : servers;
-  }
-
-  /**
    * The single MCP-server registration dispatcher, shared by the agent-facing
    * `mcp_register_server` tool (via `onRegisterMcpServer` in the per-thread MCP
    * factory) and the peer-plugin `api.v1.mcp.register` method. Both callers pass
@@ -2699,37 +2673,42 @@ export default class ClaudeThreadsPlugin extends Plugin {
       setRemoteDaemons: (next) => { this.settings.remoteDaemons = next; },
       saveSettings: () => this.saveSettings(),
       onRegistryChanged: () => this.daemonRegistry?.refresh(),
+      projectFolders: () => this.projectWorkFolders(),
+      externalRoots: () => this.listExternalMountRoots(),
       createSocket: createPluginWebSocketFactory(),
       log: (message) => debugLog(message),
     });
     const controller = this.localDaemon;
     // Lazy start: a thread that runs on the managed daemon starts it on first use.
-    this.manager.beforeRemoteSend = async (daemonId) => {
+    this.manager.beforeRemoteSend = async (daemonId, threadId) => {
       const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
-      if (daemon?.managed === 'local-container') await controller.ensureRunning();
+      if (daemon?.managed !== 'local-container') return;
+      await controller.ensureRunning();
+      // Before the session opens: the daemon reads what is pushed to it when a session starts. Neither call throws.
+      await this.localDaemonGithub?.ensureFresh();
+      if (this.localDaemonPrep) {
+        const extras = await this.localDaemonPrep.prepare(this.manager.getThread(threadId)?.projectId);
+        this.localDaemonExtras.set(threadId, { ...(extras.envKind ? { envKind: extras.envKind } : {}), pluginPaths: extras.pluginPaths });
+      }
     };
+    this.manager.remoteSessionExtras = (threadId) => this.localDaemonExtras.get(threadId);
+    {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createLocalDaemonSessionPrep } = require('./localDaemon/wiring') as typeof import('./localDaemon/wiring');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { resolveDaemonAwsProfiles } = require('./localDaemon/awsCopy') as typeof import('./localDaemon/awsCopy');
+      this.localDaemonPrep = createLocalDaemonSessionPrep({
+        vaultBasePath: () => (adapter instanceof FileSystemAdapter ? adapter.getBasePath() : null),
+        // What a host session would get: Extra environment variables, then the keychain secrets visible to the project.
+        resolveEnv: (projectId) => ({ ...parseExtraEnv(effectiveExtraEnv(this.settings)), ...(this.manager.secretEnvResolver?.(projectId) ?? {}) }),
+        skillPlugins: () => this.manager.buildHostSkillPlugins(),
+        awsProfiles: () => resolveDaemonAwsProfiles({ provider: this.settings.provider, settingValue: this.settings.containerAwsProfiles, extraEnv: effectiveExtraEnv(this.settings) }),
+        hostAwsConfigPath: () => process.env.AWS_CONFIG_FILE,
+        log: (message) => debugLog(message),
+      });
+      this.register(() => { void this.localDaemonPrep?.stop(); });
+    }
     this.register(() => { controller.cancel(); });
-  }
-
-  /**
-   * ADR-0015 container sign-in: after `signInToClaudeInContainer()` succeeds,
-   * store the resulting long-lived OAuth token and restart the thread's
-   * session so it is picked up.
-   *
-   * Stored under its OWN secret key (`CONTAINER_AUTH_TOKEN_SECRET`), NOT as a
-   * `CLAUDE_CODE_OAUTH_TOKEN` entry in `secretEnvKeys`. `secretEnv` reaches
-   * every session including host-spawned ones, and an env
-   * `CLAUDE_CODE_OAUTH_TOKEN` overrides the host keychain login — so a
-   * container-only credential there would break (or, once stale, poison)
-   * every host thread. `ThreadSession` injects this token ONLY into a
-   * VM-routed session's container `--env` (see `containerAuthTokenResolver`).
-   * It is global rather than project-scoped: it is the user's own Claude
-   * login, so one sign-in serves every container-routed thread and survives
-   * containers being recreated.
-   */
-  async persistContainerAuthToken(threadId: string, token: string): Promise<void> {
-    this.app.secretStorage.setSecret(secretStorageKey(CONTAINER_AUTH_TOKEN_SECRET), token);
-    this.manager.requestSessionRestart(threadId);
   }
 
   getPluginSkillsRoot(): string {
@@ -2850,14 +2829,18 @@ export default class ClaudeThreadsPlugin extends Plugin {
       broker: this.githubBroker,
       isEnabled: () => this.settings.githubConnectionEnabled !== false,
     }));
-    // Harness threads create their container through ThreadManager's shared VM manager, not the
-    // enter_vm tool, so it needs the same credential/identity hooks (no-ops while unavailable).
-    this.manager.sandboxVmHooks = createGithubVmHooks({
+    if (!bridge || !Platform.isDesktop) return;
+    // The managed local daemon gets the same connection (git + gh inside its container).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { createLocalDaemonGithubDelivery } = require('./localDaemon/wiring') as typeof import('./localDaemon/wiring');
+    const vaultAdapter = this.app.vault.adapter;
+    this.localDaemonGithub = createLocalDaemonGithubDelivery({
       broker: this.githubBroker,
       isEnabled: () => this.settings.githubConnectionEnabled !== false,
       getEmailOverride: () => this.settings.githubCommitEmail,
+      vaultBasePath: () => (vaultAdapter instanceof FileSystemAdapter ? vaultAdapter.getBasePath() : null),
+      log: (message) => debugLog(message),
     });
-    if (!bridge || !Platform.isDesktop) return;
     this.githubHost = new GithubHostDelivery({
       broker: this.githubBroker,
       isEnabled: () => this.settings.githubConnectionEnabled !== false,
@@ -2873,6 +2856,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     setGitAuthProvider(undefined);
     // Delete the published GitHub token file immediately; never wait on the shutdown poll below.
     void this.githubHost?.stop();
+    void this.localDaemonGithub?.stop();
+    this.daemonPortForwarder?.close();
     // Revoke peer references before asynchronous shutdown begins. Obsidian does
     // not await plugin onunload hooks, so delaying this would leave a stale
     // generation callable while sessions are draining.
@@ -3307,12 +3292,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
   private claudeCliProbe: { path: string; promise: Promise<void> } | undefined;
 
   /**
-   * Probes the configured claude binary (desktop only; skipped when threads are
-   * forced into the sandbox VM, where the host binary is not used). Never throws.
+   * Probes the configured claude binary (desktop only). Never throws.
    */
   refreshClaudeCliInfo(): Promise<void> {
     const path = this.settings.claudeBinaryPath;
-    if (Platform.isMobile || !path || this.settings.harnessVmMode === 'always') {
+    if (Platform.isMobile || !path) {
       this.claudeCliInfo = undefined;
       return Promise.resolve();
     }
@@ -3328,7 +3312,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   /** Problems to surface in Settings and the model menu; empty when healthy or not applicable. */
   getClaudeCliProblems(): CliProblem[] {
-    if (Platform.isMobile || this.settings.harnessVmMode === 'always') return [];
+    if (Platform.isMobile) return [];
     const info = this.claudeCliInfo?.binaryPath === this.settings.claudeBinaryPath ? this.claudeCliInfo : undefined;
     const missing = findMissingKnownModels(this.discoveredModelsByHarness.claude, Object.values(FALLBACK_RESOLVED));
     return describeCliProblems(info, missing);
@@ -3465,7 +3449,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       threadId,
       pool: this.agentBrowser,
       getSecrets: () => this.collectSecretValues(),
-      resolveUrl: (url) => this.manager.getSandboxVmManager(threadId).resolveLoopbackUrl(url),
+      // A thread on the managed local daemon: `localhost` means the container, so forward it (localDaemon/portForward.ts).
+      resolveUrl: (url) => this.resolveDaemonLoopbackUrl(threadId, url),
       // Read lazily so toggling the setting applies to the next browser_eval call.
       isEvalEnabled: () => this.settings.enableAgentBrowserEval ?? false,
       getUrlPolicy: () => ({ allowPrivateNetwork: this.settings.agentBrowserAllowPrivateNetwork ?? false }),
@@ -3635,6 +3620,114 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return threadId;
   }
 
+  /**
+   * True when "Run on: This Mac (container)" can be offered but is not set up yet: a desktop app, a Mac that can run
+   * the container runtime, and no managed daemon registered. The kickoff picker then shows a set-up entry (what the
+   * removed sandbox VM's in-thread "Run this thread in a sandbox?" card was for).
+   */
+  isLocalDaemonSetupOffered(): boolean {
+    if (!Platform.isDesktopApp || !this.localDaemon) return false;
+    if ((this.settings.remoteDaemons ?? []).some((d) => d.managed === 'local-container')) return false;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      return (require('./sandboxRuntime') as typeof import('./sandboxRuntime')).isRuntimeSupported().supported;
+    } catch {
+      return false;
+    }
+  }
+
+  private daemonUpdateNotice: Notice | null = null;
+
+  /**
+   * After a Project is saved: if the managed daemon's mounts no longer match what would be created now (a new
+   * external-folder Project under "share all Project folders"), offer a one-click Update. Never automatic, because
+   * Update recreates the container under any thread running on it.
+   */
+  async offerDaemonUpdateIfMountsChanged(): Promise<void> {
+    if (!Platform.isDesktopApp || !this.localDaemon || !this.settings.localDaemon?.enabled || this.daemonUpdateNotice) return;
+    try {
+      const snap = await this.localDaemon.snapshot();
+      if (!snap.assessment.drift) return;
+      const controller = this.localDaemon;
+      const frag = document.createDocumentFragment();
+      frag.createDiv({ text: 'The local daemon needs an update to share this Project\'s folder. Updating restarts it, which interrupts threads running on it.' });
+      const notice = new Notice(frag, 0);
+      this.daemonUpdateNotice = notice;
+      const dismiss = () => { notice.hide(); this.daemonUpdateNotice = null; };
+      const row = frag.createDiv();
+      const go = row.createEl('button', { text: 'Update daemon', cls: 'mod-cta' });
+      go.addEventListener('click', () => {
+        dismiss();
+        const progress = new Notice('Updating the local daemon…', 0);
+        controller.update().then(() => new Notice('Local daemon updated.'), (err: unknown) => new Notice(`Local daemon update failed: ${err instanceof Error ? err.message : String(err)}`)).finally(() => progress.hide());
+      });
+      row.createEl('button', { text: 'Later' }).addEventListener('click', dismiss);
+    } catch {
+      // Advisory only: Settings → Remote → Local daemon still shows the drift hint.
+    }
+  }
+
+  /** Each Project's working folder (its folder override, or its vault folder); the daemon vets and drops the ones it already mounts. */
+  private projectWorkFolders(): string[] {
+    return this.manager.getProjects().map((p) => this.manager.getProjectCwd(p));
+  }
+
+  /** The managed daemon's shared folders (Settings) that exist, as host folder -> /work/<name>. */
+  private sharedFolderMounts(): Array<{ host: string; name: string }> {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter) || Platform.isMobile) return [];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { resolveWorkFolders, sharedFolderList } = require('./localDaemon/spec') as typeof import('./localDaemon/spec');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    return resolveWorkFolders(sharedFolderList(this.settings.localDaemon, () => this.projectWorkFolders()), {
+      vaultPath: adapter.getBasePath(),
+      isDirectory: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
+    });
+  }
+
+  /**
+   * Where `localCwd` (a folder on this computer) is on a daemon: under its vault mapping, or (the managed daemon) under
+   * a shared folder at /work/<name>. Undefined when the daemon cannot see that folder.
+   */
+  mapCwdToDaemon(daemonId: string, localCwd: string): string | undefined {
+    const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
+    if (!daemon) return undefined;
+    const viaVault = daemon.vaultMapping ? mapLocalToRemote(daemon.vaultMapping, this.manager.vaultRoot, localCwd) : undefined;
+    if (viaVault) return viaVault;
+    if (daemon.managed !== 'local-container') return undefined;
+    // Linear trim (a `/\/+$/` regex is quadratic on a long run of slashes).
+    let end = localCwd.length;
+    while (end > 0 && localCwd.charCodeAt(end - 1) === 47) end--;
+    const base = localCwd.slice(0, end);
+    for (const m of this.sharedFolderMounts()) {
+      if (base === m.host) return `/work/${m.name}`;
+      if (base.startsWith(`${m.host}/`)) return `/work/${m.name}${base.slice(m.host.length)}`;
+    }
+    return undefined;
+  }
+
+  /** The folder on this computer that a daemon path corresponds to; falls back to the vault root. */
+  mapCwdFromDaemon(daemonId: string, remoteCwd: string): string | undefined {
+    const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
+    const viaVault = daemon?.vaultMapping ? mapRemoteToLocal(daemon.vaultMapping, this.manager.vaultRoot, remoteCwd) : undefined;
+    if (viaVault) return viaVault;
+    for (const m of this.sharedFolderMounts()) {
+      const root = `/work/${m.name}`;
+      if (remoteCwd === root) return m.host;
+      if (remoteCwd.startsWith(`${root}/`)) return `${m.host}${remoteCwd.slice(root.length)}`;
+    }
+    return this.manager.vaultRoot || this.getEffectiveCwd();
+  }
+
+  /** Open Settings → Remote, where the Local daemon block (consent text, progress, sign-in) lives. */
+  openLocalDaemonSettings(): void {
+    (this.settingSectionTabs.get('remote') ?? this.settingTab)?.showSection('remote');
+    const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
+    setting?.open();
+    setting?.openTabById(this.remoteSectionId || this.manifest.id);
+  }
+
   /** Open Settings → Projects with a blank new-project draft. */
   openNewProjectSettings(): void {
     (this.settingSectionTabs.get('projects') ?? this.settingTab)?.showNewProject();
@@ -3668,8 +3761,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       loop?: { intervalSeconds: number };
       /** Harness override selected at kickoff; does not change Settings. */
       agentHarness?: AgentHarness;
-      /** Container/host override selected at kickoff (Claude only); omit to follow Settings. */
-      harnessVmMode?: HarnessVmMode;
       /** Project selected by a dispatch surface. Omit for deliberate Unassigned. */
       projectId?: string;
       /** Run the thread on a remote daemon, in this folder on its machine, with `agentHarness` (the daemon must offer it). */
@@ -3693,11 +3784,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       ? this.manager.createRemoteThread(title, { daemonId: opts.remote.daemonId, remoteCwd: opts.remote.cwd, clientId: this.settings.remoteClientId ?? 'unknown', agentHarness: opts.agentHarness ?? this.settings.agentHarness ?? 'claude' }, project?.id)
       : this.manager.createThread(title, cwd, project?.id, opts?.agentHarness);
     if (opts?.model) this.manager.setThreadModel(thread.id, opts.model);
-    // Container routing exists only for Claude; the picker never offers it for
-    // other harnesses, so a mismatched request is ignored rather than fatal.
-    if (opts?.harnessVmMode && !thread.remote && (thread.agentHarness ?? 'claude') === 'claude') {
-      this.manager.setInitialThreadHarnessVmMode(thread.id, opts.harnessVmMode);
-    }
     const goalRevision = opts?.goal ? this.manager.setThreadGoal(thread.id, opts.goal) : undefined;
     if (opts?.loop) {
       await this.scheduler.createItem({
@@ -3804,6 +3890,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return this.getView()?.getActiveThreadId() ?? null;
   }
 
+  /** Re-apply the tool-call style class on every open view (desktop + mobile), no reload needed. */
+  applyToolCallStyle(): void {
+    this.getView()?.applyToolCallStyle();
+    for (const leaf of this.app.workspace.getLeavesOfType(MOBILE_VIEW_TYPE)) {
+      if (leaf.view instanceof MobileView) leaf.view.applyToolCallStyle();
+    }
+  }
+
   getView(): ThreadsView | null {
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
     const view = leaf?.view;
@@ -3823,18 +3917,35 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   /**
    * Single handler behind all three "Chat about this document" entry points:
-   * open the Agents List and seed its dispatch composer with an `@[[doc]]`
-   * mention. Submitting the composer is what creates the new thread, so the
-   * user gets to type the actual question first.
+   * open the conversation panel in new-conversation mode with an `@[[doc]]`
+   * mention seeded. Submitting the composer is what creates the new thread, so
+   * the user gets to type the actual question first.
    */
   async startDocumentChat(file: TFile): Promise<void> {
-    await this.activateAgentView();
-    const dashboard = this.getAgentDashboard();
-    if (!dashboard) {
-      new Notice('Could not open the Agents List to chat about this document.');
-      return;
+    if (!(await this.openNewConversation({ mention: file.basename }))) {
+      new Notice('Could not open the conversation panel to chat about this document.');
     }
-    dashboard.seedDocumentChat(file.basename);
+  }
+
+  /**
+   * Reveal the conversation panel in new-conversation mode (the single entry
+   * point behind the "New thread" buttons in the Agents List and Kanban board,
+   * the command palette, and "Chat about this document"). No thread exists
+   * until the first message is sent. Returns false if the panel could not open.
+   */
+  async openNewConversation(opts: { projectId?: string; draft?: string; mention?: string } = {}): Promise<boolean> {
+    // Right after launch the workspace may not have restored its leaves yet, and a freshly
+    // created view finishes building asynchronously; wait for both rather than failing.
+    await new Promise<void>((resolve) => this.app.workspace.onLayoutReady(() => resolve()));
+    await this.activateView();
+    let view = this.getView();
+    for (let attempt = 0; attempt < 50 && !view?.isReady(); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      view = this.getView();
+    }
+    if (!view?.isReady()) return false;
+    await view.startNewConversation(opts);
+    return true;
   }
 
   /**
@@ -3862,7 +3973,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   getAgentDashboard(): AgentDashboard | null {
     const leaf = this.app.workspace.getLeavesOfType(AGENT_VIEW_TYPE)[0];
     const view = leaf?.view;
-    if (!view || typeof (view as any).focusDispatchInput !== 'function') return null;
+    if (!view || typeof (view as any).jumpToLatestUnreviewed !== 'function') return null;
     return view as AgentDashboard;
   }
 
@@ -4004,6 +4115,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // No saved data at all = a genuinely new install (gates the Chief of Staff first run).
     this.isFreshInstall = isFreshInstallData(data);
     this.settings = mergePersistedSettings(DEFAULT_SETTINGS, data);
+    // Per-thread sandbox VMs were removed; their settings are inert and leave data.json on the next save.
+    stripLegacySandboxSettings(this.settings);
     const { sanitizeConversationCompanionSettings } = require('./conversationFirstPlacement') as typeof import('./conversationFirstPlacement');
     sanitizeConversationCompanionSettings(this.settings as unknown as Record<string, unknown>);
     // Migrate old WebLLM model IDs to claude alias
