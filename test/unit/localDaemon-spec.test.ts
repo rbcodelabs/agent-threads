@@ -9,7 +9,9 @@ import {
   containerNameFor,
   credentialPresentArgs,
   dataVolumeFor,
+  DATA_MOUNT,
   labelsFor,
+  mcpSyncArgs,
   localImageRef,
   mountsFor,
   dropOverlappingRoots,
@@ -243,5 +245,25 @@ describe('specSignature', () => {
     for (const change of [{ hostPort: 7434 }, { version: '0.66.0' }, { maskedDirs: ['.geode'] }, { memory: '8G' }, { cpus: 2 }, { vaultPath: '/Users/user/Other' }]) {
       expect(specSignature({ ...spec, ...change })).not.toBe(specSignature(spec));
     }
+  });
+});
+
+describe('synced stdio MCP servers', () => {
+  it('is off by default: no env, and the signature is the one containers made before the option have', () => {
+    expect(runArgs(spec).join(' ')).not.toContain('ALLOW_SYNCED_STDIO');
+    expect(specSignature({ ...spec, allowSyncedStdio: false })).toBe(specSignature(spec));
+  });
+
+  it('turning it on sets the daemon env and reads as drift so Apply recreates the container', () => {
+    const on = { ...spec, allowSyncedStdio: true };
+    const args = runArgs(on);
+    expect(args[args.indexOf('AGENT_THREADS_ALLOW_SYNCED_STDIO=1') - 1]).toBe('--env');
+    expect(specSignature(on)).not.toBe(specSignature(spec));
+  });
+
+  it('mcp sync runs inside the container on stdin, JSON out, and carries no definition in argv', () => {
+    const name = containerNameFor(spec.vaultPath);
+    const args = mcpSyncArgs(name);
+    expect(args).toEqual(['exec', '-i', '--user', '10001', name, 'agent-threads', 'mcp', 'sync', '--stdin', '--clear', '--json', '--url', 'ws://127.0.0.1:7433', '--data-dir', DATA_MOUNT]);
   });
 });

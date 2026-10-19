@@ -2515,7 +2515,7 @@ export class ThreadManager {
     // External MCP servers: only what a daemon can use (http/sse it can reach, no secrets) goes along; the rest is
     // dropped and the user is told once per change.
     const hostToolSettings = this.remoteDaemons?.hostToolsOf?.(remote.daemonId);
-    const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist);
+    const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist, this.remoteDaemons?.mcpSyncOf?.(remote.daemonId));
     const droppedNote = describeDroppedMcp(partition.dropped, daemonName);
     if ((this.remoteMcpNoticeSig.get(threadId) ?? '') !== (droppedNote ?? '')) {
       this.remoteMcpNoticeSig.set(threadId, droppedNote ?? '');

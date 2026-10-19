@@ -21,6 +21,7 @@ import {
   containerNameFor,
   credsPushArgs,
   credsRemoveArgs,
+  mcpSyncArgs,
   tokenListArgs,
   tokenRevokeArgs,
 } from './spec';
@@ -63,6 +64,29 @@ export class CredsPusher {
         const detail = redactSecrets(tail(`${r.stderr}\n${r.stdout}`.trim()), secrets);
         throw new Error(`pushing "${kind}" to the local daemon failed (exit ${r.exitCode}): ${detail}`);
       }
+    }
+  }
+
+  /**
+   * Replaces the daemon's synced MCP servers (`agent-threads mcp sync`, full replace). Definitions only (placeholders,
+   * never values), on stdin. Returns the daemon's reply.
+   */
+  async syncMcp(servers: Record<string, unknown>): Promise<{ accepted: string[]; rejected: Array<{ name: string; reason: string }>; requiredCreds: string[]; shadowed: string[] }> {
+    const name = this.containerName();
+    const run = this.deps.runner();
+    for (let attempt = 0; ; attempt++) {
+      await this.ensureCliToken(name);
+      const r = await run(mcpSyncArgs(name), { timeoutMs: CREDS_EXEC_TIMEOUT_MS, input: JSON.stringify(servers) });
+      if (r.exitCode === 0) {
+        try {
+          const parsed = JSON.parse(r.stdout.trim().split('\n').pop() ?? '') as Partial<{ accepted: string[]; rejected: Array<{ name: string; reason: string }>; requiredCreds: string[]; shadowed: string[] }>;
+          return { accepted: parsed.accepted ?? [], rejected: parsed.rejected ?? [], requiredCreds: parsed.requiredCreds ?? [], shadowed: parsed.shadowed ?? [] };
+        } catch {
+          throw new Error('the local daemon answered the MCP sync with something unreadable');
+        }
+      }
+      this.cliTokenReady.delete(name);
+      if (attempt >= 1) throw new Error(`syncing MCP servers to the local daemon failed (exit ${r.exitCode}): ${tail(`${r.stderr}\n${r.stdout}`.trim())}`);
     }
   }
 
