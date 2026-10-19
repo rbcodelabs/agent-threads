@@ -34,7 +34,8 @@ import * as fsp from 'fs/promises';
 import type ClaudeThreadsPlugin from './main';
 import { isDefaultThreadTitle } from './thread-title-utils';
 import { formatToolName, getToolIcon } from './ClaudeSession';
-import { isPermissionPreApproved, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
+import { isPermissionPreApproved, isHostExecPermission, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
+import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
 import { applyToolCallStyleClass, refreshToolRowByUseId, renderToolGroupShell, renderToolRow } from './toolCallDom';
 import { groupToolRuns, liveToolGroupKey, mergeAdjacentToolOnlyMessages, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
@@ -4661,10 +4662,19 @@ export class ThreadsView extends ItemView {
     this.renderPermissionDetail(body, detail);
 
     const actions = card.createDiv('ct-permission-actions');
+    const hostExecPrefix = hostExecAlwaysAllowOffer({ toolName, detail });
     actions.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' })
       .addEventListener('click', () => done(false));
-    actions.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
+    actions.createEl('button', { text: isHostExecPermission(toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
       .addEventListener('click', () => done(true));
+    if (hostExecPrefix) {
+      // Scoped to a command prefix; never adds host_exec to alwaysAllowedTools.
+      actions.createEl('button', { text: `Always allow \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' })
+        .addEventListener('click', async () => {
+          if (addHostExecPrefix(this.plugin.settings, hostExecPrefix)) await this.plugin.saveSettings();
+          done(true);
+        });
+    }
     if (canAlwaysAllow(toolName) && !(this.activeThreadId && this.manager.isRemoteThread(this.activeThreadId))) {
       actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
         .addEventListener('click', async () => {

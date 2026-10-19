@@ -100,11 +100,27 @@ AWS sign-in card) instead of retrying for minutes. Narrower than the removed san
 
 **Tools that run on this Mac.** A new local daemon entry starts with the read groups (`vault`, `workspace`, `threads`,
 `skills`, `browser`), your Google and OAuth MCP servers (`mcp`) and `host_exec` turned on (Settings, Remote, edit daemon
-changes any of it; later edits are kept). `host_exec` runs ONE command on this Mac after an Allow once / Deny card for every
-call (never "Always allow", whatever the permission mode); its directory defaults to the thread's folder on the Mac. Tools
+changes any of it; later edits are kept). `host_exec` runs ONE command on this Mac after an Allow once / Always allow `<prefix>` / Deny card
+(see "Always allow a command prefix" below; never the generic "Always allow", whatever the permission mode); its directory defaults to the thread's folder on the Mac. Tools
 that write, schedule or touch secrets are off for every daemon unless you switch a group on for THIS daemon (Settings, Remote, **Local daemon: tools that act on this Mac**: threads, schedule, secrets and MCP registration, skills, vault history, app commands and editor, browser scripts, GitHub discovery). Off by default; every call still asks you in the app first. **They act on this Mac with your account, not in the container**: an agent that read untrusted text could be steered into calling them, so leave a group off unless you need it. A change applies to the next thread session you open (see "Tools on your computer (host tools)" below).
 `browser_navigate` forwards `localhost` URLs of a server the agent started in the container to a loopback port on this
 Mac (relay through `container exec`, loopback only), so the page opens; start such servers in the background.
+
+**Always allow a command prefix (`host_exec`).** For a simple command the card also offers **Always allow `<prefix>`**:
+the program (`ls`, `brew`), or program plus subcommand for `npm`, `pnpm`, `yarn`, `git` and `cargo` (`git status`,
+`npm test`, `npm run build`). Later `host_exec` calls whose command splits into the same leading tokens run on this Mac
+without a card; matching is on whole tokens, so `git status` covers `git status -sb` but not `git push`, `git-lfs` or
+`gitk`. Prefixes are kept in Settings, Tools, **Always-allowed host commands**, where each can be removed (it applies to
+the next call). Limits, all fail-closed (the card is shown as before):
+
+- A command with shell syntax (`;`, `&&`, pipes, redirects, quotes, `$`, backticks, globs, newlines), a `VAR=x` prefix or
+  a path-qualified program is never offered and never auto-approved.
+- Programs that run other programs or are broadly destructive (shells, `sudo`, `env`, `xargs`, `ssh`, `curl`, `rm`,
+  interpreters such as `python` and `node`, ...) and subcommands such as `npm exec` or `git push` are never offered.
+- Scheduled and other headless threads get no pre-approval, and `host_exec` still refuses them.
+- `host_exec` is never added to the generic always-allowed tools.
+- An approved program still runs whatever arguments the agent passes it, and the denylist is best-effort. Save only
+  prefixes you are happy for an agent to run with any arguments.
 
 **Run on, and moving a thread.** The kickoff picker's **Run on** section lists "This Mac (container)"; before it is set up
 it shows "This Mac (container) - set up..." which opens this block. A Claude thread's menu (Harness, **Run on**) moves it
@@ -522,7 +538,7 @@ tools that only exist in the app on your computer, while the app is connected, *
 |---|---|
 | On the daemon, beside the repo | `enter_worktree`, `exit_worktree`, `set_working_directory` (worktrees go under `<first workspace>/.worktrees`, or `worktreeRoot`). These refuse a folder in a read-only workspace, and the repo and git root they work on are checked like the target. |
 | In the app on your computer, opt-in groups (all off until listed) | `vault` (search, backlinks, links, note metadata, file history, list, bridge list), `workspace` (open tabs, active file, watched documents), `threads` (list, current, projects, messages, log, wait), `skills` (list, search, get, sources), `browser` (the in-app browser tools except `browser_eval` and `browser_save_page`), `mcp` (your Google Workspace and OAuth MCP servers, under their own names, for example `mcp__google-docs__*`; or name one server) |
-| One command on your computer, opt-in group `exec` | `host_exec`: runs ONE shell command on your computer; every call shows an Allow once / Deny card with the exact command, folder and reason, no permission mode or remembered answer skips it, and its environment is scrubbed (no credentials). On for the managed local daemon only by default. |
+| One command on your computer, opt-in group `exec` | `host_exec`: runs ONE shell command on your computer; every call shows an Allow once / Always allow `<prefix>` / Deny card with the exact command, folder and reason, no permission mode or generic remembered answer skips it (only a command prefix you saved can; see "Always allow a command prefix"), and its environment is scrubbed (no credentials). On for the managed local daemon only by default. |
 | Never offered to a daemon you add yourself; the managed local daemon can opt in per group | (same list) |
 | Never offered, whatever you set | everything that writes, executes, schedules, installs, sends or reads a secret on your computer: `request_secret`, `mcp_register_server`, `host_execute_command` / `host_list_commands` / `host_open_url`, `workspace_navigate_to_file` / `workspace_insert_at_cursor`, `watch_document`, `vault_restore_file_version`, `vault_add_bridge`, `sync_resolve_conflict`, `threads_create` / `threads_send_message` / `threads_archive` / `threads_open` and every `threads_set_*` / project setter, `skills_install` / `create` / `update` / `uninstall` / `check_updates`, `Cron*` / `ScheduleWakeup`, `browser_eval`, `browser_save_page` |
 | Not offered either | `github_*` (the discovery tools run against Geode's connection; the daemon gets the token itself, not the tools), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |

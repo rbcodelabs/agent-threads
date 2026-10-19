@@ -52,6 +52,7 @@ import { mergeMcpServers } from './mcpServerMerge';
 import { clientSecretVariableName, createMcpRegistration, mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import { McpRegistrationModal } from './confirmModal';
 import { redactGithubSecrets } from './githubCredentials';
+import { matchesHostExecPrefix } from './hostExecPrefix';
 import { canAlwaysAllow } from './permissionDetail';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
@@ -1064,6 +1065,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       // host_exec exists only for the managed local daemon (a container on this Mac). The app shows its Allow once / Deny
       // card before ANY proxied call that needs approval, so the handler's own prompt is satisfied by that card.
       let hostExec: HostExecHooks | undefined;
+      let preApprove: ((tool: string, input: Record<string, unknown>) => boolean) | undefined;
       let builtInCwd = thread.cwd;
       if (daemonConfig?.managed === 'local-container' && !Platform.isMobile) {
         hostExec = {
@@ -1071,6 +1073,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
           requestApproval: async () => true,
           redact: redactGithubSecrets,
         };
+        // Scoped standing approval, the only one host_exec has (never alwaysAllowedTools): a saved command prefix
+        // matched on whole tokens of a plain command. Read per call so a revoke in Settings applies at once; scheduled
+        // or headless threads get none. The executor asks this only for a call it is about to show a card for.
+        preApprove = (tool, input) =>
+          tool === 'host_exec'
+          && !this.manager.getThread(threadId)?.scheduledItemId
+          && typeof input.command === 'string'
+          && matchesHostExecPrefix(input.command, this.settings.hostExecAlwaysAllowedPrefixes ?? []);
         // The thread's cwd is a path in the container; its default on the Mac is the same folder under the vault.
         const mapping = daemonConfig.vaultMapping;
         builtInCwd = (mapping && thread.remote ? mapRemoteToLocal(mapping, this.manager.vaultRoot, thread.remote.remoteCwd) : undefined)
@@ -1095,7 +1105,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         routes = opt.withOptionalRoutes(routes, optionalIds);
         optionalTools = opt.optionalToolsFor(optionalIds);
       }
-      return new RemoteHostTools({ builtIn, mcpSources, overrides: routes, ...(optionalTools ? { optionalTools } : {}), log: m => debugLog(m) });
+      return new RemoteHostTools({ builtIn, mcpSources, overrides: routes, ...(optionalTools ? { optionalTools } : {}), ...(preApprove ? { preApprove } : {}), log: m => debugLog(m) });
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect

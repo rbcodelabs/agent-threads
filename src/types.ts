@@ -1171,6 +1171,11 @@ export interface PluginSettings {
   /** Model alias the escalation keyword routes to (fable, opus, sonnet, haiku). */
   escalationModel: string;
   alwaysAllowedTools: string[];
+  /**
+   * Command prefixes (`git status`, `npm test`) the user always-allowed on a `host_exec` card.
+   * Separate from alwaysAllowedTools, which never holds host_exec. See hostExecPrefix.ts.
+   */
+  hostExecAlwaysAllowedPrefixes: string[];
   disallowedTools: string[];
   threads: Thread[];
   projects: Project[];
@@ -1431,6 +1436,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   escalationKeyword: '/escalate',
   escalationModel: 'opus',
   alwaysAllowedTools: [],
+  hostExecAlwaysAllowedPrefixes: [],
   disallowedTools: ['CronCreate', 'CronDelete', 'CronList', 'CronUpdate'],
   threads: [],
   projects: [],
