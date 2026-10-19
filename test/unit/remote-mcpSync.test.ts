@@ -89,7 +89,7 @@ describe('evaluateServer', () => {
 class FakeTransport implements McpSyncTransport {
   pushes: Array<{ kind: string; fields: Record<string, string>; ttlSec: number }> = [];
   syncs: Array<Record<string, unknown>> = [];
-  reply: (servers: Record<string, unknown>) => { accepted: string[]; rejected: Array<{ name: string; reason: string }>; requiredCreds: string[]; shadowed: string[] } =
+  reply: (servers: Record<string, unknown>) => { accepted: string[]; rejected: Array<{ name: string; reason: string }>; requiredCreds: string[]; shadowed: string[]; kept?: boolean } =
     (s) => ({ accepted: Object.keys(s), rejected: [], requiredCreds: [], shadowed: [] });
   failWith: Error | null = null;
   async pushCreds(kind: string, fields: Record<string, string>, ttlSec: number): Promise<void> {
@@ -211,6 +211,27 @@ describe('McpSyncEngine', () => {
     await r.engine.setEnabled('d1', 'docs', true);
     await vi.runAllTimersAsync();
     expect(r.engine.statusOf('d1', 'docs').state).toBe('synced');
+  });
+
+  it('a kept reply (every server refused) is not a success: reasons are surfaced, nothing is marked synced or pruned', async () => {
+    const r = rig();
+    await enable(r, 'docs');
+    const savesBefore = r.saves.n;
+    const namesBefore = [...(r.daemon.mcpSyncNames ?? [])];
+    const pushesBefore = r.transport.pushes.length;
+    r.transport.reply = (s) => ({ accepted: [], rejected: Object.keys(s).map((name) => ({ name, reason: 'bad placeholder' })), requiredCreds: [], shadowed: [], kept: true });
+    await r.engine.sync('d1', 'force');
+    expect(r.engine.statusOf('d1', 'docs')).toEqual({ state: 'rejected', reason: 'bad placeholder' });
+    expect(r.daemon.mcpSyncNames).toEqual(namesBefore);
+    expect(r.saves.n).toBe(savesBefore);
+    // The credentials the running set may need are left alone (only the push before the sync).
+    expect(r.transport.pushes.length).toBe(pushesBefore + 1);
+    // A kept state is not "fresh": the next normal trigger tries again.
+    const syncsBefore = r.transport.syncs.length;
+    await r.engine.sync('d1', 'normal');
+    expect(r.transport.syncs.length).toBe(syncsBefore + 1);
+    // What the daemon runs is unchanged, so the transcript note still counts the previously accepted name.
+    expect(r.engine.syncedNamesOf('d1').has('docs')).toBe(true);
   });
 
   it('reports a server whose secret is not set on this computer, without sending it', async () => {
@@ -376,6 +397,15 @@ describe('wireTransport', () => {
     const ok = wireTransport(client((type) => (type === 'mcp.sync' ? { accepted: ['a'] } : {})));
     expect(await ok.syncServers({ a: { type: 'http', url: 'https://x' } })).toEqual({ accepted: ['a'], rejected: [], requiredCreds: [], shadowed: [] });
     expect(await ok.probeAdmin!()).toBe(true);
+  });
+
+  it('sends clear: true only with an empty set, and passes kept through', async () => {
+    const seen: any[] = [];
+    const t = wireTransport(client((type, payload) => { seen.push(payload); return { accepted: [], rejected: [{ name: 'a', reason: 'no' }], kept: true }; }));
+    expect(await t.syncServers({ a: { type: 'http', url: 'https://x' } })).toEqual({ accepted: [], rejected: [{ name: 'a', reason: 'no' }], requiredCreds: [], shadowed: [], kept: true });
+    await t.syncServers({});
+    expect(seen[0]).toEqual({ servers: { a: { type: 'http', url: 'https://x' } } });
+    expect(seen[1]).toEqual({ servers: {}, clear: true });
   });
 
   it('the admin probe pushes no fields to a throwaway kind, so it changes nothing', async () => {

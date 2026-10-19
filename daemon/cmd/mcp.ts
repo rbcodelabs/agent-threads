@@ -3,7 +3,8 @@
  *
  * Standard input is a JSON object of `name -> definition` (the same shapes as the `mcpServers` section of config.json,
  * with credentials written as `${mcpsync-<project>.NAME}` and pushed separately with `creds push mcpsync-<project>`).
- * It is a full replace: servers not in the input are removed from the daemon. The managed local daemon uses this
+ * It is a full replace of the accepted servers: servers not in the input are removed from the daemon. If servers are given
+ * and the daemon accepts none, it keeps the previous set (reply `kept`), and the command exits 1. The managed local daemon uses this
  * from inside its container, where its admin token lives (src/localDaemon/credsPusher.ts).
  */
 import type { McpSyncReply } from '../../src/protocol';
@@ -30,12 +31,14 @@ export function prepareSync(opts: McpSyncOptions, stdinText: string | undefined)
 }
 
 export async function syncMcp(client: DaemonClient, servers: Record<string, unknown>): Promise<McpSyncReply> {
-  const r = await command<Partial<McpSyncReply>>(client, 'mcp.sync', { servers });
-  return { accepted: r.accepted ?? [], rejected: r.rejected ?? [], requiredCreds: r.requiredCreds ?? [], shadowed: r.shadowed ?? [] };
+  // An empty set is only ever sent as an explicit clear (prepareSync refused it otherwise).
+  const empty = Object.keys(servers).length === 0;
+  const r = await command<Partial<McpSyncReply>>(client, 'mcp.sync', { servers, ...(empty ? { clear: true } : {}) });
+  return { accepted: r.accepted ?? [], rejected: r.rejected ?? [], requiredCreds: r.requiredCreds ?? [], shadowed: r.shadowed ?? [], ...(r.kept === true ? { kept: true } : {}) };
 }
 
 export function formatSync(r: McpSyncReply): string[] {
-  const lines = [r.accepted.length ? `synced ${r.accepted.length} server${r.accepted.length === 1 ? '' : 's'}: ${r.accepted.join(', ')}` : 'no servers are synced now'];
+  const lines = [r.kept ? 'no server was accepted: the previously synced set was kept unchanged' : r.accepted.length ? `synced ${r.accepted.length} server${r.accepted.length === 1 ? '' : 's'}: ${r.accepted.join(', ')}` : 'no servers are synced now'];
   for (const x of r.rejected) lines.push(`rejected ${x.name}: ${x.reason}`);
   if (r.shadowed.length) lines.push(`overridden by config.json: ${r.shadowed.join(', ')}`);
   if (r.requiredCreds.length) lines.push(`needs credentials (push with "creds push"): ${r.requiredCreds.join(', ')}`);

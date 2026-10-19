@@ -41,6 +41,19 @@ describe('CredsPusher.syncMcp', () => {
     await expect(ok.pusher.syncMcp({})).resolves.toMatchObject({ accepted: ['docs'] });
   });
 
+  it('treats exit 1 with a kept reply as the daemon\'s answer, not a failed exec', async () => {
+    const kept = '{"accepted":[],"rejected":[{"name":"docs","reason":"bad"}],"requiredCreds":[],"shadowed":[],"kept":true}\n';
+    const calls: string[][] = [];
+    const run: VmCommandRunner = async (args): Promise<VmCommandResult> => {
+      calls.push([...args]);
+      if (args.join(' ') === cliTokenPresentArgs(NAME).join(' ')) return { exitCode: 0, stdout: '', stderr: '' };
+      return { exitCode: 1, stdout: kept, stderr: '' };
+    };
+    const pusher = new CredsPusher({ vaultPath: () => VAULT, runner: () => run });
+    await expect(pusher.syncMcp({ docs: { type: 'http' } })).resolves.toEqual({ accepted: [], rejected: [{ name: 'docs', reason: 'bad' }], requiredCreds: [], shadowed: [], kept: true });
+    expect(calls.filter((c) => c.includes('sync'))).toHaveLength(1);
+  });
+
   it('pushes credential values on stdin, never in argv', async () => {
     const f = fixture();
     await f.pusher.push('mcpsync-global', { T: SECRET }, 30 * 86400);

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -48,12 +48,54 @@ describe('SyncedMcpStore.replace', () => {
     expect(r.rejected.find((x) => x.name === 'claude_threads')!.reason).toMatch(/reserved/);
   });
 
+  it('keeps the previous set, untouched on disk, when the request is non-empty and nothing is accepted', () => {
+    const store = new SyncedMcpStore(dir, OPEN, () => 1000);
+    store.replace({ docs: HTTP, tools: STDIO }, 't');
+    const before = readFileSync(store.file, 'utf8');
+    const mtime = statSync(store.file).mtimeMs;
+    const r = store.replace({ docs: { type: 'http' }, tools: { command: 'x', args: ['${NOPE}'], env: { K: '${bare}' } }, claude_threads: HTTP }, 'other-token');
+    expect(r).toMatchObject({ kept: true, accepted: [], added: [], removed: [], requiredCreds: [], shadowed: [] });
+    expect(r.rejected.map((x) => x.name).sort()).toEqual(['claude_threads', 'docs', 'tools']);
+    expect(readFileSync(store.file, 'utf8')).toBe(before);
+    expect(statSync(store.file).mtimeMs).toBe(mtime);
+    expect(Object.keys(store.records()).sort()).toEqual(['docs', 'tools']);
+  });
+
+  it('keeps the set when the operator turned allowSyncedStdio off and only stdio servers are sent', () => {
+    new SyncedMcpStore(dir, OPEN).replace({ tools: STDIO }, 't');
+    const strict = new SyncedMcpStore(dir, { allowStdio: false, commandAllowlist: [] });
+    const r = strict.replace({ tools: STDIO }, 't');
+    expect(r.kept).toBe(true);
+    expect(r.rejected[0].reason).toMatch(/allowSyncedStdio/);
+    expect(Object.keys(strict.records())).toEqual(['tools']); // stored, though active() will not start it
+    expect(strict.active()).toEqual({});
+  });
+
+  it('does not report kept for a clear, a first sync that is all rejected, or a partial rejection', () => {
+    const store = new SyncedMcpStore(dir, OPEN);
+    expect(store.replace({ bad: { type: 'http' } }, 't')).toMatchObject({ kept: true }); // nothing stored yet: still kept (empty), no file written
+    expect(existsSync(store.file)).toBe(false);
+    store.replace({ docs: HTTP }, 't');
+    expect(store.replace({}, 't')).toMatchObject({ removed: ['docs'] });
+    expect(store.replace({}, 't').kept).toBeUndefined();
+    store.replace({ docs: HTTP, tools: STDIO }, 't');
+    expect(store.replace({ docs: HTTP, tools: { command: 'x', env: { K: '${bare}' } } }, 't').kept).toBeUndefined();
+  });
+
+  it('on partial rejection a previously synced name that is rejected now is dropped, not kept at its old definition', () => {
+    const store = new SyncedMcpStore(dir, OPEN);
+    store.replace({ docs: HTTP, tools: STDIO }, 't');
+    const r = store.replace({ docs: HTTP, tools: { command: 'x', env: { K: '${bare}' } } }, 't');
+    expect(r).toMatchObject({ accepted: ['docs'], removed: ['tools'] });
+    expect(Object.keys(store.records())).toEqual(['docs']);
+  });
+
   it('drops a previously stored name that is rejected now', () => {
     const store = new SyncedMcpStore(dir, OPEN);
-    store.replace({ x: HTTP }, 't');
-    const r = store.replace({ x: { type: 'http' } }, 't');
+    store.replace({ x: HTTP, y: HTTP }, 't');
+    const r = store.replace({ x: { type: 'http' }, y: HTTP }, 't');
     expect(r.removed).toEqual(['x']);
-    expect(store.records()).toEqual({});
+    expect(Object.keys(store.records())).toEqual(['y']);
   });
 
   it('keeps syncedAt when the definition is unchanged', () => {
@@ -150,6 +192,8 @@ describe('protocol helpers', () => {
   });
   it('validateSyncedMcpShape', () => {
     expect(validateSyncedMcpShape({})).toBeNull();
+    expect(validateSyncedMcpShape({}, true)).toBeNull();
+    expect(validateSyncedMcpShape({ a: {} }, true)).toMatch(/clear/);
     expect(validateSyncedMcpShape([])).toMatch(/object/);
     expect(validateSyncedMcpShape({ a: 3 })).toMatch(/must be an object/);
     expect(validateSyncedMcpShape(Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`s${i}`, {}])))).toMatch(/at most/);

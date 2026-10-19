@@ -775,6 +775,20 @@ message). A server whose credential lapsed or was never delivered shows `Failed:
 - `mcp.sync` needs an admin token and replaces the whole synced set. `agent-threads mcp sync --stdin [--clear] [--strict]` does the
   same from a shell: standard input is a JSON object of `name -> definition` (the `mcpServers` shape above) and the output lists
   names and reasons, never a value. Once the app syncs to a daemon it owns that set, so a set made with the CLI is replaced.
+- Replace semantics. The accepted servers of a request become the whole set; a name that is absent, or that is rejected now,
+  is removed (a rejected name does not keep its old definition: it was superseded by one the daemon refuses, and the client
+  has been told it is not running). **Exception: if the request names at least one server and the daemon accepts none, the
+  previous set is KEPT unchanged** (`synced-mcp.json` is not rewritten, no `removed` audit entry) and the reply carries
+  `kept: true` beside the usual `rejected` reasons. A bad placeholder, a stdio server after the operator turned
+  `allowSyncedStdio` off, or an allowlist miss therefore cannot wipe a working set. Audit entry for that case:
+  `mcp_sync_rejected` with the rejected names only. `agent-threads mcp sync` prints that the previous set was kept and exits 1
+  (`--json` prints the reply, `kept` included); partial rejection exits 0 unless `--strict`.
+- Clearing is explicit. `mcp.sync` takes an optional `clear: true` (additive within v1; valid only with an empty `servers`,
+  otherwise `bad_frame`). The CLI sends it for `--clear`, and the app sends it whenever its set is empty (the user turned the
+  last server off). A daemon from before this field, and this one, also treat an empty `servers` without `clear` as a clear, so
+  the shipped app keeps working; `clear` lets a future daemon refuse the unflagged form. The app, on a `kept` reply, shows the
+  rejection reasons in the server's sync status instead of "synced", does not record the names as synced, leaves the pushed
+  credentials alone (the kept set may still use them) and tries again on the next trigger.
 - Definitions are stored in `<data-dir>/synced-mcp.json` (0600) with, per server, the id of the token that synced it and a hash.
   They are never copied into a thread's saved spec (`sessions/<id>.json`). Audit entry: `mcp_sync` with names only.
 - `allowSyncedStdio` (config.json, flag-free; env `AGENT_THREADS_ALLOW_SYNCED_STDIO=1`; default **false**) lets stdio definitions
