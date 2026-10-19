@@ -84,6 +84,7 @@ import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
 import { DaemonRegistry } from './remote/DaemonRegistry';
+import { LOCAL_DAEMON_ID } from './localDaemon/spec';
 import { createRemoteFolderSource, type RemoteFolderSource } from './remote/folderSource';
 import { createRemoteReposSource, type RemoteReposSource } from './remote/repos';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
@@ -648,6 +649,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       createSocket: createPluginWebSocketFactory(),
       clientVersion: this.manifest.version,
       getInstanceId: () => this.settings.remoteClientId,
+      getMounts: (daemonId) => (this.localDaemon && daemonId === LOCAL_DAEMON_ID ? this.localDaemon.currentMounts() : undefined),
       log: (message) => debugLog(message),
     });
     this.remoteFolders = createRemoteFolderSource(this.daemonRegistry);

@@ -288,6 +288,8 @@ export class LocalDaemonController {
   /** Vetted external roots as of the last {@link refreshExternalRoots}. */
   private extRoots: ExternalRootMount[] = [];
   private workFolders: ExternalRootMount[] = [];
+  private extRootsLoaded = false;
+  private extRootsLoading = false;
 
   private async refreshExternalRoots(vaultPath: string | null): Promise<void> {
     this.workFolders = vaultPath ? resolveWorkFolders(sharedFolderList(this.settings(), this.deps.projectFolders), { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) }) : [];
@@ -296,6 +298,9 @@ export class LocalDaemonController {
       this.extRoots = dropOverlappingRoots(resolveExternalRoots(await this.deps.externalRoots(), { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) }), this.workFolders);
     } catch {
       this.extRoots = []; // an unreadable host answer means no extra mounts, never a failed operation
+    } finally {
+      this.extRootsLoaded = true;
+      this.extRootsLoading = false;
     }
   }
 
@@ -390,6 +395,22 @@ export class LocalDaemonController {
     return finish(observed, version, welcome?.daemonVersion ?? containerVersion);
   }
 
+  /**
+   * The mounts the daemon is (or will next be) created with. Synchronous so a session prompt can use it, and it does
+   * not depend on `observe()` having run: shared (work) folders are recomputed from settings each call, and external
+   * roots come from the cache, with a one-time background refresh when it has never been filled. Empty without a vault.
+   */
+  currentMounts(): Array<{ host: string; guest: string; readOnly: boolean }> {
+    const vaultPath = this.deps.vaultPath();
+    if (!vaultPath) return [];
+    const workFolders = resolveWorkFolders(sharedFolderList(this.settings(), this.deps.projectFolders), { vaultPath, isDirectory: (p) => this.deps.isDirectory(p) });
+    if (!this.extRootsLoaded && !this.extRootsLoading && this.deps.externalRoots) {
+      this.extRootsLoading = true;
+      void this.refreshExternalRoots(vaultPath).catch(() => { /* refreshExternalRoots already swallows host errors */ });
+    }
+    return mountsFor({ vaultPath, maskedDirs: this.maskedDirs(vaultPath), externalRoots: dropOverlappingRoots(this.extRoots, workFolders), workFolders });
+  }
+
   /** What a UI renders. Cheap enough to call when a panel opens; never mutates. */
   async snapshot(): Promise<LocalDaemonSnapshot> {
     const o = await this.observe();
@@ -400,7 +421,7 @@ export class LocalDaemonController {
       pluginVersion: this.deps.pluginVersion,
       port: o.port,
       ...(o.vaultPath ? { vaultPath: o.vaultPath } : {}),
-      mounts: o.vaultPath ? mountsFor({ vaultPath: o.vaultPath, maskedDirs: this.maskedDirs(o.vaultPath), externalRoots: this.extRoots, workFolders: this.workFolders }) : [],
+      mounts: o.vaultPath ? this.currentMounts() : [],
       busy: this.getBusy(),
       lastError: this.lastError,
     };
