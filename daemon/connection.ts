@@ -78,8 +78,11 @@ export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idem
  * `harness.<kind>` for each harness a client may request, plus `harness.<kind>.<feature>` for what that harness
  * supports (see `HARNESS_FEATURES`). The scripted fake advertises only `harness.fake`.
  */
-export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = []): string[] =>
-  harness === 'fake' ? [...BASE_CAPABILITIES, 'harness.fake'] : [...BASE_CAPABILITIES, ...harnessCapabilities(enabled.length ? enabled : isRealHarness(harness) ? [harness] : [])];
+export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = [], autoUpdate = false): string[] => [
+  ...(harness === 'fake' ? [...BASE_CAPABILITIES, 'harness.fake'] : [...BASE_CAPABILITIES, ...harnessCapabilities(enabled.length ? enabled : isRealHarness(harness) ? [harness] : [])]),
+  // Additive: this daemon replaces its own bundle and restarts when idle, so a version change can appear between sessions.
+  ...(autoUpdate ? ['update.auto'] : []),
+];
 
 export interface Timings {
   helloTimeoutMs: number;

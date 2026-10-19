@@ -12,7 +12,7 @@ import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync, statfsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_LISTEN, DEFAULT_PORT, DEFAULT_WORKSPACES, isLoopbackAddress, isWildcardAddress } from '../config';
+import { DEFAULT_LISTEN, DEFAULT_PORT, DEFAULT_WORKSPACES, isLoopbackAddress, isWildcardAddress, parseBoolEnv } from '../config';
 import { findClaudeBinary } from '../claudeDriver';
 import { HARNESS_BINARY, REAL_HARNESSES, findHarnessBinary, isRealHarness, type RealHarness } from '../harnesses';
 import { sha256Hex } from '../tokenStore';
@@ -88,6 +88,8 @@ export interface DoctorTarget {
   harnesses?: RealHarness[];
   /** Files that may carry the Claude credential for a systemd-run daemon. */
   credentialFiles: string[];
+  /** Auto-update opted in (environment, then config.json; a `--auto-update` flag on the service is only seen in its status file). */
+  autoUpdate?: boolean;
 }
 
 const GIB = 1024 ** 3;
@@ -370,6 +372,35 @@ export async function checkTailscale(p: Probes, port: number): Promise<CheckResu
     : { id: 'tailscale', status: 'warn', title, detail: `${dns || 'connected'}; nothing serves port ${port} yet`, fix: `sudo tailscale serve --bg --https=8443 http://127.0.0.1:${port}   (then use wss://${dns || '<machine>.<tailnet>.ts.net'}:8443)` };
 }
 
+// ── auto-update ─────────────────────────────────────────────────────────────
+
+interface RawUpdateStatus { enabled?: unknown; available?: unknown; reason?: unknown; phase?: unknown; version?: unknown; lastError?: unknown; intervalMinutes?: unknown; quietMinutes?: unknown }
+
+/** `update-status.json`, written by the running daemon; unreadable or missing is just "no status yet". */
+function readUpdateStatus(p: Probes, dataDir: string): RawUpdateStatus | null {
+  try {
+    const raw = p.readFile(join(dataDir, 'update-status.json'));
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    return typeof parsed === 'object' && parsed !== null ? (parsed as RawUpdateStatus) : null;
+  } catch { return null; }
+}
+
+export function checkAutoUpdate(p: Probes, t: DoctorTarget): CheckResult {
+  const title = 'auto-update';
+  const status = readUpdateStatus(p, t.dataDir);
+  const enabled = status && typeof status.enabled === 'boolean' ? status.enabled : t.autoUpdate === true;
+  if (!enabled) return { id: 'auto-update', status: 'skip', title, detail: 'off (opt in with --auto-update or AGENT_THREADS_AUTO_UPDATE=1; docs/remote-daemon.md, "Automatic updates")' };
+  if (!status) return { id: 'auto-update', status: 'skip', title, detail: 'on in the configuration, but the daemon has not reported yet (start it)' };
+  if (status.available === false) {
+    return { id: 'auto-update', status: 'warn', title, detail: `on, but unavailable here: ${String(status.reason ?? 'unknown reason')}`, fix: 'upgrade by hand (docs/remote-daemon.md, "Upgrade"), or turn auto-update off to silence this' };
+  }
+  const phase = String(status.phase ?? 'unknown');
+  if (phase === 'held' || phase === 'paused_after_rollback' || phase === 'error') {
+    return { id: 'auto-update', status: 'warn', title, detail: `${phase.replace(/_/g, ' ')}${status.lastError ? `: ${String(status.lastError)}` : ''}`, fix: phase === 'error' ? 'see the daemon log; it retries with backoff' : 'a newer release is needed, or upgrade by hand' };
+  }
+  return { id: 'auto-update', status: 'pass', title, detail: `on, running ${String(status.version ?? '?')}, ${phase.replace(/_/g, ' ')}; checks every ${String(status.intervalMinutes ?? '?')} min, restarts after ${String(status.quietMinutes ?? '?')} min idle` };
+}
+
 // ── whole run ───────────────────────────────────────────────────────────────
 
 export async function runChecks(p: Probes, t: DoctorTarget): Promise<CheckResult[]> {
@@ -396,6 +427,7 @@ export async function runChecks(p: Probes, t: DoctorTarget): Promise<CheckResult
   }
   results.push(checkClockSkew(p, health.reachable ? health : null, ntp));
   results.push(await checkTailscale(p, t.port));
+  results.push(checkAutoUpdate(p, t));
   return results;
 }
 
@@ -524,7 +556,7 @@ export function resolveDoctorTarget(flags: DoctorFlags, p: Probes): DoctorTarget
   const env = p.env;
   const dirs = [env.DATA_DIR, '/var/lib/agent-threads', join(p.home, '.agent-threads'), join(p.home, '.local/state/agent-threads')].filter((d): d is string => !!d);
   const dataDir = flags.dataDir ?? dirs.find((d) => p.stat(d)?.isDirectory) ?? dirs[0] ?? join(p.home, '.agent-threads');
-  let file: { listen?: unknown; port?: unknown; workspaces?: unknown; claudeBinaryPath?: unknown; codexBinaryPath?: unknown; opencodeBinaryPath?: unknown; harness?: unknown; harnesses?: unknown } = {};
+  let file: { autoUpdate?: unknown; listen?: unknown; port?: unknown; workspaces?: unknown; claudeBinaryPath?: unknown; codexBinaryPath?: unknown; opencodeBinaryPath?: unknown; harness?: unknown; harnesses?: unknown } = {};
   try {
     const raw = p.readFile(join(dataDir, 'config.json'));
     if (raw) file = JSON.parse(raw) as typeof file;
@@ -551,5 +583,6 @@ export function resolveDoctorTarget(flags: DoctorFlags, p: Probes): DoctorTarget
   const listed = env.AGENT_THREADS_HARNESSES ? env.AGENT_THREADS_HARNESSES.split(/[,:]/).map((x) => x.trim()).filter(Boolean) : Array.isArray(file.harnesses) ? file.harnesses : undefined;
   const single = env.AGENT_THREADS_HARNESS || (typeof file.harness === 'string' ? file.harness : undefined);
   const harnesses: RealHarness[] = listed?.length ? [...new Set(listed.filter(isRealHarness))] : isRealHarness(single) ? [single] : [...REAL_HARNESSES];
-  return { dataDir, listen, port, baseUrl, workspaces, harnesses, ...(claudeBinaryPath ? { claudeBinaryPath } : {}), ...(codexBinaryPath ? { codexBinaryPath } : {}), ...(opencodeBinaryPath ? { opencodeBinaryPath } : {}), credentialFiles: defaultCredentialFiles(p.home) };
+  const autoUpdate = parseBoolEnv(env.AGENT_THREADS_AUTO_UPDATE) ?? file.autoUpdate === true;
+  return { dataDir, listen, port, baseUrl, workspaces, harnesses, autoUpdate, ...(claudeBinaryPath ? { claudeBinaryPath } : {}), ...(codexBinaryPath ? { codexBinaryPath } : {}), ...(opencodeBinaryPath ? { opencodeBinaryPath } : {}), credentialFiles: defaultCredentialFiles(p.home) };
 }
