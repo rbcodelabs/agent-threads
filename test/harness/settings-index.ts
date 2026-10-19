@@ -434,10 +434,11 @@ void mcpSyncReady.then(() => tab.display());
  * Opens the Remote daemons edit dialog (remote-thread.spec.ts). `advertise` says what the stand-in daemon
  * answers to Test connection: its workspaces, or that it is too old to list them.
  */
-(window as any).__openRemoteDaemonModal = (opts: { advertise?: 'workspaces' | 'old'; saved?: boolean; url?: string } = {}): void => {
+(window as any).__openRemoteDaemonModal = (opts: { advertise?: 'workspaces' | 'old'; saved?: boolean; url?: string; hostTools?: any } = {}): void => {
   const advertise = opts.advertise ?? 'workspaces';
   const existing = {
     id: 'my-server', name: 'my-server', url: opts.url ?? 'wss://my-server.tailnet-name.ts.net:8443', tokenSecretName: 'T',
+    ...(opts.hostTools ? { hostTools: opts.hostTools } : {}),
     ...(opts.saved ? { defaultCwdRoot: '/home/user/projects', vaultMapping: { remoteRoot: '/home/user/vault' } } : {}),
   };
   new RemoteDaemonModal(mockApp as any, existing, [existing], '/Users/me/Documents/vault', {
@@ -453,6 +454,8 @@ void mcpSyncReady.then(() => tab.display());
           ],
         },
       },
-    save: async () => {},
+    save: async (config: any) => { (window as any).__savedDaemon = config; },
+    proxiedServers: () => ['google-docs', 'hiptrip-new', 'vercel'],
+    ownServers: () => ['docs', 'search'],
   }).open();
 };

@@ -10385,3 +10385,27 @@ button.ct-agent-crumb:focus-visible {
   .ct-project-picker .ct-project-picker-sort-btn { min-height: 36px; }
   .ct-project-picker .ct-project-picker-input { min-height: 40px; }
 }
+
+/* Settings, MCP: "Available on" of a proxied server, and the daemon editor's tools checklist. */
+.ct-mcp-available-missing {
+  color: var(--text-faint);
+}
+
+.ct-host-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--background-modifier-border);
+}
+
+.ct-host-tools-list h4 {
+  margin: 8px 0 0;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+}
+
+.ct-host-tools-item .setting-item-description {
+  margin-left: 22px;
+}

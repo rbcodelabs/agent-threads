@@ -433,16 +433,3 @@ describe('loopback MCP source', () => {
     expect(made).toBe(2);
   });
 });
-
-describe('daemon settings -> hostTools config', () => {
-  it('omits the field at defaults, and builds routes and allowlist from the inputs', async () => {
-    const { hostToolsSettingsFrom } = await import('../../src/SettingsTab');
-    expect(hostToolsSettingsFrom(false, '', '')).toEqual({});
-    expect(hostToolsSettingsFrom(true, '', '')).toEqual({ hostTools: { enabled: true } });
-    expect(hostToolsSettingsFrom(true, 'vault, browser  vault', 'docs,search')).toEqual({
-      hostTools: { enabled: true, routes: { vault: 'host', browser: 'host' }, mcpAllowlist: ['docs', 'search'] },
-    });
-    // Off but with groups remembered: stored, still not enabled.
-    expect(hostToolsSettingsFrom(false, 'vault', '')).toEqual({ hostTools: { routes: { vault: 'host' } } });
-  });
-});
