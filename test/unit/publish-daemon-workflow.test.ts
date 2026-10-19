@@ -23,13 +23,14 @@ describe('publish-daemon-image workflow', () => {
     for (const t of targets) expect(t).toBe('base');
     expect(text).not.toMatch(/^\s+build-args:/m);
   });
-  it('the Dockerfile keeps with-claude as the last (default) stage and the harness installs opt-in and off by default', () => {
+  it('the Dockerfile keeps with-claude as the last (default) stage; the harness installs are a separate opt-in stage, off by default', () => {
     const docker = readFileSync(resolve(__dirname, '../../sandbox/Dockerfile.daemon'), 'utf8');
     const stages = [...docker.matchAll(/^FROM\s+\S+\s+AS\s+(\S+)/gm)].map((m) => m[1]);
-    expect(stages).toEqual(['builder', 'base', 'with-claude']);
+    expect(stages).toEqual(['builder', 'base', 'with-harnesses', 'with-claude']);
     expect(docker).toMatch(/^ARG INSTALL_CODEX=0$/m);
     expect(docker).toMatch(/^ARG INSTALL_OPENCODE=0$/m);
-    // The args come after the base stage, so `--target base` cannot see them.
-    expect(docker.indexOf('ARG INSTALL_CODEX')).toBeGreaterThan(docker.indexOf('AS with-claude'));
+    // The args live in their own stage after base, so `--target base` cannot see them and with-claude is untouched.
+    expect(docker.indexOf('ARG INSTALL_CODEX')).toBeGreaterThan(docker.indexOf('AS with-harnesses'));
+    expect(docker.indexOf('ARG INSTALL_CODEX')).toBeLessThan(docker.indexOf('AS with-claude'));
   });
 });

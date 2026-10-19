@@ -260,13 +260,15 @@ docker build -f sandbox/Dockerfile.daemon \
 
 (Building the Dockerfile without `BASE_IMAGE` builds everything from the checkout, with the CLI.)
 
-**Codex and OpenCode in the image.** Off by default, so the default image is the same as before. Opt in on your own build
-with `--build-arg INSTALL_CODEX=1` (npm `@openai/codex`, `CODEX_VERSION`, default `latest`) and/or
-`--build-arg INSTALL_OPENCODE=1` (npm `opencode-ai`, `OPENCODE_VERSION`, default the version the adapter is verified
-against). They install into `/opt/harnesses` outside the volumes, like the Claude CLI; their logins and config live in the
-persisted HOME (`~/.codex`, `~/.local/share/opencode`) or come from env keys. These args work on top of a published `base`
-too (`--build-arg BASE_IMAGE=...`). The published image never contains any of the three CLIs: the workflow builds the
-`base` stage only and passes no build args. The package is
+**Codex and OpenCode in the image.** A separate, opt-in `with-harnesses` stage, declared before `with-claude` so the default
+target (and the Claude layer the app builds) is unchanged. Build it with `--target with-harnesses` and
+`--build-arg INSTALL_CODEX=1` (npm `@openai/codex`, `CODEX_VERSION`, default `latest`) and/or `--build-arg INSTALL_OPENCODE=1`
+(npm `opencode-ai`, `OPENCODE_VERSION`, default the version the adapter is verified against); add
+`--build-arg BASE_IMAGE=ghcr.io/...:<version>` to start from the published image. For all three, layer Claude on top by
+building the default target with `--build-arg BASE_IMAGE=<the with-harnesses image>`. The CLIs install into
+`/opt/harnesses` outside the volumes, like the Claude CLI; their logins and config live in the persisted HOME
+(`~/.codex`, `~/.local/share/opencode`) or come from env keys. The published image never contains any of the three CLIs:
+the workflow builds the `base` stage only and passes no build args. The package is
 private until the repository owner sets its visibility to Public once, after the first publish.
 
 ## CLI

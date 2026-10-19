@@ -8,19 +8,19 @@
 #   builder      npm ci + `npm run build:daemon` -> the single-file bundle.
 #   base         Node 22 + git, ripgrep, jq, curl, gh, build-essential + the bundle. NO Claude CLI.
 #   with-claude  base + Claude Code's native installer. The DEFAULT target (last stage), so a plain
-#                `docker build` gives a ready-to-run image. Opt-in build args add the other harnesses' CLIs to
-#                this same stage (off by default, so the default image is unchanged):
-#                  --build-arg INSTALL_CODEX=1      Codex (npm @openai/codex, CODEX_VERSION, default latest)
-#                  --build-arg INSTALL_OPENCODE=1   OpenCode (npm opencode-ai, OPENCODE_VERSION, default 1.18.32,
-#                                                   the version the adapter is verified against)
+#                `docker build` gives a ready-to-run image.
+#   with-harnesses  (declared before with-claude, so the default target is unchanged) base + opt-in Codex and
+#                OpenCode CLIs: --build-arg INSTALL_CODEX=1 (npm @openai/codex, CODEX_VERSION, default latest),
+#                --build-arg INSTALL_OPENCODE=1 (npm opencode-ai, OPENCODE_VERSION, default 1.18.32, the version
+#                the adapter is verified against). Used with `--target with-harnesses`; see below.
 #
 # The image published to ghcr.io is the `base` stage only: Claude Code has no redistribution grant (the
 # same rule as the sandbox image, see .github/workflows/publish-sandbox-image.yml). Codex and OpenCode are
-# likewise never baked into the published image (the INSTALL_* args are off there; the workflow builds
+# likewise never baked into the published image (they live in the opt-in with-harnesses stage; the workflow builds
 # `base` only), so nothing is redistributed. Add the CLIs on your own machine, which is exactly what
 # installing them yourself is:
 #   docker build -f sandbox/Dockerfile.daemon --build-arg BASE_IMAGE=ghcr.io/<owner>/agent-threads-daemon:<version> \
-#     [--build-arg INSTALL_CODEX=1 --build-arg INSTALL_OPENCODE=1] -t agent-threads-daemon .
+#     -t agent-threads-daemon .
 #
 # Design rules: no secrets baked in (the Claude credential arrives at run time through an env file or a
 # mounted file, see deploy/compose.yaml); a non-root user; state only in /var/lib/agent-threads (data) and
@@ -91,20 +91,16 @@ ENTRYPOINT ["agent-threads", "serve"]
 # because the port is published on the host's loopback; never `-p 7433:7433` on an exposed host.
 CMD ["--listen", "0.0.0.0", "--i-know-this-is-open", "--workspace", "/srv/workspaces"]
 
-FROM ${BASE_IMAGE} AS with-claude
-USER root
-# The Claude CLI goes OUTSIDE every VOLUME path. Under /var/lib/agent-threads/home it would be copied into a named
-# volume once and then frozen there across image upgrades (or hidden entirely by a bind mount). The login and the
-# sessions still live in the persisted HOME; only the program itself is part of the image.
-RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/claude
-USER agentthreads
-RUN curl -fsSL https://claude.ai/install.sh | HOME=/opt/claude bash
-ENV PATH="/opt/claude/.local/bin:${PATH}" \
-    DISABLE_AUTOUPDATER=1
-
-# Codex and OpenCode, opt-in. Installed with npm into /opt/harnesses, OUTSIDE every VOLUME path for the same reason
-# as the Claude CLI (an image upgrade must really upgrade them; their logins and config live in the persisted HOME:
-# ~/.codex and ~/.local/share/opencode). The RUN is a no-op unless the arg is set, so the default image is the same.
+# Codex and OpenCode, opt-in: a separate stage BEFORE with-claude, so with-claude stays the last (default) stage and
+# its body stays byte-for-byte what the plugin embeds (src/localDaemon/spec.ts). Build it on its own, then layer
+# Claude on top of that image if you want all three:
+#   docker build -f sandbox/Dockerfile.daemon --target with-harnesses --build-arg INSTALL_CODEX=1 --build-arg INSTALL_OPENCODE=1 \
+#     [--build-arg BASE_IMAGE=ghcr.io/<owner>/agent-threads-daemon:<version>] -t agent-threads-daemon:harnesses .
+#   docker build -f sandbox/Dockerfile.daemon --build-arg BASE_IMAGE=agent-threads-daemon:harnesses -t agent-threads-daemon .
+# Installed with npm into /opt/harnesses, OUTSIDE every VOLUME path for the same reason as the Claude CLI (an image
+# upgrade must really upgrade them; their logins and config live in the persisted HOME: ~/.codex and
+# ~/.local/share/opencode). With neither arg set the stage installs nothing.
+FROM ${BASE_IMAGE} AS with-harnesses
 ARG INSTALL_CODEX=0
 ARG INSTALL_OPENCODE=0
 ARG CODEX_VERSION=latest
@@ -118,3 +114,14 @@ RUN set -eu; \
     if [ "$INSTALL_OPENCODE" = "1" ]; then pkgs="$pkgs opencode-ai@${OPENCODE_VERSION}"; fi; \
     if [ -n "$pkgs" ]; then npm install --global --no-audit --no-fund --prefix /opt/harnesses $pkgs; fi
 ENV PATH="/opt/harnesses/bin:${PATH}"
+
+FROM ${BASE_IMAGE} AS with-claude
+USER root
+# The Claude CLI goes OUTSIDE every VOLUME path. Under /var/lib/agent-threads/home it would be copied into a named
+# volume once and then frozen there across image upgrades (or hidden entirely by a bind mount). The login and the
+# sessions still live in the persisted HOME; only the program itself is part of the image.
+RUN install -d -o agentthreads -g agentthreads -m 0755 /opt/claude
+USER agentthreads
+RUN curl -fsSL https://claude.ai/install.sh | HOME=/opt/claude bash
+ENV PATH="/opt/claude/.local/bin:${PATH}" \
+    DISABLE_AUTOUPDATER=1
