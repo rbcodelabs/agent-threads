@@ -4273,9 +4273,13 @@ export class ThreadsView extends ItemView {
    *   pass `live: true` — first-time append of a settled row and the full
    *   renderMessages() rebuild both keep the default (stable) keying.
    */
-  private renderToolCalls(parent: HTMLElement, tools: ToolCallRecord[], opts?: { live?: boolean }): HTMLElement {
+  private renderToolCalls(
+    parent: HTMLElement,
+    tools: ToolCallRecord[],
+    opts?: { live?: boolean; onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void },
+  ): HTMLElement {
     const wrapper = parent.createDiv('ct-tools');
-    this.populateToolCallsWrapper(wrapper, tools, { live: opts?.live ?? false });
+    this.populateToolCallsWrapper(wrapper, tools, { live: opts?.live ?? false, onPillRendered: opts?.onPillRendered });
     return wrapper;
   }
 
@@ -4411,12 +4415,32 @@ export class ThreadsView extends ItemView {
    * on every step). Passes `{ live: true }` so a group the user expanded
    * mid-run stays expanded as it grows (see renderToolCalls' doc comment).
    */
-  private rebuildRowToolsInPlace(rowEl: HTMLElement, toolCalls: ToolCallRecord[], row?: ChatMessage): void {
+  private rebuildRowToolsInPlace(
+    rowEl: HTMLElement,
+    toolCalls: ToolCallRecord[],
+    row?: ChatMessage,
+    onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void,
+  ): void {
     const existing = rowEl.querySelector(':scope > .ct-tools');
+    // A row first drawn from the finalized message keys its groups by member
+    // hash; the rebuild below keys them by first call (stable as the run
+    // grows). Carry a group the user opened across that change by position.
+    if (existing && toolCalls.length > 0) {
+      const groupEls = [...existing.querySelectorAll(':scope > .ct-tool-group')];
+      const entries = groupToolRuns(toolCalls);
+      if (groupEls.length > 0 && entries.every((e) => e.kind === 'group') && groupEls.length <= entries.length) {
+        groupEls.forEach((el, i) => {
+          const entry = entries[i];
+          if (el.classList.contains('ct-tool-group-open') && entry.kind === 'group') {
+            this.liveExpandedToolGroups.add(liveToolGroupKey(entry.tools));
+          }
+        });
+      }
+    }
     existing?.remove();
     if (row) rowEl.querySelectorAll(':scope > .ct-tool-result-images').forEach((n) => n.remove());
     if (!toolCalls || toolCalls.length === 0) return;
-    const wrapper = this.renderToolCalls(rowEl, toolCalls, { live: true });
+    const wrapper = this.renderToolCalls(rowEl, toolCalls, { live: true, onPillRendered });
     // renderToolCalls appends via createDiv (last child) — move it to the
     // front so tools stay above the message content, matching the layout
     // appendMessage produces when a row is first created.
@@ -4529,16 +4553,32 @@ export class ThreadsView extends ItemView {
       }
       return;
     }
+    const onPillRendered = (tool: ToolCallRecord, pill: HTMLElement): void => {
+      if (tool.status === 'pending' && tool.toolUseId) {
+        this.toolPillsByUseId.set(tool.toolUseId, pill);
+      }
+    };
+    // The previous step's tool-only row is still the tail of the transcript:
+    // extend it in place so this step's calls join its group instead of
+    // showing a second group until the step's 'message' event lands.
+    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : undefined;
+    const tail = thread ? mergeAdjacentToolOnlyMessages(thread.messages).at(-1) : undefined;
+    if (
+      tail && tail.role === 'assistant' && tail.content === '' &&
+      (tail.toolCalls?.length ?? 0) > 0 &&
+      tail.id === this.lastAppendedRowId &&
+      this.lastAppendedRowEl?.isConnected
+    ) {
+      if (this.streamingToolsEl) {
+        this.streamingToolsEl.remove();
+        this.streamingToolsEl = null;
+      }
+      this.rebuildRowToolsInPlace(this.lastAppendedRowEl, [...tail.toolCalls!, ...visible], tail, onPillRendered);
+      return;
+    }
     const wrapper = this.ensureStreamingToolsEl();
     wrapper.empty();
-    this.populateToolCallsWrapper(wrapper, visible, {
-      live: true,
-      onPillRendered: (tool, pill) => {
-        if (tool.status === 'pending' && tool.toolUseId) {
-          this.toolPillsByUseId.set(tool.toolUseId, pill);
-        }
-      },
-    });
+    this.populateToolCallsWrapper(wrapper, visible, { live: true, onPillRendered });
   }
 
   /**

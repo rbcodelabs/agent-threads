@@ -205,6 +205,8 @@ export class ThreadManager {
    * (`start()`/`restart()`) and reused across every turn of that session,
    * not rebuilt per turn.
    */
+  /** Records announced via onToolUse that haven't received a result yet, by toolUseId. */
+  private liveToolRecords: Map<string, ToolCallRecord> = new Map();
   private pendingToolResultImages: Map<string, Array<{ mediaType: string; data: string }>> = new Map();
   /**
    * Per-thread tracking of background (skipTranscript) tasks that have
@@ -2672,6 +2674,7 @@ export class ThreadManager {
             if (!thread.editedFiles.includes(filePath)) thread.editedFiles.push(filePath);
           }
         }
+        if (record.toolUseId) this.liveToolRecords.set(record.toolUseId, record);
         this.emit(threadId, { type: 'tool_use', record });
       },
       onFilesEdited: (paths) => {
@@ -3070,7 +3073,24 @@ export class ThreadManager {
         this.emit(threadId, { type: 'task_progress_summary', taskId, summary });
       },
       onGitOperation: (summary) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'git_operation', summary }); },
-      onToolResult: (toolUseId, status, durationMs) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'tool_result_status', toolUseId, status, durationMs }); },
+      onToolResult: (toolUseId, status, durationMs) => {
+        if (!isCurrentGeneration()) return;
+        // Local sessions mutate the shared record in place, but a remote
+        // session replays wire events, so the records held by the streaming
+        // buffer and by committed messages are separate copies: settle every
+        // copy here or finished calls keep showing as running.
+        const settle = (r: ToolCallRecord | undefined): void => {
+          if (!r || r.toolUseId !== toolUseId) return;
+          r.status = status;
+          if (durationMs !== undefined) r.durationMs = durationMs;
+        };
+        settle(this.liveToolRecords.get(toolUseId));
+        this.liveToolRecords.delete(toolUseId);
+        for (let i = thread.messages.length - 1; i >= 0 && i >= thread.messages.length - 50; i--) {
+          for (const r of thread.messages[i].toolCalls ?? []) settle(r);
+        }
+        this.emit(threadId, { type: 'tool_result_status', toolUseId, status, durationMs });
+      },
       onEnterPlanMode: () => { if (isCurrentGeneration()) this.emit(threadId, { type: 'enter_plan_mode' }); },
       onPlanModeRequested: () => {
         if (!isCurrentGeneration()) return;
