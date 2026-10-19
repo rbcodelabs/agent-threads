@@ -389,9 +389,10 @@ describe('DispatchInput — harness picker', () => {
   it('shows the initial harness and submits it with the payload', async () => {
     const { textarea, sendButton, onSend } = mountPicker();
 
-    expect(sendButton.getAttribute('aria-label')).toContain('Claude');
-    expect(sendButton.querySelector('.ct-harness-mark-claude')?.getAttribute('data-icon')).toBe('claude-spark');
-    expect(sendButton.querySelector('.ct-harness-mark-claude')?.textContent).toBe('');
+    const { root } = { root: sendButton.closest('.ct-dispatch-root')! };
+    expect(root.querySelector('.ct-settings-indicator')?.getAttribute('aria-label')).toContain('Claude');
+    expect(root.querySelector('.ct-si-provider')?.getAttribute('data-glyph')).toBe('claude');
+    expect(sendButton.textContent).not.toBe('');
     textarea.value = 'Do the task';
     sendButton.click();
     await Promise.resolve();
@@ -402,12 +403,10 @@ describe('DispatchInput — harness picker', () => {
     }));
   });
 
-  it('right-click opens a selector; choosing Codex changes selection without dispatching', async () => {
+  it('the settings indicator opens a selector; choosing Codex changes selection without dispatching', async () => {
     const { root, textarea, sendButton, onSend } = mountPicker();
 
-    const contextMenu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
-    sendButton.dispatchEvent(contextMenu);
-    expect(contextMenu.defaultPrevented).toBe(true);
+    root.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
 
     const codexOption = root.querySelector<HTMLButtonElement>('[role="menuitemradio"][data-harness="codex"]')!;
     expect(codexOption).toBeTruthy();
@@ -415,7 +414,8 @@ describe('DispatchInput — harness picker', () => {
     expect(codexOption.querySelector('.ct-harness-mark-codex')?.textContent).toBe('');
     codexOption.click();
     expect(onSend).not.toHaveBeenCalled();
-    expect(sendButton.getAttribute('aria-label')).toContain('Codex');
+    expect(root.querySelector('.ct-settings-indicator')?.getAttribute('aria-label')).toContain('Codex');
+    expect(root.querySelector('.ct-si-provider')?.getAttribute('data-glyph')).toBe('codex');
 
     textarea.value = 'Use Codex';
     sendButton.click();
@@ -423,32 +423,23 @@ describe('DispatchInput — harness picker', () => {
     expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ agentHarness: 'codex' }));
   });
 
-  it('opens from the keyboard and closes on Escape', () => {
-    const { root, sendButton } = mountPicker();
+  it('opens from the indicator and closes on Escape', () => {
+    const { root } = mountPicker();
+    const btn = root.querySelector<HTMLButtonElement>('.ct-settings-indicator')!;
 
-    sendButton.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true }));
+    btn.click();
     expect(root.querySelector('[role="menu"]')).toBeTruthy();
+    expect(btn.getAttribute('aria-expanded')).toBe('true');
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(root.querySelector('[role="menu"]')).toBeFalsy();
-    expect(document.activeElement).toBe(sendButton);
+    expect(document.activeElement).toBe(btn);
   });
 
-  it('long-press opens the selector and suppresses the resulting send click', () => {
-    vi.useFakeTimers();
-    try {
-      const { root, sendButton, onSend } = mountPicker();
-
-      sendButton.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
-      vi.advanceTimersByTime(500);
-      sendButton.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, button: 0 }));
-      sendButton.click();
-
-      expect(root.querySelector('[role="menu"]')).toBeTruthy();
-      expect(onSend).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+  it('keeps the send button a plain send: no right-click menu, no long-press', () => {
+    const { root, sendButton } = mountPicker();
+    sendButton.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    expect(root.querySelector('[role="menu"]')).toBeFalsy();
   });
 });
 
@@ -461,7 +452,7 @@ describe('DispatchInput — no local container run mode', () => {
     const root = di.mount(container);
     const textarea = root.querySelector('textarea')!;
     const sendButton = root.querySelector<HTMLButtonElement>('.ct-send-btn')!;
-    sendButton.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    root.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
     expect(root.querySelector('.ct-run-mode-item[data-run-mode]')).toBeFalsy();
     expect(root.textContent).not.toContain('Run in');
     textarea.value = 'hello';
@@ -479,7 +470,7 @@ describe('DispatchInput — set up the local daemon from the picker', () => {
     document.body.appendChild(container);
     const root = di.mount(container);
     const sendButton = root.querySelector<HTMLButtonElement>('.ct-send-btn')!;
-    sendButton.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    root.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
     return { root, onSetUp };
   }
 
@@ -522,7 +513,7 @@ describe('DispatchInput — Run on a remote daemon: vault folder suggestion', ()
     const sendButton = root.querySelector<HTMLButtonElement>('.ct-send-btn')!;
     return { root, textarea, sendButton, onSend };
   }
-  const openMenu = (btn: HTMLElement) => btn.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  const openMenu = (btn: HTMLElement) => btn.closest('.ct-dispatch-root')!.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
   const pick = (root: HTMLElement, id: string) => root.querySelector<HTMLButtonElement>(`.ct-run-on-item[data-run-on="${id}"]`)!.click();
   const folder = (root: HTMLElement) => root.querySelector<HTMLInputElement>('.ct-run-on-folder-input')!;
   const hint = (root: HTMLElement) => root.querySelector<HTMLElement>('[data-testid="run-on-folder-hint"]')!;
@@ -624,7 +615,7 @@ describe('DispatchInput — Run on a remote daemon: the daemon offers its own fo
     const root = di.mount(container);
     return { root, textarea: root.querySelector('textarea')!, sendButton: root.querySelector<HTMLButtonElement>('.ct-send-btn')!, onSend, src };
   }
-  const openMenu = (btn: HTMLElement) => btn.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  const openMenu = (btn: HTMLElement) => btn.closest('.ct-dispatch-root')!.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
   const pick = (root: HTMLElement, id: string) => root.querySelector<HTMLButtonElement>(`.ct-run-on-item[data-run-on="${id}"]`)!.click();
   const select = (root: HTMLElement) => root.querySelector<HTMLSelectElement>('.ct-run-on-folder-select')!;
   const hint = (root: HTMLElement) => root.querySelector<HTMLElement>('[data-testid="run-on-folder-hint"]')!;

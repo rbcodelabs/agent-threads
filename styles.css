@@ -2829,23 +2829,6 @@
   position: relative;
 }
 
-.ct-harness-send-btn {
-  position: relative;
-}
-
-.ct-harness-send-btn::after {
-  content: '';
-  position: absolute;
-  right: 3px;
-  bottom: 3px;
-  width: 0;
-  height: 0;
-  border-left: 2.5px solid transparent;
-  border-right: 2.5px solid transparent;
-  border-top: 3px solid currentColor;
-  opacity: 0.65;
-}
-
 .ct-harness-mark {
   display: inline-flex;
   align-items: center;
@@ -9777,8 +9760,6 @@ button.ct-agent-crumb:focus-visible {
   .ct-remote-pill--reconnecting::before { animation: none; }
 }
 
-/* Dispatch send button when the next thread will run on a daemon */
-.ct-harness-send-btn--remote { box-shadow: inset 0 0 0 1px var(--interactive-accent); }
 
 .ct-run-on-folder {
   display: flex;

@@ -12,6 +12,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import './harnessBrandIcons';
+import { describeComposerSettings } from './composerSettings';
+import { createGlyph } from './composerGlyphs';
 
 const HARNESS_BRAND_ICONS: Record<AgentHarness, string> = {
   claude: 'claude-spark',
@@ -165,6 +167,8 @@ export class DispatchInput {
   private hiddenFileInput!: HTMLInputElement;
 
   private sendBtn!: HTMLButtonElement;
+  /** Quiet-Rail settings indicator (harness picker mode); opens the harness / Run-on menu. */
+  private settingsBtn: HTMLButtonElement | null = null;
   private stopBtn: HTMLButtonElement | null = null;
   private contextChipNameEl: HTMLElement | null = null;
   private contextChipEl: HTMLElement | null = null;
@@ -202,10 +206,8 @@ export class DispatchInput {
   private runOnFolders = new Map<string, FolderLoad<WorkspaceInfo[]>>();
   private runOnLoadToken = 0;
   private harnessMenu: HTMLElement | null = null;
-  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
-  private suppressNextSendClick = false;
   private readonly closeHarnessMenuOnPointerDown = (event: PointerEvent): void => {
-    if (this.harnessMenu && !this.harnessMenu.contains(event.target as Node) && event.target !== this.sendBtn) {
+    if (this.harnessMenu && !this.harnessMenu.contains(event.target as Node) && !this.settingsBtn?.contains(event.target as Node)) {
       this.closeHarnessMenu();
     }
   };
@@ -256,12 +258,7 @@ export class DispatchInput {
     });
     this.sendBtn = sendBtn;
     this.selectedHarness = this.options.harnessPicker?.initialHarness ?? null;
-    if (this.selectedHarness) this.configureHarnessPicker();
-    sendBtn.addEventListener('click', () => {
-      if (this.suppressNextSendClick) {
-        this.suppressNextSendClick = false;
-        return;
-      }
+        sendBtn.addEventListener('click', () => {
       this.send();
     });
 
@@ -315,7 +312,7 @@ export class DispatchInput {
       leftActionsEl!.appendChild(micBtn);
     } else {
       // ── Column layout: footer row or fallback to input-actions column ────
-      const needsFooter = !!(this.options.showContextChip || this.options.appendFooterActions || this.options.appendFooterMetadata);
+      const needsFooter = !!(this.options.showContextChip || this.options.harnessPicker || this.options.appendFooterActions || this.options.appendFooterMetadata);
       if (needsFooter) {
         const inputFooter = this.rootEl.createDiv('ct-input-footer');
 
@@ -348,6 +345,7 @@ export class DispatchInput {
         // Attach + mic live in the footer bottom row (keeps input area compact)
         footerActionsEl.appendChild(attachBtn);
         footerActionsEl.appendChild(micBtn);
+        if (this.selectedHarness) this.configureHarnessPicker(footerActionsEl);
       } else {
         this.contextChipNameEl = null;
         this.contextChipEl = null;
@@ -434,7 +432,6 @@ export class DispatchInput {
   destroy(): void {
     this.unsubscribeCommands?.();
     this.unsubscribeCommands = undefined;
-    this.clearLongPressTimer();
     this.closeHarnessMenu();
     this.sttController?.destroy();
     this.hideFileDropdown();
@@ -577,60 +574,45 @@ export class DispatchInput {
     this.renderChips();
   }
 
-  private configureHarnessPicker(): void {
+  private configureHarnessPicker(footerActionsEl: HTMLElement): void {
     this.rootEl.addClass('ct-harness-picker-root');
-    this.sendBtn.addClass('ct-harness-send-btn');
+    // Same indicator button as an existing thread's composer; the send button stays a plain send button.
+    this.settingsBtn = footerActionsEl.createEl('button', {
+      cls: 'ct-more-btn ct-settings-indicator',
+      attr: { type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false' },
+    });
+    this.settingsBtn.addEventListener('click', () => {
+      if (this.harnessMenu) this.closeHarnessMenu();
+      else this.openHarnessMenu();
+    });
     this.renderHarnessIdentity();
-    this.sendBtn.addEventListener('contextmenu', (event) => {
-      event.preventDefault();
-      this.openHarnessMenu();
-    });
-    this.sendBtn.addEventListener('keydown', (event) => {
-      if ((event.shiftKey && event.key === 'F10') || event.key === 'ContextMenu' || (event.altKey && event.key === 'ArrowDown')) {
-        event.preventDefault();
-        this.openHarnessMenu();
-      }
-    });
-    this.sendBtn.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) return;
-      this.clearLongPressTimer();
-      this.longPressTimer = setTimeout(() => {
-        this.longPressTimer = null;
-        this.suppressNextSendClick = true;
-        this.openHarnessMenu();
-      }, 500);
-    });
-    this.sendBtn.addEventListener('pointerup', () => {
-      this.clearLongPressTimer();
-      // A synthesized click follows pointerup synchronously. If the platform
-      // omits that click, avoid suppressing the user's next intentional send.
-      if (this.suppressNextSendClick) setTimeout(() => { this.suppressNextSendClick = false; }, 0);
-    });
-    this.sendBtn.addEventListener('pointercancel', () => {
-      this.clearLongPressTimer();
-      this.suppressNextSendClick = false;
-    });
-    this.sendBtn.addEventListener('pointerleave', () => this.clearLongPressTimer());
   }
 
   private renderHarnessIdentity(): void {
-    if (!this.selectedHarness) return;
-    const name = agentHarnessLabel(this.selectedHarness);
-    this.sendBtn.empty();
-    this.createHarnessMark(this.sendBtn, this.selectedHarness);
-    this.sendBtn.removeClass('ct-harness-send-btn--remote');
-    if (this.effectiveRunOn().daemonId) {
-      this.sendBtn.addClass('ct-harness-send-btn--remote');
-      const badge = this.sendBtn.createSpan({ cls: 'ct-run-mode-badge', attr: { 'aria-hidden': 'true', 'data-run-mode': 'remote' } });
-      setIcon(badge, 'server');
-    }
-    const remoteWhere = runOnSuffix(this.effectiveRunOn(), this.remoteDaemons());
-    const where = remoteWhere;
-    const label = `Start task with ${name}${where}; right-click or hold to change agent or where it runs`;
-    this.sendBtn.setAttribute('aria-label', label);
-    this.sendBtn.setAttribute('aria-haspopup', 'menu');
-    this.sendBtn.setAttribute('aria-expanded', this.harnessMenu ? 'true' : 'false');
-    this.sendBtn.title = label;
+    const btn = this.settingsBtn;
+    if (!btn || !this.selectedHarness) return;
+    const runOn = this.effectiveRunOn();
+    const d = describeComposerSettings({
+      harness: this.selectedHarness,
+      model: undefined,
+      activeModel: undefined,
+      remote: runOn.daemonId ? { daemonName: runOn.daemonId, connection: 'pending' } : undefined,
+    });
+    btn.empty();
+    const body = btn.createSpan('ct-si-body');
+    const model = body.createSpan({ cls: 'ct-si-glyph ct-si-model', attr: { 'data-tier': d.model.tier, 'data-glyph': d.model.glyph } });
+    model.appendChild(createGlyph(d.model.glyph));
+    const provider = body.createSpan({ cls: 'ct-si-glyph ct-si-provider', attr: { 'data-glyph': d.provider.glyph } });
+    provider.appendChild(createGlyph(d.provider.glyph));
+    const location = body.createSpan({ cls: 'ct-si-glyph ct-si-location', attr: { 'data-glyph': d.location.glyph } });
+    location.appendChild(createGlyph(d.location.glyph));
+    const chevron = body.createSpan('ct-si-chevron');
+    chevron.setAttribute('aria-hidden', 'true');
+    setIcon(chevron, 'chevron-up');
+    const label = `New conversation settings: ${agentHarnessLabel(this.selectedHarness)}${runOnSuffix(runOn, this.remoteDaemons())}. Click to change agent or where it runs`;
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('aria-expanded', this.harnessMenu ? 'true' : 'false');
+    btn.title = label;
   }
 
   /** Default remote folder for `daemon`: its mapped vault folder when we are in the vault, else its default folder. */
@@ -684,7 +666,7 @@ export class DispatchInput {
     const daemons = this.remoteDaemons();
     const offerSetUp = this.options.harnessPicker?.localDaemonOffer?.available() === true;
     if (this.selectedHarness === 'claude' && (daemons.length > 0 || offerSetUp)) this.renderRunOnSection(menu, daemons, offerSetUp);
-    this.sendBtn.setAttribute('aria-expanded', 'true');
+    this.settingsBtn?.setAttribute('aria-expanded', 'true');
     document.addEventListener('pointerdown', this.closeHarnessMenuOnPointerDown);
     document.addEventListener('keydown', this.closeHarnessMenuOnEscape);
     menu.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
@@ -898,16 +880,12 @@ export class DispatchInput {
     if (!this.harnessMenu) return;
     this.harnessMenu.remove();
     this.harnessMenu = null;
-    this.sendBtn?.setAttribute('aria-expanded', 'false');
+    this.settingsBtn?.setAttribute('aria-expanded', 'false');
     document.removeEventListener('pointerdown', this.closeHarnessMenuOnPointerDown);
     document.removeEventListener('keydown', this.closeHarnessMenuOnEscape);
-    if (restoreFocus) this.sendBtn?.focus();
+    if (restoreFocus) this.settingsBtn?.focus();
   }
 
-  private clearLongPressTimer(): void {
-    if (this.longPressTimer) clearTimeout(this.longPressTimer);
-    this.longPressTimer = null;
-  }
 
   // ── Attachment handling ───────────────────────────────────────────────────
 

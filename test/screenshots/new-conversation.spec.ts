@@ -233,34 +233,35 @@ test.describe('searchable Project picker', () => {
 });
 
 test.describe('kickoff harness picker (moved from the Kanban dispatch box)', () => {
-  const sendBtn = (page: Page) => composer(page).locator('.ct-harness-send-btn');
+  const sendBtn = (page: Page) => composer(page).locator('.ct-settings-indicator');
 
   test('selects OpenCode with its brand mark, without dispatching', async ({ page }) => {
     await open(page, '?projects=1', 900, 760);
-    await sendBtn(page).click({ button: 'right' });
+    await sendBtn(page).click();
     const menu = page.locator('.ct-harness-menu');
     await expect(menu.getByRole('menuitemradio', { name: 'OpenCode' }).locator('.ct-harness-mark-opencode svg')).toHaveCount(1);
     await menu.getByRole('menuitemradio', { name: 'OpenCode' }).click();
     await expect(menu).toHaveCount(0);
     await expect(sendBtn(page)).toHaveAttribute('aria-label', /OpenCode/);
-    await expect(sendBtn(page).locator('.ct-harness-mark-opencode')).toHaveAttribute('data-icon', 'opencode-mark');
+    await expect(sendBtn(page).locator('.ct-si-provider')).toHaveAttribute('data-glyph', 'opencode');
+    await expect(composer(page).locator('.ct-send-btn')).toHaveText('↵');
     expect((await dispatchCalls(page)).length).toBe(0);
     await shot(composer(page), 'new-conversation-harness-picker-opencode.png');
   });
 
   test('offers no per-thread "Run in" section (sandbox VMs were removed)', async ({ page }) => {
     await open(page, '?projects=1', 900, 760);
-    await sendBtn(page).click({ button: 'right' });
+    await sendBtn(page).click();
     const menu = page.locator('.ct-harness-menu');
     await expect(menu.getByRole('menuitemradio', { name: 'Claude' })).toBeVisible();
     await expect(menu.locator('.ct-run-mode-item[data-run-mode]')).toHaveCount(0);
     await expect(menu.getByText('Run in', { exact: true })).toHaveCount(0);
-    await expect(sendBtn(page).locator('.ct-run-mode-badge')).toHaveCount(0);
+    await expect(sendBtn(page).locator('.ct-si-location')).toHaveAttribute('data-glyph', 'laptop');
   });
 
   test('the chosen harness and run mode travel with the first send', async ({ page }) => {
     await open(page, '?projects=1', 900, 760);
-    await sendBtn(page).click({ button: 'right' });
+    await sendBtn(page).click();
     await page.locator('.ct-harness-menu').getByRole('menuitemradio', { name: 'Codex' }).click();
     await input(page).fill('Review the diff');
     await input(page).press('Enter');
@@ -270,7 +271,7 @@ test.describe('kickoff harness picker (moved from the Kanban dispatch box)', () 
 
   test('the harness menu items are touch sized', async ({ page }) => {
     await open(page, '?projects=1', 900, 760);
-    await sendBtn(page).click({ button: 'right' });
+    await sendBtn(page).click();
     const menu = page.locator('.ct-harness-menu');
     await expect(menu.getByRole('menuitemradio', { name: 'Claude' })).toHaveAttribute('aria-checked', 'true');
     await expect(menu.getByRole('menuitemradio', { name: 'Codex' })).toHaveCSS('min-height', '44px');
