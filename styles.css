@@ -8430,6 +8430,112 @@ body.ct-skills-resizing {
   font-size: 12px;
 }
 
+/* ── "Runs on" for a Custom MCP server (Settings → MCP) ─────────────────────
+   One line per remote daemon under the server row: a checkbox, the daemon name,
+   a status chip and, when the toggle is off or broken, the reason in words. */
+.setting-item.ct-mcp-has-runson {
+  flex-wrap: wrap;
+}
+
+.ct-mcp-runson {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: var(--font-ui-smaller);
+}
+
+.ct-mcp-runson-label {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ct-mcp-runson-local {
+  color: var(--text-faint);
+}
+
+.ct-mcp-runson-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+.ct-mcp-runson-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.ct-mcp-runson-toggle.is-disabled {
+  cursor: not-allowed;
+  color: var(--text-faint);
+}
+
+.ct-mcp-runson-chip {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.ct-mcp-runson-chip--ok {
+  color: var(--color-green);
+  background: color-mix(in srgb, var(--color-green) 16%, transparent);
+}
+
+.ct-mcp-runson-chip--warn {
+  color: var(--text-warning, var(--color-orange, #d19a3e));
+  background: color-mix(in srgb, var(--color-orange, #d19a3e) 16%, transparent);
+}
+
+.ct-mcp-runson-chip--bad {
+  color: var(--text-error, var(--color-red, #d14b4b));
+  background: color-mix(in srgb, var(--color-red, #d14b4b) 14%, transparent);
+}
+
+.ct-mcp-runson-action {
+  padding: 1px 8px;
+  font-size: inherit;
+}
+
+.ct-mcp-runson-reason {
+  flex-basis: 100%;
+  color: var(--text-faint);
+  margin-left: 22px;
+}
+
+/* Confirmation before a server (or a changed server) is sent to a daemon. */
+.ct-mcp-sync-confirm-details {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 8px 0;
+}
+
+.ct-mcp-sync-confirm-details dt {
+  color: var(--text-muted);
+}
+
+.ct-mcp-sync-confirm-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ct-mcp-sync-confirm-mono {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.ct-mcp-sync-confirm-warnings {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 /* ── OAuth MCP server status (Settings → MCP) ──────────────────────────────
    Rendered in the row's description under the URL, on its own line. These
    classes previously had no rules at all, so the dot and label ran into the

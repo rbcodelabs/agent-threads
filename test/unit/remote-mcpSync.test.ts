@@ -162,6 +162,15 @@ describe('McpSyncEngine', () => {
     expect(r.reads).not.toContain('UNRELATED_SECRET');
   });
 
+  it('sends no credentials for a server that needs none', async () => {
+    const r = rig();
+    r.settings.mcpServers.plain = { type: 'sse', url: 'https://events.example.test/sse' };
+    await enable(r, 'plain');
+    expect(r.transport.pushes).toEqual([]);
+    expect(r.transport.syncs.at(-1)).toEqual({ plain: { type: 'sse', url: 'https://events.example.test/sse' } });
+    expect(r.daemon.mcpSyncKinds).toEqual([]);
+  });
+
   it('does not sync a server whose definition the user has not confirmed, and re-asks after an edit', async () => {
     const r = rig();
     await r.engine.setEnabled('d1', 'docs', true); // no confirmed hash

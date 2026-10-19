@@ -511,6 +511,8 @@ export class McpSyncEngine {
       const fieldsByKind = (evs: ServerEvaluation[]): Map<string, Record<string, string>> => {
         const out = new Map<string, Record<string, string>>();
         for (const ev of evs) {
+          // A server without secrets needs no kind: it must not create one (an empty push would delete the kind).
+          if (ev.secretNames.length === 0) continue;
           const f = out.get(ev.kind!) ?? {};
           for (const n of ev.secretNames) f[n] = secrets.get(`${ev.kind}\u0000${n}`)!;
           out.set(ev.kind!, f);
@@ -540,7 +542,7 @@ export class McpSyncEngine {
       const keep = included.filter((ev) => accepted.has(ev.name));
       if (keep.length !== included.length) {
         kinds = fieldsByKind(keep);
-        for (const kind of new Set(included.map((e) => e.kind!))) await transport.pushCreds(kind, kinds.get(kind) ?? {}, MCP_SYNC_TTL_SEC);
+        for (const kind of new Set(included.filter((e) => e.secretNames.length).map((e) => e.kind!))) await transport.pushCreds(kind, kinds.get(kind) ?? {}, MCP_SYNC_TTL_SEC);
       }
       // 4. kinds that are no longer used are removed (an empty push deletes the kind).
       for (const kind of previousKinds) if (!kinds.has(kind)) await transport.pushCreds(kind, {}, 0);
