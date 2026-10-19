@@ -202,8 +202,16 @@ export function isTrustedBuiltInTool(raw: string): boolean {
  * the user should be able to read it. It is otherwise permissioned like any
  * other tool, including Always Allow.
  */
-/** The host_exec permission request of the managed local daemon's tool group: decided per call, never remembered. */
+/**
+ * The host_exec permission request of the managed local daemon's tool group: decided per call, never remembered by
+ * the generic Always Allow. The only standing approval is the scoped command-prefix allowlist (`hostExecPrefix.ts`).
+ */
 export const HOST_EXEC_PERMISSION_TOOL = 'host_exec';
+
+/** True for a host_exec permission card under either name (`host_exec` or the daemon's `mcp__claude_threads__host_exec`). */
+export function isHostExecPermission(toolName: string): boolean {
+  return toolKey(toolName) === HOST_EXEC_PERMISSION_TOOL;
+}
 
 const FULL_INPUT_DETAIL_TOOL_KEYS: ReadonlySet<string> = new Set(['browser_eval']);
 
@@ -214,7 +222,9 @@ function showsFullInput(toolName: string): boolean {
 
 /** False for requests that must be decided afresh every time (never "Always Allow"). */
 export function canAlwaysAllow(toolName: string): boolean {
-  return toolName !== HOST_EXEC_PERMISSION_TOOL && toolKey(toolName) !== 'sync_resolve_conflict';
+  // By bare key: the managed local daemon's card is named `mcp__claude_threads__host_exec`, not `host_exec`.
+  const key = toolKey(toolName);
+  return key !== HOST_EXEC_PERMISSION_TOOL && key !== 'sync_resolve_conflict';
 }
 
 /**

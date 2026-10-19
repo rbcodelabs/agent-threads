@@ -40,6 +40,11 @@ export interface RemoteHostToolsDeps {
   overrides?: RouteOverrides;
   /** Tools of `NEVER_OFFERED` the user switched on for this (managed local) daemon; see localDaemon/optionalTools.ts. */
   optionalTools?: ReadonlySet<string>;
+  /**
+   * The user's standing approval for a built-in `claude_threads` tool call (a saved host_exec command prefix), or
+   * false. Never consulted for proxied servers. The executor asks it only for a tool in the manifest that needs approval.
+   */
+  preApprove?: (tool: string, input: Record<string, unknown>) => boolean;
   log?: (message: string) => void;
 }
 
@@ -71,6 +76,13 @@ export class RemoteHostTools {
   constructor(private readonly deps: RemoteHostToolsDeps) {}
 
   get summary(): HostToolsSummary { return this.lastSummary; }
+
+  /** See {@link RemoteHostToolsDeps.preApprove}. Only a built-in tool of the thread's own `claude_threads` server qualifies. */
+  isPreApproved(server: string, tool: string, input: Record<string, unknown>): boolean {
+    if (server !== CLAUDE_THREADS_SERVER || !this.deps.preApprove) return false;
+    if (!(this.deps.builtIn ?? []).some((t) => t.name === tool)) return false;
+    return this.deps.preApprove(tool, input) === true;
+  }
 
   /** Build the manifest now (proxied servers are listed over the network, so this is async). */
   async manifest(): Promise<HostManifest> {

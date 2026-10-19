@@ -112,7 +112,7 @@ export function createMiscTools(port: MiscToolsPort): Record<string, ToolDef> {
     'host_exec',
     [
       'Runs ONE shell command on the real host machine (the user\'s Mac, outside the local daemon container this session runs in), only after the user explicitly approves it.',
-      'Every call shows the user the exact command, working directory and your reason, and they choose Allow once or Deny; this prompt cannot be skipped by any permission mode.',
+      'Every call shows the user the exact command, working directory and your reason, and they choose Allow once, Always allow a simple command prefix, or Deny; this prompt cannot be skipped by any permission mode. Commands with shell syntax (chaining, pipes, redirects, quotes, substitutions) are always prompted for.',
       'Use only when the task truly needs the host (host-only tools, files outside the mounted workspaces); prefer commands in your own container for everything else.',
       'The working directory defaults to the user\'s vault folder on the Mac; a path under the vault mount in this container is mapped to the same folder on the Mac.',
       'Scheduled or non-interactive threads cannot prompt, so the call is denied.',

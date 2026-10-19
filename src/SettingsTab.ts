@@ -2447,6 +2447,34 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       );
     containerEl.appendChild(allowedList);
     renderAllowedTools();
+
+    // — Always-allowed host commands (host_exec prefixes) —
+    new Setting(containerEl)
+      .setName('Always-allowed host commands')
+      .setDesc('Command prefixes you chose "Always allow" for on a host_exec card. Calls that start with one of these run on the host without a prompt (simple commands only; never for scheduled or headless threads). Remove an entry to be asked again.')
+      .setHeading();
+    const prefixList = containerEl.createDiv({ cls: 'ct-allowed-tools-list' });
+    const renderPrefixes = () => {
+      prefixList.empty();
+      const prefixes = this.plugin.settings.hostExecAlwaysAllowedPrefixes ?? [];
+      if (prefixes.length === 0) {
+        prefixList.createEl('p', { text: 'No host command prefixes always allowed yet.', cls: 'ct-settings-empty' });
+        return;
+      }
+      for (const prefix of prefixes) {
+        new Setting(prefixList)
+          .setName(prefix)
+          .addButton((btn) =>
+            btn.setButtonText('Remove').setWarning().onClick(async () => {
+              this.plugin.settings.hostExecAlwaysAllowedPrefixes =
+                this.plugin.settings.hostExecAlwaysAllowedPrefixes.filter((p) => p !== prefix);
+              await this.plugin.saveSettings();
+              renderPrefixes();
+            }),
+          );
+      }
+    };
+    renderPrefixes();
   }
 
   // ── Vault ───────────────────────────────────────────────────────────────

@@ -3,7 +3,8 @@ import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread } from './types';
 import { formatToolName } from './ClaudeSession';
-import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
+import { canAlwaysAllow, summarizePermissionDetail, isHostExecPermission } from './permissionDetail';
+import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
 import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks';
@@ -548,8 +549,18 @@ export class AgentDashboard extends ItemView {
         const deny = btns.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' });
         deny.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, false); });
 
-        const allow = btns.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
+        const allow = btns.createEl('button', { text: !!pendingInfo && isHostExecPermission(pendingInfo.toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
         allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, true); });
+
+        const hostExecPrefix = hostExecAlwaysAllowOffer(pendingInfo);
+        if (hostExecPrefix) {
+          const alwaysPrefix = btns.createEl('button', { text: `Always allow \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' });
+          alwaysPrefix.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (addHostExecPrefix(this.plugin.settings, hostExecPrefix)) await this.plugin.saveSettings();
+            this.manager.resolvePermission(thread.id, true);
+          });
+        }
 
         if ((!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) && !this.manager.isRemoteThread(thread.id)) {
           const always = btns.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' });
