@@ -7,6 +7,7 @@
  */
 import type { HarnessPermissionMode } from '../HarnessSession';
 import type { Channel } from './envelope';
+import type { SyncedMcpServers } from './mcpSync';
 import type { RemoteHostToolSpec, RemoteSessionSpec } from './spec';
 
 export type ClientKind = 'geode-plugin' | 'cli';
@@ -79,7 +80,13 @@ export type ClientCommand =
    */
   | { type: 'repos.sync'; repos?: RepoSpec[]; wait?: boolean }
   /** The state of each configured repository. Additive within v1. */
-  | { type: 'repos.status' };
+  | { type: 'repos.status' }
+  /**
+   * Replace the MCP server definitions synced from the client (full replace: absent names are removed). Values of
+   * `${NAME}` placeholders are NOT sent here; they go with `creds.push`. Needs an admin token. Additive within v1;
+   * advertised as the `mcp.sync` capability.
+   */
+  | { type: 'mcp.sync'; servers: SyncedMcpServers; wait?: boolean };
 
 /** One repository the daemon keeps cloned. The authentication token comes from the daemon's `creds/`, never from here. */
 export interface RepoSpec {
@@ -256,4 +263,5 @@ export const CLIENT_COMMAND_TYPES: Record<ClientCommandType, true> = {
   'creds.push': true,
   'repos.sync': true,
   'repos.status': true,
+  'mcp.sync': true,
 };

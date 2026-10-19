@@ -2375,6 +2375,34 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'settings-mcp.png', { fullPage: true });
   });
 
+  test('settings — mcp tab, runs on daemons', async ({ page }) => {
+    const settingsUrl = 'file://' + path.resolve('test/harness/settings.html') + '?mcpSync=1';
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto(settingsUrl);
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
+    await page.waitForSelector('.ct-mcp-runson');
+    await page.evaluate(() => {
+      const app = document.getElementById('app');
+      if (app) app.style.height = 'auto';
+    });
+    await page.waitForTimeout(50);
+    await shot(page, 'settings-mcp-runs-on.png', { fullPage: true });
+  });
+
+  test('settings — mcp sync confirmation names what leaves the Mac', async ({ page }) => {
+    const settingsUrl = 'file://' + path.resolve('test/harness/settings.html') + '?mcpSync=1';
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto(settingsUrl);
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
+    await page.waitForSelector('.ct-mcp-runson');
+    await page.getByLabel('Run team_events on Plain box').check();
+    await page.waitForSelector('.ct-mcp-sync-confirm');
+    await page.waitForTimeout(100);
+    await shot(page, 'settings-mcp-sync-confirm.png');
+  });
+
   test('settings — MCP registration host confirmation', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto('file://' + path.resolve('test/harness/settings.html'));

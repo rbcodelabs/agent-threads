@@ -259,6 +259,7 @@ describe('L. scopes and request ownership', () => {
     'creds.push': { kind: 'k', ttlSec: 1, fields: {} },
     'repos.sync': {},
     'repos.status': {},
+    'mcp.sync': { servers: {} },
   };
 
   it('REQUIRED_SCOPE lists exactly every command except hello, and each sample is a valid frame', () => {

@@ -21,6 +21,7 @@ import { createClaudeDriverFactory, describeCredentialSource, resolveCredentialE
 import { HARNESS_BINARY, HARNESS_SECRET_ENV, describeHarnessCredential, findHarnessBinary, harnessCapabilities, type RealHarness } from './harnesses';
 import { describePathAccess, withRepoRoot, type SessionPolicy } from './sessionPolicy';
 import { ReposManager } from './repos';
+import { SyncedMcpStore } from './syncedMcp';
 import { pruneIdleWorktrees } from './worktreePrune';
 import { listSubfolders, listWorkspaces } from './workspaces';
 import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, PRE_AUTH_MAX_FRAME_BYTES, capabilitiesFor, type ServerContext, type Timings } from './connection';
@@ -137,6 +138,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     ...(options.now ? { now: options.now } : {}),
     log,
   });
+  const syncedMcp = new SyncedMcpStore(config.dataDir, { allowStdio: config.allowSyncedStdio, commandAllowlist: config.syncedCommandAllowlist }, options.now);
   let driverFactory = options.driverFactory;
   let rawLog: ((threadId: string, event: Record<string, unknown>) => void) | undefined;
   if (real) {
@@ -154,7 +156,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     const credentialEnv = resolveCredentialEnv(env);
     setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN, ...HARNESS_SECRET_ENV.map((k) => env[k]), ...creds.secretValues(), ...repos.envSecretValues()].filter((v): v is string => !!v));
     if (!driverFactory) {
-      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, codexBinaryPath: config.codexBinaryPath, opencodeBinaryPath: config.opencodeBinaryPath, env, mcpServers: config.mcpServers, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: (spec) => ({ ...repos.sessionEnv(), ...sessionEnvFromCreds(creds, spec) }), onSessionStart: (cwd) => repos.refreshForCwd(cwd), authPreflight: createGhAuthPreflight({ hasToken: () => repos.hasToken() }) });
+      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, codexBinaryPath: config.codexBinaryPath, opencodeBinaryPath: config.opencodeBinaryPath, env, mcpServers: config.mcpServers, syncedMcp, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: (spec) => ({ ...repos.sessionEnv(), ...sessionEnvFromCreds(creds, spec) }), onSessionStart: (cwd) => repos.refreshForCwd(cwd), authPreflight: createGhAuthPreflight({ hasToken: () => repos.hasToken() }) });
       const explicit: Record<RealHarness, string | undefined> = { claude: config.claudeBinaryPath, codex: config.codexBinaryPath, opencode: config.opencodeBinaryPath };
       for (const kind of config.harnesses) {
         const b = HARNESS_BINARY[kind];
@@ -215,10 +217,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     cmdCache: new CommandCache(),
     daemonId,
     epoch,
-    capabilities: capabilitiesFor(config.harness, config.harnesses, updater.autoEnabled),
+    capabilities: capabilitiesFor(config.harness, config.harnesses, config.allowSyncedStdio, updater.autoEnabled),
     controllers,
     creds,
     repos,
+    syncedMcp,
+    configuredMcpNames: () => new Set(Object.keys(config.mcpServers)),
     checkPath: (path) => describePathAccess(path, sessionPolicy),
     listWorkspaces: () => listWorkspaces(existsSync(config.repoRoot) ? sessionPolicy : configuredPolicy),
     listPath: (path) => listSubfolders(path, sessionPolicy),

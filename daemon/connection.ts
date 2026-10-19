@@ -23,6 +23,8 @@ import type { RawData, WebSocket } from 'ws';
 import {
   CLOSE_SLOW_CONSUMER,
   CLOSE_UNAUTHORIZED,
+  MCP_SYNC_CAPABILITY,
+  MCP_SYNC_STDIO_CAPABILITY,
   PROTOCOL_VERSION,
   decodeClientFrame,
   encodeFrame,
@@ -43,6 +45,7 @@ import {
 import type { CommandCache } from './cmdCache';
 import { CredError, type CredStore } from './credStore';
 import { RepoError, type ReposManager } from './repos';
+import type { SyncedMcpStore } from './syncedMcp';
 import type { PathAccess } from './sessionPolicy';
 import type { ControlRegistry } from './controlRegistry';
 import type { FailureThrottle } from './failureThrottle';
@@ -73,13 +76,16 @@ export function raiseFrameLimit(ws: WebSocket, bytes: number): boolean {
 /** Stop handing frames to the socket once this much is already buffered in it. */
 const SOCKET_HIGH_WATER = 256 * 1024;
 /** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
-export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'host.tools', 'creds.push', 'mcp.status', 'repos'];
+export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'host.tools', 'creds.push', 'mcp.status', 'repos', MCP_SYNC_CAPABILITY];
 /**
  * `harness.<kind>` for each harness a client may request, plus `harness.<kind>.<feature>` for what that harness
  * supports (see `HARNESS_FEATURES`). The scripted fake advertises only `harness.fake`.
  */
-export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = [], autoUpdate = false): string[] => [
-  ...(harness === 'fake' ? [...BASE_CAPABILITIES, 'harness.fake'] : [...BASE_CAPABILITIES, ...harnessCapabilities(enabled.length ? enabled : isRealHarness(harness) ? [harness] : [])]),
+export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = [], syncedStdio = false, autoUpdate = false): string[] => [
+  ...BASE_CAPABILITIES,
+  // Tells the app, before it syncs anything, that stdio definitions will not be refused by policy.
+  ...(syncedStdio ? [MCP_SYNC_STDIO_CAPABILITY] : []),
+  ...(harness === 'fake' ? ['harness.fake'] : harnessCapabilities(enabled.length ? enabled : isRealHarness(harness) ? [harness] : [])),
   // Additive: this daemon replaces its own bundle and restarts when idle, so a version change can appear between sessions.
   ...(autoUpdate ? ['update.auto'] : []),
 ];
@@ -112,6 +118,10 @@ export interface ServerContext {
   creds: CredStore;
   /** The repositories the daemon keeps cloned (`repos.sync`, `repos.status`). */
   repos: ReposManager;
+  /** MCP server definitions synced by the app (`mcp.sync`). */
+  syncedMcp: SyncedMcpStore;
+  /** Names of the servers in the operator's config.json, which override a synced server of the same name. */
+  configuredMcpNames(): ReadonlySet<string>;
   /** Answers `path.check` from the configured workspaces (set even when the session host is not policed). */
   checkPath(path: string): PathAccess;
   /** Answers `workspaces.list`: the configured roots, with vault detection. */
@@ -155,6 +165,8 @@ export const REQUIRED_SCOPE: Record<string, TokenScope> = {
   // Changing the list runs git against remotes with the stored token; looking at it only shows names and states.
   'repos.sync': 'admin',
   'repos.status': 'read',
+  // Defines programs and endpoints sessions will start, with the credentials pushed beside them.
+  'mcp.sync': 'admin',
 };
 
 /** Commands whose reply must be re-evaluated, not replayed from the idempotency cache. */
@@ -545,6 +557,12 @@ export class Connection {
       }
       case 'repos.sync': return this.reposSync(frame.repos, frame.wait === true, auth);
       case 'repos.status': return { ...this.ctx.repos.status() };
+      case 'mcp.sync': {
+        const change = this.ctx.syncedMcp.replace(frame.servers, auth.id, this.ctx.configuredMcpNames());
+        // Names only: never a definition, a header or a credential.
+        this.ctx.audit({ event: 'mcp_sync', tokenId: auth.id, names: change.accepted, added: change.added, removed: change.removed });
+        return { accepted: change.accepted, rejected: change.rejected, requiredCreds: change.requiredCreds, shadowed: change.shadowed };
+      }
       case 'resolve.openTab':
         // OpenNewTab is refused when the harness asks (daemon sessions cannot create Geode threads), so nothing is ever pending.
         throw new CommandError('unknown_command', 'open-tab requests are not supported by this daemon build');

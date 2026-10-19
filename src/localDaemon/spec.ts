@@ -267,6 +267,8 @@ export interface LocalDaemonSpec {
   cpus: number;
   /** Enabled harnesses; absent = Claude only. */
   harnesses?: readonly LocalHarness[];
+  /** Let the daemon accept stdio MCP servers synced from Settings (`allowSyncedStdio`); absent = no. */
+  allowSyncedStdio?: boolean;
 }
 
 /** One vetted external root: an existing absolute host directory and its unique path segment under /ext. */
@@ -399,6 +401,8 @@ export function specSignature(spec: LocalDaemonSpec): string {
     // Only a non-default set is hashed, so a Claude-only container made before harness toggles existed does not
     // read as drifted after an upgrade.
     ...(isDefaultHarnessSet(spec.harnesses) ? {} : { harnesses: normalizeHarnesses(spec.harnesses) }),
+    // Same rule: only the non-default value is hashed.
+    ...(spec.allowSyncedStdio ? { allowSyncedStdio: true } : {}),
   })).slice(0, 16);
 }
 
@@ -521,6 +525,8 @@ export function runArgs(spec: LocalDaemonSpec): string[] {
     '--env', `CREDENTIALS_DIRECTORY=${CREDENTIALS_DIR}`,
     // The daemon's allowed set follows the toggles: a session for a harness that is off is refused at the door.
     '--env', `AGENT_THREADS_HARNESSES=${normalizeHarnesses(spec.harnesses).join(',')}`,
+    // The container is this Mac's own sandbox, so the user decides here whether synced stdio servers may run in it.
+    ...(spec.allowSyncedStdio ? ['--env', 'AGENT_THREADS_ALLOW_SYNCED_STDIO=1'] : []),
     localImageRef(spec.version, spec.harnesses),
     ...serveCommand(spec),
   ];
@@ -572,6 +578,16 @@ export function credsPushArgs(name: string, kind: string, ttlSec: number): strin
 /** Deletes a pushed credential kind. */
 export function credsRemoveArgs(name: string, kind: string): string[] {
   return [...CREDS_PUSH_BASE(name, kind), '--remove'];
+}
+/**
+ * Replaces the daemon's synced MCP servers from a JSON object of name -> definition on stdin (`agent-threads mcp sync`).
+ * Definitions hold `${mcpsync-<project>.NAME}` placeholders only; the values go separately with `credsPushArgs`.
+ */
+export function mcpSyncArgs(name: string): string[] {
+  return [
+    'exec', '-i', '--user', String(DAEMON_UID), name, 'agent-threads', 'mcp', 'sync', '--stdin', '--clear', '--json',
+    '--url', `ws://127.0.0.1:${DAEMON_INTERNAL_PORT}`, '--data-dir', DATA_MOUNT,
+  ];
 }
 /** Sets one key in the daemon user's global git config (a repository's own config still wins). */
 export function gitConfigSetArgs(name: string, key: string, value: string): string[] {

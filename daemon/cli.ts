@@ -11,6 +11,7 @@ import {
 } from './cmd/doctor';
 import { CliError, EXIT, exitCodeFor, messageOf } from './cmd/exit';
 import { formatPush, parseTtl, preparePush, pushCreds } from './cmd/creds';
+import { formatSync, prepareSync, syncMcp } from './cmd/mcp';
 import { runInstall, realInstallSys } from './cmd/install';
 import { runUpdate } from './cmd/update';
 import { applyUpdate } from './update/apply';
@@ -41,6 +42,8 @@ Usage:
   agent-threads token revoke <id|name>
   agent-threads creds push <kind> [NAME...] [--stdin] [--ttl <s|15m|24h|7d>] [--remove]
                                           send credentials to a daemon (admin token); values never touch argv
+  agent-threads mcp sync --stdin [--clear] [--strict]
+                                          replace the MCP servers synced to a daemon (admin token); JSON name -> definition on stdin
   agent-threads doctor [--strict] [--json]  check this machine and the daemon
   agent-threads install [--dry-run] [--no-start]   set up the systemd user service (Linux)
   agent-threads update --check [--json]   current vs latest release, and whether/when auto-update would apply it
@@ -105,6 +108,11 @@ creds push: field values are read from standard input as a JSON object (--stdin)
   the same name (NAME). "NAME=value" on the command line is refused unless --allow-argv (it shows in "ps"). With
   --remove and no fields the kind is deleted. Output lists field names, never values.
 
+mcp sync: standard input is a JSON object of name -> MCP server definition (config.json's mcpServers shape). It replaces
+  the whole synced set; an empty object needs --clear. Credentials are referenced as \${mcpsync-<project>.NAME} and pushed
+  separately with "creds push mcpsync-<project>". Output lists server names and reasons, never a value; --strict exits 1
+  when any definition was rejected.
+
 The token and doctor commands accept --data-dir too.
 `;
 
@@ -145,7 +153,7 @@ export interface Parsed {
 const BOOLEAN_FLAGS = new Set([
   'i-know-this-is-open', 'help', 'version', 'allow-bypass', 'fake-harness',
   'auto-update', 'check', 'apply', 'now',
-  'json', 'detach', 'unattended', 'claim', 'until-idle', 'strict', 'save', 'dry-run', 'no-start', 'force', 'remove', 'stdin', 'allow-argv',
+  'json', 'detach', 'unattended', 'claim', 'until-idle', 'strict', 'save', 'dry-run', 'no-start', 'force', 'remove', 'stdin', 'allow-argv', 'clear',
 ]);
 
 export function parseArgs(argv: string[]): Parsed {
@@ -350,7 +358,7 @@ export async function runCli(argv: string[], io: Io = consoleIo, runtime?: Parti
     });
   }
 
-  if (cmd === 'list' || cmd === 'attach' || cmd === 'run' || cmd === 'doctor' || cmd === 'install' || cmd === 'creds' || cmd === 'update') {
+  if (cmd === 'list' || cmd === 'attach' || cmd === 'run' || cmd === 'doctor' || cmd === 'install' || cmd === 'creds' || cmd === 'mcp' || cmd === 'update') {
     const rt: CliRuntime = { ...processRuntime(), ...runtime };
     const raw = toRawIo(io);
     try {
@@ -467,6 +475,22 @@ async function runClientCommand(cmd: string, p: Parsed, io: Io, raw: RawIo, rt: 
         if (json) io.out(JSON.stringify({ kind: reply.kind, fields: reply.fields, removed: reply.removed, expiresAt: reply.expiresAt ?? null }));
         else io.out(formatPush(reply));
         return EXIT.OK;
+      } finally {
+        client.dispose();
+      }
+    }
+    case 'mcp': {
+      if (p.positionals[1] !== 'sync') throw new CliError('usage: agent-threads mcp sync --stdin [--clear] [--strict]', EXIT.USAGE);
+      const opts = { stdinJson: p.bools.has('stdin'), clear: p.bools.has('clear') };
+      const stdinText = opts.stdinJson ? await readAll(rt.stdin) : undefined;
+      const servers = prepareSync(opts, stdinText);
+      const flags = connFlags(p);
+      const client = await connectDaemon(resolveConnectionSettings(flags, rt.env), { reconnect: false, connectTimeoutMs: flags.connectTimeoutMs, createSocket: rt.createSocket });
+      try {
+        const reply = await syncMcp(client, servers);
+        if (json) io.out(JSON.stringify(reply));
+        else for (const line of formatSync(reply)) io.out(line);
+        return p.bools.has('strict') && reply.rejected.length ? EXIT.FAILED : EXIT.OK;
       } finally {
         client.dispose();
       }

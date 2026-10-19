@@ -194,7 +194,7 @@ describe('config', () => {
 describe('welcome capability', () => {
   it('advertises update.auto only when the daemon will update itself', () => {
     expect(capabilitiesFor('claude', ['claude'])).not.toContain('update.auto');
-    expect(capabilitiesFor('claude', ['claude'], true)).toContain('update.auto');
+    expect(capabilitiesFor('claude', ['claude'], false, true)).toContain('update.auto');
   });
 });
 
