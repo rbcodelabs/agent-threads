@@ -144,3 +144,11 @@ Settings → MCP has a **Quick connect** section (directly above the OAuth MCP s
 Peer plugins read and use the same presets through the public API rather than hardcoding URLs: `api.v1.mcp.listPresets()` returns the descriptors and `api.v1.mcp.registerPreset(id, overrides?)` registers one by id. Overrides win over preset values, `url`/`type`/`grantType` cannot be overridden, and registration runs through the same path (and consent dialog) as `mcp.register`. An unknown id or a `requiresClientId` preset without a `clientId` override throws `INVALID_ARGUMENT`. Feature-detect with the `mcp.listPresets` and `mcp.registerPreset` capability strings, and fall back to `mcp.register` with your own config on older hosts. See the README's public-API section for the full contract.
 
 You can connect one from the UI as well as from an agent: **Add MCP server → OAuth** collects the same fields, validates them against the `mcpRegistrationSchema` above, and calls the same `OAuthMcpRegistry.registerServer()` the tool path uses — so the two entry points cannot drift. The OAuth option is offered only when adding, not when editing: a connected server's credentials live in the keychain and changing its configuration means Disconnect plus a fresh consent round-trip, not an in-place field edit.
+
+## Running a server on a remote daemon
+
+Servers registered here (stdio, http, sse) run on this computer by default. For threads on a remote daemon, tick the daemon under
+**Runs on** in Settings, MCP to have the server synced and started there too, with its `${NAME}` secrets delivered to the daemon
+(a dialog first shows exactly what is sent). OAuth servers and servers that point at this computer never leave it. A server
+registered by an agent through `mcp_register_server` is not synced until you opt it in. See
+[Remote daemon](remote-daemon.md#mcp-servers-synced-from-the-app).

@@ -12,7 +12,19 @@
  *
  * With an allowlist set, ONLY listed servers pass (headers included). Every dropped server comes back with a
  * reason so the user is told, not left guessing why a tool is missing.
+ *
+ * Servers the user synced to this daemon (Settings, MCP, "Runs on"; `mcpSync.ts`) are run by the daemon itself, so they
+ * are neither sent in the spec nor reported as dropped. One that was asked for but is not running there (changed and not
+ * re-confirmed, credential missing, refused by the daemon, ...) falls through to the rules above and, if dropped, is
+ * reported with the sync reason instead of the generic one.
  */
+export interface McpSyncView {
+  /** Names the daemon is running from the last sync. */
+  synced: ReadonlySet<string>;
+  /** Why an opted-in server is not running there, or undefined. */
+  reasonFor(name: string): string | undefined;
+}
+
 import { resolveMcpServers } from '../mcpServerStore';
 import type { StoredMcpServer } from '../types';
 import { urlCarriesCredentials, type RemoteMcpServerConfig } from '../protocol';
@@ -47,6 +59,7 @@ export function isLoopbackUrl(url: string): boolean {
 export function partitionExternalMcpServers(
   stored: Record<string, StoredMcpServer> | undefined,
   allowlist?: readonly string[],
+  sync?: McpSyncView,
 ): McpPartition {
   const passthrough: Record<string, RemoteMcpServerConfig> = {};
   const dropped: DroppedMcpServer[] = [];
@@ -57,15 +70,17 @@ export function partitionExternalMcpServers(
   for (const [name, raw] of Object.entries(stored)) {
     const type = (raw as { type?: string } | undefined)?.type;
     if (type !== 'stdio' && type !== 'http' && type !== 'sse') continue; // oauth/invalid entries are handled elsewhere
-    if (type === 'stdio') { dropped.push({ name, reason: 'it starts a program on this computer' }); continue; }
+    if (sync?.synced.has(name)) continue; // the daemon runs its own synced copy
+    const dropWith = (reason: string): void => { dropped.push({ name, reason: sync?.reasonFor(name) ?? reason }); };
+    if (type === 'stdio') { dropWith('it starts a program on this computer'); continue; }
     const resolved = servers[name] as { type?: string; url?: string; headers?: Record<string, string> } | undefined;
-    if (!resolved) { dropped.push({ name, reason: 'its configuration uses a secret from this computer, which is never sent to a daemon' }); continue; }
+    if (!resolved) { dropWith('its configuration uses a secret from this computer, which is never sent to a daemon'); continue; }
     const url = resolved.url ?? '';
-    if (isLoopbackUrl(url)) { dropped.push({ name, reason: 'its address is on this computer and the daemon cannot reach it' }); continue; }
-    if (!allow && urlCarriesCredentials(url)) { dropped.push({ name, reason: "its address carries a credential (a user name or a token in the URL); add it to this daemon's MCP allowlist to send it" }); continue; }
-    if (allow && !allow.has(name)) { dropped.push({ name, reason: "it is not on this daemon's MCP allowlist" }); continue; }
+    if (isLoopbackUrl(url)) { dropWith('its address is on this computer and the daemon cannot reach it'); continue; }
+    if (!allow && urlCarriesCredentials(url)) { dropWith("its address carries a credential (a user name or a token in the URL); add it to this daemon's MCP allowlist to send it"); continue; }
+    if (allow && !allow.has(name)) { dropWith("it is not on this daemon's MCP allowlist"); continue; }
     const hasHeaders = !!resolved.headers && Object.keys(resolved.headers).length > 0;
-    if (hasHeaders && !allow) { dropped.push({ name, reason: "it sends headers (usually credentials); add it to this daemon's MCP allowlist to send it" }); continue; }
+    if (hasHeaders && !allow) { dropWith("it sends headers (usually credentials); add it to this daemon's MCP allowlist to send it"); continue; }
     passthrough[name] = { type: type as 'http' | 'sse', url, ...(hasHeaders ? { headers: resolved.headers } : {}) };
   }
   return { passthrough, dropped };
