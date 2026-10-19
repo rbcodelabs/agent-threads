@@ -10,7 +10,7 @@
  * kept out of every message.
  */
 
-import { VM_LIFECYCLE_TIMEOUT_MS, type VmCommandResult, type VmCommandRunner } from '../sandboxVm';
+import { VM_LIFECYCLE_TIMEOUT_MS, type VmCommandResult, type VmCommandRunner } from '../containerCli';
 import {
   BUILD_TIMEOUT_MS,
   MAX_BUFFER_BYTES,

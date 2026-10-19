@@ -36,7 +36,7 @@ import {
   type RawStashMeta,
   type SaveFormat,
 } from './agentBrowserScript';
-import { VmLoopbackError, type VmUrlResolution } from '../vmPortForward';
+import { DaemonLoopbackError, type DaemonUrlResolution } from '../loopbackUrl';
 import { containsKnownSecret, frameUntrusted, matchesKnownSecret, stripInvisible } from './agentBrowserSanitize';
 import {
   buildEvalScript,
@@ -137,11 +137,10 @@ export interface ThreadBrowserOptions {
   /** Injected so saved filenames are deterministic in tests. */
   nowMs?: () => number;
   /**
-   * Maps a URL the agent asked for to the one the HOST browser should load.
-   * Supplied for threads with a sandbox container, where `localhost` means the
-   * container, not the Mac (see vmPortForward.ts). Absent = no mapping.
+   * Maps a URL the agent asked for to the one the HOST browser should load. Supplied for threads on the managed
+   * local daemon, where `localhost` means the container, not the Mac (see localDaemon/portForward.ts). Absent = no mapping.
    */
-  resolveUrl?: (url: string) => Promise<VmUrlResolution>;
+  resolveUrl?: (url: string) => Promise<DaemonUrlResolution>;
   /** Read live (not captured) so toggling the setting applies to the next call. Absent = eval disabled. */
   isEvalEnabled?: () => boolean;
   /** URL policy applied to literal URLs in eval expressions. Absent = defaults (private network refused). */
@@ -174,7 +173,7 @@ export class ThreadBrowser {
   private readonly nowMs: () => number;
   private readonly saveSink: SaveSink | undefined;
   private saveSeq = 0;
-  private readonly resolveUrl: ((url: string) => Promise<VmUrlResolution>) | undefined;
+  private readonly resolveUrl: ((url: string) => Promise<DaemonUrlResolution>) | undefined;
   private readonly isEvalEnabled: () => boolean;
   private readonly getUrlPolicy: () => UrlPolicyOptions;
 
@@ -259,18 +258,13 @@ export class ThreadBrowser {
     return this.snapshotWith(guest);
   }
 
-  private async resolveForHost(url: string): Promise<VmUrlResolution> {
+  private async resolveForHost(url: string): Promise<DaemonUrlResolution> {
     if (!this.resolveUrl) return { kind: 'passthrough' };
     try {
       return await this.resolveUrl(url);
     } catch (error) {
-      if (error instanceof VmLoopbackError) {
-        throw new AgentBrowserError({
-          code: 'operation_failed',
-          message: error.message,
-          retryable: false,
-          hint: error.hint,
-        });
+      if (error instanceof DaemonLoopbackError) {
+        throw new AgentBrowserError({ code: 'operation_failed', message: error.message, retryable: false, hint: error.hint });
       }
       throw error;
     }

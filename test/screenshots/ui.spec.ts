@@ -849,10 +849,15 @@ test.describe('Agent Threads UI', () => {
     await page.waitForTimeout(200);
 
     // Notice icons render full size (not the 24%-scale dot a 100×100-viewBox
-    // addIcon override produces) and share the tool rows' leading-icon column.
+    // addIcon override produces) and share the tool rows' leading column.
     const geometry = await page.evaluate(() => {
       const box = (el: Element) => el.getBoundingClientRect();
-      const toolIcon = box(document.querySelector('.ct-tool-pill-icon svg')!);
+      // The tool block's leading column. Every call now lives in a (collapsed)
+      // group whose leading glyph is style-dependent (tree chevron, chip,
+      // card), so anchor on what .ct-notice-row documents: the .ct-tools
+      // block's left edge plus the 6px row inset.
+      const tools = document.querySelector('.ct-tools')!;
+      const toolIcon = { left: box(tools).left + 6, width: 12 };
       const noticeIcons = Array.from(document.querySelectorAll('.ct-notice-icon svg')).map((svg) => {
         const r = box(svg);
         return { left: r.left, width: r.width, height: r.height, viewBox: svg.getAttribute('viewBox') };
@@ -2153,27 +2158,6 @@ test.describe('Agent Threads UI', () => {
     await shot(page.locator('.ct-settings-popover'), 'model-menu-cli-stale.png');
   });
 
-  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }, { width: 375, height: 667 }]) {
-    test(`settings — sandbox VM controls ${viewport.width}`, async ({ page }) => {
-      await page.setViewportSize(viewport);
-      await page.goto('file://' + path.resolve('test/harness/settings.html'));
-      await page.getByLabel('Settings section').selectOption('claude');
-      const imageRow = page.locator('.setting-item').filter({ has: page.getByText('Sandbox VM image', { exact: true }) });
-      const networkRow = page.locator('.setting-item').filter({ has: page.getByText('Sandbox VM network', { exact: true }) });
-      await imageRow.scrollIntoViewIfNeeded();
-      await expect(imageRow.locator('input')).toHaveValue('claude-threads-coding:1');
-      await networkRow.locator('select').selectOption('none');
-      await expect(networkRow.locator('select')).toHaveValue('none');
-      await networkRow.scrollIntoViewIfNeeded();
-      const bounds = await networkRow.locator('select').boundingBox();
-      expect(bounds).not.toBeNull();
-      expect(bounds!.x).toBeGreaterThanOrEqual(0);
-      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
-      if (viewport.width < 480) expect(bounds!.height).toBeGreaterThanOrEqual(44);
-      await shot(page, `settings-sandbox-vm-${viewport.width}.png`);
-    });
-  }
-
   test('settings — switching harness reveals Codex Ultra effort without overwriting Claude effort', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
@@ -3025,6 +3009,35 @@ test.describe('Agent Threads UI', () => {
 
   const kanbanUrl = 'file://' + path.resolve('test/harness/kanban.html');
 
+  test('kanban board — New thread opens new-conversation mode; no dispatch composer remains', async ({ page }) => {
+    await page.setViewportSize({ width: 1240, height: 820 });
+    await page.goto(kanbanUrl);
+    await page.waitForSelector('.ct-kanban-board');
+    await expect(page.locator('.ct-kanban-dispatch textarea')).toHaveCount(0);
+    await expect(page.getByLabel('Dispatch Project')).toHaveCount(0);
+    const button = page.getByRole('button', { name: 'New thread' });
+    await expect(button).toBeVisible();
+    await expect(button).toHaveAttribute('aria-label', 'New thread');
+    await button.click();
+    expect(await page.evaluate(() => (window as any).__newConversationCalls.length)).toBe(1);
+    await shot(page.locator('.ct-kanban-dispatch'), 'kanban-new-thread-panel.png');
+  });
+
+  test('agents list — New thread opens new-conversation mode; no dispatch composer remains', async ({ page }) => {
+    await page.setViewportSize({ width: 760, height: 820 });
+    await page.goto(kanbanUrl + '?dashboard=1');
+    await page.waitForSelector('.ct-agents-project');
+    await expect(page.locator('.ct-agents-root textarea')).toHaveCount(0);
+    await expect(page.getByText('Dispatch a task...')).toHaveCount(0);
+    const button = page.locator('[data-testid="new-thread-button"]');
+    await expect(button).toBeVisible();
+    await expect(button).toHaveAttribute('aria-label', 'New thread');
+    await expect(page.locator('.ct-kanban-toggle')).toHaveCount(0);
+    await button.click();
+    expect(await page.evaluate(() => (window as any).__newConversationCalls.length)).toBe(1);
+    await shot(page.locator('.view-header'), 'agents-list-new-thread.png');
+  });
+
   test('kanban board — group by status', async ({ page }) => {
     await page.setViewportSize({ width: 1240, height: 820 });
     await page.goto(kanbanUrl);
@@ -3073,127 +3086,6 @@ test.describe('Agent Threads UI', () => {
     await expect(activeCard.locator('.ct-kanban-agent-count')).toHaveCount(0);
     await page.evaluate(() => (window as any).__replaceAgentRuns('k-hiptrip-running', ['waiting']));
     await expect(activeCard.locator('.ct-kanban-agent-count')).toHaveClass(/ct-agent-count-active/);
-  });
-
-  test('kanban kickoff harness picker selects OpenCode with its brand mark', async ({ page }) => {
-    await page.setViewportSize({ width: 1240, height: 820 });
-    await page.goto(kanbanUrl);
-    await page.waitForSelector('.ct-kanban-board');
-
-    const harnessButton = page.locator('.ct-kanban-dispatch .ct-harness-send-btn');
-    await harnessButton.click({ button: 'right' });
-    const menu = page.locator('.ct-harness-menu');
-    await expect(menu.getByRole('menuitemradio', { name: 'OpenCode' }).locator('.ct-harness-mark-opencode svg')).toHaveCount(1);
-    await menu.getByRole('menuitemradio', { name: 'OpenCode' }).click();
-    await expect(menu).toHaveCount(0);
-    await expect(harnessButton).toHaveAttribute('aria-label', /OpenCode/);
-    await expect(harnessButton.locator('.ct-harness-mark-opencode')).toHaveAttribute('data-icon', 'opencode-mark');
-    expect(await page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(0);
-    await shot(page.locator('.ct-kanban-dispatch'), 'kanban-harness-picker-opencode.png');
-  });
-
-  test('kanban kickoff picker offers Run in (container/host) for Claude and badges the button', async ({ page }) => {
-    await page.setViewportSize({ width: 1240, height: 820 });
-    await page.goto(kanbanUrl);
-    await page.waitForSelector('.ct-kanban-board');
-
-    const harnessButton = page.locator('.ct-kanban-dispatch .ct-harness-send-btn');
-    await harnessButton.click({ button: 'right' });
-    const menu = page.locator('.ct-harness-menu');
-    await expect(menu.locator('.ct-run-mode-item')).toHaveCount(3);
-    const box = await page.locator('.ct-kanban-dispatch').boundingBox();
-    await shot(page, 'kanban-run-mode-menu.png', { clip: { x: 620, y: Math.max(0, box!.y - 300), width: 620, height: 300 + box!.height } });
-    await menu.locator('.ct-run-mode-item[data-run-mode="always"]').click();
-    await expect(menu).toHaveCount(0);
-    await expect(harnessButton).toHaveAttribute('aria-label', /in a container/);
-    await expect(harnessButton.locator('.ct-run-mode-badge')).toHaveCount(1);
-    await shot(page.locator('.ct-kanban-dispatch'), 'kanban-run-mode-badge.png');
-
-    await harnessButton.click({ button: 'right' });
-    await menu.getByRole('menuitemradio', { name: 'Codex' }).click();
-    await expect(harnessButton.locator('.ct-run-mode-badge')).toHaveCount(0);
-    expect(await page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(0);
-  });
-
-  test('kanban kickoff harness picker selects without dispatching', async ({ page }) => {
-    await page.setViewportSize({ width: 1240, height: 820 });
-    await page.goto(kanbanUrl);
-    await page.waitForSelector('.ct-kanban-board');
-
-    const harnessButton = page.locator('.ct-kanban-dispatch .ct-harness-send-btn');
-    await expect(harnessButton).toHaveAttribute('aria-label', /Claude/);
-    await harnessButton.click({ button: 'right' });
-
-    const menu = page.locator('.ct-harness-menu');
-    await expect(menu).toBeVisible();
-    await expect(menu.getByRole('menuitemradio', { name: 'Claude' })).toHaveAttribute('aria-checked', 'true');
-    await expect(menu.getByRole('menuitemradio', { name: 'Codex' })).toHaveCSS('min-height', '44px');
-
-    await menu.getByRole('menuitemradio', { name: 'Codex' }).click();
-    await expect(menu).toHaveCount(0);
-    await expect(harnessButton).toHaveAttribute('aria-label', /Codex/);
-    expect(await page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(0);
-
-    await harnessButton.click({ button: 'right' });
-    const reopenedMenu = page.locator('.ct-harness-menu');
-    await expect(reopenedMenu).toBeVisible();
-    await expect(reopenedMenu.getByRole('menuitemradio', { name: 'OpenCode' })).toHaveCSS('min-height', '44px');
-    await shot(reopenedMenu, 'kanban-harness-picker.png');
-  });
-
-  test('kanban kickoff Project selector preserves the selected Project in dispatch options', async ({ page }) => {
-    await page.setViewportSize({ width: 1240, height: 820 });
-    await page.goto(kanbanUrl);
-    const project = page.getByLabel('Dispatch Project');
-    await expect(project).toHaveValue('');
-    await project.selectOption('proj-hiptrip');
-    await page.locator('.ct-kanban-dispatch .ct-agents-dispatch-input').fill('Plan the next HipTrip release');
-    await page.locator('.ct-kanban-dispatch .ct-send-btn').click();
-
-    const opts = await page.evaluate(() => (window as any).__dispatchCalls.at(-1)?.[3]);
-    expect(opts).toMatchObject({ projectId: 'proj-hiptrip', agentHarness: 'claude' });
-    await shot(page.locator('.ct-kanban-dispatch'), 'kanban-project-selector.png');
-  });
-
-  test('kanban kickoff Project selector fits a narrow mobile viewport', async ({ page }) => {
-    for (const viewport of [{ width: 390, height: 844 }, { width: 375, height: 667 }]) {
-      await page.setViewportSize(viewport);
-      await page.goto(kanbanUrl + '?mobile=1');
-      const project = page.getByLabel('Dispatch Project');
-      await project.selectOption('proj-threads');
-      const controls = [
-        project,
-        page.locator('.ct-kanban-groupby'),
-        page.locator('.ct-agents-search-btn'),
-      ];
-      for (const control of controls) {
-        await expect(control).toBeVisible();
-        const box = await control.boundingBox();
-        expect(box?.height).toBeGreaterThanOrEqual(44);
-        expect(box?.width).toBeGreaterThanOrEqual(44);
-      }
-      await expect(page.locator('.ct-agents-count')).toBeVisible();
-      if (viewport.width === 390) {
-        await expect(page.locator('.ct-kanban-dispatch')).toHaveCSS('width', '358px');
-        await shot(page.locator('.ct-kanban-dispatch'), 'kanban-project-selector-mobile.png');
-      }
-    }
-  });
-
-  test('kanban Project selector converges on create, rename, and delete', async ({ page }) => {
-    await page.goto(kanbanUrl);
-    const project = page.getByLabel('Dispatch Project');
-    await project.selectOption('proj-hiptrip');
-
-    await page.evaluate(() => (window as any).__manager.updateProject('proj-hiptrip', { name: 'HipTrip Studio' }));
-    await expect(project.locator('option:checked')).toHaveText('HipTrip Studio');
-    await expect(project).toHaveValue('proj-hiptrip');
-
-    const createdId = await page.evaluate(() => (window as any).__manager.createProject('New Product', 'Projects/New').id);
-    await expect(project.locator(`option[value="${createdId}"]`)).toHaveText('New Product');
-
-    await page.evaluate(() => (window as any).__manager.deleteProject('proj-hiptrip'));
-    await expect(project).toHaveValue('');
   });
 
   test('kanban board — group by folder swimlanes', async ({ page }) => {
@@ -3269,14 +3161,15 @@ test.describe('Agent Threads UI', () => {
     await page.setViewportSize({ width: 760, height: 820 });
     await page.goto(kanbanUrl + '?dashboard=1');
     await page.waitForSelector('.ct-agents-project');
-    expect(await page.evaluate(() => (window as any).__dashboard.getDisplayText())).toBe('Agents · 14 threads');
+    expect(await page.evaluate(() => (window as any).__dashboard.getDisplayText())).toBe('14 threads');
     expect(await page.evaluate(() => (window as any).__dashboard.getIcon())).toBe('list');
     await expect(page.locator('.view-header')).toBeVisible();
-    await expect(page.locator('.view-header-title')).toHaveText('Agents · 14 threads');
+    await expect(page.locator('.view-header-title')).toHaveText('14 threads');
     await expect(page.locator('.ct-agents-header')).toHaveCount(0);
-    await expect(page.locator('.view-actions .view-action')).toHaveCount(2);
-    await expect(page.locator('.ct-agents-floating-panel .ct-agents-count')).toHaveCount(0);
-    await expect(page.locator('.ct-agents-floating-panel .ct-agents-search-btn')).toHaveCount(0);
+    await expect(page.locator('.view-actions .view-action')).toHaveCount(3);
+    // The dispatch composer moved to the conversation panel: the list has a New thread button, not a floating panel.
+    await expect(page.locator('.ct-agents-floating-panel')).toHaveCount(0);
+    await expect(page.locator('[data-testid="new-thread-button"]')).toBeVisible();
 
     const projects = await page.locator('.ct-agents-project-name').allInnerTexts();
     expect(projects.slice(0, 2)).toEqual(['acme-api', 'Agent Threads']);
@@ -3350,10 +3243,10 @@ test.describe('Agent Threads UI', () => {
     await expect(search).toBeFocused();
     await search.fill('Mobile layout polish');
     await expect(page.locator('.ct-agents-row')).toHaveCount(1);
-    await expect(page.locator('.view-header-title')).toHaveText('Agents · 1 thread');
+    await expect(page.locator('.view-header-title')).toHaveText('1 thread');
     await page.locator('.search-input-clear-button').click();
     await expect(search).toHaveValue('');
-    await expect(page.locator('.view-header-title')).toHaveText('Agents · 14 threads');
+    await expect(page.locator('.view-header-title')).toHaveText('14 threads');
     await search.fill('Mobile layout polish');
     await search.press('Escape');
     await expect(searchPanel).toBeHidden();
@@ -3362,7 +3255,7 @@ test.describe('Agent Threads UI', () => {
     await search.fill('Kanban');
     await searchButton.click();
     await expect(searchPanel).toBeHidden();
-    await expect(page.locator('.view-header-title')).toHaveText('Agents · 14 threads');
+    await expect(page.locator('.view-header-title')).toHaveText('14 threads');
 
     const groupingButton = page.getByRole('button', { name: 'Group agents' });
     await groupingButton.click();
@@ -3398,32 +3291,7 @@ test.describe('Agent Threads UI', () => {
       await dashboard.onClose();
       await dashboard.onOpen();
     });
-    await expect(page.locator('.view-actions .view-action')).toHaveCount(2);
-  });
-
-  test('agents list — themed Project menu selects, checks, and dispatches a Project', async ({ page }) => {
-    await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto(kanbanUrl + '?dashboard=1');
-
-    const trigger = page.getByRole('button', { name: 'Dispatch Project: No Project' });
-    await page.locator('.ct-agents-floating-panel').hover();
-    await expect(trigger).toBeVisible();
-    await trigger.click();
-
-    let menu = page.locator('.menu');
-    await expect(menu.getByRole('menuitemcheckbox', { name: 'No Project' })).toHaveAttribute('aria-checked', 'true');
-    await menu.getByRole('menuitemcheckbox', { name: 'HipTrip' }).click();
-    await expect(page.getByRole('button', { name: 'Dispatch Project: HipTrip' })).toBeVisible();
-
-    await page.getByPlaceholder('Dispatch a task...').fill('Ship the themed menu');
-    await page.getByPlaceholder('Dispatch a task...').press('Enter');
-    await expect.poll(() => page.evaluate(() => (window as any).__dispatchCalls.length)).toBe(1);
-    expect(await page.evaluate(() => (window as any).__dispatchCalls[0][3].projectId)).toBe('proj-hiptrip');
-
-    await page.getByRole('button', { name: 'Dispatch Project: HipTrip' }).click();
-    menu = page.locator('.menu');
-    await expect(menu.getByRole('menuitemcheckbox', { name: 'HipTrip' })).toHaveAttribute('aria-checked', 'true');
-    await shot(page, 'agent-dashboard-project-menu.png', { fullPage: true });
+    await expect(page.locator('.view-actions .view-action')).toHaveCount(3);
   });
 
   // Non-visual: the archive menu adds no resting-state DOM, so there is nothing
@@ -3536,19 +3404,19 @@ test.describe('Agent Threads UI', () => {
       expect(await list.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       expect(await page.locator('.ct-agents-row').evaluateAll(rows => rows.every(row => row.scrollWidth <= row.clientWidth))).toBe(true);
       expect(await page.locator('.view-header').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-      await expect(page.locator('.view-actions .view-action')).toHaveCount(2);
+      await expect(page.locator('.view-actions .view-action')).toHaveCount(3);
 
       if (width <= 380) {
         await expect(page.locator('.ct-agents-row').first()).toHaveCSS('min-height', '52px');
         await expect(page.locator('.ct-dashboard-agent-count')).toHaveCSS('min-height', '28px');
         await expect(page.locator('.ct-agents-row-cwd').first()).toBeHidden();
 
-        await page.locator('.ct-agents-floating-panel').hover();
-        await expect(page.locator('.ct-dispatch-project')).toBeVisible();
-        await expect(page.locator('.ct-dispatch-project-label')).toHaveCount(0);
-        await expect(page.getByRole('button', { name: 'Dispatch Project: No Project' })).toBeVisible();
-        expect(await page.locator('.ct-agents-panel-meta').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-        await expect.poll(() => page.locator('.ct-agents-panel-meta').evaluate(el => el.scrollHeight <= el.clientHeight)).toBe(true);
+        const newThread = page.locator('[data-testid="new-thread-button"]');
+        await expect(newThread).toBeVisible();
+        const newThreadBox = await newThread.boundingBox();
+        const headerBox = await page.locator('.view-header').boundingBox();
+        expect(newThreadBox!.x).toBeGreaterThanOrEqual(headerBox!.x);
+        expect(newThreadBox!.x + newThreadBox!.width).toBeLessThanOrEqual(headerBox!.x + headerBox!.width);
         if (width === 320) await shot(page.locator('#app'), 'agent-dashboard-narrow-desktop.png');
       }
     }
@@ -3578,10 +3446,8 @@ test.describe('Agent Threads UI', () => {
     await page.waitForSelector('.ct-agents-row-plan');
     await expect(page.locator('.ct-agents-permission-actions .ct-permission-btn').first()).toHaveCSS('min-height', '44px');
     await expect(page.locator('.ct-dashboard-agent-count')).toHaveCSS('min-height', '44px');
-    const projectTrigger = page.getByRole('button', { name: 'Dispatch Project: No Project' });
-    await expect(projectTrigger).toBeVisible();
-    expect((await projectTrigger.boundingBox())?.height).toBeGreaterThanOrEqual(44);
-    expect(await page.locator('.ct-agents-panel-meta').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await expect(page.locator('[data-testid="new-thread-button"]')).toBeVisible();
+    expect(await page.locator('.view-header').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     expect(await page.locator('.ct-agents-list').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     await shot(page, 'agent-dashboard-exceptional-mobile.png', { fullPage: true });
   });

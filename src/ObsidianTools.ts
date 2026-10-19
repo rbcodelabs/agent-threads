@@ -12,8 +12,6 @@ import type { SchedulerItemPatch } from './Scheduler';
 import path from 'path';
 import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
 import { type GithubCredentialBroker } from './githubCredentials';
-import { SandboxVmManager, type ExternalMountRootInput, type VmCommandRunner } from './sandboxVm';
-import { type VmUrlResolution } from './vmPortForward';
 import type { InstalledSkillInfo, MarketplaceSkill, SkillDetailResult, SkillSourceListItem, SourceUpdateCheckResult, InstallSkillParams } from './skillManager';
 import { LEGACY_MCP_SERVER_NAME } from './productIdentity';
 import { AGENT_BROWSER_READ_ONLY_TOOL_NAMES, createAgentBrowserTools } from './agentBrowser/agentBrowserTools';
@@ -23,11 +21,10 @@ import { createScheduleTools } from './tools/schedule';
 import { createSkillsTools } from './tools/skills';
 import { createThreadTools } from './tools/threads';
 import { createVaultTools } from './tools/vault';
-import { createVmTools } from './tools/vm';
 import { createWorkspaceTools } from './tools/workspace';
 import { createWorktreeTools } from './tools/worktree';
-import { BUILT_IN_TOOL_ORDER, LEGACY_TO_CANONICAL_TOOL_NAMES } from './tools/toolNames';
 import { type HostExecHooks } from './hostExec';
+import { BUILT_IN_TOOL_ORDER, LEGACY_TO_CANONICAL_TOOL_NAMES } from './tools/toolNames';
 
 // ── Thread-state snapshot types ───────────────────────────────────────────────
 // Plain data types used by the thread-coordination tools below.
@@ -99,8 +96,6 @@ export interface ThreadSnapshot {
   /** Name of the scheduled item at the time this thread was created, if any. */
   scheduledItemName?: string;
   updatedAt: number;
-  /** Per-thread container-execution override ('auto' | 'always' | 'never'); absent means the global setting applies. */
-  harnessVmMode?: string;
   /** Number of non-compact messages */
   messageCount: number;
   /** Vault-relative path to the thread's raw JSONL conversation log, if raw logging is enabled. Read it with obsidian_get_thread_log. */
@@ -152,8 +147,11 @@ export interface ProjectUpdatePatch {
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 export interface ObsidianMcpServerOptions {
-  /** Build a roster for a harness already running inside its thread's VM. */
-  harnessInVm?: boolean;
+  /**
+   * Enables the `host_exec` tool. Supplied ONLY for a thread on the managed local daemon (desktop); omitted
+   * everywhere else, in which case the tool is not registered at all.
+   */
+  hostExec?: HostExecHooks;
   /**
    * Agent tools contributed by peers through `extensions.registerAgentTool`,
    * already bound to this thread by the host (ADR-0008).
@@ -164,22 +162,10 @@ export interface ObsidianMcpServerOptions {
    */
   contributedTools?: readonly import('./AgentToolContributions').BoundAgentTool[];
   onRegisterMcpServer?: (input: unknown) => Promise<McpRegistrationResult>;
-  /**
-   * Enables the `host_exec` tool. Supplied ONLY for a thread whose Claude
-   * harness is actually VM-routed (ADR-0015) on desktop; omitted everywhere
-   * else, in which case the tool is not registered at all.
-   */
-  hostExec?: HostExecHooks;
   /** Route agent-triggered file navigation through the host's contextual panel policy. */
   openContextualFile?: (file: TFile, newLeaf: boolean) => Promise<boolean>;
   /** Route agent-triggered Web Viewer navigation through the contextual panel policy. */
   openContextualUrl?: (url: string, newTab: boolean) => Promise<false | { reusedTab: boolean }>;
-  /**
-   * Maps a loopback URL to one the HOST can reach when this thread runs in a
-   * sandbox container (see vmPortForward.ts). Omitted = no mapping, i.e. exactly
-   * the host-local behavior.
-   */
-  resolveSandboxUrl?: (url: string) => Promise<VmUrlResolution>;
   /**
    * Called when the agent requests a working-directory change. Receives the
    * resolved absolute path.
@@ -215,46 +201,6 @@ export interface ObsidianMcpServerOptions {
    * takes effect on the next tool call instead of requiring a session restart.
    */
   getWorktreeRoot?: () => string | undefined;
-  /**
-   * Returns the configured container image for `enter_vm`. Undefined/blank
-   * falls back to `claude-threads-coding:1`. Read lazily for the same reason as
-   * {@link getWorktreeRoot}.
-   */
-  getVmImage?: () => string | undefined;
-  /**
-   * Returns the configured default network mode for `enter_vm` when the call
-   * does not pass one. Anything unrecognised falls back to `'default'`
-   * (full egress). Read lazily for the same reason as {@link getWorktreeRoot}.
-   */
-  getVmDefaultNetwork?: () => string | undefined;
-  /** Resource limits for newly created containers (settings sandboxVmMemory/sandboxVmCpus). */
-  getVmMemory?: () => string | undefined;
-  getVmCpus?: () => number | undefined;
-  /**
-   * Returns the host's connected external roots (Geode's
-   * `externalRoots.listMountRoots()`), called at `enter_vm` time. They are
-   * bind-mounted read-only at `/ext/<label>`. Absent on Obsidian / old Geode;
-   * failures are swallowed (no extra mounts) rather than failing `enter_vm`.
-   */
-  getExternalMounts?: () => Promise<ExternalMountRootInput[] | null | undefined>;
-  /** Host path of the vault, mounted read-write at /vault in every VM. Empty/undefined skips it. */
-  getVaultPath?: () => string | null | undefined;
-  /**
-   * Overrides how sandbox VM commands are executed. Tests inject a fake so
-   * command construction and lifecycle transitions are exercised without a
-   * macOS 26 container runtime. Ignored when `sandboxVmManager` is provided.
-   */
-  vmCommandRunner?: VmCommandRunner;
-  /**
-   * ADR-0015 §3: the SAME `SandboxVmManager` instance this thread's Claude
-   * harness uses for its own VM routing, so `enter_vm`/`vm_exec`/`exit_vm`
-   * see the container's real origin (agent-started vs. harness-owned)
-   * instead of each side tracking it separately against the same
-   * deterministic container name. Falls back to a freshly constructed
-   * manager when omitted (existing behavior, and what direct callers of
-   * `createClaudeThreadsMcpServers` in tests still get).
-   */
-  sandboxVmManager?: SandboxVmManager;
   /** Geode GitHub connection broker; undefined on Obsidian / older Geode. */
   githubBroker?: GithubCredentialBroker;
   /** Read lazily: the "Use Geode GitHub connection" setting. */
@@ -442,7 +388,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   // Unlike cwdAtStart in ThreadManager (which is frozen in the subprocess),
   // the effective cwd is updated immediately by set_working_directory so
   // worktree tools always operate on the right repo within the same turn.
-  // Shared by the worktree, VM and host_exec tools (see tools/cwdTracker.ts).
+  // Shared by the worktree tools (see tools/cwdTracker.ts).
   const cwd = createCwdTracker(options.initialCwd ?? '');
 
   // Domain modules (src/tools/*): each is a factory over a narrow port and
@@ -465,7 +411,6 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
         }
       },
     }),
-    ...createVmTools({ cwd, options }),
     ...createThreadTools({ options }),
     ...createSkillsTools({ options }),
     ...createMiscTools({ app, cwd, options }),
@@ -522,12 +467,9 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     .filter(binding => !builtInNames.has(binding.name) && !binding.requiresApproval)
     .map(binding => binding.name);
 
-  const exposedTools = options.harnessInVm
-    ? tools.filter(definition => definition.name !== 'enter_vm' && definition.name !== 'exit_vm')
-    : tools;
-  // host_exec is newer than the deprecated `obsidian` alias server, which is
-  // frozen at its legacy roster: exposing a host-command tool under two names
-  // would only double the approval surface.
+  const exposedTools = tools;
+  // host_exec is newer than the deprecated `obsidian` alias server, which is frozen at its legacy roster: exposing a
+  // host-command tool under two names would only double the approval surface.
   const legacyTools = exposedTools
     .filter(definition => definition.name !== 'host_exec')
     .map(toDeprecatedLegacyToolDefinition);
@@ -585,7 +527,7 @@ const CANONICAL_DESCRIPTION_OVERRIDES: Readonly<Record<string, string>> = Object
   workspace_insert_at_cursor: 'Inserts text at the cursor in the active editor, replacing the current selection.',
   host_list_commands: 'Returns registered host commands with their ID and name, sorted by ID. Optionally filters by query. Use this before host_execute_command.',
   host_execute_command: 'Executes a host command by ID. Use host_list_commands to discover available IDs. Third-party command IDs remain unchanged.',
-  host_open_url: 'Opens a URL in the host Web Viewer, reusing an existing tab by default and falling back to the system browser when unavailable. In a sandbox-VM thread, localhost URLs for servers started inside the VM are forwarded to a loopback port on the Mac automatically.',
+  host_open_url: 'Opens a URL in the host Web Viewer, reusing an existing tab by default and falling back to the system browser when unavailable.',
 });
 
 function toCanonicalToolDefinition(definition: SdkMcpToolDefinition<any>): SdkMcpToolDefinition<any> {

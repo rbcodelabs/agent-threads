@@ -53,16 +53,17 @@ export function isFreshInstallData(saved: unknown): boolean {
 }
 
 /**
- * Harness for the Chief of Staff thread: the selected one if it can load skill
- * sources and resolves, else Claude, else Codex. OpenCode is never chosen —
- * its sessions do not receive skill sources, so `cos-setup` would not exist.
+ * Harness for the Chief of Staff thread: the selected one if it resolves, else
+ * the first installed of Claude, Codex, OpenCode. Every harness loads skill
+ * sources (OpenCode through its native `skills.paths` config), so `cos-setup`
+ * exists on all of them.
  */
 export function chooseChiefOfStaffHarness(
   selected: AgentHarness,
   canResolve: (harness: AgentHarness) => boolean,
 ): AgentHarness | undefined {
-  const skillCapable: AgentHarness[] = ['claude', 'codex'];
-  const order = skillCapable.includes(selected) ? [selected, ...skillCapable.filter(h => h !== selected)] : skillCapable;
+  const fallbackOrder: AgentHarness[] = ['claude', 'codex', 'opencode'];
+  const order = [selected, ...fallbackOrder.filter(h => h !== selected)];
   return order.find(h => canResolve(h));
 }
 
@@ -150,7 +151,7 @@ const MISSING_REMOTE = /repository not found|remote branch .* not found|could no
 export function describeChiefOfStaffFailure(reason: ChiefOfStaffFailureReason | 'unexpected', error: string): string {
   switch (reason) {
     case 'harness-unavailable':
-      return 'no Claude Code or Codex found';
+      return 'no agent harness (Claude Code, Codex or OpenCode) found';
     case 'thread-failed':
       return 'couldn\u2019t start the thread';
     case 'clone-failed':
@@ -217,7 +218,7 @@ export async function setUpChiefOfStaff(deps: ChiefOfStaffDeps): Promise<ChiefOf
     return {
       status: 'failed',
       reason: 'harness-unavailable',
-      error: 'Chief of Staff needs Claude Code or Codex installed (OpenCode sessions do not load skill sources yet).',
+      error: 'Chief of Staff needs Claude Code, Codex or OpenCode installed.',
     };
   }
 

@@ -14,10 +14,10 @@ export interface ClaudeSignInBannerDeps {
   canSignIn: boolean;
   /**
    * Runs the resolved sign-in flow: `claude auth login` + `claude auth
-   * status` on the host, or (ADR-0015 container-routed threads) the
-   * container's own `claude setup-token` via `onCodePrompt`. Host-flow
+   * status` on the host, or (threads on the managed local daemon) the
+   * daemon container's own `claude setup-token` via `onCodePrompt`. Host-flow
    * callers can ignore the third argument — it is only invoked by the
-   * container flow.
+   * daemon flow.
    */
   signIn: (
     onProgress: (text: string) => void,
@@ -96,7 +96,7 @@ export function renderClaudeSignInBanner(parent: HTMLElement, deps: ClaudeSignIn
   };
 
   /**
-   * Shows an inline "paste the login code" field (ADR-0015 container sign-in
+   * Shows an inline "paste the login code" field (daemon sign-in
    * flow) and resolves with the typed code, or `null` on Cancel/Enter-less
    * abandonment. The host flow's `signIn` never calls this.
    */

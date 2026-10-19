@@ -4,7 +4,7 @@
  * rather than throwing, so a CLI output change degrades to "unknown", never a crash.
  */
 
-import { parseContainerLabels } from '../sandboxVm';
+import { parseContainerLabels } from '../containerCli';
 
 export type ContainerState = 'running' | 'stopped' | 'unknown';
 

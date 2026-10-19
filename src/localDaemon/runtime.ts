@@ -1,8 +1,6 @@
 /**
  * Local daemon: the container-runtime steps (install the managed runtime,
- * start its system service), reusing `sandboxRuntime.ts` unchanged. Kept here
- * rather than refactoring `sandboxSetup.ts` so the sandbox feature and its
- * tests are untouched; the error mapping mirrors that file's `guard`.
+ * start its system service), on top of `sandboxRuntime.ts` (the bundled runtime).
  */
 
 import {
@@ -16,7 +14,7 @@ import {
   type RuntimeProgress,
   type RuntimeStatus,
 } from '../sandboxRuntime';
-import { VmUnavailableError } from '../sandboxVm';
+import { VmUnavailableError } from '../containerCli';
 import { LocalDaemonAbortedError, LocalDaemonError } from './provision';
 
 /** The runtime operations, injectable so tests need no macOS 26 and no download. */

@@ -323,7 +323,7 @@ async function main(): Promise<void> {
     const htMeta = JSON.parse(readFileSync(path.join(daemonDir, 'sessions', `${htThreadId}.json`), 'utf8'));
     check('host tool: the session was opened with a manifest of host-routed tools only (no worktree/VM/GitHub tools, no secrets)',
       Array.isArray(htMeta.spec.hostTools) && htMeta.spec.hostTools.some((t: any) => t.name === 'vault_search')
-      && !htMeta.spec.hostTools.some((t: any) => ['enter_worktree', 'enter_vm', 'vm_exec', 'github_list_access', 'host_exec'].includes(t.name))
+      && !htMeta.spec.hostTools.some((t: any) => ['enter_worktree', 'github_list_access'].includes(t.name))
       && !JSON.stringify(htMeta).includes(token), `${htMeta.spec.hostTools?.length} tools`);
     check('host tool: the remote system prompt lists what runs on the user\'s computer',
       htMeta.spec.appendSystemPrompt.includes('mcp__claude_threads__*') && htMeta.spec.appendSystemPrompt.includes('vault_search') && !htMeta.spec.appendSystemPrompt.includes('{{HOST_TOOLS}}'));

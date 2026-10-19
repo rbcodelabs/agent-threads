@@ -25,7 +25,7 @@ describe('modelTier', () => {
 });
 
 describe('describeComposerSettings', () => {
-  const base = { harness: undefined, model: undefined, activeModel: undefined, vmMode: undefined, settingsVmMode: undefined } as const;
+  const base = { harness: undefined, model: undefined, activeModel: undefined } as const;
 
   it('maps the tier to notch count and tint', () => {
     expect(describeComposerSettings({ ...base, model: 'haiku' }).model).toMatchObject({ glyph: 'chip-1', tier: 'haiku', label: 'Haiku' });
@@ -51,11 +51,9 @@ describe('describeComposerSettings', () => {
     expect(describeComposerSettings({ ...base, harness: 'opencode' }).provider).toEqual({ glyph: 'opencode', label: 'OpenCode' });
   });
 
-  it('derives host vs container from the thread override, then settings, for Claude only', () => {
-    expect(describeComposerSettings({ ...base, vmMode: 'never' }).location.glyph).toBe('laptop');
-    expect(describeComposerSettings({ ...base, vmMode: 'always' }).location).toMatchObject({ glyph: 'cube', label: 'container' });
-    expect(describeComposerSettings({ ...base, settingsVmMode: 'always' }).location.glyph).toBe('cube');
-    expect(describeComposerSettings({ ...base, vmMode: 'always', harness: 'codex' }).location.glyph).toBe('laptop');
+  it('shows the laptop for local threads', () => {
+    expect(describeComposerSettings({ ...base }).location).toMatchObject({ glyph: 'laptop', label: 'host' });
+    expect(describeComposerSettings({ ...base, harness: 'codex' }).location.glyph).toBe('laptop');
   });
 
   it('shows a cloud for remote threads with a connection marker', () => {
@@ -68,7 +66,7 @@ describe('describeComposerSettings', () => {
   });
 
   it('summarises the state for assistive tech', () => {
-    expect(describeComposerSettings({ ...base, model: 'opus', vmMode: 'never' }).ariaLabel).toBe('Composer settings: Opus, Claude, host');
+    expect(describeComposerSettings({ ...base, model: 'opus' }).ariaLabel).toBe('Composer settings: Opus, Claude, host');
     expect(describeComposerSettings({ ...base, remote: { daemonName: 'homelab', connection: 'unreachable' } }).ariaLabel)
       .toBe('Composer settings: Default, Claude, remote on homelab (unreachable)');
     expect(describeComposerSettings({ ...base, remote: { daemonName: 'homelab', connection: 'connected' } }).ariaLabel)

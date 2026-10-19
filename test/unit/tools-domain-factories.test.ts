@@ -20,7 +20,6 @@ import { createScheduleTools } from '../../src/tools/schedule';
 import { createSkillsTools } from '../../src/tools/skills';
 import { createThreadTools } from '../../src/tools/threads';
 import { createVaultTools } from '../../src/tools/vault';
-import { createVmTools } from '../../src/tools/vm';
 import { createWorkspaceTools } from '../../src/tools/workspace';
 import { createWorktreeTools } from '../../src/tools/worktree';
 import { createCwdTracker } from '../../src/tools/cwdTracker';
@@ -45,11 +44,10 @@ describe('domain factories return exactly their domain', () => {
   it('threads', () => expect(sorted(createThreadTools({ options: {} }))).toEqual(domain('threads')));
   it('schedule', () => expect(sorted(createScheduleTools({ options: {} }))).toEqual(domain('schedule')));
   it('skills', () => expect(sorted(createSkillsTools({ options: {} }))).toEqual(domain('skills')));
-  it('vm', () => expect(sorted(createVmTools({ cwd: createCwdTracker(), options: {} }))).toEqual(domain('vm')));
-  it('misc (host_exec only with its hook)', () => {
-    expect(sorted(createMiscTools({ app, cwd: createCwdTracker(), options: {} }))).toEqual(domain('misc', ['host_exec']));
-    expect(sorted(createMiscTools({ app, cwd: createCwdTracker(), options: { hostExec: { confirm: async () => ({ allowed: false }) } as never } })))
-      .toEqual(domain('misc'));
+  it('misc (host_exec, its own exec domain, only with its hook)', () => {
+    expect(sorted(createMiscTools({ app, cwd: createCwdTracker(), options: {} }))).toEqual(domain('misc'));
+    expect(sorted(createMiscTools({ app, cwd: createCwdTracker(), options: { hostExec: { isInteractive: () => true, requestApproval: async () => true } } })))
+      .toEqual([...domain('misc'), ...domain('exec')].sort());
   });
 });
 

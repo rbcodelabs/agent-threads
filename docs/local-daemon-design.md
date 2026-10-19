@@ -1,5 +1,11 @@
 # Local daemon: design
 
+> Update: the per-thread sandbox VMs (ADR-0015, `enter_vm`/`vm_exec`/`exit_vm`, "Run in: Container") that this design
+> positions itself against, and the `sandboxVm.ts` / `sandboxImage.ts` / `harnessVmRouting.ts` modules it mentions, have
+> since been removed. `sandboxVm.ts` became `containerCli.ts` (the command runner only), `buildImagePullArgs` moved into
+> `src/localDaemon/spec.ts`, and `sandboxRuntime.ts` stays as the bundled runtime. Read those references as history.
+> GitHub delivery, listed below as a non-goal, now exists: see `docs/github-integration.md`.
+
 Status: proposed (design only, no code). Audience: whoever implements the PRs in section 12.
 Baseline: v0.64.0 (`f2d6daa`; the commit that contains #776). Written against `git archive f2d6daa`, because the
 worktree path `/Users/user/.geode/worktrees/agent-threads/feat-local-daemon` is not mounted in the sandbox

@@ -364,6 +364,8 @@ test.describe('Browser session card — sign-in handoff (amber "you are in contr
       await expect(page.getByRole('button', { name: 'Not now' })).toBeFocused({ timeout: 500 });
     }).toPass();
     await page.keyboard.press('Shift+Tab');
+    // Confirm focus actually landed before Enter, so a late re-render can't swallow the keypress.
+    await expect(take).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(page.locator('.ct-bc.is-control')).toBeVisible();
   });
