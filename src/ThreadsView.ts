@@ -1209,6 +1209,21 @@ export class ThreadsView extends ItemView {
     setIcon(badgeIcon, 'server');
     badge.createSpan({ cls: 'ct-remote-badge-name', text: name });
     strip.createSpan({ cls: 'ct-remote-cwd', text: remote.remoteCwd, attr: { title: `${name}:${remote.remoteCwd}` } });
+    const warnings = this.activeThreadId ? this.manager.getRemoteMcpWarnings(this.activeThreadId) : [];
+    if (warnings.length) {
+      const detail = warnings.map((w) => `${w.name}: ${w.reason}`).join('\n');
+      const warn = strip.createSpan({
+        cls: 'ct-remote-warn',
+        attr: { title: `Not available on ${name}\n${detail}`, role: 'button', tabindex: '0', 'data-testid': 'remote-warnings' },
+      });
+      const warnIcon = warn.createSpan({ cls: 'ct-remote-warn-icon' });
+      warnIcon.setAttribute('aria-hidden', 'true');
+      setIcon(warnIcon, 'triangle-alert');
+      warn.createSpan({ text: String(warnings.length) });
+      const show = (): void => { new Notice(`Not available on ${name}:\n${detail}`, 10000); };
+      warn.addEventListener('click', show);
+      warn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); show(); } });
+    }
     strip.createSpan({
       cls: `ct-remote-pill ct-remote-pill--${pill.kind}`,
       text: pill.label,
