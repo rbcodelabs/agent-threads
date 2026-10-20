@@ -195,6 +195,12 @@ const fakeDaemonRegistry = {
   t.cwd = '/srv/workspaces/agent-threads';
 };
 
+/** Sets the user's external MCP servers (Settings, MCP) and re-renders the active thread so the remote strip recomputes its warnings. */
+(window as any).__setMcpServers = (servers: Record<string, unknown>, threadId: string) => {
+  (manager as any).settings.mcpServers = servers;
+  (window as any).__view.focusThread(threadId);
+};
+
 const mockPlugin = {
   daemonRegistry: fakeDaemonRegistry,
   remoteFolders: fakeRemoteFolders,
