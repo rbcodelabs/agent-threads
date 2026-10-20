@@ -37,6 +37,7 @@ import {
   pullDaemonImage,
   removeContainer,
   removeImage,
+  pruneStaleDaemonImages,
   removeVolumes,
   startContainer,
   stopContainer,
@@ -689,6 +690,7 @@ export class LocalDaemonController {
         throw new LocalDaemonError('incompatible', `The daemon still reports a different version than v${version} after updating.`);
       }
       if (oldVersion && oldVersion !== version) await removeImage(d, oldVersion, harnesses);
+      await pruneStaleDaemonImages(d, version);
       return result;
     });
   }

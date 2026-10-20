@@ -457,6 +457,37 @@ export function imageInspectArgs(ref: string): string[] {
 export function imageRemoveArgs(ref: string): string[] {
   return ['image', 'rm', ref];
 }
+/** One `name:tag` per line (verified against `container image list --quiet`). */
+export function imageListArgs(): string[] {
+  return ['image', 'list', '--quiet'];
+}
+
+const REGISTRY_PREFIXES = ['docker.io/library/', 'docker.io/', 'index.docker.io/library/', 'index.docker.io/'];
+
+/**
+ * From the names `image list --quiet` printed, the daemon images that do not belong to `currentVersion`: published
+ * (`ghcr.io/.../agent-threads-daemon`) and locally built (`agent-threads-daemon-local`) images whose tag is neither
+ * `<currentVersion>` nor `<currentVersion>-<harness suffix>`. The dash is required, so `0.70.0` is not kept for `0.7.0`.
+ * Other repositories (node, the build shim, ...) and untagged or digest-only entries are never returned.
+ */
+export function staleDaemonImages(names: readonly string[], currentVersion: string): string[] {
+  const stale: string[] = [];
+  for (const raw of names) {
+    const ref = raw.trim();
+    if (!ref || ref.includes('@')) continue;
+    const colon = ref.lastIndexOf(':');
+    if (colon < 0 || ref.indexOf('/', colon) >= 0) continue; // no tag (a ':' before the last '/' is a registry port)
+    let repo = ref.slice(0, colon);
+    const tag = ref.slice(colon + 1);
+    for (const prefix of REGISTRY_PREFIXES) {
+      if (repo.startsWith(prefix)) { repo = repo.slice(prefix.length); break; }
+    }
+    if (repo !== DAEMON_IMAGE_REPOSITORY && repo !== LOCAL_IMAGE_REPOSITORY) continue;
+    if (!tag || tag === currentVersion || tag.startsWith(`${currentVersion}-`)) continue;
+    stale.push(ref);
+  }
+  return stale;
+}
 export function volumeCreateArgs(name: string): string[] {
   return ['volume', 'create', name];
 }

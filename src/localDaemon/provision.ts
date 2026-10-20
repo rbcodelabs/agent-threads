@@ -26,7 +26,9 @@ import {
   credentialPresentArgs,
   dataVolumeFor,
   imageInspectArgs,
+  imageListArgs,
   imageRemoveArgs,
+  staleDaemonImages,
   inspectContainerArgs,
   localImageRef,
   logsArgs,
@@ -308,6 +310,29 @@ export async function removeImage(d: StepDeps, version: string, harnesses?: read
   if (!(await imagePresent(d, ref))) return;
   // Best effort: an image still used by a container is simply kept.
   await run(d, imageRemoveArgs(ref), VM_LIFECYCLE_TIMEOUT_MS);
+}
+
+/**
+ * Removes every daemon image (published or locally built) that is not for `currentVersion`, whatever harness set it
+ * was built for. Best effort and never throws: an image a container still uses is refused by `image rm` and kept,
+ * and a failed list or removal only means the image stays. Returns the refs that were removed.
+ */
+export async function pruneStaleDaemonImages(d: StepDeps, currentVersion: string): Promise<string[]> {
+  const removed: string[] = [];
+  try {
+    const listed = await run(d, imageListArgs(), SHORT_TIMEOUT_MS);
+    if (listed.exitCode !== 0) return removed;
+    for (const ref of staleDaemonImages(listed.stdout.split('\n'), currentVersion)) {
+      try {
+        if ((await run(d, imageRemoveArgs(ref), VM_LIFECYCLE_TIMEOUT_MS)).exitCode === 0) removed.push(ref);
+      } catch (e) {
+        if (e instanceof LocalDaemonAbortedError) throw e;
+      }
+    }
+  } catch (e) {
+    if (e instanceof LocalDaemonAbortedError) throw e;
+  }
+  return removed;
 }
 
 /** Last lines of the container log, for a failure message. Never throws. */
