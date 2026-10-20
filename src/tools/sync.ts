@@ -45,6 +45,25 @@ function parseHistoryId(id: string): { entityId: string; heads: string[] } | nul
 
 export interface SyncToolsPort {
   app: Pick<App, 'vault'>;
+  /** Busy-retry tuning (tests override). Defaults: 8 attempts, 3s apart. */
+  busyRetry?: { attempts: number; delayMs: number };
+}
+
+/**
+ * Geode's sync service has a single-owner slot that the 30s background poll also takes, so resolve calls
+ * made while it is busy fail immediately with this message (before doing any work, so retrying is safe).
+ */
+const BUSY_RE = /Sync already running or disconnecting/;
+
+export async function retryWhenSyncBusy<T>(fn: () => Promise<T>, { attempts, delayMs }: { attempts: number; delayMs: number }): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i >= attempts || !BUSY_RE.test(err instanceof Error ? err.message : String(err))) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
 }
 
 interface AdapterLike {
@@ -92,6 +111,8 @@ export function lineDiff(local: string, remote: string): string {
 
 export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
   const { app } = port;
+  const retry = port.busyRetry ?? { attempts: 8, delayMs: 3000 };
+  const whenIdle = <T>(fn: () => Promise<T>) => retryWhenSyncBusy(fn, retry);
 
   const getSync = (): GeodeSyncApi | null => {
     const sync = (app as unknown as { sync?: Partial<GeodeSyncApi> }).sync;
@@ -157,16 +178,16 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
           if (!hid || !sync.describeHistoryConflict) {
             return ok({ kind: 'history', conflict, note: 'This Geode build cannot describe history conflicts; the user resolves it in Settings → Sync.' });
           }
-          const comparison = (await sync.describeHistoryConflict(hid.entityId)) as {
+          const comparison = (await whenIdle(() => sync.describeHistoryConflict!(hid.entityId))) as {
             comparable?: boolean;
             heads?: Array<{ recordId: string; deleted?: boolean }>;
           };
           let local: string | null = null;
           const versions: Array<{ recordId: string; text: string | null }> = [];
           if (comparison.comparable && sync.readHistoryConflictText) {
-            local = clip(await sync.readHistoryConflictText(hid.entityId, { kind: 'current' }).catch(() => null));
+            local = clip(await whenIdle(() => sync.readHistoryConflictText!(hid.entityId, { kind: 'current' })).catch(() => null));
             for (const h of comparison.heads ?? []) {
-              const text = h.deleted ? null : await sync.readHistoryConflictText(hid.entityId, { kind: 'version', recordId: h.recordId }).catch(() => null);
+              const text = h.deleted ? null : await whenIdle(() => sync.readHistoryConflictText!(hid.entityId, { kind: 'version', recordId: h.recordId })).catch(() => null);
               versions.push({ recordId: h.recordId, text: clip(text) });
             }
           }
@@ -218,11 +239,8 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
           if (args.mergedContent !== undefined) return fail('mergedContent is only supported for sibling conflicts.');
           if (args.resolution === 'accept-remote' && !args.recordId) return fail('History conflicts need recordId to accept a version (see sync_inspect_conflict).');
           if (args.recordId && !hid.heads.includes(args.recordId)) return fail('recordId is not one of this conflict\'s versions.');
-          await sync.resolveHistoryConflict({
-            entityId: hid.entityId,
-            heads: hid.heads,
-            choice: args.resolution === 'accept-remote' ? { kind: 'version', recordId: args.recordId! } : { kind: 'current' },
-          });
+          const choice = args.resolution === 'accept-remote' ? { kind: 'version' as const, recordId: args.recordId! } : { kind: 'current' as const };
+          await whenIdle(() => sync.resolveHistoryConflict!({ entityId: hid.entityId, heads: hid.heads, choice }));
           return ok({ resolved: true, id: args.id, resolution: args.resolution, recordId: args.recordId ?? null });
         }
         let resolution = args.resolution;
@@ -231,7 +249,7 @@ export function createSyncTools(port: SyncToolsPort): Record<string, ToolDef> {
           await writeLocal(conflict.path, args.mergedContent);
           resolution = 'keep-local';
         }
-        await sync.resolveConflict(args.id, resolution);
+        await whenIdle(() => sync.resolveConflict(args.id, resolution));
         return ok({ resolved: true, id: args.id, resolution, mergedWritten: args.mergedContent !== undefined });
       } catch (err) {
         return fail(err instanceof Error ? err.message : String(err));
