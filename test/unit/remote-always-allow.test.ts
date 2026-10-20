@@ -99,3 +99,47 @@ describe('normalizeRemoteAlwaysAllowed', () => {
     expect(out.box).toEqual(['a']);
   });
 });
+
+describe('remote always-allow, hostile and malformed input', () => {
+  it('a forged relay approval for a per-call tool is never stored, under any name variant', () => {
+    const s = settings();
+    for (const t of ['host_exec', 'mcp__claude_threads__host_exec', 'mcp__other__host_exec', 'sync_resolve_conflict', 'mcp__claude_threads__sync_resolve_conflict']) {
+      expect(recordAlwaysAllow(s, t, { daemonId: 'box' })).toBe(false);
+    }
+    expect(s.remoteAlwaysAllowedTools).toEqual({});
+    expect(s.alwaysAllowedTools).toEqual([]);
+  });
+
+  it('a daemon id of __proto__ or constructor cannot pollute or approve across daemons', () => {
+    const s = settings();
+    expect(addRemoteAlwaysAllow(s, '__proto__', 'a')).toBe(false);
+    expect(({} as Record<string, unknown>).a).toBeUndefined();
+    expect(isPermissionPreApprovedForThread('a', { daemonId: '__proto__' }, s)).toBe(false);
+    expect(isPermissionPreApprovedForThread('a', { daemonId: 'constructor' }, s)).toBe(false);
+    expect(isPermissionPreApprovedForThread('a', { daemonId: 'toString' }, s)).toBe(false);
+    expect(addRemoteAlwaysAllow(s, 'constructor', 'a')).toBe(true);
+    expect(isPermissionPreApprovedForThread('a', { daemonId: 'constructor' }, s)).toBe(true);
+    expect(isPermissionPreApprovedForThread('a', { daemonId: 'box' }, s)).toBe(false);
+  });
+
+  it('a malformed daemon entry (non-array) in settings does not throw or approve', () => {
+    const s = settings({ remoteAlwaysAllowedTools: { box: 'a' as unknown as string[] } });
+    expect(() => isPermissionPreApprovedForThread('a', { daemonId: 'box' }, s)).not.toThrow();
+  });
+
+  it('removing a daemon from remoteDaemons leaves its entries inert for other daemons', () => {
+    const s = settings({ remoteAlwaysAllowedTools: { gone: ['a'] } });
+    expect(isPermissionPreApprovedForThread('a', { daemonId: 'box' }, s)).toBe(false);
+    expect(removeRemoteAlwaysAllow(s, 'gone', 'a')).toBe(true);
+    expect(s.remoteAlwaysAllowedTools).toEqual({});
+  });
+
+  it('removing a tool from a missing map does not throw', () => {
+    const s = { alwaysAllowedTools: [] } as unknown as AlwaysAllowSettings;
+    expect(removeRemoteAlwaysAllow(s, 'box', 'a')).toBe(false);
+  });
+
+  it('normalize survives a nested-junk map and keeps tool names case-sensitive', () => {
+    expect(normalizeRemoteAlwaysAllowed({ box: [null, undefined, {}, ['x'], 'A', 'a'] })).toEqual({ box: ['A', 'a'] });
+  });
+});
