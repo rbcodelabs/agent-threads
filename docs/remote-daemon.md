@@ -941,7 +941,7 @@ that is also clean, fully pushed and not locked goes; anything else is left and 
    (for example `wss://my-server.tailnet-name.ts.net:8443`) and the token. Press **Test connection**: it
    should say `Connected: agent-threads <version>, protocol 1`, and the dialog then offers the folders the
    daemon itself advertises (next section). You do not type any path on the daemon machine.
-3. In the Agents list composer, right-click (or hold) the send button: under **Run on** choose
+3. In the Agents list composer, click the settings indicator beside the attach/mic buttons: under **Run on** choose
    `my-server`. The folder is a dropdown of the daemon's own folders (with **Browse...** to pick a
    subfolder); send. The thread shows a `my-server` badge, the remote folder and a connection pill.
 4. Quit Geode mid-turn, wait, reopen: the transcript completes without any action.
