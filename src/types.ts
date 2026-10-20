@@ -272,6 +272,12 @@ export interface RemoteDaemonConfig {
    */
   managed?: 'local-container';
   /**
+   * Whether the skill folders Threads controls (installed, local and GitHub skill sources; never `~/.claude`) are
+   * copied to this daemon's data directory over its connection. Absent = `'auto'`; an unrecognised value is treated as
+   * `'off'`. Read it only through `resolveSkillsSyncMode` (src/remote/skillsSync.ts). Not used by the managed daemon.
+   */
+  skillsSync?: 'auto' | 'off';
+  /**
    * Settings MCP servers the user chose to run on this daemon (key = server name). Absent = none. A server is synced
    * only while `enabled` AND `confirmedHash` equals the hash of its current definition (see `src/remote/mcpSync.ts`).
    */

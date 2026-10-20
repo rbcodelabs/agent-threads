@@ -26,6 +26,7 @@ import {
   MCP_SYNC_CAPABILITY,
   MCP_SYNC_STDIO_CAPABILITY,
   PROTOCOL_VERSION,
+  SKILLS_SYNC_CAPABILITY,
   decodeClientFrame,
   encodeFrame,
   isChannel,
@@ -46,6 +47,7 @@ import {
 import type { CommandCache } from './cmdCache';
 import { CredError, type CredStore } from './credStore';
 import { RepoError, type ReposManager } from './repos';
+import { SkillError, type SkillStore } from './skillStore';
 import type { SyncedMcpStore } from './syncedMcp';
 import type { PathAccess } from './sessionPolicy';
 import type { ControlRegistry } from './controlRegistry';
@@ -77,7 +79,7 @@ export function raiseFrameLimit(ws: WebSocket, bytes: number): boolean {
 /** Stop handing frames to the socket once this much is already buffered in it. */
 const SOCKET_HIGH_WATER = 256 * 1024;
 /** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
-export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'file.read', 'host.tools', 'creds.push', 'mcp.status', 'repos', MCP_SYNC_CAPABILITY];
+export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'file.read', 'host.tools', 'creds.push', 'mcp.status', 'repos', MCP_SYNC_CAPABILITY, SKILLS_SYNC_CAPABILITY];
 /**
  * `harness.<kind>` for each harness a client may request, plus `harness.<kind>.<feature>` for what that harness
  * supports (see `HARNESS_FEATURES`). The scripted fake advertises only `harness.fake`.
@@ -119,6 +121,8 @@ export interface ServerContext {
   creds: CredStore;
   /** The repositories the daemon keeps cloned (`repos.sync`, `repos.status`). */
   repos: ReposManager;
+  /** Skill trees pushed by admin clients (`skills.*`). */
+  skills: SkillStore;
   /** MCP server definitions synced by the app (`mcp.sync`). */
   syncedMcp: SyncedMcpStore;
   /** Names of the servers in the operator's config.json, which override a synced server of the same name. */
@@ -169,6 +173,10 @@ export const REQUIRED_SCOPE: Record<string, TokenScope> = {
   // Changing the list runs git against remotes with the stored token; looking at it only shows names and states.
   'repos.sync': 'admin',
   'repos.status': 'read',
+  // These write to the daemon's disk.
+  'skills.sync': 'admin',
+  'skills.put': 'admin',
+  'skills.commit': 'admin',
   // Defines programs and endpoints sessions will start, with the credentials pushed beside them.
   'mcp.sync': 'admin',
 };
@@ -446,6 +454,15 @@ export class Connection {
     }
   }
 
+  private skillOp<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (err) {
+      if (err instanceof SkillError) throw new CommandError('bad_frame', err.message);
+      throw err;
+    }
+  }
+
   private async reposSync(repos: unknown, wait: boolean, auth: VerifiedToken): Promise<unknown> {
     let reply;
     try {
@@ -559,6 +576,21 @@ export class Connection {
         // Who changed which credential, never the values.
         this.ctx.audit({ event: 'creds_push', tokenId: auth.id, kind: result.kind, fields: result.fields, removed: result.removed });
         return { kind: result.kind, fields: result.fields, removed: result.removed, ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}) };
+      }
+      case 'skills.sync': {
+        const reply = this.skillOp(() => this.ctx.skills.sync(frame.trees));
+        this.ctx.audit({ event: 'skills_sync', tokenId: auth.id, wanted: frame.trees.map((t) => t.dir), missing: reply.missing });
+        return { ...reply };
+      }
+      case 'skills.put': {
+        const r = this.skillOp(() => this.ctx.skills.put(frame.upload, frame.dir, frame.seq, frame.files));
+        return { ...r };
+      }
+      case 'skills.commit': {
+        const r = this.skillOp(() => this.ctx.skills.commit(frame.upload, frame.dir, frame.hash, frame.files, frame.bytes));
+        // Directory names and sizes only, never content.
+        this.ctx.audit({ event: 'skills_commit', tokenId: auth.id, dir: r.dir, files: frame.files, bytes: frame.bytes, created: r.created });
+        return { ...r };
       }
       case 'repos.sync': return this.reposSync(frame.repos, frame.wait === true, auth);
       case 'repos.status': return { ...this.ctx.repos.status() };

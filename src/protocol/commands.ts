@@ -7,6 +7,7 @@
  */
 import type { HarnessPermissionMode } from '../HarnessSession';
 import type { Channel } from './envelope';
+import type { SkillTreeManifest, SkillWireFile } from './skills';
 import type { SyncedMcpServers } from './mcpSync';
 import type { RemoteHostToolSpec, RemoteSessionSpec } from './spec';
 
@@ -86,6 +87,13 @@ export type ClientCommand =
   | { type: 'repos.sync'; repos?: RepoSpec[]; wait?: boolean }
   /** The state of each configured repository. Additive within v1. */
   | { type: 'repos.status' }
+  // Skill delivery (admin: it writes to the daemon's disk). See ./skills.ts. Additive within v1.
+  /** Manifest of the skill trees the client wants present. Replies `{ root, have, missing }`. */
+  | { type: 'skills.sync'; trees: SkillTreeManifest[] }
+  /** One chunk of a missing tree, staged under `.incoming/<upload>`. */
+  | { type: 'skills.put'; upload: string; dir: string; seq: number; files: SkillWireFile[] }
+  /** Verify the staged tree against `hash` and move it into place. Idempotent. */
+  | { type: 'skills.commit'; upload: string; dir: string; hash: string; files: number; bytes: number }
   /**
    * Replace the MCP server definitions synced from the client (full replace: absent names are removed). Values of
    * `${NAME}` placeholders are NOT sent here; they go with `creds.push`. Needs an admin token. Additive within v1;
@@ -285,5 +293,8 @@ export const CLIENT_COMMAND_TYPES: Record<ClientCommandType, true> = {
   'creds.push': true,
   'repos.sync': true,
   'repos.status': true,
+  'skills.sync': true,
+  'skills.put': true,
+  'skills.commit': true,
   'mcp.sync': true,
 };

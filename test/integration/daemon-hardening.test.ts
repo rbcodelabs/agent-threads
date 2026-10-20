@@ -260,6 +260,9 @@ describe('L. scopes and request ownership', () => {
     'creds.push': { kind: 'k', ttlSec: 1, fields: {} },
     'repos.sync': {},
     'repos.status': {},
+    'skills.sync': { trees: [] },
+    'skills.put': { upload: 'upload-0001', dir: 'demo-0123456789ab', seq: 0, files: [] },
+    'skills.commit': { upload: 'upload-0001', dir: 'demo-0123456789ab', hash: '0123456789ab'.padEnd(64, '0'), files: 0, bytes: 0 },
     'mcp.sync': { servers: {} },
   };
 

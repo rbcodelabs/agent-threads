@@ -199,6 +199,11 @@ export class ThreadHost {
     }));
   }
 
+  /** Plugin paths of sessions with a running driver; the skill store never prunes trees these name. */
+  pluginPathsInUse(): string[] {
+    return [...this.threads.values()].flatMap((rt) => (rt.driver ? rt.meta?.spec.pluginPaths ?? [] : []));
+  }
+
   /**
    * What the auto-updater needs to decide whether a restart would interrupt anyone: threads with a turn in flight,
    * a request waiting on a human, or a host-tool call in flight (`busy`), and the last time anything happened

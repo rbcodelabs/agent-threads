@@ -10,6 +10,7 @@ import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifa
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig, RemoteHostToolsSettings } from './types';
 import { daemonWsUrl, probeDaemon, type ProbeWorkspaces } from './remote/DaemonClient';
 import { connectionPill } from './remote/connectionPill';
+import { resolveSkillsSyncMode } from './remote/skillsSync';
 import { adminTokenSecretNameFor, checkDaemonInput, checkVaultMappingInput, describeTest, parsePushedSecrets, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
 import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel } from './remote/workspaceChoice';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
@@ -739,6 +740,17 @@ export class RemoteDaemonModal extends Modal {
     };
     drawHostTools();
 
+    // Skill folders Threads controls are copied to the daemon automatically. Not for the managed local daemon (own path).
+    let skillsSync: string | undefined = this.existing?.skillsSync;
+    if (this.existing?.managed !== 'local-container') {
+      new Setting(advanced).setName('Skills')
+        .setDesc('Automatic: your installed, local and GitHub skills are copied to this daemon\'s data directory when a thread starts there, and only Agent Threads sessions on it use them. Nothing is written to ~/.claude on that machine. Skills are instructions the agent follows and may contain secrets, so use Off for a daemon you do not fully trust. Turning this off does not delete what was already copied; the daemon removes unused skills after 14 days.')
+        .addDropdown((d) => d
+          .addOption('auto', 'Automatic')
+          .addOption('off', 'Off')
+          .setValue(resolveSkillsSyncMode({ skillsSync }) === 'auto' ? 'auto' : 'off')
+          .onChange((v) => { skillsSync = v; }));
+    }
     // Secrets this app may PUSH to the daemon (names only). The list is the consent: nothing leaves until a name is on
     // it, and a name is only sent over wss:// (or loopback) with the admin token below.
     let pushedText = (this.existing?.pushedSecrets ?? []).join('\n');
@@ -813,6 +825,7 @@ export class RemoteDaemonModal extends Modal {
           tokenSecretName: this.existing?.tokenSecretName ?? tokenSecretNameFor(id),
           ...(folder.trim() ? { defaultCwdRoot: folder.trim() } : {}),
           ...(mapping.mapping ? { vaultMapping: mapping.mapping } : {}),
+          ...(skillsSync !== undefined && skillsSync !== 'auto' ? { skillsSync: skillsSync as 'off' } : {}),
           ...hostToolsSettingsFrom(hostTools),
           ...(pushed.names.length > 0 ? { pushedSecrets: pushed.names } : {}),
         },
