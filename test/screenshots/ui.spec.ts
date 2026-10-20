@@ -3206,7 +3206,7 @@ test.describe('Agent Threads UI', () => {
     const hiptrip = page.locator('.ct-agents-project').filter({
       has: page.locator('.ct-agents-project-name', { hasText: 'HipTrip' }),
     });
-    const sections = (await hiptrip.locator('.ct-agents-group-label > span:first-child').allInnerTexts()).map(label => label.trim().toUpperCase());
+    const sections = (await hiptrip.locator('.ct-agents-group-label > span:nth-child(2)').allInnerTexts()).map(label => label.trim().toUpperCase());
     expect(sections).toEqual(expect.arrayContaining(['WORKING', 'WAITING', 'NEW', 'REVIEWED']));
     expect(sections.indexOf('WORKING')).toBeLessThan(sections.indexOf('WAITING'));
     expect(sections.indexOf('WAITING')).toBeLessThan(sections.indexOf('NEW'));
