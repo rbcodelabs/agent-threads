@@ -85,6 +85,9 @@ import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
 import { DaemonRegistry } from './remote/DaemonRegistry';
+import { DaemonClient, daemonWsUrl } from './remote/DaemonClient';
+import { adminTokenSecretNameFor } from './remote/daemonConfig';
+import { RemoteSecretPush } from './remote/secretPush';
 import { McpSyncEngine, normalizeDaemonMcpSync, wireTransport, type McpSyncTransport } from './remote/mcpSync';
 import { LOCAL_DAEMON_ID } from './localDaemon/spec';
 import { createRemoteFolderSource, type RemoteFolderSource } from './remote/folderSource';
@@ -278,6 +281,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
   manager!: ThreadManager;
   /** Connections to the remote agent-threads daemons (Settings -> Remote daemons). */
   daemonRegistry: DaemonRegistry | null = null;
+  /** Pushes allowlisted secrets to remote daemons (`RemoteDaemonConfig.pushedSecrets`); see src/remote/secretPush.ts. */
+  remoteSecretPush: RemoteSecretPush | null = null;
+  /** Warnings already shown, so a missing admin token is reported once, not on every send. */
+  private readonly shownSecretPushWarnings = new Set<string>();
   /** Last MCP server status each remote daemon reported (shown in Settings, Remote). */
   readonly daemonMcpStatus = new DaemonMcpStatusStore();
   /** Syncs the Settings MCP servers the user opted in for each remote daemon (see remote/mcpSync.ts). */
@@ -658,6 +665,26 @@ export default class ClaudeThreadsPlugin extends Plugin {
       getMcpSync: (daemonId) => (this.mcpSync ? { synced: this.mcpSync.syncedNamesOf(daemonId), reasonFor: (name) => this.mcpSync?.unsyncedReasonOf(daemonId, name) } : undefined),
       log: (message) => debugLog(message),
     });
+    this.remoteSecretPush = new RemoteSecretPush({
+      daemons: () => this.settings.remoteDaemons ?? [],
+      // A separate, optional admin token: `creds.push` needs admin scope, the everyday token is control.
+      adminToken: (daemon) => this.app.secretStorage.getSecret(secretStorageKey(adminTokenSecretNameFor(daemon.id))) || undefined,
+      // What a host session would get: Extra environment variables, then the keychain secrets visible to the project.
+      resolveEnv: (projectId) => ({ ...parseExtraEnv(effectiveExtraEnv(this.settings)), ...(this.manager.secretEnvResolver?.(projectId) ?? {}) }),
+      createClient: (daemon, adminToken) => new DaemonClient({
+        url: daemonWsUrl(daemon.url),
+        getToken: () => adminToken,
+        createSocket: createPluginWebSocketFactory(),
+        clientVersion: this.manifest.version,
+        log: (message) => debugLog(message),
+      }),
+      log: (message) => debugLog(message),
+    });
+    // Quit: re-push without the secrets (bounded, best effort); the daemon's TTL deletes whatever this cannot reach.
+    this.register(() => { void this.remoteSecretPush?.stop(); });
+    // Keeps pushed kinds from lapsing between messages (reconcile re-pushes only kinds older than half the TTL), so a
+    // daemon-side session restart with no send from here still finds its environment.
+    this.registerInterval(window.setInterval(() => { void this.remoteSecretPush?.reconcile(); }, 10 * 60 * 1000));
     this.remoteFolders = createRemoteFolderSource(this.daemonRegistry);
     this.remoteRepos = createRemoteReposSource(this.daemonRegistry);
     this.register(() => { this.daemonRegistry?.disposeAll(); });
@@ -2747,7 +2774,18 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Lazy start: a thread that runs on the managed daemon starts it on first use.
     this.manager.beforeRemoteSend = async (daemonId, threadId) => {
       const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
-      if (daemon?.managed !== 'local-container') return;
+      if (daemon?.managed !== 'local-container') {
+        // A remote daemon: push the secrets its allowlist names (nothing when the list is empty, the default).
+        const prep = await this.remoteSecretPush?.prepare(daemonId, this.manager.getThread(threadId)?.projectId);
+        if (prep?.envKind) this.localDaemonExtras.set(threadId, { envKind: prep.envKind, pluginPaths: [] });
+        else this.localDaemonExtras.delete(threadId);
+        for (const warning of prep?.warnings ?? []) {
+          if (this.shownSecretPushWarnings.has(warning)) continue;
+          this.shownSecretPushWarnings.add(warning);
+          new Notice(warning, 9000);
+        }
+        return;
+      }
       await controller.ensureRunning();
       // Before the session opens: the daemon reads what is pushed to it when a session starts. Neither call throws.
       await this.localDaemonGithub?.ensureFresh();

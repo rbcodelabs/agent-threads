@@ -82,13 +82,9 @@ export const HOME_DIR = `${DATA_MOUNT}/home`;
 export const CLAUDE_HOME_DIR = `${HOME_DIR}/.claude`;
 export const AWS_HOME_DIR = `${HOME_DIR}/.aws`;
 /** Credential kinds holding a session's environment: `sessenv-<project id>`; the session spec carries only the name. */
-export const SESSION_ENV_KIND_PREFIX = 'sessenv-';
+export { SESSION_ENV_KIND_PREFIX, sessionEnvKind } from '../credsDelivery';
 /** The environment is read when a session (re)starts, which can be long after it was pushed; refreshed on every send. */
 export const SESSION_ENV_TTL_SEC = 24 * 60 * 60;
-export function sessionEnvKind(projectId: string | undefined): string {
-  const id = (projectId ?? 'none').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+/, '').slice(0, 48) || 'none';
-  return `${SESSION_ENV_KIND_PREFIX}${id}`;
-}
 
 /** `creds.push` kind and field the daemon reads GitHub access from (daemon/repos.ts). */
 export const GITHUB_CREDS_KIND = 'github';
