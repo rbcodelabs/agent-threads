@@ -18,6 +18,16 @@ test.describe('agents list — collapsible groups', () => {
     const before = await rows.count();
     expect(before).toBeGreaterThan(1);
 
+    if (out) {
+      await hiptrip.locator('.ct-agents-group-label').filter({ hasText: 'Waiting' }).hover();
+      await page.screenshot({ path: path.join(out, '1b-hover.png') });
+      await hiptrip.locator('.ct-agents-project-header').focus();
+      await page.keyboard.press('Shift+Tab');
+      await page.keyboard.press('Tab');
+      await page.mouse.move(0, 0);
+      await page.screenshot({ path: path.join(out, '1c-focus.png') });
+    }
+
     // Collapse one status group inside the project.
     const newLabel = hiptrip.locator('.ct-agents-group-label').filter({ hasText: 'Working' }).first();
     await newLabel.click();
