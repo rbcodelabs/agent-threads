@@ -62,15 +62,19 @@ test.describe('agents list — archived threads', () => {
     await expect(group).toBeVisible();
     // Collapsed by default: header only.
     await expect(group.locator('.ct-agents-row')).toHaveCount(0);
-    if (out) await group.scrollIntoViewIfNeeded();
+    if (out) {
+      await group.scrollIntoViewIfNeeded();
       await page.mouse.move(0, 0);
       await page.screenshot({ path: path.join(out, '4-archived-collapsed.png') });
+    }
 
     await group.locator('.ct-agents-group-label').click();
     await expect(group.locator('.ct-agents-row-archived').first()).toBeVisible();
-    if (out) await group.scrollIntoViewIfNeeded();
+    if (out) {
+      await group.scrollIntoViewIfNeeded();
       await page.mouse.move(0, 0);
       await page.screenshot({ path: path.join(out, '5-archived-expanded.png') });
+    }
 
     const title = await group.locator('.ct-agents-row-archived .ct-agents-row-title-text').first().innerText();
     await group.locator('.ct-agents-row-archived').first().hover();
