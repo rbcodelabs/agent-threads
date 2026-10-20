@@ -190,8 +190,10 @@ export function wireTransport(client: DaemonClient): McpSyncTransport {
     },
     async syncServers(servers) {
       try {
-        const r = (await client.command('mcp.sync', { servers }, { timeoutMs: 15_000 })) as unknown as Partial<McpSyncReply>;
-        return { accepted: r.accepted ?? [], rejected: r.rejected ?? [], requiredCreds: r.requiredCreds ?? [], shadowed: r.shadowed ?? [] };
+        // An empty set is always an explicit clear, so a daemon that distinguishes the two honours it.
+        const payload = Object.keys(servers).length === 0 ? { servers, clear: true } : { servers };
+        const r = (await client.command('mcp.sync', payload, { timeoutMs: 15_000 })) as unknown as Partial<McpSyncReply>;
+        return { accepted: r.accepted ?? [], rejected: r.rejected ?? [], requiredCreds: r.requiredCreds ?? [], shadowed: r.shadowed ?? [], ...(r.kept === true ? { kept: true } : {}) };
       } catch (e) { return forbidden(e); }
     },
     async probeAdmin() {
@@ -536,8 +538,23 @@ export class McpSyncEngine {
       // 2. definitions (full replace of the synced set).
       const servers: SyncedMcpServers = Object.fromEntries(included.map((ev) => [ev.name, ev.wire!]));
       const reply = await transport.syncServers(servers);
-      const accepted = new Set(reply.accepted);
       const rejected = Object.fromEntries(reply.rejected.map((r) => [r.name, r.reason]));
+      if (reply.kept) {
+        // Every server was refused and the daemon kept what it already ran. Nothing changed there, so: no pruning of
+        // credentials (the running set may still need them), no record of new names, no "synced" status, and the next
+        // trigger retries instead of treating this state as fresh.
+        const reason = 'the daemon refused every server and kept the previous set';
+        st.phase = 'error';
+        st.error = `${reason}: ${reply.rejected.map((r) => `${r.name} (${r.reason})`).join('; ').slice(0, 400)}`;
+        st.rejected = rejected;
+        st.adminState = 'yes';
+        st.missing = missing;
+        st.statuses = { ...statuses, ...Object.fromEntries(included.map((ev) => [ev.name, { state: 'rejected', reason: rejected[ev.name] ?? 'the daemon did not accept it' } as McpSyncServerStatus])) };
+        this.lastKey.delete(daemonId);
+        this.emit(daemonId);
+        return;
+      }
+      const accepted = new Set(reply.accepted);
       // 3. a server the daemon refused does not keep its secrets there.
       const keep = included.filter((ev) => accepted.has(ev.name));
       if (keep.length !== included.length) {

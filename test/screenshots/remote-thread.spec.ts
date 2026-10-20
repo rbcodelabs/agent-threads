@@ -75,8 +75,8 @@ test.describe('Run on a daemon: folders come from the daemon', () => {
     await page.waitForSelector('.ct-title-row');
     await page.waitForTimeout(300);
     await page.getByRole('button', { name: 'New thread' }).first().click();
-    await page.waitForSelector('.ct-new-conv-row .ct-agents-dispatch-btn');
-    await page.locator('.ct-new-conv-row .ct-agents-dispatch-btn').dispatchEvent('contextmenu');
+    await page.waitForSelector('.ct-new-conv-row .ct-settings-indicator');
+    await page.locator('.ct-new-conv-row .ct-settings-indicator').click();
     await page.locator(`.ct-run-on-item[data-run-on="${daemon}"]`).click();
     await page.waitForSelector(ready);
   }
@@ -197,8 +197,8 @@ test.describe('Run on: set up the local daemon from the picker', () => {
     await page.waitForSelector('.ct-title-row');
     await page.waitForTimeout(300);
     await page.getByRole('button', { name: 'New thread' }).first().click();
-    await page.waitForSelector('.ct-new-conv-row .ct-agents-dispatch-btn');
-    await page.locator('.ct-new-conv-row .ct-agents-dispatch-btn').dispatchEvent('contextmenu');
+    await page.waitForSelector('.ct-new-conv-row .ct-settings-indicator');
+    await page.locator('.ct-new-conv-row .ct-settings-indicator').click();
   }
 
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {

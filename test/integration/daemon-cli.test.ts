@@ -424,6 +424,32 @@ describe('mcp sync', () => {
     expect(r.code).toBe(1);
   });
 
+  it('exits 1 and keeps the previous set when every server is rejected, with or without --strict', async () => {
+    await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({ docs: DOCS }) }, td.adminToken);
+    const file = join(td.dataDir, 'synced-mcp.json');
+    const before = readFileSync(file, 'utf8');
+    const r = await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({ bad: { type: 'http' }, tool: { command: 'x' } }) }, td.adminToken);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('previously synced set was kept unchanged');
+    expect(r.out).toContain('rejected bad:');
+    expect(r.out).not.toContain('no servers are synced now');
+    expect(readFileSync(file, 'utf8')).toBe(before);
+    const json = await cli(['mcp', 'sync', '--stdin', '--json'], { stdin: stdinOf({ bad: { type: 'http' } }) }, td.adminToken);
+    expect(json.code).toBe(1);
+    expect(JSON.parse(json.out)).toMatchObject({ accepted: [], kept: true, rejected: [{ name: 'bad' }] });
+    expect((await cli(['mcp', 'sync', '--stdin', '--strict'], { stdin: stdinOf({ bad: { type: 'http' } }) }, td.adminToken)).code).toBe(1);
+    // Partial rejection still exits 0 without --strict.
+    expect((await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({ docs: DOCS, bad: { type: 'http' } }) }, td.adminToken)).code).toBe(0);
+  });
+
+  it('--clear removes the synced set', async () => {
+    await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({ docs: DOCS }) }, td.adminToken);
+    const r = await cli(['mcp', 'sync', '--stdin', '--clear'], { stdin: stdinOf({}) }, td.adminToken);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('no servers are synced now');
+    expect(JSON.parse(readFileSync(join(td.dataDir, 'synced-mcp.json'), 'utf8')).servers).toEqual({});
+  });
+
   it('needs --stdin, refuses an empty set without --clear, and needs an admin token (exit 4)', async () => {
     expect((await cli(['mcp', 'sync'], {}, td.adminToken)).code).toBe(2);
     expect((await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({}) }, td.adminToken)).code).toBe(2);

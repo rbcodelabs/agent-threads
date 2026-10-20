@@ -82,11 +82,13 @@ export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idem
  * `harness.<kind>` for each harness a client may request, plus `harness.<kind>.<feature>` for what that harness
  * supports (see `HARNESS_FEATURES`). The scripted fake advertises only `harness.fake`.
  */
-export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = [], syncedStdio = false): string[] => [
+export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = [], syncedStdio = false, autoUpdate = false): string[] => [
   ...BASE_CAPABILITIES,
   // Tells the app, before it syncs anything, that stdio definitions will not be refused by policy.
   ...(syncedStdio ? [MCP_SYNC_STDIO_CAPABILITY] : []),
   ...(harness === 'fake' ? ['harness.fake'] : harnessCapabilities(enabled.length ? enabled : isRealHarness(harness) ? [harness] : [])),
+  // Additive: this daemon replaces its own bundle and restarts when idle, so a version change can appear between sessions.
+  ...(autoUpdate ? ['update.auto'] : []),
 ];
 
 export interface Timings {
@@ -562,6 +564,11 @@ export class Connection {
       case 'repos.status': return { ...this.ctx.repos.status() };
       case 'mcp.sync': {
         const change = this.ctx.syncedMcp.replace(frame.servers, auth.id, this.ctx.configuredMcpNames());
+        if (change.kept) {
+          // The previous set stands: audit the refusal (names only) and say so in the reply.
+          this.ctx.audit({ event: 'mcp_sync_rejected', tokenId: auth.id, rejected: change.rejected.map((r) => r.name) });
+          return { accepted: [], rejected: change.rejected, requiredCreds: [], shadowed: [], kept: true };
+        }
         // Names only: never a definition, a header or a credential.
         this.ctx.audit({ event: 'mcp_sync', tokenId: auth.id, names: change.accepted, added: change.added, removed: change.removed });
         return { accepted: change.accepted, rejected: change.rejected, requiredCreds: change.requiredCreds, shadowed: change.shadowed };

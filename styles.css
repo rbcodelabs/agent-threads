@@ -2829,23 +2829,6 @@
   position: relative;
 }
 
-.ct-harness-send-btn {
-  position: relative;
-}
-
-.ct-harness-send-btn::after {
-  content: '';
-  position: absolute;
-  right: 3px;
-  bottom: 3px;
-  width: 0;
-  height: 0;
-  border-left: 2.5px solid transparent;
-  border-right: 2.5px solid transparent;
-  border-top: 3px solid currentColor;
-  opacity: 0.65;
-}
-
 .ct-harness-mark {
   display: inline-flex;
   align-items: center;
@@ -8468,6 +8451,7 @@ body.ct-skills-resizing {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 6px 4px;
   cursor: pointer;
 }
 
@@ -9883,8 +9867,6 @@ button.ct-agent-crumb:focus-visible {
   .ct-remote-pill--reconnecting::before { animation: none; }
 }
 
-/* Dispatch send button when the next thread will run on a daemon */
-.ct-harness-send-btn--remote { box-shadow: inset 0 0 0 1px var(--interactive-accent); }
 
 .ct-run-on-folder {
   display: flex;
@@ -10390,3 +10372,32 @@ button.ct-agent-crumb:focus-visible {
 .ct-message-assistant .ct-message-content img.ct-remote-img { max-width: 100%; border-radius: 4px; }
 .ct-message-assistant .ct-message-content img.ct-remote-img.is-loading { min-height: 48px; min-width: 48px; background: var(--background-modifier-hover); }
 .ct-remote-img-unavailable { color: var(--text-muted); font-style: italic; font-size: var(--font-ui-smaller); }
+
+/* Settings, MCP: "Available on" of a proxied server, and the daemon editor's tools checklist. */
+.ct-mcp-available-missing {
+  color: var(--text-faint);
+}
+
+.ct-host-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--background-modifier-border);
+}
+
+.ct-host-tools-list h4 {
+  margin: 8px 0 0;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+}
+
+.ct-host-tools-item .setting-item-description {
+  margin-left: 22px;
+}
+
+.ct-host-tools-item .ct-mcp-runson-toggle {
+  display: flex;
+  min-height: 32px;
+}

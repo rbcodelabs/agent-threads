@@ -108,8 +108,12 @@ export class SyncedMcpStore {
   }
 
   /**
-   * Replace the stored set. Each entry is validated on its own, so one bad definition does not stop the others;
-   * a name that is rejected is also dropped from the store (full replace), never kept from an earlier sync.
+   * Replace the stored set. Each entry is validated on its own, so one bad definition does not stop the others.
+   * When some are accepted, a name that is rejected is also dropped from the store (full replace), never kept from an
+   * earlier sync: the definition it had was superseded by one the daemon refuses, and silently running the old one
+   * would contradict what the client was just told.
+   * When the request named servers and NONE was accepted, nothing is replaced (`kept`): a policy change (stdio turned
+   * off) or one invalid definition must not wipe a working set. An empty request is a deliberate clear.
    * `configured` is the set of names the operator's config.json defines: they are accepted but reported as shadowed.
    */
   replace(servers: unknown, tokenId: string, configured: ReadonlySet<string> = new Set()): SyncedMcpChange {
@@ -135,6 +139,9 @@ export class SyncedMcpStore {
       next[name] = { def, hash, syncedBy: tokenId, syncedAt: before && before.hash === hash ? before.syncedAt : this.now() };
     }
     const names = Object.keys(next);
+    if (entries.length > 0 && names.length === 0) {
+      return { accepted: [], rejected, requiredCreds: [], shadowed: [], kept: true, added: [], removed: [] };
+    }
     writeFileAtomic(this.file, `${JSON.stringify({ version: 1, servers: next } satisfies SyncedFile)}\n`);
     return {
       accepted: names,

@@ -12,7 +12,7 @@ The composer stays live while a child view is open. Its placeholder notes that a
 
 ## Choosing the harness at kickoff
 
-The Agents List and Agent Board dispatch controls show the harness that will own the new thread. A normal click dispatches with the shown Claude or Codex harness. Right-click, press and hold, or focus the button and press `Shift+F10` to choose the other harness without sending. The selection remains local to that mounted view; the Agent harness setting is only its initial default.
+The Agents List and Agent Board dispatch controls show the harness that will own the new thread. The send button always just sends. Click the settings indicator (agent and location icons with a chevron) next to the attach and mic buttons to choose the agent, or where it runs, without sending. The selection remains local to that mounted view; the Agent harness setting is only its initial default.
 
 ## Switching an existing thread
 

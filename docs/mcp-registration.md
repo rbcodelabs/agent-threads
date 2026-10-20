@@ -150,5 +150,7 @@ You can connect one from the UI as well as from an agent: **Add MCP server → O
 Servers registered here (stdio, http, sse) run on this computer by default. For threads on a remote daemon, tick the daemon under
 **Runs on** in Settings, MCP to have the server synced and started there too, with its `${NAME}` secrets delivered to the daemon
 (a dialog first shows exactly what is sent). OAuth servers and servers that point at this computer never leave it. A server
-registered by an agent through `mcp_register_server` is not synced until you opt it in. See
+registered by an agent through `mcp_register_server` is not synced until you opt it in. The daemon replaces its synced set with the
+servers it accepts; if it refuses every server you ticked (for example stdio while its operator has not allowed it), it keeps what
+it was already running and the reasons show on each server in Settings, MCP. See
 [Remote daemon](remote-daemon.md#mcp-servers-synced-from-the-app).
