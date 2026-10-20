@@ -1,5 +1,5 @@
 import { isValidOverviewPath } from './projectOverview';
-import { isAgentHarness } from './types';
+import { effectiveExtraEnv, isAgentHarness, parseExtraEnv } from './types';
 import { normalizeToolCallStyle } from './toolNameUtils';
 import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
@@ -11,7 +11,8 @@ import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledIte
 import { daemonWsUrl, probeDaemon, type ProbeWorkspaces } from './remote/DaemonClient';
 import { connectionPill } from './remote/connectionPill';
 import { resolveSkillsSyncMode } from './remote/skillsSync';
-import { adminTokenSecretNameFor, checkDaemonInput, checkVaultMappingInput, describeTest, parsePushedSecrets, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
+import { adminTokenSecretNameFor, checkDaemonInput, checkVaultMappingInput, describeTest, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
+import { addNamedRow, buildPickerRows, checkAddByName, mergeSavedEntries, selectedEntries, type PickerRow, type PushableSecretSources } from './remote/pushedSecretPicker';
 import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel } from './remote/workspaceChoice';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { renderLocalDaemonPanel } from './localDaemon/localDaemonPanel';
@@ -576,6 +577,8 @@ export class RemoteDaemonModal extends Modal {
       proxiedServers?(): string[];
       /** Names of the user's own servers (Settings, MCP) that a daemon may be sent. */
       ownServers?(): string[];
+      /** Names (never values) of the secrets that could be sent to a daemon right now. */
+      pushableSecrets?(): PushableSecretSources;
     },
   ) {
     super(app);
@@ -753,11 +756,49 @@ export class RemoteDaemonModal extends Modal {
     }
     // Secrets this app may PUSH to the daemon (names only). The list is the consent: nothing leaves until a name is on
     // it, and a name is only sent over wss:// (or loopback) with the admin token below.
-    let pushedText = (this.existing?.pushedSecrets ?? []).join('\n');
+    const saved = this.existing?.pushedSecrets ?? [];
+    let pushedRows: PickerRow[] = mergeSavedEntries(buildPickerRows(this.actions.pushableSecrets?.() ?? { envNames: [], keychain: [] }), saved);
+    let pushedSelected = new Set(saved);
     let adminToken = '';
     new Setting(advanced).setName('Secrets to send to this daemon')
-      .setDesc('Names only, one per line: environment variables or keychain secrets (for example GH_TOKEN), or project/NAME for one project. Their values are sent to this daemon when a thread starts there and can be read by anything running on it; an hour later they expire. Empty (the default): nothing is sent. Never type a secret value here.')
-      .addTextArea((t) => { t.inputEl.rows = 3; t.inputEl.setAttribute('aria-label', 'Secrets to send to this daemon'); t.setPlaceholder('GH_TOKEN').setValue(pushedText).onChange((v) => { pushedText = v; }); });
+      .setDesc('Tick the environment variables or keychain secrets to send. Their values are sent to this daemon when a thread starts there and can be read by anything running on it; an hour later they expire. None ticked (the default): nothing is sent.');
+    const pushedEl = advanced.createDiv({ cls: 'ct-pushed-secrets' });
+    const pushedMsg = pushedEl.createDiv({ cls: 'setting-item-description', attr: { role: 'status' } });
+    const pushedList = pushedEl.createDiv({ cls: 'ct-host-tools-list', attr: { role: 'group', 'aria-label': 'Secrets to send to this daemon' } });
+    const drawPushed = (): void => {
+      pushedList.empty();
+      if (pushedRows.length === 0) pushedList.createDiv({ cls: 'setting-item-description', text: 'No secrets found. Add keychain secrets or Extra environment variables in Settings, or add a name below.' });
+      for (const r of pushedRows) {
+        const row = pushedList.createDiv({ cls: 'ct-host-tools-item' });
+        const label = row.createEl('label', { cls: 'ct-mcp-runson-toggle' });
+        const box = label.createEl('input', { attr: { type: 'checkbox', 'aria-label': r.entry } });
+        box.checked = pushedSelected.has(r.entry);
+        label.createSpan({ text: r.label });
+        row.createDiv({ cls: `setting-item-description${r.found ? '' : ' mod-warning'}`, text: r.hint });
+        box.addEventListener('change', () => { if (box.checked) pushedSelected.add(r.entry); else pushedSelected.delete(r.entry); });
+      }
+    };
+    drawPushed();
+    let addInput: TextComponent | undefined;
+    const addByName = (): void => {
+      const check = checkAddByName(addInput?.getValue() ?? '');
+      pushedMsg.toggleClass('mod-warning', !check.ok);
+      if (!check.ok) { pushedMsg.setText(check.reason); return; }
+      pushedMsg.setText('');
+      const next = addNamedRow(pushedRows, pushedSelected, check.entry);
+      pushedRows = next.rows; pushedSelected = next.selected;
+      addInput?.setValue('');
+      drawPushed();
+    };
+    new Setting(advanced).setName('Add by name')
+      .setDesc('For a name that is not listed yet. The name only, for example GH_TOKEN, or project/NAME for one project. Never the secret itself.')
+      .addText((t) => {
+        addInput = t;
+        t.inputEl.setAttribute('aria-label', 'Add a secret by name');
+        t.setPlaceholder('GH_TOKEN');
+        t.inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addByName(); } });
+      })
+      .addButton((b) => b.setButtonText('Add').onClick(addByName));
     new Setting(advanced).setName('Admin token for sending secrets')
       .setDesc((this.existing ? 'Leave blank to keep the stored one. ' : '') + 'Sending needs an admin token, kept apart from the access token above. Create one with "agent-threads token create --scope admin" on the daemon machine. Secrets are only sent over wss:// (or to this computer).')
       .addText((t) => { t.inputEl.type = 'password'; t.inputEl.setAttribute('aria-label', 'Admin token for sending secrets'); t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { adminToken = v; }); });
@@ -812,8 +853,7 @@ export class RemoteDaemonModal extends Modal {
       if (!check.ok) { status.setText(check.reason); status.addClass('mod-warning'); return null; }
       const mapping = checkVaultMappingInput({ remoteRoot: vaultRemote, localRoot: vaultLocal });
       if (!mapping.ok) { status.setText(mapping.reason); status.addClass('mod-warning'); advanced.open = true; return null; }
-      const pushed = parsePushedSecrets(pushedText);
-      if (!pushed.ok) { status.setText(pushed.reason); status.addClass('mod-warning'); advanced.open = true; return null; }
+      const pushedNames = selectedEntries(pushedRows, pushedSelected);
       status.removeClass('mod-warning');
       const id = this.existing?.id ?? uniqueDaemonId(name, this.all);
       return {
@@ -827,7 +867,7 @@ export class RemoteDaemonModal extends Modal {
           ...(mapping.mapping ? { vaultMapping: mapping.mapping } : {}),
           ...(skillsSync !== undefined && skillsSync !== 'auto' ? { skillsSync: skillsSync as 'off' } : {}),
           ...hostToolsSettingsFrom(hostTools),
-          ...(pushed.names.length > 0 ? { pushedSecrets: pushed.names } : {}),
+          ...(pushedNames.length > 0 ? { pushedSecrets: pushedNames } : {}),
         },
       };
     };
@@ -3614,12 +3654,27 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     };
   }
 
+  /**
+   * Names the daemon editor may offer to send. Whether a keychain secret has a value is checked here and the value is
+   * dropped at once; only names reach the editor.
+   */
+  private pushableSecretSources(): PushableSecretSources {
+    const settings = this.plugin.settings;
+    const envNames = Object.entries(parseExtraEnv(effectiveExtraEnv(settings))).filter(([, v]) => v !== '').map(([k]) => k);
+    const keychain = (settings.secretEnvKeys ?? [])
+      .filter((name) => !!this.app.secretStorage.getSecret(secretStorageKey(name)))
+      .map((name) => ({ name, projectIds: settings.secretEnvScopes?.[name] ?? [] }));
+    const projects = settings.projects ?? [];
+    return { envNames, keychain, projectName: (id) => projects.find((p) => p.id === id)?.name };
+  }
+
   private openDaemonModal(existing: RemoteDaemonConfig | null): void {
     new RemoteDaemonModal(this.app, existing, this.plugin.settings.remoteDaemons ?? [], this.plugin.manager.vaultRoot ?? '', {
       test: (candidate, token) => this.testDaemon(candidate, token),
       mcpStatus: (id) => this.plugin.daemonMcpStatus.get(id)?.servers,
       proxiedServers: () => proxiedServerNames(this.plugin.settings),
       ownServers: () => listMcpServers(this.plugin.settings).servers.map((x) => x.name),
+      pushableSecrets: () => this.pushableSecretSources(),
       ...(this.plugin.remoteRepos ? { repos: this.plugin.remoteRepos } : {}),
       save: async (config, token, adminToken) => {
         const list = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);

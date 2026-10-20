@@ -458,5 +458,10 @@ void mcpSyncReady.then(() => tab.display());
     save: async (config: any) => { (window as any).__savedDaemon = config; },
     proxiedServers: () => ['google-docs', 'hiptrip-new', 'vercel'],
     ownServers: () => ['docs', 'search'],
+    pushableSecrets: () => ({
+      envNames: ['GH_TOKEN', 'PATH'],
+      keychain: [{ name: 'NPM_TOKEN', projectIds: ['proj'] }, { name: 'LINEAR_API_KEY', projectIds: [] }, { name: 'OTHER_KEY', projectIds: [] }],
+      projectName: (id: string) => (id === 'proj' ? 'proj' : undefined),
+    }),
   }).open();
 };

@@ -3,12 +3,12 @@ import path from 'path';
 import { settleView } from './helpers';
 
 /**
- * Daemon editor: "Secrets to send to this daemon" (RemoteDaemonConfig.pushedSecrets, parser in src/remote/daemonConfig.ts).
+ * Daemon editor: "Secrets to send to this daemon" checklist (RemoteDaemonConfig.pushedSecrets; logic in src/remote/pushedSecretPicker.ts).
  * Functional checks drive the real modal; the two viewport screenshots are written to test-results/ for visual QA (not baselines).
  */
 const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
 const FIELD = 'Secrets to send to this daemon';
-// Deliberately secret-looking: asserts the error never echoes the entry.
+// Deliberately secret-looking: asserts the Add-by-name error never echoes the entry.
 const SECRET_VALUE = 'ghp_ABCDEF0123456789zzzzSECRETVALUE';
 
 async function openModal(page: Page, opts: Record<string, unknown> = {}, viewport = { width: 760, height: 1700 }) {
@@ -23,84 +23,103 @@ const save = (page: Page) => page.locator('.modal-container').getByRole('button'
 const savedDaemon = (page: Page) => page.evaluate(() => (window as any).__savedDaemon);
 const status = (page: Page) => page.locator('.modal-container .ct-remote-daemon-test.mod-warning');
 
+const box = (page: Page, name: string) => page.getByRole('checkbox', { name, exact: true });
+const addInput = (page: Page) => page.getByLabel('Add a secret by name');
+const add = (page: Page) => page.locator('.modal-container').getByRole('button', { name: 'Add', exact: true }).evaluate((b: HTMLElement) => b.click());
+
 test.describe('Daemon editor: secrets to send', () => {
-  test('NAME and project/NAME lines save as pushedSecrets, trimmed and de-duplicated', async ({ page }) => {
+  test('lists forwardable names only (no PATH), project-scoped as project/NAME, all unticked by default', async ({ page }) => {
     await openModal(page);
-    await page.getByLabel(FIELD).fill('GH_TOKEN\n  proj-1/NPM_TOKEN  \nGH_TOKEN, OTHER_KEY');
+    for (const n of ['GH_TOKEN', 'LINEAR_API_KEY', 'OTHER_KEY', 'proj/NPM_TOKEN']) {
+      await expect(box(page, n)).toBeVisible();
+      await expect(box(page, n)).not.toBeChecked();
+    }
+    await expect(box(page, 'PATH')).toHaveCount(0);
+    await expect(box(page, 'NPM_TOKEN')).toHaveCount(0);
+  });
+
+  test('ticked names save as pushedSecrets in list order', async ({ page }) => {
+    await openModal(page);
+    await box(page, 'proj/NPM_TOKEN').check();
+    await box(page, 'GH_TOKEN').check();
     await save(page);
-    expect((await savedDaemon(page)).pushedSecrets).toEqual(['GH_TOKEN', 'proj-1/NPM_TOKEN', 'OTHER_KEY']);
+    expect((await savedDaemon(page)).pushedSecrets).toEqual(['GH_TOKEN', 'proj/NPM_TOKEN']);
+  });
+
+  test('a saved name nothing provides stays, ticked and flagged not found, and can be unticked', async ({ page }) => {
+    await openModal(page, { pushedSecrets: ['GH_TOKEN', 'GONE_KEY'] });
+    await expect(box(page, 'GH_TOKEN')).toBeChecked();
+    await expect(box(page, 'GONE_KEY')).toBeChecked();
+    await expect(page.locator('.ct-pushed-secrets')).toContainText('Not found');
+    await save(page);
+    expect((await savedDaemon(page)).pushedSecrets).toEqual(['GH_TOKEN', 'GONE_KEY']);
+    await openModal(page, { pushedSecrets: ['GH_TOKEN', 'GONE_KEY'] });
+    await box(page, 'GONE_KEY').uncheck();
+    await save(page);
+    expect((await savedDaemon(page)).pushedSecrets).toEqual(['GH_TOKEN']);
+  });
+
+  test('Add by name appends a ticked row and saves it', async ({ page }) => {
+    await openModal(page);
+    await addInput(page).fill('  proj-1/NEW_TOKEN ');
+    await add(page);
+    await expect(box(page, 'proj-1/NEW_TOKEN')).toBeChecked();
+    await expect(addInput(page)).toHaveValue('');
+    await save(page);
+    expect((await savedDaemon(page)).pushedSecrets).toEqual(['proj-1/NEW_TOKEN']);
   });
 
   for (const bad of [`GH_TOKEN=${SECRET_VALUE}`, SECRET_VALUE + ' extra words', 'has space', '1STARTS_WITH_DIGIT', 'a/b/c']) {
-    test(`rejects ${JSON.stringify(bad.length > 12 ? bad.slice(0, 8) + '...' : bad)} without echoing it and without saving`, async ({ page }) => {
+    test(`Add by name rejects ${JSON.stringify(bad.length > 12 ? bad.slice(0, 8) + '...' : bad)} without echoing it`, async ({ page }) => {
       await openModal(page);
-      await page.getByLabel(FIELD).fill(`GOOD_NAME\n${bad}`);
+      await addInput(page).fill(bad);
+      await add(page);
+      const msg = page.locator('.ct-pushed-secrets [role=status]');
+      await expect(msg).toContainText('never the secret itself');
+      expect(await msg.innerText()).not.toContain('ghp_');
+      expect(await page.locator('.ct-pushed-secrets').innerText()).not.toContain(SECRET_VALUE);
       await save(page);
-      await expect(status(page)).toContainText('entry 2');
-      await expect(status(page)).toContainText('never the secret itself');
-      const text = (await page.locator('.modal-container').innerText());
-      expect(text).not.toContain(SECRET_VALUE);
-      expect(text).not.toContain('ghp_');
-      // Error text itself must not contain the bad entry (the textarea legitimately still holds it).
-      expect(await status(page).innerText()).not.toContain(bad.split('\n')[0].slice(0, 6) === 'GH_TOK' ? 'GH_TOKEN=' : bad);
-      expect(await savedDaemon(page)).toBeUndefined();
-      await expect(page.locator('.modal-container')).toBeVisible();
+      expect(await savedDaemon(page)).not.toHaveProperty('pushedSecrets');
     });
   }
 
-  test('an empty (or whitespace-only) box saves no pushedSecrets key at all', async ({ page }) => {
+  test('nothing ticked saves no pushedSecrets key; unticking everything removes a saved list', async ({ page }) => {
     await openModal(page);
     await save(page);
     expect(await savedDaemon(page)).not.toHaveProperty('pushedSecrets');
-    await openModal(page);
-    await page.getByLabel(FIELD).fill('  \n , \n');
-    await save(page);
-    expect(await savedDaemon(page)).not.toHaveProperty('pushedSecrets');
-  });
-
-  test('clearing a previously saved list removes the key', async ({ page }) => {
     await openModal(page, { pushedSecrets: ['GH_TOKEN'] });
-    await expect(page.getByLabel(FIELD)).toHaveValue('GH_TOKEN');
-    await page.getByLabel(FIELD).fill('');
+    await box(page, 'GH_TOKEN').uncheck();
     await save(page);
     expect(await savedDaemon(page)).not.toHaveProperty('pushedSecrets');
   });
 
-  test('a legacy config without the field loads with an empty box and saves with no new keys', async ({ page }) => {
+  test('a legacy config without the field loads with nothing ticked and saves with no new keys', async ({ page }) => {
     await openModal(page, { saved: true });
-    await expect(page.getByLabel(FIELD)).toHaveValue('');
+    await expect(page.getByRole('checkbox', { name: 'GH_TOKEN', exact: true })).not.toBeChecked();
     await save(page);
     const cfg = await savedDaemon(page);
-    expect(cfg).not.toHaveProperty('pushedSecrets');
     expect(cfg).toEqual({
       id: 'my-server', name: 'my-server', url: 'wss://my-server.tailnet-name.ts.net:8443', tokenSecretName: 'T',
       defaultCwdRoot: '/home/user/projects', vaultMapping: { remoteRoot: '/home/user/vault' },
     });
   });
 
-  test('an existing list round-trips unchanged', async ({ page }) => {
-    await openModal(page, { pushedSecrets: ['GH_TOKEN', 'proj/NPM_TOKEN'] });
-    await save(page);
-    expect((await savedDaemon(page)).pushedSecrets).toEqual(['GH_TOKEN', 'proj/NPM_TOKEN']);
-  });
-
   for (const [label, viewport, file] of [
     ['desktop', { width: 1280, height: 800 }, 'daemon-pushed-secrets-desktop-1280x800.png'],
     ['mobile', { width: 390, height: 844 }, 'daemon-pushed-secrets-mobile-390x844.png'],
   ] as const) {
-    test(`${label}: field is fully visible inside the modal and does not overlap its neighbours`, async ({ page }) => {
-      await openModal(page, { pushedSecrets: ['GH_TOKEN', 'proj/NPM_TOKEN'] }, viewport);
-      const field = page.getByLabel(FIELD);
-      await field.scrollIntoViewIfNeeded();
+    test(`${label}: checklist stays inside the modal and does not overlap the admin token field`, async ({ page }) => {
+      await openModal(page, { pushedSecrets: ['GH_TOKEN', 'GONE_KEY'] }, viewport);
+      const list = page.getByRole('group', { name: FIELD });
+      await list.scrollIntoViewIfNeeded();
       await settleView(page);
-      const box = (await field.boundingBox())!;
+      const b = (await list.boundingBox())!;
       const modal = (await page.locator('.modal-container').boundingBox())!;
-      expect(box.x).toBeGreaterThanOrEqual(modal.x - 1);
-      expect(box.x + box.width).toBeLessThanOrEqual(modal.x + modal.width + 1);
-      expect(box.width).toBeGreaterThan(120);
+      expect(b.x).toBeGreaterThanOrEqual(modal.x - 1);
+      expect(b.x + b.width).toBeLessThanOrEqual(modal.x + modal.width + 1);
       const adminBox = (await page.getByLabel('Admin token for sending secrets').boundingBox())!;
-      const overlaps = box.y < adminBox.y + adminBox.height && adminBox.y < box.y + box.height && box.x < adminBox.x + adminBox.width && adminBox.x < box.x + box.width;
-      expect(overlaps, 'secrets textarea overlaps admin token input').toBe(false);
+      const overlaps = b.y < adminBox.y + adminBox.height && adminBox.y < b.y + b.height && b.x < adminBox.x + adminBox.width && adminBox.x < b.x + b.width;
+      expect(overlaps, 'secrets checklist overlaps admin token input').toBe(false);
       await page.screenshot({ path: `test-results/${file}` });
       await page.locator('.modal-container').screenshot({ path: `test-results/modal-${file}` });
     });
