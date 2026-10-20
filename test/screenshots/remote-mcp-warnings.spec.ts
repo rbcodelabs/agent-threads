@@ -33,8 +33,9 @@ const strip = (page: Page) => page.locator('.ct-remote-strip');
 const warn = (page: Page) => page.locator('[data-testid="remote-warnings"]');
 
 const VIEWPORTS = [
-  ['desktop', 900],
-  ['mobile', 360],
+  ['1280', 1280],
+  ['390', 390],
+  ['375', 375],
 ] as const;
 
 test.describe('remote thread header: dropped MCP servers pill', () => {
@@ -61,8 +62,12 @@ test.describe('remote thread header: dropped MCP servers pill', () => {
       expect(w.x + w.width).toBeLessThanOrEqual(viewport.width);
       expect(conn.x + conn.width).toBeLessThanOrEqual(viewport.width);
       expect(w.x + w.width).toBeLessThanOrEqual(conn.x + 1);
+      const noOverflow = await strip(page).evaluate((el) => el.scrollWidth <= el.clientWidth + 1);
+      expect(noOverflow, 'strip content must not overflow its box').toBe(true);
+      test.info().annotations.push({ type: 'pill-box', description: `${Math.round(w.width)}x${Math.round(w.height)}` });
       await settleView(page);
       await expect(strip(page)).toHaveScreenshot(`remote-mcp-warnings-${label}.png`);
+      await expect(page).toHaveScreenshot(`remote-mcp-warnings-page-${label}.png`);
     });
 
     test(`shows no pill when every server reaches the daemon (${label})`, async ({ page }) => {

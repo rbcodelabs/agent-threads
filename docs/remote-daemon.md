@@ -694,8 +694,8 @@ exactly which tools run on your computer (or says none do).
   dropped rather than allowed to exceed the frame limit.
 - **Your MCP servers.** By default servers that start a program on your computer (stdio), use an address on your computer, or
   need a secret from your keychain cannot work on the daemon and are not sent; a server with headers (usually credentials) is
-  sent only if you list it under "MCP servers it may receive". Each dropped server is named in a transcript row with the
-  reason. Other http/sse servers the daemon can reach are passed through. To run one of your Settings servers ON the daemon
+  sent only if you list it under "MCP servers it may receive". Dropped servers are counted in a yellow warnings pill beside the connection pill in the thread header; hover or click it to see
+  each server and the reason. Other http/sse servers the daemon can reach are passed through. To run one of your Settings servers ON the daemon
   (including a stdio server with a keychain secret), opt it in per daemon: see "MCP servers synced from the app".
 - **Secrets stay here.** Only tool names, descriptions, schemas and tool *results* cross to the daemon. Keychain values, the
   loopback addresses and capability headers of your Google and OAuth brokers, and the token never do.
