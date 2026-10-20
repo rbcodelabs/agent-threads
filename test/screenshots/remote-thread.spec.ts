@@ -140,7 +140,7 @@ test.describe('existing thread: Run on is its own popover row', () => {
   }
 
   for (const width of [1280, 390]) {
-    test(`Run on is separate from Harness, drills in, and explains unavailable daemons at ${width}`, async ({ page }) => {
+    test(`Run on is separate from Harness, drills in, and offers a daemon with no vault mapping at ${width}`, async ({ page }) => {
       await openPopover(page, width);
       await expect(page.locator('[data-ct-key="row:harness"] .ct-sp-value')).toHaveText('Claude');
       await expect(page.locator('[data-ct-key="row:runon"] .ct-sp-value')).toHaveText('This computer');
@@ -158,8 +158,9 @@ test.describe('existing thread: Run on is its own popover row', () => {
       await expect(popover(page).getByRole('menuitemradio', { name: 'This computer' })).toHaveAttribute('aria-checked', 'true');
       await expect(popover(page).getByRole('menuitemradio', { name: 'my-server' })).toBeEnabled();
       const plain = popover(page).getByRole('menuitemradio', { name: /plain-box/ });
-      await expect(plain).toBeDisabled();
-      await expect(plain).toContainText('\u2014 its folder is not shared with this daemon');
+      // No vault mapping is no longer a blocker: the move falls back to the daemon's default folder (#821).
+      await expect(plain).toBeEnabled();
+      await expect(plain).not.toContainText('not shared');
       await settleView(page);
       await expect(popover(page)).toHaveScreenshot(`existing-thread-popover-runon-${width}.png`);
     });
