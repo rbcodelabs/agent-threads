@@ -34,7 +34,7 @@ export function adminTokenSecretNameFor(id: string): string {
   return `AGENT_THREADS_PUSHADMIN_${id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_TOKEN`;
 }
 
-const PUSHED_SECRET_ENTRY = /^(?:[^/\s,]{1,64}\/)?[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+export const PUSHED_SECRET_ENTRY = /^(?:[^/\s,]{1,64}\/)?[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
 /**
  * Parses the "Secrets to send" box: names one per line or comma separated, `NAME` or `<projectId>/NAME`. A rejected
