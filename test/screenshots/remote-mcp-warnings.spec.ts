@@ -70,6 +70,29 @@ test.describe('remote thread header: dropped MCP servers pill', () => {
       await expect(page).toHaveScreenshot(`remote-mcp-warnings-page-${label}.png`);
     });
 
+    test(`the pill has a 44x44 tap target that does not steal clicks from neighbours (${label})`, async ({ page }) => {
+      await open(page, width, SERVERS);
+      const w = (await warn(page).boundingBox())!;
+      const cx = w.x + w.width / 2;
+      const cy = w.y + w.height / 2;
+      const hits = (x: number, y: number) => page.evaluate(([px, py]) => { const el = document.elementFromPoint(px, py); return !!el?.closest('[data-testid="remote-warnings"]'); }, [x, y]);
+      // The box reaches 6px above the pill (clear of the title button) and 20px below; 43px of that 44px is probed.
+      for (const dx of [-21, 0, 21]) for (const y of [w.y - 5.5, w.y + 9, w.y + 37.5]) expect(await hits(cx + dx, y), `point (${dx}, ${(y - w.y).toFixed(1)}) from the pill top-left`).toBe(true);
+      // Neighbours keep their own area: the badge and the connection pill resolve to themselves.
+      const owner = (sel: string) => page.evaluate(([s]) => { const r = document.querySelector(s)!.getBoundingClientRect(); return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest(s) === document.querySelector(s); }, [sel]);
+      expect(await owner('[data-testid="remote-badge"]')).toBe(true);
+      expect(await owner('[data-testid="remote-pill"]')).toBe(true);
+      const conn = (await strip(page).locator('.ct-remote-pill').boundingBox())!;
+      expect(await hits(conn.x + 1, cy), 'left edge of the connection pill').toBe(false);
+      // The extended area must not reach the title-row controls above the strip.
+      const area = { top: w.y - 6, bottom: w.y + 38, left: cx - 22, right: cx + 22 };
+      const controls = await page.locator('.ct-title-row button, .ct-title-row [role="button"], .ct-title-row .clickable-icon').evaluateAll((els) => els.filter((e) => (e as HTMLElement).offsetParent).map((e) => e.getBoundingClientRect().toJSON()));
+      for (const c of controls) {
+        const overlap = c.left < area.right && c.right > area.left && c.top < area.bottom && c.bottom > area.top;
+        expect(overlap, `title-row control at x=${Math.round(c.left)} overlaps the pill hit area`).toBe(false);
+      }
+    });
+
     test(`shows no pill when every server reaches the daemon (${label})`, async ({ page }) => {
       await open(page, width, { docs: SERVERS.docs });
       await expect(strip(page)).toBeVisible();
