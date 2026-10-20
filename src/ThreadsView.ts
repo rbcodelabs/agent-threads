@@ -58,6 +58,7 @@ import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openLocalFileViaHost, o
 import type { StatusTag } from './types';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { promptConfirm } from './confirmModal';
+import { pickDefaultWorkspace } from './remote/workspaceChoice';
 import { describeOrchestratorThread, isOrchestratorThread, orchestratorWarning, type OrchestratorContext } from './orchestratorThreads';
 import { partitionThreads } from './threadRowState';
 import { agentLabel, buildAgentBreadcrumbs, summarizeAgentTeam } from './agentRuns/agentTreeModel';
@@ -2793,13 +2794,15 @@ export class ThreadsView extends ItemView {
         const target = thread.remote ? undefined : this.plugin.mapCwdToDaemon(d.id, thread.cwd);
         const selected = here === d.id;
         const offered = gateHarness(harness, this.plugin.daemonRegistry?.capabilitiesOf(d.id), d.name);
-        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : !offered.ok ? `no ${agentHarnessLabel(harness)} on it` : target ? undefined : 'its folder is not shared with this daemon');
+        // No vault mapping: fall back to the daemon's default folder, or (on select) its advertised default workspace.
+        const fallback = thread.remote ? undefined : target ?? (d.defaultCwdRoot?.trim() || undefined);
+        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : !offered.ok ? `no ${agentHarnessLabel(harness)} on it` : undefined);
         options.push({
           label: reason ? `${d.name} \u2014 ${reason}` : d.name,
           checked: selected,
           disabled: !selected && !!reason,
           closeOnSelect: true,
-          onSelect: () => { if (!selected && target) void this.requestMoveExecution(threadId, { daemonId: d.id, remoteCwd: target }); },
+          onSelect: () => { if (!selected) void this.moveToDaemonResolvingFolder(threadId, d.id, fallback); },
         });
       }
       harnessGroups.push({ title: 'Run on', options });
@@ -2995,6 +2998,20 @@ export class ThreadsView extends ItemView {
     this.manager.setThreadPermissionMode(threadId, mode);
     await this.plugin.saveSettings();
     this.renderThreadInfo();
+  }
+
+  /** Move to a daemon using `cwd` when known, else the daemon's own default workspace (a daemon with no vault mapping). */
+  private async moveToDaemonResolvingFolder(threadId: string, daemonId: string, cwd: string | undefined): Promise<void> {
+    let remoteCwd = cwd;
+    if (!remoteCwd) {
+      const loaded = await this.plugin.remoteFolders?.workspaces(daemonId);
+      remoteCwd = loaded?.ok ? pickDefaultWorkspace(loaded.value)?.path : undefined;
+    }
+    if (!remoteCwd) {
+      new Notice('That daemon has no folder to run in. Set a default folder for it in Settings \u2192 Remote.');
+      return;
+    }
+    await this.requestMoveExecution(threadId, { daemonId, remoteCwd });
   }
 
   private async requestMoveExecution(threadId: string, to: { daemonId: string; remoteCwd: string } | undefined): Promise<void> {
