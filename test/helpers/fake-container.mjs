@@ -148,9 +148,11 @@ if (a === 'start') {
   c.state = 'running';
   done(0);
 }
-if (a === 'stop') {
+if (a === 'stop' || a === 'kill') {
   const c = state.containers[args[1]];
   if (!c) { err('not found'); done(1); }
+  // stop:wedged / kill:wedged = the VM ignores it until the host helper process is ended (state.helperKilled)
+  if (fails.has(`${a}:wedged`) && !state.helperKilled) { err('timed out'); done(1); }
   c.state = 'stopped';
   done(0);
 }

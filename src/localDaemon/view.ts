@@ -10,7 +10,7 @@ import type { DegradedReason } from './assess';
 import { HARNESS_LABEL, LOCAL_HARNESSES, VAULT_GUEST_PATH, manualLoginCommand, normalizeHarnesses, type LocalHarness } from './spec';
 
 export type LocalDaemonButtonId =
-  | 'setup' | 'start' | 'stop' | 'restart' | 'reset' | 'update' | 'sign-in' | 'remove';
+  | 'setup' | 'start' | 'stop' | 'restart' | 'reset' | 'update' | 'sign-in' | 'remove' | 'kill';
 
 export interface LocalDaemonButton {
   id: LocalDaemonButtonId;
@@ -163,9 +163,10 @@ function buildViewCore(snap: LocalDaemonSnapshot): Omit<LocalDaemonView, 'harnes
         : a.degraded === 'incompatible' ? { id: 'update', label: 'Update', cta: a.update !== 'plugin-too-old' }
           : { id: 'start', label: 'Start', cta: true };
       const stop: LocalDaemonButton = { id: 'stop', label: 'Stop' };
+      const kill: LocalDaemonButton = { id: 'kill', label: 'Kill', danger: true };
       const buttons: LocalDaemonButton[] = a.update === 'plugin-too-old' && a.degraded === 'incompatible'
-        ? [stop, ...tail]
-        : [primary, stop, ...tail];
+        ? [stop, kill, ...tail]
+        : [primary, stop, kill, ...tail];
       return { ...base, statusLabel: d.label, tone: 'warn', buttons, busy: false, hint: updateHint ?? d.hint };
     }
     default:
@@ -220,6 +221,10 @@ export function describeSetup(snap: LocalDaemonSnapshot): string {
 export const DESCRIBE_RESET =
   'This stops the daemon and deletes its data: sessions, journals, workspaces volume and access token. Threads that ran there '
   + 'stay in your transcript list but cannot resume their Claude session. It is then set up again from scratch. Continue?';
+
+export const DESCRIBE_KILL =
+  'This force-stops the daemon without letting it shut down cleanly, and ends the container\'s VM process if it does not respond. '
+  + 'Any turn running right now is lost and resumes on your next message. Data is kept. Continue?';
 
 export const DESCRIBE_REMOVE =
   'This stops and deletes the local daemon, its data and its access token, and removes it from Remote daemons. Threads that ran '

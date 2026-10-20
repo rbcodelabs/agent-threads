@@ -537,6 +537,9 @@ export function startContainerArgs(name: string): string[] {
 export function stopContainerArgs(name: string): string[] {
   return ['stop', name];
 }
+export function killContainerArgs(name: string): string[] {
+  return ['kill', name];
+}
 export function removeContainerArgs(name: string): string[] {
   return ['rm', '--force', name];
 }

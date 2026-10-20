@@ -94,6 +94,20 @@ function probeHostLoopbackPort(port: number, timeoutMs = 500): Promise<boolean> 
   });
 }
 
+/** `pkill` the `container-runtime-linux` helper whose command line names this container (it runs the container's VM). */
+function killVmHelperProcess(containerName: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { execFile } = require('child_process') as typeof import('child_process');
+    const pattern = `container-runtime-linux.*${containerName.replace(/[^A-Za-z0-9_-]/g, '')}`;
+    // pkill exits 1 when nothing matched: not an error here, the caller re-checks the container's state.
+    execFile('pkill', ['-9', '-f', pattern], { timeout: 5000 }, (err) => {
+      const code = (err as NodeJS.ErrnoException | null)?.code as unknown;
+      if (err && code !== 1) reject(err); else resolve();
+    });
+  });
+}
+
 export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonController {
   const deps: LocalDaemonDeps = {
     vaultPath: () => host.vaultBasePath(),
@@ -153,6 +167,7 @@ export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonC
         onUrl: opts.onUrl,
       });
     },
+    killVmHelper: (containerName) => killVmHelperProcess(containerName),
     ...(host.projectFolders ? { projectFolders: () => host.projectFolders!() } : {}),
     ...(host.externalRoots ? { externalRoots: () => host.externalRoots!() } : {}),
     log: host.log,

@@ -29,6 +29,7 @@ import {
   createVolumes,
   credentialFilePresent,
   imagePresent,
+  forceStopContainer,
   inspectOurContainer,
   logTail,
   mintControlToken,
@@ -114,6 +115,11 @@ export interface LocalDaemonDeps {
   signInRunner?(opts: { containerName: string; containerBinaryPath: string } & SignInHandlers): Promise<ContainerSignInResult>;
   /** Runs `codex login --device-auth` in the container. Absent where it cannot run (the panel then shows the manual command). */
   harnessSignInRunner?(opts: { harness: 'codex'; containerName: string; onProgress: (text: string) => void; onUrl: (url: string) => void }): Promise<HarnessLoginResult>;
+  /**
+   * Ends the container's VM helper process (`container-runtime-linux`) on the host: the last resort when a wedged VM
+   * ignores `container stop` and `container kill`. Absent where it cannot run.
+   */
+  killVmHelper?(containerName: string): Promise<void>;
   /** State changed: a UI should re-read {@link LocalDaemonController.getBusy} / take a new snapshot. */
   onChange?(): void;
   log?(message: string): void;
@@ -124,7 +130,7 @@ export interface LocalDaemonDeps {
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
-export type LocalDaemonOpKind = 'setup' | 'start' | 'stop' | 'restart' | 'update' | 'reset' | 'remove' | 'sign-in';
+export type LocalDaemonOpKind = 'setup' | 'start' | 'stop' | 'restart' | 'kill' | 'update' | 'reset' | 'remove' | 'sign-in';
 
 export interface LocalDaemonProgress {
   kind: LocalDaemonOpKind;
@@ -162,6 +168,7 @@ const OP_LABEL: Record<LocalDaemonOpKind, string> = {
   start: 'Starting the local daemon',
   stop: 'Stopping the local daemon',
   restart: 'Restarting the local daemon',
+  kill: 'Force-stopping the local daemon',
   update: 'Updating the local daemon',
   reset: 'Resetting the local daemon',
   remove: 'Removing the local daemon',
@@ -333,7 +340,7 @@ export class LocalDaemonController {
   }
 
   /** Read-only: facts about the world plus the assessment. Never mutates anything. */
-  async observe(signal?: AbortSignal): Promise<{ observed: Observed; desired: Desired; assessment: Assessment; version: string; port: number; vaultPath: string | null; daemonVersion?: string }> {
+  async observe(signal?: AbortSignal, opts: { quick?: boolean } = {}): Promise<{ observed: Observed; desired: Desired; assessment: Assessment; version: string; port: number; vaultPath: string | null; daemonVersion?: string }> {
     const vaultPath = this.deps.vaultPath();
     await this.refreshExternalRoots(vaultPath);
     const settings = this.settings();
@@ -390,15 +397,19 @@ export class LocalDaemonController {
         }
       }
     }
-    const credentialInVolume = running ? await credentialFilePresent(d, vaultPath) : settings.credentialWritten === true;
+    // `exec` probes need a live VM: skip them when healthz is down (a wedged VM would burn their timeouts) and in a
+    // quick observation. The container exists, so its image and volumes do too; the last known credential state stands.
+    const skipSlow = opts.quick === true || (running && health === 'down');
+    const credentialInVolume = running && !skipSlow ? await credentialFilePresent(d, vaultPath) : settings.credentialWritten === true;
     const harnesses = this.harnesses();
-    const harnessProbe = running && health === 'ok' ? await probeHarnesses(d, vaultPath) : null;
+    const harnessProbe = running && health === 'ok' && !skipSlow ? await probeHarnesses(d, vaultPath) : null;
+    const assumeProvisioned = skipSlow && typeof ours === 'object';
     const observed: Observed = {
       supported: true,
       runtimeInstalled: true,
       runtimeRunning: true,
-      imageReady: await imagePresent(d, localImageRef(version, harnesses)),
-      volumesPresent: await volumesPresent(d, vaultPath),
+      imageReady: assumeProvisioned || await imagePresent(d, localImageRef(version, harnesses)),
+      volumesPresent: assumeProvisioned || await volumesPresent(d, vaultPath),
       container: ours === 'absent' ? 'absent' : ours === 'foreign' ? 'foreign' : running ? 'running' : 'stopped',
       ...(containerVersion ? { containerVersion } : {}),
       ...(containerSpec ? { containerSpec } : {}),
@@ -432,8 +443,8 @@ export class LocalDaemonController {
   }
 
   /** What a UI renders. Cheap enough to call when a panel opens; never mutates. */
-  async snapshot(): Promise<LocalDaemonSnapshot> {
-    const o = await this.observe();
+  async snapshot(opts: { quick?: boolean } = {}): Promise<LocalDaemonSnapshot> {
+    const o = await this.observe(undefined, opts);
     const binary = o.observed.supported ? (await readRuntime(this.deps.runtime)).binary : undefined;
     return {
       assessment: o.assessment,
@@ -537,7 +548,7 @@ export class LocalDaemonController {
           await this.runAndAwaitHealthy(step(), vaultPath, () => startContainer(step(), vaultPath), port, ctx);
           break;
         case 'restart-container':
-          await stopContainer(step(), vaultPath);
+          await this.forceStop(step(), vaultPath);
           await this.runAndAwaitHealthy(step(), vaultPath, () => startContainer(step(), vaultPath), port, ctx);
           break;
         case 'apply-credential': {
@@ -643,11 +654,23 @@ export class LocalDaemonController {
     });
   }
 
+  private forceStop(d: StepDeps, vaultPath: string, skipGraceful = false): Promise<void> {
+    return forceStopContainer(d, vaultPath, { skipGraceful, ...(this.deps.killVmHelper ? { killVmHelper: (n: string) => this.deps.killVmHelper!(n) } : {}) });
+  }
+
+  /** Force-stop for a wedged daemon: skips the graceful stop, then kill, then the VM helper process. Data is kept. */
+  kill(opts: RunOptions = {}): Promise<void> {
+    return this.runOp('kill', opts, async (ctx) => {
+      const vaultPath = this.requireVault();
+      await this.forceStop({ runner: this.deps.createRunner(), signal: ctx.signal }, vaultPath, true);
+    });
+  }
+
   restart(opts: RunOptions = {}): Promise<Assessment> {
     return this.runOp('restart', opts, async (ctx) => {
       this.requireEnabled();
       const vaultPath = this.requireVault();
-      await stopContainer({ runner: this.deps.createRunner(), signal: ctx.signal }, vaultPath);
+      await this.forceStop({ runner: this.deps.createRunner(), signal: ctx.signal }, vaultPath);
       return this.reconcile(ctx);
     });
   }

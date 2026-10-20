@@ -3564,6 +3564,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       isMobile: Platform.isMobile,
       pluginVersion: this.plugin.manifest.version,
       snapshot: () => controller.snapshot(),
+      snapshotQuick: () => controller.snapshot({ quick: true }),
       subscribe: (listener) => controller.subscribe(listener),
       setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, projectFoldersSetting, syncedStdioSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
@@ -3578,6 +3579,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           case 'start': return controller.start(opts);
           case 'stop': return controller.stop(opts);
           case 'restart': return controller.restart(opts);
+          case 'kill': return controller.kill(opts);
           case 'update': return showAfter(() => controller.update(opts))();
           case 'reset': return controller.reset(opts);
           case 'remove': return showAfter(() => controller.remove({ ...opts, removeData: true }))();
