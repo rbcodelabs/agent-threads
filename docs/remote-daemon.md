@@ -821,6 +821,16 @@ names the field. The output lists field names and the expiry, never a value (`--
 Settings, Remote shows each daemon's MCP servers (connected / failed / needs sign-in) as last reported by its sessions;
 a server that dies mid-session turns to failed at the end of the next turn.
 
+## Secrets for your threads on a remote daemon
+
+By default no secret leaves your computer for a remote daemon. To send some, open **Settings → Remote → Edit** on that daemon and list **Secrets to send to this daemon**: names only, one per line (an environment variable or keychain secret such as `GH_TOKEN`, or `project/NAME` for one Project). Values are never typed here, and a line that looks like `NAME=value` is rejected without echoing it.
+
+- Sending needs a separate **admin-scope** token (stored in your keychain as `AGENT_THREADS_PUSHADMIN_<ID>_TOKEN`); without one nothing is sent and you see a single warning. The everyday control token cannot push credentials.
+- Values go over the existing `creds.push` command as a `sessenv-<project>` kind and are read when a session starts. Pushes to plain `ws://` addresses are refused unless the address is loopback; use `wss://`.
+- The kind lasts one hour and is refreshed at half that while Geode is connected. A session that starts after Geode has been away for more than an hour starts without these variables until Geode reconnects.
+- Removing a name re-sends the kind without it. Emptying the list, removing the daemon or quitting Geode deletes the kind from the daemon.
+- Values are redacted from logs and errors and are never put in command arguments.
+
 ## MCP servers synced from the app
 
 Settings, MCP lists a **Runs on** line under each Custom MCP server: This computer, plus a checkbox per remote daemon. Ticking
