@@ -3258,6 +3258,13 @@
   color: var(--text-muted);
 }
 
+.ct-agents-collapsible { cursor: pointer; user-select: none; }
+.ct-agents-collapsible:hover { color: var(--text-normal); }
+.ct-agents-group-chevron { display: inline-flex; color: var(--text-faint); margin-right: 2px; }
+.ct-agents-group-chevron svg { width: 12px; height: 12px; }
+.ct-agents-group-label.ct-agents-collapsible { display: flex; align-items: center; }
+.ct-agents-group-label .ct-agents-project-count { margin-left: auto; text-transform: none; letter-spacing: 0; }
+
 .ct-agents-group-badge {
   display: inline-flex;
   align-items: center;

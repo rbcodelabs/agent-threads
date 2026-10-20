@@ -59,6 +59,8 @@ export class AgentDashboard extends ItemView {
 
   /** IDs (Thread.scheduledItemId) of currently-expanded rows in the "Scheduled Jobs" section. */
   private expandedScheduledStacks = new Set<string>();
+  /** Collapsed project / status groups (keys from groupKey). In-memory only. */
+  private collapsedGroups = new Set<string>();
 
   /** Built once; every row's archive menu shares it (all fields read live state). */
   private archiveDeps: ArchiveMenuDeps | null = null;
@@ -378,6 +380,8 @@ export class AgentDashboard extends ItemView {
         setIcon(icon, project.key === 'unassigned' ? 'folder-minus' : 'folder');
         header.createSpan({ cls: 'ct-agents-project-name', text: project.label });
         header.createSpan({ cls: 'ct-agents-project-count', text: String(project.threads.length) });
+        const projectCollapsed = this.bindGroupToggle(header, `project:${project.key}`);
+        if (projectCollapsed) continue;
         if (mode === 'project-status') this.renderProjectStatuses(projectEl, project.key, project.threads);
         else this.renderProjectThreads(projectEl, project.key, project.threads);
       }
@@ -478,12 +482,39 @@ export class AgentDashboard extends ItemView {
     }
   }
 
+  /** Makes `header` a click/keyboard toggle for a collapsible group; returns whether it is collapsed. */
+  private bindGroupToggle(header: HTMLElement, key: string): boolean {
+    const collapsed = this.collapsedGroups.has(key);
+    header.addClass('ct-agents-collapsible');
+    header.toggleClass('is-collapsed', collapsed);
+    header.setAttribute('role', 'button');
+    header.setAttribute('tabindex', '0');
+    header.setAttribute('aria-expanded', String(!collapsed));
+    const chevron = createSpan({ cls: 'ct-agents-group-chevron' });
+    setIcon(chevron, collapsed ? 'chevron-right' : 'chevron-down');
+    header.prepend(chevron);
+    const toggle = () => {
+      if (this.collapsedGroups.has(key)) this.collapsedGroups.delete(key);
+      else this.collapsedGroups.add(key);
+      this.scheduleRender();
+    };
+    header.addEventListener('click', (e) => { e.stopPropagation(); toggle(); });
+    header.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+    return collapsed;
+  }
+
   private renderGroup(label: string, threads: Thread[], state: RowState, badge?: number, parent = this.listEl, scopeKey = ''): HTMLElement {
     const group = parent.createDiv('ct-agents-group');
     const labelEl = group.createDiv('ct-agents-group-label');
     labelEl.createSpan({ text: label });
     if (badge !== undefined) {
       labelEl.createSpan({ cls: 'ct-agents-group-badge', text: String(badge) });
+    }
+    if (this.bindGroupToggle(labelEl, `status:${scopeKey}:${label}`)) {
+      labelEl.createSpan({ cls: 'ct-agents-project-count', text: String(threads.length) });
+      return group;
     }
     const stackable = (label === 'New' || label === 'Reviewed' || label === 'Ready')
       && (this.plugin.settings.stackScheduledThreads ?? true);
