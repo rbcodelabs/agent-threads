@@ -1412,7 +1412,10 @@ test.describe('Agent Threads UI', () => {
     await page.mouse.move(0, 0);
     await shot(page, 'composer-settings-popover.png', { fullPage: true });
 
-    // Keyboard: Escape closes and returns focus to the indicator.
+    // Keyboard: Escape goes back from a level; at the root it closes and returns focus to the indicator.
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.ct-settings-popover')).toHaveCount(1);
+    await expect(page.locator('[data-ct-key="row:model"]')).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(page.locator('.ct-settings-popover')).toHaveCount(0);
     await expect(indicator).toBeFocused();

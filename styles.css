@@ -2829,106 +2829,6 @@
   position: relative;
 }
 
-.ct-harness-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-}
-
-.ct-harness-mark svg {
-  width: 18px;
-  height: 18px;
-  stroke-width: 2.25;
-}
-
-.ct-harness-menu {
-  position: absolute;
-  z-index: var(--layer-popover, 1000);
-  right: 8px;
-  bottom: 46px;
-  min-width: 132px;
-  padding: 4px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  background: var(--background-primary);
-  box-shadow: var(--shadow-s);
-}
-
-.ct-harness-menu-item {
-  width: 100%;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 9px;
-  border-radius: 6px;
-  color: var(--text-normal);
-  background: transparent;
-}
-
-.ct-harness-menu-item:hover,
-.ct-harness-menu-item:focus,
-.ct-harness-menu-item[aria-checked='true'] {
-  background: var(--background-modifier-hover);
-}
-
-/* "Run in" section of the kickoff picker (Claude only) */
-.ct-harness-menu-separator {
-  height: 1px;
-  margin: 4px 0;
-  background: var(--background-modifier-border);
-}
-
-.ct-harness-menu-heading {
-  padding: 4px 9px 2px;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
-
-.ct-run-mode-item {
-  white-space: nowrap;
-}
-
-.ct-run-mode-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-}
-
-.ct-run-mode-mark svg {
-  width: 16px;
-  height: 16px;
-}
-
-/* Default has no icon; keep its label aligned with the icon rows. */
-.ct-run-mode-item[data-run-mode='default'] {
-  padding-left: 35px;
-}
-
-/* Badge on the send button when a run-mode override is active */
-.ct-run-mode-badge {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  display: inline-flex;
-  width: 11px;
-  height: 11px;
-  color: var(--text-muted);
-  pointer-events: none;
-}
-
-.ct-run-mode-badge svg {
-  width: 11px;
-  height: 11px;
-  stroke-width: 2.5;
-}
-
 .ct-root .ct-stop-btn {
   background: var(--color-red, #e05252);
   color: white;
@@ -9892,7 +9792,9 @@ button.ct-agent-crumb:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 4px 9px 6px;
+  margin-top: 4px;
+  padding: 8px 4px 4px;
+  border-top: 1px solid var(--background-modifier-border);
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
 }
@@ -10149,10 +10051,11 @@ button.ct-agent-crumb:focus-visible {
 .ct-sp-options {
   display: flex;
   flex-direction: column;
-  margin: 0 0 4px 14px;
-  padding-left: 6px;
-  border-left: 1px solid var(--background-modifier-border);
 }
+.ct-sp-back { color: var(--text-muted); font-weight: var(--font-semibold); }
+.ct-sp-back .ct-sp-label { color: var(--text-normal); }
+.ct-sp-custom { padding: 4px 4px 2px; }
+.ct-sp-custom:empty { display: none; }
 .ct-sp-option .ct-sp-label { white-space: normal; }
 .ct-sp-group-title {
   padding: 6px 8px 2px;
