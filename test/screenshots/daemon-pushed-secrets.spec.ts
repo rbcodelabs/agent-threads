@@ -24,6 +24,9 @@ const savedDaemon = (page: Page) => page.evaluate(() => (window as any).__savedD
 const status = (page: Page) => page.locator('.modal-container .ct-remote-daemon-test.mod-warning');
 
 const box = (page: Page, name: string) => page.getByRole('checkbox', { name, exact: true });
+// The harness modal scrolls inside a short viewport; a DOM click toggles the box without needing it on screen.
+const setChecked = (page: Page, name: string, on: boolean) =>
+  box(page, name).evaluate((b: HTMLInputElement, v) => { if (b.checked !== v) { b.checked = v; b.dispatchEvent(new Event('change')); } }, on);
 const addInput = (page: Page) => page.getByLabel('Add a secret by name');
 const add = (page: Page) => page.locator('.modal-container').getByRole('button', { name: 'Add', exact: true }).evaluate((b: HTMLElement) => b.click());
 
@@ -40,8 +43,8 @@ test.describe('Daemon editor: secrets to send', () => {
 
   test('ticked names save as pushedSecrets in list order', async ({ page }) => {
     await openModal(page);
-    await box(page, 'proj/NPM_TOKEN').check();
-    await box(page, 'GH_TOKEN').check();
+    await setChecked(page, 'proj/NPM_TOKEN', true);
+    await setChecked(page, 'GH_TOKEN', true);
     await save(page);
     expect((await savedDaemon(page)).pushedSecrets).toEqual(['GH_TOKEN', 'proj/NPM_TOKEN']);
   });
@@ -54,7 +57,7 @@ test.describe('Daemon editor: secrets to send', () => {
     await save(page);
     expect((await savedDaemon(page)).pushedSecrets).toEqual(['GH_TOKEN', 'GONE_KEY']);
     await openModal(page, { pushedSecrets: ['GH_TOKEN', 'GONE_KEY'] });
-    await box(page, 'GONE_KEY').uncheck();
+    await setChecked(page, 'GONE_KEY', false);
     await save(page);
     expect((await savedDaemon(page)).pushedSecrets).toEqual(['GH_TOKEN']);
   });
@@ -88,7 +91,7 @@ test.describe('Daemon editor: secrets to send', () => {
     await save(page);
     expect(await savedDaemon(page)).not.toHaveProperty('pushedSecrets');
     await openModal(page, { pushedSecrets: ['GH_TOKEN'] });
-    await box(page, 'GH_TOKEN').uncheck();
+    await setChecked(page, 'GH_TOKEN', false);
     await save(page);
     expect(await savedDaemon(page)).not.toHaveProperty('pushedSecrets');
   });

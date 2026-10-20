@@ -781,7 +781,7 @@ export class RemoteDaemonModal extends Modal {
     drawPushed();
     let addInput: TextComponent | undefined;
     const addByName = (): void => {
-      const check = checkAddByName(addInput?.getValue() ?? '');
+      const check = checkAddByName(addInput?.inputEl.value ?? '');
       pushedMsg.toggleClass('mod-warning', !check.ok);
       if (!check.ok) { pushedMsg.setText(check.reason); return; }
       pushedMsg.setText('');
