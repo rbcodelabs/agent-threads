@@ -3707,7 +3707,8 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         // An OAuth server signs in through this computer, so it cannot be synced to a daemon; it can be proxied from here.
         if (visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile).length > 0) {
           row.settingEl.addClass('ct-mcp-has-runson');
-          renderHostToolsAvailability(row.settingEl, this.proxiedAvailabilityHost(), name);
+          renderHostToolsAvailability(row.settingEl, this.proxiedAvailabilityHost(), name,
+            oauthMcpNeedsAttention({ tone }) ? { unavailableReason: 'Re-authorize this server before making it available.' } : {});
         }
         row.addButton((btn) => {
           btn.setButtonText('Re-authorize').onClick(() =>

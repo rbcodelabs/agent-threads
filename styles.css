@@ -8468,6 +8468,7 @@ body.ct-skills-resizing {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 6px 4px;
   cursor: pointer;
 }
 
@@ -10408,4 +10409,9 @@ button.ct-agent-crumb:focus-visible {
 
 .ct-host-tools-item .setting-item-description {
   margin-left: 22px;
+}
+
+.ct-host-tools-item .ct-mcp-runson-toggle {
+  display: flex;
+  min-height: 32px;
 }

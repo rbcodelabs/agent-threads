@@ -17,7 +17,7 @@ export const PROXIED_SERVER_COPY =
   + 'Anything that changes something still asks for approval here. Applies to new threads.';
 
 /** Renders nothing when there is no daemon to offer it to. Redraws itself after a change. */
-export function renderHostToolsAvailability(parent: HTMLElement, host: AvailabilityHost, server: string): void {
+export function renderHostToolsAvailability(parent: HTMLElement, host: AvailabilityHost, server: string, opts: { unavailableReason?: string } = {}): void {
   if (host.daemons().length === 0) return;
   const wrap = parent.createDiv({ cls: 'ct-mcp-runson ct-mcp-available', attr: { role: 'group', 'aria-label': `Where ${server} is available` } });
   const draw = (): void => {
@@ -30,6 +30,10 @@ export function renderHostToolsAvailability(parent: HTMLElement, host: Availabil
       const label = line.createEl('label', { cls: 'ct-mcp-runson-toggle' });
       const box = label.createEl('input', { attr: { type: 'checkbox', 'aria-label': `Make ${server} available on ${d.name}` } });
       box.checked = on;
+      // A server that needs to sign in again cannot serve a daemon; a daemon that already has it can still turn it off.
+      const blocked = !on && opts.unavailableReason !== undefined;
+      box.disabled = blocked;
+      if (blocked) label.addClass('is-disabled');
       label.createSpan({ text: d.name });
       const set = (want: boolean): void => {
         void (async () => {
@@ -40,7 +44,9 @@ export function renderHostToolsAvailability(parent: HTMLElement, host: Availabil
         })();
       };
       box.addEventListener('change', () => set(box.checked));
-      if (!on) {
+      if (blocked) {
+        line.createSpan({ cls: 'ct-mcp-available-missing', text: opts.unavailableReason! });
+      } else if (!on) {
         line.createSpan({ cls: 'ct-mcp-available-missing', text: `Not available on ${d.name}. Tick to turn on.` });
       } else {
         line.createSpan({ cls: 'ct-mcp-runson-chip ct-mcp-runson-chip--ok', text: 'Available' });
