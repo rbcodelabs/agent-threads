@@ -10,7 +10,7 @@ import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifa
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig, RemoteHostToolsSettings } from './types';
 import { daemonWsUrl, probeDaemon, type ProbeWorkspaces } from './remote/DaemonClient';
 import { connectionPill } from './remote/connectionPill';
-import { checkDaemonInput, checkVaultMappingInput, describeTest, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
+import { adminTokenSecretNameFor, checkDaemonInput, checkVaultMappingInput, describeTest, parsePushedSecrets, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
 import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel } from './remote/workspaceChoice';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { renderLocalDaemonPanel } from './localDaemon/localDaemonPanel';
@@ -566,7 +566,7 @@ export class RemoteDaemonModal extends Modal {
     private readonly vaultRoot: string,
     private readonly actions: {
       test(candidate: RemoteDaemonConfig, typedToken: string): Promise<DaemonTestOutcome>;
-      save(config: RemoteDaemonConfig, token: string): Promise<void>;
+      save(config: RemoteDaemonConfig, token: string, adminToken: string): Promise<void>;
       /** Last MCP server status this daemon's sessions reported (absent until a session has started on it). */
       mcpStatus?(daemonId: string): McpServerStatusEntry[] | undefined;
       /** Repositories the daemon keeps cloned; absent when the plugin has no live connection layer. */
@@ -739,6 +739,17 @@ export class RemoteDaemonModal extends Modal {
     };
     drawHostTools();
 
+    // Secrets this app may PUSH to the daemon (names only). The list is the consent: nothing leaves until a name is on
+    // it, and a name is only sent over wss:// (or loopback) with the admin token below.
+    let pushedText = (this.existing?.pushedSecrets ?? []).join('\n');
+    let adminToken = '';
+    new Setting(advanced).setName('Secrets to send to this daemon')
+      .setDesc('Names only, one per line: environment variables or keychain secrets (for example GH_TOKEN), or project/NAME for one project. Their values are sent to this daemon when a thread starts there and can be read by anything running on it; an hour later they expire. Empty (the default): nothing is sent. Never type a secret value here.')
+      .addTextArea((t) => { t.inputEl.rows = 3; t.inputEl.setAttribute('aria-label', 'Secrets to send to this daemon'); t.setPlaceholder('GH_TOKEN').setValue(pushedText).onChange((v) => { pushedText = v; }); });
+    new Setting(advanced).setName('Admin token for sending secrets')
+      .setDesc((this.existing ? 'Leave blank to keep the stored one. ' : '') + 'Sending needs an admin token, kept apart from the access token above. Create one with "agent-threads token create --scope admin" on the daemon machine. Secrets are only sent over wss:// (or to this computer).')
+      .addText((t) => { t.inputEl.type = 'password'; t.inputEl.setAttribute('aria-label', 'Admin token for sending secrets'); t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { adminToken = v; }); });
+
     const setVault = (v: string): void => { vaultRemote = v; vaultTouched = true; vaultText?.setValue(v); };
     const setFolder = (v: string): void => { folder = v; folderTouched = true; folderText?.setValue(v); };
 
@@ -789,6 +800,8 @@ export class RemoteDaemonModal extends Modal {
       if (!check.ok) { status.setText(check.reason); status.addClass('mod-warning'); return null; }
       const mapping = checkVaultMappingInput({ remoteRoot: vaultRemote, localRoot: vaultLocal });
       if (!mapping.ok) { status.setText(mapping.reason); status.addClass('mod-warning'); advanced.open = true; return null; }
+      const pushed = parsePushedSecrets(pushedText);
+      if (!pushed.ok) { status.setText(pushed.reason); status.addClass('mod-warning'); advanced.open = true; return null; }
       status.removeClass('mod-warning');
       const id = this.existing?.id ?? uniqueDaemonId(name, this.all);
       return {
@@ -801,6 +814,7 @@ export class RemoteDaemonModal extends Modal {
           ...(folder.trim() ? { defaultCwdRoot: folder.trim() } : {}),
           ...(mapping.mapping ? { vaultMapping: mapping.mapping } : {}),
           ...hostToolsSettingsFrom(hostTools),
+          ...(pushed.names.length > 0 ? { pushedSecrets: pushed.names } : {}),
         },
       };
     };
@@ -831,7 +845,7 @@ export class RemoteDaemonModal extends Modal {
     save.addEventListener('click', async () => {
       const c = candidate();
       if (!c) return;
-      await this.actions.save(c.config, token.trim());
+      await this.actions.save(c.config, token.trim(), adminToken.trim());
       this.close();
     });
   }
@@ -3442,7 +3456,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         const inUse = this.plugin.manager.getThreads().filter((t) => t.remote?.daemonId === daemon.id && t.status !== 'archived').length;
         if (inUse > 0 && !window.confirm(`${inUse} thread${inUse === 1 ? '' : 's'} run on "${daemon.name}". They stay in your list but cannot continue until a daemon with this id is configured again. Remove it?`)) return;
         this.plugin.settings.remoteDaemons = daemons.filter((d) => d.id !== daemon.id);
+        await this.plugin.remoteSecretPush?.reconcile();
         this.app.secretStorage.setSecret(secretStorageKey(daemon.tokenSecretName), '');
+        this.app.secretStorage.setSecret(secretStorageKey(adminTokenSecretNameFor(daemon.id)), '');
         await this.plugin.saveSettings();
         this.plugin.daemonRegistry?.refresh();
         this.display();
@@ -3592,13 +3608,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       proxiedServers: () => proxiedServerNames(this.plugin.settings),
       ownServers: () => listMcpServers(this.plugin.settings).servers.map((x) => x.name),
       ...(this.plugin.remoteRepos ? { repos: this.plugin.remoteRepos } : {}),
-      save: async (config, token) => {
+      save: async (config, token, adminToken) => {
         const list = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
         const index = list.findIndex((d) => d.id === config.id);
         if (index >= 0) list[index] = config; else list.push(config);
         if (token) this.app.secretStorage.setSecret(secretStorageKey(config.tokenSecretName), token);
+        if (adminToken) this.app.secretStorage.setSecret(secretStorageKey(adminTokenSecretNameFor(config.id)), adminToken);
         await this.plugin.saveSettings();
         this.plugin.daemonRegistry?.refresh();
+        // An edited allowlist takes effect now: dropped names are re-pushed away (or the kind deleted).
+        void this.plugin.remoteSecretPush?.reconcile();
         this.display();
       },
     }).open();

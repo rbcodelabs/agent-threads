@@ -13,6 +13,7 @@
  */
 
 import type { VmCommandRunner } from '../containerCli';
+import type { CredsSink } from '../credsDelivery';
 import { redactSecrets, parseTokenList, tail } from './parse';
 import {
   CREDS_TOKEN_NAME,
@@ -37,7 +38,7 @@ export interface CredsPusherDeps {
   onFreshVolume?(): void;
 }
 
-export class CredsPusher {
+export class CredsPusher implements CredsSink {
   /** Containers whose admin token for `creds push` is known to exist. */
   private readonly cliTokenReady = new Set<string>();
 

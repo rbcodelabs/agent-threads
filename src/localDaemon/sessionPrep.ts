@@ -28,28 +28,16 @@ import {
   shortHash,
   type FsLike,
 } from './containerFiles';
+import { EnvKindDelivery, forwardableEnv, sessionEnvKind } from '../credsDelivery';
 import { CredsPusher } from './credsPusher';
 import {
   AWS_HOME_DIR,
   CLAUDE_HOME_DIR,
   SESSION_ENV_TTL_SEC,
   SKILLS_DIR,
-  sessionEnvKind,
 } from './spec';
 
-/** Variables never forwarded: they describe THIS Mac's shell and would break a process in the container. */
-const NOT_FORWARDED = /^(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|PWD|OLDPWD|TERM|LANG|LC_[A-Z_]+|SHLVL|_|(DYLD|LD)_[A-Z_]+)$/;
-const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
-
-/** The variables that may go to the daemon: valid names, none of the Mac shell's own, non-empty values. */
-export function forwardableEnv(env: Readonly<Record<string, string | undefined>>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) {
-    if (typeof v !== 'string' || v === '' || !NAME.test(k) || NOT_FORWARDED.test(k)) continue;
-    out[k] = v;
-  }
-  return out;
-}
+export { forwardableEnv };
 
 export interface SessionExtras {
   /** Name of the credential kind holding the session environment; absent when there is none to send. */
@@ -82,8 +70,8 @@ const AWS_REFRESH_MS = 5 * 60_000;
 export class LocalDaemonSessionPrep {
   private readonly pusher: CredsPusher;
   private readonly now: () => number;
-  /** kind -> hash of what is stored and when it was pushed. */
-  private readonly envPushed = new Map<string, { hash: string; at: number }>();
+  /** Change detection and TTL refresh of the pushed session environment (shared with remote daemons). */
+  private readonly env: EnvKindDelivery;
   private awsState: { hash: string; at: number } | null = null;
   private userSkills = new Map<string, string>();
   private readonly skillDirs = new Set<string>();
@@ -94,8 +82,9 @@ export class LocalDaemonSessionPrep {
       vaultPath: deps.vaultPath,
       runner: deps.runner,
       // A fresh data volume has none of what we copied or pushed before.
-      onFreshVolume: () => { this.envPushed.clear(); this.awsState = null; this.userSkills.clear(); this.skillDirs.clear(); },
+      onFreshVolume: () => { this.env.clear(); this.awsState = null; this.userSkills.clear(); this.skillDirs.clear(); },
     });
+    this.env = new EnvKindDelivery(this.pusher, { refreshMs: ENV_REFRESH_MS, now: this.now });
   }
 
   async prepare(projectId: string | undefined): Promise<SessionExtras> {
@@ -117,8 +106,7 @@ export class LocalDaemonSessionPrep {
 
   /** Removes what was pushed or copied, best effort. */
   async stop(): Promise<void> {
-    for (const kind of this.envPushed.keys()) await this.pusher.remove(kind);
-    this.envPushed.clear();
+    await this.env.stop();
     if (this.awsState) {
       this.awsState = null;
       try { await this.deps.runner()(removeDirArgs(this.pusher.containerName(), AWS_HOME_DIR), { timeoutMs: 30_000 }); } catch { /* best effort */ }
@@ -132,17 +120,7 @@ export class LocalDaemonSessionPrep {
     const base = forwardableEnv(this.deps.resolveEnv(projectId));
     const profiles = this.deps.awsProfiles();
     const env = { ...base, ...daemonAwsEnv(profiles.length > 0, base) };
-    if (Object.keys(env).length === 0) {
-      if (this.envPushed.delete(kind)) await this.pusher.remove(kind);
-      return undefined;
-    }
-    const hash = shortHash(JSON.stringify(Object.entries(env).sort()));
-    const prev = this.envPushed.get(kind);
-    if (!prev || prev.hash !== hash || this.now() - prev.at > ENV_REFRESH_MS) {
-      await this.pusher.push(kind, env, SESSION_ENV_TTL_SEC);
-      this.envPushed.set(kind, { hash, at: this.now() });
-    }
-    return kind;
+    return (await this.env.deliver(kind, env, SESSION_ENV_TTL_SEC)) ? kind : undefined;
   }
 
   // ── skills ───────────────────────────────────────────────────────────────
