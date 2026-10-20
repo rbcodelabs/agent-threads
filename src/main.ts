@@ -3250,6 +3250,30 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.deleteThread(id);
   }
 
+  /** Archived threads still on disk (vault notes) that are not live in memory. Empty when vault persistence is off. */
+  async loadArchivedThreads(): Promise<Thread[]> {
+    if (!this.persistence) return [];
+    const all = await this.persistence.loadAllThreads();
+    return all.filter(thread => thread.status === 'archived' && !this.manager.getThread(thread.id));
+  }
+
+  /**
+   * Brings an archived thread back to life: the inverse of archiveThreadById.
+   * updatedAt is bumped so the idle auto-archive sweep does not immediately
+   * re-archive it.
+   */
+  async restoreArchivedThread(archived: Thread): Promise<void> {
+    if (!this.manager.getThread(archived.id)) {
+      const restored: Thread = { ...archived, status: 'waiting', updatedAt: Date.now() };
+      this.manager.loadThreads([restored], true);
+      if (!restored.private && this.settings.saveThreadsToVault) {
+        await this.persistence?.saveThread(restored).catch(console.error);
+      }
+      await this.saveSettings();
+    }
+    await this.openThreadInChatView(archived.id);
+  }
+
   async retireOrchestratorThread(
     threadId: string,
     prepared?: { projectId: string; priorEnabled: boolean },

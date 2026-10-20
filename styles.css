@@ -3158,6 +3158,34 @@
   color: var(--text-muted);
 }
 
+.ct-agents-collapsible {
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-s);
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.ct-agents-collapsible:hover { background-color: var(--background-modifier-hover); color: var(--text-normal); }
+.ct-agents-collapsible:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+.ct-agents-group-chevron {
+  display: inline-flex;
+  flex: none;
+  width: 14px;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.ct-agents-group-chevron svg { width: 14px; height: 14px; }
+.ct-agents-collapsible:hover .ct-agents-group-chevron { color: var(--text-normal); }
+/* Collapsed project: keep the header, soften it so it reads as "folded". */
+.ct-agents-project-header.is-collapsed .ct-agents-project-name { color: var(--text-muted); }
+.ct-agents-group-label.ct-agents-collapsible {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 2px 8px;
+}
+.ct-agents-group-label .ct-agents-project-count { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--text-faint); }
+
 .ct-agents-group-badge {
   display: inline-flex;
   align-items: center;
@@ -10324,3 +10352,27 @@ button.ct-agent-crumb:focus-visible {
   display: flex;
   min-height: 32px;
 }
+
+.ct-agents-project-header.ct-agents-collapsible { border-radius: var(--radius-s) var(--radius-s) 0 0; }
+
+/* Archived threads (Agents List → "Show archived") */
+.ct-agents-archived-group .ct-agents-row-archived { position: relative; opacity: 0.8; min-height: 0; }
+.ct-agents-archived-group .ct-agents-row-archived:hover,
+.ct-agents-archived-group .ct-agents-row-archived:focus-within { opacity: 1; }
+.ct-agents-icon-archived { color: var(--text-faint); }
+.ct-agents-restore-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 10px;
+  font-size: var(--font-ui-smaller);
+  border-radius: var(--radius-s);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.ct-agents-row-archived:hover .ct-agents-restore-btn,
+.ct-agents-row-archived:focus-within .ct-agents-restore-btn { opacity: 1; pointer-events: auto; }
+.ct-agents-row-archived:hover .ct-agents-row-time,
+.ct-agents-row-archived:focus-within .ct-agents-row-time { visibility: hidden; }
+.view-action.is-active { color: var(--interactive-accent); }

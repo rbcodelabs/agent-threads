@@ -92,6 +92,23 @@ const openedAgentTeams: string[] = [];
 /** Threads archived via the right-click menu, in order — asserted by ui.spec.ts. */
 const archivedThreadIds: string[] = [];
 let saveSettingsCalls = 0;
+/** Archived-thread fixtures (vault notes) surfaced by "Show archived"; restored ids are recorded. */
+const restoredThreadIds: string[] = [];
+const archivedFixtures = kanbanFixtureThreads
+  .filter(thread => thread.projectId)
+  .slice(0, 4)
+  .map((thread, index) => ({
+    ...thread,
+    id: `archived-${index}`,
+    title: ['Retire legacy auth routes', 'Spike: offline itinerary cache', 'Rate limiter postmortem', 'Q2 dependency sweep'][index],
+    summary: ['Removed /v0 endpoints and the shim.', 'Prototype works; needs IndexedDB quota handling.', undefined, undefined][index],
+    status: 'archived' as const,
+    updatedAt: Date.now() - (index + 3) * 86_400_000,
+    messages: thread.messages.slice(0, 1),
+    pendingPlan: undefined,
+    pendingQuestions: undefined,
+    agentRuns: [],
+  }));
 
 const mockPlugin = {
   app: (mockLeaf as any).app,
@@ -102,6 +119,8 @@ const mockPlugin = {
   saveSettings: async () => { saveSettingsCalls += 1; },
   getActiveThreadId: () => null,
   openThreadInChatView: async () => {},
+  loadArchivedThreads: async () => archivedFixtures.filter(thread => !restoredThreadIds.includes(thread.id)),
+  restoreArchivedThread: async (thread: { id: string }) => { restoredThreadIds.push(thread.id); },
   openAgentTeamInChatView: async (threadId: string) => { openedAgentTeams.push(threadId); },
   openNewConversation: async (...args: unknown[]) => {
     newConversationCalls.push(args);
@@ -146,6 +165,7 @@ void view.onOpen();
 (window as any).__openedAgentTeams = openedAgentTeams;
 (window as any).__archivedThreadIds = archivedThreadIds;
 (window as any).__getSaveSettingsCalls = () => saveSettingsCalls;
+(window as any).__getRestoredThreadIds = () => restoredThreadIds;
 (window as any).__getAgentsGroupBy = () => settings.agentsGroupBy;
 (window as any).__getHeaderUpdateCalls = getHeaderUpdateCalls;
 (window as any).__replaceAgentRuns = (threadId: string, statuses: Array<'starting' | 'working' | 'waiting' | 'completed' | 'failed' | 'interrupted' | 'unavailable'>) => {
