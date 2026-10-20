@@ -676,10 +676,15 @@ exactly which tools run on your computer (or says none do).
   connected and that the tool needs it, so it carries on instead of looping. The turn is never held longer than that plus
   `hostToolTimeoutSec` (default 300) for a slow answer. When you reopen the app a transcript row says which host tools were
   unavailable. Nothing is queued: the call is not run later.
-- **Choose what is offered.** Settings, Remote daemons, edit, Advanced: switch on "Tools on this computer" for the daemon,
-  then list the groups to allow under "Tool groups to allow" (`vault`, `workspace`, `threads`, `skills`, `browser`, `mcp`;
-  you can also name one read tool, or one proxied server). Anything unlisted is off. Upgrading from a build where host tools
-  were on by default: they are now off until you do this. If the daemon holds its own synced copy of the vault leave `vault`
+- **Choose what is offered.** Two places edit the same setting. In Settings, Remote daemons, edit, Advanced, switch on "Tools on this computer",
+  then tick what the daemon may use: a checklist of "Notes in this vault" (`vault`), "Open tabs and active file" (`workspace`), "Your other
+  threads" (`threads`), "Installed skills" (`skills`), "In-app browser" (`browser`) and each of your connected OAuth and Google Workspace
+  servers. Items stay greyed out until the master switch is on. In Settings, MCP, every OAuth and Google Workspace server row has an
+  "Available on" checkbox per daemon, which turns host tools on for that daemon if they were off and names only that server. Settings, MCP shows
+  "Not available on <daemon>. Turn on" when a server is not offered to a daemon. Anything unticked is off. Entries from an older config that the
+  checklist does not know (the whole `mcp` group, a single read tool, a server that is gone) are listed under "Custom" and kept until you untick them.
+  A change applies to the next thread session you open. Upgrading from a build where host tools
+  were on by default: they are now off until you do this. If the daemon holds its own synced copy of the vault leave "Notes in this vault"
   off so the agent uses its file tools on the copy (see "Working in the vault"; the two are different views of the same notes).
 - **Seat and manifest.** Only the client that holds the thread's read-write seat acts on `tool.call`; a second install or
   a terminal viewing the thread ignores it. The daemon treats a thread as having host tools only while the seat holder is
@@ -841,8 +846,8 @@ not synced, and the old copy is removed from the daemon.
 
 **When a toggle is disabled** the reason is shown: the daemon is too old (no `mcp.sync` capability), needs an admin token (the
 token stored for a daemon you added must have scope `admin`; the managed local daemon needs nothing, its admin token lives in
-its container), the daemon does not accept programs from the app (stdio), the server is OAuth, loopback-only, or uses a secret
-that is not stored. With a daemon that is too old nothing changes: dropped servers are dropped with the usual reason.
+its container), the daemon does not accept programs from the app (stdio), the server is loopback-only or uses a secret
+that is not stored. OAuth and Google Workspace servers have no "Runs on" toggle: they cannot run on a daemon, but they can be proxied from this computer through their "Available on" checkbox (see "Choose what is offered"). With a daemon that is too old nothing changes: dropped servers are dropped with the usual reason.
 
 **Status.** Each ticked daemon shows a chip from what its sessions report (Connected, Needs sign-in, Failed with the daemon's
 message). A server whose credential lapsed or was never delivered shows `Failed: missing credential ...` with **Push now**.
