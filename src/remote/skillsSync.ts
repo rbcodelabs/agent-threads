@@ -103,10 +103,17 @@ export class RemoteSkillsSync {
         if (ms <= 0) throw new DaemonCommandError('timeout', 'timed out');
         return ms;
       };
-      const plan = await client.command('skills.sync', { trees: trees.map(({ dir, hash, files, bytes }) => ({ dir, hash, files, bytes })) }, { timeoutMs: left() });
-      const root = typeof plan.root === 'string' && plan.root.startsWith('/') ? plan.root.replace(/\/+$/, '') : '';
-      const have = new Set(Array.isArray(plan.have) ? (plan.have as unknown[]).filter((d): d is string => typeof d === 'string') : []);
-      if (!root) return fail('the daemon sent no skills directory');
+      // The daemon rejects more than SKILL_LIMITS.maxTrees per call; sync() is stateless, so batch and merge.
+      let root = '';
+      const have = new Set<string>();
+      for (let i = 0; i < trees.length; i += SKILL_LIMITS.maxTrees) {
+        const batch = trees.slice(i, i + SKILL_LIMITS.maxTrees).map(({ dir, hash, files, bytes }) => ({ dir, hash, files, bytes }));
+        const plan = await client.command('skills.sync', { trees: batch }, { timeoutMs: left() });
+        const batchRoot = typeof plan.root === 'string' && plan.root.startsWith('/') ? plan.root.replace(/\/+$/, '') : '';
+        if (!batchRoot || (root && batchRoot !== root)) return fail('the daemon sent no skills directory');
+        root = batchRoot;
+        if (Array.isArray(plan.have)) for (const d of plan.have as unknown[]) if (typeof d === 'string') have.add(d);
+      }
       let uploaded = 0;
       const problems: string[] = [];
       for (const tree of trees) {

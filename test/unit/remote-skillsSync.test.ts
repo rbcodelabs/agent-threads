@@ -54,11 +54,13 @@ describe('RemoteSkillsSync', () => {
   interface Opts { capabilities?: string[] | null; reachable?: boolean; failOn?: string; files?: Record<string, string>; plugins?: string[] }
   function setup(o: Opts = {}) {
     const sent: string[] = [];
+    const syncSizes: number[] = [];
     const caps = o.capabilities === undefined ? ['skills.sync'] : o.capabilities;
     const client = {
       daemonInfo: o.reachable === false || caps === null ? undefined : { capabilities: caps, epoch: 'e1' },
       async command(type: string, payload: Record<string, unknown>) {
         sent.push(type);
+        if (type === 'skills.sync') syncSizes.push((payload.trees as unknown[]).length);
         if (o.failOn === type) throw new DaemonCommandError('unreachable', 'daemon unreachable');
         try {
           if (type === 'skills.sync') return { ...store.sync(payload.trees) };
@@ -75,8 +77,41 @@ describe('RemoteSkillsSync', () => {
       fs: treeFs(files),
       sha256: () => createHash('sha256'),
     });
-    return { sync, sent };
+    return { sync, sent, syncSizes };
   }
+
+  const manyTrees = (n: number) => {
+    const files: Record<string, string> = {};
+    const plugins: string[] = [];
+    for (let i = 0; i < n; i++) { files[`/vault/skills/t${i}/SKILL.md`] = `skill ${i}`; plugins.push(`/vault/skills/t${i}`); }
+    return { files, plugins };
+  };
+
+  it('batches skills.sync at the daemon tree limit and keeps every tree in order', async () => {
+    const { sync, sent, syncSizes } = setup(manyTrees(70));
+    const r = await sync.prepare(daemon());
+    expect(syncSizes).toEqual([32, 32, 6]);
+    expect(sent.filter((t) => t === 'skills.sync')).toHaveLength(3);
+    expect(r.notices).toEqual(['Synced 70 skill folders to my-server.']);
+    expect(r.pluginPaths).toHaveLength(70);
+    expect(r.pluginPaths.map((p) => p.split('/').pop()!.replace(/-[0-9a-f]{12}$/, ''))).toEqual(Array.from({ length: 70 }, (_, i) => `skills-t${i}`));
+  });
+
+  it('already-present trees from every batch are not re-uploaded', async () => {
+    const { sync, sent } = setup(manyTrees(40));
+    await sync.prepare(daemon());
+    sent.length = 0;
+    const again = await sync.prepare(daemon());
+    expect(sent).toEqual(['skills.sync', 'skills.sync']);
+    expect(again.pluginPaths).toHaveLength(40);
+    expect(again.notices).toEqual([]);
+  });
+
+  it('sends a single skills.sync for exactly the limit', async () => {
+    const { sync, syncSizes } = setup(manyTrees(SKILL_LIMITS.maxTrees));
+    expect((await sync.prepare(daemon())).pluginPaths).toHaveLength(SKILL_LIMITS.maxTrees);
+    expect(syncSizes).toEqual([SKILL_LIMITS.maxTrees]);
+  });
 
   it('uploads a missing tree, hands back absolute daemon paths, and says how many folders it synced', async () => {
     const { sync, sent } = setup();
