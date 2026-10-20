@@ -627,7 +627,12 @@ describe('DispatchInput — Run on a remote daemon: vault folder suggestion', ()
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
     expect(root.querySelector('.ct-sp-back')).not.toBeNull(); // still in the Run on level
     expect(document.activeElement).toBe(before);
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    // Escape in the field goes back a level (it must reach the popover), and a second one closes it.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    expect(root.querySelector('.ct-sp-back')).toBeNull();
+    expect(root.querySelector('.ct-settings-popover')).not.toBeNull();
+    level(root, 'runon');
+    folder(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     expect(root.querySelector('.ct-settings-popover')).toBeNull();
   });
 

@@ -240,16 +240,18 @@ export class ComposerSettingsPopover extends PopoverBase {
   private renderLevel(root: HTMLElement, setting: PopoverSetting): void {
     const back = root.createEl('button', {
       cls: 'ct-sp-item ct-sp-back',
-      attr: { type: 'button', role: 'menuitem', 'aria-label': `Back to settings from ${setting.label}`, 'data-ct-nav': '', 'data-ct-key': 'back' },
+      // No aria-label: the host shows aria-labels as a tooltip, and this button takes focus on drill-in.
+      attr: { type: 'button', role: 'menuitem', 'data-ct-nav': '', 'data-ct-key': 'back' },
     });
     iconSpan(back, 'chevron-left', 'ct-sp-chevron');
-    back.createSpan({ cls: 'ct-sp-label', text: setting.label });
+    const backLabel = back.createSpan({ cls: 'ct-sp-label', text: setting.label, attr: { id: 'ct-sp-level-label' } });
     back.addEventListener('click', () => this.goTo(null, `row:${setting.id}`));
     root.createDiv('ct-sp-divider').setAttribute('role', 'separator');
 
     const panel = root.createDiv('ct-sp-options');
     panel.setAttribute('role', 'group');
-    panel.setAttribute('aria-label', setting.label);
+    // Named by the back header's text (an aria-label would surface as a hover tooltip in the host).
+    panel.setAttribute('aria-labelledby', backLabel.id);
     const ctl: PopoverCustomControls = { close: () => this.close(true), refresh: () => this.refresh() };
     let n = 0;
     let rendered = 0;

@@ -862,7 +862,7 @@ export class DispatchInput {
       refreshHint();
     });
     input.addEventListener('keydown', (event) => {
-      event.stopPropagation();
+      if (event.key !== 'Escape') event.stopPropagation(); // Escape goes back in the popover
       if (event.key === 'Enter') { event.preventDefault(); this.settingsPopover?.close(true); }
     });
     input.focus();
@@ -900,7 +900,7 @@ export class DispatchInput {
       this.selectedRunOn = { daemonId: daemon.id, cwd: path };
       this.refreshRunOnFolderRow(this.runOnFolderHost ?? row.parentElement as HTMLElement, this.remoteDaemons());
     };
-    select.addEventListener('keydown', (event) => event.stopPropagation());
+    select.addEventListener('keydown', (event) => { if (event.key !== 'Escape') event.stopPropagation(); });
     select.addEventListener('change', () => {
       if (select.value !== OTHER_FOLDER) { choose(select.value); return; }
       // "Other folder…": fall back to typing for this daemon.
