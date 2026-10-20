@@ -248,6 +248,13 @@ export interface RemoteDaemonConfig {
   /** Default directory offered for new remote threads (a path on the daemon's machine). */
   defaultCwdRoot?: string;
   /**
+   * Names (never values) of the environment variables / keychain secrets this app may PUSH to this daemon, as the
+   * session environment of threads that run there. `NAME` applies to every project, `<projectId>/NAME` to one
+   * project. Absent or empty = nothing is sent (the default). Needs an admin token under
+   * `adminTokenSecretNameFor(id)`; see src/remote/secretPush.ts.
+   */
+  pushedSecrets?: string[];
+  /**
    * This daemon holds a synced mirror of the vault. A vault thread run there
    * defaults to the same relative folder under `remoteRoot`.
    */
