@@ -1,6 +1,7 @@
 import { gateHarness } from './remote/harnessSupport';
 import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
+import { RemoteImageCache, createRemoteImageLoader, hydrateRemoteImages } from './remote/remoteImages';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import { connectionPill } from './remote/connectionPill';
 import { describeComposerSettings, type ComposerSettingsDescription, type RemoteConnection } from './composerSettings';
@@ -3114,6 +3115,8 @@ export class ThreadsView extends ItemView {
     });
   }
 
+  private readonly remoteImageCache = new RemoteImageCache();
+
   private async renderMarkdown(
     markdown: string,
     el: HTMLElement,
@@ -3151,6 +3154,11 @@ export class ThreadsView extends ItemView {
     // a frame is never rebuilt on every token.
     this.visualizeManager?.hydrate(el, visualize.markers, { interactive: !options.streaming });
     if (threadId && !signal.aborted) void this.messageContentManager?.hydrate(el, inline.markers, { threadId, messageId: transcriptMessage?.id ?? 'streaming', signal }, options);
+    // `![alt](/abs/path)` in a remote thread names a file on the daemon's machine: fetch it with file.read.
+    const remote = threadId ? this.manager.getThread(threadId)?.remote : undefined;
+    if (remote && this.plugin.daemonRegistry) {
+      hydrateRemoteImages(el, { load: createRemoteImageLoader(this.plugin.daemonRegistry, this.remoteImageCache, remote.daemonId), signal });
+    }
     // Wrap tables in a scrollable container so wide tables don't overflow.
     el.querySelectorAll<HTMLTableElement>('table').forEach((table) => {
       const wrapper = document.createElement('div');

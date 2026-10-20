@@ -978,6 +978,26 @@ What Geode does with it:
   mapped folder preselected. **Browse...** lists subfolders (`path.list`) to descend into and **Use this
   folder** selects one. **Other folder...** switches to typing.
 
+## Images in the chat
+
+An agent on a daemon can show an image inline by writing a markdown image with an absolute path on the daemon's
+machine, for example `![chart](/srv/workspaces/app/out/chart.png)`. The remote environment prompt tells the agent so.
+Geode cannot load that path itself, so it asks the daemon with the additive, read-scope command `file.read {path}`
+(capability `file.read` in `welcome`) and shows the returned bytes. Only remote threads do this; `http(s)`, `data:` and
+`blob:` images and local threads behave as before, and the mobile (relay) view does not resolve daemon paths.
+
+What the daemon returns, and refuses (every refusal is the same `not_found` "image unavailable", so the command cannot
+be used to probe the disk):
+
+- png, jpeg, gif and webp only, checked by extension **and** magic bytes (a mismatch is refused). SVG is never served.
+- Regular files up to 5 MB (`FILE_READ_MAX_BYTES`).
+- The real path (symlinks followed) must be inside a configured workspace, read-write or read-only. On the managed
+  local daemon those are the session folders, the shared folders (`/work/*`), the external roots (`/ext/*`) and the
+  vault mirror. A symlink that leads outside, and anything under `.git` or `.obsidian`, is refused.
+
+An older daemon answers `unknown_command` (or lacks the capability); Geode then shows "Image unavailable" in place of the
+image. Images are fetched when they scroll into view and cached for the session.
+
 ## Working in the vault
 
 A daemon can hold a synced copy of your vault (for example `/home/user/vault`, kept in sync with your

@@ -147,6 +147,7 @@ export function buildRemoteEnvironmentPrompt(
       ? [HOST_TOOLS_PLACEHOLDER]
       : ['- You only have this machine\'s own tools (shell, file read/write, search). The user\'s vault and editor tools (vault_*, host_*, workspace_*) are not available in this session.']),
     '- All paths are paths on this remote machine.',
+    '- To show the user an image inline in the chat, write a markdown image with an absolute path on this machine, for example ![chart](/abs/path/chart.png). Supported: png, jpeg, gif and webp, under about 5 MB, inside your working folders. SVG is not supported.',
   ];
   const addendum = vault && isUnderRemoteRoot(vault.mapping, cwd) ? buildRemoteVaultAddendum(cwd, vault) : [];
   return [...lines, ...addendum, ...buildMountedFoldersBlock(options.mounts)].join('\n');

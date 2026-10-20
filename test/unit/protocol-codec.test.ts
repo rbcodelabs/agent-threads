@@ -23,6 +23,7 @@ const clientSamples: ClientFrame[] = [
   { v: 1, cmdId: 'c9', type: 'path.check', path: '/home/user/vault' },
   { v: 1, cmdId: 'c10', type: 'workspaces.list' },
   { v: 1, cmdId: 'c11', type: 'path.list', path: '/home/user/vault' },
+  { v: 1, cmdId: 'c15', type: 'file.read', path: '/home/user/vault/chart.png' },
   { v: 1, cmdId: 'c8', type: 'creds.push', kind: 'claude', ttlSec: 60, fields: { token: 'x' } },
   { v: 1, cmdId: 'c12', type: 'repos.sync', repos: [{ name: 'proj', url: 'https://github.com/o/proj.git', branch: 'main' }], wait: true },
   { v: 1, cmdId: 'c13', type: 'repos.sync' },

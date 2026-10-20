@@ -235,6 +235,7 @@ describe('L. scopes and request ownership', () => {
     'path.check': { path: '/tmp' },
     'workspaces.list': {},
     'path.list': { path: '/tmp' },
+    'file.read': { path: '/tmp/x.png' },
     'session.getContextUsage': { threadId: 'x' },
     'session.mcpServerStatus': { threadId: 'x' },
     'session.getUsageSnapshot': { threadId: 'x' },

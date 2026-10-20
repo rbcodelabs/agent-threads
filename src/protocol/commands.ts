@@ -38,6 +38,11 @@ export type ClientCommand =
   /** Subfolders of an allowed folder, for browsing. Directories only, capped, confined to the workspaces. Additive. */
   | { type: 'path.list'; path: string }
   /**
+   * Read one image file inside the daemon's workspaces so the client can show it inline (`![](/abs/path)`). Read scope.
+   * png / jpeg / gif / webp only (no svg), at most `FILE_READ_MAX_BYTES`. Additive; older daemons answer `unknown_command`.
+   */
+  | { type: 'file.read'; path: string }
+  /**
    * `epoch` is the daemon process epoch the client last saw on this channel. If the daemon has restarted
    * since and lost journal entries the client already applied (a crash before they were flushed, so their
    * seqs were reused), the reply carries `rewind` and replay starts there. Additive within v1.
@@ -231,6 +236,17 @@ export function validateWireImages(images: unknown): string | null {
   return null;
 }
 
+/** Reply to `file.read`. */
+export interface FileReadReply {
+  base64: string;
+  mediaType: WireImage['mediaType'];
+  /** Size of the file in bytes. */
+  size: number;
+}
+
+/** Largest file `file.read` returns. */
+export const FILE_READ_MAX_BYTES = 5 * 1024 * 1024;
+
 /** At most this many subfolders are returned by one `path.list`. */
 export const PATH_LIST_MAX_ENTRIES = 300;
 
@@ -246,6 +262,7 @@ export const CLIENT_COMMAND_TYPES: Record<ClientCommandType, true> = {
   'path.check': true,
   'workspaces.list': true,
   'path.list': true,
+  'file.read': true,
   attach: true,
   ack: true,
   'session.send': true,

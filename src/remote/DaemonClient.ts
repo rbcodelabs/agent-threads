@@ -39,6 +39,7 @@ import {
   type ErrorCode,
   type EventFrame,
   type PathCheckReply,
+  type FileReadReply,
   type PathListReply,
   type WorkspaceInfo,
   type WorkspacesListReply,
@@ -845,6 +846,21 @@ export async function fetchSubfolders(client: DaemonClient, path: string, timeou
     return { allowed: !!r.allowed, entries: Array.isArray(r.entries) ? r.entries : [], truncated: !!r.truncated };
   } catch (err) {
     if (isUnknownCommand(err)) return undefined;
+    throw err;
+  }
+}
+
+/**
+ * `file.read` on a live client: an image under the daemon's workspaces. `undefined` when the daemon cannot (or will
+ * not) provide it: too old to know the command, or the file is refused (missing, outside the workspaces, too big,
+ * not an image). Connection problems still reject so the caller can tell "offline" from "no image".
+ */
+export async function fetchRemoteImage(client: DaemonClient, path: string, timeoutMs = 20000): Promise<FileReadReply | undefined> {
+  try {
+    const r = (await client.command('file.read', { path }, { timeoutMs })) as unknown as FileReadReply;
+    return typeof r.base64 === 'string' && typeof r.mediaType === 'string' ? r : undefined;
+  } catch (err) {
+    if (isUnknownCommand(err) || (err instanceof DaemonCommandError && (err.code === 'not_found' || err.code === 'forbidden' || err.code === 'bad_frame'))) return undefined;
     throw err;
   }
 }

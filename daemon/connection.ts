@@ -37,6 +37,7 @@ import {
   type ErrFrame,
   type ErrorCode,
   type JournalEntry,
+  type FileReadReply,
   type PathListReply,
   type WelcomeFrame,
   type WireEvent,
@@ -76,7 +77,7 @@ export function raiseFrameLimit(ws: WebSocket, bytes: number): boolean {
 /** Stop handing frames to the socket once this much is already buffered in it. */
 const SOCKET_HIGH_WATER = 256 * 1024;
 /** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
-export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'host.tools', 'creds.push', 'mcp.status', 'repos', MCP_SYNC_CAPABILITY];
+export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'file.read', 'host.tools', 'creds.push', 'mcp.status', 'repos', MCP_SYNC_CAPABILITY];
 /**
  * `harness.<kind>` for each harness a client may request, plus `harness.<kind>.<feature>` for what that harness
  * supports (see `HARNESS_FEATURES`). The scripted fake advertises only `harness.fake`.
@@ -128,6 +129,8 @@ export interface ServerContext {
   listWorkspaces(): WorkspaceInfo[];
   /** Answers `path.list`: subfolders of an allowed folder. */
   listPath(path: string): PathListReply;
+  /** Answers `file.read`: an image inside the workspaces; throws `HostError` when it may not be shown. */
+  readFile(path: string): FileReadReply;
   timings: Timings;
   maxOutboundBytes: number;
   audit(record: Record<string, unknown>): void;
@@ -140,6 +143,7 @@ export const REQUIRED_SCOPE: Record<string, TokenScope> = {
   'path.check': 'read',
   'workspaces.list': 'read',
   'path.list': 'read',
+  'file.read': 'read',
   'session.getContextUsage': 'read',
   'session.mcpServerStatus': 'read',
   'session.getUsageSnapshot': 'read',
@@ -517,6 +521,7 @@ export class Connection {
       case 'path.check': return { ...this.ctx.checkPath(frame.path) };
       case 'workspaces.list': return { workspaces: this.ctx.listWorkspaces() };
       case 'path.list': return { ...this.ctx.listPath(frame.path) };
+      case 'file.read': return { ...this.ctx.readFile(frame.path) };
       case 'resolve.permission':
         this.requireControl(frame.threadId, auth);
         host.resolve(frame.threadId, 'permission', frame.requestId, { allow: frame.allow }, auth.id);
