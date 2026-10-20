@@ -128,6 +128,9 @@ function buildViewCore(snap: LocalDaemonSnapshot): Omit<LocalDaemonView, 'harnes
   if (snap.daemonVersion) lines.push({ label: 'Daemon', value: `v${snap.daemonVersion}${snap.daemonVersion === snap.pluginVersion ? '' : `, this plugin is v${snap.pluginVersion}`}` });
   if (snap.port !== undefined && a.status !== 'not-set-up') lines.push({ label: 'Address', value: `127.0.0.1:${snap.port} (this Mac only)` });
 
+  const watchdogLine = watchdogLineFor(snap);
+  if (watchdogLine) lines.push({ label: 'Auto-recovery', value: watchdogLine });
+
   const update: LocalDaemonButton | null = a.update === 'available' || a.update === 'required'
     ? { id: 'update', label: 'Update available', cta: a.update === 'required' }
     : null;
@@ -141,6 +144,13 @@ function buildViewCore(snap: LocalDaemonSnapshot): Omit<LocalDaemonView, 'harnes
     case 'not-set-up':
       return { ...base, statusLabel: 'Not set up', tone: 'muted', buttons: [{ id: 'setup', label: 'Set up', cta: true }], busy: false };
     case 'stopped': {
+      if (o.stoppedOutOfMemory) {
+        return {
+          ...base, statusLabel: 'Stopped: out of memory', tone: 'error', busy: false,
+          buttons: [{ id: 'restart', label: 'Restart', cta: true }, ...(update ? [update] : []), ...tail],
+          hint: OUT_OF_MEMORY_HINT,
+        };
+      }
       const buttons: LocalDaemonButton[] = [{ id: 'start', label: 'Start', cta: true }, ...(update ? [update] : []), ...tail];
       return { ...base, statusLabel: 'Stopped', tone: 'muted', buttons, busy: false, ...(a.needsSignIn ? { hint: 'Claude sign-in is still needed once it is running.' } : {}) };
     }
@@ -172,6 +182,25 @@ function buildViewCore(snap: LocalDaemonSnapshot): Omit<LocalDaemonView, 'harnes
     default:
       return { ...base, statusLabel: 'Unknown', tone: 'muted', buttons: [], busy: false };
   }
+}
+
+export const OUT_OF_MEMORY_HINT =
+  'The daemon container was killed, most likely because the VM ran out of memory (exit 137). Restart starts it again. '
+  + 'If this keeps happening, raise "Local daemon memory" in Settings and choose Update to recreate the container.';
+
+/** `HH:MM` in the user's locale-independent 24-hour form. */
+export function formatClockTime(epochMs: number): string {
+  const d = new Date(epochMs);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function watchdogLineFor(snap: LocalDaemonSnapshot): string | null {
+  const w = snap.watchdog;
+  if (!w) return null;
+  if (w.status === 'recovering') return 'Restarting an unresponsive daemon';
+  if (w.status === 'gave-up') return `Watchdog gave up after ${w.attempts} attempts. Use Restart or Kill, and check the logs.`;
+  if (w.lastRestartAt !== undefined) return `Auto-restarted at ${formatClockTime(w.lastRestartAt)}${w.lastRestartOk === false ? ' (the restart did not finish)' : ''}`;
+  return null;
 }
 
 function maskedList(snap: LocalDaemonSnapshot): string {

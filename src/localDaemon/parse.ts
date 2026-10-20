@@ -11,6 +11,23 @@ export type ContainerState = 'running' | 'stopped' | 'unknown';
 export interface InspectedContainer {
   state: ContainerState;
   labels: Record<string, string>;
+  /** Exit code of the last run, when `inspect` reports one (field names are not verified against every CLI version). */
+  exitCode?: number;
+  /** The runtime says the last run ended because it ran out of memory (`OOMKilled`). */
+  oomKilled?: boolean;
+}
+
+/** SIGKILL (128 + 9): what the kernel OOM killer, `container kill` and an expired `stop` timeout all produce. */
+export const EXIT_CODE_SIGKILL = 137;
+
+function pickNumber(...candidates: unknown[]): number | undefined {
+  for (const c of candidates) if (typeof c === 'number' && Number.isFinite(c)) return c;
+  return undefined;
+}
+
+/** True when a stopped container's last exit looks like an out-of-memory kill. */
+export function looksOutOfMemory(c: Pick<InspectedContainer, 'exitCode' | 'oomKilled'>): boolean {
+  return c.oomKilled === true || c.exitCode === EXIT_CODE_SIGKILL;
 }
 
 /** `container inspect <name>` JSON. Only a positively reported `running` counts as running. */
@@ -28,7 +45,15 @@ export function parseInspectedContainer(stdout: string): InspectedContainer | nu
     ?? entry.state ?? (entry.State as Record<string, unknown> | undefined)?.Status;
   const text = typeof raw === 'string' ? raw.toLowerCase() : '';
   const state: ContainerState = text === 'running' ? 'running' : text ? 'stopped' : 'unknown';
-  return { state, labels: parseContainerLabels(stdout) ?? {} };
+  const statusObj = (typeof entry.status === 'object' && entry.status !== null ? entry.status : {}) as Record<string, unknown>;
+  const legacy = (entry.State && typeof entry.State === 'object' ? entry.State : {}) as Record<string, unknown>;
+  const exitCode = pickNumber(statusObj.exitCode, entry.exitCode, legacy.ExitCode);
+  const oom = [statusObj.oomKilled, entry.oomKilled, legacy.OOMKilled].find((v) => typeof v === 'boolean');
+  return {
+    state, labels: parseContainerLabels(stdout) ?? {},
+    ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(oom === true ? { oomKilled: true } : {}),
+  };
 }
 
 export interface CreatedToken {

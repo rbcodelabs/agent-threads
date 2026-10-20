@@ -3496,7 +3496,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       return result;
     };
     // Resources apply when the container is (re)created: the status then offers Update.
-    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; shareProjectFolders?: boolean; optionalTools?: string[]; allowSyncedStdio?: boolean }): Promise<void> => {
+    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; shareProjectFolders?: boolean; optionalTools?: string[]; allowSyncedStdio?: boolean; watchdog?: boolean }): Promise<void> => {
       const current = this.plugin.settings.localDaemon ?? { enabled: false, port: 7433 };
       this.plugin.settings.localDaemon = { ...current, ...patch };
       await this.plugin.saveSettings();
@@ -3530,6 +3530,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       .addToggle((toggle) => toggle
         .setValue(this.plugin.settings.localDaemon?.allowSyncedStdio === true)
         .onChange(async (on) => { await saveResources({ allowSyncedStdio: on || undefined }); }));
+    const watchdogSetting = new Setting(containerEl)
+      .setName('Local daemon: restart automatically when it stops answering')
+      .setDesc('Checks the daemon every 30 seconds and force-restarts it after three failed checks in a row, at most three times per 30 minutes. Never acts on a daemon you stopped yourself.')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.localDaemon?.watchdog !== false)
+        .onChange(async (on) => { await saveResources({ watchdog: on ? undefined : false }); }));
     // Tools that write, schedule or touch secrets on this Mac, which every daemon is denied by default.
     const optionalSettings: Setting[] = [];
     {
@@ -3566,7 +3572,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       snapshot: () => controller.snapshot(),
       snapshotQuick: () => controller.snapshot({ quick: true }),
       subscribe: (listener) => controller.subscribe(listener),
-      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, projectFoldersSetting, syncedStdioSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
+      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, projectFoldersSetting, syncedStdioSetting, watchdogSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       cancel: () => controller.cancel(),
       openUrl: (url) => { try { window.open(url, '_blank'); } catch { /* the panel keeps a link */ } },

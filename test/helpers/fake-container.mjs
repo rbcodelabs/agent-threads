@@ -135,7 +135,7 @@ if (a === 'run') {
 if (a === 'inspect') {
   const c = state.containers[args[1]];
   if (!c) { err('not found'); done(1); }
-  out(JSON.stringify([{ status: c.state, configuration: { id: args[1], labels: c.labels } }]));
+  out(JSON.stringify([{ status: c.state, ...(c.exitCode !== undefined ? { exitCode: c.exitCode } : {}), ...(c.oomKilled ? { oomKilled: true } : {}), configuration: { id: args[1], labels: c.labels } }]));
   done(0);
 }
 

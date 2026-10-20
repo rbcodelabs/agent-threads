@@ -46,6 +46,8 @@ import {
   waitHealthy,
   type StepDeps,
 } from './provision';
+import { looksOutOfMemory } from './parse';
+import { LocalDaemonWatchdog, type WatchdogConfig, type WatchdogState } from './watchdog';
 import { buildRegistration, isRegistrationCurrent, localDaemonUrl, LOCAL_DAEMON_TOKEN_SECRET } from './registration';
 import { installRuntime, readRuntime, startRuntimeService, type RuntimeApi } from './runtime';
 import {
@@ -156,6 +158,8 @@ export interface LocalDaemonSnapshot {
   containerBinary?: string;
   busy: LocalDaemonProgress | null;
   lastError: { code: string; message: string } | null;
+  /** Present once the watchdog has been started. */
+  watchdog?: WatchdogState;
 }
 
 export interface RunOptions {
@@ -206,6 +210,9 @@ interface ActiveOp {
 export class LocalDaemonController {
   private op: ActiveOp | null = null;
   private lastError: { code: string; message: string } | null = null;
+  /** This session stopped or killed the container (a SIGKILL exit is then ours, not an out-of-memory kill). */
+  private stoppedByUs = false;
+  private watchdog: LocalDaemonWatchdog | null = null;
 
   constructor(private readonly deps: LocalDaemonDeps) {}
 
@@ -378,6 +385,9 @@ export class LocalDaemonController {
     const keepVersion = containerVersion !== undefined && assessDaemonVersion(pluginVersion, containerVersion) !== 'required';
     const version = keepVersion ? containerVersion : pluginVersion;
     const running = typeof ours === 'object' && ours.state === 'running';
+    // A stop or kill WE ran also ends in SIGKILL (137), so only an exit we did not cause counts as out of memory.
+    const stoppedOutOfMemory = typeof ours === 'object' && ours.state === 'stopped' && looksOutOfMemory(ours)
+      && (ours.oomKilled === true || !this.stoppedByUs);
     const token = this.deps.secrets.get(LOCAL_DAEMON_TOKEN_SECRET);
 
     let health: Observed['health'] = 'na';
@@ -413,6 +423,7 @@ export class LocalDaemonController {
       container: ours === 'absent' ? 'absent' : ours === 'foreign' ? 'foreign' : running ? 'running' : 'stopped',
       ...(containerVersion ? { containerVersion } : {}),
       ...(containerSpec ? { containerSpec } : {}),
+      ...(stoppedOutOfMemory ? { stoppedOutOfMemory: true } : {}),
       health,
       ...(welcome ? { welcome } : {}),
       tokenInKeychain: !!token,
@@ -459,7 +470,32 @@ export class LocalDaemonController {
       ...(binary ? { containerBinary: binary } : {}),
       busy: this.getBusy(),
       lastError: this.lastError,
+      ...(this.watchdog ? { watchdog: this.watchdog.getState() } : {}),
     };
+  }
+
+  // ── watchdog ───────────────────────────────────────────────────────────────
+
+  /**
+   * Starts the health watchdog (idempotent). It polls with a quick snapshot and force-restarts a daemon that is
+   * supposed to be running but stops answering. A timer is used because a wedged VM emits no event to react to.
+   */
+  startWatchdog(config: Partial<WatchdogConfig> = {}): void {
+    if (this.watchdog) return;
+    this.watchdog = new LocalDaemonWatchdog({
+      target: this,
+      isEnabled: () => { const s = this.settings(); return s.enabled && s.watchdog !== false; },
+      onChange: () => this.notify(),
+      ...(this.deps.log ? { log: this.deps.log } : {}),
+      ...config,
+    });
+    this.watchdog.start();
+  }
+
+  /** Stops the watchdog's timer (plugin unload). Safe to call when it never started. */
+  stopWatchdog(): void {
+    this.watchdog?.stop();
+    this.watchdog = null;
   }
 
   // ── reconcile ──────────────────────────────────────────────────────────────
@@ -579,6 +615,7 @@ export class LocalDaemonController {
 
   private async runAndAwaitHealthy(d: StepDeps, vaultPath: string, start: () => Promise<void>, port: number, ctx: OpContext): Promise<void> {
     await start();
+    this.stoppedByUs = false;
     ctx.emit({ line: 'Waiting for the daemon to answer' });
     const ok = await waitHealthy({
       probe: () => this.deps.healthz(port),
@@ -650,11 +687,13 @@ export class LocalDaemonController {
   stop(opts: RunOptions = {}): Promise<void> {
     return this.runOp('stop', opts, async (ctx) => {
       const vaultPath = this.requireVault();
+      this.stoppedByUs = true;
       await stopContainer({ runner: this.deps.createRunner(), signal: ctx.signal }, vaultPath);
     });
   }
 
   private forceStop(d: StepDeps, vaultPath: string, skipGraceful = false): Promise<void> {
+    this.stoppedByUs = true;
     return forceStopContainer(d, vaultPath, { skipGraceful, ...(this.deps.killVmHelper ? { killVmHelper: (n: string) => this.deps.killVmHelper!(n) } : {}) });
   }
 
