@@ -1212,6 +1212,12 @@ export interface PluginSettings {
   escalationModel: string;
   alwaysAllowedTools: string[];
   /**
+   * "Always Allow" for threads hosted on a remote daemon: `Thread.remote.daemonId` -> tool names. Kept apart from
+   * alwaysAllowedTools so one daemon's approvals never apply to local threads or to another daemon.
+   * See remoteAlwaysAllow.ts.
+   */
+  remoteAlwaysAllowedTools: Record<string, string[]>;
+  /**
    * Command prefixes (`git status`, `npm test`) the user always-allowed on a `host_exec` card.
    * Separate from alwaysAllowedTools, which never holds host_exec. See hostExecPrefix.ts.
    */
@@ -1478,6 +1484,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   escalationKeyword: '/escalate',
   escalationModel: 'opus',
   alwaysAllowedTools: [],
+  remoteAlwaysAllowedTools: {},
   hostExecAlwaysAllowedPrefixes: [],
   disallowedTools: ['CronCreate', 'CronDelete', 'CronList', 'CronUpdate'],
   threads: [],

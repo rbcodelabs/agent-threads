@@ -4,6 +4,7 @@ import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread, TaskItem } from './types';
 import { formatToolName } from './ClaudeSession';
 import { canAlwaysAllow, summarizePermissionDetail, isHostExecPermission } from './permissionDetail';
+import { recordAlwaysAllow } from './remoteAlwaysAllow';
 import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
@@ -868,13 +869,12 @@ export class KanbanView extends ItemView {
           this.manager.resolvePermission(thread.id, true);
         });
       }
-      if ((!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) && !this.manager.isRemoteThread(thread.id)) {
+      if (!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) {
         const always = btns.createEl('button', { text: 'Always', cls: 'ct-permission-btn ct-permission-always' });
         always.addEventListener('click', async (e) => {
           e.stopPropagation();
           if (pendingInfo) {
-            this.plugin.settings.alwaysAllowedTools.push(pendingInfo.toolName);
-            await this.plugin.saveSettings();
+            if (recordAlwaysAllow(this.plugin.settings, pendingInfo.toolName, this.manager.getRemoteScope(thread.id))) await this.plugin.saveSettings();
           }
           this.manager.resolvePermission(thread.id, true);
         });

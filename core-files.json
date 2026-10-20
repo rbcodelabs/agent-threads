@@ -73,6 +73,7 @@
     "src/remote/randomId.ts",
     "src/remote/sessionSpec.ts",
     "src/remote/vaultMapping.ts",
+    "src/remoteAlwaysAllow.ts",
     "src/resumeFailureRecovery.ts",
     "src/secretRedaction.ts",
     "src/skillManager.ts",

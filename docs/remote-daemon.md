@@ -1145,9 +1145,14 @@ actually happened, not "just now". What makes that work:
 - One writer per thread. The seat is held by (token, Geode install): the same install reconnecting takes its own seat back
   at once, a second install using the same token is an observer and gets `conflict` on writes. Installs identify
   themselves with the `remoteClientId` in their settings; an older plugin sends none and is treated as one install per token.
-- "Always allow" on a permission prompt is **not supported** on a daemon session: the answer applies once, and the
-  daemon's acknowledgement says `alwaysAllow: "not_supported"`. Nothing in the journal claims a standing rule. The app does
-  not offer it on a remote thread's card either, and an always-allow entry made for a local thread never applies to one.
+- "Always allow" is **not a daemon feature**: the daemon's acknowledgement to `resolve.permission` says
+  `alwaysAllow: "not_supported"` and nothing in the journal claims a standing rule. The app implements it itself, **per
+  daemon**: the button on a remote thread's card (when the tool is allowable at all; `host_exec` and
+  `sync_resolve_conflict` never are) stores the tool name under that thread's `daemonId` in
+  `settings.remoteAlwaysAllowedTools`, and later requests for it from that daemon are answered without a card. Because
+  the tool name is the daemon's word, a remote thread is never pre-approved by the local always-allowed list or the
+  trusted built-ins, and one daemon's list never applies to local threads or other daemons. Entries are listed and
+  revocable in Settings, Tools (see `src/remoteAlwaysAllow.ts`).
 - A remote thread cannot be forked (Fork conversation and `/fork` are refused with an explanation): a fork is a local
   thread and would start in the daemon's folder on the wrong machine.
 - A send the daemon answers with a retryable `conflict` (it is running its maximum number of turns) is retried

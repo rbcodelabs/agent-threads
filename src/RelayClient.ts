@@ -90,10 +90,10 @@ export class RelayClient {
    * Called in desktop mode when a mobile client sends resolve_permission with
    * alwaysAllow=true. The plugin injects this to add the tool to alwaysAllowedTools.
    */
-  onAlwaysAllowTool: ((toolName: string) => void) | null = null;
+  onAlwaysAllowTool: ((toolName: string, remote?: { daemonId: string }) => void) | null = null;
 
   /** Maps requestId → toolName so alwaysAllow can be persisted on the desktop. */
-  private permissionToolNames: Map<string, string> = new Map();
+  private permissionToolNames: Map<string, { toolName: string; remote?: { daemonId: string } }> = new Map();
 
   // Mobile-mode state
   private frameListeners: Set<FrameListener> = new Set();
@@ -319,9 +319,9 @@ export class RelayClient {
       case 'resolve_permission':
         // 3.11 — If alwaysAllow, fire the plugin callback before resolving
         if (cmd.alwaysAllow) {
-          const toolName = this.permissionToolNames.get(cmd.requestId);
-          if (toolName && this.onAlwaysAllowTool) {
-            this.onAlwaysAllowTool(toolName);
+          const pending = this.permissionToolNames.get(cmd.requestId);
+          if (pending && this.onAlwaysAllowTool) {
+            this.onAlwaysAllowTool(pending.toolName, pending.remote);
           }
         }
         this.threadManager.resolvePermissionByRequestId(cmd.requestId, cmd.allow);
@@ -442,8 +442,8 @@ export class RelayClient {
           // Generate a stable requestId for this permission so mobile can reference it.
           // Register a resolver in ThreadManager so resolve_permission commands work.
           const requestId = crypto.randomUUID();
-          // Always Allow is never remembered for a remote thread (the tool name is the daemon's word).
-          if (!this.threadManager!.isRemoteThread(threadId)) this.permissionToolNames.set(requestId, event.toolName);
+          // Remember the tool and, for a remote thread, its daemon: Always Allow is scoped per daemon.
+          this.permissionToolNames.set(requestId, { toolName: event.toolName, remote: this.threadManager!.getRemoteScope(threadId) ?? undefined });
           this.threadManager!.registerRemotePermissionResolver(requestId, (allow) => {
             this.permissionToolNames.delete(requestId);
             this.threadManager!.resolvePermission(threadId, allow);
