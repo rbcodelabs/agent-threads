@@ -152,6 +152,7 @@ abstract class PopoverBase {
 function iconSpan(parent: HTMLElement, icon: string, cls: string): void {
   const span = parent.createSpan(cls);
   span.setAttribute('aria-hidden', 'true');
+  span.dataset.icon = icon;
   setIcon(span, icon);
 }
 

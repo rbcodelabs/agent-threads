@@ -362,6 +362,21 @@ describe('DispatchInput — failed dispatch recovery', () => {
   });
 });
 
+
+// jsdom has no CSS.escape (the popover uses it to restore focus after a re-render).
+if (!(globalThis as any).CSS) (globalThis as any).CSS = { escape: (v: string) => v.replace(/([^\w-])/g, '\\$1') };
+
+// ── Settings popover helpers (drill-down: root rows, then one level of options) ──
+const popoverKey = (el: Element, k: string) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+/** Go to the named level (root first if already inside another one). */
+function level(root: Element, id: string): void {
+  root.querySelector<HTMLButtonElement>('.ct-sp-back')?.click();
+  root.querySelector<HTMLButtonElement>(`[data-ct-key="row:${id}"]`)!.click();
+}
+/** An option of the current level, matched by the start of its label. */
+const optionIn = (root: Element, label: string) =>
+  Array.from(root.querySelectorAll<HTMLButtonElement>('.ct-sp-option')).find((o) => o.querySelector('.ct-sp-label')!.textContent!.startsWith(label))!;
+
 describe('DispatchInput — harness picker', () => {
   function mountPicker(onSend = vi.fn()) {
     const di = new DispatchInput({
@@ -408,11 +423,12 @@ describe('DispatchInput — harness picker', () => {
 
     root.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
 
-    const codexOption = root.querySelector<HTMLButtonElement>('[role="menuitemradio"][data-harness="codex"]')!;
-    expect(codexOption).toBeTruthy();
-    expect(codexOption.querySelector('.ct-harness-mark-codex')?.getAttribute('data-icon')).toBe('openai-blossom');
-    expect(codexOption.querySelector('.ct-harness-mark-codex')?.textContent).toBe('');
+    level(root, 'harness');
+    const codexOption = optionIn(root, 'Codex');
+    expect(codexOption.getAttribute('role')).toBe('menuitemradio');
+    expect(codexOption.querySelector('.ct-sp-icon')?.getAttribute('data-icon')).toBe('openai-blossom');
     codexOption.click();
+    expect(root.querySelector('.ct-settings-popover')).toBeNull(); // picking a harness closes, as before
     expect(onSend).not.toHaveBeenCalled();
     expect(root.querySelector('.ct-settings-indicator')?.getAttribute('aria-label')).toContain('Codex');
     expect(root.querySelector('.ct-si-provider')?.getAttribute('data-glyph')).toBe('codex');
@@ -431,9 +447,63 @@ describe('DispatchInput — harness picker', () => {
     expect(root.querySelector('[role="menu"]')).toBeTruthy();
     expect(btn.getAttribute('aria-expanded')).toBe('true');
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    popoverKey(document.activeElement!, 'Escape');
     expect(root.querySelector('[role="menu"]')).toBeFalsy();
     expect(document.activeElement).toBe(btn);
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('lists Model, Permissions and Harness; no Run on without daemons or a set-up offer', () => {
+    const { root } = mountPicker();
+    root.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
+    const rows = Array.from(root.querySelectorAll('.ct-sp-row')).map((r) => r.querySelector('.ct-sp-label')!.textContent);
+    expect(rows).toEqual(['Permissions', 'Harness']); // no model source in this fixture
+  });
+
+  it('offers Model when a model source is given, and sends the chosen model and permission mode', async () => {
+    const onSend = vi.fn();
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend,
+      harnessPicker: { initialHarness: 'claude', getModelOptions: () => [{ label: 'Default', value: undefined }, { label: 'Opus', value: 'opus' }] },
+    });
+    const container = makeContainer();
+    document.body.appendChild(container);
+    const root = di.mount(container);
+    root.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
+    expect(root.querySelector('[data-ct-key="row:model"] .ct-sp-value')!.textContent).toBe('Default');
+    level(root, 'model');
+    optionIn(root, 'Opus').click();
+    expect(root.querySelector('[data-ct-key="row:model"] .ct-sp-value')!.textContent).toBe('Opus');
+    level(root, 'permissions');
+    optionIn(root, 'Plan only').click();
+    const textarea = root.querySelector('textarea')!;
+    textarea.value = 'go';
+    root.querySelector<HTMLButtonElement>('.ct-send-btn')!.click();
+    await Promise.resolve();
+    expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ model: 'opus', permissionMode: 'plan' }));
+  });
+
+  it('forgets the chosen model when the harness changes (models are per harness)', async () => {
+    const onSend = vi.fn();
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend,
+      harnessPicker: { initialHarness: 'claude', getModelOptions: () => [{ label: 'Default', value: undefined }, { label: 'Opus', value: 'opus' }] },
+    });
+    const container = makeContainer();
+    document.body.appendChild(container);
+    const root = di.mount(container);
+    const btn = root.querySelector<HTMLButtonElement>('.ct-settings-indicator')!;
+    btn.click();
+    level(root, 'model');
+    optionIn(root, 'Opus').click();
+    level(root, 'harness');
+    optionIn(root, 'Codex').click();
+    root.querySelector('textarea')!.value = 'go';
+    root.querySelector<HTMLButtonElement>('.ct-send-btn')!.click();
+    await Promise.resolve();
+    expect(onSend.mock.calls[0][0]).not.toHaveProperty('model');
   });
 
   it('keeps the send button a plain send: no right-click menu, no long-press', () => {
@@ -453,8 +523,8 @@ describe('DispatchInput — no local container run mode', () => {
     const textarea = root.querySelector('textarea')!;
     const sendButton = root.querySelector<HTMLButtonElement>('.ct-send-btn')!;
     root.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
-    expect(root.querySelector('.ct-run-mode-item[data-run-mode]')).toBeFalsy();
     expect(root.textContent).not.toContain('Run in');
+    expect(root.querySelector('[data-ct-key="row:runon"]')).toBeNull();
     textarea.value = 'hello';
     sendButton.click();
     await Promise.resolve();
@@ -476,16 +546,18 @@ describe('DispatchInput — set up the local daemon from the picker', () => {
 
   it('offers "This Mac (container) - set up" when the daemon can run here but is not set up, and opens its settings', () => {
     const { root, onSetUp } = mountOffer(true);
-    const item = root.querySelector<HTMLButtonElement>('[data-run-on="setup-local"]');
-    expect(item?.textContent).toContain('This Mac (container)');
-    item!.click();
+    level(root, 'runon');
+    const item = optionIn(root, 'This Mac (container)');
+    expect(item.textContent).toContain('set up');
+    expect(item.getAttribute('role')).toBe('menuitem'); // an action, not a location
+    item.click();
     expect(onSetUp).toHaveBeenCalledTimes(1);
-    expect(root.querySelector('.ct-harness-menu')).toBeNull();
+    expect(root.querySelector('.ct-settings-popover')).toBeNull();
   });
 
   it('shows nothing extra when it is already set up or cannot run on this machine', () => {
     const { root } = mountOffer(false);
-    expect(root.querySelector('[data-run-on="setup-local"]')).toBeNull();
+    expect(root.querySelector('[data-ct-key="row:runon"]')).toBeNull();
     expect(root.textContent).not.toContain('Run on');
   });
 });
@@ -514,7 +586,8 @@ describe('DispatchInput — Run on a remote daemon: vault folder suggestion', ()
     return { root, textarea, sendButton, onSend };
   }
   const openMenu = (btn: HTMLElement) => btn.closest('.ct-dispatch-root')!.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
-  const pick = (root: HTMLElement, id: string) => root.querySelector<HTMLButtonElement>(`.ct-run-on-item[data-run-on="${id}"]`)!.click();
+  const NAMES: Record<string, string> = { box: 'my-server', plain: 'plain-box' };
+  const pick = (root: HTMLElement, id: string) => { level(root, 'runon'); optionIn(root, NAMES[id]).click(); };
   const folder = (root: HTMLElement) => root.querySelector<HTMLInputElement>('.ct-run-on-folder-input')!;
   const hint = (root: HTMLElement) => root.querySelector<HTMLElement>('[data-testid="run-on-folder-hint"]')!;
 
@@ -525,6 +598,37 @@ describe('DispatchInput — Run on a remote daemon: vault folder suggestion', ()
     expect(folder(root).value).toBe('/home/user/vault/Products/Agent Threads');
     expect(hint(root).classList.contains('is-hidden')).toBe(false);
     expect(hint(root).textContent).toContain('Same folder as in your vault');
+  });
+
+  it('shows the folder control below the daemon list inside Run on, and the row value follows the choice', () => {
+    const { root, sendButton } = mountRemote({ localCwd: VAULT });
+    openMenu(sendButton);
+    expect(root.querySelector('[data-ct-key="row:runon"] .ct-sp-value')!.textContent).toBe('This computer');
+    pick(root, 'box');
+    const lastOption = Array.from(root.querySelectorAll('.ct-sp-option')).pop()!;
+    const custom = root.querySelector('.ct-sp-custom')!;
+    expect(lastOption.compareDocumentPosition(custom) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(custom.querySelector('.ct-run-on-folder')).not.toBeNull();
+    expect(optionIn(root, 'my-server').getAttribute('aria-checked')).toBe('true');
+    root.querySelector<HTMLButtonElement>('.ct-sp-back')!.click();
+    expect(root.querySelector('[data-ct-key="row:runon"] .ct-sp-value')!.textContent).toBe('my-server');
+    // Back on "This computer": the popover closes and there is no folder control any more.
+    level(root, 'runon');
+    optionIn(root, 'This computer').click();
+    expect(root.querySelector('.ct-settings-popover')).toBeNull();
+  });
+
+  it('Enter in the folder text field closes the popover; arrow keys there do not navigate the menu', () => {
+    const { root, sendButton } = mountRemote({ localCwd: VAULT });
+    openMenu(sendButton);
+    pick(root, 'box');
+    const input = folder(root);
+    const before = document.activeElement;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+    expect(root.querySelector('.ct-sp-back')).not.toBeNull(); // still in the Run on level
+    expect(document.activeElement).toBe(before);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    expect(root.querySelector('.ct-settings-popover')).toBeNull();
   });
 
   it('keeps the daemon default folder for a non-vault cwd, with no hint', () => {
@@ -562,10 +666,11 @@ describe('DispatchInput — Run on a remote daemon: vault folder suggestion', ()
     openMenu(sendButton);
     pick(root, 'box');
     expect(folder(root).value).toBe('/home/user/vault/Daily');
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); // dismiss the menu
-    expect(root.querySelector('.ct-harness-menu')).toBeNull();
+    sendButton.closest('.ct-dispatch-root')!.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click(); // dismiss the popover
+    expect(root.querySelector('.ct-settings-popover')).toBeNull();
     state.localCwd = `${VAULT}/Products`;
     openMenu(sendButton);
+    level(root, 'runon');
     expect(folder(root).value).toBe('/home/user/vault/Products');
   });
 });
@@ -616,7 +721,8 @@ describe('DispatchInput — Run on a remote daemon: the daemon offers its own fo
     return { root, textarea: root.querySelector('textarea')!, sendButton: root.querySelector<HTMLButtonElement>('.ct-send-btn')!, onSend, src };
   }
   const openMenu = (btn: HTMLElement) => btn.closest('.ct-dispatch-root')!.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
-  const pick = (root: HTMLElement, id: string) => root.querySelector<HTMLButtonElement>(`.ct-run-on-item[data-run-on="${id}"]`)!.click();
+  const NAMES: Record<string, string> = { box: 'my-server', old: 'old-server' };
+  const pick = (root: HTMLElement, id: string) => { level(root, 'runon'); optionIn(root, NAMES[id]).click(); };
   const select = (root: HTMLElement) => root.querySelector<HTMLSelectElement>('.ct-run-on-folder-select')!;
   const hint = (root: HTMLElement) => root.querySelector<HTMLElement>('[data-testid="run-on-folder-hint"]')!;
 
@@ -743,15 +849,15 @@ describe('DispatchInput — remote threads with any harness, gated on the daemon
     return { root, onSend, textarea: root.querySelector('textarea')!, sendButton: root.querySelector<HTMLButtonElement>('.ct-send-btn')! };
   }
   const openMenu = (btn: HTMLElement) => btn.closest('.ct-dispatch-root')!.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
-  const runOn = (root: HTMLElement, id: string) => root.querySelector<HTMLButtonElement>(`.ct-run-on-item[data-run-on="${id}"]`)!;
-  const harness = (root: HTMLElement, h: string) => root.querySelector<HTMLButtonElement>(`[data-harness="${h}"]`)!;
+  const DAEMON_NAMES: Record<string, string> = { modern: 'modern-box', 'claude-only': 'lite-box', old: 'old-box', fresh: 'fresh-box' };
+  const runOn = (root: HTMLElement, id: string) => { level(root, 'runon'); return optionIn(root, DAEMON_NAMES[id]); };
+  const harness = (root: HTMLElement, h: string) => { level(root, 'harness'); return optionIn(root, h === 'opencode' ? 'OpenCode' : h[0].toUpperCase() + h.slice(1)); };
 
   it('offers Run on for Codex and OpenCode, not only Claude', () => {
     for (const h of ['claude', 'codex', 'opencode'] as const) {
       const { root, sendButton } = mount(h);
       openMenu(sendButton);
       expect(runOn(root, 'modern'), h).toBeTruthy();
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     }
   });
 
@@ -773,9 +879,11 @@ describe('DispatchInput — remote threads with any harness, gated on the daemon
     expect(co.disabled).toBe(true);
     expect(co.title).toContain('not set up for Codex');
     expect(co.title).toContain('offers: Claude');
-    expect(co.querySelector('.ct-harness-menu-note')?.textContent).toContain('lite-box is not set up for Codex');
+    expect(co.textContent).toContain('\u2014 lite-box is not set up for Codex');
     co.click();
     expect(root.querySelector('.ct-run-on-folder')).toBeNull(); // nothing got selected
+    root.querySelector<HTMLButtonElement>('.ct-sp-back')!.click();
+    expect(root.querySelector('[data-ct-key="row:runon"] .ct-sp-value')!.textContent).toBe('This computer');
   });
 
   it('treats a daemon that advertises no harness.* as Claude only (older daemon)', () => {
@@ -783,7 +891,6 @@ describe('DispatchInput — remote threads with any harness, gated on the daemon
     openMenu(codex.sendButton);
     expect(runOn(codex.root, 'old').disabled).toBe(true);
     expect(runOn(codex.root, 'old').title).toContain('older daemon that only runs Claude');
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     const claude = mount('claude');
     openMenu(claude.sendButton);
     expect(runOn(claude.root, 'old').disabled).toBe(false);

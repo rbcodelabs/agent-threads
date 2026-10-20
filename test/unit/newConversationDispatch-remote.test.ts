@@ -17,4 +17,21 @@ describe('dispatchNewConversation: the new composer\'s remote create carries the
     expect(call[0]).toBe('do it');
     expect(call[3]).toMatchObject({ agentHarness, remote: { daemonId: 'box', cwd: '/srv/w' } });
   });
+
+  it('forwards the model and permission mode chosen in the settings popover; a /model directive wins', async () => {
+    const dispatch = vi.fn(async () => 't1');
+    await dispatchNewConversation(deps(dispatch), { text: 'do it', images: [], attachment: null, model: 'opus', permissionMode: 'plan' } as never);
+    expect((dispatch.mock.calls[0] as unknown as unknown[])[3]).toMatchObject({ model: 'opus', permissionMode: 'plan' });
+    const second = vi.fn(async () => 't2');
+    await dispatchNewConversation(deps(second), { text: '/model sonnet fix it', images: [], attachment: null, model: 'opus' } as never);
+    expect((second.mock.calls[0] as unknown as unknown[])[3]).toMatchObject({ model: expect.stringMatching(/sonnet/i) });
+  });
+
+  it('adds neither key when nothing was chosen', async () => {
+    const dispatch = vi.fn(async () => 't1');
+    await dispatchNewConversation(deps(dispatch), { text: 'do it', images: [], attachment: null } as never);
+    const opts = (dispatch.mock.calls[0] as unknown as unknown[])[3] as Record<string, unknown>;
+    expect('model' in opts).toBe(false);
+    expect('permissionMode' in opts).toBe(false);
+  });
 });
