@@ -57,7 +57,9 @@ const ctx = await esbuild.context({
   target: 'es2020',
   platform: 'node',
   logLevel: 'info',
-  sourcemap: 'inline',
+  // Inline maps are ~2/3 of main.js (25 MB vs ~7.5 MB) and push it past Geode mobile's
+  // 16 MB plugin-source cap. Keep them for dev/watch or SOURCEMAP=1 only.
+  sourcemap: (isWatch || process.env.SOURCEMAP) ? 'inline' : false,
   treeShaking: true,
   outfile: 'dist/main.js',
   // The claude-agent-sdk calls createRequire(import.meta.url) at the top level of sdk.mjs.
