@@ -16,6 +16,7 @@ import {
 } from './composerPopovers';
 import { forkBlockedReason } from './remote/threadLocation';
 import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
+import { isPermissionPreApprovedForThread, recordAlwaysAllow } from './remoteAlwaysAllow';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
 import { splitTextWithUrls, isHttpUrl, urlChipLabel } from './urlLinks';
@@ -36,7 +37,7 @@ import * as fsp from 'fs/promises';
 import type ClaudeThreadsPlugin from './main';
 import { isDefaultThreadTitle } from './thread-title-utils';
 import { formatToolName, getToolIcon } from './ClaudeSession';
-import { isPermissionPreApproved, isHostExecPermission, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
+import { isHostExecPermission, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
 import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
 import { applyToolCallStyleClass, refreshToolRowByUseId, renderToolGroupShell, renderToolRow } from './toolCallDom';
 import { groupToolRuns, liveToolGroupKey, mergeAdjacentToolOnlyMessages, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
@@ -510,8 +511,8 @@ export class ThreadsView extends ItemView {
     this.manager.permissionHandler = (threadId, toolName, detail) => {
       // First-party host tools are always trusted; classification is an explicit
       // capability allowlist, not a forgeable naming-prefix convention.
-      // A remote thread's requests are never pre-approved: the tool name comes from the daemon (see isRemoteThread).
-      if (!this.manager.isRemoteThread(threadId) && isPermissionPreApproved(toolName, this.plugin.settings.alwaysAllowedTools)) return Promise.resolve(true);
+      // A remote thread is pre-approved only by its own daemon's list, never the local one (see isRemoteThread).
+      if (isPermissionPreApprovedForThread(toolName, this.manager.getRemoteScope(threadId), this.plugin.settings)) return Promise.resolve(true);
 
       return new Promise((resolve) => {
         let resolved = false;
@@ -4768,11 +4769,12 @@ export class ThreadsView extends ItemView {
           done(true);
         });
     }
-    if (canAlwaysAllow(toolName) && !(this.activeThreadId && this.manager.isRemoteThread(this.activeThreadId))) {
+    if (canAlwaysAllow(toolName)) {
+      // Stored under this thread's daemon when remote, so it cannot leak to local threads or other daemons.
+      const scope = this.activeThreadId ? this.manager.getRemoteScope(this.activeThreadId) : null;
       actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
         .addEventListener('click', async () => {
-          this.plugin.settings.alwaysAllowedTools.push(toolName);
-          await this.plugin.saveSettings();
+          if (recordAlwaysAllow(this.plugin.settings, toolName, scope)) await this.plugin.saveSettings();
           done(true);
         });
     }

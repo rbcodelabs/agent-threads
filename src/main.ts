@@ -54,6 +54,7 @@ import { McpRegistrationModal } from './confirmModal';
 import { redactGithubSecrets } from './githubCredentials';
 import { matchesHostExecPrefix } from './hostExecPrefix';
 import { canAlwaysAllow } from './permissionDetail';
+import { normalizeRemoteAlwaysAllowed, recordAlwaysAllow } from './remoteAlwaysAllow';
 import { openOAuthConsentUrl, type ExternalShellLike } from './linkUtils';
 import type { SkillsManagerView } from './SkillsManagerView';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
@@ -2366,10 +2367,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     };
 
     // 3.11 — When mobile sends Always Allow, persist the tool name to settings.
-    this.relayClient.onAlwaysAllowTool = (toolName: string) => {
-      // Defence in depth: a forged resolve_permission must not persist a per-call approval.
-      if (canAlwaysAllow(toolName) && !this.settings.alwaysAllowedTools.includes(toolName)) {
-        this.settings.alwaysAllowedTools.push(toolName);
+    // A remote thread's approval is scoped to its daemon (`remote`); a local one goes to the shared list.
+    this.relayClient.onAlwaysAllowTool = (toolName: string, remote?: { daemonId: string }) => {
+      // recordAlwaysAllow refuses per-call tools, so a forged resolve_permission cannot persist one.
+      if (recordAlwaysAllow(this.settings, toolName, remote)) {
         this.saveSettings().catch(console.error);
       }
     };
@@ -4294,6 +4295,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.settings.projects = this.settings.projects ?? [];
     // Stable id of this install, stamped on remote threads as their owner.
     this.settings.remoteDaemons = this.settings.remoteDaemons ?? [];
+    this.settings.remoteAlwaysAllowedTools = normalizeRemoteAlwaysAllowed(this.settings.remoteAlwaysAllowedTools);
     this.settings.remoteClientId = this.settings.remoteClientId ?? crypto.randomUUID();
     // Ensure secretEnvKeys array exists for installs predating this feature
     this.settings.secretEnvKeys = this.settings.secretEnvKeys ?? [];

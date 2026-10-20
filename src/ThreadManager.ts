@@ -35,6 +35,7 @@ import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { isAuthErrorTranscriptMessage } from './claudeAuthRecovery';
 import type { DaemonMcpStatusStore } from './mcpStatus';
+import { alwaysAllowScopeFor } from './remoteAlwaysAllow';
 
 type ThreadStateListener = (threadId: string, event: ThreadEvent) => void;
 
@@ -648,11 +649,17 @@ export class ThreadManager {
 
   /**
    * A thread hosted on a daemon. Its permission requests come from another machine (or from tools that act on this
-   * one on a daemon's behalf), so "Always Allow" never applies to them: nothing is remembered from a click and
-   * nothing remembered locally pre-approves a request, because the tool name on the card is the daemon's word.
+   * one on a daemon's behalf), and the tool name on the card is the daemon's word. "Always Allow" therefore works
+   * only per daemon (see getRemoteScope and remoteAlwaysAllow.ts): a remote thread is never pre-approved by the
+   * local list or the trusted built-ins, and a daemon's list never applies to local threads or other daemons.
    */
   isRemoteThread(threadId: string): boolean {
     return !!this.getThread(threadId)?.remote;
+  }
+
+  /** The Always Allow scope of a thread: its daemon, or null for a local thread. */
+  getRemoteScope(threadId: string): { daemonId: string } | null {
+    return alwaysAllowScopeFor(this.getThread(threadId)?.remote);
   }
 
   getThread(id: string): Thread | undefined {

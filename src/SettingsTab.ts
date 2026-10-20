@@ -46,6 +46,7 @@ import { formatToolName } from './toolNameUtils';
 import { describeMcpServer } from './mcpStatus';
 import { describeRepo, formatRepoLines, parseRepoLines, type RemoteReposSource } from './remote/repos';
 import type { McpServerStatusEntry } from './ClaudeSession';
+import { removeRemoteAlwaysAllow } from './remoteAlwaysAllow';
 
 // View-type string constants, mirrored as local literals (see main.ts) so referencing
 // them never triggers a static import of the desktop-only KanbanView/AgentDashboard
@@ -2527,6 +2528,39 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       );
     containerEl.appendChild(allowedList);
     renderAllowedTools();
+
+    // — Always-allowed tools on remote daemons (per daemon) —
+    new Setting(containerEl)
+      .setName('Always-allowed tools on remote daemons')
+      .setDesc('Tools you chose "Always allow" for on a thread running on a remote daemon. Each approval applies only to that daemon; it never applies to local threads or other daemons. Remove an entry to be asked again.')
+      .setHeading();
+    const remoteAllowedList = containerEl.createDiv({ cls: 'ct-allowed-tools-list' });
+    const renderRemoteAllowedTools = () => {
+      remoteAllowedList.empty();
+      const byDaemon = this.plugin.settings.remoteAlwaysAllowedTools ?? {};
+      const daemonIds = Object.keys(byDaemon).filter((id) => byDaemon[id].length > 0);
+      if (daemonIds.length === 0) {
+        remoteAllowedList.createEl('p', { text: 'No tools always allowed on remote daemons yet.', cls: 'ct-settings-empty' });
+        return;
+      }
+      for (const daemonId of daemonIds) {
+        const daemon = (this.plugin.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
+        const label = daemon ? daemon.name : `${daemonId} (daemon no longer configured)`;
+        for (const tool of [...byDaemon[daemonId]]) {
+          new Setting(remoteAllowedList)
+            .setName(formatToolName(tool))
+            .setDesc(label)
+            .addButton((btn) =>
+              btn.setButtonText('Remove').setWarning().onClick(async () => {
+                if (removeRemoteAlwaysAllow(this.plugin.settings, daemonId, tool)) await this.plugin.saveSettings();
+                renderRemoteAllowedTools();
+              }),
+            );
+        }
+      }
+    };
+    containerEl.appendChild(remoteAllowedList);
+    renderRemoteAllowedTools();
 
     // — Always-allowed host commands (host_exec prefixes) —
     new Setting(containerEl)
