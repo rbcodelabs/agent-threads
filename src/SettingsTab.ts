@@ -800,9 +800,9 @@ export class RemoteDaemonModal extends Modal {
         t.inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addByName(); } });
       })
       .addButton((b) => b.setButtonText('Add').onClick(addByName));
-    new Setting(advanced).setName('Admin token for sending secrets')
-      .setDesc((this.existing ? 'Leave blank to keep the stored one. ' : '') + 'Sending needs an admin token, kept apart from the access token above. Create one with "agent-threads token create --scope admin" on the daemon machine. Secrets are only sent over wss:// (or to this computer).')
-      .addText((t) => { t.inputEl.type = 'password'; t.inputEl.setAttribute('aria-label', 'Admin token for sending secrets'); t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { adminToken = v; }); });
+    new Setting(advanced).setName('Admin token for secrets and skills')
+      .setDesc((this.existing ? 'Leave blank to keep the stored one. ' : '') + 'Sending secrets and syncing skills need an admin token, kept apart from the access token above. Create one with "agent-threads token create --name geode-admin --scope admin" on the daemon machine. Secrets are only sent over wss:// (or to this computer).')
+      .addText((t) => { t.inputEl.type = 'password'; t.inputEl.setAttribute('aria-label', 'Admin token for secrets and skills'); t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { adminToken = v; }); });
 
     const setVault = (v: string): void => { vaultRemote = v; vaultTouched = true; vaultText?.setValue(v); };
     const setFolder = (v: string): void => { folder = v; folderTouched = true; folderText?.setValue(v); };

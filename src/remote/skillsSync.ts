@@ -24,6 +24,13 @@ import type { RemoteDaemonConfig } from '../types';
 import { DaemonCommandError } from './DaemonClient';
 import type { RemoteDaemonResolver } from './DaemonRegistry';
 
+/** The part of `DaemonClient` skill sync uses; lets tests stand in for a short-lived admin connection. */
+export interface SkillsClient {
+  readonly daemonInfo: { capabilities: readonly string[]; epoch: string } | undefined;
+  command(type: string, payload: Record<string, unknown>, opts?: { timeoutMs?: number }): Promise<Record<string, unknown>>;
+  dispose?(): void;
+}
+
 export type SkillsSyncMode = 'auto' | 'off' | 'n/a';
 
 /**
@@ -35,6 +42,10 @@ export function resolveSkillsSyncMode(daemon: Pick<RemoteDaemonConfig, 'managed'
   if (daemon.skillsSync === undefined || daemon.skillsSync === 'auto') return 'auto';
   return 'off';
 }
+
+/** Shown in the thread when no admin token is stored for the daemon. */
+export const MISSING_ADMIN_TOKEN_REASON =
+  'syncing skills needs an admin token, and none is saved for this daemon. Add one in Settings, Remote daemons, Edit, "Admin token for secrets and skills" (create it on the daemon machine with `agent-threads token create --name geode-admin --scope admin`).';
 
 /** Whole sync, including a daemon that has to be reached first. */
 export const SKILLS_SYNC_BUDGET_MS = 30_000;
@@ -49,7 +60,13 @@ export interface SkillsSyncResult {
 }
 
 export interface RemoteSkillsSyncDeps {
-  resolver: Pick<RemoteDaemonResolver, 'clientFor' | 'nameOf' | 'warm'>;
+  resolver: Pick<RemoteDaemonResolver, 'nameOf'>;
+  /** The separate admin token from the keychain; undefined when none is stored. Skill commands need admin scope. */
+  adminToken: (daemon: RemoteDaemonConfig) => string | undefined;
+  /** A short-lived client authenticated with `adminToken`. Disposed by `prepare()`. */
+  createClient: (daemon: RemoteDaemonConfig, adminToken: string) => SkillsClient;
+  /** Starts connecting and resolves once the daemon answered, failed, or `timeoutMs` passed. Never rejects. */
+  warm?: (client: SkillsClient, timeoutMs: number) => Promise<void>;
   skillPlugins: () => Array<{ path: string }>;
   fs: FsLike;
   sha256: () => Sha256Like;
@@ -82,12 +99,15 @@ export class RemoteSkillsSync {
       this.deps.log?.(`[skills-sync] ${daemon.id}: ${reason}`);
       return result;
     };
+    let client: SkillsClient | undefined;
     try {
-      const client = this.deps.resolver.clientFor(daemon.id);
-      if (!client) return fail('this daemon is no longer configured');
       const trees = this.manifestsFor(result.notices, name);
       if (trees.length === 0) return result;
-      await this.deps.resolver.warm?.(daemon.id, Math.min(4000, Math.max(0, deadline - now())));
+      // The everyday connection holds a control token, which the daemon refuses these commands; use the admin one.
+      const admin = this.deps.adminToken(daemon);
+      if (!admin) return fail(MISSING_ADMIN_TOKEN_REASON);
+      client = this.deps.createClient(daemon, admin);
+      await this.deps.warm?.(client, Math.min(4000, Math.max(0, deadline - now())));
       const info = client.daemonInfo;
       if (!info) return fail('the daemon is not reachable');
       if (!info.capabilities.includes(SKILLS_SYNC_CAPABILITY)) {
@@ -137,6 +157,8 @@ export class RemoteSkillsSync {
     } catch (err) {
       result.pluginPaths = [];
       return fail(describeError(err));
+    } finally {
+      try { client?.dispose?.(); } catch { /* closing */ }
     }
   }
 
@@ -170,7 +192,7 @@ export class RemoteSkillsSync {
     return out;
   }
 
-  private async upload(client: NonNullable<ReturnType<RemoteDaemonResolver['clientFor']>>, tree: Manifest, left: () => number): Promise<void> {
+  private async upload(client: SkillsClient, tree: Manifest, left: () => number): Promise<void> {
     const { fs, sha256 } = this.deps;
     const scan = scanTree(fs, tree.real);
     const loaded = loadTree(fs, scan);
@@ -213,7 +235,7 @@ function randomId(): string {
 
 function describeError(err: unknown): string {
   if (err instanceof DaemonCommandError) {
-    if (err.code === 'forbidden') return 'syncing skills needs an admin token for this daemon';
+    if (err.code === 'forbidden') return 'the saved admin token was refused: it needs scope admin (agent-threads token create --name geode-admin --scope admin)';
     if (err.code === 'unknown_command') return 'this daemon predates skill sync. Update the daemon.';
     if (err.code === 'timeout') return 'timed out';
     if (err.code === 'unreachable' || err.code === 'closed') return 'the daemon is not reachable';

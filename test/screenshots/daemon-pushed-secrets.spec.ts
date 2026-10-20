@@ -120,7 +120,7 @@ test.describe('Daemon editor: secrets to send', () => {
       const modal = (await page.locator('.modal-container').boundingBox())!;
       expect(b.x).toBeGreaterThanOrEqual(modal.x - 1);
       expect(b.x + b.width).toBeLessThanOrEqual(modal.x + modal.width + 1);
-      const adminBox = (await page.getByLabel('Admin token for sending secrets').boundingBox())!;
+      const adminBox = (await page.getByLabel('Admin token for secrets and skills').boundingBox())!;
       const overlaps = b.y < adminBox.y + adminBox.height && adminBox.y < b.y + b.height && b.x < adminBox.x + adminBox.width && adminBox.x < b.x + b.width;
       expect(overlaps, 'secrets checklist overlaps admin token input').toBe(false);
       await page.screenshot({ path: `test-results/${file}` });

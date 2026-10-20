@@ -88,17 +88,7 @@ export class DaemonRegistry implements RemoteDaemonResolver {
 
   warm(daemonId: string, timeoutMs = 4000): Promise<void> {
     const client = this.clientFor(daemonId);
-    if (!client) return Promise.resolve();
-    if (client.daemonInfo) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      let off: (() => void) | undefined;
-      const done = (): void => { clearTimeout(timer); off?.(); resolve(); };
-      const timer = setTimeout(done, timeoutMs);
-      off = client.onState((s) => {
-        if (s.info || s.status === 'unreachable' || s.status === 'unauthorized' || s.status === 'incompatible' || s.status === 'closed') done();
-      });
-      client.connect();
-    });
+    return client ? warmClient(client, timeoutMs) : Promise.resolve();
   }
 
   clientFor(daemonId: string): DaemonClient | undefined {
@@ -159,4 +149,18 @@ export class DaemonRegistry implements RemoteDaemonResolver {
     this.entries.clear();
     this.listeners.clear();
   }
+}
+
+/** Start connecting `client` and resolve once it has a welcome, failed for good, or `timeoutMs` passed. Never rejects. */
+export function warmClient(client: Pick<DaemonClient, 'daemonInfo' | 'onState' | 'connect'>, timeoutMs = 4000): Promise<void> {
+  if (client.daemonInfo) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let off: (() => void) | undefined;
+    const done = (): void => { clearTimeout(timer); off?.(); resolve(); };
+    const timer = setTimeout(done, timeoutMs);
+    off = client.onState((s) => {
+      if (s.info || s.status === 'unreachable' || s.status === 'unauthorized' || s.status === 'incompatible' || s.status === 'closed') done();
+    });
+    client.connect();
+  });
 }

@@ -203,7 +203,8 @@ On the daemon machine (needs Node 22+ and a logged-in `claude`):
 ```bash
 mkdir -p ~/agent-threads/data && cd ~/agent-threads
 # a control-scope token for Geode (read < control < admin); shown once, only its hash is stored.
-# `control` is all Geode needs. Keep `admin` for operator tooling: it adds nothing Geode uses.
+# `control` is the everyday token Geode needs. Sending secrets or syncing skills also needs a separate `admin` token,
+# saved in the daemon's *Admin token for secrets and skills* field (see "Secrets for your threads" and "Skills").
 node agent-threads.cjs token create --name geode --scope control --data-dir ~/agent-threads/data
 
 # Run the daemon in the foreground to try it. For a service that survives reboots, use the systemd
@@ -825,7 +826,7 @@ a server that dies mid-session turns to failed at the end of the next turn.
 
 By default no secret leaves your computer for a remote daemon. To send some, open **Settings → Remote → Edit** on that daemon and tick them under **Secrets to send to this daemon**. The list shows the names (never the values) of everything the app could send: your keychain secrets (a secret limited to a Project is listed as that Project's own entry, saved as `project/NAME`) and your Extra environment variables. Variables that describe this Mac's shell (`PATH`, `HOME` and similar) and secrets with no value are not offered. A name saved earlier that nothing provides any more stays in the list, ticked and marked *Not found*, so you can untick it; use **Add by name** for a name that is not defined yet (`NAME`, or `project/NAME`). Nothing ticked (the default) sends nothing. Values are never typed here, and an Add by name entry that looks like `NAME=value` is rejected without echoing it.
 
-- Sending needs a separate **admin-scope** token (stored in your keychain as `AGENT_THREADS_PUSHADMIN_<ID>_TOKEN`); without one nothing is sent and you see a single warning. The everyday control token cannot push credentials.
+- Sending needs a separate **admin-scope** token (the *Admin token for secrets and skills* field; stored in your keychain as `AGENT_THREADS_PUSHADMIN_<ID>_TOKEN`); without one nothing is sent and you see a single warning. The everyday control token cannot push credentials.
 - Values go over the existing `creds.push` command as a `sessenv-<project>` kind and are read when a session starts. Pushes to plain `ws://` addresses are refused unless the address is loopback; use `wss://`.
 - The kind lasts one hour. It is re-sent before each message once it is half that old, and every 10 minutes while Geode is open, so a session the daemon restarts on its own still finds it. If Geode is closed for more than an hour the kind is deleted by the daemon (or by Geode on quit) and is sent again with your next message.
 - Removing a name re-sends the kind without it. Emptying the list, removing the daemon or quitting Geode deletes the kind from the daemon.
@@ -961,8 +962,11 @@ the session as plugin directories, so only Agent Threads sessions on that daemon
 - **Trust.** Skills are instructions the agent follows, and a skill folder can contain secrets (for example an `.env`).
   Automatic puts every installed skill, including third-party GitHub ones, on a machine where the agent has a shell and its
   own login. Use Off for a daemon you do not fully trust.
-- **Token.** Needs an **admin** token (it writes to the daemon's disk), like `creds.push`. With a lower scope the thread
-  shows a notice and starts without the skills.
+- **Token.** Needs an **admin** token (it writes to the daemon's disk), like `creds.push`. Sync does not use the everyday
+  control connection: it opens its own short-lived one with the **Admin token for secrets and skills** saved on the
+  daemon (Settings, Remote, Edit, Advanced; the same token secret pushing uses). Create it on the daemon machine with
+  `agent-threads token create --name geode-admin --scope admin`. With no admin token saved, or one that is not admin
+  scope, the thread shows a notice saying so and starts without the skills.
 - **Failures never block a send.** If the daemon is offline, too old (it does not advertise the `skills.sync`
   capability: update the daemon), refuses the token, or a skill folder is over the limits, the thread shows a
   "Skills not synced to <daemon>: ..." notice and the session starts with whatever did arrive. After a copy the thread

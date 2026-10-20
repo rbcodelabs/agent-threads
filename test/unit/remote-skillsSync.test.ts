@@ -51,9 +51,10 @@ describe('RemoteSkillsSync', () => {
   beforeEach(() => { dataDir = mkdtempSync(join(tmpdir(), 'skillsync-')); store = new SkillStore(dataDir); });
   afterEach(() => { rmSync(dataDir, { recursive: true, force: true }); });
 
-  interface Opts { capabilities?: string[] | null; reachable?: boolean; failOn?: string; files?: Record<string, string>; plugins?: string[] }
+  interface Opts { adminToken?: string | null; capabilities?: string[] | null; reachable?: boolean; failOn?: string; files?: Record<string, string>; plugins?: string[] }
   function setup(o: Opts = {}) {
     const sent: string[] = [];
+    const created: Array<{ token: string; disposed: boolean }> = [];
     const syncSizes: number[] = [];
     const caps = o.capabilities === undefined ? ['skills.sync'] : o.capabilities;
     const client = {
@@ -72,12 +73,18 @@ describe('RemoteSkillsSync', () => {
     };
     const files = o.files ?? { '/vault/skills/a/SKILL.md': 'A', '/vault/skills/a/run.sh': '#!/bin/sh' };
     const sync = new RemoteSkillsSync({
-      resolver: { clientFor: () => client as never, nameOf: () => 'my-server', warm: async () => {} },
+      resolver: { nameOf: () => 'my-server' },
+      adminToken: () => (o.adminToken === null ? undefined : o.adminToken ?? 'atd_admin'),
+      createClient: (_d, token) => {
+        const rec = { token, disposed: false };
+        created.push(rec);
+        return { get daemonInfo() { return client.daemonInfo; }, command: client.command, dispose: () => { rec.disposed = true; } } as never;
+      },
       skillPlugins: () => (o.plugins ?? ['/vault/skills/a']).map((path) => ({ path })),
       fs: treeFs(files),
       sha256: () => createHash('sha256'),
     });
-    return { sync, sent, syncSizes };
+    return { sync, sent, syncSizes, created };
   }
 
   const manyTrees = (n: number) => {
@@ -121,6 +128,49 @@ describe('RemoteSkillsSync', () => {
     expect(readFileSync(join(r.pluginPaths[0], 'SKILL.md'), 'utf8')).toBe('A');
     expect(r.notices).toEqual(['Synced 1 skill folder to my-server.']);
     expect(sent).toEqual(['skills.sync', 'skills.put', 'skills.commit']);
+  });
+
+  it('talks to the daemon over its own connection with the stored admin token, and closes it afterwards', async () => {
+    const { sync, created } = setup({ adminToken: 'atd_admin_secret' });
+    const r = await sync.prepare(daemon());
+    expect(r.notices).toEqual(['Synced 1 skill folder to my-server.']);
+    expect(created).toEqual([{ token: 'atd_admin_secret', disposed: true }]);
+  });
+
+  it('closes the admin connection when the sync fails', async () => {
+    const { sync, created } = setup({ failOn: 'skills.sync' });
+    await sync.prepare(daemon());
+    expect(created).toEqual([{ token: 'atd_admin', disposed: true }]);
+  });
+
+  it('without a stored admin token it says where to add one, opens no connection and syncs nothing', async () => {
+    const { sync, sent, created } = setup({ adminToken: null });
+    const r = await sync.prepare(daemon());
+    expect(created).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(r.pluginPaths).toEqual([]);
+    expect(r.notices).toHaveLength(1);
+    expect(r.notices[0]).toContain('Skills not synced to my-server: syncing skills needs an admin token');
+    expect(r.notices[0]).toContain('Admin token for secrets and skills');
+    expect(r.notices[0]).toContain('agent-threads token create --name geode-admin --scope admin');
+  });
+
+  it('a missing admin token is not mentioned when there are no skills to send', async () => {
+    const { sync } = setup({ adminToken: null, plugins: [] });
+    expect(await sync.prepare(daemon())).toEqual({ pluginPaths: [], notices: [] });
+  });
+
+  it('a refused admin token says the token needs scope admin', async () => {
+    const forbidden = new RemoteSkillsSync({
+      resolver: { nameOf: () => 'my-server' },
+      adminToken: () => 'atd_control_by_mistake',
+      createClient: () => ({ daemonInfo: { capabilities: ['skills.sync'], epoch: 'e1' }, command: async () => { throw new DaemonCommandError('forbidden', 'no'); } }),
+      skillPlugins: () => [{ path: '/vault/skills/a' }],
+      fs: treeFs({ '/vault/skills/a/SKILL.md': 'A' }),
+      sha256: () => createHash('sha256'),
+    });
+    const r = await forbidden.prepare(daemon());
+    expect(r.notices[0]).toContain('the saved admin token was refused');
   });
 
   it('an unchanged tree costs one round trip and no notice', async () => {
@@ -189,12 +239,5 @@ describe('RemoteSkillsSync', () => {
     const r = await sync.prepare(daemon());
     expect(r.pluginPaths).toHaveLength(1);
     expect(r.notices.join('\n')).toMatch(/big is over the size limits/);
-  });
-
-  it('a forbidden token is explained as needing admin', async () => {
-    const { sync } = setup();
-    const client = (sync as unknown as { deps: { resolver: { clientFor(): { command: unknown } } } }).deps.resolver.clientFor();
-    client.command = async () => { throw new DaemonCommandError('forbidden', 'no'); };
-    expect((await sync.prepare(daemon())).notices[0]).toMatch(/needs an admin token/);
   });
 });
