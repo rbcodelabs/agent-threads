@@ -48,7 +48,7 @@ function render(remote: Record<string, string[]>) {
   const settings = {
     disallowedTools: [], alwaysAllowedTools: ['LocalTool'], hostExecAlwaysAllowedPrefixes: [],
     remoteAlwaysAllowedTools: remote,
-    remoteDaemons: [{ id: 'd1', name: 'claude-box', url: 'ws://x', tokenSecretName: 't' }],
+    remoteDaemons: [{ id: 'd1', name: 'my-daemon', url: 'ws://x', tokenSecretName: 't' }],
   };
   const plugin = { app: new App(), settings, saveSettings } as unknown as ClaudeThreadsPlugin;
   const tab = new ClaudeThreadsSettingTab(new App(), plugin);
@@ -65,9 +65,9 @@ describe('Always-allowed tools on remote daemons settings', () => {
 
   it('lists each tool under its daemon name and Remove revokes only that daemon entry', async () => {
     const { settings, saveSettings } = render({ d1: ['mcp__a__x', 'mcp__a__y'], gone: ['mcp__a__x'] });
-    expect(rows.some(r => r.desc === 'claude-box')).toBe(true);
+    expect(rows.some(r => r.desc === 'my-daemon')).toBe(true);
     expect(rows.some(r => r.desc?.includes('no longer configured'))).toBe(true);
-    const boxRows = rows.filter(r => r.desc === 'claude-box');
+    const boxRows = rows.filter(r => r.desc === 'my-daemon');
     expect(boxRows).toHaveLength(2);
     await boxRows[0].remove!();
     expect(settings.remoteAlwaysAllowedTools).toEqual({ d1: ['mcp__a__y'], gone: ['mcp__a__x'] });
