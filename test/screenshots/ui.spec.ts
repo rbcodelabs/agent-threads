@@ -1412,7 +1412,10 @@ test.describe('Agent Threads UI', () => {
     await page.mouse.move(0, 0);
     await shot(page, 'composer-settings-popover.png', { fullPage: true });
 
-    // Keyboard: Escape closes and returns focus to the indicator.
+    // Keyboard: Escape goes back from a level; at the root it closes and returns focus to the indicator.
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.ct-settings-popover')).toHaveCount(1);
+    await expect(page.locator('[data-ct-key="row:model"]')).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(page.locator('.ct-settings-popover')).toHaveCount(0);
     await expect(indicator).toBeFocused();
@@ -2373,6 +2376,34 @@ test.describe('Agent Threads UI', () => {
     });
     await page.waitForTimeout(50);
     await shot(page, 'settings-mcp.png', { fullPage: true });
+  });
+
+  test('settings — mcp tab, runs on daemons', async ({ page }) => {
+    const settingsUrl = 'file://' + path.resolve('test/harness/settings.html') + '?mcpSync=1';
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto(settingsUrl);
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
+    await page.waitForSelector('.ct-mcp-runson');
+    await page.evaluate(() => {
+      const app = document.getElementById('app');
+      if (app) app.style.height = 'auto';
+    });
+    await page.waitForTimeout(50);
+    await shot(page, 'settings-mcp-runs-on.png', { fullPage: true });
+  });
+
+  test('settings — mcp sync confirmation names what leaves the Mac', async ({ page }) => {
+    const settingsUrl = 'file://' + path.resolve('test/harness/settings.html') + '?mcpSync=1';
+    await page.setViewportSize({ width: 860, height: 820 });
+    await page.goto(settingsUrl);
+    await page.waitForSelector('.ct-settings-shell');
+    await page.getByLabel('Settings section').selectOption('mcp');
+    await page.waitForSelector('.ct-mcp-runson');
+    await page.getByLabel('Run team_events on Plain box').check();
+    await page.waitForSelector('.ct-mcp-sync-confirm');
+    await page.waitForTimeout(100);
+    await shot(page, 'settings-mcp-sync-confirm.png');
   });
 
   test('settings — MCP registration host confirmation', async ({ page }) => {

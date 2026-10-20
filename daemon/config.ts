@@ -90,8 +90,24 @@ export interface DaemonConfig {
   repoRoot: string;
   /** Worktrees idle this many days are removed at daemon start (0 = never). */
   worktreePruneDays: number;
+  /**
+   * Accept `stdio` definitions in `mcp.sync` (they start a program on this machine as the daemon user). Off unless the
+   * operator opts in; http/sse definitions are always accepted.
+   */
+  allowSyncedStdio: boolean;
+  /** With `allowSyncedStdio`: only these commands may be synced (bare names or absolute paths). Empty = any command. */
+  syncedCommandAllowlist: string[];
   /** Allow `repos` URLs that are paths on this machine (off by default: only https/ssh remotes). */
   allowLocalRepoUrls: boolean;
+  /**
+   * Opt in to replacing this daemon's own bundle with the newest stable release and restarting when idle
+   * (daemon/update/). Off by default. Only effective on an install that can do it safely (see `assessInstall`).
+   */
+  autoUpdate: boolean;
+  /** How often to look for a new release, in minutes (default 360, minimum 15). */
+  autoUpdateIntervalMinutes: number;
+  /** The daemon must have been quiet (no turn, no open request, no client command) this long before it restarts. */
+  autoUpdateQuietMinutes: number;
 }
 
 export type HarnessKind = RealHarness | 'fake';
@@ -107,6 +123,9 @@ export const DEFAULT_REQUEST_TIMEOUT_MINUTES = 60;
 export const DEFAULT_HOST_TOOL_GRACE_SEC = 60;
 export const DEFAULT_HOST_TOOL_TIMEOUT_SEC = 300;
 export const DEFAULT_WORKTREE_PRUNE_DAYS = 14;
+export const DEFAULT_AUTO_UPDATE_INTERVAL_MINUTES = 360;
+export const MIN_AUTO_UPDATE_INTERVAL_MINUTES = 15;
+export const DEFAULT_AUTO_UPDATE_QUIET_MINUTES = 2;
 
 export interface ConfigInputs {
   flags?: Partial<{
@@ -115,6 +134,8 @@ export interface ConfigInputs {
     idleReapMinutes: number; claudeBinaryPath: string; codexBinaryPath: string; opencodeBinaryPath: string; journalTtlDays: number; journalMaxMb: number;
     maxConnections: number; maxLiveSessions: number; requestTimeoutMinutes: number; allowedClientEnv: string[];
     hostToolGraceSec: number; hostToolTimeoutSec: number; worktreeRoot: string;
+    allowSyncedStdio: boolean; syncedCommandAllowlist: string[];
+    autoUpdate: boolean; autoUpdateIntervalMinutes: number; autoUpdateQuietMinutes: number;
   }>;
   env?: NodeJS.ProcessEnv;
 }
@@ -130,7 +151,7 @@ export function defaultDataDir(): string {
   }
 }
 
-interface ConfigFile {
+export interface ConfigFile {
   daemonId?: string;
   listen?: string;
   port?: number;
@@ -159,6 +180,19 @@ interface ConfigFile {
   repoRoot?: string;
   worktreePruneDays?: number;
   allowLocalRepoUrls?: boolean;
+  autoUpdate?: boolean;
+  autoUpdateIntervalMinutes?: number;
+  autoUpdateQuietMinutes?: number;
+  allowSyncedStdio?: boolean;
+  syncedCommandAllowlist?: string[];
+}
+
+/** `1/true/yes/on` and `0/false/no/off` (any case); anything else, including empty, is "not set". */
+export function parseBoolEnv(v: string | undefined): boolean | undefined {
+  const t = v?.trim().toLowerCase();
+  if (t === '1' || t === 'true' || t === 'yes' || t === 'on') return true;
+  if (t === '0' || t === 'false' || t === 'no' || t === 'off') return false;
+  return undefined;
 }
 
 /** `~` and `~/x` mean the daemon user's home; everything else must already be absolute. */
@@ -211,6 +245,15 @@ function allowedClientEnv(names: unknown): string[] {
   if (!Array.isArray(names) || !names.every((n) => typeof n === 'string')) throw new Error('invalid allowedClientEnv: expected a list of variable names');
   for (const n of names as string[]) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n)) throw new Error(`invalid allowedClientEnv entry: ${n}`);
+  }
+  return [...new Set(names as string[])];
+}
+
+/** Bare command names or absolute paths; anything else (relative paths, empty strings) would never match a command. */
+function syncedCommandAllowlist(names: unknown): string[] {
+  if (!Array.isArray(names) || !names.every((n) => typeof n === 'string')) throw new Error('invalid syncedCommandAllowlist: expected a list of command names or absolute paths');
+  for (const n of names as string[]) {
+    if (!n || /\s/.test(n) || (n.includes('/') && !isAbsolute(n))) throw new Error(`invalid syncedCommandAllowlist entry: "${n}" (use a bare command name or an absolute path)`);
   }
   return [...new Set(names as string[])];
 }
@@ -291,6 +334,11 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     repoRoot,
     worktreePruneDays: positiveInt('worktreePruneDays', file.worktreePruneDays ?? DEFAULT_WORKTREE_PRUNE_DAYS, 0),
     allowLocalRepoUrls: file.allowLocalRepoUrls === true,
+    autoUpdate: flags.autoUpdate ?? parseBoolEnv(env.AGENT_THREADS_AUTO_UPDATE) ?? file.autoUpdate === true,
+    autoUpdateIntervalMinutes: positiveInt('autoUpdateIntervalMinutes', flags.autoUpdateIntervalMinutes ?? envInt(env.AGENT_THREADS_AUTO_UPDATE_INTERVAL_MINUTES) ?? file.autoUpdateIntervalMinutes ?? DEFAULT_AUTO_UPDATE_INTERVAL_MINUTES, MIN_AUTO_UPDATE_INTERVAL_MINUTES),
+    autoUpdateQuietMinutes: positiveInt('autoUpdateQuietMinutes', flags.autoUpdateQuietMinutes ?? envInt(env.AGENT_THREADS_AUTO_UPDATE_QUIET_MINUTES) ?? file.autoUpdateQuietMinutes ?? DEFAULT_AUTO_UPDATE_QUIET_MINUTES, 0),
+    allowSyncedStdio: flags.allowSyncedStdio ?? (env.AGENT_THREADS_ALLOW_SYNCED_STDIO === '1' || file.allowSyncedStdio === true),
+    syncedCommandAllowlist: syncedCommandAllowlist(flags.syncedCommandAllowlist ?? envList(env.AGENT_THREADS_SYNCED_COMMAND_ALLOWLIST) ?? file.syncedCommandAllowlist ?? []),
     ...(worktreeRoot ? { worktreeRoot } : {}),
     ...(claudeBinaryPath ? { claudeBinaryPath } : {}),
     ...(codexBinaryPath ? { codexBinaryPath } : {}),

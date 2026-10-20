@@ -9,6 +9,7 @@ export * from './sessionEvents';
 export * from './spec';
 export * from './hostTools';
 export * from './commands';
+export * from './mcpSync';
 export * from './envelope';
 export * from './journal';
 export * from './journalPolicy';

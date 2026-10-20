@@ -107,3 +107,36 @@ describe('sync conflict tools', () => {
     });
   });
 });
+
+describe('busy retry', () => {
+  const hid = JSON.stringify(['ent', ['r1']]);
+  const make = (failures: number, message = 'Sync already running or disconnecting') => {
+    let n = 0;
+    const resolveHistoryConflict = vi.fn(async () => { if (n++ < failures) throw new Error(message); });
+    const app: any = {
+      sync: { listConflicts: async () => [{ id: hid, path: 'h.md', conflictPath: '' }], resolveConflict: vi.fn(), resolveHistoryConflict },
+      vault: { adapter: {} },
+    };
+    return { tools: createSyncTools({ app, busyRetry: { attempts: 3, delayMs: 1 } }) as Record<string, any>, resolveHistoryConflict };
+  };
+
+  it('retries resolve while sync is busy, then succeeds', async () => {
+    const { tools, resolveHistoryConflict } = make(2);
+    const out = parse(await tools.sync_resolve_conflict.handler({ id: hid, resolution: 'keep-local' }));
+    expect(out.resolved).toBe(true);
+    expect(resolveHistoryConflict).toHaveBeenCalledTimes(3);
+  });
+
+  it('gives up after the attempt limit and reports the error', async () => {
+    const { tools, resolveHistoryConflict } = make(10);
+    const res = await tools.sync_resolve_conflict.handler({ id: hid, resolution: 'keep-local' });
+    expect(res.isError).toBe(true);
+    expect(resolveHistoryConflict).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry other errors', async () => {
+    const { tools, resolveHistoryConflict } = make(10, 'boom');
+    expect((await tools.sync_resolve_conflict.handler({ id: hid, resolution: 'keep-local' })).isError).toBe(true);
+    expect(resolveHistoryConflict).toHaveBeenCalledTimes(1);
+  });
+});

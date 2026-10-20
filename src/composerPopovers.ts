@@ -2,8 +2,8 @@
  * Custom DOM popovers for the composer: the settings popover opened by the
  * settings indicator, and the project popover opened by the project/cwd chip.
  *
- * They are plain DOM (not an Obsidian `Menu`) so rows can expand in place and
- * the project list can carry a filter input. ThreadsView supplies the content
+ * They are plain DOM (not an Obsidian `Menu`) so the settings rows can drill down
+ * into their options and the project list can carry a filter input. ThreadsView supplies the content
  * and the handlers; nothing here knows about threads.
  */
 import { setIcon } from 'obsidian';
@@ -17,6 +17,23 @@ export interface PopoverOption {
   onSelect: () => void | Promise<void>;
   /** Close the popover instead of re-rendering it (for choices that open a confirm modal). */
   closeOnSelect?: boolean;
+  /** Stay on this level after choosing (re-rendered), for choices that reveal more controls below. */
+  stayOnLevel?: boolean;
+  /** Icon shown before the label. */
+  icon?: string;
+  /** A plain action rather than a radio choice (no checked state). */
+  action?: boolean;
+  /** Draw a divider above this option. */
+  dividerBefore?: boolean;
+  /** Tooltip. */
+  title?: string;
+}
+
+/** Handed to a group's custom renderer. */
+export interface PopoverCustomControls {
+  close: () => void;
+  /** Re-render the popover from the model. */
+  refresh: () => void;
 }
 
 export interface PopoverOptionGroup {
@@ -24,6 +41,11 @@ export interface PopoverOptionGroup {
   options: PopoverOption[];
   /** Informational line above the options (e.g. a stale-CLI notice). */
   note?: string;
+  /**
+   * Custom content rendered below the options (e.g. a folder field). The popover re-runs it on every
+   * render; keys typed inside it are not treated as menu navigation.
+   */
+  render?: (container: HTMLElement, controls: PopoverCustomControls) => void;
 }
 
 export interface PopoverSetting {
@@ -130,12 +152,23 @@ abstract class PopoverBase {
 function iconSpan(parent: HTMLElement, icon: string, cls: string): void {
   const span = parent.createSpan(cls);
   span.setAttribute('aria-hidden', 'true');
+  span.dataset.icon = icon;
   setIcon(span, icon);
 }
 
-/** One narrow list: expandable settings rows, a divider, then plain actions. */
+/**
+ * Settings popover with drill-down navigation. The root level lists one row per setting (icon, label, current
+ * value, chevron) plus plain actions. Choosing a row replaces the content with that setting's options under a
+ * back header; picking an option applies it and returns to the root (or closes, for `closeOnSelect`).
+ *
+ * Keys: Up/Down/Home/End move within a level; Right or Enter drills into a row; Left or Escape goes back
+ * (Escape at the root closes). The popover keeps the height of its root level while drilled in, so it does not
+ * jump between levels.
+ */
 export class ComposerSettingsPopover extends PopoverBase {
-  private expandedId: string | null = null;
+  /** Id of the setting whose options are showing; null is the root level. */
+  private levelId: string | null = null;
+  private rootHeight = 0;
 
   constructor(opts: PopoverOptions, private readonly build: () => SettingsPopoverModel) {
     super(opts);
@@ -143,17 +176,31 @@ export class ComposerSettingsPopover extends PopoverBase {
 
   open(): void {
     if (this.el) return;
+    this.levelId = null;
     this.mount('ct-settings-popover', 'Composer settings').setAttribute('role', 'menu');
     this.render();
     this.focusables()[0]?.focus();
   }
 
-  /** Re-reads the model (values changed) while keeping expansion and focus. */
+  /** Re-reads the model (values changed) while keeping the current level and focus. */
   refresh(): void {
     if (!this.el) return;
     const focusedKey = (document.activeElement as HTMLElement | null)?.dataset?.ctKey;
     this.render();
-    if (focusedKey) this.el.querySelector<HTMLElement>(`[data-ct-key="${CSS.escape(focusedKey)}"]`)?.focus();
+    // Custom content may have focused its own control while rendering; leave that alone.
+    if (focusedKey && !this.el.contains(document.activeElement)) {
+      this.el.querySelector<HTMLElement>(`[data-ct-key="${CSS.escape(focusedKey)}"]`)?.focus();
+    }
+  }
+
+  private goTo(levelId: string | null, focusKey?: string): void {
+    const root = this.el;
+    if (!root) return;
+    if (levelId !== null && this.levelId === null) this.rootHeight = root.offsetHeight;
+    this.levelId = levelId;
+    this.render();
+    const target = focusKey ? root.querySelector<HTMLElement>(`[data-ct-key="${CSS.escape(focusKey)}"]`) : null;
+    (target ?? this.focusables()[0])?.focus();
   }
 
   private render(): void {
@@ -161,7 +208,12 @@ export class ComposerSettingsPopover extends PopoverBase {
     if (!root) return;
     root.empty();
     const model = this.build();
-    for (const setting of model.settings) this.renderSetting(root, setting);
+    const level = this.levelId === null ? undefined : model.settings.find(s => s.id === this.levelId);
+    if (this.levelId !== null && !level) this.levelId = null;
+    root.style.minHeight = level && this.rootHeight > 0 ? `${this.rootHeight}px` : '';
+    if (level) { this.renderLevel(root, level); return; }
+
+    for (const setting of model.settings) this.renderRow(root, setting);
     if (model.actions.length) {
       root.createDiv('ct-sp-divider').setAttribute('role', 'separator');
       for (const action of model.actions) {
@@ -173,38 +225,48 @@ export class ComposerSettingsPopover extends PopoverBase {
     }
   }
 
-  private renderSetting(root: HTMLElement, setting: PopoverSetting): void {
-    const expanded = this.expandedId === setting.id;
+  private renderRow(root: HTMLElement, setting: PopoverSetting): void {
     const row = root.createEl('button', {
       cls: 'ct-sp-item ct-sp-row',
-      attr: { type: 'button', role: 'menuitem', 'aria-haspopup': 'true', 'aria-expanded': String(expanded), 'data-ct-nav': '', 'data-ct-key': `row:${setting.id}` },
+      attr: { type: 'button', role: 'menuitem', 'aria-haspopup': 'menu', 'data-ct-nav': '', 'data-ct-key': `row:${setting.id}` },
     });
     iconSpan(row, setting.icon, 'ct-sp-icon');
     row.createSpan({ cls: 'ct-sp-label', text: setting.label });
     row.createSpan({ cls: 'ct-sp-value', text: setting.value });
-    iconSpan(row, expanded ? 'chevron-up' : 'chevron-down', 'ct-sp-chevron');
-    row.addEventListener('click', () => {
-      this.expandedId = expanded ? null : setting.id;
-      this.refresh();
+    iconSpan(row, 'chevron-right', 'ct-sp-chevron');
+    row.addEventListener('click', () => this.goTo(setting.id));
+  }
+
+  private renderLevel(root: HTMLElement, setting: PopoverSetting): void {
+    const back = root.createEl('button', {
+      cls: 'ct-sp-item ct-sp-back',
+      // No aria-label: the host shows aria-labels as a tooltip, and this button takes focus on drill-in.
+      attr: { type: 'button', role: 'menuitem', 'data-ct-nav': '', 'data-ct-key': 'back' },
     });
-    row.addEventListener('keydown', (e) => {
-      if (e.key === 'ArrowRight' && !expanded) { e.preventDefault(); row.click(); }
-      else if (e.key === 'ArrowLeft' && expanded) { e.preventDefault(); row.click(); }
-    });
-    if (!expanded) return;
+    iconSpan(back, 'chevron-left', 'ct-sp-chevron');
+    const backLabel = back.createSpan({ cls: 'ct-sp-label', text: setting.label, attr: { id: 'ct-sp-level-label' } });
+    back.addEventListener('click', () => this.goTo(null, `row:${setting.id}`));
+    root.createDiv('ct-sp-divider').setAttribute('role', 'separator');
 
     const panel = root.createDiv('ct-sp-options');
     panel.setAttribute('role', 'group');
-    panel.setAttribute('aria-label', setting.label);
+    // Named by the back header's text (an aria-label would surface as a hover tooltip in the host).
+    panel.setAttribute('aria-labelledby', backLabel.id);
+    const ctl: PopoverCustomControls = { close: () => this.close(true), refresh: () => this.refresh() };
     let n = 0;
+    let rendered = 0;
     for (const group of setting.groups) {
       if (group.title) panel.createDiv({ cls: 'ct-sp-group-title', text: group.title });
       if (group.note) panel.createDiv({ cls: 'ct-sp-note', text: group.note });
       for (const option of group.options) {
+        rendered++;
+        if (option.dividerBefore) panel.createDiv('ct-sp-divider').setAttribute('role', 'separator');
         const btn = panel.createEl('button', {
           cls: 'ct-sp-item ct-sp-option',
           attr: {
-            type: 'button', role: 'menuitemradio', 'aria-checked': String(!!option.checked),
+            type: 'button', role: option.action ? 'menuitem' : 'menuitemradio',
+            ...(option.action ? {} : { 'aria-checked': String(!!option.checked) }),
+            ...(option.title ? { title: option.title } : {}),
             'data-ct-key': `opt:${setting.id}:${n++}`,
             ...(option.disabled ? { disabled: '' } : { 'data-ct-nav': '' }),
           },
@@ -212,20 +274,51 @@ export class ComposerSettingsPopover extends PopoverBase {
         const check = btn.createSpan('ct-sp-check');
         check.setAttribute('aria-hidden', 'true');
         if (option.checked) setIcon(check, 'check');
+        if (option.icon) iconSpan(btn, option.icon, 'ct-sp-icon');
         btn.createSpan({ cls: 'ct-sp-label', text: option.label });
         btn.addEventListener('click', () => {
           if (option.closeOnSelect) { this.close(); void option.onSelect(); return; }
-          // Collapse back to the row so the new value is visible, then re-render.
-          this.expandedId = null;
+          if (option.stayOnLevel) {
+            void Promise.resolve(option.onSelect()).finally(() => this.refresh());
+            this.refresh();
+            return;
+          }
+          // Back to the root so the new value is visible, then re-render once the change settles.
           void Promise.resolve(option.onSelect()).finally(() => this.refresh());
-          this.refresh();
-          this.el?.querySelector<HTMLElement>(`[data-ct-key="row:${setting.id}"]`)?.focus();
+          this.goTo(null, `row:${setting.id}`);
         });
       }
+      if (group.render) {
+        const custom = panel.createDiv('ct-sp-custom');
+        group.render(custom, ctl);
+        rendered++;
+      }
     }
+    if (!rendered) panel.createDiv({ cls: 'ct-sp-note', text: 'No options available.' });
   }
 
   protected onKeyDown(e: KeyboardEvent): void {
+    const target = e.target as HTMLElement | null;
+    // Custom content (text field, select, browser) owns its keys; only Escape still navigates.
+    if (target?.closest('.ct-sp-custom') && e.key !== 'Escape') return;
+    if (e.key === 'Escape' && this.levelId !== null) {
+      e.preventDefault();
+      e.stopPropagation();
+      const id = this.levelId;
+      this.goTo(null, `row:${id}`);
+      return;
+    }
+    if (e.key === 'ArrowLeft' && this.levelId !== null) {
+      e.preventDefault();
+      const id = this.levelId;
+      this.goTo(null, `row:${id}`);
+      return;
+    }
+    if (e.key === 'ArrowRight' && this.levelId === null && target?.classList.contains('ct-sp-row')) {
+      e.preventDefault();
+      target.click();
+      return;
+    }
     this.handleRoving(e);
   }
 }

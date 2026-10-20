@@ -8,7 +8,7 @@ Direct child-agent messaging and single-agent interruption are capability-gated.
 
 A native Obsidian and Geode plugin for running multiple Claude Code sessions in parallel — with streaming markdown responses, tab management, and deep vault integration.
 
-![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.68.0-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
+![Agent Threads](https://img.shields.io/badge/Obsidian-Plugin-7C3AED) ![Version](https://img.shields.io/badge/version-0.69.3-blue) [![Roadmap](https://img.shields.io/badge/Roadmap-Compass-6366F1)](https://compass.rbcodelabs.com/portal/rbcodelabs/claude-threads/roadmap)
 
 <p align="center">
   <img src="docs/screenshot-main.png" width="800" alt="Main view: conversation panel with tool calls and Agents List showing thread summaries" />
@@ -68,6 +68,7 @@ Agent Threads embeds Claude Code directly in your host workspace. Each tab is an
 - **Plan Mode** — Claude and Codex can propose a written plan before making any mutations, and Codex can autonomously invoke `EnterPlanMode` when a task needs investigation first. An inline card lets you **Approve**, **Edit**, or **Reject** the plan with optional revision feedback before execution begins
 - **Thinking mode** — enable extended thinking for harder problems, with a configurable token budget for how long Claude reasons before responding
 - **Provider-aware effort** — Claude keeps its `low` through `max` effort controls; Codex has a separate setting through `ultra`, where Ultra enables proactive native agents on models that advertise support
+- **MCP servers on remote daemons** — in **Settings → MCP**, tick a daemon under a server's **Runs on** line to run that server there too, including stdio servers that need a keychain secret. A dialog shows the exact command and the secret names that will leave your Mac; secrets are sent only for servers you opt in, expire after 30 days unless renewed, and OAuth servers never leave your computer. See [docs/remote-daemon.md](docs/remote-daemon.md#mcp-servers-synced-from-the-app)
 - **MCP Elicitation** — when an MCP server needs OAuth or a form filled mid-session, a card appears inline in the conversation (URL auth or structured form fields) so you can respond without leaving Agent Threads
 - **Tool call visibility** — see exactly which files the active Claude or Codex agent is reading/writing during each response; tool pills show elapsed time once complete, REPL calls get a dedicated icon and summary, and git operations render as structured pills; files the agent edited that you subsequently modified show a "Modified by user" badge; a tool call that's auto-denied without a prompt (in `auto` or `dontAsk` mode, or by a deny rule) shows a distinct "Auto-denied" annotation so the denial is visible instead of silently swallowed
 - **Sticky last-message bubble** — when you scroll up through a long reply, your most recent prompt floats at the top of the conversation as a small chat bubble (two-line preview) while the content beneath it fades out; click it to jump back to that message. Hidden when the prompt is already on screen and in the agent view.

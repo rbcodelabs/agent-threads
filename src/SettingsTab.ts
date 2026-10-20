@@ -7,7 +7,7 @@ import type { ButtonComponent, TextComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
 import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifactStorage';
-import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig } from './types';
+import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig, RemoteHostToolsSettings } from './types';
 import { daemonWsUrl, probeDaemon, type ProbeWorkspaces } from './remote/DaemonClient';
 import { connectionPill } from './remote/connectionPill';
 import { resolveSkillsSyncMode } from './remote/skillsSync';
@@ -16,6 +16,13 @@ import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel }
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
 import { renderLocalDaemonPanel } from './localDaemon/localDaemonPanel';
 import { visibleDaemons } from './localDaemon/registration';
+import { renderMcpRunsOn, type RunsOnHost } from './mcpRunsOn';
+import { renderHostToolsAvailability, type AvailabilityHost } from './hostToolsAvailability';
+import {
+  HOST_TOOL_GROUPS, customRoutes, describeCustomRoute, hostToolsSettingsFrom, isGroupOn, isServerOn, proxiedServerNames,
+  removeRoute, setGroupAvailable, setHostToolsEnabled, setMcpSent, setServerAvailable,
+} from './hostToolsChecklist';
+export { hostToolsSettingsFrom };
 import { DESCRIBE_REMOVE } from './localDaemon/view';
 import { serializeKey } from './stt';
 import { debugLog, setDebugLogging } from './logger';
@@ -565,6 +572,10 @@ export class RemoteDaemonModal extends Modal {
       mcpStatus?(daemonId: string): McpServerStatusEntry[] | undefined;
       /** Repositories the daemon keeps cloned; absent when the plugin has no live connection layer. */
       repos?: RemoteReposSource;
+      /** Names of the servers that run on this computer and can be proxied to a daemon (OAuth, Google Workspace). */
+      proxiedServers?(): string[];
+      /** Names of the user's own servers (Settings, MCP) that a daemon may be sent. */
+      ownServers?(): string[];
     },
   ) {
     super(app);
@@ -676,19 +687,58 @@ export class RemoteDaemonModal extends Modal {
       .setDesc('The folder on that machine offered for new threads. Normally chosen for you above.')
       .addText((t) => { folderText = t; t.setPlaceholder('/srv/workspaces').setValue(folder).onChange((v) => { folder = v; folderTouched = true; renderFolders(); }); });
 
-    // What this daemon may do on THIS computer (design 3.3). Default: nothing; every group is opt-in.
-    let hostToolsOn = this.existing?.hostTools?.enabled === true;
-    let allowedGroups = Object.entries(this.existing?.hostTools?.routes ?? {}).filter(([, v]) => v === 'host').map(([k]) => k).join(', ');
-    let mcpAllow = (this.existing?.hostTools?.mcpAllowlist ?? []).join(', ');
-    new Setting(advanced).setName('Tools on this computer')
-      .setDesc('Off by default. On: threads on this daemon can call the groups you list below on this computer, while this app is connected, and each tool that changes anything still asks you here first. Off: they keep only the daemon machine\'s own tools. Anything that writes, runs commands, schedules, installs or reads secrets is never offered.')
-      .addToggle((t) => t.setValue(hostToolsOn).onChange((v) => { hostToolsOn = v; }));
-    new Setting(advanced).setName('Tool groups to allow')
-      .setDesc('Comma-separated, all read-only and all off until listed: vault (search and read notes), workspace (open tabs, active file), threads (list and read your other threads), skills (list installed skills), browser (the in-app browser), mcp (your Google Workspace and OAuth servers; or name one server). Only listed groups are offered, and only while "Tools on this computer" is on.')
-      .addText((t) => t.setPlaceholder('vault, mcp').setValue(allowedGroups).onChange((v) => { allowedGroups = v; }));
-    new Setting(advanced).setName('MCP servers it may receive')
-      .setDesc('Names of your external MCP servers (Settings, MCP) to send to this daemon. Blank: servers without headers that the daemon can reach. Servers that start a program here, use a local address or a secret are never sent.')
-      .addText((t) => t.setPlaceholder('docs, search').setValue(mcpAllow).onChange((v) => { mcpAllow = v; }));
+    // What this daemon may do on THIS computer (design 3.3). Default: nothing; every item is opt-in. A draft of the saved
+    // `hostTools`, edited only through the pure helpers so this checklist and Settings, MCP can never disagree.
+    let hostTools: RemoteHostToolsSettings | undefined = this.existing?.hostTools ? structuredClone(this.existing.hostTools) : undefined;
+    const proxied = this.actions.proxiedServers?.() ?? [];
+    const own = this.actions.ownServers?.() ?? [];
+    const toolsEl = advanced.createDiv({ cls: 'ct-host-tools' });
+    const drawHostTools = (): void => {
+      toolsEl.empty();
+      const enabled = hostTools?.enabled === true;
+      const change = (next: RemoteHostToolsSettings | undefined): void => { hostTools = next; drawHostTools(); };
+      new Setting(toolsEl).setName('Tools on this computer')
+        .setDesc('Off by default. On: threads on this daemon can use the items ticked below on this computer, while this app is connected, and each tool that changes anything still asks you here first. Off: they keep only the daemon machine\'s own tools. Anything that writes, runs commands, schedules, installs or reads secrets is never offered.')
+        .addToggle((t) => t.setValue(enabled).onChange((v) => change(setHostToolsEnabled(hostTools, v))));
+      const list = toolsEl.createDiv({ cls: 'ct-host-tools-list', attr: { role: 'group', 'aria-label': 'Tools this daemon may use on this computer' } });
+      if (!enabled) list.createDiv({ cls: 'setting-item-description', text: 'Turn on "Tools on this computer" to choose what this daemon can use.' });
+      const item = (name: string, hint: string, checked: boolean, onToggle: (v: boolean) => void): void => {
+        const row = list.createDiv({ cls: 'ct-host-tools-item' });
+        const label = row.createEl('label', { cls: `ct-mcp-runson-toggle${enabled ? '' : ' is-disabled'}` });
+        const box = label.createEl('input', { attr: { type: 'checkbox', 'aria-label': name } });
+        box.checked = checked && enabled;
+        box.disabled = !enabled;
+        label.createSpan({ text: name });
+        row.createDiv({ cls: 'setting-item-description', text: hint });
+        box.addEventListener('change', () => onToggle(box.checked));
+      };
+      list.createEl('h4', { text: 'Built-in tools' });
+      for (const g of HOST_TOOL_GROUPS) {
+        item(g.label, g.hint, isGroupOn(hostTools, g.key), (v) => change(setGroupAvailable(hostTools, g.key, v)));
+      }
+      if (proxied.length > 0) {
+        list.createEl('h4', { text: 'Connected servers' });
+        for (const name of proxied) {
+          item(name, 'Runs here and is proxied to this daemon. Reads are allowed; anything that changes something asks first.', isServerOn(hostTools, name), (v) => change(setServerAvailable(hostTools, name, v)));
+        }
+      }
+      const custom = customRoutes(hostTools, proxied);
+      if (custom.length > 0) {
+        list.createEl('h4', { text: 'Custom' });
+        for (const key of custom) item(key, describeCustomRoute(key), true, () => change(removeRoute(hostTools, key)));
+      }
+      const sent = new Set(hostTools?.mcpAllowlist ?? []);
+      const unknownSent = [...sent].filter((n) => !own.includes(n));
+      if (own.length > 0 || unknownSent.length > 0) {
+        list.createEl('h4', { text: 'Your other MCP servers to send' });
+        list.createDiv({ cls: 'setting-item-description', text: 'Servers from Settings, MCP that start nothing here and use no secret. None ticked: the ones the daemon can reach are sent automatically. Ticked: only those. Servers that start a program, use a local address or a secret are never sent this way (use "Runs on" in Settings, MCP).' });
+        for (const name of [...own, ...unknownSent]) {
+          const hint = own.includes(name) ? '' : 'Not in Settings, MCP any more. Untick to remove.';
+          item(name, hint, sent.has(name), (v) => change(setMcpSent(hostTools, name, v)));
+        }
+      }
+    };
+    drawHostTools();
 
     // Skill folders Threads controls are copied to the daemon automatically. Not for the managed local daemon (own path).
     let skillsSync: string | undefined = this.existing?.skillsSync;
@@ -763,8 +813,8 @@ export class RemoteDaemonModal extends Modal {
           tokenSecretName: this.existing?.tokenSecretName ?? tokenSecretNameFor(id),
           ...(folder.trim() ? { defaultCwdRoot: folder.trim() } : {}),
           ...(mapping.mapping ? { vaultMapping: mapping.mapping } : {}),
-          ...hostToolsSettingsFrom(hostToolsOn, allowedGroups, mcpAllow),
           ...(skillsSync !== undefined && skillsSync !== 'auto' ? { skillsSync: skillsSync as 'off' } : {}),
+          ...hostToolsSettingsFrom(hostTools),
         },
       };
     };
@@ -1126,6 +1176,7 @@ export class McpServerModal extends Modal {
       const result = saveMcpServer(this.plugin.settings, server, this.existing?.name);
       if (!result.ok) { showError(result.error); return; }
       void this.plugin.saveSettings();
+      this.plugin.onMcpSyncInputsChanged?.();
 
       new Notice(`Saved MCP server "${name}".`);
       this.close();
@@ -1204,6 +1255,7 @@ export class McpServerModal extends Modal {
       const result = saveMcpServer(this.plugin.settings, server, this.existing?.name);
       if (!result.ok) { showError(result.error); return; }
       void this.plugin.saveSettings();
+      this.plugin.onMcpSyncInputsChanged?.();
 
       new Notice(`Saved MCP server "${name}".`);
       this.close();
@@ -1468,6 +1520,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   private activeTab: SettingsTabId = 'general';
   private selectedProjectId: string | null = null;
   private selectedSecretName: string | null = null;
+  private mcpSyncUnsub: (() => void) | null = null;
 
   /** Switch the (single-pane) settings to a section before it is opened. */
   showSection(id: SettingsTabId): void {
@@ -2835,7 +2888,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         this.plugin.app.secretStorage.setSecret(secretStorageKey(secretName), '');
         this.plugin.settings.secretEnvKeys = keys.filter(key => key !== secretName);
         if (this.plugin.settings.secretEnvScopes) delete this.plugin.settings.secretEnvScopes[secretName];
-        await this.plugin.saveSettings(); this.selectedSecretName = null; this.display();
+        await this.plugin.saveSettings(); this.plugin.onMcpSyncInputsChanged?.(); this.selectedSecretName = null; this.display();
       });
     }
     const actions = detail.createEl('footer', { cls: 'ct-manager-actions' });
@@ -2854,7 +2907,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       if (isNew) this.plugin.settings.secretEnvKeys = [...keys, resolvedName];
       const scopes = this.plugin.settings.secretEnvScopes ?? (this.plugin.settings.secretEnvScopes = {});
       if (selectedRadio.checked) scopes[resolvedName] = [...chosen]; else delete scopes[resolvedName];
-      await this.plugin.saveSettings(); this.selectedSecretName = resolvedName; this.display();
+      await this.plugin.saveSettings(); this.plugin.onMcpSyncInputsChanged?.(); this.selectedSecretName = resolvedName; this.display();
     });
   }
 
@@ -3428,7 +3481,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       return result;
     };
     // Resources apply when the container is (re)created: the status then offers Update.
-    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; shareProjectFolders?: boolean; optionalTools?: string[] }): Promise<void> => {
+    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; shareProjectFolders?: boolean; optionalTools?: string[]; allowSyncedStdio?: boolean }): Promise<void> => {
       const current = this.plugin.settings.localDaemon ?? { enabled: false, port: 7433 };
       this.plugin.settings.localDaemon = { ...current, ...patch };
       await this.plugin.saveSettings();
@@ -3456,6 +3509,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           const folders = value.split('\n').map((l) => l.trim()).filter(Boolean);
           await saveResources({ folders: folders.length ? folders : undefined });
         }));
+    const syncedStdioSetting = new Setting(containerEl)
+      .setName('Local daemon: allow MCP servers that start programs')
+      .setDesc('Lets you run a Settings MCP server that starts a program (stdio) inside the local daemon container (Settings, MCP, "Runs on"). The program runs as the daemon user with access to everything the daemon can see. Off by default; http and sse servers do not need it. Applies when the container is next created: choose Update in the block above.')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.localDaemon?.allowSyncedStdio === true)
+        .onChange(async (on) => { await saveResources({ allowSyncedStdio: on || undefined }); }));
     // Tools that write, schedule or touch secrets on this Mac, which every daemon is denied by default.
     const optionalSettings: Setting[] = [];
     {
@@ -3491,7 +3550,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       pluginVersion: this.plugin.manifest.version,
       snapshot: () => controller.snapshot(),
       subscribe: (listener) => controller.subscribe(listener),
-      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, projectFoldersSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
+      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, projectFoldersSetting, syncedStdioSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
       confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
       cancel: () => controller.cancel(),
       openUrl: (url) => { try { window.open(url, '_blank'); } catch { /* the panel keeps a link */ } },
@@ -3529,10 +3588,23 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     };
   }
 
+  /** Saves a daemon's host-tool choices the way the daemon editor does, so new threads on it pick them up. */
+  private proxiedAvailabilityHost(): AvailabilityHost {
+    return {
+      daemons: () => visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile),
+      save: async () => {
+        await this.plugin.saveSettings();
+        this.plugin.daemonRegistry?.refresh();
+      },
+    };
+  }
+
   private openDaemonModal(existing: RemoteDaemonConfig | null): void {
     new RemoteDaemonModal(this.app, existing, this.plugin.settings.remoteDaemons ?? [], this.plugin.manager.vaultRoot ?? '', {
       test: (candidate, token) => this.testDaemon(candidate, token),
       mcpStatus: (id) => this.plugin.daemonMcpStatus.get(id)?.servers,
+      proxiedServers: () => proxiedServerNames(this.plugin.settings),
+      ownServers: () => listMcpServers(this.plugin.settings).servers.map((x) => x.name),
       ...(this.plugin.remoteRepos ? { repos: this.plugin.remoteRepos } : {}),
       save: async (config, token) => {
         const list = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
@@ -3602,6 +3674,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       const setting = new Setting(containerEl).setName(label);
       if (service === 'gmail') setting.setDesc(MAIL_CALENDAR_DESC.gmail);
       if (service === 'calendar') setting.setDesc(MAIL_CALENDAR_DESC.calendar);
+      if (this.plugin.settings.googleWorkspaceMcp?.[service] === true && visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile).length > 0) {
+        setting.settingEl.addClass('ct-mcp-has-runson');
+        renderHostToolsAvailability(setting.settingEl, this.proxiedAvailabilityHost(), `google-${service}`);
+      }
       setting.addToggle(toggle => toggle
         .setValue(this.plugin.settings.googleWorkspaceMcp?.[service] === true)
         .onChange(async enabled => {
@@ -3641,6 +3717,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         renderOAuthStatusBadge(row.descEl, { label, tone });
         if (state && state.status !== 'connected' && state.errorMessage) {
           row.descEl.createDiv({ cls: 'ct-mcp-server-warning', text: state.errorMessage });
+        }
+        // An OAuth server signs in through this computer, so it cannot be synced to a daemon; it can be proxied from here.
+        if (visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile).length > 0) {
+          row.settingEl.addClass('ct-mcp-has-runson');
+          renderHostToolsAvailability(row.settingEl, this.proxiedAvailabilityHost(), name,
+            oauthMcpNeedsAttention({ tone }) ? { unavailableReason: 'Re-authorize this server before making it available.' } : {});
         }
         row.addButton((btn) => {
           btn.setButtonText('Re-authorize').onClick(() =>
@@ -3738,6 +3820,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     for (const key of this.plugin.settings.secretEnvKeys ?? []) knownEnv[key] = 'set';
 
     const listEl = containerEl.createDiv({ cls: 'ct-mcp-servers-list' });
+    const runsOnHost: RunsOnHost | null = this.plugin.mcpSync ? {
+      app: this.app,
+      engine: this.plugin.mcpSync,
+      daemons: () => visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile),
+      reported: (id) => this.plugin.daemonMcpStatus?.get(id)?.servers,
+      rerender: () => renderList(),
+    } : null;
     const renderList = () => {
       listEl.empty();
       const { servers, invalid } = listMcpServers(this.plugin.settings);
@@ -3779,6 +3868,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
         );
 
+        // Where else this server may run: the remote daemons the user can opt it in for.
+        const syncEngine = this.plugin.mcpSync;
+        if (syncEngine) {
+          const ev = syncEngine.evaluate(server.name);
+          if (ev) {
+            row.settingEl.addClass('ct-mcp-has-runson');
+            if (runsOnHost) renderMcpRunsOn(row.settingEl, runsOnHost, ev);
+          }
+        }
+
         row.addButton((btn) =>
           btn.setButtonText('Remove').setWarning().onClick(() => {
             const result = deleteMcpServer(this.plugin.settings, server.name);
@@ -3787,6 +3886,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               return;
             }
             void this.plugin.saveSettings();
+            this.plugin.onMcpSyncInputsChanged?.();
             new Notice(`Removed MCP server "${server.name}".`);
             renderList();
           }),
@@ -3814,6 +3914,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       }
     };
     renderList();
+    // The engine reports progress (synced, failed, needs an admin token) as it learns it; redraw the list when it does.
+    this.mcpSyncUnsub?.();
+    this.mcpSyncUnsub = this.plugin.mcpSync?.onChange(() => { if (listEl.isConnected) renderList(); }) ?? null;
+    // Which daemons need an admin token is learned by asking (harmlessly) once each is connected.
+    if (this.plugin.mcpSync) {
+      for (const d of visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile)) void this.plugin.mcpSync.probeAdmin(d.id);
+    }
 
     new Setting(containerEl)
       .addButton((btn) =>
@@ -3925,19 +4032,4 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
   }
-}
-
-/** The `hostTools` field of a daemon config from the three Advanced inputs; omitted when everything is at its default (off). */
-export function hostToolsSettingsFrom(enabled: boolean, allowedGroups: string, mcpAllow: string): { hostTools?: import('./types').RemoteHostToolsSettings } {
-  const list = (v: string): string[] => [...new Set(v.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean))];
-  const groups = list(allowedGroups);
-  const allow = list(mcpAllow);
-  if (!enabled && groups.length === 0 && allow.length === 0) return {};
-  return {
-    hostTools: {
-      ...(enabled ? { enabled: true } : {}),
-      ...(groups.length ? { routes: Object.fromEntries(groups.map((k) => [k, 'host' as const])) } : {}),
-      ...(allow.length ? { mcpAllowlist: allow } : {}),
-    },
-  };
 }

@@ -47,3 +47,12 @@ describe('remote environment prompt: vault addendum', () => {
     expect(lines.join('\n')).not.toContain('Conversation history');
   });
 });
+
+describe('remote environment prompt: inline images', () => {
+  it('tells the agent how to show an image inline', () => {
+    const p = buildRemoteEnvironmentPrompt('/home/user/projects/x', 'my-server', 'Geode');
+    expect(p).toMatch(/markdown image with an absolute path on this machine/);
+    expect(p).toMatch(/png, jpeg, gif and webp/);
+    expect(p).toMatch(/5 MB/);
+  });
+});

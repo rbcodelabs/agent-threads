@@ -233,47 +233,79 @@ test.describe('searchable Project picker', () => {
 });
 
 test.describe('kickoff harness picker (moved from the Kanban dispatch box)', () => {
-  const sendBtn = (page: Page) => composer(page).locator('.ct-harness-send-btn');
+  const sendBtn = (page: Page) => composer(page).locator('.ct-settings-indicator');
 
-  test('selects OpenCode with its brand mark, without dispatching', async ({ page }) => {
+  const popover = (page: Page) => page.locator('.ct-settings-popover');
+  const drill = (page: Page, id: string) => page.locator(`[data-ct-key="row:${id}"]`).click();
+
+  test('root lists Model, Permissions and Harness; selecting OpenCode shows its mark and does not dispatch', async ({ page }) => {
     await open(page, '?projects=1', 900, 760);
-    await sendBtn(page).click({ button: 'right' });
-    const menu = page.locator('.ct-harness-menu');
-    await expect(menu.getByRole('menuitemradio', { name: 'OpenCode' }).locator('.ct-harness-mark-opencode svg')).toHaveCount(1);
-    await menu.getByRole('menuitemradio', { name: 'OpenCode' }).click();
-    await expect(menu).toHaveCount(0);
+    await sendBtn(page).click();
+    await expect(popover(page).locator('.ct-sp-row .ct-sp-label')).toHaveText(['Model', 'Permissions', 'Harness']);
+    await expect(page.locator('[data-ct-key="row:harness"] .ct-sp-value')).toHaveText('Claude');
+    await shot(popover(page), 'new-conversation-settings-popover-root.png');
+    await drill(page, 'harness');
+    await expect(popover(page).locator('.ct-sp-back')).toContainText('Harness');
+    await expect(popover(page).getByRole('menuitemradio', { name: 'OpenCode' }).locator('.ct-sp-icon[data-icon="opencode-mark"] svg')).toHaveCount(1);
+    await shot(popover(page), 'new-conversation-settings-popover-harness.png');
+    await popover(page).getByRole('menuitemradio', { name: 'OpenCode' }).click();
+    await expect(popover(page)).toHaveCount(0);
     await expect(sendBtn(page)).toHaveAttribute('aria-label', /OpenCode/);
-    await expect(sendBtn(page).locator('.ct-harness-mark-opencode')).toHaveAttribute('data-icon', 'opencode-mark');
+    await expect(sendBtn(page).locator('.ct-si-provider')).toHaveAttribute('data-glyph', 'opencode');
+    await expect(composer(page).locator('.ct-send-btn')).toHaveText('↵');
     expect((await dispatchCalls(page)).length).toBe(0);
     await shot(composer(page), 'new-conversation-harness-picker-opencode.png');
   });
 
-  test('offers no per-thread "Run in" section (sandbox VMs were removed)', async ({ page }) => {
+  test('offers no per-thread "Run in" section (sandbox VMs were removed) and no Run on without daemons', async ({ page }) => {
     await open(page, '?projects=1', 900, 760);
-    await sendBtn(page).click({ button: 'right' });
-    const menu = page.locator('.ct-harness-menu');
-    await expect(menu.getByRole('menuitemradio', { name: 'Claude' })).toBeVisible();
-    await expect(menu.locator('.ct-run-mode-item[data-run-mode]')).toHaveCount(0);
-    await expect(menu.getByText('Run in', { exact: true })).toHaveCount(0);
-    await expect(sendBtn(page).locator('.ct-run-mode-badge')).toHaveCount(0);
+    await sendBtn(page).click();
+    await expect(popover(page).getByText('Run in', { exact: true })).toHaveCount(0);
+    await expect(page.locator('[data-ct-key="row:runon"]')).toHaveCount(0);
+    await expect(sendBtn(page).locator('.ct-si-location')).toHaveAttribute('data-glyph', 'laptop');
   });
 
-  test('the chosen harness and run mode travel with the first send', async ({ page }) => {
+  test('the chosen harness, model and permissions travel with the first send', async ({ page }) => {
     await open(page, '?projects=1', 900, 760);
-    await sendBtn(page).click({ button: 'right' });
-    await page.locator('.ct-harness-menu').getByRole('menuitemradio', { name: 'Codex' }).click();
+    await sendBtn(page).click();
+    await drill(page, 'permissions');
+    await popover(page).locator('.ct-sp-option', { hasText: 'Plan only' }).click();
+    await expect(page.locator('[data-ct-key="row:permissions"] .ct-sp-value')).toContainText('Plan only');
+    await drill(page, 'harness');
+    await popover(page).getByRole('menuitemradio', { name: 'Codex' }).click();
     await input(page).fill('Review the diff');
     await input(page).press('Enter');
     await expect.poll(async () => (await dispatchCalls(page)).length).toBe(1);
-    expect((await dispatchCalls(page))[0][3]).toMatchObject({ agentHarness: 'codex' });
+    expect((await dispatchCalls(page))[0][3]).toMatchObject({ agentHarness: 'codex', permissionMode: 'plan' });
   });
 
-  test('the harness menu items are touch sized', async ({ page }) => {
+  test('keyboard: Right drills in, Left and Escape go back, Escape at the root closes', async ({ page }) => {
     await open(page, '?projects=1', 900, 760);
-    await sendBtn(page).click({ button: 'right' });
-    const menu = page.locator('.ct-harness-menu');
-    await expect(menu.getByRole('menuitemradio', { name: 'Claude' })).toHaveAttribute('aria-checked', 'true');
-    await expect(menu.getByRole('menuitemradio', { name: 'Codex' })).toHaveCSS('min-height', '44px');
-    await shot(menu, 'new-conversation-harness-picker.png');
+    await sendBtn(page).click();
+    await page.keyboard.press('ArrowDown'); // Model -> Permissions
+    await page.keyboard.press('ArrowDown'); // -> Harness
+    await page.keyboard.press('ArrowRight');
+    await expect(popover(page).locator('.ct-sp-back')).toContainText('Harness');
+    await page.keyboard.press('ArrowLeft');
+    await expect(popover(page).locator('.ct-sp-back')).toHaveCount(0);
+    await expect(page.locator('[data-ct-key="row:harness"]')).toBeFocused();
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Escape');
+    await expect(popover(page)).toHaveCount(1);
+    await expect(popover(page).locator('.ct-sp-back')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(popover(page)).toHaveCount(0);
+    await expect(sendBtn(page)).toBeFocused();
+  });
+
+  test('the popover keeps its height between levels and its items are touch sized on mobile', async ({ page }) => {
+    await open(page, '?projects=1', 390, 760);
+    await sendBtn(page).click();
+    const rootBox = await popover(page).boundingBox();
+    await drill(page, 'harness');
+    const levelBox = await popover(page).boundingBox();
+    expect(levelBox!.height).toBeGreaterThanOrEqual(rootBox!.height - 1);
+    expect(levelBox!.width).toBeCloseTo(rootBox!.width, 0);
+    await expect(popover(page).getByRole('menuitemradio', { name: 'Claude' })).toHaveAttribute('aria-checked', 'true');
   });
 });

@@ -8,6 +8,7 @@
 import type { HarnessPermissionMode } from '../HarnessSession';
 import type { Channel } from './envelope';
 import type { SkillTreeManifest, SkillWireFile } from './skills';
+import type { SyncedMcpServers } from './mcpSync';
 import type { RemoteHostToolSpec, RemoteSessionSpec } from './spec';
 
 export type ClientKind = 'geode-plugin' | 'cli';
@@ -37,6 +38,11 @@ export type ClientCommand =
   | { type: 'workspaces.list' }
   /** Subfolders of an allowed folder, for browsing. Directories only, capped, confined to the workspaces. Additive. */
   | { type: 'path.list'; path: string }
+  /**
+   * Read one image file inside the daemon's workspaces so the client can show it inline (`![](/abs/path)`). Read scope.
+   * png / jpeg / gif / webp only (no svg), at most `FILE_READ_MAX_BYTES`. Additive; older daemons answer `unknown_command`.
+   */
+  | { type: 'file.read'; path: string }
   /**
    * `epoch` is the daemon process epoch the client last saw on this channel. If the daemon has restarted
    * since and lost journal entries the client already applied (a crash before they were flushed, so their
@@ -87,7 +93,18 @@ export type ClientCommand =
   /** One chunk of a missing tree, staged under `.incoming/<upload>`. */
   | { type: 'skills.put'; upload: string; dir: string; seq: number; files: SkillWireFile[] }
   /** Verify the staged tree against `hash` and move it into place. Idempotent. */
-  | { type: 'skills.commit'; upload: string; dir: string; hash: string; files: number; bytes: number };
+  | { type: 'skills.commit'; upload: string; dir: string; hash: string; files: number; bytes: number }
+  /**
+   * Replace the MCP server definitions synced from the client (full replace: absent names are removed). Values of
+   * `${NAME}` placeholders are NOT sent here; they go with `creds.push`. Needs an admin token. Additive within v1;
+   * advertised as the `mcp.sync` capability.
+   *
+   * If `servers` names at least one server and the daemon accepts none, the previous set is KEPT and the reply has
+   * `kept: true`. `clear: true` states that an empty `servers` is meant to remove every synced server (clients send it
+   * whenever they send an empty set; it is invalid together with a non-empty `servers`). A daemon from before this
+   * field treats an empty `servers` as a clear whether or not `clear` is present.
+   */
+  | { type: 'mcp.sync'; servers: SyncedMcpServers; clear?: boolean; wait?: boolean };
 
 /** One repository the daemon keeps cloned. The authentication token comes from the daemon's `creds/`, never from here. */
 export interface RepoSpec {
@@ -227,6 +244,17 @@ export function validateWireImages(images: unknown): string | null {
   return null;
 }
 
+/** Reply to `file.read`. */
+export interface FileReadReply {
+  base64: string;
+  mediaType: WireImage['mediaType'];
+  /** Size of the file in bytes. */
+  size: number;
+}
+
+/** Largest file `file.read` returns. */
+export const FILE_READ_MAX_BYTES = 5 * 1024 * 1024;
+
 /** At most this many subfolders are returned by one `path.list`. */
 export const PATH_LIST_MAX_ENTRIES = 300;
 
@@ -242,6 +270,7 @@ export const CLIENT_COMMAND_TYPES: Record<ClientCommandType, true> = {
   'path.check': true,
   'workspaces.list': true,
   'path.list': true,
+  'file.read': true,
   attach: true,
   ack: true,
   'session.send': true,
@@ -267,4 +296,5 @@ export const CLIENT_COMMAND_TYPES: Record<ClientCommandType, true> = {
   'skills.sync': true,
   'skills.put': true,
   'skills.commit': true,
+  'mcp.sync': true,
 };

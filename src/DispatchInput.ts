@@ -1,5 +1,5 @@
 import { gateHarness, type HarnessGate } from './remote/harnessSupport';
-import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness, type RemoteDaemonConfig } from './types';
+import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness, type PluginSettings, type RemoteDaemonConfig } from './types';
 import { resolveRunOn, runOnSuffix, type RunOnRemote, type RunOnSelection } from './remote/runOn';
 import { suggestRemoteCwd } from './remote/vaultMapping';
 import type { RemoteFolderSource, FolderLoad } from './remote/folderSource';
@@ -12,13 +12,10 @@ import { SttController } from './stt';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import './harnessBrandIcons';
-
-const HARNESS_BRAND_ICONS: Record<AgentHarness, string> = {
-  claude: 'claude-spark',
-  codex: 'openai-blossom',
-  opencode: 'opencode-mark',
-};
+import { HARNESS_BRAND_ICONS } from './harnessBrandIcons';
+import { describeComposerSettings, PERMISSION_MODE_OPTIONS } from './composerSettings';
+import { ComposerSettingsPopover, type SettingsPopoverModel, type PopoverSetting } from './composerPopovers';
+import { createGlyph } from './composerGlyphs';
 
 export interface DispatchPayload {
   text: string;
@@ -26,6 +23,10 @@ export interface DispatchPayload {
   attachment: string | null;
   /** Harness selected by a kickoff picker, when that picker is enabled. */
   agentHarness?: AgentHarness;
+  /** Model chosen in the settings popover (omitted = the default). */
+  model?: string;
+  /** Permission mode chosen in the settings popover (omitted = the global default). */
+  permissionMode?: PluginSettings['permissionMode'];
   /** Run the thread on this remote daemon, in this folder on its machine (picked under "Run on"). */
   remote?: RunOnRemote;
 }
@@ -100,7 +101,9 @@ export interface DispatchInputOptions {
   /** Turn the send button into a locally sticky kickoff harness picker. */
   harnessPicker?: {
     initialHarness: AgentHarness;
-    /** Configured remote daemons; when non-empty the menu offers a "Run on" section. */
+    /** Models offered for a harness; `value: undefined` is the default. Omit to hide the Model row. */
+    getModelOptions?: (harness: AgentHarness) => Array<{ label: string; value: string | undefined }>;
+    /** Configured remote daemons; when non-empty the popover offers a "Run on" row. */
     getRemoteDaemons?: () => RemoteDaemonConfig[];
     /**
      * `welcome.capabilities` of a daemon as last seen, or undefined while it has not been reached. The menu uses them
@@ -173,6 +176,8 @@ export class DispatchInput {
   private hiddenFileInput!: HTMLInputElement;
 
   private sendBtn!: HTMLButtonElement;
+  /** Quiet-Rail settings indicator (harness picker mode); opens the harness / Run-on menu. */
+  private settingsBtn: HTMLButtonElement | null = null;
   private stopBtn: HTMLButtonElement | null = null;
   private contextChipNameEl: HTMLElement | null = null;
   private contextChipEl: HTMLElement | null = null;
@@ -209,20 +214,11 @@ export class DispatchInput {
   /** Workspaces each daemon advertised, loaded when the menu opens (cleared on every open). */
   private runOnFolders = new Map<string, FolderLoad<WorkspaceInfo[]>>();
   private runOnLoadToken = 0;
-  private harnessMenu: HTMLElement | null = null;
-  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
-  private suppressNextSendClick = false;
-  private readonly closeHarnessMenuOnPointerDown = (event: PointerEvent): void => {
-    if (this.harnessMenu && !this.harnessMenu.contains(event.target as Node) && event.target !== this.sendBtn) {
-      this.closeHarnessMenu();
-    }
-  };
-  private readonly closeHarnessMenuOnEscape = (event: KeyboardEvent): void => {
-    if (event.key === 'Escape' && this.harnessMenu) {
-      event.preventDefault();
-      this.closeHarnessMenu(true);
-    }
-  };
+  private selectedModel: string | undefined;
+  private selectedPermission: PluginSettings['permissionMode'] | undefined;
+  private settingsPopover: ComposerSettingsPopover | null = null;
+  /** Where the Run-on folder control is rendered while the popover shows it. */
+  private runOnFolderHost: HTMLElement | null = null;
 
   constructor(options: DispatchInputOptions) {
     this.app = options.app;
@@ -264,12 +260,7 @@ export class DispatchInput {
     });
     this.sendBtn = sendBtn;
     this.selectedHarness = this.options.harnessPicker?.initialHarness ?? null;
-    if (this.selectedHarness) this.configureHarnessPicker();
-    sendBtn.addEventListener('click', () => {
-      if (this.suppressNextSendClick) {
-        this.suppressNextSendClick = false;
-        return;
-      }
+        sendBtn.addEventListener('click', () => {
       this.send();
     });
 
@@ -323,7 +314,7 @@ export class DispatchInput {
       leftActionsEl!.appendChild(micBtn);
     } else {
       // ── Column layout: footer row or fallback to input-actions column ────
-      const needsFooter = !!(this.options.showContextChip || this.options.appendFooterActions || this.options.appendFooterMetadata);
+      const needsFooter = !!(this.options.showContextChip || this.options.harnessPicker || this.options.appendFooterActions || this.options.appendFooterMetadata);
       if (needsFooter) {
         const inputFooter = this.rootEl.createDiv('ct-input-footer');
 
@@ -353,6 +344,8 @@ export class DispatchInput {
 
         const footerActionsEl = inputFooter.createDiv('ct-input-footer-actions');
         this.options.appendFooterActions?.(footerActionsEl);
+        // Same order as an existing thread: settings indicator, then attach, then mic.
+        if (this.selectedHarness) this.configureHarnessPicker(footerActionsEl);
         // Attach + mic live in the footer bottom row (keeps input area compact)
         footerActionsEl.appendChild(attachBtn);
         footerActionsEl.appendChild(micBtn);
@@ -442,8 +435,7 @@ export class DispatchInput {
   destroy(): void {
     this.unsubscribeCommands?.();
     this.unsubscribeCommands = undefined;
-    this.clearLongPressTimer();
-    this.closeHarnessMenu();
+    this.settingsPopover?.close();
     this.sttController?.destroy();
     this.hideFileDropdown();
     this.hideSkillDropdown();
@@ -567,6 +559,8 @@ export class DispatchInput {
         images,
         attachment,
         ...(this.selectedHarness ? { agentHarness: this.selectedHarness } : {}),
+        ...(this.selectedModel ? { model: this.selectedModel } : {}),
+        ...(this.selectedPermission ? { permissionMode: this.selectedPermission } : {}),
         ...(runOn.remote ? { remote: runOn.remote } : {}),
       });
     } catch (err) {
@@ -595,60 +589,45 @@ export class DispatchInput {
     this.renderChips();
   }
 
-  private configureHarnessPicker(): void {
+  private configureHarnessPicker(footerActionsEl: HTMLElement): void {
     this.rootEl.addClass('ct-harness-picker-root');
-    this.sendBtn.addClass('ct-harness-send-btn');
+    // Same indicator button as an existing thread's composer; the send button stays a plain send button.
+    this.settingsBtn = footerActionsEl.createEl('button', {
+      cls: 'ct-more-btn ct-settings-indicator',
+      attr: { type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false' },
+    });
+    this.settingsBtn.addEventListener('click', () => {
+      if (this.settingsPopover?.isOpen) this.settingsPopover.close(true);
+      else this.openSettingsPopover();
+    });
     this.renderHarnessIdentity();
-    this.sendBtn.addEventListener('contextmenu', (event) => {
-      event.preventDefault();
-      this.openHarnessMenu();
-    });
-    this.sendBtn.addEventListener('keydown', (event) => {
-      if ((event.shiftKey && event.key === 'F10') || event.key === 'ContextMenu' || (event.altKey && event.key === 'ArrowDown')) {
-        event.preventDefault();
-        this.openHarnessMenu();
-      }
-    });
-    this.sendBtn.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) return;
-      this.clearLongPressTimer();
-      this.longPressTimer = setTimeout(() => {
-        this.longPressTimer = null;
-        this.suppressNextSendClick = true;
-        this.openHarnessMenu();
-      }, 500);
-    });
-    this.sendBtn.addEventListener('pointerup', () => {
-      this.clearLongPressTimer();
-      // A synthesized click follows pointerup synchronously. If the platform
-      // omits that click, avoid suppressing the user's next intentional send.
-      if (this.suppressNextSendClick) setTimeout(() => { this.suppressNextSendClick = false; }, 0);
-    });
-    this.sendBtn.addEventListener('pointercancel', () => {
-      this.clearLongPressTimer();
-      this.suppressNextSendClick = false;
-    });
-    this.sendBtn.addEventListener('pointerleave', () => this.clearLongPressTimer());
   }
 
   private renderHarnessIdentity(): void {
-    if (!this.selectedHarness) return;
-    const name = agentHarnessLabel(this.selectedHarness);
-    this.sendBtn.empty();
-    this.createHarnessMark(this.sendBtn, this.selectedHarness);
-    this.sendBtn.removeClass('ct-harness-send-btn--remote');
-    if (this.effectiveRunOn().daemonId) {
-      this.sendBtn.addClass('ct-harness-send-btn--remote');
-      const badge = this.sendBtn.createSpan({ cls: 'ct-run-mode-badge', attr: { 'aria-hidden': 'true', 'data-run-mode': 'remote' } });
-      setIcon(badge, 'server');
-    }
-    const remoteWhere = runOnSuffix(this.effectiveRunOn(), this.remoteDaemons());
-    const where = remoteWhere;
-    const label = `Start task with ${name}${where}; right-click or hold to change agent or where it runs`;
-    this.sendBtn.setAttribute('aria-label', label);
-    this.sendBtn.setAttribute('aria-haspopup', 'menu');
-    this.sendBtn.setAttribute('aria-expanded', this.harnessMenu ? 'true' : 'false');
-    this.sendBtn.title = label;
+    const btn = this.settingsBtn;
+    if (!btn || !this.selectedHarness) return;
+    const runOn = this.effectiveRunOn();
+    const d = describeComposerSettings({
+      harness: this.selectedHarness,
+      model: undefined,
+      activeModel: undefined,
+      remote: runOn.daemonId ? { daemonName: runOn.daemonId, connection: 'pending' } : undefined,
+    });
+    btn.empty();
+    const body = btn.createSpan('ct-si-body');
+    const model = body.createSpan({ cls: 'ct-si-glyph ct-si-model', attr: { 'data-tier': d.model.tier, 'data-glyph': d.model.glyph } });
+    model.appendChild(createGlyph(d.model.glyph));
+    const provider = body.createSpan({ cls: 'ct-si-glyph ct-si-provider', attr: { 'data-glyph': d.provider.glyph } });
+    provider.appendChild(createGlyph(d.provider.glyph));
+    const location = body.createSpan({ cls: 'ct-si-glyph ct-si-location', attr: { 'data-glyph': d.location.glyph } });
+    location.appendChild(createGlyph(d.location.glyph));
+    const chevron = body.createSpan('ct-si-chevron');
+    chevron.setAttribute('aria-hidden', 'true');
+    setIcon(chevron, 'chevron-up');
+    const label = `New conversation settings: ${agentHarnessLabel(this.selectedHarness)}${runOnSuffix(runOn, this.remoteDaemons())}. Click to change agent or where it runs`;
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('aria-expanded', this.settingsPopover?.isOpen ? 'true' : 'false');
+    btn.title = label;
   }
 
   /** Default remote folder for `daemon`: its mapped vault folder when we are in the vault, else its default folder. */
@@ -671,137 +650,157 @@ export class DispatchInput {
     return gateHarness(harness, this.options.harnessPicker?.getDaemonCapabilities?.(daemon.id), daemon.name);
   }
 
+  private activeDaemon(): RemoteDaemonConfig | undefined {
+    return this.remoteDaemons().find((d) => d.id === this.selectedRunOn.daemonId);
+  }
+
+  /** Why `harness` cannot run on the selected daemon, if it cannot. */
+  private harnessGateReason(harness: AgentHarness): string | undefined {
+    const selected = this.activeDaemon();
+    if (!selected) return undefined;
+    const gate = this.gateHarnessOn(harness, selected);
+    return gate.ok ? undefined : gate.reason;
+  }
+
+  private chooseHarness(harness: AgentHarness): void {
+    if (harness !== this.selectedHarness) this.selectedModel = undefined; // models are per harness
+    this.selectedHarness = harness;
+    this.renderHarnessIdentity();
+    this.settingsBtn?.focus();
+  }
+
+  private chooseRunOn(daemon: RemoteDaemonConfig | undefined): void {
+    if (!daemon) this.runOnCwdEdited = false;
+    const cwd = this.runOnCwdEdited && this.selectedRunOn.cwd !== undefined
+      ? this.selectedRunOn.cwd
+      : (daemon ? this.suggestedRemoteCwd(daemon).cwd : '');
+    this.selectedRunOn = daemon ? { daemonId: daemon.id, cwd } : {};
+    this.renderHarnessIdentity();
+    if (!daemon) this.settingsBtn?.focus();
+  }
+
   /**
-   * Disable, with the reason beside it, every harness the selected daemon does not offer and every daemon that does
-   * not offer the selected harness. Re-run when capabilities arrive or the selection changes.
+   * The settings popover's content for a new conversation: Model, Permissions, Harness and (when daemons or the
+   * local-daemon set-up offer exist) Run on. Harnesses a selected daemon does not offer, and daemons that do not
+   * offer the selected harness, are disabled with the reason beside them. Rebuilt on every render.
    */
-  private applyRunOnGating(menu: HTMLElement): void {
+  private buildSettingsModel(): SettingsPopoverModel {
+    const picker = this.options.harnessPicker;
+    const harness = this.selectedHarness ?? 'claude';
     const daemons = this.remoteDaemons();
-    const mark = (el: HTMLButtonElement, gate: HarnessGate): void => {
-      el.disabled = !gate.ok;
-      el.toggleClass('is-unavailable', !gate.ok);
-      el.setAttribute('aria-disabled', String(!gate.ok));
-      el.querySelector('.ct-harness-menu-note')?.remove();
-      if (gate.ok) { el.removeAttribute('title'); return; }
-      el.title = gate.reason;
-      el.createSpan({ cls: 'ct-harness-menu-note', text: gate.reason });
-    };
-    const selected = daemons.find((d) => d.id === this.selectedRunOn.daemonId);
-    for (const el of Array.from(menu.querySelectorAll<HTMLButtonElement>('[data-harness]'))) {
-      const harness = el.getAttribute('data-harness') as AgentHarness;
-      mark(el, selected ? this.gateHarnessOn(harness, selected) : { ok: true, known: true });
+    const offerSetUp = picker?.localDaemonOffer?.available() === true;
+    const settings: PopoverSetting[] = [];
+
+    const modelOptions = picker?.getModelOptions?.(harness) ?? [];
+    if (modelOptions.length) {
+      settings.push({
+        id: 'model', label: 'Model', icon: 'cpu',
+        value: modelOptions.find((o) => o.value === this.selectedModel)?.label ?? 'Default',
+        groups: [{
+          options: modelOptions.map((o) => ({
+            label: o.label,
+            checked: o.value === this.selectedModel,
+            onSelect: () => { this.selectedModel = o.value; },
+          })),
+        }],
+      });
     }
-    for (const el of Array.from(menu.querySelectorAll<HTMLButtonElement>('.ct-run-on-item[data-run-on]'))) {
-      const daemon = daemons.find((d) => d.id === el.getAttribute('data-run-on'));
-      mark(el, daemon && this.selectedHarness ? this.gateHarnessOn(this.selectedHarness, daemon) : { ok: true, known: true });
+    settings.push({
+      id: 'permissions', label: 'Permissions', icon: 'shield',
+      value: PERMISSION_MODE_OPTIONS.find((o) => o.value === this.selectedPermission)?.label ?? 'Global default',
+      groups: [{
+        options: PERMISSION_MODE_OPTIONS.map((o) => ({
+          label: o.label,
+          checked: o.value === this.selectedPermission,
+          onSelect: () => { this.selectedPermission = o.value; },
+        })),
+      }],
+    });
+    settings.push({
+      id: 'harness', label: 'Harness', icon: 'bot', value: agentHarnessLabel(harness),
+      groups: [{
+        options: AGENT_HARNESSES.map((value) => {
+          const reason = this.harnessGateReason(value);
+          return {
+            label: reason ? `${agentHarnessLabel(value)} \u2014 ${reason}` : agentHarnessLabel(value),
+            checked: this.selectedHarness === value,
+            disabled: !!reason,
+            title: reason,
+            icon: HARNESS_BRAND_ICONS[value],
+            closeOnSelect: true,
+            onSelect: () => this.chooseHarness(value),
+          };
+        }),
+      }],
+    });
+
+    if (daemons.length > 0 || offerSetUp) {
+      const selected = this.activeDaemon();
+      const options: PopoverSetting['groups'][number]['options'] = [{
+        label: 'This computer',
+        checked: !selected,
+        icon: 'laptop',
+        closeOnSelect: true,
+        onSelect: () => this.chooseRunOn(undefined),
+      }];
+      for (const d of daemons) {
+        const gate = this.selectedHarness ? this.gateHarnessOn(this.selectedHarness, d) : { ok: true as const };
+        const reason = gate.ok ? undefined : gate.reason;
+        options.push({
+          label: reason ? `${d.name} \u2014 ${reason}` : d.name,
+          checked: this.selectedRunOn.daemonId === d.id,
+          disabled: !!reason,
+          title: reason,
+          icon: 'server',
+          stayOnLevel: true,
+          onSelect: () => this.chooseRunOn(d),
+        });
+      }
+      if (offerSetUp) {
+        options.push({
+          label: 'This Mac (container) \u2014 set up\u2026',
+          icon: 'box',
+          action: true,
+          dividerBefore: true,
+          title: 'Runs the agent-threads daemon in a container on this Mac. Opens Settings, Remote, Local daemon.',
+          closeOnSelect: true,
+          onSelect: () => { this.settingsBtn?.focus(); picker?.localDaemonOffer?.onSetUp(); },
+        });
+      }
+      settings.push({
+        id: 'runon', label: 'Run on', icon: 'server',
+        value: selected?.name ?? 'This computer',
+        groups: [{
+          options,
+          render: selected ? (container) => {
+            this.runOnFolderHost = container;
+            this.refreshRunOnFolderRow(container, daemons);
+          } : undefined,
+        }],
+      });
     }
+    return { settings, actions: [] };
   }
 
-  private openHarnessMenu(): void {
-    if (this.harnessMenu) return;
+  private openSettingsPopover(): void {
+    const btn = this.settingsBtn;
+    if (!btn || this.settingsPopover?.isOpen) return;
     this.runOnFolders.clear();
-    const menu = this.rootEl.createDiv({ cls: 'ct-harness-menu', attr: { role: 'menu', 'aria-label': 'Choose agent harness' } });
-    this.harnessMenu = menu;
-    for (const harness of AGENT_HARNESSES) {
-      const name = agentHarnessLabel(harness);
-      const item = menu.createEl('button', {
-        cls: 'ct-harness-menu-item',
-        attr: {
-          role: 'menuitemradio',
-          'aria-checked': String(this.selectedHarness === harness),
-          'data-harness': harness,
-        },
-      });
-      this.createHarnessMark(item, harness);
-      item.createSpan({ text: name });
-      item.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this.selectedHarness = harness;
-        this.closeHarnessMenu(true);
-        this.renderHarnessIdentity();
-      });
-      item.addEventListener('keydown', (event) => {
-        if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-        event.preventDefault();
-        const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'));
-        const offset = event.key === 'ArrowDown' ? 1 : -1;
-        items[(items.indexOf(item) + offset + items.length) % items.length]?.focus();
-      });
-    }
-    const daemons = this.remoteDaemons();
-    const offerSetUp = this.options.harnessPicker?.localDaemonOffer?.available() === true;
-    if (daemons.length > 0 || offerSetUp) this.renderRunOnSection(menu, daemons, offerSetUp);
-    this.sendBtn.setAttribute('aria-expanded', 'true');
-    document.addEventListener('pointerdown', this.closeHarnessMenuOnPointerDown);
-    document.addEventListener('keydown', this.closeHarnessMenuOnEscape);
-    menu.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
-  }
-
-  /** "Run on": this computer, or a remote daemon plus the folder to work in on that machine. */
-  private renderRunOnSection(menu: HTMLElement, daemons: RemoteDaemonConfig[], offerSetUp = false): void {
-    menu.createDiv({ cls: 'ct-harness-menu-separator', attr: { role: 'separator' } });
-    menu.createDiv({ cls: 'ct-harness-menu-heading', text: 'Run on' });
-    // The Project selection may have changed since the menu was last open.
-    const selected = daemons.find((d) => d.id === this.selectedRunOn.daemonId);
+    // The Project selection may have changed since the popover was last open.
+    const selected = this.activeDaemon();
     if (selected && !this.runOnCwdEdited) this.selectedRunOn = { daemonId: selected.id, cwd: this.suggestedRemoteCwd(selected).cwd };
-    const choices: Array<{ id: string | undefined; label: string; icon: string }> = [
-      { id: undefined, label: 'This computer', icon: 'laptop' },
-      ...daemons.map((d) => ({ id: d.id, label: d.name, icon: 'server' })),
-    ];
-    for (const choice of choices) {
-      const item = menu.createEl('button', {
-        cls: 'ct-harness-menu-item ct-run-mode-item ct-run-on-item',
-        attr: {
-          role: 'menuitemradio',
-          'aria-checked': String(this.selectedRunOn.daemonId === choice.id),
-          'data-run-on': choice.id ?? 'local',
-        },
-      });
-      const mark = item.createSpan({ cls: 'ct-run-mode-mark', attr: { 'aria-hidden': 'true' } });
-      setIcon(mark, choice.icon);
-      item.createSpan({ text: choice.label });
-      item.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const daemon = daemons.find((d) => d.id === choice.id);
-        if (!choice.id) this.runOnCwdEdited = false;
-        const cwd = this.runOnCwdEdited && this.selectedRunOn.cwd !== undefined
-          ? this.selectedRunOn.cwd
-          : (daemon ? this.suggestedRemoteCwd(daemon).cwd : '');
-        this.selectedRunOn = choice.id ? { daemonId: choice.id, cwd } : {};
-        if (!choice.id) this.closeHarnessMenu(true);
-        else this.refreshRunOnFolderRow(menu, daemons);
-        this.renderHarnessIdentity();
-        for (const el of Array.from(menu.querySelectorAll<HTMLElement>('.ct-run-on-item'))) {
-          el.setAttribute('aria-checked', String((el.getAttribute('data-run-on') ?? 'local') === (choice.id ?? 'local')));
-        }
-        this.applyRunOnGating(menu);
-      });
-    }
-    if (offerSetUp) {
-      const item = menu.createEl('button', {
-        cls: 'ct-harness-menu-item ct-run-mode-item ct-run-on-item',
-        attr: { role: 'menuitem', 'data-run-on': 'setup-local', title: 'Runs the agent-threads daemon in a container on this Mac. Opens Settings, Remote, Local daemon.' },
-      });
-      const mark = item.createSpan({ cls: 'ct-run-mode-mark', attr: { 'aria-hidden': 'true' } });
-      setIcon(mark, 'box');
-      item.createSpan({ text: 'This Mac (container) \u2014 set up\u2026' });
-      item.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this.closeHarnessMenu(true);
-        this.options.harnessPicker?.localDaemonOffer?.onSetUp();
-      });
-    }
-    this.refreshRunOnFolderRow(menu, daemons);
-    this.applyRunOnGating(menu);
+    const popover = new ComposerSettingsPopover(
+      { host: this.rootEl, anchor: btn, onClose: () => { this.runOnFolderHost = null; this.runOnLoadToken++; } },
+      () => this.buildSettingsModel(),
+    );
+    this.settingsPopover = popover;
+    popover.open();
     // A daemon not reached yet has no capabilities: connect so the gating can say what it offers.
     const picker = this.options.harnessPicker;
     if (picker?.warmDaemon) {
-      for (const d of daemons) {
+      for (const d of this.remoteDaemons()) {
         if (picker.getDaemonCapabilities?.(d.id)) continue;
-        void picker.warmDaemon(d.id).then(() => { if (this.harnessMenu === menu) this.applyRunOnGating(menu); });
+        void picker.warmDaemon(d.id).then(() => { if (this.settingsPopover === popover && popover.isOpen) popover.refresh(); });
       }
     }
   }
@@ -812,11 +811,11 @@ export class DispatchInput {
    * Browse panel (no typing); without one, or when the daemon cannot list its
    * folders, it is the plain text field.
    */
-  private refreshRunOnFolderRow(menu: HTMLElement, daemons: RemoteDaemonConfig[]): void {
-    menu.querySelector('.ct-run-on-folder')?.remove();
+  private refreshRunOnFolderRow(host: HTMLElement, daemons: RemoteDaemonConfig[]): void {
+    host.querySelector('.ct-run-on-folder')?.remove();
     const daemon = daemons.find((d) => d.id === this.selectedRunOn.daemonId);
     if (!daemon) return;
-    const row = menu.createDiv({ cls: 'ct-run-on-folder' });
+    const row = host.createDiv({ cls: 'ct-run-on-folder' });
     const source = this.options.harnessPicker?.getFolderSource?.();
     if (!source) { this.renderRunOnFolderText(row, daemon); return; }
     const loaded = this.runOnFolders.get(daemon.id);
@@ -826,8 +825,9 @@ export class DispatchInput {
       const token = ++this.runOnLoadToken;
       void source.workspaces(daemon.id).then((result) => {
         this.runOnFolders.set(daemon.id, result);
-        if (token !== this.runOnLoadToken || !this.harnessMenu || this.selectedRunOn.daemonId !== daemon.id) return;
-        this.refreshRunOnFolderRow(this.harnessMenu, this.remoteDaemons());
+        const host = this.runOnFolderHost;
+        if (token !== this.runOnLoadToken || !host?.isConnected || this.selectedRunOn.daemonId !== daemon.id) return;
+        this.refreshRunOnFolderRow(host, this.remoteDaemons());
       });
       return;
     }
@@ -862,8 +862,8 @@ export class DispatchInput {
       refreshHint();
     });
     input.addEventListener('keydown', (event) => {
-      event.stopPropagation();
-      if (event.key === 'Enter') { event.preventDefault(); this.closeHarnessMenu(true); }
+      if (event.key !== 'Escape') event.stopPropagation(); // Escape goes back in the popover
+      if (event.key === 'Enter') { event.preventDefault(); this.settingsPopover?.close(true); }
     });
     input.focus();
   }
@@ -898,9 +898,9 @@ export class DispatchInput {
     const choose = (path: string): void => {
       this.runOnCwdEdited = true;
       this.selectedRunOn = { daemonId: daemon.id, cwd: path };
-      this.refreshRunOnFolderRow(this.harnessMenu ?? row.parentElement as HTMLElement, this.remoteDaemons());
+      this.refreshRunOnFolderRow(this.runOnFolderHost ?? row.parentElement as HTMLElement, this.remoteDaemons());
     };
-    select.addEventListener('keydown', (event) => event.stopPropagation());
+    select.addEventListener('keydown', (event) => { if (event.key !== 'Escape') event.stopPropagation(); });
     select.addEventListener('change', () => {
       if (select.value !== OTHER_FOLDER) { choose(select.value); return; }
       // "Other folder…": fall back to typing for this daemon.
@@ -941,30 +941,6 @@ export class DispatchInput {
       const start = workspaceContaining(workspaces, cwd) ? cwd : (pickDefaultWorkspace(workspaces)?.path ?? workspaces[0].path);
       void renderBrowser(start);
     });
-  }
-
-  private createHarnessMark(container: HTMLElement, harness: AgentHarness): void {
-    const icon = HARNESS_BRAND_ICONS[harness];
-    const mark = container.createSpan({
-      cls: `ct-harness-mark ct-harness-mark-${harness}`,
-      attr: { 'aria-hidden': 'true', 'data-icon': icon },
-    });
-    setIcon(mark, icon);
-  }
-
-  private closeHarnessMenu(restoreFocus = false): void {
-    if (!this.harnessMenu) return;
-    this.harnessMenu.remove();
-    this.harnessMenu = null;
-    this.sendBtn?.setAttribute('aria-expanded', 'false');
-    document.removeEventListener('pointerdown', this.closeHarnessMenuOnPointerDown);
-    document.removeEventListener('keydown', this.closeHarnessMenuOnEscape);
-    if (restoreFocus) this.sendBtn?.focus();
-  }
-
-  private clearLongPressTimer(): void {
-    if (this.longPressTimer) clearTimeout(this.longPressTimer);
-    this.longPressTimer = null;
   }
 
   // ── Attachment handling ───────────────────────────────────────────────────

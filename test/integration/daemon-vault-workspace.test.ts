@@ -163,6 +163,24 @@ describe('workspaces.list and path.list over the wire', () => {
   });
 });
 
+describe('file.read over the wire', () => {
+  it('serves an image to a read-scope token, refuses outside paths, and advertises the capability', async () => {
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('x')]);
+    writeFileSync(join(vault, 'Daily', 'chart.png'), png);
+    writeFileSync(join(outside, 'chart.png'), png);
+    const td = await daemon({ workspaces: [vault] });
+    const read = td.daemon.tokens.create('ro', 'read').token;
+    const c = await TestClient.connect(td.daemon.url, read);
+    cleanups.push(() => c.close().catch(() => {}));
+    const ok = await c.cmd('file.read', { path: join(vault, 'Daily', 'chart.png') });
+    expect(ok.result).toEqual({ base64: png.toString('base64'), mediaType: 'image/png', size: png.length });
+    expect(await c.cmd('file.read', { path: join(outside, 'chart.png') })).toMatchObject({ type: 'err', code: 'not_found' });
+    expect(await c.cmd('file.read', {})).toMatchObject({ type: 'err', code: 'bad_frame' });
+    const welcome = await c.waitFor((f) => f.type === 'welcome');
+    expect(welcome.capabilities).toContain('file.read');
+  });
+});
+
 describe('read-only workspaces', () => {
   it('allows the folder as cwd, denies the edit tools, and reports readOnly in path.check', async () => {
     const c = await client(await daemon({ workspaces: [], readOnlyWorkspaces: [vault] }));

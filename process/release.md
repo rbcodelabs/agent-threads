@@ -103,7 +103,7 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
 - Verifies `manifest.json` version matches the tag (fails fast if not)
 - Runs `npm run build`
 - Prepends the new entry to `versions.json`
-- Builds the daemon bundle (`npm run build:daemon`) and creates the GitHub release with `dist/main.js`, `dist/styles.css`, `manifest.json`, `versions.json`, plus `dist/agent-threads.cjs` and `dist/agent-threads.cjs.sha256` (the headless daemon; `deploy/install.sh` downloads and verifies it)
+- Builds the daemon bundle (`npm run build:daemon`) and creates the GitHub release with `dist/main.js`, `dist/styles.css`, `manifest.json`, `versions.json`, plus `dist/agent-threads.cjs` and `dist/agent-threads.cjs.sha256` (the headless daemon; `deploy/install.sh` downloads and verifies it, and so does the daemon's opt-in auto-update: it picks the newest stable release that has both assets, so **every release must keep publishing `agent-threads.cjs` and `agent-threads.cjs.sha256` under exactly those names**, and `agent-threads.cjs --version --json` must print the release version; a pre-release or draft is never picked up, a major version bump or a changed wire protocol is held back from automatic update)
 
 The same tag also triggers `.github/workflows/publish-daemon-image.yml`, which builds the daemon image
 (`sandbox/Dockerfile.daemon`, `base` stage, `linux/amd64` + `linux/arm64`), smoke-tests it with

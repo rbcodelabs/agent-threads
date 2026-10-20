@@ -4,6 +4,7 @@ import { DEFAULT_SETTINGS, type PluginSettings, type Project, type ScheduledItem
 import { mockApp } from './obsidian-mock';
 import { McpRegistrationModal } from '../../src/confirmModal';
 import { secretStorageKey } from '../../src/secretUtils';
+import { McpSyncEngine, type McpSyncTransport } from '../../src/remote/mcpSync';
 
 (window as any).__openMcpRegistration = (type: 'stdio' | 'http' = 'stdio') => {
   (window as any).__mcpRegistrationResult = undefined;
@@ -336,6 +337,56 @@ const mockPlugin = {
   },
 };
 
+// Settings → MCP "Runs on" (?mcpSync=1). The engine is the real one; only its transport (a recording fake that
+// accepts everything, so no socket) and the daemons' abilities are stand-ins.
+const mcpSyncCalls: { creds: Array<{ daemonId: string; kind: string; fields: string[]; ttlSec: number }>; servers: Array<{ daemonId: string; names: string[] }> } = { creds: [], servers: [] };
+let mcpSyncReady: Promise<void> = Promise.resolve();
+if (new URLSearchParams(location.search).get('mcpSync')) {
+  const caps: Record<string, string[]> = {
+    homelab: ['mcp.sync', 'mcp.sync.stdio', 'creds.push'],
+    'old-box': ['creds.push'],
+    'plain-box': ['mcp.sync', 'creds.push'],
+  };
+  settings.remoteDaemons = [
+    { id: 'homelab', name: 'Homelab', url: 'wss://homelab.tailnet.ts.net:8443', tokenSecretName: 'T1' },
+    { id: 'old-box', name: 'Old box', url: 'wss://old.tailnet.ts.net:8443', tokenSecretName: 'T2' },
+    { id: 'plain-box', name: 'Plain box', url: 'wss://plain.tailnet.ts.net:8443', tokenSecretName: 'T3' },
+  ];
+  const transportFor = (daemonId: string): McpSyncTransport => ({
+    pushCreds: async (kind, fields, ttlSec) => { mcpSyncCalls.creds.push({ daemonId, kind, fields: Object.keys(fields), ttlSec }); },
+    syncServers: async (servers) => {
+      mcpSyncCalls.servers.push({ daemonId, names: Object.keys(servers) });
+      return { accepted: Object.keys(servers), rejected: [], requiredCreds: [], shadowed: [] };
+    },
+  });
+  const engine = new McpSyncEngine({
+    daemons: () => settings.remoteDaemons ?? [],
+    settings: () => settings,
+    readSecret: (name) => (settings.secretEnvKeys?.includes(name) ? `value-of-${name}` : undefined),
+    capabilitiesOf: (id) => caps[id],
+    transportFor: (daemon) => transportFor(daemon.id),
+    saveSettings: async () => {},
+  });
+  (mockPlugin as any).mcpSync = engine;
+  (mockPlugin as any).daemonMcpStatus = {
+    get: (id: string) => id === 'homelab'
+      ? { at: FIXTURE_NOW, servers: [
+        { name: 'team_events', status: 'connected' },
+        { name: 'obsidian_notes', status: 'failed', error: 'missing credential mcpsync-global.NOTES_API_TOKEN' },
+      ] }
+      : undefined,
+  };
+  (mockPlugin as any).onMcpSyncInputsChanged = () => engine.onSettingsChanged();
+  // Homelab already runs two servers (the user confirmed them earlier); nothing else is opted in.
+  const home = settings.remoteDaemons[0];
+  home.mcpSync = {
+    obsidian_notes: { enabled: true, confirmedHash: engine.evaluate('obsidian_notes')!.hash },
+    team_events: { enabled: true, confirmedHash: engine.evaluate('team_events')!.hash },
+  };
+  mcpSyncReady = engine.sync('homelab', 'force').then(() => { mcpSyncCalls.creds.length = 0; mcpSyncCalls.servers.length = 0; });
+  (window as any).__mcpSyncCalls = mcpSyncCalls;
+}
+
 const fixedSection = new URLSearchParams(location.search).get('section') as any;
 const tab = new ClaudeThreadsSettingTab(mockApp as any, mockPlugin as any, fixedSection || undefined);
 const container = document.getElementById('app')!;
@@ -355,7 +406,7 @@ if (new URLSearchParams(location.search).get('host') === 'geode') {
   container.appendChild(nav);
 }
 container.appendChild(tab.containerEl);
-tab.display();
+void mcpSyncReady.then(() => tab.display());
 
 // Expose for Playwright
 (window as any).__settingsTab = tab;
@@ -383,10 +434,11 @@ tab.display();
  * Opens the Remote daemons edit dialog (remote-thread.spec.ts). `advertise` says what the stand-in daemon
  * answers to Test connection: its workspaces, or that it is too old to list them.
  */
-(window as any).__openRemoteDaemonModal = (opts: { advertise?: 'workspaces' | 'old'; saved?: boolean; url?: string } = {}): void => {
+(window as any).__openRemoteDaemonModal = (opts: { advertise?: 'workspaces' | 'old'; saved?: boolean; url?: string; hostTools?: any } = {}): void => {
   const advertise = opts.advertise ?? 'workspaces';
   const existing = {
     id: 'my-server', name: 'my-server', url: opts.url ?? 'wss://my-server.tailnet-name.ts.net:8443', tokenSecretName: 'T',
+    ...(opts.hostTools ? { hostTools: opts.hostTools } : {}),
     ...(opts.saved ? { defaultCwdRoot: '/home/user/projects', vaultMapping: { remoteRoot: '/home/user/vault' } } : {}),
   };
   new RemoteDaemonModal(mockApp as any, existing, [existing], '/Users/me/Documents/vault', {
@@ -402,6 +454,8 @@ tab.display();
           ],
         },
       },
-    save: async () => {},
+    save: async (config: any) => { (window as any).__savedDaemon = config; },
+    proxiedServers: () => ['google-docs', 'hiptrip-new', 'vercel'],
+    ownServers: () => ['docs', 'search'],
   }).open();
 };

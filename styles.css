@@ -2829,123 +2829,6 @@
   position: relative;
 }
 
-.ct-harness-send-btn {
-  position: relative;
-}
-
-.ct-harness-send-btn::after {
-  content: '';
-  position: absolute;
-  right: 3px;
-  bottom: 3px;
-  width: 0;
-  height: 0;
-  border-left: 2.5px solid transparent;
-  border-right: 2.5px solid transparent;
-  border-top: 3px solid currentColor;
-  opacity: 0.65;
-}
-
-.ct-harness-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-}
-
-.ct-harness-mark svg {
-  width: 18px;
-  height: 18px;
-  stroke-width: 2.25;
-}
-
-.ct-harness-menu {
-  position: absolute;
-  z-index: var(--layer-popover, 1000);
-  right: 8px;
-  bottom: 46px;
-  min-width: 132px;
-  padding: 4px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  background: var(--background-primary);
-  box-shadow: var(--shadow-s);
-}
-
-.ct-harness-menu-item {
-  width: 100%;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 9px;
-  border-radius: 6px;
-  color: var(--text-normal);
-  background: transparent;
-}
-
-.ct-harness-menu-item:hover,
-.ct-harness-menu-item:focus,
-.ct-harness-menu-item[aria-checked='true'] {
-  background: var(--background-modifier-hover);
-}
-
-/* "Run in" section of the kickoff picker (Claude only) */
-.ct-harness-menu-separator {
-  height: 1px;
-  margin: 4px 0;
-  background: var(--background-modifier-border);
-}
-
-.ct-harness-menu-heading {
-  padding: 4px 9px 2px;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
-
-.ct-run-mode-item {
-  white-space: nowrap;
-}
-
-.ct-run-mode-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-}
-
-.ct-run-mode-mark svg {
-  width: 16px;
-  height: 16px;
-}
-
-/* Default has no icon; keep its label aligned with the icon rows. */
-.ct-run-mode-item[data-run-mode='default'] {
-  padding-left: 35px;
-}
-
-/* Badge on the send button when a run-mode override is active */
-.ct-run-mode-badge {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  display: inline-flex;
-  width: 11px;
-  height: 11px;
-  color: var(--text-muted);
-  pointer-events: none;
-}
-
-.ct-run-mode-badge svg {
-  width: 11px;
-  height: 11px;
-  stroke-width: 2.5;
-}
-
 .ct-root .ct-stop-btn {
   background: var(--color-red, #e05252);
   color: white;
@@ -8430,6 +8313,113 @@ body.ct-skills-resizing {
   font-size: 12px;
 }
 
+/* ── "Runs on" for a Custom MCP server (Settings → MCP) ─────────────────────
+   One line per remote daemon under the server row: a checkbox, the daemon name,
+   a status chip and, when the toggle is off or broken, the reason in words. */
+.setting-item.ct-mcp-has-runson {
+  flex-wrap: wrap;
+}
+
+.ct-mcp-runson {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: var(--font-ui-smaller);
+}
+
+.ct-mcp-runson-label {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ct-mcp-runson-local {
+  color: var(--text-faint);
+}
+
+.ct-mcp-runson-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+.ct-mcp-runson-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px;
+  cursor: pointer;
+}
+
+.ct-mcp-runson-toggle.is-disabled {
+  cursor: not-allowed;
+  color: var(--text-faint);
+}
+
+.ct-mcp-runson-chip {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.ct-mcp-runson-chip--ok {
+  color: var(--color-green);
+  background: color-mix(in srgb, var(--color-green) 16%, transparent);
+}
+
+.ct-mcp-runson-chip--warn {
+  color: var(--text-warning, var(--color-orange, #d19a3e));
+  background: color-mix(in srgb, var(--color-orange, #d19a3e) 16%, transparent);
+}
+
+.ct-mcp-runson-chip--bad {
+  color: var(--text-error, var(--color-red, #d14b4b));
+  background: color-mix(in srgb, var(--color-red, #d14b4b) 14%, transparent);
+}
+
+.ct-mcp-runson-action {
+  padding: 1px 8px;
+  font-size: inherit;
+}
+
+.ct-mcp-runson-reason {
+  flex-basis: 100%;
+  color: var(--text-faint);
+  margin-left: 22px;
+}
+
+/* Confirmation before a server (or a changed server) is sent to a daemon. */
+.ct-mcp-sync-confirm-details {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 8px 0;
+}
+
+.ct-mcp-sync-confirm-details dt {
+  color: var(--text-muted);
+}
+
+.ct-mcp-sync-confirm-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ct-mcp-sync-confirm-mono {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.ct-mcp-sync-confirm-warnings {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 /* ── OAuth MCP server status (Settings → MCP) ──────────────────────────────
    Rendered in the row's description under the URL, on its own line. These
    classes previously had no rules at all, so the dot and label ran into the
@@ -9768,6 +9758,26 @@ button.ct-agent-crumb:focus-visible {
 .ct-remote-pill--protocol,
 .ct-remote-pill--auth { color: var(--text-error, var(--color-red, #e05252)); }
 
+.ct-remote-warn {
+  flex-shrink: 0;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--color-yellow, #d9a21b);
+  border: 1px solid var(--color-yellow, #d9a21b);
+}
+
+/* Invisible hit area: the pill is ~40x18, so a 44x44 box centred horizontally on it (the minimum tap target) is lifted over the strip without changing its look. It reaches only 6px above the pill (not into the title-row button above) and the rest below. It reaches at most ~3px sideways, inside the 8px strip gap, so it never covers a neighbouring control. z-index lifts it over the (positioned) message rows that start just below the strip. */
+.ct-remote-warn::after { content: ""; position: absolute; z-index: 1; left: 50%; top: -7px; width: 44px; height: 44px; transform: translateX(-50%); }
+
+.ct-remote-warn-icon { display: inline-flex; }
+.ct-remote-warn-icon svg { width: 12px; height: 12px; }
+
 @keyframes ct-remote-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
@@ -9777,14 +9787,14 @@ button.ct-agent-crumb:focus-visible {
   .ct-remote-pill--reconnecting::before { animation: none; }
 }
 
-/* Dispatch send button when the next thread will run on a daemon */
-.ct-harness-send-btn--remote { box-shadow: inset 0 0 0 1px var(--interactive-accent); }
 
 .ct-run-on-folder {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 4px 9px 6px;
+  margin-top: 4px;
+  padding: 8px 4px 4px;
+  border-top: 1px solid var(--background-modifier-border);
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
 }
@@ -10041,10 +10051,11 @@ button.ct-agent-crumb:focus-visible {
 .ct-sp-options {
   display: flex;
   flex-direction: column;
-  margin: 0 0 4px 14px;
-  padding-left: 6px;
-  border-left: 1px solid var(--background-modifier-border);
 }
+.ct-sp-back { color: var(--text-muted); font-weight: var(--font-semibold); }
+.ct-sp-back .ct-sp-label { color: var(--text-normal); }
+.ct-sp-custom { padding: 4px 4px 2px; }
+.ct-sp-custom:empty { display: none; }
 .ct-sp-option .ct-sp-label { white-space: normal; }
 .ct-sp-group-title {
   padding: 6px 8px 2px;
@@ -10278,4 +10289,38 @@ button.ct-agent-crumb:focus-visible {
   .ct-project-picker-row { min-height: 44px; }
   .ct-project-picker .ct-project-picker-sort-btn { min-height: 36px; }
   .ct-project-picker .ct-project-picker-input { min-height: 40px; }
+}
+
+/* Inline images from a remote thread (fetched with file.read). */
+.ct-message-assistant .ct-message-content img.ct-remote-img { max-width: 100%; border-radius: 4px; }
+.ct-message-assistant .ct-message-content img.ct-remote-img.is-loading { min-height: 48px; min-width: 48px; background: var(--background-modifier-hover); }
+.ct-remote-img-unavailable { color: var(--text-muted); font-style: italic; font-size: var(--font-ui-smaller); }
+
+/* Settings, MCP: "Available on" of a proxied server, and the daemon editor's tools checklist. */
+.ct-mcp-available-missing {
+  color: var(--text-faint);
+}
+
+.ct-host-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--background-modifier-border);
+}
+
+.ct-host-tools-list h4 {
+  margin: 8px 0 0;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+}
+
+.ct-host-tools-item .setting-item-description {
+  margin-left: 22px;
+}
+
+.ct-host-tools-item .ct-mcp-runson-toggle {
+  display: flex;
+  min-height: 32px;
 }

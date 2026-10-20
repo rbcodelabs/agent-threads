@@ -16,13 +16,16 @@ import { PROTOCOL_VERSION } from '../src/protocol';
 import { AuditLog } from './auditLog';
 import { CommandCache } from './cmdCache';
 import { isLoopbackAddress, isWildcardAddress, loadOrCreateDaemonId, updateConfigFile, type DaemonConfig } from './config';
+import { createGhAuthPreflight } from './ghPreflight';
 import { createClaudeDriverFactory, describeCredentialSource, resolveCredentialEnv, sessionEnvFromCreds } from './claudeDriver';
 import { HARNESS_BINARY, HARNESS_SECRET_ENV, describeHarnessCredential, findHarnessBinary, harnessCapabilities, type RealHarness } from './harnesses';
 import { describePathAccess, withRepoRoot, type SessionPolicy } from './sessionPolicy';
 import { ReposManager } from './repos';
 import { SkillStore } from './skillStore';
+import { SyncedMcpStore } from './syncedMcp';
 import { pruneIdleWorktrees } from './worktreePrune';
 import { listSubfolders, listWorkspaces } from './workspaces';
+import { readImageFile } from './fileRead';
 import { Connection, DEFAULT_TIMINGS, MAX_OUTBOUND_BYTES, PRE_AUTH_MAX_FRAME_BYTES, capabilitiesFor, type ServerContext, type Timings } from './connection';
 import { ControlRegistry } from './controlRegistry';
 import { fakeHarnessFactory } from './fakeHarness';
@@ -36,6 +39,8 @@ import { RawLogWriter } from '../src/RawLogWriter';
 import { setKnownSecretsProvider } from '../src/secretRedaction';
 import { TokenStore } from './tokenStore';
 import { DAEMON_VERSION } from './version';
+import { createAutoUpdater, type AutoUpdateOverrides } from './update';
+import type { AutoUpdater } from './update/autoUpdater';
 
 export interface DaemonOptions {
   config: DaemonConfig;
@@ -65,6 +70,10 @@ export interface DaemonOptions {
   throttleLoopback?: boolean;
   /** Test seam: audit log tuning. */
   audit?: ConstructorParameters<typeof AuditLog>[1];
+  /** Test seams for the auto-updater (network, install detection, timings). Production leaves this unset. */
+  autoUpdate?: AutoUpdateOverrides;
+  /** The updater wants the daemon to stop so its supervisor starts the new bundle. The CLI exits 75 from here. */
+  onRestartRequested?: (info: { to: string }) => void;
   log?: (line: string) => void;
 }
 
@@ -82,6 +91,8 @@ export interface DaemonHandle {
   readonly startup: Promise<void>;
   /** Thread ids whose in-flight turn was closed out during startup recovery. */
   readonly recovered: string[];
+  /** The auto-updater (always present; inert unless enabled or an `update --apply` request arrives). */
+  readonly updater: AutoUpdater;
   /** Graceful: close sockets, flush + fsync journals. */
   stop(): Promise<void>;
   /** Test hook: behave like SIGKILL; unflushed journal data is lost. */
@@ -129,6 +140,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     ...(options.now ? { now: options.now } : {}),
     log,
   });
+  const syncedMcp = new SyncedMcpStore(config.dataDir, { allowStdio: config.allowSyncedStdio, commandAllowlist: config.syncedCommandAllowlist }, options.now);
   let driverFactory = options.driverFactory;
   let rawLog: ((threadId: string, event: Record<string, unknown>) => void) | undefined;
   if (real) {
@@ -144,9 +156,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       writer.append(threadId, typeof event.session_id === 'string' ? event.session_id : undefined, type, event);
     };
     const credentialEnv = resolveCredentialEnv(env);
-    setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN, ...HARNESS_SECRET_ENV.map((k) => env[k]), ...creds.secretValues()].filter((v): v is string => !!v));
+    setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN, ...HARNESS_SECRET_ENV.map((k) => env[k]), ...creds.secretValues(), ...repos.envSecretValues()].filter((v): v is string => !!v));
     if (!driverFactory) {
-      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, codexBinaryPath: config.codexBinaryPath, opencodeBinaryPath: config.opencodeBinaryPath, env, mcpServers: config.mcpServers, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: (spec) => ({ ...repos.sessionEnv(), ...sessionEnvFromCreds(creds, spec) }), onSessionStart: (cwd) => repos.refreshForCwd(cwd) });
+      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, codexBinaryPath: config.codexBinaryPath, opencodeBinaryPath: config.opencodeBinaryPath, env, mcpServers: config.mcpServers, syncedMcp, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: (spec) => ({ ...repos.sessionEnv(), ...sessionEnvFromCreds(creds, spec) }), onSessionStart: (cwd) => repos.refreshForCwd(cwd), authPreflight: createGhAuthPreflight({ hasToken: () => repos.hasToken() }) });
       const explicit: Record<RealHarness, string | undefined> = { claude: config.claudeBinaryPath, codex: config.codexBinaryPath, opencode: config.opencodeBinaryPath };
       for (const kind of config.harnesses) {
         const b = HARNESS_BINARY[kind];
@@ -191,6 +203,16 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
   sweepRawLogs(logsDir, rawLogLimits, options.now?.());
   for (const id of recovered) log(`recovered thread ${id}: closed in-flight turn as daemon_restarted`);
 
+  const updater = await createAutoUpdater({
+    config,
+    activity: host,
+    audit,
+    log,
+    onRestart: (info) => (options.onRestartRequested ?? ((i) => log(`update to ${i.to} installed; restart this daemon to run it`)))(info),
+    ...(options.now ? { now: options.now } : {}),
+    ...(options.autoUpdate ? { overrides: options.autoUpdate } : {}),
+  });
+
   const ctx: ServerContext = {
     host,
     tokens,
@@ -198,14 +220,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     cmdCache: new CommandCache(),
     daemonId,
     epoch,
-    capabilities: capabilitiesFor(config.harness, config.harnesses),
+    capabilities: capabilitiesFor(config.harness, config.harnesses, config.allowSyncedStdio, updater.autoEnabled),
     controllers,
     creds,
     repos,
     skills,
+    syncedMcp,
+    configuredMcpNames: () => new Set(Object.keys(config.mcpServers)),
     checkPath: (path) => describePathAccess(path, sessionPolicy),
     listWorkspaces: () => listWorkspaces(existsSync(config.repoRoot) ? sessionPolicy : configuredPolicy),
     listPath: (path) => listSubfolders(path, sessionPolicy),
+    readFile: (path) => readImageFile(path, sessionPolicy),
     timings: { ...DEFAULT_TIMINGS, ...options.timings },
     maxOutboundBytes: options.maxOutboundBytes ?? MAX_OUTBOUND_BYTES,
     audit,
@@ -297,6 +322,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       : `WARNING: listening on ${hostName} over plain ws://. Traffic is unencrypted outside a Tailscale/VPN tunnel.`);
   }
 
+  updater.start();
+
   // Housekeeping that must never delay or fail startup: drop worktrees idle for a long time, then bring the clones up to date.
   const startup = (async () => {
     try {
@@ -326,7 +353,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     repos,
     startup,
     recovered,
+    updater,
     async stop() {
+      updater.stop();
       clearInterval(sweep);
       clearInterval(maintenance);
       if (reaper) clearInterval(reaper);
@@ -337,6 +366,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
       await closeHttp(http);
     },
     async crash() {
+      updater.stop();
       clearInterval(sweep);
       clearInterval(maintenance);
       if (reaper) clearInterval(reaper);

@@ -3,7 +3,7 @@
  * (the Quiet Rail button) and the project popover's list helpers. No DOM here:
  * `composerGlyphs.ts` draws the glyph ids, `composerSettingsPopover.ts` the UI.
  */
-import { agentHarnessLabel, type AgentHarness } from './types';
+import { agentHarnessLabel, type AgentHarness, type PluginSettings } from './types';
 
 export type ModelTier = 'haiku' | 'sonnet' | 'opus' | 'fable' | 'unknown';
 export type ModelGlyph = 'chip' | 'chip-1' | 'chip-2' | 'chip-3' | 'sparkle';
@@ -97,3 +97,17 @@ export function sortProjects<P extends NamedProject>(
   const stamp = (p: P) => last.get(p.id) ?? p.createdAt;
   return out.sort((a, b) => stamp(b) - stamp(a));
 }
+
+/**
+ * Permission modes offered per thread, in menu order. `value: undefined` means "use the global default"
+ * (clears the per-thread override).
+ */
+export const PERMISSION_MODE_OPTIONS: Array<{ label: string; value: PluginSettings['permissionMode'] | undefined }> = [
+  { label: 'Global default', value: undefined },
+  { label: 'Prompt for permissions', value: 'default' },
+  { label: 'Accept edits automatically', value: 'acceptEdits' },
+  { label: 'Bypass all permissions', value: 'bypassPermissions' },
+  { label: 'Plan only (read & propose, no execute)', value: 'plan' },
+  { label: 'Silent deny (CI/cron)', value: 'dontAsk' },
+  { label: 'Auto-approve', value: 'auto' },
+];

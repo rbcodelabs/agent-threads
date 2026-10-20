@@ -1,9 +1,10 @@
 import { gateHarness } from './remote/harnessSupport';
 import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
+import { RemoteImageCache, createRemoteImageLoader, hydrateRemoteImages } from './remote/remoteImages';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import { connectionPill } from './remote/connectionPill';
-import { describeComposerSettings, type ComposerSettingsDescription, type RemoteConnection } from './composerSettings';
+import { describeComposerSettings, PERMISSION_MODE_OPTIONS, type ComposerSettingsDescription, type RemoteConnection } from './composerSettings';
 import { createGlyph } from './composerGlyphs';
 import {
   ComposerProjectPopover,
@@ -40,6 +41,7 @@ import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
 import { applyToolCallStyleClass, refreshToolRowByUseId, renderToolGroupShell, renderToolRow } from './toolCallDom';
 import { groupToolRuns, liveToolGroupKey, mergeAdjacentToolOnlyMessages, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
+import { HARNESS_BRAND_ICONS } from './harnessBrandIcons';
 import { DispatchInput, type DispatchPayload, type ExtraSkillDir } from './DispatchInput';
 import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, execEnv, splitErrorMessage } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
@@ -57,6 +59,7 @@ import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openLocalFileViaHost, o
 import type { StatusTag } from './types';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { promptConfirm } from './confirmModal';
+import { pickDefaultWorkspace } from './remote/workspaceChoice';
 import { describeOrchestratorThread, isOrchestratorThread, orchestratorWarning, type OrchestratorContext } from './orchestratorThreads';
 import { partitionThreads } from './threadRowState';
 import { agentLabel, buildAgentBreadcrumbs, summarizeAgentTeam } from './agentRuns/agentTreeModel';
@@ -404,15 +407,7 @@ export class ThreadsView extends ItemView {
 
   // Ordered list for the footer permission-mode picker menu.
   // `value: undefined` means "use the global default" (clears the per-thread override).
-  private static readonly PERMISSION_MODE_OPTIONS: Array<{ label: string; value: import('./types').PluginSettings['permissionMode'] | undefined }> = [
-    { label: 'Global default', value: undefined },
-    { label: 'Prompt for permissions', value: 'default' },
-    { label: 'Accept edits automatically', value: 'acceptEdits' },
-    { label: 'Bypass all permissions', value: 'bypassPermissions' },
-    { label: 'Plan only (read & propose, no execute)', value: 'plan' },
-    { label: 'Silent deny (CI/cron)', value: 'dontAsk' },
-    { label: 'Auto-approve', value: 'auto' },
-  ];
+  private static readonly PERMISSION_MODE_OPTIONS = PERMISSION_MODE_OPTIONS;
 
   /**
    * Rows for the per-thread model switcher. Claude threads get family aliases
@@ -1209,6 +1204,21 @@ export class ThreadsView extends ItemView {
     setIcon(badgeIcon, 'server');
     badge.createSpan({ cls: 'ct-remote-badge-name', text: name });
     strip.createSpan({ cls: 'ct-remote-cwd', text: remote.remoteCwd, attr: { title: `${name}:${remote.remoteCwd}` } });
+    const warnings = this.activeThreadId ? this.manager.getRemoteMcpWarnings(this.activeThreadId) : [];
+    if (warnings.length) {
+      const detail = warnings.map((w) => `${w.name}: ${w.reason}`).join('\n');
+      const warn = strip.createSpan({
+        cls: 'ct-remote-warn',
+        attr: { title: `Not available on ${name}\n${detail}`, role: 'button', tabindex: '0', 'data-testid': 'remote-warnings' },
+      });
+      const warnIcon = warn.createSpan({ cls: 'ct-remote-warn-icon' });
+      warnIcon.setAttribute('aria-hidden', 'true');
+      setIcon(warnIcon, 'triangle-alert');
+      warn.createSpan({ text: String(warnings.length) });
+      const show = (): void => { new Notice(`Not available on ${name}:\n${detail}`, 10000); };
+      warn.addEventListener('click', show);
+      warn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); show(); } });
+    }
     strip.createSpan({
       cls: `ct-remote-pill ct-remote-pill--${pill.kind}`,
       text: pill.label,
@@ -1362,6 +1372,7 @@ export class ThreadsView extends ItemView {
       peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
       harnessPicker: {
         initialHarness: this.plugin.settings.agentHarness ?? 'claude',
+        getModelOptions: (harness) => this.modelOptionsFor(harness),
         getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
         getDaemonCapabilities: (id) => this.plugin.daemonRegistry?.capabilitiesOf(id),
         warmDaemon: (id) => this.plugin.daemonRegistry?.warm(id) ?? Promise.resolve(),
@@ -2760,7 +2771,7 @@ export class ThreadsView extends ItemView {
     }
     if (thread.activeModel) modelNotes.push(`Running: ${activeModelLabel(thread.activeModel)}`);
 
-    const harnessValue = `${agentHarnessLabel(thread.agentHarness)}${thread.remote ? ' \u00b7 Remote' : ''}`;
+    const harnessValue = agentHarnessLabel(thread.agentHarness);
     // A remote thread can only hand off to a harness its daemon offers (older daemons: Claude only).
     const remoteGate = (value: AgentHarness): string | undefined => {
       if (!thread.remote) return undefined;
@@ -2773,17 +2784,20 @@ export class ThreadsView extends ItemView {
         checked: value === harness,
         disabled: value !== harness && !!(blocked ?? remoteGate(value)),
         closeOnSelect: true,
+        icon: HARNESS_BRAND_ICONS[value],
         onSelect: () => { if (value !== harness) void this.requestHarnessSwitch(threadId, value); },
       })),
     }];
     // Where this thread runs: this computer, or a daemon that can see its folder (the managed local daemon is
     // "This Mac (container)"). Moving resets the native session; the conversation continues from a summary.
+    let runOnSetting: PopoverSetting | undefined;
     const daemons = this.plugin.settings.remoteDaemons ?? [];
     if (!Platform.isMobile && daemons.length > 0) {
       const here = thread.remote?.daemonId;
       const options: PopoverOptionGroup['options'] = [{
         label: !!blocked && !!here ? `This computer \u2014 ${blocked}` : 'This computer',
         checked: !here,
+        icon: 'laptop',
         disabled: !!here && !!blocked,
         closeOnSelect: true,
         onSelect: () => { if (here) void this.requestMoveExecution(threadId, undefined); },
@@ -2792,16 +2806,23 @@ export class ThreadsView extends ItemView {
         const target = thread.remote ? undefined : this.plugin.mapCwdToDaemon(d.id, thread.cwd);
         const selected = here === d.id;
         const offered = gateHarness(harness, this.plugin.daemonRegistry?.capabilitiesOf(d.id), d.name);
-        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : !offered.ok ? `no ${agentHarnessLabel(harness)} on it` : target ? undefined : 'its folder is not shared with this daemon');
+        // No vault mapping: fall back to the daemon's default folder, or (on select) its advertised default workspace.
+        const fallback = thread.remote ? undefined : target ?? (d.defaultCwdRoot?.trim() || undefined);
+        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : !offered.ok ? `no ${agentHarnessLabel(harness)} on it` : undefined);
         options.push({
           label: reason ? `${d.name} \u2014 ${reason}` : d.name,
           checked: selected,
+          icon: 'server',
           disabled: !selected && !!reason,
           closeOnSelect: true,
-          onSelect: () => { if (!selected && target) void this.requestMoveExecution(threadId, { daemonId: d.id, remoteCwd: target }); },
+          onSelect: () => { if (!selected) void this.moveToDaemonResolvingFolder(threadId, d.id, fallback); },
         });
       }
-      harnessGroups.push({ title: 'Run on', options });
+      runOnSetting = {
+        id: 'runon', label: 'Run on', icon: 'server',
+        value: here ? (daemons.find((d) => d.id === here)?.name ?? 'Remote daemon') : 'This computer',
+        groups: [{ options }],
+      };
     }
     const currentPermission = thread.permissionMode ?? undefined;
     const settings: PopoverSetting[] = [
@@ -2827,6 +2848,7 @@ export class ThreadsView extends ItemView {
         }],
       },
       { id: 'harness', label: 'Harness', icon: 'bot', value: harnessValue, groups: harnessGroups },
+      ...(runOnSetting ? [runOnSetting] : []),
     ];
 
     const actions: PopoverAction[] = [
@@ -2996,6 +3018,20 @@ export class ThreadsView extends ItemView {
     this.renderThreadInfo();
   }
 
+  /** Move to a daemon using `cwd` when known, else the daemon's own default workspace (a daemon with no vault mapping). */
+  private async moveToDaemonResolvingFolder(threadId: string, daemonId: string, cwd: string | undefined): Promise<void> {
+    let remoteCwd = cwd;
+    if (!remoteCwd) {
+      const loaded = await this.plugin.remoteFolders?.workspaces(daemonId);
+      remoteCwd = loaded?.ok ? pickDefaultWorkspace(loaded.value)?.path : undefined;
+    }
+    if (!remoteCwd) {
+      new Notice('That daemon has no folder to run in. Set a default folder for it in Settings \u2192 Remote.');
+      return;
+    }
+    await this.requestMoveExecution(threadId, { daemonId, remoteCwd });
+  }
+
   private async requestMoveExecution(threadId: string, to: { daemonId: string; remoteCwd: string } | undefined): Promise<void> {
     const thread = this.manager.getThread(threadId);
     if (!thread) return;
@@ -3114,6 +3150,8 @@ export class ThreadsView extends ItemView {
     });
   }
 
+  private readonly remoteImageCache = new RemoteImageCache();
+
   private async renderMarkdown(
     markdown: string,
     el: HTMLElement,
@@ -3151,6 +3189,11 @@ export class ThreadsView extends ItemView {
     // a frame is never rebuilt on every token.
     this.visualizeManager?.hydrate(el, visualize.markers, { interactive: !options.streaming });
     if (threadId && !signal.aborted) void this.messageContentManager?.hydrate(el, inline.markers, { threadId, messageId: transcriptMessage?.id ?? 'streaming', signal }, options);
+    // `![alt](/abs/path)` in a remote thread names a file on the daemon's machine: fetch it with file.read.
+    const remote = threadId ? this.manager.getThread(threadId)?.remote : undefined;
+    if (remote && this.plugin.daemonRegistry) {
+      hydrateRemoteImages(el, { load: createRemoteImageLoader(this.plugin.daemonRegistry, this.remoteImageCache, remote.daemonId), signal });
+    }
     // Wrap tables in a scrollable container so wide tables don't overflow.
     el.querySelectorAll<HTMLTableElement>('table').forEach((table) => {
       const wrapper = document.createElement('div');
@@ -4273,9 +4316,13 @@ export class ThreadsView extends ItemView {
    *   pass `live: true` — first-time append of a settled row and the full
    *   renderMessages() rebuild both keep the default (stable) keying.
    */
-  private renderToolCalls(parent: HTMLElement, tools: ToolCallRecord[], opts?: { live?: boolean }): HTMLElement {
+  private renderToolCalls(
+    parent: HTMLElement,
+    tools: ToolCallRecord[],
+    opts?: { live?: boolean; onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void },
+  ): HTMLElement {
     const wrapper = parent.createDiv('ct-tools');
-    this.populateToolCallsWrapper(wrapper, tools, { live: opts?.live ?? false });
+    this.populateToolCallsWrapper(wrapper, tools, { live: opts?.live ?? false, onPillRendered: opts?.onPillRendered });
     return wrapper;
   }
 
@@ -4411,12 +4458,32 @@ export class ThreadsView extends ItemView {
    * on every step). Passes `{ live: true }` so a group the user expanded
    * mid-run stays expanded as it grows (see renderToolCalls' doc comment).
    */
-  private rebuildRowToolsInPlace(rowEl: HTMLElement, toolCalls: ToolCallRecord[], row?: ChatMessage): void {
+  private rebuildRowToolsInPlace(
+    rowEl: HTMLElement,
+    toolCalls: ToolCallRecord[],
+    row?: ChatMessage,
+    onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void,
+  ): void {
     const existing = rowEl.querySelector(':scope > .ct-tools');
+    // A row first drawn from the finalized message keys its groups by member
+    // hash; the rebuild below keys them by first call (stable as the run
+    // grows). Carry a group the user opened across that change by position.
+    if (existing && toolCalls.length > 0) {
+      const groupEls = [...existing.querySelectorAll(':scope > .ct-tool-group')];
+      const entries = groupToolRuns(toolCalls);
+      if (groupEls.length > 0 && entries.every((e) => e.kind === 'group') && groupEls.length <= entries.length) {
+        groupEls.forEach((el, i) => {
+          const entry = entries[i];
+          if (el.classList.contains('ct-tool-group-open') && entry.kind === 'group') {
+            this.liveExpandedToolGroups.add(liveToolGroupKey(entry.tools));
+          }
+        });
+      }
+    }
     existing?.remove();
     if (row) rowEl.querySelectorAll(':scope > .ct-tool-result-images').forEach((n) => n.remove());
     if (!toolCalls || toolCalls.length === 0) return;
-    const wrapper = this.renderToolCalls(rowEl, toolCalls, { live: true });
+    const wrapper = this.renderToolCalls(rowEl, toolCalls, { live: true, onPillRendered });
     // renderToolCalls appends via createDiv (last child) — move it to the
     // front so tools stay above the message content, matching the layout
     // appendMessage produces when a row is first created.
@@ -4529,16 +4596,32 @@ export class ThreadsView extends ItemView {
       }
       return;
     }
+    const onPillRendered = (tool: ToolCallRecord, pill: HTMLElement): void => {
+      if (tool.status === 'pending' && tool.toolUseId) {
+        this.toolPillsByUseId.set(tool.toolUseId, pill);
+      }
+    };
+    // The previous step's tool-only row is still the tail of the transcript:
+    // extend it in place so this step's calls join its group instead of
+    // showing a second group until the step's 'message' event lands.
+    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : undefined;
+    const tail = thread ? mergeAdjacentToolOnlyMessages(thread.messages).at(-1) : undefined;
+    if (
+      tail && tail.role === 'assistant' && tail.content === '' &&
+      (tail.toolCalls?.length ?? 0) > 0 &&
+      tail.id === this.lastAppendedRowId &&
+      this.lastAppendedRowEl?.isConnected
+    ) {
+      if (this.streamingToolsEl) {
+        this.streamingToolsEl.remove();
+        this.streamingToolsEl = null;
+      }
+      this.rebuildRowToolsInPlace(this.lastAppendedRowEl, [...tail.toolCalls!, ...visible], tail, onPillRendered);
+      return;
+    }
     const wrapper = this.ensureStreamingToolsEl();
     wrapper.empty();
-    this.populateToolCallsWrapper(wrapper, visible, {
-      live: true,
-      onPillRendered: (tool, pill) => {
-        if (tool.status === 'pending' && tool.toolUseId) {
-          this.toolPillsByUseId.set(tool.toolUseId, pill);
-        }
-      },
-    });
+    this.populateToolCallsWrapper(wrapper, visible, { live: true, onPillRendered });
   }
 
   /**

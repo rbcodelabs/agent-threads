@@ -10,7 +10,8 @@
  * The script answers only for the hosts of the configured repositories (and github.com): a remote that redirects to,
  * or a submodule that points at, some other host gets no token.
  *
- * The same token reaches the agent's own process as `GH_TOKEN` (for `gh`) plus the same askpass wiring (for `git
+ * If nothing is pushed (or the pushed credential expired) the daemon's own `GH_TOKEN` / `GITHUB_TOKEN` environment is
+ * used instead. The same token reaches the agent's own process as `GH_TOKEN` (for `gh`) plus the same askpass wiring (for `git
  * push`) through `sessionEnv()`; nothing else in the daemon sees it.
  */
 import { execFile } from 'node:child_process';
@@ -216,12 +217,26 @@ export class ReposManager {
 
   // ── internals ────────────────────────────────────────────────────────────
 
+  /** Is any GitHub token available, pushed or from the daemon's own environment? */
+  hasToken(): boolean { return this.token() !== undefined; }
+
+  /**
+   * A pushed credential wins (it is the freshest and is revocable). The daemon's own `GH_TOKEN` / `GITHUB_TOKEN`
+   * (service EnvironmentFile) is the durable fallback for when pushes stop and the pushed credential expires.
+   */
   private token(): string | undefined {
     for (const key of TOKEN_LOOKUPS) {
       const v = this.opts.creds.lookup(key);
       if (v) return v;
     }
-    return undefined;
+    const env = this.opts.env ?? process.env;
+    return env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || undefined;
+  }
+
+  /** Token values to register with the secret redactor (the pushed ones are covered by `CredStore.secretValues`). */
+  envSecretValues(): string[] {
+    const env = this.opts.env ?? process.env;
+    return [env.GH_TOKEN, env.GITHUB_TOKEN].map((v) => v?.trim()).filter((v): v is string => !!v);
   }
 
   private gitAuthEnv(token: string): Record<string, string> {

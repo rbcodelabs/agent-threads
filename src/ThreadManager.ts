@@ -10,7 +10,7 @@ import { buildRemoteEnvironmentPrompt } from './remote/sessionSpec';
 import { gateHarness } from './remote/harnessSupport';
 import type { RemoteHostTools } from './remote/hostTools';
 import { HostToolSlots } from './remote/hostToolExecutor';
-import { describeDroppedMcp, partitionExternalMcpServers } from './remote/mcpPartition';
+import { partitionExternalMcpServers, type DroppedMcpServer } from './remote/mcpPartition';
 import { resolveCodexPermissions, serializableMcpServers, type HarnessContextUsage, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
 import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
 import { NULL_ATTACHMENT_STORE, type AttachmentStore } from './host/AttachmentStore';
@@ -205,6 +205,8 @@ export class ThreadManager {
    * (`start()`/`restart()`) and reused across every turn of that session,
    * not rebuilt per turn.
    */
+  /** Records announced via onToolUse that haven't received a result yet, by toolUseId. */
+  private liveToolRecords: Map<string, ToolCallRecord> = new Map();
   private pendingToolResultImages: Map<string, Array<{ mediaType: string; data: string }>> = new Map();
   /**
    * Per-thread tracking of background (skipTranscript) tasks that have
@@ -304,7 +306,6 @@ export class ThreadManager {
   /** Calls in flight across every remote thread (shared cap, see HostToolExecutor). */
   private readonly hostToolSlots = new HostToolSlots();
   /** Last dropped-MCP notice shown per thread, so it appears again only when the set changes. */
-  private readonly remoteMcpNoticeSig = new Map<string, string>();
   /**
    * When set, called before each session run to resolve secret env var values from
    * the OS keychain. Returns a plain key-value map that is merged into the session
@@ -1771,6 +1772,14 @@ export class ThreadManager {
    * toast, and survives reload because it lives in thread.messages (persisted
    * to data.json). Emits a 'message' event so any open view appends it live.
    */
+  /** MCP servers a remote thread's daemon cannot use. Shown as a warnings pill in the daemon header, not in the transcript. */
+  getRemoteMcpWarnings(threadId: string): DroppedMcpServer[] {
+    const remote = this.getThread(threadId)?.remote;
+    if (!remote) return [];
+    const hostToolSettings = this.remoteDaemons?.hostToolsOf?.(remote.daemonId);
+    return partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist, this.remoteDaemons?.mcpSyncOf?.(remote.daemonId)).dropped;
+  }
+
   addNoticeMessage(
     threadId: string,
     status: 'completed' | 'failed' | 'stopped',
@@ -2513,12 +2522,7 @@ export class ThreadManager {
     // External MCP servers: only what a daemon can use (http/sse it can reach, no secrets) goes along; the rest is
     // dropped and the user is told once per change.
     const hostToolSettings = this.remoteDaemons?.hostToolsOf?.(remote.daemonId);
-    const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist);
-    const droppedNote = describeDroppedMcp(partition.dropped, daemonName);
-    if ((this.remoteMcpNoticeSig.get(threadId) ?? '') !== (droppedNote ?? '')) {
-      this.remoteMcpNoticeSig.set(threadId, droppedNote ?? '');
-      if (droppedNote) this.addNoticeMessage(threadId, 'stopped', droppedNote);
-    }
+    const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist, this.remoteDaemons?.mcpSyncOf?.(remote.daemonId));
     const resume = thread.sessionId;
     const extras = this.remoteSessionExtras?.(threadId);
     const common = {
@@ -2672,6 +2676,7 @@ export class ThreadManager {
             if (!thread.editedFiles.includes(filePath)) thread.editedFiles.push(filePath);
           }
         }
+        if (record.toolUseId) this.liveToolRecords.set(record.toolUseId, record);
         this.emit(threadId, { type: 'tool_use', record });
       },
       onFilesEdited: (paths) => {
@@ -3070,7 +3075,24 @@ export class ThreadManager {
         this.emit(threadId, { type: 'task_progress_summary', taskId, summary });
       },
       onGitOperation: (summary) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'git_operation', summary }); },
-      onToolResult: (toolUseId, status, durationMs) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'tool_result_status', toolUseId, status, durationMs }); },
+      onToolResult: (toolUseId, status, durationMs) => {
+        if (!isCurrentGeneration()) return;
+        // Local sessions mutate the shared record in place, but a remote
+        // session replays wire events, so the records held by the streaming
+        // buffer and by committed messages are separate copies: settle every
+        // copy here or finished calls keep showing as running.
+        const settle = (r: ToolCallRecord | undefined): void => {
+          if (!r || r.toolUseId !== toolUseId) return;
+          r.status = status;
+          if (durationMs !== undefined) r.durationMs = durationMs;
+        };
+        settle(this.liveToolRecords.get(toolUseId));
+        this.liveToolRecords.delete(toolUseId);
+        for (let i = thread.messages.length - 1; i >= 0 && i >= thread.messages.length - 50; i--) {
+          for (const r of thread.messages[i].toolCalls ?? []) settle(r);
+        }
+        this.emit(threadId, { type: 'tool_result_status', toolUseId, status, durationMs });
+      },
       onEnterPlanMode: () => { if (isCurrentGeneration()) this.emit(threadId, { type: 'enter_plan_mode' }); },
       onPlanModeRequested: () => {
         if (!isCurrentGeneration()) return;

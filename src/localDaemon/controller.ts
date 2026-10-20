@@ -321,7 +321,7 @@ export class LocalDaemonController {
   }
 
   private specFor(vaultPath: string, version: string, port: number): LocalDaemonSpec {
-    return { vaultPath, version, hostPort: port, maskedDirs: this.maskedDirs(vaultPath), externalRoots: this.extRoots, workFolders: this.workFolders, memory: resolveDaemonMemory(this.settings().memory), cpus: resolveDaemonCpus(this.settings().cpus), harnesses: this.harnesses() };
+    return { vaultPath, version, hostPort: port, maskedDirs: this.maskedDirs(vaultPath), externalRoots: this.extRoots, workFolders: this.workFolders, memory: resolveDaemonMemory(this.settings().memory), cpus: resolveDaemonCpus(this.settings().cpus), harnesses: this.harnesses(), ...(this.settings().allowSyncedStdio ? { allowSyncedStdio: true } : {}) };
   }
 
   private emptyObserved(partial: Partial<Observed>): Observed {

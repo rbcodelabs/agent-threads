@@ -383,9 +383,11 @@ token created for that purpose. Nothing is ever put in the URL.
 | `agent-threads attach <thread> [--from N\|end] [--claim] [--until-idle] [--json]` | follow a thread. Replays the journal after `--from` (default `0`: everything the daemon still holds; `end`: live only), then streams live. A unique id prefix is enough. |
 | `agent-threads run [options] "<prompt>"` | open a new session, send one prompt, stream the answer, exit with a code for how it ended. |
 | `agent-threads creds push <kind> [NAME...] [--stdin] [--ttl T] [--remove]` | send credentials to the daemon (`admin` token). See "Pushing credentials from the CLI". |
+| `agent-threads mcp sync --stdin [--clear] [--strict]` | replace the MCP servers synced to the daemon (`admin` token): JSON `name -> definition` on stdin. See "MCP servers synced from the app". |
 | `agent-threads token create\|list\|revoke` | manage tokens (`--json` for scripts; `create --save` as above). |
 | `agent-threads doctor` | check the machine and the daemon (below). |
 | `agent-threads install` | set up the systemd user service (above). |
+| `agent-threads update --check\|--apply [--now] [--json]` | compare with the latest stable release, or install it in place; see "Automatic updates". |
 
 **attach and the one-writer seat.** A thread has one read-write client at a time (see "Known limits"). `attach` is a
 **read-only observer by default**: it never takes the seat, so watching a thread from a terminal cannot lock Geode out
@@ -448,7 +450,7 @@ nativeSessionId, lastActivityAt`.
 Node 22+; the `claude` CLI; `git`; `gh` and whether it is logged in; `rg`; the listen address (warns on a wildcard or
 non-loopback address); whether the daemon answers `/healthz`; data directory ownership and permissions (0700), token
 and `cli-token` file modes; `tokens.json` readable with at least one active token (and `cli-token` still valid);
-a Claude credential **as seen from the shell you ran it in** (environment, systemd credential, env file, or an existing `~/.claude` login; values are never
+the auto-update state (skipped when off; warns when it is on but this install cannot update itself, or a release is held or was rolled back); a Claude credential **as seen from the shell you ran it in** (environment, systemd credential, env file, or an existing `~/.claude` login; values are never
 printed). It cannot see the environment of a service started by systemd or a container: run it as the daemon user, or inside the container, and remember that a finding about the credential describes this shell, not the service; workspaces exist and are writable; free disk space (warns under 5 GiB, fails under 500 MiB); clock skew
 against the daemon's HTTP `Date` header; and Tailscale (installed, running, serving the port). The exit code is 1 if
 anything FAILed (`--strict`: or warned), else 0; SKIP never counts. Run it as the user the daemon runs as, and pass
@@ -467,6 +469,83 @@ upgrade the daemon first (or together).
 
 A restart stops live `claude` processes: a running turn is closed as `daemon_restarted`, Geode shows it, and the next
 message resumes the same native session. Do it between turns when you can (`agent-threads list` shows what is running).
+
+### Automatic updates (opt in)
+
+Off by default. With it on, the daemon follows the newest **stable** GitHub release of `rbcodelabs/agent-threads`
+(drafts and pre-releases are ignored, and it never moves to an older version) and applies it **only when idle**.
+
+```bash
+agent-threads serve --auto-update                 # or AGENT_THREADS_AUTO_UPDATE=1, or "autoUpdate": true in config.json
+#   --auto-update-interval-minutes N   how often to look (default 360, minimum 15)
+#   --auto-update-quiet-minutes N      quiet time required before the restart (default 2)
+agent-threads update --check                      # current vs latest, whether it is on and possible here, when it would apply
+agent-threads update --apply [--now]              # the same safe procedure, by hand
+```
+
+For the systemd user service, add `--auto-update` to the unit with a drop-in (`systemctl --user edit agent-threads`,
+clear and re-set `ExecStart=`), or put `AGENT_THREADS_AUTO_UPDATE=1` in `~/.config/agent-threads/env`.
+
+**Where it works.** Only where the daemon can replace its own bundle *and* something will start it again. It checks, it
+does not assume: it runs from the release bundle (`agent-threads.cjs`), is not in a container, can write the directory the
+bundle lives in, runs under a systemd unit, and that unit's `Restart=` is `on-failure` or `always` (read with
+`systemctl show`). The script install of section A qualifies. The system-wide unit of section B normally does not (the
+bundle is root-owned and `ProtectSystem=strict` makes it read-only for the service): upgrade it by hand. Anywhere else it logs once that
+auto-update is unavailable and why, makes no request to GitHub and changes nothing; `agent-threads doctor` and
+`agent-threads update --check` show the reason.
+
+**Docker and Compose never self-update.** A container's image is the unit of deployment: rewriting the bundle inside it
+would be lost on the next recreate and would drift from the image tag. Pull the new tag instead (`docker compose pull &&
+docker compose up -d`), pin a tag you trust, or run a watchtower-style updater that does this for you. The same applies
+to read-only or unknown installs.
+
+**The procedure.** Every `--auto-update-interval-minutes` it asks the GitHub releases API (no token; conditional
+requests, so an unchanged answer does not use the rate limit; failures back off 1, 2, 4 minutes and so on up to the
+interval, and a rate-limit reply is waited out). For a newer release it:
+
+1. downloads `agent-threads.cjs` and `agent-threads.cjs.sha256` (HTTPS to github.com hosts only, every redirect hop
+   re-checked, size capped) and verifies the SHA-256;
+2. writes the bundle to a temp file next to the running one (same permissions) and runs
+   `node <new> --version --json`, which must print the expected version. This is the only time a downloaded file runs,
+   and only after the checksum matched;
+3. keeps the old bundle as `agent-threads.cjs.prev-<old version>` (the last two are kept);
+4. renames the new file into place (atomic: the old or the new file, never half of one).
+
+A failure in any step leaves the running bundle untouched, is logged and audited (`audit.ndjson`: `update_check`,
+`update_apply`, `update_restart`, `update_failed`, `update_held`, `update_rollback`) and is retried with backoff. A release
+that is a **major** version bump, or whose bundle reports a different wire protocol, is **reported and held**, never
+applied automatically (`update --check` says so); upgrade the daemon and the Geode plugin together by hand.
+
+**When it restarts.** The new bundle is on disk but the old one keeps running until the daemon is idle: no turn in
+flight, no permission/question/plan/elicitation or host-tool call waiting, and no session activity or client command for
+`--auto-update-quiet-minutes`. It re-checks every 15 seconds; a new turn or request resets the quiet time; a running turn
+is never interrupted (it can wait as long as it takes). Then it shuts down cleanly (sockets closed, journals flushed) and
+exits with code **75**. That is deliberately non-zero: the units use `Restart=on-failure`, which does **not** restart a
+clean exit 0, so a clean exit would leave the daemon down. `systemctl status` will show the 75 as "failed" for the instant
+before the restart; that is expected, and the units need no change. On start the usual recovery applies (a thread that
+was idle is untouched; sessions are cold-resumed on the next message). Not detected: a client command that is
+mid-flight asynchronously (for example a long `repos.sync`); most commands are handled synchronously on the event loop,
+so the check and the shutdown cannot interleave with them.
+
+**If the new version does not start.** The install leaves a `pendingUpgrade` marker (`<data-dir>/update.json`). The new
+version counts each start; if it dies before it has been listening for 60 seconds twice, the third start puts the saved
+`.prev` bundle back instead, exits 75 to be restarted into it, and pauses auto-update until a release other than the failed one
+is published (logged and audited). Limits, honestly: the guard is part of the new bundle, so it cannot catch a bundle
+that fails before its first line runs (the `--version` check before the swap is what covers that); only one level of
+rollback exists (the version that was running before); any failure to become healthy counts, including an environment
+problem such as the port being taken, which a rollback will not fix (auto-update then pauses, and says why).
+
+**Manual apply.** `agent-threads update --apply` runs the same steps from a shell (it needs the same install to be
+updatable), then asks the running daemon, through a request file in the data directory, to restart when idle, even if
+that daemon has auto-update off. `--now` skips only the idle wait (an explicit choice: a running turn is closed as
+`daemon_restarted`). With no running daemon it tells you to restart it yourself.
+
+**Security.** The checksum is published next to the bundle **in the same release**, so it detects a damaged or truncated
+download, not a compromised release or GitHub account: trust comes from HTTPS to github.com and from the repository's
+release process (the same caveat as `deploy/install.sh`, which has you pin a tag). Auto-update extends that trust to
+"whatever is published as the latest stable release", on a schedule, with no one watching: turn it on only if you accept
+that. It runs no shell, sends nothing but the GitHub requests (no telemetry, no token), and only ever replaces the bundle
+file it is running from. The wire protocol advertises `update.auto` in `welcome.capabilities` when it is on and possible.
 
 ## Backup
 
@@ -597,10 +676,15 @@ exactly which tools run on your computer (or says none do).
   connected and that the tool needs it, so it carries on instead of looping. The turn is never held longer than that plus
   `hostToolTimeoutSec` (default 300) for a slow answer. When you reopen the app a transcript row says which host tools were
   unavailable. Nothing is queued: the call is not run later.
-- **Choose what is offered.** Settings, Remote daemons, edit, Advanced: switch on "Tools on this computer" for the daemon,
-  then list the groups to allow under "Tool groups to allow" (`vault`, `workspace`, `threads`, `skills`, `browser`, `mcp`;
-  you can also name one read tool, or one proxied server). Anything unlisted is off. Upgrading from a build where host tools
-  were on by default: they are now off until you do this. If the daemon holds its own synced copy of the vault leave `vault`
+- **Choose what is offered.** Two places edit the same setting. In Settings, Remote daemons, edit, Advanced, switch on "Tools on this computer",
+  then tick what the daemon may use: a checklist of "Notes in this vault" (`vault`), "Open tabs and active file" (`workspace`), "Your other
+  threads" (`threads`), "Installed skills" (`skills`), "In-app browser" (`browser`) and each of your connected OAuth and Google Workspace
+  servers. Items stay greyed out until the master switch is on. In Settings, MCP, every OAuth and Google Workspace server row has an
+  "Available on" checkbox per daemon, which turns host tools on for that daemon if they were off and names only that server. Settings, MCP shows
+  "Not available on <daemon>. Turn on" when a server is not offered to a daemon. Anything unticked is off. Entries from an older config that the
+  checklist does not know (the whole `mcp` group, a single read tool, a server that is gone) are listed under "Custom" and kept until you untick them.
+  A change applies to the next thread session you open. Upgrading from a build where host tools
+  were on by default: they are now off until you do this. If the daemon holds its own synced copy of the vault leave "Notes in this vault"
   off so the agent uses its file tools on the copy (see "Working in the vault"; the two are different views of the same notes).
 - **Seat and manifest.** Only the client that holds the thread's read-write seat acts on `tool.call`; a second install or
   a terminal viewing the thread ignores it. The daemon treats a thread as having host tools only while the seat holder is
@@ -608,10 +692,11 @@ exactly which tools run on your computer (or says none do).
   call fails after the grace period with the "your computer is not connected" message instead of waiting for an answer
   that cannot come. Results are cut at 100,000 characters (with a marker), images are bounded, and a large screenshot is
   dropped rather than allowed to exceed the frame limit.
-- **Your MCP servers.** Servers that start a program on your computer (stdio), use an address on your computer, or need a
-  secret from your keychain cannot work on the daemon and are not sent; a server with headers (usually credentials) is sent
-  only if you list it under "MCP servers it may receive". Each dropped server is named in a transcript row with the reason.
-  Other http/sse servers the daemon can reach are passed through.
+- **Your MCP servers.** By default servers that start a program on your computer (stdio), use an address on your computer, or
+  need a secret from your keychain cannot work on the daemon and are not sent; a server with headers (usually credentials) is
+  sent only if you list it under "MCP servers it may receive". Dropped servers are counted in a yellow warnings pill beside the connection pill in the thread header; hover or click it to see
+  each server and the reason. Other http/sse servers the daemon can reach are passed through. To run one of your Settings servers ON the daemon
+  (including a stdio server with a keychain secret), opt it in per daemon: see "MCP servers synced from the app".
 - **Secrets stay here.** Only tool names, descriptions, schemas and tool *results* cross to the daemon. Keychain values, the
   loopback addresses and capability headers of your Google and OAuth brokers, and the token never do.
 - **Limits.** A new proxied server that first appears after a session started needs a new session (tools of servers already
@@ -704,7 +789,7 @@ Some MCP servers need a key the daemon must hold itself (a hosted docs server, a
 ```
 
 `type` is `stdio` (the default, with `command`, `args`, `env`), `http` or `sse`. `claude_threads` and `obsidian` are reserved.
-A daemon-listed server replaces a same-named server sent by the app. They are started for every harness (Claude, Codex, OpenCode).
+A daemon-listed server replaces a same-named server sent by the app (and a same-named synced server; see "MCP servers synced from the app"). They are started for every harness (Claude, Codex, OpenCode).
 
 Secret values are sent with the `creds.push` protocol command (`{ kind, ttlSec, fields }`), which needs an **admin** token.
 They are stored on the daemon as `<data-dir>/creds/<kind>.json` (directory 0700, files 0600), never in `config.json` or in a
@@ -736,6 +821,75 @@ names the field. The output lists field names and the expiry, never a value (`--
 Settings, Remote shows each daemon's MCP servers (connected / failed / needs sign-in) as last reported by its sessions;
 a server that dies mid-session turns to failed at the end of the next turn.
 
+## MCP servers synced from the app
+
+Settings, MCP lists a **Runs on** line under each Custom MCP server: This computer, plus a checkbox per remote daemon. Ticking
+one runs that server on the daemon for every thread there (Claude, Codex and OpenCode alike: the daemon hands one resolved
+server map to whichever harness a session uses). Nothing is synced until you tick it.
+
+**What you are asked first.** The first time (and after any later change to the command, arguments, environment, URL or headers)
+a dialog shows the exact command and arguments (or the URL), the *names* of environment variables and headers, the daemon, and
+the names of the keychain secrets whose values will leave this Mac. A definition you have not confirmed in its current form is
+not synced, and the old copy is removed from the daemon.
+
+**What is sent.**
+
+- The definition, over `mcp.sync`, with `${NAME}` placeholders rewritten to `${mcpsync-<project>.NAME}` and left unresolved.
+- Exactly the keychain secrets those definitions reference (no others are even read), over `creds.push`, as credential kind
+  `mcpsync-global` (or `mcpsync-p-<project>` when the secret is limited to one project). They get a 30 day lifetime, renewed
+  when the daemon connects, when a thread starts there more than 12 hours after the last sync, and on every Settings edit. Rotating a secret in Settings reaches the
+  daemon's next session. Turning a server off, or removing it, re-syncs the smaller set and deletes a kind that is no longer used.
+- Never: oauth servers, anything pointing at an address on this computer (this includes the Google and OAuth proxies), a
+  placeholder that is not a stored keychain secret (environment variables of this Mac are never sent), a literal credential
+  typed into a header or `*_KEY`/`*_TOKEN` variable (move it to Settings, Secrets), and secrets limited to *different* projects
+  in one server (a daemon cannot tell projects apart; a secret limited to one project is allowed, with a warning in the dialog).
+
+**When a toggle is disabled** the reason is shown: the daemon is too old (no `mcp.sync` capability), needs an admin token (the
+token stored for a daemon you added must have scope `admin`; the managed local daemon needs nothing, its admin token lives in
+its container), the daemon does not accept programs from the app (stdio), the server is loopback-only or uses a secret
+that is not stored. OAuth and Google Workspace servers have no "Runs on" toggle: they cannot run on a daemon, but they can be proxied from this computer through their "Available on" checkbox (see "Choose what is offered"). With a daemon that is too old nothing changes: dropped servers are dropped with the usual reason.
+
+**Status.** Each ticked daemon shows a chip from what its sessions report (Connected, Needs sign-in, Failed with the daemon's
+message). A server whose credential lapsed or was never delivered shows `Failed: missing credential ...` with **Push now**.
+`Shadowed by config.json` means the daemon's operator defines a server of the same name, which wins.
+
+**Operator side.**
+
+- `mcp.sync` needs an admin token and replaces the whole synced set. `agent-threads mcp sync --stdin [--clear] [--strict]` does the
+  same from a shell: standard input is a JSON object of `name -> definition` (the `mcpServers` shape above) and the output lists
+  names and reasons, never a value. Once the app syncs to a daemon it owns that set, so a set made with the CLI is replaced.
+- Replace semantics. The accepted servers of a request become the whole set; a name that is absent, or that is rejected now,
+  is removed (a rejected name does not keep its old definition: it was superseded by one the daemon refuses, and the client
+  has been told it is not running). **Exception: if the request names at least one server and the daemon accepts none, the
+  previous set is KEPT unchanged** (`synced-mcp.json` is not rewritten, no `removed` audit entry) and the reply carries
+  `kept: true` beside the usual `rejected` reasons. A bad placeholder, a stdio server after the operator turned
+  `allowSyncedStdio` off, or an allowlist miss therefore cannot wipe a working set. Audit entry for that case:
+  `mcp_sync_rejected` with the rejected names only. `agent-threads mcp sync` prints that the previous set was kept and exits 1
+  (`--json` prints the reply, `kept` included); partial rejection exits 0 unless `--strict`.
+- Clearing is explicit. `mcp.sync` takes an optional `clear: true` (additive within v1; valid only with an empty `servers`,
+  otherwise `bad_frame`). The CLI sends it for `--clear`, and the app sends it whenever its set is empty (the user turned the
+  last server off). A daemon from before this field, and this one, also treat an empty `servers` without `clear` as a clear, so
+  the shipped app keeps working; `clear` lets a future daemon refuse the unflagged form. The app, on a `kept` reply, shows the
+  rejection reasons in the server's sync status instead of "synced", does not record the names as synced, leaves the pushed
+  credentials alone (the kept set may still use them) and tries again on the next trigger.
+- Definitions are stored in `<data-dir>/synced-mcp.json` (0600) with, per server, the id of the token that synced it and a hash.
+  They are never copied into a thread's saved spec (`sessions/<id>.json`). Audit entry: `mcp_sync` with names only.
+- `allowSyncedStdio` (config.json, flag-free; env `AGENT_THREADS_ALLOW_SYNCED_STDIO=1`; default **false**) lets stdio definitions
+  in: they start a program on this machine as the daemon user. `syncedCommandAllowlist` (bare command names, which match only a
+  bare command, or absolute paths, which match only that command) narrows it; note that an allowlisted `npx` can still run any
+  package. With the flag off stdio definitions are rejected with a named reason and http/sse are accepted. The daemon advertises
+  `mcp.sync` always and `mcp.sync.stdio` when the flag is on. The policy is applied again when a session starts.
+- A synced definition may only refer to credentials as `${mcpsync-<project>.NAME}`. A bare `${NAME}` searches every stored kind and
+  would let an admin token read the GitHub token or another project's secrets back through a server URL it chooses; the
+  daemon refuses such a definition, and a `${...}` inside a stdio `command` (it would bypass the allowlist). `config.json` servers
+  keep the bare form: they are operator-trusted.
+- Precedence when a session starts, lowest to highest: servers in the session spec, synced servers, `config.json` servers, the
+  daemon's own host servers (`claude_threads` and `obsidian` are reserved). A missing or lapsed credential means the server is not
+  started and shows as `failed (missing credential mcpsync-<project>.NAME)`.
+- The managed local daemon: the app syncs through the container (`agent-threads mcp sync` and `creds push` run inside it with its
+  own admin token). Stdio servers need Settings, Remote, "Local daemon: allow MCP servers that start programs", then Update to
+  recreate the container.
+
 ## Repositories the daemon keeps cloned
 
 A daemon can hold clones of your repositories, so a thread there can start on code without anyone logging in to the
@@ -761,6 +915,12 @@ machine. List them in Settings, Remote, edit the daemon, **Repositories** (one p
   for the hosts of your repositories and github.com. It is never on a command line, in a clone URL or in `.git/config`, and a
   URL that contains credentials is refused. The agent's own process gets the same token as `GH_TOKEN` (for `gh`) plus the
   askpass settings (so `git push` over https works); nothing else does.
+  **Durable fallback:** if no pushed credential is live (never pushed, or its TTL lapsed because the host stopped
+  refreshing it), the daemon uses its own `GH_TOKEN` / `GITHUB_TOKEN` environment (for example from the systemd
+  `EnvironmentFile` or `deploy/compose.env`). A pushed credential always wins while it is valid. The environment token is
+  scrubbed from logs and transcripts like any other secret. When neither exists and `gh auth status` fails, a session
+  start shows a one-time "GitHub auth unavailable in the daemon" notice in the thread (the probe is cached for 60 s and
+  never delays the session).
 - **Status** (`repos.status`, `read` scope): `cloned`, `stale` (last good fetch over 24 hours ago, or the last fetch failed),
   `auth failed` (the remote refused the token, or none is stored), `not cloned yet`, `syncing`, or `failed` (any other git
   error, scrubbed of the token). Changing the list needs an `admin` token, like `creds.push`; a `control` token can only look.
@@ -824,7 +984,7 @@ Audit entries (`skills_sync`, `skills_commit`) hold folder names and sizes, neve
    (for example `wss://my-server.tailnet-name.ts.net:8443`) and the token. Press **Test connection**: it
    should say `Connected: agent-threads <version>, protocol 1`, and the dialog then offers the folders the
    daemon itself advertises (next section). You do not type any path on the daemon machine.
-3. In the Agents list composer, right-click (or hold) the send button: under **Run on** choose
+3. In the Agents list composer, click the settings indicator beside the attach/mic buttons: under **Run on** choose
    `my-server`. The folder is a dropdown of the daemon's own folders (with **Browse...** to pick a
    subfolder); send. The thread shows a `my-server` badge, the remote folder and a connection pill.
 4. Quit Geode mid-turn, wait, reopen: the transcript completes without any action.
@@ -855,6 +1015,26 @@ What Geode does with it:
 - **Run on:** the folder is a dropdown of the daemon's workspaces. A vault thread with a mapping has its
   mapped folder preselected. **Browse...** lists subfolders (`path.list`) to descend into and **Use this
   folder** selects one. **Other folder...** switches to typing.
+
+## Images in the chat
+
+An agent on a daemon can show an image inline by writing a markdown image with an absolute path on the daemon's
+machine, for example `![chart](/srv/workspaces/app/out/chart.png)`. The remote environment prompt tells the agent so.
+Geode cannot load that path itself, so it asks the daemon with the additive, read-scope command `file.read {path}`
+(capability `file.read` in `welcome`) and shows the returned bytes. Only remote threads do this; `http(s)`, `data:` and
+`blob:` images and local threads behave as before, and the mobile (relay) view does not resolve daemon paths.
+
+What the daemon returns, and refuses (every refusal is the same `not_found` "image unavailable", so the command cannot
+be used to probe the disk):
+
+- png, jpeg, gif and webp only, checked by extension **and** magic bytes (a mismatch is refused). SVG is never served.
+- Regular files up to 5 MB (`FILE_READ_MAX_BYTES`).
+- The real path (symlinks followed) must be inside a configured workspace, read-write or read-only. On the managed
+  local daemon those are the session folders, the shared folders (`/work/*`), the external roots (`/ext/*`) and the
+  vault mirror. A symlink that leads outside, and anything under `.git` or `.obsidian`, is refused.
+
+An older daemon answers `unknown_command` (or lacks the capability); Geode then shows "Image unavailable" in place of the
+image. Images are fetched when they scroll into view and cached for the session.
 
 ## Working in the vault
 
