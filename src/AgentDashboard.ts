@@ -14,7 +14,7 @@ import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
 import { remoteGroup, threadCwdLabel } from './remote/threadLocation';
 import { parsePrUrlRepo } from './gitDiffUtils';
-import { groupDashboardThreads, normalizeAgentsGroupBy, toggleAgentsGrouping, type AgentsGroupBy, type AgentsGroupingDimension } from './dashboardProjectGroups';
+import { filterArchivedThreads, groupDashboardThreads, normalizeAgentsGroupBy, toggleAgentsGrouping, type AgentsGroupBy, type AgentsGroupingDimension } from './dashboardProjectGroups';
 import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps } from './threadArchiveMenu';
 import { promptConfirm } from './confirmModal';
 
@@ -61,6 +61,10 @@ export class AgentDashboard extends ItemView {
   private expandedScheduledStacks = new Set<string>();
   /** Collapsed project / status groups (keys from groupKey). In-memory only. */
   private collapsedGroups = new Set<string>();
+  /** Archived groups are collapsed by default; this tracks the ones the user opened. */
+  private expandedArchivedGroups = new Set<string>();
+  /** Archived threads read from vault notes (only loaded while "Show archived" is on). */
+  private archivedThreads: Thread[] = [];
 
   /** Built once; every row's archive menu shares it (all fields read live state). */
   private archiveDeps: ArchiveMenuDeps | null = null;
@@ -81,6 +85,7 @@ export class AgentDashboard extends ItemView {
     this.activeThreadId = this.plugin.getActiveThreadId();
     this.buildUI();
     this.render();
+    if (this.plugin.settings.agentsShowArchived) void this.refreshArchivedThreads();
     this.unsubscribe = this.manager.subscribe((threadId, event) => {
       this.handleEvent(threadId, event);
     });
@@ -144,8 +149,9 @@ export class AgentDashboard extends ItemView {
       this.searchActionEl.setAttribute('aria-expanded', 'false');
     }
     if (!this.groupActionEl) {
-      this.groupActionEl = this.addAction('list-filter', 'Group agents', event => this.openGroupingMenu(event));
+      this.groupActionEl = this.addAction('list-filter', 'Group & filter agents', event => this.openGroupingMenu(event));
       this.groupActionEl.setAttribute('aria-haspopup', 'menu');
+      this.groupActionEl.toggleClass('is-active', !!this.plugin.settings.agentsShowArchived);
     }
   }
 
@@ -156,6 +162,12 @@ export class AgentDashboard extends ItemView {
     const menu = new Menu();
     this.addGroupingMenuItem(menu, 'Project', 'project', hasProject, hasProject && !hasStatus);
     this.addGroupingMenuItem(menu, 'Status', 'status', hasStatus, hasStatus && !hasProject);
+    menu.addSeparator();
+    menu.addItem(item => item
+      .setTitle('Show archived')
+      .setIcon('archive')
+      .setChecked(!!this.plugin.settings.agentsShowArchived)
+      .onClick(() => void this.setShowArchived(!this.plugin.settings.agentsShowArchived)));
     menu.showAtMouseEvent(event);
   }
 
@@ -171,6 +183,24 @@ export class AgentDashboard extends ItemView {
       .setChecked(checked)
       .setDisabled(disabled)
       .onClick(() => void this.setGroupingDimension(dimension)));
+  }
+
+  private async setShowArchived(show: boolean): Promise<void> {
+    this.plugin.settings.agentsShowArchived = show;
+    this.groupActionEl?.toggleClass('is-active', show);
+    if (show) await this.refreshArchivedThreads();
+    else { this.archivedThreads = []; this.render(); }
+    await this.plugin.saveSettings();
+  }
+
+  private async refreshArchivedThreads(): Promise<void> {
+    try {
+      this.archivedThreads = await this.plugin.loadArchivedThreads();
+    } catch (error) {
+      console.error('[ClaudeThreads] Failed to load archived threads:', error);
+      this.archivedThreads = [];
+    }
+    this.render();
   }
 
   private currentGroupMode(): AgentsGroupBy {
@@ -207,6 +237,11 @@ export class AgentDashboard extends ItemView {
     if (event.type === 'projects_changed') {
       this.scheduleRender();
       return;
+    }
+    if (event.type === 'thread_deleted' && this.plugin.settings.agentsShowArchived) {
+      // A thread that was just archived is written to its note before deletion;
+      // give the vault index a moment, then pick it up in the Archived group.
+      setTimeout(() => void this.refreshArchivedThreads(), 500);
     }
     if (event.type === 'threads_loaded') {
       this.scheduleRender();
@@ -360,6 +395,9 @@ export class AgentDashboard extends ItemView {
     }
 
     const mode = this.currentGroupMode();
+    const archived = this.plugin.settings.agentsShowArchived
+      ? filterArchivedThreads(this.archivedThreads, new Set(allThreads.map(t => t.id)), q)
+      : [];
     if (mode === 'status') {
       for (const section of this.statusSections(threads)) {
         if (!section.threads.length) continue;
@@ -372,8 +410,18 @@ export class AgentDashboard extends ItemView {
           'global',
         ).addClass('ct-agents-status-section');
       }
+      this.renderArchivedGroup(this.listEl, 'global', archived);
     } else {
-      for (const project of groupDashboardThreads(threads, thread => this.threadGroup(thread))) {
+      const archivedKeys = new Map<string, Thread[]>();
+      for (const group of groupDashboardThreads(archived, thread => this.threadGroup(thread))) archivedKeys.set(group.key, group.threads);
+      const liveGroups = groupDashboardThreads(threads, thread => this.threadGroup(thread));
+      const projects = [...liveGroups];
+      // Projects whose only threads are archived still need a header to hang the Archived group on.
+      for (const group of groupDashboardThreads(archived, thread => this.threadGroup(thread))) {
+        if (!liveGroups.some(live => live.key === group.key)) projects.push({ ...group, threads: [] });
+      }
+      projects.sort((a, b) => a.key === 'unassigned' ? 1 : b.key === 'unassigned' ? -1 : a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }) || a.key.localeCompare(b.key));
+      for (const project of projects) {
         const projectEl = this.listEl.createEl('section', { cls: 'ct-agents-project', attr: { 'aria-label': project.label } });
         const header = projectEl.createDiv('ct-agents-project-header');
         const icon = header.createSpan('ct-agents-project-icon');
@@ -384,6 +432,7 @@ export class AgentDashboard extends ItemView {
         if (projectCollapsed) continue;
         if (mode === 'project-status') this.renderProjectStatuses(projectEl, project.key, project.threads);
         else this.renderProjectThreads(projectEl, project.key, project.threads);
+        this.renderArchivedGroup(projectEl, project.key, archivedKeys.get(project.key) ?? []);
       }
     }
 
@@ -483,8 +532,9 @@ export class AgentDashboard extends ItemView {
   }
 
   /** Makes `header` a click/keyboard toggle for a collapsible group; returns whether it is collapsed. */
-  private bindGroupToggle(header: HTMLElement, key: string): boolean {
-    const collapsed = this.collapsedGroups.has(key);
+  private bindGroupToggle(header: HTMLElement, key: string, defaultCollapsed = false): boolean {
+    const set = defaultCollapsed ? this.expandedArchivedGroups : this.collapsedGroups;
+    const collapsed = defaultCollapsed ? !set.has(key) : set.has(key);
     header.addClass('ct-agents-collapsible');
     header.toggleClass('is-collapsed', collapsed);
     header.setAttribute('role', 'button');
@@ -494,8 +544,8 @@ export class AgentDashboard extends ItemView {
     setIcon(chevron, collapsed ? 'chevron-right' : 'chevron-down');
     header.prepend(chevron);
     const toggle = () => {
-      if (this.collapsedGroups.has(key)) this.collapsedGroups.delete(key);
-      else this.collapsedGroups.add(key);
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
       this.scheduleRender();
     };
     header.addEventListener('click', (e) => { e.stopPropagation(); toggle(); });
@@ -503,6 +553,43 @@ export class AgentDashboard extends ItemView {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
     });
     return collapsed;
+  }
+
+  private renderArchivedGroup(parent: HTMLElement, scopeKey: string, threads: Thread[]): void {
+    if (!threads.length) return;
+    const group = parent.createDiv('ct-agents-group ct-agents-archived-group');
+    const labelEl = group.createDiv('ct-agents-group-label');
+    labelEl.createSpan({ text: 'Archived' });
+    labelEl.createSpan({ cls: 'ct-agents-project-count', text: String(threads.length) });
+    if (this.bindGroupToggle(labelEl, `archived:${scopeKey}`, true)) return;
+    for (const thread of threads) this.renderArchivedRow(thread, group);
+  }
+
+  private renderArchivedRow(thread: Thread, parent: HTMLElement): void {
+    const row = parent.createDiv({ cls: 'ct-agents-row ct-agents-row-archived', attr: { role: 'button', tabindex: '0', 'aria-label': `Restore ${thread.title}` } });
+    const iconEl = row.createDiv('ct-agents-icon ct-agents-icon-archived');
+    setIcon(iconEl, 'archive');
+    const body = row.createDiv('ct-agents-row-body');
+    const primary = body.createDiv('ct-agents-row-primary');
+    primary.createDiv('ct-agents-row-title').createSpan({ cls: 'ct-agents-row-title-text', text: thread.title });
+    primary.createDiv({ cls: 'ct-agents-row-time', text: relativeTime(thread.updatedAt) });
+    const summary = thread.summary ?? thread.recap;
+    if (summary) body.createDiv('ct-agents-row-secondary').createDiv({ cls: 'ct-agents-row-activity', text: summary });
+    const restore = row.createEl('button', { cls: 'ct-agents-restore-btn', text: 'Restore', attr: { title: 'Restore this thread' } });
+    const run = async () => {
+      this.archivedThreads = this.archivedThreads.filter(t => t.id !== thread.id);
+      this.scheduleRender();
+      try {
+        await this.plugin.restoreArchivedThread(thread);
+      } catch (error) {
+        console.error('[ClaudeThreads] Failed to restore archived thread:', error);
+        new Notice('Could not restore that thread.');
+        await this.refreshArchivedThreads();
+      }
+    };
+    restore.addEventListener('click', (e) => { e.stopPropagation(); void run(); });
+    row.addEventListener('click', () => void run());
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void run(); } });
   }
 
   private renderGroup(label: string, threads: Thread[], state: RowState, badge?: number, parent = this.listEl, scopeKey = ''): HTMLElement {

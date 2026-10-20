@@ -1212,6 +1212,8 @@ export interface PluginSettings {
   toolCallStyle?: ToolCallStyle;
   /** Primary grouping shown in the Agents List. Missing values use project-status. */
   agentsGroupBy?: 'project' | 'status' | 'project-status';
+  /** Show archived threads (read from their vault notes) in a collapsed Archived group in the Agents List. */
+  agentsShowArchived?: boolean;
   /** Sort order of the searchable Project picker: most recently used (default) or alphabetical. */
   projectPickerSort?: 'recent' | 'alphabetical';
   /** Project id -> last time it was chosen in the Project picker (ms). Combined with thread activity for the 'recent' sort. */
@@ -1471,6 +1473,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   layoutDensity: 'comfortable',
   toolCallStyle: 'tree',
   agentsGroupBy: 'project-status',
+  agentsShowArchived: false,
   statusLineCommand: 'bash $HOME/claude-config/bin/statusline-command.sh',
   statusLineIntervalMs: 30_000,
   createPrMessage: '/create-pr',

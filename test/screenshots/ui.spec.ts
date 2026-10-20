@@ -3285,7 +3285,7 @@ test.describe('Agent Threads UI', () => {
     await expect(searchPanel).toBeHidden();
     await expect(page.locator('.view-header-title')).toHaveText('14 threads');
 
-    const groupingButton = page.getByRole('button', { name: 'Group agents' });
+    const groupingButton = page.getByRole('button', { name: 'Group & filter agents' });
     await groupingButton.click();
     const menu = page.locator('.menu');
     const projectItem = menu.getByRole('menuitemcheckbox', { name: 'Project' });

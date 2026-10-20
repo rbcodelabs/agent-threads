@@ -10431,3 +10431,25 @@ button.ct-agent-crumb:focus-visible {
 }
 
 .ct-agents-project-header.ct-agents-collapsible { border-radius: var(--radius-s) var(--radius-s) 0 0; }
+
+/* Archived threads (Agents List → "Show archived") */
+.ct-agents-archived-group .ct-agents-row-archived { position: relative; opacity: 0.8; min-height: 0; }
+.ct-agents-archived-group .ct-agents-row-archived:hover,
+.ct-agents-archived-group .ct-agents-row-archived:focus-within { opacity: 1; }
+.ct-agents-icon-archived { color: var(--text-faint); }
+.ct-agents-restore-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 10px;
+  font-size: var(--font-ui-smaller);
+  border-radius: var(--radius-s);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.ct-agents-row-archived:hover .ct-agents-restore-btn,
+.ct-agents-row-archived:focus-within .ct-agents-restore-btn { opacity: 1; pointer-events: auto; }
+.ct-agents-row-archived:hover .ct-agents-row-time,
+.ct-agents-row-archived:focus-within .ct-agents-row-time { visibility: hidden; }
+.view-action.is-active { color: var(--interactive-accent); }

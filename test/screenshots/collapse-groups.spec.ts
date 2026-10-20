@@ -47,3 +47,37 @@ test.describe('agents list — collapsible groups', () => {
     await expect.poll(() => rows.count()).toBeLessThan(before);
   });
 });
+
+test.describe('agents list — archived threads', () => {
+  test('Show archived adds a collapsed Archived group per project and restores on click', async ({ page }) => {
+    await page.setViewportSize({ width: 560, height: 820 });
+    await page.goto(kanbanUrl + '?dashboard=1');
+    await page.waitForSelector('.ct-agents-project');
+    const out = process.env.SHOT_DIR;
+    await expect(page.locator('.ct-agents-archived-group')).toHaveCount(0);
+
+    await page.locator('.view-action[aria-label="Group & filter agents"]').click();
+    await page.getByText('Show archived').click();
+    const group = page.locator('.ct-agents-archived-group').first();
+    await expect(group).toBeVisible();
+    // Collapsed by default: header only.
+    await expect(group.locator('.ct-agents-row')).toHaveCount(0);
+    if (out) await group.scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+      await page.screenshot({ path: path.join(out, '4-archived-collapsed.png') });
+
+    await group.locator('.ct-agents-group-label').click();
+    await expect(group.locator('.ct-agents-row-archived').first()).toBeVisible();
+    if (out) await group.scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+      await page.screenshot({ path: path.join(out, '5-archived-expanded.png') });
+
+    const title = await group.locator('.ct-agents-row-archived .ct-agents-row-title-text').first().innerText();
+    await group.locator('.ct-agents-row-archived').first().hover();
+    if (out) await page.screenshot({ path: path.join(out, '6-archived-hover.png') });
+    await group.locator('.ct-agents-restore-btn').first().click();
+    const restored = await page.evaluate(() => (window as any).__getRestoredThreadIds());
+    expect(restored).toHaveLength(1);
+    await expect(page.locator('.ct-agents-row-archived').filter({ hasText: title })).toHaveCount(0);
+  });
+});
