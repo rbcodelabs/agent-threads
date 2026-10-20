@@ -490,7 +490,7 @@ export class AgentDashboard extends ItemView {
     header.setAttribute('role', 'button');
     header.setAttribute('tabindex', '0');
     header.setAttribute('aria-expanded', String(!collapsed));
-    const chevron = createSpan({ cls: 'ct-agents-group-chevron' });
+    const chevron = header.createSpan({ cls: 'ct-agents-group-chevron' });
     setIcon(chevron, collapsed ? 'chevron-right' : 'chevron-down');
     header.prepend(chevron);
     const toggle = () => {
