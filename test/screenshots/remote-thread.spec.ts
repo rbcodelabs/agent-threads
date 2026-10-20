@@ -77,7 +77,8 @@ test.describe('Run on a daemon: folders come from the daemon', () => {
     await page.getByRole('button', { name: 'New thread' }).first().click();
     await page.waitForSelector('.ct-new-conv-row .ct-settings-indicator');
     await page.locator('.ct-new-conv-row .ct-settings-indicator').click();
-    await page.locator(`.ct-run-on-item[data-run-on="${daemon}"]`).click();
+    await page.locator('[data-ct-key="row:runon"]').click();
+    await page.locator('.ct-sp-option', { hasText: daemon }).click();
     await page.waitForSelector(ready);
   }
 
@@ -94,7 +95,11 @@ test.describe('Run on a daemon: folders come from the daemon', () => {
     await expect(page.locator('.ct-run-on-folder-input')).toHaveCount(0);
     await expect(page.locator('[data-testid="run-on-folder-hint"]')).toBeVisible();
     await settleView(page);
-    await expect(page.locator('.ct-harness-menu')).toHaveScreenshot('run-on-vault-folder.png');
+    // The folder control sits below the daemon list, inside the Run on level.
+    const lastOption = await page.locator('.ct-sp-option').last().boundingBox();
+    const folderRow = await page.locator('.ct-sp-custom .ct-run-on-folder').boundingBox();
+    expect(folderRow!.y).toBeGreaterThanOrEqual(lastOption!.y + lastOption!.height);
+    await expect(page.locator('.ct-settings-popover')).toHaveScreenshot('run-on-vault-folder.png');
   });
 
   test('Browse starts at the chosen folder, goes up inside the workspace, and Use this folder selects one', async ({ page }) => {
@@ -104,7 +109,7 @@ test.describe('Run on a daemon: folders come from the daemon', () => {
     await page.locator('.ct-run-on-browse-up').click();
     await expect(page.locator('.ct-run-on-browse-item')).toHaveText(['Agent Threads', 'Other Product']);
     await settleView(page);
-    await expect(page.locator('.ct-harness-menu')).toHaveScreenshot('run-on-browse.png');
+    await expect(page.locator('.ct-settings-popover')).toHaveScreenshot('run-on-browse.png');
     await page.locator('.ct-run-on-browse-item[data-path="/home/user/vault/Products/Other Product"]').click();
     await expect(page.locator('.ct-run-on-browse-item')).toHaveText(['Notes', 'Specs']);
     await page.locator('.ct-run-on-browse-use').click();
@@ -117,6 +122,48 @@ test.describe('Run on a daemon: folders come from the daemon', () => {
     await expect(page.locator('[data-testid="run-on-folder-note"]')).toContainText('too old');
     await expect(page.locator('[data-testid="run-on-folder-hint"]')).toBeHidden();
   });
+});
+
+test.describe('existing thread: Run on is its own popover row', () => {
+  const popover = (page: Page) => page.locator('.ct-settings-popover');
+
+  async function openPopover(page: Page, width: number): Promise<void> {
+    await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
+    await page.setViewportSize({ width, height: 760 });
+    await page.goto(harnessUrl + '?remote=1');
+    await page.waitForSelector('.ct-title-row');
+    await page.waitForSelector('.ct-messages');
+    await page.waitForTimeout(400);
+    await page.hover('.ct-floating-panel');
+    await page.click('.ct-thread-more-btn');
+    await expect(popover(page)).toBeVisible();
+  }
+
+  for (const width of [1280, 390]) {
+    test(`Run on is separate from Harness, drills in, and explains unavailable daemons at ${width}`, async ({ page }) => {
+      await openPopover(page, width);
+      await expect(page.locator('[data-ct-key="row:harness"] .ct-sp-value')).toHaveText('Claude');
+      await expect(page.locator('[data-ct-key="row:runon"] .ct-sp-value')).toHaveText('This computer');
+      await settleView(page);
+      await expect(popover(page)).toHaveScreenshot(`existing-thread-popover-root-${width}.png`);
+
+      await page.locator('[data-ct-key="row:harness"]').click();
+      // The Harness level no longer carries a "Run on" group.
+      await expect(popover(page).locator('.ct-sp-group-title')).toHaveCount(0);
+      await expect(popover(page).getByRole('menuitemradio')).toHaveCount(3);
+      await popover(page).locator('.ct-sp-back').click();
+
+      await page.locator('[data-ct-key="row:runon"]').click();
+      await expect(popover(page).locator('.ct-sp-back')).toContainText('Run on');
+      await expect(popover(page).getByRole('menuitemradio', { name: 'This computer' })).toHaveAttribute('aria-checked', 'true');
+      await expect(popover(page).getByRole('menuitemradio', { name: 'my-server' })).toBeEnabled();
+      const plain = popover(page).getByRole('menuitemradio', { name: /plain-box/ });
+      await expect(plain).toBeDisabled();
+      await expect(plain).toContainText('\u2014 no Claude on it');
+      await settleView(page);
+      await expect(popover(page)).toHaveScreenshot(`existing-thread-popover-runon-${width}.png`);
+    });
+  }
 });
 
 test.describe('Remote daemon dialog: folders are chosen from what the daemon advertises', () => {
@@ -204,20 +251,21 @@ test.describe('Run on: set up the local daemon from the picker', () => {
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test(`offers "This Mac (container) - set up" before the daemon exists, and opens its settings at ${viewport.width}`, async ({ page }) => {
     await openNewConversationPicker(page, offerUrl, viewport);
-    const item = page.locator('.ct-run-on-item[data-run-on="setup-local"]');
+    await page.locator('[data-ct-key="row:runon"]').click();
+    const item = page.locator('.ct-sp-option', { hasText: 'This Mac (container)' });
     await expect(item).toBeVisible();
     await expect(item).toContainText('This Mac (container)');
     await settleView(page);
-    await expect(page.locator('.ct-harness-menu')).toHaveScreenshot(`run-on-setup-local-offer-${viewport.width}.png`);
+    await expect(page.locator('.ct-settings-popover')).toHaveScreenshot(`run-on-setup-local-offer-${viewport.width}.png`);
     await item.click();
     expect(await page.evaluate(() => (window as any).__localDaemonSettingsOpened)).toBe(true);
-    await expect(page.locator('.ct-harness-menu')).toHaveCount(0);
+    await expect(page.locator('.ct-settings-popover')).toHaveCount(0);
   });
   }
 
-  test('shows no Run on section when the daemon is not offered', async ({ page }) => {
+  test('shows no Run on row when the daemon is not offered', async ({ page }) => {
     await openNewConversationPicker(page, plainUrl, { width: 420, height: 760 });
-    await expect(page.locator('.ct-harness-menu')).toBeVisible();
-    await expect(page.locator('.ct-run-on-item')).toHaveCount(0);
+    await expect(page.locator('.ct-settings-popover')).toBeVisible();
+    await expect(page.locator('[data-ct-key="row:runon"]')).toHaveCount(0);
   });
 });

@@ -184,6 +184,9 @@ let fakeConn: FakeConn = { status: 'connected', attempt: 0 };
 const fakeConnListeners = new Set<(id: string, s: FakeConn) => void>();
 const fakeDaemonRegistry = {
   nameOf: (id: string) => (id === 'my-server' ? 'my-server' : id),
+  // my-server offers every harness; plain-box is an older daemon (no harness.*: Claude only).
+  capabilitiesOf: (id: string) => (id === 'my-server' ? ['host.tools', 'harness.claude', 'harness.codex', 'harness.opencode'] : id === 'plain-box' ? ['host.tools'] : undefined),
+  warm: async () => {},
   clientFor: () => ({ connect() {}, get connection() { return fakeConn; } }),
   stateOf: () => fakeConn,
   onState: (l: (id: string, s: FakeConn) => void) => { fakeConnListeners.add(l); return () => fakeConnListeners.delete(l); },
@@ -206,6 +209,9 @@ const mockPlugin = {
     return thread.id;
   },
   openNewProjectSettings: () => { newProjectRequests.push(Date.now()); },
+  // Only my-server has a copy of the vault; plain-box cannot see a thread's folder.
+  mapCwdToDaemon: (daemonId: string) => (daemonId === 'my-server' ? '/home/user/vault/Products/Agent Threads' : undefined),
+  mapCwdFromDaemon: () => undefined,
   // `?daemonoffer=1`: the managed local daemon can run here but is not set up (the picker offers to set it up).
   isLocalDaemonSetupOffered: () => new URLSearchParams(window.location.search).has('daemonoffer'),
   openLocalDaemonSettings: () => { (window as any).__localDaemonSettingsOpened = true; },
