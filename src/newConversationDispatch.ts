@@ -14,6 +14,8 @@ export interface DispatchNewThreadOptions {
   goal?: string;
   loop?: { intervalSeconds: number };
   agentHarness?: AgentHarness;
+  /** Permission mode applied to the new thread (omit for the global default). */
+  permissionMode?: PluginSettings['permissionMode'];
   projectId?: string;
   remote?: { daemonId: string; cwd: string };
 }
@@ -48,12 +50,14 @@ export async function dispatchNewConversation(
   deps: NewConversationDispatchDeps,
   payload: DispatchPayload,
 ): Promise<string | null> {
-  const { images, attachment, agentHarness, remote } = payload;
+  const { images, attachment, agentHarness, remote, model, permissionMode } = payload;
   let text = payload.text;
   let opts: DispatchNewThreadOptions = {
     agentHarness,
     remote,
     projectId: deps.projectId || undefined,
+    ...(model ? { model } : {}),
+    ...(permissionMode ? { permissionMode } : {}),
   };
   let titleText = text;
 

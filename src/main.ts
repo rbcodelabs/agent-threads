@@ -3850,6 +3850,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       loop?: { intervalSeconds: number };
       /** Harness override selected at kickoff; does not change Settings. */
       agentHarness?: AgentHarness;
+      /** Permission mode chosen at kickoff; omit for the global default. */
+      permissionMode?: PluginSettings['permissionMode'];
       /** Project selected by a dispatch surface. Omit for deliberate Unassigned. */
       projectId?: string;
       /** Run the thread on a remote daemon, in this folder on its machine, with `agentHarness` (the daemon must offer it). */
@@ -3873,6 +3875,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       ? this.manager.createRemoteThread(title, { daemonId: opts.remote.daemonId, remoteCwd: opts.remote.cwd, clientId: this.settings.remoteClientId ?? 'unknown', agentHarness: opts.agentHarness ?? this.settings.agentHarness ?? 'claude' }, project?.id)
       : this.manager.createThread(title, cwd, project?.id, opts?.agentHarness);
     if (opts?.model) this.manager.setThreadModel(thread.id, opts.model);
+    if (opts?.permissionMode) this.manager.setThreadPermissionMode(thread.id, opts.permissionMode);
     const goalRevision = opts?.goal ? this.manager.setThreadGoal(thread.id, opts.goal) : undefined;
     if (opts?.loop) {
       await this.scheduler.createItem({

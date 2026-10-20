@@ -1,4 +1,12 @@
 import { addIcon } from 'obsidian';
+import type { AgentHarness } from './types';
+
+/** Icon id registered below for each harness. */
+export const HARNESS_BRAND_ICONS: Record<AgentHarness, string> = {
+  claude: 'claude-spark',
+  codex: 'openai-blossom',
+  opencode: 'opencode-mark',
+};
 
 // Official Claude Spark supplied in Anthropic's press kit. Scale converts its
 // 94 × 94 source viewbox to real Obsidian's actual icon wrapper viewbox of

@@ -10,7 +10,7 @@ import { buildRemoteEnvironmentPrompt } from './remote/sessionSpec';
 import { gateHarness } from './remote/harnessSupport';
 import type { RemoteHostTools } from './remote/hostTools';
 import { HostToolSlots } from './remote/hostToolExecutor';
-import { describeDroppedMcp, partitionExternalMcpServers } from './remote/mcpPartition';
+import { partitionExternalMcpServers, type DroppedMcpServer } from './remote/mcpPartition';
 import { resolveCodexPermissions, serializableMcpServers, type HarnessContextUsage, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
 import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
 import { NULL_ATTACHMENT_STORE, type AttachmentStore } from './host/AttachmentStore';
@@ -306,7 +306,6 @@ export class ThreadManager {
   /** Calls in flight across every remote thread (shared cap, see HostToolExecutor). */
   private readonly hostToolSlots = new HostToolSlots();
   /** Last dropped-MCP notice shown per thread, so it appears again only when the set changes. */
-  private readonly remoteMcpNoticeSig = new Map<string, string>();
   /**
    * When set, called before each session run to resolve secret env var values from
    * the OS keychain. Returns a plain key-value map that is merged into the session
@@ -1773,6 +1772,14 @@ export class ThreadManager {
    * toast, and survives reload because it lives in thread.messages (persisted
    * to data.json). Emits a 'message' event so any open view appends it live.
    */
+  /** MCP servers a remote thread's daemon cannot use. Shown as a warnings pill in the daemon header, not in the transcript. */
+  getRemoteMcpWarnings(threadId: string): DroppedMcpServer[] {
+    const remote = this.getThread(threadId)?.remote;
+    if (!remote) return [];
+    const hostToolSettings = this.remoteDaemons?.hostToolsOf?.(remote.daemonId);
+    return partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist, this.remoteDaemons?.mcpSyncOf?.(remote.daemonId)).dropped;
+  }
+
   addNoticeMessage(
     threadId: string,
     status: 'completed' | 'failed' | 'stopped',
@@ -2516,11 +2523,6 @@ export class ThreadManager {
     // dropped and the user is told once per change.
     const hostToolSettings = this.remoteDaemons?.hostToolsOf?.(remote.daemonId);
     const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist, this.remoteDaemons?.mcpSyncOf?.(remote.daemonId));
-    const droppedNote = describeDroppedMcp(partition.dropped, daemonName);
-    if ((this.remoteMcpNoticeSig.get(threadId) ?? '') !== (droppedNote ?? '')) {
-      this.remoteMcpNoticeSig.set(threadId, droppedNote ?? '');
-      if (droppedNote) this.addNoticeMessage(threadId, 'stopped', droppedNote);
-    }
     const resume = thread.sessionId;
     const extras = this.remoteSessionExtras?.(threadId);
     const common = {

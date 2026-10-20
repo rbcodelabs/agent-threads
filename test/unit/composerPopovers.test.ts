@@ -1,8 +1,8 @@
 /**
  * @vitest-environment jsdom
  *
- * Behavioural contract of the composer popovers: roles/aria, in-place expansion,
- * keyboard roving, Escape focus return, outside-click dismissal and the
+ * Behavioural contract of the composer popovers: roles/aria, drill-down levels,
+ * keyboard navigation, Escape focus return, outside-click dismissal and the
  * project filter / sort / read-only states.
  */
 import '../setup/obsidian-dom';
@@ -50,20 +50,164 @@ describe('ComposerSettingsPopover', () => {
     expect(document.activeElement).toBe(root.querySelector('.ct-sp-row'));
   });
 
-  it('expands a row in place, applies a choice, collapses, and shows the new value', () => {
+  it('drills into a row (replacing the content), applies a choice, returns to the root and shows the new value', () => {
     const state = { model: 'Default' };
     const p = new ComposerSettingsPopover({ host, anchor }, settingsModel(state));
     p.open();
-    const row = host.querySelector<HTMLButtonElement>('[data-ct-key="row:model"]')!;
-    row.click();
-    expect(host.querySelector('[data-ct-key="row:model"]')!.getAttribute('aria-expanded')).toBe('true');
+    host.querySelector<HTMLButtonElement>('[data-ct-key="row:model"]')!.click();
+    // Level view: back header + options only; the other rows and actions are gone.
+    expect(host.querySelector('.ct-sp-row')).toBeNull();
+    expect(host.querySelector('[data-ct-key="action:fork"]')).toBeNull();
+    expect(host.querySelector('.ct-sp-back .ct-sp-label')!.textContent).toBe('Model');
     const options = host.querySelectorAll('[role="menuitemradio"]');
     expect([...options].map(o => o.getAttribute('aria-checked'))).toEqual(['true', 'false']);
+    expect(document.activeElement).toBe(host.querySelector('.ct-sp-back'));
     (options[1] as HTMLButtonElement).click();
     expect(state.model).toBe('Opus');
-    expect(host.querySelector('[data-ct-key="row:model"]')!.getAttribute('aria-expanded')).toBe('false');
-    expect(host.querySelector('.ct-sp-row .ct-sp-value')!.textContent).toBe('Opus');
+    expect(host.querySelector('.ct-sp-back')).toBeNull();
+    expect(host.querySelector('[data-ct-key="row:model"] .ct-sp-value')!.textContent).toBe('Opus');
+    expect(document.activeElement).toBe(host.querySelector('[data-ct-key="row:model"]'));
     expect(host.querySelector('.ct-settings-popover')).not.toBeNull();
+  });
+
+  it('root rows carry icon, label, value and a chevron', () => {
+    const p = new ComposerSettingsPopover({ host, anchor }, settingsModel({ model: 'Default' }));
+    p.open();
+    const row = host.querySelector('[data-ct-key="row:model"]')!;
+    expect(row.querySelector('.ct-sp-icon')!.getAttribute('data-icon')).toBe('cpu');
+    expect(row.querySelector('.ct-sp-label')!.textContent).toBe('Model');
+    expect(row.querySelector('.ct-sp-value')!.textContent).toBe('Default');
+    expect(row.querySelector('.ct-sp-chevron')!.getAttribute('data-icon')).toBe('chevron-right');
+    expect(row.getAttribute('aria-haspopup')).toBe('menu');
+  });
+
+  it('Right drills in, Left goes back, Escape goes back and only closes at the root', () => {
+    const onClose = vi.fn();
+    const p = new ComposerSettingsPopover({ host, anchor, onClose }, settingsModel({ model: 'Default' }));
+    p.open();
+    const row = () => host.querySelector<HTMLElement>('[data-ct-key="row:model"]')!;
+    key(row(), 'ArrowRight');
+    expect(host.querySelector('.ct-sp-back')).not.toBeNull();
+    key(document.activeElement!, 'ArrowLeft');
+    expect(host.querySelector('.ct-sp-back')).toBeNull();
+    expect(document.activeElement).toBe(row());
+    key(row(), 'ArrowRight');
+    key(document.activeElement!, 'Escape');
+    expect(p.isOpen).toBe(true);
+    expect(host.querySelector('.ct-sp-back')).toBeNull();
+    expect(document.activeElement).toBe(row());
+    key(row(), 'Escape');
+    expect(p.isOpen).toBe(false);
+    expect(document.activeElement).toBe(anchor);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('Enter on a row drills in (native button activation)', () => {
+    const p = new ComposerSettingsPopover({ host, anchor }, settingsModel({ model: 'Default' }));
+    p.open();
+    // A real Enter on a focused button fires click; jsdom does not synthesise it.
+    host.querySelector<HTMLButtonElement>('[data-ct-key="row:permissions"]')!.click();
+    expect(host.querySelector('.ct-sp-back .ct-sp-label')!.textContent).toBe('Permissions');
+  });
+
+  it('Up/Down roam within the level, including the back header', () => {
+    const p = new ComposerSettingsPopover({ host, anchor }, settingsModel({ model: 'Default' }));
+    p.open();
+    host.querySelector<HTMLButtonElement>('[data-ct-key="row:model"]')!.click();
+    const back = host.querySelector<HTMLElement>('[data-ct-key="back"]')!;
+    key(back, 'ArrowDown');
+    expect(document.activeElement).toBe(host.querySelector('[data-ct-key="opt:model:0"]'));
+    key(document.activeElement!, 'ArrowUp');
+    expect(document.activeElement).toBe(back);
+  });
+
+  it('keeps the height of the root level while drilled in, and drops it on return', () => {
+    const p = new ComposerSettingsPopover({ host, anchor }, settingsModel({ model: 'Default' }));
+    p.open();
+    const root = host.querySelector<HTMLElement>('.ct-settings-popover')!;
+    Object.defineProperty(root, 'offsetHeight', { configurable: true, get: () => 180 });
+    host.querySelector<HTMLButtonElement>('[data-ct-key="row:model"]')!.click();
+    expect(root.style.minHeight).toBe('180px');
+    host.querySelector<HTMLButtonElement>('.ct-sp-back')!.click();
+    expect(root.style.minHeight).toBe('');
+  });
+
+  it('closeOnSelect options close the popover; stayOnLevel options keep the level and re-render', () => {
+    const state = { value: 'a' };
+    const close = vi.fn();
+    const p = new ComposerSettingsPopover({ host, anchor }, () => ({
+      settings: [{ id: 'r', label: 'Run on', icon: 'server', value: state.value, groups: [{ options: [
+        { label: 'stay', checked: state.value === 'a', stayOnLevel: true, onSelect: () => { state.value = 'a'; } },
+        { label: 'other', checked: state.value === 'b', stayOnLevel: true, onSelect: () => { state.value = 'b'; } },
+        { label: 'gone', closeOnSelect: true, onSelect: close },
+      ] }] }],
+      actions: [],
+    }));
+    p.open();
+    host.querySelector<HTMLButtonElement>('[data-ct-key="row:r"]')!.click();
+    host.querySelector<HTMLButtonElement>('[data-ct-key="opt:r:1"]')!.click();
+    expect(host.querySelector('.ct-sp-back')).not.toBeNull();
+    expect(host.querySelector('[data-ct-key="opt:r:1"]')!.getAttribute('aria-checked')).toBe('true');
+    host.querySelector<HTMLButtonElement>('[data-ct-key="opt:r:2"]')!.click();
+    expect(close).toHaveBeenCalledOnce();
+    expect(p.isOpen).toBe(false);
+  });
+
+  it('renders a group\'s custom content below its options and does not treat keys inside it as menu navigation', () => {
+    const typed = vi.fn();
+    const p = new ComposerSettingsPopover({ host, anchor }, () => ({
+      settings: [{ id: 'r', label: 'Run on', icon: 'server', value: 'x', groups: [{
+        options: [{ label: 'box', checked: true, onSelect: () => {} }],
+        render: (el, ctl) => {
+          const input = el.createEl('input', { attr: { type: 'text' } });
+          input.addEventListener('keydown', (e) => { typed(e.key); if (e.key === 'Enter') ctl.close(); });
+        },
+      }] }],
+      actions: [],
+    }));
+    p.open();
+    host.querySelector<HTMLButtonElement>('[data-ct-key="row:r"]')!.click();
+    const opt = host.querySelector('.ct-sp-option')!;
+    const custom = host.querySelector('.ct-sp-custom')!;
+    expect(opt.compareDocumentPosition(custom) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const input = custom.querySelector('input')!;
+    key(input, 'ArrowLeft');
+    expect(host.querySelector('.ct-sp-back')).not.toBeNull(); // still in the level
+    key(input, 'Enter');
+    expect(typed).toHaveBeenCalledWith('Enter');
+    expect(p.isOpen).toBe(false);
+  });
+
+  it('refresh keeps the level and falls back to the root when the setting disappears', () => {
+    let hasRow = true;
+    const p = new ComposerSettingsPopover({ host, anchor }, () => ({
+      settings: hasRow ? [{ id: 'r', label: 'Run on', icon: 'server', value: 'x', groups: [{ options: [{ label: 'a', onSelect: () => {} }] }] }, { id: 'm', label: 'Model', icon: 'cpu', value: '', groups: [] }] : [{ id: 'm', label: 'Model', icon: 'cpu', value: '', groups: [] }],
+      actions: [],
+    }));
+    p.open();
+    host.querySelector<HTMLButtonElement>('[data-ct-key="row:r"]')!.click();
+    p.refresh();
+    expect(host.querySelector('.ct-sp-back')).not.toBeNull();
+    hasRow = false;
+    p.refresh();
+    expect(host.querySelector('.ct-sp-back')).toBeNull();
+    expect(host.querySelector('[data-ct-key="row:m"]')).not.toBeNull();
+  });
+
+  it('shows disabled options with their reason, unfocusable and inert, as a radio or an action', () => {
+    const run = vi.fn();
+    const p = new ComposerSettingsPopover({ host, anchor }, () => ({
+      settings: [{ id: 'r', label: 'Run on', icon: 'server', value: 'x', groups: [{ options: [
+        { label: 'box \u2014 no Codex on it', disabled: true, onSelect: run },
+        { label: 'Set up\u2026', action: true, dividerBefore: true, closeOnSelect: true, onSelect: run },
+      ] }] }],
+      actions: [],
+    }));
+    p.open();
+    host.querySelector<HTMLButtonElement>('[data-ct-key="row:r"]')!.click();
+    expect(host.querySelector('[data-ct-key="opt:r:0"]')!.textContent).toContain('\u2014 no Codex on it');
+    expect(host.querySelector('[data-ct-key="opt:r:1"]')!.getAttribute('role')).toBe('menuitem');
+    expect(host.querySelector('.ct-sp-options [role="separator"]')).not.toBeNull();
   });
 
   it('moves focus with arrows, Home and End (wrapping)', () => {
@@ -126,7 +270,7 @@ describe('ComposerSettingsPopover', () => {
     p.open();
     host.querySelector<HTMLButtonElement>('[data-ct-key="row:h"]')!.click();
     const navs = [...host.querySelectorAll('[data-ct-nav]')];
-    expect(navs.length).toBe(2); // row + enabled option
+    expect(navs.length).toBe(2); // back header + enabled option
     host.querySelector<HTMLButtonElement>('[data-ct-key="opt:h:1"]')!.click();
     expect(run).not.toHaveBeenCalled();
   });
