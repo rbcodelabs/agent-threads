@@ -159,7 +159,7 @@ test.describe('existing thread: Run on is its own popover row', () => {
       await expect(popover(page).getByRole('menuitemradio', { name: 'my-server' })).toBeEnabled();
       const plain = popover(page).getByRole('menuitemradio', { name: /plain-box/ });
       await expect(plain).toBeDisabled();
-      await expect(plain).toContainText('\u2014 no Claude on it');
+      await expect(plain).toContainText('\u2014 its folder is not shared with this daemon');
       await settleView(page);
       await expect(popover(page)).toHaveScreenshot(`existing-thread-popover-runon-${width}.png`);
     });
