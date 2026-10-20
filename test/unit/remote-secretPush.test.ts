@@ -216,6 +216,17 @@ describe('RemoteSecretPush', () => {
     expect(sent(f)).toHaveLength(2);
   });
 
+  it('reconcile alone (no session send) refreshes a kind before the TTL lapses', async () => {
+    const f = fixture();
+    await f.push.prepare('box', 'p');
+    await f.push.reconcile();
+    expect(sent(f)).toHaveLength(1);
+    f.advance((REMOTE_SECRET_TTL_SEC * 1000) / 2 + 1);
+    await f.push.reconcile();
+    expect(sent(f)).toHaveLength(2);
+    expect(sent(f)[1].payload.kind).toBe('sessenv-p');
+  });
+
   it('a failing push becomes a redacted warning, never a throw, and no envKind', async () => {
     const f = fixture();
     const first = await f.push.prepare('box', 'p');

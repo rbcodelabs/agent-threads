@@ -682,6 +682,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
     // Quit: re-push without the secrets (bounded, best effort); the daemon's TTL deletes whatever this cannot reach.
     this.register(() => { void this.remoteSecretPush?.stop(); });
+    // Keeps pushed kinds from lapsing between messages (reconcile re-pushes only kinds older than half the TTL), so a
+    // daemon-side session restart with no send from here still finds its environment.
+    this.registerInterval(window.setInterval(() => { void this.remoteSecretPush?.reconcile(); }, 10 * 60 * 1000));
     this.remoteFolders = createRemoteFolderSource(this.daemonRegistry);
     this.remoteRepos = createRemoteReposSource(this.daemonRegistry);
     this.register(() => { this.daemonRegistry?.disposeAll(); });

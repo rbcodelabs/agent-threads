@@ -827,7 +827,7 @@ By default no secret leaves your computer for a remote daemon. To send some, ope
 
 - Sending needs a separate **admin-scope** token (stored in your keychain as `AGENT_THREADS_PUSHADMIN_<ID>_TOKEN`); without one nothing is sent and you see a single warning. The everyday control token cannot push credentials.
 - Values go over the existing `creds.push` command as a `sessenv-<project>` kind and are read when a session starts. Pushes to plain `ws://` addresses are refused unless the address is loopback; use `wss://`.
-- The kind lasts one hour and is refreshed at half that while Geode is connected. A session that starts after Geode has been away for more than an hour starts without these variables until Geode reconnects.
+- The kind lasts one hour. It is re-sent before each message once it is half that old, and every 10 minutes while Geode is open, so a session the daemon restarts on its own still finds it. If Geode is closed for more than an hour the kind is deleted by the daemon (or by Geode on quit) and is sent again with your next message.
 - Removing a name re-sends the kind without it. Emptying the list, removing the daemon or quitting Geode deletes the kind from the daemon.
 - Values are redacted from logs and errors and are never put in command arguments.
 
