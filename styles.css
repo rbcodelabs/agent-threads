@@ -9858,6 +9858,26 @@ button.ct-agent-crumb:focus-visible {
 .ct-remote-pill--protocol,
 .ct-remote-pill--auth { color: var(--text-error, var(--color-red, #e05252)); }
 
+.ct-remote-warn {
+  flex-shrink: 0;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--color-yellow, #d9a21b);
+  border: 1px solid var(--color-yellow, #d9a21b);
+}
+
+/* Invisible hit area: the pill is ~40x18, so a 44x44 box centred horizontally on it (the minimum tap target) is lifted over the strip without changing its look. It reaches only 6px above the pill (not into the title-row button above) and the rest below. It reaches at most ~3px sideways, inside the 8px strip gap, so it never covers a neighbouring control. z-index lifts it over the (positioned) message rows that start just below the strip. */
+.ct-remote-warn::after { content: ""; position: absolute; z-index: 1; left: 50%; top: -7px; width: 44px; height: 44px; transform: translateX(-50%); }
+
+.ct-remote-warn-icon { display: inline-flex; }
+.ct-remote-warn-icon svg { width: 12px; height: 12px; }
+
 @keyframes ct-remote-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
