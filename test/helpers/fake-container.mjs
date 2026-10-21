@@ -50,6 +50,11 @@ if (a === 'image' && b === 'pull') {
   done(0);
 }
 
+if (a === 'image' && b === 'list') {
+  out(Object.keys(state.images).map((r) => `${r}\n`).join(''));
+  done(0);
+}
+
 if (a === 'image' && b === 'rm') {
   delete state.images[args[2]];
   done(0);

@@ -10,6 +10,8 @@ import {
   credentialPresentArgs,
   dataVolumeFor,
   DATA_MOUNT,
+  imageListArgs,
+  staleDaemonImages,
   labelsFor,
   mcpSyncArgs,
   localImageRef,
@@ -265,5 +267,43 @@ describe('synced stdio MCP servers', () => {
     const name = containerNameFor(spec.vaultPath);
     const args = mcpSyncArgs(name);
     expect(args).toEqual(['exec', '-i', '--user', '10001', name, 'agent-threads', 'mcp', 'sync', '--stdin', '--clear', '--json', '--url', 'ws://127.0.0.1:7433', '--data-dir', DATA_MOUNT]);
+  });
+});
+
+describe('staleDaemonImages', () => {
+  const GHCR = 'ghcr.io/rbcodelabs/agent-threads-daemon';
+  const LOCAL = 'agent-threads-daemon-local';
+
+  it('lists images with one name per line', () => {
+    expect(imageListArgs()).toEqual(['image', 'list', '--quiet']);
+  });
+
+  it('returns old published and locally built images, with or without a harness suffix', () => {
+    const names = [`${GHCR}:0.69.0`, `${LOCAL}:0.69.0`, `${LOCAL}:0.69.0-claude-codex-opencode`, `${LOCAL}:0.0.1`];
+    expect(staleDaemonImages(names, '0.70.2')).toEqual(names);
+  });
+
+  it('keeps the current version and its harness-suffixed tags', () => {
+    const names = [`${GHCR}:0.70.2`, `${LOCAL}:0.70.2`, `${LOCAL}:0.70.2-claude-codex`, `${LOCAL}:0.70.2-claude-codex-opencode`];
+    expect(staleDaemonImages(names, '0.70.2')).toEqual([]);
+  });
+
+  it('never matches a version that merely shares a prefix', () => {
+    expect(staleDaemonImages([`${LOCAL}:0.70.0`, `${GHCR}:0.7.0`, `${LOCAL}:0.7.0-codex`], '0.7.0')).toEqual([`${LOCAL}:0.70.0`]);
+    expect(staleDaemonImages([`${LOCAL}:0.7.0`, `${LOCAL}:0.7.0-codex`], '0.70.0')).toEqual([`${LOCAL}:0.7.0`, `${LOCAL}:0.7.0-codex`]);
+    expect(staleDaemonImages([`${LOCAL}:0.70.20`], '0.70.2')).toEqual([`${LOCAL}:0.70.20`]);
+  });
+
+  it('leaves unrelated repositories, lookalike names, and untagged or digest entries alone', () => {
+    const names = [
+      'docker.io/library/node:22', 'node:22', 'claude-threads-sandbox:latest', 'claude-threads-foo:0.1.0',
+      'ghcr.io/apple/containerization/vminit:0.9.1', 'ghcr.io/rbcodelabs/agent-threads-daemon-other:0.1.0',
+      'ghcr.io/rbcodelabs/agent-threads:0.1.0', `${GHCR}`, `${LOCAL}@sha256:abc`, '', `localhost:5000/${LOCAL}`,
+    ];
+    expect(staleDaemonImages(names, '0.70.2')).toEqual([]);
+  });
+
+  it('accepts a docker.io/library/ prefix on our repositories', () => {
+    expect(staleDaemonImages([`docker.io/library/${LOCAL}:0.1.0`], '0.70.2')).toEqual([`docker.io/library/${LOCAL}:0.1.0`]);
   });
 });

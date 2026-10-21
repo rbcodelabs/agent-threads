@@ -427,6 +427,11 @@ describe('update, reset, remove', () => {
     const h = makeHarness({ pluginVersion: '0.64.0', secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE } });
     await h.controller.setUp();
     const token = h.token();
+    // a leftover from an abandoned harness set, and an unrelated image
+    const seeded = h.readState();
+    seeded.images['agent-threads-daemon-local:0.60.0-codex'] = { built: true };
+    seeded.images['node:22'] = {};
+    h.writeState(seeded);
     // the plugin updates to 0.65.0
     (h.deps as { pluginVersion: string }).pluginVersion = '0.65.0';
     const snap = await h.controller.snapshot();
@@ -439,6 +444,9 @@ describe('update, reset, remove', () => {
     const s = h.readState();
     expect(s.images[localImageRef('0.65.0')]).toBeTruthy();
     expect(s.images[localImageRef('0.64.0')]).toBeUndefined();
+    expect(s.images[publishedImageRef('0.64.0')]).toBeUndefined();
+    expect(s.images['agent-threads-daemon-local:0.60.0-codex']).toBeUndefined();
+    expect(s.images['node:22']).toBeTruthy();
     expect(s.containers[h.name]?.labels['com.rbcodelabs.agent-threads.local-daemon.version']).toBe('0.65.0');
     expect(s.volumes[dataVolumeFor(h.vaultPath)]?.credential).toBe(CLAUDE);
   });
