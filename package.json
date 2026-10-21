@@ -7,6 +7,7 @@
     "build": "node esbuild.config.mjs",
     "check:mobile-load": "node scripts/check-mobile-load.cjs dist/main.js",
     "check:mobile-geode": "node scripts/check-mobile-geode.mjs dist",
+    "check:mobile-install": "node scripts/check-mobile-install.mjs dist",
     "build:daemon": "node esbuild.daemon.mjs",
     "dev": "node esbuild.config.mjs --watch",
     "build:harness": "node test/harness/esbuild.mjs",
