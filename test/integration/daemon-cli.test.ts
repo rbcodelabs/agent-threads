@@ -106,7 +106,9 @@ describe('connection failures map to exit codes', () => {
     const dead = await cli(['list'], {}, controlToken, 'ws://127.0.0.1:1');
     expect(dead.code).toBe(3);
     expect(dead.err).toMatch(/cannot reach the daemon/);
-    const none = await cli(['list'], { env: { AGENT_THREADS_URL: td.daemon.url } });
+    // --data-dir pins the token lookup to this test's own (empty) dir; otherwise the CLI falls back to the
+    // machine's real /var/lib/agent-threads/cli-token (or ~/.agent-threads) when one is installed.
+    const none = await cli(['--data-dir', td.dataDir, 'list'], { env: { AGENT_THREADS_URL: td.daemon.url } });
     expect(none.code).toBe(4);
     expect(none.err).toMatch(/no access token/);
   });

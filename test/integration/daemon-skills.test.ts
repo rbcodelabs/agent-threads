@@ -35,7 +35,7 @@ async function connect(token = td.adminToken): Promise<TestClient> {
 const skillsRoot = () => join(td.dataDir, 'skills');
 
 /** The production sync logic with the test socket as its client. `sent` records every skills.* frame. */
-function clientSync(c: TestClient, opts: { capabilities?: string[]; plugins: string[]; sent?: string[] }) {
+function clientSync(c: TestClient, opts: { capabilities?: string[]; plugins: string[]; sent?: string[]; adminToken?: string }) {
   const client = {
     daemonInfo: { capabilities: opts.capabilities ?? ['skills.sync'], epoch: 'e' },
     async command(type: string, payload: object) {
@@ -46,7 +46,9 @@ function clientSync(c: TestClient, opts: { capabilities?: string[]; plugins: str
     },
   };
   return new RemoteSkillsSync({
-    resolver: { clientFor: () => client as never, nameOf: () => 'box', warm: async () => {} },
+    resolver: { nameOf: () => 'box' },
+    adminToken: () => opts.adminToken === undefined ? td.adminToken : opts.adminToken || undefined,
+    createClient: () => client as never,
     skillPlugins: () => opts.plugins.map((path) => ({ path })),
     fs: nodeFs(),
     sha256: () => createHash('sha256'),
@@ -162,6 +164,23 @@ describe('the client logic against the daemon', () => {
     expect(r.notices[0]).toMatch(/predates skill sync/);
     expect(sent).toEqual([]);
     expect(existsSync(skillsRoot())).toBe(false);
+  });
+
+  it('the everyday control token is refused with a notice naming the admin token, and writes nothing', async () => {
+    const control = await connect(td.daemon.tokens.create('everyday', 'control').token);
+    const r = await clientSync(control, { plugins: [makeSkill('delta')], adminToken: 'atd_stored_control' }).prepare(daemonCfg());
+    expect(r.pluginPaths).toEqual([]);
+    expect(r.notices[0]).toMatch(/the saved admin token was refused/);
+    expect(existsSync(skillsRoot())).toBe(false);
+  });
+
+  it('with no admin token stored nothing is sent and the notice says where to add one', async () => {
+    const c = await connect();
+    const sent: string[] = [];
+    const r = await clientSync(c, { plugins: [makeSkill('epsilon')], adminToken: '', sent }).prepare(daemonCfg());
+    expect(r.pluginPaths).toEqual([]);
+    expect(r.notices[0]).toMatch(/needs an admin token.*Settings/);
+    expect(sent).toEqual([]);
   });
 
   it('off sends nothing and leaves earlier synced data alone', async () => {

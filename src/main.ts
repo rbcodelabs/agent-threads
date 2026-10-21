@@ -85,7 +85,7 @@ import { RelayClient } from './RelayClient';
 import { MobileThreadStore } from './MobileThreadStore';
 import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
-import { DaemonRegistry } from './remote/DaemonRegistry';
+import { DaemonRegistry, warmClient } from './remote/DaemonRegistry';
 import { DaemonClient, daemonWsUrl } from './remote/DaemonClient';
 import { adminTokenSecretNameFor } from './remote/daemonConfig';
 import { RemoteSecretPush } from './remote/secretPush';
@@ -674,13 +674,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       adminToken: (daemon) => this.app.secretStorage.getSecret(secretStorageKey(adminTokenSecretNameFor(daemon.id))) || undefined,
       // What a host session would get: Extra environment variables, then the keychain secrets visible to the project.
       resolveEnv: (projectId) => ({ ...parseExtraEnv(effectiveExtraEnv(this.settings)), ...(this.manager.secretEnvResolver?.(projectId) ?? {}) }),
-      createClient: (daemon, adminToken) => new DaemonClient({
-        url: daemonWsUrl(daemon.url),
-        getToken: () => adminToken,
-        createSocket: createPluginWebSocketFactory(),
-        clientVersion: this.manifest.version,
-        log: (message) => debugLog(message),
-      }),
+      createClient: (daemon, adminToken) => this.createAdminDaemonClient(daemon, adminToken),
       log: (message) => debugLog(message),
     });
     // Quit: re-push without the secrets (bounded, best effort); the daemon's TTL deletes whatever this cannot reach.
@@ -2818,6 +2812,18 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.register(() => { controller.cancel(); });
   }
 
+  /** A client authenticated with the separate admin token, for the commands the everyday control token cannot send. */
+  private createAdminDaemonClient(daemon: RemoteDaemonConfig, adminToken: string, opts: { reconnect?: boolean } = {}): DaemonClient {
+    return new DaemonClient({
+      url: daemonWsUrl(daemon.url),
+      getToken: () => adminToken,
+      createSocket: createPluginWebSocketFactory(),
+      clientVersion: this.manifest.version,
+      ...opts,
+      log: (message) => debugLog(message),
+    });
+  }
+
   /**
    * A plain remote daemon: copy the skill folders Threads controls to its data directory (src/remote/skillsSync.ts) and
    * hand the resulting paths to the session spec. Never throws; a problem becomes a notice in the thread and the
@@ -2836,6 +2842,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
         const crypto = require('crypto') as typeof import('crypto');
         this.remoteSkillsSync = new RemoteSkillsSync({
           resolver: this.daemonRegistry,
+          // Skill commands need admin scope, so (like secret push) they use their own short-lived admin connection.
+          adminToken: (d) => this.app.secretStorage.getSecret(secretStorageKey(adminTokenSecretNameFor(d.id))) || undefined,
+          createClient: (d, adminToken) => this.createAdminDaemonClient(d, adminToken, { reconnect: false }),
+          warm: (client, timeoutMs) => warmClient(client as DaemonClient, timeoutMs),
           skillPlugins: () => this.manager.buildHostSkillPlugins(),
           fs: nodeFs,
           sha256: () => crypto.createHash('sha256'),
