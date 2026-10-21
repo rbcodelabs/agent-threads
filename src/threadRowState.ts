@@ -21,7 +21,7 @@
  *      bucket per product decision — a thread with no active foreground turn
  *      but an outstanding background task/subagent/workflow is still "doing
  *      something," it just isn't the caller's own turn anymore)
- *   4. hasPendingWakeup     → 'waiting'
+ *   4. hasPendingWakeup     → 'waiting' (the thread is parked on a timer; its session has not started so isRunning is false)
  *   5. lastError            → 'error'
  *   6. messageCount > 0     → 'idle-reviewed' if reviewed, else 'idle-new'
  *   7. else                 → 'empty'

@@ -54,6 +54,7 @@ function renderKanbanBoard(
     hasPendingQuestion: () => false,
     hasPendingPlan: () => false,
     hasActiveBackgroundTasks: () => false,
+    isAwaitingSandboxDecision: () => false,
     isRunStale: () => false,
     getAgentRuns: () => [],
   };

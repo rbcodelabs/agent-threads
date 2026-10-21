@@ -1,8 +1,4 @@
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
-// Type-only: sandboxVm.ts has no module-scope side effects and no top-level
-// Node requires, and `import type` is erased at build time, so this stays safe
-// for the mobile bundle.
-import type { VmNetworkMode } from './sandboxVm';
 
 export type MessageRole = 'user' | 'assistant' | 'compact' | 'notice';
 
@@ -12,44 +8,6 @@ export const AGENT_HARNESSES: readonly AgentHarness[] = ['claude', 'codex', 'ope
 
 export function isAgentHarness(value: unknown): value is AgentHarness {
   return typeof value === 'string' && (AGENT_HARNESSES as readonly string[]).includes(value);
-}
-
-/**
- * ADR-0015: whether a thread's harness CLI process runs inside its sandbox
- * container instead of being spawned on the host. Claude-only for now.
- *
- * - `'auto'` (default) — routes into the VM only when the platform supports
- *   it, `SandboxVmManager.probe()` succeeds, and the harness image
- *   (`harnessVmImage`) actually exists. Any current user for whom that image
- *   doesn't exist yet sees no behavior change at all.
- * - `'always'` — forces VM routing; surfaces a clear thrown error (no silent
- *   host fallback) if any prerequisite is missing.
- * - `'never'` — exactly today's host-local spawn behavior. The rollback lever.
- */
-export type HarnessVmMode = 'auto' | 'always' | 'never';
-export const HARNESS_VM_MODES: readonly HarnessVmMode[] = ['auto', 'always', 'never'];
-
-export function isHarnessVmMode(value: unknown): value is HarnessVmMode {
-  return typeof value === 'string' && (HARNESS_VM_MODES as readonly string[]).includes(value);
-}
-
-/**
- * Effective container-routing mode for a thread: the per-thread override (set
- * from the chat's harness menu) wins over the global setting, which defaults
- * to 'auto'.
- */
-export function resolveEffectiveHarnessVmMode(
-  threadMode: HarnessVmMode | undefined,
-  settingsMode: HarnessVmMode | undefined,
-): HarnessVmMode {
-  return threadMode ?? settingsMode ?? 'auto';
-}
-
-/** Menu/info label for a per-thread execution override (undefined = follows settings). */
-export function harnessVmModeLabel(mode: HarnessVmMode | undefined): string {
-  if (mode === 'always') return 'Container';
-  if (mode === 'never') return 'Host (no container)';
-  return 'Default (follows settings)';
 }
 
 /** Short user-facing name for a harness (undefined means a legacy Claude thread). */
@@ -64,6 +22,8 @@ export function agentHarnessLabel(harness: AgentHarness | undefined): string {
 export type ThreadStatus = 'waiting' | 'active' | 'error' | 'archived' | 'reconnecting';
 
 export type LayoutDensity = 'compact' | 'comfortable' | 'spacious';
+/** How tool-call groups render in the chat. See toolNameUtils.ToolCallStyle. */
+export type ToolCallStyle = 'chips' | 'tree' | 'cards';
 
 export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
 
@@ -288,6 +248,13 @@ export interface RemoteDaemonConfig {
   /** Default directory offered for new remote threads (a path on the daemon's machine). */
   defaultCwdRoot?: string;
   /**
+   * Names (never values) of the environment variables / keychain secrets this app may PUSH to this daemon, as the
+   * session environment of threads that run there. `NAME` applies to every project, `<projectId>/NAME` to one
+   * project. Absent or empty = nothing is sent (the default). Needs an admin token under
+   * `adminTokenSecretNameFor(id)`; see src/remote/secretPush.ts.
+   */
+  pushedSecrets?: string[];
+  /**
    * This daemon holds a synced mirror of the vault. A vault thread run there
    * defaults to the same relative folder under `remoteRoot`.
    */
@@ -298,6 +265,80 @@ export interface RemoteDaemonConfig {
    * then only the groups named in `routes`.
    */
   hostTools?: RemoteHostToolsSettings;
+  /**
+   * Set when Agent Threads created and manages this daemon (the "Local daemon" block in Settings -> Remote). URL and
+   * token are owned by that feature: the entry's Edit locks them and Remove stops and deletes the container.
+   * Desktop only: hidden on mobile, where loopback means nothing.
+   */
+  managed?: 'local-container';
+  /**
+   * Whether the skill folders Threads controls (installed, local and GitHub skill sources; never `~/.claude`) are
+   * copied to this daemon's data directory over its connection. Absent = `'auto'`; an unrecognised value is treated as
+   * `'off'`. Read it only through `resolveSkillsSyncMode` (src/remote/skillsSync.ts). Not used by the managed daemon.
+   */
+  skillsSync?: 'auto' | 'off';
+  /**
+   * Settings MCP servers the user chose to run on this daemon (key = server name). Absent = none. A server is synced
+   * only while `enabled` AND `confirmedHash` equals the hash of its current definition (see `src/remote/mcpSync.ts`).
+   */
+  mcpSync?: Record<string, DaemonMcpSyncEntry>;
+  /** Credential kinds (`mcpsync-<project>`) this install has pushed to the daemon for synced servers. Names only. */
+  mcpSyncKinds?: string[];
+  /** Server names the daemon last accepted from this install, so removing the last one still re-syncs (empty). Names only. */
+  mcpSyncNames?: string[];
+}
+
+/** One server's opt-in for one daemon. No definition and no secret is stored here. */
+export interface DaemonMcpSyncEntry {
+  enabled: boolean;
+  /** Hash of the exact definition (command, args, env, url, headers, credential scope) the user confirmed for this daemon. */
+  confirmedHash?: string;
+}
+
+/**
+ * Persisted intent for the managed local daemon (a container on this Mac). No secrets: the control token and the
+ * Claude sign-in live in the keychain. Everything else about the daemon is observed, not stored.
+ */
+export interface LocalDaemonSettings {
+  /** True once Set up has run; cleared by Remove. */
+  enabled: boolean;
+  /** Host loopback port the container is published on. */
+  port: number;
+  /** The daemon-side id of the control token this plugin minted (to revoke it later). */
+  tokenId?: string;
+  /** The Claude credential file was written into the data volume (last known; the volume persists). */
+  credentialWritten?: boolean;
+  /**
+   * Which agent CLIs the daemon image carries and the daemon accepts sessions for. Absent = Claude only. Changing it
+   * changes the container's spec signature, so Update / Apply rebuilds the image layer. Contains no secrets: logins
+   * for Codex and OpenCode live inside the daemon's data volume, never here.
+   */
+  harnesses?: Array<'claude' | 'codex' | 'opencode'>;
+  /**
+   * Host folders shared READ-WRITE with the daemon, at `/work/<name>` (one path per entry). A thread can then run in a
+   * repository outside the vault, which is what the removed sandbox VM's `/work` mount was for. Applied when the
+   * container is created.
+   */
+  folders?: string[];
+  /**
+   * Also share READ-WRITE every Project's working folder that lies outside the vault (a Project's folder override), so
+   * nothing has to be listed by hand. Follows Projects as they are added or changed. Applied when the container is created.
+   */
+  shareProjectFolders?: boolean;
+  /**
+   * Let the daemon run stdio MCP servers synced from Settings, MCP (they start a program inside the container as the
+   * daemon user). Off by default. Applied when the container is created (it sets the daemon's `allowSyncedStdio`).
+   */
+  allowSyncedStdio?: boolean;
+  /**
+   * Ids of the optional tool groups (`localDaemon/optionalTools.ts`) offered to the daemon's threads: tools that write,
+   * schedule or touch secrets on this Mac. Off by default; every call still needs an approval card.
+   */
+  optionalTools?: string[];
+  /** Memory ceiling of the container, `<digits>M|G` (default `4G`). Applied when the container is created (Update). */
+  memory?: string;
+  /** CPUs of the container, a whole number 1-64 (default 4). Applied when the container is created (Update). */
+  cpus?: number;
 }
 
 /** Per-daemon choices for tools that run on this computer on a remote thread's behalf. */
@@ -358,8 +399,6 @@ export interface Thread {
   agentHarness?: AgentHarness;
   /** Monotonic fence for callbacks from retired harness adapters. */
   sessionGeneration?: number;
-  /** Per-thread container-routing override; absent means follow `settings.harnessVmMode`. Claude harness only. */
-  harnessVmMode?: HarnessVmMode;
   /**
    * Present when this thread's session runs on a remote agent-threads daemon
    * instead of this machine (daemon design section 4.2). `thread.cwd` mirrors
@@ -570,6 +609,13 @@ export interface Thread {
    * and the thread note is not saved to the vault.
    */
   ephemeral?: boolean;
+  /**
+   * Private chat: nothing about this thread is written to disk. Not saved to
+   * data.json, the vault note, the raw JSONL log, or attachment files, and the
+   * SDK session is not persisted. Set at creation only and never toggled, so
+   * history can't leak by flipping it mid-chat. Lost on reload or archive.
+   */
+  private?: boolean;
   /**
    * Per-thread permission mode override. When set, takes precedence over the
    * global settings.permissionMode for sessions in this thread.
@@ -1096,65 +1142,21 @@ export interface PluginSettings {
    * on reboot — silently destroying any uncommitted work inside them.
    */
   worktreeRoot: string;
-  /**
-   * Container image `enter_vm` starts. Built from `sandbox/Dockerfile`
-   * (`container build --tag claude-threads-coding:1 sandbox/`).
-   *
-   * Blank falls back to `claude-threads-coding:1`.
-   */
-  vmImage: string;
-  /**
-   * Network isolation `enter_vm` uses when the call does not specify one.
-   *
-   * Defaults to `'default'` — FULL EGRESS — by explicit product decision: a
-   * sandbox where `npm install` and git remotes fail is one nobody uses.
-   * `'internal'` (host-only) and `'none'` (no route) remain first-class.
-   */
-  vmDefaultNetwork: VmNetworkMode;
-  /**
-   * ADR-0015: whether a thread's Claude harness process runs inside its
-   * sandbox container instead of being spawned on the host. Defaults to
-   * `'auto'`, which is a no-op for any user who hasn't built
-   * `harnessVmImage` — see `HarnessVmMode`'s doc comment.
-   */
-  harnessVmMode: HarnessVmMode;
   /** Daemons threads can be run on (Settings -> Remote daemons). Tokens live in the keychain, not here. */
   remoteDaemons?: RemoteDaemonConfig[];
+  /** The managed local daemon (a container on this Mac); see src/localDaemon/. */
+  localDaemon?: LocalDaemonSettings;
   /** Random id of this Geode install, stamped on remote threads as `ownerClientId`. */
   remoteClientId?: string;
   /**
-   * Memory ceiling for newly created sandbox containers, `<digits>M|G`
-   * (default `'4G'`). Invalid values fall back to the default. Applies only at
-   * `container run`; existing containers keep their old limit.
-   */
-  sandboxVmMemory: string;
-  /** CPU count for newly created sandbox containers (positive integer, default 4, max 64). */
-  sandboxVmCpus: number;
-  /**
-   * Container image the harness routes into. Built from
-   * `sandbox/Dockerfile.harness` (`container build --tag
-   * claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`) —
-   * deliberately a different tag than `vmImage`'s `claude-threads-coding:1`.
-   *
-   * Blank falls back to `claude-threads-harness:1`.
-   */
-  harnessVmImage: string;
-  /**
-   * Extra AWS profiles (one per line or comma separated) exposed to harness
-   * containers, on top of the AWS_PROFILE from Extra environment variables.
-   * Non-empty enables Container AWS credentials even on the Claude provider.
-   * See containerAws.ts.
+   * Extra AWS profiles (one per line or comma separated) copied to the managed local daemon, on top of the AWS_PROFILE
+   * from Extra environment variables. Non-empty enables AWS delivery even on the Claude provider (Bedrock always does).
+   * See src/localDaemon/awsCopy.ts.
    */
   containerAwsProfiles: string;
   /**
-   * True once the user chose "Don't ask again" on the in-thread "Run this thread in a
-   * sandbox?" card. Suppresses that offer for good; Settings → Claude → Set up
-   * sandbox still works.
-   */
-  sandboxSetupPromptDismissed: boolean;
-  /**
    * Use Geode's GitHub connection (Settings → GitHub) for git, gh and the GitHub
-   * API in threads and the sandbox VM. Only has an effect in Geode ≥ 0.25.0;
+   * API in threads. Only has an effect in Geode ≥ 0.25.0;
    * manually configured credentials (GH_TOKEN, gh auth, git helpers) always win.
    */
   githubConnectionEnabled: boolean;
@@ -1209,13 +1211,32 @@ export interface PluginSettings {
   /** Model alias the escalation keyword routes to (fable, opus, sonnet, haiku). */
   escalationModel: string;
   alwaysAllowedTools: string[];
+  /**
+   * "Always Allow" for threads hosted on a remote daemon: `Thread.remote.daemonId` -> tool names. Kept apart from
+   * alwaysAllowedTools so one daemon's approvals never apply to local threads or to another daemon.
+   * See remoteAlwaysAllow.ts.
+   */
+  remoteAlwaysAllowedTools: Record<string, string[]>;
+  /**
+   * Command prefixes (`git status`, `npm test`) the user always-allowed on a `host_exec` card.
+   * Separate from alwaysAllowedTools, which never holds host_exec. See hostExecPrefix.ts.
+   */
+  hostExecAlwaysAllowedPrefixes: string[];
   disallowedTools: string[];
   threads: Thread[];
   projects: Project[];
   wakeLockEnabled: boolean;
   layoutDensity: LayoutDensity;
+  /** Tool-call display style (chips | tree | cards). Missing values use tree. */
+  toolCallStyle?: ToolCallStyle;
   /** Primary grouping shown in the Agents List. Missing values use project-status. */
   agentsGroupBy?: 'project' | 'status' | 'project-status';
+  /** Show archived threads (read from their vault notes) in a collapsed Archived group in the Agents List. */
+  agentsShowArchived?: boolean;
+  /** Sort order of the searchable Project picker: most recently used (default) or alphabetical. */
+  projectPickerSort?: 'recent' | 'alphabetical';
+  /** Project id -> last time it was chosen in the Project picker (ms). Combined with thread activity for the 'recent' sort. */
+  projectLastUsed?: Record<string, number>;
   /**
    * Shell command for the context footer bar. Receives JSON on stdin with
    * {cwd, workspace:{current_dir}, branch} describing the thread. stdout may be
@@ -1438,14 +1459,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   opencodeBinaryPath: 'opencode',
   codexComputerUseEnabled: false,
   worktreeRoot: '',
-  vmImage: 'claude-threads-coding:1',
-  vmDefaultNetwork: 'default',
-  harnessVmMode: 'auto',
-  sandboxVmMemory: '4G',
-  sandboxVmCpus: 4,
-  harnessVmImage: 'claude-threads-harness:1',
   containerAwsProfiles: '',
-  sandboxSetupPromptDismissed: false,
   githubConnectionEnabled: true,
   githubCommitEmail: '',
   defaultCwd: '',
@@ -1470,12 +1484,16 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   escalationKeyword: '/escalate',
   escalationModel: 'opus',
   alwaysAllowedTools: [],
+  remoteAlwaysAllowedTools: {},
+  hostExecAlwaysAllowedPrefixes: [],
   disallowedTools: ['CronCreate', 'CronDelete', 'CronList', 'CronUpdate'],
   threads: [],
   projects: [],
   wakeLockEnabled: true,
   layoutDensity: 'comfortable',
+  toolCallStyle: 'tree',
   agentsGroupBy: 'project-status',
+  agentsShowArchived: false,
   statusLineCommand: 'bash $HOME/claude-config/bin/statusline-command.sh',
   statusLineIntervalMs: 30_000,
   createPrMessage: '/create-pr',

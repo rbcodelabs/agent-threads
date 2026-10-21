@@ -25,6 +25,14 @@ export function isShellDenied(disallowedTools: readonly string[] | undefined): b
   return (disallowedTools ?? []).includes('Bash');
 }
 
+/** Claude's file-editing tool names; OpenCode folds them all into its `edit` permission. */
+const EDIT_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'] as const;
+
+/** Whether file edits are denied (any of Claude's edit tools; OpenCode `edit` covers edit, write and patch). */
+export function isEditDenied(disallowedTools: readonly string[] | undefined): boolean {
+  return (disallowedTools ?? []).some((tool) => (EDIT_TOOLS as readonly string[]).includes(tool));
+}
+
 /**
  * Adds the creating thread's denylist to something that creator is making —
  * a scheduled item or a child thread — and records the creator's id. Returns

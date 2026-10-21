@@ -30,6 +30,8 @@ export interface RunArgs extends ConnectionFlags {
   cwd?: string;
   permissionMode?: string;
   model?: string;
+  /** claude (default), codex or opencode; the daemon refuses one it has not enabled. */
+  harness?: string;
   thread?: string;
   detach: boolean;
   unattended: boolean;
@@ -104,7 +106,7 @@ export async function runRun(args: RunArgs, io: RawIo, rt: CliRuntime): Promise<
     if ('error' in chosen) throw new CliError(chosen.error, EXIT.USAGE);
 
     const spec: RemoteSessionSpec = {
-      harness: 'claude',
+      harness: (args.harness ?? 'claude') as RemoteSessionSpec['harness'],
       cwd: chosen.cwd,
       permissionMode: permissionMode as RemoteSessionSpec['permissionMode'],
       extraEnvRaw: '',

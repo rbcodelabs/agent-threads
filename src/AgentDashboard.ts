@@ -1,25 +1,21 @@
-import type { AgentHarness, HarnessVmMode } from './types';
 import { ItemView, WorkspaceLeaf, setIcon, Notice, Platform, Menu, SearchComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread } from './types';
-import { buildMessageWithAttachment, deriveDispatchTitle } from './attachmentUtils';
 import { formatToolName } from './ClaudeSession';
-import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
+import { canAlwaysAllow, summarizePermissionDetail, isHostExecPermission } from './permissionDetail';
+import { recordAlwaysAllow } from './remoteAlwaysAllow';
+import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
-import { DispatchInput } from './DispatchInput';
-import { seedDocumentChatDraft } from './documentChat';
-import { DISPATCH_BUILTIN_COMMANDS, DISPATCH_ARG_COMPLETIONS, parseDispatchDirective, goalKickoffMessage, escalationCommand } from './slashCommands';
 import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { partitionThreads } from './threadRowState';
 import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
-import { handleContributedDispatch } from './slashCommandRouting';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
 import { remoteGroup, threadCwdLabel } from './remote/threadLocation';
 import { parsePrUrlRepo } from './gitDiffUtils';
-import { groupDashboardThreads, normalizeAgentsGroupBy, toggleAgentsGrouping, type AgentsGroupBy, type AgentsGroupingDimension } from './dashboardProjectGroups';
+import { filterArchivedThreads, groupDashboardThreads, normalizeAgentsGroupBy, toggleAgentsGrouping, type AgentsGroupBy, type AgentsGroupingDimension } from './dashboardProjectGroups';
 import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps } from './threadArchiveMenu';
 import { promptConfirm } from './confirmModal';
 
@@ -39,14 +35,11 @@ export class AgentDashboard extends ItemView {
   private listEl!: HTMLElement;
   private searchBarEl!: HTMLElement;
   private searchInputEl!: HTMLInputElement;
+  private newThreadActionEl: HTMLElement | null = null;
   private searchActionEl: HTMLElement | null = null;
   private groupActionEl: HTMLElement | null = null;
   private searchQuery = '';
   private displayedThreadCount = 0;
-  private dispatchComponent!: DispatchInput;
-  private selectedProjectId = '';
-  private projectButtonEl!: HTMLButtonElement;
-  private projectButtonNameEl!: HTMLElement;
 
   // Per-row activity text elements for live update without full re-render
   private activityEls: Map<string, HTMLElement> = new Map();
@@ -67,6 +60,12 @@ export class AgentDashboard extends ItemView {
 
   /** IDs (Thread.scheduledItemId) of currently-expanded rows in the "Scheduled Jobs" section. */
   private expandedScheduledStacks = new Set<string>();
+  /** Collapsed project / status groups (keys from groupKey). In-memory only. */
+  private collapsedGroups = new Set<string>();
+  /** Archived groups are collapsed by default; this tracks the ones the user opened. */
+  private expandedArchivedGroups = new Set<string>();
+  /** Archived threads read from vault notes (only loaded while "Show archived" is on). */
+  private archivedThreads: Thread[] = [];
 
   /** Built once; every row's archive menu shares it (all fields read live state). */
   private archiveDeps: ArchiveMenuDeps | null = null;
@@ -79,7 +78,7 @@ export class AgentDashboard extends ItemView {
 
   getViewType(): string { return AGENT_VIEW_TYPE; }
   getDisplayText(): string {
-    return `Agents · ${this.displayedThreadCount} thread${this.displayedThreadCount === 1 ? '' : 's'}`;
+    return `${this.displayedThreadCount} thread${this.displayedThreadCount === 1 ? '' : 's'}`;
   }
   getIcon(): string { return 'list'; }
 
@@ -87,6 +86,7 @@ export class AgentDashboard extends ItemView {
     this.activeThreadId = this.plugin.getActiveThreadId();
     this.buildUI();
     this.render();
+    if (this.plugin.settings.agentsShowArchived) void this.refreshArchivedThreads();
     this.unsubscribe = this.manager.subscribe((threadId, event) => {
       this.handleEvent(threadId, event);
     });
@@ -99,7 +99,6 @@ export class AgentDashboard extends ItemView {
     if (this.activityTimer) clearTimeout(this.activityTimer);
     if (this.timeInterval) clearInterval(this.timeInterval);
     if (this.staleInterval) clearInterval(this.staleInterval);
-    this.dispatchComponent?.destroy();
   }
 
   /**
@@ -135,142 +134,25 @@ export class AgentDashboard extends ItemView {
       if (e.key === 'Escape') this.closeSearch();
     });
 
-    // Scrollable thread list — padding-bottom leaves clearance for the floating panel
+    // Scrollable thread list
     this.listEl = root.createDiv('ct-agents-list');
-
-    // Floating panel anchored at the bottom (matches ThreadsView pattern)
-    const panel = root.createDiv('ct-floating-panel ct-agents-floating-panel ct-panel-collapsible');
-
-    // Meta strip: dispatch Project (left) + Kanban action (right)
-    const metaRow = panel.createDiv('ct-agents-panel-meta');
-    this.addProjectSelector(metaRow);
-    const metaActions = metaRow.createDiv('ct-agents-panel-actions');
-
-    const kanbanBtn = metaActions.createEl('button', {
-      cls: 'ct-kanban-toggle clickable-icon',
-      attr: { title: 'Open Agent Board', 'aria-label': 'Open Agent Board' },
-    });
-    setIcon(kanbanBtn, 'kanban');
-    kanbanBtn.addEventListener('click', () => {
-      this.plugin.activateKanbanView();
-    });
-
-    // Dispatch input — mounted inside the floating panel
-    const dispatchEl = panel.createDiv();
-    this.dispatchComponent = new DispatchInput({
-      app: this.app,
-      placeholder: 'Dispatch a task...',
-      builtinCommands: () => {
-        const esc = escalationCommand(this.plugin.settings, true);
-        const commands = [...DISPATCH_BUILTIN_COMMANDS, ...(this.plugin.slashCommands?.list('dispatch') ?? [])];
-        return esc ? [...commands, esc] : commands;
-      },
-      subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
-      argCompletions: DISPATCH_ARG_COMPLETIONS,
-      peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
-      harnessPicker: {
-        initialHarness: this.plugin.settings.agentHarness ?? 'claude',
-        getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
-        getFolderSource: () => this.plugin.remoteFolders ?? undefined,
-        getLocalCwd: () => {
-          const project = this.manager.getProject(this.selectedProjectId);
-          return project ? this.manager.getProjectCwd(project) : this.plugin.getEffectiveCwd();
-        },
-        getVaultRoot: () => this.manager.vaultRoot,
-      },
-      onSend: async ({ text, images, attachment, agentHarness, harnessVmMode, remote }) => {
-        // Intercept contributed commands, then core model/goal/loop directives.
-        // Apply directives instead of sending command text to the agent verbatim.
-        let dispatchOpts: { model?: string; goal?: string; loop?: { intervalSeconds: number }; agentHarness?: AgentHarness; harnessVmMode?: HarnessVmMode; projectId?: string; remote?: { daemonId: string; cwd: string } } = {
-          agentHarness,
-          harnessVmMode,
-          remote,
-          projectId: this.selectedProjectId || undefined,
-        };
-        let titleText = text;
-        if (await handleContributedDispatch({
-          registry: this.plugin.slashCommands, text, images, attachment, agentHarness,
-          projectId: dispatchOpts.projectId, input: this.dispatchComponent,
-        })) return;
-        const directive = parseDispatchDirective(
-          text,
-          this.plugin.settings.escalationEnabled ? this.plugin.settings.escalationKeyword : undefined,
-        );
-        if (directive) {
-          if (directive.error) {
-            new Notice(directive.error);
-            this.dispatchComponent.setValue(text);
-            return;
-          }
-          if (directive.kind === 'model') {
-            if (!directive.rest && images.length === 0 && !attachment) {
-              new Notice('Include a prompt after /model — e.g. "/model opus fix the login bug"');
-              this.dispatchComponent.setValue(text);
-              return;
-            }
-            dispatchOpts = { ...dispatchOpts, model: directive.model };
-            text = titleText = directive.rest;
-          } else if (directive.kind === 'goal') {
-            dispatchOpts = { ...dispatchOpts, goal: directive.goal };
-            text = goalKickoffMessage(directive.goal);
-            titleText = directive.goal;
-          } else if (directive.kind === 'loop') {
-            dispatchOpts = { ...dispatchOpts, loop: { intervalSeconds: directive.intervalSeconds } };
-            text = titleText = directive.prompt;
-          }
-          // 'escalate' directives always carry `error` (handled above) — no
-          // success case, so nothing to do here; fall through to dispatch
-          // the raw text as-is via the ThreadManager keyword path.
-        }
-
-        let messageText = buildMessageWithAttachment(text, attachment);
-
-        // Resolve @[[basename]] file mentions — append each file's content as context
-        const mentionRegex = /@\[\[([^\]]+)\]\]/g;
-        const mentions = [...messageText.matchAll(mentionRegex)].map(m => m[1]);
-        if (mentions.length > 0) {
-          const fileContextParts: string[] = [];
-          for (const basename of mentions) {
-            const file = this.app.vault.getMarkdownFiles().find(f => f.basename === basename);
-            if (file) {
-              try {
-                const content = await this.app.vault.cachedRead(file);
-                fileContextParts.push(`**File: ${file.path}**\n\`\`\`\n${content}\n\`\`\``);
-              } catch { /* skip */ }
-            }
-          }
-          if (fileContextParts.length > 0) {
-            messageText = messageText + '\n\n---\nReferenced files:\n\n' + fileContextParts.join('\n\n');
-          }
-        }
-
-        const titleHint = deriveDispatchTitle(titleText, attachment, images.length);
-        const threadId = await this.plugin.dispatchNewThread(
-          messageText,
-          images.length > 0 ? images : undefined,
-          titleHint,
-          dispatchOpts,
-        );
-        await this.plugin.openThreadInChatView(threadId);
-        this.render();
-      },
-      getPttKey: () => this.plugin.settings.pttKey ?? '',
-      captureLongPaste: true,
-      // Empty callback forces needsFooter=true so attach+mic land in the footer
-      // row (matching the conversation panel layout). No "more" button needed here.
-      appendFooterActions: () => {},
-    });
-    this.dispatchComponent.mount(dispatchEl);
   }
 
   private ensureHeaderActions(): void {
+    // "New thread" opens the conversation panel in new-conversation mode: the dispatch
+    // composer (project picker, slash commands, attachments, harness picker) lives there.
+    if (!this.newThreadActionEl) {
+      this.newThreadActionEl = this.addAction('square-pen', 'New thread', () => { void this.plugin.openNewConversation(); });
+      this.newThreadActionEl.setAttribute('data-testid', 'new-thread-button');
+    }
     if (!this.searchActionEl) {
       this.searchActionEl = this.addAction('search', 'Search threads', () => this.toggleSearch());
       this.searchActionEl.setAttribute('aria-expanded', 'false');
     }
     if (!this.groupActionEl) {
-      this.groupActionEl = this.addAction('list-filter', 'Group agents', event => this.openGroupingMenu(event));
+      this.groupActionEl = this.addAction('list-filter', 'Group & filter agents', event => this.openGroupingMenu(event));
       this.groupActionEl.setAttribute('aria-haspopup', 'menu');
+      this.groupActionEl.toggleClass('is-active', !!this.plugin.settings.agentsShowArchived);
     }
   }
 
@@ -281,6 +163,12 @@ export class AgentDashboard extends ItemView {
     const menu = new Menu();
     this.addGroupingMenuItem(menu, 'Project', 'project', hasProject, hasProject && !hasStatus);
     this.addGroupingMenuItem(menu, 'Status', 'status', hasStatus, hasStatus && !hasProject);
+    menu.addSeparator();
+    menu.addItem(item => item
+      .setTitle('Show archived')
+      .setIcon('archive')
+      .setChecked(!!this.plugin.settings.agentsShowArchived)
+      .onClick(() => void this.setShowArchived(!this.plugin.settings.agentsShowArchived)));
     menu.showAtMouseEvent(event);
   }
 
@@ -298,6 +186,24 @@ export class AgentDashboard extends ItemView {
       .onClick(() => void this.setGroupingDimension(dimension)));
   }
 
+  private async setShowArchived(show: boolean): Promise<void> {
+    this.plugin.settings.agentsShowArchived = show;
+    this.groupActionEl?.toggleClass('is-active', show);
+    if (show) await this.refreshArchivedThreads();
+    else { this.archivedThreads = []; this.render(); }
+    await this.plugin.saveSettings();
+  }
+
+  private async refreshArchivedThreads(): Promise<void> {
+    try {
+      this.archivedThreads = await this.plugin.loadArchivedThreads();
+    } catch (error) {
+      console.error('[ClaudeThreads] Failed to load archived threads:', error);
+      this.archivedThreads = [];
+    }
+    this.render();
+  }
+
   private currentGroupMode(): AgentsGroupBy {
     return normalizeAgentsGroupBy(this.plugin.settings.agentsGroupBy);
   }
@@ -309,57 +215,6 @@ export class AgentDashboard extends ItemView {
     this.plugin.settings.agentsGroupBy = next;
     this.render();
     await this.plugin.saveSettings();
-  }
-
-  private addProjectSelector(container: HTMLElement): void {
-    this.projectButtonEl = container.createEl('button', {
-      cls: 'ct-dispatch-project ct-agents-project-trigger ct-footer-context',
-      attr: { type: 'button', 'aria-haspopup': 'menu' },
-    });
-    const projectIcon = this.projectButtonEl.createSpan('ct-footer-context-icon');
-    setIcon(projectIcon, 'folder');
-    this.projectButtonNameEl = this.projectButtonEl.createSpan('ct-footer-context-name');
-    const projectChevron = this.projectButtonEl.createSpan('ct-footer-context-chevron');
-    setIcon(projectChevron, 'chevron-down');
-    this.projectButtonEl.addEventListener('click', (event) => this.openProjectMenu(event));
-    this.refreshProjectSelector();
-  }
-
-  private refreshProjectSelector(): void {
-    const selectionStillExists = !this.selectedProjectId || this.manager.getProject(this.selectedProjectId);
-    if (!selectionStillExists) this.selectedProjectId = '';
-    const projectName = this.manager.getProject(this.selectedProjectId)?.name ?? 'No Project';
-    this.projectButtonNameEl.textContent = projectName;
-    this.projectButtonEl.setAttribute('aria-label', `Dispatch Project: ${projectName}`);
-    this.projectButtonEl.setAttribute('title', `Dispatch Project: ${projectName}`);
-  }
-
-  private openProjectMenu(event: MouseEvent): void {
-    this.refreshProjectSelector();
-    const menu = new Menu();
-    menu.addItem(item => item
-      .setTitle('No Project')
-      .setIcon('folder-minus')
-      .setChecked(!this.selectedProjectId)
-      .onClick(() => this.selectProject('')));
-    for (const project of this.manager.getProjects()) {
-      menu.addItem(item => item
-        .setTitle(project.name)
-        .setIcon('folder')
-        .setChecked(this.selectedProjectId === project.id)
-        .onClick(() => this.selectProject(project.id)));
-    }
-    menu.addSeparator();
-    menu.addItem(item => item
-      .setTitle('New Project…')
-      .setIcon('folder-plus')
-      .onClick(() => this.plugin.openNewProjectSettings()));
-    menu.showAtMouseEvent(event);
-  }
-
-  private selectProject(projectId: string): void {
-    this.selectedProjectId = projectId;
-    this.refreshProjectSelector();
   }
 
   /** Adapter for the shared archive context menu (see threadArchiveMenu.ts). */
@@ -381,9 +236,13 @@ export class AgentDashboard extends ItemView {
 
   private handleEvent(threadId: string, event: ThreadEvent): void {
     if (event.type === 'projects_changed') {
-      if (this.projectButtonEl) this.refreshProjectSelector();
       this.scheduleRender();
       return;
+    }
+    if (event.type === 'thread_deleted' && this.plugin.settings.agentsShowArchived) {
+      // A thread that was just archived is written to its note before deletion;
+      // give the vault index a moment, then pick it up in the Archived group.
+      setTimeout(() => void this.refreshArchivedThreads(), 500);
     }
     if (event.type === 'threads_loaded') {
       this.scheduleRender();
@@ -391,6 +250,10 @@ export class AgentDashboard extends ItemView {
     }
     if (event.type === 'active_thread_changed') {
       this.setActiveRow(threadId);
+      return;
+    }
+    if (event.type === 'active_thread_cleared') {
+      this.clearActiveRow();
       return;
     }
     if (
@@ -472,6 +335,14 @@ export class AgentDashboard extends ItemView {
     this.rowEls.get(threadId)?.addClass('ct-agents-row-active');
   }
 
+  /** New-conversation mode: no thread is active, so no row should look selected. */
+  private clearActiveRow(): void {
+    if (this.activeThreadId) {
+      this.rowEls.get(this.activeThreadId)?.removeClass('ct-agents-row-active');
+    }
+    this.activeThreadId = null;
+  }
+
   private scheduleRender(): void {
     if (this.renderPending) return;
     this.renderPending = true;
@@ -520,11 +391,14 @@ export class AgentDashboard extends ItemView {
         emptyEl.createDiv({ text: 'No threads match your search.' });
       } else {
         emptyEl.createDiv({ text: 'No threads yet.' });
-        emptyEl.createDiv({ cls: 'ct-agents-empty-sub', text: 'Use the dispatch input below to start a task.' });
+        emptyEl.createDiv({ cls: 'ct-agents-empty-sub', text: 'Use New thread above to start a task.' });
       }
     }
 
     const mode = this.currentGroupMode();
+    const archived = this.plugin.settings.agentsShowArchived
+      ? filterArchivedThreads(this.archivedThreads, new Set(allThreads.map(t => t.id)), q)
+      : [];
     if (mode === 'status') {
       for (const section of this.statusSections(threads)) {
         if (!section.threads.length) continue;
@@ -537,16 +411,29 @@ export class AgentDashboard extends ItemView {
           'global',
         ).addClass('ct-agents-status-section');
       }
+      this.renderArchivedGroup(this.listEl, 'global', archived);
     } else {
-      for (const project of groupDashboardThreads(threads, thread => this.threadGroup(thread))) {
+      const archivedKeys = new Map<string, Thread[]>();
+      for (const group of groupDashboardThreads(archived, thread => this.threadGroup(thread))) archivedKeys.set(group.key, group.threads);
+      const liveGroups = groupDashboardThreads(threads, thread => this.threadGroup(thread));
+      const projects = [...liveGroups];
+      // Projects whose only threads are archived still need a header to hang the Archived group on.
+      for (const group of groupDashboardThreads(archived, thread => this.threadGroup(thread))) {
+        if (!liveGroups.some(live => live.key === group.key)) projects.push({ ...group, threads: [] });
+      }
+      projects.sort((a, b) => a.key === 'unassigned' ? 1 : b.key === 'unassigned' ? -1 : a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }) || a.key.localeCompare(b.key));
+      for (const project of projects) {
         const projectEl = this.listEl.createEl('section', { cls: 'ct-agents-project', attr: { 'aria-label': project.label } });
         const header = projectEl.createDiv('ct-agents-project-header');
         const icon = header.createSpan('ct-agents-project-icon');
         setIcon(icon, project.key === 'unassigned' ? 'folder-minus' : 'folder');
         header.createSpan({ cls: 'ct-agents-project-name', text: project.label });
         header.createSpan({ cls: 'ct-agents-project-count', text: String(project.threads.length) });
+        const projectCollapsed = this.bindGroupToggle(header, `project:${project.key}`);
+        if (projectCollapsed) continue;
         if (mode === 'project-status') this.renderProjectStatuses(projectEl, project.key, project.threads);
         else this.renderProjectThreads(projectEl, project.key, project.threads);
+        this.renderArchivedGroup(projectEl, project.key, archivedKeys.get(project.key) ?? []);
       }
     }
 
@@ -645,12 +532,77 @@ export class AgentDashboard extends ItemView {
     }
   }
 
+  /** Makes `header` a click/keyboard toggle for a collapsible group; returns whether it is collapsed. */
+  private bindGroupToggle(header: HTMLElement, key: string, defaultCollapsed = false): boolean {
+    const set = defaultCollapsed ? this.expandedArchivedGroups : this.collapsedGroups;
+    const collapsed = defaultCollapsed ? !set.has(key) : set.has(key);
+    header.addClass('ct-agents-collapsible');
+    header.toggleClass('is-collapsed', collapsed);
+    header.setAttribute('role', 'button');
+    header.setAttribute('tabindex', '0');
+    header.setAttribute('aria-expanded', String(!collapsed));
+    const chevron = header.createSpan({ cls: 'ct-agents-group-chevron' });
+    setIcon(chevron, collapsed ? 'chevron-right' : 'chevron-down');
+    header.prepend(chevron);
+    const toggle = () => {
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
+      this.scheduleRender();
+    };
+    header.addEventListener('click', (e) => { e.stopPropagation(); toggle(); });
+    header.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+    return collapsed;
+  }
+
+  private renderArchivedGroup(parent: HTMLElement, scopeKey: string, threads: Thread[]): void {
+    if (!threads.length) return;
+    const group = parent.createDiv('ct-agents-group ct-agents-archived-group');
+    const labelEl = group.createDiv('ct-agents-group-label');
+    labelEl.createSpan({ text: 'Archived' });
+    labelEl.createSpan({ cls: 'ct-agents-project-count', text: String(threads.length) });
+    if (this.bindGroupToggle(labelEl, `archived:${scopeKey}`, true)) return;
+    for (const thread of threads) this.renderArchivedRow(thread, group);
+  }
+
+  private renderArchivedRow(thread: Thread, parent: HTMLElement): void {
+    const row = parent.createDiv({ cls: 'ct-agents-row ct-agents-row-archived', attr: { role: 'button', tabindex: '0', 'aria-label': `Restore ${thread.title}` } });
+    const iconEl = row.createDiv('ct-agents-icon ct-agents-icon-archived');
+    setIcon(iconEl, 'archive');
+    const body = row.createDiv('ct-agents-row-body');
+    const primary = body.createDiv('ct-agents-row-primary');
+    primary.createDiv('ct-agents-row-title').createSpan({ cls: 'ct-agents-row-title-text', text: thread.title });
+    primary.createDiv({ cls: 'ct-agents-row-time', text: relativeTime(thread.updatedAt) });
+    const summary = thread.summary ?? thread.recap;
+    if (summary) body.createDiv('ct-agents-row-secondary').createDiv({ cls: 'ct-agents-row-activity', text: summary });
+    const restore = row.createEl('button', { cls: 'ct-agents-restore-btn', text: 'Restore', attr: { title: 'Restore this thread' } });
+    const run = async () => {
+      this.archivedThreads = this.archivedThreads.filter(t => t.id !== thread.id);
+      this.scheduleRender();
+      try {
+        await this.plugin.restoreArchivedThread(thread);
+      } catch (error) {
+        console.error('[ClaudeThreads] Failed to restore archived thread:', error);
+        new Notice('Could not restore that thread.');
+        await this.refreshArchivedThreads();
+      }
+    };
+    restore.addEventListener('click', (e) => { e.stopPropagation(); void run(); });
+    row.addEventListener('click', () => void run());
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void run(); } });
+  }
+
   private renderGroup(label: string, threads: Thread[], state: RowState, badge?: number, parent = this.listEl, scopeKey = ''): HTMLElement {
     const group = parent.createDiv('ct-agents-group');
     const labelEl = group.createDiv('ct-agents-group-label');
     labelEl.createSpan({ text: label });
     if (badge !== undefined) {
       labelEl.createSpan({ cls: 'ct-agents-group-badge', text: String(badge) });
+    }
+    if (this.bindGroupToggle(labelEl, `status:${scopeKey}:${label}`)) {
+      labelEl.createSpan({ cls: 'ct-agents-project-count', text: String(threads.length) });
+      return group;
     }
     const stackable = (label === 'New' || label === 'Reviewed' || label === 'Ready')
       && (this.plugin.settings.stackScheduledThreads ?? true);
@@ -716,16 +668,25 @@ export class AgentDashboard extends ItemView {
         const deny = btns.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' });
         deny.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, false); });
 
-        const allow = btns.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
+        const allow = btns.createEl('button', { text: !!pendingInfo && isHostExecPermission(pendingInfo.toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
         allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, true); });
 
-        if ((!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) && !this.manager.isRemoteThread(thread.id)) {
+        const hostExecPrefix = hostExecAlwaysAllowOffer(pendingInfo);
+        if (hostExecPrefix) {
+          const alwaysPrefix = btns.createEl('button', { text: `Always allow \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' });
+          alwaysPrefix.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (addHostExecPrefix(this.plugin.settings, hostExecPrefix)) await this.plugin.saveSettings();
+            this.manager.resolvePermission(thread.id, true);
+          });
+        }
+
+        if (!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) {
           const always = btns.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' });
           always.addEventListener('click', async (e) => {
             e.stopPropagation();
             if (pendingInfo) {
-              this.plugin.settings.alwaysAllowedTools.push(pendingInfo.toolName);
-              await this.plugin.saveSettings();
+              if (recordAlwaysAllow(this.plugin.settings, pendingInfo.toolName, this.manager.getRemoteScope(thread.id))) await this.plugin.saveSettings();
             }
             this.manager.resolvePermission(thread.id, true);
           });
@@ -881,27 +842,6 @@ export class AgentDashboard extends ItemView {
     thread.reviewed = true;
     this.plugin.saveSettings();
     this.scheduleRender();
-  }
-
-  /** Focus the dispatch input so the user can type a task immediately. */
-  public focusDispatchInput(): void {
-    this.dispatchComponent?.focus();
-  }
-
-  /**
-   * Seed the dispatch composer with a `@[[basename]]` mention for a document
-   * and focus it — the "Chat about this document" entry points land here.
-   *
-   * Only the draft is seeded: the thread is created when the user submits, so
-   * this always starts a *new* thread and never appends to an open one. The
-   * mention is resolved to the file's content by the dispatch handler's
-   * existing resolver.
-   */
-  public seedDocumentChat(basename: string): void {
-    if (!this.dispatchComponent) return;
-    this.dispatchComponent.setValueAndFocus(
-      seedDocumentChatDraft(this.dispatchComponent.getValue(), basename),
-    );
   }
 
   /** Open the most recently completed unreviewed thread and mark it reviewed.

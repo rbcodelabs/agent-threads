@@ -23,7 +23,10 @@ import type { RawData, WebSocket } from 'ws';
 import {
   CLOSE_SLOW_CONSUMER,
   CLOSE_UNAUTHORIZED,
+  MCP_SYNC_CAPABILITY,
+  MCP_SYNC_STDIO_CAPABILITY,
   PROTOCOL_VERSION,
+  SKILLS_SYNC_CAPABILITY,
   decodeClientFrame,
   encodeFrame,
   isChannel,
@@ -35,15 +38,21 @@ import {
   type ErrFrame,
   type ErrorCode,
   type JournalEntry,
+  type FileReadReply,
   type PathListReply,
   type WelcomeFrame,
   type WireEvent,
   type WorkspaceInfo,
 } from '../src/protocol';
 import type { CommandCache } from './cmdCache';
+import { CredError, type CredStore } from './credStore';
+import { RepoError, type ReposManager } from './repos';
+import { SkillError, type SkillStore } from './skillStore';
+import type { SyncedMcpStore } from './syncedMcp';
 import type { PathAccess } from './sessionPolicy';
 import type { ControlRegistry } from './controlRegistry';
 import type { FailureThrottle } from './failureThrottle';
+import { harnessCapabilities, isRealHarness, type RealHarness } from './harnesses';
 import { HostError, type ThreadHost, type ThreadJournal } from './threadHost';
 import { scopeSatisfies, type TokenScope, type TokenStore, type VerifiedToken } from './tokenStore';
 import { DAEMON_VERSION, MIN_CLIENT_VERSION } from './version';
@@ -70,8 +79,19 @@ export function raiseFrameLimit(ws: WebSocket, bytes: number): boolean {
 /** Stop handing frames to the socket once this much is already buffered in it. */
 const SOCKET_HIGH_WATER = 256 * 1024;
 /** What every daemon build speaks; `harness.<kind>` is added from the configured session host. */
-export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'host.tools'];
-export const capabilitiesFor = (harness: string): string[] => [...BASE_CAPABILITIES, `harness.${harness}`];
+export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idempotency', 'requests.reopen', 'session.cold_resume', 'path.check', 'workspaces.list', 'path.list', 'file.read', 'host.tools', 'creds.push', 'mcp.status', 'repos', MCP_SYNC_CAPABILITY, SKILLS_SYNC_CAPABILITY];
+/**
+ * `harness.<kind>` for each harness a client may request, plus `harness.<kind>.<feature>` for what that harness
+ * supports (see `HARNESS_FEATURES`). The scripted fake advertises only `harness.fake`.
+ */
+export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = [], syncedStdio = false, autoUpdate = false): string[] => [
+  ...BASE_CAPABILITIES,
+  // Tells the app, before it syncs anything, that stdio definitions will not be refused by policy.
+  ...(syncedStdio ? [MCP_SYNC_STDIO_CAPABILITY] : []),
+  ...(harness === 'fake' ? ['harness.fake'] : harnessCapabilities(enabled.length ? enabled : isRealHarness(harness) ? [harness] : [])),
+  // Additive: this daemon replaces its own bundle and restarts when idle, so a version change can appear between sessions.
+  ...(autoUpdate ? ['update.auto'] : []),
+];
 
 export interface Timings {
   helloTimeoutMs: number;
@@ -97,12 +117,24 @@ export interface ServerContext {
   /** Advertised in `welcome`. */
   capabilities: string[];
   controllers: ControlRegistry;
+  /** Credentials pushed by admin clients (`creds.push`). */
+  creds: CredStore;
+  /** The repositories the daemon keeps cloned (`repos.sync`, `repos.status`). */
+  repos: ReposManager;
+  /** Skill trees pushed by admin clients (`skills.*`). */
+  skills: SkillStore;
+  /** MCP server definitions synced by the app (`mcp.sync`). */
+  syncedMcp: SyncedMcpStore;
+  /** Names of the servers in the operator's config.json, which override a synced server of the same name. */
+  configuredMcpNames(): ReadonlySet<string>;
   /** Answers `path.check` from the configured workspaces (set even when the session host is not policed). */
   checkPath(path: string): PathAccess;
   /** Answers `workspaces.list`: the configured roots, with vault detection. */
   listWorkspaces(): WorkspaceInfo[];
   /** Answers `path.list`: subfolders of an allowed folder. */
   listPath(path: string): PathListReply;
+  /** Answers `file.read`: an image inside the workspaces; throws `HostError` when it may not be shown. */
+  readFile(path: string): FileReadReply;
   timings: Timings;
   maxOutboundBytes: number;
   audit(record: Record<string, unknown>): void;
@@ -115,6 +147,7 @@ export const REQUIRED_SCOPE: Record<string, TokenScope> = {
   'path.check': 'read',
   'workspaces.list': 'read',
   'path.list': 'read',
+  'file.read': 'read',
   'session.getContextUsage': 'read',
   'session.mcpServerStatus': 'read',
   'session.getUsageSnapshot': 'read',
@@ -137,6 +170,15 @@ export const REQUIRED_SCOPE: Record<string, TokenScope> = {
   'tool.result': 'control',
   'tool.manifest': 'control',
   'creds.push': 'admin',
+  // Changing the list runs git against remotes with the stored token; looking at it only shows names and states.
+  'repos.sync': 'admin',
+  'repos.status': 'read',
+  // These write to the daemon's disk.
+  'skills.sync': 'admin',
+  'skills.put': 'admin',
+  'skills.commit': 'admin',
+  // Defines programs and endpoints sessions will start, with the credentials pushed beside them.
+  'mcp.sync': 'admin',
 };
 
 /** Commands whose reply must be re-evaluated, not replayed from the idempotency cache. */
@@ -412,6 +454,27 @@ export class Connection {
     }
   }
 
+  private skillOp<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (err) {
+      if (err instanceof SkillError) throw new CommandError('bad_frame', err.message);
+      throw err;
+    }
+  }
+
+  private async reposSync(repos: unknown, wait: boolean, auth: VerifiedToken): Promise<unknown> {
+    let reply;
+    try {
+      reply = await this.ctx.repos.sync(repos, wait);
+    } catch (err) {
+      if (err instanceof RepoError) throw new CommandError('bad_frame', err.message);
+      throw err;
+    }
+    this.ctx.audit({ event: 'repos_sync', tokenId: auth.id, repos: reply.repos.map((r) => r.name), replaced: repos !== undefined });
+    return { ...reply };
+  }
+
   private dispatch(frame: ClientFrame, auth: VerifiedToken): unknown {
     const { host } = this.ctx;
     switch (frame.type) {
@@ -475,6 +538,7 @@ export class Connection {
       case 'path.check': return { ...this.ctx.checkPath(frame.path) };
       case 'workspaces.list': return { workspaces: this.ctx.listWorkspaces() };
       case 'path.list': return { ...this.ctx.listPath(frame.path) };
+      case 'file.read': return { ...this.ctx.readFile(frame.path) };
       case 'resolve.permission':
         this.requireControl(frame.threadId, auth);
         host.resolve(frame.threadId, 'permission', frame.requestId, { allow: frame.allow }, auth.id);
@@ -501,6 +565,46 @@ export class Connection {
         this.requireSeat(frame.threadId);
         host.toolResult(frame.threadId, frame.callId, { success: frame.success, text: frame.text, content: frame.content }, auth.id);
         return {};
+      case 'creds.push': {
+        let result;
+        try {
+          result = this.ctx.creds.push(frame.kind, frame.ttlSec, frame.fields);
+        } catch (err) {
+          if (err instanceof CredError) throw new CommandError('bad_frame', err.message);
+          throw err;
+        }
+        // Who changed which credential, never the values.
+        this.ctx.audit({ event: 'creds_push', tokenId: auth.id, kind: result.kind, fields: result.fields, removed: result.removed });
+        return { kind: result.kind, fields: result.fields, removed: result.removed, ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}) };
+      }
+      case 'skills.sync': {
+        const reply = this.skillOp(() => this.ctx.skills.sync(frame.trees));
+        this.ctx.audit({ event: 'skills_sync', tokenId: auth.id, wanted: frame.trees.map((t) => t.dir), missing: reply.missing });
+        return { ...reply };
+      }
+      case 'skills.put': {
+        const r = this.skillOp(() => this.ctx.skills.put(frame.upload, frame.dir, frame.seq, frame.files));
+        return { ...r };
+      }
+      case 'skills.commit': {
+        const r = this.skillOp(() => this.ctx.skills.commit(frame.upload, frame.dir, frame.hash, frame.files, frame.bytes));
+        // Directory names and sizes only, never content.
+        this.ctx.audit({ event: 'skills_commit', tokenId: auth.id, dir: r.dir, files: frame.files, bytes: frame.bytes, created: r.created });
+        return { ...r };
+      }
+      case 'repos.sync': return this.reposSync(frame.repos, frame.wait === true, auth);
+      case 'repos.status': return { ...this.ctx.repos.status() };
+      case 'mcp.sync': {
+        const change = this.ctx.syncedMcp.replace(frame.servers, auth.id, this.ctx.configuredMcpNames());
+        if (change.kept) {
+          // The previous set stands: audit the refusal (names only) and say so in the reply.
+          this.ctx.audit({ event: 'mcp_sync_rejected', tokenId: auth.id, rejected: change.rejected.map((r) => r.name) });
+          return { accepted: [], rejected: change.rejected, requiredCreds: [], shadowed: [], kept: true };
+        }
+        // Names only: never a definition, a header or a credential.
+        this.ctx.audit({ event: 'mcp_sync', tokenId: auth.id, names: change.accepted, added: change.added, removed: change.removed });
+        return { accepted: change.accepted, rejected: change.rejected, requiredCreds: change.requiredCreds, shadowed: change.shadowed };
+      }
       case 'resolve.openTab':
         // OpenNewTab is refused when the harness asks (daemon sessions cannot create Geode threads), so nothing is ever pending.
         throw new CommandError('unknown_command', 'open-tab requests are not supported by this daemon build');

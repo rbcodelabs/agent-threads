@@ -61,7 +61,9 @@ export class ScriptedHarness implements HarnessSession {
   async getContextUsage(): Promise<HarnessContextUsage | null> {
     return { categories: [], totalTokens: 10, maxTokens: 200, percentage: 5, model: 'haiku' };
   }
-  async mcpServerStatus(): Promise<Array<{ name: string; status: string }>> { return [{ name: 'm', status: 'connected' }]; }
+  /** What `mcpServerStatus()` reports; a test flips an entry to simulate a server dying mid-session. */
+  mcpStatus: Array<{ name: string; status: string }> = [{ name: 'm', status: 'connected' }];
+  async mcpServerStatus(): Promise<Array<{ name: string; status: string }>> { return this.mcpStatus.map((s) => ({ ...s })); }
   async getUsageSnapshot(): Promise<null> { return null; }
   prepared: string[] = [];
   async prepareForSend(text: string): Promise<void> { this.prepared.push(text); }

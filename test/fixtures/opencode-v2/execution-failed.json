@@ -1,0 +1,72 @@
+[
+ {
+  "type": "session.created",
+  "created": 1792294692670,
+  "data": {
+   "sessionID": "ses_root",
+   "slug": "hidden-engine",
+   "version": "2.0.32",
+   "projectID": "1f29ea24da1fefbbe9ecde894f13a08a7f35d6db",
+   "location": {
+    "directory": "/tmp/ocprobe/work"
+   },
+   "subpath": "../../../../tmp/ocprobe/work",
+   "title": "probe",
+   "agent": "build",
+   "model": {
+    "id": "nonexistent",
+    "providerID": "llm-server"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.inbox.enqueued",
+  "created": 1792294692678,
+  "data": {
+   "inboxID": "msg_14d16a745001qRWV5PUspo60IC",
+   "sessionID": "ses_root",
+   "item": {
+    "type": "user",
+    "payload": {
+     "text": "hi"
+    },
+    "delivery": "steer"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.execution.started",
+  "created": 1792294692679,
+  "data": {
+   "sessionID": "ses_root"
+  }
+ },
+ {
+  "type": "session.inbox.delivered",
+  "created": 1792294692686,
+  "data": {
+   "sessionID": "ses_root",
+   "inboxID": "msg_14d16a745001qRWV5PUspo60IC"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.execution.failed",
+  "created": 1792294692689,
+  "data": {
+   "sessionID": "ses_root",
+   "error": {
+    "type": "provider.no-route",
+    "message": "Model unavailable: llm-server/nonexistent"
+   }
+  }
+ }
+]

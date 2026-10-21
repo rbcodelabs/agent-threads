@@ -7,6 +7,10 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writeFileAtomic } from './fsutil';
+import { parseDaemonMcpServers, type DaemonMcpServers } from './mcpServers';
+import type { RepoSpec } from '../src/protocol';
+import { sanitizeConfiguredRepos } from './repos';
+import { REAL_HARNESSES, isRealHarness, type RealHarness } from './harnesses';
 
 export const DEFAULT_PORT = 7433;
 export const DEFAULT_LISTEN = '127.0.0.1';
@@ -20,8 +24,17 @@ export interface DaemonConfig {
   allowedOrigins: string[];
   /** Required to bind a wildcard address. */
   acknowledgeOpen: boolean;
-  /** Which session host runs behind `session.open`. 'fake' is the scripted harness used by tests and smoke runs. */
+  /**
+   * The default harness (what `agent-threads run` uses without `--harness`). 'fake' is the scripted harness used by
+   * tests and smoke runs: it replaces the real session host and ignores `harnesses`.
+   */
   harness: HarnessKind;
+  /**
+   * Harnesses a client may request in `session.open` (`spec.harness`); any other is refused. Unset everywhere: all
+   * three (a harness whose CLI is not installed fails its own sessions with a clear error). An explicit `harness`
+   * without `harnesses` restricts the daemon to that one, as before.
+   */
+  harnesses: RealHarness[];
   /** Absolute directories a session's cwd (and additionalDirectories) must sit under. */
   workspaces: string[];
   /** Folders sessions may run in but whose files the harness's edit tools may not change (also allowed as cwd). */
@@ -34,6 +47,10 @@ export interface DaemonConfig {
   idleReapMinutes: number;
   /** Explicit path to the `claude` CLI; otherwise discovered on PATH and in the usual install dirs. */
   claudeBinaryPath?: string;
+  /** Explicit path to the `codex` CLI; otherwise discovered like `claudeBinaryPath`. */
+  codexBinaryPath?: string;
+  /** Explicit path to the `opencode` CLI; otherwise discovered like `claudeBinaryPath`. */
+  opencodeBinaryPath?: string;
   /** A journal entry older than this is dropped (a client that was away longer gets a `resync`). 0 = keep forever. */
   journalTtlDays: number;
   /** Cap on one thread's retained journal (approximate JSON bytes); oldest entries go first. 0 = no cap. */
@@ -62,9 +79,38 @@ export interface DaemonConfig {
    * session to resume there). Default: `.worktrees` inside the first read-write workspace.
    */
   worktreeRoot?: string;
+  /**
+   * MCP servers the daemon starts for every session (config.json only). `${NAME}` placeholders are filled from the
+   * credentials pushed with `creds.push` when a session starts.
+   */
+  mcpServers: DaemonMcpServers;
+  /** Repositories the daemon keeps cloned under `repoRoot` (changed by `repos.sync`, stored in config.json). */
+  repos: RepoSpec[];
+  /** Where the clones live; always allowlisted for sessions. Default `<dataDir>/workspace`. */
+  repoRoot: string;
+  /** Worktrees idle this many days are removed at daemon start (0 = never). */
+  worktreePruneDays: number;
+  /**
+   * Accept `stdio` definitions in `mcp.sync` (they start a program on this machine as the daemon user). Off unless the
+   * operator opts in; http/sse definitions are always accepted.
+   */
+  allowSyncedStdio: boolean;
+  /** With `allowSyncedStdio`: only these commands may be synced (bare names or absolute paths). Empty = any command. */
+  syncedCommandAllowlist: string[];
+  /** Allow `repos` URLs that are paths on this machine (off by default: only https/ssh remotes). */
+  allowLocalRepoUrls: boolean;
+  /**
+   * Opt in to replacing this daemon's own bundle with the newest stable release and restarting when idle
+   * (daemon/update/). Off by default. Only effective on an install that can do it safely (see `assessInstall`).
+   */
+  autoUpdate: boolean;
+  /** How often to look for a new release, in minutes (default 360, minimum 15). */
+  autoUpdateIntervalMinutes: number;
+  /** The daemon must have been quiet (no turn, no open request, no client command) this long before it restarts. */
+  autoUpdateQuietMinutes: number;
 }
 
-export type HarnessKind = 'claude' | 'fake';
+export type HarnessKind = RealHarness | 'fake';
 
 export const DEFAULT_WORKSPACES = ['/srv/workspaces'];
 export const DEFAULT_MAX_CONCURRENT_TURNS = 3;
@@ -76,14 +122,20 @@ export const DEFAULT_MAX_LIVE_SESSIONS = 8;
 export const DEFAULT_REQUEST_TIMEOUT_MINUTES = 60;
 export const DEFAULT_HOST_TOOL_GRACE_SEC = 60;
 export const DEFAULT_HOST_TOOL_TIMEOUT_SEC = 300;
+export const DEFAULT_WORKTREE_PRUNE_DAYS = 14;
+export const DEFAULT_AUTO_UPDATE_INTERVAL_MINUTES = 360;
+export const MIN_AUTO_UPDATE_INTERVAL_MINUTES = 15;
+export const DEFAULT_AUTO_UPDATE_QUIET_MINUTES = 2;
 
 export interface ConfigInputs {
   flags?: Partial<{
     dataDir: string; listen: string; port: number; allowedOrigins: string[]; acknowledgeOpen: boolean;
-    harness: HarnessKind; workspaces: string[]; readOnlyWorkspaces: string[]; allowBypass: boolean; maxConcurrentTurns: number;
-    idleReapMinutes: number; claudeBinaryPath: string; journalTtlDays: number; journalMaxMb: number;
+    harness: HarnessKind; harnesses: RealHarness[]; workspaces: string[]; readOnlyWorkspaces: string[]; allowBypass: boolean; maxConcurrentTurns: number;
+    idleReapMinutes: number; claudeBinaryPath: string; codexBinaryPath: string; opencodeBinaryPath: string; journalTtlDays: number; journalMaxMb: number;
     maxConnections: number; maxLiveSessions: number; requestTimeoutMinutes: number; allowedClientEnv: string[];
     hostToolGraceSec: number; hostToolTimeoutSec: number; worktreeRoot: string;
+    allowSyncedStdio: boolean; syncedCommandAllowlist: string[];
+    autoUpdate: boolean; autoUpdateIntervalMinutes: number; autoUpdateQuietMinutes: number;
   }>;
   env?: NodeJS.ProcessEnv;
 }
@@ -99,7 +151,7 @@ export function defaultDataDir(): string {
   }
 }
 
-interface ConfigFile {
+export interface ConfigFile {
   daemonId?: string;
   listen?: string;
   port?: number;
@@ -110,6 +162,10 @@ interface ConfigFile {
   maxConcurrentTurns?: number;
   idleReapMinutes?: number;
   claudeBinaryPath?: string;
+  codexBinaryPath?: string;
+  opencodeBinaryPath?: string;
+  harness?: string;
+  harnesses?: string[];
   journalTtlDays?: number;
   journalMaxMb?: number;
   maxConnections?: number;
@@ -119,6 +175,24 @@ interface ConfigFile {
   hostToolGraceSec?: number;
   hostToolTimeoutSec?: number;
   worktreeRoot?: string;
+  mcpServers?: unknown;
+  repos?: unknown;
+  repoRoot?: string;
+  worktreePruneDays?: number;
+  allowLocalRepoUrls?: boolean;
+  autoUpdate?: boolean;
+  autoUpdateIntervalMinutes?: number;
+  autoUpdateQuietMinutes?: number;
+  allowSyncedStdio?: boolean;
+  syncedCommandAllowlist?: string[];
+}
+
+/** `1/true/yes/on` and `0/false/no/off` (any case); anything else, including empty, is "not set". */
+export function parseBoolEnv(v: string | undefined): boolean | undefined {
+  const t = v?.trim().toLowerCase();
+  if (t === '1' || t === 'true' || t === 'yes' || t === 'on') return true;
+  if (t === '0' || t === 'false' || t === 'no' || t === 'off') return false;
+  return undefined;
 }
 
 /** `~` and `~/x` mean the daemon user's home; everything else must already be absolute. */
@@ -153,6 +227,12 @@ export function loadOrCreateDaemonId(dataDir: string): string {
   return daemonId;
 }
 
+/** Merge `patch` into config.json (other keys untouched), atomically. */
+export function updateConfigFile(dataDir: string, patch: Record<string, unknown>): void {
+  const cfg = readConfigFile(dataDir);
+  writeFileAtomic(join(dataDir, 'config.json'), `${JSON.stringify({ ...cfg, ...patch }, null, 2)}\n`);
+}
+
 export function isWildcardAddress(host: string): boolean {
   return host === '0.0.0.0' || host === '::' || host === '' || host === '0:0:0:0:0:0:0:0';
 }
@@ -165,6 +245,15 @@ function allowedClientEnv(names: unknown): string[] {
   if (!Array.isArray(names) || !names.every((n) => typeof n === 'string')) throw new Error('invalid allowedClientEnv: expected a list of variable names');
   for (const n of names as string[]) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n)) throw new Error(`invalid allowedClientEnv entry: ${n}`);
+  }
+  return [...new Set(names as string[])];
+}
+
+/** Bare command names or absolute paths; anything else (relative paths, empty strings) would never match a command. */
+function syncedCommandAllowlist(names: unknown): string[] {
+  if (!Array.isArray(names) || !names.every((n) => typeof n === 'string')) throw new Error('invalid syncedCommandAllowlist: expected a list of command names or absolute paths');
+  for (const n of names as string[]) {
+    if (!n || /\s/.test(n) || (n.includes('/') && !isAbsolute(n))) throw new Error(`invalid syncedCommandAllowlist entry: "${n}" (use a bare command name or an absolute path)`);
   }
   return [...new Set(names as string[])];
 }
@@ -199,13 +288,26 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
   for (const w of readOnlyWorkspaces) {
     if (!isAbsolute(w)) throw new Error(`read-only workspace "${w}" must be an absolute path`);
   }
-  const harness = flags.harness ?? (env.AGENT_THREADS_HARNESS as HarnessKind | undefined) ?? 'claude';
-  if (harness !== 'claude' && harness !== 'fake') throw new Error(`invalid harness: ${String(harness)}`);
+  const explicitHarness = flags.harness ?? (env.AGENT_THREADS_HARNESS || undefined) ?? file.harness;
+  if (explicitHarness !== undefined && explicitHarness !== 'fake' && !isRealHarness(explicitHarness)) throw new Error(`invalid harness: ${String(explicitHarness)} (expected ${[...REAL_HARNESSES, 'fake'].join(', ')})`);
+  const rawHarnesses = flags.harnesses ?? envList(env.AGENT_THREADS_HARNESSES?.replace(/,/g, ':')) ?? file.harnesses;
+  for (const h of rawHarnesses ?? []) {
+    if (!isRealHarness(h)) throw new Error(`invalid harness in harnesses: ${String(h)} (expected ${REAL_HARNESSES.join(', ')})`);
+  }
+  const harnesses: RealHarness[] = rawHarnesses?.length
+    ? [...new Set(rawHarnesses as RealHarness[])]
+    : explicitHarness && explicitHarness !== 'fake' ? [explicitHarness] : [...REAL_HARNESSES];
+  const harness: HarnessKind = explicitHarness ?? harnesses[0];
+  if (harness !== 'fake' && !harnesses.includes(harness)) throw new Error(`default harness ${harness} is not among the enabled harnesses (${harnesses.join(', ')})`);
   const envInt = (v: string | undefined) => (v !== undefined && v !== '' ? Number(v) : undefined);
   const worktreeRootRaw = flags.worktreeRoot ?? (env.AGENT_THREADS_WORKTREE_ROOT || undefined) ?? file.worktreeRoot;
   const worktreeRoot = worktreeRootRaw ? resolve(expandHome(worktreeRootRaw)) : undefined;
   if (worktreeRoot && !isAbsolute(worktreeRoot)) throw new Error(`worktreeRoot "${worktreeRoot}" must be an absolute path`);
   const claudeBinaryPath = flags.claudeBinaryPath ?? (env.AGENT_THREADS_CLAUDE_BINARY || undefined) ?? file.claudeBinaryPath;
+  const codexBinaryPath = flags.codexBinaryPath ?? (env.AGENT_THREADS_CODEX_BINARY || undefined) ?? file.codexBinaryPath;
+  const opencodeBinaryPath = flags.opencodeBinaryPath ?? (env.AGENT_THREADS_OPENCODE_BINARY || undefined) ?? file.opencodeBinaryPath;
+  const repoRoot = resolve(expandHome(file.repoRoot ?? join(dataDir, 'workspace')));
+  if (!isAbsolute(repoRoot)) throw new Error(`repoRoot "${repoRoot}" must be an absolute path`);
   return {
     dataDir,
     listen,
@@ -213,6 +315,7 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     allowedOrigins: flags.allowedOrigins ?? envOrigins ?? file.allowedOrigins ?? [],
     acknowledgeOpen,
     harness,
+    harnesses,
     workspaces: [...new Set(workspaces.map((w) => resolve(w)))],
     readOnlyWorkspaces: [...new Set(readOnlyWorkspaces.map((w) => resolve(w)))],
     allowBypass: flags.allowBypass ?? (env.AGENT_THREADS_ALLOW_BYPASS === '1' || file.allowBypass === true),
@@ -226,7 +329,19 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     allowedClientEnv: allowedClientEnv(flags.allowedClientEnv ?? envList(env.AGENT_THREADS_ALLOWED_CLIENT_ENV) ?? file.allowedClientEnv ?? []),
     hostToolGraceSec: positiveInt('hostToolGraceSec', flags.hostToolGraceSec ?? envInt(env.AGENT_THREADS_HOST_TOOL_GRACE_SEC) ?? file.hostToolGraceSec ?? DEFAULT_HOST_TOOL_GRACE_SEC, 0),
     hostToolTimeoutSec: positiveInt('hostToolTimeoutSec', flags.hostToolTimeoutSec ?? envInt(env.AGENT_THREADS_HOST_TOOL_TIMEOUT_SEC) ?? file.hostToolTimeoutSec ?? DEFAULT_HOST_TOOL_TIMEOUT_SEC, 1),
+    mcpServers: parseDaemonMcpServers(file.mcpServers),
+    repos: sanitizeConfiguredRepos(file.repos),
+    repoRoot,
+    worktreePruneDays: positiveInt('worktreePruneDays', file.worktreePruneDays ?? DEFAULT_WORKTREE_PRUNE_DAYS, 0),
+    allowLocalRepoUrls: file.allowLocalRepoUrls === true,
+    autoUpdate: flags.autoUpdate ?? parseBoolEnv(env.AGENT_THREADS_AUTO_UPDATE) ?? file.autoUpdate === true,
+    autoUpdateIntervalMinutes: positiveInt('autoUpdateIntervalMinutes', flags.autoUpdateIntervalMinutes ?? envInt(env.AGENT_THREADS_AUTO_UPDATE_INTERVAL_MINUTES) ?? file.autoUpdateIntervalMinutes ?? DEFAULT_AUTO_UPDATE_INTERVAL_MINUTES, MIN_AUTO_UPDATE_INTERVAL_MINUTES),
+    autoUpdateQuietMinutes: positiveInt('autoUpdateQuietMinutes', flags.autoUpdateQuietMinutes ?? envInt(env.AGENT_THREADS_AUTO_UPDATE_QUIET_MINUTES) ?? file.autoUpdateQuietMinutes ?? DEFAULT_AUTO_UPDATE_QUIET_MINUTES, 0),
+    allowSyncedStdio: flags.allowSyncedStdio ?? (env.AGENT_THREADS_ALLOW_SYNCED_STDIO === '1' || file.allowSyncedStdio === true),
+    syncedCommandAllowlist: syncedCommandAllowlist(flags.syncedCommandAllowlist ?? envList(env.AGENT_THREADS_SYNCED_COMMAND_ALLOWLIST) ?? file.syncedCommandAllowlist ?? []),
     ...(worktreeRoot ? { worktreeRoot } : {}),
     ...(claudeBinaryPath ? { claudeBinaryPath } : {}),
+    ...(codexBinaryPath ? { codexBinaryPath } : {}),
+    ...(opencodeBinaryPath ? { opencodeBinaryPath } : {}),
   };
 }

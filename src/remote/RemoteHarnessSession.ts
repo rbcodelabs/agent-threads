@@ -180,7 +180,7 @@ export class RemoteHarnessSession implements HarnessSession {
     if (mode.attachOnly && this.remote.turnPending) this.sendAwaitingState = true;
     if (this.deps.hostTools) await this.prepareHostTools();
     if (this.spec.appendSystemPrompt) {
-      this.spec = { ...this.spec, appendSystemPrompt: applyHostToolsPrompt(this.spec.appendSystemPrompt, this.sentManifest && Object.keys(this.sentManifest).length ? this.deps.hostTools?.summary ?? null : null, this.deps.hostName ?? 'Geode') };
+      this.spec = { ...this.spec, appendSystemPrompt: applyHostToolsPrompt(this.spec.appendSystemPrompt, this.sentManifest && Object.keys(this.sentManifest).length ? this.deps.hostTools?.summary ?? null : null, this.deps.hostName ?? 'Geode', this.thread.agentHarness ?? 'claude') };
     }
     if (mode.attachOnly) {
       // A turn was running when the host quit: show it as running until the replay says otherwise.
@@ -214,6 +214,7 @@ export class RemoteHarnessSession implements HarnessSession {
       manifest: () => this.sentManifest,
       invoke: (server, tool, input, signal) => tools.invoke(server, tool, input, signal),
       requestPermission: (name, detail) => (this.callbacks ? this.callbacks.onPermissionRequest(name, detail) : Promise.resolve(false)),
+      isPreApproved: (server, tool, input) => tools.isPreApproved(server, tool, input),
       sendResult: async (callId, result) => {
         await this.client.command('tool.result', { threadId: this.threadId, callId, success: result.success, text: result.text, ...(result.content?.length ? { content: result.content } : {}) });
       },

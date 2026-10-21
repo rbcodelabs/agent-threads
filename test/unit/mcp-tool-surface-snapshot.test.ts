@@ -37,9 +37,7 @@ const CANONICAL_TOOLS = [
   'CronList',
   'CronUpdate',
   'ScheduleWakeup',
-  'enter_vm',
   'enter_worktree',
-  'exit_vm',
   'exit_worktree',
   'github_check_repo',
   'github_list_access',
@@ -60,6 +58,9 @@ const CANONICAL_TOOLS = [
   'skills_uninstall',
   'skills_update',
   'skills_update_local',
+  'sync_inspect_conflict',
+  'sync_list_conflicts',
+  'sync_resolve_conflict',
   'threads_archive',
   'threads_clear_proposed_reply',
   'threads_create',
@@ -86,7 +87,6 @@ const CANONICAL_TOOLS = [
   'vault_list_bridges',
   'vault_restore_file_version',
   'vault_search',
-  'vm_exec',
   'watch_document',
   'workspace_get_active_file',
   'workspace_get_open_tabs',
@@ -101,9 +101,7 @@ const LEGACY_TOOLS = [
   'CronList',
   'CronUpdate',
   'ScheduleWakeup',
-  'enter_vm',
   'enter_worktree',
-  'exit_vm',
   'exit_worktree',
   'github_check_repo',
   'github_list_access',
@@ -151,10 +149,12 @@ const LEGACY_TOOLS = [
   'skills_uninstall',
   'skills_update',
   'skills_update_local',
+  'sync_inspect_conflict',
+  'sync_list_conflicts',
+  'sync_resolve_conflict',
   'threads_create',
   'unwatch_document',
   'vault_list',
-  'vm_exec',
   'watch_document',
 ];
 
@@ -165,9 +165,7 @@ const HARNESS_TOOLS = [
   'CronList',
   'CronUpdate',
   'ScheduleWakeup',
-  'enter_vm',
   'enter_worktree',
-  'exit_vm',
   'exit_worktree',
   'github_check_repo',
   'github_list_access',
@@ -188,6 +186,9 @@ const HARNESS_TOOLS = [
   'skills_uninstall',
   'skills_update',
   'skills_update_local',
+  'sync_inspect_conflict',
+  'sync_list_conflicts',
+  'sync_resolve_conflict',
   'threads_archive',
   'threads_clear_proposed_reply',
   'threads_create',
@@ -214,7 +215,6 @@ const HARNESS_TOOLS = [
   'vault_list_bridges',
   'vault_restore_file_version',
   'vault_search',
-  'vm_exec',
   'watch_document',
   'workspace_get_active_file',
   'workspace_get_open_tabs',
@@ -237,6 +237,8 @@ const HARNESS_READ_ONLY_TOOLS = [
   'skills_list_installed',
   'skills_list_sources',
   'skills_search',
+  'sync_inspect_conflict',
+  'sync_list_conflicts',
   'threads_get_current',
   'threads_get_log',
   'threads_get_messages',
@@ -292,33 +294,6 @@ describe('MCP tool surface is pinned on all three paths', () => {
     }
     expect(canonical.tools.length).toBe(legacy.tools.length);
     expect(canonical.tools.length).toBe(canonical.harnessTools.length);
-  });
-});
-
-/**
- * host_exec is opt-in per session (VM-routed desktop threads only): absent
- * from the default surface pinned above, present on the canonical and harness
- * paths only when hooks are supplied, and never on the deprecated alias.
- */
-describe('host_exec exposure', () => {
-  const hooks = { isInteractive: () => true, requestApproval: async () => false };
-  const withHostExec = () => createClaudeThreadsMcpServers(app, { hostExec: hooks }) as unknown as {
-    claude_threads: Surface;
-    obsidian: Surface;
-  };
-
-  it('is absent by default on every path', () => {
-    const s = surfaces();
-    expect(s.claude_threads.tools.map(t => t.name)).not.toContain('host_exec');
-    expect(s.obsidian.tools.map(t => t.name)).not.toContain('host_exec');
-    expect(s.claude_threads.harnessTools.map(t => t.name)).not.toContain('host_exec');
-  });
-
-  it('adds exactly host_exec to the canonical surface when hooks are supplied', () => {
-    const s = withHostExec();
-    expect(s.claude_threads.tools.map(t => t.name).sort()).toEqual([...CANONICAL_TOOLS, 'host_exec'].sort());
-    expect(s.obsidian.tools.map(t => t.name).sort()).toEqual(LEGACY_TOOLS);
-    expect(s.claude_threads.harnessTools.find(t => t.name === 'host_exec')?.requiresApproval).toBe(true);
   });
 });
 
@@ -388,5 +363,31 @@ describe('contributed agent tools reach every session path', () => {
     expect(matches).toHaveLength(1);
     expect((await matches[0].handler({ brief: 'x' }, {})).content[0].text).toBe('contributed design');
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * host_exec is opt-in per session (threads on the managed local daemon only): absent from the default surface pinned
+ * above, present on the canonical and harness paths only when hooks are supplied, and never on the deprecated alias.
+ */
+describe('host_exec exposure', () => {
+  const hooks = { isInteractive: () => true, requestApproval: async () => false };
+  const withHostExec = () => createClaudeThreadsMcpServers(app, { hostExec: hooks }) as unknown as {
+    claude_threads: Surface;
+    obsidian: Surface;
+  };
+
+  it('is absent by default on every path', () => {
+    const s = surfaces();
+    expect(s.claude_threads.tools.map(t => t.name)).not.toContain('host_exec');
+    expect(s.obsidian.tools.map(t => t.name)).not.toContain('host_exec');
+    expect(s.claude_threads.harnessTools.map(t => t.name)).not.toContain('host_exec');
+  });
+
+  it('adds exactly host_exec to the canonical surface when hooks are supplied, requiring approval', () => {
+    const s = withHostExec();
+    expect(s.claude_threads.tools.map(t => t.name).sort()).toEqual([...CANONICAL_TOOLS, 'host_exec'].sort());
+    expect(s.obsidian.tools.map(t => t.name).sort()).toEqual(LEGACY_TOOLS);
+    expect(s.claude_threads.harnessTools.find(t => t.name === 'host_exec')?.requiresApproval).toBe(true);
   });
 });

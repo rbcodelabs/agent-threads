@@ -563,41 +563,6 @@ describe('AskUserQuestion handler', () => {
   });
 });
 
-describe('host_exec approval card', () => {
-  const request = { command: 'ls -la', cwd: os.tmpdir(), reason: 'inspect', timeoutSeconds: 60 };
-
-  it('prompts on the thread card even in bypassPermissions with host_exec always-allowed', async () => {
-    const manager = makeManager({ permissionMode: 'bypassPermissions', alwaysAllowedTools: ['host_exec'] });
-    const thread = manager.createThread('T', os.tmpdir());
-    thread.permissionMode = 'bypassPermissions';
-    const events: ThreadEvent[] = [];
-    manager.subscribe((_id, e) => events.push(e));
-    let respond!: (allow: boolean) => void;
-    const handler = vi.fn((_id: string, _tool: string, _detail: string) => new Promise<boolean>((resolve) => { respond = resolve; }));
-    manager.permissionHandler = handler;
-
-    const approval = manager.requestHostExecApproval(thread.id, request);
-    await Promise.resolve();
-
-    expect(handler).toHaveBeenCalledWith(thread.id, 'host_exec', expect.stringContaining('"command":"ls -la"'));
-    expect(manager.getPendingPermission(thread.id)?.toolName).toBe('host_exec');
-    expect(events).toContainEqual(expect.objectContaining({ type: 'permission_request', toolName: 'host_exec' }));
-
-    respond(true);
-    await expect(approval).resolves.toBe(true);
-    expect(manager.hasPendingPermission(thread.id)).toBe(false);
-    expect(events).toContainEqual({ type: 'permission_resolved' });
-  });
-
-  it('resolves false when the user denies', async () => {
-    const manager = makeManager();
-    const thread = manager.createThread('T', os.tmpdir());
-    manager.permissionHandler = async () => false;
-    await expect(manager.requestHostExecApproval(thread.id, request)).resolves.toBe(false);
-    expect(manager.hasPendingPermission(thread.id)).toBe(false);
-  });
-});
-
 describe('tool use events', () => {
   it('emits tool_use event and stores tool calls on message', async () => {
     const manager = makeManager();
@@ -615,6 +580,28 @@ describe('tool use events', () => {
     expect(toolEvent?.record.name).toBe('Write');
     const assistantMsg = thread.messages.find(m => m.role === 'assistant');
     expect(assistantMsg?.toolCalls?.[0].name).toBe('Write');
+  });
+});
+
+describe('tool result settling (remote sessions replay wire events)', () => {
+  it('settles the streamed copy AND the committed message copy of a record', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    const events: ThreadEvent[] = [];
+    manager.subscribe((_, e) => events.push(e));
+
+    await manager.sendMessage(thread.id, 'Do something');
+    const streamed = { name: 'Read', summary: 'Read: a.ts', timestamp: 1, toolUseId: 'tu-1', status: 'pending' as const };
+    // Remote: onMessage carries a separately-deserialized copy.
+    const committed = { ...streamed };
+    mock.callbacks!.onToolUse(streamed);
+    mock.callbacks!.onMessage('', [committed]);
+    mock.callbacks!.onToolResult!('tu-1', 'success', 42);
+
+    expect(streamed.status).toBe('success');
+    expect(committed.status).toBe('success');
+    expect(thread.messages.at(-1)!.toolCalls![0]).toMatchObject({ status: 'success', durationMs: 42 });
+    expect(events.some(e => e.type === 'tool_result_status')).toBe(true);
   });
 });
 

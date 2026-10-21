@@ -49,3 +49,14 @@ export function groupDashboardThreads(
     return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }) || a.key.localeCompare(b.key);
   });
 }
+
+/** Archived threads matching the (already lower-cased) search query, newest first. */
+export function filterArchivedThreads(threads: Thread[], liveIds: ReadonlySet<string>, query: string): Thread[] {
+  return threads
+    .filter(thread => thread.status === 'archived' && !liveIds.has(thread.id))
+    .filter(thread => !query
+      || thread.title.toLowerCase().includes(query)
+      || (thread.summary ?? '').toLowerCase().includes(query)
+      || (thread.recap ?? '').toLowerCase().includes(query))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}

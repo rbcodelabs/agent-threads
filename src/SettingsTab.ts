@@ -1,17 +1,30 @@
 import { isValidOverviewPath } from './projectOverview';
-import { isAgentHarness } from './types';
+import { effectiveExtraEnv, isAgentHarness, parseExtraEnv } from './types';
+import { normalizeToolCallStyle } from './toolNameUtils';
 import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type { ButtonComponent, TextComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
 import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifactStorage';
-import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig } from './types';
+import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig, RemoteHostToolsSettings } from './types';
 import { daemonWsUrl, probeDaemon, type ProbeWorkspaces } from './remote/DaemonClient';
 import { connectionPill } from './remote/connectionPill';
-import { checkDaemonInput, checkVaultMappingInput, describeTest, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
+import { resolveSkillsSyncMode } from './remote/skillsSync';
+import { adminTokenSecretNameFor, checkDaemonInput, checkVaultMappingInput, describeTest, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
+import { addNamedRow, buildPickerRows, checkAddByName, mergeSavedEntries, selectedEntries, type PickerRow, type PushableSecretSources } from './remote/pushedSecretPicker';
 import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel } from './remote/workspaceChoice';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
+import { renderLocalDaemonPanel } from './localDaemon/localDaemonPanel';
+import { visibleDaemons } from './localDaemon/registration';
+import { renderMcpRunsOn, type RunsOnHost } from './mcpRunsOn';
+import { renderHostToolsAvailability, type AvailabilityHost } from './hostToolsAvailability';
+import {
+  HOST_TOOL_GROUPS, customRoutes, describeCustomRoute, hostToolsSettingsFrom, isGroupOn, isServerOn, proxiedServerNames,
+  removeRoute, setGroupAvailable, setHostToolsEnabled, setMcpSent, setServerAvailable,
+} from './hostToolsChecklist';
+export { hostToolsSettingsFrom };
+import { DESCRIBE_REMOVE } from './localDaemon/view';
 import { serializeKey } from './stt';
 import { debugLog, setDebugLogging } from './logger';
 import { telemetry } from './telemetry';
@@ -28,13 +41,13 @@ import { mcpRegistrationSchema, listMcpServers, deleteMcpServer, findUnresolvedP
 import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
 import type { OAuthMcpPreset } from './oauthMcpPresets';
 import { classifyScheduledItems, describeScheduledExecution, formatNextOccurrence } from './scheduledWorkView';
-import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
-import { DEFAULT_VM_CPUS, DEFAULT_VM_MEMORY, MAX_VM_CPUS, resolveVmCpus, resolveVmMemory } from './sandboxVm';
-import { describeReset, getSandboxSetupStatus, resetSandbox, runSandboxSetup } from './sandboxSetup';
-import { renderSandboxSettingsPanel } from './sandboxSetupPanel';
 import { checkAwsCredentialsNow, reauthenticateAws, resolveSignInProfile } from './awsReauth';
 import { promptConfirm } from './confirmModal';
 import { formatToolName } from './toolNameUtils';
+import { describeMcpServer } from './mcpStatus';
+import { describeRepo, formatRepoLines, parseRepoLines, type RemoteReposSource } from './remote/repos';
+import type { McpServerStatusEntry } from './ClaudeSession';
+import { removeRemoteAlwaysAllow } from './remoteAlwaysAllow';
 
 // View-type string constants, mirrored as local literals (see main.ts) so referencing
 // them never triggers a static import of the desktop-only KanbanView/AgentDashboard
@@ -530,12 +543,25 @@ class OpenAiKeyModal extends Modal {
   }
 }
 
+/** One line per MCP server; anything not connected is flagged so a dead server is visible without opening a thread. */
+export function renderMcpServerStatus(el: HTMLElement, servers: readonly McpServerStatusEntry[]): void {
+  el.empty();
+  el.createDiv({ cls: 'setting-item-description ct-remote-mcp-heading', text: servers.length ? 'MCP servers (from the latest session)' : 'No MCP servers in the latest session' });
+  const list = el.createEl('ul', { cls: 'ct-remote-mcp-list', attr: { 'aria-label': 'MCP server status' } });
+  for (const server of servers) {
+    const d = describeMcpServer(server);
+    list.createEl('li', { cls: `ct-remote-mcp-item ${d.ok ? 'ct-remote-mcp-item--ok' : 'ct-remote-mcp-item--bad mod-warning'}`, text: d.text });
+  }
+}
+
 /**
  * Add / edit one remote daemon. The token is written to the keychain
  * (`app.secretStorage`) under a name derived from the daemon id and never to
  * data.json; leaving the token blank while editing keeps the stored one.
  */
 export class RemoteDaemonModal extends Modal {
+  private readonly onCloseCallbacks: Array<() => void> = [];
+
   constructor(
     app: App,
     private readonly existing: RemoteDaemonConfig | null,
@@ -543,10 +569,75 @@ export class RemoteDaemonModal extends Modal {
     private readonly vaultRoot: string,
     private readonly actions: {
       test(candidate: RemoteDaemonConfig, typedToken: string): Promise<DaemonTestOutcome>;
-      save(config: RemoteDaemonConfig, token: string): Promise<void>;
+      save(config: RemoteDaemonConfig, token: string, adminToken: string): Promise<void>;
+      /** Last MCP server status this daemon's sessions reported (absent until a session has started on it). */
+      mcpStatus?(daemonId: string): McpServerStatusEntry[] | undefined;
+      /** Repositories the daemon keeps cloned; absent when the plugin has no live connection layer. */
+      repos?: RemoteReposSource;
+      /** Names of the servers that run on this computer and can be proxied to a daemon (OAuth, Google Workspace). */
+      proxiedServers?(): string[];
+      /** Names of the user's own servers (Settings, MCP) that a daemon may be sent. */
+      ownServers?(): string[];
+      /** Names (never values) of the secrets that could be sent to a daemon right now. */
+      pushableSecrets?(): PushableSecretSources;
     },
   ) {
     super(app);
+  }
+
+  /**
+   * The repositories this daemon keeps cloned: one per line, saved to the daemon (which clones them under its
+   * workspace root and uses the GitHub token stored there). Needs an admin token to change; anyone can look.
+   */
+  private renderRepos(parent: HTMLElement, daemonId: string, source: RemoteReposSource): void {
+    const el = parent.createDiv({ cls: 'ct-remote-repos' });
+    el.createEl('h3', { text: 'Repositories' });
+    el.createDiv({ cls: 'setting-item-description', text: 'Repos this daemon keeps cloned so threads there can work on them. One per line: <url> [branch] [as name]. Private repos use the GitHub token stored on the daemon (`agent-threads creds push github GH_TOKEN`).' });
+    const list = el.createEl('ul', { cls: 'ct-remote-repos-list', attr: { 'aria-label': 'Repository status' } });
+    const message = el.createDiv({ cls: 'setting-item-description ct-remote-repos-message', attr: { role: 'status' } });
+    let text = '';
+    let edited = false;
+    let poll: number | undefined;
+    const show = (load: Awaited<ReturnType<RemoteReposSource['status']>>): void => {
+      list.empty();
+      if (!load.ok) {
+        message.setText(load.detail);
+        message.addClass('mod-warning');
+        return;
+      }
+      message.setText(load.value.root ? `Cloned under ${load.value.root} on the daemon.` : '');
+      message.removeClass('mod-warning');
+      for (const r of load.value.repos) {
+        const d = describeRepo(r);
+        list.createEl('li', { cls: `ct-remote-repo-item ${d.ok ? 'ct-remote-repo-item--ok' : 'ct-remote-repo-item--bad mod-warning'}`, text: d.text });
+      }
+      if (!edited) { text = formatRepoLines(load.value.repos); input.value = text; }
+      // A sync in progress finishes in the background: look again until nothing is syncing.
+      window.clearTimeout(poll);
+      if (load.value.repos.some((r) => r.state === 'syncing')) poll = window.setTimeout(() => { void source.status(daemonId).then(show); }, 2000);
+    };
+    const input = el.createEl('textarea', {
+      cls: 'ct-remote-repos-input',
+      attr: { rows: '4', 'aria-label': 'Repositories', placeholder: 'https://github.com/owner/repo.git main', spellcheck: 'false' },
+    });
+    input.addEventListener('input', () => { text = input.value; edited = true; });
+    const row = el.createDiv('ct-modal-button-row');
+    const saveBtn = row.createEl('button', { text: 'Save and sync' });
+    saveBtn.addEventListener('click', async () => {
+      const parsed = parseRepoLines(text);
+      if (parsed.errors.length) { message.setText(parsed.errors.join(' ')); message.addClass('mod-warning'); return; }
+      saveBtn.disabled = true;
+      message.setText('Saving…');
+      message.removeClass('mod-warning');
+      const load = await source.sync(daemonId, parsed.repos);
+      saveBtn.disabled = false;
+      if (load.ok) edited = false;
+      show(load);
+    });
+    const refreshBtn = row.createEl('button', { text: 'Refresh' });
+    refreshBtn.addEventListener('click', () => { void source.status(daemonId).then(show); });
+    this.onCloseCallbacks.push(() => window.clearTimeout(poll));
+    void source.status(daemonId).then(show);
   }
 
   onOpen(): void {
@@ -578,6 +669,12 @@ export class RemoteDaemonModal extends Modal {
     new Setting(contentEl).setName('Access token').setDesc(this.existing ? 'Leave blank to keep the stored token.' : 'From `agent-threads token create --scope control` on the daemon machine.')
       .addText((t) => { t.inputEl.type = 'password'; t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { token = v; }); });
 
+    // What the daemon's sessions report about their MCP servers; a server that is down shows as failed.
+    const mcpServers = this.existing ? this.actions.mcpStatus?.(this.existing.id) : undefined;
+    if (mcpServers) renderMcpServerStatus(contentEl.createDiv({ cls: 'ct-remote-mcp-status' }), mcpServers);
+
+    if (this.existing && this.actions.repos) this.renderRepos(contentEl, this.existing.id, this.actions.repos);
+
     // Folders: chosen from what the daemon offers once a test has succeeded; typed paths live under Advanced.
     const foldersEl = contentEl.createDiv({ cls: 'ct-remote-folders' });
     const advanced = contentEl.createEl('details', { cls: 'ct-remote-advanced' });
@@ -594,19 +691,118 @@ export class RemoteDaemonModal extends Modal {
       .setDesc('The folder on that machine offered for new threads. Normally chosen for you above.')
       .addText((t) => { folderText = t; t.setPlaceholder('/srv/workspaces').setValue(folder).onChange((v) => { folder = v; folderTouched = true; renderFolders(); }); });
 
-    // What this daemon may do on THIS computer (design 3.3). Default: nothing; every group is opt-in.
-    let hostToolsOn = this.existing?.hostTools?.enabled === true;
-    let allowedGroups = Object.entries(this.existing?.hostTools?.routes ?? {}).filter(([, v]) => v === 'host').map(([k]) => k).join(', ');
-    let mcpAllow = (this.existing?.hostTools?.mcpAllowlist ?? []).join(', ');
-    new Setting(advanced).setName('Tools on this computer')
-      .setDesc('Off by default. On: threads on this daemon can call the groups you list below on this computer, while this app is connected, and each tool that changes anything still asks you here first. Off: they keep only the daemon machine\'s own tools. Anything that writes, runs commands, schedules, installs or reads secrets is never offered.')
-      .addToggle((t) => t.setValue(hostToolsOn).onChange((v) => { hostToolsOn = v; }));
-    new Setting(advanced).setName('Tool groups to allow')
-      .setDesc('Comma-separated, all read-only and all off until listed: vault (search and read notes), workspace (open tabs, active file), threads (list and read your other threads), skills (list installed skills), browser (the in-app browser), mcp (your Google Workspace and OAuth servers; or name one server). Only listed groups are offered, and only while "Tools on this computer" is on.')
-      .addText((t) => t.setPlaceholder('vault, mcp').setValue(allowedGroups).onChange((v) => { allowedGroups = v; }));
-    new Setting(advanced).setName('MCP servers it may receive')
-      .setDesc('Names of your external MCP servers (Settings, MCP) to send to this daemon. Blank: servers without headers that the daemon can reach. Servers that start a program here, use a local address or a secret are never sent.')
-      .addText((t) => t.setPlaceholder('docs, search').setValue(mcpAllow).onChange((v) => { mcpAllow = v; }));
+    // What this daemon may do on THIS computer (design 3.3). Default: nothing; every item is opt-in. A draft of the saved
+    // `hostTools`, edited only through the pure helpers so this checklist and Settings, MCP can never disagree.
+    let hostTools: RemoteHostToolsSettings | undefined = this.existing?.hostTools ? structuredClone(this.existing.hostTools) : undefined;
+    const proxied = this.actions.proxiedServers?.() ?? [];
+    const own = this.actions.ownServers?.() ?? [];
+    const toolsEl = advanced.createDiv({ cls: 'ct-host-tools' });
+    const drawHostTools = (): void => {
+      toolsEl.empty();
+      const enabled = hostTools?.enabled === true;
+      const change = (next: RemoteHostToolsSettings | undefined): void => { hostTools = next; drawHostTools(); };
+      new Setting(toolsEl).setName('Tools on this computer')
+        .setDesc('Off by default. On: threads on this daemon can use the items ticked below on this computer, while this app is connected, and each tool that changes anything still asks you here first. Off: they keep only the daemon machine\'s own tools. Anything that writes, runs commands, schedules, installs or reads secrets is never offered.')
+        .addToggle((t) => t.setValue(enabled).onChange((v) => change(setHostToolsEnabled(hostTools, v))));
+      const list = toolsEl.createDiv({ cls: 'ct-host-tools-list', attr: { role: 'group', 'aria-label': 'Tools this daemon may use on this computer' } });
+      if (!enabled) list.createDiv({ cls: 'setting-item-description', text: 'Turn on "Tools on this computer" to choose what this daemon can use.' });
+      const item = (name: string, hint: string, checked: boolean, onToggle: (v: boolean) => void): void => {
+        const row = list.createDiv({ cls: 'ct-host-tools-item' });
+        const label = row.createEl('label', { cls: `ct-mcp-runson-toggle${enabled ? '' : ' is-disabled'}` });
+        const box = label.createEl('input', { attr: { type: 'checkbox', 'aria-label': name } });
+        box.checked = checked && enabled;
+        box.disabled = !enabled;
+        label.createSpan({ text: name });
+        row.createDiv({ cls: 'setting-item-description', text: hint });
+        box.addEventListener('change', () => onToggle(box.checked));
+      };
+      list.createEl('h4', { text: 'Built-in tools' });
+      for (const g of HOST_TOOL_GROUPS) {
+        item(g.label, g.hint, isGroupOn(hostTools, g.key), (v) => change(setGroupAvailable(hostTools, g.key, v)));
+      }
+      if (proxied.length > 0) {
+        list.createEl('h4', { text: 'Connected servers' });
+        for (const name of proxied) {
+          item(name, 'Runs here and is proxied to this daemon. Reads are allowed; anything that changes something asks first.', isServerOn(hostTools, name), (v) => change(setServerAvailable(hostTools, name, v)));
+        }
+      }
+      const custom = customRoutes(hostTools, proxied);
+      if (custom.length > 0) {
+        list.createEl('h4', { text: 'Custom' });
+        for (const key of custom) item(key, describeCustomRoute(key), true, () => change(removeRoute(hostTools, key)));
+      }
+      const sent = new Set(hostTools?.mcpAllowlist ?? []);
+      const unknownSent = [...sent].filter((n) => !own.includes(n));
+      if (own.length > 0 || unknownSent.length > 0) {
+        list.createEl('h4', { text: 'Your other MCP servers to send' });
+        list.createDiv({ cls: 'setting-item-description', text: 'Servers from Settings, MCP that start nothing here and use no secret. None ticked: the ones the daemon can reach are sent automatically. Ticked: only those. Servers that start a program, use a local address or a secret are never sent this way (use "Runs on" in Settings, MCP).' });
+        for (const name of [...own, ...unknownSent]) {
+          const hint = own.includes(name) ? '' : 'Not in Settings, MCP any more. Untick to remove.';
+          item(name, hint, sent.has(name), (v) => change(setMcpSent(hostTools, name, v)));
+        }
+      }
+    };
+    drawHostTools();
+
+    // Skill folders Threads controls are copied to the daemon automatically. Not for the managed local daemon (own path).
+    let skillsSync: string | undefined = this.existing?.skillsSync;
+    if (this.existing?.managed !== 'local-container') {
+      new Setting(advanced).setName('Skills')
+        .setDesc('Automatic: your installed, local and GitHub skills are copied to this daemon\'s data directory when a thread starts there, and only Agent Threads sessions on it use them. Nothing is written to ~/.claude on that machine. Skills are instructions the agent follows and may contain secrets, so use Off for a daemon you do not fully trust. Turning this off does not delete what was already copied; the daemon removes unused skills after 14 days.')
+        .addDropdown((d) => d
+          .addOption('auto', 'Automatic')
+          .addOption('off', 'Off')
+          .setValue(resolveSkillsSyncMode({ skillsSync }) === 'auto' ? 'auto' : 'off')
+          .onChange((v) => { skillsSync = v; }));
+    }
+    // Secrets this app may PUSH to the daemon (names only). The list is the consent: nothing leaves until a name is on
+    // it, and a name is only sent over wss:// (or loopback) with the admin token below.
+    const saved = this.existing?.pushedSecrets ?? [];
+    let pushedRows: PickerRow[] = mergeSavedEntries(buildPickerRows(this.actions.pushableSecrets?.() ?? { envNames: [], keychain: [] }), saved);
+    let pushedSelected = new Set(saved);
+    let adminToken = '';
+    new Setting(advanced).setName('Secrets to send to this daemon')
+      .setDesc('Tick the environment variables or keychain secrets to send. Their values are sent to this daemon when a thread starts there and can be read by anything running on it; an hour later they expire. None ticked (the default): nothing is sent.');
+    const pushedEl = advanced.createDiv({ cls: 'ct-pushed-secrets' });
+    const pushedMsg = pushedEl.createDiv({ cls: 'setting-item-description', attr: { role: 'status' } });
+    const pushedList = pushedEl.createDiv({ cls: 'ct-host-tools-list', attr: { role: 'group', 'aria-label': 'Secrets to send to this daemon' } });
+    const drawPushed = (): void => {
+      pushedList.empty();
+      if (pushedRows.length === 0) pushedList.createDiv({ cls: 'setting-item-description', text: 'No secrets found. Add keychain secrets or Extra environment variables in Settings, or add a name below.' });
+      for (const r of pushedRows) {
+        const row = pushedList.createDiv({ cls: 'ct-host-tools-item' });
+        const label = row.createEl('label', { cls: 'ct-mcp-runson-toggle' });
+        const box = label.createEl('input', { attr: { type: 'checkbox', 'aria-label': r.entry } });
+        box.checked = pushedSelected.has(r.entry);
+        label.createSpan({ text: r.label });
+        row.createDiv({ cls: `setting-item-description${r.found ? '' : ' mod-warning'}`, text: r.hint });
+        box.addEventListener('change', () => { if (box.checked) pushedSelected.add(r.entry); else pushedSelected.delete(r.entry); });
+      }
+    };
+    drawPushed();
+    let addInput: TextComponent | undefined;
+    const addByName = (): void => {
+      const check = checkAddByName(addInput?.inputEl.value ?? '');
+      pushedMsg.toggleClass('mod-warning', !check.ok);
+      if (!check.ok) { pushedMsg.setText(check.reason); return; }
+      pushedMsg.setText('');
+      const next = addNamedRow(pushedRows, pushedSelected, check.entry);
+      pushedRows = next.rows; pushedSelected = next.selected;
+      addInput?.setValue('');
+      drawPushed();
+    };
+    new Setting(advanced).setName('Add by name')
+      .setDesc('For a name that is not listed yet. The name only, for example GH_TOKEN, or project/NAME for one project. Never the secret itself.')
+      .addText((t) => {
+        addInput = t;
+        t.inputEl.setAttribute('aria-label', 'Add a secret by name');
+        t.setPlaceholder('GH_TOKEN');
+        t.inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addByName(); } });
+      })
+      .addButton((b) => b.setButtonText('Add').onClick(addByName));
+    new Setting(advanced).setName('Admin token for sending secrets')
+      .setDesc((this.existing ? 'Leave blank to keep the stored one. ' : '') + 'Sending needs an admin token, kept apart from the access token above. Create one with "agent-threads token create --scope admin" on the daemon machine. Secrets are only sent over wss:// (or to this computer).')
+      .addText((t) => { t.inputEl.type = 'password'; t.inputEl.setAttribute('aria-label', 'Admin token for sending secrets'); t.setPlaceholder(this.existing ? '(unchanged)' : 'atd_…').onChange((v) => { adminToken = v; }); });
 
     const setVault = (v: string): void => { vaultRemote = v; vaultTouched = true; vaultText?.setValue(v); };
     const setFolder = (v: string): void => { folder = v; folderTouched = true; folderText?.setValue(v); };
@@ -658,6 +854,7 @@ export class RemoteDaemonModal extends Modal {
       if (!check.ok) { status.setText(check.reason); status.addClass('mod-warning'); return null; }
       const mapping = checkVaultMappingInput({ remoteRoot: vaultRemote, localRoot: vaultLocal });
       if (!mapping.ok) { status.setText(mapping.reason); status.addClass('mod-warning'); advanced.open = true; return null; }
+      const pushedNames = selectedEntries(pushedRows, pushedSelected);
       status.removeClass('mod-warning');
       const id = this.existing?.id ?? uniqueDaemonId(name, this.all);
       return {
@@ -669,7 +866,9 @@ export class RemoteDaemonModal extends Modal {
           tokenSecretName: this.existing?.tokenSecretName ?? tokenSecretNameFor(id),
           ...(folder.trim() ? { defaultCwdRoot: folder.trim() } : {}),
           ...(mapping.mapping ? { vaultMapping: mapping.mapping } : {}),
-          ...hostToolsSettingsFrom(hostToolsOn, allowedGroups, mcpAllow),
+          ...(skillsSync !== undefined && skillsSync !== 'auto' ? { skillsSync: skillsSync as 'off' } : {}),
+          ...hostToolsSettingsFrom(hostTools),
+          ...(pushedNames.length > 0 ? { pushedSecrets: pushedNames } : {}),
         },
       };
     };
@@ -700,12 +899,13 @@ export class RemoteDaemonModal extends Modal {
     save.addEventListener('click', async () => {
       const c = candidate();
       if (!c) return;
-      await this.actions.save(c.config, token.trim());
+      await this.actions.save(c.config, token.trim(), adminToken.trim());
       this.close();
     });
   }
 
   onClose(): void {
+    for (const cb of this.onCloseCallbacks.splice(0)) cb();
     this.contentEl.empty();
   }
 }
@@ -1030,6 +1230,7 @@ export class McpServerModal extends Modal {
       const result = saveMcpServer(this.plugin.settings, server, this.existing?.name);
       if (!result.ok) { showError(result.error); return; }
       void this.plugin.saveSettings();
+      this.plugin.onMcpSyncInputsChanged?.();
 
       new Notice(`Saved MCP server "${name}".`);
       this.close();
@@ -1108,6 +1309,7 @@ export class McpServerModal extends Modal {
       const result = saveMcpServer(this.plugin.settings, server, this.existing?.name);
       if (!result.ok) { showError(result.error); return; }
       void this.plugin.saveSettings();
+      this.plugin.onMcpSyncInputsChanged?.();
 
       new Notice(`Saved MCP server "${name}".`);
       this.close();
@@ -1372,6 +1574,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   private activeTab: SettingsTabId = 'general';
   private selectedProjectId: string | null = null;
   private selectedSecretName: string | null = null;
+  private mcpSyncUnsub: (() => void) | null = null;
+
+  /** Switch the (single-pane) settings to a section before it is opened. */
+  showSection(id: SettingsTabId): void {
+    this.activeTab = id;
+  }
 
   showNewProject(): void {
     this.activeTab = 'projects';
@@ -1442,7 +1650,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     }
 
     if (this.fixedSection) {
-      this.renderActiveTab(containerEl.createDiv({ cls: 'ct-settings-tab-body' }));
+      const hostedBody = containerEl.createDiv({ cls: 'ct-settings-tab-body is-hosted' });
+      this.renderActiveTab(hostedBody);
+      this.applyHelpTextMode(hostedBody);
+      this.groupSectionsCollapsible(hostedBody);
       return;
     }
 
@@ -1465,6 +1676,80 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     });
 
     this.renderActiveTab(shell.createDiv({ cls: 'ct-settings-tab-body' }));
+  }
+
+  private static readonly HELP_PREF_KEY = 'claude-threads:settings-show-help';
+
+  /**
+   * Sidebar-hosted sections: setting descriptions collapse behind an (i) button
+   * beside each title, with one global "Show help text" toggle. Descriptions
+   * holding links or controls stay inline so nothing interactive is hidden.
+   */
+  private applyHelpTextMode(body: HTMLElement): void {
+    const items = Array.from(body.querySelectorAll<HTMLElement>('.setting-item')).filter(item => {
+      const desc = item.querySelector<HTMLElement>('.setting-item-description');
+      return !!desc && desc.textContent?.trim() && !desc.querySelector('a, button, input, select, textarea');
+    });
+    if (items.length === 0) return;
+    let showHelp = false;
+    try { showHelp = window.localStorage.getItem(ClaudeThreadsSettingTab.HELP_PREF_KEY) === '1'; } catch { /* storage unavailable */ }
+    body.toggleClass('is-help-visible', showHelp);
+
+    const toggle = body.createDiv({ cls: 'ct-help-toggle' });
+    const label = toggle.createEl('label');
+    const box = label.createEl('input', { type: 'checkbox', attr: { 'aria-label': 'Show help text' } });
+    box.checked = showHelp;
+    label.createSpan({ text: 'Show help text' });
+    box.addEventListener('change', () => {
+      try { window.localStorage.setItem(ClaudeThreadsSettingTab.HELP_PREF_KEY, box.checked ? '1' : '0'); } catch { /* ignore */ }
+      body.toggleClass('is-help-visible', box.checked);
+    });
+    body.prepend(toggle);
+
+    for (const item of items) {
+      const desc = item.querySelector<HTMLElement>('.setting-item-description')!;
+      const name = item.querySelector<HTMLElement>('.setting-item-name');
+      if (!name) continue;
+      const text = desc.textContent!.trim();
+      const icon = name.createEl('button', { cls: 'ct-help-icon', text: 'i', attr: { type: 'button', title: text, 'aria-label': `Help: ${text}`, 'aria-expanded': 'false' } });
+      icon.addEventListener('click', (event) => {
+        event.preventDefault();
+        item.toggleClass('is-help-open', !item.hasClass('is-help-open'));
+        icon.setAttribute('aria-expanded', String(item.hasClass('is-help-open')));
+      });
+    }
+  }
+
+  /**
+   * Sidebar-hosted sections: fold each heading and the rows under it into a
+   * collapsible group so long tabs (Agent, MCP) don't need scrolling. The first
+   * group starts open; open/closed state is remembered per heading.
+   */
+  private groupSectionsCollapsible(body: HTMLElement): void {
+    const isHeading = (el: Element) => el.matches('.setting-item-heading, h3');
+    const kids = Array.from(body.children);
+    if (kids.filter(isHeading).length < 2) return;
+    const store = (() => { try { return window.localStorage; } catch { return null; } })();
+    let group: HTMLDetailsElement | null = null;
+    let index = 0;
+    for (const el of kids) {
+      if (isHeading(el)) {
+        const nameEl = el.querySelector('.setting-item-name');
+        const title = (nameEl?.firstChild?.textContent ?? el.textContent ?? '').trim() || `group-${index}`;
+        const key = `claude-threads:settings-group:${this.activeTab}:${title}`;
+        const saved = store?.getItem(key);
+        group = body.createEl('details', { cls: 'ct-settings-group' });
+        group.open = saved === null || saved === undefined ? index === 0 : saved === '1';
+        el.before(group);
+        const summary = group.createEl('summary');
+        summary.appendChild(el);
+        const g = group;
+        g.addEventListener('toggle', () => { try { store?.setItem(key, g.open ? '1' : '0'); } catch { /* ignore */ } });
+        index++;
+      } else if (group && !el.matches('.ct-help-toggle')) {
+        group.appendChild(el);
+      }
+    }
   }
 
   private renderActiveTab(body: HTMLElement): void {
@@ -1526,6 +1811,22 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             this.plugin.settings.layoutDensity = value as LayoutDensity;
             await this.plugin.saveSettings();
             this.plugin.getView()?.applyDensity();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Tool call style')
+      .setDesc('How tool calls ("Working", "Exploring", ...) look in the conversation. Applies immediately.')
+      .addDropdown((drop) =>
+        drop
+          .addOption('chips', 'Chips')
+          .addOption('tree', 'Tree (default)')
+          .addOption('cards', 'Cards')
+          .setValue(normalizeToolCallStyle(this.plugin.settings.toolCallStyle))
+          .onChange(async (value) => {
+            this.plugin.settings.toolCallStyle = normalizeToolCallStyle(value);
+            await this.plugin.saveSettings();
+            this.plugin.applyToolCallStyle();
           }),
       );
 
@@ -1638,6 +1939,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   // ── Agent harness ───────────────────────────────────────────────────────
 
   private renderClaudeTab(containerEl: HTMLElement): void {
+    if (this.fixedSection) new Setting(containerEl).setName('Harness & sandbox').setHeading();
     new Setting(containerEl)
       .setName('Agent harness')
       .setDesc('New threads use this local coding agent. Existing threads retain the harness that created them.')
@@ -1714,85 +2016,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl)
-      .setName('Sandbox VM image')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Container image enter_vm starts. Requires Apple\'s container runtime (macOS 26+, Apple silicon). '
-        + 'Use "Set up sandbox" below to install the runtime and fetch this image automatically. Advanced fallback: '
-        + 'build it yourself with `container build --tag claude-threads-coding:1 sandbox/`. '
-        + 'Leave empty for claude-threads-coding:1.',
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder('claude-threads-coding:1')
-          .setValue(this.plugin.settings.vmImage ?? '')
-          .onChange(async (value) => {
-            this.plugin.settings.vmImage = value.trim();
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Sandbox VM network')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Network isolation enter_vm uses when a call does not pass one. '
-        + 'Full egress is the default so npm install, git remotes and web access work.',
-      )
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('default', 'Full egress (default)')
-          .addOption('internal', 'Internal — host only, no internet')
-          .addOption('none', 'None — no network at all')
-          .setValue(this.plugin.settings.vmDefaultNetwork ?? 'default')
-          .onChange(async (value) => {
-            this.plugin.settings.vmDefaultNetwork = value as PluginSettings['vmDefaultNetwork'];
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    const resourceHelp = 'Applies only to newly created containers. To pick up a change for an existing one, remove it '
-      + '(`container rm --force claude-threads-vm-<thread-id>`); it is recreated on next use.';
-    new Setting(containerEl)
-      .setName('Sandbox VM memory')
-      .setClass('ct-sandbox-setting')
-      .setDesc(`Memory limit per sandbox container, e.g. 4G or 2048M (default 4G). Invalid values fall back to 4G. ${resourceHelp}`)
-      .addText((text) =>
-        text
-          .setPlaceholder(DEFAULT_VM_MEMORY)
-          .setValue(this.plugin.settings.sandboxVmMemory ?? DEFAULT_VM_MEMORY)
-          .onChange(async (value) => {
-            this.plugin.settings.sandboxVmMemory = resolveVmMemory(value);
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Sandbox VM CPUs')
-      .setClass('ct-sandbox-setting')
-      .setDesc(`CPU count per sandbox container, a whole number from 1 to ${MAX_VM_CPUS} (default ${DEFAULT_VM_CPUS}). ${resourceHelp}`)
-      .addText((text) =>
-        text
-          .setPlaceholder(String(DEFAULT_VM_CPUS))
-          .setValue(String(this.plugin.settings.sandboxVmCpus ?? DEFAULT_VM_CPUS))
-          .onChange(async (value) => {
-            this.plugin.settings.sandboxVmCpus = resolveVmCpus(/^\s*\d+\s*$/.test(value) ? Number(value) : undefined);
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
     // GitHub connection (Geode >= 0.25 only; hidden elsewhere so Obsidian is unchanged).
     if (this.plugin.githubBroker?.available) {
       new Setting(containerEl)
         .setName('Use Geode GitHub connection')
         .setDesc(
           'Let threads use the GitHub account connected in Geode (Settings → GitHub) for git over HTTPS, the gh CLI and '
-          + 'the GitHub API — on the host and in the sandbox VM — with no personal access token. The token is handed to a '
+          + 'the GitHub API with no personal access token. The token is handed to a '
           + 'credential helper via a short-lived private file, never put in prompts, logs or environment variables, and '
           + 'it reaches every repository the Geode GitHub App is installed on. Your own GH_TOKEN, gh login and git '
           + 'credential helpers always take priority.',
@@ -1804,9 +2034,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               this.plugin.settings.githubConnectionEnabled = value;
               this.plugin.manager.updateSettings(this.plugin.settings);
               await this.plugin.saveSettings();
-              // Apply to the host runtime dir now; VM hooks read the setting lazily.
+              // Apply to the host runtime dir now.
               if (value) void this.plugin.githubHost?.start();
-              else void this.plugin.githubHost?.stop();
+              else {
+                void this.plugin.githubHost?.stop();
+                void this.plugin.localDaemonGithub?.stop();
+              }
             }),
         );
 
@@ -1829,65 +2062,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         );
     }
 
-    new Setting(containerEl)
-      .setName('Run harness inside sandbox VM')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Runs a thread\'s Claude CLI process inside its sandbox container instead of on the host (ADR-0015). '
-        + '"Auto" only routes into the VM when the container runtime, a probe, and the harness image are all '
-        + 'ready — until you run "Set up sandbox" (below), threads keep running on your Mac and offer to set it up. "Always" forces VM '
-        + 'routing and errors clearly instead of silently falling back if anything is missing. "Never" is '
-        + 'today\'s host-local spawn, unchanged.',
-      )
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('auto', 'Auto (default)')
-          .addOption('always', 'Always — error if unavailable')
-          .addOption('never', 'Never — host-local spawn only')
-          .setValue(this.plugin.settings.harnessVmMode ?? 'auto')
-          .onChange(async (value) => {
-            this.plugin.settings.harnessVmMode = value as PluginSettings['harnessVmMode'];
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-            this.display();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Harness VM image')
-      .setClass('ct-sandbox-setting')
-      .setDesc(
-        'Container image the harness routes into — a separate image tag from the sandbox VM image above, by design '
-        + '(ADR-0015 §7). "Set up sandbox" below builds it for you. Advanced fallback: '
-        + '`container build --tag claude-threads-harness:1 -f sandbox/Dockerfile.harness sandbox/`. '
-        + 'Leave empty for claude-threads-harness:1.',
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder('claude-threads-harness:1')
-          .setValue(this.plugin.settings.harnessVmImage ?? '')
-          .onChange(async (value) => {
-            this.plugin.settings.harnessVmImage = value.trim();
-            this.plugin.manager.updateSettings(this.plugin.settings);
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    if ((this.plugin.settings.harnessVmMode ?? 'auto') !== 'never') {
-      const sandboxSetting = new Setting(containerEl)
-        .setName('Sandbox setup')
-        .setClass('ct-sandbox-setting');
-      const harnessImage = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
-      renderSandboxSettingsPanel(sandboxSetting.descEl, {
-        isMobile: Platform.isMobile,
-        getStatus: () => getSandboxSetupStatus({ harnessImage }),
-        run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
-        reset: ({ onProgress, signal }) => resetSandbox({ harnessImage, onProgress, signal }),
-        resetMessage: describeReset(harnessImage),
-        confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
-      });
-    }
-
+    if (this.fixedSection) new Setting(containerEl).setName('Claude').setHeading();
     new Setting(containerEl)
       .setName('Claude binary path')
       .setDesc('Path to the claude executable. Leave empty to find it on $PATH.')
@@ -1972,14 +2147,14 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         awsStatus.setText(res.expired ? "Not signed in (SSO session expired or missing)." : res.error);
       }
     };
-    // Containers are desktop-only, so is this.
+    // The local daemon is desktop-only, so is this.
     if (!Platform.isMobile) new Setting(containerEl)
-      .setName('AWS profiles exposed to containers')
+      .setName('AWS profiles for the local daemon')
       .setDesc(
-        'One profile per line. Sandbox containers get a read-only copy of the AWS SSO token cache and a trimmed AWS config '
-        + 'containing only these profiles, plus the AWS_PROFILE from Extra environment variables. Takes effect for containers '
-        + 'created afterwards (a running thread keeps its container). Leave empty to expose nothing extra. '
-        + 'Note: the whole SSO token cache directory is mounted, not just these profiles\' tokens — see docs/sandbox-vms.md.',
+        'One profile per line. Threads that run on the local daemon (Run on: This Mac (container)) get a trimmed AWS config '
+        + 'containing only these profiles, plus the AWS_PROFILE from Extra environment variables, and the SSO token of each '
+        + 'profile\'s session (only that session\'s token file). Copied before each message, so a fresh sign-in on this Mac '
+        + 'reaches the daemon. Amazon Bedrock threads always get their AWS_PROFILE. Leave empty to share nothing extra.',
       )
       .addTextArea((ta) =>
         ta
@@ -2393,6 +2568,67 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       );
     containerEl.appendChild(allowedList);
     renderAllowedTools();
+
+    // — Always-allowed tools on remote daemons (per daemon) —
+    new Setting(containerEl)
+      .setName('Always-allowed tools on remote daemons')
+      .setDesc('Tools you chose "Always allow" for on a thread running on a remote daemon. Each approval applies only to that daemon; it never applies to local threads or other daemons. Remove an entry to be asked again.')
+      .setHeading();
+    const remoteAllowedList = containerEl.createDiv({ cls: 'ct-allowed-tools-list' });
+    const renderRemoteAllowedTools = () => {
+      remoteAllowedList.empty();
+      const byDaemon = this.plugin.settings.remoteAlwaysAllowedTools ?? {};
+      const daemonIds = Object.keys(byDaemon).filter((id) => byDaemon[id].length > 0);
+      if (daemonIds.length === 0) {
+        remoteAllowedList.createEl('p', { text: 'No tools always allowed on remote daemons yet.', cls: 'ct-settings-empty' });
+        return;
+      }
+      for (const daemonId of daemonIds) {
+        const daemon = (this.plugin.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
+        const label = daemon ? daemon.name : `${daemonId} (daemon no longer configured)`;
+        for (const tool of [...byDaemon[daemonId]]) {
+          new Setting(remoteAllowedList)
+            .setName(formatToolName(tool))
+            .setDesc(label)
+            .addButton((btn) =>
+              btn.setButtonText('Remove').setWarning().onClick(async () => {
+                if (removeRemoteAlwaysAllow(this.plugin.settings, daemonId, tool)) await this.plugin.saveSettings();
+                renderRemoteAllowedTools();
+              }),
+            );
+        }
+      }
+    };
+    containerEl.appendChild(remoteAllowedList);
+    renderRemoteAllowedTools();
+
+    // — Always-allowed host commands (host_exec prefixes) —
+    new Setting(containerEl)
+      .setName('Always-allowed host commands')
+      .setDesc('Command prefixes you chose "Always allow" for on a host_exec card. Calls that start with one of these run on the host without a prompt (simple commands only; never for scheduled or headless threads). Remove an entry to be asked again.')
+      .setHeading();
+    const prefixList = containerEl.createDiv({ cls: 'ct-allowed-tools-list' });
+    const renderPrefixes = () => {
+      prefixList.empty();
+      const prefixes = this.plugin.settings.hostExecAlwaysAllowedPrefixes ?? [];
+      if (prefixes.length === 0) {
+        prefixList.createEl('p', { text: 'No host command prefixes always allowed yet.', cls: 'ct-settings-empty' });
+        return;
+      }
+      for (const prefix of prefixes) {
+        new Setting(prefixList)
+          .setName(prefix)
+          .addButton((btn) =>
+            btn.setButtonText('Remove').setWarning().onClick(async () => {
+              this.plugin.settings.hostExecAlwaysAllowedPrefixes =
+                this.plugin.settings.hostExecAlwaysAllowedPrefixes.filter((p) => p !== prefix);
+              await this.plugin.saveSettings();
+              renderPrefixes();
+            }),
+          );
+      }
+    };
+    renderPrefixes();
   }
 
   // ── Vault ───────────────────────────────────────────────────────────────
@@ -2466,13 +2702,36 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
   }
 
+  /** Primary action for the current manager tab when the page header is folded into the host sidebar. */
+  private managerAction: { label: string; onAction: () => void } | null = null;
+
   private renderManagerHeader(container: HTMLElement, title: string, description: string, actionLabel: string, onAction: () => void): void {
+    // Hosted in a sidebar that already names the section: skip the big header
+    // and surface the action as a compact button beside the list search.
+    if (this.fixedSection) {
+      this.managerAction = { label: actionLabel, onAction };
+      container.addClass('is-compact');
+      return;
+    }
+    this.managerAction = null;
     const header = container.createDiv({ cls: 'ct-settings-page-header' });
     const copy = header.createDiv();
     copy.createEl('h1', { text: title });
     copy.createEl('p', { text: description });
     const action = header.createEl('button', { text: actionLabel, cls: 'mod-cta', attr: { type: 'button' } });
     action.addEventListener('click', onAction);
+  }
+
+  /** Search box for a manager list, with the tab's primary action as a "+" button when the header is folded away. */
+  private createManagerListToolbar(list: HTMLElement, label: string, placeholder: string): HTMLInputElement {
+    const toolbar = list.createDiv({ cls: 'ct-manager-list-toolbar' });
+    const search = toolbar.createEl('input', { type: 'search', placeholder, attr: { 'aria-label': label } });
+    const action = this.managerAction;
+    if (action) {
+      const add = toolbar.createEl('button', { text: '+', cls: 'mod-cta ct-manager-add', attr: { type: 'button', 'aria-label': action.label, title: action.label } });
+      add.addEventListener('click', action.onAction);
+    }
+    return search;
   }
 
   private createManagerField(
@@ -2484,12 +2743,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const field = container.createEl('label', { cls: 'ct-manager-field' });
     field.createSpan({ text: label, cls: 'ct-manager-field-label' });
     const input = options.textarea
-      ? field.createEl('textarea', { attr: { rows: '6', 'aria-label': label } })
+      ? field.createEl('textarea', { attr: { rows: '4', 'aria-label': label } })
       : field.createEl('input', { type: options.type ?? 'text', attr: { 'aria-label': label } });
     input.value = value;
     if (options.placeholder) input.setAttribute('placeholder', options.placeholder);
     if (options.disabled && input instanceof HTMLInputElement) input.disabled = true;
-    if (options.description) field.createEl('small', { text: options.description });
+    if (options.description) field.createEl('small', { text: options.description, attr: { title: options.description } });
     return input;
   }
 
@@ -2542,7 +2801,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     }
     const manager = containerEl.createDiv({ cls: 'ct-settings-manager' });
     const list = manager.createEl('section', { cls: 'ct-manager-list', attr: { 'aria-label': 'Projects' } });
-    const search = list.createEl('input', { type: 'search', placeholder: 'Search projects', attr: { 'aria-label': 'Search projects' } });
+    const search = this.createManagerListToolbar(list, 'Search projects', 'Search projects');
     const rows = list.createDiv({ cls: 'ct-manager-list-rows' });
     const renderRows = () => {
       rows.empty();
@@ -2621,6 +2880,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       if (project) this.plugin.manager.updateProject(project.id, { name: projectName, vaultFolder, cwdOverride: cwd.value.trim() || undefined, overviewPath: overview.value.trim() || undefined, description: description.value });
       else this.selectedProjectId = this.plugin.manager.createProject(projectName, vaultFolder, description.value, cwd.value.trim() || undefined, overview.value.trim() || undefined).id;
       await this.plugin.saveSettings();
+      void this.plugin.offerDaemonUpdateIfMountsChanged();
       this.display();
     });
   }
@@ -2638,7 +2898,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     if (this.selectedSecretName === null || (this.selectedSecretName && !keys.includes(this.selectedSecretName))) this.selectedSecretName = keys[0] ?? '';
     const manager = containerEl.createDiv({ cls: 'ct-settings-manager' });
     const list = manager.createEl('section', { cls: 'ct-manager-list', attr: { 'aria-label': 'Secrets' } });
-    const search = list.createEl('input', { type: 'search', placeholder: 'Search secrets', attr: { 'aria-label': 'Search secrets' } });
+    const search = this.createManagerListToolbar(list, 'Search secrets', 'Search secrets');
     const rows = list.createDiv({ cls: 'ct-manager-list-rows' });
     const mask = (value: string | null) => !value ? 'No value stored' : value.length <= 8 ? '••••••••' : `${value.slice(0, 4)}••••${value.slice(-4)}`;
     const renderRows = () => {
@@ -2715,7 +2975,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         this.plugin.app.secretStorage.setSecret(secretStorageKey(secretName), '');
         this.plugin.settings.secretEnvKeys = keys.filter(key => key !== secretName);
         if (this.plugin.settings.secretEnvScopes) delete this.plugin.settings.secretEnvScopes[secretName];
-        await this.plugin.saveSettings(); this.selectedSecretName = null; this.display();
+        await this.plugin.saveSettings(); this.plugin.onMcpSyncInputsChanged?.(); this.selectedSecretName = null; this.display();
       });
     }
     const actions = detail.createEl('footer', { cls: 'ct-manager-actions' });
@@ -2734,7 +2994,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       if (isNew) this.plugin.settings.secretEnvKeys = [...keys, resolvedName];
       const scopes = this.plugin.settings.secretEnvScopes ?? (this.plugin.settings.secretEnvScopes = {});
       if (selectedRadio.checked) scopes[resolvedName] = [...chosen]; else delete scopes[resolvedName];
-      await this.plugin.saveSettings(); this.selectedSecretName = resolvedName; this.display();
+      await this.plugin.saveSettings(); this.plugin.onMcpSyncInputsChanged?.(); this.selectedSecretName = resolvedName; this.display();
     });
   }
 
@@ -3249,13 +3509,19 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       cls: 'setting-item-description',
       text: 'Run threads on an agent-threads daemon on another machine (for example a homelab box). They keep running there when this app is closed, and reconnect to the live stream when you return. Reach the daemon over Tailscale; see docs/remote-daemon.md.',
     });
+    this.renderLocalDaemonBlock(containerEl);
     const daemons = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
-    for (const daemon of daemons) {
+    for (const daemon of visibleDaemons(daemons, Platform.isMobile)) {
       const state = this.plugin.daemonRegistry?.stateOf(daemon.id);
       const pill = connectionPill(state, daemon.name);
+      const managed = daemon.managed === 'local-container';
       const row = new Setting(containerEl)
         .setName(daemon.name)
-        .setDesc(`${daemon.url}${daemon.defaultCwdRoot ? ` · default folder ${daemon.defaultCwdRoot}` : ''}`);
+        .setDesc(managed
+          ? `${daemon.url} · managed by Agent Threads (Local daemon above)`
+          : `${daemon.url}${daemon.defaultCwdRoot ? ` · default folder ${daemon.defaultCwdRoot}` : ''}`);
+      const reported = this.plugin.daemonMcpStatus.get(daemon.id)?.servers;
+      if (reported) renderMcpServerStatus(row.descEl.createDiv({ cls: 'ct-remote-mcp-status' }), reported);
       row.nameEl.createSpan({ cls: `ct-remote-pill ct-remote-pill--${pill.kind} ct-remote-daemon-status`, text: pill.label, attr: { title: pill.title } });
       row.addButton((btn) => btn.setButtonText('Test').onClick(async () => {
         btn.setDisabled(true).setButtonText('Testing…');
@@ -3263,12 +3529,23 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         btn.setDisabled(false).setButtonText('Test');
         new Notice(outcome.text, outcome.tone === 'ok' ? 4000 : 9000);
       }));
-      row.addButton((btn) => btn.setButtonText('Edit').onClick(() => this.openDaemonModal(daemon)));
+      // A managed entry's address and token belong to the Local daemon block; editing them here would break it.
+      if (!managed) row.addButton((btn) => btn.setButtonText('Edit').onClick(() => this.openDaemonModal(daemon)));
       row.addButton((btn) => btn.setButtonText('Remove').setWarning().onClick(async () => {
+        if (managed) {
+          const controller = this.plugin.localDaemon;
+          if (!controller) return;
+          if (!await promptConfirm(this.app, { message: DESCRIBE_REMOVE, confirmLabel: 'Remove', danger: true })) return;
+          try { await controller.remove({ removeData: true }); } catch (err) { new Notice(`Could not remove the local daemon: ${err instanceof Error ? err.message : String(err)}`, 9000); }
+          this.display();
+          return;
+        }
         const inUse = this.plugin.manager.getThreads().filter((t) => t.remote?.daemonId === daemon.id && t.status !== 'archived').length;
         if (inUse > 0 && !window.confirm(`${inUse} thread${inUse === 1 ? '' : 's'} run on "${daemon.name}". They stay in your list but cannot continue until a daemon with this id is configured again. Remove it?`)) return;
         this.plugin.settings.remoteDaemons = daemons.filter((d) => d.id !== daemon.id);
+        await this.plugin.remoteSecretPush?.reconcile();
         this.app.secretStorage.setSecret(secretStorageKey(daemon.tokenSecretName), '');
+        this.app.secretStorage.setSecret(secretStorageKey(adminTokenSecretNameFor(daemon.id)), '');
         await this.plugin.saveSettings();
         this.plugin.daemonRegistry?.refresh();
         this.display();
@@ -3279,6 +3556,108 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       .setDesc('You need the daemon address (wss://… through `tailscale serve`) and a token from `agent-threads token create` on that machine.')
       .addButton((btn) => btn.setButtonText('Add daemon').setCta().onClick(() => this.openDaemonModal(null)));
     applySecretStorageCopy(this.app, containerEl.createEl('p', { cls: 'setting-item-description' }), (storage) => `${storage} The token never appears in data.json.`);
+  }
+
+  /** Settings -> Remote -> Local daemon: one-click managed daemon in a container on this Mac. Desktop only. */
+  private renderLocalDaemonBlock(containerEl: HTMLElement): void {
+    const controller = this.plugin.localDaemon;
+    if (Platform.isMobile || !controller) return;
+    const setting = new Setting(containerEl).setName('Local daemon').setClass('ct-local-daemon-setting');
+    const showAfter = (fn: () => Promise<unknown>) => async (): Promise<unknown> => {
+      const result = await fn();
+      // Set up / Remove / Update change the Remote daemons list below; redraw it.
+      this.display();
+      return result;
+    };
+    // Resources apply when the container is (re)created: the status then offers Update.
+    const saveResources = async (patch: { memory?: string; cpus?: number; folders?: string[]; shareProjectFolders?: boolean; optionalTools?: string[]; allowSyncedStdio?: boolean }): Promise<void> => {
+      const current = this.plugin.settings.localDaemon ?? { enabled: false, port: 7433 };
+      this.plugin.settings.localDaemon = { ...current, ...patch };
+      await this.plugin.saveSettings();
+    };
+    const memorySetting = new Setting(containerEl)
+      .setName('Local daemon memory')
+      .setDesc('Memory limit of the local daemon container, e.g. 4G or 2048M (default 4G). Invalid values fall back to 4G. Applies when the container is next created: choose Update in the block above.')
+      .addText((text) => text
+        .setPlaceholder('4G')
+        .setValue(this.plugin.settings.localDaemon?.memory ?? '')
+        .onChange(async (value) => { await saveResources({ memory: value.trim() || undefined }); }));
+    const projectFoldersSetting = new Setting(containerEl)
+      .setName('Local daemon: share all Project folders')
+      .setDesc('Automatically share READ-WRITE every Project\'s working folder that is outside your vault (the folder set in the Project\'s settings), at /work/<folder name>, so you do not have to list them below. New Projects are included. An agent there can edit or delete anything in them. Applies when the container is next created: choose Update in the block above.')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.localDaemon?.shareProjectFolders === true)
+        .onChange(async (on) => { await saveResources({ shareProjectFolders: on || undefined }); }));
+    const foldersSetting = new Setting(containerEl)
+      .setName('Local daemon shared folders')
+      .setDesc('Folders on this Mac to share READ-WRITE with the local daemon, one absolute path per line (for example a repository outside your vault). They appear in the daemon at /work/<folder name>; pick one under "Run on" when you start a thread. An agent there can edit or delete anything in them. Applies when the container is next created: choose Update in the block above.')
+      .addTextArea((ta) => ta
+        .setPlaceholder('/Users/me/projects/my-repo')
+        .setValue((this.plugin.settings.localDaemon?.folders ?? []).join('\n'))
+        .onChange(async (value) => {
+          const folders = value.split('\n').map((l) => l.trim()).filter(Boolean);
+          await saveResources({ folders: folders.length ? folders : undefined });
+        }));
+    const syncedStdioSetting = new Setting(containerEl)
+      .setName('Local daemon: allow MCP servers that start programs')
+      .setDesc('Lets you run a Settings MCP server that starts a program (stdio) inside the local daemon container (Settings, MCP, "Runs on"). The program runs as the daemon user with access to everything the daemon can see. Off by default; http and sse servers do not need it. Applies when the container is next created: choose Update in the block above.')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.localDaemon?.allowSyncedStdio === true)
+        .onChange(async (on) => { await saveResources({ allowSyncedStdio: on || undefined }); }));
+    // Tools that write, schedule or touch secrets on this Mac, which every daemon is denied by default.
+    const optionalSettings: Setting[] = [];
+    {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const opt = require('./localDaemon/optionalTools') as typeof import('./localDaemon/optionalTools');
+      const head = new Setting(containerEl).setName('Local daemon: tools that act on this Mac').setDesc(`Off by default. ${opt.OPTIONAL_TOOLS_WARNING} Takes effect for the next thread session you open.`);
+      head.settingEl.addClass('ct-local-daemon-optional-head');
+      optionalSettings.push(head);
+      for (const group of opt.OPTIONAL_TOOL_GROUPS) {
+        const row = new Setting(containerEl)
+          .setName(group.label)
+          .setDesc(`Lets a thread on the daemon ${group.description}. (${group.tools.join(', ')})`)
+          .addToggle((toggle) => toggle
+            .setValue(opt.normalizeOptionalGroups(this.plugin.settings.localDaemon?.optionalTools).includes(group.id))
+            .onChange(async (on) => {
+              const current = new Set(opt.normalizeOptionalGroups(this.plugin.settings.localDaemon?.optionalTools));
+              if (on) current.add(group.id); else current.delete(group.id);
+              await saveResources({ optionalTools: opt.normalizeOptionalGroups([...current]) });
+            }));
+        row.settingEl.addClass('ct-local-daemon-optional-row');
+        optionalSettings.push(row);
+      }
+    }
+    const cpusSetting = new Setting(containerEl)
+      .setName('Local daemon CPUs')
+      .setDesc('CPU count of the local daemon container, a whole number from 1 to 64 (default 4). Applies when the container is next created.')
+      .addText((text) => text
+        .setPlaceholder('4')
+        .setValue(this.plugin.settings.localDaemon?.cpus ? String(this.plugin.settings.localDaemon.cpus) : '')
+        .onChange(async (value) => { await saveResources({ cpus: /^\s*\d+\s*$/.test(value) ? Number(value) : undefined }); }));
+    renderLocalDaemonPanel(setting.descEl, {
+      isMobile: Platform.isMobile,
+      pluginVersion: this.plugin.manifest.version,
+      snapshot: () => controller.snapshot(),
+      subscribe: (listener) => controller.subscribe(listener),
+      setVisible: (visible) => { for (const s of [setting, memorySetting, cpusSetting, projectFoldersSetting, syncedStdioSetting, foldersSetting, ...optionalSettings]) s.settingEl.style.display = visible ? '' : 'none'; },
+      confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
+      cancel: () => controller.cancel(),
+      openUrl: (url) => { try { window.open(url, '_blank'); } catch { /* the panel keeps a link */ } },
+      signIn: (handlers) => controller.signIn(handlers),
+      signInHarness: (harness, handlers) => controller.signInHarness(harness, handlers),
+      setHarnesses: (harnesses) => controller.setHarnesses(harnesses),
+      run: (id, opts) => {
+        switch (id) {
+          case 'setup': return showAfter(() => controller.setUp(opts))();
+          case 'start': return controller.start(opts);
+          case 'stop': return controller.stop(opts);
+          case 'restart': return controller.restart(opts);
+          case 'update': return showAfter(() => controller.update(opts))();
+          case 'reset': return controller.reset(opts);
+          case 'remove': return showAfter(() => controller.remove({ ...opts, removeData: true }))();
+        }
+      },
+    });
   }
 
   private async testDaemon(daemon: RemoteDaemonConfig, typedToken: string | undefined): Promise<DaemonTestOutcome> {
@@ -3298,16 +3677,49 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     };
   }
 
+  /** Saves a daemon's host-tool choices the way the daemon editor does, so new threads on it pick them up. */
+  private proxiedAvailabilityHost(): AvailabilityHost {
+    return {
+      daemons: () => visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile),
+      save: async () => {
+        await this.plugin.saveSettings();
+        this.plugin.daemonRegistry?.refresh();
+      },
+    };
+  }
+
+  /**
+   * Names the daemon editor may offer to send. Whether a keychain secret has a value is checked here and the value is
+   * dropped at once; only names reach the editor.
+   */
+  private pushableSecretSources(): PushableSecretSources {
+    const settings = this.plugin.settings;
+    const envNames = Object.entries(parseExtraEnv(effectiveExtraEnv(settings))).filter(([, v]) => v !== '').map(([k]) => k);
+    const keychain = (settings.secretEnvKeys ?? [])
+      .filter((name) => !!this.app.secretStorage.getSecret(secretStorageKey(name)))
+      .map((name) => ({ name, projectIds: settings.secretEnvScopes?.[name] ?? [] }));
+    const projects = settings.projects ?? [];
+    return { envNames, keychain, projectName: (id) => projects.find((p) => p.id === id)?.name };
+  }
+
   private openDaemonModal(existing: RemoteDaemonConfig | null): void {
     new RemoteDaemonModal(this.app, existing, this.plugin.settings.remoteDaemons ?? [], this.plugin.manager.vaultRoot ?? '', {
       test: (candidate, token) => this.testDaemon(candidate, token),
-      save: async (config, token) => {
+      mcpStatus: (id) => this.plugin.daemonMcpStatus.get(id)?.servers,
+      proxiedServers: () => proxiedServerNames(this.plugin.settings),
+      ownServers: () => listMcpServers(this.plugin.settings).servers.map((x) => x.name),
+      pushableSecrets: () => this.pushableSecretSources(),
+      ...(this.plugin.remoteRepos ? { repos: this.plugin.remoteRepos } : {}),
+      save: async (config, token, adminToken) => {
         const list = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
         const index = list.findIndex((d) => d.id === config.id);
         if (index >= 0) list[index] = config; else list.push(config);
         if (token) this.app.secretStorage.setSecret(secretStorageKey(config.tokenSecretName), token);
+        if (adminToken) this.app.secretStorage.setSecret(secretStorageKey(adminTokenSecretNameFor(config.id)), adminToken);
         await this.plugin.saveSettings();
         this.plugin.daemonRegistry?.refresh();
+        // An edited allowlist takes effect now: dropped names are re-pushed away (or the kind deleted).
+        void this.plugin.remoteSecretPush?.reconcile();
         this.display();
       },
     }).open();
@@ -3369,6 +3781,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       const setting = new Setting(containerEl).setName(label);
       if (service === 'gmail') setting.setDesc(MAIL_CALENDAR_DESC.gmail);
       if (service === 'calendar') setting.setDesc(MAIL_CALENDAR_DESC.calendar);
+      if (this.plugin.settings.googleWorkspaceMcp?.[service] === true && visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile).length > 0) {
+        setting.settingEl.addClass('ct-mcp-has-runson');
+        renderHostToolsAvailability(setting.settingEl, this.proxiedAvailabilityHost(), `google-${service}`);
+      }
       setting.addToggle(toggle => toggle
         .setValue(this.plugin.settings.googleWorkspaceMcp?.[service] === true)
         .onChange(async enabled => {
@@ -3408,6 +3824,12 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         renderOAuthStatusBadge(row.descEl, { label, tone });
         if (state && state.status !== 'connected' && state.errorMessage) {
           row.descEl.createDiv({ cls: 'ct-mcp-server-warning', text: state.errorMessage });
+        }
+        // An OAuth server signs in through this computer, so it cannot be synced to a daemon; it can be proxied from here.
+        if (visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile).length > 0) {
+          row.settingEl.addClass('ct-mcp-has-runson');
+          renderHostToolsAvailability(row.settingEl, this.proxiedAvailabilityHost(), name,
+            oauthMcpNeedsAttention({ tone }) ? { unavailableReason: 'Re-authorize this server before making it available.' } : {});
         }
         row.addButton((btn) => {
           btn.setButtonText('Re-authorize').onClick(() =>
@@ -3505,6 +3927,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     for (const key of this.plugin.settings.secretEnvKeys ?? []) knownEnv[key] = 'set';
 
     const listEl = containerEl.createDiv({ cls: 'ct-mcp-servers-list' });
+    const runsOnHost: RunsOnHost | null = this.plugin.mcpSync ? {
+      app: this.app,
+      engine: this.plugin.mcpSync,
+      daemons: () => visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile),
+      reported: (id) => this.plugin.daemonMcpStatus?.get(id)?.servers,
+      rerender: () => renderList(),
+    } : null;
     const renderList = () => {
       listEl.empty();
       const { servers, invalid } = listMcpServers(this.plugin.settings);
@@ -3546,6 +3975,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
         );
 
+        // Where else this server may run: the remote daemons the user can opt it in for.
+        const syncEngine = this.plugin.mcpSync;
+        if (syncEngine) {
+          const ev = syncEngine.evaluate(server.name);
+          if (ev) {
+            row.settingEl.addClass('ct-mcp-has-runson');
+            if (runsOnHost) renderMcpRunsOn(row.settingEl, runsOnHost, ev);
+          }
+        }
+
         row.addButton((btn) =>
           btn.setButtonText('Remove').setWarning().onClick(() => {
             const result = deleteMcpServer(this.plugin.settings, server.name);
@@ -3554,6 +3993,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
               return;
             }
             void this.plugin.saveSettings();
+            this.plugin.onMcpSyncInputsChanged?.();
             new Notice(`Removed MCP server "${server.name}".`);
             renderList();
           }),
@@ -3581,6 +4021,13 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       }
     };
     renderList();
+    // The engine reports progress (synced, failed, needs an admin token) as it learns it; redraw the list when it does.
+    this.mcpSyncUnsub?.();
+    this.mcpSyncUnsub = this.plugin.mcpSync?.onChange(() => { if (listEl.isConnected) renderList(); }) ?? null;
+    // Which daemons need an admin token is learned by asking (harmlessly) once each is connected.
+    if (this.plugin.mcpSync) {
+      for (const d of visibleDaemons(this.plugin.settings.remoteDaemons ?? [], Platform.isMobile)) void this.plugin.mcpSync.probeAdmin(d.id);
+    }
 
     new Setting(containerEl)
       .addButton((btn) =>
@@ -3692,19 +4139,4 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           }),
       );
   }
-}
-
-/** The `hostTools` field of a daemon config from the three Advanced inputs; omitted when everything is at its default (off). */
-export function hostToolsSettingsFrom(enabled: boolean, allowedGroups: string, mcpAllow: string): { hostTools?: import('./types').RemoteHostToolsSettings } {
-  const list = (v: string): string[] => [...new Set(v.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean))];
-  const groups = list(allowedGroups);
-  const allow = list(mcpAllow);
-  if (!enabled && groups.length === 0 && allow.length === 0) return {};
-  return {
-    hostTools: {
-      ...(enabled ? { enabled: true } : {}),
-      ...(groups.length ? { routes: Object.fromEntries(groups.map((k) => [k, 'host' as const])) } : {}),
-      ...(allow.length ? { mcpAllowlist: allow } : {}),
-    },
-  };
 }

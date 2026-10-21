@@ -25,6 +25,33 @@ export function tokenSecretNameFor(id: string): string {
   return `AGENT_THREADS_DAEMON_${id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_TOKEN`;
 }
 
+/**
+ * Keychain entry for the OPTIONAL admin token used only to push secrets to a daemon (`creds.push` needs admin scope;
+ * the everyday token is `control`). A different prefix from `tokenSecretNameFor`, so no daemon id can make the two
+ * collide (id "x-admin" vs the admin token of "x").
+ */
+export function adminTokenSecretNameFor(id: string): string {
+  return `AGENT_THREADS_PUSHADMIN_${id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_TOKEN`;
+}
+
+export const PUSHED_SECRET_ENTRY = /^(?:[^/\s,]{1,64}\/)?[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+
+/**
+ * Parses the "Secrets to send" box: names one per line or comma separated, `NAME` or `<projectId>/NAME`. A rejected
+ * entry is reported by position only, never echoed: the user may have pasted a VALUE there.
+ */
+export function parsePushedSecrets(text: string): { ok: true; names: string[] } | { ok: false; reason: string } {
+  const entries = text.split(/[\n,]+/).map((e) => e.trim()).filter(Boolean);
+  const names: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    if (!PUSHED_SECRET_ENTRY.test(entries[i])) {
+      return { ok: false, reason: `Secrets to send, entry ${i + 1}: enter variable names only (letters, digits and _, optionally project/NAME), never the secret itself.` };
+    }
+    if (!names.includes(entries[i])) names.push(entries[i]);
+  }
+  return { ok: true, names };
+}
+
 export type DaemonInputCheck = { ok: true; url: string } | { ok: false; field: 'name' | 'url' | 'token'; reason: string };
 
 /** Accepts ws://, wss://, http://, https:// (and bare host:port, treated as ws://). */
@@ -59,7 +86,7 @@ export function checkDaemonInput(
   return { ok: true, url: withScheme.replace(/\/+$/, '') };
 }
 
-function isLoopbackHost(host: string): boolean {
+export function isLoopbackHost(host: string): boolean {
   return host === 'localhost' || host === '::1' || /^127\.\d+\.\d+\.\d+$/.test(host);
 }
 

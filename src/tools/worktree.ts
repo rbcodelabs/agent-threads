@@ -27,6 +27,13 @@ export interface WorktreeToolsPort {
     onSetCwd?: (path: string, originRepoPath?: string | null) => void;
     /** Refuses a working directory before it is adopted (throws with the reason). */
     validateCwd?: (path: string) => void;
+    /**
+     * Daemon only. The folder holding the repositories the daemon keeps cloned: a relative `repoPath` (`my-repo`)
+     * resolves against it, and worktrees of repositories inside it are created under `<root>/.worktrees`.
+     */
+    workspaceRoot?: string;
+    /** Daemon only. Ignore the `worktreeRoot` argument: where worktrees go is the operator's decision, not the agent's. */
+    lockWorktreeRoot?: boolean;
   };
 }
 
@@ -114,13 +121,20 @@ export function createWorktreeTools(port: WorktreeToolsPort): Record<string, Too
       try {
         const path = require('path') as typeof import('path');
 
-        const repoPath = args.repoPath ?? cwd.get();
+        // A relative repoPath names a clone under the daemon's repository root; anything else is taken as given and then
+        // checked against the host's allowed folders.
+        const repoPath = args.repoPath && options.workspaceRoot && !path.isAbsolute(args.repoPath)
+          ? path.resolve(options.workspaceRoot, args.repoPath)
+          : (args.repoPath ?? cwd.get());
         if (!repoPath) {
           return {
             content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: 'No working directory set. Call set_working_directory first.' }) }],
             isError: true,
           };
         }
+
+        // Judge the path the agent named BEFORE running git in it: git reads configuration from the directory it is run in.
+        options.validateCwd?.(repoPath);
 
         // Resolve the git root (handles cases where repoPath is a subdirectory)
         let gitRoot: string;
@@ -133,8 +147,8 @@ export function createWorktreeTools(port: WorktreeToolsPort): Record<string, Too
           };
         }
 
-        // Refuse a repo or git root the host does not allow before anything is created beside it.
-        options.validateCwd?.(repoPath);
+        // The git root can differ from the path (a subfolder, or a symlink that leads elsewhere): it must be allowed too,
+        // before anything is created beside it.
         options.validateCwd?.(gitRoot);
 
         const branchName = args.branch ?? `claude/${Date.now()}`;
@@ -142,7 +156,13 @@ export function createWorktreeTools(port: WorktreeToolsPort): Record<string, Too
         // Worktrees go under a durable, app-owned root — NOT os.tmpdir(). macOS
         // clears $TMPDIR on reboot, which silently destroyed worktrees and any
         // uncommitted work in them. See src/worktreePaths.ts for the full rationale.
-        const worktreeRoot = resolveWorktreeRoot(args.worktreeRoot ?? options.getWorktreeRoot?.());
+        const realWorkspaceRoot = options.workspaceRoot ? (() => { try { return fs.realpathSync(options.workspaceRoot!); } catch { return path.resolve(options.workspaceRoot!); } })() : undefined;
+        const insideWorkspaceRoot = !!realWorkspaceRoot && gitRoot.startsWith(realWorkspaceRoot + path.sep);
+        const worktreeRoot = resolveWorktreeRoot(
+          options.lockWorktreeRoot
+            ? (insideWorkspaceRoot ? path.join(options.workspaceRoot!, '.worktrees') : options.getWorktreeRoot?.())
+            : (args.worktreeRoot ?? options.getWorktreeRoot?.()),
+        );
         let rawWorktreePath = worktreePathFor(worktreeRoot, gitRoot, branchName);
         // Two worktrees off the same branch name would collide; git refuses to
         // create into a non-empty directory, so disambiguate rather than fail.

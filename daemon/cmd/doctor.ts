@@ -12,8 +12,9 @@ import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync, statfsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_LISTEN, DEFAULT_PORT, DEFAULT_WORKSPACES, isLoopbackAddress, isWildcardAddress } from '../config';
+import { DEFAULT_LISTEN, DEFAULT_PORT, DEFAULT_WORKSPACES, isLoopbackAddress, isWildcardAddress, parseBoolEnv } from '../config';
 import { findClaudeBinary } from '../claudeDriver';
+import { HARNESS_BINARY, REAL_HARNESSES, findHarnessBinary, isRealHarness, type RealHarness } from '../harnesses';
 import { sha256Hex } from '../tokenStore';
 import { CLI_TOKEN_FILE } from './connection';
 
@@ -67,6 +68,8 @@ export interface Probes {
   canWrite(path: string): boolean;
   /** Is this file executable (used for the `claude` binary lookup)? */
   findClaude(explicit: string | undefined): string | null;
+  /** Same lookup for the Codex and OpenCode CLIs. */
+  findHarness(harness: RealHarness, explicit: string | undefined): string | null;
   health(baseUrl: string): Promise<HealthResult>;
 }
 
@@ -79,8 +82,14 @@ export interface DoctorTarget {
   baseUrl: string;
   workspaces: string[];
   claudeBinaryPath?: string;
+  codexBinaryPath?: string;
+  opencodeBinaryPath?: string;
+  /** Harnesses the daemon is configured to host; absent = all three. */
+  harnesses?: RealHarness[];
   /** Files that may carry the Claude credential for a systemd-run daemon. */
   credentialFiles: string[];
+  /** Auto-update opted in (environment, then config.json; a `--auto-update` flag on the service is only seen in its status file). */
+  autoUpdate?: boolean;
 }
 
 const GIB = 1024 ** 3;
@@ -118,6 +127,26 @@ export async function checkClaude(p: Probes, explicit?: string): Promise<CheckRe
   const v = await version(p, path);
   if (!v) return { id: 'claude', status: 'warn', title, detail: `${path} is present but \`--version\` failed`, fix: 'run it once by hand to see why' };
   return { id: 'claude', status: 'pass', title, detail: `${v} (${path})` };
+}
+
+/**
+ * Codex / OpenCode CLI. A harness the operator enabled but whose CLI is missing only breaks that harness's
+ * sessions (the daemon keeps serving the others), so a missing CLI is a warning, never a failure.
+ */
+export async function checkHarnessCli(p: Probes, harness: Exclude<RealHarness, 'claude'>, explicit?: string): Promise<CheckResult> {
+  const b = HARNESS_BINARY[harness];
+  const id = harness;
+  const title = `${b.exe} CLI`;
+  const path = p.findHarness(harness, explicit);
+  if (!path) {
+    return {
+      id, status: 'warn', title, detail: explicit ? `${explicit} is not an executable file` : 'not found on PATH, ~/.local/bin or ~/.npm-global/bin',
+      fix: `${harness} sessions will fail until it is installed as the daemon user (${b.installHint}); or set ${b.flag} / ${b.configKey}, or remove ${harness} from harnesses`,
+    };
+  }
+  const v = await version(p, path);
+  if (!v) return { id, status: 'warn', title, detail: `${path} is present but \`--version\` failed`, fix: 'run it once by hand to see why' };
+  return { id, status: 'pass', title, detail: `${v} (${path})` };
 }
 
 export async function checkGit(p: Probes): Promise<CheckResult> {
@@ -343,12 +372,44 @@ export async function checkTailscale(p: Probes, port: number): Promise<CheckResu
     : { id: 'tailscale', status: 'warn', title, detail: `${dns || 'connected'}; nothing serves port ${port} yet`, fix: `sudo tailscale serve --bg --https=8443 http://127.0.0.1:${port}   (then use wss://${dns || '<machine>.<tailnet>.ts.net'}:8443)` };
 }
 
+// ── auto-update ─────────────────────────────────────────────────────────────
+
+interface RawUpdateStatus { enabled?: unknown; available?: unknown; reason?: unknown; phase?: unknown; version?: unknown; lastError?: unknown; intervalMinutes?: unknown; quietMinutes?: unknown }
+
+/** `update-status.json`, written by the running daemon; unreadable or missing is just "no status yet". */
+function readUpdateStatus(p: Probes, dataDir: string): RawUpdateStatus | null {
+  try {
+    const raw = p.readFile(join(dataDir, 'update-status.json'));
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    return typeof parsed === 'object' && parsed !== null ? (parsed as RawUpdateStatus) : null;
+  } catch { return null; }
+}
+
+export function checkAutoUpdate(p: Probes, t: DoctorTarget): CheckResult {
+  const title = 'auto-update';
+  const status = readUpdateStatus(p, t.dataDir);
+  const enabled = status && typeof status.enabled === 'boolean' ? status.enabled : t.autoUpdate === true;
+  if (!enabled) return { id: 'auto-update', status: 'skip', title, detail: 'off (opt in with --auto-update or AGENT_THREADS_AUTO_UPDATE=1; docs/remote-daemon.md, "Automatic updates")' };
+  if (!status) return { id: 'auto-update', status: 'skip', title, detail: 'on in the configuration, but the daemon has not reported yet (start it)' };
+  if (status.available === false) {
+    return { id: 'auto-update', status: 'warn', title, detail: `on, but unavailable here: ${String(status.reason ?? 'unknown reason')}`, fix: 'upgrade by hand (docs/remote-daemon.md, "Upgrade"), or turn auto-update off to silence this' };
+  }
+  const phase = String(status.phase ?? 'unknown');
+  if (phase === 'held' || phase === 'paused_after_rollback' || phase === 'error') {
+    return { id: 'auto-update', status: 'warn', title, detail: `${phase.replace(/_/g, ' ')}${status.lastError ? `: ${String(status.lastError)}` : ''}`, fix: phase === 'error' ? 'see the daemon log; it retries with backoff' : 'a newer release is needed, or upgrade by hand' };
+  }
+  return { id: 'auto-update', status: 'pass', title, detail: `on, running ${String(status.version ?? '?')}, ${phase.replace(/_/g, ' ')}; checks every ${String(status.intervalMinutes ?? '?')} min, restarts after ${String(status.quietMinutes ?? '?')} min idle` };
+}
+
 // ── whole run ───────────────────────────────────────────────────────────────
 
 export async function runChecks(p: Probes, t: DoctorTarget): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   results.push(checkNode(p));
-  results.push(await checkClaude(p, t.claudeBinaryPath));
+  const enabled = t.harnesses ?? [...REAL_HARNESSES];
+  if (enabled.includes('claude')) results.push(await checkClaude(p, t.claudeBinaryPath));
+  if (enabled.includes('codex')) results.push(await checkHarnessCli(p, 'codex', t.codexBinaryPath));
+  if (enabled.includes('opencode')) results.push(await checkHarnessCli(p, 'opencode', t.opencodeBinaryPath));
   results.push(await checkGit(p));
   results.push(...(await checkGh(p)));
   results.push(await checkRipgrep(p));
@@ -366,6 +427,7 @@ export async function runChecks(p: Probes, t: DoctorTarget): Promise<CheckResult
   }
   results.push(checkClockSkew(p, health.reachable ? health : null, ntp));
   results.push(await checkTailscale(p, t.port));
+  results.push(checkAutoUpdate(p, t));
   return results;
 }
 
@@ -448,6 +510,7 @@ export function realProbes(env: NodeJS.ProcessEnv = process.env): Probes {
       try { accessSync(path, constants.W_OK); return true; } catch { return false; }
     },
     findClaude: (explicit) => findClaudeBinary(explicit, env),
+    findHarness: (harness, explicit) => findHarnessBinary(harness, explicit, env),
     async health(baseUrl) {
       try {
         const res = await fetch(`${baseUrl}/healthz`, { signal: AbortSignal.timeout(4000) });
@@ -481,6 +544,8 @@ export interface DoctorFlags {
   port?: number;
   workspaces?: string[];
   claudeBinaryPath?: string;
+  codexBinaryPath?: string;
+  opencodeBinaryPath?: string;
 }
 
 /**
@@ -491,7 +556,7 @@ export function resolveDoctorTarget(flags: DoctorFlags, p: Probes): DoctorTarget
   const env = p.env;
   const dirs = [env.DATA_DIR, '/var/lib/agent-threads', join(p.home, '.agent-threads'), join(p.home, '.local/state/agent-threads')].filter((d): d is string => !!d);
   const dataDir = flags.dataDir ?? dirs.find((d) => p.stat(d)?.isDirectory) ?? dirs[0] ?? join(p.home, '.agent-threads');
-  let file: { listen?: unknown; port?: unknown; workspaces?: unknown; claudeBinaryPath?: unknown } = {};
+  let file: { autoUpdate?: unknown; listen?: unknown; port?: unknown; workspaces?: unknown; claudeBinaryPath?: unknown; codexBinaryPath?: unknown; opencodeBinaryPath?: unknown; harness?: unknown; harnesses?: unknown } = {};
   try {
     const raw = p.readFile(join(dataDir, 'config.json'));
     if (raw) file = JSON.parse(raw) as typeof file;
@@ -510,5 +575,14 @@ export function resolveDoctorTarget(flags: DoctorFlags, p: Probes): DoctorTarget
       ? env.AGENT_THREADS_URL.replace(/^ws/i, 'http').replace(/\/v1\/ws\/?$/, '').replace(/\/+$/, '')
       : `http://${host.includes(':') ? `[${host}]` : host}:${port}`;
   const claudeBinaryPath = flags.claudeBinaryPath ?? (env.AGENT_THREADS_CLAUDE_BINARY || undefined) ?? (typeof file.claudeBinaryPath === 'string' ? file.claudeBinaryPath : undefined);
-  return { dataDir, listen, port, baseUrl, workspaces, ...(claudeBinaryPath ? { claudeBinaryPath } : {}), credentialFiles: defaultCredentialFiles(p.home) };
+  const pathFor = (flag: string | undefined, envVar: string, fileValue: unknown): string | undefined =>
+    flag ?? (env[envVar] || undefined) ?? (typeof fileValue === 'string' ? fileValue : undefined);
+  const codexBinaryPath = pathFor(flags.codexBinaryPath, 'AGENT_THREADS_CODEX_BINARY', file.codexBinaryPath);
+  const opencodeBinaryPath = pathFor(flags.opencodeBinaryPath, 'AGENT_THREADS_OPENCODE_BINARY', file.opencodeBinaryPath);
+  // Same rule as `serve`: an explicit set wins; an explicit single harness restricts to it; otherwise all three.
+  const listed = env.AGENT_THREADS_HARNESSES ? env.AGENT_THREADS_HARNESSES.split(/[,:]/).map((x) => x.trim()).filter(Boolean) : Array.isArray(file.harnesses) ? file.harnesses : undefined;
+  const single = env.AGENT_THREADS_HARNESS || (typeof file.harness === 'string' ? file.harness : undefined);
+  const harnesses: RealHarness[] = listed?.length ? [...new Set(listed.filter(isRealHarness))] : isRealHarness(single) ? [single] : [...REAL_HARNESSES];
+  const autoUpdate = parseBoolEnv(env.AGENT_THREADS_AUTO_UPDATE) ?? file.autoUpdate === true;
+  return { dataDir, listen, port, baseUrl, workspaces, harnesses, autoUpdate, ...(claudeBinaryPath ? { claudeBinaryPath } : {}), ...(codexBinaryPath ? { codexBinaryPath } : {}), ...(opencodeBinaryPath ? { opencodeBinaryPath } : {}), credentialFiles: defaultCredentialFiles(p.home) };
 }

@@ -2,6 +2,9 @@
  * The CLI against a REAL daemon (fake harness): list, run, detach + attach replay, answering requests
  * from the terminal, and the one-writer seat with a second client instance standing in for Geode.
  */
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runCli, type Io } from '../../daemon/cli';
 import { nodeSocketFactory } from '../../daemon/cmd/connection';
@@ -359,4 +362,99 @@ describe('the read-write seat', () => {
     expect(r.err).toMatch(/answered elsewhere/);
     expect(r.code).toBe(0);
   }, 15000);
+});
+
+describe('creds push', () => {
+  const dataDirOf = () => td.dataDir;
+
+  it('pushes env fields without argv values, never prints them, and removes the kind', async () => {
+    const adminToken = td.adminToken;
+    const pushed = await cli(['creds', 'push', 'mcp', 'DOCS_TOKEN', '--ttl', '1h'], { env: { AGENT_THREADS_URL: td.daemon.url, AGENT_THREADS_TOKEN: adminToken, DOCS_TOKEN: 'cli-secret-value' } }, adminToken);
+    expect(pushed.code).toBe(0);
+    expect(pushed.out).toContain('pushed 1 field to "mcp": DOCS_TOKEN');
+    expect(pushed.out + pushed.err).not.toContain('cli-secret-value');
+    expect(JSON.parse(readFileSync(join(dataDirOf(), 'creds', 'mcp.json'), 'utf8'))).toMatchObject({ fields: { DOCS_TOKEN: 'cli-secret-value' } });
+    expect(JSON.parse(readFileSync(join(dataDirOf(), 'creds', 'mcp.json'), 'utf8')).expiresAt).toBeGreaterThan(Date.now());
+
+    const removed = await cli(['creds', 'push', 'mcp', '--remove', '--json'], {}, adminToken);
+    expect(removed.code).toBe(0);
+    expect(JSON.parse(removed.out)).toMatchObject({ kind: 'mcp', removed: true });
+    expect(existsSync(join(dataDirOf(), 'creds', 'mcp.json'))).toBe(false);
+  });
+
+  it('reads a JSON object from stdin', async () => {
+    const adminToken = td.adminToken;
+    const stdin = Readable.from([JSON.stringify({ A: 'stdin-secret', B: 'b' })]);
+    const r = await cli(['creds', 'push', 'k', '--stdin', '--json'], { stdin: stdin as unknown as NodeJS.ReadableStream }, adminToken);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ kind: 'k', fields: ['A', 'B'] });
+    expect(r.out + r.err).not.toContain('stdin-secret');
+  });
+
+  it('refuses NAME=value in argv (exit 2) and a non-admin token (exit 4)', async () => {
+    const argv = await cli(['creds', 'push', 'k', 'A=topsecret'], {}, td.adminToken);
+    expect(argv.code).toBe(2);
+    expect(argv.err).not.toContain('topsecret');
+    expect(existsSync(join(dataDirOf(), 'creds', 'k.json'))).toBe(false);
+    const denied = await cli(['creds', 'push', 'k', 'A'], { env: { AGENT_THREADS_URL: td.daemon.url, AGENT_THREADS_TOKEN: controlToken, A: 'x' } });
+    expect(denied.code).toBe(4);
+  });
+});
+
+describe('mcp sync', () => {
+  const DOCS = { type: 'http', url: 'https://docs.example.test/mcp', headers: { Authorization: 'Bearer ${mcpsync-p.DOCS_TOKEN}' } };
+  const stdinOf = (v: unknown) => Readable.from([JSON.stringify(v)]) as unknown as NodeJS.ReadableStream;
+
+  it('replaces the synced set from stdin, prints names and reasons only, and --json prints the reply', async () => {
+    const r = await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({ docs: DOCS, bad: { type: 'http' }, tool: { command: 'x' } }) }, td.adminToken);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('synced 1 server: docs');
+    expect(r.out).toContain('rejected bad:');
+    expect(r.out).toContain('rejected tool:');
+    expect(r.out).toContain('needs credentials (push with "creds push"): mcpsync-p.DOCS_TOKEN');
+    expect(r.out + r.err).not.toContain('docs.example.test');
+    expect(JSON.parse(readFileSync(join(td.dataDir, 'synced-mcp.json'), 'utf8')).servers.docs.def.url).toBe('https://docs.example.test/mcp');
+
+    const json = await cli(['mcp', 'sync', '--stdin', '--json'], { stdin: stdinOf({ docs: DOCS }) }, td.adminToken);
+    expect(JSON.parse(json.out)).toEqual({ accepted: ['docs'], rejected: [], requiredCreds: ['mcpsync-p.DOCS_TOKEN'], shadowed: [] });
+  });
+
+  it('--strict exits 1 when something was rejected', async () => {
+    const r = await cli(['mcp', 'sync', '--stdin', '--strict'], { stdin: stdinOf({ bad: { type: 'http' } }) }, td.adminToken);
+    expect(r.code).toBe(1);
+  });
+
+  it('exits 1 and keeps the previous set when every server is rejected, with or without --strict', async () => {
+    await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({ docs: DOCS }) }, td.adminToken);
+    const file = join(td.dataDir, 'synced-mcp.json');
+    const before = readFileSync(file, 'utf8');
+    const r = await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({ bad: { type: 'http' }, tool: { command: 'x' } }) }, td.adminToken);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('previously synced set was kept unchanged');
+    expect(r.out).toContain('rejected bad:');
+    expect(r.out).not.toContain('no servers are synced now');
+    expect(readFileSync(file, 'utf8')).toBe(before);
+    const json = await cli(['mcp', 'sync', '--stdin', '--json'], { stdin: stdinOf({ bad: { type: 'http' } }) }, td.adminToken);
+    expect(json.code).toBe(1);
+    expect(JSON.parse(json.out)).toMatchObject({ accepted: [], kept: true, rejected: [{ name: 'bad' }] });
+    expect((await cli(['mcp', 'sync', '--stdin', '--strict'], { stdin: stdinOf({ bad: { type: 'http' } }) }, td.adminToken)).code).toBe(1);
+    // Partial rejection still exits 0 without --strict.
+    expect((await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({ docs: DOCS, bad: { type: 'http' } }) }, td.adminToken)).code).toBe(0);
+  });
+
+  it('--clear removes the synced set', async () => {
+    await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({ docs: DOCS }) }, td.adminToken);
+    const r = await cli(['mcp', 'sync', '--stdin', '--clear'], { stdin: stdinOf({}) }, td.adminToken);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('no servers are synced now');
+    expect(JSON.parse(readFileSync(join(td.dataDir, 'synced-mcp.json'), 'utf8')).servers).toEqual({});
+  });
+
+  it('needs --stdin, refuses an empty set without --clear, and needs an admin token (exit 4)', async () => {
+    expect((await cli(['mcp', 'sync'], {}, td.adminToken)).code).toBe(2);
+    expect((await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({}) }, td.adminToken)).code).toBe(2);
+    expect((await cli(['mcp', 'sync', '--stdin', '--clear'], { stdin: stdinOf({}) }, td.adminToken)).code).toBe(0);
+    expect((await cli(['mcp', 'sync', '--stdin'], { stdin: stdinOf({ docs: DOCS }) }, controlToken)).code).toBe(4);
+    expect((await cli(['mcp', 'push'], {}, td.adminToken)).code).toBe(2);
+  });
 });

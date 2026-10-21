@@ -1,10 +1,11 @@
 {
   "name": "obsidian-claude-threads",
-  "version": "0.63.0",
+  "version": "0.70.3",
   "description": "Multi-threaded Claude Code sessions in Obsidian and Geode",
   "main": "dist/main.js",
   "scripts": {
     "build": "node esbuild.config.mjs",
+    "check:mobile-load": "node scripts/check-mobile-load.cjs dist/main.js",
     "build:daemon": "node esbuild.daemon.mjs",
     "dev": "node esbuild.config.mjs --watch",
     "build:harness": "node test/harness/esbuild.mjs",

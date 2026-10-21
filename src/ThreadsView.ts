@@ -1,16 +1,29 @@
-import { AGENT_HARNESSES, agentHarnessLabel, harnessVmModeLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
+import { gateHarness } from './remote/harnessSupport';
+import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
 import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
+import { RemoteImageCache, createRemoteImageLoader, hydrateRemoteImages } from './remote/remoteImages';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import { connectionPill } from './remote/connectionPill';
+import { describeComposerSettings, PERMISSION_MODE_OPTIONS, type ComposerSettingsDescription, type RemoteConnection } from './composerSettings';
+import { createGlyph } from './composerGlyphs';
+import {
+  ComposerProjectPopover,
+  ComposerSettingsPopover,
+  type PopoverAction,
+  type PopoverOptionGroup,
+  type PopoverSetting,
+  type SettingsPopoverModel,
+} from './composerPopovers';
 import { forkBlockedReason } from './remote/threadLocation';
 import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
+import { isPermissionPreApprovedForThread, recordAlwaysAllow } from './remoteAlwaysAllow';
 import type { ViewStateResult } from 'obsidian';
 import { marked } from 'marked';
 import { splitTextWithUrls, isHttpUrl, urlChipLabel } from './urlLinks';
 import { effectiveExtraEnv } from './types';
 import { parseLoopArgs, formatLoopInterval } from './loopUtils';
 import { buildClaudeModelOptions, aliasLabel, activeModelLabel, formatModelId, type ModelOption } from './modelOptions';
-import { THREAD_BUILTIN_COMMANDS, THREAD_ARG_COMPLETIONS, MODEL_ALIASES, goalKickoffMessage, resolveCreatePrMessage, escalationCommand } from './slashCommands';
+import { THREAD_BUILTIN_COMMANDS, THREAD_ARG_COMPLETIONS, DISPATCH_BUILTIN_COMMANDS, DISPATCH_ARG_COMPLETIONS, MODEL_ALIASES, goalKickoffMessage, resolveCreatePrMessage, escalationCommand } from './slashCommands';
 import { isSetAsGoalEligible } from './goalContext';
 import { isRetryEligible } from './retryMessage';
 import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo } from './gitDiffUtils';
@@ -24,18 +37,19 @@ import * as fsp from 'fs/promises';
 import type ClaudeThreadsPlugin from './main';
 import { isDefaultThreadTitle } from './thread-title-utils';
 import { formatToolName, getToolIcon } from './ClaudeSession';
-import { isPermissionPreApproved } from './toolNameUtils';
-import { groupToolCalls, liveToolGroupKey, mergeAdjacentToolOnlyMessages, ACTIVITY_LABELS, smoothToolGroups, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
+import { isHostExecPermission, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
+import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
+import { applyToolCallStyleClass, refreshToolRowByUseId, renderToolGroupShell, renderToolRow } from './toolCallDom';
+import { groupToolRuns, liveToolGroupKey, mergeAdjacentToolOnlyMessages, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
-import { DispatchInput, type ExtraSkillDir } from './DispatchInput';
+import { HARNESS_BRAND_ICONS } from './harnessBrandIcons';
+import { DispatchInput, type DispatchPayload, type ExtraSkillDir } from './DispatchInput';
 import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, execEnv, splitErrorMessage } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
 import { reauthenticateAws } from './awsReauth';
 import { isAwsSignInExpiredError } from './awsAuthRecovery';
 import { isSignInExpiredError } from './claudeAuthRecovery';
 import { signInToClaude, type SpawnLike } from './claudeAuthCli';
-import { signInToClaudeInContainer, type SpawnLike as ContainerSpawnLike } from './claudeContainerAuthCli';
-import { runnerEnv as hostRunnerEnv } from './sandboxVm';
 import { renderClaudeSignInBanner } from './claudeSignInBanner';
 import { getVaultBridgesAPI, mapToVaultPath, type BridgeInfo } from './bridgeUtils';
 import { resolveTagIcon, planFooter, derivePrUrl } from './statusLine';
@@ -46,9 +60,7 @@ import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openLocalFileViaHost, o
 import type { StatusTag } from './types';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { promptConfirm } from './confirmModal';
-import { renderSandboxOfferCard } from './sandboxSetupPanel';
-import { getSandboxSetupStatus, runSandboxSetup } from './sandboxSetup';
-import { DEFAULT_HARNESS_VM_IMAGE } from './harnessVmRouting';
+import { pickDefaultWorkspace } from './remote/workspaceChoice';
 import { describeOrchestratorThread, isOrchestratorThread, orchestratorWarning, type OrchestratorContext } from './orchestratorThreads';
 import { partitionThreads } from './threadRowState';
 import { agentLabel, buildAgentBreadcrumbs, summarizeAgentTeam } from './agentRuns/agentTreeModel';
@@ -65,6 +77,10 @@ import { VisualizeMountManager, resolveVisualizeTokens, toFileUrl, type Visualiz
 import { deleteScheduledActivity, scheduledActivityForThread, scheduledActivitySummary, type ScheduledActivity } from './scheduledActivity';
 import { ConversationViewPlacementState, resolveHostRestoredActiveThread } from './conversationFirstPlacement';
 import { pickStickyUserIndex, truncateStickyText } from './stickyUserMessage';
+import { openProjectPicker } from './projectPickerHost';
+import type { ProjectPicker } from './ProjectPicker';
+import { dispatchNewConversation } from './newConversationDispatch';
+import { seedDocumentChatDraft } from './documentChat';
 
 export const VIEW_TYPE = 'claude-threads:chat';
 
@@ -131,6 +147,17 @@ export class ThreadsView extends ItemView {
   private mainEl!: HTMLElement;
   private messagesEl!: HTMLElement;
   private inputRowEl!: HTMLElement;
+  /**
+   * New-conversation mode: no thread exists yet. The thread composer is swapped for
+   * `newConvInput` (project chip, dispatch slash commands, harness / run-on picker) and
+   * the thread is created by the first send. `returnTo` is the thread to go back to on Cancel.
+   */
+  private newConv: { returnTo: string | null } | null = null;
+  /** Project chosen for the next new conversation ('' = none). Survives leaving the mode so a half-typed draft keeps its project. */
+  private newConvProjectId = '';
+  private newConvInput: DispatchInput | null = null;
+  private newConvRowEl: HTMLElement | null = null;
+  private projectPicker: ProjectPicker | null = null;
 
   // ── Sub-agent surfaces ────────────────────────────────────────────────────
   /** Always-visible status pill in the composer footer; hidden when no agents exist. */
@@ -161,7 +188,14 @@ export class ThreadsView extends ItemView {
   private stickyUserTarget: HTMLElement | null = null;
   private stickyUserFrame: number | null = null;
   private stickyUserObserver: MutationObserver | null = null;
+  /** Footer "settings indicator" button (model / provider / location glyphs). */
   private moreBtn!: HTMLButtonElement;
+  private settingsIndicatorBodyEl: HTMLElement | null = null;
+  private settingsPopover: ComposerSettingsPopover | null = null;
+  private projectPopover: ComposerProjectPopover | null = null;
+  /** Thread the open popover was built for; it closes if the active thread changes. */
+  private popoverThreadId: string | null = null;
+  private projectSortMode: 'recent' | 'alpha' = 'recent';
   private statusRailEl!: HTMLElement;
   private queueRowsEl!: HTMLElement;
   private activeWorkCardEl: HTMLElement | null = null;
@@ -289,6 +323,8 @@ export class ThreadsView extends ItemView {
   // ':'-joined toolUseId/timestamp of the group's tools. In-memory only —
   // cleared alongside groupSummaryCache so state doesn't leak across threads.
   private expandedToolGroups: Set<string> = new Set();
+  // Keys of RUNNING groups the user collapsed (running groups default open).
+  private userCollapsedToolGroups: Set<string> = new Set();
   // Expand/collapse state for LIVE (in-progress) tool-call groups, keyed by
   // liveToolGroupKey (firstToolUseId:activityKind) rather than toolGroupKey's
   // full toolUseId list — a live group's tool list keeps growing as more calls
@@ -372,15 +408,7 @@ export class ThreadsView extends ItemView {
 
   // Ordered list for the footer permission-mode picker menu.
   // `value: undefined` means "use the global default" (clears the per-thread override).
-  private static readonly PERMISSION_MODE_OPTIONS: Array<{ label: string; value: import('./types').PluginSettings['permissionMode'] | undefined }> = [
-    { label: 'Global default', value: undefined },
-    { label: 'Prompt for permissions', value: 'default' },
-    { label: 'Accept edits automatically', value: 'acceptEdits' },
-    { label: 'Bypass all permissions', value: 'bypassPermissions' },
-    { label: 'Plan only (read & propose, no execute)', value: 'plan' },
-    { label: 'Silent deny (CI/cron)', value: 'dontAsk' },
-    { label: 'Auto-approve', value: 'auto' },
-  ];
+  private static readonly PERMISSION_MODE_OPTIONS = PERMISSION_MODE_OPTIONS;
 
   /**
    * Rows for the per-thread model switcher. Claude threads get family aliases
@@ -407,6 +435,7 @@ export class ThreadsView extends ItemView {
   }
 
   getDisplayText(): string {
+    if (this.newConv) return 'New conversation';
     if (this.activeThreadId) {
       const thread = this.manager.getThread(this.activeThreadId);
       if (thread) return thread.title;
@@ -448,6 +477,8 @@ export class ThreadsView extends ItemView {
       (id) => Boolean(this.manager.getThread(id)),
     );
     if (!activeThreadId) return;
+    // A late layout restore must not pull the panel out of a conversation being composed.
+    if (this.newConv) return;
     this.activeThreadId = activeThreadId;
     if (this.rootEl) await this.setActiveThread(activeThreadId);
   }
@@ -480,10 +511,8 @@ export class ThreadsView extends ItemView {
     this.manager.permissionHandler = (threadId, toolName, detail) => {
       // First-party host tools are always trusted; classification is an explicit
       // capability allowlist, not a forgeable naming-prefix convention.
-      // Requests that cannot be always-allowed (host_exec) skip both shortcuts
-      // and are decided on the card every time.
-      // A remote thread's requests are never pre-approved: the tool name comes from the daemon (see isRemoteThread).
-      if (!this.manager.isRemoteThread(threadId) && isPermissionPreApproved(toolName, this.plugin.settings.alwaysAllowedTools)) return Promise.resolve(true);
+      // A remote thread is pre-approved only by its own daemon's list, never the local one (see isRemoteThread).
+      if (isPermissionPreApprovedForThread(toolName, this.manager.getRemoteScope(threadId), this.plugin.settings)) return Promise.resolve(true);
 
       return new Promise((resolve) => {
         let resolved = false;
@@ -626,6 +655,7 @@ export class ThreadsView extends ItemView {
       // even when the turn ends on a non-active thread.
       if (event.type === 'escalated') {
         this.escalatedTurnModels.set(threadId, event.model);
+        if (threadId === this.activeThreadId) this.renderSettingsIndicator();
       } else if (event.type === 'done' || event.type === 'error' || event.type === 'interrupted') {
         this.clearEscalatedTurn(threadId);
       }
@@ -737,7 +767,10 @@ export class ThreadsView extends ItemView {
   private handleThreadListEvent(threadId: string, event: ThreadEvent): void {
     if (event.type === 'threads_loaded' || event.type === 'projects_changed') {
       this.renderProjectBar();
-      if (event.type === 'projects_changed') this.renderComposerContext();
+      if (event.type === 'projects_changed') {
+        this.renderComposerContext();
+        this.refreshNewConversationContext();
+      }
     }
     if (event.type === 'thread_deleted') this.repairSelectionAfterDelete(threadId);
   }
@@ -798,6 +831,10 @@ export class ThreadsView extends ItemView {
     this.closeAgentPopover();
     this.closeSchedulePopover();
     this.closeTaskPopover();
+    this.projectPicker?.close(false);
+    this.projectPicker = null;
+    this.newConvInput?.destroy();
+    this.newConvInput = null;
     this.agentScroll.clear();
     this.dispatchInput?.destroy();
     // Leaves an IntersectionObserver and a window-level message listener
@@ -836,6 +873,7 @@ export class ThreadsView extends ItemView {
     root.addClass('ct-root');
     root.toggleClass('ct-mobile', Platform.isMobile);
     root.setAttribute('data-density', this.plugin.settings.layoutDensity ?? 'comfortable');
+    applyToolCallStyleClass(root, normalizeToolCallStyle(this.plugin.settings.toolCallStyle));
 
     const titleRow = root.createDiv('ct-title-row');
     this.titleRowEl = titleRow;
@@ -877,7 +915,7 @@ export class ThreadsView extends ItemView {
     this.remoteStripEl = root.createDiv({ cls: 'ct-remote-strip ct-hidden', attr: { 'data-testid': 'remote-strip' } });
     if (!this.remoteStateSubscribed && this.plugin.daemonRegistry) {
       this.remoteStateSubscribed = true;
-      this.register(this.plugin.daemonRegistry.onState(() => this.renderRemoteStrip()));
+      this.register(this.plugin.daemonRegistry.onState(() => { this.renderRemoteStrip(); this.renderSettingsIndicator(); }));
     }
 
     this.mainEl = root.createDiv('ct-main');
@@ -973,7 +1011,7 @@ export class ThreadsView extends ItemView {
       onStop: () => this.stopMessage(),
       showThisMention: true,
       showContextChip: true,
-      onContextClick: (event) => this.toggleComposerContextMenu(event),
+      onContextClick: (event) => this.toggleProjectPopover(event.currentTarget as HTMLElement),
       captureLongPaste: true,
       builtinCommands: () => {
         const esc = escalationCommand(this.plugin.settings);
@@ -1038,12 +1076,15 @@ export class ThreadsView extends ItemView {
         this.renderAgentPill();
       },
       appendFooterActions: (container) => {
+        // Keeps the legacy .ct-more-btn / .ct-thread-more-btn classes: tests and
+        // the summarize/escalation code locate the button by them.
         this.moreBtn = container.createEl('button', {
-          cls: 'ct-more-btn ct-thread-more-btn',
-          attr: { title: 'More actions' },
+          cls: 'ct-more-btn ct-thread-more-btn ct-settings-indicator',
+          attr: { type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', title: 'Composer settings', 'aria-label': 'Composer settings' },
         });
-        setIcon(this.moreBtn, 'menu');
-        this.moreBtn.addEventListener('click', (e) => this.toggleMoreMenu(e));
+        this.settingsIndicatorBodyEl = this.moreBtn.createSpan('ct-si-body');
+        this.moreBtn.addEventListener('click', () => this.toggleSettingsPopover());
+        this.renderSettingsIndicator();
       },
       onSend: async ({ text, images, attachment }) => {
         await this.handleSendFromDispatch(text, images, attachment);
@@ -1114,11 +1155,12 @@ export class ThreadsView extends ItemView {
   private renderTitleBar(): void {
     if (!this.titleTextEl) return;
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    this.titleTextEl.textContent = thread?.title ?? 'Agent Threads';
+    this.titleTextEl.textContent = this.newConv ? 'New conversation' : (thread?.title ?? 'Agent Threads');
 
     // Show the ephemeral badge when the active thread is marked ephemeral
     if (this.ephemeralBadgeEl) {
-      this.ephemeralBadgeEl.toggleClass('ct-hidden', !thread?.ephemeral);
+      this.ephemeralBadgeEl.toggleClass('ct-hidden', !thread?.ephemeral && !thread?.private);
+      this.ephemeralBadgeEl.setText(thread?.private ? 'private' : 'ephemeral');
     }
     this.renderRemoteStrip();
 
@@ -1163,6 +1205,21 @@ export class ThreadsView extends ItemView {
     setIcon(badgeIcon, 'server');
     badge.createSpan({ cls: 'ct-remote-badge-name', text: name });
     strip.createSpan({ cls: 'ct-remote-cwd', text: remote.remoteCwd, attr: { title: `${name}:${remote.remoteCwd}` } });
+    const warnings = this.activeThreadId ? this.manager.getRemoteMcpWarnings(this.activeThreadId) : [];
+    if (warnings.length) {
+      const detail = warnings.map((w) => `${w.name}: ${w.reason}`).join('\n');
+      const warn = strip.createSpan({
+        cls: 'ct-remote-warn',
+        attr: { title: `Not available on ${name}\n${detail}`, role: 'button', tabindex: '0', 'data-testid': 'remote-warnings' },
+      });
+      const warnIcon = warn.createSpan({ cls: 'ct-remote-warn-icon' });
+      warnIcon.setAttribute('aria-hidden', 'true');
+      setIcon(warnIcon, 'triangle-alert');
+      warn.createSpan({ text: String(warnings.length) });
+      const show = (): void => { new Notice(`Not available on ${name}:\n${detail}`, 10000); };
+      warn.addEventListener('click', show);
+      warn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); show(); } });
+    }
     strip.createSpan({
       cls: `ct-remote-pill ct-remote-pill--${pill.kind}`,
       text: pill.label,
@@ -1206,6 +1263,201 @@ export class ThreadsView extends ItemView {
     if (useNativeHeader) this.refreshLeafHeader();
   }
 
+
+  // ---------------------------------------------------------------------------
+  // New-conversation mode
+  // ---------------------------------------------------------------------------
+
+  /** True once buildUI has run, i.e. startNewConversation can act. */
+  isReady(): boolean {
+    return Boolean(this.floatingPanelEl && this.titleEl);
+  }
+
+  /** True while the panel is composing a conversation that has no thread yet. */
+  isNewConversation(): boolean {
+    return this.newConv !== null;
+  }
+
+  /**
+   * Swap the panel into new-conversation mode: the composer gets a Project chip,
+   * the dispatch slash commands and the harness / run-on picker, and the thread
+   * is created by the first send (so abandoning the mode leaves nothing behind).
+   *
+   * `projectId` preselects a Project; `mention` seeds an `@[[note]]` mention
+   * (Chat about this document); `draft` pre-fills the text.
+   */
+  async startNewConversation(opts: { projectId?: string; draft?: string; mention?: string } = {}): Promise<void> {
+    // Built on first use so the ordinary thread view carries no second composer in its DOM.
+    if (!this.newConvInput && this.floatingPanelEl) this.buildNewConversationComposer(this.floatingPanelEl);
+    const composer = this.newConvInput;
+    if (!composer) return;
+    if (!this.newConv) {
+      // A fresh entry starts clean: a command pill or draft left from an earlier
+      // session (abandoned, or a failed directive) must not leak into this one.
+      composer.setValue('');
+      composer.clearAttachments();
+      this.newConvProjectId = '';
+    }
+    if (opts.projectId !== undefined) {
+      this.newConvProjectId = this.manager.getProject(opts.projectId) ? opts.projectId : '';
+    } else if (!this.manager.getProject(this.newConvProjectId)) {
+      this.newConvProjectId = '';
+    }
+    if (!this.newConv) {
+      this.messageContentController?.abort();
+      this.messageContentManager?.reset();
+      this.closeSwitcherPanel();
+      this.closeAgentPopover();
+      this.closeSchedulePopover();
+      this.closeTaskPopover();
+      this.rememberAgentScroll();
+      // Keep the thread we are leaving: its unsent draft is saved and Cancel returns to it.
+      this.saveDraftToThread(this.activeThreadId);
+      this.newConv = { returnTo: this.activeThreadId };
+      this.activeThreadId = null;
+      this.floatingPanelEl?.addClass('ct-new-conversation');
+      this.manager.notifyActiveThreadCleared();
+      this.setRunningState(false);
+      this.renderTitleBar();
+      this.renderManagerNotesPanel();
+      this.renderGitDiffBar();
+      await this.renderMessages();
+      this.refreshLeafHeader();
+    }
+    if (opts.draft) composer.setValue(opts.draft);
+    if (opts.mention) {
+      composer.setValue(seedDocumentChatDraft(composer.getValue(), opts.mention));
+    }
+    this.refreshNewConversationContext();
+    composer.focus();
+  }
+
+  /** Drop new-conversation chrome. Called by setActiveThread() — every selection change funnels through it. */
+  private leaveNewConversationUi(): void {
+    if (!this.newConv) return;
+    this.newConv = null;
+    this.projectPicker?.close(false);
+    this.projectPicker = null;
+    this.floatingPanelEl?.removeClass('ct-new-conversation');
+  }
+
+  private cancelNewConversation(): void {
+    const target = this.newConv?.returnTo;
+    if (target && this.manager.getThread(target)) {
+      void this.setActiveThread(target);
+      return;
+    }
+    const fallback = this.manager.getThreads()[0];
+    if (fallback) void this.setActiveThread(fallback.id);
+  }
+
+  private buildNewConversationComposer(floatingPanel: HTMLElement): void {
+    this.newConvRowEl = floatingPanel.createDiv({ cls: 'ct-input-row ct-new-conv-row', attr: { 'data-testid': 'new-conversation-composer' } });
+    this.newConvInput = new DispatchInput({
+      app: this.app,
+      placeholder: 'Describe what you want done…',
+      inputCls: 'ct-input',
+      sendBtnText: '↵',
+      sendBtnTitle: 'Start conversation',
+      showThisMention: true,
+      showContextChip: true,
+      onContextClick: (event) => this.openNewConversationProjectPicker(event),
+      captureLongPaste: true,
+      builtinCommands: () => {
+        const esc = escalationCommand(this.plugin.settings, true);
+        const commands = [...DISPATCH_BUILTIN_COMMANDS, ...(this.plugin.slashCommands?.list('dispatch') ?? [])];
+        return esc ? [...commands, esc] : commands;
+      },
+      subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
+      argCompletions: DISPATCH_ARG_COMPLETIONS,
+      peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
+      harnessPicker: {
+        initialHarness: this.plugin.settings.agentHarness ?? 'claude',
+        getModelOptions: (harness) => this.modelOptionsFor(harness),
+        getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
+        getDaemonCapabilities: (id) => this.plugin.daemonRegistry?.capabilitiesOf(id),
+        warmDaemon: (id) => this.plugin.daemonRegistry?.warm(id) ?? Promise.resolve(),
+        localDaemonOffer: { available: () => this.plugin.isLocalDaemonSetupOffered(), onSetUp: () => this.plugin.openLocalDaemonSettings() },
+        getFolderSource: () => this.plugin.remoteFolders ?? undefined,
+        getLocalCwd: () => {
+          const project = this.manager.getProject(this.newConvProjectId);
+          return project ? this.manager.getProjectCwd(project) : this.plugin.getEffectiveCwd();
+        },
+        getVaultRoot: () => this.manager.vaultRoot,
+      },
+      onSend: (payload) => this.sendNewConversation(payload),
+      getPttKey: () => this.plugin.settings.pttKey ?? '',
+    });
+    this.newConvInput.mount(this.newConvRowEl);
+    this.refreshNewConversationContext();
+  }
+
+  private refreshNewConversationContext(): void {
+    if (!this.newConvInput) return;
+    if (!this.manager.getProject(this.newConvProjectId)) this.newConvProjectId = '';
+    const project = this.manager.getProject(this.newConvProjectId);
+    const name = project?.name ?? 'No project';
+    this.newConvInput.setContext(name, `Project: ${name}. Click to change.`);
+  }
+
+  private openNewConversationProjectPicker(event: MouseEvent): void {
+    const anchor = this.pickerAnchor(event);
+    if (this.projectPicker?.isOpen) {
+      this.projectPicker.close(false);
+      this.projectPicker = null;
+      return;
+    }
+    this.projectPicker = openProjectPicker(this.plugin, {
+      anchor,
+      selectedId: this.newConvProjectId || null,
+      noneLabel: 'No Project',
+      onSelect: (projectId) => {
+        this.newConvProjectId = projectId ?? '';
+        this.refreshNewConversationContext();
+        this.newConvInput?.focus();
+      },
+    });
+  }
+
+  private async sendNewConversation(payload: DispatchPayload): Promise<void> {
+    const conv = this.newConv;
+    const input = this.newConvInput;
+    if (!conv || !input) return;
+    const threadId = await dispatchNewConversation({
+      app: this.app,
+      settings: this.plugin.settings,
+      slashCommands: this.plugin.slashCommands,
+      dispatchNewThread: (text, images, titleHint, opts) => this.plugin.dispatchNewThread(text, images, titleHint, opts),
+      input,
+      projectId: this.newConvProjectId,
+    }, payload);
+    if (!threadId) return;
+    this.newConvProjectId = '';
+    // A contributed command may already have navigated elsewhere; only switch if we are still composing.
+    if (this.newConv === conv) await this.setActiveThread(threadId);
+    this.refreshNewConversationContext();
+  }
+
+  private renderNewConversationEmptyState(): void {
+    const empty = this.messagesEl.createDiv({ cls: 'ct-empty ct-new-conv-empty', attr: { 'data-testid': 'new-conversation' } });
+    const iconEl = empty.createDiv('ct-empty-icon');
+    setIcon(iconEl, 'square-pen');
+    empty.createEl('p', { cls: 'ct-empty-title', text: 'New conversation' });
+    empty.createEl('p', {
+      cls: 'ct-empty-sub ct-new-conv-sub',
+      text: 'Pick a project below, then describe the task. The thread is created when you send.',
+    });
+    empty.createEl('p', { cls: 'ct-empty-hint', text: 'Enter to send · Shift+Enter for newline · / for commands' });
+    const returnTo = this.newConv?.returnTo ? this.manager.getThread(this.newConv.returnTo) : undefined;
+    if (returnTo) {
+      const back = empty.createEl('button', {
+        cls: 'ct-new-conv-cancel',
+        text: `Back to ${returnTo.title}`,
+        attr: { type: 'button' },
+      });
+      back.addEventListener('click', () => this.cancelNewConversation());
+    }
+  }
 
   focusThread(id: string): Promise<void> {
     return this.setActiveThread(id);
@@ -1293,7 +1545,8 @@ export class ThreadsView extends ItemView {
     this.closeSchedulePopover();
     this.closeTaskPopover();
     this.rememberAgentScroll();
-    const previousId = this.activeThreadId;
+    const previousId = this.activeThreadId ?? this.newConv?.returnTo ?? null;
+    this.leaveNewConversationUi();
 
     // Mark the thread as reviewed when the user explicitly opens it.
     // This covers all entry paths: switcher dropdown clicks, focusThread()
@@ -1318,6 +1571,7 @@ export class ThreadsView extends ItemView {
     this.summaryGeneration++; // cancel any queued summary jobs from the previous thread
     this.groupSummaryCache.clear();
     this.expandedToolGroups.clear();
+    this.userCollapsedToolGroups.clear();
     this.liveExpandedToolGroups.clear();
     this.expandedOuterToolWrap.clear();
     this.liveExpandedOuterToolWrap.clear();
@@ -2105,6 +2359,9 @@ export class ThreadsView extends ItemView {
     if (!thread) return;
 
     this.renderComposerContext();
+    this.renderSettingsIndicator();
+    if (this.popoverThreadId && this.popoverThreadId !== thread.id) this.closeComposerPopovers();
+    this.settingsPopover?.refresh();
     this.renderTaskPill();
 
     // Re-render queue rows in case the thread changed.
@@ -2407,80 +2664,255 @@ export class ThreadsView extends ItemView {
     this.scrollToBottom();
   }
 
-  private toggleMoreMenu(event: MouseEvent): void {
-    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    if (!thread) return;
+  // ── Composer settings indicator + popovers (Direction A, "Quiet Rail") ──────
 
-    const menu = new Menu();
-    menu.addItem(item => item
-      .setTitle(`Model: ${this.currentModelLabel()}`)
-      .setIcon('cpu')
-      .onClick(() => this.toggleModelMenu(event))
+  /** Pure description of the active thread's model / provider / location for the indicator. */
+  private describeSettings(thread: import('./types').Thread | null | undefined): ComposerSettingsDescription {
+    const remote = thread?.remote;
+    let connection: RemoteConnection = 'pending';
+    let daemonName = '';
+    if (remote) {
+      const registry = this.plugin.daemonRegistry;
+      daemonName = registry?.nameOf(remote.daemonId) ?? remote.daemonId;
+      const tone = connectionPill(registry?.stateOf(remote.daemonId), daemonName).tone;
+      connection = tone === 'ok' ? 'connected' : tone === 'error' ? 'unreachable' : 'pending';
+    }
+    const escalated = thread ? this.escalatedTurnModels.get(thread.id) : undefined;
+    return describeComposerSettings({
+      harness: thread?.agentHarness,
+      model: escalated ?? thread?.model ?? undefined,
+      activeModel: escalated ? undefined : thread?.activeModel,
+      remote: remote ? { daemonName, connection } : undefined,
+    });
+  }
+
+  /** Redraws the three glyphs + chevron inside the footer indicator button. */
+  private renderSettingsIndicator(): void {
+    const body = this.settingsIndicatorBodyEl;
+    if (!body || !this.moreBtn) return;
+    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
+    const d = this.describeSettings(thread);
+    body.empty();
+    const model = body.createSpan({ cls: 'ct-si-glyph ct-si-model', attr: { 'data-tier': d.model.tier, 'data-glyph': d.model.glyph } });
+    model.appendChild(createGlyph(d.model.glyph));
+    const provider = body.createSpan({ cls: 'ct-si-glyph ct-si-provider', attr: { 'data-glyph': d.provider.glyph } });
+    provider.appendChild(createGlyph(d.provider.glyph));
+    const location = body.createSpan({ cls: 'ct-si-glyph ct-si-location', attr: { 'data-glyph': d.location.glyph } });
+    location.appendChild(createGlyph(d.location.glyph));
+    if (d.location.marker) {
+      location.createSpan({
+        cls: `ct-si-marker ct-si-marker--${d.location.marker}`,
+        text: d.location.marker === 'unreachable' ? '!' : '',
+      });
+    }
+    const chevron = body.createSpan('ct-si-chevron');
+    chevron.setAttribute('aria-hidden', 'true');
+    setIcon(chevron, 'chevron-up');
+    this.moreBtn.setAttribute('aria-label', d.ariaLabel);
+    this.moreBtn.setAttribute('title', d.ariaLabel);
+  }
+
+  /** Summarize shows a spinner in place of the glyphs while it runs. */
+  private setIndicatorBusy(busy: boolean): void {
+    if (!this.moreBtn) return;
+    this.moreBtn.disabled = busy;
+    this.moreBtn.toggleClass('ct-summarize-spinning', busy);
+    this.moreBtn.querySelector('.ct-si-spinner')?.remove();
+    if (busy) {
+      const spinner = this.moreBtn.createSpan('ct-si-spinner');
+      setIcon(spinner, 'loader');
+    }
+  }
+
+  private popoverHost(): HTMLElement | null {
+    return this.mainEl?.querySelector('.ct-panel-wrapper') as HTMLElement | null;
+  }
+
+  /** The collapsible footer must stay visible while a popover anchored to it is open. */
+  private setPopoverPinned(pinned: boolean): void {
+    this.floatingPanelEl?.toggleClass('ct-popover-open', pinned);
+  }
+
+  private closeComposerPopovers(): void {
+    this.settingsPopover?.close();
+    this.projectPopover?.close();
+  }
+
+  private toggleSettingsPopover(): void {
+    if (this.settingsPopover?.isOpen) { this.settingsPopover.close(true); return; }
+    const host = this.popoverHost();
+    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
+    if (!host || !thread || !this.moreBtn) return;
+    this.closeComposerPopovers();
+    this.popoverThreadId = thread.id;
+    const popover = new ComposerSettingsPopover(
+      { host, anchor: this.moreBtn, onClose: () => this.setPopoverPinned(false) },
+      () => this.buildSettingsPopoverModel(thread.id),
     );
-    menu.addItem(item => item
-      .setTitle(`Permissions: ${this.currentPermissionLabel()}`)
-      .setIcon('shield')
-      .onClick(() => this.togglePermissionModeMenu(event))
-    );
-    menu.addItem(item => item
-      .setTitle(`Harness: ${agentHarnessLabel(thread.agentHarness)}${(thread.agentHarness ?? 'claude') === 'claude' && thread.harnessVmMode ? ` · ${harnessVmModeLabel(thread.harnessVmMode)}` : ''}`)
-      .setIcon('bot')
-      .onClick(() => this.toggleHarnessMenu(event, thread.id))
-    );
-    menu.addSeparator();
-    menu.addItem(item =>
-      item
-        .setTitle(this.compressedView ? 'Expand view' : 'Compress view')
-        .setIcon(this.compressedView ? 'maximize-2' : 'minimize-2')
-        .onClick(() => this.toggleCompressView())
-    );
-    menu.addSeparator();
-    menu.addItem(item =>
-      item
-        .setTitle('Summarize thread')
-        .setIcon('brain-circuit')
-        .onClick(() => this.summarizeThread(thread.id))
-    );
+    this.settingsPopover = popover;
+    this.setPopoverPinned(true);
+    popover.open();
+  }
+
+  private buildSettingsPopoverModel(threadId: string): SettingsPopoverModel {
+    const thread = this.manager.getThread(threadId);
+    if (!thread) return { settings: [], actions: [] };
+    const harness = thread.agentHarness ?? 'claude';
+    const blocked = this.manager.getHarnessSwitchBlockReason(threadId);
+
+    // Model — same setter as the old Model menu (applyThreadModel).
+    const currentModel = thread.model ?? undefined;
+    const modelNotes: string[] = [];
+    if (harness === 'claude') {
+      const problem = this.plugin.getClaudeCliProblems()[0];
+      if (problem) {
+        const cmd = problem.upgradeCommand ?? 'claude update';
+        modelNotes.push(problem.severity === 'warning' ? `Claude CLI out of date: ${cmd}` : `Some models not reported by your CLI: ${cmd}`);
+      }
+    }
+    if (thread.activeModel) modelNotes.push(`Running: ${activeModelLabel(thread.activeModel)}`);
+
+    const harnessValue = agentHarnessLabel(thread.agentHarness);
+    // A remote thread can only hand off to a harness its daemon offers (older daemons: Claude only).
+    const remoteGate = (value: AgentHarness): string | undefined => {
+      if (!thread.remote) return undefined;
+      const g = gateHarness(value, this.plugin.daemonRegistry?.capabilitiesOf(thread.remote.daemonId), this.plugin.daemonRegistry?.nameOf(thread.remote.daemonId) ?? 'the daemon');
+      return g.ok ? undefined : g.reason;
+    };
+    const harnessGroups: PopoverOptionGroup[] = [{
+      options: AGENT_HARNESSES.map((value) => ({
+        label: value !== harness && (blocked ?? remoteGate(value)) ? `${agentHarnessLabel(value)} \u2014 ${blocked ?? remoteGate(value)}` : agentHarnessLabel(value),
+        checked: value === harness,
+        disabled: value !== harness && !!(blocked ?? remoteGate(value)),
+        closeOnSelect: true,
+        icon: HARNESS_BRAND_ICONS[value],
+        onSelect: () => { if (value !== harness) void this.requestHarnessSwitch(threadId, value); },
+      })),
+    }];
+    // Where this thread runs: this computer, or a daemon that can see its folder (the managed local daemon is
+    // "This Mac (container)"). Moving resets the native session; the conversation continues from a summary.
+    let runOnSetting: PopoverSetting | undefined;
+    const daemons = this.plugin.settings.remoteDaemons ?? [];
+    if (!Platform.isMobile && daemons.length > 0) {
+      const here = thread.remote?.daemonId;
+      const options: PopoverOptionGroup['options'] = [{
+        label: !!blocked && !!here ? `This computer \u2014 ${blocked}` : 'This computer',
+        checked: !here,
+        icon: 'laptop',
+        disabled: !!here && !!blocked,
+        closeOnSelect: true,
+        onSelect: () => { if (here) void this.requestMoveExecution(threadId, undefined); },
+      }];
+      for (const d of daemons) {
+        const target = thread.remote ? undefined : this.plugin.mapCwdToDaemon(d.id, thread.cwd);
+        const selected = here === d.id;
+        const offered = gateHarness(harness, this.plugin.daemonRegistry?.capabilitiesOf(d.id), d.name);
+        // No vault mapping: fall back to the daemon's default folder, or (on select) its advertised default workspace.
+        const fallback = thread.remote ? undefined : target ?? (d.defaultCwdRoot?.trim() || undefined);
+        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : !offered.ok ? `no ${agentHarnessLabel(harness)} on it` : undefined);
+        options.push({
+          label: reason ? `${d.name} \u2014 ${reason}` : d.name,
+          checked: selected,
+          icon: 'server',
+          disabled: !selected && !!reason,
+          closeOnSelect: true,
+          onSelect: () => { if (!selected) void this.moveToDaemonResolvingFolder(threadId, d.id, fallback); },
+        });
+      }
+      runOnSetting = {
+        id: 'runon', label: 'Run on', icon: 'server',
+        value: here ? (daemons.find((d) => d.id === here)?.name ?? 'Remote daemon') : 'This computer',
+        groups: [{ options }],
+      };
+    }
+    const currentPermission = thread.permissionMode ?? undefined;
+    const settings: PopoverSetting[] = [
+      {
+        id: 'model', label: 'Model', icon: 'cpu', value: this.currentModelLabel(),
+        groups: this.modelOptionsFor(harness).length ? [{
+          note: modelNotes.join('\n') || undefined,
+          options: this.modelOptionsFor(harness).map((opt) => ({
+            label: opt.label,
+            checked: currentModel === opt.value,
+            onSelect: () => this.applyThreadModel(threadId, opt.value),
+          })),
+        }] : [],
+      },
+      {
+        id: 'permissions', label: 'Permissions', icon: 'shield', value: this.currentPermissionLabel(),
+        groups: [{
+          options: ThreadsView.PERMISSION_MODE_OPTIONS.map((opt) => ({
+            label: opt.label,
+            checked: currentPermission === opt.value,
+            onSelect: () => this.applyThreadPermissionMode(threadId, opt.value),
+          })),
+        }],
+      },
+      { id: 'harness', label: 'Harness', icon: 'bot', value: harnessValue, groups: harnessGroups },
+      ...(runOnSetting ? [runOnSetting] : []),
+    ];
+
+    const actions: PopoverAction[] = [
+      {
+        id: 'compress',
+        label: this.compressedView ? 'Expand view' : 'Compress view',
+        icon: this.compressedView ? 'maximize-2' : 'minimize-2',
+        onActivate: () => this.toggleCompressView(),
+      },
+      { id: 'summarize', label: 'Summarize thread', icon: 'brain-circuit', onActivate: () => { void this.summarizeThread(threadId); } },
+    ];
     // A fork is a local thread; for a remote thread it would run on this machine in the daemon's folder.
     if (!thread.remote) {
-      menu.addItem(item =>
-        item
-          .setTitle('Fork conversation')
-          .setIcon('git-branch')
-          .onClick(() => this.forkThread(thread.id))
-      );
+      actions.push({ id: 'fork', label: 'Fork conversation', icon: 'git-branch', onActivate: () => { void this.forkThread(threadId); } });
     }
     // Orchestrator threads are pinned to their scope by ThreadManager.setThreadProject,
     // so offering the move would only ever produce an error notice.
-    if (this.canMoveToProject(thread.id)) {
-      menu.addSeparator();
-      menu.addItem(item =>
-        item
-          .setTitle('Move to Project…')
-          .setIcon('folder')
-          .onClick(() => this.openMoveToProjectMenu(event, thread.id))
-      );
+    if (this.canMoveToProject(threadId)) {
+      actions.push({ id: 'project', label: 'Move to Project\u2026', icon: 'folder', onActivate: () => this.openProjectPopover() });
     }
-    menu.showAtMouseEvent(event);
+    return { settings, actions };
   }
 
-  private toggleComposerContextMenu(event: MouseEvent): void {
+  /** Project/cwd chip: filterable project picker. */
+  private toggleProjectPopover(anchor: HTMLElement): void {
+    if (this.projectPopover?.isOpen) { this.projectPopover.close(true); return; }
+    this.openProjectPopover(anchor);
+  }
+
+  private openProjectPopover(anchorOverride?: HTMLElement): void {
+    const host = this.popoverHost();
     const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    if (!thread) return;
-    const project = thread.projectId ? this.manager.getProject(thread.projectId) : null;
-    const cwd = thread.cwd || this.plugin.getEffectiveCwd() || os.homedir();
-    const menu = new Menu();
-    menu.addItem(item => item.setTitle(`Project: ${project?.name ?? 'No project'}`).setIcon('folder'));
-    menu.addItem(item => item.setTitle(`Working directory: ${cwd}`).setIcon('folder-open'));
-    if (this.canMoveToProject(thread.id)) {
-      menu.addSeparator();
-      menu.addItem(item => item
-        .setTitle('Change project…')
-        .setIcon('folder-cog')
-        .onClick(() => this.openMoveToProjectMenu(event, thread.id))
-      );
-    }
-    menu.showAtMouseEvent(event);
+    const anchor = anchorOverride
+      ?? (this.floatingPanelEl?.querySelector('.ct-footer-context') as HTMLElement | null)
+      ?? this.moreBtn;
+    if (!host || !thread || !anchor) return;
+    this.closeComposerPopovers();
+    const threadId = thread.id;
+    this.popoverThreadId = threadId;
+    const popover = new ComposerProjectPopover(
+      { host, anchor, onClose: () => this.setPopoverPinned(false) },
+      () => {
+        const t = this.manager.getThread(threadId);
+        const project = t?.projectId ? this.manager.getProject(t.projectId) : null;
+        return {
+          cwd: t?.cwd || this.plugin.getEffectiveCwd() || os.homedir(),
+          currentProjectId: t?.projectId ?? undefined,
+          currentProjectName: project?.name,
+          projects: this.manager.getProjects(),
+          threads: this.manager.getThreads(),
+          canChange: this.canMoveToProject(threadId),
+        };
+      },
+      {
+        onSelect: (projectId) => { void this.moveThreadToProject(threadId, projectId); },
+        onNewProject: () => this.plugin.openNewProjectSettings(),
+        getSortMode: () => this.projectSortMode,
+        setSortMode: (mode) => { this.projectSortMode = mode; },
+      },
+    );
+    this.projectPopover = popover;
+    this.setPopoverPinned(true);
+    popover.open();
   }
 
   /** Settings + live Projects, in the shape the orchestrator helpers expect. */
@@ -2499,31 +2931,10 @@ export class ThreadsView extends ItemView {
     return !isOrchestratorThread(threadId, this.orchestratorContext());
   }
 
-  /**
-   * Second-level Project picker for `Move to Project…`. Opened as a separate Menu at the
-   * same mouse event rather than `MenuItem.setSubmenu()`, which is absent from the pinned
-   * obsidian typings and from the 1.0.0 minAppVersion this plugin supports.
-   */
-  private openMoveToProjectMenu(event: MouseEvent, threadId: string): void {
-    const thread = this.manager.getThread(threadId);
-    if (!thread) return;
-    const menu = new Menu();
-    menu.addItem(item =>
-      item
-        .setTitle('(No project)')
-        .setChecked(!thread.projectId)
-        .onClick(() => this.moveThreadToProject(threadId, null))
-    );
-    for (const project of this.manager.getProjects()) {
-      menu.addItem(item =>
-        item
-          .setTitle(project.name)
-          .setIcon('folder')
-          .setChecked(thread.projectId === project.id)
-          .onClick(() => this.moveThreadToProject(threadId, project.id))
-      );
-    }
-    menu.showAtMouseEvent(event);
+  /** The element to anchor a popover to: the control that was clicked, else the composer. */
+  private pickerAnchor(event: MouseEvent): HTMLElement {
+    const target = event.currentTarget ?? event.target;
+    return target instanceof HTMLElement ? target : (this.moreBtn ?? this.inputRowEl);
   }
 
   /**
@@ -2547,12 +2958,6 @@ export class ThreadsView extends ItemView {
     } catch (err: unknown) {
       new Notice(err instanceof Error ? err.message : String(err));
     }
-  }
-
-  /** Returns the model active for the current thread, or undefined for the global default. */
-  private currentModel(): string | undefined {
-    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : null;
-    return thread?.model ?? undefined;
   }
 
   /**
@@ -2583,51 +2988,14 @@ export class ThreadsView extends ItemView {
    */
   private clearEscalatedTurn(threadId: string): void {
     if (!this.escalatedTurnModels.delete(threadId)) return;
-    // The value is read when the actions menu next opens.
+    this.renderSettingsIndicator();
   }
 
-  private toggleModelMenu(event: MouseEvent): void {
-    if (!this.activeThreadId) return;
-    const current = this.currentModel();
-    const menu = new Menu();
-    const thread = this.manager.getThread(this.activeThreadId);
-    const harness = thread?.agentHarness ?? 'claude';
-    const options = this.modelOptionsFor(harness);
-    if (harness === 'claude') {
-      // Compact stale-CLI notice, only when a problem is detected.
-      const problem = this.plugin.getClaudeCliProblems()[0];
-      if (problem) {
-        const cmd = problem.upgradeCommand ?? 'claude update';
-        menu.addItem(item => item
-          .setTitle(problem.severity === 'warning' ? `Claude CLI out of date: ${cmd}` : `Some models not reported by your CLI: ${cmd}`)
-          .setIcon('alert-triangle')
-          .setDisabled(true));
-        menu.addSeparator();
-      }
-    }
-    if (thread?.activeModel) {
-      // Informational header: the exact provider model id of the last reply.
-      const running = thread.activeModel;
-      menu.addItem(item => item
-        .setTitle(`Running: ${activeModelLabel(running)}`)
-        .setIcon('cpu')
-        .setDisabled(true));
-      menu.addSeparator();
-    }
-    for (const opt of options) {
-      menu.addItem(item => {
-        item
-          .setTitle(opt.label)
-          .setChecked(current === opt.value)
-          .onClick(async () => {
-            if (!this.activeThreadId) return;
-            this.manager.setThreadModel(this.activeThreadId, opt.value);
-            await this.plugin.saveSettings();
-            this.renderThreadInfo();
-          });
-      });
-    }
-    menu.showAtMouseEvent(event);
+  /** Applies a per-thread model choice (undefined clears the override). */
+  private async applyThreadModel(threadId: string, model: string | undefined): Promise<void> {
+    this.manager.setThreadModel(threadId, model);
+    await this.plugin.saveSettings();
+    this.renderThreadInfo();
   }
 
   private currentPermissionMode(): import('./types').PluginSettings['permissionMode'] | undefined {
@@ -2641,85 +3009,54 @@ export class ThreadsView extends ItemView {
     return opt?.label ?? 'Global default';
   }
 
-  private togglePermissionModeMenu(event: MouseEvent): void {
-    if (!this.activeThreadId) return;
-    const current = this.currentPermissionMode();
-    const menu = new Menu();
-    for (const opt of ThreadsView.PERMISSION_MODE_OPTIONS) {
-      menu.addItem(item => {
-        item
-          .setTitle(opt.label)
-          .setChecked(current === opt.value)
-          .onClick(async () => {
-            if (!this.activeThreadId) return;
-            this.manager.setThreadPermissionMode(this.activeThreadId, opt.value);
-            await this.plugin.saveSettings();
-            this.renderThreadInfo();
-          });
-      });
-    }
-    menu.showAtMouseEvent(event);
+  /** Applies a per-thread permission mode (undefined clears the override). */
+  private async applyThreadPermissionMode(
+    threadId: string,
+    mode: import('./types').PluginSettings['permissionMode'] | undefined,
+  ): Promise<void> {
+    this.manager.setThreadPermissionMode(threadId, mode);
+    await this.plugin.saveSettings();
+    this.renderThreadInfo();
   }
 
-  private toggleHarnessMenu(event: MouseEvent, threadId: string): void {
-    const thread = this.manager.getThread(threadId);
-    if (!thread) return;
-    const current = thread.agentHarness ?? 'claude';
-    const blocked = this.manager.getHarnessSwitchBlockReason(threadId);
-    const menu = new Menu();
-    for (const option of AGENT_HARNESSES.map((value) => ({ value, label: agentHarnessLabel(value) }))) {
-      menu.addItem(item => {
-        item.setTitle(option.value !== current && blocked ? `${option.label} — ${blocked}` : option.label)
-          .setChecked(option.value === current)
-          .setDisabled(option.value !== current && !!blocked);
-        if (option.value !== current && !blocked) {
-          item.onClick(() => { void this.requestHarnessSwitch(threadId, option.value); });
-        }
-      });
+  /** Move to a daemon using `cwd` when known, else the daemon's own default workspace (a daemon with no vault mapping). */
+  private async moveToDaemonResolvingFolder(threadId: string, daemonId: string, cwd: string | undefined): Promise<void> {
+    let remoteCwd = cwd;
+    if (!remoteCwd) {
+      const loaded = await this.plugin.remoteFolders?.workspaces(daemonId);
+      remoteCwd = loaded?.ok ? pickDefaultWorkspace(loaded.value)?.path : undefined;
     }
-    if (current === 'claude') {
-      menu.addSeparator();
-      menu.addItem(item => item.setTitle('Run in').setDisabled(true));
-      const modes: Array<HarnessVmMode | undefined> = ['always', 'never', undefined];
-      for (const mode of modes) {
-        const selected = thread.harnessVmMode === mode;
-        menu.addItem(item => {
-          item.setTitle(!selected && blocked ? `${harnessVmModeLabel(mode)} — ${blocked}` : harnessVmModeLabel(mode))
-            .setChecked(selected)
-            .setDisabled(!selected && !!blocked);
-          if (!selected && !blocked) {
-            item.onClick(() => { void this.requestHarnessVmModeChange(threadId, mode); });
-          }
-        });
-      }
+    if (!remoteCwd) {
+      new Notice('That daemon has no folder to run in. Set a default folder for it in Settings \u2192 Remote.');
+      return;
     }
-    menu.showAtMouseEvent(event);
+    await this.requestMoveExecution(threadId, { daemonId, remoteCwd });
   }
 
-  private async requestHarnessVmModeChange(threadId: string, mode: HarnessVmMode | undefined): Promise<void> {
+  private async requestMoveExecution(threadId: string, to: { daemonId: string; remoteCwd: string } | undefined): Promise<void> {
     const thread = this.manager.getThread(threadId);
     if (!thread) return;
-    const hadConversation = thread.messages.some(message => message.role === 'user' || message.role === 'assistant');
-    // A native Claude session cannot be resumed across host <-> container, so a
-    // containerized <-> host flip resets it (the conversation continues from a
-    // summary). Only confirm when that will actually happen.
-    const wasContainerized = resolveEffectiveHarnessVmMode(thread.harnessVmMode, this.plugin.settings.harnessVmMode) !== 'never';
-    const nowContainerized = resolveEffectiveHarnessVmMode(mode, this.plugin.settings.harnessVmMode) !== 'never';
-    if (hadConversation && thread.sessionId && wasContainerized !== nowContainerized) {
+    const hadConversation = thread.messages.some((message) => message.role === 'user' || message.role === 'assistant');
+    const where = to ? (this.plugin.settings.remoteDaemons ?? []).find((d) => d.id === to.daemonId)?.name ?? 'the daemon' : 'this computer';
+    if (hadConversation) {
       const confirmed = await promptConfirm(this.app, {
-        message: `Run this thread ${nowContainerized ? 'in a container' : 'on the host (no container)'}? The conversation stays here, but the native Claude session resets and continues from a summary and transcript references.`,
-        confirmLabel: 'Change',
+        message: `Run this thread on ${where}? The conversation stays here, but the native ${agentHarnessLabel(thread.agentHarness)} session resets and continues from a summary and transcript references.`,
+        confirmLabel: 'Move',
         danger: false,
       });
       if (!confirmed) return;
     }
     try {
-      await this.manager.setThreadHarnessVmMode(threadId, mode, () => this.plugin.saveSettings());
+      const target = to
+        ? { kind: 'daemon' as const, daemonId: to.daemonId, remoteCwd: to.remoteCwd, clientId: this.plugin.settings.remoteClientId ?? 'unknown' }
+        : { kind: 'host' as const, cwd: this.plugin.mapCwdFromDaemon(thread.remote?.daemonId ?? '', thread.remote?.remoteCwd ?? '') ?? this.plugin.getEffectiveCwd() };
+      await this.manager.moveThreadExecution(threadId, target, () => this.plugin.saveSettings());
       if (threadId === this.activeThreadId) {
         this.renderThreadInfo();
+        this.applyComposerPlaceholder();
         this.setRunningState(false);
       }
-      new Notice(`This thread will run in: ${harnessVmModeLabel(mode)}.`);
+      new Notice(`This thread will run on ${where}.`);
     } catch (error) {
       new Notice(error instanceof Error ? error.message : String(error));
     }
@@ -2756,6 +3093,7 @@ export class ThreadsView extends ItemView {
     this.summaryTextEls.clear();
     this.groupSummaryCache.clear();
     this.expandedToolGroups.clear();
+    this.userCollapsedToolGroups.clear();
     this.liveExpandedToolGroups.clear();
     this.expandedOuterToolWrap.clear();
     this.liveExpandedOuterToolWrap.clear();
@@ -2813,6 +3151,8 @@ export class ThreadsView extends ItemView {
     });
   }
 
+  private readonly remoteImageCache = new RemoteImageCache();
+
   private async renderMarkdown(
     markdown: string,
     el: HTMLElement,
@@ -2850,6 +3190,11 @@ export class ThreadsView extends ItemView {
     // a frame is never rebuilt on every token.
     this.visualizeManager?.hydrate(el, visualize.markers, { interactive: !options.streaming });
     if (threadId && !signal.aborted) void this.messageContentManager?.hydrate(el, inline.markers, { threadId, messageId: transcriptMessage?.id ?? 'streaming', signal }, options);
+    // `![alt](/abs/path)` in a remote thread names a file on the daemon's machine: fetch it with file.read.
+    const remote = threadId ? this.manager.getThread(threadId)?.remote : undefined;
+    if (remote && this.plugin.daemonRegistry) {
+      hydrateRemoteImages(el, { load: createRemoteImageLoader(this.plugin.daemonRegistry, this.remoteImageCache, remote.daemonId), signal });
+    }
     // Wrap tables in a scrollable container so wide tables don't overflow.
     el.querySelectorAll<HTMLTableElement>('table').forEach((table) => {
       const wrapper = document.createElement('div');
@@ -3150,9 +3495,7 @@ export class ThreadsView extends ItemView {
     const thread = this.manager.getThread(threadId);
     if (!thread || thread.messages.length === 0) return;
 
-    this.moreBtn.disabled = true;
-    setIcon(this.moreBtn, 'loader');
-    this.moreBtn.addClass('ct-summarize-spinning');
+    this.setIndicatorBusy(true);
 
     const onProgress = (status: string) => {
       this.showStatusCard('active', status);
@@ -3178,9 +3521,7 @@ export class ThreadsView extends ItemView {
       }
       await this.plugin.saveSettings();
       this.clearStatusCard('active');
-      this.moreBtn.removeClass('ct-summarize-spinning');
-      setIcon(this.moreBtn, 'menu');
-      this.moreBtn.disabled = false;
+      this.setIndicatorBusy(false);
       this.renderTitleBar();
       this.renderThreadInfo();
       this.refreshLeafHeader();
@@ -3189,9 +3530,7 @@ export class ThreadsView extends ItemView {
     } catch (err) {
       console.error('[Agent Threads] summarize error:', err);
       this.clearStatusCard('active');
-      this.moreBtn.removeClass('ct-summarize-spinning');
-      setIcon(this.moreBtn, 'menu');
-      this.moreBtn.disabled = false;
+      this.setIndicatorBusy(false);
       new Notice(`Summarization failed: ${(err as Error).message}`, 8000);
     }
   }
@@ -3370,6 +3709,10 @@ export class ThreadsView extends ItemView {
     this.browserRowEls.clear();
     this.browser?.resetForRebuild();
 
+    if (this.newConv) {
+      this.renderNewConversationEmptyState();
+      return;
+    }
     if (!this.activeThreadId) return;
     const thread = this.manager.getThread(this.activeThreadId);
     if (!thread) return;
@@ -3481,12 +3824,6 @@ export class ThreadsView extends ItemView {
     // (live 'error' cards are not persisted, but this state is).
     if (thread.authRequired && !this.manager.isRunning(this.activeThreadId)) {
       this.renderClaudeSignInCard(this.activeThreadId, thread.authRequired.message);
-    }
-
-    // Restore a still-pending "Run this thread in a sandbox?" offer (its
-    // state lives in the manager, so switching threads doesn't lose it).
-    if (this.manager.getSandboxSetupOffer(this.activeThreadId)) {
-      this.renderSandboxOfferCard(this.activeThreadId);
     }
 
     this.applyPendingMainScroll();
@@ -3928,18 +4265,22 @@ export class ThreadsView extends ItemView {
    * heartbeat updates.
    */
   private renderToolPill(wrapper: HTMLElement, tool: ToolCallRecord): HTMLElement {
-    const pill = wrapper.createDiv('ct-tool-pill');
-    if (tool.status === 'error') pill.addClass('ct-tool-error');
-    else if (tool.status === 'success') pill.addClass('ct-tool-success');
-    else if (tool.status === 'pending') pill.addClass('ct-tool-active');
-    const iconEl = pill.createSpan({ cls: 'ct-tool-pill-icon' });
-    setIcon(iconEl, getToolIcon(tool.name));
-    pill.createSpan({ cls: 'ct-tool-pill-name', text: formatToolName(tool.name) });
-    if (tool.summary) pill.createSpan({ cls: 'ct-tool-pill-text', text: tool.summary });
-    if (tool.timestamp) {
-      pill.createSpan({ cls: 'ct-tool-pill-ts', text: this.formatShortTime(tool.timestamp) });
-    }
-    return pill;
+    return renderToolRow(wrapper, tool, {
+      pathCtx: this.toolPathContext(),
+      time: tool.timestamp ? this.formatShortTime(tool.timestamp) : undefined,
+    });
+  }
+
+  /** Vault root + home dir, so tool-call paths render vault-relative / ~-relative. */
+  private toolPathContext(): ToolPathContext {
+    const adapter = this.app.vault.adapter as { basePath?: string };
+    const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+    return { vaultRoot: adapter.basePath || undefined, home: proc?.env?.HOME || undefined };
+  }
+
+  /** Apply the "Tool call style" setting live by swapping the root's ct-tools-* class. */
+  applyToolCallStyle(): void {
+    applyToolCallStyleClass(this.rootEl, normalizeToolCallStyle(this.plugin.settings.toolCallStyle));
   }
 
   /** Deterministic key for a FINALIZED tool-call group's expand/collapse state. */
@@ -3976,9 +4317,13 @@ export class ThreadsView extends ItemView {
    *   pass `live: true` — first-time append of a settled row and the full
    *   renderMessages() rebuild both keep the default (stable) keying.
    */
-  private renderToolCalls(parent: HTMLElement, tools: ToolCallRecord[], opts?: { live?: boolean }): HTMLElement {
+  private renderToolCalls(
+    parent: HTMLElement,
+    tools: ToolCallRecord[],
+    opts?: { live?: boolean; onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void },
+  ): HTMLElement {
     const wrapper = parent.createDiv('ct-tools');
-    this.populateToolCallsWrapper(wrapper, tools, { live: opts?.live ?? false });
+    this.populateToolCallsWrapper(wrapper, tools, { live: opts?.live ?? false, onPillRendered: opts?.onPillRendered });
     return wrapper;
   }
 
@@ -4097,7 +4442,7 @@ export class ThreadsView extends ItemView {
     tools: ToolCallRecord[],
     opts: { live: boolean; onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void },
   ): void {
-    const grouped = smoothToolGroups(groupToolCalls(tools));
+    const grouped = groupToolRuns(tools);
     if (shouldWrapOuter(grouped)) {
       this.renderOuterToolWrap(wrapper, tools, grouped, opts);
     } else {
@@ -4114,12 +4459,32 @@ export class ThreadsView extends ItemView {
    * on every step). Passes `{ live: true }` so a group the user expanded
    * mid-run stays expanded as it grows (see renderToolCalls' doc comment).
    */
-  private rebuildRowToolsInPlace(rowEl: HTMLElement, toolCalls: ToolCallRecord[], row?: ChatMessage): void {
+  private rebuildRowToolsInPlace(
+    rowEl: HTMLElement,
+    toolCalls: ToolCallRecord[],
+    row?: ChatMessage,
+    onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void,
+  ): void {
     const existing = rowEl.querySelector(':scope > .ct-tools');
+    // A row first drawn from the finalized message keys its groups by member
+    // hash; the rebuild below keys them by first call (stable as the run
+    // grows). Carry a group the user opened across that change by position.
+    if (existing && toolCalls.length > 0) {
+      const groupEls = [...existing.querySelectorAll(':scope > .ct-tool-group')];
+      const entries = groupToolRuns(toolCalls);
+      if (groupEls.length > 0 && entries.every((e) => e.kind === 'group') && groupEls.length <= entries.length) {
+        groupEls.forEach((el, i) => {
+          const entry = entries[i];
+          if (el.classList.contains('ct-tool-group-open') && entry.kind === 'group') {
+            this.liveExpandedToolGroups.add(liveToolGroupKey(entry.tools));
+          }
+        });
+      }
+    }
     existing?.remove();
     if (row) rowEl.querySelectorAll(':scope > .ct-tool-result-images').forEach((n) => n.remove());
     if (!toolCalls || toolCalls.length === 0) return;
-    const wrapper = this.renderToolCalls(rowEl, toolCalls, { live: true });
+    const wrapper = this.renderToolCalls(rowEl, toolCalls, { live: true, onPillRendered });
     // renderToolCalls appends via createDiv (last child) — move it to the
     // front so tools stay above the message content, matching the layout
     // appendMessage produces when a row is first created.
@@ -4180,49 +4545,27 @@ export class ThreadsView extends ItemView {
     const expandedSet = opts?.expandedSet ?? this.expandedToolGroups;
     const groupKey = opts?.keyOverride ?? this.toolGroupKey(tools);
 
-    const groupEl = wrapper.createDiv('ct-tool-group');
-    const headerRow = groupEl.createDiv('ct-tool-group-header ct-compressed-row');
-    // Flag on the header (which owns the border-left) so ct-tool-error's
-    // border-left-color override and icon-tint rule both take visible effect.
-    if (hasError) headerRow.addClass('ct-tool-error');
-    // "Still running" affordance — reuses the same ct-tool-active convention
-    // as an individual pending pill (pulsing left border + icon tint; the
-    // group-header-specific pulsing dot on .ct-compressed-summary is added in
-    // styles.css). Does NOT force-expand — only an error does that — so a
-    // long run of successful same-kind calls stays collapsed while live.
-    if (hasPending) headerRow.addClass('ct-tool-active');
-
-    const iconEl = headerRow.createSpan({ cls: 'ct-tool-pill-icon' });
-    setIcon(iconEl, getToolIcon(tools[0].name));
-
-    headerRow.createSpan({
-      cls: 'ct-compressed-summary',
-      text: `${ACTIVITY_LABELS[activityKind]} (${tools.length})`,
+    // Collapsed by default, running, failed or finished; the red header icon
+    // flags a failure. Only a group the user opened stays open.
+    const expanded = expandedSet.has(groupKey);
+    const { body } = renderToolGroupShell(wrapper, activityKind, tools, {
+      hasError,
+      hasPending,
+      expanded,
+      onToggle: (open) => {
+        if (open) {
+          expandedSet.add(groupKey);
+          this.userCollapsedToolGroups.delete(groupKey);
+        } else {
+          expandedSet.delete(groupKey);
+          this.userCollapsedToolGroups.add(groupKey);
+        }
+      },
     });
-
-    const expandBtn = headerRow.createEl('button', { cls: 'ct-expand-btn', attr: { title: 'Expand' } });
-
-    const fullContent = groupEl.createDiv('ct-full-content');
     for (const tool of tools) {
-      const pill = this.renderToolPill(fullContent, tool);
+      const pill = this.renderToolPill(body, tool);
       opts?.onPillRendered?.(tool, pill);
     }
-
-    let expanded = hasError || expandedSet.has(groupKey);
-    if (!expanded) fullContent.addClass('ct-hidden');
-    setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
-
-    expandBtn.addEventListener('click', () => {
-      expanded = !expanded;
-      if (expanded) {
-        fullContent.removeClass('ct-hidden');
-        expandedSet.add(groupKey);
-      } else {
-        fullContent.addClass('ct-hidden');
-        expandedSet.delete(groupKey);
-      }
-      setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
-    });
   }
 
   /**
@@ -4254,16 +4597,32 @@ export class ThreadsView extends ItemView {
       }
       return;
     }
+    const onPillRendered = (tool: ToolCallRecord, pill: HTMLElement): void => {
+      if (tool.status === 'pending' && tool.toolUseId) {
+        this.toolPillsByUseId.set(tool.toolUseId, pill);
+      }
+    };
+    // The previous step's tool-only row is still the tail of the transcript:
+    // extend it in place so this step's calls join its group instead of
+    // showing a second group until the step's 'message' event lands.
+    const thread = this.activeThreadId ? this.manager.getThread(this.activeThreadId) : undefined;
+    const tail = thread ? mergeAdjacentToolOnlyMessages(thread.messages).at(-1) : undefined;
+    if (
+      tail && tail.role === 'assistant' && tail.content === '' &&
+      (tail.toolCalls?.length ?? 0) > 0 &&
+      tail.id === this.lastAppendedRowId &&
+      this.lastAppendedRowEl?.isConnected
+    ) {
+      if (this.streamingToolsEl) {
+        this.streamingToolsEl.remove();
+        this.streamingToolsEl = null;
+      }
+      this.rebuildRowToolsInPlace(this.lastAppendedRowEl, [...tail.toolCalls!, ...visible], tail, onPillRendered);
+      return;
+    }
     const wrapper = this.ensureStreamingToolsEl();
     wrapper.empty();
-    this.populateToolCallsWrapper(wrapper, visible, {
-      live: true,
-      onPillRendered: (tool, pill) => {
-        if (tool.status === 'pending' && tool.toolUseId) {
-          this.toolPillsByUseId.set(tool.toolUseId, pill);
-        }
-      },
-    });
+    this.populateToolCallsWrapper(wrapper, visible, { live: true, onPillRendered });
   }
 
   /**
@@ -4397,15 +4756,25 @@ export class ThreadsView extends ItemView {
     this.renderPermissionDetail(body, detail);
 
     const actions = card.createDiv('ct-permission-actions');
+    const hostExecPrefix = hostExecAlwaysAllowOffer({ toolName, detail });
     actions.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' })
       .addEventListener('click', () => done(false));
-    actions.createEl('button', { text: 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
+    actions.createEl('button', { text: isHostExecPermission(toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' })
       .addEventListener('click', () => done(true));
-    if (canAlwaysAllow(toolName) && !(this.activeThreadId && this.manager.isRemoteThread(this.activeThreadId))) {
+    if (hostExecPrefix) {
+      // Scoped to a command prefix; never adds host_exec to alwaysAllowedTools.
+      actions.createEl('button', { text: `Always allow \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' })
+        .addEventListener('click', async () => {
+          if (addHostExecPrefix(this.plugin.settings, hostExecPrefix)) await this.plugin.saveSettings();
+          done(true);
+        });
+    }
+    if (canAlwaysAllow(toolName)) {
+      // Stored under this thread's daemon when remote, so it cannot leak to local threads or other daemons.
+      const scope = this.activeThreadId ? this.manager.getRemoteScope(this.activeThreadId) : null;
       actions.createEl('button', { text: 'Always Allow', cls: 'ct-permission-btn ct-permission-always' })
         .addEventListener('click', async () => {
-          this.plugin.settings.alwaysAllowedTools.push(toolName);
-          await this.plugin.saveSettings();
+          if (recordAlwaysAllow(this.plugin.settings, toolName, scope)) await this.plugin.saveSettings();
           done(true);
         });
     }
@@ -5822,6 +6191,9 @@ export class ThreadsView extends ItemView {
         // debounced rebuild so the live pill/group picks it up — no manual
         // DOM class-swap needed.
         if (this.streamingEl) this.scheduleLiveToolsRender();
+        // Rows committed mid-turn were drawn while pending and are not rebuilt;
+        // repaint them (and their group) in place from the mutated record.
+        refreshToolRowByUseId(this.messagesEl, event.toolUseId);
         // Rows already committed to the transcript hold the SAME mutated
         // records; a browser card must show the result (url, ok/failed).
         this.scheduleBrowserRefresh();
@@ -5918,13 +6290,6 @@ export class ThreadsView extends ItemView {
         break;
       }
 
-      case 'sandbox_setup_offer': {
-        // The thread is running on the host because the sandbox isn't set up.
-        // Offer setup without interrupting it (the card is not modal).
-        if (this.activeThreadId) this.renderSandboxOfferCard(this.activeThreadId);
-        break;
-      }
-
       case 'auth_retry': {
         // Expired Claude sign-in: ThreadSession is restarting the CLI process
         // (the fresh one re-reads the keychain) and replaying the turn once.
@@ -5992,18 +6357,8 @@ export class ThreadsView extends ItemView {
    * "Sign in to Claude" card for a turn whose silent fresh-process retry
    * still failed to authenticate (see claudeAuthRecovery.ts). Desktop only.
    *
-   * Two flows, chosen by `ThreadManager.getClaudeVmRouting()` — the ACTUAL
-   * routing decision this thread's last session start made, not a re-derived
-   * capability check (ADR-0015 follow-up):
-   * - Host-spawned (routing absent/null): `claude auth login` on the host,
-   *   same as before this ADR.
-   * - Container-routed: the container's own `claude setup-token`, since the
-   *   host's keychain sign-in never reaches a process running inside the
-   *   sandbox container. Runs through `/usr/bin/expect` over a plain
-   *   `child_process` pipe (no pty needed on this side — see
-   *   claudeContainerAuthCli.ts's doc comment for why `node-pty` was ruled
-   *   out: this plugin's release workflow never ships `node_modules/`, so a
-   *   native module's compiled binary could never reach a real install).
+   * Host threads run `claude auth login` on the host. A thread on the managed local daemon signs in INSIDE the daemon
+   * container (`claude setup-token`, paste back a login code) and forces a fresh token: the stored one just failed.
    */
   private renderClaudeSignInCard(threadId: string, message: string): void {
     this.messagesEl.querySelector('.ct-auth-required')?.remove();
@@ -6011,53 +6366,37 @@ export class ThreadsView extends ItemView {
       message,
       canSignIn: Platform.isDesktopApp,
       flavor: isAwsSignInExpiredError(message) ? 'aws' : 'claude',
-      // The flow is chosen when the button is CLICKED, not when the card is
-      // rendered: this card is also rebuilt from persisted `authRequired` state
-      // after a plugin reload, before any session has started, when the
-      // recorded routing is still empty. Rendering-time selection silently
-      // picked the host flow there — which can never authenticate a
-      // containerized session.
       signIn: async (onProgress, onUrl, onCodePrompt) => {
         // Bedrock credential failure: native AWS SSO device-flow sign-in on the
         // host (opens the browser itself; the URL is the manual fallback).
         if (isAwsSignInExpiredError(message)) {
           return reauthenticateAws(this.plugin.settings, message, { onProgress, onUrl });
         }
-        const routing = await this.manager.resolveClaudeVmRoutingForSignIn(threadId);
-        if (!routing) {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { spawn } = require('child_process') as typeof import('child_process');
-          return signInToClaude(this.plugin.settings.claudeBinaryPath || 'claude', {
-            spawn: spawn as unknown as SpawnLike,
-            env: execEnv(),
+        // The flow is chosen when the button is clicked: this card is also rebuilt from saved state after a reload.
+        const remote = this.manager.getThread(threadId)?.remote;
+        const daemon = remote ? (this.plugin.settings.remoteDaemons ?? []).find((d) => d.id === remote.daemonId) : undefined;
+        if (daemon?.managed === 'local-container') {
+          const controller = this.plugin.localDaemon;
+          if (!controller) return { ok: false as const, error: 'The local daemon is not available on this platform.' };
+          onProgress('Signing in inside the local daemon…');
+          return controller.signIn({
             onProgress,
-            onUrl,
-          });
+            onUrl: (url) => {
+              onUrl(url);
+              // The CLI runs inside the container and cannot launch a host browser; the link stays as the fallback.
+              try { window.open(url, '_blank'); } catch { /* link is the fallback */ }
+            },
+            onCodePrompt,
+          }, { force: true });
         }
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { spawn } = require('child_process') as typeof import('child_process');
-        onProgress('Signing in inside the sandbox container…');
-        const result = await signInToClaudeInContainer({
-          spawn: spawn as unknown as ContainerSpawnLike,
-          hostEnv: hostRunnerEnv() as NodeJS.ProcessEnv,
-          containerName: routing.containerName,
-          containerBinaryPath: routing.containerBinaryPath,
+        return signInToClaude(this.plugin.settings.claudeBinaryPath || 'claude', {
+          spawn: spawn as unknown as SpawnLike,
+          env: execEnv(),
           onProgress,
-          onUrl: (url) => {
-            onUrl(url);
-            // The CLI runs inside the container and cannot launch a host
-            // browser; the fallback link stays for a blocked pop-up.
-            try { window.open(url, '_blank'); } catch { /* link is the fallback */ }
-          },
-          onCodePrompt,
+          onUrl,
         });
-        if (!result.ok) return result;
-        try {
-          await this.plugin.persistContainerAuthToken(threadId, result.token);
-        } catch (err) {
-          return { ok: false as const, error: `Signed in, but saving the token failed: ${err instanceof Error ? err.message : String(err)}` };
-        }
-        return { ok: true as const };
       },
       retry: async () => {
         try {
@@ -6067,30 +6406,6 @@ export class ThreadsView extends ItemView {
           new Notice(`Retry failed: ${(err as Error).message}`);
           return false;
         }
-      },
-    });
-    this.scrollToBottom();
-  }
-
-  /**
-   * One-time "Run this thread in a sandbox?" card. Setup progress runs inside
-   * the card; a finished setup only affects the thread's NEXT fresh session
-   * start (the running session is deliberately left alone).
-   */
-  private renderSandboxOfferCard(threadId: string): void {
-    if (!Platform.isDesktopApp) return;
-    this.messagesEl.querySelector('.ct-sandbox-offer')?.remove();
-    const harnessImage = this.plugin.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE;
-    renderSandboxOfferCard(this.messagesEl, {
-      getStatus: () => getSandboxSetupStatus({ harnessImage }),
-      run: ({ onProgress, signal }) => runSandboxSetup({ harnessImage, onProgress, signal }),
-      confirm: (message) => promptConfirm(this.app, { message, confirmLabel: 'Continue', danger: false }),
-      onNotNow: () => this.manager.clearSandboxSetupOffer(threadId),
-      onDontAskAgain: () => {
-        this.manager.clearSandboxSetupOffer(threadId);
-        this.plugin.settings.sandboxSetupPromptDismissed = true;
-        this.manager.updateSettings(this.plugin.settings);
-        void this.plugin.saveSettings();
       },
     });
     this.scrollToBottom();
@@ -7157,47 +7472,13 @@ export class ThreadsView extends ItemView {
     return `${Math.floor(diff / 86_400_000)}d ago`;
   }
 
-  async openNewThread(event?: MouseEvent): Promise<void> {
-    const projects = this.manager.getProjects();
-
-    if (projects.length === 0) {
-      await this.createThreadWithProject(null);
-      return;
-    }
-
-    const menu = new Menu();
-    menu.addItem(item =>
-      item.setTitle('New chat')
-        .setIcon('square-pen')
-        .onClick(() => this.createThreadWithProject(null)),
-    );
-    menu.addSeparator();
-    for (const project of projects) {
-      menu.addItem(item =>
-        item.setTitle(project.name)
-          .setIcon('folder')
-          .onClick(() => this.createThreadWithProject(project.id)),
-      );
-    }
-
-    if (event) menu.showAtMouseEvent(event);
-    else menu.showAtPosition({ x: 0, y: 0 });
-  }
-
-  private async createThreadWithProject(projectId: string | null): Promise<void> {
-    let cwd = this.plugin.getEffectiveCwd();
-    if (projectId) {
-      const project = this.manager.getProject(projectId);
-      if (project) cwd = this.manager.getProjectCwd(project);
-    }
-    const thread = this.manager.createThread(
-      `Thread ${this.manager.getThreads().length + 1}`,
-      cwd,
-      projectId ?? undefined,
-    );
-    await this.plugin.saveSettings();
-    this.renderProjectBar(); // update thread count badges
-    void this.setActiveThread(thread.id);
+  /**
+   * "New thread" entry point (header button, switcher footer, Agents List, Kanban,
+   * command palette). Opens new-conversation mode; no thread is created until the
+   * first message is sent.
+   */
+  async openNewThread(_event?: MouseEvent): Promise<void> {
+    await this.startNewConversation();
   }
 
   navigateTab(direction: 1 | -1): void {

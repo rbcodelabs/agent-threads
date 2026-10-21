@@ -24,6 +24,13 @@ export type TaskTrackerEvent =
   | { kind: 'create'; id: string; content: string }
   | { kind: 'update'; id: string; status?: string; content?: string };
 
+/** One MCP server's connection state as the SDK reports it (`connected`, `failed`, `needs-auth`, `pending`, `disabled`). */
+export interface McpServerStatusEntry {
+  name: string;
+  status: string;
+  error?: string;
+}
+
 export interface ModelRefusalFallback {
   content: string;
   originalModel: string;
@@ -92,24 +99,6 @@ export interface SessionCallbacks {
    * message is delivered through `onError` instead (unattended callers).
    */
   onAuthRequired?: (message: string) => void;
-  /**
-   * ADR-0015 follow-up: fired once per `ThreadSession.start()` with the
-   * ACTUAL resolved VM-routing decision — `null` for a host-local spawn
-   * (mode `'never'`, or `'auto'` with a failed capability/container-start
-   * check), or the container this session's `claude` process is now running
-   * in. Lets the UI pick the right "Sign in to Claude" flow (host `claude
-   * auth login` vs. the container's own `claude setup-token`) from what
-   * actually happened, rather than a possibly-stale capability re-check.
-   * Only `ThreadSession` (Claude) ever calls this.
-   *
-   * `fallbackReason` accompanies a `null` routing: why the host was used
-   * (`HarnessVmFallbackReason`). Undefined when VM routing was not configured
-   * for the session at all.
-   */
-  onVmRouting?: (
-    routing: { containerName: string; containerBinaryPath: string } | null,
-    fallbackReason?: import('./harnessVmRouting').HarnessVmFallbackReason,
-  ) => void;
   onPermissionRequest: (toolName: string, detail: string) => Promise<boolean>;
   onAskUserQuestion: (questions: AskQuestion[]) => Promise<Record<string, string>>;
   /** Provider resolved/canceled its pending question before the user answered. */
@@ -159,6 +148,11 @@ export interface SessionCallbacks {
   onToolProgress?: (toolUseId: string, toolName: string, elapsedSeconds: number) => void;
   /** Fired when the session surfaces memory files into the current turn. */
   onMemoryRecall?: (paths: string[], mode: 'select' | 'synthesize') => void;
+  /**
+   * Fired with the connection state of every MCP server in the session: from the `init` message, and again when the
+   * state changes (a server that died mid-session reports `failed`).
+   */
+  onMcpServerStatus?: (servers: McpServerStatusEntry[]) => void;
   /** Fired when the slash-command list changes mid-session (e.g. new skill discovered). */
   onCommandsChanged?: (commands: import('@anthropic-ai/claude-agent-sdk').SlashCommand[]) => void;
   /** Fired when agentProgressSummaries is enabled and a task emits an AI summary. */

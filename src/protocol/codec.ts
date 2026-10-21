@@ -10,8 +10,10 @@
  * `unknown_type` (server frames) so the caller can decide, instead of being
  * silently mis-parsed.
  */
-import { CLIENT_COMMAND_TYPES, validateWireImages, type ClientCommandType } from './commands';
+import { validateSkillManifest, validateSkillWireFiles } from './skills';
+import { CLIENT_COMMAND_TYPES, validateRepoSpecs, validateWireImages, type ClientCommandType } from './commands';
 import { validateManifestServers, validateToolResultPayload } from './hostTools';
+import { validateSyncedMcpShape } from './mcpSync';
 import { validateSpecShape } from './spec';
 import {
   PROTOCOL_VERSION,
@@ -108,6 +110,7 @@ const COMMAND_FIELDS: Record<ClientCommandType, FieldSpec> = {
   'path.check': { path: 'S' },
   'workspaces.list': {},
   'path.list': { path: 'S' },
+  'file.read': { path: 'S' },
   attach: { ch: 'c', afterSeq: 'i', epoch: 's?', observe: 'b?' },
   ack: { ch: 'c', seq: 'i' },
   'session.send': { threadId: 'S', text: 's', userMessageUuid: 'S', images: 'a?' },
@@ -128,6 +131,12 @@ const COMMAND_FIELDS: Record<ClientCommandType, FieldSpec> = {
   'tool.result': { threadId: 'S', callId: 'S', success: 'b', text: 's', content: 'a?' },
   'tool.manifest': { threadId: 'S', servers: 'o' },
   'creds.push': { kind: 'S', ttlSec: 'n', fields: 'o' },
+  'repos.sync': { repos: 'a?', wait: 'b?' },
+  'repos.status': {},
+  'skills.sync': { trees: 'a' },
+  'skills.put': { upload: 'S', dir: 'S', seq: 'i', files: 'a' },
+  'skills.commit': { upload: 'S', dir: 'S', hash: 'S', files: 'i', bytes: 'i' },
+  'mcp.sync': { servers: 'o', clear: 'b?', wait: 'b?' },
 };
 
 const SERVER_FIELDS: Record<'event' | 'resync' | 'ack' | 'err' | 'welcome', FieldSpec> = {
@@ -172,6 +181,14 @@ function validateDeep(type: string, obj: Record<string, unknown>): string | null
       return validateWireImages(obj.images);
     case 'session.open':
       return validateSpecShape(obj.spec);
+    case 'repos.sync':
+      return validateRepoSpecs(obj.repos);
+    case 'skills.sync':
+      return validateSkillManifest(obj.trees);
+    case 'skills.put':
+      return validateSkillWireFiles(obj.files);
+    case 'mcp.sync':
+      return validateSyncedMcpShape(obj.servers, obj.clear === true);
     case 'tool.manifest':
       return validateManifestServers(obj.servers);
     case 'tool.result':

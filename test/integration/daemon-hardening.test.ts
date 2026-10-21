@@ -235,6 +235,7 @@ describe('L. scopes and request ownership', () => {
     'path.check': { path: '/tmp' },
     'workspaces.list': {},
     'path.list': { path: '/tmp' },
+    'file.read': { path: '/tmp/x.png' },
     'session.getContextUsage': { threadId: 'x' },
     'session.mcpServerStatus': { threadId: 'x' },
     'session.getUsageSnapshot': { threadId: 'x' },
@@ -257,6 +258,12 @@ describe('L. scopes and request ownership', () => {
     'tool.result': { threadId: 'x', callId: 'c', success: true, text: '' },
     'tool.manifest': { threadId: 'x', servers: {} },
     'creds.push': { kind: 'k', ttlSec: 1, fields: {} },
+    'repos.sync': {},
+    'repos.status': {},
+    'skills.sync': { trees: [] },
+    'skills.put': { upload: 'upload-0001', dir: 'demo-0123456789ab', seq: 0, files: [] },
+    'skills.commit': { upload: 'upload-0001', dir: 'demo-0123456789ab', hash: '0123456789ab'.padEnd(64, '0'), files: 0, bytes: 0 },
+    'mcp.sync': { servers: {} },
   };
 
   it('REQUIRED_SCOPE lists exactly every command except hello, and each sample is a valid frame', () => {

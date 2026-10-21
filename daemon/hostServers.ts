@@ -8,7 +8,7 @@
  * Servers are fixed when the session starts (a name that first appears in a later manifest needs a new session),
  * but each server's TOOL list follows the live manifest.
  */
-import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
+import type { McpSdkServerConfigWithInstance, SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { RemoteHostToolSpec } from '../src/protocol';
 import { createCwdTracker } from '../src/tools/cwdTracker';
 import { createWorktreeTools } from '../src/tools/worktree';
@@ -23,18 +23,26 @@ export interface HostServers {
   dispose(): void;
 }
 
-export function buildHostServers(ctx: DriverContext): HostServers {
-  const port = ctx.hostTools;
+/** The daemon-local worktree tools for one session (none in a read-only workspace). `onCwdChanged` is how a move reaches the host. */
+export function buildLocalToolDefs(ctx: DriverContext): Array<SdkMcpToolDefinition<any>> {
   const local = ctx.localTools;
   const cwd = createCwdTracker(ctx.spec.cwd);
-  const localDefs = local?.enabled === false ? [] : Object.values(createWorktreeTools({
+  return local?.enabled === false ? [] : Object.values(createWorktreeTools({
     cwd,
     options: {
       getWorktreeRoot: () => local?.worktreeRoot,
+      // On a daemon the agent does not get to choose where worktrees go, and a relative repoPath means "a clone under the repo root".
+      lockWorktreeRoot: true,
+      ...(local?.repoRoot ? { workspaceRoot: local.repoRoot } : {}),
       validateCwd: local ? (p) => local.checkCwd(p) : undefined,
       onSetCwd: (p, origin) => ctx.onCwdChanged?.(p, origin),
     },
   }));
+}
+
+export function buildHostServers(ctx: DriverContext): HostServers {
+  const port = ctx.hostTools;
+  const localDefs = buildLocalToolDefs(ctx);
 
   const manifest = (): Record<string, RemoteHostToolSpec[]> => port?.manifest() ?? {};
   const names = new Set<string>(Object.keys(manifest()));

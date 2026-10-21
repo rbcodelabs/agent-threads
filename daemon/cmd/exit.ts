@@ -20,6 +20,11 @@ export const EXIT = {
   INTERRUPTED: 6,
   /** `run`: a permission/question was raised and nobody could answer it (unattended, or no terminal). */
   NEEDS_INPUT: 7,
+  /**
+   * `serve` stopped on purpose to be restarted into a newer bundle (auto-update). Non-zero (EX_TEMPFAIL) so a
+   * `Restart=on-failure` supervisor brings it back; a clean 0 would leave it down. See docs/remote-daemon.md.
+   */
+  RESTART: 75,
   /** Ctrl-C, by shell convention. */
   SIGINT: 130,
 } as const;

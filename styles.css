@@ -1404,6 +1404,277 @@
   }
 }
 
+/* ═══ Tool call styles (setting: Tool call style) ═══════════════════════════
+   One shared DOM (src/toolCallDom.ts); the root carries ct-tools-chips |
+   ct-tools-tree | ct-tools-cards. Everything below is scoped to .ct-tools so
+   task pills / other .ct-tool-pill users elsewhere are untouched. */
+
+/* ── Shared ─────────────────────────────────────────────────────────────── */
+.ct-tools .ct-tool-pill {
+  border-left: 0;
+  background: transparent;
+  padding: 2px 6px;
+  gap: 8px;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+.ct-tools .ct-tool-pill:focus-visible,
+.ct-tools .ct-tool-group-header:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+.ct-tools .ct-tool-pill .ct-tool-pill-icon { display: none; }
+.ct-tools .ct-tool-pill .ct-tool-pill-name {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0;
+}
+.ct-tools .ct-tool-pill .ct-tool-pill-name::before { content: none; }
+.ct-tools .ct-tool-pill.ct-tool-error .ct-tool-pill-name { color: var(--color-red); }
+.ct-tools .ct-tool-pill-text { color: var(--text-muted); }
+.ct-tools .ct-tool-pill-text-path { display: flex; min-width: 0; }
+.ct-tools .ct-tool-path-dir {
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.ct-tools .ct-tool-path-file {
+  color: var(--text-normal);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ct-tools .ct-tool-pill-ts { font-size: 11px; color: var(--text-faint); }
+
+.ct-tools .ct-tool-status,
+.ct-tools .ct-tool-group-status {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--text-faint);
+}
+.ct-tools .ct-tool-status svg,
+.ct-tools .ct-tool-group-status svg { width: 12px; height: 12px; }
+.ct-tools .ct-tool-state-success { color: var(--color-green); }
+.ct-tools .ct-tool-state-pending { color: var(--color-yellow); }
+.ct-tools .ct-tool-state-error { color: var(--color-red); }
+@media (prefers-reduced-motion: no-preference) {
+  .ct-tools .ct-tool-state-pending svg { animation: ct-tool-spin 1s linear infinite; }
+}
+@keyframes ct-tool-spin { to { transform: rotate(360deg); } }
+@keyframes ct-tool-bar-slide { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+
+.ct-tools .ct-tool-group-header {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-left: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: none;
+}
+.ct-tools .ct-tool-group-header .ct-compressed-summary {
+  flex: 0 1 auto;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  font-size: var(--font-ui-small);
+}
+.ct-tools .ct-tool-group-header .ct-compressed-summary::before { content: none; }
+.ct-tools .ct-tool-group-header .ct-expand-btn {
+  width: 14px;
+  height: 14px;
+  opacity: 0.7;
+}
+.ct-tools .ct-tool-group-header:hover .ct-expand-btn { opacity: 1; background: none; }
+.ct-tools .ct-tool-group-header .ct-expand-btn svg { width: 14px; height: 14px; transition: transform 0.15s; }
+.ct-tools .ct-tool-group-header .ct-tool-group-running {
+  font-size: 11.5px;
+  color: var(--color-yellow);
+}
+.ct-tools .ct-tool-group-count { font-size: 11px; color: var(--text-faint); flex: none; }
+.ct-tools .ct-tool-group > .ct-full-content { margin: 0; }
+
+/* ── Tree (default) ─────────────────────────────────────────────────────── */
+.ct-tools-tree .ct-tool-group { margin-bottom: 4px; }
+.ct-tools-tree .ct-tool-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px 3px 2px;
+  min-height: 24px;
+  border-radius: 4px;
+}
+.ct-tools-tree .ct-tool-group-header:hover { background: var(--background-modifier-hover); }
+.ct-tools-tree .ct-tool-group-header .ct-expand-btn { order: -2; }
+.ct-tools-tree .ct-tool-group-header .ct-expand-btn svg { transform: rotate(-90deg); }
+.ct-tools-tree .ct-tool-group-header[aria-expanded="true"] .ct-expand-btn svg { transform: none; }
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-status { order: -1; }
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-status svg { display: none; }
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  margin: 2.5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ct-tools-tree .ct-tool-group-header .ct-tool-state-pending::before { animation: ct-dot-pulse 1.2s ease-in-out infinite; }
+}
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-icon,
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-running,
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-count[data-count-in-label="true"] { display: none; }
+.ct-tools-tree .ct-tool-group-header .ct-tool-group-count::before { content: '\00b7  '; }
+.ct-tools-tree .ct-tool-group > .ct-full-content {
+  margin: 0 0 0 8px;
+  padding: 2px 0 2px 14px;
+  border-left: 1px solid var(--background-modifier-border);
+}
+.ct-tools-tree .ct-tool-pill { position: relative; margin-left: -6px; max-width: calc(100% + 6px); box-sizing: border-box; }
+.ct-tools-tree .ct-tools > .ct-tool-pill { margin-left: 0; }
+.ct-tools-tree .ct-tool-pill:hover { background: var(--background-modifier-hover); }
+.ct-tools-tree .ct-tool-pill .ct-tool-state-success { visibility: hidden; }
+.ct-tools-tree .ct-tool-pill .ct-tool-pill-name { min-width: 64px; }
+.ct-tools-tree .ct-tool-pill .ct-tool-pill-ts { opacity: 0; transition: opacity 0.12s; margin-left: auto; }
+.ct-tools-tree .ct-tool-pill:hover .ct-tool-pill-ts,
+.ct-tools-tree .ct-tool-pill:focus-within .ct-tool-pill-ts,
+.ct-tools-tree .ct-tool-pill:focus .ct-tool-pill-ts { opacity: 1; }
+@media (hover: none) {
+  .ct-tools-tree .ct-tool-pill .ct-tool-pill-ts { opacity: 0.7; }
+}
+.ct-tools-tree .ct-tool-pill.ct-tool-active .ct-tool-pill-name { color: var(--color-yellow); }
+
+/* ── Chips ──────────────────────────────────────────────────────────────── */
+.ct-tools-chips .ct-tool-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-bottom: 6px;
+}
+.ct-tools-chips .ct-tool-group-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: auto;
+  max-width: 100%;
+  min-height: 0;
+  padding: 3px 11px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: var(--background-secondary);
+}
+.ct-tools-chips .ct-tool-group-header:hover { border-color: var(--background-modifier-border-hover); color: var(--text-normal); }
+.ct-tools-chips .ct-tool-group-header .ct-compressed-summary { color: var(--text-normal); font-size: 12.5px; }
+.ct-tools-chips .ct-tool-group-header .ct-tool-group-icon,
+.ct-tools-chips .ct-tool-group-header .ct-tool-group-running,
+.ct-tools-chips .ct-tool-group-header .ct-tool-group-count[data-count-in-label="true"] { display: none; }
+.ct-tools-chips .ct-tool-group-header .ct-tool-group-count { color: var(--text-muted); }
+.ct-tools-chips .ct-tool-group-header .ct-tool-group-count::after { content: '\00d7'; }
+.ct-tools-chips .ct-tool-group-header[aria-expanded="true"] .ct-expand-btn svg { transform: rotate(180deg); }
+.ct-tools-chips .ct-tool-group > .ct-full-content {
+  align-self: stretch;
+  margin: 6px 0 0 6px;
+  padding: 2px 0 2px 14px;
+  border-left: 1px solid var(--background-modifier-border);
+}
+.ct-tools-chips .ct-tool-pill .ct-tool-state-success { visibility: hidden; }
+.ct-tools-chips .ct-tool-pill .ct-tool-pill-name {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 500;
+  color: var(--text-normal);
+}
+.ct-tools-chips .ct-tool-pill .ct-tool-pill-ts { margin-left: auto; }
+
+/* ── Cards ──────────────────────────────────────────────────────────────── */
+.ct-tools-cards .ct-tool-group {
+  position: relative;
+  margin: 0 36px 8px 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+  overflow: hidden;
+}
+.ct-tools-cards .ct-tool-group-pending::before {
+  content: '';
+  display: block;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--color-yellow), transparent) no-repeat;
+  background-size: 40% 100%;
+  background-position: 40% 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ct-tools-cards .ct-tool-group-pending::before { animation: ct-tool-bar-slide 1.4s linear infinite; }
+}
+.ct-tools-cards .ct-tool-group-error { border-color: color-mix(in srgb, var(--color-red) 55%, var(--background-modifier-border)); }
+.ct-tools-cards .ct-tool-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+}
+.ct-tools-cards .ct-tool-group-header .ct-tool-group-status { display: none; }
+.ct-tools-cards .ct-tool-group-header .ct-tool-group-icon {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+}
+.ct-tools-cards .ct-tool-group-header.ct-tool-error .ct-tool-group-icon { color: var(--color-red); }
+.ct-tools-cards .ct-tool-group-header .ct-compressed-summary { font-weight: 500; color: var(--text-normal); }
+.ct-tools-cards .ct-tool-group-header .ct-tool-group-count {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+.ct-tools-cards .ct-tool-group-header .ct-tool-group-count[data-count-in-label="true"] { }
+/* Narrow viewports: a group never outgrows its column, and the mobile header is a 44px tap target. */
+.ct-tools-tree .ct-tool-group,
+.ct-tools-cards .ct-tool-group { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.ct-tools .ct-tool-group > .ct-full-content { min-width: 0; overflow: hidden; }
+.ct-mobile-root .ct-tools .ct-tool-group-header { min-height: 44px; }
+/* The message is a shrink-to-fit flex column: let the tool list fill it so nowrap rows truncate instead of widening past the screen. */
+.ct-mobile-message > .ct-tools { align-self: stretch; min-width: 0; }
+.ct-tools-cards .ct-tool-group-header[aria-expanded="true"] .ct-expand-btn svg { transform: rotate(180deg); }
+.ct-tools-cards .ct-tool-group > .ct-full-content { border-top: 1px solid var(--background-modifier-border); }
+.ct-tools-cards .ct-tool-group .ct-tool-pill {
+  padding: 7px 12px;
+  border-radius: 0;
+  font-size: var(--font-ui-small);
+}
+.ct-tools-cards .ct-tool-group .ct-tool-pill + .ct-tool-pill { border-top: 1px solid var(--background-modifier-border); }
+.ct-tools-cards .ct-tool-pill .ct-tool-pill-ts { margin-left: auto; }
+.ct-tools-cards .ct-tools > .ct-tool-pill { padding: 3px 6px; }
+
+/* The two-tier outer wrap's live header keeps its own look but loses the yellow chip. */
+.ct-tool-outer-wrap-live-summary .ct-tool-pill-name {
+  background: none;
+  padding: 0;
+  color: var(--text-muted);
+}
+
 /* ── Workflow progress block ─────────────────────────────────────────────── */
 
 .ct-workflow-block {
@@ -1583,16 +1854,16 @@
 
 /* Background-task completion notice — a subtle left-aligned row in the
    transcript, shown instead of a global toast when a background task finishes
-   on an idle thread. It shares the tool rows' leading-icon column: 8px of left
-   padding stands in for .ct-tool-pill's 2px border + 6px padding, and the
-   12px icon and 6px gap match .ct-tool-pill-icon, so the status icon and text
-   line up with the tool icons and tool names above it. */
+   on an idle thread. It shares the tool rows' leading column: 6px of left
+   padding matches .ct-tool-pill's 6px padding (rows have no left border now),
+   and the 12px icon and 6px gap match the row's status icon, so the status
+   icon and text line up with the tool rows above it. */
 .ct-notice-row {
   display: flex;
   align-items: flex-start;
   gap: 6px;
   margin: 8px 0;
-  padding-left: 8px;
+  padding-left: 6px;
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   line-height: 1.5;
@@ -2558,123 +2829,6 @@
   position: relative;
 }
 
-.ct-harness-send-btn {
-  position: relative;
-}
-
-.ct-harness-send-btn::after {
-  content: '';
-  position: absolute;
-  right: 3px;
-  bottom: 3px;
-  width: 0;
-  height: 0;
-  border-left: 2.5px solid transparent;
-  border-right: 2.5px solid transparent;
-  border-top: 3px solid currentColor;
-  opacity: 0.65;
-}
-
-.ct-harness-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-}
-
-.ct-harness-mark svg {
-  width: 18px;
-  height: 18px;
-  stroke-width: 2.25;
-}
-
-.ct-harness-menu {
-  position: absolute;
-  z-index: var(--layer-popover, 1000);
-  right: 8px;
-  bottom: 46px;
-  min-width: 132px;
-  padding: 4px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  background: var(--background-primary);
-  box-shadow: var(--shadow-s);
-}
-
-.ct-harness-menu-item {
-  width: 100%;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 9px;
-  border-radius: 6px;
-  color: var(--text-normal);
-  background: transparent;
-}
-
-.ct-harness-menu-item:hover,
-.ct-harness-menu-item:focus,
-.ct-harness-menu-item[aria-checked='true'] {
-  background: var(--background-modifier-hover);
-}
-
-/* "Run in" section of the kickoff picker (Claude only) */
-.ct-harness-menu-separator {
-  height: 1px;
-  margin: 4px 0;
-  background: var(--background-modifier-border);
-}
-
-.ct-harness-menu-heading {
-  padding: 4px 9px 2px;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
-
-.ct-run-mode-item {
-  white-space: nowrap;
-}
-
-.ct-run-mode-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-}
-
-.ct-run-mode-mark svg {
-  width: 16px;
-  height: 16px;
-}
-
-/* Default has no icon; keep its label aligned with the icon rows. */
-.ct-run-mode-item[data-run-mode='default'] {
-  padding-left: 35px;
-}
-
-/* Badge on the send button when a run-mode override is active */
-.ct-run-mode-badge {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  display: inline-flex;
-  width: 11px;
-  height: 11px;
-  color: var(--text-muted);
-  pointer-events: none;
-}
-
-.ct-run-mode-badge svg {
-  width: 11px;
-  height: 11px;
-  stroke-width: 2.5;
-}
-
 .ct-root .ct-stop-btn {
   background: var(--color-red, #e05252);
   color: white;
@@ -2964,11 +3118,6 @@
   padding: 8px 0;
 }
 
-/* AgentDashboard root — extra bottom clearance so the floating panel doesn't hide content */
-.ct-dashboard-root .ct-agents-list {
-  padding-bottom: 180px;
-}
-
 .ct-agents-empty {
   padding: 32px 16px;
   text-align: center;
@@ -3008,6 +3157,34 @@
   letter-spacing: 0.04em;
   color: var(--text-muted);
 }
+
+.ct-agents-collapsible {
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-s);
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.ct-agents-collapsible:hover { background-color: var(--background-modifier-hover); color: var(--text-normal); }
+.ct-agents-collapsible:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+.ct-agents-group-chevron {
+  display: inline-flex;
+  flex: none;
+  width: 14px;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.ct-agents-group-chevron svg { width: 14px; height: 14px; }
+.ct-agents-collapsible:hover .ct-agents-group-chevron { color: var(--text-normal); }
+/* Collapsed project: keep the header, soften it so it reads as "folded". */
+.ct-agents-project-header.is-collapsed .ct-agents-project-name { color: var(--text-muted); }
+.ct-agents-group-label.ct-agents-collapsible {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 2px 8px;
+}
+.ct-agents-group-label .ct-agents-project-count { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--text-faint); }
 
 .ct-agents-group-badge {
   display: inline-flex;
@@ -3272,15 +3449,7 @@
     gap: 4px 8px;
   }
   .ct-agents-panel-meta > .ct-agents-count { flex: 1 1 auto; min-width: 0; }
-  .ct-dispatch-project { flex: 1 1 120px; min-width: 0; }
-  .ct-dispatch-project select { flex: 1 1 auto; min-width: 0; max-width: 100%; }
-  .ct-agents-project-trigger { max-width: 100%; }
   .ct-agents-panel-actions { margin-left: auto; flex: 0 0 auto; }
-
-  .ct-dashboard-root .ct-agents-floating-panel.ct-panel-collapsible:hover .ct-agents-panel-meta,
-  .ct-dashboard-root .ct-agents-floating-panel.ct-panel-collapsible:focus-within .ct-agents-panel-meta {
-    max-height: 112px;
-  }
 }
 
 .ct-agents-root.ct-mobile .ct-dashboard-agent-count,
@@ -3327,29 +3496,6 @@
   align-items: stretch;
   transition: background 0.1s ease, border-top-color 0.1s ease;
 }
-
-.ct-dispatch-project {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-}
-
-.ct-dispatch-project select {
-  max-width: 150px;
-  min-height: 28px;
-  padding: 2px 24px 2px 7px;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-normal);
-  background: var(--background-primary-alt, var(--background-primary));
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-}
-
-.ct-agents-root.ct-mobile .ct-dispatch-project-label { display: none; }
-.ct-agents-root.ct-mobile .ct-dispatch-project select { max-width: 140px; min-height: 44px; }
 
 /* Image chip strip inside the dispatch area */
 .ct-agents-dispatch-chips {
@@ -4437,7 +4583,7 @@
   font-size: var(--font-ui-smaller);
 }
 
-/* Paste-code affordance for container-routed sign-in (ADR-0015 `claude setup-token`) */
+/* Paste-code affordance for daemon sign-in (`claude setup-token`) */
 .ct-auth-code-prompt {
   margin-top: 8px;
 }
@@ -5917,30 +6063,6 @@
 
 /* ── Kanban Board ──────────────────────────────────────────────────────── */
 
-.ct-kanban-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  flex-shrink: 0;
-  padding: 0;
-  transition: color 0.15s, background 0.15s;
-}
-.ct-kanban-toggle:hover {
-  color: var(--text-normal);
-  background: var(--background-modifier-hover);
-}
-.ct-kanban-toggle svg {
-  width: 15px;
-  height: 15px;
-}
-
 .ct-kanban-groupby {
   display: flex;
   align-items: center;
@@ -6497,22 +6619,55 @@
 .ct-settings-page-header button, .ct-manager-detail button { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); background: var(--interactive-normal); color: var(--text-normal); padding: 6px 12px; cursor: pointer; }
 .ct-settings-page-header button.mod-cta, .ct-manager-detail button.mod-cta { background: var(--interactive-accent); border-color: transparent; color: var(--text-on-accent); }
 .ct-manager-detail button.mod-warning { color: var(--color-red); }
-.ct-settings-manager { display: grid; grid-template-columns: minmax(190px, .78fr) minmax(300px, 1.35fr); border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; min-height: 510px; }
+.ct-settings-manager { display: grid; grid-template-columns: minmax(190px, .78fr) minmax(300px, 1.35fr); border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; min-height: 360px; height: clamp(360px, calc(100vh - 150px), 640px); }
+.vertical-tab-content-container:has(.ct-settings-tab-body.is-compact) { display: flex; flex-direction: column; overflow: hidden; }
+.vertical-tab-content-container:has(.ct-settings-tab-body.is-compact) > .vertical-tab-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.vertical-tab-content-container:has(.ct-settings-tab-body.is-compact) .ct-settings-tab-body.is-compact { flex: 1; height: auto; min-height: 0; }
+.ct-settings-tab-body.is-compact { display: flex; flex-direction: column; height: calc(100vh - 32px); min-height: 380px; }
+.ct-settings-tab-body.is-compact .ct-settings-manager { flex: 1; height: auto; min-height: 0; max-height: none; }
+.ct-settings-tab-body.is-compact .ct-secret-storage-notice { margin-bottom: 8px; padding: 6px 10px; }
+/* Sidebar-hosted sections: denser setting rows; long help text clamps to two lines until hovered/focused. */
+.ct-settings-tab-body.is-hosted .setting-item { padding: 8px 0; }
+.ct-settings-tab-body.is-hosted .setting-item-description { font-size: var(--font-ui-smaller); line-height: 1.35; }
+.ct-settings-tab-body.is-hosted:not(.is-help-visible) .setting-item:not(.is-help-open) .setting-item-description:not(:has(a, button, input, select, textarea)) { display: none; }
+.ct-settings-tab-body.is-hosted.is-help-visible .ct-help-icon { display: none; }
+.ct-help-icon { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 6px; padding: 0; border: 1px solid var(--text-faint); border-radius: 50%; background: transparent; box-shadow: none; color: var(--text-muted); font: italic 600 10px/1 serif; cursor: help; vertical-align: middle; }
+.ct-help-icon:hover, .ct-help-icon:focus-visible, .ct-help-icon[aria-expanded="true"] { color: var(--text-on-accent); background: var(--interactive-accent); border-color: transparent; }
+.ct-settings-group { border-bottom: 1px solid var(--background-modifier-border); }
+.ct-settings-group > summary { cursor: pointer; list-style: none; display: flex; align-items: center; }
+.ct-settings-group > summary::-webkit-details-marker { display: none; }
+.ct-settings-group > summary::before { content: '▸'; color: var(--text-muted); width: 16px; flex: none; transition: transform .1s; }
+.ct-settings-group[open] > summary::before { transform: rotate(90deg); }
+.ct-settings-tab-body.is-hosted .ct-settings-group > summary > .setting-item { flex: 1; border: 0; padding: 8px 0; margin: 0; }
+.ct-help-toggle { display: flex; justify-content: flex-end; margin-bottom: 4px; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.ct-help-toggle label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.ct-settings-tab-body.is-hosted .setting-item-heading { padding-top: 14px; }
+.ct-settings-tab-body.is-hosted h1 { font-size: 1.3rem; margin: 0 0 8px; }
+.ct-settings-tab-body.is-hosted h2 { font-size: 1.05rem; margin: 12px 0 6px; }
+.ct-manager-list-toolbar { display: flex; gap: 6px; margin-bottom: 8px; }
+.ct-manager-list-toolbar > input { flex: 1; min-width: 0; background: var(--background-modifier-form-field); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); color: var(--text-normal); font-size: var(--font-ui-small); padding: 5px 8px; }
+.ct-manager-list-toolbar .ct-manager-add { width: 30px; padding: 0; font-size: 1.2em; line-height: 1; border: 0; border-radius: var(--radius-s); background: var(--interactive-accent); color: var(--text-on-accent); cursor: pointer; }
+.ct-manager-list-rows, .ct-manager-detail { overflow-y: auto; min-height: 0; }
 .ct-manager-list { display: flex; flex-direction: column; min-width: 0; background: var(--background-secondary); border-right: 1px solid var(--background-modifier-border); padding: 12px; }
 .ct-manager-list > input, .ct-secret-projects > input { width: 100%; margin-bottom: 10px; }
 .ct-manager-list-rows { display: flex; flex-direction: column; gap: 4px; flex: 1; }
-.ct-manager-list-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 10px; text-align: left; border: 0; box-shadow: none; background: transparent; color: var(--text-normal); border-radius: 6px; cursor: pointer; min-width: 0; }
+.ct-manager-list-item { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; padding: 7px 10px; text-align: left; border: 0; box-shadow: none; background: transparent; color: var(--text-normal); border-radius: 6px; cursor: pointer; min-width: 0; }
 .ct-manager-list-item:hover { background: var(--background-modifier-hover); }
 .ct-manager-list-item.is-selected { background: color-mix(in srgb, var(--interactive-accent) 18%, transparent); }
 .ct-manager-list-item strong, .ct-manager-list-item small, .ct-manager-list-item span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ct-manager-list-item small, .ct-manager-list-item span, .ct-manager-list footer { color: var(--text-muted); font-size: var(--font-ui-smaller); }
 .ct-manager-list footer { padding: 10px 4px 0; }
-.ct-manager-detail { display: flex; flex-direction: column; min-width: 0; padding: 20px; }
+.ct-manager-detail { display: flex; flex-direction: column; min-width: 0; padding: 14px 16px; }
 .ct-manager-detail h2 { margin: 0 0 16px; }
-.ct-manager-detail-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.ct-manager-detail-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.ct-manager-detail-header h2 { font-size: 1.15rem; }
 .ct-manager-detail-header h2 { margin: 0; }
-.ct-manager-form { display: flex; flex-direction: column; gap: 14px; }
-.ct-manager-field { display: flex; flex-direction: column; gap: 5px; }
+.ct-manager-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
+.ct-manager-form > .ct-manager-field:has(textarea), .ct-manager-form > .ct-manager-field:has(.ct-manager-path-row), .ct-manager-form > :not(.ct-manager-field) { grid-column: 1 / -1; }
+.ct-manager-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ct-manager-form .ct-manager-field > small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ct-manager-danger small { display: none; }
+.ct-manager-path-row { min-width: 0; }
 .ct-manager-field-label, .ct-secret-scope-choice legend { font-weight: 600; font-size: var(--font-ui-small); }
 .ct-manager-field input, .ct-manager-field textarea { width: 100%; }
 .ct-manager-field input, .ct-manager-field textarea, .ct-manager-list > input, .ct-secret-projects > input, .ct-settings-compact-nav select { background: var(--background-modifier-form-field); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); color: var(--text-normal); font-size: var(--font-ui-small); padding: 7px 9px; }
@@ -6523,16 +6678,17 @@
 .ct-secret-projects { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--background-modifier-border); border-radius: 6px; }
 .ct-secret-projects > div { display: flex; flex-direction: column; gap: 7px; }
 .ct-secret-projects.is-hidden { display: none; }
-.ct-manager-danger { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; padding: 12px; border: 1px solid color-mix(in srgb, var(--color-red) 45%, var(--background-modifier-border)); border-radius: 6px; }
+.ct-manager-danger { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--color-red) 45%, var(--background-modifier-border)); border-radius: 6px; }
 .ct-manager-danger > div { display: flex; flex-direction: column; gap: 2px; }
-.ct-manager-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: auto; padding-top: 18px; }
+.ct-manager-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: auto; padding-top: 12px; position: sticky; bottom: 0; background: var(--background-primary); }
 .ct-manager-actions > span { margin-right: auto; color: var(--text-muted); font-size: var(--font-ui-smaller); }
 .ct-manager-error { color: var(--color-red); font-size: var(--font-ui-small); margin: 10px 0 0; }
 .ct-manager-empty { margin: auto; max-width: 280px; text-align: center; color: var(--text-muted); }
 .ct-secret-storage-notice { margin-top: 0; }
 
 @container ct-settings (max-width: 620px) {
-  .ct-settings-manager { grid-template-columns: 1fr; }
+  .ct-settings-manager { grid-template-columns: 1fr; height: auto; }
+  .ct-manager-form { grid-template-columns: 1fr; }
   .ct-manager-list { border-right: 0; border-bottom: 1px solid var(--background-modifier-border); max-height: 250px; }
   .ct-manager-detail { min-height: 500px; }
 }
@@ -6892,81 +7048,16 @@ textarea.ct-settings-wide-input {
   border-color: var(--background-modifier-border-hover, var(--interactive-accent));
 }
 
-/* The dispatch-root inside the panel gets the agents-dispatch padding */
-.ct-kanban-dispatch .ct-dispatch-root {
-  padding: 8px 10px;
-}
-
-/* Strip Obsidian's theme button chrome (border, background, shadow) for all
-   buttons inside the kanban dispatch panel — same reset as .ct-root button. */
-.ct-kanban-dispatch button {
+/* Panel buttons: strip the theme's button chrome (the New thread button re-applies its accent). */
+.ct-kanban-dispatch button:not(.ct-new-thread-btn) {
   box-shadow: none;
   background: transparent;
   border: none;
 }
 
-/* Re-apply the send button's accent — it needs to stay prominent. */
-.ct-kanban-dispatch .ct-send-btn {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-}
-.ct-kanban-dispatch .ct-send-btn:hover {
-  background: var(--interactive-accent-hover);
-}
-/* Stop button shares this panel and its own (0,1,1) `button` reset, but has no
-   2-class context rule the way send-btn does, so re-assert its fill here. */
-.ct-kanban-dispatch .ct-stop-btn {
-  background: var(--color-red, #e05252);
-  color: white;
-}
-
-/* ── Inline layout (used by Kanban dispatch) ───────────────────────────────── */
-
-/* Single row: [left-actions] [textarea] [right-actions] */
-.ct-dispatch-inline-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-/* Left-side button group (attach + mic) */
-.ct-dispatch-left-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-/* Inline textarea: borderless + transparent — the panel is the visual container */
-.ct-kanban-dispatch .ct-agents-dispatch-input {
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  padding: 6px 4px;
-  min-height: 34px;
-  max-height: 120px;
-  overflow-y: auto;
-}
-
-.ct-kanban-dispatch .ct-agents-dispatch-input:focus {
-  outline: none;
-  box-shadow: none;
-}
-
-/* Right-side actions column in inline mode: just send/stop */
-.ct-dispatch-inline-row .ct-input-actions {
-  padding-left: 2px;
-}
-
-/* Extra bottom padding on the board so cards don't hide under the panel (meta strip + dispatch) */
+/* Extra bottom padding on the board so cards don't hide under the floating action panel */
 .ct-kanban-board {
-  padding-bottom: 130px;
-}
-
-/* Drag-over highlight for the kanban dispatch panel */
-.ct-kanban-dispatch .ct-drag-over {
-  border-color: var(--interactive-accent);
-  background: color-mix(in srgb, var(--interactive-accent) 8%, var(--background-secondary));
+  padding-bottom: 76px;
 }
 
 /* ── Shared panel meta strip (AgentDashboard + KanbanView) ─────────────── */
@@ -6987,80 +7078,39 @@ textarea.ct-settings-wide-input {
   gap: 2px;
 }
 
-/* ── AgentDashboard floating panel (ct-floating-panel + ct-agents-floating-panel) ── */
+/* ── "New thread" button (AgentDashboard toolbar + Kanban panel) ───────────── */
 
-/* Give the panel breathing room from the sidebar walls (mirrors ct-panel-wrapper padding) */
-.ct-agents-floating-panel {
-  margin: 0 8px 8px;
+.ct-new-thread-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 12px;
+  border-radius: 8px;
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium, 500);
+  cursor: pointer;
+  white-space: nowrap;
 }
-
-/* Button chrome reset — floating panel provides the visual container */
-.ct-agents-floating-panel button {
-  box-shadow: none;
-  background: transparent;
-  border: none;
-}
-
-/* Dashboard Project picker mirrors the compact context pill in Chat. The
-   compound selector restores its chrome after the panel's button reset. */
-.ct-agents-floating-panel button.ct-agents-project-trigger {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: min(65%, 240px);
-  min-height: 28px;
-  padding: 2px 7px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 9px;
-  background: transparent;
-  color: var(--text-muted);
-}
-
-.ct-agents-floating-panel button.ct-agents-project-trigger:hover {
-  color: var(--text-normal);
-  background: var(--background-modifier-hover);
-}
-
-.ct-agents-root.ct-mobile .ct-agents-floating-panel button.ct-agents-project-trigger {
-  min-height: 44px;
-  max-width: min(70%, 240px);
-}
-
-/* Re-apply accent for send button */
-.ct-agents-floating-panel .ct-send-btn {
+.ct-kanban-dispatch .ct-new-thread-btn {
   background: var(--interactive-accent);
   color: var(--text-on-accent);
-}
-
-.ct-agents-floating-panel .ct-send-btn:hover {
-  background: var(--interactive-accent-hover);
-}
-
-/* Re-apply red for stop button (no 2-class context rule otherwise). */
-.ct-agents-floating-panel .ct-stop-btn {
-  background: var(--color-red, #e05252);
-  color: white;
-}
-
-/* Padding for the dispatch input section within the floating panel */
-.ct-agents-floating-panel .ct-dispatch-root {
-  padding: 6px 8px 8px;
-}
-
-/* Borderless + transparent textarea — the floating panel is the visual container */
-.ct-agents-floating-panel .ct-agents-dispatch-input {
-  background: transparent;
   border: none;
-  border-radius: 0;
-  padding: 6px 4px;
-  min-height: 34px;
-  max-height: 120px;
-  overflow-y: auto;
-}
-
-.ct-agents-floating-panel .ct-agents-dispatch-input:focus {
-  outline: none;
   box-shadow: none;
 }
+.ct-kanban-dispatch .ct-new-thread-btn:hover { background: var(--interactive-accent-hover); }
+.ct-new-thread-btn-icon { display: inline-flex; }
+.ct-new-thread-btn-icon svg { width: 15px; height: 15px; }
+.ct-kanban-dispatch .ct-new-thread-btn {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  box-shadow: none;
+  margin-right: 4px;
+}
+.ct-kanban-dispatch .ct-new-thread-btn:hover { background: var(--interactive-accent-hover); }
+.ct-agents-root.ct-mobile .ct-new-thread-btn { min-height: 44px; }
 
 /* ── Skills Manager ────────────────────────────────────────────────────────── */
 
@@ -7827,11 +7877,13 @@ body.ct-skills-resizing {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 6px 3px 8px;
+  padding: 2px 6px 2px 8px;
   margin-top: 6px;
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-  border-radius: 6px;
+  /* Quiet Rail: a ghost pill on the composer's 8px radius, not a solid accent block. */
+  background: var(--background-modifier-hover);
+  color: var(--interactive-accent);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
   font-size: var(--font-ui-smaller);
   font-weight: 600;
   white-space: nowrap;
@@ -8017,43 +8069,6 @@ body.ct-skills-resizing {
   transition: max-height 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
 }
 
-/* — Left actions in inline layout (KanbanView: attach + mic) ────────────── */
-.ct-kanban-dispatch.ct-panel-collapsible .ct-dispatch-left-actions {
-  max-width: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transition: max-width 0.2s ease, opacity 0.16s ease;
-}
-
-.ct-kanban-dispatch.ct-panel-collapsible:hover .ct-dispatch-left-actions,
-.ct-kanban-dispatch.ct-panel-collapsible:focus-within .ct-dispatch-left-actions {
-  max-width: 80px;
-  opacity: 1;
-  pointer-events: auto;
-  transition: max-width 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
-}
-
-/* — Attach + mic in inputActions column (AgentDashboard: no-footer path) ── */
-.ct-agents-floating-panel.ct-panel-collapsible .ct-input-actions .ct-agents-dispatch-attach-btn,
-.ct-agents-floating-panel.ct-panel-collapsible .ct-input-actions .ct-mic-btn {
-  max-height: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transition: max-height 0.2s ease, opacity 0.16s ease;
-}
-
-.ct-agents-floating-panel.ct-panel-collapsible:hover .ct-input-actions .ct-agents-dispatch-attach-btn,
-.ct-agents-floating-panel.ct-panel-collapsible:hover .ct-input-actions .ct-mic-btn,
-.ct-agents-floating-panel.ct-panel-collapsible:focus-within .ct-input-actions .ct-agents-dispatch-attach-btn,
-.ct-agents-floating-panel.ct-panel-collapsible:focus-within .ct-input-actions .ct-mic-btn {
-  max-height: 30px;
-  opacity: 1;
-  pointer-events: auto;
-  transition: max-height 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
-}
-
 /* — Status rail (ThreadsView: active-work / tool status pills) ──────────── */
 .ct-floating-panel.ct-panel-collapsible .ct-status-rail {
   max-height: 0;
@@ -8149,46 +8164,17 @@ body.ct-skills-resizing {
   transition: max-height 0.25s ease 0.05s, min-height 0.25s ease 0.05s, padding 0.25s ease 0.05s, opacity 0.2s ease 0.07s;
 }
 
-/* — Meta strip (KanbanView + AgentDashboard: thread count + search/actions) ─ */
-/* Zero padding AND border-width (color alone still leaves a 1px gap)          */
-.ct-kanban-dispatch.ct-panel-collapsible .ct-agents-panel-meta,
-.ct-agents-floating-panel.ct-panel-collapsible .ct-agents-panel-meta {
-  max-height: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  border-bottom-width: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transition: max-height 0.2s ease, padding 0.2s ease, border-width 0.2s ease, opacity 0.16s ease;
-}
-
-.ct-kanban-dispatch.ct-panel-collapsible:hover .ct-agents-panel-meta,
-.ct-kanban-dispatch.ct-panel-collapsible:focus-within .ct-agents-panel-meta,
-.ct-agents-floating-panel.ct-panel-collapsible:hover .ct-agents-panel-meta,
-.ct-agents-floating-panel.ct-panel-collapsible:focus-within .ct-agents-panel-meta {
-  max-height: 50px;
-  padding-top: 6px;
-  padding-bottom: 6px;
-  border-bottom-width: 1px;
-  opacity: 1;
-  pointer-events: auto;
-  transition: max-height 0.25s ease 0.05s, padding 0.25s ease 0.05s, border-width 0.2s ease 0.05s, opacity 0.2s ease 0.07s;
-}
-
-/* True mobile panels cannot rely on hover to reveal the Project selector. */
-.ct-agents-root.ct-mobile .ct-kanban-dispatch.ct-panel-collapsible .ct-agents-panel-meta,
-.ct-agents-root.ct-mobile .ct-agents-floating-panel.ct-panel-collapsible .ct-agents-panel-meta {
-    max-height: 112px;
+/* — Meta strip (KanbanView: thread count + New thread / group / search) ──── */
+/* The Kanban panel holds only this strip now, so it is always visible (no hover reveal). */
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-agents-panel-meta {
     padding-top: 6px;
     padding-bottom: 6px;
-    border-bottom-width: 1px;
-    opacity: 1;
-    pointer-events: auto;
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 4px 8px;
 }
+.ct-kanban-dispatch .ct-agents-panel-meta { border-bottom-width: 0; }
+.ct-kanban-dispatch .ct-agents-search-bar:not(.ct-hidden) { border-top: 1px solid var(--background-modifier-border); }
 
 .ct-agents-root.ct-mobile .ct-agents-panel-meta > .ct-agents-count { display: block; }
 
@@ -8353,6 +8339,113 @@ body.ct-skills-resizing {
      declaration would be invalid and the warning would render as body text. */
   color: var(--text-warning, var(--color-orange, #d19a3e));
   font-size: 12px;
+}
+
+/* ── "Runs on" for a Custom MCP server (Settings → MCP) ─────────────────────
+   One line per remote daemon under the server row: a checkbox, the daemon name,
+   a status chip and, when the toggle is off or broken, the reason in words. */
+.setting-item.ct-mcp-has-runson {
+  flex-wrap: wrap;
+}
+
+.ct-mcp-runson {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: var(--font-ui-smaller);
+}
+
+.ct-mcp-runson-label {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ct-mcp-runson-local {
+  color: var(--text-faint);
+}
+
+.ct-mcp-runson-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+.ct-mcp-runson-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px;
+  cursor: pointer;
+}
+
+.ct-mcp-runson-toggle.is-disabled {
+  cursor: not-allowed;
+  color: var(--text-faint);
+}
+
+.ct-mcp-runson-chip {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.ct-mcp-runson-chip--ok {
+  color: var(--color-green);
+  background: color-mix(in srgb, var(--color-green) 16%, transparent);
+}
+
+.ct-mcp-runson-chip--warn {
+  color: var(--text-warning, var(--color-orange, #d19a3e));
+  background: color-mix(in srgb, var(--color-orange, #d19a3e) 16%, transparent);
+}
+
+.ct-mcp-runson-chip--bad {
+  color: var(--text-error, var(--color-red, #d14b4b));
+  background: color-mix(in srgb, var(--color-red, #d14b4b) 14%, transparent);
+}
+
+.ct-mcp-runson-action {
+  padding: 1px 8px;
+  font-size: inherit;
+}
+
+.ct-mcp-runson-reason {
+  flex-basis: 100%;
+  color: var(--text-faint);
+  margin-left: 22px;
+}
+
+/* Confirmation before a server (or a changed server) is sent to a daemon. */
+.ct-mcp-sync-confirm-details {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 8px 0;
+}
+
+.ct-mcp-sync-confirm-details dt {
+  color: var(--text-muted);
+}
+
+.ct-mcp-sync-confirm-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ct-mcp-sync-confirm-mono {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.ct-mcp-sync-confirm-warnings {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
 }
 
 /* ── OAuth MCP server status (Settings → MCP) ──────────────────────────────
@@ -9090,22 +9183,6 @@ button.ct-agent-crumb:focus-visible {
 .ct-root.ct-mobile .ct-panel-collapsible:has(.ct-agent-pill:not(.ct-hidden), .ct-schedule-pill:not(.ct-hidden), .ct-tasklist-pill:not(.ct-hidden)) .ct-input-footer { max-height: 58px; }
 
 @media (max-width: 480px) {
-  .ct-sandbox-setting.setting-item {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .ct-sandbox-setting .setting-item-control {
-    justify-content: stretch;
-    margin-top: 12px;
-  }
-
-  .ct-sandbox-setting input,
-  .ct-sandbox-setting select {
-    width: 100%;
-    min-height: 44px;
-  }
-
   .ct-agent-popover { left: 6px; right: 6px; max-height: min(260px, 50vh); }
   .ct-tasklist-popover { left: 6px; right: 6px; max-height: min(260px, 50vh); }
   .ct-schedule-popover { left: 6px; right: 6px; max-height: min(320px, 55vh); }
@@ -9631,70 +9708,6 @@ button.ct-agent-crumb:focus-visible {
 .ct-bc-lightbox-body img { display: block; width: 100%; height: auto; border-radius: 6px; }
 .ct-bc-lightbox-cap { padding-top: 10px; font-size: 12px; color: var(--text-muted); }
 
-/* ── Sandbox setup: Settings status block + in-thread offer card ──────────── */
-
-.ct-sandbox-setup-line {
-  font-size: var(--font-ui-small);
-  color: var(--text-normal);
-}
-.ct-sandbox-setup-label { color: var(--text-muted); }
-.ct-sandbox-setup-note {
-  margin-top: 6px;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
-.ct-sandbox-setup-actions,
-.ct-sandbox-offer-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-.ct-sandbox-setup-actions:empty { display: none; }
-.ct-sandbox-setup-progress,
-.ct-sandbox-offer-progress {
-  margin-top: 6px;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-  white-space: pre-line;
-  overflow-wrap: anywhere;
-}
-.ct-sandbox-setup-progress:empty,
-.ct-sandbox-offer-progress:empty,
-.ct-sandbox-setup-error:empty,
-.ct-sandbox-offer-error:empty { display: none; }
-.ct-sandbox-setup-error-title,
-.ct-sandbox-offer-error-title {
-  margin-top: 6px;
-  font-size: var(--font-ui-smaller);
-  color: var(--color-red);
-}
-.ct-sandbox-setup-error-tail,
-.ct-sandbox-offer-error-tail {
-  margin: 4px 0 0;
-  padding: 6px 8px;
-  max-height: 160px;
-  overflow: auto;
-  font-size: var(--font-ui-smaller);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  background: var(--background-secondary);
-  border-radius: 4px;
-}
-.ct-sandbox-offer {
-  padding: 10px 12px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  background: var(--background-secondary);
-}
-.ct-sandbox-offer-title { font-weight: var(--font-semibold); }
-.ct-sandbox-offer-body {
-  margin-top: 4px;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
-
-
 /* ── Remote threads (daemon): host badge, folder and connection pill ───────── */
 .ct-remote-strip {
   display: flex;
@@ -9773,6 +9786,26 @@ button.ct-agent-crumb:focus-visible {
 .ct-remote-pill--protocol,
 .ct-remote-pill--auth { color: var(--text-error, var(--color-red, #e05252)); }
 
+.ct-remote-warn {
+  flex-shrink: 0;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--color-yellow, #d9a21b);
+  border: 1px solid var(--color-yellow, #d9a21b);
+}
+
+/* Invisible hit area: the pill is ~40x18, so a 44x44 box centred horizontally on it (the minimum tap target) is lifted over the strip without changing its look. It reaches only 6px above the pill (not into the title-row button above) and the rest below. It reaches at most ~3px sideways, inside the 8px strip gap, so it never covers a neighbouring control. z-index lifts it over the (positioned) message rows that start just below the strip. */
+.ct-remote-warn::after { content: ""; position: absolute; z-index: 1; left: 50%; top: -7px; width: 44px; height: 44px; transform: translateX(-50%); }
+
+.ct-remote-warn-icon { display: inline-flex; }
+.ct-remote-warn-icon svg { width: 12px; height: 12px; }
+
 @keyframes ct-remote-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
@@ -9782,14 +9815,14 @@ button.ct-agent-crumb:focus-visible {
   .ct-remote-pill--reconnecting::before { animation: none; }
 }
 
-/* Dispatch send button when the next thread will run on a daemon */
-.ct-harness-send-btn--remote { box-shadow: inset 0 0 0 1px var(--interactive-accent); }
 
 .ct-run-on-folder {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 4px 9px 6px;
+  margin-top: 4px;
+  padding: 8px 4px 4px;
+  border-top: 1px solid var(--background-modifier-border);
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
 }
@@ -9857,6 +9890,20 @@ button.ct-agent-crumb:focus-visible {
 .ct-remote-advanced { margin-top: 8px; }
 .ct-remote-advanced > summary { cursor: pointer; color: var(--text-muted); }
 .ct-remote-folders-hint { margin: 6px 0; }
+.ct-remote-mcp-status { margin: 6px 0; }
+.ct-remote-mcp-list { margin: 2px 0 0; padding-left: 18px; font-size: var(--font-ui-smaller); }
+.ct-remote-repos { margin: 12px 0; }
+.ct-remote-repos h3 { margin: 0 0 4px; }
+.ct-remote-repos-list { margin: 6px 0 2px; padding-left: 18px; font-size: var(--font-ui-smaller); }
+.ct-remote-repo-item--ok { color: var(--text-muted); }
+.ct-remote-repo-item--bad { color: var(--text-error); font-weight: var(--font-semibold); overflow-wrap: anywhere; }
+.ct-remote-repos-message { overflow-wrap: anywhere; }
+.ct-remote-repos-input { width: 100%; min-height: 4.5em; font-family: var(--font-monospace); font-size: var(--font-ui-smaller); resize: vertical; }
+@media (max-width: 480px) {
+  .ct-remote-repos .ct-modal-button-row { flex-wrap: wrap; }
+}
+.ct-remote-mcp-item--ok { color: var(--text-muted); }
+.ct-remote-mcp-item--bad { color: var(--text-error); font-weight: var(--font-semibold); overflow-wrap: anywhere; }
 .ct-remote-daemon-status {
   display: inline-flex;
   align-items: center;
@@ -9883,9 +9930,449 @@ button.ct-agent-crumb:focus-visible {
 }
 .ct-cli-notice-copy { flex-shrink: 0; }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   Composer "Quiet Rail": settings indicator, settings popover, project popover.
+   Theme variables only, so Geode/Obsidian light + dark and mobile all work.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* The popover-anchored footer must not collapse while a popover is open. */
+.ct-panel-collapsible.ct-popover-open .ct-input-footer {
+  max-height: 50px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ct-more-btn.ct-settings-indicator {
+  width: auto;
+  min-width: 34px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-family: var(--font-interface);
+}
+
+.ct-si-body {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ct-si-glyph {
+  position: relative;
+  display: inline-flex;
+  color: var(--text-muted);
+}
+
+.ct-more-btn.ct-settings-indicator .ct-si-glyph svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* Model glyph is tinted by tier; unknown models stay neutral. */
+.ct-si-model[data-tier="haiku"] { color: var(--color-green, var(--text-muted)); }
+.ct-si-model[data-tier="sonnet"] { color: var(--color-blue, var(--text-muted)); }
+.ct-si-model[data-tier="opus"] { color: var(--color-purple, var(--text-muted)); }
+.ct-si-model[data-tier="fable"] { color: var(--color-orange, var(--text-muted)); }
+
+.ct-more-btn.ct-settings-indicator .ct-si-chevron svg {
+  width: 11px;
+  height: 11px;
+}
+
+.ct-si-chevron {
+  display: inline-flex;
+  opacity: 0.7;
+}
+
+.ct-settings-indicator[aria-expanded="true"] .ct-si-chevron { transform: rotate(180deg); }
+.ct-settings-indicator[aria-expanded="true"] { background: var(--background-modifier-hover); }
+
+.ct-settings-indicator:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
+.ct-si-marker {
+  position: absolute;
+  right: -3px;
+  top: -3px;
+  box-sizing: border-box;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--background-primary);
+  font-size: 6px;
+  font-weight: 800;
+  line-height: 5px;
+  text-align: center;
+  color: var(--background-primary);
+}
+.ct-si-marker--connected { background: var(--color-green, #3fb950); }
+.ct-si-marker--unreachable { background: var(--color-yellow, #d29922); width: 9px; height: 9px; line-height: 7px; right: -4px; top: -4px; }
+
+.ct-settings-indicator .ct-si-spinner { display: inline-flex; }
+.ct-settings-indicator.ct-summarize-spinning .ct-si-body { display: none; }
+
+/* — Popovers (anchored above the composer, inside .ct-panel-wrapper) ─────── */
+.ct-settings-popover,
+.ct-project-popover {
+  position: absolute;
+  bottom: 100%;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(300px, calc(100% - 20px));
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-small);
+}
+.ct-settings-popover { right: 10px; }
+.ct-project-popover { left: 10px; }
+
+.ct-sp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ct-sp-item:hover,
+.ct-sp-item:focus-visible { background: var(--background-modifier-hover); }
+.ct-sp-item:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+.ct-sp-item:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.ct-sp-icon,
+.ct-sp-chevron,
+.ct-sp-check { display: inline-flex; flex-shrink: 0; color: var(--text-muted); }
+.ct-sp-icon svg,
+.ct-sp-chevron svg,
+.ct-sp-check svg { width: 14px; height: 14px; }
+.ct-sp-check { width: 14px; color: var(--interactive-accent); }
+
+.ct-sp-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-sp-row .ct-sp-label { flex: 0 0 auto; }
+.ct-sp-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--text-muted);
+}
+
+.ct-sp-options {
+  display: flex;
+  flex-direction: column;
+}
+.ct-sp-back { color: var(--text-muted); font-weight: var(--font-semibold); }
+.ct-sp-back .ct-sp-label { color: var(--text-normal); }
+.ct-sp-custom { padding: 4px 4px 2px; }
+.ct-sp-custom:empty { display: none; }
+.ct-sp-option .ct-sp-label { white-space: normal; }
+.ct-sp-group-title {
+  padding: 6px 8px 2px;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ct-sp-note {
+  padding: 4px 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  white-space: pre-line;
+}
+.ct-sp-divider { height: 1px; margin: 4px 2px; background: var(--background-modifier-border); }
+
+/* Project popover */
+.ct-pp-info { padding: 4px 8px 6px; }
+.ct-pp-info-label { color: var(--text-faint); font-size: var(--font-ui-smaller); }
+.ct-pp-cwd {
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ct-pp-bar { display: flex; align-items: center; gap: 6px; padding: 2px 4px 6px; }
+.ct-pp-filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: var(--font-ui-smaller);
+}
+.ct-pp-sort {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.ct-pp-sort-btn {
+  height: 24px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+}
+.ct-pp-sort-btn[aria-pressed="true"] { background: var(--background-modifier-hover); color: var(--text-normal); }
+.ct-pp-sort-btn:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+.ct-pp-list { display: flex; flex-direction: column; }
+
+/* Narrow panes and the mobile layout: full-width, bottom-sheet-like list. */
+@media (max-width: 480px) {
+  .ct-settings-popover,
+  .ct-project-popover { left: 6px; right: 6px; width: auto; max-height: min(70vh, 480px); }
+}
+.ct-root.ct-mobile .ct-settings-popover,
+.ct-root.ct-mobile .ct-project-popover { left: 6px; right: 6px; width: auto; max-height: min(70vh, 480px); }
+.ct-root.ct-mobile .ct-sp-item { min-height: 44px; }
+.ct-root.ct-mobile .ct-pp-filter { height: 36px; }
+.ct-root.ct-mobile .ct-pp-sort-btn { height: 34px; }
 .ct-outside-link-path {
   display: block;
   word-break: break-all;
   user-select: text;
   margin-bottom: 12px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   New-conversation mode (ThreadsView)
+   The thread composer and its status chrome are swapped for the dispatch
+   composer; the thread is created by the first send.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.ct-floating-panel > .ct-new-conv-row { display: none; }
+
+.ct-floating-panel.ct-new-conversation > .ct-input-row:not(.ct-new-conv-row),
+.ct-floating-panel.ct-new-conversation > .ct-panel-context,
+.ct-floating-panel.ct-new-conversation > .ct-git-diff-bar,
+.ct-floating-panel.ct-new-conversation > .ct-bc-control-chip { display: none; }
+
+.ct-floating-panel.ct-new-conversation > .ct-new-conv-row { display: flex; }
+
+/* The Project chip lives in the footer; keep it visible at rest in this mode
+   (the footer is hover-only in a normal thread) so the choice is discoverable. */
+.ct-floating-panel.ct-new-conversation .ct-input-footer {
+  max-height: 50px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ct-new-conv-empty .ct-new-conv-sub { max-width: 34ch; text-align: center; }
+
+.ct-new-conv-cancel {
+  margin-top: 14px;
+  padding: 4px 12px;
+  border-radius: 8px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ct-new-conv-cancel:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Project picker (ProjectPicker.ts) — filter box, sort toggle, listbox
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.ct-project-picker {
+  position: fixed;
+  z-index: var(--layer-menu, 65);
+  max-width: calc(100vw - 16px);
+  display: flex;
+  flex-direction: column;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+}
+
+.ct-project-picker-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ct-project-picker-search {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.ct-project-picker-search-icon {
+  position: absolute;
+  left: 8px;
+  display: inline-flex;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+.ct-project-picker-search-icon svg { width: 14px; height: 14px; }
+
+.ct-project-picker .ct-project-picker-input {
+  width: 100%;
+  min-height: 28px;
+  padding: 3px 8px 3px 28px;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: none;
+}
+.ct-project-picker .ct-project-picker-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 25%, transparent);
+}
+
+.ct-project-picker-sort {
+  flex: 0 0 auto;
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--background-modifier-hover);
+  border-radius: 7px;
+}
+
+.ct-project-picker .ct-project-picker-sort-btn {
+  min-height: 24px;
+  padding: 1px 8px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  box-shadow: none;
+  cursor: pointer;
+}
+.ct-project-picker .ct-project-picker-sort-btn.is-active {
+  color: var(--text-normal);
+  background: var(--background-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.ct-project-picker-list {
+  max-height: min(320px, 50vh);
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.ct-project-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+.ct-project-picker-row.is-highlighted { background: var(--background-modifier-hover); }
+.ct-project-picker-row-icon { display: inline-flex; color: var(--text-muted); flex: 0 0 auto; }
+.ct-project-picker-row-icon svg { width: 15px; height: 15px; }
+.ct-project-picker-row-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-project-picker-row-check { display: inline-flex; color: var(--interactive-accent); flex: 0 0 auto; }
+.ct-project-picker-row-check svg { width: 14px; height: 14px; }
+.ct-project-picker-row-new { color: var(--text-muted); }
+
+.ct-project-picker-sep { height: 1px; margin: 4px 2px; background: var(--background-modifier-border); }
+.ct-project-picker-empty { padding: 10px 8px; font-size: var(--font-ui-smaller); color: var(--text-muted); text-align: center; }
+
+@media (pointer: coarse) {
+  .ct-project-picker-row { min-height: 44px; }
+  .ct-project-picker .ct-project-picker-sort-btn { min-height: 36px; }
+  .ct-project-picker .ct-project-picker-input { min-height: 40px; }
+}
+
+/* Inline images from a remote thread (fetched with file.read). */
+.ct-message-assistant .ct-message-content img.ct-remote-img { max-width: 100%; border-radius: 4px; }
+.ct-message-assistant .ct-message-content img.ct-remote-img.is-loading { min-height: 48px; min-width: 48px; background: var(--background-modifier-hover); }
+.ct-remote-img-unavailable { color: var(--text-muted); font-style: italic; font-size: var(--font-ui-smaller); }
+
+/* Settings, MCP: "Available on" of a proxied server, and the daemon editor's tools checklist. */
+.ct-mcp-available-missing {
+  color: var(--text-faint);
+}
+
+.ct-host-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--background-modifier-border);
+}
+
+.ct-host-tools-list h4 {
+  margin: 8px 0 0;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+}
+
+.ct-host-tools-item .setting-item-description {
+  margin-left: 22px;
+}
+
+.ct-host-tools-item .ct-mcp-runson-toggle {
+  display: flex;
+  min-height: 32px;
+}
+
+.ct-agents-project-header.ct-agents-collapsible { border-radius: var(--radius-s) var(--radius-s) 0 0; }
+
+/* Archived threads (Agents List → "Show archived") */
+.ct-agents-archived-group .ct-agents-row-archived { position: relative; opacity: 0.8; min-height: 0; }
+.ct-agents-archived-group .ct-agents-row-archived:hover,
+.ct-agents-archived-group .ct-agents-row-archived:focus-within { opacity: 1; }
+.ct-agents-icon-archived { color: var(--text-faint); }
+.ct-agents-restore-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 10px;
+  font-size: var(--font-ui-smaller);
+  border-radius: var(--radius-s);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.ct-agents-row-archived:hover .ct-agents-restore-btn,
+.ct-agents-row-archived:focus-within .ct-agents-restore-btn { opacity: 1; pointer-events: auto; }
+.ct-agents-row-archived:hover .ct-agents-row-time,
+.ct-agents-row-archived:focus-within .ct-agents-row-time { visibility: hidden; }
+.view-action.is-active { color: var(--interactive-accent); }

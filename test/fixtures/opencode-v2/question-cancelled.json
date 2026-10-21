@@ -1,0 +1,357 @@
+[
+ {
+  "type": "session.created",
+  "created": 1792294405012,
+  "data": {
+   "sessionID": "ses_root",
+   "slug": "quiet-panda",
+   "version": "2.0.32",
+   "projectID": "1f29ea24da1fefbbe9ecde894f13a08a7f35d6db",
+   "location": {
+    "directory": "/tmp/ocprobe/work"
+   },
+   "subpath": "../../../../tmp/ocprobe/work",
+   "title": "probe",
+   "agent": "build",
+   "model": {
+    "id": "qwen3.8:27b",
+    "providerID": "llm-server"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.inbox.enqueued",
+  "created": 1792294405026,
+  "data": {
+   "inboxID": "msg_14d1243a1001bzK5AraiLGck77",
+   "sessionID": "ses_root",
+   "item": {
+    "type": "user",
+    "payload": {
+     "text": "Use the question tool to ask me which color I prefer: red or blue. Then tell me my answer."
+    },
+    "delivery": "steer"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.execution.started",
+  "created": 1792294405027,
+  "data": {
+   "sessionID": "ses_root"
+  }
+ },
+ {
+  "type": "session.inbox.delivered",
+  "created": 1792294405032,
+  "data": {
+   "sessionID": "ses_root",
+   "inboxID": "msg_14d1243a1001bzK5AraiLGck77"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.step.started",
+  "created": 1792294405340,
+  "data": {
+   "sessionID": "ses_root",
+   "agent": "build",
+   "model": {
+    "id": "qwen3.8:27b",
+    "providerID": "llm-server",
+    "variant": "default"
+   },
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+   "started": 1792294405040
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.reasoning.started",
+  "created": 1792294405343,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+   "ordinal": 0,
+   "state": {
+    "reasoningField": "reasoning"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.reasoning.delta",
+  "created": 1792294405445,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+   "ordinal": 0,
+   "delta": "The"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.reasoning.delta",
+  "created": 1792294405577,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+   "ordinal": 0,
+   "delta": " user is asking me to"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.tool.input.started",
+  "created": 1792294409348,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+   "id": "call_9nl33abc",
+   "name": "question"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.reasoning.ended",
+  "created": 1792294409351,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+   "ordinal": 0,
+   "text": "The user is asking me to use the question tool to ask about my preferred color, red or blue, and then convey my answer to them.",
+   "state": {
+    "reasoningField": "reasoning"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.tool.input.ended",
+  "created": 1792294409353,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+   "id": "call_9nl33abc",
+   "text": "{\"questions\":[{\"header\":\"Color preference\",\"options\":[{\"description\":\"You prefer red.\",\"label\":\"Red\"},{\"description\":\"You prefer blue.\",\"label\":\"Blue\"}],\"question\":\"Which color do you prefer: red or blue?\"}]}"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.tool.called",
+  "created": 1792294409354,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+   "id": "call_9nl33abc",
+   "input": {
+    "questions": [
+     {
+      "header": "Color preference",
+      "options": [
+       {
+        "description": "You prefer red.",
+        "label": "Red"
+       },
+       {
+        "description": "You prefer blue.",
+        "label": "Blue"
+       }
+      ],
+      "question": "Which color do you prefer: red or blue?"
+     }
+    ]
+   },
+   "executed": false
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.step.streamed",
+  "created": 1792294409355,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "permission.asked",
+  "created": 1792294409359,
+  "data": {
+   "id": "per_14d12548f001TKMQSYDJwn12Qt",
+   "sessionID": "ses_root",
+   "action": "question",
+   "resources": [
+    "*"
+   ],
+   "source": {
+    "type": "tool",
+    "messageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+    "id": "call_9nl33abc"
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "permission.replied",
+  "created": 1792294409361,
+  "data": {
+   "sessionID": "ses_root",
+   "requestID": "per_14d12548f001TKMQSYDJwn12Qt",
+   "reply": "once"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "form.created",
+  "created": 1792294409361,
+  "data": {
+   "form": {
+    "id": "frm_14d125491002vylUaODRarFKd8",
+    "sessionID": "ses_root",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question",
+     "tool": {
+      "messageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+      "id": "call_9nl33abc"
+     }
+    },
+    "fields": [
+     {
+      "key": "q0",
+      "title": "Color preference",
+      "description": "Which color do you prefer: red or blue?",
+      "type": "string",
+      "options": [
+       {
+        "value": "Red",
+        "label": "Red",
+        "description": "You prefer red."
+       },
+       {
+        "value": "Blue",
+        "label": "Blue",
+        "description": "You prefer blue."
+       }
+      ],
+      "custom": true
+     }
+    ]
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "form.cancelled",
+  "created": 1792294409363,
+  "data": {
+   "id": "frm_14d125491002vylUaODRarFKd8",
+   "sessionID": "ses_root"
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.tool.failed",
+  "created": 1792294409364,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+   "id": "call_9nl33abc",
+   "error": {
+    "type": "aborted",
+    "message": "The user dismissed this question"
+   },
+   "executed": false
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.step.failed",
+  "created": 1792294409364,
+  "data": {
+   "sessionID": "ses_root",
+   "assistantMessageID": "msg_14d1243ab001vcrYDgKG8vmDWY",
+   "error": {
+    "type": "aborted",
+    "message": "Step interrupted"
+   },
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 4,
+    "output": 114,
+    "reasoning": 0,
+    "cache": {
+     "read": 8467,
+     "write": 0
+    }
+   }
+  },
+  "location": {
+   "directory": "/tmp/ocprobe/work"
+  }
+ },
+ {
+  "type": "session.usage.updated",
+  "created": 1792294409365,
+  "data": {
+   "sessionID": "ses_root",
+   "cost": 0,
+   "tokens": {
+    "input": 4,
+    "output": 114,
+    "reasoning": 0,
+    "cache": {
+     "read": 8467,
+     "write": 0
+    }
+   }
+  }
+ },
+ {
+  "type": "session.execution.interrupted",
+  "created": 1792294409366,
+  "data": {
+   "sessionID": "ses_root",
+   "reason": "shutdown"
+  }
+ }
+]

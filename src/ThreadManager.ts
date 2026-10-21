@@ -1,4 +1,4 @@
-import { agentHarnessLabel, resolveEffectiveHarnessVmMode, type AgentHarness, type HarnessVmMode } from './types';
+import { agentHarnessLabel, type AgentHarness } from './types';
 import { buildProjectOverviewContext, composeAppendSystemPrompt, readProjectOverview } from './projectOverview';
 import { extractUrls } from './urlLinks';
 import { mergeDisallowedTools } from './toolRestrictions';
@@ -7,9 +7,10 @@ import { createHarnessSession } from './HarnessFactory';
 import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
 import type { RemoteSessionDeps } from './remote/RemoteHarnessSession';
 import { buildRemoteEnvironmentPrompt } from './remote/sessionSpec';
+import { gateHarness } from './remote/harnessSupport';
 import type { RemoteHostTools } from './remote/hostTools';
 import { HostToolSlots } from './remote/hostToolExecutor';
-import { describeDroppedMcp, partitionExternalMcpServers } from './remote/mcpPartition';
+import { partitionExternalMcpServers, type DroppedMcpServer } from './remote/mcpPartition';
 import { resolveCodexPermissions, serializableMcpServers, type HarnessContextUsage, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
 import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
 import { NULL_ATTACHMENT_STORE, type AttachmentStore } from './host/AttachmentStore';
@@ -19,29 +20,22 @@ import { removeStorageRoot, type ArtifactStorageFs } from './artifactStorage';
 import { collectPendingImageExternalizations } from './imageExternalization';
 import { effectiveExtraEnv, parseExtraEnv } from './types';
 import { derivePrUrl } from './statusLine';
+import { stripLegacySandboxThreadFields } from './legacySandboxVm';
 import { resolveGitProjectName } from './pathUtils';
 import { legacyWorktreeRoot, resolveWorktreeRoot } from './worktreePaths';
 import { debugLog } from './logger';
 import { codexSkillRoots, buildSkillPlugins } from './skillManager';
 import { pluginSkillsRootFrom } from './skillPaths';
-import { nodeMountFs, planSkillMounts, type SkillMountPlan } from './skillMounts';
 import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
 import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
-import { checkImageHealth } from './sandboxImage';
-import { sweepOrphanedThreadContainers, type OrphanSweepResult } from './sandboxVmSweep';
-import { containerNameForThread, createDefaultVmCommandRunner, resolveVmCpus, resolveVmMemory, SandboxVmManager, type VmCommandRunner, type VmHooks } from './sandboxVm';
-import { DEFAULT_HARNESS_VM_IMAGE, resolveClaudeVmRouting, type ClaudeVmRoutingInputs, type HarnessVmFallbackReason } from './harnessVmRouting';
-import { resolveContainerAwsProfiles, planContainerAwsMounts, nodeContainerAwsFs, type ContainerAwsPlan } from './containerAws';
-import { isRuntimeSupported } from './sandboxRuntime';
-import { shouldOfferSandboxSetup } from './sandboxSetupPrompt';
 import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun } from './types';
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { formatHostExecPermissionDetail, type HostExecRequest } from './hostExec';
 import { isAuthErrorTranscriptMessage } from './claudeAuthRecovery';
-import { HOST_EXEC_PERMISSION_TOOL } from './permissionDetail';
+import type { DaemonMcpStatusStore } from './mcpStatus';
+import { alwaysAllowScopeFor } from './remoteAlwaysAllow';
 
 type ThreadStateListener = (threadId: string, event: ThreadEvent) => void;
 
@@ -82,8 +76,6 @@ export type ThreadEvent =
   | { type: 'rate_limit_retry'; attempt: number; maxRetries: number; delayMs: number }
   /** Expired Claude sign-in: the CLI process is being restarted and the turn replayed once. */
   | { type: 'auth_retry'; error: string }
-  /** A Claude thread fell back to the host because the sandbox isn't set up: render the one-time "Run this thread in a sandbox?" card. */
-  | { type: 'sandbox_setup_offer'; reason: HarnessVmFallbackReason }
   | { type: 'streaming_start' }
   | { type: 'escalated'; model: string }
   | { type: 'queued'; text: string; images?: ImageAttachment[] }
@@ -116,6 +108,8 @@ export type ThreadEvent =
   /** A remote resync: whatever the view accumulated for the unfinished assistant message is stale; text re-streams after this. */
   | { type: 'stream_reset' }
   | { type: 'active_thread_changed' }
+  /** The conversation panel is composing a new conversation: no thread is active. */
+  | { type: 'active_thread_cleared' }
   | { type: 'user_message_added'; message: ChatMessage }
   | { type: 'summary_updated' }
   | { type: 'tool_result_images'; images: Array<{ mediaType: string; data: string }> }
@@ -149,8 +143,7 @@ export type ThreadEvent =
   | { type: 'capabilities_discovered'; models: import('@anthropic-ai/claude-agent-sdk').ModelInfo[]; agents: import('@anthropic-ai/claude-agent-sdk').AgentInfo[] }
   | { type: 'elicitation_request'; request: import('@anthropic-ai/claude-agent-sdk').ElicitationRequest; signal: AbortSignal; respond: (result: import('@anthropic-ai/claude-agent-sdk').ElicitationResult) => void }
   | { type: 'harness_switching'; targetHarness: AgentHarness }
-  | { type: 'harness_changed'; sourceHarness: AgentHarness; targetHarness: AgentHarness }
-  | { type: 'harness_vm_mode_changed'; mode: HarnessVmMode | undefined };
+  | { type: 'harness_changed'; sourceHarness: AgentHarness; targetHarness: AgentHarness };
 
 /**
  * Structural equality for the small, plain-data poll payloads (StatusTag[] /
@@ -199,34 +192,6 @@ export class ThreadManager {
   /** Signature at which a status-triggered rebuild already happened, to stop rebuild loops on a persistently failing server. */
   private statusRebuildSignatures = new Map<string, string>();
   /**
-   * ADR-0015: one `SandboxVmManager` per thread, SHARED between this thread's
-   * `enter_vm`/`vm_exec`/`exit_vm` MCP tools and its Claude harness's own VM
-   * routing. Sharing the instance (rather than each side building its own
-   * against the same deterministic container name) is what lets `enter()`
-   * recognize "this container already exists because the harness started
-   * it" instead of reporting it as a stray leftover from an earlier session
-   * — see `SandboxVmManager.enter()`/`ensureHarnessContainer()`'s origin
-   * tracking. Entries persist for the thread's lifetime; torn down only at
-   * thread deletion/archive (`deleteThread()`), never at session `close()`.
-   */
-  private sandboxVmManagers: Map<string, SandboxVmManager> = new Map();
-  /** Test seam: overrides the real `container` CLI for every SandboxVmManager this instance creates. Production leaves this undefined (the real runner). */
-  vmCommandRunner: VmCommandRunner | undefined = undefined;
-  /**
-   * ADR-0015 follow-up: the actual VM-routing decision the thread's last
-   * `ThreadSession.start()` made (`SessionCallbacks.onVmRouting`), not a
-   * re-derived capability check — see `getClaudeVmRouting()`. Populated once
-   * per session start; absent entirely until a Claude session has started.
-   */
-  private claudeVmRoutingByThread: Map<string, { containerName: string; containerBinaryPath: string } | null> = new Map();
-  /** Threads whose "Run this thread in a sandbox?" card is currently pending (so a re-render of the thread can restore it). */
-  private sandboxSetupOffers: Map<string, HarnessVmFallbackReason> = new Map();
-  private staleImageWarned = new Set<string>();
-  /** Threads that have been offered the card this app session — at most one card each, however many sessions start. */
-  private sandboxSetupOffered: Set<string> = new Set();
-  /** Test seam: whether sandbox setup can run on this machine. Production uses the real macOS/arch check. */
-  sandboxSetupSupported: () => boolean = () => isRuntimeSupported().supported;
-  /**
    * Initialization context cannot be mutated on a live Claude or Codex
    * adapter. Track the goal revision each adapter was built with and retire it
    * only at a safe boundary. A pending kickoff is revision-scoped, making
@@ -241,6 +206,8 @@ export class ThreadManager {
    * (`start()`/`restart()`) and reused across every turn of that session,
    * not rebuilt per turn.
    */
+  /** Records announced via onToolUse that haven't received a result yet, by toolUseId. */
+  private liveToolRecords: Map<string, ToolCallRecord> = new Map();
   private pendingToolResultImages: Map<string, Array<{ mediaType: string; data: string }>> = new Map();
   /**
    * Per-thread tracking of background (skipTranscript) tasks that have
@@ -312,14 +279,6 @@ export class ThreadManager {
    * (e.g. onSetCwd) into the server without shared mutable state across concurrent threads.
    */
   mcpServerFactory: ((threadId: string, initialCwd: string) => Record<string, McpServerConfig>) | undefined = undefined;
-  /** Builds the host-owned SDK bridge overlay used only after Claude VM routing succeeds. */
-  vmMcpServerFactory: ((threadId: string, ordinaryServers: Record<string, McpServerConfig>) => Record<string, McpServerConfig>) | undefined = undefined;
-  /**
-   * Resolves the in-container Claude sign-in token (see `containerAuthToken`
-   * on `HarnessSessionOptions`). Read at session start, like `secretEnvResolver`,
-   * but kept separate: it must reach ONLY VM-routed sessions.
-   */
-  containerAuthTokenResolver: (() => string | undefined) | undefined = undefined;
   /** Human-readable plugin host injected into new session context. */
   hostName: 'Geode' | 'Obsidian' = 'Obsidian';
   /**
@@ -328,6 +287,18 @@ export class ThreadManager {
    * to start with a clear error instead of silently running locally.
    */
   remoteDaemons: RemoteDaemonResolver | undefined = undefined;
+  /** Last MCP server status reported by each daemon's sessions (shown in the daemon's settings). */
+  daemonMcpStatus: DaemonMcpStatusStore | undefined = undefined;
+  /**
+   * Awaited before a remote thread with no live session sends, so a daemon this app manages (the local container)
+   * can be started on first use. A rejection becomes the send's error, shown to the user verbatim.
+   */
+  beforeRemoteSend: ((daemonId: string, threadId: string) => Promise<void>) | undefined = undefined;
+  /**
+   * What the managed local daemon was prepared with for this thread's next session (`beforeRemoteSend` computes it):
+   * the credential kind holding the session environment and the skill plugin directories copied there.
+   */
+  remoteSessionExtras: ((threadId: string) => { envKind?: string; pluginPaths?: string[] } | undefined) | undefined = undefined;
   /**
    * Builds the host tools (vault, workspace, threads, Google, ...) a remote thread's daemon may call back into,
    * bound to this thread. Set by the plugin; absent on hosts that cannot serve them.
@@ -336,7 +307,6 @@ export class ThreadManager {
   /** Calls in flight across every remote thread (shared cap, see HostToolExecutor). */
   private readonly hostToolSlots = new HostToolSlots();
   /** Last dropped-MCP notice shown per thread, so it appears again only when the set changes. */
-  private readonly remoteMcpNoticeSig = new Map<string, string>();
   /**
    * When set, called before each session run to resolve secret env var values from
    * the OS keychain. Returns a plain key-value map that is merged into the session
@@ -353,8 +323,6 @@ export class ThreadManager {
    * because it runs while building session options; `main.ts` backs it with a
    * runtime dir that is kept fresh out of band. Additions sit UNDER user secrets.
    */
-  /** GitHub credential delivery hooks for the shared per-thread VM manager (harness threads create their container through it). */
-  sandboxVmHooks: VmHooks | undefined = undefined;
   githubEnvResolver: ((cwd: string, baseEnv: Record<string, string | undefined>) => Record<string, string>) | undefined = undefined;
   permissionHandler: (threadId: string, toolName: string, detail: string) => Promise<boolean> = async () => false;
 
@@ -370,8 +338,6 @@ export class ThreadManager {
   questionHandler: (threadId: string, questions: AskQuestion[]) => Promise<Record<string, string>> = async () => ({});
   openNewTabHandler: (title?: string, initialPrompt?: string) => Promise<{ threadId: string; title: string }> = async (title) => ({ threadId: '', title: title ?? 'New Thread' });
   vaultRoot = '';
-  /** Geode-only, set from main.ts: connected external roots to mount read-only in the sandbox VM. */
-  getExternalMounts?: ClaudeVmRoutingInputs['getExternalMounts'];
 
   private localSkillsRoot(): string {
     if (!this.vaultRoot) return '';
@@ -502,6 +468,7 @@ export class ThreadManager {
    */
   private externalizeMessageImages(threadId: string, message: ChatMessage): void {
     if (!this.attachmentWriter.isDesktop()) return;
+    if (this.threads.get(threadId)?.private) return;
     message.images?.forEach((img, index) => {
       if (img.base64 && !img.path) {
         void this.attachmentWriter
@@ -653,6 +620,8 @@ export class ThreadManager {
 
   loadThreads(threads: Thread[], notify = false): void {
     for (const t of threads) {
+      // Threads saved while per-thread sandbox VMs existed carry a now-inert VM mode.
+      stripLegacySandboxThreadFields(t);
       // Threads saved before multi-harness support are Claude sessions.
       if (!t.agentHarness) t.agentHarness = 'claude';
       // Migrate threads persisted before status was introduced.
@@ -680,11 +649,17 @@ export class ThreadManager {
 
   /**
    * A thread hosted on a daemon. Its permission requests come from another machine (or from tools that act on this
-   * one on a daemon's behalf), so "Always Allow" never applies to them: nothing is remembered from a click and
-   * nothing remembered locally pre-approves a request, because the tool name on the card is the daemon's word.
+   * one on a daemon's behalf), and the tool name on the card is the daemon's word. "Always Allow" therefore works
+   * only per daemon (see getRemoteScope and remoteAlwaysAllow.ts): a remote thread is never pre-approved by the
+   * local list or the trusted built-ins, and a daemon's list never applies to local threads or other daemons.
    */
   isRemoteThread(threadId: string): boolean {
     return !!this.getThread(threadId)?.remote;
+  }
+
+  /** The Always Allow scope of a thread: its daemon, or null for a local thread. */
+  getRemoteScope(threadId: string): { daemonId: string } | null {
+    return alwaysAllowScopeFor(this.getThread(threadId)?.remote);
   }
 
   getThread(id: string): Thread | undefined {
@@ -729,7 +704,9 @@ export class ThreadManager {
     if (!thread) throw new Error(`Thread not found: ${id}`);
     const sourceHarness = thread.agentHarness ?? 'claude';
     if (sourceHarness === targetHarness) return;
-    if (thread.remote) throw new Error('Remote threads run Claude only for now.');
+    // A remote thread hands off like a local one: the daemon closes the old harness's session and the next send opens
+    // the new harness's on the same daemon. Only a harness the daemon offers can be chosen.
+    if (thread.remote) this.assertDaemonOffersHarness(thread.remote.daemonId, targetHarness);
     const blocked = this.getHarnessSwitchBlockReason(id);
     if (blocked) throw new Error(blocked);
 
@@ -808,65 +785,57 @@ export class ThreadManager {
   }
 
   /**
-   * Sets (or, with `undefined`, clears) the thread's container-routing override.
-   *
-   * Takes effect on the next session start, so a live session is closed. The
-   * container has its own ~/.claude, so a native session ID cannot be resumed
-   * across host <-> container: when the change flips containerized vs host
-   * execution and a native session exists, the ID is dropped and a same-harness
-   * handoff (summary + transcript references) carries the conversation instead.
-   * 'auto' <-> 'always' keeps the session (both route to the container when it
-   * is available). Same transactional shape as `switchHarness`.
+   * Moves a thread between this computer and a daemon (the managed local daemon, or any configured one), the
+   * way the removed per-thread sandbox VM's "Run in" switch did: the conversation stays, and because a native session
+   * cannot be resumed across machines it is dropped and a same-harness handoff (summary plus transcript
+   * references) carries the conversation to the new place. Works for every harness (the thread keeps its own);
+   * a daemon is refused when it is known not to offer that harness. Takes effect on the next message.
    */
-  async setThreadHarnessVmMode(
+  async moveThreadExecution(
     id: string,
-    mode: HarnessVmMode | undefined,
+    target: { kind: 'daemon'; daemonId: string; remoteCwd: string; clientId: string } | { kind: 'host'; cwd: string },
     persist: () => Promise<void>,
   ): Promise<void> {
     const thread = this.threads.get(id);
     if (!thread) throw new Error(`Thread not found: ${id}`);
-    if (thread.remote) throw new Error('This thread runs on a remote daemon; container execution does not apply.');
-    if ((thread.agentHarness ?? 'claude') !== 'claude') {
-      throw new Error('Container execution is only available for the Claude harness.');
-    }
-    if (thread.harnessVmMode === mode) return;
+    const harness: AgentHarness = thread.agentHarness ?? 'claude';
+    if (target.kind === 'daemon') this.assertDaemonOffersHarness(target.daemonId, harness);
+    if (target.kind === 'daemon' && thread.remote?.daemonId === target.daemonId) return;
+    if (target.kind === 'host' && !thread.remote) return;
     const blocked = this.getHarnessSwitchBlockReason(id);
     if (blocked) throw new Error(blocked);
 
-    const wasContainerized = resolveEffectiveHarnessVmMode(thread.harnessVmMode, this.settings.harnessVmMode) !== 'never';
-    const nowContainerized = resolveEffectiveHarnessVmMode(mode, this.settings.harnessVmMode) !== 'never';
-    const resetNativeSession = wasContainerized !== nowContainerized && !!thread.sessionId;
-
     const snapshot = {
-      harnessVmMode: thread.harnessVmMode, sessionGeneration: thread.sessionGeneration,
-      sessionId: thread.sessionId, pendingHarnessHandoff: thread.pendingHarnessHandoff,
-      updatedAt: thread.updatedAt,
+      remote: thread.remote, cwd: thread.cwd, originRepoPath: thread.originRepoPath, sessionGeneration: thread.sessionGeneration,
+      sessionId: thread.sessionId, pendingHarnessHandoff: thread.pendingHarnessHandoff, updatedAt: thread.updatedAt,
     };
     this.harnessSwitches.add(id);
     try {
-      if (mode === undefined) delete thread.harnessVmMode; else thread.harnessVmMode = mode;
-      if (resetNativeSession) {
-        thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
-        delete thread.sessionId;
-        thread.pendingHarnessHandoff = createHarnessHandoff(thread, 'claude', 'claude');
+      if (target.kind === 'daemon') {
+        thread.remote = { daemonId: target.daemonId, ownership: 'client', remoteCwd: target.remoteCwd, lastSeq: 0, ownerClientId: target.clientId };
+        thread.cwd = target.remoteCwd;
+      } else {
+        delete thread.remote;
+        thread.cwd = target.cwd;
       }
+      delete thread.sessionId;
+      delete thread.originRepoPath;
+      thread.sessionGeneration = (thread.sessionGeneration ?? 0) + 1;
+      thread.pendingHarnessHandoff = createHarnessHandoff(thread, harness, harness);
       thread.updatedAt = Date.now();
       await persist();
-      if (this.threads.get(id) !== thread) {
-        throw new Error('Thread was deleted while the execution mode was being saved.');
-      }
-      // Always recycle: even without a session reset, the next start() must
-      // re-run VM routing under the new mode.
+      if (this.threads.get(id) !== thread) throw new Error('Thread was deleted while the move was being saved.');
       const oldSession = this.sessions.get(id);
       if (oldSession) oldSession.close();
       this.sessions.delete(id);
-      this.claudeVmRoutingByThread.delete(id);
-      this.emit(id, { type: 'harness_vm_mode_changed', mode });
+      this.selectedAgentRuns.delete(id);
+      this.emit(id, { type: 'harness_changed', sourceHarness: harness, targetHarness: harness });
     } catch (error) {
       if (this.threads.get(id) === thread) {
         Object.assign(thread, snapshot);
-        if (snapshot.harnessVmMode === undefined) delete thread.harnessVmMode;
+        if (snapshot.remote === undefined) delete thread.remote;
         if (snapshot.sessionId === undefined) delete thread.sessionId;
+        if (snapshot.originRepoPath === undefined) delete thread.originRepoPath;
         if (snapshot.pendingHarnessHandoff === undefined) delete thread.pendingHarnessHandoff;
       }
       throw error;
@@ -874,26 +843,6 @@ export class ThreadManager {
       this.harnessSwitches.delete(id);
       if (this.threads.has(id)) await this.flushQueuedMessages(id);
     }
-  }
-
-  /**
-   * Sets the container-routing override on a thread that has not started yet
-   * (no messages, no session) — used by dispatch surfaces before the first
-   * turn. Synchronous and side-effect free beyond the field: there is no live
-   * session to recycle and no native session to reset, unlike
-   * `setThreadHarnessVmMode`. Persisting is the caller's job (`saveSettings`).
-   */
-  setInitialThreadHarnessVmMode(id: string, mode: HarnessVmMode | undefined): void {
-    const thread = this.threads.get(id);
-    if (!thread) throw new Error(`Thread not found: ${id}`);
-    if ((thread.agentHarness ?? 'claude') !== 'claude') {
-      throw new Error('Container execution is only available for the Claude harness.');
-    }
-    if (thread.sessionId || this.sessions.has(id) || thread.messages.length > 0) {
-      throw new Error('The execution mode of a started thread must be changed with setThreadHarnessVmMode.');
-    }
-    if (mode === undefined) delete thread.harnessVmMode; else thread.harnessVmMode = mode;
-    thread.updatedAt = Date.now();
   }
 
   private claimHarnessHandoff(id: string): Thread['pendingHarnessHandoff'] {
@@ -954,7 +903,7 @@ export class ThreadManager {
     this.emit(thread.id, { type: 'agent_runs_changed', agentRuns: thread.agentRuns });
   }
 
-  createThread(title: string, cwd?: string, projectId?: string, agentHarness?: AgentHarness, metadata?: Pick<Thread, 'origin' | 'externalJobId' | 'ephemeral' | 'background'>): Thread {
+  createThread(title: string, cwd?: string, projectId?: string, agentHarness?: AgentHarness, metadata?: Pick<Thread, 'origin' | 'externalJobId' | 'ephemeral' | 'background' | 'private'>): Thread {
     const thread: Thread = {
       id: crypto.randomUUID(),
       title: title || `Thread ${this.threads.size + 1}`,
@@ -974,15 +923,18 @@ export class ThreadManager {
 
   /**
    * A thread whose session runs on the daemon `daemonId`, in `remoteCwd` on that
-   * machine. Claude only (the daemon hosts nothing else yet); `thread.cwd`
+   * machine, with the user's chosen harness (Claude when none is given); `thread.cwd`
    * mirrors the remote path for display and is never touched on this disk.
+   * Throws when the daemon is known not to offer that harness.
    */
   createRemoteThread(
     title: string,
-    remote: { daemonId: string; remoteCwd: string; clientId: string },
+    remote: { daemonId: string; remoteCwd: string; clientId: string; agentHarness?: AgentHarness },
     projectId?: string,
   ): Thread {
-    const thread = this.createThread(title, remote.remoteCwd, projectId, 'claude');
+    const harness = remote.agentHarness ?? 'claude';
+    this.assertDaemonOffersHarness(remote.daemonId, harness);
+    const thread = this.createThread(title, remote.remoteCwd, projectId, harness);
     thread.remote = {
       daemonId: remote.daemonId,
       ownership: 'client',
@@ -991,6 +943,15 @@ export class ThreadManager {
       ownerClientId: remote.clientId,
     };
     return thread;
+  }
+
+  /**
+   * Refuse a harness the daemon has told us it does not offer (an older daemon offers Claude only). A daemon whose
+   * capabilities are not known yet is not blocked on a guess: `session.open` reports a refusal clearly.
+   */
+  assertDaemonOffersHarness(daemonId: string, harness: AgentHarness): void {
+    const gate = gateHarness(harness, this.remoteDaemons?.capabilitiesOf?.(daemonId), this.remoteDaemons?.nameOf(daemonId) ?? daemonId);
+    if (!gate.ok) throw new Error(gate.reason);
   }
 
   /**
@@ -1074,27 +1035,6 @@ export class ThreadManager {
       session.close();
       this.sessions.delete(id);
     }
-    // ADR-0015 §3: a harness-hosted sandbox container is deliberately NOT torn
-    // down by session.close() above (a lingering session or quick restart
-    // shouldn't pay container-start latency every turn) — thread deletion is
-    // its actual lifecycle owner, mirroring docs/sandbox-vms.md's existing
-    // "call exit_vm before deleting the thread" guidance for agent-started
-    // containers. Neither case was wired before this change: deleteThread()
-    // had no sandbox VM teardown call at all (verified while implementing
-    // this ADR — see the PR description's Open Question #4 answer). Runs
-    // fire-and-forget: deleteThread() is synchronous and this is best-effort
-    // cleanup, never a correctness gate — a stray container is one
-    // `container rm -f` away regardless.
-    // Always attempt teardown, even with no cached manager: the map is lazily
-    // populated and empty after a plugin reload/restart, but the container name
-    // is derived from the thread id, so a fresh manager reaches the same
-    // container. exit() resolves (never rejects) and is a no-op when the
-    // container doesn't exist; the catch guards runner rejections.
-    const vmManager = this.getSandboxVmManager(id);
-    this.sandboxVmManagers.delete(id);
-    void vmManager.exit({ force: true, allowHarnessOwned: true }).catch((err) => {
-      console.error(`[ClaudeThreads] Failed to tear down sandbox VM for deleted thread ${id}:`, err);
-    });
     this.cancelPendingGoalContext(id);
     this.pendingToolResultImages.delete(id);
     this.activeBgTasks.delete(id);
@@ -1104,9 +1044,6 @@ export class ThreadManager {
     this.threadActivity.delete(id);
     this.lastActivityAt.delete(id);
     this.selectedAgentRuns.delete(id);
-    this.claudeVmRoutingByThread.delete(id);
-    this.sandboxSetupOffers.delete(id);
-    this.sandboxSetupOffered.delete(id);
     this.threads.delete(id);
     this.emit(id, { type: 'thread_deleted' });
   }
@@ -1572,7 +1509,7 @@ export class ThreadManager {
     return this.getThreads().filter((t) => this.sessions.has(t.id));
   }
 
-  /** Shared by harness permission requests and {@link requestHostExecApproval}. */
+  /** Shared by harness permission requests. */
   private async promptPermission(threadId: string, toolName: string, detail: string): Promise<boolean> {
     this.pendingPermissions.set(threadId, { toolName, detail });
     this.emit(threadId, { type: 'permission_request', toolName, detail });
@@ -1583,18 +1520,6 @@ export class ThreadManager {
       this.permissionResolvers.delete(threadId);
       this.emit(threadId, { type: 'permission_resolved' });
     }
-  }
-
-  /**
-   * Per-call approval for `host_exec`, shown as the thread's in-chat permission
-   * card. Called directly by the tool handler rather than through a session's
-   * `onPermissionRequest`, so no harness permission mode (bypassPermissions,
-   * dontAsk, auto-approve) can resolve it. The `host_exec` tool name makes the
-   * permission handler ignore `alwaysAllowedTools` and hide Always Allow
-   * (see `canAlwaysAllow`).
-   */
-  requestHostExecApproval(threadId: string, request: HostExecRequest): Promise<boolean> {
-    return this.enqueuePermissionPrompt(threadId, HOST_EXEC_PERMISSION_TOOL, formatHostExecPermissionDetail(request));
   }
 
   /**
@@ -1854,6 +1779,14 @@ export class ThreadManager {
    * toast, and survives reload because it lives in thread.messages (persisted
    * to data.json). Emits a 'message' event so any open view appends it live.
    */
+  /** MCP servers a remote thread's daemon cannot use. Shown as a warnings pill in the daemon header, not in the transcript. */
+  getRemoteMcpWarnings(threadId: string): DroppedMcpServer[] {
+    const remote = this.getThread(threadId)?.remote;
+    if (!remote) return [];
+    const hostToolSettings = this.remoteDaemons?.hostToolsOf?.(remote.daemonId);
+    return partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist, this.remoteDaemons?.mcpSyncOf?.(remote.daemonId)).dropped;
+  }
+
   addNoticeMessage(
     threadId: string,
     status: 'completed' | 'failed' | 'stopped',
@@ -2147,6 +2080,11 @@ export class ThreadManager {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error(`Thread not found: ${threadId}`);
 
+    // Before any state changes: a remote thread with no live session may need its (managed) daemon started first.
+    if (thread.remote && this.beforeRemoteSend && !this.sessions.has(threadId)) {
+      await this.beforeRemoteSend(thread.remote.daemonId, threadId);
+    }
+
     // A completed plan is a real lifecycle gate, not merely a card rendered
     // over an otherwise-sendable session. Keep fresh user input out of the
     // provider until the user approves or rejects the plan explicitly.
@@ -2422,195 +2360,6 @@ export class ThreadManager {
   }
 
   /**
-   * Removes `claude-threads-vm-*` containers whose thread is no longer live
-   * (leaked by deletes that predate/missed teardown). Best-effort; never throws.
-   */
-  sweepOrphanedSandboxContainers(): Promise<OrphanSweepResult> {
-    return sweepOrphanedThreadContainers({
-      run: this.vmCommandRunner ?? createDefaultVmCommandRunner(),
-      liveThreadIds: Array.from(this.threads.keys()),
-      log: (message) => console.log(`[ClaudeThreads] ${message}`),
-    });
-  }
-
-  /**
-   * Shared per-thread sandbox VM manager (ADR-0015 §3) — see the field's own
-   * doc comment for why sharing the instance matters. Created lazily on
-   * first access and reused for the thread's whole lifetime.
-   */
-  getSandboxVmManager(threadId: string): SandboxVmManager {
-    let manager = this.sandboxVmManagers.get(threadId);
-    if (!manager) {
-      manager = new SandboxVmManager({
-        containerName: () => containerNameForThread(threadId),
-        run: this.vmCommandRunner,
-        hooks: this.sandboxVmHooks,
-        checkImageHealth: (image) => checkImageHealth(this.vmCommandRunner ?? createDefaultVmCommandRunner(), image, 'base'),
-      });
-      this.sandboxVmManagers.set(threadId, manager);
-    }
-    return manager;
-  }
-
-  /**
-   * The actual VM-routing decision this thread's last Claude session start
-   * made (populated by `SessionCallbacks.onVmRouting`) — NOT a re-derived
-   * capability check, so it reflects what's really running even if the
-   * capability check would answer differently right now (image rebuilt,
-   * container CLI restarted, etc.). Consulted by the "Sign in to Claude" card
-   * to decide between the host `claude auth login` flow and the container's
-   * own `claude setup-token` flow.
-   *
-   * - `undefined` — no Claude session has started for this thread yet (or it
-   *   was cleared by `deleteThread()`). The host flow is the safe default.
-   * - `null` — the last session start resolved to a host-local spawn.
-   * - the routing object — the last session start's `claude` process is
-   *   running inside this container.
-   */
-  getClaudeVmRouting(threadId: string): { containerName: string; containerBinaryPath: string } | null | undefined {
-    return this.claudeVmRoutingByThread.get(threadId);
-  }
-
-  /**
-   * Like `getClaudeVmRouting`, but never returns `undefined`: when no session
-   * has started yet (the sign-in card is rebuilt from PERSISTED `authRequired`
-   * state after a plugin reload, before any session start), it resolves the
-   * routing the same way a session start would — including starting the
-   * thread's container so `container exec` has something to attach to — and
-   * remembers the answer. Without this the card silently fell back to the host
-   * `claude auth login`, which can never authenticate a containerized session.
-   *
-   * A routing failure (`'always'` mode, container won't start) resolves to
-   * `null` (host flow) rather than throwing: the card must still render.
-   */
-  async resolveClaudeVmRoutingForSignIn(
-    threadId: string,
-  ): Promise<{ containerName: string; containerBinaryPath: string } | null> {
-    const known = this.claudeVmRoutingByThread.get(threadId);
-    if (known !== undefined) return known;
-    const thread = this.getThread(threadId);
-    const inputs = thread ? this.buildClaudeVmRoutingInputs(threadId, thread) : undefined;
-    if (!inputs) return null;
-    try {
-      const decision = await resolveClaudeVmRouting(inputs);
-      const routing = decision.routed
-        ? { containerName: decision.routing.containerName, containerBinaryPath: decision.routing.containerBinaryPath }
-        : null;
-      this.claudeVmRoutingByThread.set(threadId, routing);
-      return routing;
-    } catch (err) {
-      console.warn('[ClaudeThreads] could not resolve VM routing for sign-in; using host flow:', err);
-      return null;
-    }
-  }
-
-  /**
-   * Decides whether a host fallback deserves the one-time sandbox-setup card
-   * and, if so, records + announces it. The thread keeps running on the host
-   * regardless; this only adds a card.
-   */
-  private maybeOfferSandboxSetup(threadId: string, reason: HarnessVmFallbackReason | undefined): void {
-    if (!shouldOfferSandboxSetup({
-      mode: resolveEffectiveHarnessVmMode(this.threads.get(threadId)?.harnessVmMode, this.settings.harnessVmMode),
-      reason,
-      dismissedForever: this.settings.sandboxSetupPromptDismissed === true,
-      alreadyOffered: this.sandboxSetupOffered.has(threadId),
-      setupSupported: this.sandboxSetupSupported(),
-    })) return;
-    this.sandboxSetupOffered.add(threadId);
-    this.sandboxSetupOffers.set(threadId, reason!);
-    this.emit(threadId, { type: 'sandbox_setup_offer', reason: reason! });
-  }
-
-  /** The pending sandbox-setup offer for a thread, if its card should be (re)shown. */
-  getSandboxSetupOffer(threadId: string): HarnessVmFallbackReason | undefined {
-    return this.sandboxSetupOffers.get(threadId);
-  }
-
-  /** "Not now" / after setup: hide the card. It is not re-offered this app session. */
-  clearSandboxSetupOffer(threadId: string): void {
-    this.sandboxSetupOffers.delete(threadId);
-  }
-
-  /**
-   * ADR-0015 VM routing inputs for this thread's Claude harness, or undefined
-   * for host-local spawn (today's behavior, unchanged) — either because this
-   * thread isn't running the Claude harness, or `harnessVmMode` is `'never'`.
-   * The actual capability check (platform/probe/image-exists) and container
-   * start happen once, lazily, inside `ThreadSession.start()` — this only
-   * builds the inputs that decision needs.
-   */
-  private buildClaudeVmRoutingInputs(threadId: string, thread: Thread): ClaudeVmRoutingInputs | undefined {
-    if (thread.remote) return undefined; // the daemon is the sandbox
-    const mode = resolveEffectiveHarnessVmMode(thread.harnessVmMode, this.settings.harnessVmMode);
-    if (mode === 'never') return undefined;
-    if ((thread.agentHarness ?? 'claude') !== 'claude') return undefined;
-    // Skills live at host paths the container cannot see; plan read-only
-    // mounts for them (and ~/.claude/skills|agents). Planning only reads the
-    // filesystem — failure must never block the session, so it degrades to
-    // "no skills in the VM" rather than throwing.
-    let skillMountPlan: SkillMountPlan | undefined;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const os = require('os') as typeof import('os');
-      skillMountPlan = planSkillMounts({ plugins: this.buildHostSkillPlugins(), homeDir: os.homedir(), fs: nodeMountFs() });
-    } catch (err) {
-      console.warn('[ClaudeThreads] Could not plan skill mounts for the sandbox VM:', err);
-    }
-    return {
-      mode,
-      image: this.settings.harnessVmImage?.trim() || DEFAULT_HARNESS_VM_IMAGE,
-      vmManager: this.getSandboxVmManager(threadId),
-      mountPath: thread.cwd,
-      skillMountPlan,
-      awsMountPlan: this.planContainerAws(),
-      getExternalMounts: this.getExternalMounts,
-      memory: resolveVmMemory(this.settings.sandboxVmMemory),
-      cpus: resolveVmCpus(this.settings.sandboxVmCpus),
-      getVaultPath: () => this.vaultRoot,
-      checkImageHealth: (image) => checkImageHealth(this.vmCommandRunner ?? createDefaultVmCommandRunner(), image, 'harness'),
-      onImageWarning: (message) => this.warnStaleSandboxImage(threadId, message),
-    };
-  }
-
-  /**
-   * Container AWS credentials: the profiles exposed to containers plus the
-   * read-only mounts that carry them, or null when not relevant. Never throws:
-   * a planning failure must not block the session, it just means no AWS in the VM.
-   */
-  private planContainerAws(): ContainerAwsPlan | null {
-    try {
-      const profiles = resolveContainerAwsProfiles({
-        provider: this.settings.provider,
-        settingValue: this.settings.containerAwsProfiles,
-        extraEnv: effectiveExtraEnv(this.settings),
-      });
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const os = require('os') as typeof import('os');
-      const plan = planContainerAwsMounts({
-        profiles,
-        homeDir: os.homedir(),
-        hostConfigPath: process.env.AWS_CONFIG_FILE,
-        dataDir: this.pluginResourceDir,
-        fs: nodeContainerAwsFs(),
-      });
-      for (const w of plan?.warnings ?? []) console.warn('[ClaudeThreads] container AWS:', w);
-      return plan;
-    } catch (err) {
-      console.warn('[ClaudeThreads] Could not plan container AWS credentials:', err);
-      return null;
-    }
-  }
-
-  /** Tells the user (once per thread per message) that its sandbox image is stale; the session still starts. */
-  private warnStaleSandboxImage(threadId: string, message: string): void {
-    const key = `${threadId}|${message}`;
-    if (this.staleImageWarned.has(key)) return;
-    this.staleImageWarned.add(key);
-    this.addNoticeMessage(threadId, 'failed', message);
-  }
-
-  /**
    * Builds the full options needed to open (or restart) a thread's
    * `ThreadSession`: cwd validation/repair, additional directories, the
    * per-thread system-prompt context, MCP servers, secret env, and the
@@ -2660,10 +2409,6 @@ export class ThreadManager {
     if (builtFor && this.proxyMcpServersForThread && !this.sessionMcpSignatures.has(builtFor)) {
       this.sessionMcpSignatures.set(builtFor, this.proxyMcpSignature(threadId));
     }
-    const claudeVm = this.buildClaudeVmRoutingInputs(threadId, thread);
-    const vmMcpServers = claudeVm && this.vmMcpServerFactory && sessionMcpServers
-      ? this.vmMcpServerFactory(threadId, sessionMcpServers)
-      : undefined;
     // The Agent Threads MCP server exposes the same canonical tool definitions to
     // Codex through its app-server dynamic-tool adapter and to OpenCode through a
     // loopback MCP bridge. Serializable external stdio/HTTP/SSE servers are
@@ -2675,6 +2420,18 @@ export class ThreadManager {
       : {};
     const resolvedSecretEnv = { ...githubEnv, ...(this.secretEnvResolver ? this.secretEnvResolver(project?.id) : {}) };
     const agentProfiles = loadAgentProfiles(this.settings.skillSources ?? []);
+    // One skill-root list for every harness that discovers by parent directory
+    // (Codex via skills/extraRoots/set, OpenCode via its native skills.paths).
+    const skillRoots = codexSkillRoots(
+      this.settings.skillSources ?? [],
+      this.pluginResourceDir
+        ? require('path').join(this.pluginResourceDir, 'resources', 'skills')
+        : undefined,
+      // Vault-installed skills. These harnesses discover by parent root, so they get
+      // the skills dir itself rather than the generated plugin root Claude uses.
+      pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
+      this.localSkillsRoot(),
+    );
 
     return {
       cwd: thread.cwd,
@@ -2712,13 +2469,10 @@ export class ThreadManager {
           )
         : undefined,
       secretEnv: resolvedSecretEnv,
-      containerAuthToken: this.containerAuthTokenResolver?.(),
       claude: {
         mcpServers: sessionMcpServers,
-        vmMcpServers,
         disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
         sessionOptions: this.buildSessionOptions(thread, agentProfiles),
-        vm: claudeVm,
       },
       codex: {
         computerUseEnabled: this.settings.codexComputerUseEnabled === true,
@@ -2727,16 +2481,7 @@ export class ThreadManager {
         ...(this.settings.codexEffort && this.settings.codexEffort !== 'default'
           ? { effort: this.settings.codexEffort }
           : {}),
-        skillRoots: codexSkillRoots(
-          this.settings.skillSources ?? [],
-          this.pluginResourceDir
-            ? require('path').join(this.pluginResourceDir, 'resources', 'skills')
-            : undefined,
-          // Vault-installed skills. Codex discovers by parent root, so it gets
-          // the skills dir itself rather than the generated plugin root Claude uses.
-          pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
-          this.localSkillsRoot(),
-        ),
+        skillRoots,
         dynamicTools: codexDynamicTools,
         mcpServers: codexMcpServers,
         agentProfiles,
@@ -2744,6 +2489,7 @@ export class ThreadManager {
       opencode: {
         dynamicTools: codexDynamicTools,
         mcpServers: codexMcpServers,
+        skillRoots,
       },
     };
   }
@@ -2764,7 +2510,9 @@ export class ThreadManager {
     const project = thread.projectId ? this.getProject(thread.projectId) : undefined;
     const daemonName = this.remoteDaemons?.nameOf(remote.daemonId) ?? remote.daemonId;
     const vaultMapping = this.remoteDaemons?.vaultMappingOf?.(remote.daemonId);
+    const mounts = this.remoteDaemons?.mountsOf?.(remote.daemonId);
     const hostToolsEnabled = !!this.remoteHostToolsFactory && this.remoteDaemons?.hostToolsOf?.(remote.daemonId)?.enabled === true;
+    const harness: AgentHarness = thread.agentHarness ?? 'claude';
     const goalContext = thread.goal
       ? `## Active Goal\nThe user has set a persistent goal for this thread: "${thread.goal}"\n` +
         'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
@@ -2778,7 +2526,7 @@ export class ThreadManager {
         vaultMapping
           ? { mapping: vaultMapping, vaultFolder: this.settings.vaultFolder, saveThreadsToVault: this.settings.saveThreadsToVault }
           : undefined,
-        { hostTools: hostToolsEnabled },
+        { hostTools: hostToolsEnabled, ...(mounts?.length ? { mounts } : {}) },
       ),
       project?.description?.trim(),
       goalContext,
@@ -2787,32 +2535,58 @@ export class ThreadManager {
     // External MCP servers: only what a daemon can use (http/sse it can reach, no secrets) goes along; the rest is
     // dropped and the user is told once per change.
     const hostToolSettings = this.remoteDaemons?.hostToolsOf?.(remote.daemonId);
-    const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist);
-    const droppedNote = describeDroppedMcp(partition.dropped, daemonName);
-    if ((this.remoteMcpNoticeSig.get(threadId) ?? '') !== (droppedNote ?? '')) {
-      this.remoteMcpNoticeSig.set(threadId, droppedNote ?? '');
-      if (droppedNote) this.addNoticeMessage(threadId, 'stopped', droppedNote);
-    }
-    return {
+    const partition = partitionExternalMcpServers(this.settings.mcpServers, hostToolSettings?.mcpAllowlist, this.remoteDaemons?.mcpSyncOf?.(remote.daemonId));
+    const resume = thread.sessionId;
+    const extras = this.remoteSessionExtras?.(threadId);
+    const common = {
       cwd: remote.remoteCwd,
       permissionMode: thread.permissionMode ?? this.settings.permissionMode,
-      ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
       extraEnvRaw: '',
-      resume: thread.sessionId,
+      resume,
       callbacks: this.buildSessionCallbacks(threadId, thread),
-      model: modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
       appendSystemPrompt,
-      resumeFallbackHistory: thread.sessionId
+      resumeFallbackHistory: resume
         ? buildHistoryPreamble(
             latestMessageIsCurrentSend ? thread.messages.slice(0, -1) : thread.messages,
             remote.remoteCwd,
           )
         : undefined,
-      claude: {
-        disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
-        sessionOptions: this.buildSessionOptions(thread, agentProfiles),
-        ...(Object.keys(partition.passthrough).length ? { remoteMcpServers: partition.passthrough } : {}),
-      },
+    };
+    const passthrough = Object.keys(partition.passthrough).length ? partition.passthrough : undefined;
+    if (harness === 'claude') {
+      return {
+        ...common,
+        ...(thread.disallowedTools?.length ? { disallowedTools: [...thread.disallowedTools] } : {}),
+        model: modelOverride ?? thread.model ?? (this.settings.defaultModel || undefined),
+        claude: {
+          disallowedTools: mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools),
+          sessionOptions: this.buildSessionOptions(thread, agentProfiles),
+          ...(passthrough ? { remoteMcpServers: passthrough } : {}),
+          ...(extras?.envKind ? { remoteEnvKind: extras.envKind } : {}),
+          ...(extras?.pluginPaths?.length ? { remotePluginPaths: extras.pluginPaths } : {}),
+        },
+      };
+    }
+    // Codex and OpenCode: Claude's model aliases mean nothing to them (as for a local thread), the denylist is the
+    // top-level one (Claude's tool names are ignored by the daemon's adapters except Bash), and the vetted MCP servers
+    // go in the harness's own block, which `projectSessionOptions` reads back.
+    const disallowed = mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools);
+    return {
+      ...common,
+      ...(disallowed.length ? { disallowedTools: disallowed } : {}),
+      model: modelOverride ?? thread.model ?? undefined,
+      ...(harness === 'codex'
+        ? {
+            codex: {
+              ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
+              ...(this.settings.codexEffort && this.settings.codexEffort !== 'default' ? { effort: this.settings.codexEffort } : {}),
+              ...(passthrough ? { mcpServers: passthrough } : {}),
+            },
+          }
+        : { opencode: { ...(passthrough ? { mcpServers: passthrough } : {}) } }),
+      // The session environment (Extra env, keychain secrets) reaches every harness through the daemon's credential
+      // kind; skill plugin paths are Claude plugins and are not sent to Codex or OpenCode.
+      ...(extras?.envKind ? { claude: { remoteEnvKind: extras.envKind } } : {}),
     };
   }
 
@@ -2881,6 +2655,7 @@ export class ThreadManager {
     const callbacks: SessionCallbacks = {
       onRawEvent: (event) => {
         if (!isCurrentGeneration()) return;
+        if (thread.private) return;
         if (!this.settings.saveRawLogs || !this.vaultRoot) return;
         // Record the log path on the thread the first time we write, so the
         // markdown note's `raw_log` frontmatter can link to it.
@@ -2914,6 +2689,7 @@ export class ThreadManager {
             if (!thread.editedFiles.includes(filePath)) thread.editedFiles.push(filePath);
           }
         }
+        if (record.toolUseId) this.liveToolRecords.set(record.toolUseId, record);
         this.emit(threadId, { type: 'tool_use', record });
       },
       onFilesEdited: (paths) => {
@@ -2999,7 +2775,7 @@ export class ThreadManager {
         // same generation per ADR-0002 §2) has now been answered. Nothing to
         // roll back, just stop tracking them.
         this.pendingUserMessageIds.delete(threadId);
-        if (thread.pendingHarnessHandoff && thread.sessionId) delete thread.pendingHarnessHandoff;
+        if (thread.pendingHarnessHandoff && (thread.sessionId || thread.remote?.nativeSessionId)) delete thread.pendingHarnessHandoff;
         this.releaseHarnessHandoffClaim(threadId);
 
         // Safety net: if a pending plan somehow survived to onDone (e.g. the
@@ -3207,11 +2983,6 @@ export class ThreadManager {
         thread.authRequired = { message, at: this.now() };
         callbacks.onError(new Error(message));
       },
-      onVmRouting: (routing, fallbackReason) => {
-        if (!isCurrentGeneration()) return;
-        this.claudeVmRoutingByThread.set(threadId, routing);
-        if (!routing) this.maybeOfferSandboxSetup(threadId, fallbackReason);
-      },
       onCompact: (trigger, preTokens) => {
         if (!isCurrentGeneration()) return;
         const compactMsg: ChatMessage = {
@@ -3302,6 +3073,10 @@ export class ThreadManager {
       onModelRefusalNoFallback: (refusal) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'model_refusal_no_fallback', ...refusal }); },
       onToolProgress: (toolUseId, toolName, elapsedSeconds) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'tool_progress', toolUseId, toolName, elapsedSeconds }); },
       onMemoryRecall: (paths, mode) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'memory_recall', paths, mode }); },
+      onMcpServerStatus: (servers) => {
+        // A daemon's MCP health is a property of the daemon, shown in its settings; a local session has no such view.
+        if (isCurrentGeneration() && thread.remote) this.daemonMcpStatus?.set(thread.remote.daemonId, servers);
+      },
       onCommandsChanged: (commands) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'commands_changed', commands }); },
       onTaskProgressSummary: (taskId, summary) => {
         if (!isCurrentGeneration()) return;
@@ -3313,7 +3088,24 @@ export class ThreadManager {
         this.emit(threadId, { type: 'task_progress_summary', taskId, summary });
       },
       onGitOperation: (summary) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'git_operation', summary }); },
-      onToolResult: (toolUseId, status, durationMs) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'tool_result_status', toolUseId, status, durationMs }); },
+      onToolResult: (toolUseId, status, durationMs) => {
+        if (!isCurrentGeneration()) return;
+        // Local sessions mutate the shared record in place, but a remote
+        // session replays wire events, so the records held by the streaming
+        // buffer and by committed messages are separate copies: settle every
+        // copy here or finished calls keep showing as running.
+        const settle = (r: ToolCallRecord | undefined): void => {
+          if (!r || r.toolUseId !== toolUseId) return;
+          r.status = status;
+          if (durationMs !== undefined) r.durationMs = durationMs;
+        };
+        settle(this.liveToolRecords.get(toolUseId));
+        this.liveToolRecords.delete(toolUseId);
+        for (let i = thread.messages.length - 1; i >= 0 && i >= thread.messages.length - 50; i--) {
+          for (const r of thread.messages[i].toolCalls ?? []) settle(r);
+        }
+        this.emit(threadId, { type: 'tool_result_status', toolUseId, status, durationMs });
+      },
       onEnterPlanMode: () => { if (isCurrentGeneration()) this.emit(threadId, { type: 'enter_plan_mode' }); },
       onPlanModeRequested: () => {
         if (!isCurrentGeneration()) return;
@@ -3468,8 +3260,8 @@ export class ThreadManager {
     this.touch(thread);
   }
 
-  /** Skill plugins as HOST paths. VM-routed sessions map these to guest mounts (see skillMounts.ts). */
-  private buildHostSkillPlugins(): Array<{ type: 'local'; path: string }> {
+  /** Skill plugins as host paths. */
+  buildHostSkillPlugins(): Array<{ type: 'local'; path: string }> {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const path = require('path') as typeof import('path');
     return buildSkillPlugins({
@@ -3525,7 +3317,7 @@ export class ThreadManager {
     }
 
     // Ephemeral session (thread-level flag)
-    if (thread.ephemeral) {
+    if (thread.ephemeral || thread.private) {
       opts.persistSession = false;
     }
 
@@ -3594,6 +3386,10 @@ export class ThreadManager {
 
   notifyActiveThreadChanged(threadId: string): void {
     this.emit(threadId, { type: 'active_thread_changed' });
+  }
+
+  notifyActiveThreadCleared(): void {
+    this.emit('', { type: 'active_thread_cleared' });
   }
 
   notifySummaryUpdated(threadId: string): void {
