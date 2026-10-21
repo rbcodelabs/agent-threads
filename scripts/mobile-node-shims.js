@@ -181,3 +181,6 @@ var process = globalThis.process || (function () {
   p.hrtime.bigint = function () { return BigInt(Date.now()) * 1000000n; };
   return p;
 })();
+// WKWebView has no SharedArrayBuffer (needs cross-origin isolation). A few dependencies allocate
+// one at load time for a synchronous-sleep helper; hand them a plain ArrayBuffer there.
+var SharedArrayBuffer = globalThis.SharedArrayBuffer || function SharedArrayBuffer(n) { return new ArrayBuffer(n); };
