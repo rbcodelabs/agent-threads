@@ -133,6 +133,49 @@ describe('host tool round trip', () => {
   });
 });
 
+describe('servers that appear after the session started', () => {
+  it('a manifest naming a new server makes it reachable on the next send', async () => {
+    const td = await track();
+    const c = await connect(td);
+    await open(c, 't');
+    // The fake harness builds its servers on first use; this send pins them to the opening manifest.
+    await send(c, 't', '/mcp-list claude_threads');
+    const seq = (await c.waitFor((f) => f.name === 'onMessage')).seq;
+    const reply = await c.cmd('tool.manifest', { threadId: 't', servers: { claude_threads: [tool('vault_search')], vercel: [tool('list_projects', 'vercel')] } });
+    expect(reply).toMatchObject({ type: 'ack', result: { changed: true } });
+    await send(c, 't', '/mcp vercel list_projects {}');
+    const call = await c.waitFor((f) => f.name === 'tool.call');
+    expect(call.args).toMatchObject({ server: 'vercel', tool: 'list_projects' });
+    await c.cmd('tool.result', { threadId: 't', callId: call.args.callId, success: true, text: 'projects' });
+    expect(await lastMessage(c, seq)).toBe('mcp ok: projects');
+  });
+
+  it('a new server arriving mid-turn applies to the following send, not the running turn', async () => {
+    const td = await track();
+    const c = await connect(td);
+    await open(c, 't');
+    await send(c, 't', '/mcp claude_threads vault_search {}');
+    const call = await c.waitFor((f) => f.name === 'tool.call');
+    await c.cmd('tool.manifest', { threadId: 't', servers: { claude_threads: [tool('vault_search')], vercel: [tool('list_projects', 'vercel')] } });
+    await c.cmd('tool.result', { threadId: 't', callId: call.args.callId, success: true, text: 'first' });
+    const seq = (await c.waitFor((f) => f.name === 'onMessage')).seq;
+    expect(await lastMessage(c)).toBe('mcp ok: first');
+    await send(c, 't', '/mcp-list vercel');
+    expect(await lastMessage(c, seq)).toContain('list_projects');
+  });
+
+  it('open() on a live session adopts server names it did not have', async () => {
+    const td = await track();
+    const c = await connect(td);
+    await open(c, 't');
+    await send(c, 't', '/mcp-list claude_threads');
+    const seq = (await c.waitFor((f) => f.name === 'onMessage')).seq;
+    await open(c, 't', [tool('vault_search'), tool('list_projects', 'vercel')]);
+    await send(c, 't', '/mcp-list vercel');
+    expect(await lastMessage(c, seq)).toContain('list_projects');
+  });
+});
+
 describe('binding and authority', () => {
   it('a call id from another thread cannot be answered through a different thread', async () => {
     const td = await track();

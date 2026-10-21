@@ -73,6 +73,8 @@ export interface HarnessSession {
   getContextUsage(): Promise<HarnessContextUsage | null>;
   /** Connection state of the session's MCP servers, when the harness can report it (Claude SDK). */
   mcpServerStatus?(): Promise<Array<{ name: string; status: string }>>;
+  /** A remote session: the host now offers a tool server the session was opened without (rebuild to tell the model). */
+  hostServersChanged?(): Promise<boolean>;
   getUsageSnapshot(includeAccountUsage?: boolean): Promise<import('./Usage').UsageSnapshot | null>;
 }
 

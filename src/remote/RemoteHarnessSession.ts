@@ -129,6 +129,8 @@ export class RemoteHarnessSession implements HarnessSession {
   private sendRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** The manifest THIS client sent: the only thing a `tool.call` may name. */
   private sentManifest: HostManifest | null = null;
+  /** Server names the spec (and so the daemon's driver and the system prompt) was built with. */
+  private specServers = new Set<string>();
   private manifestSent = '';
   private executor: HostToolExecutor | null = null;
   /**
@@ -203,9 +205,10 @@ export class RemoteHarnessSession implements HarnessSession {
       const manifest = await tools.manifest();
       this.sentManifest = manifest;
       const flat = specsFromManifest(manifest);
-      if (flat.length > 0) this.spec = { ...this.spec, hostTools: flat };
-      const skipped = tools.summary.skipped;
-      if (skipped.length > 0) this.log(`host tools not offered: ${skipped.map((x) => `${x.server} (${x.reason})`).join('; ')}`);
+      // Sent even when empty: a daemon that remembers an earlier manifest for this thread must be able to clear it.
+      this.spec = { ...this.spec, hostTools: flat };
+      this.specServers = new Set(Object.keys(manifest));
+      this.logSkipped(tools.summary.skipped);
     } catch (err) {
       this.log(`could not build the host tool manifest: ${errText(err)}`);
       this.sentManifest = {};
@@ -224,6 +227,31 @@ export class RemoteHarnessSession implements HarnessSession {
     this.manifestSent = this.sentManifest ? manifestSignature(this.sentManifest) : '';
   }
 
+  private logSkipped(skipped: ReadonlyArray<{ server: string; reason: string }>): void {
+    if (skipped.length === 0) return;
+    const line = `host tools not offered: ${skipped.map((x) => `${x.server} (${x.reason})`).join('; ')}`;
+    this.log(line);
+    // A server that was switched on but is skipped (not just "not turned on") must not fail silently.
+    if (skipped.some((x) => x.reason !== 'not turned on for this daemon')) console.warn(`[ClaudeThreads] ${line}`);
+  }
+
+  /**
+   * True when the tools now on offer include a server this session was opened without. The daemon picks such a
+   * server up on its own, but the model's system prompt (written at open) does not mention it, so the thread
+   * rebuilds at a turn boundary.
+   */
+  async hostServersChanged(): Promise<boolean> {
+    const tools = this.deps.hostTools;
+    if (!tools || this.closed) return false;
+    try {
+      const names = Object.keys(await tools.manifest());
+      return names.some((n) => !this.specServers.has(n));
+    } catch (err) {
+      this.log(`could not check host tool servers: ${errText(err)}`);
+      return false;
+    }
+  }
+
   /** Tell the daemon the current manifest if it changed (on open, on every attach, before each turn). */
   private async syncManifest(force = false): Promise<void> {
     const tools = this.deps.hostTools;
@@ -233,6 +261,7 @@ export class RemoteHarnessSession implements HarnessSession {
       const sig = manifestSignature(manifest);
       if (!force && sig === this.manifestSent) return;
       this.sentManifest = manifest;
+      this.logSkipped(tools.summary.skipped);
       await this.client.command('tool.manifest', { threadId: this.threadId, servers: manifest });
       this.manifestSent = sig;
     } catch (err) {
