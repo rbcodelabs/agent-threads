@@ -43,3 +43,13 @@ describe('parsePermissionDetail', () => {
     expect(parsePermissionDetail('{"command": "ls').fields).toBeNull();
   });
 });
+
+describe('parsePermissionDetail for remote host-tool cards', () => {
+  it('exposes the full JSON input as fields instead of a 120-char summary', () => {
+    const body = 'b'.repeat(21_000);
+    const p = parsePermissionDetail(`Run write_doc for a remote thread: ${JSON.stringify({ title: 'T', body })}`);
+    expect(p.fields?.find((f) => f.key === 'body')?.value).toBe(body);
+    expect(p.summary.startsWith('write_doc: ')).toBe(true);
+    expect(p.summary.length).toBeLessThanOrEqual(120);
+  });
+});

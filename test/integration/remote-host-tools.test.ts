@@ -161,11 +161,40 @@ describe('host tools: plugin executes what the daemon proxies', () => {
     const invoke = vi.fn(async () => ({ success: true, text: 'RAN' }));
     const { r, session } = make(td, 'h5b', [dyn('threads_get_log', true, invoke)]);
     await session.start(options(r));
-    session.send(`/mcp claude_threads threads_get_log ${JSON.stringify({ query: 'x'.repeat(5000) })}`, undefined, 'u1');
+    session.send(`/mcp claude_threads threads_get_log ${JSON.stringify({ query: 'x'.repeat(70_000) })}`, undefined, 'u1');
     await until(() => r.messages.length > 0, 'the refusal');
     expect(r.messages[0]).toMatch(/too long to show the user in full/);
     expect(r.prompts).toHaveLength(0);
     expect(invoke).not.toHaveBeenCalled();
+    session.close();
+  });
+
+  it('shows a ~21 KB input in full on the card and runs it once allowed', async () => {
+    const td = await daemon();
+    const invoke = vi.fn(async () => ({ success: true, text: 'RAN' }));
+    const { r, session } = make(td, 'h5c', [dyn('threads_get_log', true, invoke)]);
+    await session.start(options(r));
+    const body = 'w'.repeat(21_000);
+    session.send(`/mcp claude_threads threads_get_log ${JSON.stringify({ query: body })}`, undefined, 'u1');
+    await until(() => r.prompts.length === 1, 'the card');
+    expect(r.prompts[0].detail).toContain(body);
+    r.prompts[0].answer(true);
+    await until(() => r.messages.length > 0, 'tool answer');
+    expect(invoke).toHaveBeenCalledTimes(1);
+    session.close();
+  });
+
+  it('runs a pre-approved call whose input is too long for any card, without a card', async () => {
+    const td = await daemon();
+    const invoke = vi.fn(async () => ({ success: true, text: 'RAN' }));
+    const tools = [dyn('threads_get_log', true, invoke)];
+    const hostTools = new RemoteHostTools({ builtIn: tools, mcpSources: {}, overrides: ON, preApprove: () => true });
+    const { r, session } = make(td, 'h5d', tools, { hostTools });
+    await session.start(options(r));
+    session.send(`/mcp claude_threads threads_get_log ${JSON.stringify({ query: 'x'.repeat(70_000) })}`, undefined, 'u1');
+    await until(() => r.messages.length > 0, 'the answer');
+    expect(r.prompts).toHaveLength(0);
+    expect(invoke).toHaveBeenCalledTimes(1);
     session.close();
   });
 

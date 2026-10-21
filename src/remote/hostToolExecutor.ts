@@ -39,9 +39,9 @@ export interface HostToolExecutorDeps {
   /** The thread's normal permission prompt (pre-approvals, permission mode and the card all live behind it). */
   requestPermission(toolName: string, detail: string): Promise<boolean>;
   /**
-   * A standing approval the USER granted for this exact call (today only a saved host_exec command prefix). Asked
-   * after the input is known to fit on the card, so what is skipped is always a card the user could have read.
-   * Nothing the daemon sends can make it true; it throws or returns false to fall back to the card.
+   * A standing approval the USER granted for this exact call (today only a saved host_exec command prefix). When
+   * true no card is shown, so the input-too-long-for-the-card refusal does not apply: the user already trusted the
+   * tool. Nothing the daemon sends can make it true; it throws or returns false to fall back to the card.
    */
   isPreApproved?(server: string, tool: string, input: Record<string, unknown>): boolean;
   sendResult(callId: string, result: { success: boolean; text: string; content?: unknown[] }): Promise<void>;
@@ -53,8 +53,11 @@ export interface HostToolExecutorDeps {
 type CallState = { state: 'running'; abort: AbortController } | { state: 'done'; result: { success: boolean; text: string; content?: unknown[] } };
 
 const REMEMBERED_CALLS = 64;
-/** How much of a call's input the approval card shows. Input beyond this is never executed unseen. */
-export const APPROVAL_DETAIL_LIMIT = 4000;
+/**
+ * How much of a call's input the approval card shows. A call that needs a card and exceeds this is never executed
+ * unseen. 64 KB holds a large document write; the card scrolls (see `.ct-permission-field-value`).
+ */
+export const APPROVAL_DETAIL_LIMIT = 64 * 1024;
 
 /**
  * What the approval card shows for a call. `unseenBytes` > 0 means the serialized input is longer than the card
@@ -151,15 +154,18 @@ export class HostToolExecutor {
     let result: { success: boolean; text: string; content?: unknown[] };
     try {
       if (spec.requiresApproval) {
-        const card = describeCallForApproval(spec.name, input);
-        if (card.unseenBytes > 0) {
-          this.deps.log?.(`REFUSED ${spec.server}/${spec.name}: ${card.unseenBytes} bytes of input would not be shown on the approval card`);
-          this.finish(callId, refusal(`The host tool "${spec.name}" was not run: its input is too long to show the user in full for approval (${card.unseenBytes} more bytes than the card can display). Call it again with a shorter input.`));
-          return;
-        }
-        const detail = card.detail;
         let preApproved = false;
         try { preApproved = this.deps.isPreApproved?.(spec.server, spec.name, input) === true; } catch { preApproved = false; }
+        let detail = '';
+        if (!preApproved) {
+          const card = describeCallForApproval(spec.name, input);
+          if (card.unseenBytes > 0) {
+            this.deps.log?.(`REFUSED ${spec.server}/${spec.name}: ${card.unseenBytes} bytes of input would not be shown on the approval card`);
+            this.finish(callId, refusal(`The host tool "${spec.name}" was not run: its input is too long to show the user in full for approval (${card.unseenBytes} more bytes than the card can display). Call it again with a shorter input.`));
+            return;
+          }
+          detail = card.detail;
+        }
         const allowed = preApproved || await this.deps.requestPermission(name, detail).catch(() => false);
         if (!allowed) { this.finish(callId, refusal('The user denied this tool call.')); return; }
       }

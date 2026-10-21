@@ -3,7 +3,7 @@ import {
   HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, manifestFromSpecs, manifestSignature,
   sanitizeResultContent, specsFromManifest, validateHostToolSpecs, validateManifestServers, validateToolResultPayload,
 } from '../../src/protocol';
-import { HostToolExecutor, HostToolSlots, describeCallForApproval } from '../../src/remote/hostToolExecutor';
+import { APPROVAL_DETAIL_LIMIT, HostToolExecutor, HostToolSlots, describeCallForApproval } from '../../src/remote/hostToolExecutor';
 import { RemoteHostTools, describeHostToolsForPrompt } from '../../src/remote/hostTools';
 import { createLoopbackMcpSource, type HostMcpSource } from '../../src/remote/hostMcpClient';
 import { describeDroppedMcp, isLoopbackUrl, partitionExternalMcpServers } from '../../src/remote/mcpPartition';
@@ -210,15 +210,42 @@ describe('HostToolExecutor gate', () => {
   });
   it('shows an explicit marker and refuses to run input too long to be shown on the card', async () => {
     const { ex, results, invoke, requestPermission } = rig();
-    const big = 'x'.repeat(5000);
+    const big = 'x'.repeat(APPROVAL_DETAIL_LIMIT + 5000);
     const card = describeCallForApproval('write', { data: big });
-    expect(card.unseenBytes).toBeGreaterThan(900);
+    expect(card.unseenBytes).toBeGreaterThan(4000);
     expect(card.detail).toMatch(/\(\d+ more bytes not shown\)$/);
     ex.handleCall(call('a', 'write', 'claude_threads', { data: big }));
     await tick();
     expect(requestPermission).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
     expect(results[0].success).toBe(false);
+    expect(results[0].text).toMatch(/too long to show the user in full/);
+  });
+  it('shows input between the old 4 KB cap and the new cap in full on the card', async () => {
+    const { ex, invoke, requestPermission } = rig();
+    requestPermission.mockResolvedValueOnce(true);
+    const body = 'y'.repeat(21_000);
+    ex.handleCall(call('a', 'write', 'claude_threads', { data: body }));
+    await tick();
+    expect(requestPermission).toHaveBeenCalledWith('mcp__claude_threads__write', expect.stringContaining(body));
+    expect(requestPermission).toHaveBeenCalledWith('mcp__claude_threads__write', expect.not.stringContaining('not shown'));
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+  it('runs pre-approved input of any size without a card, but only asks isPreApproved for tools that need approval', async () => {
+    const isPreApproved = vi.fn(() => true);
+    const { ex, results, invoke, requestPermission } = rig({ isPreApproved });
+    ex.handleCall(call('a', 'write', 'claude_threads', { data: 'z'.repeat(APPROVAL_DETAIL_LIMIT * 2) }));
+    await tick();
+    expect(requestPermission).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(results[0].success).toBe(true);
+  });
+  it('still refuses over-cap input when the call is not pre-approved', async () => {
+    const { ex, results, invoke, requestPermission } = rig({ isPreApproved: () => false });
+    ex.handleCall(call('a', 'write', 'claude_threads', { data: 'z'.repeat(APPROVAL_DETAIL_LIMIT * 2) }));
+    await tick();
+    expect(requestPermission).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
     expect(results[0].text).toMatch(/too long to show the user in full/);
   });
   it('runs input that fits the card completely, with no marker', async () => {
