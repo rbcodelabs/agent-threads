@@ -23,6 +23,7 @@ import {
   clampResultText,
   findManifestTool,
   hostUnavailableText,
+  isHostResourceTool,
   manifestSignature,
   sanitizeResultContent,
   type RemoteHostToolSpec,
@@ -161,8 +162,12 @@ export class HostToolBroker {
 
   /** Run one host tool. Never rejects: every failure is a model-readable outcome. */
   call(threadId: string, server: string, tool: string, input: unknown, signal?: AbortSignal): Promise<HostToolOutcome> {
-    const spec = findManifestTool(this.manifests.get(threadId), server, tool);
-    if (!spec) return Promise.resolve(failure(`The host tool "${server}/${tool}" is not available in this session.`));
+    const manifest = this.manifests.get(threadId);
+    // Resource requests name a server the client offered (any tool of it), not a manifest tool.
+    const offered = isHostResourceTool(tool)
+      ? Boolean(manifest && Object.prototype.hasOwnProperty.call(manifest, server) && server !== 'claude_threads')
+      : findManifestTool(manifest, server, tool) !== undefined;
+    if (!offered) return Promise.resolve(failure(`The host tool "${server}/${tool}" is not available in this session.`));
     const bad = checkCallInput(input ?? {});
     if (bad) return Promise.resolve(failure(`The host tool "${tool}" was not run: ${bad}.`));
     if (this.openCalls(threadId) >= HOST_TOOL_LIMITS.maxConcurrentCallsPerThread) {

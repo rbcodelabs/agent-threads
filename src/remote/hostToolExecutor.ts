@@ -16,7 +16,7 @@
  * A call id already seen is never run twice: a reopened call that finished gets its stored result re-sent, one
  * still running is left alone.
  */
-import { HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, sanitizeResultContent, type RemoteHostToolSpec } from '../protocol';
+import { HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, isHostResourceTool, sanitizeResultContent, type RemoteHostToolSpec } from '../protocol';
 import type { HostToolOutput } from './hostTools';
 
 /** Calls in flight across all threads; one instance per plugin. */
@@ -97,7 +97,7 @@ export class HostToolExecutor {
     }
     if (typeof server !== 'string' || typeof tool !== 'string') { this.answer(callId, refusal('Malformed host tool call.')); return; }
 
-    const spec = findManifestTool(this.deps.manifest() ?? undefined, server, tool);
+    const spec = isHostResourceTool(tool) ? this.resourceSpec(server, tool) : findManifestTool(this.deps.manifest() ?? undefined, server, tool);
     if (!spec) {
       this.deps.log?.(`REFUSED tool.call for ${server}/${tool.slice(0, 60)}: not in the manifest this client sent`);
       this.answer(callId, refusal(`The host tool "${server}/${tool}" is not offered in this session.`));
@@ -122,6 +122,16 @@ export class HostToolExecutor {
     const abort = new AbortController();
     this.calls.set(callId, { state: 'running', abort });
     void this.run(callId, spec, input as Record<string, unknown>, abort).finally(() => { this.active--; release(); });
+  }
+
+  /**
+   * A resource request (`resources/list`, `resources/read`) is read-only and needs no card, but it may only name a
+   * server this client offered in its manifest, so the daemon cannot reach one the user did not switch on.
+   */
+  private resourceSpec(server: string, tool: string): RemoteHostToolSpec | undefined {
+    const manifest = this.deps.manifest();
+    if (!manifest || !Object.prototype.hasOwnProperty.call(manifest, server)) return undefined;
+    return { name: tool, description: '', inputSchema: {}, requiresApproval: false, server };
   }
 
   /** `tool.cancel`: the daemon gave up on the call (interrupt, timeout). */

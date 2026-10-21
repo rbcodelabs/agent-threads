@@ -54,6 +54,7 @@ export function buildHostServers(ctx: DriverContext): HostServers {
       name,
       local: name === CLAUDE_THREADS_SERVER ? localDefs : undefined,
       proxied: () => manifest()[name] ?? [],
+      resources: name !== CLAUDE_THREADS_SERVER,
       call: (tool, input, signal) => port
         ? port.call(name, tool, input, signal)
         : Promise.resolve({ success: false, text: 'Host tools are not available in this session.' }),

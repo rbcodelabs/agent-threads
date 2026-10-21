@@ -14,7 +14,10 @@
  * capability header stay in the `HostMcpSource`.
  */
 import type { HarnessDynamicTool } from '../HarnessSession';
-import { HOST_TOOL_LIMITS, validateHostToolSpec, type RemoteHostToolSpec } from '../protocol';
+import {
+  HOST_RESOURCE_TOOLS, HOST_TOOL_LIMITS, checkResourceUri, encodeResourceContents, encodeResourceList, encodeResourceTemplates,
+  isHostResourceTool, validateHostToolSpec, type RemoteHostToolSpec,
+} from '../protocol';
 import { routeFor, type RouteOverrides } from '../toolRouting';
 import type { HostMcpSource } from './hostMcpClient';
 
@@ -71,6 +74,8 @@ function flatten(content: ReadonlyArray<Record<string, unknown>>): { text: strin
 
 export class RemoteHostTools {
   private index = new Map<string, { run(input: Record<string, unknown>, signal?: AbortSignal): Promise<HostToolOutput> }>();
+  /** Proxied servers whose MCP resources may be listed and read (the ones offered in the last manifest). */
+  private resourceServers = new Set<string>();
   private lastSummary: HostToolsSummary = { builtIn: [], servers: {}, skipped: [] };
 
   constructor(private readonly deps: RemoteHostToolsDeps) {}
@@ -89,6 +94,7 @@ export class RemoteHostTools {
     const servers: HostManifest = {};
     const index = new Map<string, { run(input: Record<string, unknown>, signal?: AbortSignal): Promise<HostToolOutput> }>();
     const summary: HostToolsSummary = { builtIn: [], servers: {}, skipped: [] };
+    const resourceServers = new Set<string>();
     const key = (server: string, tool: string): string => `${server}\u0000${tool}`;
 
     for (const t of this.deps.builtIn ?? []) {
@@ -128,6 +134,7 @@ export class RemoteHostTools {
         summary.skipped.push({ server, reason: 'could not list its tools' });
         continue;
       }
+      resourceServers.add(server);
       for (const t of listed) {
         const spec: RemoteHostToolSpec = {
           name: t.name, description: t.description ?? '', inputSchema: (t.inputSchema ?? { type: 'object' }) as Record<string, unknown>,
@@ -158,14 +165,17 @@ export class RemoteHostTools {
       delete summary.servers[name];
       summary.skipped.push({ server: name, reason: 'too many tools for one daemon session' });
     }
+    for (const name of resourceServers) if (!servers[name]) resourceServers.delete(name);
 
     this.index = index;
+    this.resourceServers = resourceServers;
     this.lastSummary = summary;
     return servers;
   }
 
   /** Run one tool the manifest offered. Never throws: a failure is an unsuccessful output. */
   async invoke(server: string, tool: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<HostToolOutput> {
+    if (isHostResourceTool(tool)) return this.invokeResource(server, tool, input);
     const entry = this.index.get(`${server}\u0000${tool}`);
     if (!entry) return { success: false, text: `The host tool "${server}/${tool}" is not available.` };
     try {
@@ -174,6 +184,33 @@ export class RemoteHostTools {
       // The message can carry local paths or loopback addresses; it stays here, the daemon gets a plain sentence.
       this.deps.log?.(`${server}/${tool} threw: ${err instanceof Error ? err.message : String(err)}`);
       return { success: false, text: `The host tool "${tool}" failed to run.` };
+    }
+  }
+
+  /**
+   * `resources/list`, `resources/templates/list` and `resources/read` of a proxied server, as the JSON text the
+   * daemon decodes (`encodeResource*`). Read-only, so no approval; only servers offered in the manifest qualify.
+   * Never throws.
+   */
+  private async invokeResource(server: string, tool: string, input: Record<string, unknown>): Promise<HostToolOutput> {
+    const source = this.resourceServers.has(server) ? this.deps.mcpSources?.[server] : undefined;
+    if (!source) return { success: false, text: `The host server "${server}" has no resources to offer in this session.` };
+    try {
+      switch (tool) {
+        case HOST_RESOURCE_TOOLS.list: return { success: true, text: encodeResourceList(await source.listResources?.() ?? []) };
+        case HOST_RESOURCE_TOOLS.templates: return { success: true, text: encodeResourceTemplates(await source.listResourceTemplates?.() ?? []) };
+        default: {
+          const bad = checkResourceUri(input.uri);
+          if (bad) return { success: false, text: `The resource was not read: ${bad}.` };
+          if (!source.readResource) return { success: false, text: `The host server "${server}" has no resources to offer in this session.` };
+          return { success: true, text: encodeResourceContents(await source.readResource(input.uri as string)) };
+        }
+      }
+    } catch (err) {
+      this.deps.log?.(`${server}/${tool} threw: ${err instanceof Error ? err.message : String(err)}`);
+      // An MCP error message from the upstream server (unknown uri, ...) is the model's to read; a transport error is not.
+      const mcp = err instanceof Error && err.name === 'McpError';
+      return { success: false, text: mcp ? `The host server "${server}" refused: ${(err as Error).message.slice(0, 500)}` : `The host server "${server}" could not serve this resource request.` };
     }
   }
 

@@ -98,6 +98,39 @@ describe('host tool round trip', () => {
     expect(c.events().some((f) => f.name === 'tool.call')).toBe(false);
   });
 
+  it('proxies MCP resources of a proxied server end to end (list, templates, read) and advertises none for claude_threads', async () => {
+    const td = await track();
+    const c = await connect(td);
+    await open(c, 't', [tool('get_doc', 'compass'), tool('vault_search')]);
+    const answer = async (tl: string, text: string, success = true): Promise<Frame> => {
+      const call = await c.waitFor((f) => f.name === 'tool.call' && f.args.tool === tl && !answered.has(f.seq as number));
+      answered.add(call.seq as number);
+      await c.cmd('tool.result', { threadId: 't', callId: call.args.callId, success, text });
+      return call;
+    };
+    const answered = new Set<number>();
+
+    await send(c, 't', '/mcp-res-list compass');
+    const listCall = await answer('resources/list', JSON.stringify({ resources: [{ uri: 'docs://w/a%20b.md', name: 'A B', mimeType: 'text/markdown' }] }));
+    expect(listCall.args).toMatchObject({ server: 'compass', input: {} });
+    expect(await lastMessage(c)).toContain('"uri":"docs://w/a%20b.md"');
+
+    let after = c.events().filter((f) => f.name === 'onMessage').length ? Math.max(...c.events().filter((f) => f.name === 'onMessage').map((f) => f.seq as number)) : 0;
+    await send(c, 't', '/mcp-res-read compass docs://w/a%20b.md');
+    const readCall = await answer('resources/read', JSON.stringify({ contents: [{ uri: 'docs://w/a%20b.md', mimeType: 'text/markdown', text: '# Hello' }] }));
+    expect(readCall.args).toMatchObject({ server: 'compass', input: { uri: 'docs://w/a%20b.md' } });
+    expect(await lastMessage(c, after)).toContain('# Hello');
+
+    after = Math.max(...c.events().filter((f) => f.name === 'onMessage').map((f) => f.seq as number));
+    await send(c, 't', '/mcp-res-read compass docs://w/missing');
+    await answer('resources/read', 'Resource not found: docs://w/missing', false);
+    expect(await lastMessage(c, after)).toMatch(/mcp error:.*Resource not found/);
+
+    after = Math.max(...c.events().filter((f) => f.name === 'onMessage').map((f) => f.seq as number));
+    await send(c, 't', '/mcp-res-list claude_threads');
+    expect(await lastMessage(c, after)).toMatch(/mcp error:/);
+  });
+
   it('follows a manifest update on a running session', async () => {
     const td = await track();
     const c = await connect(td);
