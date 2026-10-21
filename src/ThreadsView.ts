@@ -2804,12 +2804,14 @@ export class ThreadsView extends ItemView {
         onSelect: () => { if (here) void this.requestMoveExecution(threadId, undefined); },
       }];
       for (const d of daemons) {
-        const target = thread.remote ? undefined : this.plugin.mapCwdToDaemon(d.id, thread.cwd);
+        // A remote thread hops daemon to daemon: translate its folder back to this computer, then onto the target.
+        const localCwd = thread.remote ? this.plugin.mapCwdFromDaemon(thread.remote.daemonId, thread.remote.remoteCwd) : thread.cwd;
+        const target = localCwd ? this.plugin.mapCwdToDaemon(d.id, localCwd) : undefined;
         const selected = here === d.id;
         const offered = gateHarness(harness, this.plugin.daemonRegistry?.capabilitiesOf(d.id), d.name);
         // No vault mapping: fall back to the daemon's default folder, or (on select) its advertised default workspace.
-        const fallback = thread.remote ? undefined : target ?? (d.defaultCwdRoot?.trim() || undefined);
-        const reason = selected ? undefined : blocked ?? (thread.remote ? 'move it to this computer first' : !offered.ok ? `no ${agentHarnessLabel(harness)} on it` : undefined);
+        const fallback = target ?? (d.defaultCwdRoot?.trim() || undefined);
+        const reason = selected ? undefined : blocked ?? (!offered.ok ? `no ${agentHarnessLabel(harness)} on it` : undefined);
         options.push({
           label: reason ? `${d.name} \u2014 ${reason}` : d.name,
           checked: selected,
