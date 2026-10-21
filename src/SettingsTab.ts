@@ -5,6 +5,7 @@ import { buildClaudeModelOptions } from './modelOptions';
 import { App, Modal, Notice, Platform, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type { ButtonComponent, TextComponent } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
+import { deepLinkScheme } from './hostEnvironment';
 import { DEFAULT_VAULT_FOLDER } from './productIdentity';
 import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifactStorage';
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig, RemoteHostToolsSettings } from './types';
@@ -1028,7 +1029,7 @@ class PairingModal extends Modal {
     // obsidian:// deep link — iOS/Android camera apps will offer "Open in Obsidian"
     // when the user scans this QR code. registerObsidianProtocolHandler('pair', ...)
     // handles obsidian://pair?... on the mobile side.
-    const pairingUrl = `obsidian://pair?roomId=${ra.roomId}&relay=${encodeURIComponent(ra.relayUrl)}`;
+    const pairingUrl = `${deepLinkScheme(window as unknown as { geode?: unknown })}://pair?roomId=${ra.roomId}&relay=${encodeURIComponent(ra.relayUrl)}`;
     const formatted = formatRoomIdAsCode(ra.roomId);
 
     contentEl.createEl('h2', { text: 'Pair with mobile' });
