@@ -14,7 +14,7 @@ export interface AvailabilityHost {
 
 export const PROXIED_SERVER_COPY =
   'Runs on this computer and is proxied to the daemon. This computer must be online with the app open. '
-  + 'Anything that changes something still asks for approval here. Applies to new threads.';
+  + 'Anything that changes something still asks for approval here. Running threads pick it up on their next message.';
 
 /** Renders nothing when there is no daemon to offer it to. Redraws itself after a change. */
 export function renderHostToolsAvailability(parent: HTMLElement, host: AvailabilityHost, server: string, opts: { unavailableReason?: string } = {}): void {
