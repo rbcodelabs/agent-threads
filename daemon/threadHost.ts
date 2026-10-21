@@ -22,6 +22,7 @@ import {
 } from '../src/protocol';
 import { DiskJournal, type DiskJournalOptions } from './diskJournal';
 import { HostToolBroker } from './hostTools';
+import { CLAUDE_THREADS_SERVER } from './hostServers';
 import { ensureDir, isSafeThreadId } from './fsutil';
 import type { DriverFactory, RequestKind, SessionDriver } from './sessionDriver';
 import { SessionMetaStore, type SessionMeta } from './sessionMeta';
@@ -82,6 +83,8 @@ interface Runtime {
   gen: number;
   /** `userMessageUuid`s already accepted, newest last, so a client retry of a send cannot run the turn twice. */
   seenSends: string[];
+  /** Host-tool server names the live driver's MCP servers were built with; later manifests can add tools to these but not new names. */
+  builtServers: Set<string>;
 }
 
 const SEEN_SENDS_KEPT = 64;
@@ -240,7 +243,18 @@ export class ThreadHost {
     if (!isSafeThreadId(threadId)) throw new HostError('bad_frame', `invalid threadId "${threadId}"`);
     this.lastCommandAt = this.now();
     const rt = this.runtime(threadId);
-    if (rt.driver) return { created: false, lastSeq: rt.journal.lastSeq, nativeSessionId: rt.meta?.nativeSessionId };
+    if (rt.driver) {
+      // Adopting a live session (a handoff or reconnect re-opens it): the new spec may offer servers it was built
+      // without. Take the manifest now; the driver is rebuilt at the next send, when no turn can be running.
+      if (spec.hostTools) {
+        const valid = this.validate(spec);
+        if (valid.hostTools) {
+          this.hostTools.setManifest(threadId, manifestFromSpecs(valid.hostTools), owner);
+          this.updateSpec(rt, { hostTools: valid.hostTools });
+        }
+      }
+      return { created: false, lastSeq: rt.journal.lastSeq, nativeSessionId: rt.meta?.nativeSessionId };
+    }
     const valid = this.validate(spec);
     if (valid.hostTools) this.hostTools.setManifest(threadId, manifestFromSpecs(valid.hostTools), owner);
     const previous = rt.meta;
@@ -272,6 +286,9 @@ export class ThreadHost {
     if (cap !== undefined && this.turnsInFlight() >= cap) {
       throw new HostError('conflict', `the daemon is already running ${cap} turns (maxConcurrentTurns); retry shortly`, true);
     }
+    // A server that joined the manifest after the driver was built is only reachable in a new driver. The session
+    // is idle here (a running turn was refused above), so restart it; cold resume keeps the native session id.
+    if (rt.driver && this.hasUnbuiltServers(threadId, rt) && !rt.driver.hasPendingPermission) this.stop(threadId, rt, 'idle');
     if (!rt.driver) this.coldResume(threadId, rt);
     rt.driver!.send(text, userMessageUuid, images);
     rt.seenSends.push(userMessageUuid);
@@ -497,6 +514,10 @@ export class ThreadHost {
     this.startDriver(threadId, rt, spec, rt.meta.nativeSessionId);
   }
 
+  private hasUnbuiltServers(threadId: string, rt: Runtime): boolean {
+    return Object.keys(this.hostTools.manifest(threadId)).some((name) => !rt.builtServers.has(name));
+  }
+
   private liveSessions(): number {
     let n = 0;
     for (const rt of this.threads.values()) if (rt.driver) n++;
@@ -540,6 +561,8 @@ export class ThreadHost {
       throw new HostError('internal', err instanceof Error ? err.message : String(err));
     }
     rt.driver = driver;
+    rt.builtServers = new Set(Object.keys(this.hostTools.manifest(threadId)));
+    if (!this.cwdPolicy || !specIsReadOnly(spec, this.cwdPolicy)) rt.builtServers.add(CLAUDE_THREADS_SERVER);
   }
 
   private rememberNative(rt: Runtime, id: string): void {
@@ -596,7 +619,7 @@ export class ThreadHost {
         isBoundary,
         isTurnInFlight: (cp) => cp.state?.event.name === 'session.state' && cp.state.event.args.turnInFlight === true,
       });
-      rt = { journal, driver: null, meta: null, gen: 0, seenSends: [] };
+      rt = { journal, driver: null, meta: null, gen: 0, seenSends: [], builtServers: new Set() };
       this.threads.set(threadId, rt);
     }
     return rt;

@@ -12,6 +12,7 @@ import { DEFAULT_SETTINGS, type Thread } from '../../src/types';
 type FakeSession = {
   id: number; closed: boolean; turnInFlight: boolean;
   status?: Array<{ name: string; status: string }>;
+  hostChanged?: boolean;
 };
 const fake = vi.hoisted(() => ({ sessions: [] as FakeSession[] }));
 
@@ -24,6 +25,7 @@ vi.mock('../../src/HarnessFactory', () => ({
       close() { s.closed = true; }, interrupt: async () => {}, getContextUsage: async () => null,
       getUsageSnapshot: async () => null,
       mcpServerStatus: async () => s.status ?? [],
+      hostServersChanged: async () => s.hostChanged === true,
     };
     fake.sessions.push(s);
     return s;
@@ -120,5 +122,35 @@ describe('ThreadManager stale MCP detection on send', () => {
     await manager.sendMessage('t1', 'a');
     await manager.sendMessage('t1', 'b');
     expect(fake.sessions).toHaveLength(1);
+  });
+});
+
+describe('ThreadManager stale host-tool servers on a remote thread', () => {
+  const remoteThread = (): Thread => ({
+    ...thread('r1'),
+    remote: { daemonId: 'd1', ownership: 'client', remoteCwd: '/srv/x', lastSeq: 0, ownerClientId: 'c' },
+  } as Thread);
+
+  it('rebuilds at the next turn when a tool server joined the host manifest', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.loadThreads([remoteThread()]);
+    await manager.sendMessage('r1', 'a');
+    await manager.sendMessage('r1', 'b'); // nothing new -> reuse
+    expect(fake.sessions).toHaveLength(1);
+
+    fake.sessions[0].hostChanged = true; // e.g. vercel was switched on for this daemon
+    await manager.sendMessage('r1', 'c');
+    expect(fake.sessions[0].closed).toBe(true);
+    expect(fake.sessions).toHaveLength(2);
+  });
+
+  it('does not rebuild a remote session mid-turn', async () => {
+    const manager = new ThreadManager(DEFAULT_SETTINGS);
+    manager.loadThreads([remoteThread()]);
+    await manager.sendMessage('r1', 'a');
+    fake.sessions[0].hostChanged = true;
+    fake.sessions[0].turnInFlight = true;
+    await manager.sendMessage('r1', 'b');
+    expect(fake.sessions[0].closed).toBe(false);
   });
 });

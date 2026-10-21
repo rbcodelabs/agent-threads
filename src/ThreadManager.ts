@@ -1472,8 +1472,9 @@ export class ThreadManager {
    * proxy-owned config differs from what the session was built with.
    */
   private async sessionMcpStale(threadId: string, session: HarnessSession): Promise<boolean> {
+    // A remote thread's proxied servers go through the host-tool manifest, not MCP config: rebuild when a server joins it.
+    if (this.threads.get(threadId)?.remote) return (await session.hostServersChanged?.()) === true;
     if (!this.proxyMcpServersForThread) return false;
-    if (this.threads.get(threadId)?.remote) return false; // proxied MCP servers are not forwarded to a daemon yet
     const signature = this.proxyMcpSignature(threadId);
     const built = this.sessionMcpSignatures.get(session);
     if (built === undefined) { this.sessionMcpSignatures.set(session, signature); return false; }
