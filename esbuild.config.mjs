@@ -24,6 +24,13 @@ const ctx = await esbuild.context({
       build.onResolve({ filter: /^@anthropic-ai\/claude-agent-sdk$/ }, () => ({
         path: require.resolve('@anthropic-ai/claude-agent-sdk/core'),
       }));
+      // pkce-challenge's node entry contains a literal `import("node:crypto")` fallback.
+      // Geode mobile's plugin preflight rejects any dynamic import, so the plugin fails to
+      // load there. The browser entry uses globalThis.crypto, which Electron, Node 20+ and
+      // mobile webviews all provide.
+      build.onResolve({ filter: /^pkce-challenge$/ }, () => ({
+        path: path.join(__dirname, 'node_modules/pkce-challenge/dist/index.browser.js'),
+      }));
     },
   }],
   external: [
@@ -53,6 +60,7 @@ const ctx = await esbuild.context({
     '@codemirror/tooltip',
     '@codemirror/view',
   ],
+  inject: [path.join(__dirname, 'scripts/buffer-inject.js')],
   format: 'cjs',
   target: 'es2020',
   platform: 'node',
@@ -66,7 +74,9 @@ const ctx = await esbuild.context({
   // When bundled to CJS, esbuild sets import_meta={} so import_meta.url===undefined,
   // crashing the plugin on load. Define import.meta.url at runtime via __filename.
   banner: {
-    js: 'var __importMetaUrl = typeof __filename !== "undefined" ? require("url").pathToFileURL(__filename).href : "file:///plugin/main.js";',
+    // Mobile shims first (wraps `require`), then the import.meta.url definition.
+    js: fs.readFileSync(path.join(__dirname, 'scripts/mobile-node-shims.js'), 'utf8') + '\n' +
+      'var __importMetaUrl = typeof __filename !== "undefined" ? require("url").pathToFileURL(__filename).href : "file:///plugin/main.js";',
   },
   define: {
     'import.meta.url': '__importMetaUrl',
