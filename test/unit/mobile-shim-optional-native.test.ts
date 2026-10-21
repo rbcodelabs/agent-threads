@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
  */
 function loadShim(hostRequire: (id: string) => unknown): (id: string) => unknown {
   const code = readFileSync(join(__dirname, '../../scripts/mobile-node-shims.js'), 'utf8');
-  const ctx = vm.createContext({ require: hostRequire, globalThis: undefined, console });
+  const ctx = vm.createContext({ require: hostRequire, console });
   return vm.runInContext(`${code}\nrequire`, ctx) as (id: string) => unknown;
 }
 
