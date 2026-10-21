@@ -9,6 +9,7 @@ const log=[];
 const hostReq=(s)=>{ if(s==='obsidian'||s==='geode'||/^@(codemirror|lezer)\//.test(s)) return stub; log.push(s); throw new Error('Mobile plugin "claude-threads" cannot load unsupported module "'+s+'".'); };
 const ctx=vm.createContext({console,TextEncoder,TextDecoder,URL,URLSearchParams,setTimeout,clearTimeout,setInterval,clearInterval,queueMicrotask,fetch,crypto:globalThis.crypto,performance,AbortController,Event,EventTarget,atob,btoa,structuredClone,DOMException,Blob,File:globalThis.File,FormData,Headers,Request,Response,ReadableStream,WritableStream,TransformStream,WebSocket:globalThis.WebSocket,MessageChannel,BroadcastChannel:globalThis.BroadcastChannel,CustomEvent:globalThis.CustomEvent,navigator:{userAgent:'iPhone'}});
 ctx.window=ctx; ctx.self=ctx; ctx.globalThis=ctx;
+vm.runInContext('delete globalThis.SharedArrayBuffer; delete globalThis.Atomics;',ctx); // WKWebView has neither
 const fn=vm.runInContext('(function(module,exports,require,fetch){"use strict";\n'+code+'\n})',ctx);
 const m={exports:{}};
 try{ fn(m,m.exports,hostReq,fetch); const c=m.exports.default??m.exports; console.log('LOADED; export:',typeof c); }
