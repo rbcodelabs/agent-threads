@@ -70,6 +70,25 @@ This syncs the worktree to dev-builder, rebuilds the harness and runs Playwright
 
 ---
 
+## Mobile gate (any release that touches the bundle, build config, or dependencies)
+
+Geode mobile loads `main.js` in WKWebView with a restricted `require` (no Node builtins, no `SharedArrayBuffer`,
+no dynamic `import()`, 16 MiB cap). Node's V8 is NOT a valid stand-in — v0.70.3 passed a V8-only check and failed on
+device. Before tagging, and again against the **published** assets before updating the geode-site catalog entry:
+
+```bash
+npx playwright install webkit              # once; Linux also needs `sudo npx playwright install-deps webkit`
+# Geode checkout with `npm ci && npm run build:mobile` done
+export GEODE_DIR=~/projects/geode
+npm run build && npm run check:mobile-load      # Node-free realm, no SharedArrayBuffer/Atomics
+npm run check:mobile-geode                      # real WebKit + real Geode mobile host + wss relay round-trip
+CATALOG=<geode-site>/src/data/supported-plugins.v1.json node scripts/check-mobile-install.mjs <dir with released main.js/manifest.json/styles.css>
+```
+
+All three must print PASS. Never point the catalog at a release that has not passed `check:mobile-install`.
+
+---
+
 ## Step 5 — Quality Gate, Commit, Push, PR
 
 ```bash
