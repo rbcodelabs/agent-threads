@@ -687,6 +687,12 @@ exactly which tools run on your computer (or says none do).
   A change applies to the next thread session you open. Upgrading from a build where host tools
   were on by default: they are now off until you do this. If the daemon holds its own synced copy of the vault leave "Notes in this vault"
   off so the agent uses its file tools on the copy (see "Working in the vault"; the two are different views of the same notes).
+- **MCP resources.** A proxied server's resources (`ListMcpResourcesTool` / `ReadMcpResourceTool`: Compass docs, for example) are
+  forwarded too, as `tool.call` / `tool.result` frames with the reserved tool names `resources/list`, `resources/templates/list` and
+  `resources/read` (no new message type, so older daemons and plugins interoperate: an older plugin answers "not offered" and an older
+  daemon never asks). They are read-only, need no approval card, and are allowed only for a server in the manifest this client sent. Results
+  are bounded like tool results (500 entries, 100,000 characters, text only: binary blobs become a one-line note). A server with no
+  resources lists as empty. The `claude_threads` server has none.
 - **Seat and manifest.** Only the client that holds the thread's read-write seat acts on `tool.call`; a second install or
   a terminal viewing the thread ignores it. The daemon treats a thread as having host tools only while the seat holder is
   the connection that sent the current manifest, so after a terminal claims the seat (`attach --claim`, `run --thread`) a

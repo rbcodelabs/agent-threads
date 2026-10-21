@@ -10,6 +10,9 @@
  *   /permission                   open a permission_request, finish after resolve.permission
  *   /question | /plan | /elicitation   same shape with a question_request / plan_ready / elicitation_request
  *   /mcp-list <server>            list the tools the host MCP server <server> offers (as the model would see them)
+ *   /mcp-res-list <server>        list the MCP resources the host server <server> offers
+ *   /mcp-res-templates <server>   list its resource templates
+ *   /mcp-res-read <server> <uri>  read one resource
  *   /mcp <server> <tool> [json]   call a tool on a host MCP server through a real MCP client, i.e. the same
  *                                 handlers Claude reaches (local worktree tools run here, host tools are proxied)
  *   anything else                 echo "echo: <text>" word by word
@@ -32,7 +35,7 @@ export function fakeTokenText(i: number, size = 0): string {
 }
 
 interface ParsedScript {
-  kind: 'tokens' | 'hang' | 'mcp' | 'mcp-list' | RequestScript | 'echo';
+  kind: 'tokens' | 'hang' | 'mcp' | 'mcp-list' | 'mcp-res' | RequestScript | 'echo';
   count: number;
   size: number;
   burst: number;
@@ -51,6 +54,7 @@ function parseScript(text: string): ParsedScript {
     const n = Number(rest[0]);
     return { kind: 'tokens', count: Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0, size: opt('size', 0), burst: opt('burst', 10), delay: opt('delay', 0), text };
   }
+  if (head === '/mcp-res-list' || head === '/mcp-res-templates' || head === '/mcp-res-read') return { kind: 'mcp-res', count: 0, size: 0, burst: 1, delay: 0, text };
   if (head === '/mcp' || head === '/mcp-list') return { kind: head === '/mcp' ? 'mcp' : 'mcp-list', count: 0, size: 0, burst: 1, delay: 0, text };
   if (head === '/hang') return { kind: 'hang', count: 0, size: 0, burst: 1, delay: 0, text };
   for (const k of REQUEST_SCRIPTS) {
@@ -103,6 +107,7 @@ export class FakeHarnessSession implements SessionDriver {
       case 'tokens': this.streamTokens(script, alive); break;
       case 'mcp':
       case 'mcp-list':
+      case 'mcp-res':
         void this.runMcp(script, alive);
         break;
       case 'hang':
@@ -136,13 +141,13 @@ export class FakeHarnessSession implements SessionDriver {
     this.mcpAbort = new AbortController();
     let out: string;
     // `/mcp delay=MS <server> <tool> ...` waits first, so a test can drop its connection before the call is made.
-    const delayed = /^(\/mcp(?:-list)?)\s+delay=(\d+)\s+/.exec(script.text.trim());
+    const delayed = /^(\/mcp(?:-list|-res-\w+)?)\s+delay=(\d+)\s+/.exec(script.text.trim());
     const text = delayed ? script.text.trim().replace(/\s+delay=\d+/, '') : script.text;
     if (delayed) await new Promise((r) => setTimeout(r, Number(delayed[2])));
     if (!alive()) return;
     try {
       this.hostServers ??= buildHostServers(this.ctx);
-      const m = /^\/mcp(?:-list)?\s+(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(text.trim());
+      const m = /^\/mcp(?:-list|-res-\w+)?\s+(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(text.trim());
       const server = m?.[1] ? this.hostServers.servers[m[1]] : undefined;
       if (!server) {
         out = `mcp error: no server "${m?.[1] ?? ''}" (have: ${Object.keys(this.hostServers.servers).join(', ') || 'none'})`;
@@ -152,7 +157,12 @@ export class FakeHarnessSession implements SessionDriver {
         const client = new Client({ name: 'fake-harness', version: '1.0.0' });
         await client.connect(clientSide);
         try {
-          if (script.kind === 'mcp-list') {
+          if (script.kind === 'mcp-res') {
+            const op = /^\/mcp-res-(\w+)/.exec(text.trim())![1];
+            if (op === 'list') out = `resources: ${JSON.stringify((await client.listResources()).resources)}`;
+            else if (op === 'templates') out = `templates: ${JSON.stringify((await client.listResourceTemplates()).resourceTemplates)}`;
+            else out = `resource: ${JSON.stringify((await client.readResource({ uri: m![2] })).contents)}`;
+          } else if (script.kind === 'mcp-list') {
             out = `tools: ${(await client.listTools()).tools.map((t) => t.name).sort().join(',')}`;
           } else {
             const args = m?.[3]?.trim() ? JSON.parse(m[3]) : {};

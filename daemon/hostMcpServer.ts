@@ -11,9 +11,15 @@
  */
 import type { McpSdkServerConfigWithInstance, SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolRequestSchema, ErrorCode, ListResourceTemplatesRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema,
+  McpError, ReadResourceRequestSchema, type CallToolResult,
+} from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import type { RemoteHostToolSpec } from '../src/protocol';
+import {
+  HOST_RESOURCE_TOOLS, checkResourceUri, decodeResourceContents, decodeResourceList, decodeResourceTemplates,
+  type RemoteHostToolSpec, type ResourceDecode,
+} from '../src/protocol';
 import type { HostToolOutcome } from './hostTools';
 
 export interface HostMcpServerHandle {
@@ -30,6 +36,12 @@ export interface HostMcpServerOptions {
   proxied(): readonly RemoteHostToolSpec[];
   /** Run one proxied tool in the host. Never rejects. */
   call(tool: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<HostToolOutcome>;
+  /**
+   * Also serve the MCP resources of this proxied server (`resources/list`, `resources/templates/list`,
+   * `resources/read`) by asking the host through `call` with the reserved resource tool names. Off for the
+   * `claude_threads` server, whose tools are the app's own and have no resources.
+   */
+  resources?: boolean;
 }
 
 /**
@@ -48,7 +60,7 @@ function toResult(outcome: HostToolOutcome): CallToolResult {
 
 export function createHostMcpServer(opts: HostMcpServerOptions): HostMcpServerHandle {
   const local = new Map((opts.local ?? []).map((d) => [d.name, d]));
-  const instance = new McpServer({ name: `agent-threads-host-${opts.name}`, version: '1.0.0' }, { capabilities: { tools: { listChanged: true } } });
+  const instance = new McpServer({ name: `agent-threads-host-${opts.name}`, version: '1.0.0' }, { capabilities: { tools: { listChanged: true }, ...(opts.resources ? { resources: {} } : {}) } });
 
   instance.server.setRequestHandler(ListToolsRequestSchema, async () => {
     const tools = [...local.values()].map((d) => ({
@@ -82,6 +94,29 @@ export function createHostMcpServer(opts: HostMcpServerOptions): HostMcpServerHa
     }
     return toResult(await opts.call(name, args, extra.signal));
   });
+
+  if (opts.resources) {
+    // The host answers with JSON text (`encodeResource*`); anything it cannot serve is an MCP error the model reads.
+    const ask = async <T>(tool: string, input: Record<string, unknown>, decode: (text: string) => ResourceDecode<T>, signal: AbortSignal): Promise<T> => {
+      if (opts.proxied().length === 0) throw new McpError(ErrorCode.InvalidRequest, `The host server "${opts.name}" is not available in this session.`);
+      const outcome = await opts.call(tool, input, signal);
+      if (!outcome.success) throw new McpError(ErrorCode.InternalError, outcome.text);
+      const decoded = decode(outcome.text);
+      if (!decoded.ok) throw new McpError(ErrorCode.InternalError, decoded.error);
+      return decoded.value;
+    };
+    instance.server.setRequestHandler(ListResourcesRequestSchema, async (_request, extra) => ({
+      resources: await ask(HOST_RESOURCE_TOOLS.list, {}, decodeResourceList, extra.signal),
+    }));
+    instance.server.setRequestHandler(ListResourceTemplatesRequestSchema, async (_request, extra) => ({
+      resourceTemplates: await ask(HOST_RESOURCE_TOOLS.templates, {}, decodeResourceTemplates, extra.signal),
+    }));
+    instance.server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) => {
+      const bad = checkResourceUri(request.params.uri);
+      if (bad) throw new McpError(ErrorCode.InvalidParams, bad);
+      return { contents: await ask(HOST_RESOURCE_TOOLS.read, { uri: request.params.uri }, decodeResourceContents, extra.signal) };
+    });
+  }
 
   return {
     config: { type: 'sdk', name: opts.name, instance } as McpSdkServerConfigWithInstance,
