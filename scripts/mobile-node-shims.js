@@ -163,6 +163,10 @@ var require = (function (__hostRequire) {
     } catch (e) {
       var bare = String(id).replace(/^node:/, '');
       if (cache[bare]) return cache[bare];
+      // Optional native accelerators that `ws` probes inside try/catch: they MUST keep throwing, or `ws` takes the
+      // stub as the real addon and its first `send()` dies with "bufferutil.mask is not available" (hello never
+      // leaves the plugin; the daemon times out and the UI says "rejected the access token").
+      if (bare === 'bufferutil' || bare === 'utf-8-validate') throw e;
       return (cache[bare] = overrides[bare] || deepStub(bare));
     }
   }
