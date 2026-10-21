@@ -7,7 +7,7 @@ import {
   matchesHostExecPrefix,
   tokenizeSimpleCommand,
 } from '../../src/hostExecPrefix';
-import { describeCallForApproval } from '../../src/remote/hostToolExecutor';
+import { APPROVAL_DETAIL_LIMIT, describeCallForApproval } from '../../src/remote/hostToolExecutor';
 import { DEFAULT_SETTINGS } from '../../src/types';
 import { canAlwaysAllow, isPermissionPreApproved, isHostExecPermission } from '../../src/toolNameUtils';
 
@@ -118,7 +118,7 @@ describe('card offer', () => {
     expect(hostExecAlwaysAllowOffer({ toolName: 'Bash', detail: detail('ls') })).toBeNull();
     expect(hostExecAlwaysAllowOffer({ toolName: 'mcp__claude_threads__vault_search', detail: detail('ls') })).toBeNull();
     expect(hostExecAlwaysAllowOffer({ toolName: CARD, detail: 'not json' })).toBeNull();
-    expect(hostExecAlwaysAllowOffer({ toolName: CARD, detail: detail('ls ' + 'x'.repeat(5000)) })).toBeNull();
+    expect(hostExecAlwaysAllowOffer({ toolName: CARD, detail: detail('ls ' + 'x'.repeat(APPROVAL_DETAIL_LIMIT + 1000)) })).toBeNull();
     expect(hostExecAlwaysAllowOffer(null)).toBeNull();
   });
   it('adds a prefix once', () => {

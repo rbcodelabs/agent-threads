@@ -40,9 +40,17 @@ function stringifyValue(v: unknown): string {
   return String(v);
 }
 
+/** Remote host-tool cards read `Run <tool> for a remote thread: <JSON input>`; the JSON is shown as fields, in full. */
+const REMOTE_CALL_DETAIL = /^Run (\S+) for a remote thread: (\{[\s\S]*\})$/;
+
 export function parsePermissionDetail(detail: string): ParsedPermissionDetail {
   const text = (detail ?? '').trim();
   if (!text) return { summary: '', fields: null };
+  const remote = REMOTE_CALL_DETAIL.exec(text);
+  if (remote) {
+    const inner = parsePermissionDetail(remote[2]);
+    if (inner.fields) return { ...inner, summary: truncate(`${remote[1]}: ${inner.summary}`, SUMMARY_MAX) };
+  }
 
   if (text.startsWith('{')) {
     try {

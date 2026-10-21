@@ -123,11 +123,10 @@ describe('host_exec saved-prefix approval on the managed daemon', () => {
     }
   });
 
-  it('input too long to show on the card is refused even when its prefix is saved', async () => {
+  it('input too long for any card still runs when its prefix is saved: no card is shown, so nothing is unseen', async () => {
     const t = await rig({ prefixes: ['echo'] });
-    const r = await t.call('echo ' + 'x'.repeat(5000));
-    expect(r.success).toBe(false);
-    expect(r.text).toMatch(/too long to show/);
-    expect(t.run).not.toHaveBeenCalled();
+    const r = await t.call('echo ' + 'x'.repeat(100_000));
+    expect(r.success).toBe(true);
+    expect(t.run).toHaveBeenCalledOnce();
   });
 });
