@@ -358,7 +358,7 @@ export class ThreadHost {
   }
 
   /** `tool.result`: the client's answer to a `tool.call`. Only a call made for THIS thread can be answered. */
-  toolResult(threadId: string, callId: string, result: { success: boolean; text: string; content?: unknown[] }, by: string): void {
+  toolResult(threadId: string, callId: string, result: { success: boolean; text: string; content?: unknown[]; structuredContent?: unknown }, by: string): void {
     this.requireThread(threadId);
     if (!this.hostTools.resolve(threadId, callId, result, by)) {
       throw new HostError('not_found', `no pending host tool call ${callId} for this thread`);

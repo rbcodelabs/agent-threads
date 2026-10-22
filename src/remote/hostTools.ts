@@ -16,7 +16,7 @@
 import type { HarnessDynamicTool } from '../HarnessSession';
 import {
   HOST_RESOURCE_TOOLS, HOST_TOOL_LIMITS, checkResourceUri, encodeResourceContents, encodeResourceList, encodeResourceTemplates,
-  isHostResourceTool, validateHostToolSpec, type RemoteHostToolSpec,
+  isHostResourceTool, asStructuredContent, validateHostToolSpec, type RemoteHostToolSpec,
 } from '../protocol';
 import { routeFor, type RouteOverrides } from '../toolRouting';
 import type { HostMcpSource } from './hostMcpClient';
@@ -32,6 +32,8 @@ export interface HostToolOutput {
   text: string;
   /** Image blocks (MCP shape) to hand the model alongside the text. */
   content?: Array<Record<string, unknown>>;
+  /** The tool's MCP `structuredContent`, when it returned a plain object; see `run` of the proxied tools. */
+  structuredContent?: Record<string, unknown>;
 }
 
 export interface RemoteHostToolsDeps {
@@ -149,7 +151,14 @@ export class RemoteHostTools {
           run: async (input, signal) => {
             const r = await source.callTool(t.name, input, signal);
             const { text, images } = flatten(r.content ?? []);
-            return { success: r.isError !== true, text, ...(images.length ? { content: images } : {}) };
+            // `structuredContent` is forwarded unconditionally when the server returned it (never `_meta`). The Claude CLI
+            // then gives the model JSON.stringify(structuredContent) INSTEAD of the text blocks, exactly as it does for
+            // the same MCP server connected directly in a local thread, so a remote thread sees what a local one sees
+            // (some tools, e.g. an upload token, return data ONLY there). Gating it would leave those tools unusable;
+            // a server that wants a terse text result simply should not set it. Passed through unchanged; the executor
+            // only checks that it fits the frame (`fitStructuredContent`).
+            const structuredContent = asStructuredContent(r.structuredContent);
+            return { success: r.isError !== true, text, ...(images.length ? { content: images } : {}), ...(structuredContent ? { structuredContent } : {}) };
           },
         });
       }

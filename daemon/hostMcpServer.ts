@@ -55,7 +55,9 @@ function toResult(outcome: HostToolOutcome): CallToolResult {
   for (const block of outcome.content ?? []) {
     if (block.type === 'image') content.push({ type: 'image', data: block.data, mimeType: block.mimeType });
   }
-  return { content, ...(outcome.success ? {} : { isError: true }) };
+  // The Claude CLI hands the model JSON.stringify(structuredContent) instead of the text blocks when it is set, which
+  // is what a directly connected MCP server gets too. `isError` is independent of it.
+  return { content, ...(outcome.structuredContent ? { structuredContent: outcome.structuredContent } : {}), ...(outcome.success ? {} : { isError: true }) };
 }
 
 export function createHostMcpServer(opts: HostMcpServerOptions): HostMcpServerHandle {

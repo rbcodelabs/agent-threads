@@ -26,6 +26,7 @@ import {
   isHostResourceTool,
   manifestSignature,
   sanitizeResultContent,
+  asStructuredContent,
   type RemoteHostToolSpec,
   type ResultBlock,
   type WireEvent,
@@ -35,6 +36,8 @@ export interface HostToolOutcome {
   success: boolean;
   text: string;
   content?: ResultBlock[];
+  /** MCP `structuredContent` from the host tool: a bounded plain JSON object, or absent. Never journaled or audited. */
+  structuredContent?: Record<string, unknown>;
 }
 
 export interface HostToolBrokerOptions {
@@ -193,14 +196,16 @@ export class HostToolBroker {
    * The client answered. Only a call that is open, issued, and bound to THIS thread resolves; anything else
    * (unknown id, another thread's id, a repeat) is refused.
    */
-  resolve(threadId: string, callId: string, result: { success: boolean; text: string; content?: unknown[] }, by: string): boolean {
+  resolve(threadId: string, callId: string, result: { success: boolean; text: string; content?: unknown[]; structuredContent?: unknown }, by: string): boolean {
     const p = this.pending.get(callId);
     if (!p || p.threadId !== threadId || !p.issued || p.done) return false;
     const { text, truncated } = clampResultText(result.text);
     const content = sanitizeResultContent(result.content);
-    this.finish(callId, p, { success: result.success === true, text, ...(content.length ? { content } : {}) });
+    // Passed through unchanged; the frame limit already bounded it. Only a non-object is treated as absent.
+    const structuredContent = asStructuredContent(result.structuredContent);
+    this.finish(callId, p, { success: result.success === true, text, ...(content.length ? { content } : {}), ...(structuredContent ? { structuredContent } : {}) });
     this.opts.emit(threadId, { name: 'request_resolved', args: { requestId: callId, by, outcome: 'resolved' } });
-    this.opts.audit?.({ event: 'host_tool_result', threadId, server: p.server, tool: p.tool, ok: result.success === true, chars: result.text.length, truncated, blocks: content.length });
+    this.opts.audit?.({ event: 'host_tool_result', threadId, server: p.server, tool: p.tool, ok: result.success === true, chars: result.text.length, truncated, blocks: content.length, ...(structuredContent ? { structured: true } : {}) });
     return true;
   }
 

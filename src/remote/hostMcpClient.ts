@@ -19,6 +19,8 @@ export interface McpToolInfo {
 export interface McpCallResult {
   isError?: boolean;
   content: Array<Record<string, unknown>>;
+  /** MCP structured output; passed through as is. */
+  structuredContent?: unknown;
 }
 
 export interface McpResourceInfo { uri: string; name?: string; description?: string; mimeType?: string }

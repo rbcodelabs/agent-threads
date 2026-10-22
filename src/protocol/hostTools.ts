@@ -207,6 +207,37 @@ export function sanitizeResultContent(content: unknown): ResultBlock[] {
   return out;
 }
 
+/**
+ * MCP `structuredContent`, passed through unchanged (no copy, no filtering, no size policy of its own). The one guard:
+ * MCP types it as an object, and the receiving MCP server's `CallToolResult` schema rejects anything else, which would
+ * fail the whole call; a non-object is treated as absent so the call still returns its text.
+ */
+export function asStructuredContent(value: unknown): Record<string, unknown> | undefined {
+  return isPlainObject(value) ? value : undefined;
+}
+
+/**
+ * Fit a result's `structuredContent` into the frame. Its serialized size counts against `maxResultFrameChars` (the
+ * same budget a `tool.result` text may use at most; measured in UTF-8 bytes, which is what the transport limit of
+ * `MAX_FRAME_BYTES` counts). Text is clamped by `clampResultText` and images by `sanitizeResultContent`, so
+ * structured content was the one unbounded part of a frame; with 8 MB here, 4 MB of images and the clamped text the
+ * frame stays under the 16 MB transport limit.
+ *
+ * Over budget (or not serializable, which could not be sent anyway) JSON cannot be cut, so it is left out and the text
+ * says so, the same way over-long text is cut with `TRUNCATION_MARKER`: the model is told, and the call does not fail.
+ */
+export function fitStructuredContent(structured: Record<string, unknown> | undefined, text: string): { text: string; structuredContent?: Record<string, unknown> } {
+  if (!structured) return { text };
+  let bytes: number;
+  try { bytes = new TextEncoder().encode(JSON.stringify(structured)).length; } catch { bytes = Number.POSITIVE_INFINITY; }
+  if (bytes <= HOST_TOOL_LIMITS.maxResultFrameChars) return { text, structuredContent: structured };
+  const size = Number.isFinite(bytes) ? `${bytes} bytes` : 'not serializable';
+  return { text: `${text}${STRUCTURED_OMITTED_MARKER(size)}` };
+}
+
+export const STRUCTURED_OMITTED_MARKER = (size: string): string =>
+  `\n[... structured output omitted: it is ${size}, over the ${HOST_TOOL_LIMITS.maxResultFrameChars}-byte limit for a proxied tool result ...]`;
+
 /** The text the model reads when a host tool cannot run because Geode is not connected. */
 export function hostUnavailableText(tool: string, graceSec: number, why: 'detached' | 'timeout' | 'canceled' = 'detached'): string {
   if (why === 'timeout') {

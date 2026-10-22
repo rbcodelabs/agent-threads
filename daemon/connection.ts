@@ -563,7 +563,7 @@ export class Connection {
       case 'tool.result':
         // Only the client holding this thread's seat can answer, and only a call made for this thread.
         this.requireSeat(frame.threadId);
-        host.toolResult(frame.threadId, frame.callId, { success: frame.success, text: frame.text, content: frame.content }, auth.id);
+        host.toolResult(frame.threadId, frame.callId, { success: frame.success, text: frame.text, content: frame.content, structuredContent: frame.structuredContent }, auth.id);
         return {};
       case 'creds.push': {
         let result;

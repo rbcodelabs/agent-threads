@@ -699,6 +699,15 @@ exactly which tools run on your computer (or says none do).
   call fails after the grace period with the "your computer is not connected" message instead of waiting for an answer
   that cannot come. Results are cut at 100,000 characters (with a marker), images are bounded, and a large screenshot is
   dropped rather than allowed to exceed the frame limit.
+  **Structured output.** A proxied MCP tool's `structuredContent` is passed through unchanged in an optional `structuredContent` field
+  of `tool.result` and returned to the model next to the text and images (`_meta` is not sent). The Claude CLI shows the model that
+  JSON *instead of* the text blocks, as it does for the same server connected directly, so tools that return data only there (for
+  example an upload token) work from a thread. The only limit is the wire's: its serialized size must fit within 8,000,000 bytes
+  (text is cut at 100,000 characters and images at 4 MB, so a frame stays under the 16 MB transport limit). Past that it is left out,
+  since JSON cannot be cut, and the text gets a marker saying so; the call does not fail. A value that is not an object is treated as
+  absent. It is additive (no capability or protocol bump): an older daemon ignores the field, an older plugin never sends it. The
+  audit log records only that it was present, and the journal never holds a result. Claude threads only: Codex and OpenCode adapters
+  still read the text.
 - **Your MCP servers.** By default servers that start a program on your computer (stdio), use an address on your computer, or
   need a secret from your keychain cannot work on the daemon and are not sent; a server with headers (usually credentials) is
   sent only if you list it under "MCP servers it may receive". Dropped servers are counted in a yellow warnings pill beside the connection pill in the thread header; hover or click it to see
