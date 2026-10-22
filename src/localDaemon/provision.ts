@@ -30,6 +30,7 @@ import {
   inspectContainerArgs,
   localImageRef,
   logsArgs,
+  bootLogArgs,
   prepareArgs,
   publishedImageRef,
   pullArgs,
@@ -59,6 +60,8 @@ import {
   redactSecrets,
   tail,
   type InspectedContainer,
+  type LastRunExit,
+  parseBootLogExit,
 } from './parse';
 
 export type LocalDaemonErrorCode =
@@ -354,6 +357,16 @@ export async function logTail(d: StepDeps, vaultPath: string): Promise<string> {
     return tail(text(r), 20);
   } catch {
     return '(no log available)';
+  }
+}
+
+/** How the stopped container's last run ended (see `parseBootLogExit`). Null when the boot log is unavailable. Never throws. */
+export async function lastRunExit(d: StepDeps, vaultPath: string): Promise<LastRunExit | null> {
+  try {
+    const r = await d.runner(bootLogArgs(containerNameFor(vaultPath)), { timeoutMs: SHORT_TIMEOUT_MS, signal: d.signal });
+    return r.exitCode === 0 ? parseBootLogExit(r.stdout) : null;
+  } catch {
+    return null;
   }
 }
 

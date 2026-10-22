@@ -339,6 +339,8 @@ export interface LocalDaemonSettings {
   memory?: string;
   /** CPUs of the container, a whole number 1-64 (default 4). Applied when the container is created (Update). */
   cpus?: number;
+  /** Auto-recover a wedged daemon (see localDaemon/watchdog.ts). Absent = on; `false` turns it off. */
+  watchdog?: boolean;
 }
 
 /** Per-daemon choices for tools that run on this computer on a remote thread's behalf. */

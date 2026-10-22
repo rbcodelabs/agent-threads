@@ -546,6 +546,10 @@ export function removeContainerArgs(name: string): string[] {
 export function logsArgs(name: string): string[] {
   return ['logs', name];
 }
+/** The VM boot log (kernel + vminitd): the only place Apple `container` 1.5.0 records how the last run ended. */
+export function bootLogArgs(name: string, lines = 500): string[] {
+  return ['logs', '--boot', '-n', String(lines), name];
+}
 
 const EXEC_AS_DAEMON = (name: string): string[] => ['exec', '--user', String(DAEMON_UID), name, 'agent-threads'];
 
