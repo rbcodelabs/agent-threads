@@ -19,6 +19,8 @@ export interface McpToolInfo {
 export interface McpCallResult {
   isError?: boolean;
   content: Array<Record<string, unknown>>;
+  /** MCP structured output; untrusted shape until `sanitizeStructuredContent`. */
+  structuredContent?: unknown;
 }
 
 export interface McpResourceInfo { uri: string; name?: string; description?: string; mimeType?: string }

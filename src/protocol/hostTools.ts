@@ -33,6 +33,8 @@ export const HOST_TOOL_LIMITS = {
   /** Structured content blocks kept from one result (images), and their total serialized size. */
   maxResultContentBlocks: 8,
   maxResultContentBytes: 4 * 1024 * 1024,
+  /** Serialized `structuredContent` of one result; larger is dropped whole (JSON cannot be cut), the text still goes. */
+  maxStructuredContentChars: 100_000,
   /** Calls the daemon keeps open per thread, and the plugin accepts at once per thread. */
   maxConcurrentCallsPerThread: 8,
   /** Calls the plugin accepts at once across all its threads. */
@@ -201,6 +203,25 @@ export function sanitizeResultContent(content: unknown): ResultBlock[] {
     }
   }
   return out;
+}
+
+/**
+ * The MCP `structuredContent` of a tool result, if it may reach the model: a plain JSON object that serializes to at
+ * most `maxStructuredContentChars`. Anything else (array, scalar, cyclic, oversized) is dropped and the call
+ * degrades to the text-only result it had before; it never fails the call.
+ *
+ * Returned as a JSON round-trip copy, so nothing but JSON data (no prototypes, functions or shared references)
+ * crosses the wire or reaches the model.
+ */
+export function sanitizeStructuredContent(value: unknown): Record<string, unknown> | undefined {
+  if (!isPlainObject(value)) return undefined;
+  let json: string | undefined;
+  try { json = JSON.stringify(value); } catch { return undefined; }
+  if (json === undefined || json.length > HOST_TOOL_LIMITS.maxStructuredContentChars) return undefined;
+  try {
+    const copy: unknown = JSON.parse(json);
+    return isPlainObject(copy) ? copy : undefined;
+  } catch { return undefined; }
 }
 
 /** The text the model reads when a host tool cannot run because Geode is not connected. */

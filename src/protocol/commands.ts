@@ -74,7 +74,7 @@ export type ClientCommand =
   | { type: 'resolve.elicitation'; threadId: string; requestId: string; result: Record<string, unknown> }
   | { type: 'resolve.openTab'; threadId: string; requestId: string; openedThreadId: string; title: string }
   // Host tools
-  | { type: 'tool.result'; threadId: string; callId: string; success: boolean; text: string; content?: unknown[] }
+  | { type: 'tool.result'; threadId: string; callId: string; success: boolean; text: string; content?: unknown[]; /** Additive: the tool's MCP `structuredContent` (plain object, bounded). Older daemons ignore it. */ structuredContent?: Record<string, unknown> }
   | { type: 'tool.manifest'; threadId: string; servers: Record<string, RemoteHostToolSpec[]> }
   // Credentials (PR 17)
   | { type: 'creds.push'; kind: string; ttlSec: number; fields: Record<string, string> }

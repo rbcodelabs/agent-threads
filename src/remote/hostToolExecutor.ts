@@ -16,7 +16,7 @@
  * A call id already seen is never run twice: a reopened call that finished gets its stored result re-sent, one
  * still running is left alone.
  */
-import { HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, isHostResourceTool, sanitizeResultContent, type RemoteHostToolSpec } from '../protocol';
+import { HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, isHostResourceTool, sanitizeResultContent, sanitizeStructuredContent, type RemoteHostToolSpec } from '../protocol';
 import type { HostToolOutput } from './hostTools';
 
 /** Calls in flight across all threads; one instance per plugin. */
@@ -44,13 +44,13 @@ export interface HostToolExecutorDeps {
    * tool. Nothing the daemon sends can make it true; it throws or returns false to fall back to the card.
    */
   isPreApproved?(server: string, tool: string, input: Record<string, unknown>): boolean;
-  sendResult(callId: string, result: { success: boolean; text: string; content?: unknown[] }): Promise<void>;
+  sendResult(callId: string, result: { success: boolean; text: string; content?: unknown[]; structuredContent?: Record<string, unknown> }): Promise<void>;
   slots: HostToolSlots;
   now?: () => number;
   log?: (message: string) => void;
 }
 
-type CallState = { state: 'running'; abort: AbortController } | { state: 'done'; result: { success: boolean; text: string; content?: unknown[] } };
+type CallState = { state: 'running'; abort: AbortController } | { state: 'done'; result: { success: boolean; text: string; content?: unknown[]; structuredContent?: Record<string, unknown> } };
 
 const REMEMBERED_CALLS = 64;
 /**
@@ -151,7 +151,7 @@ export class HostToolExecutor {
 
   private async run(callId: string, spec: RemoteHostToolSpec, input: Record<string, unknown>, abort: AbortController): Promise<void> {
     const name = mcpToolName(spec.server, spec.name);
-    let result: { success: boolean; text: string; content?: unknown[] };
+    let result: { success: boolean; text: string; content?: unknown[]; structuredContent?: Record<string, unknown> };
     try {
       if (spec.requiresApproval) {
         let preApproved = false;
@@ -175,7 +175,8 @@ export class HostToolExecutor {
       // Same filter the daemon applies: images only, bounded in count and total size, so one large screenshot
       // cannot push the frame past the transport limit and loop on re-send.
       const sanitized = sanitizeResultContent(out.content);
-      result = { success: out.success, text: clamped.text, ...(sanitized.length ? { content: sanitized } : {}) };
+      const structuredContent = sanitizeStructuredContent(out.structuredContent);
+      result = { success: out.success, text: clamped.text, ...(sanitized.length ? { content: sanitized } : {}), ...(structuredContent ? { structuredContent } : {}) };
     } catch (err) {
       this.deps.log?.(`host tool ${spec.server}/${spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
       result = refusal(`The host tool "${spec.name}" failed.`);
@@ -183,7 +184,7 @@ export class HostToolExecutor {
     this.finish(callId, result);
   }
 
-  private finish(callId: string, result: { success: boolean; text: string; content?: unknown[] }): void {
+  private finish(callId: string, result: { success: boolean; text: string; content?: unknown[]; structuredContent?: Record<string, unknown> }): void {
     this.calls.set(callId, { state: 'done', result });
     // Forget only finished calls: dropping a running entry would let a reopened call run a second time.
     if (this.calls.size > REMEMBERED_CALLS) {
@@ -198,7 +199,7 @@ export class HostToolExecutor {
   /** Answer a call that was refused before it ran (remembered, so a reopen gets the same answer). */
   private answer(callId: string, result: { success: boolean; text: string }): void { this.finish(callId, result); }
 
-  private async send(callId: string, result: { success: boolean; text: string; content?: unknown[] }): Promise<void> {
+  private async send(callId: string, result: { success: boolean; text: string; content?: unknown[]; structuredContent?: Record<string, unknown> }): Promise<void> {
     try { await this.deps.sendResult(callId, result); } catch (err) { this.deps.log?.(`could not send tool.result for ${callId}: ${err instanceof Error ? err.message : String(err)}`); }
   }
 }

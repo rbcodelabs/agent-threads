@@ -216,7 +216,7 @@ export class RemoteHarnessSession implements HarnessSession {
       requestPermission: (name, detail) => (this.callbacks ? this.callbacks.onPermissionRequest(name, detail) : Promise.resolve(false)),
       isPreApproved: (server, tool, input) => tools.isPreApproved(server, tool, input),
       sendResult: async (callId, result) => {
-        await this.client.command('tool.result', { threadId: this.threadId, callId, success: result.success, text: result.text, ...(result.content?.length ? { content: result.content } : {}) });
+        await this.client.command('tool.result', { threadId: this.threadId, callId, success: result.success, text: result.text, ...(result.content?.length ? { content: result.content } : {}), ...(result.structuredContent ? { structuredContent: result.structuredContent } : {}) });
       },
       slots: this.deps.hostToolSlots ?? new HostToolSlots(),
       log: (m) => this.log(m),
