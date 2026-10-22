@@ -17,6 +17,11 @@ export function parseInitMcpServers(value: unknown): McpServerStatusEntry[] | nu
   return out;
 }
 
+/** Servers whose tools are missing from the session: failed or awaiting sign-in. `pending`/`disabled` are not problems. */
+export function mcpAttentionServers(servers: readonly McpServerStatusEntry[]): McpServerStatusEntry[] {
+  return servers.filter((s) => s.status === 'failed' || s.status === 'needs-auth');
+}
+
 /** What the daemon modal says for one server. A server that is not `connected` is called out as a problem. */
 export function describeMcpServer(entry: McpServerStatusEntry): { text: string; ok: boolean } {
   const ok = entry.status === 'connected';

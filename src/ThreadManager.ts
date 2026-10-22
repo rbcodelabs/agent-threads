@@ -34,7 +34,7 @@ import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, 
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { isAuthErrorTranscriptMessage } from './claudeAuthRecovery';
-import type { DaemonMcpStatusStore } from './mcpStatus';
+import { mcpAttentionServers, type DaemonMcpStatusStore } from './mcpStatus';
 import { alwaysAllowScopeFor } from './remoteAlwaysAllow';
 
 type ThreadStateListener = (threadId: string, event: ThreadEvent) => void;
@@ -88,6 +88,7 @@ export type ThreadEvent =
   | { type: 'task_notification'; taskId: string; status: 'completed' | 'failed' | 'stopped'; summary: string }
   | { type: 'background_tasks_pending'; tasks: PendingBackgroundTask[] }
   | { type: 'notification'; text: string; priority: 'low' | 'medium' | 'high' | 'immediate' }
+  | { type: 'mcp_attention'; servers: import('./ClaudeSession').McpServerStatusEntry[] }
   | { type: 'api_retry'; attempt: number; maxRetries: number; error: string }
   | { type: 'permission_denied'; toolName: string; toolUseId: string; message: string; agentId?: string; decisionReasonType?: string }
   | { type: 'rate_limit'; limitStatus: 'allowed' | 'allowed_warning' | 'rejected'; resetsAt?: number }
@@ -3076,7 +3077,11 @@ export class ThreadManager {
       onMemoryRecall: (paths, mode) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'memory_recall', paths, mode }); },
       onMcpServerStatus: (servers) => {
         // A daemon's MCP health is a property of the daemon, shown in its settings; a local session has no such view.
-        if (isCurrentGeneration() && thread.remote) this.daemonMcpStatus?.set(thread.remote.daemonId, servers);
+        if (!isCurrentGeneration()) return;
+        if (thread.remote) { this.daemonMcpStatus?.set(thread.remote.daemonId, servers); return; }
+        // Locally, a dead server silently loses its tools; tell the user instead.
+        const broken = mcpAttentionServers(servers);
+        if (broken.length) this.emit(threadId, { type: 'mcp_attention', servers: broken });
       },
       onCommandsChanged: (commands) => { if (isCurrentGeneration()) this.emit(threadId, { type: 'commands_changed', commands }); },
       onTaskProgressSummary: (taskId, summary) => {
