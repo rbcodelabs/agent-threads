@@ -25,7 +25,7 @@ describe('protocol host-tool rules', () => {
     expect(validateHostToolSpecs([{ ...spec('a'), server: 'x/y' }])).toContain('server');
     expect(validateHostToolSpecs([{ ...spec('a'), requiresApproval: 'no' }])).toContain('requiresApproval');
     expect(validateHostToolSpecs([{ ...spec('a'), inputSchema: { x: 'y'.repeat(70_000) } }])).toContain('too large');
-    expect(validateHostToolSpecs(Array.from({ length: 501 }, (_, i) => spec(`t${i}`)))).toContain('too many');
+    expect(validateHostToolSpecs(Array.from({ length: HOST_TOOL_LIMITS.maxTools + 1 }, (_, i) => spec(`t${i}`)))).toContain('too many');
     expect(validateHostToolSpecs('x')).toContain('array');
   });
   it('validates the manifest form and that keys match', () => {
@@ -458,5 +458,65 @@ describe('loopback MCP source', () => {
     expect((await src.callTool('x', {})).content).toHaveLength(1);
     expect(calls).toEqual(['x']);
     expect(made).toBe(2);
+  });
+});
+
+/** A loopback source with `n` tools whose schema is `schemaChars` of padding (to model a real server's size). */
+const bulkSource = (prefix: string, n: number, schemaChars = 0): HostMcpSource => ({
+  listTools: async () => Array.from({ length: n }, (_, i) => ({
+    name: `${prefix}_${i}`, description: 'd', inputSchema: { type: 'object', properties: schemaChars ? { p: { type: 'string', description: 'x'.repeat(schemaChars) } } : {} },
+  })),
+  callTool: async () => ({ content: [] }), close: async () => undefined,
+});
+
+describe('host-tool manifest caps', () => {
+  it('allows a realistic multi-server manifest (512 tools, as on claude-box) without shedding anything', async () => {
+    const tools = new RemoteHostTools({
+      builtIn: [dyn('vault_search'), dyn('threads_list')],
+      mcpSources: { vercel: bulkSource('v', 238, 1500), compass: bulkSource('c', 197, 1500), 'google-docs': bulkSource('g', 49, 1500), 'hiptrip-new': bulkSource('h', 16, 1500) },
+      overrides: { mcp: 'host', vault: 'host', threads: 'host' },
+    });
+    const m = await tools.manifest();
+    const count = Object.values(m).reduce((n, l) => n + l.length, 0);
+    expect(count).toBe(2 + 238 + 197 + 49 + 16);
+    expect(tools.summary.skipped).toEqual([]);
+    expect(validateManifestServers(m)).toBeNull();
+    expect(JSON.stringify(m).length).toBeLessThan(HOST_TOOL_LIMITS.maxManifestBytes);
+  });
+
+  it('over the tool cap sheds the largest server with a recorded count reason, and the result validates', async () => {
+    const tools = new RemoteHostTools({
+      mcpSources: { big: bulkSource('b', HOST_TOOL_LIMITS.maxTools - 10), small: bulkSource('s', 20) },
+      overrides: { mcp: 'host' },
+    });
+    const m = await tools.manifest();
+    expect(Object.keys(m)).toEqual(['small']);
+    expect(tools.summary.skipped).toEqual([expect.objectContaining({ server: 'big', reason: `too many tools (${HOST_TOOL_LIMITS.maxTools + 10} > ${HOST_TOOL_LIMITS.maxTools})`, notify: true })]);
+    expect(validateManifestServers(m)).toBeNull();
+  });
+
+  it('over the byte cap sheds the largest server by size, never claude_threads', async () => {
+    const chunk = 60_000; // under the per-tool schema limit; 25 of them is 1.5 MB per server
+    const tools = new RemoteHostTools({
+      builtIn: [dyn('vault_search')],
+      mcpSources: { fat: bulkSource('f', 25, chunk), fat2: bulkSource('g', 12, chunk), thin: bulkSource('t', 30) },
+      overrides: { mcp: 'host', vault: 'host' },
+    });
+    const m = await tools.manifest();
+    expect(Object.keys(m).sort()).toEqual(['claude_threads', 'fat2', 'thin']);
+    const shed = tools.summary.skipped.find((s) => s.server === 'fat');
+    expect(shed?.reason).toMatch(/^manifest too large \(/);
+    expect(shed?.notify).toBe(true);
+    expect(validateManifestServers(m)).toBeNull();
+  });
+
+  it('only a shed or failed server is flagged for a user notice, not "not turned on"', async () => {
+    const boom: HostMcpSource = { listTools: async () => { throw new Error('down'); }, callTool: async () => ({ content: [] }), close: async () => undefined };
+    const tools = new RemoteHostTools({ mcpSources: { off: bulkSource('o', 1), flaky: boom, on: bulkSource('n', 1) }, overrides: { 'on': 'host', flaky: 'host' } });
+    await tools.manifest();
+    const bySrv = Object.fromEntries(tools.summary.skipped.map((s) => [s.server, s]));
+    expect(bySrv.off.reason).toBe('not turned on for this daemon');
+    expect(bySrv.off.notify).toBeFalsy();
+    expect(bySrv.flaky.notify).toBe(true);
   });
 });

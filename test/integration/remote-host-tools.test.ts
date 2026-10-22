@@ -8,7 +8,7 @@ import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionCallbacks } from '../../src/ClaudeSession';
 import type { HarnessDynamicTool, HarnessSessionOptions } from '../../src/HarnessSession';
-import { CALLBACK_DISPOSITION } from '../../src/protocol';
+import { CALLBACK_DISPOSITION, HOST_TOOL_LIMITS } from '../../src/protocol';
 import { DaemonClient, type WebSocketFactory } from '../../src/remote/DaemonClient';
 import { RemoteHarnessSession, type RemoteSessionDeps } from '../../src/remote/RemoteHarnessSession';
 import { RemoteHostTools } from '../../src/remote/hostTools';
@@ -278,6 +278,23 @@ describe('host tools: plugin executes what the daemon proxies', () => {
     expect(notices[0]).toContain('Geode');
     expect(r.messages).toHaveLength(0);
     s2.close();
+  });
+
+  it('tells the user when a server was shed for size, naming it and the daemon, but not for "not turned on"', async () => {
+    const td = await daemon();
+    const bulk = (n: number): HostMcpSource => ({
+      listTools: async () => Array.from({ length: n }, (_, i) => ({ name: `t_${i}`, inputSchema: { type: 'object' } })),
+      callTool: async () => ({ content: [] }), close: async () => undefined,
+    });
+    const t = thread('h-shed');
+    const r = recorder();
+    const notices: string[] = [];
+    const hostTools = new RemoteHostTools({ mcpSources: { vercel: bulk(HOST_TOOL_LIMITS.maxTools + 12), compass: bulk(3), unused: bulk(1) }, overrides: { vercel: 'host', compass: 'host' } });
+    const session = new RemoteHarnessSession(client(td), t, { hostTools, onNotice: (_s, text) => notices.push(text), daemonName: 'claude-box', replayedCallSettleMs: 30 });
+    await session.start(options(r));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toBe(`vercel was not sent to claude-box: too many tools (${HOST_TOOL_LIMITS.maxTools + 15} > ${HOST_TOOL_LIMITS.maxTools})`);
+    session.close();
   });
 
   it('does not re-run a call that already finished when its history is replayed', async () => {
