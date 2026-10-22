@@ -11,6 +11,7 @@ import type { LocalDaemonProgress, LocalDaemonSnapshot, SignInHandlers } from '.
 import type { LocalHarness } from './spec';
 import { LocalDaemonAbortedError } from './provision';
 import {
+  DESCRIBE_KILL,
   DESCRIBE_REMOVE,
   DESCRIBE_RESET,
   POSITIONING_NOTE,
@@ -26,6 +27,13 @@ export interface LocalDaemonPanelDeps {
   /** Desktop-only: where this is true, `renderLocalDaemonPanel` renders nothing. */
   isMobile: boolean;
   snapshot(): Promise<LocalDaemonSnapshot>;
+  /**
+   * Cheap facts only (container state, port, healthz; no `exec` probes). Rendered first so the panel is useful
+   * while the full {@link snapshot} is still running, or never finishes because the container VM is wedged.
+   */
+  snapshotQuick?(): Promise<LocalDaemonSnapshot>;
+  /** How long a snapshot may take before the panel gives up on it and shows the recovery buttons. Default 15 s. */
+  snapshotTimeoutMs?: number;
   /** Called on every state or progress change. Returns the unsubscribe. */
   subscribe(listener: () => void): () => void;
   /** Resolves true only on an explicit "Continue". */
@@ -50,6 +58,19 @@ export interface LocalDaemonPanel {
   refresh(): Promise<void>;
 }
 
+const DEFAULT_SNAPSHOT_TIMEOUT_MS = 15_000;
+
+class SnapshotTimeoutError extends Error {
+  constructor(ms: number) { super(`the container runtime did not answer within ${Math.round(ms / 1000)} seconds`); }
+}
+
+/** Buttons that must stay reachable when nothing is known about the daemon: the recovery path for a wedged VM. */
+const RECOVERY_BUTTONS: Array<{ id: LocalDaemonButtonId; label: string; cta?: boolean; danger?: boolean }> = [
+  { id: 'stop', label: 'Stop' },
+  { id: 'restart', label: 'Restart', cta: true },
+  { id: 'kill', label: 'Kill', danger: true },
+];
+
 export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPanelDeps): LocalDaemonPanel {
   if (deps.isMobile) return { el: null, refresh: async () => undefined };
 
@@ -67,6 +88,7 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
   let localError: string | null = null;
   let unsubscribe: (() => void) | null = null;
   let wasConnected = false;
+  let hasRendered = false;
   let refreshing = false;
   let queued = false;
 
@@ -97,13 +119,39 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
       cancel.addEventListener('click', () => deps.cancel());
       return;
     }
-    for (const b of view.buttons) {
-      const btn = actionsEl.createEl('button', {
-        cls: `ct-local-daemon-btn ct-local-daemon-btn-${b.id}${b.cta ? ' mod-cta' : ''}${b.danger ? ' mod-warning' : ''}`,
-        text: b.label,
-      });
-      btn.addEventListener('click', () => { void act(b.id, snap); });
-    }
+    for (const b of view.buttons) addButton(b, snap);
+  };
+
+  const addButton = (b: { id: LocalDaemonButtonId; label: string; cta?: boolean; danger?: boolean }, snap: LocalDaemonSnapshot | null): void => {
+    const btn = actionsEl.createEl('button', {
+      cls: `ct-local-daemon-btn ct-local-daemon-btn-${b.id}${b.cta ? ' mod-cta' : ''}${b.danger ? ' mod-warning' : ''}`,
+      text: b.label,
+    });
+    btn.addEventListener('click', () => { void act(b.id, snap); });
+  };
+
+  /** Status plus the recovery buttons, for when there is no (usable) snapshot: still loading, or it failed. */
+  const renderUnknown = (statusText: string, tone: 'muted' | 'error', detail?: string): void => {
+    statusEl.empty();
+    statusEl.createSpan({ cls: 'ct-local-daemon-status-label', text: 'Status: ' });
+    statusEl.createSpan({ cls: `ct-local-daemon-status-value ct-local-daemon-tone-${tone}`, text: statusText });
+    linesEl.empty();
+    harnessEl.empty();
+    hintEl.setText(tone === 'error' ? 'If the daemon is stuck, Restart tries a graceful stop, then a force kill, then ends the container’s VM process. Kill skips the graceful stop.' : '');
+    const shownError = localError ?? detail ?? '';
+    errorEl.setText(shownError);
+    errorEl.toggleClass('is-visible', shownError.length > 0);
+    progressEl.setText('');
+    actionsEl.empty();
+    for (const b of RECOVERY_BUTTONS) addButton(b, null);
+  };
+
+  const withTimeout = <T,>(p: Promise<T>): Promise<T> => {
+    const ms = deps.snapshotTimeoutMs ?? DEFAULT_SNAPSHOT_TIMEOUT_MS;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new SnapshotTimeoutError(ms)), ms);
+      p.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+    });
   };
 
   const renderHarnesses = (view: ReturnType<typeof buildLocalDaemonView>): void => {
@@ -144,11 +192,20 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
     try {
       do {
         queued = false;
+        let shown = false;
+        // First paint only: later refreshes keep the previous view on screen rather than flashing a loading state.
+        if (!hasRendered) renderUnknown('Checking…', 'muted');
+        if (deps.snapshotQuick) {
+          try { render(await withTimeout(deps.snapshotQuick())); shown = true; hasRendered = true; } catch { /* the full snapshot below reports */ }
+        }
         try {
-          render(await deps.snapshot());
+          render(await withTimeout(deps.snapshot()));
+          hasRendered = true;
         } catch (err) {
-          statusEl.empty();
-          statusEl.createSpan({ text: `Could not check the local daemon: ${err instanceof Error ? err.message : String(err)}` });
+          const why = err instanceof Error ? err.message : String(err);
+          // A quick view already on screen stays (it has the buttons); otherwise show the recovery state.
+          if (!shown) renderUnknown('Can’t reach the daemon', 'error', why);
+          else errorEl.setText(`Some details could not be checked: ${why}`), errorEl.toggleClass('is-visible', true);
         }
       } while (queued);
     } finally {
@@ -156,7 +213,10 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
     }
   };
 
-  const confirmFor = (id: LocalDaemonButtonId, snap: LocalDaemonSnapshot): string | null => {
+  const confirmFor = (id: LocalDaemonButtonId, snap: LocalDaemonSnapshot | null): string | null => {
+    if (id === 'kill') return DESCRIBE_KILL;
+    // Nothing is known about the daemon: Restart is the recovery, so it is always confirmed.
+    if (snap === null) return id === 'restart' ? describeRestart() : null;
     switch (id) {
       case 'setup': return describeSetup(snap);
       case 'update': return describeUpdate(deps.pluginVersion, snap.harnesses);
@@ -167,7 +227,7 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
     }
   };
 
-  const act = async (id: LocalDaemonButtonId, snap: LocalDaemonSnapshot): Promise<void> => {
+  const act = async (id: LocalDaemonButtonId, snap: LocalDaemonSnapshot | null): Promise<void> => {
     localError = null;
     const message = confirmFor(id, snap);
     if (message && !(await deps.confirm(message))) return;

@@ -32,6 +32,7 @@ import {
   inspectContainerArgs,
   localImageRef,
   logsArgs,
+  bootLogArgs,
   prepareArgs,
   publishedImageRef,
   pullArgs,
@@ -39,6 +40,7 @@ import {
   runArgs,
   startContainerArgs,
   stopContainerArgs,
+  killContainerArgs,
   tokenCreateArgs,
   tokenListArgs,
   tokenRevokeArgs,
@@ -60,6 +62,8 @@ import {
   redactSecrets,
   tail,
   type InspectedContainer,
+  type LastRunExit,
+  parseBootLogExit,
 } from './parse';
 
 export type LocalDaemonErrorCode =
@@ -297,6 +301,42 @@ export async function stopContainer(d: StepDeps, vaultPath: string): Promise<voi
   throw failed('stop', 'Stopping the daemon container', r);
 }
 
+const ESCALATION_TIMEOUT_MS = 15_000;
+
+export interface ForceStopOptions {
+  /** Ends the container's VM helper process on the host (`container-runtime-linux`); the last resort for a wedged VM. */
+  killVmHelper?(containerName: string): Promise<void>;
+  /** Skip the graceful `stop` (the Kill button). */
+  skipGraceful?: boolean;
+}
+
+async function isStopped(d: StepDeps, vaultPath: string): Promise<boolean> {
+  const state = await inspectOurContainer(d, vaultPath);
+  return state === 'absent' || (state !== 'foreign' && state.state !== 'running');
+}
+
+/**
+ * Stops the container however it takes: `stop` with a short timeout, then `kill`, then the VM helper process. A
+ * wedged VM (out of memory) ignores `container stop`, so one 60 s attempt would just hang. Never throws for a step
+ * that merely did not work; throws only when the container is still running after every step.
+ */
+export async function forceStopContainer(d: StepDeps, vaultPath: string, opts: ForceStopOptions = {}): Promise<void> {
+  const name = containerNameFor(vaultPath);
+  if (!opts.skipGraceful) {
+    await run(d, stopContainerArgs(name), ESCALATION_TIMEOUT_MS);
+    if (await isStopped(d, vaultPath)) return;
+  }
+  await run(d, killContainerArgs(name), ESCALATION_TIMEOUT_MS);
+  if (await isStopped(d, vaultPath)) return;
+  if (opts.killVmHelper) {
+    try { await opts.killVmHelper(name); } catch { /* reported below if the container is still up */ }
+    // With the helper gone the apiserver can finally reap the container.
+    await run(d, stopContainerArgs(name), ESCALATION_TIMEOUT_MS);
+    if (await isStopped(d, vaultPath)) return;
+  }
+  throw new LocalDaemonError('stop', 'The daemon container did not stop (graceful stop, kill and ending its VM process all failed). Restart the container runtime or this Mac.');
+}
+
 /** Removes OUR container only (the caller has already established ownership). Absent is success. */
 export async function removeContainer(d: StepDeps, vaultPath: string): Promise<void> {
   const r = await run(d, removeContainerArgs(containerNameFor(vaultPath)), VM_LIFECYCLE_TIMEOUT_MS);
@@ -342,6 +382,16 @@ export async function logTail(d: StepDeps, vaultPath: string): Promise<string> {
     return tail(text(r), 20);
   } catch {
     return '(no log available)';
+  }
+}
+
+/** How the stopped container's last run ended (see `parseBootLogExit`). Null when the boot log is unavailable. Never throws. */
+export async function lastRunExit(d: StepDeps, vaultPath: string): Promise<LastRunExit | null> {
+  try {
+    const r = await d.runner(bootLogArgs(containerNameFor(vaultPath)), { timeoutMs: SHORT_TIMEOUT_MS, signal: d.signal });
+    return r.exitCode === 0 ? parseBootLogExit(r.stdout) : null;
+  } catch {
+    return null;
   }
 }
 

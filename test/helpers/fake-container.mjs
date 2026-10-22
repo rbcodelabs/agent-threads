@@ -140,7 +140,8 @@ if (a === 'run') {
 if (a === 'inspect') {
   const c = state.containers[args[1]];
   if (!c) { err('not found'); done(1); }
-  out(JSON.stringify([{ status: c.state, configuration: { id: args[1], labels: c.labels } }]));
+  // Real Apple `container` 1.5.0 shape: status is an object with NO exit code / OOM fields, even when stopped.
+  out(JSON.stringify([{ status: { networks: [], startedDate: '2026-10-22T01:09:11Z', state: c.state }, configuration: { id: args[1], labels: c.labels } }]));
   done(0);
 }
 
@@ -153,14 +154,23 @@ if (a === 'start') {
   c.state = 'running';
   done(0);
 }
-if (a === 'stop') {
+if (a === 'stop' || a === 'kill') {
   const c = state.containers[args[1]];
   if (!c) { err('not found'); done(1); }
+  // stop:wedged / kill:wedged = the VM ignores it until the host helper process is ended (state.helperKilled)
+  if (fails.has(`${a}:wedged`) && !state.helperKilled) { err('timed out'); done(1); }
   c.state = 'stopped';
   done(0);
 }
 if (a === 'rm') {
   delete state.containers[args[args.length - 1]];
+  done(0);
+}
+if (a === 'logs' && args.includes('--boot')) {
+  // Real boot logs are APPENDED to on every start; vminitd lines carry the exit, the kernel dump carries the OOM.
+  const c = state.containers[args[args.length - 1]];
+  if (!c) { err('not found'); done(1); }
+  out((c.bootLog ?? []).join('\n'));
   done(0);
 }
 if (a === 'logs') {

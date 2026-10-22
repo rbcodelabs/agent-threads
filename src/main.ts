@@ -2810,6 +2810,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.register(() => { void this.localDaemonPrep?.stop(); });
     }
     this.register(() => { controller.cancel(); });
+    // Auto-recovers a wedged daemon; the timer is cleared on unload (the container itself keeps running).
+    controller.startWatchdog();
+    this.register(() => { controller.stopWatchdog(); });
   }
 
   /** A client authenticated with the separate admin token, for the commands the everyday control token cannot send. */

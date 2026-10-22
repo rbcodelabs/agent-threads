@@ -29,7 +29,9 @@ import {
   createVolumes,
   credentialFilePresent,
   imagePresent,
+  forceStopContainer,
   inspectOurContainer,
+  lastRunExit,
   logTail,
   mintControlToken,
   prepareVolumes,
@@ -46,6 +48,8 @@ import {
   waitHealthy,
   type StepDeps,
 } from './provision';
+import { looksOutOfMemory } from './parse';
+import { LocalDaemonWatchdog, type WatchdogConfig, type WatchdogState } from './watchdog';
 import { buildRegistration, isRegistrationCurrent, localDaemonUrl, LOCAL_DAEMON_TOKEN_SECRET } from './registration';
 import { installRuntime, readRuntime, startRuntimeService, type RuntimeApi } from './runtime';
 import {
@@ -115,6 +119,11 @@ export interface LocalDaemonDeps {
   signInRunner?(opts: { containerName: string; containerBinaryPath: string } & SignInHandlers): Promise<ContainerSignInResult>;
   /** Runs `codex login --device-auth` in the container. Absent where it cannot run (the panel then shows the manual command). */
   harnessSignInRunner?(opts: { harness: 'codex'; containerName: string; onProgress: (text: string) => void; onUrl: (url: string) => void }): Promise<HarnessLoginResult>;
+  /**
+   * Ends the container's VM helper process (`container-runtime-linux`) on the host: the last resort when a wedged VM
+   * ignores `container stop` and `container kill`. Absent where it cannot run.
+   */
+  killVmHelper?(containerName: string): Promise<void>;
   /** State changed: a UI should re-read {@link LocalDaemonController.getBusy} / take a new snapshot. */
   onChange?(): void;
   log?(message: string): void;
@@ -125,7 +134,7 @@ export interface LocalDaemonDeps {
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
-export type LocalDaemonOpKind = 'setup' | 'start' | 'stop' | 'restart' | 'update' | 'reset' | 'remove' | 'sign-in';
+export type LocalDaemonOpKind = 'setup' | 'start' | 'stop' | 'restart' | 'kill' | 'update' | 'reset' | 'remove' | 'sign-in';
 
 export interface LocalDaemonProgress {
   kind: LocalDaemonOpKind;
@@ -151,6 +160,8 @@ export interface LocalDaemonSnapshot {
   containerBinary?: string;
   busy: LocalDaemonProgress | null;
   lastError: { code: string; message: string } | null;
+  /** Present once the watchdog has been started. */
+  watchdog?: WatchdogState;
 }
 
 export interface RunOptions {
@@ -163,6 +174,7 @@ const OP_LABEL: Record<LocalDaemonOpKind, string> = {
   start: 'Starting the local daemon',
   stop: 'Stopping the local daemon',
   restart: 'Restarting the local daemon',
+  kill: 'Force-stopping the local daemon',
   update: 'Updating the local daemon',
   reset: 'Resetting the local daemon',
   remove: 'Removing the local daemon',
@@ -200,6 +212,10 @@ interface ActiveOp {
 export class LocalDaemonController {
   private op: ActiveOp | null = null;
   private lastError: { code: string; message: string } | null = null;
+  /** This session stopped or killed the container (a SIGKILL exit is then ours, not an out-of-memory kill). */
+  private stoppedByUs = false;
+  private watchdog: LocalDaemonWatchdog | null = null;
+  private opsStarted = 0;
 
   constructor(private readonly deps: LocalDaemonDeps) {}
 
@@ -218,6 +234,11 @@ export class LocalDaemonController {
     for (const l of [...this.listeners]) {
       try { l(); } catch { /* a UI callback must not break the run */ }
     }
+  }
+
+  /** Operations started so far; the watchdog compares it to tell the user's actions from its own. */
+  operationCount(): number {
+    return this.opsStarted;
   }
 
   getBusy(): LocalDaemonProgress | null {
@@ -253,6 +274,7 @@ export class LocalDaemonController {
       this.notify();
     };
     this.op = op;
+    this.opsStarted++;
     op.promise = (async () => {
       try {
         const result = await fn({ signal: controller.signal, emit });
@@ -334,7 +356,7 @@ export class LocalDaemonController {
   }
 
   /** Read-only: facts about the world plus the assessment. Never mutates anything. */
-  async observe(signal?: AbortSignal): Promise<{ observed: Observed; desired: Desired; assessment: Assessment; version: string; port: number; vaultPath: string | null; daemonVersion?: string }> {
+  async observe(signal?: AbortSignal, opts: { quick?: boolean } = {}): Promise<{ observed: Observed; desired: Desired; assessment: Assessment; version: string; port: number; vaultPath: string | null; daemonVersion?: string }> {
     const vaultPath = this.deps.vaultPath();
     await this.refreshExternalRoots(vaultPath);
     const settings = this.settings();
@@ -372,6 +394,10 @@ export class LocalDaemonController {
     const keepVersion = containerVersion !== undefined && assessDaemonVersion(pluginVersion, containerVersion) !== 'required';
     const version = keepVersion ? containerVersion : pluginVersion;
     const running = typeof ours === 'object' && ours.state === 'running';
+    // `inspect` carries no exit facts on Apple `container`, so read the boot log. A stop or kill WE ran also ends in
+    // SIGKILL (137), so only an exit we did not cause counts as out of memory.
+    const lastExit = typeof ours === 'object' && ours.state === 'stopped' && !this.stoppedByUs ? await lastRunExit(d, vaultPath) : null;
+    const stoppedOutOfMemory = lastExit !== null && looksOutOfMemory(lastExit);
     const token = this.deps.secrets.get(LOCAL_DAEMON_TOKEN_SECRET);
 
     let health: Observed['health'] = 'na';
@@ -391,18 +417,23 @@ export class LocalDaemonController {
         }
       }
     }
-    const credentialInVolume = running ? await credentialFilePresent(d, vaultPath) : settings.credentialWritten === true;
+    // `exec` probes need a live VM: skip them when healthz is down (a wedged VM would burn their timeouts) and in a
+    // quick observation. The container exists, so its image and volumes do too; the last known credential state stands.
+    const skipSlow = opts.quick === true || (running && health === 'down');
+    const credentialInVolume = running && !skipSlow ? await credentialFilePresent(d, vaultPath) : settings.credentialWritten === true;
     const harnesses = this.harnesses();
-    const harnessProbe = running && health === 'ok' ? await probeHarnesses(d, vaultPath) : null;
+    const harnessProbe = running && health === 'ok' && !skipSlow ? await probeHarnesses(d, vaultPath) : null;
+    const assumeProvisioned = skipSlow && typeof ours === 'object';
     const observed: Observed = {
       supported: true,
       runtimeInstalled: true,
       runtimeRunning: true,
-      imageReady: await imagePresent(d, localImageRef(version, harnesses)),
-      volumesPresent: await volumesPresent(d, vaultPath),
+      imageReady: assumeProvisioned || await imagePresent(d, localImageRef(version, harnesses)),
+      volumesPresent: assumeProvisioned || await volumesPresent(d, vaultPath),
       container: ours === 'absent' ? 'absent' : ours === 'foreign' ? 'foreign' : running ? 'running' : 'stopped',
       ...(containerVersion ? { containerVersion } : {}),
       ...(containerSpec ? { containerSpec } : {}),
+      ...(stoppedOutOfMemory ? { stoppedOutOfMemory: true } : {}),
       health,
       ...(welcome ? { welcome } : {}),
       tokenInKeychain: !!token,
@@ -433,8 +464,8 @@ export class LocalDaemonController {
   }
 
   /** What a UI renders. Cheap enough to call when a panel opens; never mutates. */
-  async snapshot(): Promise<LocalDaemonSnapshot> {
-    const o = await this.observe();
+  async snapshot(opts: { quick?: boolean } = {}): Promise<LocalDaemonSnapshot> {
+    const o = await this.observe(undefined, opts);
     const binary = o.observed.supported ? (await readRuntime(this.deps.runtime)).binary : undefined;
     return {
       assessment: o.assessment,
@@ -449,7 +480,32 @@ export class LocalDaemonController {
       ...(binary ? { containerBinary: binary } : {}),
       busy: this.getBusy(),
       lastError: this.lastError,
+      ...(this.watchdog ? { watchdog: this.watchdog.getState() } : {}),
     };
+  }
+
+  // ── watchdog ───────────────────────────────────────────────────────────────
+
+  /**
+   * Starts the health watchdog (idempotent). It polls with a quick snapshot and force-restarts a daemon that is
+   * supposed to be running but stops answering. A timer is used because a wedged VM emits no event to react to.
+   */
+  startWatchdog(config: Partial<WatchdogConfig> = {}): void {
+    if (this.watchdog) return;
+    this.watchdog = new LocalDaemonWatchdog({
+      target: this,
+      isEnabled: () => { const s = this.settings(); return s.enabled && s.watchdog !== false; },
+      onChange: () => this.notify(),
+      ...(this.deps.log ? { log: this.deps.log } : {}),
+      ...config,
+    });
+    this.watchdog.start();
+  }
+
+  /** Stops the watchdog's timer (plugin unload). Safe to call when it never started. */
+  stopWatchdog(): void {
+    this.watchdog?.stop();
+    this.watchdog = null;
   }
 
   // ── reconcile ──────────────────────────────────────────────────────────────
@@ -538,7 +594,7 @@ export class LocalDaemonController {
           await this.runAndAwaitHealthy(step(), vaultPath, () => startContainer(step(), vaultPath), port, ctx);
           break;
         case 'restart-container':
-          await stopContainer(step(), vaultPath);
+          await this.forceStop(step(), vaultPath);
           await this.runAndAwaitHealthy(step(), vaultPath, () => startContainer(step(), vaultPath), port, ctx);
           break;
         case 'apply-credential': {
@@ -569,6 +625,7 @@ export class LocalDaemonController {
 
   private async runAndAwaitHealthy(d: StepDeps, vaultPath: string, start: () => Promise<void>, port: number, ctx: OpContext): Promise<void> {
     await start();
+    this.stoppedByUs = false;
     ctx.emit({ line: 'Waiting for the daemon to answer' });
     const ok = await waitHealthy({
       probe: () => this.deps.healthz(port),
@@ -640,7 +697,21 @@ export class LocalDaemonController {
   stop(opts: RunOptions = {}): Promise<void> {
     return this.runOp('stop', opts, async (ctx) => {
       const vaultPath = this.requireVault();
+      this.stoppedByUs = true;
       await stopContainer({ runner: this.deps.createRunner(), signal: ctx.signal }, vaultPath);
+    });
+  }
+
+  private forceStop(d: StepDeps, vaultPath: string, skipGraceful = false): Promise<void> {
+    this.stoppedByUs = true;
+    return forceStopContainer(d, vaultPath, { skipGraceful, ...(this.deps.killVmHelper ? { killVmHelper: (n: string) => this.deps.killVmHelper!(n) } : {}) });
+  }
+
+  /** Force-stop for a wedged daemon: skips the graceful stop, then kill, then the VM helper process. Data is kept. */
+  kill(opts: RunOptions = {}): Promise<void> {
+    return this.runOp('kill', opts, async (ctx) => {
+      const vaultPath = this.requireVault();
+      await this.forceStop({ runner: this.deps.createRunner(), signal: ctx.signal }, vaultPath, true);
     });
   }
 
@@ -648,7 +719,7 @@ export class LocalDaemonController {
     return this.runOp('restart', opts, async (ctx) => {
       this.requireEnabled();
       const vaultPath = this.requireVault();
-      await stopContainer({ runner: this.deps.createRunner(), signal: ctx.signal }, vaultPath);
+      await this.forceStop({ runner: this.deps.createRunner(), signal: ctx.signal }, vaultPath);
       return this.reconcile(ctx);
     });
   }

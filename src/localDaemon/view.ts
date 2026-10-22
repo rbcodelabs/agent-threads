@@ -10,7 +10,7 @@ import type { DegradedReason } from './assess';
 import { HARNESS_LABEL, LOCAL_HARNESSES, VAULT_GUEST_PATH, manualLoginCommand, normalizeHarnesses, type LocalHarness } from './spec';
 
 export type LocalDaemonButtonId =
-  | 'setup' | 'start' | 'stop' | 'restart' | 'reset' | 'update' | 'sign-in' | 'remove';
+  | 'setup' | 'start' | 'stop' | 'restart' | 'reset' | 'update' | 'sign-in' | 'remove' | 'kill';
 
 export interface LocalDaemonButton {
   id: LocalDaemonButtonId;
@@ -128,6 +128,9 @@ function buildViewCore(snap: LocalDaemonSnapshot): Omit<LocalDaemonView, 'harnes
   if (snap.daemonVersion) lines.push({ label: 'Daemon', value: `v${snap.daemonVersion}${snap.daemonVersion === snap.pluginVersion ? '' : `, this plugin is v${snap.pluginVersion}`}` });
   if (snap.port !== undefined && a.status !== 'not-set-up') lines.push({ label: 'Address', value: `127.0.0.1:${snap.port} (this Mac only)` });
 
+  const watchdogLine = watchdogLineFor(snap);
+  if (watchdogLine) lines.push({ label: 'Auto-recovery', value: watchdogLine });
+
   const update: LocalDaemonButton | null = a.update === 'available' || a.update === 'required'
     ? { id: 'update', label: 'Update available', cta: a.update === 'required' }
     : null;
@@ -141,6 +144,13 @@ function buildViewCore(snap: LocalDaemonSnapshot): Omit<LocalDaemonView, 'harnes
     case 'not-set-up':
       return { ...base, statusLabel: 'Not set up', tone: 'muted', buttons: [{ id: 'setup', label: 'Set up', cta: true }], busy: false };
     case 'stopped': {
+      if (o.stoppedOutOfMemory) {
+        return {
+          ...base, statusLabel: 'Stopped: out of memory', tone: 'error', busy: false,
+          buttons: [{ id: 'restart', label: 'Restart', cta: true }, ...(update ? [update] : []), ...tail],
+          hint: OUT_OF_MEMORY_HINT,
+        };
+      }
       const buttons: LocalDaemonButton[] = [{ id: 'start', label: 'Start', cta: true }, ...(update ? [update] : []), ...tail];
       return { ...base, statusLabel: 'Stopped', tone: 'muted', buttons, busy: false, ...(a.needsSignIn ? { hint: 'Claude sign-in is still needed once it is running.' } : {}) };
     }
@@ -163,14 +173,39 @@ function buildViewCore(snap: LocalDaemonSnapshot): Omit<LocalDaemonView, 'harnes
         : a.degraded === 'incompatible' ? { id: 'update', label: 'Update', cta: a.update !== 'plugin-too-old' }
           : { id: 'start', label: 'Start', cta: true };
       const stop: LocalDaemonButton = { id: 'stop', label: 'Stop' };
+      const kill: LocalDaemonButton = { id: 'kill', label: 'Kill', danger: true };
       const buttons: LocalDaemonButton[] = a.update === 'plugin-too-old' && a.degraded === 'incompatible'
-        ? [stop, ...tail]
-        : [primary, stop, ...tail];
+        ? [stop, kill, ...tail]
+        : [primary, stop, kill, ...tail];
       return { ...base, statusLabel: d.label, tone: 'warn', buttons, busy: false, hint: updateHint ?? d.hint };
     }
     default:
       return { ...base, statusLabel: 'Unknown', tone: 'muted', buttons: [], busy: false };
   }
+}
+
+export const OUT_OF_MEMORY_HINT =
+  'The daemon container was killed, most likely because the VM ran out of memory (exit 137). Restart starts it again. '
+  + 'If this keeps happening, raise "Local daemon memory" in Settings and choose Update to recreate the container.';
+
+/** `HH:MM` in the user's locale-independent 24-hour form. */
+export function formatClockTime(epochMs: number): string {
+  const d = new Date(epochMs);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function watchdogLineFor(snap: LocalDaemonSnapshot): string | null {
+  const w = snap.watchdog;
+  if (!w) return null;
+  if (w.status === 'recovering') return 'Restarting an unresponsive daemon';
+  const failure = w.lastRestartOk === false && w.lastError ? ` The last restart failed: ${w.lastError}.` : '';
+  if (w.status === 'gave-up') return `Watchdog gave up after ${w.attempts} attempts.${failure} Use ${failure ? 'Start or Restart' : 'Restart or Kill'}, and check the logs.`;
+  if (w.lastRestartAt !== undefined) {
+    if (w.lastRestartOk !== false) return `Auto-restarted at ${formatClockTime(w.lastRestartAt)}`;
+    const reason = w.lastError ? `: ${w.lastError}` : '';
+    return `Auto-restart at ${formatClockTime(w.lastRestartAt)} failed${reason}.${w.retryPending ? ' Trying again shortly.' : ''}`;
+  }
+  return null;
 }
 
 function maskedList(snap: LocalDaemonSnapshot): string {
@@ -220,6 +255,10 @@ export function describeSetup(snap: LocalDaemonSnapshot): string {
 export const DESCRIBE_RESET =
   'This stops the daemon and deletes its data: sessions, journals, workspaces volume and access token. Threads that ran there '
   + 'stay in your transcript list but cannot resume their Claude session. It is then set up again from scratch. Continue?';
+
+export const DESCRIBE_KILL =
+  'This force-stops the daemon without letting it shut down cleanly, and ends the container\'s VM process if it does not respond. '
+  + 'Any turn running right now is lost and resumes on your next message. Data is kept. Continue?';
 
 export const DESCRIBE_REMOVE =
   'This stops and deletes the local daemon, its data and its access token, and removes it from Remote daemons. Threads that ran '
