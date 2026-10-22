@@ -424,7 +424,7 @@ describe('daemon-local tools', () => {
 });
 
 describe('manifest size limits', () => {
-  it('accepts a 512-tool manifest across several servers (claude-box with Vercel on)', async () => {
+  it('accepts a 512-tool manifest across several servers (my-server with Vercel on)', async () => {
     const td = await track();
     const c = await connect(td);
     await open(c, 't');

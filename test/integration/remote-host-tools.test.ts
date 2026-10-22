@@ -290,10 +290,10 @@ describe('host tools: plugin executes what the daemon proxies', () => {
     const r = recorder();
     const notices: string[] = [];
     const hostTools = new RemoteHostTools({ mcpSources: { vercel: bulk(HOST_TOOL_LIMITS.maxTools + 12), compass: bulk(3), unused: bulk(1) }, overrides: { vercel: 'host', compass: 'host' } });
-    const session = new RemoteHarnessSession(client(td), t, { hostTools, onNotice: (_s, text) => notices.push(text), daemonName: 'claude-box', replayedCallSettleMs: 30 });
+    const session = new RemoteHarnessSession(client(td), t, { hostTools, onNotice: (_s, text) => notices.push(text), daemonName: 'my-server', replayedCallSettleMs: 30 });
     await session.start(options(r));
     expect(notices).toHaveLength(1);
-    expect(notices[0]).toBe(`vercel was not sent to claude-box: too many tools (${HOST_TOOL_LIMITS.maxTools + 15} > ${HOST_TOOL_LIMITS.maxTools})`);
+    expect(notices[0]).toBe(`vercel was not sent to my-server: too many tools (${HOST_TOOL_LIMITS.maxTools + 15} > ${HOST_TOOL_LIMITS.maxTools})`);
     session.close();
   });
 

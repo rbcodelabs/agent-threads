@@ -470,7 +470,7 @@ const bulkSource = (prefix: string, n: number, schemaChars = 0): HostMcpSource =
 });
 
 describe('host-tool manifest caps', () => {
-  it('allows a realistic multi-server manifest (512 tools, as on claude-box) without shedding anything', async () => {
+  it('allows a realistic multi-server manifest (512 tools, as on my-server) without shedding anything', async () => {
     const tools = new RemoteHostTools({
       builtIn: [dyn('vault_search'), dyn('threads_list')],
       mcpSources: { vercel: bulkSource('v', 238, 1500), compass: bulkSource('c', 197, 1500), 'google-docs': bulkSource('g', 49, 1500), 'hiptrip-new': bulkSource('h', 16, 1500) },

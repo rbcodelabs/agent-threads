@@ -16,7 +16,7 @@ export const HOST_TOOL_LIMITS = {
   /** Servers in one manifest (`claude_threads`, `google-docs`, one per OAuth MCP). */
   maxServers: 16,
   /**
-   * Tools across all servers. Was 500; claude-box alone offers 512 (Vercel 238, Compass 197, Google 49, HipTrip 16,
+   * Tools across all servers. Was 500; a large setup alone offers 512 (Vercel 238, Compass 197, Google 49, HipTrip 16,
    * built-ins 12) and the largest server was silently shed. Real manifests run about 1.8 KB a tool, so 1000 tools
    * is still inside `maxManifestBytes`.
    */
