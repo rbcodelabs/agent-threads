@@ -8729,6 +8729,7 @@ body.ct-skills-resizing {
   gap: 4px;
   min-width: 0;
   flex: 0 1 auto;
+  overflow: hidden; /* pills shrink/ellipsize instead of painting over the action icons */
   margin-right: auto; /* absorbs the free space so the action buttons stay right */
 }
 
@@ -8761,8 +8762,9 @@ body.ct-skills-resizing {
   padding: 1px 7px 1px 5px;
   min-height: 22px;
   max-width: 240px;
-  /* Live agent state remains compact enough to share the context row. */
-  flex-shrink: 0;
+  /* Live agent state stays compact, but yields to the action icons when the row is tight. */
+  flex-shrink: 1;
+  min-width: 0;
   border: 0;
   border-radius: 10px;
   background: color-mix(in srgb, var(--background-modifier-border) 60%, transparent);
@@ -8933,7 +8935,8 @@ body.ct-skills-resizing {
   padding: 1px 7px 1px 5px;
   min-height: 22px;
   max-width: 240px;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
   border: 0;
   border-radius: 10px;
   background: color-mix(in srgb, var(--background-modifier-border) 60%, transparent);
