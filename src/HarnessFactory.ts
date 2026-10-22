@@ -33,7 +33,7 @@ export function createHarnessSession(
   thread: Thread,
   settings: PluginSettings,
   remoteDaemons?: RemoteDaemonResolver,
-  remoteHooks?: Pick<RemoteSessionDeps, 'onPendingChanged' | 'log' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName'>,
+  remoteHooks?: Pick<RemoteSessionDeps, 'onPendingChanged' | 'log' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName' | 'daemonName'>,
   env: Record<string, string | undefined> = process.env,
 ): HarnessSession {
   // A remote thread runs on a daemon whatever its harness says.

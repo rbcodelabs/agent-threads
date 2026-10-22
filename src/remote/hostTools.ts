@@ -58,7 +58,7 @@ export interface HostToolsSummary {
   /** Proxied server name -> tool names. */
   servers: Record<string, string[]>;
   /** Servers that were configured but could not be offered, with the reason. */
-  skipped: Array<{ server: string; reason: string }>;
+  skipped: Array<{ server: string; reason: string; /** Worth telling the user (a size shed or a failed listing), unlike a server they never turned on. */ notify?: boolean }>;
 }
 
 function flatten(content: ReadonlyArray<Record<string, unknown>>): { text: string; images: Array<Record<string, unknown>> } {
@@ -131,7 +131,7 @@ export class RemoteHostTools {
         listed = await source.listTools();
       } catch (err) {
         this.deps.log?.(`${server}: could not list tools: ${err instanceof Error ? err.message : String(err)}`);
-        summary.skipped.push({ server, reason: 'could not list its tools' });
+        summary.skipped.push({ server, reason: 'could not list its tools', notify: true });
         continue;
       }
       resourceServers.add(server);
@@ -155,15 +155,31 @@ export class RemoteHostTools {
       }
     }
 
-    // A manifest over the wire limits would be refused whole; shed whole servers (not tools) until it fits.
-    let total = Object.values(servers).reduce((n, l) => n + l.length, 0);
-    for (const name of Object.keys(servers).sort((a, b) => servers[b].length - servers[a].length)) {
-      if (total <= HOST_TOOL_LIMITS.maxTools && Object.keys(servers).length <= HOST_TOOL_LIMITS.maxServers) break;
-      if (name === CLAUDE_THREADS_SERVER) continue;
-      total -= servers[name].length;
-      delete servers[name];
-      delete summary.servers[name];
-      summary.skipped.push({ server: name, reason: 'too many tools for one daemon session' });
+    // A manifest over the wire limits would be refused whole by the daemon; shed whole servers (not tools) until it
+    // fits: the largest one first (by tool count for the count/server limits, by size for the byte limit).
+    const L = HOST_TOOL_LIMITS;
+    const bytesOf = (name: string): number => JSON.stringify(servers[name]).length;
+    for (;;) {
+      const names = Object.keys(servers);
+      const total = names.reduce((n, k) => n + servers[k].length, 0);
+      const bytes = JSON.stringify(servers).length;
+      let reason: string;
+      let order: (a: string, b: string) => number;
+      if (bytes > L.maxManifestBytes) {
+        reason = `manifest too large (${(bytes / 1048576).toFixed(1)} MB > ${(L.maxManifestBytes / 1048576).toFixed(1)} MB)`;
+        order = (a, b) => bytesOf(b) - bytesOf(a);
+      } else if (total > L.maxTools) {
+        reason = `too many tools (${total} > ${L.maxTools})`;
+        order = (a, b) => servers[b].length - servers[a].length;
+      } else if (names.length > L.maxServers) {
+        reason = `too many servers (${names.length} > ${L.maxServers})`;
+        order = (a, b) => servers[b].length - servers[a].length;
+      } else break;
+      const victim = names.filter((n) => n !== CLAUDE_THREADS_SERVER).sort(order)[0];
+      if (!victim) break; // only claude_threads left: nothing more to shed
+      delete servers[victim];
+      delete summary.servers[victim];
+      summary.skipped.push({ server: victim, reason, notify: true });
     }
     for (const name of resourceServers) if (!servers[name]) resourceServers.delete(name);
 

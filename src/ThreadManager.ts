@@ -990,7 +990,7 @@ export class ThreadManager {
     return resumed;
   }
 
-  private remoteHooks(thread: Thread): Pick<RemoteSessionDeps, 'onPendingChanged' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName'> | undefined {
+  private remoteHooks(thread: Thread): Pick<RemoteSessionDeps, 'onPendingChanged' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName' | 'daemonName'> | undefined {
     if (!thread.remote) return undefined;
     const enabled = this.remoteDaemons?.hostToolsOf?.(thread.remote.daemonId)?.enabled === true;
     let hostTools: RemoteHostTools | undefined;
@@ -1005,6 +1005,7 @@ export class ThreadManager {
       ...(hostTools ? { hostTools } : {}),
       hostToolSlots: this.hostToolSlots,
       hostName: this.hostName,
+      daemonName: this.remoteDaemons?.nameOf(thread.remote.daemonId) ?? thread.remote.daemonId,
       onNotice: (status, text) => this.addNoticeMessage(thread.id, status, text),
       // A worktree tool moved the session on the daemon: mirror the folder (same bookkeeping as a local cwd change).
       onCwdChanged: (cwd, origin) => this.setThreadCwd(thread.id, cwd, origin),

@@ -41,6 +41,7 @@ import {
 import type { ImageAttachment, Thread, ThreadRemote } from '../types';
 import type { UsageSnapshot } from '../Usage';
 import { DaemonCommandError, type ChannelSubscription, type DaemonClient } from './DaemonClient';
+import { logger } from '../logger';
 import { randomHex } from './randomId';
 import { applyHostToolsPrompt, projectSessionOptions } from './sessionSpec';
 import type { HostManifest, RemoteHostTools } from './hostTools';
@@ -77,6 +78,8 @@ export interface RemoteSessionDeps {
   onCwdChanged?: (cwd: string, originRepoPath?: string | null) => void;
   /** Name of this computer's host app for user-facing text. */
   hostName?: string;
+  /** The daemon's display name, for notices about what was or was not sent to it. */
+  daemonName?: string;
   /** How long a replayed tool call waits for its closing event before it runs (default 300 ms). */
   replayedCallSettleMs?: number;
 }
@@ -206,6 +209,14 @@ export class RemoteHarnessSession implements HarnessSession {
       if (flat.length > 0) this.spec = { ...this.spec, hostTools: flat };
       const skipped = tools.summary.skipped;
       if (skipped.length > 0) this.log(`host tools not offered: ${skipped.map((x) => `${x.server} (${x.reason})`).join('; ')}`);
+      // A server dropped for size or a failed listing is a loss the user should see (debug logging is off by default);
+      // "not turned on" is their own choice and stays quiet.
+      const daemon = this.deps.daemonName ?? 'the daemon';
+      for (const x of skipped.filter((k) => k.notify)) {
+        const text = `${x.server} was not sent to ${daemon}: ${x.reason}`;
+        logger.warn(`[RemoteHarnessSession ${this.threadId}] ${text}`);
+        this.deps.onNotice?.('failed', text);
+      }
     } catch (err) {
       this.log(`could not build the host tool manifest: ${errText(err)}`);
       this.sentManifest = {};

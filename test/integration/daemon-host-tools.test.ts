@@ -422,3 +422,30 @@ describe('daemon-local tools', () => {
     expect(c.events().some((f) => f.name === 'session.cwd')).toBe(false);
   });
 });
+
+describe('manifest size limits', () => {
+  it('accepts a 512-tool manifest across several servers (my-server with Vercel on)', async () => {
+    const td = await track();
+    const c = await connect(td);
+    await open(c, 't');
+    const servers: Record<string, ReturnType<typeof tool>[]> = {
+      claude_threads: Array.from({ length: 12 }, (_, i) => tool(`ct_${i}`)),
+      vercel: Array.from({ length: 238 }, (_, i) => tool(`v_${i}`, 'vercel')),
+      compass: Array.from({ length: 197 }, (_, i) => tool(`c_${i}`, 'compass')),
+      'google-docs': Array.from({ length: 49 }, (_, i) => tool(`g_${i}`, 'google-docs')),
+      'hiptrip-new': Array.from({ length: 16 }, (_, i) => tool(`h_${i}`, 'hiptrip-new')),
+    };
+    expect(Object.values(servers).reduce((n, l) => n + l.length, 0)).toBe(512);
+    expect((await c.cmd('tool.manifest', { threadId: 't', servers })).type).toBe('ack');
+    // session.open takes the flat form: 512 entries are accepted there too.
+    expect((await c.cmd('session.open', { threadId: 't2', spec: { ...SPEC, hostTools: Object.values(servers).flat() } })).type).toBe('ack');
+  });
+
+  it('still refuses a manifest over the (raised) tool cap', async () => {
+    const td = await track();
+    const c = await connect(td);
+    await open(c, 't');
+    const servers = { s: Array.from({ length: 1001 }, (_, i) => tool(`t_${i}`, 's')) };
+    expect(await c.cmd('tool.manifest', { threadId: 't', servers })).toMatchObject({ type: 'err', code: 'bad_frame' });
+  });
+});
