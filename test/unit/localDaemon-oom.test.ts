@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { makeHarness } from '../helpers/localDaemonHarness';
 import { CONTAINER_AUTH_TOKEN_SECRET } from '../../src/claudeContainerAuthCli';
-import { looksOutOfMemory, parseInspectedContainer } from '../../src/localDaemon/parse';
+import { looksOutOfMemory, parseBootLogExit, parseInspectedContainer } from '../../src/localDaemon/parse';
 import { buildLocalDaemonView, formatClockTime } from '../../src/localDaemon/view';
 
 const CLAUDE = 'sk-ant-oat01-TESTTOKEN';
@@ -12,35 +12,61 @@ async function setUp() {
   return h;
 }
 
-function crash(h: Awaited<ReturnType<typeof setUp>>, extra: { exitCode?: number; oomKilled?: boolean }) {
+// Lines copied from real `container logs --boot` output (Apple container 1.5.0, 256 MB container, node allocating Buffers).
+const START = '2026-10-22T01:09:08.100Z info vminitd: id: NAME starting managed process';
+const KERNEL_OOM = [
+  '[    3.031246] [    128] 10001   128   252403    65198    65120       78         0  1073152        0             0 node',
+  '[    3.031370] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=NAME,mems_allowed=0,oom_memcg=/container/NAME,task_memcg=/container/NAME,task=node,pid=128,uid=10001',
+  '[    3.031590] Memory cgroup out of memory: Killed process 128 (node) total-vm:1009612kB, anon-rss:260480kB, file-rss:312kB, shmem-rss:0kB, UID:10001 pgtables:1048kB oom_score_adj:0',
+];
+const exited = (n: number) => `2026-10-22T01:09:11.457Z info vminitd: id: NAME, status: ${n} managed process exit`;
+const KILLED = ['2026-10-22T01:09:21.945Z info vminitd: id: NAME sending signal 9 to process 129'];
+const LOGS = { oom: [START, ...KERNEL_OOM, exited(137)], kill: [START, ...KILLED, exited(137)], clean: [START, exited(0)] };
+
+function crash(h: Awaited<ReturnType<typeof setUp>>, bootLog: string[]) {
   const s = h.readState();
-  s.containers[h.name] = { ...s.containers[h.name], state: 'stopped', ...extra };
+  s.containers[h.name] = { ...s.containers[h.name], state: 'stopped', bootLog: bootLog.map((l) => l.replaceAll('NAME', h.name)) };
   h.writeState(s);
 }
 
-describe('parseInspectedContainer exit facts', () => {
-  const wrap = (entry: object) => JSON.stringify([entry]);
-  it('reads exit code and OOMKilled from either shape', () => {
-    expect(parseInspectedContainer(wrap({ status: { state: 'stopped', exitCode: 137 } }))).toMatchObject({ state: 'stopped', exitCode: 137 });
-    expect(parseInspectedContainer(wrap({ status: 'stopped', exitCode: 137 }))?.exitCode).toBe(137);
-    expect(parseInspectedContainer(wrap({ State: { Status: 'exited', ExitCode: 0, OOMKilled: true } }))).toMatchObject({ exitCode: 0, oomKilled: true });
-    expect(parseInspectedContainer(wrap({ status: 'stopped' }))).toEqual({ state: 'stopped', labels: {} });
+describe('real `container` CLI output shapes', () => {
+  it('inspect of a stopped container carries no exit facts (only state and labels)', () => {
+    const real = JSON.stringify([{ status: { networks: [], startedDate: '2026-10-22T01:09:11Z', state: 'stopped' }, configuration: { id: 'x', labels: {} } }]);
+    expect(parseInspectedContainer(real)).toEqual({ state: 'stopped', labels: {} });
   });
-  it('looksOutOfMemory is true for OOMKilled or exit 137 only', () => {
-    expect(looksOutOfMemory({ oomKilled: true })).toBe(true);
-    expect(looksOutOfMemory({ exitCode: 137 })).toBe(true);
-    expect(looksOutOfMemory({ exitCode: 0 })).toBe(false);
-    expect(looksOutOfMemory({ exitCode: 143 })).toBe(false);
+});
+
+describe('parseBootLogExit', () => {
+  it('a kernel OOM kill ends with exit 137 and the kernel line', () => {
+    expect(parseBootLogExit(LOGS.oom.join('\n'))).toEqual({ exitStatus: 137, oomKill: true });
+  });
+  it('a plain container kill is exit 137 WITHOUT the kernel line', () => {
+    expect(parseBootLogExit(LOGS.kill.join('\n'))).toEqual({ exitStatus: 137, oomKill: false });
+  });
+  it('a clean exit is status 0', () => {
+    expect(parseBootLogExit(LOGS.clean.join('\n'))).toEqual({ exitStatus: 0, oomKill: false });
+  });
+  it('only the last run counts: an OOM from an earlier start does not leak into a later clean run', () => {
+    expect(parseBootLogExit([...LOGS.oom, ...LOGS.clean].join('\n'))).toEqual({ exitStatus: 0, oomKill: false });
+  });
+  it('an empty or unrecognised log is neutral', () => {
+    expect(parseBootLogExit('')).toEqual({ oomKill: false });
+  });
+  it('looksOutOfMemory needs the kernel line AND exit 137', () => {
+    expect(looksOutOfMemory({ oomKill: true, exitStatus: 137 })).toBe(true);
+    expect(looksOutOfMemory({ oomKill: false, exitStatus: 137 })).toBe(false);
+    expect(looksOutOfMemory({ oomKill: true, exitStatus: 0 })).toBe(false);
+    expect(looksOutOfMemory({ oomKill: true })).toBe(false);
   });
 });
 
 describe('out-of-memory detection', () => {
-  it('a container that exited 137 on its own shows the out-of-memory view with a Restart button', async () => {
+  it('a container the kernel OOM-killed shows the out-of-memory view with a Restart button', async () => {
     const h = await setUp();
     // a fresh controller (a new plugin session) did not stop it
     const fresh = makeHarness({ secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE }, vaultPath: h.vaultPath, settings: h.settings });
     fresh.writeState(h.readState());
-    crash(fresh, { exitCode: 137 });
+    crash(fresh, LOGS.oom);
     const snap = await fresh.controller.snapshot({ quick: true });
     expect(snap.observed.stoppedOutOfMemory).toBe(true);
     const view = buildLocalDaemonView(snap);
@@ -50,17 +76,20 @@ describe('out-of-memory detection', () => {
     expect(view.buttons[0]).toMatchObject({ id: 'restart', cta: true });
   });
 
-  it('an OOMKilled flag counts even for a container we stopped', async () => {
+  it('a bare exit 137 with no kernel OOM line (an external kill) is just Stopped', async () => {
     const h = await setUp();
-    await h.controller.stop();
-    crash(h, { exitCode: 1, oomKilled: true });
-    expect((await h.controller.snapshot({ quick: true })).observed.stoppedOutOfMemory).toBe(true);
+    const fresh = makeHarness({ secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE }, vaultPath: h.vaultPath, settings: h.settings });
+    fresh.writeState(h.readState());
+    crash(fresh, LOGS.kill);
+    const snap = await fresh.controller.snapshot({ quick: true });
+    expect(snap.observed.stoppedOutOfMemory).toBeUndefined();
+    expect(buildLocalDaemonView(snap).statusLabel).toBe('Stopped');
   });
 
-  it('a plain exit 137 after our own stop or kill is not reported as out of memory', async () => {
+  it('an exit after our own stop or kill is not reported as out of memory', async () => {
     const h = await setUp();
     await h.controller.kill();
-    crash(h, { exitCode: 137 });
+    crash(h, LOGS.oom);
     const snap = await h.controller.snapshot({ quick: true });
     expect(snap.observed.stoppedOutOfMemory).toBeUndefined();
     expect(buildLocalDaemonView(snap).statusLabel).toBe('Stopped');
@@ -68,13 +97,22 @@ describe('out-of-memory detection', () => {
 
   it('a clean exit is just Stopped', async () => {
     const h = await setUp();
-    crash(h, { exitCode: 0 });
-    expect((await h.controller.snapshot({ quick: true })).observed.stoppedOutOfMemory).toBeUndefined();
+    const fresh = makeHarness({ secrets: { [CONTAINER_AUTH_TOKEN_SECRET]: CLAUDE }, vaultPath: h.vaultPath, settings: h.settings });
+    fresh.writeState(h.readState());
+    crash(fresh, LOGS.clean);
+    expect((await fresh.controller.snapshot({ quick: true })).observed.stoppedOutOfMemory).toBeUndefined();
+  });
+
+  it('a running container never reads the boot log', async () => {
+    const h = await setUp();
+    const before = h.calls().length;
+    await h.controller.snapshot({ quick: true });
+    expect(h.calls().slice(before).some((c) => c.includes('--boot'))).toBe(false);
   });
 
   it('Restart brings an out-of-memory container back', async () => {
     const h = await setUp();
-    crash(h, { oomKilled: true });
+    crash(h, LOGS.oom);
     await h.controller.restart();
     expect(h.readState().containers[h.name]?.state).toBe('running');
   });

@@ -11,23 +11,49 @@ export type ContainerState = 'running' | 'stopped' | 'unknown';
 export interface InspectedContainer {
   state: ContainerState;
   labels: Record<string, string>;
-  /** Exit code of the last run, when `inspect` reports one (field names are not verified against every CLI version). */
-  exitCode?: number;
-  /** The runtime says the last run ended because it ran out of memory (`OOMKilled`). */
-  oomKilled?: boolean;
 }
 
 /** SIGKILL (128 + 9): what the kernel OOM killer, `container kill` and an expired `stop` timeout all produce. */
 export const EXIT_CODE_SIGKILL = 137;
 
-function pickNumber(...candidates: unknown[]): number | undefined {
-  for (const c of candidates) if (typeof c === 'number' && Number.isFinite(c)) return c;
-  return undefined;
+/**
+ * What the last run of a container looked like, read from `container logs --boot <name>`.
+ *
+ * Apple `container` 1.5.0 reports no exit code or OOM flag in `inspect` or `list` (a stopped container's status is
+ * just `{networks, startedDate, state}`) and has no `wait` command. The boot log is the only place the exit is
+ * visible: vminitd logs `id: <name>, status: <n> managed process exit`, and when the kernel's cgroup OOM killer
+ * fired, its dump (`oom-kill:constraint=CONSTRAINT_MEMCG...`, `Memory cgroup out of memory: Killed process ...`)
+ * is in the same log. A plain `container kill` logs `sending signal 9 to process` and exit 137 with no kernel OOM
+ * lines. The boot log is appended to on every start, so only the text after the last
+ * `starting managed process` belongs to the last run.
+ */
+export interface LastRunExit {
+  /** Exit status vminitd logged for the main process, when the run has ended. */
+  exitStatus?: number;
+  /** The kernel logged a memory-cgroup OOM kill during the last run. */
+  oomKill: boolean;
 }
 
-/** True when a stopped container's last exit looks like an out-of-memory kill. */
-export function looksOutOfMemory(c: Pick<InspectedContainer, 'exitCode' | 'oomKilled'>): boolean {
-  return c.oomKilled === true || c.exitCode === EXIT_CODE_SIGKILL;
+const MANAGED_START = /starting managed process/g;
+const MANAGED_EXIT = /status: (\d+) managed process exit/g;
+const KERNEL_OOM = /oom-kill:constraint=|Memory cgroup out of memory: Killed process/;
+
+export function parseBootLogExit(bootLog: string): LastRunExit {
+  let startAt = -1;
+  for (const m of bootLog.matchAll(MANAGED_START)) startAt = m.index ?? startAt;
+  const lastRun = startAt >= 0 ? bootLog.slice(startAt) : bootLog;
+  let exitStatus: number | undefined;
+  for (const m of lastRun.matchAll(MANAGED_EXIT)) exitStatus = Number(m[1]);
+  return { ...(exitStatus !== undefined ? { exitStatus } : {}), oomKill: KERNEL_OOM.test(lastRun) };
+}
+
+/**
+ * True when the last run ended because the kernel OOM-killed the main process. Needs BOTH the kernel OOM line and
+ * exit 137, so a child process that was OOM-killed while the daemon lived on does not count. A bare 137 (for
+ * example a `container kill` from a terminal) is deliberately not reported as out of memory.
+ */
+export function looksOutOfMemory(exit: LastRunExit): boolean {
+  return exit.oomKill && exit.exitStatus === EXIT_CODE_SIGKILL;
 }
 
 /** `container inspect <name>` JSON. Only a positively reported `running` counts as running. */
@@ -45,15 +71,7 @@ export function parseInspectedContainer(stdout: string): InspectedContainer | nu
     ?? entry.state ?? (entry.State as Record<string, unknown> | undefined)?.Status;
   const text = typeof raw === 'string' ? raw.toLowerCase() : '';
   const state: ContainerState = text === 'running' ? 'running' : text ? 'stopped' : 'unknown';
-  const statusObj = (typeof entry.status === 'object' && entry.status !== null ? entry.status : {}) as Record<string, unknown>;
-  const legacy = (entry.State && typeof entry.State === 'object' ? entry.State : {}) as Record<string, unknown>;
-  const exitCode = pickNumber(statusObj.exitCode, entry.exitCode, legacy.ExitCode);
-  const oom = [statusObj.oomKilled, entry.oomKilled, legacy.OOMKilled].find((v) => typeof v === 'boolean');
-  return {
-    state, labels: parseContainerLabels(stdout) ?? {},
-    ...(exitCode !== undefined ? { exitCode } : {}),
-    ...(oom === true ? { oomKilled: true } : {}),
-  };
+  return { state, labels: parseContainerLabels(stdout) ?? {} };
 }
 
 export interface CreatedToken {

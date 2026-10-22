@@ -31,6 +31,7 @@ import {
   imagePresent,
   forceStopContainer,
   inspectOurContainer,
+  lastRunExit,
   logTail,
   mintControlToken,
   prepareVolumes,
@@ -385,9 +386,10 @@ export class LocalDaemonController {
     const keepVersion = containerVersion !== undefined && assessDaemonVersion(pluginVersion, containerVersion) !== 'required';
     const version = keepVersion ? containerVersion : pluginVersion;
     const running = typeof ours === 'object' && ours.state === 'running';
-    // A stop or kill WE ran also ends in SIGKILL (137), so only an exit we did not cause counts as out of memory.
-    const stoppedOutOfMemory = typeof ours === 'object' && ours.state === 'stopped' && looksOutOfMemory(ours)
-      && (ours.oomKilled === true || !this.stoppedByUs);
+    // `inspect` carries no exit facts on Apple `container`, so read the boot log. A stop or kill WE ran also ends in
+    // SIGKILL (137), so only an exit we did not cause counts as out of memory.
+    const lastExit = typeof ours === 'object' && ours.state === 'stopped' && !this.stoppedByUs ? await lastRunExit(d, vaultPath) : null;
+    const stoppedOutOfMemory = lastExit !== null && looksOutOfMemory(lastExit);
     const token = this.deps.secrets.get(LOCAL_DAEMON_TOKEN_SECRET);
 
     let health: Observed['health'] = 'na';
