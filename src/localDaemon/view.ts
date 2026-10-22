@@ -198,8 +198,13 @@ function watchdogLineFor(snap: LocalDaemonSnapshot): string | null {
   const w = snap.watchdog;
   if (!w) return null;
   if (w.status === 'recovering') return 'Restarting an unresponsive daemon';
-  if (w.status === 'gave-up') return `Watchdog gave up after ${w.attempts} attempts. Use Restart or Kill, and check the logs.`;
-  if (w.lastRestartAt !== undefined) return `Auto-restarted at ${formatClockTime(w.lastRestartAt)}${w.lastRestartOk === false ? ' (the restart did not finish)' : ''}`;
+  const failure = w.lastRestartOk === false && w.lastError ? ` The last restart failed: ${w.lastError}.` : '';
+  if (w.status === 'gave-up') return `Watchdog gave up after ${w.attempts} attempts.${failure} Use ${failure ? 'Start or Restart' : 'Restart or Kill'}, and check the logs.`;
+  if (w.lastRestartAt !== undefined) {
+    if (w.lastRestartOk !== false) return `Auto-restarted at ${formatClockTime(w.lastRestartAt)}`;
+    const reason = w.lastError ? `: ${w.lastError}` : '';
+    return `Auto-restart at ${formatClockTime(w.lastRestartAt)} failed${reason}.${w.retryPending ? ' Trying again shortly.' : ''}`;
+  }
   return null;
 }
 

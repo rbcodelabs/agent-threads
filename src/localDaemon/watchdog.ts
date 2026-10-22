@@ -3,6 +3,9 @@
  * running stops answering `/healthz` for several checks in a row, force-restarts it (the same stop, kill, end the VM
  * helper path as the Restart button). A wedged VM emits no event to react to, so a timer is the only option here.
  *
+ * A restart that fails and leaves the container stopped is still our job: it is retried within the same cap and backoff
+ * until it works or gives up, unless the user acted in between (a deliberate stop with no failed restart is left alone).
+ *
  * It never fights the user or itself: it only counts failures for a container that is up and unhealthy, skips while
  * any operation is running, backs off between attempts and gives up after a capped number of attempts per window.
  */
@@ -41,6 +44,8 @@ export interface WatchdogState {
   lastRestartAt?: number;
   lastRestartOk?: boolean;
   lastError?: string;
+  /** True while the last automatic restart failed and left the container stopped, so another attempt is owed. */
+  retryPending?: boolean;
 }
 
 /** What the watchdog needs from the controller; narrow so tests can drive it without containers. */
@@ -48,6 +53,8 @@ export interface WatchdogTarget {
   snapshot(opts: { quick: boolean }): Promise<LocalDaemonSnapshot>;
   restart(): Promise<unknown>;
   getBusy(): unknown;
+  /** Counts every operation started so far; a change the watchdog did not cause means the user acted. */
+  operationCount?(): number;
 }
 
 export interface WatchdogDeps extends Partial<WatchdogConfig> {
@@ -68,6 +75,9 @@ export class LocalDaemonWatchdog {
   private cooldownUntil = 0;
   private gaveUp = false;
   private recovering = false;
+  /** The last automatic restart failed, so a stopped container is our unfinished business, not a deliberate stop. */
+  private pendingRetry = false;
+  private opsMark: number | undefined;
   private last: Pick<WatchdogState, 'lastRestartAt' | 'lastRestartOk' | 'lastError'> = {};
 
   constructor(private readonly deps: WatchdogDeps) {
@@ -98,6 +108,7 @@ export class LocalDaemonWatchdog {
       attempts: this.attemptTimes.length,
       maxAttempts: this.cfg.maxAttempts,
       ...this.last,
+      retryPending: this.pendingRetry,
     };
   }
 
@@ -115,9 +126,11 @@ export class LocalDaemonWatchdog {
     if (this.ticking || this.stopped) return;
     this.ticking = true;
     try {
-      if (!this.deps.isEnabled()) { this.failures = 0; return; }
-      // An operation in flight (including the user's own Stop or Restart) owns the container: do not count or act.
-      if (this.deps.target.getBusy()) return;
+      if (!this.deps.isEnabled()) { this.failures = 0; this.pendingRetry = false; return; }
+      // An operation in flight (including the user's own Stop or Restart) owns the container: do not count or act,
+      // and any recovery we still owed is moot because the user has taken over.
+      if (this.deps.target.getBusy()) { this.pendingRetry = false; return; }
+      this.noteUserActions();
       let snap: LocalDaemonSnapshot;
       try {
         snap = await this.deps.target.snapshot({ quick: true });
@@ -128,6 +141,7 @@ export class LocalDaemonWatchdog {
       }
       if (this.stopped) return;
       const o = snap.observed;
+      if (this.pendingRetry && o.container === 'stopped') { await this.retryStopped(); return; }
       // Only a container that is up and not answering counts. Stopped, absent, not set up or runtime-down states are
       // either deliberate or someone else's job; a healthy answer resets everything.
       const wedged = !snap.busy && snap.assessment.status === 'degraded' && snap.assessment.degraded === 'health-down'
@@ -135,27 +149,47 @@ export class LocalDaemonWatchdog {
       if (!wedged) {
         const changed = this.failures !== 0 || (o.health === 'ok' && this.gaveUp);
         this.failures = 0;
-        if (o.health === 'ok') this.gaveUp = false;
+        if (o.health === 'ok') { this.gaveUp = false; this.pendingRetry = false; }
         if (changed) this.deps.onChange?.();
         return;
       }
       this.failures++;
       if (this.failures < this.cfg.failuresBeforeRecovery) return;
       this.pruneAttempts();
-      if (this.attemptTimes.length >= this.cfg.maxAttempts) {
-        if (!this.gaveUp) {
-          this.gaveUp = true;
-          this.deps.log?.(`Local daemon watchdog: giving up after ${this.attemptTimes.length} restart attempts`);
-          this.deps.onChange?.();
-        }
-        return;
-      }
+      if (this.attemptTimes.length >= this.cfg.maxAttempts) { this.giveUp(); return; }
       this.gaveUp = false;
       if (this.cfg.now() < this.cooldownUntil || !this.mayAct()) return;
       await this.recover();
     } finally {
       this.ticking = false;
     }
+  }
+
+  /** A user action (any operation we did not start) cancels a recovery we owed and clears a stale give-up. */
+  private noteUserActions(): void {
+    const ops = this.deps.target.operationCount?.();
+    if (ops === undefined) return;
+    if (this.opsMark !== undefined && ops !== this.opsMark) {
+      this.pendingRetry = false;
+      if (this.gaveUp) { this.gaveUp = false; this.deps.onChange?.(); }
+    }
+    this.opsMark = ops;
+  }
+
+  private giveUp(): void {
+    this.pendingRetry = false;
+    if (this.gaveUp) return;
+    this.gaveUp = true;
+    this.deps.log?.(`Local daemon watchdog: giving up after ${this.attemptTimes.length} restart attempts`);
+    this.deps.onChange?.();
+  }
+
+  /** The last automatic restart failed and left the container stopped: try again within the same cap and backoff. */
+  private async retryStopped(): Promise<void> {
+    this.pruneAttempts();
+    if (this.attemptTimes.length >= this.cfg.maxAttempts) { this.giveUp(); return; }
+    if (this.cfg.now() < this.cooldownUntil || !this.mayAct()) return;
+    await this.recover();
   }
 
   private async recover(): Promise<void> {
@@ -168,13 +202,17 @@ export class LocalDaemonWatchdog {
     try {
       await this.deps.target.restart();
       this.last = { lastRestartAt: this.cfg.now(), lastRestartOk: true };
+      this.pendingRetry = false;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.last = { lastRestartAt: this.cfg.now(), lastRestartOk: false, lastError: message };
+      this.pendingRetry = true;
       this.deps.log?.(`Local daemon watchdog: restart failed: ${message}`);
     } finally {
       this.recovering = false;
-      if (this.attemptTimes.length >= this.cfg.maxAttempts && this.last.lastRestartOk !== true) this.gaveUp = true;
+      // Our own restart counted as an operation; only later ones are the user's.
+      this.opsMark = this.deps.target.operationCount?.();
+      if (this.attemptTimes.length >= this.cfg.maxAttempts && this.last.lastRestartOk !== true) { this.gaveUp = true; this.pendingRetry = false; }
       this.deps.onChange?.();
     }
   }

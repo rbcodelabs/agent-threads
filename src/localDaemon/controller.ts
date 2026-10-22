@@ -214,6 +214,7 @@ export class LocalDaemonController {
   /** This session stopped or killed the container (a SIGKILL exit is then ours, not an out-of-memory kill). */
   private stoppedByUs = false;
   private watchdog: LocalDaemonWatchdog | null = null;
+  private opsStarted = 0;
 
   constructor(private readonly deps: LocalDaemonDeps) {}
 
@@ -232,6 +233,11 @@ export class LocalDaemonController {
     for (const l of [...this.listeners]) {
       try { l(); } catch { /* a UI callback must not break the run */ }
     }
+  }
+
+  /** Operations started so far; the watchdog compares it to tell the user's actions from its own. */
+  operationCount(): number {
+    return this.opsStarted;
   }
 
   getBusy(): LocalDaemonProgress | null {
@@ -267,6 +273,7 @@ export class LocalDaemonController {
       this.notify();
     };
     this.op = op;
+    this.opsStarted++;
     op.promise = (async () => {
       try {
         const result = await fn({ signal: controller.signal, emit });

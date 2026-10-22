@@ -173,3 +173,33 @@ describe('watchdog in the view', () => {
     expect(buildLocalDaemonView(snap).lines.some((l) => l.label === 'Auto-recovery')).toBe(false);
   });
 });
+
+describe('watchdog failure in the view', () => {
+  it('says so when the last auto-restart failed, with the error, and when it gave up', async () => {
+    const h = await setUp();
+    const snap = await h.controller.snapshot({ quick: true });
+    const at = new Date(2026, 9, 20, 9, 7).getTime();
+    const failed = buildLocalDaemonView({ ...snap, watchdog: { status: 'watching', consecutiveFailures: 0, attempts: 1, maxAttempts: 3, lastRestartAt: at, lastRestartOk: false, lastError: 'container start failed', retryPending: true } });
+    expect(failed.lines.find((l) => l.label === 'Auto-recovery')?.value).toBe('Auto-restart at 09:07 failed: container start failed. Trying again shortly.');
+    const gaveUp = buildLocalDaemonView({ ...snap, watchdog: { status: 'gave-up', consecutiveFailures: 0, attempts: 3, maxAttempts: 3, lastRestartAt: at, lastRestartOk: false, lastError: 'container start failed', retryPending: false } });
+    expect(gaveUp.lines.find((l) => l.label === 'Auto-recovery')?.value).toBe('Watchdog gave up after 3 attempts. The last restart failed: container start failed. Use Start or Restart, and check the logs.');
+  });
+
+  it('shows the failure on the stopped panel', async () => {
+    const h = await setUp();
+    await h.controller.stop();
+    const snap = await h.controller.snapshot({ quick: true });
+    const view = buildLocalDaemonView({ ...snap, watchdog: { status: 'gave-up', consecutiveFailures: 0, attempts: 2, maxAttempts: 2, lastRestartAt: 1, lastRestartOk: false, lastError: 'boom' } });
+    expect(view.statusLabel).toBe('Stopped');
+    expect(view.lines.find((l) => l.label === 'Auto-recovery')?.value).toMatch(/gave up after 2 attempts.*boom/);
+  });
+});
+
+describe('controller operation count', () => {
+  it('increases for every operation, so the watchdog can tell the user acted', async () => {
+    const h = await setUp();
+    const before = h.controller.operationCount();
+    await h.controller.stop();
+    expect(h.controller.operationCount()).toBe(before + 1);
+  });
+});

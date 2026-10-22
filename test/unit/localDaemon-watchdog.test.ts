@@ -23,10 +23,12 @@ function setUp(opts: { enabled?: () => boolean; restart?: () => Promise<unknown>
   let busy = false;
   const restart = vi.fn(opts.restart ?? (async () => undefined));
   const snapshot = vi.fn(async () => snapshotFor(mode));
-  const target: WatchdogTarget = { snapshot, restart, getBusy: () => (busy ? { kind: 'stop' } : null) };
+  let ops = 0;
+  const countedRestart = vi.fn(async () => { ops++; return restart(); });
+  const target: WatchdogTarget = { snapshot, restart: countedRestart, getBusy: () => (busy ? { kind: 'stop' } : null), operationCount: () => ops };
   const onChange = vi.fn();
   const dog = new LocalDaemonWatchdog({ target, isEnabled: opts.enabled ?? (() => true), onChange });
-  return { dog, restart, snapshot, onChange, setMode: (m: Mode) => { mode = m; }, setBusy: (b: boolean) => { busy = b; } };
+  return { dog, restart, snapshot, onChange, setMode: (m: Mode) => { mode = m; }, setBusy: (b: boolean) => { busy = b; }, userAction: () => { ops++; } };
 }
 
 describe('LocalDaemonWatchdog', () => {
@@ -156,5 +158,112 @@ describe('LocalDaemonWatchdog', () => {
     t.dog.start();
     expect(vi.getTimerCount()).toBe(1);
     t.dog.stop();
+  });
+
+  describe('a failed automatic restart that leaves the container stopped', () => {
+    /** The restart fails after the stop, so the container is left stopped. */
+    function failing(failTimes = Infinity) {
+      let n = 0;
+      const t: ReturnType<typeof setUp> = setUp({
+        restart: async () => {
+          n++;
+          if (n <= failTimes) { t.setMode('stopped'); throw new Error('container start failed'); }
+          t.setMode('healthy');
+        },
+      });
+      return t;
+    }
+
+    it('retries after the backoff and reaches gave-up at the cap', async () => {
+      const t = failing();
+      t.dog.start();
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(t.restart).toHaveBeenCalledTimes(1);
+      expect(t.dog.getState()).toMatchObject({ status: 'watching', lastRestartOk: false, retryPending: true });
+      // inside the 2 min backoff nothing happens
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(t.restart).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(t.restart).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(t.restart).toHaveBeenCalledTimes(3);
+      expect(t.dog.getState()).toMatchObject({ status: 'gave-up', attempts: 3, retryPending: false, lastError: 'container start failed' });
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(t.restart).toHaveBeenCalledTimes(3);
+      t.dog.stop();
+    });
+
+    it('recovers when a retry succeeds', async () => {
+      const t = failing(1);
+      t.dog.start();
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      expect(t.restart).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(t.dog.getState()).toMatchObject({ status: 'watching', lastRestartOk: true, retryPending: false });
+      t.dog.stop();
+    });
+
+    it('does not retry after the user stops it', async () => {
+      const t = failing();
+      t.dog.start();
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(t.restart).toHaveBeenCalledTimes(1);
+      t.userAction();
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(t.restart).toHaveBeenCalledTimes(1);
+      expect(t.dog.getState().retryPending).toBe(false);
+      t.dog.stop();
+    });
+
+    it('does not retry while an operation is running, and forgets the debt', async () => {
+      const t = failing();
+      t.dog.start();
+      await vi.advanceTimersByTimeAsync(90_000);
+      t.setBusy(true);
+      await vi.advanceTimersByTimeAsync(60_000);
+      t.setBusy(false);
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(t.restart).toHaveBeenCalledTimes(1);
+      t.dog.stop();
+    });
+
+    it('does not retry when switched off, and forgets the debt', async () => {
+      let enabled = true;
+      const t2: ReturnType<typeof setUp> = setUp({ enabled: () => enabled, restart: async () => { t2.setMode('stopped'); throw new Error('boom'); } });
+      t2.dog.start();
+      await vi.advanceTimersByTimeAsync(90_000);
+      enabled = false;
+      await vi.advanceTimersByTimeAsync(60_000);
+      enabled = true;
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(t2.restart).toHaveBeenCalledTimes(1);
+      t2.dog.stop();
+    });
+
+    it('clears the pending retry when the daemon answers again', async () => {
+      const t = failing();
+      t.dog.start();
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(t.dog.getState().retryPending).toBe(true);
+      t.setMode('healthy');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(t.dog.getState().retryPending).toBe(false);
+      // a later deliberate stop is then left alone
+      t.setMode('stopped');
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(t.restart).toHaveBeenCalledTimes(1);
+      t.dog.stop();
+    });
+
+    it('leaves a daemon alone that was stopped deliberately with no failed auto-restart', async () => {
+      const t = setUp();
+      t.dog.start();
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(t.restart).toHaveBeenCalledTimes(1);
+      t.setMode('stopped');
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(t.restart).toHaveBeenCalledTimes(1);
+      t.dog.stop();
+    });
   });
 });
