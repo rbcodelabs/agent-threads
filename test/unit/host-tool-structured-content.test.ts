@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { HOST_TOOL_LIMITS, manifestFromSpecs, sanitizeStructuredContent, type RemoteHostToolSpec } from '../../src/protocol';
+import { HOST_TOOL_LIMITS, asStructuredContent, fitStructuredContent, manifestFromSpecs, type RemoteHostToolSpec } from '../../src/protocol';
 import { HostToolExecutor, HostToolSlots } from '../../src/remote/hostToolExecutor';
 import { RemoteHostTools } from '../../src/remote/hostTools';
 import type { HostMcpSource } from '../../src/remote/hostMcpClient';
@@ -10,7 +10,8 @@ import { createHostMcpServer } from '../../daemon/hostMcpServer';
 
 const IMG = { type: 'image', data: 'AAAA', mimeType: 'image/png' };
 const upload = { ok: true, message: 'ready', data: { clientToken: 'tok-secret', receipt: 'r1' } };
-const HUGE = 'x'.repeat(HOST_TOOL_LIMITS.maxStructuredContentChars + 1);
+const LARGE = { rows: 'x'.repeat(1_000_000), nested: { a: [1, { b: 2 }] } };
+const OVER = { big: 'x'.repeat(HOST_TOOL_LIMITS.maxResultFrameChars + 1) };
 
 async function proxied(result: Record<string, unknown>) {
   const source: HostMcpSource = {
@@ -23,18 +24,27 @@ async function proxied(result: Record<string, unknown>) {
   return tools;
 }
 
-describe('sanitizeStructuredContent', () => {
-  it('keeps a plain object as a JSON copy', () => {
-    const copy = sanitizeStructuredContent(upload);
-    expect(copy).toEqual(upload);
-    expect(copy).not.toBe(upload);
+describe('asStructuredContent / fitStructuredContent', () => {
+  it('passes an object through by reference, unchanged', () => {
+    expect(asStructuredContent(upload)).toBe(upload);
+    expect(asStructuredContent(LARGE)).toBe(LARGE);
   });
-  it('drops non-objects, cyclic and oversized values', () => {
-    for (const v of [undefined, null, 'x', 5, true, [1], [{ a: 1 }]]) expect(sanitizeStructuredContent(v)).toBeUndefined();
+  it('treats non-objects as absent (the MCP result schema would reject them)', () => {
+    for (const v of [undefined, null, 'x', 5, true, [1], [{ a: 1 }]]) expect(asStructuredContent(v)).toBeUndefined();
+  });
+  it('keeps a large object that fits the frame budget, intact', () => {
+    expect(fitStructuredContent(LARGE, 't')).toEqual({ text: 't', structuredContent: LARGE });
+  });
+  it('over budget (by UTF-8 bytes) or unserializable: omitted, and the text says so', () => {
+    const over = fitStructuredContent(OVER, 't');
+    expect(over.structuredContent).toBeUndefined();
+    expect(over.text).toMatch(/^t\n\[\.\.\. structured output omitted: it is \d+ bytes/);
+    // 3-byte characters: under the limit in characters, over it in bytes
+    expect(fitStructuredContent({ s: '€'.repeat(Math.ceil(HOST_TOOL_LIMITS.maxResultFrameChars / 3)) }, 't').structuredContent).toBeUndefined();
     const cyc: Record<string, unknown> = {}; cyc.self = cyc;
-    expect(sanitizeStructuredContent(cyc)).toBeUndefined();
-    expect(sanitizeStructuredContent({ big: HUGE })).toBeUndefined();
-    expect(sanitizeStructuredContent({ ok: 'x'.repeat(1000) })).toBeDefined();
+    const bad = fitStructuredContent(cyc, 't');
+    expect(bad.structuredContent).toBeUndefined();
+    expect(bad.text).toContain('not serializable');
   });
 });
 
@@ -48,10 +58,11 @@ describe('plugin side: RemoteHostTools / HostToolExecutor', () => {
     const mixed = await (await proxied({ content: [{ type: 'text', text: 't' }, IMG], structuredContent: { a: 1 } })).invoke('compass', 'prepare', {});
     expect(mixed).toEqual({ success: true, text: 't', content: [IMG], structuredContent: { a: 1 } });
   });
-  it('degrades to text-only for non-object or oversized values, and keeps isError', async () => {
-    for (const bad of [[1, 2], 'str', 7, null, { big: HUGE }]) {
+  it('drops only non-object values, passes a large object intact, and keeps isError', async () => {
+    for (const bad of [[1, 2], 'str', 7, null]) {
       expect(await (await proxied({ content: [{ type: 'text', text: 't' }], structuredContent: bad })).invoke('compass', 'prepare', {})).toEqual({ success: true, text: 't' });
     }
+    expect(await (await proxied({ content: [{ type: 'text', text: 't' }], structuredContent: LARGE })).invoke('compass', 'prepare', {})).toEqual({ success: true, text: 't', structuredContent: LARGE });
     expect(await (await proxied({ isError: true, content: [{ type: 'text', text: 'no' }], structuredContent: { e: 1 } })).invoke('compass', 'prepare', {}))
       .toEqual({ success: false, text: 'no', structuredContent: { e: 1 } });
   });
@@ -68,6 +79,21 @@ describe('plugin side: RemoteHostTools / HostToolExecutor', () => {
     out = { success: true, text: 'x', structuredContent: [1] };
     ex.handleCall(call('b')); await new Promise((r) => setTimeout(r, 5));
     expect(results).toEqual([{ callId: 'a', success: true, text: 'x', structuredContent: upload }, { callId: 'b', success: true, text: 'x' }]);
+  });
+  it('an over-budget structuredContent never reaches the frame: the call still succeeds and the text tells the model', async () => {
+    const spec: RemoteHostToolSpec = { name: 'prepare', description: '', inputSchema: { type: 'object' }, requiresApproval: false, server: 'compass' };
+    const results: Array<Record<string, unknown>> = [];
+    const ex = new HostToolExecutor({
+      manifest: () => manifestFromSpecs([spec]), invoke: async () => ({ success: true, text: 'summary', content: [IMG], structuredContent: OVER }) as never,
+      requestPermission: async () => true, slots: new HostToolSlots(), sendResult: async (callId, r) => { results.push({ callId, ...r }); },
+    });
+    ex.handleCall({ callId: 'o', threadId: 't', server: 'compass', tool: 'prepare', input: {} });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ success: true, content: [IMG] });
+    expect(results[0].structuredContent).toBeUndefined();
+    expect(String(results[0].text)).toContain('structured output omitted');
+    expect(JSON.stringify(results[0]).length).toBeLessThan(HOST_TOOL_LIMITS.maxResultFrameChars);
   });
 });
 
@@ -88,8 +114,14 @@ describe('daemon side: HostToolBroker', () => {
     expect(JSON.stringify(audit)).not.toContain('tok-secret');
     expect(JSON.stringify(events)).not.toContain('tok-secret');
   });
-  it('old client shape (no field) and bad values resolve as text-only', async () => {
-    for (const sc of [undefined, [1], 'x', { big: HUGE }]) {
+  it('passes a large object through unchanged; old client shape (no field) and non-objects resolve as text-only', async () => {
+    {
+      const { broker } = rig();
+      const p = broker.call('t', 'compass', 'prepare', {});
+      broker.resolve('t', 'id1', { success: true, text: 's', structuredContent: LARGE }, 'c');
+      expect(await p).toEqual({ success: true, text: 's', structuredContent: LARGE });
+    }
+    for (const sc of [undefined, [1], 'x']) {
       const { broker } = rig();
       const p = broker.call('t', 'compass', 'prepare', {});
       broker.resolve('t', 'id1', { success: true, text: 's', structuredContent: sc }, 'c');

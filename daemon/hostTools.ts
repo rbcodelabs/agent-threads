@@ -26,7 +26,7 @@ import {
   isHostResourceTool,
   manifestSignature,
   sanitizeResultContent,
-  sanitizeStructuredContent,
+  asStructuredContent,
   type RemoteHostToolSpec,
   type ResultBlock,
   type WireEvent,
@@ -201,8 +201,8 @@ export class HostToolBroker {
     if (!p || p.threadId !== threadId || !p.issued || p.done) return false;
     const { text, truncated } = clampResultText(result.text);
     const content = sanitizeResultContent(result.content);
-    // Re-checked here even though the plugin bounds it: the daemon never trusts the client's frame.
-    const structuredContent = sanitizeStructuredContent(result.structuredContent);
+    // Passed through unchanged; the frame limit already bounded it. Only a non-object is treated as absent.
+    const structuredContent = asStructuredContent(result.structuredContent);
     this.finish(callId, p, { success: result.success === true, text, ...(content.length ? { content } : {}), ...(structuredContent ? { structuredContent } : {}) });
     this.opts.emit(threadId, { name: 'request_resolved', args: { requestId: callId, by, outcome: 'resolved' } });
     this.opts.audit?.({ event: 'host_tool_result', threadId, server: p.server, tool: p.tool, ok: result.success === true, chars: result.text.length, truncated, blocks: content.length, ...(structuredContent ? { structured: true } : {}) });

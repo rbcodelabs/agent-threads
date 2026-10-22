@@ -19,7 +19,7 @@ export interface McpToolInfo {
 export interface McpCallResult {
   isError?: boolean;
   content: Array<Record<string, unknown>>;
-  /** MCP structured output; untrusted shape until `sanitizeStructuredContent`. */
+  /** MCP structured output; passed through as is. */
   structuredContent?: unknown;
 }
 

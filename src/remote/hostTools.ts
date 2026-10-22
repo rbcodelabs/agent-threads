@@ -16,7 +16,7 @@
 import type { HarnessDynamicTool } from '../HarnessSession';
 import {
   HOST_RESOURCE_TOOLS, HOST_TOOL_LIMITS, checkResourceUri, encodeResourceContents, encodeResourceList, encodeResourceTemplates,
-  isHostResourceTool, sanitizeStructuredContent, validateHostToolSpec, type RemoteHostToolSpec,
+  isHostResourceTool, asStructuredContent, validateHostToolSpec, type RemoteHostToolSpec,
 } from '../protocol';
 import { routeFor, type RouteOverrides } from '../toolRouting';
 import type { HostMcpSource } from './hostMcpClient';
@@ -155,9 +155,9 @@ export class RemoteHostTools {
             // then gives the model JSON.stringify(structuredContent) INSTEAD of the text blocks, exactly as it does for
             // the same MCP server connected directly in a local thread, so a remote thread sees what a local one sees
             // (some tools, e.g. an upload token, return data ONLY there). Gating it would leave those tools unusable;
-            // a server that wants a terse text result simply should not set it. Bounded and shape-checked by
-            // `sanitizeStructuredContent`; anything it rejects falls back to the text-only result.
-            const structuredContent = sanitizeStructuredContent(r.structuredContent);
+            // a server that wants a terse text result simply should not set it. Passed through unchanged; the executor
+            // only checks that it fits the frame (`fitStructuredContent`).
+            const structuredContent = asStructuredContent(r.structuredContent);
             return { success: r.isError !== true, text, ...(images.length ? { content: images } : {}), ...(structuredContent ? { structuredContent } : {}) };
           },
         });

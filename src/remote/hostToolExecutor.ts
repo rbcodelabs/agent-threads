@@ -16,7 +16,7 @@
  * A call id already seen is never run twice: a reopened call that finished gets its stored result re-sent, one
  * still running is left alone.
  */
-import { HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, isHostResourceTool, sanitizeResultContent, sanitizeStructuredContent, type RemoteHostToolSpec } from '../protocol';
+import { HOST_TOOL_LIMITS, checkCallInput, clampResultText, findManifestTool, isHostResourceTool, sanitizeResultContent, asStructuredContent, fitStructuredContent, type RemoteHostToolSpec } from '../protocol';
 import type { HostToolOutput } from './hostTools';
 
 /** Calls in flight across all threads; one instance per plugin. */
@@ -175,8 +175,10 @@ export class HostToolExecutor {
       // Same filter the daemon applies: images only, bounded in count and total size, so one large screenshot
       // cannot push the frame past the transport limit and loop on re-send.
       const sanitized = sanitizeResultContent(out.content);
-      const structuredContent = sanitizeStructuredContent(out.structuredContent);
-      result = { success: out.success, text: clamped.text, ...(sanitized.length ? { content: sanitized } : {}), ...(structuredContent ? { structuredContent } : {}) };
+      // Structured content is the one unbounded part of the frame: it must fit the budget or the daemon would drop
+      // the connection on an oversized frame. Over budget it is left out and the text says so.
+      const fitted = fitStructuredContent(asStructuredContent(out.structuredContent), clamped.text);
+      result = { success: out.success, text: fitted.text, ...(sanitized.length ? { content: sanitized } : {}), ...(fitted.structuredContent ? { structuredContent: fitted.structuredContent } : {}) };
     } catch (err) {
       this.deps.log?.(`host tool ${spec.server}/${spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
       result = refusal(`The host tool "${spec.name}" failed.`);
