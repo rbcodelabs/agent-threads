@@ -297,6 +297,23 @@ describe('host tools: plugin executes what the daemon proxies', () => {
     session.close();
   });
 
+  it('collapses several dropped servers into a single notice', async () => {
+    const td = await daemon();
+    const failing: HostMcpSource = {
+      listTools: async () => { throw new Error('boom'); },
+      callTool: async () => ({ content: [] }), close: async () => undefined,
+    };
+    const t = thread('h-shed-many');
+    const r = recorder();
+    const notices: string[] = [];
+    const hostTools = new RemoteHostTools({ mcpSources: { a: failing, b: failing, c: failing }, overrides: { a: 'host', b: 'host', c: 'host' } });
+    const session = new RemoteHarnessSession(client(td), t, { hostTools, onNotice: (_s, text) => notices.push(text), daemonName: 'my-server', replayedCallSettleMs: 30 });
+    await session.start(options(r));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatch(/^3 MCP servers were not sent to my-server: a, b, c/);
+    session.close();
+  });
+
   it('does not re-run a call that already finished when its history is replayed', async () => {
     const td = await daemon();
     const invoke = vi.fn(async () => ({ success: true, text: 'once' }));

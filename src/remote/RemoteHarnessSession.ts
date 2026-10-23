@@ -212,8 +212,12 @@ export class RemoteHarnessSession implements HarnessSession {
       // A server dropped for size or a failed listing is a loss the user should see (debug logging is off by default);
       // "not turned on" is their own choice and stays quiet.
       const daemon = this.deps.daemonName ?? 'the daemon';
-      for (const x of skipped.filter((k) => k.notify)) {
-        const text = `${x.server} was not sent to ${daemon}: ${x.reason}`;
+      // One notice for the lot: a row per server filled the transcript when several failed at once.
+      const lost = skipped.filter((k) => k.notify);
+      if (lost.length > 0) {
+        const text = lost.length === 1
+          ? `${lost[0].server} was not sent to ${daemon}: ${lost[0].reason}`
+          : `${lost.length} MCP servers were not sent to ${daemon}: ${lost.map((x) => x.server).join(', ')} (${[...new Set(lost.map((x) => x.reason))].join('; ')})`;
         logger.warn(`[RemoteHarnessSession ${this.threadId}] ${text}`);
         this.deps.onNotice?.('failed', text);
       }
