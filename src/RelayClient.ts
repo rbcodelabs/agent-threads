@@ -511,6 +511,7 @@ export class RelayClient {
         case 'task_progress':
         case 'task_notification':
         case 'notification':
+        case 'mcp_attention':
         case 'api_retry':
         case 'permission_denied':
         case 'rate_limit':

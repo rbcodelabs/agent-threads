@@ -200,6 +200,7 @@ export class ThreadsView extends ItemView {
   private queueRowsEl!: HTMLElement;
   private activeWorkCardEl: HTMLElement | null = null;
   private rateLimitCardEl: HTMLElement | null = null;
+  private mcpAttentionCardEl: HTMLElement | null = null;
   private editedFilesEl!: HTMLElement;
   private artifactCardEl!: HTMLElement;
   /** Small badge shown in the title bar when the active thread is ephemeral. */
@@ -6038,6 +6039,11 @@ export class ThreadsView extends ItemView {
         break;
       }
 
+      case 'mcp_attention': {
+        this.showMcpAttentionCard(event.servers);
+        break;
+      }
+
       case 'api_retry': {
         this.showStatusCard('active', `Retrying (${event.attempt}/${event.maxRetries})…`);
         break;
@@ -6443,6 +6449,34 @@ export class ThreadsView extends ItemView {
       card.createSpan({ cls: 'ct-status-card-text', text });
       this.rateLimitCardEl = card;
     }
+  }
+
+  /** Banner for MCP servers whose tools are unavailable; OAuth-managed ones get a Re-authorize button. */
+  private showMcpAttentionCard(servers: { name: string; status: string; error?: string }[]): void {
+    this.mcpAttentionCardEl?.remove();
+    const card = this.statusRailEl.createDiv('ct-status-card ct-status-card-warning ct-mcp-attention-card');
+    const registry = this.plugin.oauthMcpRegistry;
+    for (const s of servers) {
+      const row = card.createDiv('ct-mcp-attention-row');
+      const oauth = !!registry?.status(s.name);
+      const why = oauth ? 'needs re-authorization' : s.status === 'needs-auth' ? 'needs sign-in' : 'failed to connect';
+      row.createSpan({
+        cls: 'ct-status-card-text',
+        text: `${s.name} ${why} — its tools are unavailable in this thread.${!oauth && s.error ? ` (${s.error})` : ''}`,
+      });
+      if (oauth && registry) {
+        const btn = row.createEl('button', { cls: 'ct-mcp-attention-btn', text: 'Re-authorize' });
+        btn.addEventListener('click', () => {
+          btn.disabled = true;
+          btn.setText('Authorizing…');
+          registry.reauthorize(s.name).then((r) => {
+            if (r.success) { new Notice(`Re-authorized "${s.name}". Send a new message to restart the session with its tools.`); row.remove(); if (!card.hasChildNodes()) card.remove(); }
+            else { new Notice(r.message || `Could not re-authorize "${s.name}".`); btn.disabled = false; btn.setText('Re-authorize'); }
+          }, (err) => { new Notice(err instanceof Error ? err.message : String(err)); btn.disabled = false; btn.setText('Re-authorize'); });
+        });
+      }
+    }
+    this.mcpAttentionCardEl = card;
   }
 
   private clearStatusCard(type: 'active' | 'rateLimit'): void {

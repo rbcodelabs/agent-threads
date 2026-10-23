@@ -786,6 +786,39 @@ describe('system events', () => {
     expect(evt?.error).toBe('server_error');
   });
 
+  it('emits mcp_attention for failed or needs-auth servers only', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    const events: ThreadEvent[] = [];
+    manager.subscribe((_, e) => events.push(e));
+
+    await manager.sendMessage(thread.id, 'Hi');
+    mock.callbacks!.onMcpServerStatus!([
+      { name: 'ok', status: 'connected' },
+      { name: 'conductor', status: 'needs-auth' },
+      { name: 'exa', status: 'failed', error: 'ENOENT' },
+      { name: 'slow', status: 'pending' },
+    ]);
+    driveResponse('Done');
+
+    const evt = events.find(e => e.type === 'mcp_attention') as
+      { type: 'mcp_attention'; servers: { name: string }[] } | undefined;
+    expect(evt?.servers.map(s => s.name)).toEqual(['conductor', 'exa']);
+  });
+
+  it('emits no mcp_attention when every server is connected', async () => {
+    const manager = makeManager();
+    const thread = manager.createThread('T', os.tmpdir());
+    const events: ThreadEvent[] = [];
+    manager.subscribe((_, e) => events.push(e));
+
+    await manager.sendMessage(thread.id, 'Hi');
+    mock.callbacks!.onMcpServerStatus!([{ name: 'ok', status: 'connected' }]);
+    driveResponse('Done');
+
+    expect(events.some(e => e.type === 'mcp_attention')).toBe(false);
+  });
+
   it('emits rate_limit event for rejected status', async () => {
     const manager = makeManager();
     const thread = manager.createThread('T', os.tmpdir());
