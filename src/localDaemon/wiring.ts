@@ -39,6 +39,8 @@ export interface LocalDaemonHost {
   projectFolders?(): string[];
   externalRoots?(): Promise<ExternalRootInput[] | null | undefined>;
   createSocket: WebSocketFactory;
+  /** Managed policy: why the container must not be created or started right now (read fresh), or undefined. */
+  policyDenial?(): Promise<string | undefined>;
   log?(message: string): void;
 }
 
@@ -116,6 +118,7 @@ export function createLocalDaemonController(host: LocalDaemonHost): LocalDaemonC
     runtime: createDefaultRuntimeApi(),
     createRunner: () => createDefaultVmCommandRunner(),
     healthz: (port) => httpGetHealth(port, 1500),
+    ...(host.policyDenial ? { policyDenial: host.policyDenial } : {}),
     probeDaemon: (url, token) => probeDaemon({
       url: daemonWsUrl(url),
       token,

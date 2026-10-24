@@ -7,6 +7,7 @@ import { ThreadSession } from './ThreadSession';
 import type { HarnessSession } from './HarnessSession';
 import { RemoteHarnessSession, type RemoteSessionDeps } from './remote/RemoteHarnessSession';
 import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
+import { assertLaunchAllowed, type PolicyTarget, type ThreadExecutionPolicy } from './managedPolicy';
 import type { PluginSettings, Thread } from './types';
 
 /**
@@ -28,6 +29,21 @@ function loadDemoScript(file: string): ReplayScript {
   return script;
 }
 
+/**
+ * The policy snapshot a caller took in the SAME call path as the session start (the fresh read happens one level up,
+ * where the code is async). Passing it is mandatory for ThreadManager (a source-scan test pins that); an absent
+ * argument means "this host has no managed policy" (the daemon, tests).
+ */
+export interface LaunchPolicy {
+  policy: ThreadExecutionPolicy | undefined;
+}
+
+/** Where a thread runs, for policy: a daemon is local or remote by how its config is classified. */
+export function policyTargetOfThread(thread: Pick<Thread, 'remote'>, remoteDaemons?: RemoteDaemonResolver): PolicyTarget {
+  if (!thread.remote) return { kind: 'machine' };
+  return remoteDaemons?.targetOf?.(thread.remote.daemonId) ?? { kind: 'remoteDaemon' };
+}
+
 /** Central harness selection point. ThreadManager never constructs adapters directly. */
 export function createHarnessSession(
   thread: Thread,
@@ -35,7 +51,11 @@ export function createHarnessSession(
   remoteDaemons?: RemoteDaemonResolver,
   remoteHooks?: Pick<RemoteSessionDeps, 'onPendingChanged' | 'log' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName' | 'daemonName'>,
   env: Record<string, string | undefined> = process.env,
+  launchPolicy?: LaunchPolicy,
 ): HarnessSession {
+  // Last-resort synchronous guard: whatever the callers did, a refused (target, harness) pair never reaches a spawn,
+  // a socket or a daemon.
+  if (launchPolicy) assertLaunchAllowed(launchPolicy.policy, policyTargetOfThread(thread, remoteDaemons), thread.agentHarness ?? 'claude');
   // A remote thread runs on a daemon whatever its harness says.
   if (thread.remote) {
     const client = remoteDaemons?.clientFor(thread.remote.daemonId);

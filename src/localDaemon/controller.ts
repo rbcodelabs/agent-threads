@@ -124,6 +124,12 @@ export interface LocalDaemonDeps {
    * ignores `container stop` and `container kill`. Absent where it cannot run.
    */
   killVmHelper?(containerName: string): Promise<void>;
+  /**
+   * Managed policy (docs/managed-policy.md): why the local daemon must not be created, started or updated, or
+   * undefined. Read FRESH by the operations that would create or start the container; never applied to stop/remove,
+   * and an existing container is left exactly as it is (policy is a gate, not a mutation).
+   */
+  policyDenial?(): Promise<string | undefined> | string | undefined;
   /** State changed: a UI should re-read {@link LocalDaemonController.getBusy} / take a new snapshot. */
   onChange?(): void;
   log?(message: string): void;
@@ -133,6 +139,9 @@ export interface LocalDaemonDeps {
 }
 
 // ── Public types ─────────────────────────────────────────────────────────────
+
+/** Operations that create or start the container: refused while managed policy forbids the local daemon. */
+const POLICY_GATED_OPS: ReadonlySet<string> = new Set(['setup', 'start', 'restart', 'update', 'reset', 'sign-in']);
 
 export type LocalDaemonOpKind = 'setup' | 'start' | 'stop' | 'restart' | 'kill' | 'update' | 'reset' | 'remove' | 'sign-in';
 
@@ -277,6 +286,7 @@ export class LocalDaemonController {
     this.opsStarted++;
     op.promise = (async () => {
       try {
+        if (POLICY_GATED_OPS.has(kind)) await this.assertPolicyAllows();
         const result = await fn({ signal: controller.signal, emit });
         this.lastError = null;
         return result;
@@ -660,6 +670,11 @@ export class LocalDaemonController {
 
   // ── operations ─────────────────────────────────────────────────────────────
 
+  private async assertPolicyAllows(): Promise<void> {
+    const denied = await this.deps.policyDenial?.();
+    if (denied) throw new LocalDaemonError('policy', denied);
+  }
+
   /** Install what is missing, create the daemon, mint its token, register it. Idempotent; safe to re-run after a failure. */
   setUp(opts: RunOptions = {}): Promise<Assessment> {
     return this.runOp('setup', opts, async (ctx) => {
@@ -681,6 +696,8 @@ export class LocalDaemonController {
    * Throws a typed error (`not-set-up`, `needs-sign-in`, `incompatible`, ...) the caller shows verbatim.
    */
   async ensureRunning(opts: RunOptions = {}): Promise<void> {
+    // Before the "already healthy" fast path: an existing container is not attached to when policy forbids the target.
+    await this.assertPolicyAllows();
     const settings = this.settings();
     // Only Claude has a credential this plugin manages; with Claude off there is nothing to wait for here.
     const signedIn = !this.harnesses().includes('claude') || settings.credentialWritten === true || !!this.deps.secrets.get(CONTAINER_AUTH_TOKEN_SECRET);

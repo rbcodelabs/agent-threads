@@ -37,6 +37,11 @@ export interface SchedulerOptions {
   saveItems?: (items: ScheduledItem[]) => Promise<void>;
   createThread: (title: string, cwd: string, projectId?: string, scheduledItemId?: string) => { id: string };
   sendMessage: (threadId: string, prompt: string) => Promise<void>;
+  /**
+   * Managed policy: throws (with the user-facing reason) when a new scheduled thread may not run on this computer with
+   * the default harness. The reason lands in the item's run history as an error; the scheduler keeps running.
+   */
+  assertCanLaunchNewThread?: () => Promise<void>;
   getDefaultCwd: () => string;
   /** Resolve a Project cwd at use time. Undefined means the Project is stale. */
   getProjectCwd?: (projectId: string) => string | undefined;
@@ -809,6 +814,7 @@ export class Scheduler {
             // deleted Project, even when an explicit cwd is present.
             this.validateProject(current.projectId);
             effectiveCwd ??= this.getEffectiveCwd(current);
+            await this.options.assertCanLaunchNewThread?.();
             const thread = this.options.createThread(current.name, effectiveCwd, current.projectId, current.id);
             await this.options.sendMessage(thread.id, promptToSend);
             current.lastThreadId = thread.id;

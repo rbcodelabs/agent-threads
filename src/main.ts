@@ -91,6 +91,10 @@ import { adminTokenSecretNameFor } from './remote/daemonConfig';
 import { RemoteSecretPush } from './remote/secretPush';
 import { McpSyncEngine, normalizeDaemonMcpSync, wireTransport, type McpSyncTransport } from './remote/mcpSync';
 import { LOCAL_DAEMON_ID } from './localDaemon/spec';
+import {
+  ManagedPolicyService, ManagedPolicyError, assertLaunchAllowed, daemonUseDenial, hostExecState, mobileRemoteAccessAllowed, policyTargetOfDaemon, resolvePolicyBridge,
+  type HostExecPolicyAccess, type ThreadExecutionPolicy,
+} from './managedPolicy';
 import { createRemoteFolderSource, type RemoteFolderSource } from './remote/folderSource';
 import { createRemoteReposSource, type RemoteReposSource } from './remote/repos';
 import { RemoteSkillsSync, resolveSkillsSyncMode } from './remote/skillsSync';
@@ -352,6 +356,18 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * recomputes the warning every time the tab is drawn.
    */
   private reportedMcpWarnings = new Set<string>();
+
+  /**
+   * Managed `threadExecution` policy (docs/managed-policy.md). Reads go to the host every time (`read()`); `peek()` is
+   * only for advisory UI and for synchronous spots whose caller has just read it. Fails open without a host bridge.
+   */
+  managedPolicy: ManagedPolicyService = new ManagedPolicyService({
+    bridge: () => resolvePolicyBridge(window as unknown as { geode?: { getEffectivePolicy?: unknown } }),
+  });
+
+  /** Why the administrator's policy forbids connecting to / pushing to this daemon, or undefined. Uses the last snapshot. */
+  daemonPolicyDenial = (daemon: RemoteDaemonConfig): string | undefined =>
+    daemonUseDenial(this.managedPolicy.peek(), policyTargetOfDaemon(daemon, LOCAL_DAEMON_ID));
 
   // Remote access (desktop and mobile)
   relayClient: RelayClient | null = null;
@@ -664,6 +680,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       createSocket: createPluginWebSocketFactory(),
       clientVersion: this.manifest.version,
       getInstanceId: () => this.settings.remoteClientId,
+      policy: this.managedPolicy,
+      localDaemonId: LOCAL_DAEMON_ID,
       getMounts: (daemonId) => (this.localDaemon && daemonId === LOCAL_DAEMON_ID ? this.localDaemon.currentMounts() : undefined),
       getMcpSync: (daemonId) => (this.mcpSync ? { synced: this.mcpSync.syncedNamesOf(daemonId), reasonFor: (name) => this.mcpSync?.unsyncedReasonOf(daemonId, name) } : undefined),
       log: (message) => debugLog(message),
@@ -675,6 +693,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       // What a host session would get: Extra environment variables, then the keychain secrets visible to the project.
       resolveEnv: (projectId) => ({ ...parseExtraEnv(effectiveExtraEnv(this.settings)), ...(this.manager.secretEnvResolver?.(projectId) ?? {}) }),
       createClient: (daemon, adminToken) => this.createAdminDaemonClient(daemon, adminToken),
+      policyDenial: this.daemonPolicyDenial,
       log: (message) => debugLog(message),
     });
     // Quit: re-push without the secrets (bounded, best effort); the daemon's TTL deletes whatever this cannot reach.
@@ -686,6 +705,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.remoteRepos = createRemoteReposSource(this.daemonRegistry);
     this.register(() => { this.daemonRegistry?.disposeAll(); });
     this.manager.remoteDaemons = this.daemonRegistry;
+    this.manager.managedPolicy = this.managedPolicy;
+    // Prime the snapshot (advisory UI, the registry's synchronous guard) and keep it from going stale: every send also
+    // re-reads, this covers idle time. Reads are cheap IPC calls; the file is read by the host.
+    void this.managedPolicy.read();
+    this.registerInterval(window.setInterval(() => { void this.managedPolicy.read(); }, 30_000));
+    this.registerDomEvent(window, 'focus', () => { void this.managedPolicy.read(); });
     this.manager.daemonMcpStatus = this.daemonMcpStatus;
     this.setUpLocalDaemon();
     this.setUpMcpSync();
@@ -1089,7 +1114,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // vault/workspace/threads/... handlers plus the Google and OAuth brokers, filtered by toolRouting.ts and the
     // daemon's own settings. Only tool names, schemas and results ever leave; the broker URLs and their capability
     // headers stay in the sources created here.
-    this.manager.remoteHostToolsFactory = (threadId: string, thread: Thread) => {
+    this.manager.remoteHostToolsFactory = (threadId: string, thread: Thread, hostExecPolicy: HostExecPolicyAccess) => {
       const daemonSettings = thread.remote ? this.settings.remoteDaemons?.find(d => d.id === thread.remote!.daemonId)?.hostTools : undefined;
       const daemonConfig = thread.remote ? this.settings.remoteDaemons?.find(d => d.id === thread.remote!.daemonId) : undefined;
       // host_exec exists only for the managed local daemon (a container on this Mac). The app shows its Allow once / Deny
@@ -1097,7 +1122,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
       let hostExec: HostExecHooks | undefined;
       let preApprove: ((tool: string, input: Record<string, unknown>) => boolean) | undefined;
       let builtInCwd = thread.cwd;
-      if (daemonConfig?.managed === 'local-container' && !Platform.isMobile) {
+      // Managed policy: with host_exec disabled the handler is never built, so the tool does not exist for the session.
+      // (RemoteHostTools and HostToolExecutor re-check on every manifest and call, so a later change also applies.)
+      if (daemonConfig?.managed === 'local-container' && !Platform.isMobile && hostExecPolicy.initial.enabled) {
         hostExec = {
           isInteractive: () => this.mcpRegistrationAvailable && !this.manager.getThread(threadId)?.scheduledItemId,
           requestApproval: async () => true,
@@ -1135,7 +1162,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         routes = opt.withOptionalRoutes(routes, optionalIds);
         optionalTools = opt.optionalToolsFor(optionalIds);
       }
-      return new RemoteHostTools({ builtIn, mcpSources, overrides: routes, ...(optionalTools ? { optionalTools } : {}), ...(preApprove ? { preApprove } : {}), log: m => debugLog(m) });
+      return new RemoteHostTools({ builtIn, mcpSources, overrides: routes, hostExecPolicy, ...(optionalTools ? { optionalTools } : {}), ...(preApprove ? { preApprove } : {}), log: m => debugLog(m) });
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect
@@ -1306,8 +1333,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // A remote turn that was running when Geode last quit is still running (or finished) on the daemon:
     // re-attach so its transcript completes without anyone opening the thread.
     this.app.workspace.onLayoutReady(() => {
-      const resumed = this.manager.resumeRemoteTurns();
-      if (resumed.length > 0) debugLog(`[ClaudeThreads] re-attached ${resumed.length} remote turn(s)`);
+      void (async () => {
+        // Fresh policy: a thread whose daemon is now disallowed is not re-attached (it keeps its pending turn).
+        const resumed = this.manager.resumeRemoteTurns({ policy: await this.managedPolicy.read() });
+        if (resumed.length > 0) debugLog(`[ClaudeThreads] re-attached ${resumed.length} remote turn(s)`);
+      })();
     });
     // Remote transcripts are persisted as soon as a turn produces something durable, not only when a
     // view happens to save, and each save tells the daemon how much of its replay buffer can go (ack).
@@ -1350,6 +1380,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
       },
       createThread: (title, cwd, projectId, scheduledItemId) => this.createScheduledThread(title, cwd, projectId, scheduledItemId),
       sendMessage: (threadId, prompt) => this.manager.sendMessage(threadId, prompt),
+      // A scheduled item always starts a LOCAL thread with the default harness; refuse it (as a run error on the item)
+      // when the administrator's policy forbids that, instead of creating a thread that can never run.
+      assertCanLaunchNewThread: () => this.manager.assertLaunchAllowedNow({ kind: 'machine' }, this.settings.agentHarness ?? 'claude'),
       getDefaultCwd: () => this.getEffectiveCwd(),
       getProjectCwd: (projectId) => {
         const project = this.manager.getProject(projectId);
@@ -2076,6 +2109,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   /** A thread an agent creates via threads_create; it inherits the creator's denylist. */
   createThreadFromAgent(creatorThreadId: string, title: string, cwd?: string, projectId?: string): Thread {
+    // Synchronous, so the last policy snapshot (the creator's own send just read it); the fresh check is at send.
+    assertLaunchAllowed(this.managedPolicy.peek(), { kind: 'machine' }, this.settings.agentHarness ?? 'claude');
     const thread = this.manager.createThread(title, cwd, projectId);
     const creator = this.manager.getThread(creatorThreadId);
     if (creator?.disallowedTools?.length) {
@@ -2348,7 +2383,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
     if (!ra.enabled || !ra.roomId) return;
 
     this.relayClient?.disconnect();
-    this.relayClient = new RelayClient('desktop', ra.relayUrl, ra.roomId, this.manager);
+    // Managed policy (mobileRemoteAccess) is consulted before every connection attempt and every phone command.
+    this.relayClient = new RelayClient('desktop', ra.relayUrl, ra.roomId, this.manager, this.managedPolicy);
 
     // Provide expiry getter so RelayClient can gate first-time joins.
     this.relayClient.getPairingExpiresAt = () => this.settings.remoteAccess.pairingExpiresAt;
@@ -2695,6 +2731,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       settings: () => this.settings,
       readSecret: (name) => this.app.secretStorage.getSecret(secretStorageKey(name)) || undefined,
       capabilitiesOf: (id) => registry.capabilitiesOf(id),
+      policyDenial: this.daemonPolicyDenial,
       transportFor: (daemon) => {
         if (daemon.managed === 'local-container') {
           if (!Platform.isDesktopApp) return undefined;
@@ -2765,12 +2802,19 @@ export default class ClaudeThreadsPlugin extends Plugin {
       projectFolders: () => this.projectWorkFolders(),
       externalRoots: () => this.listExternalMountRoots(),
       createSocket: createPluginWebSocketFactory(),
+      policyDenial: async () => daemonUseDenial(await this.managedPolicy.read(), { kind: 'localDaemon' }),
       log: (message) => debugLog(message),
     });
     const controller = this.localDaemon;
     // Lazy start: a thread that runs on the managed daemon starts it on first use.
     this.manager.beforeRemoteSend = async (daemonId, threadId) => {
       const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
+      // Defense in depth (ThreadManager.sendMessage already refused a disallowed thread before this hook): no daemon
+      // start, secret push or skills sync for a daemon the administrator disallowed. Fresh read, not a snapshot.
+      if (daemon) {
+        const denied = daemonUseDenial(await this.managedPolicy.read(), policyTargetOfDaemon(daemon, LOCAL_DAEMON_ID));
+        if (denied) throw new ManagedPolicyError('target-disabled', denied);
+      }
       if (daemon?.managed !== 'local-container') {
         await this.syncSkillsToRemoteDaemon(daemon, threadId);
         // A remote daemon: push the secrets its allowlist names (nothing when the list is empty, the default).
@@ -2817,6 +2861,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
   /** A client authenticated with the separate admin token, for the commands the everyday control token cannot send. */
   private createAdminDaemonClient(daemon: RemoteDaemonConfig, adminToken: string, opts: { reconnect?: boolean } = {}): DaemonClient {
+    // Managed policy: never open an admin connection (secret push, skills, MCP sync) to a daemon that is disallowed.
+    const denied = this.daemonPolicyDenial(daemon);
+    if (denied) throw new ManagedPolicyError('target-disabled', denied);
     return new DaemonClient({
       url: daemonWsUrl(daemon.url),
       getToken: () => adminToken,
@@ -2850,6 +2897,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
           createClient: (d, adminToken) => this.createAdminDaemonClient(d, adminToken, { reconnect: false }),
           warm: (client, timeoutMs) => warmClient(client as DaemonClient, timeoutMs),
           skillPlugins: () => this.manager.buildHostSkillPlugins(),
+          policyDenial: this.daemonPolicyDenial,
           fs: nodeFs,
           sha256: () => crypto.createHash('sha256'),
           log: (message) => debugLog(message),
@@ -3120,6 +3168,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       getThread: (id) => this.manager.getThread(id),
       isRunning: (id) => this.manager.isRunning(id),
       createThread: async (input: CreateThreadInput) => {
+        await this.manager.assertLaunchAllowedNow({ kind: 'machine' }, input.agentHarness ?? this.settings.agentHarness ?? 'claude');
         const project = input.projectId ? this.manager.getProject(input.projectId) : undefined;
         if (input.projectId && !project) throw new Error(`Project not found: ${input.projectId}`);
         const cwd = input.cwd ?? (project ? this.manager.getProjectCwd(project) : this.getEffectiveCwd());
@@ -3187,6 +3236,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * between begin and commit; this host handle owns only lifecycle rollback.
    */
   private async beginPublicProvisionalThread(input: CreateThreadInput) {
+    await this.manager.assertLaunchAllowedNow({ kind: 'machine' }, input.agentHarness ?? this.settings.agentHarness ?? 'claude');
     const project = input.projectId ? this.manager.getProject(input.projectId) : undefined;
     if (input.projectId && !project) throw new Error(`Project not found: ${input.projectId}`);
     const previousActiveThreadId = this.getActiveThreadId();
@@ -3805,6 +3855,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
    */
   isLocalDaemonSetupOffered(): boolean {
     if (!Platform.isDesktopApp || !this.localDaemon) return false;
+    // Managed policy: do not offer to create a container the administrator forbids (advisory; setUp itself also refuses).
+    if (daemonUseDenial(this.managedPolicy.peek(), { kind: 'localDaemon' })) return false;
     if ((this.settings.remoteDaemons ?? []).some((d) => d.managed === 'local-container')) return false;
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -3947,6 +3999,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
       remote?: { daemonId: string; cwd: string };
     },
   ): Promise<string> {
+    // Managed policy, read fresh BEFORE any thread, scheduled loop or project lookup exists: a refused dispatch leaves
+    // nothing behind. (The thread's own send re-checks, so this is about not creating a dead thread.)
+    await this.manager.assertLaunchAllowedNow(
+      this.manager.policyTargetFor(opts?.remote?.daemonId),
+      opts?.agentHarness ?? this.settings.agentHarness ?? 'claude',
+    );
     const rawTitle = titleHint ?? text;
     const title = rawTitle.trim()
       ? rawTitle.slice(0, 50).split('\n')[0].trim()

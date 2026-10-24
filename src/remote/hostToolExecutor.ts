@@ -44,6 +44,13 @@ export interface HostToolExecutorDeps {
    * tool. Nothing the daemon sends can make it true; it throws or returns false to fall back to the card.
    */
   isPreApproved?(server: string, tool: string, input: Record<string, unknown>): boolean;
+  /**
+   * Managed policy for one call (docs/managed-policy.md), read fresh when the call is about to run. `ok: false`
+   * refuses it before any approval card or invocation (a stale manifest, or a daemon that sends `tool.call` for a tool
+   * the administrator disabled, cannot execute). `allowAlways: false` ignores every standing approval, so the
+   * per-call card is shown. Absent = no managed policy.
+   */
+  gateCall?(server: string, tool: string): Promise<{ ok: true; allowAlways: boolean } | { ok: false; text: string }>;
   sendResult(callId: string, result: { success: boolean; text: string; content?: unknown[]; structuredContent?: Record<string, unknown> }): Promise<void>;
   slots: HostToolSlots;
   now?: () => number;
@@ -153,9 +160,19 @@ export class HostToolExecutor {
     const name = mcpToolName(spec.server, spec.name);
     let result: { success: boolean; text: string; content?: unknown[]; structuredContent?: Record<string, unknown> };
     try {
+      let allowStanding = true;
+      if (this.deps.gateCall) {
+        const gate = await this.deps.gateCall(spec.server, spec.name);
+        if (!gate.ok) {
+          this.deps.log?.(`REFUSED ${spec.server}/${spec.name}: ${gate.text}`);
+          this.finish(callId, refusal(gate.text));
+          return;
+        }
+        allowStanding = gate.allowAlways;
+      }
       if (spec.requiresApproval) {
         let preApproved = false;
-        try { preApproved = this.deps.isPreApproved?.(spec.server, spec.name, input) === true; } catch { preApproved = false; }
+        if (allowStanding) { try { preApproved = this.deps.isPreApproved?.(spec.server, spec.name, input) === true; } catch { preApproved = false; } }
         let detail = '';
         if (!preApproved) {
           const card = describeCallForApproval(spec.name, input);

@@ -21,6 +21,7 @@ import type {
 import type { Thread, ChatMessage } from './types';
 import { debugLog } from './logger';
 import { RECONNECT_BACKOFF_MS } from './remote/backoff';
+import { mobileRemoteAccessAllowed, type ManagedPolicySource } from './managedPolicy';
 
 type FrameListener = (frame: RelayFrame) => void;
 type ConnectionStateListener = (state: ConnectionState) => void;
@@ -29,6 +30,9 @@ type ConnectionStateListener = (state: ConnectionState) => void;
 const PONG_TIMEOUT_MS = 10_000;
 /** How often to send pings (mobile mode). */
 const PING_INTERVAL_MS = 20_000;
+
+/** How often a connected desktop relay re-reads managed policy, so a live change disconnects it. */
+const POLICY_WATCH_MS = 15_000;
 
 /** Backoff sequence in ms, capped at 30s. */
 const BACKOFF = RECONNECT_BACKOFF_MS;
@@ -103,12 +107,45 @@ export class RelayClient {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pongTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Desktop mode only: a managed policy that forbids mobile remote access suspends the connection (never deletes pairing). */
+  private policyWatchTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor(
     private readonly mode: 'desktop' | 'mobile',
     private readonly relayUrl: string,
     private readonly roomId: string,
     private readonly threadManager?: ThreadManager,
+    /** Managed policy (docs/managed-policy.md). Absent = unrestricted. Only consulted in desktop mode. */
+    private readonly policy?: ManagedPolicySource,
   ) {}
+
+  private get policed(): boolean {
+    return this.mode === 'desktop' && this.policy !== undefined;
+  }
+
+  /** Fresh read: may this desktop talk to the relay at all? */
+  private async relayAllowed(): Promise<boolean> {
+    return !this.policed || mobileRemoteAccessAllowed(await this.policy!.read());
+  }
+
+  private startPolicyWatch(): void {
+    if (!this.policed || this.policyWatchTimer !== null) return;
+    this.policyWatchTimer = setInterval(() => {
+      if (!this.ws) return;
+      void this.relayAllowed().then((allowed) => {
+        // Closing runs the normal close path, which schedules a reconnect; that reconnect re-checks policy and, while
+        // forbidden, opens nothing. Pairing state (settings.remoteAccess) is untouched, so relaxing the policy resumes.
+        if (!allowed && this.ws && !this.destroyed) this.ws.close(1000, 'Disabled by managed policy');
+      });
+    }, POLICY_WATCH_MS);
+  }
+
+  private stopPolicyWatch(): void {
+    if (this.policyWatchTimer !== null) {
+      clearInterval(this.policyWatchTimer);
+      this.policyWatchTimer = null;
+    }
+  }
 
   // ── Public API ──────────────────────────────────────────────────────────
 
@@ -119,6 +156,7 @@ export class RelayClient {
 
   disconnect(): void {
     this.destroyed = true;
+    this.stopPolicyWatch();
     this.stopReconnect();
     this.stopPingPong();
     if (this.ws) {
@@ -188,6 +226,29 @@ export class RelayClient {
   // ── Private: WebSocket lifecycle ────────────────────────────────────────
 
   private openWebSocket(): void {
+    if (this.destroyed) return;
+    if (this.policed) {
+      void this.openIfAllowed();
+      return;
+    }
+    this.openSocketNow();
+  }
+
+  /** Managed policy gate in front of every desktop connection attempt (first connect and every reconnect). */
+  private async openIfAllowed(): Promise<void> {
+    const allowed = await this.relayAllowed();
+    if (this.destroyed) return;
+    if (!allowed) {
+      debugLog('[RelayClient] Mobile remote access is disabled by managed policy; not connecting');
+      this.scheduleReconnect();
+      return;
+    }
+    if (this.ws) return;
+    this.openSocketNow();
+    this.startPolicyWatch();
+  }
+
+  private openSocketNow(): void {
     if (this.destroyed) return;
 
     const url = `${this.relayUrl}/room/${this.roomId}?role=${this.mode}`;
@@ -298,6 +359,24 @@ export class RelayClient {
 
   private handleRemoteCommand(cmd: RemoteCommand): void {
     if (!this.threadManager) return;
+    if (this.policed) {
+      // A command from a phone is an instruction to this machine: it must pass policy at the moment it arrives, not
+      // just when the socket was opened. Reads resolve in order, so command order is preserved.
+      void this.relayAllowed().then((allowed) => {
+        if (this.destroyed) return;
+        if (!allowed) {
+          this.ws?.close(1000, 'Disabled by managed policy');
+          return;
+        }
+        this.runRemoteCommand(cmd);
+      });
+      return;
+    }
+    this.runRemoteCommand(cmd);
+  }
+
+  private runRemoteCommand(cmd: RemoteCommand): void {
+    if (!this.threadManager) return;
 
     switch (cmd.type) {
       case 'ping':
@@ -338,9 +417,17 @@ export class RelayClient {
         break;
 
       case 'create_thread': {
-        const thread = this.threadManager.createThread(cmd.title, cmd.cwd);
-        // Snapshot will propagate the new thread; thread_created event also fires
-        void thread;
+        // create_thread bypasses the dispatch path, so it gets its own managed-policy check (a local thread with the
+        // default harness): a refused phone request creates nothing.
+        const manager = this.threadManager;
+        void manager.assertLaunchAllowedNow({ kind: 'machine' }, manager.defaultHarness()).then(
+          () => {
+            const thread = manager.createThread(cmd.title, cmd.cwd);
+            // Snapshot will propagate the new thread; thread_created event also fires
+            void thread;
+          },
+          (err) => console.warn('[RelayClient] create_thread refused:', err instanceof Error ? err.message : err),
+        );
         break;
       }
 

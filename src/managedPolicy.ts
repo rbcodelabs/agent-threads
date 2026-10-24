@@ -270,6 +270,27 @@ export function isEverythingDisabled(policy: ThreadExecutionPolicy | undefined):
   return !(['machine', 'localDaemon', 'remoteDaemon'] as const).some((kind) => targetUsable(policy, kind));
 }
 
+/**
+ * May this app register, connect to, push to or sync to a daemon at all (independent of any one thread's harness)?
+ * Local: the local-daemon target must be usable. Remote: the remote target must be usable and the URL on `hosts`.
+ * Returns the user-facing refusal, or `undefined` when allowed.
+ */
+export function daemonUseDenial(policy: ThreadExecutionPolicy | undefined, target: PolicyTarget): string | undefined {
+  if (!policy || target.kind === 'machine') return undefined;
+  if (!targetUsable(policy, target.kind)) {
+    if (isEverythingDisabled(policy)) return ALL_DISABLED_MESSAGE;
+    const block = blockFor(policy, target.kind);
+    if (block?.enabled === false) return `Running threads on ${TARGET_LABEL[target.kind]} is disabled by your administrator.`;
+    return target.kind === 'remoteDaemon' && allowedOrigins(policy)?.size === 0
+      ? 'Your administrator has not allowed any remote daemon host.'
+      : `${TARGET_LABEL[target.kind][0].toUpperCase()}${TARGET_LABEL[target.kind].slice(1)} are not available: your administrator has not allowed any harness there.`;
+  }
+  if (target.kind === 'remoteDaemon' && !remoteHostAllowed(policy, target.url)) {
+    return 'This remote daemon is not on the list of hosts your administrator allows.';
+  }
+  return undefined;
+}
+
 /** Why a harness is unavailable on a target, for a disabled menu item; `undefined` when it is available. */
 export function harnessDenyReason(policy: ThreadExecutionPolicy | undefined, target: PolicyTarget, harness: AgentHarness): string | undefined {
   const decision = evaluateLaunch(policy, target, harness);
@@ -305,6 +326,12 @@ export interface HostExecPolicyState {
 export function hostExecState(policy: ThreadExecutionPolicy | undefined): HostExecPolicyState {
   const enabled = policy?.hostExec?.enabled !== false;
   return { enabled, allowAlways: enabled && policy?.hostExec?.allowAlways !== false };
+}
+
+/** What the host_exec wiring gets: the state when the session was set up, and a fresh answer on demand. */
+export interface HostExecPolicyAccess {
+  initial: HostExecPolicyState;
+  current(): Promise<HostExecPolicyState>;
 }
 
 export const HOST_EXEC_DISABLED_MESSAGE = 'host_exec is disabled by your administrator.';

@@ -68,6 +68,8 @@ export interface RemoteSkillsSyncDeps {
   /** Starts connecting and resolves once the daemon answered, failed, or `timeoutMs` passed. Never rejects. */
   warm?: (client: SkillsClient, timeoutMs: number) => Promise<void>;
   skillPlugins: () => Array<{ path: string }>;
+  /** Managed policy: why this daemon must not be connected to at all, or undefined (docs/managed-policy.md). */
+  policyDenial?: (daemon: RemoteDaemonConfig) => string | undefined;
   fs: FsLike;
   sha256: () => Sha256Like;
   newUploadId?: () => string;
@@ -94,6 +96,11 @@ export class RemoteSkillsSync {
     const now = this.deps.now ?? Date.now;
     const deadline = now() + SKILLS_SYNC_BUDGET_MS;
     const name = this.deps.resolver.nameOf(daemon.id) || daemon.name;
+    const denied = this.deps.policyDenial?.(daemon);
+    if (denied) {
+      result.notices.push(`Skills not synced to ${name}: ${denied}`);
+      return result;
+    }
     const fail = (reason: string): SkillsSyncResult => {
       result.notices.push(`Skills not synced to ${name}: ${reason}`);
       this.deps.log?.(`[skills-sync] ${daemon.id}: ${reason}`);
