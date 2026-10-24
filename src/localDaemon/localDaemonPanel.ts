@@ -67,7 +67,7 @@ export interface LocalDaemonPanel {
 const DEFAULT_SNAPSHOT_TIMEOUT_MS = 15_000;
 
 /** Buttons that create or start the container; disabled while managed policy forbids the local daemon. */
-const MANAGED_BLOCKED_BUTTONS: ReadonlySet<LocalDaemonButtonId> = new Set<LocalDaemonButtonId>(['setup', 'start', 'restart', 'update', 'reset']);
+const MANAGED_BLOCKED_BUTTONS: ReadonlySet<LocalDaemonButtonId> = new Set<LocalDaemonButtonId>(['setup', 'start', 'restart', 'update', 'reset', 'sign-in']);
 
 class SnapshotTimeoutError extends Error {
   constructor(ms: number) { super(`the container runtime did not answer within ${Math.round(ms / 1000)} seconds`); }

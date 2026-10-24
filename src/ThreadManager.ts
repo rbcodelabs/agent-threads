@@ -711,7 +711,7 @@ export class ThreadManager {
     const sourceHarness = thread.agentHarness ?? 'claude';
     if (sourceHarness === targetHarness) return;
     // The new harness must be allowed where the thread runs.
-    await this.assertLaunchAllowedNow(policyTargetOfThread(thread, this.remoteDaemons), targetHarness);
+    if (this.managedPolicy) await this.assertLaunchAllowedNow(policyTargetOfThread(thread, this.remoteDaemons), targetHarness);
     // A remote thread hands off like a local one: the daemon closes the old harness's session and the next send opens
     // the new harness's on the same daemon. Only a harness the daemon offers can be chosen.
     if (thread.remote) this.assertDaemonOffersHarness(thread.remote.daemonId, targetHarness);
@@ -808,7 +808,7 @@ export class ThreadManager {
     if (!thread) throw new Error(`Thread not found: ${id}`);
     const harness: AgentHarness = thread.agentHarness ?? 'claude';
     // The destination must be allowed for this thread's harness (moving to this computer is a target too).
-    await this.assertLaunchAllowedNow(this.policyTargetFor(target.kind === 'daemon' ? target.daemonId : undefined), harness);
+    if (this.managedPolicy) await this.assertLaunchAllowedNow(this.policyTargetFor(target.kind === 'daemon' ? target.daemonId : undefined), harness);
     if (target.kind === 'daemon') this.assertDaemonOffersHarness(target.daemonId, harness);
     if (target.kind === 'daemon' && thread.remote?.daemonId === target.daemonId) return;
     if (target.kind === 'host' && !thread.remote) return;

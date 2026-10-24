@@ -21,6 +21,7 @@ function pluginHarness() {
   const plugin = {
     manager,
     scheduler,
+    settings: {},
     getEffectiveCwd: () => '/global',
     saveSettings: vi.fn().mockResolvedValue(undefined),
   };

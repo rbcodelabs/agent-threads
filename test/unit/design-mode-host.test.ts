@@ -9,9 +9,11 @@ function hostFixture(saveSettings = vi.fn(async () => {})) {
     deleteThread: vi.fn(),
     getProject: vi.fn(),
     artifactCleanupSettled: Promise.resolve(),
+    assertLaunchAllowedNow: vi.fn(async () => {}), // managed policy: none in this fixture
   };
   const plugin = Object.assign(Object.create(ClaudeThreadsPlugin.prototype), {
     manager,
+    settings: {},
     saveSettings,
     getActiveThreadId: () => 'previous-thread',
     getEffectiveCwd: () => '/vault',
