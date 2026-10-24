@@ -1385,7 +1385,7 @@ export class ThreadsView extends ItemView {
           return project ? this.manager.getProjectCwd(project) : this.plugin.getEffectiveCwd();
         },
         getVaultRoot: () => this.manager.vaultRoot,
-        managedPolicy: { get: () => this.plugin.managedPolicy.peek(), targetOf: (id) => this.manager.policyTargetFor(id) },
+        managedPolicy: { get: () => this.plugin.managedPolicy?.peek(), targetOf: (id) => this.manager.policyTargetFor(id) },
       },
       onSend: (payload) => this.sendNewConversation(payload),
       getPttKey: () => this.plugin.settings.pttKey ?? '',
@@ -2782,7 +2782,7 @@ export class ThreadsView extends ItemView {
       return g.ok ? undefined : g.reason;
     };
     // Managed policy (advisory; switchHarness re-checks fresh): a harness the administrator removed where this thread runs.
-    const policy = this.plugin.managedPolicy.peek();
+    const policy = this.plugin.managedPolicy?.peek();
     const managedHarness = (value: AgentHarness): string | undefined =>
       harnessDenyReason(policy, this.manager.policyTargetFor(thread.remote?.daemonId), value) ? MANAGED_SUFFIX : undefined;
     const harnessGroups: PopoverOptionGroup[] = [{
@@ -4767,7 +4767,7 @@ export class ThreadsView extends ItemView {
     this.renderPermissionDetail(body, detail);
 
     const actions = card.createDiv('ct-permission-actions');
-    const hostExecPrefix = hostExecAlwaysAllowOffer({ toolName, detail }, hostExecState(this.plugin.managedPolicy.peek()).allowAlways);
+    const hostExecPrefix = hostExecAlwaysAllowOffer({ toolName, detail }, hostExecState(this.plugin.managedPolicy?.peek()).allowAlways);
     actions.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' })
       .addEventListener('click', () => done(false));
     actions.createEl('button', { text: isHostExecPermission(toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' })

@@ -2120,7 +2120,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   /** A thread an agent creates via threads_create; it inherits the creator's denylist. */
   createThreadFromAgent(creatorThreadId: string, title: string, cwd?: string, projectId?: string): Thread {
     // Synchronous, so the last policy snapshot (the creator's own send just read it); the fresh check is at send.
-    assertLaunchAllowed(this.managedPolicy.peek(), { kind: 'machine' }, this.settings.agentHarness ?? 'claude');
+    assertLaunchAllowed(this.managedPolicy?.peek(), { kind: 'machine' }, this.settings.agentHarness ?? 'claude');
     const thread = this.manager.createThread(title, cwd, projectId);
     const creator = this.manager.getThread(creatorThreadId);
     if (creator?.disallowedTools?.length) {

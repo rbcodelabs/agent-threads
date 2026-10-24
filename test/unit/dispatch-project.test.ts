@@ -13,6 +13,9 @@ function pluginHarness() {
     setThreadGoal: vi.fn(),
     commitThreadGoal: vi.fn(),
     sendMessage: vi.fn().mockResolvedValue(undefined),
+    // Managed policy (docs/managed-policy.md): no policy in this fixture.
+    policyTargetFor: vi.fn(() => ({ kind: 'machine' })),
+    assertLaunchAllowedNow: vi.fn().mockResolvedValue(undefined),
   };
   const scheduler = { createItem: vi.fn().mockResolvedValue(undefined) };
   const plugin = {

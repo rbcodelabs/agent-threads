@@ -7,7 +7,7 @@ import { ThreadSession } from './ThreadSession';
 import type { HarnessSession } from './HarnessSession';
 import { RemoteHarnessSession, type RemoteSessionDeps } from './remote/RemoteHarnessSession';
 import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
-import { assertLaunchAllowed, type PolicyTarget, type ThreadExecutionPolicy } from './managedPolicy';
+import { assertLaunchAllowed, policyTargetOfThread, type LaunchPolicy } from './managedPolicy';
 import type { PluginSettings, Thread } from './types';
 
 /**
@@ -27,21 +27,6 @@ function loadDemoScript(file: string): ReplayScript {
   const script = parseReplayScript(JSON.parse(fs.readFileSync(resolved, 'utf8')));
   scriptCache.set(resolved, { mtimeMs, script });
   return script;
-}
-
-/**
- * The policy snapshot a caller took in the SAME call path as the session start (the fresh read happens one level up,
- * where the code is async). Passing it is mandatory for ThreadManager (a source-scan test pins that); an absent
- * argument means "this host has no managed policy" (the daemon, tests).
- */
-export interface LaunchPolicy {
-  policy: ThreadExecutionPolicy | undefined;
-}
-
-/** Where a thread runs, for policy: a daemon is local or remote by how its config is classified. */
-export function policyTargetOfThread(thread: Pick<Thread, 'remote'>, remoteDaemons?: RemoteDaemonResolver): PolicyTarget {
-  if (!thread.remote) return { kind: 'machine' };
-  return remoteDaemons?.targetOf?.(thread.remote.daemonId) ?? { kind: 'remoteDaemon' };
 }
 
 /** Central harness selection point. ThreadManager never constructs adapters directly. */

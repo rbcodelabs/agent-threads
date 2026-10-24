@@ -3,8 +3,8 @@ import { buildProjectOverviewContext, composeAppendSystemPrompt, readProjectOver
 import { extractUrls } from './urlLinks';
 import { mergeDisallowedTools } from './toolRestrictions';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
-import { createHarnessSession, policyTargetOfThread, type LaunchPolicy } from './HarnessFactory';
-import { assertLaunchAllowed, evaluateLaunch, hostExecState, type HostExecPolicyAccess, type ManagedPolicySource, type PolicyDecision, type PolicyTarget } from './managedPolicy';
+import { createHarnessSession } from './HarnessFactory';
+import { assertLaunchAllowed, policyTargetOfThread, type LaunchPolicy, evaluateLaunch, hostExecState, type HostExecPolicyAccess, type ManagedPolicySource, type PolicyDecision, type PolicyTarget } from './managedPolicy';
 import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
 import type { RemoteSessionDeps } from './remote/RemoteHarnessSession';
 import { buildRemoteEnvironmentPrompt } from './remote/sessionSpec';

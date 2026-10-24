@@ -1969,7 +1969,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     // Managed policy (advisory; launch is enforced elsewhere): a harness the administrator removed on this computer
     // stays visible but cannot be chosen, and the setting is never rewritten (policy is a gate, not a mutation).
     {
-      const policy = this.plugin.managedPolicy.peek();
+      const policy = this.plugin.managedPolicy?.peek();
       const dropdown = harnessSetting.controlEl?.querySelector?.('select');
       let managed = false;
       for (const option of Array.from(dropdown?.options ?? [])) {
@@ -2635,7 +2635,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const renderPrefixes = () => {
       prefixList.empty();
       // Managed policy: with host_exec "Always allow" turned off the saved prefixes are kept but ignored.
-      const execPolicy = hostExecState(this.plugin.managedPolicy.peek());
+      const execPolicy = hostExecState(this.plugin.managedPolicy?.peek());
       if (!execPolicy.allowAlways) {
         prefixList.createEl('p', {
           cls: 'ct-managed-note is-visible',
@@ -3463,7 +3463,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
     // Managed policy (mobileRemoteAccess=false): shown off and locked. settings.remoteAccess (room, pairing) is NOT
     // touched, so relaxing the policy resumes the existing pairing.
-    const mobileManaged = !mobileRemoteAccessAllowed(this.plugin.managedPolicy.peek());
+    const mobileManaged = !mobileRemoteAccessAllowed(this.plugin.managedPolicy?.peek());
     new Setting(containerEl)
       .setName('Enable remote access')
       .setDesc(mobileManaged
@@ -3548,7 +3548,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       cls: 'setting-item-description',
       text: 'Run threads on an agent-threads daemon on another machine (for example a homelab box). They keep running there when this app is closed, and reconnect to the live stream when you return. Reach the daemon over Tailscale; see docs/remote-daemon.md.',
     });
-    const remoteBlock = daemonUseDenial(this.plugin.managedPolicy.peek(), { kind: 'remoteDaemon' });
+    const remoteBlock = daemonUseDenial(this.plugin.managedPolicy?.peek(), { kind: 'remoteDaemon' });
     if (remoteBlock?.includes('administrator')) {
       containerEl.createEl('p', { cls: 'setting-item-description ct-managed-note is-visible', text: `Managed by your administrator: ${remoteBlock}`, attr: { role: 'status' } });
     }
@@ -3600,7 +3600,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       .addButton((btn) => {
         btn.setButtonText('Add daemon').setCta().onClick(() => this.openDaemonModal(null));
         // Advisory: when no remote daemon may be registered at all, say so instead of letting Save fail.
-        if (remoteBlock && !this.plugin.managedPolicy.peek()?.remoteDaemon?.hosts) { btn.setDisabled(true); btn.setTooltip(remoteBlock); }
+        if (remoteBlock && !this.plugin.managedPolicy?.peek()?.remoteDaemon?.hosts) { btn.setDisabled(true); btn.setTooltip(remoteBlock); }
       });
     applySecretStorageCopy(this.app, containerEl.createEl('p', { cls: 'setting-item-description' }), (storage) => `${storage} The token never appears in data.json.`);
   }
@@ -3690,7 +3690,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     renderLocalDaemonPanel(setting.descEl, {
       isMobile: Platform.isMobile,
       pluginVersion: this.plugin.manifest.version,
-      managedBlock: () => daemonUseDenial(this.plugin.managedPolicy.peek(), { kind: 'localDaemon' }),
+      managedBlock: () => daemonUseDenial(this.plugin.managedPolicy?.peek(), { kind: 'localDaemon' }),
       snapshot: () => controller.snapshot(),
       snapshotQuick: () => controller.snapshot({ quick: true }),
       subscribe: (listener) => controller.subscribe(listener),
@@ -3718,7 +3718,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
   private async testDaemon(daemon: RemoteDaemonConfig, typedToken: string | undefined): Promise<DaemonTestOutcome> {
     // Managed policy, read fresh: a probe is a connection, so it is refused like any other use of a disallowed daemon.
-    const denied = daemonUseDenial(await this.plugin.managedPolicy.read(), policyTargetOfDaemon(daemon, LOCAL_DAEMON_ID));
+    const denied = daemonUseDenial(await this.plugin.managedPolicy?.read(), policyTargetOfDaemon(daemon, LOCAL_DAEMON_ID));
     if (denied) return { tone: 'error', text: denied };
     const token = typedToken?.trim() || this.app.secretStorage.getSecret(secretStorageKey(daemon.tokenSecretName)) || '';
     if (!token) return { tone: 'error', text: 'No token is stored for this daemon yet.' };
@@ -3771,7 +3771,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       ...(this.plugin.remoteRepos ? { repos: this.plugin.remoteRepos } : {}),
       save: async (config, token, adminToken) => {
         // Managed policy, read fresh: no registration (or edit) of a daemon the administrator disallowed.
-        const denied = daemonUseDenial(await this.plugin.managedPolicy.read(), policyTargetOfDaemon(config, LOCAL_DAEMON_ID));
+        const denied = daemonUseDenial(await this.plugin.managedPolicy?.read(), policyTargetOfDaemon(config, LOCAL_DAEMON_ID));
         if (denied) throw new Error(denied);
         const list = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
         const index = list.findIndex((d) => d.id === config.id);

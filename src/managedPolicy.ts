@@ -297,6 +297,21 @@ export function harnessDenyReason(policy: ThreadExecutionPolicy | undefined, tar
   return decision.allowed ? undefined : decision.message;
 }
 
+/**
+ * The policy snapshot a caller took in the SAME call path as the session start (the fresh read happens one level up,
+ * where the code is async). Passing it is mandatory for ThreadManager (a source-scan test pins that); an absent
+ * argument means "this host has no managed policy" (the daemon, tests).
+ */
+export interface LaunchPolicy {
+  policy: ThreadExecutionPolicy | undefined;
+}
+
+/** Where a thread runs, for policy: a daemon is local or remote by how its config is classified. */
+export function policyTargetOfThread(thread: { remote?: { daemonId: string } }, remoteDaemons?: { targetOf?(daemonId: string): PolicyTarget | undefined }): PolicyTarget {
+  if (!thread.remote) return { kind: 'machine' };
+  return remoteDaemons?.targetOf?.(thread.remote.daemonId) ?? { kind: 'remoteDaemon' };
+}
+
 /** Which target a daemon config is, for policy. */
 export function policyTargetOfDaemon(daemon: { id: string; url: string; managed?: string } | undefined, localDaemonId: string): PolicyTarget {
   if (!daemon) return { kind: 'remoteDaemon' };
@@ -338,6 +353,19 @@ export const HOST_EXEC_DISABLED_MESSAGE = 'host_exec is disabled by your adminis
 
 export function mobileRemoteAccessAllowed(policy: ThreadExecutionPolicy | undefined): boolean {
   return policy?.mobileRemoteAccess !== false;
+}
+
+// ── GitHub delivery to remote daemons ────────────────────────────────────────
+
+/**
+ * `github.deliverToRemoteDaemon` from a raw `getEffectivePolicy()` reply; absent or unrecognised = allowed (fail open).
+ * Today this plugin delivers a GitHub token only to the managed LOCAL daemon (localDaemon/githubDelivery.ts); it has no
+ * remote-daemon GitHub delivery. Any code that would ever send a GitHub token to a remote daemon MUST ask this first,
+ * with a fresh reply (`test/unit/managed-policy-boundaries.test.ts` pins that nothing sends one today).
+ */
+export function githubDeliveryToRemoteDaemonAllowed(rawReply: unknown): boolean {
+  if (!isObject(rawReply) || !isObject(rawReply.effective) || !isObject(rawReply.effective.github)) return true;
+  return rawReply.effective.github.deliverToRemoteDaemon !== false;
 }
 
 // ── The bridge ───────────────────────────────────────────────────────────────

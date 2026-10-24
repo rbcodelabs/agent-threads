@@ -435,3 +435,13 @@ describe('ManagedPolicyService', () => {
     expect(heard.mock.calls.length).toBe(afterFirst + 1);
   });
 });
+
+describe('githubDeliveryToRemoteDaemonAllowed', () => {
+  it('fails open and honours an explicit false', async () => {
+    const { githubDeliveryToRemoteDaemonAllowed } = await import('../../src/managedPolicy');
+    for (const raw of [undefined, null, 5, {}, { effective: {} }, { effective: { github: 'x' } }, { effective: { github: {} } }, { effective: { github: { deliverToRemoteDaemon: true } } }]) {
+      expect(githubDeliveryToRemoteDaemonAllowed(raw)).toBe(true);
+    }
+    expect(githubDeliveryToRemoteDaemonAllowed({ effective: { github: { deliverToRemoteDaemon: false } } })).toBe(false);
+  });
+});
