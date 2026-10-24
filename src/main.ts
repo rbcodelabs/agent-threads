@@ -1190,6 +1190,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.setUpGithubConnection();
     this.persistence = new VaultPersistence(this.app, this.settings.vaultFolder);
     this.inProcessSummarizer = new InProcessSummarizer();
+    this.inProcessSummarizer.spawnGuard = () => this.assertClaudeMayRunOnThisComputer();
 
     // Wake lock — keep computer awake while sessions are processing
     this.wakeLock = new WakeLockService({ enabled: this.settings.wakeLockEnabled });
@@ -2071,6 +2072,15 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.settings.hasSeenWelcome = true;
       this.saveSettings().catch(console.error);
     }
+  }
+
+  /**
+   * Managed policy for work that runs the `claude` binary here without being a thread (summaries, constrained peer
+   * runs): treated as the `machine` target with the Claude harness, read fresh. Version probes and the sign-in CLI are
+   * deliberately not gated (docs/managed-policy.md, "Not enforced").
+   */
+  private async assertClaudeMayRunOnThisComputer(): Promise<void> {
+    assertLaunchAllowed(await this.managedPolicy.read(), { kind: 'machine' }, 'claude');
   }
 
   /** Thread for one run of a scheduled item (the Scheduler's createThread). */
@@ -3190,7 +3200,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       getRedactionSecrets: () => this.collectSecretValues(),
       getPublicState: () => this.settings.publicApiState,
       savePublicState: async (state) => { this.settings.publicApiState = state; await this.saveSettings(); },
-      runConstrainedQuery: createConstrainedQueryRunner(() => this.settings, undefined, () => this.manager.secretEnvResolver?.() ?? {}),
+      runConstrainedQuery: createConstrainedQueryRunner(() => this.settings, undefined, () => this.manager.secretEnvResolver?.() ?? {}, () => this.assertClaudeMayRunOnThisComputer()),
       openThread: (id) => this.openThreadInChatView(id),
       archiveThread: lifecycle.archive,
       markThreadReviewed: lifecycle.markReviewed,

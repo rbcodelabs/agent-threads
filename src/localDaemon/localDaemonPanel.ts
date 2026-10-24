@@ -50,6 +50,12 @@ export interface LocalDaemonPanelDeps {
   /** Opens the sign-in page; the link in the panel is the fallback. */
   openUrl?(url: string): void;
   pluginVersion: string;
+  /**
+   * Managed policy: the administrator's reason the local daemon may not be created or started, or undefined. The
+   * panel then says so and disables the buttons that would create or start the container. Stop, Kill and Remove stay
+   * available (policy never deletes a container, and never blocks a user from removing their own).
+   */
+  managedBlock?(): string | undefined;
 }
 
 export interface LocalDaemonPanel {
@@ -59,6 +65,9 @@ export interface LocalDaemonPanel {
 }
 
 const DEFAULT_SNAPSHOT_TIMEOUT_MS = 15_000;
+
+/** Buttons that create or start the container; disabled while managed policy forbids the local daemon. */
+const MANAGED_BLOCKED_BUTTONS: ReadonlySet<LocalDaemonButtonId> = new Set<LocalDaemonButtonId>(['setup', 'start', 'restart', 'update', 'reset']);
 
 class SnapshotTimeoutError extends Error {
   constructor(ms: number) { super(`the container runtime did not answer within ${Math.round(ms / 1000)} seconds`); }
@@ -76,6 +85,13 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
 
   const root = parent.createDiv('ct-local-daemon');
   root.createDiv({ cls: 'ct-local-daemon-note setting-item-description', text: POSITIONING_NOTE });
+  const managedEl = root.createDiv({ cls: 'ct-managed-note', attr: { role: 'status' } });
+  const refreshManagedNote = (): string | undefined => {
+    const reason = deps.managedBlock?.();
+    managedEl.setText(reason ? `Managed by your administrator: ${reason}` : '');
+    managedEl.toggleClass('is-visible', !!reason);
+    return reason;
+  };
   const statusEl = root.createDiv('ct-local-daemon-status');
   const linesEl = root.createDiv('ct-local-daemon-lines');
   const harnessEl = root.createDiv('ct-local-daemon-harnesses');
@@ -97,6 +113,7 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
     const unsupported = snap.assessment.status === 'unsupported';
     root.toggleClass('is-hidden', unsupported);
     deps.setVisible?.(!unsupported);
+    refreshManagedNote();
     const view = buildLocalDaemonView(snap);
     statusEl.empty();
     statusEl.createSpan({ cls: 'ct-local-daemon-status-label', text: 'Status: ' });
@@ -127,6 +144,11 @@ export function renderLocalDaemonPanel(parent: HTMLElement, deps: LocalDaemonPan
       cls: `ct-local-daemon-btn ct-local-daemon-btn-${b.id}${b.cta ? ' mod-cta' : ''}${b.danger ? ' mod-warning' : ''}`,
       text: b.label,
     });
+    const blocked = refreshManagedNote();
+    if (blocked && MANAGED_BLOCKED_BUTTONS.has(b.id)) {
+      btn.disabled = true;
+      btn.title = blocked;
+    }
     btn.addEventListener('click', () => { void act(b.id, snap); });
   };
 

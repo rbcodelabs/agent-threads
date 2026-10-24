@@ -149,8 +149,12 @@ export function hostExecAlwaysAllowPrefixFromDetail(detail: string): string | nu
  * only for the managed local daemon, whose threads are `remote` threads, so no thread-kind check is made here;
  * the standing approval itself is applied (and re-checked) only where that daemon's tool group is built (main.ts).
  */
-export function hostExecAlwaysAllowOffer(pending: { toolName: string; detail: string } | null | undefined): string | null {
-  if (!pending || !isHostExecPermission(pending.toolName)) return null;
+export function hostExecAlwaysAllowOffer(
+  pending: { toolName: string; detail: string } | null | undefined,
+  /** Managed policy `hostExec.allowAlways`: false removes the option (the per-call prompt stays). */
+  allowAlways = true,
+): string | null {
+  if (!allowAlways || !pending || !isHostExecPermission(pending.toolName)) return null;
   return hostExecAlwaysAllowPrefixFromDetail(pending.detail);
 }
 

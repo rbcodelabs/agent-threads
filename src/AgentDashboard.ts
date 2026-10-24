@@ -6,6 +6,7 @@ import { formatToolName } from './ClaudeSession';
 import { canAlwaysAllow, summarizePermissionDetail, isHostExecPermission } from './permissionDetail';
 import { recordAlwaysAllow } from './remoteAlwaysAllow';
 import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
+import { hostExecState } from './managedPolicy';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
 import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks';
@@ -671,7 +672,7 @@ export class AgentDashboard extends ItemView {
         const allow = btns.createEl('button', { text: !!pendingInfo && isHostExecPermission(pendingInfo.toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
         allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, true); });
 
-        const hostExecPrefix = hostExecAlwaysAllowOffer(pendingInfo);
+        const hostExecPrefix = hostExecAlwaysAllowOffer(pendingInfo, hostExecState(this.plugin.managedPolicy.peek()).allowAlways);
         if (hostExecPrefix) {
           const alwaysPrefix = btns.createEl('button', { text: `Always allow \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' });
           alwaysPrefix.addEventListener('click', async (e) => {
