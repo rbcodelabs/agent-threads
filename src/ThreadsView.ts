@@ -1384,6 +1384,9 @@ export class ThreadsView extends ItemView {
           return project ? this.manager.getProjectCwd(project) : this.plugin.getEffectiveCwd();
         },
         getVaultRoot: () => this.manager.vaultRoot,
+        getMounts: (id) => this.plugin.localDaemonMounts(id),
+        getProjects: () => this.manager.getProjects().map((p) => ({ name: p.name, cwd: this.manager.getProjectCwd(p) })),
+        shareFolder: (hostPath) => this.plugin.shareLocalDaemonFolder(hostPath),
       },
       onSend: (payload) => this.sendNewConversation(payload),
       getPttKey: () => this.plugin.settings.pttKey ?? '',

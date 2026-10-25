@@ -5,6 +5,7 @@
  */
 import type { WorkspaceInfo } from '../protocol';
 import { normalizePosixPath } from './vaultMapping';
+import { guestToHostPath, hostToGuestPath, type PathMount } from './mountPaths';
 
 const fold = (s: string): string => s.normalize('NFC').toLowerCase();
 
@@ -121,4 +122,63 @@ export function applyDiscovery(draft: FolderDraft, workspaces: readonly Workspac
     next.folder = pickDefaultWorkspace(workspaces)?.path ?? '';
   }
   return { draft: next, vaultPick, vaultAutoSelected };
+}
+
+// ── Local daemon: folders named for the Mac, valued as the daemon's own paths ─
+
+export interface LocalDaemonChoice {
+  /** The path inside the daemon (what a thread's cwd is). */
+  value: string;
+  /** Host-side name: a Project's name, `vault`, or the shared folder's name. */
+  label: string;
+}
+
+export interface LocalDaemonChoices {
+  choices: LocalDaemonChoice[];
+  /** The guest path to pre-select (the selected Project's folder), when it is shared. */
+  selected?: string;
+  /** Projects whose folder is not under any mount. */
+  unshared: Array<{ name: string; hostPath: string }>;
+  /** The selected Project's entry in `unshared`, if that is the one in play. */
+  selectedUnshared?: { name: string; hostPath: string };
+}
+
+const baseName = (p: string): string => p.replace(/\/+$/, '').split('/').pop() || p;
+
+/**
+ * The "Run on this Mac (container)" folder list. Each folder the daemon advertises is named for its folder on the
+ * Mac (a Project's name when a Project lives there); Projects inside a mount but not advertised are added; Projects
+ * outside every mount are reported as `unshared` so the UI can offer to share them.
+ */
+export function buildLocalDaemonChoices(input: {
+  workspaces: readonly WorkspaceInfo[];
+  mounts: readonly PathMount[];
+  projects: ReadonlyArray<{ name: string; cwd: string }>;
+  selectedProjectCwd?: string;
+}): LocalDaemonChoices {
+  const { workspaces, mounts, projects } = input;
+  const norm = (p: string): string => normalizePosixPath(p) ?? p;
+  const projectAt = new Map<string, string>(); // guest path -> project name
+  const unshared: Array<{ name: string; hostPath: string }> = [];
+  for (const project of projects) {
+    const guest = hostToGuestPath(mounts, project.cwd);
+    if (guest === undefined) {
+      if (!unshared.some((u) => norm(u.hostPath) === norm(project.cwd))) unshared.push({ name: project.name, hostPath: project.cwd });
+    } else if (!projectAt.has(guest)) projectAt.set(guest, project.name);
+  }
+  const choices: LocalDaemonChoice[] = [];
+  for (const w of workspaces) {
+    const guest = norm(w.path);
+    const host = guestToHostPath(mounts, w.path);
+    const label = projectAt.get(guest) ?? (w.kind === 'vault' ? 'vault' : host ? baseName(host) : w.name || w.path);
+    choices.push({ value: w.path, label: `${label}${w.readOnly ? ' (read-only)' : ''}` });
+  }
+  for (const [guest, name] of projectAt) {
+    if (!choices.some((c) => norm(c.value) === guest)) choices.push({ value: guest, label: name });
+  }
+  const selectedGuest = input.selectedProjectCwd ? hostToGuestPath(mounts, input.selectedProjectCwd) : undefined;
+  const selectedUnshared = input.selectedProjectCwd
+    ? unshared.find((u) => norm(u.hostPath) === norm(input.selectedProjectCwd as string))
+    : undefined;
+  return { choices, selected: selectedGuest, unshared, selectedUnshared };
 }

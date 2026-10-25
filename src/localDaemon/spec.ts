@@ -385,6 +385,8 @@ export function mountsFor(spec: Pick<LocalDaemonSpec, 'vaultPath' | 'maskedDirs'
   ];
 }
 
+export { hostToGuestPath, guestToHostPath, type PathMount } from '../remote/mountPaths';
+
 /** Hash of everything fixed at `run`. A container whose label differs needs recreating to apply a change. */
 export function specSignature(spec: LocalDaemonSpec): string {
   return hashHex(JSON.stringify({
