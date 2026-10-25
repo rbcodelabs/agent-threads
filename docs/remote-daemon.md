@@ -95,10 +95,10 @@ the data volume, and the `localDaemon` settings carry just the toggles. **Reset 
 
 **More folders.** Besides the vault: **Settings, Remote, Local daemon shared folders** lists host folders to share
 READ-WRITE at `/work/<folder name>` (for example a repository outside the vault; they appear under "Run on" as
-workspaces), and Geode's connected external roots are mounted READ-ONLY at `/ext/<name>` and offered as read-only
+workspaces, labelled by their name on the Mac, such as "App - /work/app"), and Geode's connected external roots are mounted READ-ONLY at `/ext/<name>` and offered as read-only
 workspaces (the daemon denies the edit tools there). A folder that is both a shared folder and an external root (or one inside the other) is mounted once, read-write, at `/work`: a folder cannot be shared with two modes at the same time. Mounts are fixed when the container is created, so a change shows as
 "settings changed" and is applied by **Update** (or the next start of a stopped container). The consent text lists every
-mount. Memory and CPUs (**Local daemon memory** / **CPUs**, defaults 4G and 4) work the same way.
+mount. When the selected Project's folder is not shared, the folder chooser says so and offers **Share this folder**, which adds it to the shared folders list; apply it with **Update**. Otherwise the Project's folder is preselected. Memory and CPUs (**Local daemon memory** / **CPUs**, defaults 4G and 4) work the same way.
 
 **Environment and keychain secrets.** The daemon never receives your keychain or shell. Before each message to a thread on
 it, Agent Threads pushes that project's **Extra environment variables** (`AWS_PROFILE`, `CLAUDE_CODE_USE_BEDROCK`, ...) and

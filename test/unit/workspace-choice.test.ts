@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { WorkspaceInfo } from '../../src/protocol';
 import {
   applyDiscovery,
+  buildLocalDaemonChoices,
   describeVaultPick,
   parentPath,
   pickDefaultWorkspace,
@@ -110,5 +111,42 @@ describe('applyDiscovery', () => {
     expect(saved.draft).toMatchObject({ vaultRemote: '/saved/vault', folder: '/saved/dir' });
     const touched = applyDiscovery({ ...empty, vaultTouched: true, folderTouched: true }, [projects, notes], 'Personal');
     expect(touched.draft).toMatchObject({ vaultRemote: '', folder: '' });
+  });
+});
+
+describe('buildLocalDaemonChoices', () => {
+  const ws = (path: string, extra: Partial<WorkspaceInfo> = {}): WorkspaceInfo => ({ path, name: path.split('/').pop() || path, readOnly: false, kind: 'folder', isDefault: false, ...extra });
+  const mounts = [
+    { host: '/Users/me/Vault', guest: '/vault', readOnly: false },
+    { host: '/Users/me/code/app', guest: '/work/app', readOnly: false },
+  ];
+  const workspaces = [ws('/srv/workspaces'), ws('/vault', { kind: 'vault' }), ws('/work/app')];
+
+  it('names folders for the Mac and keeps guest paths as values', () => {
+    const r = buildLocalDaemonChoices({ workspaces, mounts, projects: [] });
+    expect(r.choices).toEqual([
+      { value: '/srv/workspaces', label: 'workspaces' },
+      { value: '/vault', label: 'vault' },
+      { value: '/work/app', label: 'app' },
+    ]);
+  });
+  it('uses the Project name and pre-selects the selected Project, adding Projects inside a mount', () => {
+    const r = buildLocalDaemonChoices({
+      workspaces, mounts,
+      projects: [{ name: 'App', cwd: '/Users/me/code/app' }, { name: 'Notes', cwd: '/Users/me/Vault/Notes' }],
+      selectedProjectCwd: '/Users/me/Vault/Notes',
+    });
+    expect(r.choices.find((c) => c.value === '/work/app')?.label).toBe('App');
+    expect(r.choices).toContainEqual({ value: '/vault/Notes', label: 'Notes' });
+    expect(r.selected).toBe('/vault/Notes');
+    expect(r.unshared).toEqual([]);
+  });
+  it('flags Projects outside every mount as unshared, once, and reports the selected one', () => {
+    const projects = [{ name: 'Far', cwd: '/Users/me/far' }, { name: 'Far again', cwd: '/Users/me/far/' }];
+    const r = buildLocalDaemonChoices({ workspaces, mounts, projects, selectedProjectCwd: '/Users/me/far' });
+    expect(r.unshared).toEqual([{ name: 'Far', hostPath: '/Users/me/far' }]);
+    expect(r.selectedUnshared).toEqual({ name: 'Far', hostPath: '/Users/me/far' });
+    expect(r.selected).toBeUndefined();
+    expect(r.choices.map((c) => c.label)).not.toContain('Far');
   });
 });

@@ -3803,6 +3803,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * the container runtime, and no managed daemon registered. The kickoff picker then shows a set-up entry (what the
    * removed sandbox VM's in-thread "Run this thread in a sandbox?" card was for).
    */
+  /** Bind mounts of the managed local daemon, or undefined for any other daemon (or when it is not running here). */
+  localDaemonMounts(daemonId: string): Array<{ host: string; guest: string; readOnly: boolean }> | undefined {
+    return this.localDaemon && daemonId === LOCAL_DAEMON_ID ? this.localDaemon.currentMounts() : undefined;
+  }
+
+  /** Add a Mac folder to the local daemon's shared folders (Settings, Local daemon shared folders). Takes effect on its next Update. */
+  async shareLocalDaemonFolder(hostPath: string): Promise<void> {
+    const current = this.settings.localDaemon ?? { enabled: false, port: 7433 };
+    const folders = current.folders ?? [];
+    if (folders.includes(hostPath)) return;
+    this.settings.localDaemon = { ...current, folders: [...folders, hostPath] };
+    await this.saveSettings();
+  }
+
   isLocalDaemonSetupOffered(): boolean {
     if (!Platform.isDesktopApp || !this.localDaemon) return false;
     if ((this.settings.remoteDaemons ?? []).some((d) => d.managed === 'local-container')) return false;

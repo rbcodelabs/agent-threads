@@ -254,6 +254,8 @@ const mockPlugin = {
     }
   },
   getEffectiveCwd: () => settings.defaultCwd || '/Users/mock/projects/my-app',
+  localDaemonMounts: () => undefined,
+  shareLocalDaemonFolder: async () => {},
   isConversationFirst: () => settings.threadViewPlacement === 'conversation-first',
   contextPanel: {
     openLinkText: async (href: string, sourcePath: string) => { (window as any).__contextLinkCalls.push([href, sourcePath]); },
