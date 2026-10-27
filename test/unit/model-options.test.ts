@@ -35,7 +35,7 @@ describe('aliasLabel', () => {
 
   it('falls back to built-in versions before any session has run', () => {
     expect(aliasLabel('sonnet')).toBe('Sonnet 5.5 (latest)');
-    expect(aliasLabel('haiku')).toBe('Haiku 4.5 (latest)');
+    expect(aliasLabel('haiku')).toBe('Haiku 5.5 (latest)');
   });
 
   it('leaves unknown values untouched', () => {
@@ -51,7 +51,7 @@ describe('buildClaudeModelOptions', () => {
       'Default',
       'Opus 5.5 (latest)',
       'Sonnet 5.5 (latest)',
-      'Haiku 4.5 (latest)',
+      'Haiku 5.5 (latest)',
       'Fable 5.1 (latest)',
     ]);
   });
@@ -127,7 +127,7 @@ describe('buildClaudeModelOptions with a Bedrock catalog', () => {
       'Default',
       'Opus 5.5 (latest)',
       'Sonnet 5.5 (latest)',
-      'Haiku 4.5 (latest)',
+      'Haiku 4.5',
       'Fable 5.1 (latest)',
       'Opus 4.1',
       'Opus 5.5 (1M context)',
