@@ -160,7 +160,11 @@ function targetAllows(policy: ThreadExecutionPolicy, kind: PolicyTargetKind, har
  * free here; a unit test pins the two together): http(s) becomes ws(s), a bare host:port becomes ws://.
  */
 function connectionUrl(input: string): string {
-  let url = input.trim().replace(/\/+$/, '');
+  let url = input.trim();
+  // Linear trailing-slash trim (a `/\/+$/` regex is polynomial on long runs of slashes; CodeQL flags it).
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47) end--;
+  url = url.slice(0, end);
   if (/^http:\/\//i.test(url)) url = `ws://${url.slice(7)}`;
   else if (/^https:\/\//i.test(url)) url = `wss://${url.slice(8)}`;
   else if (!/^wss?:\/\//i.test(url)) url = `ws://${url}`;
