@@ -62,6 +62,17 @@ test.describe('Daemon editor: tools checklist', () => {
     expect((await page.evaluate(() => (window as any).__savedDaemon)).hostTools).toEqual({ enabled: true, routes: { vault: 'host', 'hiptrip-new': 'host' } });
   });
 
+  test('"Tools from other plugins" ticks to plugins: host', async ({ page }) => {
+    await openModal(page, {});
+    const modal = page.locator('.modal-container');
+    await modal.locator('.setting-item', { hasText: 'Tools on this computer' }).locator('.checkbox-container').click();
+    const row = modal.getByLabel('Tools from other plugins');
+    await expect(row).not.toBeChecked();
+    await row.check();
+    await modal.getByRole('button', { name: /save/i }).evaluate((b: HTMLElement) => b.click());
+    expect((await page.evaluate(() => (window as any).__savedDaemon)).hostTools).toEqual({ enabled: true, routes: { plugins: 'host' } });
+  });
+
   test('a legacy config shows custom rows and saves back unchanged', async ({ page }) => {
     const hostTools = { enabled: true, routes: { vault: 'host', mcp: 'host', old_tool: 'host' }, mcpAllowlist: ['docs', 'gone'] };
     await openModal(page, { hostTools });
