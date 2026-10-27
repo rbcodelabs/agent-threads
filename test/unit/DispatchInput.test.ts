@@ -943,3 +943,66 @@ describe('DispatchInput — remote threads with any harness, gated on the daemon
     expect(textarea.value).toBe('keep me');
   });
 });
+
+
+describe('DispatchInput — Run on the local daemon: Projects and mounted folders', () => {
+  const local = { id: 'this-mac-container', name: 'This Mac (container)', url: 'ws://127.0.0.1:7433', tokenSecretName: 'T', managed: 'local-container' as const };
+  const mounts = [
+    { host: '/Users/me/Vault', guest: '/vault', readOnly: false },
+    { host: '/Users/me/code/app', guest: '/work/app', readOnly: false },
+  ];
+  const workspaces = [
+    { path: '/srv/workspaces', name: 'workspaces', readOnly: false, kind: 'folder' as const, isDefault: true },
+    { path: '/vault', name: 'vault', readOnly: false, kind: 'vault' as const, isDefault: false },
+    { path: '/work/app', name: 'app', readOnly: false, kind: 'folder' as const, isDefault: false },
+  ];
+  const projects = [{ name: 'App', cwd: '/Users/me/code/app' }, { name: 'Far', cwd: '/Users/me/far' }];
+  const flush = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0)); };
+
+  function mountLocal(localCwd: string, shareFolder = vi.fn(async () => {})) {
+    const di = new DispatchInput({
+      app: makeApp(),
+      onSend: vi.fn(),
+      harnessPicker: {
+        initialHarness: 'claude',
+        getRemoteDaemons: () => [local],
+        getLocalCwd: () => localCwd,
+        getVaultRoot: () => '/Users/me/Vault',
+        getFolderSource: () => ({ workspaces: async () => ({ ok: true as const, value: workspaces }), subfolders: vi.fn() }) as never,
+        getMounts: (id) => (id === local.id ? mounts : undefined),
+        getProjects: () => projects,
+        shareFolder,
+      },
+    });
+    const container = makeContainer();
+    document.body.appendChild(container);
+    const root = di.mount(container);
+    root.querySelector<HTMLButtonElement>('.ct-settings-indicator')!.click();
+    level(root, 'runon');
+    optionIn(root, 'This Mac (container)').click();
+    return { root, shareFolder };
+  }
+
+  it('lists folders by host name and pre-selects the selected Project\'s translated folder', async () => {
+    const { root } = mountLocal('/Users/me/code/app');
+    await flush();
+    const select = root.querySelector<HTMLSelectElement>('.ct-run-on-folder-select')!;
+    const labels = Array.from(select.options).map((o) => o.textContent);
+    expect(labels).toContain('App - /work/app');
+    expect(labels).toContain('vault - /vault');
+    expect(select.value).toBe('/work/app');
+    expect(root.querySelector('[data-testid="run-on-unshared"]')).toBeNull();
+  });
+
+  it('flags an unshared Project and shares it through the callback', async () => {
+    const { root, shareFolder } = mountLocal('/Users/me/far');
+    await flush();
+    const note = root.querySelector<HTMLElement>('[data-testid="run-on-unshared"]')!;
+    expect(note.textContent).toContain('Far is not shared');
+    root.querySelector<HTMLButtonElement>('.ct-run-on-share-btn')!.click();
+    await flush();
+    expect(shareFolder).toHaveBeenCalledWith('/Users/me/far');
+    expect(root.querySelector('.ct-run-on-share-btn')).toBeNull();
+    expect(root.querySelector('[data-testid="run-on-unshared"]')!.textContent).toContain('is shared');
+  });
+});

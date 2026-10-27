@@ -3,7 +3,8 @@ import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness, type PluginSetti
 import { resolveRunOn, runOnSuffix, type RunOnRemote, type RunOnSelection } from './remote/runOn';
 import { suggestRemoteCwd } from './remote/vaultMapping';
 import type { RemoteFolderSource, FolderLoad } from './remote/folderSource';
-import { parentPath, pickDefaultWorkspace, workspaceContaining, workspaceForPath, workspaceLabel } from './remote/workspaceChoice';
+import { buildLocalDaemonChoices, parentPath, pickDefaultWorkspace, workspaceContaining, workspaceForPath, workspaceLabel } from './remote/workspaceChoice';
+import { hostToGuestPath, type PathMount } from './remote/mountPaths';
 import type { WorkspaceInfo } from './protocol';
 import { App, setIcon, setTooltip, Notice } from 'obsidian';
 import type { ImageAttachment, ImageMediaType } from './types';
@@ -140,6 +141,16 @@ export interface DispatchInputOptions {
      * this computer). The real enforcement is in ThreadManager.sendMessage and dispatchNewThread.
      */
     managedPolicy?: { get: () => ThreadExecutionPolicy | undefined; targetOf: (daemonId: string | undefined) => PolicyTarget };
+    /**
+     * The bind mounts (Mac folder -> path inside the daemon) of the managed local daemon, or undefined for any other
+     * daemon. When it returns mounts the folder list is named for the Mac's folders and the selected Project's
+     * folder is pre-selected, translated to the daemon's path.
+     */
+    getMounts?: (daemonId: string) => PathMount[] | undefined;
+    /** Projects with their Mac working folder, to list them for the local daemon and flag the ones it cannot see. */
+    getProjects?: () => Array<{ name: string; cwd: string }>;
+    /** Share a Mac folder with the local daemon (adds it to the shared folders). Applies when the daemon is next updated. */
+    shareFolder?: (hostPath: string) => Promise<void>;
   };
   /**
    * Called on every keydown/keyup to retrieve the current push-to-talk hotkey
@@ -657,7 +668,14 @@ export class DispatchInput {
   /** Default remote folder for `daemon`: its mapped vault folder when we are in the vault, else its default folder. */
   private suggestedRemoteCwd(daemon: RemoteDaemonConfig): { cwd: string; fromVault: boolean } {
     const picker = this.options.harnessPicker;
-    return suggestRemoteCwd(daemon, picker?.getLocalCwd?.(), picker?.getVaultRoot?.());
+    const localCwd = picker?.getLocalCwd?.();
+    // The managed local daemon: the folder is the same one, seen through the bind mounts.
+    const mounts = picker?.getMounts?.(daemon.id);
+    if (mounts && localCwd) {
+      const guest = hostToGuestPath(mounts, localCwd);
+      if (guest !== undefined) return { cwd: guest, fromVault: false };
+    }
+    return suggestRemoteCwd(daemon, localCwd, picker?.getVaultRoot?.());
   }
 
   private remoteDaemons(): RemoteDaemonConfig[] {
@@ -929,6 +947,20 @@ export class DispatchInput {
     input.focus();
   }
 
+  /** The selected Project's folder is not visible to the local daemon: say so and offer to share it. */
+  private renderShareFolderPrompt(row: HTMLElement, project: { name: string; hostPath: string }, share: (hostPath: string) => Promise<void>): void {
+    const box = row.createDiv({ cls: 'ct-run-on-folder-hint ct-run-on-unshared', attr: { 'data-testid': 'run-on-unshared' } });
+    const text = box.createSpan({ text: `${project.name} is not shared with the daemon.` });
+    const btn = box.createEl('button', { cls: 'ct-run-on-share-btn', text: 'Share this folder', attr: { type: 'button' } });
+    btn.addEventListener('click', () => {
+      btn.disabled = true;
+      void share(project.hostPath).then(
+        () => { text.setText(`${project.name} is shared. Update the local daemon in Settings to apply it.`); btn.remove(); },
+        (err: unknown) => { text.setText(`Could not share: ${err instanceof Error ? err.message : String(err)}`); btn.disabled = false; },
+      );
+    });
+  }
+
   private renderRunOnFolderChooser(row: HTMLElement, daemon: RemoteDaemonConfig, workspaces: WorkspaceInfo[], source: RemoteFolderSource): void {
     // Nothing chosen yet (no mapping, no default folder): start in the daemon's own default workspace.
     if (!this.selectedRunOn.cwd?.trim()) {
@@ -936,14 +968,24 @@ export class DispatchInput {
       if (fallback) this.selectedRunOn = { daemonId: daemon.id, cwd: fallback.path };
     }
     const cwd = this.selectedRunOn.cwd ?? '';
+    const picker = this.options.harnessPicker;
+    const mounts = picker?.getMounts?.(daemon.id);
+    const local = mounts
+      ? buildLocalDaemonChoices({ workspaces, mounts, projects: picker?.getProjects?.() ?? [], selectedProjectCwd: picker?.getLocalCwd?.() })
+      : undefined;
     row.createEl('label', { text: `Folder on ${daemon.name}`, attr: { for: 'ct-run-on-folder-select' } });
     const controls = row.createDiv({ cls: 'ct-run-on-folder-controls' });
     const select = controls.createEl('select', {
       cls: 'ct-run-on-folder-select dropdown',
       attr: { id: 'ct-run-on-folder-select', 'aria-label': `Folder on ${daemon.name}` },
     });
-    for (const w of workspaces) select.createEl('option', { value: w.path, text: workspaceLabel(w) });
-    if (cwd && !workspaceForPath(workspaces, cwd)) select.createEl('option', { value: cwd, text: cwd });
+    if (local) {
+      for (const c of local.choices) select.createEl('option', { value: c.value, text: `${c.label} - ${c.value}` });
+      if (cwd && !local.choices.some((c) => c.value === cwd)) select.createEl('option', { value: cwd, text: cwd });
+    } else {
+      for (const w of workspaces) select.createEl('option', { value: w.path, text: workspaceLabel(w) });
+      if (cwd && !workspaceForPath(workspaces, cwd)) select.createEl('option', { value: cwd, text: cwd });
+    }
     select.createEl('option', { value: OTHER_FOLDER, text: 'Other folder…' });
     select.value = cwd;
     const browseBtn = controls.createEl('button', { cls: 'ct-run-on-browse-btn', text: 'Browse…', attr: { type: 'button', 'aria-expanded': 'false' } });
@@ -956,6 +998,7 @@ export class DispatchInput {
       hint.setText(show ? `Same folder as in your vault, in ${daemon.name}'s copy of it.` : '');
     };
     refreshHint();
+    if (local?.selectedUnshared && picker?.shareFolder) this.renderShareFolderPrompt(row, local.selectedUnshared, picker.shareFolder);
     const choose = (path: string): void => {
       this.runOnCwdEdited = true;
       this.selectedRunOn = { daemonId: daemon.id, cwd: path };
