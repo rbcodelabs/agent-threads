@@ -13,7 +13,7 @@
  * user opts a GROUP in per daemon (`RouteOverrides`: vault, workspace, threads, skills, browser, mcp), and a group
  * only ever contains read tools; the tools that write, execute, schedule, install, send or touch secrets are in
  * `NEVER_OFFERED` and cannot be promoted. A `local` tool is never overridable (it must run beside the repo).
- * Anything the table does not know (a peer-contributed tool, a future built-in) is `absent`.
+ * Anything the table does not know is `absent`, except a peer-contributed tool the caller names in `contributed` and the user routed via the `plugins` key.
  */
 import { BUILT_IN_TOOL_ORDER, TOOL_NAMES_BY_DOMAIN, canonicalToolName, type ToolDomain } from './tools/toolNames';
 
@@ -51,6 +51,14 @@ export const OPT_IN_GROUPS: readonly ToolDomain[] = Object.freeze(['vault', 'wor
 
 /** The `mcp` group key (proxied Google Workspace and OAuth MCP servers). */
 export const MCP_GROUP = 'mcp';
+
+/**
+ * The `plugins` group key: tools contributed by peer plugins through `api.extensions.registerAgentTool` (ADR-0008).
+ * They are not in the built-in table, so they are identified by NAME (`contributed` of {@link routeFor}), never as
+ * "any unknown tool". Off unless routed `host` (a single tool can still be named `absent`); the managed local daemon
+ * defaults it on (main.ts). A built-in name always wins, and `NEVER_OFFERED` stays closed.
+ */
+export const PLUGINS_GROUP = 'plugins';
 
 /**
  * Per-tool exceptions (canonical names), never offered to a remote session and not promotable by any setting:
@@ -118,9 +126,16 @@ export function isClassified(toolName: string): boolean {
  * tool of a domain that cannot be opted into stay `absent` whatever the settings say. An override naming a tool
  * (canonical or legacy) beats one naming its domain, so a group can be on with one tool off.
  */
-export function routeFor(toolName: string, overrides?: RouteOverrides, optional?: ReadonlySet<string>): ToolRoute {
+export function routeFor(
+  toolName: string, overrides?: RouteOverrides, optional?: ReadonlySet<string>, contributed?: ReadonlySet<string>,
+): ToolRoute {
   const domain = DOMAIN_OF.get(toolName);
-  if (!domain) return 'absent';
+  if (!domain) {
+    // A peer-contributed tool: only when the caller identified it as one, it shadows no built-in (checked above by
+    // the table lookup, and by canonical name here) and is not a NEVER_OFFERED name. Tool name beats the group.
+    if (!contributed?.has(toolName) || NEVER_OFFERED.has(canonicalToolName(toolName)) || DOMAIN_OF.has(canonicalToolName(toolName))) return 'absent';
+    return (overrides?.[toolName] ?? overrides?.[PLUGINS_GROUP]) === 'host' ? 'host' : 'absent';
+  }
   if (DEFAULT_DOMAIN_ROUTES[domain] === 'local') return 'local';
   const canonical = canonicalToolName(toolName);
   if (NEVER_OFFERED.has(canonical) || !OPT_IN_GROUPS.includes(domain)) {

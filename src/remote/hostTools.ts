@@ -42,6 +42,11 @@ export interface RemoteHostToolsDeps {
   builtIn?: readonly HarnessDynamicTool[];
   /** Loopback brokers by MCP server name (`google-docs`, an OAuth server). */
   mcpSources?: Readonly<Record<string, HostMcpSource>>;
+  /**
+   * Names of the tools peer plugins contributed (ADR-0008); a subset of `builtIn`, which already carries them. Offered
+   * only through the `plugins` route (see `routeFor`); a name that is also a built-in is never treated as contributed.
+   */
+  contributedTools?: ReadonlySet<string>;
   /** The user's per-daemon choices (domain or tool -> host | absent). */
   overrides?: RouteOverrides;
   /** Tools of `NEVER_OFFERED` the user switched on for this (managed local) daemon; see localDaemon/optionalTools.ts. */
@@ -118,7 +123,7 @@ export class RemoteHostTools {
     const key = (server: string, tool: string): string => `${server}\u0000${tool}`;
 
     for (const t of this.deps.builtIn ?? []) {
-      if (routeFor(t.name, this.deps.overrides, this.deps.optionalTools) !== 'host') continue;
+      if (routeFor(t.name, this.deps.overrides, this.deps.optionalTools, this.deps.contributedTools) !== 'host') continue;
       if (execState && !execState.enabled && domainOf(t.name) === 'exec') continue;
       const spec: RemoteHostToolSpec = {
         name: t.name, description: t.description, inputSchema: t.inputSchema,

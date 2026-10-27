@@ -13,13 +13,13 @@ export const LOCAL_DAEMON_TOKEN_SECRET = tokenSecretNameFor(LOCAL_DAEMON_ID);
 /**
  * Host tools the managed daemon's threads get on first registration. Threads that ran in the removed per-thread
  * sandbox VM had these (they ran inside the plugin's own tool server), and a container on this Mac is the user's own
- * machine, so they are on: the read groups, the Google/OAuth brokers (`mcp`) and `host_exec` (one command on this Mac,
+ * machine, so they are on: the read groups, the Google/OAuth brokers (`mcp`), tools contributed by peer plugins (`plugins`) and `host_exec` (one command on this Mac,
  * behind a per-call Allow once / Deny card). Tools that write or schedule stay off (`NEVER_OFFERED`). The user can
  * change any of it in Settings, Remote, edit daemon; later edits are kept.
  */
 export const DEFAULT_LOCAL_DAEMON_HOST_TOOLS: NonNullable<RemoteDaemonConfig['hostTools']> = {
   enabled: true,
-  routes: { vault: 'host', workspace: 'host', threads: 'host', skills: 'host', browser: 'host', mcp: 'host', exec: 'host' },
+  routes: { vault: 'host', workspace: 'host', threads: 'host', skills: 'host', browser: 'host', mcp: 'host', exec: 'host', plugins: 'host' },
 };
 
 export function localDaemonUrl(port: number): string {
