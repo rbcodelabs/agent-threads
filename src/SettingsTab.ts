@@ -1576,7 +1576,7 @@ const FALLBACK_MODELS: { value: string; displayName: string }[] = [
   { value: 'claude-opus-5-5', displayName: 'Claude Opus 5.5' },
   { value: 'claude-opus-4-8', displayName: 'Claude Opus 4.8' },
   { value: 'claude-sonnet-5-5', displayName: 'Claude Sonnet 5.5' },
-  { value: 'claude-haiku-4-5', displayName: 'Claude Haiku 4.5' },
+  { value: 'claude-haiku-5-5', displayName: 'Claude Haiku 5.5' },
 ];
 
 export class ClaudeThreadsSettingTab extends PluginSettingTab {
