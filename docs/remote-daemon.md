@@ -122,7 +122,7 @@ the daemon user's home before each message, so a fresh `aws sso login` on this M
 AWS sign-in card) instead of retrying for minutes. Narrower than the removed sandbox VM, which mounted the whole token cache.
 
 **Tools that run on this Mac.** A new local daemon entry starts with the read groups (`vault`, `workspace`, `threads`,
-`skills`, `browser`), your Google and OAuth MCP servers (`mcp`) and `host_exec` turned on (Settings, Remote, edit daemon
+`skills`, `browser`), your Google and OAuth MCP servers (`mcp`), tools other plugins add to your threads (`plugins`, for example Design's `EnterDesignMode`) and `host_exec` turned on (Settings, Remote, edit daemon
 changes any of it; later edits are kept). `host_exec` runs ONE command on this Mac after an Allow once / Always allow `<prefix>` / Deny card
 (see "Always allow a command prefix" below; never the generic "Always allow", whatever the permission mode); its directory defaults to the thread's folder on the Mac. Tools
 that write, schedule or touch secrets are off for every daemon unless you switch a group on for THIS daemon (Settings, Remote, **Local daemon: tools that act on this Mac**: threads, schedule, secrets and MCP registration, skills, vault history, app commands and editor, browser scripts, GitHub discovery). Off by default; every call still asks you in the app first. **They act on this Mac with your account, not in the container**: an agent that read untrusted text could be steered into calling them, so leave a group off unless you need it. A change applies to the next thread session you open (see "Tools on your computer (host tools)" below).
@@ -647,16 +647,17 @@ deleted and a file past `journalMaxMb` is rotated to `.jsonl.1` (so at most abou
 
 A remote thread keeps the daemon machine's own tools (shell, file read/write, search). It can ALSO reach read-only
 tools that only exist in the app on your computer, while the app is connected, **but only if you turn that on**:
-**host tools are off by default for every daemon you add yourself**, and when you turn them on nothing is offered until you list a group. (The managed local daemon, a container on this Mac, starts with the read groups, `mcp` and `exec` listed.)
+**host tools are off by default for every daemon you add yourself**, and when you turn them on nothing is offered until you list a group. (The managed local daemon, a container on this Mac, starts with the read groups, `mcp`, `plugins` and `exec` listed.)
 
 | Runs | Tools |
 |---|---|
 | On the daemon, beside the repo | `enter_worktree`, `exit_worktree`, `set_working_directory` (worktrees go under `<first workspace>/.worktrees`, or `worktreeRoot`). These refuse a folder in a read-only workspace, and the repo and git root they work on are checked like the target. |
 | In the app on your computer, opt-in groups (all off until listed) | `vault` (search, backlinks, links, note metadata, file history, list, bridge list), `workspace` (open tabs, active file, watched documents), `threads` (list, current, projects, messages, log, wait), `skills` (list, search, get, sources), `browser` (the in-app browser tools except `browser_eval` and `browser_save_page`), `mcp` (your Google Workspace and OAuth MCP servers, under their own names, for example `mcp__google-docs__*`; or name one server) |
+| In the app on your computer, opt-in group `plugins` | Tools that other plugins add to your threads (for example Design's `EnterDesignMode`), named individually. Only tools registered when the thread's session starts are offered; a plugin enabled later appears on the next session. A tool that changes something still shows the app's own approval card. A name that matches a built-in is never treated as a plugin tool, and the "never offered" list below stays closed to it. On for the managed local daemon by default; for any other daemon it is off until you tick it. |
 | One command on your computer, opt-in group `exec` | `host_exec`: runs ONE shell command on your computer; every call shows an Allow once / Always allow `<prefix>` / Deny card with the exact command, folder and reason, no permission mode or generic remembered answer skips it (only a command prefix you saved can; see "Always allow a command prefix"), and its environment is scrubbed (no credentials). On for the managed local daemon only by default. |
 | Never offered to a daemon you add yourself; the managed local daemon can opt in per group | (same list) |
 | Never offered, whatever you set | everything that writes, executes, schedules, installs, sends or reads a secret on your computer: `request_secret`, `mcp_register_server`, `host_execute_command` / `host_list_commands` / `host_open_url`, `workspace_navigate_to_file` / `workspace_insert_at_cursor`, `watch_document`, `vault_restore_file_version`, `vault_add_bridge`, `sync_resolve_conflict`, `threads_create` / `threads_send_message` / `threads_archive` / `threads_open` and every `threads_set_*` / project setter, `skills_install` / `create` / `update` / `uninstall` / `check_updates`, `Cron*` / `ScheduleWakeup`, `browser_eval`, `browser_save_page` |
-| Not offered either | `github_*` (the discovery tools run against Geode's connection; the daemon gets the token itself, not the tools), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |
+| Not offered either | `github_*` (the discovery tools run against Geode's connection; the daemon gets the token itself, not the tools), `google-drive-files` (its paths are on your computer), tools contributed by other plugins unless you switch on the `plugins` group |
 
 The names are the ones a local thread has (`mcp__claude_threads__vault_search`). The remote session's system prompt lists
 exactly which tools run on your computer (or says none do).
@@ -679,7 +680,7 @@ exactly which tools run on your computer (or says none do).
   unavailable. Nothing is queued: the call is not run later.
 - **Choose what is offered.** Two places edit the same setting. In Settings, Remote daemons, edit, Advanced, switch on "Tools on this computer",
   then tick what the daemon may use: a checklist of "Notes in this vault" (`vault`), "Open tabs and active file" (`workspace`), "Your other
-  threads" (`threads`), "Installed skills" (`skills`), "In-app browser" (`browser`) and each of your connected OAuth and Google Workspace
+  threads" (`threads`), "Installed skills" (`skills`), "In-app browser" (`browser`), "Tools from other plugins" (`plugins`; on by default for the managed local daemon, untick it to write `plugins: absent`) and each of your connected OAuth and Google Workspace
   servers. Items stay greyed out until the master switch is on. In Settings, MCP, every OAuth and Google Workspace server row has an
   "Available on" checkbox per daemon, which turns host tools on for that daemon if they were off and names only that server. Settings, MCP shows
   "Not available on <daemon>. Turn on" when a server is not offered to a daemon. Anything unticked is off. Entries from an older config that the
