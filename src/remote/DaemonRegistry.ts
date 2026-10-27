@@ -9,11 +9,14 @@
 import type { RemoteDaemonConfig, RemoteHostToolsSettings, RemoteVaultMapping } from '../types';
 import type { McpSyncView } from './mcpPartition';
 import type { RemoteMount } from './sessionSpec';
+import { daemonUseDenial, policyTargetOfDaemon, type ManagedPolicySource, type PolicyTarget } from '../managedPolicy';
 import { DaemonClient, daemonWsUrl, type ConnectionState, type WebSocketFactory } from './DaemonClient';
 
 /** What `HarnessFactory` / `ThreadManager` need; implemented by `DaemonRegistry`. */
 export interface RemoteDaemonResolver {
   clientFor(daemonId: string): DaemonClient | undefined;
+  /** Which policy target the daemon is (the local container, or a remote daemon); undefined = unknown daemon. */
+  targetOf?(daemonId: string): PolicyTarget | undefined;
   /** Display name for UI / prompts; falls back to the id for a removed daemon. */
   nameOf(daemonId: string): string;
   /** Where the vault is mirrored on that daemon, if configured. */
@@ -42,6 +45,13 @@ export interface DaemonRegistryOptions {
   getMounts?: (daemonId: string) => readonly RemoteMount[] | undefined;
   /** MCP servers synced to a daemon (see `mcpSync.ts`). */
   getMcpSync?: (daemonId: string) => McpSyncView | undefined;
+  /**
+   * Managed policy (docs/managed-policy.md). `peek` is the last snapshot, used because `clientFor` is synchronous; the
+   * ThreadManager has already read the policy fresh before any thread starts. `localDaemonId` tells the registry which
+   * entry may count as the local container daemon (everything else is a remote daemon).
+   */
+  policy?: Pick<ManagedPolicySource, 'peek'>;
+  localDaemonId?: string;
   log?: (message: string) => void;
 }
 
@@ -60,6 +70,11 @@ export class DaemonRegistry implements RemoteDaemonResolver {
 
   private config(daemonId: string): RemoteDaemonConfig | undefined {
     return this.opts.getDaemons().find((d) => d.id === daemonId);
+  }
+
+  targetOf(daemonId: string): PolicyTarget | undefined {
+    const cfg = this.config(daemonId);
+    return cfg ? policyTargetOfDaemon(cfg, this.opts.localDaemonId ?? '') : undefined;
   }
 
   nameOf(daemonId: string): string {
@@ -95,6 +110,9 @@ export class DaemonRegistry implements RemoteDaemonResolver {
     if (this.disposed) return undefined;
     const cfg = this.config(daemonId);
     if (!cfg) return undefined;
+    // Managed policy: a daemon the administrator disallowed is never connected to (an existing connection is not torn
+    // down mid-run; the next send is refused by the ThreadManager).
+    if (daemonUseDenial(this.opts.policy?.peek(), policyTargetOfDaemon(cfg, this.opts.localDaemonId ?? ''))) return undefined;
     const signature = `${cfg.url}\n${cfg.tokenSecretName}`;
     const existing = this.entries.get(daemonId);
     if (existing && existing.signature === signature) return existing.client;

@@ -213,6 +213,7 @@ describe('Claude Threads public API v1 contract', () => {
       manager: {
         getThreads: () => [thread], getThread: (id: string) => id === 'orch' ? thread : undefined, getProjects: () => [],
         isRunning: () => false, createThread: () => thread, sendMessage: async () => {}, subscribe: () => () => {},
+        assertLaunchAllowedNow: async () => {}, // managed policy: none in this fixture
       },
       openThreadInChatView: async () => {},
       ensureOrchestratorThread: async () => {},

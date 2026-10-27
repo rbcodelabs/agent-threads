@@ -16,8 +16,14 @@ export function createConstrainedQueryRunner(
   getSettings: () => Pick<PluginSettings, 'claudeBinaryPath' | 'extraEnv' | 'provider'>,
   runQuery: QueryFunction = query,
   getAuthentication: () => Record<string, string> = () => ({}),
+  /**
+   * Managed policy (docs/managed-policy.md): throws when the administrator forbids running Claude on this computer.
+   * A constrained run is not a thread, but it does start a `claude` process here, so it follows the `machine` target.
+   */
+  guard?: () => Promise<void>,
 ): (input: ConstrainedQueryInput) => Promise<ConstrainedQueryOutput> {
   return async ({ prompt, options, signal }) => {
+    await guard?.();
     // Desktop-only execution path. Keep Node built-ins out of module init so
     // importing the plugin bundle remains safe on Obsidian Mobile.
     // eslint-disable-next-line @typescript-eslint/no-require-imports

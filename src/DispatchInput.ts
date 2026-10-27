@@ -17,6 +17,10 @@ import { HARNESS_BRAND_ICONS } from './harnessBrandIcons';
 import { describeComposerSettings, PERMISSION_MODE_OPTIONS } from './composerSettings';
 import { ComposerSettingsPopover, type SettingsPopoverModel, type PopoverSetting } from './composerPopovers';
 import { createGlyph } from './composerGlyphs';
+import { ALL_DISABLED_MESSAGE, evaluateLaunch, isEverythingDisabled, type PolicyTarget, type ThreadExecutionPolicy } from './managedPolicy';
+
+/** Appended to a menu item the administrator's policy removed. */
+export const MANAGED_SUFFIX = 'managed by your administrator';
 
 export interface DispatchPayload {
   text: string;
@@ -132,6 +136,12 @@ export interface DispatchInputOptions {
      */
     getFolderSource?: () => RemoteFolderSource | undefined;
     /**
+     * Managed `threadExecution` policy (docs/managed-policy.md), ADVISORY: used to disable targets and harnesses the
+     * administrator removed and to say so. `get` returns the last snapshot; `targetOf` classifies a daemon (undefined =
+     * this computer). The real enforcement is in ThreadManager.sendMessage and dispatchNewThread.
+     */
+    managedPolicy?: { get: () => ThreadExecutionPolicy | undefined; targetOf: (daemonId: string | undefined) => PolicyTarget };
+    /**
      * The bind mounts (Mac folder -> path inside the daemon) of the managed local daemon, or undefined for any other
      * daemon. When it returns mounts the folder list is named for the Mac's folders and the selected Project's
      * folder is pre-selected, translated to the daemon's path.
@@ -217,6 +227,7 @@ export class DispatchInput {
 
   private sttController: SttController | null = null;
   private dispatching = false;
+  private managedNoteEl: HTMLElement | null = null;
   private selectedHarness: AgentHarness | null = null;
   /** Sticky "Run on" choice: this computer (undefined) or a remote daemon plus a folder on it. */
   private selectedRunOn: RunOnSelection = {};
@@ -356,7 +367,11 @@ export class DispatchInput {
         const footerActionsEl = inputFooter.createDiv('ct-input-footer-actions');
         this.options.appendFooterActions?.(footerActionsEl);
         // Same order as an existing thread: settings indicator, then attach, then mic.
-        if (this.selectedHarness) this.configureHarnessPicker(footerActionsEl);
+        if (this.selectedHarness) {
+          this.configureHarnessPicker(footerActionsEl);
+          this.alignHarnessWithPolicy();
+          this.renderManagedNote();
+        }
         // Attach + mic live in the footer bottom row (keeps input area compact)
         footerActionsEl.appendChild(attachBtn);
         footerActionsEl.appendChild(micBtn);
@@ -545,6 +560,15 @@ export class DispatchInput {
       new Notice(runOn.reason);
       return;
     }
+    // Managed policy (advisory here; ThreadManager re-checks fresh): refuse with the administrator's wording and keep the draft.
+    if (this.selectedHarness) {
+      const picker = this.options.harnessPicker?.managedPolicy;
+      const decision = picker ? evaluateLaunch(picker.get(), picker.targetOf(runOn.remote?.daemonId), this.selectedHarness) : undefined;
+      if (decision && !decision.allowed) {
+        new Notice(decision.message);
+        return;
+      }
+    }
     // The menu already disables a harness the daemon does not offer; this catches a daemon that changed since
     // (an older daemon after a reconnect) so the failure is a clear message here, not a refusal at session.open.
     if (runOn.remote && this.selectedHarness) {
@@ -674,10 +698,42 @@ export class DispatchInput {
 
   /** Why `harness` cannot run on the selected daemon, if it cannot. */
   private harnessGateReason(harness: AgentHarness): string | undefined {
+    const managed = this.managedReason(this.selectedRunOn.daemonId, harness);
+    if (managed) return managed;
     const selected = this.activeDaemon();
     if (!selected) return undefined;
     const gate = this.gateHarnessOn(harness, selected);
     return gate.ok ? undefined : gate.reason;
+  }
+
+  private managedPolicy(): ThreadExecutionPolicy | undefined {
+    return this.options.harnessPicker?.managedPolicy?.get();
+  }
+
+  /** Why the administrator's policy forbids `harness` on the daemon (undefined = this computer), or undefined. */
+  private managedReason(daemonId: string | undefined, harness: AgentHarness): string | undefined {
+    const picker = this.options.harnessPicker?.managedPolicy;
+    if (!picker) return undefined;
+    const decision = evaluateLaunch(picker.get(), picker.targetOf(daemonId), harness);
+    if (decision.allowed) return undefined;
+    return decision.code === 'all-disabled' ? ALL_DISABLED_MESSAGE : MANAGED_SUFFIX;
+  }
+
+  /** When nothing at all may run, say so next to the composer (and send refuses with the same words). */
+  private renderManagedNote(): void {
+    this.managedNoteEl?.remove();
+    this.managedNoteEl = null;
+    if (!isEverythingDisabled(this.managedPolicy())) return;
+    this.managedNoteEl = this.rootEl.createDiv({ cls: 'ct-managed-note is-visible', text: ALL_DISABLED_MESSAGE, attr: { role: 'status' } });
+    this.rootEl.prepend(this.managedNoteEl);
+  }
+
+  /** If the chosen harness is not allowed where it would run, move to one that is (a choice the user can still change). */
+  private alignHarnessWithPolicy(): void {
+    if (!this.selectedHarness || !this.options.harnessPicker?.managedPolicy) return;
+    if (!this.managedReason(this.selectedRunOn.daemonId, this.selectedHarness)) return;
+    const next = AGENT_HARNESSES.find((h) => !this.managedReason(this.selectedRunOn.daemonId, h));
+    if (next) { this.selectedHarness = next; this.selectedModel = undefined; this.renderHarnessIdentity(); }
   }
 
   private chooseHarness(harness: AgentHarness): void {
@@ -754,16 +810,19 @@ export class DispatchInput {
 
     if (daemons.length > 0 || offerSetUp) {
       const selected = this.activeDaemon();
+      const machineManaged = this.selectedHarness ? this.managedReason(undefined, this.selectedHarness) : undefined;
       const options: PopoverSetting['groups'][number]['options'] = [{
-        label: 'This computer',
+        label: machineManaged ? `This computer \u2014 ${machineManaged}` : 'This computer',
         checked: !selected,
         icon: 'laptop',
+        disabled: !!machineManaged,
+        title: machineManaged,
         closeOnSelect: true,
         onSelect: () => this.chooseRunOn(undefined),
       }];
       for (const d of daemons) {
         const gate = this.selectedHarness ? this.gateHarnessOn(this.selectedHarness, d) : { ok: true as const };
-        const reason = gate.ok ? undefined : gate.reason;
+        const reason = (this.selectedHarness ? this.managedReason(d.id, this.selectedHarness) : undefined) ?? (gate.ok ? undefined : gate.reason);
         options.push({
           label: reason ? `${d.name} \u2014 ${reason}` : d.name,
           checked: this.selectedRunOn.daemonId === d.id,
@@ -804,6 +863,8 @@ export class DispatchInput {
     const btn = this.settingsBtn;
     if (!btn || this.settingsPopover?.isOpen) return;
     this.runOnFolders.clear();
+    this.alignHarnessWithPolicy();
+    this.renderManagedNote();
     // The Project selection may have changed since the popover was last open.
     const selected = this.activeDaemon();
     if (selected && !this.runOnCwdEdited) this.selectedRunOn = { daemonId: selected.id, cwd: this.suggestedRemoteCwd(selected).cwd };

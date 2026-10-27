@@ -18,7 +18,8 @@ import {
   HOST_RESOURCE_TOOLS, HOST_TOOL_LIMITS, checkResourceUri, encodeResourceContents, encodeResourceList, encodeResourceTemplates,
   isHostResourceTool, asStructuredContent, validateHostToolSpec, type RemoteHostToolSpec,
 } from '../protocol';
-import { routeFor, type RouteOverrides } from '../toolRouting';
+import { domainOf, routeFor, type RouteOverrides } from '../toolRouting';
+import { HOST_EXEC_DISABLED_MESSAGE, type HostExecPolicyAccess } from '../managedPolicy';
 import type { HostMcpSource } from './hostMcpClient';
 
 export const CLAUDE_THREADS_SERVER = 'claude_threads';
@@ -50,8 +51,17 @@ export interface RemoteHostToolsDeps {
    * false. Never consulted for proxied servers. The executor asks it only for a tool in the manifest that needs approval.
    */
   preApprove?: (tool: string, input: Record<string, unknown>) => boolean;
+  /**
+   * Managed policy for `host_exec` (docs/managed-policy.md). Read fresh for every manifest and every call: when the
+   * administrator disables it the tool is not offered, and a call that arrives anyway (stale manifest, a daemon that
+   * ignores the manifest) is refused. Absent = no managed policy.
+   */
+  hostExecPolicy?: HostExecPolicyAccess;
   log?: (message: string) => void;
 }
+
+/** The verdict on one call, from managed policy (see {@link RemoteHostTools.gateCall}). */
+export type HostCallGate = { ok: true; allowAlways: boolean } | { ok: false; text: string };
 
 /** What the plugin tells the user and the model is available, for notices and the environment prompt. */
 export interface HostToolsSummary {
@@ -91,8 +101,16 @@ export class RemoteHostTools {
     return this.deps.preApprove(tool, input) === true;
   }
 
+  /** Managed policy for one call, read fresh. `host_exec` is the only tool policy governs here. */
+  async gateCall(server: string, tool: string): Promise<HostCallGate> {
+    if (server !== CLAUDE_THREADS_SERVER || domainOf(tool) !== 'exec' || !this.deps.hostExecPolicy) return { ok: true, allowAlways: true };
+    const state = await this.deps.hostExecPolicy.current();
+    return state.enabled ? { ok: true, allowAlways: state.allowAlways } : { ok: false, text: HOST_EXEC_DISABLED_MESSAGE };
+  }
+
   /** Build the manifest now (proxied servers are listed over the network, so this is async). */
   async manifest(): Promise<HostManifest> {
+    const execState = this.deps.hostExecPolicy ? await this.deps.hostExecPolicy.current() : undefined;
     const servers: HostManifest = {};
     const index = new Map<string, { run(input: Record<string, unknown>, signal?: AbortSignal): Promise<HostToolOutput> }>();
     const summary: HostToolsSummary = { builtIn: [], servers: {}, skipped: [] };
@@ -101,6 +119,7 @@ export class RemoteHostTools {
 
     for (const t of this.deps.builtIn ?? []) {
       if (routeFor(t.name, this.deps.overrides, this.deps.optionalTools) !== 'host') continue;
+      if (execState && !execState.enabled && domainOf(t.name) === 'exec') continue;
       const spec: RemoteHostToolSpec = {
         name: t.name, description: t.description, inputSchema: t.inputSchema,
         requiresApproval: t.requiresApproval, server: CLAUDE_THREADS_SERVER,
@@ -201,6 +220,8 @@ export class RemoteHostTools {
   /** Run one tool the manifest offered. Never throws: a failure is an unsuccessful output. */
   async invoke(server: string, tool: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<HostToolOutput> {
     if (isHostResourceTool(tool)) return this.invokeResource(server, tool, input);
+    const gate = await this.gateCall(server, tool);
+    if (!gate.ok) return { success: false, text: gate.text };
     const entry = this.index.get(`${server}\u0000${tool}`);
     if (!entry) return { success: false, text: `The host tool "${server}/${tool}" is not available.` };
     try {

@@ -42,6 +42,7 @@
     "src/legacySandboxVm.ts",
     "src/localSkills.ts",
     "src/logger.ts",
+    "src/managedPolicy.ts",
     "src/mcpServerMerge.ts",
     "src/mcpServerStore.ts",
     "src/mcpStatus.ts",

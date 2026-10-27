@@ -70,7 +70,7 @@ export type LocalDaemonErrorCode =
   | 'pull-denied' | 'pull-not-found' | 'pull-network' | 'disk' | 'pull'
   | 'build' | 'verify' | 'volume' | 'prepare' | 'run' | 'port-in-use' | 'name-conflict'
   | 'start' | 'stop' | 'remove' | 'health' | 'token' | 'keychain' | 'credential'
-  | 'runtime' | 'unsupported' | 'not-set-up' | 'needs-sign-in' | 'incompatible' | 'busy' | 'unavailable';
+  | 'runtime' | 'unsupported' | 'policy' | 'not-set-up' | 'needs-sign-in' | 'incompatible' | 'busy' | 'unavailable';
 
 export class LocalDaemonError extends Error {
   constructor(readonly code: LocalDaemonErrorCode, message: string, readonly detail?: string) {

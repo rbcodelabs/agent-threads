@@ -43,7 +43,8 @@ import { applyToolCallStyleClass, refreshToolRowByUseId, renderToolGroupShell, r
 import { groupToolRuns, liveToolGroupKey, mergeAdjacentToolOnlyMessages, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
 import { HARNESS_BRAND_ICONS } from './harnessBrandIcons';
-import { DispatchInput, type DispatchPayload, type ExtraSkillDir } from './DispatchInput';
+import { DispatchInput, MANAGED_SUFFIX, type DispatchPayload, type ExtraSkillDir } from './DispatchInput';
+import { harnessDenyReason, hostExecState } from './managedPolicy';
 import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, execEnv, splitErrorMessage } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
 import { reauthenticateAws } from './awsReauth';
@@ -1384,6 +1385,7 @@ export class ThreadsView extends ItemView {
           return project ? this.manager.getProjectCwd(project) : this.plugin.getEffectiveCwd();
         },
         getVaultRoot: () => this.manager.vaultRoot,
+        managedPolicy: { get: () => this.plugin.managedPolicy?.peek(), targetOf: (id) => this.manager.policyTargetFor(id) },
         getMounts: (id) => this.plugin.localDaemonMounts(id),
         getProjects: () => this.manager.getProjects().map((p) => ({ name: p.name, cwd: this.manager.getProjectCwd(p) })),
         shareFolder: (hostPath) => this.plugin.shareLocalDaemonFolder(hostPath),
@@ -2782,27 +2784,34 @@ export class ThreadsView extends ItemView {
       const g = gateHarness(value, this.plugin.daemonRegistry?.capabilitiesOf(thread.remote.daemonId), this.plugin.daemonRegistry?.nameOf(thread.remote.daemonId) ?? 'the daemon');
       return g.ok ? undefined : g.reason;
     };
+    // Managed policy (advisory; switchHarness re-checks fresh): a harness the administrator removed where this thread runs.
+    const policy = this.plugin.managedPolicy?.peek();
+    const managedHarness = (value: AgentHarness): string | undefined =>
+      harnessDenyReason(policy, this.manager.policyTargetFor(thread.remote?.daemonId), value) ? MANAGED_SUFFIX : undefined;
     const harnessGroups: PopoverOptionGroup[] = [{
       options: AGENT_HARNESSES.map((value) => ({
-        label: value !== harness && (blocked ?? remoteGate(value)) ? `${agentHarnessLabel(value)} \u2014 ${blocked ?? remoteGate(value)}` : agentHarnessLabel(value),
+        label: value !== harness && (blocked ?? remoteGate(value) ?? managedHarness(value)) ? `${agentHarnessLabel(value)} \u2014 ${blocked ?? remoteGate(value) ?? managedHarness(value)}` : agentHarnessLabel(value),
         checked: value === harness,
-        disabled: value !== harness && !!(blocked ?? remoteGate(value)),
+        disabled: value !== harness && !!(blocked ?? remoteGate(value) ?? managedHarness(value)),
         closeOnSelect: true,
         icon: HARNESS_BRAND_ICONS[value],
         onSelect: () => { if (value !== harness) void this.requestHarnessSwitch(threadId, value); },
       })),
     }];
+    const managedHarness2 = (daemonId: string | undefined, h: AgentHarness): string | undefined =>
+      harnessDenyReason(policy, this.manager.policyTargetFor(daemonId), h) ? MANAGED_SUFFIX : undefined;
     // Where this thread runs: this computer, or a daemon that can see its folder (the managed local daemon is
     // "This Mac (container)"). Moving resets the native session; the conversation continues from a summary.
     let runOnSetting: PopoverSetting | undefined;
     const daemons = this.plugin.settings.remoteDaemons ?? [];
     if (!Platform.isMobile && daemons.length > 0) {
       const here = thread.remote?.daemonId;
+      const managedMachine = !here ? undefined : managedHarness2(undefined, harness);
       const options: PopoverOptionGroup['options'] = [{
-        label: !!blocked && !!here ? `This computer \u2014 ${blocked}` : 'This computer',
+        label: (!!blocked || !!managedMachine) && !!here ? `This computer \u2014 ${blocked ?? managedMachine}` : 'This computer',
         checked: !here,
         icon: 'laptop',
-        disabled: !!here && !!blocked,
+        disabled: !!here && (!!blocked || !!managedMachine),
         closeOnSelect: true,
         onSelect: () => { if (here) void this.requestMoveExecution(threadId, undefined); },
       }];
@@ -2814,7 +2823,7 @@ export class ThreadsView extends ItemView {
         const offered = gateHarness(harness, this.plugin.daemonRegistry?.capabilitiesOf(d.id), d.name);
         // No vault mapping: fall back to the daemon's default folder, or (on select) its advertised default workspace.
         const fallback = target ?? (d.defaultCwdRoot?.trim() || undefined);
-        const reason = selected ? undefined : blocked ?? (!offered.ok ? `no ${agentHarnessLabel(harness)} on it` : undefined);
+        const reason = selected ? undefined : blocked ?? managedHarness2(d.id, harness) ?? (!offered.ok ? `no ${agentHarnessLabel(harness)} on it` : undefined);
         options.push({
           label: reason ? `${d.name} \u2014 ${reason}` : d.name,
           checked: selected,
@@ -4761,7 +4770,7 @@ export class ThreadsView extends ItemView {
     this.renderPermissionDetail(body, detail);
 
     const actions = card.createDiv('ct-permission-actions');
-    const hostExecPrefix = hostExecAlwaysAllowOffer({ toolName, detail });
+    const hostExecPrefix = hostExecAlwaysAllowOffer({ toolName, detail }, hostExecState(this.plugin.managedPolicy?.peek()).allowAlways);
     actions.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' })
       .addEventListener('click', () => done(false));
     actions.createEl('button', { text: isHostExecPermission(toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' })

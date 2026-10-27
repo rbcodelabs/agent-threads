@@ -10382,3 +10382,7 @@ button.ct-agent-crumb:focus-visible {
 .ct-agents-row-archived:hover .ct-agents-row-time,
 .ct-agents-row-archived:focus-within .ct-agents-row-time { visibility: hidden; }
 .view-action.is-active { color: var(--interactive-accent); }
+
+/* Managed policy (docs/managed-policy.md): a note that says an administrator restricted something. Hidden until set. */
+.ct-managed-note { display: none; margin: 4px 0; padding: 6px 8px; border-radius: 6px; font-size: var(--font-ui-smaller); color: var(--text-muted); background: var(--background-modifier-hover); border-left: 3px solid var(--text-accent); }
+.ct-managed-note.is-visible { display: block; }

@@ -38,6 +38,13 @@ export function resetSummarizerQueryCount(): void {
 
 export class InProcessSummarizer {
   /**
+   * Managed policy (docs/managed-policy.md): awaited before every `claude` subprocess this class would start. It
+   * throws when the administrator forbids running Claude on this computer. Titles and summaries are cosmetic, so a
+   * refusal simply leaves them as they were.
+   */
+  spawnGuard?: () => Promise<void>;
+
+  /**
    * Summarize a thread's messages.
    *
    * When `priorSummary` + `lastSummarizedAt` are supplied the method runs in
@@ -156,6 +163,7 @@ export class InProcessSummarizer {
     modelAlias: string,
     extraEnv: string,
   ): Promise<string> {
+    await this.spawnGuard?.();
     queryCount++;
     let raw = '';
     for await (const msg of query({

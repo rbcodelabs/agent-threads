@@ -45,6 +45,7 @@ function makeView(opts: {
       getProject: (id: string) => projects.find(p => p.id === id) ?? null,
       setThreadProject,
       getHarnessSwitchBlockReason: () => undefined,
+      policyTargetFor: () => ({ kind: 'machine' }),
     },
     plugin: {
       settings: { orchestratorThreadId: opts.portfolioOrchestratorThreadId },

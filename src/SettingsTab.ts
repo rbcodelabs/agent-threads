@@ -10,6 +10,8 @@ import { DEFAULT_VAULT_FOLDER } from './productIdentity';
 import { DEFAULT_VISIBLE_ARTIFACT_ROOT, sanitizeVisibleRootName } from './artifactStorage';
 import type { PluginSettings, Project, LayoutDensity, ProviderMode, ScheduledItem, ScheduledItemSchedule, SkillSource, RunEvent, OAuthMcpState, RemoteDaemonConfig, RemoteHostToolsSettings } from './types';
 import { daemonWsUrl, probeDaemon, type ProbeWorkspaces } from './remote/DaemonClient';
+import { daemonUseDenial, harnessDenyReason, hostExecState, mobileRemoteAccessAllowed, policyTargetOfDaemon } from './managedPolicy';
+import { LOCAL_DAEMON_ID } from './localDaemon/spec';
 import { connectionPill } from './remote/connectionPill';
 import { resolveSkillsSyncMode } from './remote/skillsSync';
 import { adminTokenSecretNameFor, checkDaemonInput, checkVaultMappingInput, describeTest, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
@@ -900,7 +902,14 @@ export class RemoteDaemonModal extends Modal {
     save.addEventListener('click', async () => {
       const c = candidate();
       if (!c) return;
-      await this.actions.save(c.config, token.trim(), adminToken.trim());
+      try {
+        await this.actions.save(c.config, token.trim(), adminToken.trim());
+      } catch (err) {
+        // Managed policy can refuse a registration (remote daemons off, host not on the allowed list).
+        status.setText(err instanceof Error ? err.message : String(err));
+        status.toggleClass('mod-warning', true);
+        return;
+      }
       this.close();
     });
   }
@@ -1941,7 +1950,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
 
   private renderClaudeTab(containerEl: HTMLElement): void {
     if (this.fixedSection) new Setting(containerEl).setName('Harness & sandbox').setHeading();
-    new Setting(containerEl)
+    const harnessSetting = new Setting(containerEl)
       .setName('Agent harness')
       .setDesc('New threads use this local coding agent. Existing threads retain the harness that created them.')
       .addDropdown((dropdown) =>
@@ -1957,6 +1966,20 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
             this.display();
           }),
       );
+    // Managed policy (advisory; launch is enforced elsewhere): a harness the administrator removed on this computer
+    // stays visible but cannot be chosen, and the setting is never rewritten (policy is a gate, not a mutation).
+    {
+      const policy = this.plugin.managedPolicy?.peek();
+      const dropdown = harnessSetting.controlEl?.querySelector?.('select');
+      let managed = false;
+      for (const option of Array.from(dropdown?.options ?? [])) {
+        if (!isAgentHarness(option.value) || !harnessDenyReason(policy, { kind: 'machine' }, option.value)) continue;
+        managed = true;
+        option.disabled = true;
+        option.text = `${option.text} \u2014 managed by your administrator`;
+      }
+      if (managed) harnessSetting.descEl.createDiv({ cls: 'ct-managed-note is-visible', text: 'Managed by your administrator: some harnesses are not allowed on this computer.' });
+    }
 
     new Setting(containerEl)
       .setName('Codex binary path')
@@ -2611,6 +2634,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const prefixList = containerEl.createDiv({ cls: 'ct-allowed-tools-list' });
     const renderPrefixes = () => {
       prefixList.empty();
+      // Managed policy: with host_exec "Always allow" turned off the saved prefixes are kept but ignored.
+      const execPolicy = hostExecState(this.plugin.managedPolicy?.peek());
+      if (!execPolicy.allowAlways) {
+        prefixList.createEl('p', {
+          cls: 'ct-managed-note is-visible',
+          text: execPolicy.enabled
+            ? 'Managed by your administrator: "Always allow" for host commands is off. Saved prefixes are kept but ignored; every call asks.'
+            : 'Managed by your administrator: host_exec is disabled. Saved prefixes are kept but unused.',
+        });
+      }
       const prefixes = this.plugin.settings.hostExecAlwaysAllowedPrefixes ?? [];
       if (prefixes.length === 0) {
         prefixList.createEl('p', { text: 'No host command prefixes always allowed yet.', cls: 'ct-settings-empty' });
@@ -3428,11 +3461,16 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   private renderRemoteTab(containerEl: HTMLElement): void {
     const ra = this.plugin.settings.remoteAccess;
 
+    // Managed policy (mobileRemoteAccess=false): shown off and locked. settings.remoteAccess (room, pairing) is NOT
+    // touched, so relaxing the policy resumes the existing pairing.
+    const mobileManaged = !mobileRemoteAccessAllowed(this.plugin.managedPolicy?.peek());
     new Setting(containerEl)
       .setName('Enable remote access')
-      .setDesc('Let Obsidian Mobile connect to this desktop via a relay server and control sessions in real time.')
+      .setDesc(mobileManaged
+        ? 'Managed by your administrator: mobile remote access is turned off. Existing pairings are kept and resume if this is relaxed.'
+        : 'Let Obsidian Mobile connect to this desktop via a relay server and control sessions in real time.')
       .addToggle((toggle) =>
-        toggle.setValue(ra.enabled).onChange(async (value) => {
+        toggle.setValue(mobileManaged ? false : ra.enabled).setDisabled(mobileManaged).onChange(async (value) => {
           ra.enabled = value;
           if (value && !ra.roomId) {
             ra.roomId = generateRoomId();
@@ -3448,7 +3486,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         }),
       );
 
-    if (ra.enabled && ra.roomId) {
+    if (ra.enabled && ra.roomId && !mobileManaged) {
       const maskedId = '••••••••-••••••••-••••••••-' + ra.roomId.slice(-8).toUpperCase();
 
       new Setting(containerEl)
@@ -3510,6 +3548,10 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       cls: 'setting-item-description',
       text: 'Run threads on an agent-threads daemon on another machine (for example a homelab box). They keep running there when this app is closed, and reconnect to the live stream when you return. Reach the daemon over Tailscale; see docs/remote-daemon.md.',
     });
+    const remoteBlock = daemonUseDenial(this.plugin.managedPolicy?.peek(), { kind: 'remoteDaemon' });
+    if (remoteBlock?.includes('administrator')) {
+      containerEl.createEl('p', { cls: 'setting-item-description ct-managed-note is-visible', text: `Managed by your administrator: ${remoteBlock}`, attr: { role: 'status' } });
+    }
     this.renderLocalDaemonBlock(containerEl);
     const daemons = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
     for (const daemon of visibleDaemons(daemons, Platform.isMobile)) {
@@ -3555,7 +3597,11 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Add a remote daemon')
       .setDesc('You need the daemon address (wss://… through `tailscale serve`) and a token from `agent-threads token create` on that machine.')
-      .addButton((btn) => btn.setButtonText('Add daemon').setCta().onClick(() => this.openDaemonModal(null)));
+      .addButton((btn) => {
+        btn.setButtonText('Add daemon').setCta().onClick(() => this.openDaemonModal(null));
+        // Advisory: when no remote daemon may be registered at all, say so instead of letting Save fail.
+        if (remoteBlock && !this.plugin.managedPolicy?.peek()?.remoteDaemon?.hosts) { btn.setDisabled(true); btn.setTooltip(remoteBlock); }
+      });
     applySecretStorageCopy(this.app, containerEl.createEl('p', { cls: 'setting-item-description' }), (storage) => `${storage} The token never appears in data.json.`);
   }
 
@@ -3644,6 +3690,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     renderLocalDaemonPanel(setting.descEl, {
       isMobile: Platform.isMobile,
       pluginVersion: this.plugin.manifest.version,
+      managedBlock: () => daemonUseDenial(this.plugin.managedPolicy?.peek(), { kind: 'localDaemon' }),
       snapshot: () => controller.snapshot(),
       snapshotQuick: () => controller.snapshot({ quick: true }),
       subscribe: (listener) => controller.subscribe(listener),
@@ -3670,6 +3717,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
   }
 
   private async testDaemon(daemon: RemoteDaemonConfig, typedToken: string | undefined): Promise<DaemonTestOutcome> {
+    // Managed policy, read fresh: a probe is a connection, so it is refused like any other use of a disallowed daemon.
+    const denied = daemonUseDenial(await this.plugin.managedPolicy?.read(), policyTargetOfDaemon(daemon, LOCAL_DAEMON_ID));
+    if (denied) return { tone: 'error', text: denied };
     const token = typedToken?.trim() || this.app.secretStorage.getSecret(secretStorageKey(daemon.tokenSecretName)) || '';
     if (!token) return { tone: 'error', text: 'No token is stored for this daemon yet.' };
     const result = await probeDaemon({
@@ -3720,6 +3770,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       pushableSecrets: () => this.pushableSecretSources(),
       ...(this.plugin.remoteRepos ? { repos: this.plugin.remoteRepos } : {}),
       save: async (config, token, adminToken) => {
+        // Managed policy, read fresh: no registration (or edit) of a daemon the administrator disallowed.
+        const denied = daemonUseDenial(await this.plugin.managedPolicy?.read(), policyTargetOfDaemon(config, LOCAL_DAEMON_ID));
+        if (denied) throw new Error(denied);
         const list = this.plugin.settings.remoteDaemons ?? (this.plugin.settings.remoteDaemons = []);
         const index = list.findIndex((d) => d.id === config.id);
         if (index >= 0) list[index] = config; else list.push(config);

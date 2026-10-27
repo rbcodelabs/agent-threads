@@ -219,7 +219,7 @@ export type McpSyncServerStatus =
 
 export type McpSyncAvailability =
   | { ok: true }
-  | { ok: false; code: 'not-connected' | 'daemon-too-old' | 'needs-admin' | 'stdio-forbidden'; reason: string };
+  | { ok: false; code: 'not-connected' | 'daemon-too-old' | 'needs-admin' | 'stdio-forbidden' | 'policy'; reason: string };
 
 interface DaemonState {
   phase: 'idle' | 'syncing' | 'ok' | 'error';
@@ -249,6 +249,8 @@ export interface McpSyncDeps {
   /** The transport for a daemon, or undefined when this install cannot reach it (managed daemon not available, no client). */
   transportFor(daemon: RemoteDaemonConfig): McpSyncTransport | undefined;
   saveSettings(): Promise<void>;
+  /** Managed policy: why this daemon must not be reached at all, or undefined (docs/managed-policy.md). */
+  policyDenial?(daemon: RemoteDaemonConfig): string | undefined;
   now?: () => number;
   log?(message: string): void;
 }
@@ -308,6 +310,8 @@ export class McpSyncEngine {
     const daemon = this.daemon(daemonId);
     const caps = this.deps.capabilitiesOf(daemonId);
     if (!daemon) return { ok: false, code: 'not-connected', reason: 'This daemon is no longer configured.' };
+    const denied = this.deps.policyDenial?.(daemon);
+    if (denied) return { ok: false, code: 'policy', reason: denied };
     if (!caps) return { ok: false, code: 'not-connected', reason: 'Connect to this daemon first, so its abilities are known.' };
     if (!caps.includes(MCP_SYNC_CAPABILITY)) return { ok: false, code: 'daemon-too-old', reason: 'This daemon is too old to receive MCP servers. Update it.' };
     if (daemon.managed !== 'local-container' && this.state(daemonId).adminState === 'no') {
@@ -324,6 +328,7 @@ export class McpSyncEngine {
     const daemon = this.daemon(daemonId);
     const st = this.state(daemonId);
     if (!daemon || daemon.managed === 'local-container' || st.adminState !== 'unknown') return;
+    if (this.deps.policyDenial?.(daemon)) return;
     if (!this.deps.capabilitiesOf(daemonId)?.includes(MCP_SYNC_CAPABILITY)) return;
     const transport = this.deps.transportFor(daemon);
     if (!transport?.probeAdmin) return;

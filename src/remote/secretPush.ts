@@ -111,6 +111,8 @@ export interface RemoteSecretPushDeps {
   resolveEnv(projectId: string | undefined): Record<string, string>;
   /** A client authenticated with `adminToken` for `daemon`. Disposed by this class. */
   createClient(daemon: RemoteDaemonConfig, adminToken: string): PushClient;
+  /** Managed policy: why this daemon must not be connected to at all, or undefined (docs/managed-policy.md). */
+  policyDenial?(daemon: RemoteDaemonConfig): string | undefined;
   now?(): number;
   log?(message: string): void;
 }
@@ -140,6 +142,12 @@ export class RemoteSecretPush {
   async prepare(daemonId: string, projectId: string | undefined): Promise<RemoteSecretPrep> {
     const cfg = this.deps.daemons().find((d) => d.id === daemonId);
     const allowlist = cfg?.pushedSecrets ?? [];
+    // A daemon the administrator disallowed is never contacted, not even to revoke: the pushed kind's TTL covers that.
+    const denied = cfg ? this.deps.policyDenial?.(cfg) : undefined;
+    if (cfg && denied) {
+      this.dropState(daemonId);
+      return { warnings: [`Secrets for "${cfg.name}" were not sent: ${denied}`] };
+    }
     if (!cfg || allowlist.length === 0) {
       await this.revokeDaemon(daemonId);
       return { warnings: [] };
@@ -173,6 +181,7 @@ export class RemoteSecretPush {
   async reconcile(): Promise<void> {
     for (const [daemonId, state] of [...this.states]) {
       const cfg = this.deps.daemons().find((d) => d.id === daemonId);
+      if (cfg && this.deps.policyDenial?.(cfg)) { this.dropState(daemonId); continue; }
       const allowlist = cfg?.pushedSecrets ?? [];
       const admin = cfg ? this.deps.adminToken(cfg) : undefined;
       for (const [kind, projectId] of [...state.projects]) {
@@ -191,7 +200,11 @@ export class RemoteSecretPush {
 
   /** Revokes everything pushed (best effort, bounded) and closes the connections. For app quit. */
   async stop(): Promise<void> {
-    await Promise.all([...this.states.keys()].map((id) => this.revokeDaemon(id)));
+    await Promise.all([...this.states.keys()].map((id) => {
+      const cfg = this.deps.daemons().find((d) => d.id === id);
+      if (cfg && this.deps.policyDenial?.(cfg)) { this.dropState(id); return Promise.resolve(); }
+      return this.revokeDaemon(id);
+    }));
   }
 
   // ── internals ──────────────────────────────────────────────────────────────

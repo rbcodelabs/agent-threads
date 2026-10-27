@@ -7,6 +7,7 @@ import { ThreadSession } from './ThreadSession';
 import type { HarnessSession } from './HarnessSession';
 import { RemoteHarnessSession, type RemoteSessionDeps } from './remote/RemoteHarnessSession';
 import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
+import { assertLaunchAllowed, policyTargetOfThread, type LaunchPolicy } from './managedPolicy';
 import type { PluginSettings, Thread } from './types';
 
 /**
@@ -35,7 +36,11 @@ export function createHarnessSession(
   remoteDaemons?: RemoteDaemonResolver,
   remoteHooks?: Pick<RemoteSessionDeps, 'onPendingChanged' | 'log' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName' | 'daemonName'>,
   env: Record<string, string | undefined> = process.env,
+  launchPolicy?: LaunchPolicy,
 ): HarnessSession {
+  // Last-resort synchronous guard: whatever the callers did, a refused (target, harness) pair never reaches a spawn,
+  // a socket or a daemon.
+  if (launchPolicy) assertLaunchAllowed(launchPolicy.policy, policyTargetOfThread(thread, remoteDaemons), thread.agentHarness ?? 'claude');
   // A remote thread runs on a daemon whatever its harness says.
   if (thread.remote) {
     const client = remoteDaemons?.clientFor(thread.remote.daemonId);

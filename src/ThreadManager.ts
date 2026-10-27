@@ -4,6 +4,7 @@ import { extractUrls } from './urlLinks';
 import { mergeDisallowedTools } from './toolRestrictions';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
+import { assertLaunchAllowed, policyTargetOfThread, type LaunchPolicy, evaluateLaunch, hostExecState, type HostExecPolicyAccess, type ManagedPolicySource, type PolicyDecision, type PolicyTarget } from './managedPolicy';
 import type { RemoteDaemonResolver } from './remote/DaemonRegistry';
 import type { RemoteSessionDeps } from './remote/RemoteHarnessSession';
 import { buildRemoteEnvironmentPrompt } from './remote/sessionSpec';
@@ -287,6 +288,11 @@ export class ThreadManager {
    * to start with a clear error instead of silently running locally.
    */
   remoteDaemons: RemoteDaemonResolver | undefined = undefined;
+  /**
+   * Managed policy (docs/managed-policy.md). Left undefined on hosts without it (the daemon, tests): no restriction.
+   * Every thread start, resume, move and harness switch asks it FRESH; nothing is decided from settings.
+   */
+  managedPolicy: ManagedPolicySource | undefined = undefined;
   /** Last MCP server status reported by each daemon's sessions (shown in the daemon's settings). */
   daemonMcpStatus: DaemonMcpStatusStore | undefined = undefined;
   /**
@@ -303,7 +309,7 @@ export class ThreadManager {
    * Builds the host tools (vault, workspace, threads, Google, ...) a remote thread's daemon may call back into,
    * bound to this thread. Set by the plugin; absent on hosts that cannot serve them.
    */
-  remoteHostToolsFactory: ((threadId: string, thread: Thread) => RemoteHostTools | undefined) | undefined = undefined;
+  remoteHostToolsFactory: ((threadId: string, thread: Thread, hostExecPolicy: HostExecPolicyAccess) => RemoteHostTools | undefined) | undefined = undefined;
   /** Calls in flight across every remote thread (shared cap, see HostToolExecutor). */
   private readonly hostToolSlots = new HostToolSlots();
   /** Last dropped-MCP notice shown per thread, so it appears again only when the set changes. */
@@ -704,6 +710,8 @@ export class ThreadManager {
     if (!thread) throw new Error(`Thread not found: ${id}`);
     const sourceHarness = thread.agentHarness ?? 'claude';
     if (sourceHarness === targetHarness) return;
+    // The new harness must be allowed where the thread runs.
+    if (this.managedPolicy) await this.assertLaunchAllowedNow(policyTargetOfThread(thread, this.remoteDaemons), targetHarness);
     // A remote thread hands off like a local one: the daemon closes the old harness's session and the next send opens
     // the new harness's on the same daemon. Only a harness the daemon offers can be chosen.
     if (thread.remote) this.assertDaemonOffersHarness(thread.remote.daemonId, targetHarness);
@@ -799,6 +807,8 @@ export class ThreadManager {
     const thread = this.threads.get(id);
     if (!thread) throw new Error(`Thread not found: ${id}`);
     const harness: AgentHarness = thread.agentHarness ?? 'claude';
+    // The destination must be allowed for this thread's harness (moving to this computer is a target too).
+    if (this.managedPolicy) await this.assertLaunchAllowedNow(this.policyTargetFor(target.kind === 'daemon' ? target.daemonId : undefined), harness);
     if (target.kind === 'daemon') this.assertDaemonOffersHarness(target.daemonId, harness);
     if (target.kind === 'daemon' && thread.remote?.daemonId === target.daemonId) return;
     if (target.kind === 'host' && !thread.remote) return;
@@ -933,6 +943,9 @@ export class ThreadManager {
     projectId?: string,
   ): Thread {
     const harness = remote.agentHarness ?? 'claude';
+    // Best-effort (this method is synchronous): the last policy snapshot. The authoritative, fresh check is in
+    // sendMessage and in the async callers that create threads (dispatchNewThread).
+    assertLaunchAllowed(this.managedPolicy?.peek(), this.policyTargetFor(remote.daemonId), harness);
     this.assertDaemonOffersHarness(remote.daemonId, harness);
     const thread = this.createThread(title, remote.remoteCwd, projectId, harness);
     thread.remote = {
@@ -943,6 +956,36 @@ export class ThreadManager {
       ownerClientId: remote.clientId,
     };
     return thread;
+  }
+
+  /** The harness a new local thread gets when none is chosen. */
+  defaultHarness(): AgentHarness {
+    return this.settings.agentHarness ?? 'claude';
+  }
+
+  /** A fresh policy read, taken in the call path that is about to start a session (no source: no restriction). */
+  private async readLaunchPolicy(): Promise<LaunchPolicy> {
+    return { policy: this.managedPolicy ? await this.managedPolicy.read() : undefined };
+  }
+
+  /** Throws `ManagedPolicyError` when `thread` may not run (or keep running) where and as it is configured. */
+  private enforceLaunchPolicy(launch: LaunchPolicy, thread: Pick<Thread, 'remote' | 'agentHarness'>): void {
+    assertLaunchAllowed(launch.policy, policyTargetOfThread(thread, this.remoteDaemons), thread.agentHarness ?? 'claude');
+  }
+
+  /** Where a thread would run if it were (re)configured to use `daemonId`, or this computer when undefined. */
+  policyTargetFor(daemonId: string | undefined): PolicyTarget {
+    return daemonId === undefined ? { kind: 'machine' } : this.remoteDaemons?.targetOf?.(daemonId) ?? { kind: 'remoteDaemon' };
+  }
+
+  /** Fresh answer to "may a thread of this harness run there?", for callers that create or reconfigure threads. */
+  async checkLaunch(target: PolicyTarget, harness: AgentHarness): Promise<PolicyDecision> {
+    return evaluateLaunch(await this.managedPolicy?.read(), target, harness);
+  }
+
+  /** Same as {@link checkLaunch} but throws `ManagedPolicyError`. */
+  async assertLaunchAllowedNow(target: PolicyTarget, harness: AgentHarness): Promise<void> {
+    assertLaunchAllowed(await this.managedPolicy?.read(), target, harness);
   }
 
   /**
@@ -960,13 +1003,18 @@ export class ThreadManager {
    * opening the thread or sending a message. Attach-only: it never starts a
    * process on the daemon just to look at a finished turn.
    */
-  resumeRemoteTurns(): string[] {
+  resumeRemoteTurns(launch?: LaunchPolicy): string[] {
     const resumed: string[] = [];
+    // The caller reads the policy fresh (this method is synchronous); without one, the last snapshot.
+    const launchPolicy: LaunchPolicy = launch ?? { policy: this.managedPolicy?.peek() };
     for (const [id, thread] of this.threads) {
       if (!thread.remote?.turnPending || thread.status === 'archived' || this.sessions.has(id)) continue;
+      // Attach-only still opens a connection to the daemon. A refused thread keeps `turnPending`, so it re-attaches
+      // when the policy is relaxed; nothing is deleted.
+      if (!evaluateLaunch(launchPolicy.policy, policyTargetOfThread(thread, this.remoteDaemons), thread.agentHarness ?? 'claude').allowed) continue;
       let session: HarnessSession;
       try {
-        session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread));
+        session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread, launchPolicy), process.env, launchPolicy);
       } catch (err) {
         // Daemon removed from Settings (or no resolver on this host): nothing to follow.
         console.warn(`[ClaudeThreads] cannot resume remote turn for "${thread.title}":`, err);
@@ -990,12 +1038,17 @@ export class ThreadManager {
     return resumed;
   }
 
-  private remoteHooks(thread: Thread): Pick<RemoteSessionDeps, 'onPendingChanged' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName' | 'daemonName'> | undefined {
+  private remoteHooks(thread: Thread, launch: LaunchPolicy): Pick<RemoteSessionDeps, 'onPendingChanged' | 'runAtTime' | 'hostTools' | 'hostToolSlots' | 'onNotice' | 'onCwdChanged' | 'hostName' | 'daemonName'> | undefined {
     if (!thread.remote) return undefined;
     const enabled = this.remoteDaemons?.hostToolsOf?.(thread.remote.daemonId)?.enabled === true;
     let hostTools: RemoteHostTools | undefined;
     try {
-      hostTools = enabled ? this.remoteHostToolsFactory?.(thread.id, thread) : undefined;
+      hostTools = enabled ? this.remoteHostToolsFactory?.(thread.id, thread, {
+        // What the policy said when this session was set up (decides whether the host_exec handler is even built) ...
+        initial: hostExecState(launch.policy),
+        // ... and a FRESH answer for every manifest and every call, so a policy change applies to a running session.
+        current: async () => hostExecState(await this.managedPolicy?.read()),
+      }) : undefined;
     } catch (err) {
       console.warn(`[ClaudeThreads] host tools unavailable for "${thread.title}":`, err);
     }
@@ -1973,9 +2026,22 @@ export class ThreadManager {
     const state = this.goalContextStates.get(threadId);
     if (!thread || !state || state.desiredRevision !== revision) return false;
 
+    // Managed policy, fresh. A refusal is surfaced like a failed start (the goal kickoff is a session start too).
+    const goalLaunch = await this.readLaunchPolicy();
+    if (this.goalContextStates.get(threadId) !== state || this.threads.get(threadId) !== thread || state.desiredRevision !== revision) return false;
+    try {
+      this.enforceLaunchPolicy(goalLaunch, thread);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      thread.status = 'error';
+      thread.lastError = error.message;
+      this.emit(threadId, { type: 'error', error });
+      throw error;
+    }
+
     let session = this.sessions.get(threadId);
     if (!session) {
-      session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread));
+      session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread, goalLaunch), process.env, goalLaunch);
       this.sessions.set(threadId, session);
       const options = this.buildThreadSessionOptions(threadId, thread, undefined, false);
       if (!options) {
@@ -2080,6 +2146,12 @@ export class ThreadManager {
   async sendMessage(threadId: string, userText: string, images?: ImageAttachment[], resend = false): Promise<void> {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error(`Thread not found: ${threadId}`);
+
+    // Managed policy, read FRESH, before anything else happens: no daemon start, secret push, MCP or skills sync, or
+    // GitHub push may run for a thread the administrator has disallowed. (`beforeRemoteSend` is replaced, not chained,
+    // by the local-daemon wiring, so the policy must not live in that hook.) A source-less host skips the await.
+    const launchPolicy: LaunchPolicy = this.managedPolicy ? await this.readLaunchPolicy() : { policy: undefined };
+    this.enforceLaunchPolicy(launchPolicy, thread);
 
     // Before any state changes: a remote thread with no live session may need its (managed) daemon started first.
     if (thread.remote && this.beforeRemoteSend && !this.sessions.has(threadId)) {
@@ -2194,7 +2266,8 @@ export class ThreadManager {
     if (!session) this.sessionRestartRequested.delete(threadId);
     const isNewSession = !session;
     if (!session) {
-      session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread));
+      // The last-resort synchronous guard, fed by the snapshot read at the top of this call.
+      session = createHarnessSession(thread, this.settings, this.remoteDaemons, this.remoteHooks(thread, launchPolicy), process.env, launchPolicy);
       this.sessions.set(threadId, session);
       const goalState = this.getGoalContextState(threadId);
       goalState.appliedRevision = goalState.desiredRevision;
