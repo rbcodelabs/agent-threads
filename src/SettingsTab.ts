@@ -721,7 +721,7 @@ export class RemoteDaemonModal extends Modal {
       };
       list.createEl('h4', { text: 'Built-in tools' });
       for (const g of HOST_TOOL_GROUPS) {
-        item(g.label, g.hint, isGroupOn(hostTools, g.key), (v) => change(setGroupAvailable(hostTools, g.key, v)));
+        item(g.label, g.hint, isGroupOn(hostTools, g.key, this.existing?.managed === 'local-container'), (v) => change(setGroupAvailable(hostTools, g.key, v)));
       }
       if (proxied.length > 0) {
         list.createEl('h4', { text: 'Connected servers' });

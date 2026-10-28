@@ -1144,6 +1144,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
           ?? this.manager.vaultRoot ?? thread.cwd;
       }
       const builtIn = buildBuiltInMcpServers(threadId, builtInCwd, hostExec).claude_threads.harnessTools;
+      // Peer-contributed tools are already in `builtIn` (bound at session construction); name them so routing can tell
+      // them from a built-in. Only those registered before this session was built are present in `builtIn`.
+      const contributedTools = new Set(this.agentTools.list().map(t => t.name));
       const brokers: Record<string, { type?: string; url?: string; headers?: Record<string, string> }> = {
         ...(this.googleWorkspaceMcp?.serversForThread(threadId) ?? {}),
         ...(this.oauthMcpRegistry?.serversForThread(threadId) ?? {}),
@@ -1155,6 +1158,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
       // here, so a change in Settings applies to the next session that is opened.
       const optionalIds = daemonConfig?.managed === 'local-container' ? this.settings.localDaemon?.optionalTools : undefined;
       let routes = daemonSettings?.routes;
+      // The managed local daemon is this user's own machine: contributed plugin tools default on there (the user can
+      // name `plugins: 'absent'` to turn them off). Any other daemon needs an explicit `plugins: 'host'`.
+      if (daemonConfig?.managed === 'local-container' && routes?.plugins === undefined) routes = { ...(routes ?? {}), plugins: 'host' };
       let optionalTools: ReadonlySet<string> | undefined;
       if (optionalIds?.length) {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1162,7 +1168,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         routes = opt.withOptionalRoutes(routes, optionalIds);
         optionalTools = opt.optionalToolsFor(optionalIds);
       }
-      return new RemoteHostTools({ builtIn, mcpSources, overrides: routes, hostExecPolicy, ...(optionalTools ? { optionalTools } : {}), ...(preApprove ? { preApprove } : {}), log: m => debugLog(m) });
+      return new RemoteHostTools({ builtIn, mcpSources, overrides: routes, hostExecPolicy, contributedTools, ...(optionalTools ? { optionalTools } : {}), ...(preApprove ? { preApprove } : {}), log: m => debugLog(m) });
     };
     // Project vaultFolder paths are anchored to the vault itself. defaultCwd may
     // intentionally point at a repository outside the vault and must not affect

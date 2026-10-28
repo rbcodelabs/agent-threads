@@ -9,7 +9,7 @@
  * are kept as they are and shown as "custom" rows, so an older config round-trips unchanged.
  */
 import type { RemoteHostToolsSettings } from './types';
-import { MCP_GROUP } from './toolRouting';
+import { MCP_GROUP, PLUGINS_GROUP } from './toolRouting';
 
 export interface HostToolGroupInfo { key: string; label: string; hint: string }
 
@@ -20,6 +20,7 @@ export const HOST_TOOL_GROUPS: readonly HostToolGroupInfo[] = Object.freeze([
   { key: 'threads', label: 'Your other threads', hint: 'List and read your other threads.' },
   { key: 'skills', label: 'Installed skills', hint: 'List the skills installed on this computer.' },
   { key: 'browser', label: 'In-app browser', hint: 'Look at pages in the in-app browser.' },
+  { key: PLUGINS_GROUP, label: 'Tools from other plugins', hint: 'Tools that plugins such as Design add to your threads. Ones that change something still ask first. Only tools present when the thread starts.' },
 ]);
 
 const GROUP_KEYS: ReadonlySet<string> = new Set(HOST_TOOL_GROUPS.map((g) => g.key));
@@ -53,7 +54,9 @@ function hasHostRoute(routes: Record<string, 'host' | 'absent'>): boolean {
 }
 
 /** Is this group on and effective (master switch on, group routed to this computer)? */
-export function isGroupOn(ht: RemoteHostToolsSettings | undefined, group: string): boolean {
+export function isGroupOn(ht: RemoteHostToolsSettings | undefined, group: string, managedLocal = false): boolean {
+  // The managed local daemon has plugin tools on unless they are named `absent` (main.ts applies the same default).
+  if (group === PLUGINS_GROUP && managedLocal) return ht?.enabled === true && ht.routes?.[group] !== 'absent';
   return ht?.enabled === true && ht.routes?.[group] === 'host';
 }
 
@@ -77,7 +80,8 @@ function turnOff(ht: RemoteHostToolsSettings | undefined, key: string, coveredBy
   if (!ht) return undefined;
   const routes = hostRoutes(ht);
   // The legacy `mcp` group cannot be removed by turning one server off; name that server `absent` instead.
-  if (coveredByLegacyGroup) routes[key] = 'absent'; else delete routes[key];
+  // `plugins` is on by default for the managed daemon, so off must be written down rather than deleted.
+  if (coveredByLegacyGroup || key === PLUGINS_GROUP) routes[key] = 'absent'; else delete routes[key];
   // Nothing left routed to this computer: host tools go off rather than sit on with an empty list.
   const next: RemoteHostToolsSettings = { ...ht, routes, ...(hasHostRoute(routes) ? {} : { enabled: false }) };
   return normalizeHostTools(next);

@@ -12,7 +12,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk/browser', () => ({
 
 import { builtInMcpToolNames, createClaudeThreadsMcpServers } from '../../src/ObsidianTools';
 import { AGENT_BROWSER_TOOL_NAMES } from '../../src/agentBrowser/agentBrowserTools';
-import { DEFAULT_DOMAIN_ROUTES, TOOL_DOMAINS, domainOf, isClassified, routeFor, toolsRouted } from '../../src/toolRouting';
+import { PLUGINS_GROUP, DEFAULT_DOMAIN_ROUTES, TOOL_DOMAINS, domainOf, isClassified, routeFor, toolsRouted } from '../../src/toolRouting';
 import { BROWSER_TOOL_NAMES, BUILT_IN_TOOL_ORDER, LEGACY_TO_CANONICAL_TOOL_NAMES, TOOL_NAMES_BY_DOMAIN } from '../../src/tools/toolNames';
 
 const app = {
@@ -152,5 +152,34 @@ describe('toolRouting routes', () => {
 
   it('covers every domain', () => {
     expect([...TOOL_DOMAINS].sort()).toEqual(Object.keys(DEFAULT_DOMAIN_ROUTES).sort());
+  });
+});
+
+describe('toolRouting contributed (plugin) tools', () => {
+  const contributed = new Set(['EnterDesignMode', 'vault_search', 'host_exec', 'request_secret']);
+
+  it('is absent unless the caller identifies it as contributed', () => {
+    expect(routeFor('EnterDesignMode', { [PLUGINS_GROUP]: 'host' })).toBe('absent');
+    expect(routeFor('SomethingElse', { [PLUGINS_GROUP]: 'host' }, undefined, contributed)).toBe('absent');
+  });
+
+  it('is offered when the plugins route is on, absent when off or unset', () => {
+    expect(routeFor('EnterDesignMode', { plugins: 'host' }, undefined, contributed)).toBe('host');
+    expect(routeFor('EnterDesignMode', { plugins: 'absent' }, undefined, contributed)).toBe('absent');
+    expect(routeFor('EnterDesignMode', {}, undefined, contributed)).toBe('absent');
+    expect(routeFor('EnterDesignMode', undefined, undefined, contributed)).toBe('absent');
+  });
+
+  it('a tool name beats the group in both directions', () => {
+    expect(routeFor('EnterDesignMode', { plugins: 'host', EnterDesignMode: 'absent' }, undefined, contributed)).toBe('absent');
+    expect(routeFor('EnterDesignMode', { EnterDesignMode: 'host' }, undefined, contributed)).toBe('host');
+  });
+
+  it('never overrides a built-in or a NEVER_OFFERED name, even if listed as contributed', () => {
+    expect(routeFor('vault_search', { plugins: 'host' }, undefined, contributed)).toBe('absent');
+    expect(routeFor('vault_search', { vault: 'host', plugins: 'host' }, undefined, contributed)).toBe('host'); // built-in rules decide
+    expect(routeFor('request_secret', { plugins: 'host' }, undefined, contributed)).toBe('absent');
+    expect(routeFor('host_exec', { plugins: 'host' }, undefined, contributed)).toBe('absent');
+    expect(routeFor('enter_worktree', { plugins: 'host' }, undefined, new Set(['enter_worktree']))).toBe('local');
   });
 });

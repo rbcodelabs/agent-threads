@@ -520,3 +520,32 @@ describe('host-tool manifest caps', () => {
     expect(bySrv.flaky.notify).toBe(true);
   });
 });
+
+describe('RemoteHostTools contributed plugin tools', () => {
+  const names = (m: Record<string, Array<{ name: string }>>) => (m.claude_threads ?? []).map((t) => t.name).sort();
+  const builtIn = [dyn('EnterDesignMode', true), dyn('DesignRead', false), dyn('vault_search')];
+  const contributedTools = new Set(['EnterDesignMode', 'DesignRead']);
+
+  it('offers contributed tools when plugins is on, preserving requiresApproval', async () => {
+    const m = await new RemoteHostTools({ builtIn, contributedTools, overrides: { plugins: 'host' } }).manifest();
+    expect(names(m)).toEqual(['DesignRead', 'EnterDesignMode']);
+    expect(m.claude_threads.find((t) => t.name === 'EnterDesignMode')?.requiresApproval).toBe(true);
+    expect(m.claude_threads.find((t) => t.name === 'DesignRead')?.requiresApproval).toBe(false);
+  });
+
+  it('offers none when plugins is off, unset, or the factory passes no contributed set', async () => {
+    expect(names(await new RemoteHostTools({ builtIn, contributedTools, overrides: { plugins: 'absent' } }).manifest())).toEqual([]);
+    expect(names(await new RemoteHostTools({ builtIn, contributedTools }).manifest())).toEqual([]);
+    expect(names(await new RemoteHostTools({ builtIn, overrides: { plugins: 'host' } }).manifest())).toEqual([]);
+  });
+
+  it('does not let a contributed name shadow a built-in, and runs the tool when offered', async () => {
+    const shadow = new Set(['vault_search', 'EnterDesignMode']);
+    const m = await new RemoteHostTools({ builtIn, contributedTools: shadow, overrides: { plugins: 'host' } }).manifest();
+    expect(names(m)).toEqual(['EnterDesignMode']);
+    const tools = new RemoteHostTools({ builtIn, contributedTools, overrides: { plugins: 'host' } });
+    await tools.manifest();
+    expect((await tools.invoke('claude_threads', 'EnterDesignMode', {})).success).toBe(true);
+    expect((await tools.invoke('claude_threads', 'vault_search', {})).success).toBe(false);
+  });
+});
