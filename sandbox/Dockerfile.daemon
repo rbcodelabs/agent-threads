@@ -54,7 +54,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client \
         build-essential \
         python3 \
+        postgresql \
+        postgresql-client \
     && rm -rf /var/lib/apt/lists/*
+
+# Postgres for agent work (Prisma/Next.js repos need a real database). Debian's server binaries live off PATH, so
+# link them in; the package's system cluster is unused and dropped. Agents are non-root and run their own server
+# with `local-pg [dbname] [port]` (rootless initdb + pg_ctl, prints a DATABASE_URL).
+RUN pg_dropcluster --stop "$(pg_lsclusters -h | awk '{print $1}')" main 2>/dev/null || true; \
+    ln -sf "$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"/* /usr/local/bin/
+COPY --chmod=0755 sandbox/local-pg /usr/local/bin/local-pg
+
+# Chromium's system libraries, so Playwright (E2E, screenshots) runs without root at agent time. Installs only the
+# apt dependencies; the browser itself downloads per-user into ~/.cache/ms-playwright. Pinned to the repo's
+# @playwright/test version (package.json) so the library list matches the browser build.
+ARG PLAYWRIGHT_VERSION=1.61.1
+RUN npx --yes playwright@${PLAYWRIGHT_VERSION} install-deps chromium \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
 
 # A dedicated user (UID 10001 so it never collides with a host user mapped into a bind mount by accident).
 RUN groupadd --gid 10001 agentthreads \
