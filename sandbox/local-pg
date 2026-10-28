@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# local-pg [dbname] [port]  - start a rootless Postgres (idempotent) and print a DATABASE_URL.
+# One server per port; data in $HOME/pgdata-<port> (persisted with the daemon's HOME volume).
+set -euo pipefail
+DB="${1:-app}"
+PORT="${2:-5432}"
+DIR="${HOME}/pgdata-${PORT}"
+if [ ! -f "$DIR/PG_VERSION" ]; then
+  initdb -D "$DIR" -U postgres --auth=trust >/dev/null
+fi
+if ! pg_ctl -D "$DIR" status >/dev/null 2>&1; then
+  pg_ctl -D "$DIR" -o "-p ${PORT} -k /tmp -c listen_addresses=127.0.0.1" -l "$DIR/pg.log" -w start >/dev/null
+fi
+psql -h 127.0.0.1 -p "$PORT" -U postgres -tAc "select 1 from pg_database where datname='${DB}'" | grep -q 1 \
+  || createdb -h 127.0.0.1 -p "$PORT" -U postgres "$DB"
+echo "postgres://postgres@127.0.0.1:${PORT}/${DB}?sslmode=disable"
