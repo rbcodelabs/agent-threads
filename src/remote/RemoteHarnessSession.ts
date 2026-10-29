@@ -145,12 +145,37 @@ export class RemoteHarnessSession implements HarnessSession {
   private deferredTimer: ReturnType<typeof setTimeout> | null = null;
   private unavailableNoticeShown = false;
 
+  /** Resolves the registry's CURRENT client; the registry disposes and replaces clients (config change, refresh). */
+  private readonly resolveClient: () => DaemonClient | undefined;
+  /** The client the live subscription / commands were last issued on. */
+  private boundClient: DaemonClient | null = null;
+
   constructor(
-    private readonly client: DaemonClient,
+    client: DaemonClient | (() => DaemonClient | undefined),
     private readonly thread: Thread,
     private readonly deps: RemoteSessionDeps = {},
   ) {
     if (!thread.remote) throw new Error('RemoteHarnessSession needs a thread with a remote marker');
+    this.resolveClient = typeof client === 'function' ? client : () => client;
+  }
+
+  /**
+   * The current daemon client. A long-lived session must not hold a client forever: the registry disposes the old one
+   * when the daemon's url/token changes (a disposed client rejects every command with "client closed"). When the
+   * identity changed since we last used it, move the event subscription onto the new client.
+   */
+  private get client(): DaemonClient {
+    const current = this.resolveClient();
+    if (!current) throw new Error('The remote daemon for this thread is no longer available (removed, or not permitted). Check Settings, Remote daemons.');
+    const previous = this.boundClient;
+    this.boundClient = current;
+    if (previous && previous !== current && this.sub && !this.closed) {
+      this.log('daemon client was replaced; re-attaching on the new client');
+      this.sub.close();
+      this.sub = null;
+      this.follow();
+    }
+    return current;
   }
 
   private get remote(): ThreadRemote { return this.thread.remote as ThreadRemote; }
@@ -243,8 +268,9 @@ export class RemoteHarnessSession implements HarnessSession {
   /** Tell the daemon the current manifest if it changed (on open, on every attach, before each turn). */
   private async syncManifest(force = false): Promise<void> {
     const tools = this.deps.hostTools;
-    if (!tools || this.closed || this.controller !== true || !this.client.daemonInfo?.capabilities.includes('host.tools')) return;
+    if (!tools || this.closed || this.controller !== true) return;
     try {
+      if (!this.client.daemonInfo?.capabilities.includes('host.tools')) return;
       const manifest = await tools.manifest();
       const sig = manifestSignature(manifest);
       if (!force && sig === this.manifestSent) return;

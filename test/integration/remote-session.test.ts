@@ -375,3 +375,39 @@ describe('proxy helper', () => {
     await until(() => c.connection.status === 'connected', 'reconnect');
   });
 });
+
+describe('client replaced mid-session (registry disposes and rebuilds it)', () => {
+  it('runs the next command on the registry\'s new client instead of failing with "client closed"', async () => {
+    const td = await daemon();
+    let current = client(td.daemon.url, td.adminToken);
+    const thread = remoteThread('swap1');
+    const r = recorder();
+    const session = new RemoteHarnessSession(() => current, thread);
+    await session.start(optionsFor(r));
+
+    session.send('/tokens 10', undefined, 'u1');
+    await until(() => names(r).includes('onDone'), 'first turn done');
+    await until(() => !session.turnInFlight, 'first turn to end');
+
+    // What DaemonRegistry.clientFor does on a url/token change: dispose the old client, hand out a new one.
+    const old = current;
+    old.dispose();
+    current = client(td.daemon.url, td.adminToken);
+    r.calls.length = 0;
+
+    session.send('/tokens 10', undefined, 'u2');
+    await until(() => names(r).includes('onDone'), 'second turn done on the new client');
+    expect(names(r)).not.toContain('onError');
+    expect(current.connection.status).toBe('connected');
+    session.close();
+  });
+
+  it('reports a clear error when the daemon is gone from the registry', async () => {
+    const td = await daemon();
+    let current: DaemonClient | undefined = client(td.daemon.url, td.adminToken);
+    const session = new RemoteHarnessSession(() => current, remoteThread('swap2'));
+    await session.start(optionsFor(recorder()));
+    current = undefined;
+    await expect(session.interrupt()).rejects.toThrow(/no longer available/);
+  });
+});

@@ -51,7 +51,10 @@ export function createHarnessSession(
           : 'Remote threads are not available on this host.',
       );
     }
-    return new RemoteHarnessSession(client, thread, remoteHooks);
+    // Resolve lazily: the registry replaces (and disposes) its client when the daemon's config changes, and a session
+    // holding the first one would fail every later command with "client closed".
+    const daemonId = thread.remote.daemonId;
+    return new RemoteHarnessSession(() => remoteDaemons?.clientFor(daemonId), thread, remoteHooks);
   }
   const demoScript = env[DEMO_SCRIPT_ENV];
   if (demoScript && (thread.agentHarness ?? 'claude') === 'claude') {
