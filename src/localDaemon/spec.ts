@@ -567,6 +567,9 @@ export function inspectContainerArgs(name: string): string[] {
 export function startContainerArgs(name: string): string[] {
   return ['start', name];
 }
+/** Name of the builder VM that Apple's `container build` creates and leaves running. */
+export const BUILDKIT_CONTAINER = 'buildkit';
+
 export function stopContainerArgs(name: string): string[] {
   return ['stop', name];
 }

@@ -40,6 +40,7 @@ import {
   runArgs,
   startContainerArgs,
   stopContainerArgs,
+  BUILDKIT_CONTAINER,
   killContainerArgs,
   tokenCreateArgs,
   tokenListArgs,
@@ -211,6 +212,9 @@ export async function buildThinImage(d: StepDeps, version: string, harnesses?: r
     }
   } finally {
     if (dir) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    // `container build` leaves its ~2 GB `buildkit` builder VM running indefinitely. Stop it now;
+    // the next build restarts it in a few seconds. Best effort: never fail or mask a build error.
+    await d.runner(stopContainerArgs(BUILDKIT_CONTAINER), { timeoutMs: 30_000 }).catch(() => undefined);
   }
 }
 
