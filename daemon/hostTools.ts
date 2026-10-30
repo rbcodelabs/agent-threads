@@ -18,8 +18,10 @@
  */
 import { randomUUID } from 'node:crypto';
 import {
+  HOST_RESOURCE_TOOLS,
   HOST_TOOL_LIMITS,
   checkCallInput,
+  clampResourceText,
   clampResultText,
   findManifestTool,
   hostUnavailableText,
@@ -199,7 +201,7 @@ export class HostToolBroker {
   resolve(threadId: string, callId: string, result: { success: boolean; text: string; content?: unknown[]; structuredContent?: unknown }, by: string): boolean {
     const p = this.pending.get(callId);
     if (!p || p.threadId !== threadId || !p.issued || p.done) return false;
-    const { text, truncated } = clampResultText(result.text);
+    const { text, truncated } = p.tool === HOST_RESOURCE_TOOLS.read ? clampResourceText(result.text) : clampResultText(result.text);
     const content = sanitizeResultContent(result.content);
     // Passed through unchanged; the frame limit already bounded it. Only a non-object is treated as absent.
     const structuredContent = asStructuredContent(result.structuredContent);

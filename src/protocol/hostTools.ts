@@ -274,7 +274,23 @@ export const HOST_RESOURCE_LIMITS = {
   maxUriChars: 4_096,
   maxNameChars: 512,
   maxDescriptionChars: 2_048,
+  /**
+   * `resources/read` result text (the whole serialized `{contents:[...]}`) above this is cut with a marker. Higher
+   * than `maxResultTextChars` because a resource is a document the agent asked for by uri, not incidental tool output
+   * (a 282 KB HTML artifact was cut at 100K). 400K chars is roughly 100K tokens at worst: a deliberate read, still
+   * bounded for model context, and far below `maxResultFrameChars` and the transport frame limit. Both the plugin
+   * and the daemon enforce it, so both must carry this value for it to take effect.
+   */
+  maxReadTextChars: 400_000,
 } as const;
+
+export const RESOURCE_TRUNCATION_MARKER = '\n[... resource truncated: it exceeded the size limit for a proxied resource read. If the server supports it, read the rest in pieces (offset/length parameters or a narrower uri) ...]';
+
+/** Like `clampResultText`, but for `resources/read` text: higher cap, and a marker that says how to get the rest. */
+export function clampResourceText(text: string, max: number = HOST_RESOURCE_LIMITS.maxReadTextChars): { text: string; truncated: boolean } {
+  if (text.length <= max) return { text, truncated: false };
+  return { text: text.slice(0, max) + RESOURCE_TRUNCATION_MARKER, truncated: true };
+}
 
 export interface HostResourceInfo { uri: string; name: string; description?: string; mimeType?: string }
 export interface HostResourceTemplateInfo { uriTemplate: string; name: string; description?: string; mimeType?: string }
@@ -344,9 +360,10 @@ export function encodeResourceTemplates(raw: unknown, max: number = HOST_TOOL_LI
 /**
  * Plugin side: the `tool.result.text` for `resources/read`. Text contents are kept, binary blobs become a one-line
  * note (the model reads text; a blob would also blow the frame limit). Text is cut with an explicit marker until the
- * serialized result fits, never silently.
+ * serialized result fits, never silently. The cap is `HOST_RESOURCE_LIMITS.maxReadTextChars`, not the ordinary tool-result cap.
+ * Blobs are not inlined (base64 would cost context for nothing and risk the frame limit): the note keeps mimeType and size.
  */
-export function encodeResourceContents(raw: unknown, max: number = HOST_TOOL_LIMITS.maxResultTextChars): string {
+export function encodeResourceContents(raw: unknown, max: number = HOST_RESOURCE_LIMITS.maxReadTextChars): string {
   const contents: HostResourceContent[] = [];
   if (Array.isArray(raw)) {
     for (const c of raw.slice(0, 32)) {
@@ -365,12 +382,12 @@ export function encodeResourceContents(raw: unknown, max: number = HOST_TOOL_LIM
   for (let attempt = 0; attempt < 8; attempt++) {
     const total = contents.reduce((n, c) => n + c.text.length, 0);
     const share = Math.floor(budget / Math.max(1, contents.length));
-    const fitted = total <= budget ? contents : contents.map((c) => (c.text.length <= share ? c : { ...c, text: c.text.slice(0, share) + TRUNCATION_MARKER }));
+    const fitted = total <= budget ? contents : contents.map((c) => (c.text.length <= share ? c : { ...c, text: c.text.slice(0, share) + RESOURCE_TRUNCATION_MARKER }));
     const text = JSON.stringify({ contents: fitted });
     if (text.length <= max) return text;
     budget = Math.max(0, budget - (text.length - max) - 64);
   }
-  return JSON.stringify({ contents: contents.map((c) => ({ uri: c.uri, text: TRUNCATION_MARKER.trim() })) });
+  return JSON.stringify({ contents: contents.map((c) => ({ uri: c.uri, text: RESOURCE_TRUNCATION_MARKER.trim() })) });
 }
 
 export type ResourceDecode<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -404,7 +421,7 @@ export function decodeResourceContents(text: string): ResourceDecode<HostResourc
     const uri = clip(c.uri, HOST_RESOURCE_LIMITS.maxUriChars);
     if (!uri) continue;
     const mimeType = clip(c.mimeType, 128);
-    out.push({ uri, ...(mimeType ? { mimeType } : {}), text: clampResultText(c.text).text });
+    out.push({ uri, ...(mimeType ? { mimeType } : {}), text: clampResourceText(c.text).text });
   }
   return { ok: true, value: out };
 }
