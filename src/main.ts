@@ -775,9 +775,11 @@ export default class ClaudeThreadsPlugin extends Plugin {
         catch (error) { this.mcpRegistrationModals.delete(modal); reject(error); }
       }),
     });
-    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks) =>
+    const buildBuiltInMcpServers = (threadId: string, initialCwd: string, hostExec?: HostExecHooks, forDaemon = false) =>
         createClaudeThreadsMcpServers(this.app, {
           ...(hostExec ? { hostExec } : {}),
+          // A thread on a daemon is told only saved or cancelled by request_secret (see requestSecretForDaemonThread).
+          ...(forDaemon ? { minimalSecretResult: true } : {}),
           // Contributed agent tools, bound to this thread here — the host does
           // the binding so a peer never reaches the factory (ADR-0008). Built-in
           // Design arrives through this list like any other contribution; there
@@ -1163,7 +1165,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         builtInCwd = (mapping && thread.remote ? mapRemoteToLocal(mapping, this.manager.vaultRoot, thread.remote.remoteCwd) : undefined)
           ?? this.manager.vaultRoot ?? thread.cwd;
       }
-      const builtIn = buildBuiltInMcpServers(threadId, builtInCwd, hostExec).claude_threads.harnessTools;
+      const builtIn = buildBuiltInMcpServers(threadId, builtInCwd, hostExec, true).claude_threads.harnessTools;
       // Peer-contributed tools are already in `builtIn` (bound at session construction); name them so routing can tell
       // them from a built-in. Only those registered before this session was built are present in `builtIn`.
       const contributedTools = new Set(this.agentTools.list().map(t => t.name));
@@ -2686,9 +2688,40 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * session yet, which is fine — the next-anyway-fresh session already gets it).
    */
   private async requestSecretForThread(threadId: string, secretName: string, reason: string, force?: boolean): Promise<boolean> {
+    if (this.manager.getThread(threadId)?.remote) return this.requestSecretForDaemonThread(threadId, secretName, reason, force);
     const saved = await this.requestSecretFromUser(secretName, reason, force);
     if (saved) this.manager.requestSessionRestart(threadId);
     return saved;
+  }
+
+  /**
+   * `request_secret` from a thread on the MANAGED LOCAL daemon (opt-in group `secrets`; the app's approval card has
+   * already been answered by the time this runs). The value is saved to the keychain by the host modal, then the
+   * project's session environment is re-pushed over the same credential channel every session start uses (stdin to
+   * `creds push`, kind `sessenv-<project>`; only the kind's NAME is kept here), and the daemon session is flagged to
+   * restart so the next turn's subprocess has it, with history resumed. Nothing here ever holds the value: the model
+   * gets saved or cancelled only. Any other daemon, and a scheduled thread nobody is watching, is refused before the
+   * modal opens.
+   */
+  private async requestSecretForDaemonThread(threadId: string, secretName: string, reason: string, force?: boolean): Promise<boolean> {
+    const thread = this.manager.getThread(threadId);
+    const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === thread?.remote?.daemonId);
+    const groupOn = (this.settings.localDaemon?.optionalTools ?? []).includes('secrets');
+    if (!thread || daemon?.managed !== 'local-container' || !groupOn || thread.scheduledItemId || !this.localDaemonPrep) return false;
+    const alreadyStored = !!this.app.secretStorage.getSecret(secretStorageKey(secretName));
+    const saved = alreadyStored && !force ? true : await this.requestSecretFromUser(secretName, reason, force);
+    if (!saved) return false;
+    if (!this.settings.secretEnvKeys.includes(secretName)) {
+      this.settings.secretEnvKeys.push(secretName);
+      await this.saveSettings();
+    }
+    const prep = await this.localDaemonPrep.refreshEnv(thread.projectId);
+    if (prep.envKind) {
+      this.localDaemonExtras.set(threadId, { ...(this.localDaemonExtras.get(threadId) ?? { pluginPaths: [] }), envKind: prep.envKind });
+    }
+    for (const warning of prep.warnings) new Notice(`The secret was saved, but could not be sent to the local daemon yet: ${warning}`, 9000);
+    this.manager.requestSessionRestart(threadId);
+    return true;
   }
 
   /**

@@ -33,7 +33,7 @@ function makePlugin(requestSecretFromUserImpl: (secretName: string, reason: stri
   const requestSecretFromUser = vi.fn(requestSecretFromUserImpl);
   const requestSessionRestart = vi.fn();
   (plugin as unknown as { requestSecretFromUser: typeof requestSecretFromUser }).requestSecretFromUser = requestSecretFromUser;
-  (plugin as unknown as { manager: { requestSessionRestart: typeof requestSessionRestart } }).manager = { requestSessionRestart };
+  (plugin as unknown as { manager: unknown }).manager = { requestSessionRestart, getThread: () => ({}) };
   return { plugin, requestSecretFromUser, requestSessionRestart };
 }
 
