@@ -104,7 +104,9 @@ mount. When the selected Project's folder is not shared, the folder chooser says
 it, Agent Threads pushes that project's **Extra environment variables** (`AWS_PROFILE`, `CLAUDE_CODE_USE_BEDROCK`, ...) and
 keychain secrets as a credential kind `sessenv-<project>` (`agent-threads creds push`, over stdin, 24 hour expiry,
 refreshed on every send). The session spec carries only the kind's name; the daemon reads the values when the session
-starts, so they are never in a spec, a journal, `config.json` or a log, and the daemon redacts them from its output.
+starts, so they are never in a spec or `config.json`. Known values are masked in the raw log and the daemon's logger, but NOT in the
+journal, in what is sent to clients, or in the error text the daemon prints when the agent process fails: a command that prints a value, or an
+error message that contains it, can land in the journal.
 Variables that describe this Mac's shell (`PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `DYLD_*`/`LD_*`, ...) are not
 sent. A spec cannot name any other credential kind as its environment.
 
@@ -655,7 +657,7 @@ tools that only exist in the app on your computer, while the app is connected, *
 | In the app on your computer, opt-in groups (all off until listed) | `vault` (search, backlinks, links, note metadata, file history, list, bridge list), `workspace` (open tabs, active file, watched documents), `threads` (list, current, projects, messages, log, wait), `skills` (list, search, get, sources), `browser` (the in-app browser tools except `browser_eval` and `browser_save_page`), `mcp` (your Google Workspace and OAuth MCP servers, under their own names, for example `mcp__google-docs__*`; or name one server) |
 | One command on your computer, opt-in group `exec` | `host_exec`: runs ONE shell command on your computer; every call shows an Allow once / Always allow `<prefix>` / Deny card with the exact command, folder and reason, no permission mode or generic remembered answer skips it (only a command prefix you saved can; see "Always allow a command prefix"), and its environment is scrubbed (no credentials). On for the managed local daemon only by default. |
 | Never offered to a daemon you add yourself; the managed local daemon can opt in per group | (same list) |
-| Never offered, whatever you set | everything that writes, executes, schedules, installs, sends or reads a secret on your computer: `request_secret`, `mcp_register_server`, `host_execute_command` / `host_list_commands` / `host_open_url`, `workspace_navigate_to_file` / `workspace_insert_at_cursor`, `watch_document`, `vault_restore_file_version`, `vault_add_bridge`, `sync_resolve_conflict`, `threads_create` / `threads_send_message` / `threads_archive` / `threads_open` and every `threads_set_*` / project setter, `skills_install` / `create` / `update` / `uninstall` / `check_updates`, `Cron*` / `ScheduleWakeup`, `browser_eval`, `browser_save_page` |
+| Never offered, whatever you set | everything that writes, executes, schedules, installs, sends or reads a secret on your computer: `request_secret` (the managed local daemon can opt in through the `secrets` group), `mcp_register_server`, `host_execute_command` / `host_list_commands` / `host_open_url`, `workspace_navigate_to_file` / `workspace_insert_at_cursor`, `watch_document`, `vault_restore_file_version`, `vault_add_bridge`, `sync_resolve_conflict`, `threads_create` / `threads_send_message` / `threads_archive` / `threads_open` and every `threads_set_*` / project setter, `skills_install` / `create` / `update` / `uninstall` / `check_updates`, `Cron*` / `ScheduleWakeup`, `browser_eval`, `browser_save_page` |
 | Not offered either | `github_*` (the discovery tools run against Geode's connection; the daemon gets the token itself, not the tools), `google-drive-files` (its paths are on your computer), tools contributed by other plugins |
 
 The names are the ones a local thread has (`mcp__claude_threads__vault_search`). The remote session's system prompt lists
@@ -715,9 +717,23 @@ exactly which tools run on your computer (or says none do).
   (including a stdio server with a keychain secret), opt it in per daemon: see "MCP servers synced from the app".
 - **Secrets stay here.** Only tool names, descriptions, schemas and tool *results* cross to the daemon. Keychain values, the
   loopback addresses and capability headers of your Google and OAuth brokers, and the token never do.
+- **Secrets from `request_secret` (managed local daemon only).** Switch on **Secrets and MCP servers** (group `secrets`, Settings,
+  Remote, Local daemon: tools that act on this Mac; off by default) and a thread on the local daemon can ask for a credential
+  the way a thread on this computer does. The app's approval card (the tool name, the secret name and the reason, never a value)
+  is the only approval: nothing remembered pre-approves it, "Always Allow" is not offered, and a scheduled thread nobody is
+  watching is refused. After you approve, the usual masked modal asks for the value and stores it in your keychain. The app then
+  re-sends that project's session environment to the daemon over the same channel every session start uses (`creds push` from
+  inside the container, values on stdin, the credential kind `sessenv-<project>`, 24 hour expiry; see "Environment and keychain
+  secrets" above) and restarts the daemon session, so the secret is an environment variable of the thread's next turn with the
+  conversation resumed. The value is not in the session spec, `config.json`, the permission card or the tool result:
+  the agent is told only `saved` or `cancelled`, plus the name it chose. A secret that is already in the keychain is sent
+  without a second prompt unless the agent sets `force`. If the push fails you see a notice, the secret stays in the keychain,
+  and the next session start sends it. Once a command on the daemon prints the variable (`echo $NAME`), that output is
+  tool output like any other: the model has seen it, and it is masked only in the raw log, not in the journal or in what clients receive
+  (the same goes for an error message that contains the value). Ask only for secrets you would let the agent use. Nothing in this path applies to a daemon you added yourself.
 - **Limits.** A new proxied server that first appears after a session started needs a new session (tools of servers already
-  present update live). `request_secret` stores the value in your keychain; it does not reach the daemon, so the remote
-  agent cannot read it. A tool call that was running when the app quit may be re-run after a restart only if the daemon
+  present update live). `request_secret` is not offered to a daemon you add yourself; there it stores the value in your keychain and
+  does not reach that daemon, so the remote agent cannot read it. The managed local daemon can opt in (below). A tool call that was running when the app quit may be re-run after a restart only if the daemon
   still shows it as open.
 
 ## Harnesses: Claude, Codex, OpenCode
@@ -809,7 +825,7 @@ A daemon-listed server replaces a same-named server sent by the app (and a same-
 
 Secret values are sent with the `creds.push` protocol command (`{ kind, ttlSec, fields }`), which needs an **admin** token.
 They are stored on the daemon as `<data-dir>/creds/<kind>.json` (directory 0700, files 0600), never in `config.json` or in a
-thread's saved spec, and masked in the daemon's logs. Push them with `agent-threads creds push` (below) or from any admin
+thread's saved spec, and masked in the daemon's raw log and logger (not in the journal). Push them with `agent-threads creds push` (below) or from any admin
 client on the wire protocol; there is no settings screen for it yet.
 
 A push replaces the whole kind; pushing no fields removes it; `ttlSec` (0 = no expiry) makes it lapse on its own. Placeholders

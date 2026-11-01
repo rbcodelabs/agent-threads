@@ -200,3 +200,33 @@ describe('request_secret', () => {
     });
   });
 });
+
+// ── request_secret for a thread on the managed local daemon ───────────────────
+
+describe('request_secret (thread on the managed local daemon)', () => {
+  const daemonServer = (app: App, onRequestSecret: ReturnType<typeof vi.fn>) =>
+    createObsidianMcpServer(app, { onRequestSecret, minimalSecretResult: true }) as unknown as CapturedServer;
+
+  it('says only saved, never alreadyExisted, and echoes nothing else', async () => {
+    const onRequestSecret = vi.fn().mockResolvedValue(true);
+    const result = await getTool(daemonServer(makeApp(), onRequestSecret), 'request_secret')._handler({ secretName: 'my_api_key', reason: 'r' });
+    expect(parseResult(result)).toEqual({ success: true, secretName: 'MY_API_KEY', status: 'saved' });
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('says only cancelled when the user cancels', async () => {
+    const onRequestSecret = vi.fn().mockResolvedValue(false);
+    const result = await getTool(daemonServer(makeApp(), onRequestSecret), 'request_secret')._handler({ secretName: 'K', reason: 'r' });
+    expect(parseResult(result)).toEqual({ success: false, secretName: 'K', status: 'cancelled' });
+    expect(result.isError).toBe(true);
+  });
+
+  it('does not short-circuit on a stored secret (so the host can still deliver it); the host callback decides', async () => {
+    const onRequestSecret = vi.fn().mockResolvedValue(true);
+    const app = makeApp({ 'ct-secret-my-api-key': 'existing-token' });
+    const result = await getTool(daemonServer(app, onRequestSecret), 'request_secret')._handler({ secretName: 'MY_API_KEY', reason: 'r' });
+    expect(onRequestSecret).toHaveBeenCalledWith('MY_API_KEY', 'r', false);
+    expect(JSON.stringify(parseResult(result))).not.toContain('alreadyExisted');
+    expect(JSON.stringify(parseResult(result))).not.toContain('existing-token');
+  });
+});

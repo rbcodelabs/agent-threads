@@ -19,7 +19,7 @@ type ToolDef = SdkMcpToolDefinition<any>;
 export interface MiscToolsPort {
   app: Pick<App, 'secretStorage'>;
   cwd: CwdTracker;
-  options: Pick<ObsidianMcpServerOptions, 'githubBroker' | 'hostExec' | 'isGithubConnectionEnabled' | 'onRegisterMcpServer' | 'onRequestSecret'>;
+  options: Pick<ObsidianMcpServerOptions, 'githubBroker' | 'hostExec' | 'isGithubConnectionEnabled' | 'onRegisterMcpServer' | 'onRequestSecret' | 'minimalSecretResult'>;
 }
 
 
@@ -158,7 +158,7 @@ export function createMiscTools(port: MiscToolsPort): Record<string, ToolDef> {
       const varName = args.secretName.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
 
       // If the secret is already stored and force is not set, return immediately without prompting.
-      if (!args.force) {
+      if (!args.force && !options.minimalSecretResult) {
         const existing = app.secretStorage.getSecret(secretStorageKey(varName));
         if (existing) {
           return {
@@ -184,7 +184,9 @@ export function createMiscTools(port: MiscToolsPort): Record<string, ToolDef> {
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ success: saved, secretName: varName, alreadyExisted: false }),
+          text: JSON.stringify(options.minimalSecretResult
+            ? { success: saved, secretName: varName, status: saved ? 'saved' : 'cancelled' }
+            : { success: saved, secretName: varName, alreadyExisted: false }),
         }],
         ...(saved ? {} : { isError: true }),
       };

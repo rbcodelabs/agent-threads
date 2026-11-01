@@ -297,6 +297,12 @@ export interface ObsidianMcpServerOptions {
    */
   onRequestSecret?: (secretName: string, reason: string, force?: boolean) => Promise<boolean>;
   /**
+   * Supplied ONLY for a thread on the managed local daemon. `request_secret` then reports nothing but saved or
+   * cancelled (no `alreadyExisted`, which would reveal what the keychain holds), and never answers from the keychain
+   * itself: `onRequestSecret` decides, because a stored secret may still have to be delivered to the daemon.
+   */
+  minimalSecretResult?: boolean;
+  /**
    * When false, the obsidian_open_url tool is excluded from the MCP server.
    * Should be false when the Web Viewer core plugin is disabled or the user
    * has opted out in settings. Defaults to true.

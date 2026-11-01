@@ -104,6 +104,25 @@ export class LocalDaemonSessionPrep {
     return extras;
   }
 
+  /**
+   * Re-sends ONLY the session environment of `projectId`, for a secret saved while a session is live (`request_secret`).
+   * Same channel and kind as `prepare`: values on stdin, the kind's name returned, never a value. Never throws; a
+   * failure is a warning (already redacted by the pusher) and the next session start retries.
+   */
+  async refreshEnv(projectId: string | undefined): Promise<{ envKind?: string; warnings: string[] }> {
+    const out: { envKind?: string; warnings: string[] } = { warnings: [] };
+    if (!this.deps.vaultPath()) return out;
+    try {
+      await this.pusher.verifyVolume();
+      out.envKind = await this.deliverEnv(projectId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      out.warnings.push(`session environment: ${message}`);
+      this.deps.log?.(`[local-daemon] session environment not delivered: ${message}`);
+    }
+    return out;
+  }
+
   /** Removes what was pushed or copied, best effort. */
   async stop(): Promise<void> {
     await this.env.stop();
