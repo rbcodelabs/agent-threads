@@ -35,6 +35,7 @@ import {
   isInsideRoot,
   isCurrentLocalRoot,
 } from './skillPaths';
+import { resolveManagedClonePaths } from './skillSourcePersistence';
 
 /** Resolve configured sources to roots containing Codex skill directories. */
 export function codexSkillRoots(
@@ -842,10 +843,11 @@ export async function ensureGithubSourcesCloned(
         source.id = deriveSourceIdFromRepoUrl(source.repoUrl);
         result.changed = true;
       }
-      if (!source.clonePath) {
-        source.clonePath = path.join(cloneBase, source.id);
-        result.changed = true;
-      }
+      // Re-derived from the current vault each pass, in memory only: clonePath
+      // is not persisted for managed sources (see skillSourcesForPersistence),
+      // so this does not count as a settings change.
+      resolveManagedClonePaths([source], cloneBase);
+      if (!source.clonePath) source.clonePath = path.join(cloneBase, source.id);
 
       if (isGitWorkingCopy(source.clonePath)) {
         result.present.push(source.id);

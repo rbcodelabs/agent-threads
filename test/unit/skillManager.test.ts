@@ -968,3 +968,35 @@ describe('skill source removal helpers', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 });
+
+import { resolveManagedClonePaths, skillSourcesForPersistence } from '../../src/skillSourcePersistence';
+
+describe('managed clonePath derivation', () => {
+  const src = (clonePath?: string): SkillSource => ({ id: 'abc123', name: 'S', type: 'github', repoUrl: 'https://github.com/o/r', clonePath });
+
+  it('fills a missing clonePath from the current vault', () => {
+    const sources = [src()];
+    expect(resolveManagedClonePaths(sources, '/vaultB/.obsidian/plugins/p/skill-sources')).toBe(true);
+    expect(sources[0].clonePath).toBe('/vaultB/.obsidian/plugins/p/skill-sources/abc123');
+  });
+
+  it('re-points a stale managed path left by another vault location or machine', () => {
+    const sources = [src('/Users/old/VaultA/.obsidian/plugins/p/skill-sources/abc123')];
+    resolveManagedClonePaths(sources, '/vaultB/.obsidian/plugins/p/skill-sources');
+    expect(sources[0].clonePath).toBe('/vaultB/.obsidian/plugins/p/skill-sources/abc123');
+  });
+
+  it('leaves a hand-set path elsewhere alone and is a no-op when already current', () => {
+    const custom = [src('/opt/my-skills')];
+    expect(resolveManagedClonePaths(custom, '/v/skill-sources')).toBe(false);
+    expect(custom[0].clonePath).toBe('/opt/my-skills');
+    const current = [src('/v/skill-sources/abc123')];
+    expect(resolveManagedClonePaths(current, '/v/skill-sources')).toBe(false);
+  });
+
+  it('does not persist managed clone paths but keeps custom ones', () => {
+    const out = skillSourcesForPersistence([src('/x/skill-sources/abc123'), { ...src('/opt/my-skills'), id: 'k' }])!;
+    expect(out[0].clonePath).toBeUndefined();
+    expect(out[1].clonePath).toBe('/opt/my-skills');
+  });
+});

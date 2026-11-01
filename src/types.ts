@@ -982,7 +982,8 @@ export interface SkillSource {
   /**
    * Absolute path to the managed clone, e.g.
    * "/Users/foo/MyVault/.obsidian/plugins/claude-threads/skill-sources/<id>".
-   * Omit it in a declared source — it is computed from the plugin dir and `id`.
+   * Derived in memory from the current vault and `id` on load and never
+   * persisted for managed clones (it would go stale if the vault moves).
    */
   clonePath?: string;
   /**
