@@ -241,7 +241,7 @@ export class VaultPersistence {
       thread.model ? `model: ${thread.model}` : null,
       thread.rawLogPath ? `raw_log: ${thread.rawLogPath}` : null,
       `message_count: ${messageCount}`,
-      thread.derivedGoal ? `thread_goal: "${thread.derivedGoal.replace(/"/g, '\\"').replace(/\n/g, ' ')}"` : null,
+      thread.derivedGoal ? `thread_goal: "${thread.derivedGoal.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ')}"` : null,
       thread.summary ? `summary: "${thread.summary.replace(/"/g, '\\"').replace(/\n/g, ' ')}"` : null,
       `created: ${new Date(thread.createdAt).toISOString()}`,
       `updated: ${new Date(thread.updatedAt).toISOString()}`,

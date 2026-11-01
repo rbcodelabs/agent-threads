@@ -237,6 +237,8 @@ const mockPlugin = {
   summarizer: { summarize: async () => ({ title: '', summary: '' }) },
   inProcessSummarizer: {
     summarize: async () => ({ title: '', summary: '' }),
+    hasClaimedGoalBackfill: () => false,
+    claimGoalBackfill: () => true,
     summarizeMessage: async () => 'Fixed JWT_SECRET missing in staging by updating auth.ts to fail fast on startup.',
     generateForkPrompt: async () => 'I need to fix the authentication bug in src/auth/jwt.ts. The JWT validation is rejecting valid tokens when the expiry is within 30 seconds. We decided to add a 60-second clock skew buffer to the validation logic.',
   },
