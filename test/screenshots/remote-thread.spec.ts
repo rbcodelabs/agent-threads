@@ -44,6 +44,22 @@ test.describe('remote thread strip', () => {
     });
   }
 
+  test('connection pill opens a menu with Restart session and Reconnect', async ({ page }) => {
+    await open(page);
+    await expect(strip(page).locator('.ct-remote-pill')).toHaveText('Connected');
+    await strip(page).locator('.ct-remote-pill').click();
+    const menu = page.locator('.menu');
+    await expect(menu.locator('.menu-item')).toHaveText(['Restart session', 'Reconnect to my-server']);
+    // Opens beside the pill and stays inside the viewport.
+    const m = (await menu.boundingBox())!;
+    const pill = (await strip(page).locator('.ct-remote-pill').boundingBox())!;
+    expect(m.x).toBeGreaterThanOrEqual(0);
+    expect(m.x + m.width).toBeLessThanOrEqual(420);
+    expect(m.y).toBeGreaterThanOrEqual(pill.y + pill.height); // below the pill, not covering it
+    expect(m.y - (pill.y + pill.height)).toBeLessThan(8);
+    await expect(page).toHaveScreenshot('remote-pill-menu.png');
+  });
+
   test('a local thread shows no strip', async ({ page }) => {
     await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
     await page.goto(harnessUrl);

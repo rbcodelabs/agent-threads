@@ -761,7 +761,7 @@ export class Menu {
 
   addSeparator(): this { return this; }
 
-  private show(): void {
+  private show(pos?: { x: number; y: number }): void {
     const menuEl = document.createElement('div');
     menuEl.className = 'menu';
     menuEl.style.cssText = [
@@ -793,6 +793,17 @@ export class Menu {
 
     document.body.appendChild(menuEl);
 
+    // Like Obsidian: open at the pointer / anchor, flipped or clamped so it stays inside the viewport.
+    if (pos) {
+      const margin = 8;
+      const { width, height } = menuEl.getBoundingClientRect();
+      const left = Math.max(margin, Math.min(pos.x, window.innerWidth - width - margin));
+      const flipUp = pos.y + height + margin > window.innerHeight && pos.y - height >= margin;
+      const top = flipUp ? pos.y - height : Math.max(margin, Math.min(pos.y, window.innerHeight - height - margin));
+      menuEl.style.left = `${left}px`;
+      menuEl.style.top = `${top}px`;
+    }
+
     // Dismiss on next outside click
     const dismiss = (e: MouseEvent) => {
       if (!menuEl.contains(e.target as Node)) {
@@ -803,12 +814,12 @@ export class Menu {
     setTimeout(() => document.addEventListener('click', dismiss), 0);
   }
 
-  showAtMouseEvent(_event: MouseEvent): void {
-    this.show();
+  showAtMouseEvent(event: MouseEvent): void {
+    this.show({ x: event.clientX, y: event.clientY });
   }
 
-  showAtPosition(_pos: { x: number; y: number }): void {
-    this.show();
+  showAtPosition(pos: { x: number; y: number }): void {
+    this.show(pos);
   }
 }
 

@@ -9772,6 +9772,10 @@ button.ct-agent-crumb:focus-visible {
   border: 1px solid var(--background-modifier-border);
 }
 
+.ct-remote-pill--clickable { cursor: pointer; }
+.ct-remote-pill--clickable:hover,
+.ct-remote-pill--clickable:focus-visible { background: var(--background-modifier-hover); }
+
 .ct-remote-pill::before {
   content: '';
   width: 6px;
