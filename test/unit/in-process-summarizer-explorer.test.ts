@@ -59,6 +59,7 @@ describe('InProcessSummarizer.exploreAndSummarize', () => {
 
     const { options, prompt } = mockQuery.mock.calls[0][0];
     expect(options.settingSources).toEqual([]);
+    expect(options.permissionMode).toBe('dontAsk');
     expect(options.tools).toEqual([]);
     expect(options.strictMcpConfig).toBe(true);
     expect(options.maxTurns).toBe(EXPLORER_MAX_TURNS);

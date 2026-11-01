@@ -199,7 +199,9 @@ export class InProcessSummarizer {
       prompt,
       options: {
         pathToClaudeCodeExecutable: claudeBinaryPath,
-        permissionMode: 'default',
+        // Headless one-shot: nobody can answer a prompt. 'dontAsk' denies anything not
+        // pre-approved via allowedTools instead of waiting on (or failing) a permission request.
+        permissionMode: 'dontAsk',
         model: modelAlias,
         cwd: os.tmpdir(),
         env: { ...process.env, ...parseExtraEnv(extraEnv) },
