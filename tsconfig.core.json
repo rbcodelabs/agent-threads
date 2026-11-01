@@ -83,6 +83,7 @@
     "src/secretRedaction.ts",
     "src/skillManager.ts",
     "src/skillPaths.ts",
+    "src/skillSourcePersistence.ts",
     "src/statusLine.ts",
     "src/toolNameUtils.ts",
     "src/toolRestrictions.ts",

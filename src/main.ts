@@ -1,4 +1,5 @@
 import type { AgentHarness, RemoteDaemonConfig, StorageAllocationOptions } from './types';
+import { resolveManagedClonePaths, skillSourcesForPersistence } from './skillSourcePersistence';
 import { saveThenAck } from './remote/persistAck';
 import { DaemonMcpStatusStore } from './mcpStatus';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
@@ -658,6 +659,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     void this.refreshClaudeCliInfo();
     this.detectCodexBinary();
     this.detectOpenCodeBinary();
+    this.resolveSkillSourceClonePaths();
     this.scheduleGithubSourceClonePass();
     this.registerInterval(window.setInterval(() => { void this.runSkillSourceAutoUpdate(); }, 6 * 60 * 60 * 1000));
 
@@ -2144,6 +2146,19 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const pathNode = require('path') as typeof import('path');
     return pathNode.join(adapter.getBasePath(), this.manifest.dir, 'skill-sources');
+  }
+
+  /** Re-derives managed clone paths from the current vault location (in memory; never persisted). */
+  private resolveSkillSourceClonePaths(): void {
+    const cloneBase = this.getSkillSourceCloneBase();
+    if (!cloneBase) return;
+    resolveManagedClonePaths(this.settings.skillSources, cloneBase);
+  }
+
+  /** Settings as written to data.json: managed skill-source clone paths are machine-specific and omitted. */
+  private settingsForPersistence(): typeof this.settings {
+    if (!this.settings.skillSources?.length) return this.settings;
+    return { ...this.settings, skillSources: skillSourcesForPersistence(this.settings.skillSources) ?? [] };
   }
 
   /** Clones `repoUrl` as a managed GitHub skill source and persists it. Throws on failure. */
@@ -4508,7 +4523,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Obsidian's own saveData (same write path as before this change).
     const adapter = this.app?.vault?.adapter;
     if (!(adapter instanceof FileSystemAdapter)) {
-      await this.saveData(this.settings);
+      await this.saveData(this.settingsForPersistence());
       return;
     }
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -4517,7 +4532,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const pathMod = require('path') as typeof import('path');
     const dataPath = pathMod.join(adapter.getBasePath(), this.manifest.dir!, 'data.json');
     const tmpPath = `${dataPath}.tmp`;
-    const json = JSON.stringify(this.settings);
+    const json = JSON.stringify(this.settingsForPersistence());
     await fs.promises.writeFile(tmpPath, json, 'utf8');
     await fs.promises.rename(tmpPath, dataPath);
   }
