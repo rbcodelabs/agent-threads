@@ -1221,11 +1221,52 @@ export class ThreadsView extends ItemView {
       warn.addEventListener('click', show);
       warn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); show(); } });
     }
-    strip.createSpan({
-      cls: `ct-remote-pill ct-remote-pill--${pill.kind}`,
+    const pillEl = strip.createSpan({
+      cls: `ct-remote-pill ct-remote-pill--${pill.kind} ct-remote-pill--clickable`,
       text: pill.label,
-      attr: { title: pill.title, role: 'status', 'data-testid': 'remote-pill', 'data-state': pill.kind },
+      attr: { title: pill.title, role: 'button', tabindex: '0', 'aria-haspopup': 'menu', 'data-testid': 'remote-pill', 'data-state': pill.kind },
     });
+    const open = (e: MouseEvent | KeyboardEvent): void => this.openRemotePillMenu(e, pillEl, name, remote.daemonId);
+    pillEl.addEventListener('click', open);
+    pillEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } });
+  }
+
+  /**
+   * Menu behind the header connection pill. "Restart session" rebuilds the thread's daemon session at the next
+   * safe turn boundary (never mid-turn), resuming the same conversation, so the daemon re-reads what it only
+   * reads at session start: secrets from Settings, credentials, MCP servers. "Reconnect" redials the socket.
+   */
+  private openRemotePillMenu(event: MouseEvent | KeyboardEvent, anchor: HTMLElement, daemonName: string, daemonId: string): void {
+    const threadId = this.activeThreadId;
+    if (!threadId) return;
+    const menu = new Menu();
+    menu.addItem(item =>
+      item
+        .setTitle('Restart session')
+        .setIcon('rotate-cw')
+        .onClick(() => {
+          const live = this.manager.requestSessionRestart(threadId);
+          const running = this.manager.isRunning(threadId);
+          new Notice(
+            !live
+              ? 'No live session; your next message starts a fresh one.'
+              : running
+                ? 'The session restarts after the current turn finishes, on your next message.'
+                : 'The session restarts on your next message and keeps this conversation.',
+          );
+        })
+    );
+    menu.addItem(item =>
+      item
+        .setTitle(`Reconnect to ${daemonName}`)
+        .setIcon('plug-zap')
+        .onClick(() => { this.plugin.daemonRegistry?.clientFor(daemonId)?.reconnectNow(); })
+    );
+    if (event instanceof MouseEvent) menu.showAtMouseEvent(event);
+    else {
+      const r = anchor.getBoundingClientRect();
+      menu.showAtPosition({ x: r.left, y: r.bottom });
+    }
   }
 
   private createNativeHeaderActions(): void {
