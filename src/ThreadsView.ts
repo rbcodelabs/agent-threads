@@ -1226,9 +1226,9 @@ export class ThreadsView extends ItemView {
       text: pill.label,
       attr: { title: pill.title, role: 'button', tabindex: '0', 'aria-haspopup': 'menu', 'data-testid': 'remote-pill', 'data-state': pill.kind },
     });
-    const open = (e: MouseEvent | KeyboardEvent): void => this.openRemotePillMenu(e, pillEl, name, remote.daemonId);
+    const open = (): void => this.openRemotePillMenu(pillEl, name, remote.daemonId);
     pillEl.addEventListener('click', open);
-    pillEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } });
+    pillEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
   }
 
   /**
@@ -1236,7 +1236,7 @@ export class ThreadsView extends ItemView {
    * safe turn boundary (never mid-turn), resuming the same conversation, so the daemon re-reads what it only
    * reads at session start: secrets from Settings, credentials, MCP servers. "Reconnect" redials the socket.
    */
-  private openRemotePillMenu(event: MouseEvent | KeyboardEvent, anchor: HTMLElement, daemonName: string, daemonId: string): void {
+  private openRemotePillMenu(anchor: HTMLElement, daemonName: string, daemonId: string): void {
     const threadId = this.activeThreadId;
     if (!threadId) return;
     const menu = new Menu();
@@ -1262,11 +1262,9 @@ export class ThreadsView extends ItemView {
         .setIcon('plug-zap')
         .onClick(() => { this.plugin.daemonRegistry?.clientFor(daemonId)?.reconnectNow(); })
     );
-    if (event instanceof MouseEvent) menu.showAtMouseEvent(event);
-    else {
-      const r = anchor.getBoundingClientRect();
-      menu.showAtPosition({ x: r.left, y: r.bottom });
-    }
+    // Anchored under the pill (not at the pointer) so the menu never covers the status it belongs to.
+    const r = anchor.getBoundingClientRect();
+    menu.showAtPosition({ x: r.left, y: r.bottom + 2 });
   }
 
   private createNativeHeaderActions(): void {
