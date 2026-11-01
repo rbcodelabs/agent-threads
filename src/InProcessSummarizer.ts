@@ -435,9 +435,9 @@ function buildExplorerPrompt(messageCount: number): string {
     'Output ONLY a JSON object, no markdown fences, no other text, with exactly these fields:\n' +
     '- "title": a 3-5 word tab title naming the goal (e.g. "Add offline sync mode")\n' +
     '- "goal": one or two sentences stating what this conversation is for, concrete enough to name the specific ' +
-    'feature, system or problem. Durable: still true next week.\n' +
-    '- "status": one or two sentences on where things stand now and what is next. Do NOT list individual ' +
-    'dev/test/debug cycles or recount recent steps.\n\n' +
+    'feature, system or problem. Lead with the thing being built or fixed (e.g. "Build X to ..."). Durable: still true next week.\n' +
+    '- "status": one or two sentences on the current phase and the next step or open question. Do NOT cite ' +
+    'test counts, CI results or individual dev/test/debug cycles, and do not recount recent steps.\n\n' +
     `If you cannot determine a goal, output exactly ${NO_SUMMARY_SENTINEL}.`
   );
 }
