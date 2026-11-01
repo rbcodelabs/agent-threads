@@ -643,8 +643,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
 
     // Resolve the skill roots before anything reads them. Everything the plugin
     // installs goes under <vault>/<plugin-dir>/skills/; ~/.claude/ is scanned
-    // but never written. Hoisted above migrateGithubSourcesIntoVault() below,
-    // which reuses the same containment predicate.
+    // but never written.
     {
       const adapter = this.app.vault.adapter;
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -659,7 +658,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
     void this.refreshClaudeCliInfo();
     this.detectCodexBinary();
     this.detectOpenCodeBinary();
-    this.migrateGithubSourcesIntoVault();
     this.scheduleGithubSourceClonePass();
     this.registerInterval(window.setInterval(() => { void this.runSkillSourceAutoUpdate(); }, 6 * 60 * 60 * 1000));
 
@@ -2461,55 +2459,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   /**
-   * One-time migration: move skill-source clones from the old global location
-   * (~/.claude/skill-sources/<id>) into the vault-local plugin folder
-   * (<vault>/.obsidian/plugins/claude-threads/skill-sources/<id>).
-   * Safe to call on every load — skips sources whose clonePath already points
-   * inside the vault, or whose old path no longer exists.
-   */
-  private migrateGithubSourcesIntoVault(): void {
-    const sources = this.settings.skillSources ?? [];
-    const githubSources = sources.filter(s => s.type === 'github' && s.clonePath);
-    if (githubSources.length === 0) return;
-
-    const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter)) return;
-    const vaultRoot = adapter.getBasePath();
-    const vaultLocal = require('path').join(vaultRoot, this.manifest.dir!, 'skill-sources');
-    const fs = require('fs') as typeof import('fs');
-
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { isInsideRoot } = require('./skillPaths') as typeof import('./skillPaths');
-
-    let changed = false;
-    for (const source of githubSources) {
-      const oldPath = source.clonePath!;
-      // Already vault-local — nothing to do. Uses isInsideRoot rather than a
-      // bare startsWith, which would also skip a clone in a sibling directory
-      // that merely shares the prefix (e.g. "<vaultLocal>-backup/<id>").
-      if (isInsideRoot(oldPath, vaultLocal)) continue;
-      // Old clone must exist on disk to be moveable
-      if (!fs.existsSync(oldPath)) continue;
-
-      const newPath = require('path').join(vaultLocal, source.id);
-      try {
-        fs.mkdirSync(vaultLocal, { recursive: true });
-        fs.renameSync(oldPath, newPath);
-        source.clonePath = newPath;
-        changed = true;
-      } catch (err) {
-        console.warn('[ClaudeThreads] skill-source migration failed for', source.name, err);
-      }
-    }
-
-    if (changed) {
-      this.saveSettings().catch(err =>
-        console.error('[ClaudeThreads] failed to save settings after skill-source migration', err),
-      );
-    }
-  }
-
-  /**
    * Materialize declared GitHub skill sources that have no clone on disk yet.
    *
    * Until now a source was only ever cloned as a side effect of the "add source"
@@ -2525,8 +2474,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * hold up plugin load — the plane-mode failure mode — so it is scheduled after
    * layout and deliberately not awaited. `git clone` itself runs via async
    * `execFile`, so it never blocks the main thread either. Scheduling it here
-   * (rather than earlier) also guarantees it observes the results of
-   * `migrateGithubSourcesIntoVault()` above, which runs synchronously first.
    *
    * Consequence worth knowing: a thread started in the first moments of a
    * first-ever launch may not see a source that is still cloning. The next
