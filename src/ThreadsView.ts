@@ -30,7 +30,7 @@ import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo }
 import type { Thread, ChatMessage, ToolCallRecord, AskQuestion, ImageAttachment } from './types';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { SummarizeResult } from './InProcessSummarizer';
-import { shouldAutoSummarize, isUsableTitle } from './summarization';
+import { decideSummarizeTier, isUsableTitle, applyExplorerResult, formatGoalAndStatus } from './summarization';
 import path from 'path';
 import os from 'os';
 import * as fsp from 'fs/promises';
@@ -674,14 +674,26 @@ export class ThreadsView extends ItemView {
       // `interrupted` no longer titles the thread; the next completed turn does.
       if (event.type === 'done') {
         const summarizeThread = this.manager.getThread(threadId);
-        if (summarizeThread && shouldAutoSummarize({
+        const tier = summarizeThread ? decideSummarizeTier({
           summarizationEnabled: this.plugin.settings.summarizationEnabled,
           autoSummarize: this.plugin.settings.autoSummarize,
           titleUserSet: summarizeThread.titleUserSet,
           inFlight: this.summarizeInFlight.has(threadId),
           messages: summarizeThread.messages,
           lastSummarizedAt: summarizeThread.lastSummarizedAt,
-        })) {
+          derivedGoal: summarizeThread.derivedGoal,
+          backfillAttempted: this.plugin.inProcessSummarizer.hasClaimedGoalBackfill(threadId),
+        }) : 'none';
+        if (summarizeThread && tier === 'explore') {
+          // Goal backfill for a long thread with no stored goal. Replaces the
+          // cheap pass this turn (one spawn, not two); serialized and capped
+          // inside the summarizer, at most once per thread per session.
+          this.plugin.inProcessSummarizer.claimGoalBackfill(threadId);
+          this.summarizeInFlight.add(threadId);
+          this.runExplorer(summarizeThread)
+            .catch((err: unknown) => console.warn('[claude-threads] goal backfill failed:', err))
+            .finally(() => { this.summarizeInFlight.delete(threadId); });
+        } else if (summarizeThread && tier === 'cheap') {
           this.summarizeInFlight.add(threadId);
           // Capture the cursor BEFORE the call, not after it resolves: every
           // message in the transcript has a timestamp <= this, and anything
@@ -1653,7 +1665,10 @@ export class ThreadsView extends ItemView {
     });
     closeBtn.addEventListener('click', () => this.hideSummaryBanner(false));
 
-    banner.createEl('p', { cls: 'ct-summary-banner-text', text: summary });
+    banner.createEl('p', {
+      cls: 'ct-summary-banner-text',
+      text: formatGoalAndStatus(thread.derivedGoal, summary),
+    });
 
     // Auto-dismiss after the configured delay
     this.summaryBannerTimer = setTimeout(
@@ -3129,6 +3144,7 @@ export class ThreadsView extends ItemView {
       thread?.summary,
       thread?.lastSummarizedAt,
       thread?.title,
+      thread?.derivedGoal,
     );
   }
 
@@ -3503,6 +3519,67 @@ export class ThreadsView extends ItemView {
         el.textContent = group[group.length - 1].content.slice(0, 120) + '…';
       }
     });
+  }
+
+  /**
+   * Explorer-tier pass: lets Haiku read the whole thread through read-only
+   * tools and writes back goal + status (+ title). Shared by the auto backfill
+   * and the manual "Refresh thread summary" command. Resolves true when
+   * something was persisted; an empty/invalid result changes nothing.
+   */
+  private async runExplorer(thread: Thread, onProgress?: (s: string) => void): Promise<boolean> {
+    // Cursor captured before the call, same reasoning as the cheap path.
+    const summarizedThrough = Date.now();
+    const result = await this.plugin.inProcessSummarizer.exploreAndSummarize(
+      thread.messages,
+      this.plugin.settings.claudeBinaryPath,
+      this.plugin.settings.inprocessModel,
+      effectiveExtraEnv(this.plugin.settings),
+      onProgress,
+      thread.title,
+      thread.summary,
+      thread.derivedGoal,
+    );
+    const outcome = applyExplorerResult(thread, result, Date.now());
+    if (!outcome.applied) return false;
+    thread.lastSummarizedAt = summarizedThrough;
+    if (outcome.title) this.applyAutoTitle(thread.id, outcome.title);
+    this.plugin.saveSettings();
+    if (this.plugin.settings.saveThreadsToVault && this.plugin.persistence) {
+      this.plugin.persistence.saveThread(thread).catch(console.error);
+    }
+    this.manager.notifySummaryUpdated(thread.id);
+    if (this.activeThreadId === thread.id) {
+      this.renderTitleBar();
+      this.renderThreadInfo();
+      this.refreshLeafHeader();
+    }
+    this.plugin.getAgentDashboard()?.render();
+    return true;
+  }
+
+  /** Manual "Refresh thread summary": explorer tier on demand, any thread length. */
+  async refreshThreadSummary(threadId: string): Promise<void> {
+    const thread = this.manager.getThread(threadId);
+    if (!thread || thread.messages.length === 0) return;
+    if (this.summarizeInFlight.has(threadId)) {
+      new Notice('A summary update is already running for this thread.', 4000);
+      return;
+    }
+    this.summarizeInFlight.add(threadId);
+    this.plugin.inProcessSummarizer.claimGoalBackfill(threadId);
+    this.setIndicatorBusy(true);
+    try {
+      const applied = await this.runExplorer(thread, (status) => this.showStatusCard('active', status));
+      if (!applied) new Notice('Could not determine the thread goal — summary left unchanged.', 5000);
+    } catch (err) {
+      console.error('[Agent Threads] refresh summary error:', err);
+      new Notice(`Refreshing summary failed: ${(err as Error).message}`, 8000);
+    } finally {
+      this.summarizeInFlight.delete(threadId);
+      this.clearStatusCard('active');
+      this.setIndicatorBusy(false);
+    }
   }
 
   async summarizeThread(threadId: string): Promise<void> {

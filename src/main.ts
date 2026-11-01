@@ -1939,6 +1939,21 @@ export default class ClaudeThreadsPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: 'refresh-thread-summary',
+      name: 'Refresh thread summary (explore whole thread)',
+      callback: async () => {
+        if (!this.settings.summarizationEnabled) {
+          new Notice('Thread summarization is disabled. Enable it in Settings > Agent Threads > Summarization.');
+          return;
+        }
+        await this.activateView();
+        const view = this.getView();
+        const threadId = view?.getActiveThreadId();
+        if (view && threadId) await view.refreshThreadSummary(threadId);
+      },
+    });
+
     // ── "Chat about this document" ──────────────────────────────────────────
     // Three entry points, one handler: file-explorer right-click, in-editor
     // right-click, and a command-palette entry gated on an active markdown file.
