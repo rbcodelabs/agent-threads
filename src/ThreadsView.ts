@@ -1666,7 +1666,9 @@ export class ThreadsView extends ItemView {
     closeBtn.addEventListener('click', () => this.hideSummaryBanner(false));
 
     banner.createEl('p', {
-      cls: 'ct-summary-banner-text',
+      cls: thread.derivedGoal?.trim()
+        ? ['ct-summary-banner-text', 'ct-summary-banner-text--goal']
+        : 'ct-summary-banner-text',
       text: formatGoalAndStatus(thread.derivedGoal, summary),
     });
 

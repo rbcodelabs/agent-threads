@@ -750,11 +750,16 @@
   font-size: var(--font-ui-small);
   color: var(--text-muted);
   line-height: 1.5;
-  white-space: pre-line;
   display: -webkit-box;
-  -webkit-line-clamp: 5;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* Goal + status banners carry a "Goal: …\nNow: …" body, so allow more lines. */
+.ct-summary-banner-text--goal {
+  white-space: pre-line;
+  -webkit-line-clamp: 5;
 }
 
 /* ── Scroll-to-bottom pill ────────────────────────────────────────────────── */
