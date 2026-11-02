@@ -756,6 +756,12 @@
   overflow: hidden;
 }
 
+/* Goal + status banners carry a "Goal: …\nNow: …" body, so allow more lines. */
+.ct-summary-banner-text--goal {
+  white-space: pre-line;
+  -webkit-line-clamp: 5;
+}
+
 /* ── Scroll-to-bottom pill ────────────────────────────────────────────────── */
 /* Zero-height in-flow anchor sitting exactly where .ct-messages hands off to
    the composer, so the pill floats just above it without tracking the

@@ -577,6 +577,16 @@ export interface Thread {
   /** Timestamp (ms epoch) of the last summarize call. Used by incremental summarization to identify messages added since the prior summary. */
   lastSummarizedAt?: number;
   /**
+   * What this thread is FOR, as extracted by the explorer-tier summarizer
+   * (`InProcessSummarizer.exploreAndSummarize`). Descriptive and derived, so it
+   * can be re-derived at any time. NOT the same as `goal` below, which is the
+   * user's own `/goal` directive injected into the system prompt; this one is
+   * never sent to a session.
+   */
+  derivedGoal?: string;
+  /** Timestamp (ms epoch) the explorer last wrote `derivedGoal`. */
+  derivedGoalUpdatedAt?: number;
+  /**
    * Set to true when the user has explicitly renamed this thread via the rename UI.
    * Prevents the auto-summarizer from overwriting a user-chosen title.
    * Threads that were never manually renamed (including those auto-titled from the
