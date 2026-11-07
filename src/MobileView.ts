@@ -22,6 +22,7 @@ import { extractMessageContent } from './MessageContent';
 import { outsideVaultLinkPath } from './OutsideVaultLinkModal';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from './linkUtils';
 import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
+import { renderQuestionFields, MOBILE_QUESTION_CLASSES } from './QuestionForm';
 import {
   VISUALIZE_SLOT_ATTR,
   VISUALIZE_SLOT_CLASS,

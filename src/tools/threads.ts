@@ -13,7 +13,7 @@ import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 type ToolDef = SdkMcpToolDefinition<any>;
 
 export interface ThreadToolsPort {
-  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'openThread' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
+  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
 }
 
 
