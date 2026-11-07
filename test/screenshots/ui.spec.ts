@@ -3091,6 +3091,39 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'kanban-status.png', { fullPage: true });
   });
 
+  test('kanban board — orchestrator inbox (Needs you lane, reply, decision, question, notes)', async ({ page }) => {
+    await page.setViewportSize({ width: 1240, height: 820 });
+    await page.goto(kanbanUrl + '?inbox=1');
+    await page.waitForSelector('.ct-kanban-board');
+    // The lane leads the board and holds the reply, decision and question threads.
+    const labels = (await page.locator('.ct-kanban-col-label').allInnerTexts()).map(s => s.toUpperCase());
+    expect(labels[0]).toBe('NEEDS YOU');
+    const lane = page.locator('.ct-kanban-col-needs-you');
+    await expect(lane.locator('.ct-kanban-card')).toHaveCount(3);
+    await expect(lane.locator('.ct-kanban-reply-approve')).toHaveCount(1);
+    await expect(lane.locator('.ct-kanban-decision')).toHaveCount(1);
+    await expect(lane.locator('.ct-kanban-question')).toHaveCount(1);
+    await expect(page.locator('.ct-kanban-notes:not(.ct-hidden)')).toHaveCount(2);
+    // Notes expand in place and are read-only.
+    await page.locator('.ct-kanban-notes:not(.ct-hidden) .ct-kanban-notes-head').first().click();
+    await expect(page.locator('.ct-kanban-notes.ct-expanded')).toHaveCount(1);
+    await page.waitForTimeout(200);
+    await shot(page, 'kanban-orchestrator-inbox.png', { fullPage: true });
+
+    // "Only needs you" hides everything outside the lane.
+    await page.locator('[data-testid="kanban-needs-you-filter"]').click();
+    await expect(page.locator('.ct-kanban-card')).toHaveCount(3);
+  });
+
+  test('kanban board — orchestrator inbox on mobile width', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(kanbanUrl + '?inbox=1&mobile=1');
+    await page.waitForSelector('.ct-kanban-board');
+    await expect(page.locator('.ct-kanban-reply-approve')).toHaveCount(1);
+    await page.waitForTimeout(200);
+    await shot(page, 'kanban-orchestrator-inbox-mobile.png', { fullPage: true });
+  });
+
   test('kanban agent count reflects live activity and patches in place', async ({ page }) => {
     await page.setViewportSize({ width: 1240, height: 820 });
     await page.goto(kanbanUrl);

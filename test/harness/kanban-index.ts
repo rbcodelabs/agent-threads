@@ -49,6 +49,34 @@ if (dashboardMode) {
     options: [{ label: 'Compact', description: 'Show more threads' }],
   }];
 }
+// ?inbox=1 seeds the orchestrator-inbox states (proposed reply, notes, a pending
+// question and an orchestrator decision) so the Needs you lane renders. No
+// managerNotesUpdatedAt: its "updated Nd ago" label is wall-clock dependent.
+if (new URLSearchParams(window.location.search).has('inbox')) {
+  const byTitle = (title: string) => kanbanFixtureThreads.find(thread => thread.title === title);
+  const reply = byTitle('Social "Going too?" nudge');
+  if (reply) {
+    reply.proposedReply = {
+      text: 'Looks good. Ship the nudge behind the existing flag, then confirm the open-rate dashboard before widening the rollout.',
+      generatedAt: 1,
+      sourceThreadId: kanbanRunningThreadId,
+    };
+    reply.managerNotes = 'Goal: ship the nudge\nStatus: awaiting Rick\nLast reviewed update: 1';
+  }
+  const decided = byTitle('Kanban folder swimlanes');
+  if (decided) decided.pendingDecisions = [{
+    id: 'dec-fixture-1', header: 'Lane order', question: 'Sort swimlanes by recency or alphabetically?',
+    options: [{ label: 'Alphabetical', description: 'Stable positions' }, { label: 'Recency', description: 'Busy lanes first' }],
+    multiSelect: false, allowOther: true, createdAt: 1, sourceThreadId: kanbanRunningThreadId,
+  }];
+  const asked = byTitle('Mobile layout polish');
+  if (asked) asked.pendingQuestions = [{
+    question: 'Which mobile density should we ship?', header: 'Density', multiSelect: false,
+    options: [{ label: 'Compact', description: 'Show more threads' }, { label: 'Comfortable', description: 'Larger touch targets' }],
+  }];
+  const noted = byTitle('Fix auth middleware 401s');
+  if (noted) noted.managerNotes = 'Goal: fix 401s\nStatus: done, PR merged';
+}
 manager.loadThreads(kanbanFixtureThreads);
 // Restore intentionally marks persisted non-terminal runs unavailable. Turn this
 // deterministic fixture back into a live run after hydration.
