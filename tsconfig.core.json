@@ -39,6 +39,7 @@
     "src/claudeAuthRecovery.ts",
     "src/claudeSettings.ts",
     "src/currentTimeContext.ts",
+    "src/decisions.ts",
     "src/gateRunner.ts",
     "src/gitClient.ts",
     "src/host/AttachmentStore.ts",

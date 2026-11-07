@@ -103,6 +103,19 @@ Key fields worth knowing:
 | `goal?: string` | Persistent goal set via `/goal`. Injected into the appended system prompt every turn until cleared with `/goal clear`. |
 | `rawLogPath?: string` | Vault-relative path to the thread's raw JSONL conversation log (`<vaultFolder>/logs/<thread_id>.jsonl`), written by `RawLogWriter` when the `saveRawLogs` setting is on. Keyed by the stable thread UUID so it never orphans on rename. Read back via the `obsidian_get_thread_log` MCP tool. |
 
+| `proposedReply?` / `managerNotes?` / `pendingDecisions?: PendingDecision[]` | Orchestrator bookkeeping about a thread, written by an orchestrator through MCP tools and surfaced on the Agent Board cards and in ThreadsView. **None of the three is ever injected into the thread's own session or `appendSystemPrompt`** (guarded by `test/integration/decision-routing.test.ts`). `proposedReply` and `pendingDecisions` are cleared when the thread changes Project. |
+
+---
+
+## Orchestrator inbox (Agent Board)
+
+`src/KanbanView.ts` is the single triage surface for orchestrator output.
+
+- **Cards** carry three persistent blocks that are patched in place by their own events, never by a full rebuild: `.ct-kanban-reply` (`proposed_reply_changed`), `.ct-kanban-decisions` (`pending_decisions_changed`) and `.ct-kanban-notes` (`manager_notes_changed`). A pending `AskUserQuestion` renders as an inline form in the same container (`pending_question_changed` still rebuilds). `handleInboxEvent` first recomputes the card placement and falls back to `scheduleRender` only when the card moves lane.
+- **Needs you lane** (status board only): `threadNeedsInput` (`src/needsInput.ts`) is true for a proposed reply, a pending decision, or a pending question. Those threads are pulled out of their status column into a leading `Needs you` lane (`splitNeedsInput`), each card keeping its own status styling. Awaiting stays for permissions and plans. Folder and project grouping have no lane but show the same blocks. The header chip "Only needs you" filters every mode. `computeCardPlacement` mirrors this so in-place patching stays correct.
+- **Shared logic**: `src/proposedReplyActions.ts` (Approve clears-then-sends; Edit clears and prefills the composer, via `plugin.openThreadWithPrefill` on the board; Discard), `src/questionActions.ts` (live resolver vs post-reload message, secrets never become chat), `src/QuestionForm.ts` (the radio/checkbox/Other body used by ThreadsView, MobileView and the board; each form gets unique radio group names), `src/managerActionDeps.ts` (ThreadManager adapters).
+- **Decisions** (`threads_post_decision` / `threads_clear_decision`, legacy aliases `obsidian_post_thread_decision` / `obsidian_clear_thread_decision`): `src/decisions.ts` holds the pure lifecycle (2-4 options, max 5 per thread, author-only clear mirroring `assertProposalOwnership`). `ThreadManager.answerDecision` removes the decision and sends the answer as a user message to `decision.sourceThreadId` (the posting orchestrator), and throws leaving it pending if that thread is gone. The target defaults to the caller's own thread (no scope check); other threads need `write` coordination scope. They are in `NEVER_OFFERED` / the `threads` optional-tool group for the local daemon. Not exposed through `PublicApi` (peer surface is pinned); MCP `ThreadSnapshot` carries `pendingDecisions`.
+
 ---
 
 ## Cross-project `threads_create` Approval
