@@ -10392,3 +10392,158 @@ button.ct-agent-crumb:focus-visible {
 /* Managed policy (docs/managed-policy.md): a note that says an administrator restricted something. Hidden until set. */
 .ct-managed-note { display: none; margin: 4px 0; padding: 6px 8px; border-radius: 6px; font-size: var(--font-ui-smaller); color: var(--text-muted); background: var(--background-modifier-hover); border-left: 3px solid var(--text-accent); }
 .ct-managed-note.is-visible { display: block; }
+
+/* -- Agent Board: orchestrator inbox (Needs you lane, proposed replies, decisions, notes) -- */
+.ct-kanban-col-needs-you {
+  border-color: var(--interactive-accent);
+}
+.ct-kanban-col-needs-you .ct-kanban-col-header {
+  background: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+  color: var(--interactive-accent);
+}
+
+.ct-kanban-needs-chip {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ct-kanban-needs-chip:hover { background: var(--background-modifier-hover); }
+.ct-kanban-needs-chip.ct-kanban-needs-chip-active {
+  background: color-mix(in srgb, var(--interactive-accent) 18%, var(--background-secondary));
+  border-color: var(--interactive-accent);
+  color: var(--interactive-accent);
+}
+
+.ct-kanban-inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 25px;
+  cursor: default;
+}
+.ct-kanban-inbox.ct-hidden,
+.ct-kanban-notes.ct-hidden,
+.ct-kanban-reply.ct-hidden { display: none; }
+
+.ct-kanban-reply,
+.ct-kanban-decision,
+.ct-kanban-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+}
+.ct-kanban-decision,
+.ct-kanban-question {
+  border-color: color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
+}
+.ct-kanban-decisions { display: flex; flex-direction: column; gap: 6px; }
+.ct-kanban-decisions:empty { display: none; }
+
+.ct-kanban-inbox-head,
+.ct-kanban-notes-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--text-normal);
+  min-width: 0;
+}
+.ct-kanban-inbox-icon { display: inline-flex; color: var(--text-muted); flex: 0 0 auto; }
+.ct-kanban-inbox-icon svg { width: 13px; height: 13px; }
+.ct-kanban-inbox-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-kanban-inbox-hint { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+
+.ct-kanban-reply-text {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  cursor: pointer;
+}
+.ct-kanban-reply-text.ct-expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.ct-kanban-inbox-actions { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.ct-kanban-inbox-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  cursor: pointer;
+  font-weight: 500;
+}
+.ct-kanban-inbox-btn:hover { background: var(--background-modifier-hover); }
+.ct-kanban-inbox-btn:disabled { opacity: 0.5; cursor: default; }
+.ct-kanban-inbox-btn.ct-kanban-inbox-primary {
+  margin-left: auto;
+  border-color: color-mix(in srgb, var(--color-green, #4caf50) 45%, transparent);
+  color: var(--color-green, #4caf50);
+}
+.ct-kanban-question .ct-kanban-inbox-primary,
+.ct-kanban-decision .ct-kanban-inbox-primary {
+  border-color: color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+  color: var(--interactive-accent);
+}
+.ct-kanban-reply-discard:hover {
+  background: color-mix(in srgb, var(--color-red, #e05252) 15%, var(--background-secondary));
+  border-color: var(--color-red, #e05252);
+  color: var(--color-red, #e05252);
+}
+
+/* Compact the shared QuestionForm inside a card */
+.ct-kanban-question-body .ct-question + .ct-question {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ct-kanban-question-body .ct-question-header { font-size: var(--font-ui-smaller); margin-bottom: 4px; }
+.ct-kanban-question-body .ct-question-text { font-size: var(--font-ui-smaller); margin-bottom: 6px; }
+.ct-kanban-question-body .ct-question-options { gap: 4px; }
+.ct-kanban-question-body .ct-question-option { padding: 4px 8px; gap: 6px; font-size: var(--font-ui-smaller); }
+.ct-kanban-question-body .ct-question-other-text { width: 100%; font-size: var(--font-ui-smaller); }
+
+.ct-kanban-notes {
+  margin-left: 25px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--background-modifier-hover);
+  cursor: default;
+}
+.ct-kanban-notes-head { cursor: pointer; font-weight: 500; }
+.ct-kanban-notes-updated { color: var(--text-faint); font-weight: 400; margin-left: auto; white-space: nowrap; }
+.ct-kanban-notes-chevron { display: inline-flex; color: var(--text-faint); }
+.ct-kanban-notes-chevron svg { width: 12px; height: 12px; }
+.ct-kanban-notes-text {
+  margin-top: 3px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ct-kanban-notes.ct-expanded .ct-kanban-notes-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow-y: auto;
+}

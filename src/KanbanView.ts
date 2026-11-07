@@ -2,6 +2,13 @@ import { ItemView, WorkspaceLeaf, setIcon, Notice, Platform } from 'obsidian';
 import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread, TaskItem } from './types';
+import { agentHarnessLabel } from './types';
+import { renderQuestionFields } from './QuestionForm';
+import { approveProposedReply, discardProposedReply, takeProposedReplyForEdit } from './proposedReplyActions';
+import { answerPendingQuestions } from './questionActions';
+import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
+import { threadNeedsInput, splitNeedsInput } from './needsInput';
+import { decisionToQuestion } from './decisions';
 import { formatToolName } from './ClaudeSession';
 import { canAlwaysAllow, summarizePermissionDetail, isHostExecPermission } from './permissionDetail';
 import { recordAlwaysAllow } from './remoteAlwaysAllow';
@@ -27,6 +34,9 @@ export function isKanbanThread(thread: Pick<Thread, 'background'>): boolean {
 }
 
 type RowState = 'running' | 'idle' | 'error' | 'empty' | 'waiting';
+
+/** Label of the leftmost status-board lane collecting threads that need Rick's input. */
+export const NEEDS_YOU_LABEL = 'Needs you';
 
 type ColDef = { label: string; threads: Thread[]; state: RowState; accentClass?: string; badge?: number };
 type ThreadGroup = { key: string; label: string };
@@ -99,6 +109,12 @@ export class KanbanView extends ItemView {
   private rowEls: Map<string, HTMLElement> = new Map();
   private taskEls: Map<string, HTMLElement> = new Map();
   private summaryEls: Map<string, HTMLElement> = new Map();
+  /** Per-card orchestrator-inbox blocks, patched in place by their own events. */
+  private replyEls: Map<string, HTMLElement> = new Map();
+  private decisionEls: Map<string, HTMLElement> = new Map();
+  private notesEls: Map<string, HTMLElement> = new Map();
+  private needsYouOnlyBtn!: HTMLButtonElement;
+  private needsYouOnly = false;
   private activeThreadId: string | null = null;
 
   /**
@@ -233,6 +249,18 @@ export class KanbanView extends ItemView {
     newThreadBtn.createSpan({ cls: 'ct-new-thread-btn-label', text: 'New thread' });
     newThreadBtn.addEventListener('click', () => { void this.plugin.openNewConversation(); });
 
+    this.needsYouOnlyBtn = metaActions.createEl('button', {
+      cls: 'ct-kanban-needs-chip',
+      text: 'Only needs you',
+      attr: { type: 'button', 'aria-pressed': 'false', 'data-testid': 'kanban-needs-you-filter', title: 'Show only threads waiting on you' },
+    });
+    this.needsYouOnlyBtn.addEventListener('click', () => {
+      this.needsYouOnly = !this.needsYouOnly;
+      this.needsYouOnlyBtn.toggleClass('ct-kanban-needs-chip-active', this.needsYouOnly);
+      this.needsYouOnlyBtn.setAttribute('aria-pressed', String(this.needsYouOnly));
+      this.render();
+    });
+
     this.groupByBtn = metaActions.createEl('button', {
       cls: 'ct-kanban-groupby clickable-icon',
     });
@@ -347,21 +375,27 @@ export class KanbanView extends ItemView {
     this.rowEls.clear();
     this.taskEls.clear();
     this.summaryEls.clear();
+    this.replyEls.clear();
+    this.decisionEls.clear();
+    this.notesEls.clear();
     this.cardPlacements.clear();
 
     const q = this.searchQuery;
     const allThreads = this.manager.getThreads().filter(isKanbanThread);
-    const threads = q
+    const searched = q
       ? allThreads.filter(t =>
           t.title.toLowerCase().includes(q) ||
           (t.summary ?? '').toLowerCase().includes(q) ||
           (t.recap ?? '').toLowerCase().includes(q)
         )
       : allThreads;
+    const threads = this.needsYouOnly ? searched.filter(t => this.needsYou(t)) : searched;
 
     if (threads.length === 0) {
       const emptyEl = this.boardEl.createDiv('ct-agents-empty');
-      if (q) {
+      if (this.needsYouOnly) {
+        emptyEl.createDiv({ text: 'Nothing needs you right now.' });
+      } else if (q) {
         emptyEl.createDiv({ text: 'No threads match your search.' });
       } else {
         emptyEl.createDiv({ text: 'No threads yet.' });
@@ -413,12 +447,9 @@ export class KanbanView extends ItemView {
     });
   }
 
-  /**
-   * Buckets threads into the six status columns and sorts each by recency.
-   * Shared by both the status board and each folder swimlane.
-   */
-  private bucketize(threads: Thread[]): ColDef[] {
-    const buckets = partitionThreads(threads, (t) => ({
+  /** Classification flags for a thread, read live (shared by every bucketing path). */
+  private rowFlags(t: Thread) {
+    return {
       isRunning: this.manager.isRunning(t.id),
       hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
       hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
@@ -426,7 +457,30 @@ export class KanbanView extends ItemView {
       lastError: t.lastError,
       messageCount: t.messages.length,
       reviewed: t.reviewed,
-    }));
+    };
+  }
+
+  /** True when an orchestrator staged something for Rick, or the agent is asking him a question. */
+  private needsYou(thread: Thread): boolean {
+    return threadNeedsInput(thread, this.manager.hasPendingQuestion(thread.id));
+  }
+
+  /** The card RowState a thread has by its own status, ignoring the Needs you lane. */
+  private rowStateFor(thread: Thread): RowState {
+    return STATUS_COLUMN_MAP[classifyThreadRow(this.rowFlags(thread))].state;
+  }
+
+  /**
+   * Buckets threads into the status columns and sorts each by recency.
+   * Shared by both the status board and each folder swimlane. With
+   * `withNeedsLane` (status board only) threads needing Rick are pulled out of
+   * their status column into a leading "Needs you" lane.
+   */
+  private bucketize(threads: Thread[], withNeedsLane = false): ColDef[] {
+    const { needsInput, rest } = withNeedsLane
+      ? splitNeedsInput(threads, (t) => this.needsYou(t))
+      : { needsInput: [] as Thread[], rest: threads };
+    const buckets = partitionThreads(rest, (t) => this.rowFlags(t));
 
     const byRecency = (a: Thread, b: Thread) => b.updatedAt - a.updatedAt;
     const running = buckets.running.sort(byRecency);
@@ -437,7 +491,7 @@ export class KanbanView extends ItemView {
     const errors = buckets.error.sort(byRecency);
     const empty = buckets.empty.sort(byRecency);
 
-    return [
+    const cols: ColDef[] = [
       { label: 'Working', threads: running, state: 'running' },
       { label: 'Awaiting', threads: permReqs, state: 'running', accentClass: 'ct-kanban-col-permission' },
       { label: 'Waiting', threads: waiting, state: 'waiting', accentClass: 'ct-kanban-col-waiting' },
@@ -446,12 +500,21 @@ export class KanbanView extends ItemView {
       { label: 'Failed', threads: errors, state: 'error' },
       { label: 'Ready', threads: empty, state: 'empty' },
     ];
+    if (withNeedsLane) {
+      cols.unshift({
+        label: NEEDS_YOU_LABEL,
+        threads: needsInput.sort(byRecency),
+        state: 'running',
+        accentClass: 'ct-kanban-col-needs-you',
+      });
+    }
+    return cols;
   }
 
   private renderStatusBoard(threads: Thread[]): void {
     const board = this.boardEl.createDiv('ct-kanban-board');
     board.dataset.scrollKey = '__board__';
-    const cols = this.bucketize(threads);
+    const cols = this.bucketize(threads, true);
     for (const col of cols) {
       const alwaysShow = col.label === 'Working' || col.label === 'New';
       if (!alwaysShow && col.threads.length === 0) continue;
@@ -584,15 +647,7 @@ export class KanbanView extends ItemView {
    * 'New' carries a badge with its thread count, matching the status board.
    */
   private sectionsForColumn(threads: Thread[]): ColDef[] {
-    const buckets = partitionThreads(threads, (t) => ({
-      isRunning: this.manager.isRunning(t.id),
-      hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
-      hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
-      hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
-      lastError: t.lastError,
-      messageCount: t.messages.length,
-      reviewed: t.reviewed,
-    }));
+    const buckets = partitionThreads(threads, (t) => this.rowFlags(t));
 
     const byRecency = (a: Thread, b: Thread) => b.updatedAt - a.updatedAt;
     const working = [...buckets.running, ...buckets.awaiting].sort(byRecency);
@@ -723,7 +778,8 @@ export class KanbanView extends ItemView {
     const stackingEnabled = QUIET_COLUMN_LABELS.has(label) && (this.plugin.settings.stackScheduledThreads ?? true);
     if (!stackingEnabled) {
       for (const thread of threads) {
-        this.renderCard(thread, state, body, scopeKey);
+        // The Needs you lane mixes statuses, so each card keeps its own.
+        this.renderCard(thread, label === NEEDS_YOU_LABEL ? this.rowStateFor(thread) : state, body, scopeKey);
       }
       return;
     }
@@ -797,7 +853,9 @@ export class KanbanView extends ItemView {
   private renderCard(thread: Thread, state: RowState, parent: HTMLElement, placementKey: string): void {
     const isActive = thread.id === this.activeThreadId;
     const isUnreviewed = state === 'idle' && !thread.reviewed;
-    const hasPending = state === 'running' && (this.manager.hasPendingPermission(thread.id) || this.manager.hasPendingQuestion(thread.id));
+    const hasQuestion = (thread.pendingQuestions?.length ?? 0) > 0 || this.manager.hasPendingQuestion(thread.id);
+    const hasPendingPerm = state === 'running' && this.manager.hasPendingPermission(thread.id) && !hasQuestion;
+    const hasPending = hasPendingPerm || (state === 'running' && hasQuestion);
 
     const card = parent.createDiv({
       cls: [
@@ -836,6 +894,21 @@ export class KanbanView extends ItemView {
       this.applySummary(summaryEl, thread);
     }
 
+    // Orchestrator inbox: a pending question, orchestrator decisions and a
+    // proposed reply, answerable inline. Sub-blocks are persistent containers
+    // (hidden when empty) so each event patches only its own block and never
+    // wipes text typed into a sibling form.
+    const inbox = card.createDiv('ct-kanban-inbox');
+    inbox.addEventListener('click', (e) => e.stopPropagation());
+    if (hasQuestion) this.renderQuestionBlock(inbox.createDiv('ct-kanban-question'), thread);
+    const decisionsEl = inbox.createDiv('ct-kanban-decisions');
+    this.decisionEls.set(thread.id, decisionsEl);
+    this.patchDecisionsBlock(decisionsEl, thread);
+    const replyEl = inbox.createDiv('ct-kanban-reply');
+    this.replyEls.set(thread.id, replyEl);
+    this.patchReplyBlock(replyEl, thread);
+    this.syncInboxVisibility(thread);
+
     // Task list (compact checklist from Claude Code's TodoWrite/TaskCreate).
     // Always created (even when there are no tasks yet) so a later
     // `tasks_updated` event can patch it in place via taskEls without a full
@@ -845,7 +918,7 @@ export class KanbanView extends ItemView {
     this.taskEls.set(thread.id, taskSection);
     this.populateTaskSection(taskSection, thread.tasks);
 
-    if (hasPending) {
+    if (hasPendingPerm) {
       const pendingInfo = this.manager.getPendingPermission(thread.id);
       const permContent = card.createDiv('ct-kanban-card-permission-content');
       const toolRow = permContent.createDiv('ct-kanban-card-perm-tool');
@@ -891,6 +964,12 @@ export class KanbanView extends ItemView {
       }
     }
 
+    // Orchestrator notes: one-line preview, expandable, read-only.
+    const notesEl = card.createDiv('ct-kanban-notes');
+    notesEl.addEventListener('click', (e) => e.stopPropagation());
+    this.notesEls.set(thread.id, notesEl);
+    this.patchNotesBlock(notesEl, thread);
+
     // Footer chips
     const footer = card.createDiv('ct-kanban-card-footer');
     this.buildFooter(footer, thread);
@@ -902,6 +981,160 @@ export class KanbanView extends ItemView {
 
     attachThreadArchiveMenu(card, thread.id, this.archiveMenuDeps());
   }
+
+  /** Hides the inbox container when it has nothing to show (no question, decision or reply). */
+  private syncInboxVisibility(thread: Thread): void {
+    const inbox = this.replyEls.get(thread.id)?.parentElement;
+    if (!inbox) return;
+    const hasQuestion = !!inbox.querySelector('.ct-kanban-question') ;
+    inbox.toggleClass('ct-hidden', !hasQuestion && !thread.proposedReply && (thread.pendingDecisions?.length ?? 0) === 0);
+  }
+
+  /** Inline answer form for the thread's pending AskUserQuestion set. Answers are never echoed back into the card. */
+  private renderQuestionBlock(block: HTMLElement, thread: Thread): void {
+    const questions = thread.pendingQuestions;
+    const head = block.createDiv('ct-kanban-inbox-head');
+    const iconEl = head.createSpan('ct-kanban-inbox-icon');
+    setIcon(iconEl, 'help-circle');
+    const source = agentHarnessLabel(questions?.find((q) => q.source)?.source);
+    head.createSpan({ cls: 'ct-kanban-inbox-label', text: `${source} needs your input` });
+    if (!questions || questions.length === 0) {
+      block.createDiv({ cls: 'ct-kanban-inbox-hint', text: 'Open the thread to answer.' });
+      return;
+    }
+    const body = block.createDiv('ct-kanban-question-body');
+    const collect = renderQuestionFields(body, questions);
+    const actions = block.createDiv('ct-kanban-inbox-actions');
+    const submit = actions.createEl('button', { cls: 'ct-kanban-inbox-btn ct-kanban-inbox-primary', text: 'Submit', attr: { type: 'button' } });
+    submit.addEventListener('click', () => {
+      submit.disabled = true;
+      try {
+        answerPendingQuestions(questionAnswerDeps(this.manager, () => this.plugin.saveSettings()), thread.id, questions, collect());
+      } catch (err) {
+        submit.disabled = false;
+        console.error('[claude-threads] failed to answer question from board:', err);
+        new Notice('Could not submit the answer. See the console for details.');
+      }
+    });
+  }
+
+  /**
+   * Syncs the decisions container with `thread.pendingDecisions` without
+   * touching forms that are already showing (so half-typed answers survive a
+   * sibling decision being posted or cleared).
+   */
+  private patchDecisionsBlock(container: HTMLElement, thread: Thread): void {
+    const decisions = thread.pendingDecisions ?? [];
+    const wanted = new Set(decisions.map((d) => d.id));
+    container.querySelectorAll<HTMLElement>('[data-decision-id]').forEach((el) => {
+      if (!wanted.has(el.dataset.decisionId!)) el.remove();
+    });
+    const have = new Set(Array.from(container.querySelectorAll<HTMLElement>('[data-decision-id]')).map((el) => el.dataset.decisionId));
+    for (const decision of decisions) {
+      if (have.has(decision.id)) continue;
+      const el = container.createDiv('ct-kanban-decision');
+      el.dataset.decisionId = decision.id;
+      const head = el.createDiv('ct-kanban-inbox-head');
+      const iconEl = head.createSpan('ct-kanban-inbox-icon');
+      setIcon(iconEl, 'git-fork');
+      const from = this.manager.getThread(decision.sourceThreadId)?.title;
+      head.createSpan({ cls: 'ct-kanban-inbox-label', text: from ? `Decision for you · ${from}` : 'Decision for you' });
+      const body = el.createDiv('ct-kanban-question-body');
+      const collect = renderQuestionFields(body, [decisionToQuestion(decision)]);
+      const actions = el.createDiv('ct-kanban-inbox-actions');
+      const submit = actions.createEl('button', { cls: 'ct-kanban-inbox-btn ct-kanban-inbox-primary', text: 'Send answer', attr: { type: 'button' } });
+      submit.addEventListener('click', async () => {
+        const answer = collect()[decision.id] ?? '';
+        if (!answer.trim()) {
+          new Notice('Choose an option or type an answer first.');
+          return;
+        }
+        submit.disabled = true;
+        try {
+          await this.manager.answerDecision(thread.id, decision.id, answer);
+          void this.plugin.saveSettings();
+        } catch (err) {
+          submit.disabled = false;
+          console.error('[claude-threads] failed to deliver decision answer:', err);
+          new Notice(err instanceof Error ? err.message : 'Could not deliver the answer.');
+        }
+      });
+    }
+  }
+
+  /** Renders (or clears) the proposed-reply block; idempotent on `generatedAt`. */
+  private patchReplyBlock(container: HTMLElement, thread: Thread): void {
+    const proposed = thread.proposedReply;
+    if (!proposed) {
+      container.empty();
+      delete container.dataset.generatedAt;
+      container.addClass('ct-hidden');
+      return;
+    }
+    container.removeClass('ct-hidden');
+    if (container.dataset.generatedAt === String(proposed.generatedAt)) return;
+    container.empty();
+    container.dataset.generatedAt = String(proposed.generatedAt);
+
+    const head = container.createDiv('ct-kanban-inbox-head');
+    const iconEl = head.createSpan('ct-kanban-inbox-icon');
+    setIcon(iconEl, 'reply');
+    head.createSpan({ cls: 'ct-kanban-inbox-label', text: 'Proposed reply' });
+
+    const textEl = container.createDiv({ cls: 'ct-kanban-reply-text', text: proposed.text });
+    textEl.setAttribute('title', 'Click to expand');
+    textEl.addEventListener('click', () => textEl.toggleClass('ct-expanded', !textEl.hasClass('ct-expanded')));
+
+    const deps = proposedReplyDeps(this.manager, () => this.plugin.saveSettings());
+    const actions = container.createDiv('ct-kanban-inbox-actions');
+    const edit = actions.createEl('button', { cls: 'ct-kanban-inbox-btn ct-kanban-reply-edit', text: 'Edit', attr: { type: 'button' } });
+    edit.addEventListener('click', () => {
+      const text = takeProposedReplyForEdit(deps, thread.id);
+      if (text) void this.plugin.openThreadWithPrefill(thread.id, text);
+    });
+    const discard = actions.createEl('button', { cls: 'ct-kanban-inbox-btn ct-kanban-reply-discard', text: 'Discard', attr: { type: 'button' } });
+    discard.addEventListener('click', () => discardProposedReply(deps, thread.id));
+    const approve = actions.createEl('button', { cls: 'ct-kanban-inbox-btn ct-kanban-inbox-primary ct-kanban-reply-approve', text: 'Approve & Send', attr: { type: 'button' } });
+    approve.addEventListener('click', async () => {
+      approve.disabled = true;
+      try {
+        await approveProposedReply(deps, thread.id);
+      } catch (err) {
+        console.error('[claude-threads] failed to send approved proposed reply:', err);
+        new Notice('Failed to send the approved reply. See the console for details.');
+      }
+    });
+  }
+
+  /** Renders (or hides) the read-only orchestrator notes block, keeping its expanded state. */
+  private patchNotesBlock(container: HTMLElement, thread: Thread): void {
+    const notes = thread.managerNotes?.trim();
+    const expanded = container.hasClass('ct-expanded');
+    container.empty();
+    if (!notes) {
+      container.addClass('ct-hidden');
+      container.removeClass('ct-expanded');
+      return;
+    }
+    container.removeClass('ct-hidden');
+    const head = container.createDiv('ct-kanban-notes-head');
+    const iconEl = head.createSpan('ct-kanban-inbox-icon');
+    setIcon(iconEl, 'sticky-note');
+    head.createSpan({ cls: 'ct-kanban-inbox-label', text: 'Notes' });
+    if (thread.managerNotesUpdatedAt) {
+      head.createSpan({ cls: 'ct-kanban-notes-updated', text: `updated ${relativeTime(thread.managerNotesUpdatedAt)}` });
+    }
+    const chevron = head.createSpan('ct-kanban-notes-chevron');
+    setIcon(chevron, expanded ? 'chevron-down' : 'chevron-right');
+    container.createDiv({ cls: 'ct-kanban-notes-text', text: notes });
+    head.addEventListener('click', () => {
+      const open = !container.hasClass('ct-expanded');
+      container.toggleClass('ct-expanded', open);
+      setIcon(chevron, open ? 'chevron-down' : 'chevron-right');
+    });
+    container.toggleClass('ct-expanded', expanded);
+  }
+
 
   /**
    * (Re)builds a card's footer chip row from scratch: time, edited-files, PR,
@@ -981,15 +1214,7 @@ export class KanbanView extends ItemView {
    * Mirrors `bucketize()` / `sectionsForColumn()` via the shared column maps.
    */
   private computeCardPlacement(thread: Thread): { bucketKey: string; state: RowState } {
-    const rowState = classifyThreadRow({
-      isRunning: this.manager.isRunning(thread.id),
-      hasPendingPermission: this.manager.hasPendingPermission(thread.id) || this.manager.hasPendingQuestion(thread.id) || this.manager.hasPendingPlan(thread.id),
-      hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(thread.id),
-      hasPendingWakeup: this.plugin.hasPendingWakeup(thread.id),
-      lastError: thread.lastError,
-      messageCount: thread.messages.length,
-      reviewed: thread.reviewed,
-    });
+    const rowState = classifyThreadRow(this.rowFlags(thread));
 
     const mode = this.groupBy;
     if (mode === 'project') {
@@ -1000,6 +1225,7 @@ export class KanbanView extends ItemView {
     if (mode === 'folder') {
       return { bucketKey: `${this.threadGroup(thread).key}::${label}`, state };
     }
+    if (this.needsYou(thread)) return { bucketKey: NEEDS_YOU_LABEL, state };
     return { bucketKey: label, state };
   }
 
@@ -1188,6 +1414,18 @@ export class KanbanView extends ItemView {
       }
     }
 
+    // Orchestrator-inbox events patch only their own block. A reply or decision
+    // can move a card into/out of the Needs you lane (status board), so compare
+    // the recomputed placement first and fall back to a rebuild when it moved.
+    if (
+      event.type === 'proposed_reply_changed' ||
+      event.type === 'pending_decisions_changed' ||
+      event.type === 'manager_notes_changed'
+    ) {
+      this.handleInboxEvent(threadId, event.type);
+      return;
+    }
+
     // `tasks_updated` carries the thread's full task list (thread.tasks) — patch
     // the card's task section directly instead of rebuilding the whole board.
     // Task changes never move a thread between columns (bucketing depends only
@@ -1260,6 +1498,38 @@ export class KanbanView extends ItemView {
     ) {
       this.scheduleActivityRefresh(threadId);
     }
+  }
+
+  private handleInboxEvent(threadId: string, type: 'proposed_reply_changed' | 'pending_decisions_changed' | 'manager_notes_changed'): void {
+    const thread = this.manager.getThread(threadId);
+    const recorded = this.cardPlacements.get(threadId);
+    if (!thread || !recorded || !this.rowEls.has(threadId)) {
+      // Not rendered (new to the board, or filtered out): converge with a rebuild.
+      this.scheduleRender();
+      return;
+    }
+    if (type !== 'manager_notes_changed') {
+      const next = this.computeCardPlacement(thread);
+      if (next.bucketKey !== recorded.bucketKey || next.state !== recorded.state) {
+        this.scheduleRender();
+        return;
+      }
+    }
+    if (this.needsYouOnly && type !== 'manager_notes_changed' && !this.needsYou(thread)) {
+      this.scheduleRender();
+      return;
+    }
+    if (type === 'proposed_reply_changed') {
+      const el = this.replyEls.get(threadId);
+      if (el) this.patchReplyBlock(el, thread);
+    } else if (type === 'pending_decisions_changed') {
+      const el = this.decisionEls.get(threadId);
+      if (el) this.patchDecisionsBlock(el, thread);
+    } else {
+      const el = this.notesEls.get(threadId);
+      if (el) this.patchNotesBlock(el, thread);
+    }
+    this.syncInboxVisibility(thread);
   }
 
   private setActiveCard(threadId: string): void {

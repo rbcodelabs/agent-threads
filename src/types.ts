@@ -73,6 +73,26 @@ export interface AskQuestion {
   autoResolutionMs?: number;
 }
 
+/**
+ * A decision an orchestrator thread wants Rick to make, shown inline on the
+ * Kanban card of the thread it concerns (the "subject" thread; the
+ * orchestrator's own thread for portfolio-level items). Posted via
+ * `threads_post_decision`. The answer is delivered to `sourceThreadId` (the
+ * posting orchestrator) as a user message and NEVER to the subject thread's
+ * own session or system prompt.
+ */
+export interface PendingDecision {
+  id: string;
+  question: string;
+  header: string;
+  options: AskQuestionOption[];
+  multiSelect: boolean;
+  allowOther: boolean;
+  createdAt: number;
+  /** The orchestrator thread that posted this decision and receives the answer. */
+  sourceThreadId: string;
+}
+
 export interface ToolCallRecord {
   name: string;
   summary: string;
@@ -522,6 +542,13 @@ export interface Thread {
    * sends this automatically — only a human clicking Approve & Send does.
    */
   proposedReply?: { text: string; generatedAt: number; sourceThreadId?: string };
+  /**
+   * Decisions an orchestrator has asked Rick to make about this thread, via
+   * `threads_post_decision`. Like `proposedReply` and `managerNotes`, this is
+   * orchestrator bookkeeping and is intentionally EXCLUDED from
+   * `appendSystemPrompt`. Answers go to the posting orchestrator thread only.
+   */
+  pendingDecisions?: PendingDecision[];
   /**
    * Free-form tracking notes written by the thread-orchestrator skill about
    * this thread (inferred goal, status, last-reviewed cursor). Visible in the
