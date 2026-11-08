@@ -433,10 +433,7 @@ describe('client replaced mid-session: edge cases', () => {
     session.close();
   });
 
-  // KNOWN BUG (reported, src not changed here): a fresh subscription on the new client replays from the persisted cursor,
-  // which sits before the unfinished message, and those tokens arrive as fresh events, so already-streamed tokens duplicate.
-  // it.fails flips red once fixed; change it to it() then.
-  it.fails('keeps streaming without loss or duplication when the client is swapped in the middle of a turn', async () => {
+  it('keeps streaming without loss or duplication when the client is swapped in the middle of a turn', async () => {
     const td = await daemon();
     let current = client(td.daemon.url, td.adminToken);
     const r = recorder();
@@ -467,9 +464,7 @@ describe('client replaced mid-session: edge cases', () => {
     expect(() => session.close()).not.toThrow();
   });
 
-  // KNOWN BUG (reported, src not changed here): close()/detach() read the `client` getter, which throws once the registry
-  // no longer has the daemon, so teardown throws after setting closed. it.fails flips red once fixed; change it to it() then.
-  it.fails('close() and detach() do not throw when the daemon was removed from the registry', async () => {
+  it('close() and detach() do not throw when the daemon was removed from the registry', async () => {
     const td = await daemon();
     let current: DaemonClient | undefined = client(td.daemon.url, td.adminToken);
     const a = new RemoteHarnessSession(() => current, remoteThread('swap6'));

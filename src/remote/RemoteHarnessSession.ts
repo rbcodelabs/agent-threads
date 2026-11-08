@@ -171,9 +171,12 @@ export class RemoteHarnessSession implements HarnessSession {
     this.boundClient = current;
     if (previous && previous !== current && this.sub && !this.closed) {
       this.log('daemon client was replaced; re-attaching on the new client');
+      // Resume from what the old subscription already applied, not the persisted cursor: that one is held before the
+      // unfinished assistant message, so resuming there would replay (and duplicate) tokens already streamed.
+      const applied = this.sub.cursor.lastSeq;
       this.sub.close();
       this.sub = null;
-      this.follow();
+      this.follow(applied);
     }
     return current;
   }
@@ -302,7 +305,7 @@ export class RemoteHarnessSession implements HarnessSession {
     return this.opening;
   }
 
-  private follow(): void {
+  private follow(resumeAfter?: number): void {
     if (this.sub || this.closed) return;
     this.sub = this.client.subscribe(
       this.threadId,
@@ -328,7 +331,7 @@ export class RemoteHarnessSession implements HarnessSession {
             : `Could not follow the remote thread: ${err.message}`));
         },
       },
-      this.remote.lastSeq,
+      Math.max(this.remote.lastSeq, resumeAfter ?? 0),
       this.remote.epoch,
     );
   }
@@ -357,8 +360,9 @@ export class RemoteHarnessSession implements HarnessSession {
     this.cancelLocalRequests();
     this.cancelSendRetry();
     this.queued = [];
-    if (this.opened || this.opening) {
-      void this.client.command('session.close', { threadId: this.threadId }).catch((err: unknown) => {
+    const daemon = this.resolveClient();
+    if (daemon && (this.opened || this.opening)) {
+      void daemon.command('session.close', { threadId: this.threadId }).catch((err: unknown) => {
         this.log(`session.close failed: ${errText(err)}`);
       });
     }
@@ -377,8 +381,9 @@ export class RemoteHarnessSession implements HarnessSession {
     this.cancelLocalRequests();
     this.cancelSendRetry();
     // Also when we only re-attached (never opened): that attach claimed the seat and a server-side subscription.
-    if (this.opened || attached) {
-      void this.client.command('session.detach', { threadId: this.threadId }, { timeoutMs: 3000 }).catch(() => { /* the disconnect releases the seat anyway */ });
+    const daemon = this.resolveClient();
+    if (daemon && (this.opened || attached)) {
+      void daemon.command('session.detach', { threadId: this.threadId }, { timeoutMs: 3000 }).catch(() => { /* the disconnect releases the seat anyway */ });
     }
   }
 
