@@ -348,4 +348,117 @@ describe('OrchestratorWakeup', () => {
       expect(sendMessage).not.toHaveBeenCalled();
     });
   });
+
+  describe('delegation suppression edge cases', () => {
+    it('absent isSuspended means never suspended', async () => {
+      const { manager, emit } = makeManager({ 'thread-1': 'T' });
+      const { deps, sendMessage, runTimer } = makeDeps();
+      new OrchestratorWakeup(manager, deps).start();
+      emit('thread-1', { type: 'done' });
+      runTimer();
+      await Promise.resolve();
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('discardAll with no state is a no-op and does not throw', () => {
+      const { manager } = makeManager();
+      const { deps } = makeDeps({ isSuspended: () => true });
+      expect(() => new OrchestratorWakeup(manager, deps).discardAll()).not.toThrow();
+    });
+
+    it('discardAll clears every bucket, not just one', async () => {
+      const { manager, emit } = makeManager({ 'thread-1': 'T', 'project-a-1': 'P' });
+      const timers: Array<() => void> = [];
+      const setTimeoutFn = vi.fn((cb: () => void) => { timers.push(cb); return `h${timers.length}`; });
+      const { deps, sendMessage } = makeDeps({ setTimeoutFn, isSuspended: () => false });
+      const wakeup = new OrchestratorWakeup(manager, deps);
+      wakeup.start();
+      emit('thread-1', { type: 'done' });
+      emit('project-a-1', { type: 'done' });
+      wakeup.discardAll();
+      expect(deps.clearTimeoutFn).toHaveBeenCalledTimes(2);
+      timers.forEach((cb) => cb());
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('a flush already armed when suspension starts sends nothing and drops its pending batch', async () => {
+      const { manager, emit } = makeManager({ 'thread-1': 'T' });
+      let suspended = false;
+      const { deps, sendMessage, runTimer } = makeDeps({ isSuspended: () => suspended });
+      new OrchestratorWakeup(manager, deps).start();
+      emit('thread-1', { type: 'done' });
+      suspended = true; // no discardAll: the flush guard alone must hold
+      runTimer();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sendMessage).not.toHaveBeenCalled();
+      suspended = false;
+      runTimer(); // nothing re-armed
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('suspension in the summaryOnly path sends nothing', async () => {
+      const { manager, emit } = makeManager({ 'project-a-1': 'P' });
+      let suspended = false;
+      let release!: (v: { threadId: string; summaryOnly: true }) => void;
+      const { deps, sendMessage, runTimer } = makeDeps({
+        isSuspended: () => suspended,
+        resolveTarget: () => new Promise((resolve) => { release = resolve as typeof release; }),
+      });
+      const wakeup = new OrchestratorWakeup(manager, deps);
+      wakeup.start();
+      emit('project-a-1', { type: 'done' });
+      runTimer();
+      suspended = true;
+      wakeup.discardAll();
+      release({ threadId: 'portfolio-orch', summaryOnly: true });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('ignores interrupted events regardless of suspension (only done/error wake)', async () => {
+      const { manager, emit } = makeManager({ 'thread-1': 'T' });
+      const { deps, setTimeoutFn } = makeDeps();
+      new OrchestratorWakeup(manager, deps).start();
+      emit('thread-1', { type: 'interrupted' } as ThreadEvent);
+      expect(setTimeoutFn).not.toHaveBeenCalled();
+    });
+
+    it('orchestrator thread removed while suspension lapses: no send, warns', async () => {
+      const { manager, emit } = makeManager({ 'thread-1': 'T' });
+      const onWarn = vi.fn();
+      const { deps, sendMessage, runTimer } = makeDeps({ threadExists: () => false, onWarn });
+      new OrchestratorWakeup(manager, deps).start();
+      emit('thread-1', { type: 'done' });
+      runTimer();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(onWarn).toHaveBeenCalled();
+    });
+
+    // Claim then release while a flush is already awaiting resolveTarget: the batch
+    // was captured BEFORE delegation, so it must be discarded (design: delegation
+    // discards pending batches), otherwise core pings after the delegate gave
+    // control back for events the delegate already owned.
+    it('a flush in flight across a full claim+release cycle does not ping (batch discarded)', async () => {
+      const { manager, emit } = makeManager({ 'thread-1': 'T' });
+      let suspended = false;
+      let release!: (id: string) => void;
+      const { deps, sendMessage, runTimer } = makeDeps({
+        isSuspended: () => suspended,
+        resolveTarget: () => new Promise<string>((resolve) => { release = resolve; }),
+      });
+      const wakeup = new OrchestratorWakeup(manager, deps);
+      wakeup.start();
+      emit('thread-1', { type: 'done' });
+      runTimer(); // flush now awaiting resolveTarget; timers/pending already cleared
+      suspended = true;
+      wakeup.discardAll();
+      suspended = false; // delegate disposed before target resolved
+      release('orchestrator-thread');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+  });
 });
