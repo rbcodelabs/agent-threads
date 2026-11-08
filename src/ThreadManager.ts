@@ -31,7 +31,8 @@ import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
 import { selectCanonicalHarnessTools } from './mcpServerMerge';
 import { AgentRunStore } from './agentRuns/AgentRunStore';
 import { loadAgentProfiles, type AgentProfileMap } from './AgentProfiles';
-import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun } from './types';
+import type { Thread, ChatMessage, PluginSettings, ToolCallRecord, AskQuestion, ImageAttachment, Project, PendingBackgroundTask, TaskItem, TaskItemStatus, StatusTag, GitDiffInfo, AgentRun, PendingDecision } from './types';
+import { postDecision as postDecisionOn, clearDecision as clearDecisionOn, removeDecision, formatDecisionAnswer, type PostDecisionInput } from './decisions';
 import type { McpServerConfig, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { isAuthErrorTranscriptMessage } from './claudeAuthRecovery';
@@ -119,6 +120,7 @@ export type ThreadEvent =
   | { type: 'reviewed_changed' }
   | { type: 'manager_notes_changed' }
   | { type: 'proposed_reply_changed' }
+  | { type: 'pending_decisions_changed' }
   | { type: 'run_state_settled' }
   | { type: 'status_tags' }
   | { type: 'git_diff' }
@@ -571,6 +573,7 @@ export class ThreadManager {
     for (const thread of this.threads.values()) {
       if (thread.projectId === id) {
         delete thread.proposedReply;
+        delete thread.pendingDecisions;
         this.setThreadProject(thread.id, null);
       }
     }
@@ -615,7 +618,10 @@ export class ThreadManager {
 
     const changed = thread.projectId !== (projectId ?? undefined);
     thread.projectId = projectId ?? undefined;
-    if (changed) delete thread.proposedReply;
+    if (changed) {
+      delete thread.proposedReply;
+      delete thread.pendingDecisions;
+    }
     thread.updatedAt = Date.now();
     this.emit(id, { type: 'project_changed' });
     // A remote thread's cwd is a path on the daemon's machine; a Project's folder is local.
@@ -2467,7 +2473,8 @@ export class ThreadManager {
         'Keep working toward this goal across turns. If a reply would leave the goal unmet, ' +
         'state what remains and continue working on it. The goal stays active until the user clears it with /goal clear.'
       : '';
-    // INTENTIONAL: thread.managerNotes and thread.proposedReply are never included
+    // INTENTIONAL: thread.managerNotes, thread.proposedReply and
+    // thread.pendingDecisions are never included
     // here. They are thread-orchestrator bookkeeping (inferred goal/status/cursor,
     // a drafted-but-unsent reply) meant to be visible only in the UI. Unlike
     // `goal` below — which the user explicitly asks to be injected into every
@@ -3492,6 +3499,47 @@ export class ThreadManager {
   /** Notify listeners that a thread's proposed reply was set or cleared. */
   notifyProposedReplyChanged(threadId: string): void {
     this.emit(threadId, { type: 'proposed_reply_changed' });
+  }
+
+  /** Notify listeners that a thread's orchestrator decisions changed. */
+  notifyPendingDecisionsChanged(threadId: string): void {
+    this.emit(threadId, { type: 'pending_decisions_changed' });
+  }
+
+  /** Posts an orchestrator decision on `subjectThreadId`; `callerThreadId` becomes the answer's recipient. */
+  postDecision(subjectThreadId: string, callerThreadId: string, input: PostDecisionInput): PendingDecision {
+    const thread = this.threads.get(subjectThreadId);
+    if (!thread) throw new Error(`Thread not found: ${subjectThreadId}`);
+    const decision = postDecisionOn(thread, callerThreadId, input);
+    this.notifyPendingDecisionsChanged(subjectThreadId);
+    return decision;
+  }
+
+  /** Clears a decision; throws when it belongs to another orchestrator. False when it was not pending. */
+  clearDecision(subjectThreadId: string, callerThreadId: string, decisionId: string): boolean {
+    const thread = this.threads.get(subjectThreadId);
+    if (!thread) throw new Error(`Thread not found: ${subjectThreadId}`);
+    const cleared = clearDecisionOn(thread, callerThreadId, decisionId);
+    if (cleared) this.notifyPendingDecisionsChanged(subjectThreadId);
+    return cleared;
+  }
+
+  /**
+   * Rick answered a decision. Removes it, then delivers the answer to the
+   * POSTING orchestrator thread as a user message. Never touches the subject
+   * thread's session. Throws (leaving the decision pending) when the posting
+   * orchestrator no longer exists, so the answer is not silently lost.
+   */
+  async answerDecision(subjectThreadId: string, decisionId: string, answer: string): Promise<void> {
+    const thread = this.threads.get(subjectThreadId);
+    const decision = thread?.pendingDecisions?.find((d) => d.id === decisionId);
+    if (!thread || !decision) return;
+    if (!this.threads.has(decision.sourceThreadId)) {
+      throw new Error('The orchestrator that posted this decision no longer exists.');
+    }
+    removeDecision(thread, decisionId);
+    this.notifyPendingDecisionsChanged(subjectThreadId);
+    await this.sendMessage(decision.sourceThreadId, formatDecisionAnswer(decision, answer, { id: thread.id, title: thread.title }));
   }
 
   /**

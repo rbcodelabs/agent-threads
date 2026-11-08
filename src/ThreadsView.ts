@@ -28,6 +28,10 @@ import { isSetAsGoalEligible } from './goalContext';
 import { isRetryEligible } from './retryMessage';
 import { buildComparePrUrl, gitDiffBarVisible, prButtonLabel, prUrlMatchesRepo } from './gitDiffUtils';
 import type { Thread, ChatMessage, ToolCallRecord, AskQuestion, ImageAttachment } from './types';
+import { renderQuestionFields } from './QuestionForm';
+import { approveProposedReply, discardProposedReply, takeProposedReplyForEdit } from './proposedReplyActions';
+import { sendRestoredQuestionAnswer } from './questionActions';
+import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { SummarizeResult } from './InProcessSummarizer';
 import { decideSummarizeTier, isUsableTitle, applyExplorerResult, formatGoalAndStatus } from './summarization';
@@ -1554,6 +1558,13 @@ export class ThreadsView extends ItemView {
     return this.activeThreadId;
   }
 
+  /** Puts `text` in the composer, ahead of anything already typed there. */
+  prefillComposer(text: string): void {
+    if (!this.dispatchInput) return;
+    const current = this.dispatchInput.getValue();
+    this.dispatchInput.setValue(current.trim() ? `${text}\n\n${current}` : text);
+  }
+
   /** Snapshot the current input box state into the given thread object. */
   private saveDraftToThread(threadId: string | null): void {
     if (!threadId || !this.dispatchInput) return;
@@ -2682,40 +2693,27 @@ export class ThreadsView extends ItemView {
 
     const actions = card.createDiv('ct-proposed-reply-actions');
 
-    const clearProposedReply = (id: string) => {
-      const t = this.manager.getThread(id);
-      if (!t) return;
-      delete t.proposedReply;
-      this.manager.notifyProposedReplyChanged(id);
-      void this.plugin.saveSettings();
-    };
+    const deps = proposedReplyDeps(this.manager, () => this.plugin.saveSettings());
 
     const editBtn = actions.createEl('button', { cls: 'ct-proposed-reply-edit', text: 'Edit' });
     editBtn.addEventListener('click', () => {
-      const t = this.manager.getThread(threadId);
-      const text = t?.proposedReply?.text;
-      if (!text) return;
-      clearProposedReply(threadId);
-      if (threadId === this.activeThreadId) {
+      const text = takeProposedReplyForEdit(deps, threadId);
+      if (text && threadId === this.activeThreadId) {
         this.dispatchInput?.setValue(text);
       }
     });
 
     const discardBtn = actions.createEl('button', { cls: 'ct-proposed-reply-discard', text: 'Discard' });
     discardBtn.addEventListener('click', () => {
-      clearProposedReply(threadId);
+      discardProposedReply(deps, threadId);
     });
 
     // Last, with margin-left: auto in CSS, so Edit/Discard sit left and
     // Approve is pushed right — matching the plan card's action-bar convention.
     const approveBtn = actions.createEl('button', { cls: 'ct-proposed-reply-approve', text: 'Approve & Send' });
     approveBtn.addEventListener('click', async () => {
-      const t = this.manager.getThread(threadId);
-      const text = t?.proposedReply?.text;
-      if (!text) return;
-      clearProposedReply(threadId);
       try {
-        await this.manager.sendMessage(threadId, text);
+        await approveProposedReply(deps, threadId);
       } catch (err) {
         console.error('[claude-threads] failed to send approved proposed reply:', err);
         new Notice('Failed to send the approved reply — see console for details.');
@@ -4915,26 +4913,6 @@ export class ThreadsView extends ItemView {
   }
 
   /**
-   * Makes an entire question-option row clickable, not just the tiny radio/checkbox
-   * input inside it. Native <label for> association can't be used here because the
-   * label doesn't span the full row (it only wraps its own text), so instead we
-   * listen on the row and forward the click to the input — except when the click
-   * already landed on the input itself, where the browser's native toggle behavior
-   * (and radio-group exclusivity) applies and must not be double-handled.
-   */
-  private bindQuestionRowClick(row: HTMLElement, inputEl: HTMLInputElement): void {
-    row.addEventListener('click', (e) => {
-      if (e.target === inputEl) return;
-      if (inputEl.type === 'checkbox') {
-        inputEl.checked = !inputEl.checked;
-      } else {
-        inputEl.checked = true;
-      }
-      inputEl.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-  }
-
-  /**
    * Renders the inline question card shown when Claude calls AskUserQuestion.
    * The card is anchored to the current streaming element (or messagesEl) so it
    * sits visually inside the current response turn, mirroring renderPermissionCard
@@ -4955,81 +4933,12 @@ export class ThreadsView extends ItemView {
     header.createSpan({ cls: 'ct-question-card-label', text: `${source} needs your input` });
 
     const body = card.createDiv('ct-question-card-body');
-
-    // Track each question's option inputs (plus the always-present "Other" input
-    // and its text field) so Submit can read the final selection straight from the
-    // DOM, rather than juggling incremental change-event bookkeeping across two
-    // input flavors (fixed options vs. free text).
-    const questionInputs: Array<{
-      question: AskQuestion;
-      optionInputs: HTMLInputElement[];
-      otherInput?: HTMLInputElement;
-      otherText?: HTMLInputElement;
-    }> = [];
-
-    for (const q of questions) {
-      const qEl = body.createDiv({ cls: 'ct-question' });
-      if (q.header) qEl.createEl('h3', { cls: 'ct-question-header', text: q.header });
-      qEl.createEl('p', { cls: 'ct-question-text', text: q.question });
-
-      const optionsEl = qEl.createDiv({ cls: 'ct-question-options' });
-      const optionInputs: HTMLInputElement[] = [];
-      for (const opt of q.options) {
-        const row = optionsEl.createDiv({ cls: 'ct-question-option' });
-        const inputEl = row.createEl('input', {
-          attr: { type: q.multiSelect ? 'checkbox' : 'radio', name: q.question, value: opt.label },
-        }) as HTMLInputElement;
-        const labelEl = row.createEl('label', { cls: 'ct-question-option-label' });
-        labelEl.createSpan({ cls: 'ct-question-opt-name', text: opt.label });
-        if (opt.description) {
-          labelEl.createSpan({ cls: 'ct-question-opt-desc', text: opt.description });
-        }
-        this.bindQuestionRowClick(row, inputEl);
-        optionInputs.push(inputEl);
-      }
-
-      let otherInput: HTMLInputElement | undefined;
-      let otherText: HTMLInputElement | undefined;
-      if (q.allowOther !== false) {
-        const otherRow = optionsEl.createDiv({ cls: 'ct-question-option ct-question-option-other' });
-        otherInput = otherRow.createEl('input', {
-          attr: { type: q.multiSelect ? 'checkbox' : 'radio', name: q.question, value: '__other__' },
-        }) as HTMLInputElement;
-        this.bindQuestionRowClick(otherRow, otherInput);
-        const otherLabelEl = otherRow.createEl('label', { cls: 'ct-question-option-label' });
-        otherLabelEl.createSpan({ cls: 'ct-question-opt-name', text: q.options.length > 0 ? 'Other' : 'Answer' });
-        otherText = otherLabelEl.createEl('input', {
-          cls: 'ct-question-other-text',
-          attr: {
-            type: q.isSecret ? 'password' : 'text',
-            placeholder: q.isSecret ? 'Enter secret…' : 'Type your own answer…',
-            autocomplete: q.isSecret ? 'off' : 'on',
-          },
-        }) as HTMLInputElement;
-        otherText.addEventListener('input', () => {
-          if (otherInput && !otherInput.checked) otherInput.checked = true;
-        });
-        otherText.addEventListener('click', (e) => e.stopPropagation());
-      }
-
-      questionInputs.push({ question: q, optionInputs, otherInput, otherText });
-    }
+    const collect = renderQuestionFields(body, questions);
 
     const actions = card.createDiv('ct-question-card-actions');
     const submitBtn = actions.createEl('button', { text: 'Submit', cls: 'ct-question-card-submit' });
     submitBtn.addEventListener('click', () => {
-      const result: Record<string, string> = {};
-      for (const { question, optionInputs, otherInput, otherText } of questionInputs) {
-        const values: string[] = [];
-        for (const input of optionInputs) {
-          if (input.checked) values.push(input.value);
-        }
-        if (otherInput?.checked) {
-          const text = otherText?.value.trim();
-          if (text) values.push(text);
-        }
-        result[question.id ?? question.question] = values.join(',');
-      }
+      const result = collect();
       card.remove();
       done(result);
     });
@@ -5273,22 +5182,7 @@ export class ThreadsView extends ItemView {
 
     // Post-crash / post-reload path: no live session. Dispatch via sendMessage.
     this.renderQuestionCard(questions, (result) => {
-      this.manager.setThreadPendingQuestions(threadId, undefined);
-      void this.plugin.saveSettings();
-      if (questions.some((question) => question.isSecret)) {
-        // A restored card has no live provider request to answer. Never turn a
-        // secret into an ordinary persisted chat message; ask Codex to issue a
-        // fresh request so the value can travel only in the protocol response.
-        void this.manager.sendMessage(
-          threadId,
-          'A secret input request expired when the session reloaded. Please request the secret again with request_user_input; do not ask me to send it in chat.',
-        );
-        return;
-      }
-      const formatted = questions
-        .map((question) => `${question.question}: ${result[question.id ?? question.question] ?? ''}`)
-        .join('\n');
-      void this.manager.sendMessage(threadId, formatted);
+      sendRestoredQuestionAnswer(questionAnswerDeps(this.manager, () => this.plugin.saveSettings()), threadId, questions, result);
     });
   }
 

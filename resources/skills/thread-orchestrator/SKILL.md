@@ -177,6 +177,17 @@ proposal became stale because Rick answered or the thread moved on, call
 `threads_clear_proposed_reply(threadId)`. Otherwise, do not overwrite a fresh
 unactioned proposal with a weaker one.
 
+When a thread is blocked on a choice only Rick can make (the `needs-decision`
+disposition), prefer `threads_post_decision` over asking in chat prose: give a
+short `header`, a precise `question`, and 2-4 options with one-line
+descriptions. It appears inline on that thread's Agent Board card (omit
+`threadId` for a portfolio-level question about your own work). Rick's answer
+arrives in this orchestrator thread as a user message
+(`Decision <header> ... [<decisionId>]: <answer>`); act on it on the next pass.
+It is never delivered to the thread it concerns, so relay it yourself with a
+proposed reply if that thread needs to know. Do not repeat an unanswered
+decision; withdraw a moot one with `threads_clear_decision(threadId?, decisionId)`.
+
 ## Terminal and quiet behavior
 
 A `concluded` or `no-action` thread stays quiet until its `updatedAt` changes.

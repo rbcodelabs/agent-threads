@@ -980,6 +980,10 @@ Discover, read, and message other running threads. Project threads coordinate on
 | `threads_set_notes` | `threadId`, `notes` | Sets owner-scoped orchestrator tracking notes with source/timestamp provenance. |
 | `threads_set_proposed_reply` | `threadId`, `text` | Stages a proposed reply for human approval. |
 | `threads_clear_proposed_reply` | `threadId` | Clears a stale proposed reply. |
+| `threads_post_decision` | `threadId?`, `question`, `header?`, `options` (2-4), `multiSelect?`, `allowOther?` | Asks Rick to decide, inline on the thread's Agent Board card (default: the calling thread). Rick's answer is delivered to the **calling** thread as a user message, never to the target thread. Returns a `decisionId`. |
+| `threads_clear_decision` | `threadId?`, `decisionId` | Withdraws a decision the caller posted. Only the author can clear it. |
+
+On the Agent Board, cards show an orchestrator's proposed reply (Approve & Send / Edit / Discard), its read-only notes, pending questions and decisions, and a leading **Needs you** lane (with an **Only needs you** filter) collects every thread waiting on you.
 
 These three tools back the bundled **thread-orchestrator** skill (`resources/skills/thread-orchestrator`), which lets one thread supervise several peers: it tracks per-thread notes across polling passes and proposes replies for a human to review rather than sending on a peer's behalf.
 

@@ -165,7 +165,7 @@ const LEGACY_BUILT_IN_TOOLS = new Set([
   'obsidian_open_thread',
   'obsidian_get_thread_log', 'obsidian_wait_for_thread', 'obsidian_send_message_to_thread',
   'obsidian_archive_thread', 'obsidian_set_thread_notes', 'obsidian_set_thread_proposed_reply',
-  'obsidian_clear_thread_proposed_reply',
+  'obsidian_clear_thread_proposed_reply', 'obsidian_post_thread_decision', 'obsidian_clear_thread_decision',
 ]);
 const CANONICAL_BUILT_IN_TOOLS = new Set([
   'vault_search', 'vault_list', 'vault_get_note_metadata', 'vault_get_backlinks', 'vault_get_outgoing_links',
@@ -177,7 +177,7 @@ const CANONICAL_BUILT_IN_TOOLS = new Set([
   'threads_set_project', 'threads_get_messages', 'threads_get_log', 'threads_wait',
   'threads_open',
   'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_proposed_reply',
-  'threads_clear_proposed_reply',
+  'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision',
   // Agent browser. Canonical-only: these are new tools, so they were never
   // exposed under the legacy obsidian_ names and need no compatibility alias.
   'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',

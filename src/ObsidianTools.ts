@@ -7,7 +7,7 @@ import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { HarnessDynamicTool } from './HarnessSession';
 import { App, TFile } from 'obsidian';
-import type { ScheduledItem } from './types';
+import type { PendingDecision, ScheduledItem } from './types';
 import type { SchedulerItemPatch } from './Scheduler';
 import path from 'path';
 import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
@@ -110,6 +110,8 @@ export interface ThreadSnapshot {
   managerNotesUpdatedAt?: number;
   /** An AI-proposed reply awaiting human approval, set via obsidian_set_thread_proposed_reply. */
   proposedReply?: { text: string; generatedAt: number; sourceThreadId?: string };
+  /** Decisions an orchestrator has asked Rick to make about this thread, posted via threads_post_decision. */
+  pendingDecisions?: PendingDecision[];
 }
 
 export interface ThreadMessageSnapshot {
@@ -281,6 +283,10 @@ export interface ObsidianMcpServerOptions {
   setThreadProposedReply?: (threadId: string, text: string) => void;
   /** Clears a thread's pending proposed reply, if any. */
   clearThreadProposedReply?: (threadId: string) => void;
+  /** Posts an orchestrator decision on a thread (author = the calling thread). Returns the decision id. */
+  postThreadDecision?: (threadId: string, input: { question: string; header?: string; options: Array<{ label: string; description: string }>; multiSelect?: boolean; allowOther?: boolean }) => string;
+  /** Clears a decision the calling thread posted. Returns false when it was not pending. */
+  clearThreadDecision?: (threadId: string, decisionId: string) => boolean;
   onCronCreate?: (params: CronCreateParams) => Promise<ScheduledItem>;
   onCronList?: () => ScheduledItem[];
   onCronUpdate?: (id: string, patch: CronUpdatePatch) => Promise<ScheduledItem>;

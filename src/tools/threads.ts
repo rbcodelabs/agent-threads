@@ -13,7 +13,7 @@ import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 type ToolDef = SdkMcpToolDefinition<any>;
 
 export interface ThreadToolsPort {
-  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'openThread' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
+  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
 }
 
 
@@ -543,6 +543,81 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     { alwaysLoad: true },
   );
 
+  const boundPostThreadDecision = tool(
+    'obsidian_post_thread_decision',
+    [
+      'Asks Rick to make a decision, shown inline on the Agent Board card of the target thread (default: the',
+      'current thread, for portfolio-level items) with 2-4 options and an optional free-text Other. When Rick',
+      'answers, the answer arrives in THIS thread as a user message ("Decision <header> ... [<decisionId>]: <answer>"),',
+      'never in the target thread. Returns the decisionId. Use threads_clear_decision to withdraw a stale one.',
+      'Prefer this over asking in prose when a thread is blocked on a choice only Rick can make.',
+    ].join(' '),
+    {
+      threadId: z.string().optional().describe('Thread the decision concerns. Defaults to the current thread.'),
+      question: z.string().describe('The full question for Rick'),
+      header: z.string().optional().describe('Short label (max 60 chars) shown above the question'),
+      options: z.array(z.object({
+        label: z.string().describe('Short option label'),
+        description: z.string().optional().describe('One line explaining the option'),
+      })).min(2).max(4).describe('2-4 mutually exclusive (or multi-select) options'),
+      multiSelect: z.boolean().optional().describe('Allow choosing more than one option (default false)'),
+      allowOther: z.boolean().optional().describe('Offer a free-text Other answer (default true)'),
+      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+    },
+    async (args, _extra) => {
+      try {
+        if (!options.postThreadDecision) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'postThreadDecision is not available in this context.' }) }], isError: true };
+        }
+        const target = args.threadId ?? options.threadId;
+        if (!target) throw new Error('No target thread.');
+        if (target !== options.threadId && options.authorizeThread && !options.authorizeThread(target, args.elevatedProjectId, 'write')) {
+          throw new Error('Target is outside coordination scope.');
+        }
+        const decisionId = options.postThreadDecision(target, {
+          question: args.question,
+          header: args.header,
+          options: args.options.map(o => ({ label: o.label, description: o.description ?? '' })),
+          multiSelect: args.multiSelect,
+          allowOther: args.allowOther,
+        });
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, threadId: target, decisionId }) }] };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: msg }) }], isError: true };
+      }
+    },
+    { alwaysLoad: true },
+  );
+
+  const boundClearThreadDecision = tool(
+    'obsidian_clear_thread_decision',
+    'Withdraws a decision you posted with threads_post_decision (e.g. it became moot). You can only clear decisions you posted.',
+    {
+      threadId: z.string().optional().describe('Thread the decision was posted on. Defaults to the current thread.'),
+      decisionId: z.string().describe('The decisionId returned by threads_post_decision'),
+      elevatedProjectId: z.string().optional().describe('Portfolio orchestrator only: explicit Project elevation for this call.'),
+    },
+    async (args, _extra) => {
+      try {
+        if (!options.clearThreadDecision) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'clearThreadDecision is not available in this context.' }) }], isError: true };
+        }
+        const target = args.threadId ?? options.threadId;
+        if (!target) throw new Error('No target thread.');
+        if (target !== options.threadId && options.authorizeThread && !options.authorizeThread(target, args.elevatedProjectId, 'write')) {
+          throw new Error('Target is outside coordination scope.');
+        }
+        const cleared = options.clearThreadDecision(target, args.decisionId);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, threadId: target, cleared }) }] };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: msg }) }], isError: true };
+      }
+    },
+    { alwaysLoad: true },
+  );
+
 
   const toolDefs: Array<ToolDef | undefined> = [
     boundCreateThread as ToolDef | undefined,
@@ -561,6 +636,8 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     boundSetThreadNotes as ToolDef | undefined,
     boundSetThreadProposedReply as ToolDef | undefined,
     boundClearThreadProposedReply as ToolDef | undefined,
+    boundPostThreadDecision as ToolDef | undefined,
+    boundClearThreadDecision as ToolDef | undefined,
   ];
   const toolNames = [
     'threads_create',
@@ -579,6 +656,8 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     'obsidian_set_thread_notes',
     'obsidian_set_thread_proposed_reply',
     'obsidian_clear_thread_proposed_reply',
+    'obsidian_post_thread_decision',
+    'obsidian_clear_thread_decision',
   ];
   return Object.fromEntries(toolNames.flatMap((name, i): Array<[string, ToolDef]> => (toolDefs[i] ? [[name, toolDefs[i]!]] : [])));
 }

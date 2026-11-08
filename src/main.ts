@@ -909,6 +909,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
               managerNotesSourceThreadId: t.managerNotesSourceThreadId,
               managerNotesUpdatedAt: t.managerNotesUpdatedAt,
               proposedReply: t.proposedReply,
+              pendingDecisions: t.pendingDecisions,
               messages: nonCompact.map((m: { id: string; role: string; content: string; timestamp: number }) => ({
                 id: m.id,
                 role: m.role,
@@ -918,7 +919,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
             };
           },
           openThread: (id: string) => this.openThreadInChatView(id),
-          getAllThreads: () => this.manager.getThreads().map((t: { id: string; title: string; status?: string; lastError?: string; reviewed?: boolean; projectId?: string; cwd?: string; originRepoPath?: string; projectNameOverride?: string; prUrl?: string; scheduledItemId?: string; scheduledItemName?: string; updatedAt: number; rawLogPath?: string; managerNotes?: string; proposedReply?: { text: string; generatedAt: number; sourceThreadId?: string }; messages: Array<{ role: string }> }) => {
+          getAllThreads: () => this.manager.getThreads().map((t: { id: string; title: string; status?: string; lastError?: string; reviewed?: boolean; projectId?: string; cwd?: string; originRepoPath?: string; projectNameOverride?: string; prUrl?: string; scheduledItemId?: string; scheduledItemName?: string; updatedAt: number; rawLogPath?: string; managerNotes?: string; proposedReply?: { text: string; generatedAt: number; sourceThreadId?: string }; pendingDecisions?: import("./types").PendingDecision[]; messages: Array<{ role: string }> }) => {
             const isRunning = this.manager.isRunning(t.id);
             const messageCount = t.messages.filter((m: { role: string }) => m.role !== 'compact').length;
             return {
@@ -949,6 +950,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
               managerNotesSourceThreadId: (t as typeof t & { managerNotesSourceThreadId?: string }).managerNotesSourceThreadId,
               managerNotesUpdatedAt: (t as typeof t & { managerNotesUpdatedAt?: number }).managerNotesUpdatedAt,
               proposedReply: t.proposedReply,
+              pendingDecisions: t.pendingDecisions,
             };
           }),
           getAllProjects: () => this.manager.getProjects().map((p: Project) => ({
@@ -1008,6 +1010,16 @@ export default class ClaudeThreadsPlugin extends Plugin {
             delete thread.proposedReply;
             this.manager.notifyProposedReplyChanged(id);
             this.saveSettings().catch(console.error);
+          },
+          postThreadDecision: (id, input) => {
+            const decision = this.manager.postDecision(id, threadId, input);
+            this.saveSettings().catch(console.error);
+            return decision.id;
+          },
+          clearThreadDecision: (id, decisionId) => {
+            const cleared = this.manager.clearDecision(id, threadId, decisionId);
+            if (cleared) this.saveSettings().catch(console.error);
+            return cleared;
           },
           onCronCreate: (params) => this.createCronItemFromThread(threadId, params),
           onCronList: () => this.scheduler.listItems(),
@@ -3747,6 +3759,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
     await this.activateView();
     const view = this.getView();
     await view?.focusThread(threadId);
+  }
+
+  /** Opens a thread and prefills its composer (used by the board's proposed-reply Edit). */
+  async openThreadWithPrefill(threadId: string, text: string): Promise<void> {
+    await this.openThreadInChatView(threadId);
+    this.getView()?.prefillComposer(text);
   }
 
   async openAgentTeamInChatView(threadId: string): Promise<void> {

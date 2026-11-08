@@ -22,6 +22,7 @@ import { extractMessageContent } from './MessageContent';
 import { outsideVaultLinkPath } from './OutsideVaultLinkModal';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from './linkUtils';
 import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
+import { renderQuestionFields, MOBILE_QUESTION_CLASSES } from './QuestionForm';
 import {
   VISUALIZE_SLOT_ATTR,
   VISUALIZE_SLOT_CLASS,
@@ -945,58 +946,7 @@ export class MobileView extends ItemView {
 
     const body = card.createDiv('ct-mobile-question-body');
 
-    const questionInputs: Array<{
-      answerKey: string;
-      optionInputs: HTMLInputElement[];
-      otherInput?: HTMLInputElement;
-      otherText?: HTMLInputElement;
-    }> = [];
-
-    for (const q of pending.questions) {
-      const qEl = body.createDiv({ cls: 'ct-mobile-question' });
-      if (q.header) qEl.createEl('h3', { cls: 'ct-mobile-question-title', text: q.header });
-      qEl.createEl('p', { cls: 'ct-mobile-question-text', text: q.question });
-
-      const optionsEl = qEl.createDiv({ cls: 'ct-mobile-question-options' });
-      const optionInputs: HTMLInputElement[] = [];
-      for (const opt of q.options) {
-        const row = optionsEl.createDiv({ cls: 'ct-mobile-question-option' });
-        const inputEl = row.createEl('input', {
-          attr: { type: q.multiSelect ? 'checkbox' : 'radio', name: q.question, value: opt.label },
-        }) as HTMLInputElement;
-        const labelEl = row.createEl('label', { cls: 'ct-mobile-question-option-label' });
-        labelEl.createSpan({ cls: 'ct-mobile-question-opt-name', text: opt.label });
-        if (opt.description) {
-          labelEl.createSpan({ cls: 'ct-mobile-question-opt-desc', text: opt.description });
-        }
-        optionInputs.push(inputEl);
-      }
-
-      let otherInput: HTMLInputElement | undefined;
-      let otherText: HTMLInputElement | undefined;
-      if (q.allowOther !== false) {
-        const otherRow = optionsEl.createDiv({ cls: 'ct-mobile-question-option ct-mobile-question-option-other' });
-        otherInput = otherRow.createEl('input', {
-          attr: { type: q.multiSelect ? 'checkbox' : 'radio', name: q.question, value: '__other__' },
-        }) as HTMLInputElement;
-        const otherLabelEl = otherRow.createEl('label', { cls: 'ct-mobile-question-option-label' });
-        otherLabelEl.createSpan({ cls: 'ct-mobile-question-opt-name', text: q.options.length > 0 ? 'Other' : 'Answer' });
-        otherText = otherLabelEl.createEl('input', {
-          cls: 'ct-mobile-question-other-text',
-          attr: {
-            type: q.isSecret ? 'password' : 'text',
-            placeholder: q.isSecret ? 'Enter secret…' : 'Type your own answer…',
-            autocomplete: q.isSecret ? 'off' : 'on',
-          },
-        }) as HTMLInputElement;
-        otherText.addEventListener('input', () => {
-          if (otherInput && !otherInput.checked) otherInput.checked = true;
-        });
-        otherText.addEventListener('click', (e) => e.stopPropagation());
-      }
-
-      questionInputs.push({ answerKey: q.id ?? q.question, optionInputs, otherInput, otherText });
-    }
+    const collect = renderQuestionFields(body, pending.questions, MOBILE_QUESTION_CLASSES);
 
     const actions = card.createDiv('ct-mobile-question-actions');
     const submitBtn = actions.createEl('button', {
@@ -1004,18 +954,7 @@ export class MobileView extends ItemView {
       text: 'Submit',
     });
     submitBtn.addEventListener('click', () => {
-      const answers: Record<string, string> = {};
-      for (const { answerKey, optionInputs, otherInput, otherText } of questionInputs) {
-        const values: string[] = [];
-        for (const input of optionInputs) {
-          if (input.checked) values.push(input.value);
-        }
-        if (otherInput?.checked) {
-          const text = otherText?.value.trim();
-          if (text) values.push(text);
-        }
-        answers[answerKey] = values.join(',');
-      }
+      const answers = collect();
       this.relayClient!.sendCommand({
         type: 'resolve_question',
         threadId: pending.threadId,
