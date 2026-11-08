@@ -62,6 +62,16 @@ function bindRowClick(row: HTMLElement, inputEl: HTMLInputElement): void {
   });
 }
 
+/**
+ * In-memory draft of a question form's inputs, owned by the caller so it
+ * outlives the DOM (the Kanban board rebuilds cards wholesale when any thread
+ * changes). Never persisted. Free text of secret questions is deliberately
+ * not captured, so a secret is never held or re-rendered outside the live input.
+ */
+export interface QuestionDraft {
+  fields: Record<string, { checked: string[]; other: string }>;
+}
+
 interface FieldRefs {
   question: AskQuestion;
   optionInputs: HTMLInputElement[];
@@ -78,6 +88,7 @@ export function renderQuestionFields(
   body: HTMLElement,
   questions: AskQuestion[],
   classes: QuestionFormClasses = DESKTOP_QUESTION_CLASSES,
+  draft?: QuestionDraft,
 ): () => Record<string, string> {
   // Radio groups are document-scoped by name, so two forms on one page (the
   // Kanban board) must not share a group just because their question text matches.
@@ -127,10 +138,30 @@ export function renderQuestionFields(
         if (!other.checked) other.checked = true;
       });
       otherText.addEventListener('click', (e) => e.stopPropagation());
+      otherText.dataset.fieldKey = String(qi);
     }
 
     refs.push({ question: q, optionInputs, otherInput, otherText });
   });
+
+  if (draft) {
+    const save = (): void => {
+      refs.forEach(({ question, optionInputs, otherInput, otherText }, i) => {
+        const checked = optionInputs.filter((el) => el.checked).map((el) => el.value);
+        if (otherInput?.checked) checked.push('__other__');
+        draft.fields[String(i)] = { checked, other: question.isSecret ? '' : (otherText?.value ?? '') };
+      });
+    };
+    refs.forEach(({ optionInputs, otherInput, otherText }, i) => {
+      const saved = draft.fields[String(i)];
+      if (!saved) return;
+      for (const el of optionInputs) el.checked = saved.checked.includes(el.value);
+      if (otherInput) otherInput.checked = saved.checked.includes('__other__');
+      if (otherText && saved.other) otherText.value = saved.other;
+    });
+    body.addEventListener('change', save);
+    body.addEventListener('input', save);
+  }
 
   return () => {
     const result: Record<string, string> = {};

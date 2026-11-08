@@ -3,7 +3,7 @@ import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread, TaskItem } from './types';
 import { agentHarnessLabel } from './types';
-import { renderQuestionFields } from './QuestionForm';
+import { renderQuestionFields, type QuestionDraft } from './QuestionForm';
 import { approveProposedReply, discardProposedReply, takeProposedReplyForEdit } from './proposedReplyActions';
 import { answerPendingQuestions } from './questionActions';
 import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
@@ -93,6 +93,8 @@ export class KanbanView extends ItemView {
   private plugin: ClaudeThreadsPlugin;
   private manager: ThreadManager;
   private unsubscribe: (() => void) | null = null;
+  /** Half-answered inbox forms, keyed by `<threadId>:q` / `<threadId>:d:<decisionId>`; survives full rebuilds. */
+  private inboxDrafts = new Map<string, QuestionDraft>();
 
   private boardEl!: HTMLElement;
   private headerCountEl!: HTMLElement;
@@ -368,6 +370,7 @@ export class KanbanView extends ItemView {
     // guards against a regression of the v0.25.7 incremental-render fix).
     telemetry.recordKanbanFullRebuild();
     const scrollState = this.captureScrollState();
+    const focus = this.captureInboxFocus();
 
     this.boardEl.empty();
     this.activityEls.clear();
@@ -417,6 +420,44 @@ export class KanbanView extends ItemView {
     this.updateHeader(threads.length, runningCount);
 
     this.restoreScrollState(scrollState);
+    this.restoreInboxFocus(focus);
+    this.pruneInboxDrafts();
+  }
+
+  /** Remembers which inbox text field (and caret) has focus so a rebuild doesn't drop mid-typing. */
+  private captureInboxFocus(): { draftKey: string; fieldKey: string; start: number | null; end: number | null } | null {
+    const ae = document.activeElement;
+    if (!(ae instanceof HTMLInputElement) || !this.boardEl.contains(ae)) return null;
+    const draftKey = ae.closest<HTMLElement>('[data-draft-key]')?.dataset.draftKey;
+    const fieldKey = ae.dataset.fieldKey;
+    if (!draftKey || fieldKey === undefined) return null;
+    return { draftKey, fieldKey, start: ae.selectionStart, end: ae.selectionEnd };
+  }
+
+  private restoreInboxFocus(focus: ReturnType<KanbanView['captureInboxFocus']>): void {
+    if (!focus) return;
+    for (const body of Array.from(this.boardEl.querySelectorAll<HTMLElement>('[data-draft-key]'))) {
+      if (body.dataset.draftKey !== focus.draftKey) continue;
+      const input = body.querySelector<HTMLInputElement>(`input[data-field-key="${focus.fieldKey}"]`);
+      if (!input) return;
+      input.focus({ preventScroll: true });
+      if (focus.start !== null && focus.end !== null) {
+        try { input.setSelectionRange(focus.start, focus.end); } catch { /* password inputs may refuse */ }
+      }
+      return;
+    }
+  }
+
+  /** Drops drafts whose question or decision no longer exists (answered, cleared, thread gone). */
+  private pruneInboxDrafts(): void {
+    for (const key of Array.from(this.inboxDrafts.keys())) {
+      const [threadId, kind, decisionId] = key.split(':');
+      const thread = this.manager.getThread(threadId);
+      const alive = !!thread && (kind === 'q'
+        ? (thread.pendingQuestions?.length ?? 0) > 0
+        : (thread.pendingDecisions ?? []).some((d) => d.id === decisionId));
+      if (!alive) this.inboxDrafts.delete(key);
+    }
   }
 
   /**
@@ -982,6 +1023,12 @@ export class KanbanView extends ItemView {
     attachThreadArchiveMenu(card, thread.id, this.archiveMenuDeps());
   }
 
+  private draftFor(key: string): QuestionDraft {
+    let d = this.inboxDrafts.get(key);
+    if (!d) { d = { fields: {} }; this.inboxDrafts.set(key, d); }
+    return d;
+  }
+
   /** Hides the inbox container when it has nothing to show (no question, decision or reply). */
   private syncInboxVisibility(thread: Thread): void {
     const inbox = this.replyEls.get(thread.id)?.parentElement;
@@ -1003,11 +1050,14 @@ export class KanbanView extends ItemView {
       return;
     }
     const body = block.createDiv('ct-kanban-question-body');
-    const collect = renderQuestionFields(body, questions);
+    const draftKey = `${thread.id}:q`;
+    body.dataset.draftKey = draftKey;
+    const collect = renderQuestionFields(body, questions, undefined, this.draftFor(draftKey));
     const actions = block.createDiv('ct-kanban-inbox-actions');
     const submit = actions.createEl('button', { cls: 'ct-kanban-inbox-btn ct-kanban-inbox-primary', text: 'Submit', attr: { type: 'button' } });
     submit.addEventListener('click', () => {
       submit.disabled = true;
+      this.inboxDrafts.delete(draftKey);
       try {
         answerPendingQuestions(questionAnswerDeps(this.manager, () => this.plugin.saveSettings()), thread.id, questions, collect());
       } catch (err) {
@@ -1040,7 +1090,9 @@ export class KanbanView extends ItemView {
       const from = this.manager.getThread(decision.sourceThreadId)?.title;
       head.createSpan({ cls: 'ct-kanban-inbox-label', text: from ? `Decision for you · ${from}` : 'Decision for you' });
       const body = el.createDiv('ct-kanban-question-body');
-      const collect = renderQuestionFields(body, [decisionToQuestion(decision)]);
+      const draftKey = `${thread.id}:d:${decision.id}`;
+      body.dataset.draftKey = draftKey;
+      const collect = renderQuestionFields(body, [decisionToQuestion(decision)], undefined, this.draftFor(draftKey));
       const actions = el.createDiv('ct-kanban-inbox-actions');
       const submit = actions.createEl('button', { cls: 'ct-kanban-inbox-btn ct-kanban-inbox-primary', text: 'Send answer', attr: { type: 'button' } });
       submit.addEventListener('click', async () => {
@@ -1052,6 +1104,7 @@ export class KanbanView extends ItemView {
         submit.disabled = true;
         try {
           await this.manager.answerDecision(thread.id, decision.id, answer);
+          this.inboxDrafts.delete(draftKey);
           void this.plugin.saveSettings();
         } catch (err) {
           submit.disabled = false;

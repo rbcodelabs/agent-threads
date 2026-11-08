@@ -3,7 +3,7 @@
  */
 import '../setup/obsidian-dom';
 import { describe, expect, it } from 'vitest';
-import { MOBILE_QUESTION_CLASSES, renderQuestionFields } from '../../src/QuestionForm';
+import { MOBILE_QUESTION_CLASSES, renderQuestionFields, type QuestionDraft } from '../../src/QuestionForm';
 import type { AskQuestion } from '../../src/types';
 
 const single: AskQuestion = { question: 'Which?', header: 'Pick', options: [{ label: 'A', description: 'first' }, { label: 'B', description: '' }], multiSelect: false };
@@ -51,5 +51,31 @@ describe('renderQuestionFields', () => {
     renderQuestionFields(body, [single], MOBILE_QUESTION_CLASSES);
     expect(body.querySelector('.ct-mobile-question-title')?.textContent).toBe('Pick');
     expect(body.querySelector('.ct-mobile-question-other-text')).not.toBeNull();
+  });
+
+  it('restores selections and typed text from a draft after the form is rebuilt', () => {
+    const draft: QuestionDraft = { fields: {} };
+    const first = document.createElement('div');
+    renderQuestionFields(first, [single], undefined, draft);
+    first.querySelectorAll<HTMLInputElement>('input[type=radio]')[1].click();
+    first.querySelector<HTMLInputElement>('.ct-question-row, .ct-question-option')!.click();
+    const text = first.querySelector<HTMLInputElement>('input.ct-question-other-text')!;
+    text.value = 'my own';
+    text.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const rebuilt = document.createElement('div');
+    const collect = renderQuestionFields(rebuilt, [single], undefined, draft);
+    expect(rebuilt.querySelector<HTMLInputElement>('input.ct-question-other-text')!.value).toBe('my own');
+    expect(collect()['Which?']).toBeTruthy();
+  });
+
+  it('never captures secret text into a draft', () => {
+    const draft: QuestionDraft = { fields: {} };
+    const body = document.createElement('div');
+    renderQuestionFields(body, [{ ...single, options: [], isSecret: true }], undefined, draft);
+    const text = body.querySelector<HTMLInputElement>('input.ct-question-other-text')!;
+    text.value = 'hunter2';
+    text.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(JSON.stringify(draft)).not.toContain('hunter2');
   });
 });
