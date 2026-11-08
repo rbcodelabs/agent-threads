@@ -18,6 +18,7 @@ import { getHeaderUpdateCalls, mockLeaf } from './obsidian-mock';
 import { Platform } from 'obsidian';
 import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
 import { createDesignSlashCommand } from './design-plugin/designSlashCommand';
+import { applyGalleryFixtures } from './gallery-fixtures';
 
 const settings = { ...DEFAULT_SETTINGS, claudeBinaryPath: '/opt/homebrew/bin/claude' };
 const dashboardMode = new URLSearchParams(window.location.search).has('dashboard');
@@ -77,6 +78,10 @@ if (new URLSearchParams(window.location.search).has('inbox')) {
   const noted = byTitle('Fix auth middleware 401s');
   if (noted) noted.managerNotes = 'Goal: fix 401s\nStatus: done, PR merged';
 }
+// ?gallery=1 gives existing fixture threads tool-result images for Gallery mode.
+if (new URLSearchParams(window.location.search).has('gallery')) applyGalleryFixtures(kanbanFixtureThreads);
+// ?narrow=1 sizes #app to the viewport so a 390px screenshot is really 390px wide.
+if (new URLSearchParams(window.location.search).has('narrow')) document.body.classList.add('ct-harness-narrow');
 manager.loadThreads(kanbanFixtureThreads);
 // Restore intentionally marks persisted non-terminal runs unavailable. Turn this
 // deterministic fixture back into a live run after hydration.
@@ -117,6 +122,8 @@ pendingWakeups.set(kanbanWaitingThreadId, [{ timerId: 0, fireAt: kanbanWaitingFi
 /** Times a "New thread" button asked the plugin to open the conversation panel in new-conversation mode. */
 const newConversationCalls: unknown[][] = [];
 const openedAgentTeams: string[] = [];
+/** Threads opened from a card (title link, card click), in order. */
+const openedThreadIds: string[] = [];
 /** Threads archived via the right-click menu, in order — asserted by ui.spec.ts. */
 const archivedThreadIds: string[] = [];
 let saveSettingsCalls = 0;
@@ -146,7 +153,7 @@ const mockPlugin = {
   persistence: null,
   saveSettings: async () => { saveSettingsCalls += 1; },
   getActiveThreadId: () => null,
-  openThreadInChatView: async () => {},
+  openThreadInChatView: async (threadId: string) => { openedThreadIds.push(threadId); },
   loadArchivedThreads: async () => archivedFixtures.filter(thread => !restoredThreadIds.includes(thread.id)),
   restoreArchivedThread: async (thread: { id: string }) => { restoredThreadIds.push(thread.id); },
   openAgentTeamInChatView: async (threadId: string) => { openedAgentTeams.push(threadId); },
@@ -191,6 +198,7 @@ void view.onOpen();
 (window as any).__manager = manager;
 (window as any).__newConversationCalls = newConversationCalls;
 (window as any).__openedAgentTeams = openedAgentTeams;
+(window as any).__openedThreadIds = openedThreadIds;
 (window as any).__archivedThreadIds = archivedThreadIds;
 (window as any).__getSaveSettingsCalls = () => saveSettingsCalls;
 (window as any).__getRestoredThreadIds = () => restoredThreadIds;
@@ -220,7 +228,7 @@ void view.onOpen();
   (manager as unknown as { emit(threadId: string, event: { type: string; agentRuns: unknown[] }): void })
     .emit(threadId, { type: 'agent_runs_changed', agentRuns: manager.getAgentRuns(threadId) });
 };
-(window as any).__setGroupBy = (mode: 'status' | 'folder' | 'project') => {
+(window as any).__setGroupBy = (mode: 'status' | 'folder' | 'project' | 'gallery') => {
   if (dashboardMode) return;
   settings.kanbanGroupBy = mode;
   (view as KanbanView).render();

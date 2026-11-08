@@ -59,6 +59,10 @@
       flex-direction: column;
     }
 
+    /* ?narrow=1: the app fills the viewport so a 390px screenshot is a real 390px layout */
+    body.ct-harness-narrow { display: block; min-height: 0; }
+    body.ct-harness-narrow #app { width: 100vw; height: 100vh; border-radius: 0; box-shadow: none; }
+
     /* Make the plugin's containerEl fill the #app div */
     #app > div {
       flex: 1;
