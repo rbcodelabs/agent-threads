@@ -6167,10 +6167,19 @@
 }
 
 /* ── Project columns ───────────────────────────────────────────────────── */
-/* .ct-kanban-project-col renders in the plain (non-swimlane) .ct-kanban-board,
-   so it already gets full-height sizing for free from the base .ct-kanban-col
-   rule above (flex: 1 1 230px; min-width: 230px; max-width: 380px; max-height: 100%) —
-   no override needed. */
+/* Fixed-width columns: the base .ct-kanban-col (flex: 1 1 230px; max-width: 380px)
+   lets project columns grow/shrink with the viewport, so their width varies with
+   the column count. Pin them to 300px so the board scrolls horizontally instead.
+   The column still gets full-height sizing and its own vertical scroll from the
+   base .ct-kanban-col / .ct-kanban-col-body rules. The compound selector is
+   required: the base .ct-kanban-col rule is declared later in this file, so a
+   bare .ct-kanban-project-col (same specificity) would lose the cascade. */
+.ct-kanban-col.ct-kanban-project-col {
+  flex: 0 0 300px;
+  width: 300px;
+  min-width: 300px;
+  max-width: 300px;
+}
 
 .ct-kanban-project-section {
   display: flex;
