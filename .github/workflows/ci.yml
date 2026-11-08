@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -73,4 +74,55 @@ jobs:
           path: |
             playwright-report/
             test-results/
+          retention-days: 14
+
+  real-app:
+    name: Real App (Geode)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Runs the built plugin inside the real Geode app (Electron under xvfb) via a pinned Geode checkout.
+    # See scripts/geode-harness.mts and test/real-app/geode-pin.json.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '25' # Geode's own CI node version; its build is verified there.
+          cache: 'npm'
+
+      - name: Cache the Geode checkout and Electron binary
+        uses: actions/cache@v4
+        with:
+          path: |
+            .geode-harness
+            ~/.cache/electron
+          key: geode-harness-${{ runner.os }}-${{ hashFiles('test/real-app/geode-pin.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install xvfb and Electron runtime libraries
+        run: |
+          pkgs="xvfb xauth libgtk-3-0t64 libnss3 libgbm1 libasound2t64 libxss1 libxtst6 libatk-bridge2.0-0t64 libdrm2 libxkbcommon0 libcups2t64"
+          missing=""
+          for p in $pkgs; do dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"; done
+          if [ -n "$missing" ]; then
+            sudo apt-get install -y -qq --no-install-recommends $missing \
+              || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends $missing; }
+          fi
+
+      - name: Build the plugin
+        run: npm run build
+
+      - name: Real-app tests
+        run: xvfb-run -a npm run test:real-app
+
+      - name: Upload Playwright results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-app-results
+          path: test-results/
           retention-days: 14

@@ -1,0 +1,5 @@
+{
+  "repo": "https://github.com/rbcodelabs/geode.git",
+  "ref": "20b5c9f4d9e380503882cdacfc82cfd23f7de902",
+  "note": "Geode commit providing packages/plugin-test (PR rbcodelabs/geode#452). Pinned to the merge commit."
+}
