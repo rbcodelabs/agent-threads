@@ -178,7 +178,7 @@ describe('orchestrators.dispatch queueIfBusy', () => {
     expect(h.sendMessage).toHaveBeenCalledTimes(2);
     h.emit('orch', { type: 'done' });
     const [a, b] = await Promise.all([h.api.threads.wait(first.runId), h.api.threads.wait(second.runId)]);
-    expect([a.status, b.status]).toEqual(['completed', 'completed']);
+    expect([a.status, b.status]).toEqual(['completed', 'completed']); await flush();
     expect(h.events.filter(e => e.kind === 'run.completed').map(e => e.runId).sort()).toEqual([first.runId, second.runId].sort());
   });
 
