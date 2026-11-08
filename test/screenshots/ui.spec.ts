@@ -428,7 +428,22 @@ test.describe('Agent Threads UI', () => {
     await expect(page.locator('.menu .menu-item')).toHaveText(['Retry']);
     await page.evaluate(() => document.querySelectorAll('.menu').forEach((m) => m.remove()));
     await expect(page.locator('.menu')).toHaveCount(0);
-    await userMessages.last().click({ button: 'right' });
+    // The menu opens at the pointer, so the click point must not depend on scroll/reflow still settling:
+    // wait until the latest user row has held the same position for ~10 frames.
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      const rows = document.querySelectorAll('.ct-message-user');
+      const el = rows[rows.length - 1] as HTMLElement;
+      let last = -1;
+      let stable = 0;
+      const tick = (): void => {
+        const top = el.getBoundingClientRect().top;
+        if (top === last) { if (++stable >= 10) return resolve(); } else { stable = 0; last = top; }
+        requestAnimationFrame(tick);
+      };
+      tick();
+    }));
+    // Fixed offset inside the row (not its centre): the menu opens at the pointer, and the row's height can vary by a pixel or two.
+    await userMessages.last().click({ button: 'right', position: { x: 200, y: 12 } });
     await expect(page.locator('.menu .menu-item')).toHaveText(['Retry', 'Set as goal']);
     await shot(page, 'set-as-goal-context-menu.png', { fullPage: true });
   });
