@@ -286,4 +286,66 @@ describe('OrchestratorWakeup', () => {
     expect(sendMessage).toHaveBeenCalledOnce();
     expect(sendMessage).toHaveBeenCalledWith('new-orchestrator', expect.stringContaining('project-a-new'));
   });
+
+  describe('delegation suppression', () => {
+    it('ignores events while suspended and sends nothing', async () => {
+      const { manager, emit } = makeManager({ 'thread-1': 'T' });
+      let suspended = true;
+      const { deps, sendMessage, setTimeoutFn, runTimer } = makeDeps({ isSuspended: () => suspended });
+      const wakeup = new OrchestratorWakeup(manager, deps);
+      wakeup.start();
+
+      emit('thread-1', { type: 'done' });
+      expect(setTimeoutFn).not.toHaveBeenCalled();
+      runTimer();
+      await Promise.resolve();
+      expect(sendMessage).not.toHaveBeenCalled();
+      suspended = false;
+    });
+
+    it('discardAll drops pending batches and timers; later events ping exactly once (no double ping)', async () => {
+      const { manager, emit } = makeManager({ 'thread-1': 'T' });
+      let suspended = false;
+      const clearTimeoutFn = vi.fn();
+      const { deps, sendMessage, runTimer } = makeDeps({ isSuspended: () => suspended, clearTimeoutFn });
+      const wakeup = new OrchestratorWakeup(manager, deps);
+      wakeup.start();
+
+      emit('thread-1', { type: 'done' }); // pending + armed
+      suspended = true;
+      wakeup.discardAll();
+      expect(clearTimeoutFn).toHaveBeenCalled();
+      emit('thread-1', { type: 'done' }); // ignored while suspended
+      runTimer();
+      await Promise.resolve();
+      expect(sendMessage).not.toHaveBeenCalled();
+
+      suspended = false; // delegate disposed
+      emit('thread-1', { type: 'done' });
+      runTimer();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not send when suspension begins while a flush is resolving its target', async () => {
+      const { manager, emit } = makeManager({ 'thread-1': 'T' });
+      let suspended = false;
+      let release!: (id: string) => void;
+      const { deps, sendMessage, runTimer } = makeDeps({
+        isSuspended: () => suspended,
+        resolveTarget: () => new Promise<string>((resolve) => { release = resolve; }),
+      });
+      const wakeup = new OrchestratorWakeup(manager, deps);
+      wakeup.start();
+
+      emit('thread-1', { type: 'done' });
+      runTimer();
+      suspended = true;
+      wakeup.discardAll();
+      release('orchestrator-thread');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+  });
 });
