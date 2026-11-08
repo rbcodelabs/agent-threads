@@ -15,7 +15,7 @@ const run = (cmd: string, args: string[], cwd: string) => execFileSync(cmd, args
 export function ensureGeode(): string {
   if (process.env.GEODE_REPO) return process.env.GEODE_REPO;
   const dir = process.env.GEODE_HARNESS_DIR ?? path.join(root, '.geode-harness');
-  if (!existsSync(path.join(dir, '.git'))) run('git', ['clone', '--no-checkout', pin.repo, dir], root);
+  if (!existsSync(path.join(dir, '.git'))) run('git', ['clone', pin.repo, dir], root);
   const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir }).toString().trim();
   if (head !== pin.ref) {
     run('git', ['fetch', 'origin', pin.ref], dir);
