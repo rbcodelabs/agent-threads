@@ -20,7 +20,7 @@ Listen for `claude-threads:api-ready` and `claude-threads:api-stopping`, reacqui
 
 ## Orchestrators
 
-`orchestrators.list()` returns `OrchestratorSnapshot` entries, each with `enabled: boolean`. The portfolio orchestrator is always `enabled: true`. A Project orchestrator is `enabled: false` when the Project's orchestrator is switched off; a disabled Project is still listed if its orchestrator thread exists.
+`orchestrators.list()` returns `OrchestratorSnapshot` entries, each with `enabled: boolean`. The portfolio orchestrator is always `enabled: true`. A Project orchestrator is `enabled: false` when the Project's orchestrator is switched off; a disabled Project is always listed. When it has no orchestrator thread (archiving the orchestrator disables it and clears the thread), the entry is `{ id: 'project:<id>', kind: 'project', projectId, threadId: '', title: '<project name> orchestrator', enabled: false }`: `threadId` is the empty string only for these thread-less disabled entries, so consumers should dispatch by `id`. An enabled Project with no orchestrator thread is absent from the list, which lets a peer tell "disabled" (listed, `enabled: false`) from "never created or creation failed" (absent while its Project exists). Deleted Projects are absent.
 
 `orchestrators.dispatch(target, input)` sends a prompt to an orchestrator thread (created on demand for an enabled target). A target whose `enabled` is `false` fails with `ORCHESTRATOR_NOT_FOUND` before anything is created.
 

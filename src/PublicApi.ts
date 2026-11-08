@@ -74,7 +74,7 @@ export interface ConstrainedQueryInput { readonly prompt: string; readonly optio
 export interface ConstrainedQueryOutput { readonly output: string; readonly usage: PublicUsage }
 export interface OrchestratorSnapshot {
   readonly id: string; readonly kind: 'portfolio' | 'project'; readonly threadId: string; readonly title: string; readonly projectId?: string;
-  /** Portfolio: always true. Project: false when the Project's orchestrator is disabled; `dispatch` to a disabled target fails with `ORCHESTRATOR_NOT_FOUND`. */
+  /** Portfolio: always true. Project: false when the Project's orchestrator is disabled; `dispatch` to a disabled target fails with `ORCHESTRATOR_NOT_FOUND`. A disabled Project with no thread is still listed, with `threadId: ''` (dispatch by `id`). */
   readonly enabled: boolean;
 }
 export interface OrchestratorTarget { readonly id: string }

@@ -3295,6 +3295,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
     for (const project of this.manager.getProjects()) {
       const thread = project.orchestratorThreadId ? this.manager.getThread(project.orchestratorThreadId) : undefined;
       if (thread) result.push({ id: `project:${project.id}`, kind: 'project', projectId: project.id, threadId: thread.id, title: thread.title, enabled: project.orchestratorEnabled !== false });
+      // A disabled Project has no thread (archiving clears it). List it anyway so a peer can tell
+      // "disabled" from "never created / creation failed" (absent while the Project exists).
+      else if (project.orchestratorEnabled === false) result.push({ id: `project:${project.id}`, kind: 'project', projectId: project.id, threadId: '', title: `${project.name} orchestrator`, enabled: false });
     }
     return result;
   }
