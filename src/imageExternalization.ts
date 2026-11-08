@@ -80,6 +80,20 @@ export function buildAttachmentPath(
 }
 
 /**
+ * Vault-relative path of the 160px WebP thumbnail sidecar for an externalized
+ * image: `<messageId>-<index>.thumb.webp` in the same per-thread folder, so
+ * removing the thread's attachment directory removes the sidecars too.
+ */
+export function buildThumbPath(
+  vaultFolder: string,
+  threadId: string,
+  messageId: string,
+  index: number,
+): string {
+  return `${attachmentDirForThread(vaultFolder, threadId)}/${messageId}-${index}.thumb.webp`;
+}
+
+/**
  * Returns a copy of `images` with base64 dropped from every ref that already
  * has a `path`. Returns the SAME array reference when nothing needs stripping,
  * so callers can cheaply detect "unchanged" and avoid cloning the message.

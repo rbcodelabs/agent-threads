@@ -25,6 +25,7 @@ import { stripLegacySandboxThreadFields } from './legacySandboxVm';
 import { resolveGitProjectName } from './pathUtils';
 import { legacyWorktreeRoot, resolveWorktreeRoot } from './worktreePaths';
 import { debugLog } from './logger';
+import { ThumbnailService, defaultThumbnailGenerator, type ThumbnailGenerator } from './thumbnails';
 import { codexSkillRoots, buildSkillPlugins } from './skillManager';
 import { pluginSkillsRootFrom } from './skillPaths';
 import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
@@ -379,6 +380,8 @@ export class ThreadManager {
   private rawLogWriter: RawLogWriter;
   /** Writes message images out to vault attachment files (ADR-0003, PR 1). */
   private attachmentWriter: AttachmentStore;
+  /** 160px gallery thumbnails: capture-time generation plus lazy backfill (desktop only). */
+  private thumbnails: ThumbnailService;
   /** Injectable filesystem for artifact-storage GC; defaults to the real one. */
   artifactStorageFs?: ArtifactStorageFs;
   /**
@@ -394,13 +397,18 @@ export class ThreadManager {
    * `attachmentStore` is the host's image-file writer (see `src/host/`). The
    * default leaves images inline, which is the behavior in tests and on mobile.
    */
-  constructor(settings: PluginSettings, attachmentStore: AttachmentStore = NULL_ATTACHMENT_STORE) {
+  constructor(
+    settings: PluginSettings,
+    attachmentStore: AttachmentStore = NULL_ATTACHMENT_STORE,
+    thumbnailGenerator: ThumbnailGenerator = defaultThumbnailGenerator,
+  ) {
     this.settings = settings;
     this.rawLogWriter = new RawLogWriter(
       () => this.vaultRoot,
       () => this.settings.vaultFolder,
     );
     this.attachmentWriter = attachmentStore;
+    this.thumbnails = new ThumbnailService({ generate: thumbnailGenerator, store: attachmentStore, log: debugLog });
   }
 
   updateSettings(settings: PluginSettings): void {
@@ -488,13 +496,50 @@ export class ThreadManager {
     });
     message.toolResultImages?.forEach((img, index) => {
       if (img.data && !img.path) {
+        const data = img.data;
         void this.attachmentWriter
-          .write(threadId, message.id, index, img.mediaType, img.data)
+          .write(threadId, message.id, index, img.mediaType, data)
           .then((p) => {
-            if (p) img.path = p;
+            if (!p) return;
+            img.path = p;
+            // Gallery thumbnail sidecar, after the full image is safely on disk.
+            return this.thumbnails
+              .ensure({ threadId, messageId: message.id, index, source: { mediaType: img.mediaType, base64: data } })
+              .then((tp) => {
+                if (tp) img.thumbPath = tp;
+              });
           });
       }
     });
+  }
+
+  /**
+   * Lazy gallery backfill: make sure one tool-result image has a thumbnail
+   * sidecar, generating it from `sourceUrl` (the full-size file's resource URL)
+   * when only the path exists. Returns the thumbnail's vault path, or null when
+   * unavailable (mobile, private thread, generation failed): callers then fall
+   * back to the full image. Bounded to 2 concurrent jobs by ThumbnailService.
+   */
+  async ensureImageThumbnail(
+    threadId: string,
+    messageId: string,
+    index: number,
+    sourceUrl?: string,
+  ): Promise<string | null> {
+    const thread = this.threads.get(threadId);
+    if (!thread || thread.private) return null;
+    const img = thread.messages.find((m) => m.id === messageId)?.toolResultImages?.[index];
+    if (!img) return null;
+    if (img.thumbPath) return img.thumbPath;
+    const tp = await this.thumbnails.ensure({
+      threadId,
+      messageId,
+      index,
+      isPrivate: thread.private,
+      source: { mediaType: img.mediaType, base64: img.data, url: img.data ? undefined : sourceUrl },
+    });
+    if (tp) img.thumbPath = tp;
+    return tp;
   }
 
   /**
