@@ -112,7 +112,7 @@ describe('checked-in consumer declaration', () => {
       getTraceMetadata: async () => null, readTraceChunk: async () => null,
       runConstrainedQuery: vi.fn(),
       registerMcpServer: vi.fn(), requestSecret: vi.fn(),
-      archiveThread: vi.fn(), markThreadReviewed: vi.fn(),
+      archiveThread: vi.fn(), markThreadReviewed: vi.fn(), setWakeupDelegated: vi.fn(),
       artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(), messageContentProviders: new MessageContentProviderRegistry(),
       agentTools: new AgentToolRegistry(), slashCommands: new SlashCommandRegistry(), getDefaultPermissionMode: () => 'default',
     } as never).api;
@@ -121,7 +121,7 @@ describe('checked-in consumer declaration', () => {
     // flag for an option of `artifacts.allocateStorage`, not an operation.
     const expected = [
       ...Object.entries(runtimeSurface())
-        .flatMap(([namespace, methods]) => namespace === 'agentTools' ? ['agentTools.voice-orchestration'] : methods.map(method => `${namespace}.${method}`)),
+        .flatMap(([namespace, methods]) => namespace === 'agentTools' ? ['agentTools.voice-orchestration'] : methods.map(method => `${namespace}.${method === 'delegateWakeup' ? 'wakeup.delegate' : method}`)),
       'artifacts.visibleStorage',
     ].sort();
     expect([...api.capabilities].sort()).toEqual(expected);

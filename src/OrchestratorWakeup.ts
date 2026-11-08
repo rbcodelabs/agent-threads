@@ -35,6 +35,12 @@ export interface OrchestratorWakeupDeps {
   onWarn?: (message: string) => void;
   /** Called when sendMessage rejects. */
   onError?: (error: unknown) => void;
+  /**
+   * True while a plugin has delegated wake-up (public API
+   * `orchestrators.delegateWakeup`). Events are ignored and nothing is sent
+   * while it returns true; absent means never suspended.
+   */
+  isSuspended?: () => boolean;
 }
 
 const DEFAULT_DEBOUNCE_MS = 12_000;
@@ -79,12 +85,26 @@ export class OrchestratorWakeup {
     this.generations.set(bucket, this.generation(bucket) + 1);
   }
 
+  /**
+   * Drops every queued batch and timer (used when wake-up is delegated away).
+   * In-flight flushes are stopped by the `isSuspended` checks in `flush`.
+   */
+  discardAll(): void {
+    const buckets = new Set<string>([...this.timers.keys(), ...this.pending.keys(), ...this.generations.keys()]);
+    for (const bucket of buckets) this.invalidateBucket(bucket);
+  }
+
+  private suspended(): boolean {
+    return this.deps.isSuspended?.() === true;
+  }
+
   private generation(bucket: string): number {
     return this.generations.get(bucket) ?? 0;
   }
 
   private onEvent(threadId: string, event: ThreadEvent): void {
     if (event.type !== 'done' && event.type !== 'error') return;
+    if (this.suspended()) return;
 
     const bucket = this.deps.resolveBucket(threadId);
     if (!bucket) return;
@@ -114,6 +134,7 @@ export class OrchestratorWakeup {
   }
 
   private async flush(bucket: string): Promise<void> {
+    if (this.suspended()) { this.pending.delete(bucket); return; }
     const generation = this.generation(bucket);
     // Snapshot before clearing — building the message reads this data, so
     // clearing first (as this used to do) would silently drop it.
@@ -123,7 +144,7 @@ export class OrchestratorWakeup {
 
     const isCurrent = () => this.generation(bucket) === generation;
     const resolvedTarget = await this.deps.resolveTarget(bucket, isCurrent);
-    if (this.generation(bucket) !== generation) return;
+    if (this.generation(bucket) !== generation || this.suspended()) return;
     if (!resolvedTarget) {
       this.deps.onWarn?.(`Orchestrator wake-up: no target available for ${bucket}, skipping`);
       return;
@@ -138,7 +159,7 @@ export class OrchestratorWakeup {
     if (typeof resolvedTarget !== 'string' && resolvedTarget.summaryOnly) {
       const projectId = bucket.startsWith('project:') ? bucket.slice('project:'.length) : 'unknown';
       try {
-        if (this.generation(bucket) !== generation) return;
+        if (this.generation(bucket) !== generation || this.suspended()) return;
         await this.deps.sendMessage(orchestratorId, `New activity in Project ${projectId} — the Project orchestrator could not be reached.`);
       } catch (err) {
         this.deps.onError?.(err);
@@ -161,7 +182,7 @@ export class OrchestratorWakeup {
     ].join('\n');
 
     try {
-      if (this.generation(bucket) !== generation) return;
+      if (this.generation(bucket) !== generation || this.suspended()) return;
       await this.deps.sendMessage(orchestratorId, message);
     } catch (err) {
       this.deps.onError?.(err);

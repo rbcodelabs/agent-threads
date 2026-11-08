@@ -316,6 +316,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
   statusLine: import('./StatusLineService').StatusLineService | null = null;
   gitDiff: import('./GitDiffService').GitDiffService | null = null;
   orchestratorWakeup: import('./OrchestratorWakeup').OrchestratorWakeup | null = null;
+  /** True while a peer plugin holds a public-API wake-up delegation; core wake-up pings are suppressed. */
+  wakeupDelegated = false;
   documentWatch: import('./DocumentWatchService').DocumentWatchService | null = null;
   agentBrowser: import('./agentBrowser/AgentBrowserPool').AgentBrowserPool | null = null;
   /**
@@ -1546,6 +1548,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         },
         threadExists: (id) => !!this.manager.getThread(id),
         sendMessage: (id, text) => this.manager.sendMessage(id, text),
+        isSuspended: () => this.wakeupDelegated,
         onWarn: (message) => console.warn(`[ClaudeThreads] ${message}`),
         onError: (err) => console.error('[ClaudeThreads] Orchestrator wake-up sendMessage failed:', err),
       });
@@ -3202,6 +3205,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
       subscribe: (listener) => this.manager.subscribe(listener),
       listOrchestrators: () => this.listPublicOrchestrators(),
       resolveOrchestrator: (target) => this.resolvePublicOrchestrator(target),
+      setWakeupDelegated: (delegated) => {
+        this.wakeupDelegated = delegated;
+        if (delegated) this.orchestratorWakeup?.discardAll();
+      },
       triggerHostEvent: (name, payload) => {
         const workspace = this.app.workspace as unknown as { trigger(event: string, payload: unknown): void };
         workspace.trigger(name, payload);
@@ -3284,10 +3291,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const result: OrchestratorSnapshot[] = [];
     const portfolioId = this.settings.orchestratorThreadId;
     const portfolio = portfolioId ? this.manager.getThread(portfolioId) : undefined;
-    if (portfolio) result.push({ id: 'portfolio', kind: 'portfolio', threadId: portfolio.id, title: portfolio.title });
+    if (portfolio) result.push({ id: 'portfolio', kind: 'portfolio', threadId: portfolio.id, title: portfolio.title, enabled: true });
     for (const project of this.manager.getProjects()) {
       const thread = project.orchestratorThreadId ? this.manager.getThread(project.orchestratorThreadId) : undefined;
-      if (thread) result.push({ id: `project:${project.id}`, kind: 'project', projectId: project.id, threadId: thread.id, title: thread.title });
+      if (thread) result.push({ id: `project:${project.id}`, kind: 'project', projectId: project.id, threadId: thread.id, title: thread.title, enabled: project.orchestratorEnabled !== false });
     }
     return result;
   }
@@ -3299,7 +3306,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
     if (!target.id.startsWith('project:')) return null;
     const projectId = target.id.slice('project:'.length);
-    if (!projectId || !this.manager.getProject(projectId)) return null;
+    const project = projectId ? this.manager.getProject(projectId) : undefined;
+    if (!project) return null;
+    // Refuse before ensureProjectOrchestratorThread: it would create a thread for a Project whose orchestrator is switched off.
+    if (project.orchestratorEnabled === false) return null;
     return (await this.ensureProjectOrchestratorThread(projectId, false)) ?? null;
   }
 

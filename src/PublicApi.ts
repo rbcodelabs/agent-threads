@@ -36,6 +36,13 @@ export interface ProvisionalThreadHandle {
   rollback(): Promise<ProvisionalRollbackResult>;
 }
 export interface SendInput extends CorrelationInput { readonly prompt: string }
+/**
+ * `orchestrators.dispatch` input. `queueIfBusy: true` hands the prompt to the
+ * host's normal message path even when the target thread is mid-turn (it joins
+ * the running generation / queue) instead of failing with `THREAD_BUSY`.
+ * Omitted or `false` keeps the `THREAD_BUSY` behaviour.
+ */
+export interface DispatchInput extends SendInput { readonly queueIfBusy?: boolean }
 export interface WaitOptions { readonly timeoutMs?: number }
 export type RunResult =
   | { readonly status: 'completed'; readonly runId: string; readonly threadId: string; readonly finalMessage?: MessageSnapshot; readonly usage?: PublicUsage }
@@ -65,7 +72,11 @@ export interface CorrelatedResource { readonly resourceId: string; readonly fing
 export interface PublicApiPersistedState { readonly version: 1; readonly creates: Record<string, string | CorrelatedResource>; readonly sends: Record<string, string | CorrelatedResource>; readonly runs: Record<string, PersistedThreadRun>; readonly constrained: Record<string, ConstrainedRunResult>; readonly constrainedKeys: Record<string, string | CorrelatedResource> }
 export interface ConstrainedQueryInput { readonly prompt: string; readonly options: { readonly model: string; readonly systemInstructions: string; readonly maxTurns: 1; readonly maxBudgetUsd: number; readonly timeoutMs: number }; readonly signal: AbortSignal }
 export interface ConstrainedQueryOutput { readonly output: string; readonly usage: PublicUsage }
-export interface OrchestratorSnapshot { readonly id: string; readonly kind: 'portfolio' | 'project'; readonly threadId: string; readonly title: string; readonly projectId?: string }
+export interface OrchestratorSnapshot {
+  readonly id: string; readonly kind: 'portfolio' | 'project'; readonly threadId: string; readonly title: string; readonly projectId?: string;
+  /** Portfolio: always true. Project: false when the Project's orchestrator is disabled; `dispatch` to a disabled target fails with `ORCHESTRATOR_NOT_FOUND`. */
+  readonly enabled: boolean;
+}
 export interface OrchestratorTarget { readonly id: string }
 export interface AgentToolDefinition { readonly type: 'function'; readonly name: string; readonly description: string; readonly parameters: Readonly<Record<string, unknown>> }
 export interface AgentToolBundle { readonly tools: readonly AgentToolDefinition[]; execute(name: string, args: Record<string, unknown>): Promise<string> }
@@ -138,7 +149,18 @@ export interface ClaudeThreadsApiV1 {
   };
   readonly traces: { listSources(options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceSourcePage>; readChunk(sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk>; subscribe(listener: (event: PublicTraceEvent) => void): Disposable };
   readonly constrainedRuns: { create(input: ConstrainedRunInput): Promise<{ readonly runId: string }>; get(runId: string): Promise<ConstrainedRunResult>; wait(runId: string, options?: WaitOptions): Promise<ConstrainedRunResult>; cancel(runId: string): Promise<ConstrainedRunResult> };
-  readonly orchestrators: { list(): Promise<readonly OrchestratorSnapshot[]>; dispatch(target: OrchestratorTarget, input: SendInput): Promise<{ readonly runId: string }> };
+  readonly orchestrators: {
+    list(): Promise<readonly OrchestratorSnapshot[]>;
+    dispatch(target: OrchestratorTarget, input: DispatchInput): Promise<{ readonly runId: string }>;
+    /**
+     * Takes over orchestrator wake-up (capability `orchestrators.wakeup.delegate`).
+     * While at least one delegate is live, core's built-in wake-up pings are
+     * suppressed and its pending batches discarded; they resume automatically
+     * when the last delegate is disposed or the API is stopped. Dispose is
+     * idempotent. `owner.pluginId` is advisory, like other `owner` arguments.
+     */
+    delegateWakeup(owner: PeerIdentity): Disposable;
+  };
   readonly agentTools: { createBundle(profile: 'voice-orchestration'): AgentToolBundle };
   readonly mcp: {
     register(input: McpRegisterInput): Promise<McpRegistrationResult>;
@@ -236,6 +258,8 @@ export interface PublicApiDependencies {
   getPublicState?(): PublicApiPersistedState | undefined; savePublicState?(state: PublicApiPersistedState): Promise<void>;
   runConstrainedQuery?(input: ConstrainedQueryInput): Promise<ConstrainedQueryOutput>;
   listOrchestrators(): OrchestratorSnapshot[]; resolveOrchestrator(target: OrchestratorTarget): Promise<string | null>;
+  /** Suppresses (true) or resumes (false) core's orchestrator wake-up; absent when the host cannot delegate. */
+  setWakeupDelegated?(delegated: boolean): void;
   triggerHostEvent(name: 'claude-threads:api-ready' | 'claude-threads:api-stopping', payload: { apiVersion: 1; generation: string }): void;
   registerMcpServer?(input: unknown): Promise<McpRegistrationResult>;
   requestSecret?(secretName: string, reason: string, force?: boolean): Promise<boolean>;
@@ -272,6 +296,7 @@ function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   if (deps.getTraceMetadata && deps.readTraceChunk) capabilities.push('traces.listSources', 'traces.readChunk', 'traces.subscribe');
   if (deps.runConstrainedQuery) capabilities.push('constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel');
   capabilities.push('orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration');
+  if (deps.setWakeupDelegated) capabilities.push('orchestrators.wakeup.delegate');
   capabilities.push('mcp.listPresets');
   if (deps.registerMcpServer) capabilities.push('mcp.register', 'mcp.registerPreset');
   if (deps.requestSecret) capabilities.push('mcp.requestSecret');
@@ -418,6 +443,13 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   }
   for (const [runId, stored] of Object.entries(persisted.constrained)) if (stored.status === 'running') { reconciliationDirty = true; persisted.constrained[runId] = freeze({ status: 'failed', runId, error: freeze({ code: 'RUN_INTERRUPTED' as const, message: 'The agent run was interrupted.' }) }); }
   const runIdsByThread = new Map<string, Set<string>>(); const latestRunByThread = new Map<string, string>();
+  /**
+   * Threads whose next terminal event belongs to an API run that `cancel()` has
+   * already settled, so it must not be re-announced as a non-API run.
+   */
+  const expectedTerminal = new Set<string>();
+  /** Live wake-up delegations; core wake-up is suppressed while non-empty. */
+  const wakeupDelegates = new Set<symbol>();
   const serial = new Map<string, Promise<unknown>>();
   type ProvisionalState = {
     readonly threadId: string;
@@ -481,11 +513,24 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       }).catch(error => console.error('[ClaudeThreads] Public trace metadata read failed:', error));
     }
     if (event.type === 'message' && event.message.role === 'assistant') publish({ kind: 'message.completed', threadId, runId: latestRunByThread.get(threadId), message: snapshotMessage(event.message), at: Date.now() });
-    else if (event.type === 'done') { const finalMessage = lastAssistant(threadId); const snapshot = deps.getThread(threadId)?.usageSnapshot; const usage = snapshot ? freeze({ inputTokens: snapshot.tokens?.input ?? 0, outputTokens: snapshot.tokens?.output ?? 0, costUsd: snapshot.estimatedCostUsd ?? 0, turns: snapshot.turns }) : undefined; for (const record of activeRuns(threadId)) void settle(record, { status: 'completed', runId: record.runId, threadId, finalMessage, usage }).then(() => publish({ kind: 'run.completed', threadId, runId: record.runId, finalMessage, at: Date.now() })); }
-    else if (event.type === 'error' || event.type === 'interrupted') { const code = event.type === 'interrupted' ? 'RUN_INTERRUPTED' : 'RUN_FAILED'; for (const record of activeRuns(threadId)) { const error = publicFailure(code); void settle(record, { status: 'failed', runId: record.runId, threadId, error }).then(() => publish({ kind: 'run.failed', threadId, runId: record.runId, error, at: Date.now() })); } }
+    else if (event.type === 'done') {
+      const finalMessage = lastAssistant(threadId); const snapshot = deps.getThread(threadId)?.usageSnapshot;
+      const usage = snapshot ? freeze({ inputTokens: snapshot.tokens?.input ?? 0, outputTokens: snapshot.tokens?.output ?? 0, costUsd: snapshot.estimatedCostUsd ?? 0, turns: snapshot.turns }) : undefined;
+      const records = activeRuns(threadId);
+      if (records.length === 0 && !expectedTerminal.delete(threadId)) publish({ kind: 'run.completed', threadId, runId: crypto.randomUUID(), finalMessage, at: Date.now() });
+      expectedTerminal.delete(threadId);
+      for (const record of records) void settle(record, { status: 'completed', runId: record.runId, threadId, finalMessage, usage }).then(() => publish({ kind: 'run.completed', threadId, runId: record.runId, finalMessage, at: Date.now() }));
+    }
+    else if (event.type === 'error' || event.type === 'interrupted') {
+      const code = event.type === 'interrupted' ? 'RUN_INTERRUPTED' : 'RUN_FAILED';
+      const records = activeRuns(threadId);
+      if (records.length === 0 && !expectedTerminal.delete(threadId)) publish({ kind: 'run.failed', threadId, runId: crypto.randomUUID(), error: publicFailure(code), at: Date.now() });
+      expectedTerminal.delete(threadId);
+      for (const record of records) { const error = publicFailure(code); void settle(record, { status: 'failed', runId: record.runId, threadId, error }).then(() => publish({ kind: 'run.failed', threadId, runId: record.runId, error, at: Date.now() })); }
+    }
     else if (event.type === 'thread_deleted') publish({ kind: 'thread.removed', threadId, at: Date.now() });
   });
-  const send = async (threadId: string, input: SendInput): Promise<{ readonly runId: string }> => {
+  const send = async (threadId: string, input: SendInput, queueIfBusy = false): Promise<{ readonly runId: string }> => {
     guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.');
     if (provisionalThreads.get(threadId)?.status === 'pending') {
       throw new ClaudeThreadsApiError('THREAD_BUSY', 'The provisional thread must be committed before it can run.');
@@ -494,20 +539,33 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     const key = correlationKey('send', input, threadId); const fp = await fingerprint({ threadId, prompt });
     return serialize(key ?? `thread:${threadId}`, async () => {
       const prior = key ? correlatedId(persisted.sends[key], fp) : undefined; if (prior) return freeze({ runId: prior });
-      if (activeRuns(threadId).length > 0 || deps.isRunning(threadId)) throw new ClaudeThreadsApiError('THREAD_BUSY', 'Thread is already running.');
+      if (!queueIfBusy && (activeRuns(threadId).length > 0 || deps.isRunning(threadId))) throw new ClaudeThreadsApiError('THREAD_BUSY', 'Thread is already running.');
       const runId = crypto.randomUUID(); const record: RunRecord = { runId, threadId, waiters: new Set() }; runs.set(runId, record);
       persisted.runs[runId] = freeze({ status: 'running', runId, threadId }); if (key) persisted.sends[key] = freeze({ resourceId: runId, fingerprint: fp }); await saveState();
-      const ids = runIdsByThread.get(threadId) ?? new Set<string>(); ids.add(runId); runIdsByThread.set(threadId, ids); latestRunByThread.set(threadId, runId);
+      const ids = runIdsByThread.get(threadId) ?? new Set<string>(); ids.add(runId); runIdsByThread.set(threadId, ids); latestRunByThread.set(threadId, runId); expectedTerminal.delete(threadId);
       publish({ kind: 'run.started', threadId, runId, at: Date.now() });
       try { await deps.sendMessage(threadId, prompt); } catch { const error = publicFailure('RUN_FAILED'); await settle(record, { status: 'failed', runId, threadId, error }); publish({ kind: 'run.failed', threadId, runId, error, at: Date.now() }); }
       return freeze({ runId });
     });
   };
-  const cancel = async (runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>> => { guard(); const record = runs.get(runId); if (!record) throw new ClaudeThreadsApiError('RUN_NOT_FOUND', 'Run not found.'); if (record.result) return record.result; await deps.interruptThread?.(record.threadId); const error = publicFailure('RUN_INTERRUPTED'); const result = freeze({ status: 'failed' as const, runId, threadId: record.threadId, error }); const terminal = await settle(record, result); publish({ kind: 'run.failed', threadId: record.threadId, runId, error, at: Date.now() }); return terminal; };
+  const cancel = async (runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>> => { guard(); const record = runs.get(runId); if (!record) throw new ClaudeThreadsApiError('RUN_NOT_FOUND', 'Run not found.'); if (record.result) return record.result; expectedTerminal.add(record.threadId); await deps.interruptThread?.(record.threadId); const error = publicFailure('RUN_INTERRUPTED'); const result = freeze({ status: 'failed' as const, runId, threadId: record.threadId, error }); const terminal = await settle(record, result); publish({ kind: 'run.failed', threadId: record.threadId, runId, error, at: Date.now() }); return terminal; };
   const wait = async (runId: string, options?: WaitOptions): Promise<RunResult> => {
     guard(); const record = runs.get(runId); if (!record) throw new ClaudeThreadsApiError('RUN_NOT_FOUND', 'Run not found.'); if (record.result) { await persistReconciliation(); return record.result; }
     const timeoutMs = boundedTimeout(options?.timeoutMs);
     return new Promise(resolve => { let done = false; const settleWait = (result: Exclude<RunResult, { status: 'timed_out' }>) => { if (done) return; done = true; clearTimeout(timer); record.waiters.delete(settleWait); resolve(result); }; const timer = setTimeout(() => { if (done) return; done = true; record.waiters.delete(settleWait); resolve(freeze({ status: 'timed_out', runId, threadId: record.threadId })); }, timeoutMs); record.waiters.add(settleWait); });
+  };
+  const delegateWakeup = (owner: PeerIdentity): Disposable => {
+    guard();
+    if (!deps.setWakeupDelegated) throw unavailable();
+    boundedString(owner?.pluginId, 'owner.pluginId', MAX_OWNER_LENGTH, true);
+    const token = Symbol('wakeup-delegate'); wakeupDelegates.add(token);
+    if (wakeupDelegates.size === 1) deps.setWakeupDelegated(true);
+    let disposed = false;
+    return freeze({ dispose: () => {
+      if (disposed) return; disposed = true;
+      // After stop() the set is already cleared and core resumed, so a stale dispose is a no-op.
+      if (wakeupDelegates.delete(token) && wakeupDelegates.size === 0) deps.setWakeupDelegated?.(false);
+    } });
   };
   const list = async (query?: ThreadQuery): Promise<readonly ThreadSummary[]> => { guard(); let values = deps.getThreads(); if (query?.projectId !== undefined) values = values.filter(thread => (thread.projectId ?? null) === query.projectId); if (query?.status) values = values.filter(thread => (thread.status ?? 'waiting') === query.status); if (query?.limit !== undefined) values = values.slice(0, Math.max(0, Math.floor(query.limit))); return freeze(values.map(thread => snapshotSummary(thread, deps.isRunning(thread.id)))); };
   const get = async (threadId: string): Promise<ThreadSnapshot | null> => { guard(); const thread = deps.getThread(threadId); return thread ? snapshotThread(thread, deps.isRunning(threadId)) : null; };
@@ -1085,7 +1143,8 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       permissions: threadPermissions },
     traces: { listSources: listTraceSources, readChunk: readTraceChunk, subscribe: (listener: (event: PublicTraceEvent) => void) => { guard(); traceListeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; traceListeners.delete(listener); } }); } },
     constrainedRuns: { create: createConstrained, get: getConstrained, wait: waitConstrained, cancel: cancelConstrained },
-    orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input); } },
+    orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); if (input?.queueIfBusy !== undefined && typeof input.queueIfBusy !== 'boolean') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'queueIfBusy must be a boolean.'); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input, input.queueIfBusy === true); },
+      delegateWakeup },
     agentTools: { createBundle: (profile) => {
       guard();
       if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`);
@@ -1100,7 +1159,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction, allocateStorage: allocateArtifactStorage },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
-    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const state of [...provisionalThreads.values()]) { const cleanup = state.operation.catch(() => undefined).then(async () => { if (state.status !== 'pending') return; await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root))); forgetAllocations(state.threadId); await state.host.rollback(); state.status = 'rolled-back'; provisionalThreads.delete(state.threadId); }); state.operation = cleanup; void cleanup.catch(error => console.error('[ClaudeThreads] Provisional rollback failed during API stop:', error)); } for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
+    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); if (wakeupDelegates.size > 0) { wakeupDelegates.clear(); deps.setWakeupDelegated?.(false); } listeners.clear(); traceListeners.clear(); for (const state of [...provisionalThreads.values()]) { const cleanup = state.operation.catch(() => undefined).then(async () => { if (state.status !== 'pending') return; await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root))); forgetAllocations(state.threadId); await state.host.rollback(); state.status = 'rolled-back'; provisionalThreads.delete(state.threadId); }); state.operation = cleanup; void cleanup.catch(error => console.error('[ClaudeThreads] Provisional rollback failed during API stop:', error)); } for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
 }
 
 function toolTimeout(args: Record<string, unknown>): number { return Math.min(Math.max(10, Number(args.timeout_secs) || 120), 300) * 1_000; }

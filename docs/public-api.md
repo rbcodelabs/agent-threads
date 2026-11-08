@@ -18,6 +18,25 @@ Listen for `claude-threads:api-ready` and `claude-threads:api-stopping`, reacqui
 
 `capabilities` is computed from the dependencies actually present at construction, so discovery never advertises an operation that would fail at call time. Check it before optional operations, including `threads.beginProvisional` and anything outside the core thread/orchestrator surfaces.
 
+## Orchestrators
+
+`orchestrators.list()` returns `OrchestratorSnapshot` entries, each with `enabled: boolean`. The portfolio orchestrator is always `enabled: true`. A Project orchestrator is `enabled: false` when the Project's orchestrator is switched off; a disabled Project is still listed if its orchestrator thread exists.
+
+`orchestrators.dispatch(target, input)` sends a prompt to an orchestrator thread (created on demand for an enabled target). A target whose `enabled` is `false` fails with `ORCHESTRATOR_NOT_FOUND` before anything is created.
+
+- `input.queueIfBusy?: boolean`. Omitted or `false`: a running target fails with `THREAD_BUSY` (unchanged). `true`: the prompt goes through the same `ThreadManager.sendMessage` path a user-typed message takes on a running thread (it joins the in-flight generation or the host queue; there is no second queue). A non-boolean value fails with `INVALID_ARGUMENT`.
+- `runId` for a queued send: a normal run record is created and returned immediately, and `wait(runId)` resolves at the thread's next terminal event (`done`, `error` or `interrupted`). Because the host may coalesce the queued message into the generation already in flight, that terminal event can belong to the earlier turn; the run therefore means "settled at or after the thread's next turn boundary", not "this exact message has finished processing". All active run records of a thread settle on the same terminal event.
+
+### Delegating wake-up
+
+Capability `orchestrators.wakeup.delegate`: `orchestrators.delegateWakeup(owner: { pluginId: string }): Disposable`.
+
+Core pings the orchestrator thread shortly after other threads finish a turn. A plugin that implements its own wake-up policy calls `delegateWakeup` so core stops doing so. While at least one delegate is live, core wake-up ignores events and its pending timers and batches are discarded (no replay on resume). It resumes automatically when the last delegate is disposed, or when the API generation stops (plugin unload). `dispose()` is idempotent and a dispose after stop is a no-op. `owner.pluginId` is a bounded non-empty string and is advisory, like other `owner` arguments. With no delegate, behavior is unchanged. A delegating plugin should observe thread completion through `threads.subscribe`.
+
+## Events for runs not started through the API
+
+`run.completed` and `run.failed` are also published for turns that were not started by `threads.send` (for example a user typing in a thread). They carry a synthesized `runId` with no run record, so `wait(runId)` on it fails with `RUN_NOT_FOUND`; use the event itself. `run.started` is not published for such turns. `message.completed` was already published for every assistant message; its `runId` is the thread's latest API run when one exists.
+
 ## Contributions
 
 `extensions.registerArtifactProvider(owner, contribution)` lets a peer present a durable artifact on a thread. It follows the `mcp.register` precedent: the caller supplies a namespaced owner identity, the host may refuse, the result is a structured value rather than a thrown error, and the registration is disposable.
