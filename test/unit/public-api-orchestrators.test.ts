@@ -360,6 +360,25 @@ describe('plugin wiring (listPublicOrchestrators / resolvePublicOrchestrator / s
     expect(p.listPublicOrchestrators().map((o: any) => [o.id, o.enabled])).toEqual([['portfolio', true], ['project:a', false], ['project:b', true]]);
   });
 
+  it('list reports a thread-less DISABLED project as enabled:false with empty threadId; enabled thread-less and deleted projects stay absent', () => {
+    const { p } = plugin([
+      { id: 'a', name: 'Alpha', orchestratorEnabled: false },
+      { id: 'b', name: 'Beta', orchestratorEnabled: true },
+      { id: 'c', name: 'Gamma' },
+      { id: 'd', name: 'Delta', orchestratorThreadId: 'pa', orchestratorEnabled: false },
+      { id: 'e', name: 'Echo', orchestratorThreadId: 'gone', orchestratorEnabled: false },
+    ]);
+    const list = p.listPublicOrchestrators();
+    expect(list.map((o: any) => [o.id, o.enabled, o.threadId])).toEqual([['portfolio', true, 'orch'], ['project:a', false, ''], ['project:d', false, 'pa'], ['project:e', false, '']]);
+    expect(list[1]).toEqual({ id: 'project:a', kind: 'project', projectId: 'a', threadId: '', title: 'Alpha orchestrator', enabled: false });
+  });
+
+  it('dispatch is still refused for the thread-less disabled entry, before creation', async () => {
+    const { p, ensureProjectOrchestratorThread } = plugin([{ id: 'a', name: 'Alpha', orchestratorEnabled: false }]);
+    await expect(p.resolvePublicOrchestrator({ id: 'project:a' })).resolves.toBeNull();
+    expect(ensureProjectOrchestratorThread).not.toHaveBeenCalled();
+  });
+
   it('resolve refuses a disabled project BEFORE creating any thread', async () => {
     const { p, ensureProjectOrchestratorThread } = plugin([{ id: 'a', orchestratorEnabled: false }]);
     await expect(p.resolvePublicOrchestrator({ id: 'project:a' })).resolves.toBeNull();
