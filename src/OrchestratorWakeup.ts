@@ -54,6 +54,8 @@ export class OrchestratorWakeup {
   private timers = new Map<string, unknown>();
   /** Incremented whenever queued/in-flight work for a bucket is retired. */
   private generations = new Map<string, number>();
+  /** Bumped by discardAll(); folded into every bucket generation so flushes already awaiting resolveTarget are invalidated too. */
+  private epoch = 0;
 
   constructor(manager: ThreadManager, deps: OrchestratorWakeupDeps) {
     this.manager = manager;
@@ -82,16 +84,18 @@ export class OrchestratorWakeup {
   invalidateBucket(bucket: string): void {
     this.clearTimer(bucket);
     this.pending.delete(bucket);
-    this.generations.set(bucket, this.generation(bucket) + 1);
+    this.generations.set(bucket, (this.generations.get(bucket) ?? 0) + 1);
   }
 
   /**
    * Drops every queued batch and timer (used when wake-up is delegated away).
-   * In-flight flushes are stopped by the `isSuspended` checks in `flush`.
+   * Bumping the epoch also invalidates flushes already awaiting `resolveTarget`
+   * (they sit in no map), even across a full claim+release cycle.
    */
   discardAll(): void {
-    const buckets = new Set<string>([...this.timers.keys(), ...this.pending.keys(), ...this.generations.keys()]);
-    for (const bucket of buckets) this.invalidateBucket(bucket);
+    for (const bucket of [...this.timers.keys()]) this.clearTimer(bucket);
+    this.pending.clear();
+    this.epoch += 1;
   }
 
   private suspended(): boolean {
@@ -99,7 +103,7 @@ export class OrchestratorWakeup {
   }
 
   private generation(bucket: string): number {
-    return this.generations.get(bucket) ?? 0;
+    return (this.generations.get(bucket) ?? 0) + this.epoch;
   }
 
   private onEvent(threadId: string, event: ThreadEvent): void {

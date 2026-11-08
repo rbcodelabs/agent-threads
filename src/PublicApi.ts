@@ -444,8 +444,10 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   for (const [runId, stored] of Object.entries(persisted.constrained)) if (stored.status === 'running') { reconciliationDirty = true; persisted.constrained[runId] = freeze({ status: 'failed', runId, error: freeze({ code: 'RUN_INTERRUPTED' as const, message: 'The agent run was interrupted.' }) }); }
   const runIdsByThread = new Map<string, Set<string>>(); const latestRunByThread = new Map<string, string>();
   /**
-   * Threads whose next terminal event belongs to an API run that `cancel()` has
-   * already settled, so it must not be re-announced as a non-API run.
+   * Threads where `cancel()` has interrupted an API run. Only the resulting
+   * `interrupted` event is absorbed (never `done`/`error`), and the mark is
+   * cleared by the next terminal event or API send, so an interrupt that emits
+   * nothing (no live session) cannot swallow a later genuine completion.
    */
   const expectedTerminal = new Set<string>();
   /** Live wake-up delegations; core wake-up is suppressed while non-empty. */
@@ -517,14 +519,14 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       const finalMessage = lastAssistant(threadId); const snapshot = deps.getThread(threadId)?.usageSnapshot;
       const usage = snapshot ? freeze({ inputTokens: snapshot.tokens?.input ?? 0, outputTokens: snapshot.tokens?.output ?? 0, costUsd: snapshot.estimatedCostUsd ?? 0, turns: snapshot.turns }) : undefined;
       const records = activeRuns(threadId);
-      if (records.length === 0 && !expectedTerminal.delete(threadId)) publish({ kind: 'run.completed', threadId, runId: crypto.randomUUID(), finalMessage, at: Date.now() });
+      if (records.length === 0) publish({ kind: 'run.completed', threadId, runId: crypto.randomUUID(), finalMessage, at: Date.now() });
       expectedTerminal.delete(threadId);
       for (const record of records) void settle(record, { status: 'completed', runId: record.runId, threadId, finalMessage, usage }).then(() => publish({ kind: 'run.completed', threadId, runId: record.runId, finalMessage, at: Date.now() }));
     }
     else if (event.type === 'error' || event.type === 'interrupted') {
       const code = event.type === 'interrupted' ? 'RUN_INTERRUPTED' : 'RUN_FAILED';
       const records = activeRuns(threadId);
-      if (records.length === 0 && !expectedTerminal.delete(threadId)) publish({ kind: 'run.failed', threadId, runId: crypto.randomUUID(), error: publicFailure(code), at: Date.now() });
+      if (records.length === 0 && !(event.type === 'interrupted' && expectedTerminal.has(threadId))) publish({ kind: 'run.failed', threadId, runId: crypto.randomUUID(), error: publicFailure(code), at: Date.now() });
       expectedTerminal.delete(threadId);
       for (const record of records) { const error = publicFailure(code); void settle(record, { status: 'failed', runId: record.runId, threadId, error }).then(() => publish({ kind: 'run.failed', threadId, runId: record.runId, error, at: Date.now() })); }
     }
@@ -548,7 +550,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       return freeze({ runId });
     });
   };
-  const cancel = async (runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>> => { guard(); const record = runs.get(runId); if (!record) throw new ClaudeThreadsApiError('RUN_NOT_FOUND', 'Run not found.'); if (record.result) return record.result; expectedTerminal.add(record.threadId); await deps.interruptThread?.(record.threadId); const error = publicFailure('RUN_INTERRUPTED'); const result = freeze({ status: 'failed' as const, runId, threadId: record.threadId, error }); const terminal = await settle(record, result); publish({ kind: 'run.failed', threadId: record.threadId, runId, error, at: Date.now() }); return terminal; };
+  const cancel = async (runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>> => { guard(); const record = runs.get(runId); if (!record) throw new ClaudeThreadsApiError('RUN_NOT_FOUND', 'Run not found.'); if (record.result) return record.result; expectedTerminal.add(record.threadId); await deps.interruptThread?.(record.threadId); if (record.result) return record.result; const error = publicFailure('RUN_INTERRUPTED'); const result = freeze({ status: 'failed' as const, runId, threadId: record.threadId, error }); const terminal = await settle(record, result); publish({ kind: 'run.failed', threadId: record.threadId, runId, error, at: Date.now() }); return terminal; };
   const wait = async (runId: string, options?: WaitOptions): Promise<RunResult> => {
     guard(); const record = runs.get(runId); if (!record) throw new ClaudeThreadsApiError('RUN_NOT_FOUND', 'Run not found.'); if (record.result) { await persistReconciliation(); return record.result; }
     const timeoutMs = boundedTimeout(options?.timeoutMs);
