@@ -379,6 +379,47 @@ describe('plugin wiring (listPublicOrchestrators / resolvePublicOrchestrator / s
     expect(ensureProjectOrchestratorThread).not.toHaveBeenCalled();
   });
 
+  it('QA: an ENABLED project whose orchestratorThreadId points at a missing thread is absent from the list and resolves by (re)creating', async () => {
+    const { p, ensureProjectOrchestratorThread } = plugin([{ id: 'a', name: 'Alpha', orchestratorThreadId: 'gone' }, { id: 'b', name: 'Beta' }]);
+    expect(p.listPublicOrchestrators().map((o: any) => o.id)).toEqual(['portfolio']);
+    await expect(p.resolvePublicOrchestrator({ id: 'project:a' })).resolves.toBe('pa');
+    expect(ensureProjectOrchestratorThread).toHaveBeenCalledWith('a', false);
+  });
+
+  it('QA: a disabled project whose orchestratorThreadId points at a missing thread is listed thread-less and dispatch is refused without creating anything', async () => {
+    const { p, ensureProjectOrchestratorThread } = plugin([{ id: 'e', name: 'Echo', orchestratorThreadId: 'gone', orchestratorEnabled: false }]);
+    expect(p.listPublicOrchestrators().find((o: any) => o.id === 'project:e')).toEqual({ id: 'project:e', kind: 'project', projectId: 'e', threadId: '', title: 'Echo orchestrator', enabled: false });
+    await expect(p.resolvePublicOrchestrator({ id: 'project:e' })).resolves.toBeNull();
+    expect(ensureProjectOrchestratorThread).not.toHaveBeenCalled();
+  });
+
+  it('QA invariant: threadId is empty only for disabled entries; every enabled entry has a real thread id; deleted projects never appear', () => {
+    const { p } = plugin([
+      { id: 'a', name: 'A', orchestratorEnabled: false }, { id: 'b', name: 'B', orchestratorEnabled: true },
+      { id: 'c', name: 'C', orchestratorThreadId: 'pa' }, { id: 'd', name: 'D', orchestratorThreadId: 'gone' },
+      { id: 'e', name: 'E', orchestratorThreadId: 'pb', orchestratorEnabled: false }, { id: 'f', name: 'F', orchestratorEnabled: undefined },
+    ]);
+    const list = p.listPublicOrchestrators();
+    for (const o of list) { if (o.threadId === '') expect(o.enabled).toBe(false); if (o.enabled) expect(o.threadId).not.toBe(''); }
+    expect(list.map((o: any) => o.id)).toEqual(['portfolio', 'project:a', 'project:c', 'project:e']);
+    expect(list.map((o: any) => o.id)).not.toContain('project:deleted');
+  });
+
+  it('QA: with no portfolio thread the thread-less disabled Projects are still listed (and no portfolio entry)', () => {
+    const { p } = plugin([{ id: 'a', name: 'Alpha', orchestratorEnabled: false }], { settings: { orchestratorThreadId: undefined } });
+    expect(p.listPublicOrchestrators().map((o: any) => o.id)).toEqual(['project:a']);
+  });
+
+  it('QA: through the public API a thread-less disabled entry is returned frozen and dispatch to it fails ORCHESTRATOR_NOT_FOUND without sending', async () => {
+    const entry = { id: 'project:a', kind: 'project', projectId: 'a', threadId: '', title: 'Alpha orchestrator', enabled: false };
+    const h = harness({ orchestrators: [{ id: 'portfolio', kind: 'portfolio', threadId: 'orch', title: 'P', enabled: true }, entry] });
+    const listed = await h.api.orchestrators.list();
+    expect(Object.isFrozen(listed[1])).toBe(true);
+    expect(listed[1]).toEqual(entry);
+    await expect(h.api.orchestrators.dispatch({ id: 'project:a' }, { prompt: 'x', queueIfBusy: true })).rejects.toMatchObject({ code: 'ORCHESTRATOR_NOT_FOUND' });
+    expect(h.sendMessage).not.toHaveBeenCalled();
+  });
+
   it('resolve refuses a disabled project BEFORE creating any thread', async () => {
     const { p, ensureProjectOrchestratorThread } = plugin([{ id: 'a', orchestratorEnabled: false }]);
     await expect(p.resolvePublicOrchestrator({ id: 'project:a' })).resolves.toBeNull();
