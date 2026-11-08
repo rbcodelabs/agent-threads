@@ -49,17 +49,18 @@ const screenshotCall: ToolCallRecord = {
 function withImages(
   thread: Thread,
   images: Array<{ mediaType: string; data: string }>,
-  opts: { browser?: boolean } = {},
+  /** `browser`: number of completed browser_screenshot calls; they pair FIFO with the first images. */
+  opts: { browser?: number } = {},
 ): void {
   const base = (thread.messages[thread.messages.length - 1]?.timestamp ?? thread.updatedAt) + 1000;
   const messages: ChatMessage[] = [];
   if (opts.browser) {
-    messages.push({ id: `${thread.id}-shot`, role: 'assistant', content: '', timestamp: base, toolCalls: [screenshotCall] });
+    messages.push({
+      id: `${thread.id}-shot`, role: 'assistant', content: '', timestamp: base,
+      toolCalls: Array.from({ length: opts.browser }, () => screenshotCall),
+    });
   }
   messages.push({ id: `${thread.id}-img`, role: 'assistant', content: '', timestamp: base + 1000, toolResultImages: images });
-  // Appended after the existing history without changing message counts the
-  // other boards show: the chip counts messages, so images ride on a
-  // dedicated trailing row only in gallery mode (?gallery=1).
   thread.messages.push(...messages);
 }
 
@@ -70,7 +71,7 @@ export function applyGalleryFixtures(threads: Thread[]): void {
     return t;
   };
   // Working: two images, first from a browser_screenshot call.
-  withImages(by('k-hiptrip-running'), [png('web', 'Itinerary card'), png('chart', 'Provenance chart')], { browser: true });
+  withImages(by('k-hiptrip-running'), [png('web', 'Itinerary card'), png('chart', 'Provenance chart')], { browser: 2 });
   // Needs you (awaiting permission): three images.
   withImages(by('k-hiptrip-awaiting'), [png('terminal', 'Deploy dry run'), png('diff', 'Signals diff'), png('table', 'Quality table')]);
   // One plain image.
@@ -78,9 +79,9 @@ export function applyGalleryFixtures(threads: Thread[]): void {
   // Five images: filmstrip shows 3 with +3.
   withImages(by('k-hiptrip-done'), [
     png('web', 'Staging 401'), png('terminal', 'Log tail'), png('diff', 'auth.ts'), png('chart', 'Error rate'), png('table', 'Env vars'),
-  ], { browser: true });
+  ], { browser: 1 });
   // Browser screenshot.
-  withImages(by('k-threads-new'), [png('web', 'Swimlane board')], { browser: true });
+  withImages(by('k-threads-new'), [png('web', 'Swimlane board')], { browser: 1 });
   // Private thread that has images: must render as a placeholder, never thumbnails.
   const priv = by('k-acme-tasks');
   withImages(priv, [png('table', 'Secret table')]);

@@ -3244,10 +3244,17 @@ test.describe('Agent Threads UI', () => {
       .ct-agents-list, .ct-gallery-board { height: auto !important; overflow: visible !important; }
       .ct-kanban-dispatch { position: static !important; transform: none !important; }
     ` });
+    // A full-page capture does not scroll, so grow the viewport to the content: that way the
+    // visibility observer activates every card exactly as it would while scrolling.
+    const height = await page.evaluate(() => Math.ceil(document.querySelector('#app')!.getBoundingClientRect().height) + 40);
+    await page.setViewportSize({ width: page.viewportSize()!.width, height: Math.min(height, 12000) });
+    // Native lazy loading would otherwise still skip images outside the original viewport.
+    await page.evaluate(() => document.querySelectorAll<HTMLImageElement>('.ct-gallery-hero, .ct-gallery-thumb img').forEach((img) => { img.loading = 'eager'; }));
     await page.waitForFunction(() => {
-      const imgs = Array.from(document.querySelectorAll<HTMLImageElement>('.ct-gallery-hero, .ct-gallery-thumb img'))
-        .filter((img) => img.getAttribute('src'));
-      return imgs.length > 0 && imgs.every((img) => img.complete && img.naturalWidth > 0);
+      const heroes = Array.from(document.querySelectorAll<HTMLImageElement>('.ct-gallery-hero'));
+      const imgs = [...heroes, ...Array.from(document.querySelectorAll<HTMLImageElement>('.ct-gallery-thumb img'))];
+      // Every hero has been activated by the visibility observer and decoded.
+      return heroes.length > 0 && imgs.every((img) => img.getAttribute('src') && img.complete && img.naturalWidth > 0);
     });
     await page.waitForTimeout(200);
   }
@@ -3313,7 +3320,8 @@ test.describe('Agent Threads UI', () => {
       const img = document.querySelector<HTMLImageElement>('[data-thread-id="k-hiptrip-done"] .ct-gallery-hero');
       return !!img && img.complete && img.naturalWidth > 0;
     });
-    await done.hover({ position: { x: 4, y: 4 } });
+    // The floating board panel would overlap the element capture; it is covered by the full-page shots.
+    await page.addStyleTag({ content: '.ct-kanban-dispatch { visibility: hidden !important; }' });
     await page.mouse.move(0, 0);
     await page.waitForTimeout(150);
     await shot(done, 'kanban-gallery-stepped.png');
@@ -3325,6 +3333,7 @@ test.describe('Agent Threads UI', () => {
     const priv = page.locator('[data-thread-id="k-acme-tasks"]');
     await expect(plain.locator('.ct-gallery-ph-tag')).toHaveText('No images yet');
     await expect(priv.locator('.ct-gallery-ph-tag')).toContainText('Private thread');
+    await page.addStyleTag({ content: '.ct-kanban-dispatch { visibility: hidden !important; }' });
     await plain.scrollIntoViewIfNeeded();
     await page.waitForTimeout(150);
     await shot(plain, 'kanban-gallery-placeholder.png');
