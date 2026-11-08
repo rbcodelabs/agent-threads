@@ -131,7 +131,13 @@ export interface ChatMessage {
    * dropped from the serialized data.json copy once the image is externalized
    * to `path`, but kept in the live object for render/relay.
    */
-  toolResultImages?: Array<{ mediaType: string; data?: string; path?: string }>;
+  toolResultImages?: Array<{
+    mediaType: string;
+    data?: string;
+    path?: string;
+    /** Vault-relative 160px WebP sidecar (`<id>-<n>.thumb.webp`) used by the Agent Board gallery. Kept in data.json. */
+    thumbPath?: string;
+  }>;
   /** For role 'notice': the completion status of the background task, drives the icon. */
   noticeStatus?: 'completed' | 'failed' | 'stopped';
   /** Harness that produced an assistant message. Enables accurate mixed-provider archives. */
