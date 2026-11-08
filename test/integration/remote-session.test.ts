@@ -375,3 +375,124 @@ describe('proxy helper', () => {
     await until(() => c.connection.status === 'connected', 'reconnect');
   });
 });
+
+describe('client replaced mid-session (registry disposes and rebuilds it)', () => {
+  it('runs the next command on the registry\'s new client instead of failing with "client closed"', async () => {
+    const td = await daemon();
+    let current = client(td.daemon.url, td.adminToken);
+    const thread = remoteThread('swap1');
+    const r = recorder();
+    const session = new RemoteHarnessSession(() => current, thread);
+    await session.start(optionsFor(r));
+
+    session.send('/tokens 10', undefined, 'u1');
+    await until(() => names(r).includes('onDone'), 'first turn done');
+    await until(() => !session.turnInFlight, 'first turn to end');
+
+    // What DaemonRegistry.clientFor does on a url/token change: dispose the old client, hand out a new one.
+    const old = current;
+    old.dispose();
+    current = client(td.daemon.url, td.adminToken);
+    r.calls.length = 0;
+
+    session.send('/tokens 10', undefined, 'u2');
+    await until(() => names(r).includes('onDone'), 'second turn done on the new client');
+    expect(names(r)).not.toContain('onError');
+    expect(current.connection.status).toBe('connected');
+    session.close();
+  });
+
+  it('reports a clear error when the daemon is gone from the registry', async () => {
+    const td = await daemon();
+    let current: DaemonClient | undefined = client(td.daemon.url, td.adminToken);
+    const session = new RemoteHarnessSession(() => current, remoteThread('swap2'));
+    await session.start(optionsFor(recorder()));
+    current = undefined;
+    await expect(session.interrupt()).rejects.toThrow(/no longer available/);
+  });
+});
+
+describe('client replaced mid-session: edge cases', () => {
+  it('survives repeated swaps, each turn delivering its tokens exactly once and never degrading to read-only', async () => {
+    const td = await daemon();
+    let current = client(td.daemon.url, td.adminToken);
+    const r = recorder();
+    const session = new RemoteHarnessSession(() => current, remoteThread('swap3'));
+    await session.start(optionsFor(r));
+    for (let i = 0; i < 4; i++) {
+      r.calls.length = 0; r.tokens.length = 0;
+      current.dispose();
+      current = client(td.daemon.url, td.adminToken);
+      session.send('/tokens 12', undefined, `u${i}`);
+      await until(() => names(r).includes('onDone'), `turn ${i} done`);
+      await until(() => !session.turnInFlight, `turn ${i} to end`);
+      expect(names(r), `turn ${i} errors`).not.toContain('onError');
+      expect(r.tokens, `turn ${i} tokens (duplicated or lost across the swap)`).toEqual(expectedTokens(12));
+      expect(r.calls.filter((c) => c.name === 'onNotification' && String(c.args[0]).includes('read-only')), `turn ${i} observer notice`).toEqual([]);
+    }
+    session.close();
+  });
+
+  it('keeps streaming without loss or duplication when the client is swapped in the middle of a turn', async () => {
+    const td = await daemon();
+    let current = client(td.daemon.url, td.adminToken);
+    const r = recorder();
+    const session = new RemoteHarnessSession(() => current, remoteThread('swap4'));
+    await session.start(optionsFor(r));
+    session.send('/tokens 40 burst=1 delay=15', undefined, 'u1');
+    await until(() => r.tokens.length >= 5, 'a few tokens');
+    current.dispose();
+    current = client(td.daemon.url, td.adminToken);
+    // Any command resolves the new client and moves the subscription; interrupt is a harmless trigger after the turn.
+    await until(() => r.tokens.length >= 40 || names(r).includes('onError'), 'turn to finish or fail', 3000).catch(() => undefined);
+    // The old subscription died with its client; poke the session so it re-attaches, then the replay must complete the turn.
+    await session.getContextUsage().catch(() => undefined);
+    await until(() => names(r).includes('onDone'), 'onDone after swap mid-turn');
+    expect(r.tokens).toEqual(expectedTokens(40));
+    session.close();
+  });
+
+  it('survives two client swaps inside one turn without loss or duplication', async () => {
+    const td = await daemon();
+    let current = client(td.daemon.url, td.adminToken);
+    const r = recorder();
+    const session = new RemoteHarnessSession(() => current, remoteThread('swap8'));
+    await session.start(optionsFor(r));
+    session.send('/tokens 60 burst=1 delay=40', undefined, 'u1');
+    await until(() => r.tokens.length >= 5, 'a few tokens');
+    current.dispose();
+    current = client(td.daemon.url, td.adminToken);
+    await session.getContextUsage().catch(() => undefined); // first re-attach, mid-turn
+    await until(() => r.tokens.length >= 15, 'tokens flowing on the second client');
+    current.dispose();
+    current = client(td.daemon.url, td.adminToken);
+    await session.getContextUsage().catch(() => undefined); // second re-attach, still mid-turn
+    await until(() => names(r).includes('onDone'), 'onDone after two swaps', 15000);
+    expect(r.tokens).toEqual(expectedTokens(60));
+    session.close();
+  });
+
+  it('closes cleanly after a swap and releases the new client subscription', async () => {
+    const td = await daemon();
+    let current = client(td.daemon.url, td.adminToken);
+    const session = new RemoteHarnessSession(() => current, remoteThread('swap5'));
+    await session.start(optionsFor(recorder()));
+    current.dispose();
+    current = client(td.daemon.url, td.adminToken);
+    await session.getContextUsage().catch(() => undefined); // triggers the re-attach
+    expect(() => session.close()).not.toThrow();
+    expect(() => session.close()).not.toThrow();
+  });
+
+  it('close() and detach() do not throw when the daemon was removed from the registry', async () => {
+    const td = await daemon();
+    let current: DaemonClient | undefined = client(td.daemon.url, td.adminToken);
+    const a = new RemoteHarnessSession(() => current, remoteThread('swap6'));
+    await a.start(optionsFor(recorder()));
+    const b = new RemoteHarnessSession(() => current, remoteThread('swap7'));
+    await b.start(optionsFor(recorder()));
+    current = undefined;
+    expect(() => a.close(), 'close() with the daemon gone').not.toThrow();
+    expect(() => b.detach(), 'detach() with the daemon gone').not.toThrow();
+  });
+});
