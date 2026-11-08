@@ -294,6 +294,41 @@ describe('run events for runs not started through the API', () => {
     expect(synthetic[0].runId).not.toBe(runId);
   });
 
+  it('cancel() whose interrupt event arrives during the interrupt call publishes run.failed exactly once', async () => {
+    const h = harness(); h.add('t');
+    h.interruptThread.mockImplementation(async (id: string) => { h.emit(id, { type: 'interrupted' }); });
+    const { runId } = await h.api.threads.send('t', { prompt: 'x' });
+    await expect(h.api.threads.cancel(runId)).resolves.toMatchObject({ status: 'failed', error: { code: 'RUN_INTERRUPTED' } });
+    await flush();
+    expect(h.events.filter(e => e.kind === 'run.failed')).toHaveLength(1);
+  });
+
+  it('cancel() with a silent interrupt publishes run.failed once for the cancelled run', async () => {
+    const h = harness(); h.add('t');
+    const { runId } = await h.api.threads.send('t', { prompt: 'x' });
+    await h.api.threads.cancel(runId); await flush();
+    expect(h.events.filter(e => e.kind === 'run.failed').map(e => e.runId)).toEqual([runId]);
+  });
+
+  it('a leaked cancel mark never absorbs error', async () => {
+    const h = harness(); h.add('t');
+    const { runId } = await h.api.threads.send('t', { prompt: 'x' });
+    await h.api.threads.cancel(runId);
+    h.emit('t', { type: 'error', error: new Error('e') }); await flush();
+    expect(h.events.filter(e => e.kind === 'run.failed' && e.runId !== runId)).toHaveLength(1);
+  });
+
+  // Known, accepted residual gap (QA decision): a silent cancel() leaves a mark that absorbs
+  // exactly ONE later genuine non-API `interrupted`; it is then cleared. Pinned so a change is deliberate.
+  it('a leaked cancel mark absorbs at most one later non-API interrupted, then announcements resume', async () => {
+    const h = harness(); h.add('t');
+    const { runId } = await h.api.threads.send('t', { prompt: 'x' });
+    await h.api.threads.cancel(runId);
+    h.emit('t', { type: 'interrupted' }); await flush();
+    h.emit('t', { type: 'interrupted' }); await flush();
+    expect(h.events.filter(e => e.kind === 'run.failed' && e.runId !== runId)).toHaveLength(1);
+  });
+
   it('events for one thread do not consume another thread\'s expectation', async () => {
     const h = harness(); h.add('a'); h.add('b');
     const { runId } = await h.api.threads.send('a', { prompt: 'x' });
