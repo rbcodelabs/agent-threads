@@ -442,7 +442,8 @@ test.describe('Agent Threads UI', () => {
       };
       tick();
     }));
-    await userMessages.last().click({ button: 'right' });
+    // Fixed offset inside the row (not its centre): the menu opens at the pointer, and the row's height can vary by a pixel or two.
+    await userMessages.last().click({ button: 'right', position: { x: 200, y: 12 } });
     await expect(page.locator('.menu .menu-item')).toHaveText(['Retry', 'Set as goal']);
     await shot(page, 'set-as-goal-context-menu.png', { fullPage: true });
   });
