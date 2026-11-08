@@ -5,7 +5,7 @@ import { FileSystemAdapter, type App } from 'obsidian';
  * resolved (mobile, a host adapter without getResourcePath, or a throw).
  */
 export function vaultResourceUrl(app: App, path: string): string | null {
-  const adapter = app.vault.adapter;
+  const adapter = app?.vault?.adapter;
   if (adapter instanceof FileSystemAdapter) {
     try {
       return adapter.getResourcePath(path);

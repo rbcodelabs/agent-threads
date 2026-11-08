@@ -41,10 +41,15 @@ type Placement = { bucketKey: string; state: string };
 
 function computePlacement(
   flags: ThreadClassificationFlags,
-  groupBy: 'status' | 'folder' | 'project',
+  groupBy: 'status' | 'folder' | 'project' | 'gallery',
   groupLabel: string,
+  needsYou = false,
 ): Placement {
   const rowState = classifyThreadRow(flags);
+  if (groupBy === 'gallery') {
+    // Mirrors KanbanView.computeCardPlacement: featured vs grid area, status-board row state.
+    return { bucketKey: needsYou ? 'gallery::featured' : 'gallery::grid', state: STATUS_COLUMN_MAP[rowState].state };
+  }
   if (groupBy === 'project') {
     const { label, state } = PROJECT_SECTION_MAP[rowState];
     return { bucketKey: `${groupLabel}::${label}`, state };
@@ -132,5 +137,24 @@ describe('KanbanView patch-vs-rebuild routing (grouped boards)', () => {
     expect(running.bucketKey).toBe('Working');
     expect(awaiting.bucketKey).toBe('Awaiting');
     expect(route(running, awaiting, true)).toBe('rebuild');
+  });
+});
+
+describe('KanbanView patch-vs-rebuild routing (gallery)', () => {
+  it('uses its own stable bucket keys, never the status-board keys', () => {
+    expect(computePlacement(flags(), 'gallery', '').bucketKey).toBe('gallery::grid');
+    expect(computePlacement(flags(), 'gallery', '', true).bucketKey).toBe('gallery::featured');
+  });
+  it('patches in place while the card stays in its area and state', () => {
+    const recorded = computePlacement(flags({ isRunning: true }), 'gallery', '');
+    expect(route(recorded, computePlacement(flags({ isRunning: true }), 'gallery', ''), true)).toBe('patch');
+  });
+  it('rebuilds when a thread starts needing the user (grid -> featured)', () => {
+    const recorded = computePlacement(flags(), 'gallery', '');
+    expect(route(recorded, computePlacement(flags(), 'gallery', '', true), true)).toBe('rebuild');
+  });
+  it('rebuilds when the run finishes (state change)', () => {
+    const recorded = computePlacement(flags({ isRunning: true }), 'gallery', '');
+    expect(route(recorded, computePlacement(flags(), 'gallery', ''), true)).toBe('rebuild');
   });
 });

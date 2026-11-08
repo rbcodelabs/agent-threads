@@ -27,6 +27,12 @@ import { telemetry } from './telemetry';
 import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps } from './threadArchiveMenu';
 import { promptConfirm } from './confirmModal';
 import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
+import { nextKanbanGroupBy, normalizeKanbanGroupBy } from './kanbanGroupBy';
+import type { KanbanGroupBy } from './types';
+import { buildGalleryImages, type GalleryImage } from './galleryImages';
+import { GalleryCard, type GalleryCardModel, type GalleryStatusKind } from './galleryCard';
+import { defaultVisibilityObserverFactory, type VisibilityObserver, type VisibilityObserverFactory } from './galleryLazy';
+import { vaultResourceUrl } from './imageSrc';
 
 export const KANBAN_VIEW_TYPE = 'claude-threads:kanban';
 
@@ -120,6 +126,16 @@ export class KanbanView extends ItemView {
   private needsYouOnly = false;
   private activeThreadId: string | null = null;
 
+  // ── Gallery mode ──────────────────────────────────────────────────────────
+  private galleryCards: Map<string, GalleryCard> = new Map();
+  /** Per-thread hero position, so a rebuild or live refresh keeps the user's place. */
+  private galleryPositions: Map<string, { key: string; atNewest: boolean }> = new Map();
+  /** Per-thread debounce timers for live gallery card refreshes (message / tool_result_images). */
+  private galleryTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private galleryObserver: VisibilityObserver | null = null;
+  /** Overridable in tests; production uses IntersectionObserver. */
+  private galleryObserverFactory: VisibilityObserverFactory = defaultVisibilityObserverFactory;
+
   /**
    * Records each rendered card's column placement (combined bucket + group key)
    * and RowState so `handleEvent` can decide, on a state-change event, whether
@@ -182,6 +198,9 @@ export class KanbanView extends ItemView {
     this.unsubscribe?.();
     for (const timer of this.activityTimers.values()) clearTimeout(timer);
     this.activityTimers.clear();
+    for (const timer of this.galleryTimers.values()) clearTimeout(timer);
+    this.galleryTimers.clear();
+    this.disposeGallery();
     if (this.timeInterval) clearInterval(this.timeInterval);
     if (this.staleInterval) clearInterval(this.staleInterval);
     this._restorePanels();
@@ -358,21 +377,23 @@ export class KanbanView extends ItemView {
     this.render();
   }
 
-  private get groupBy(): 'status' | 'folder' | 'project' {
-    return this.plugin.settings.kanbanGroupBy ?? 'status';
+  private get groupBy(): KanbanGroupBy {
+    return normalizeKanbanGroupBy(this.plugin.settings.kanbanGroupBy);
   }
 
   private updateGroupByBtn(): void {
     const mode = this.groupBy;
-    const ICONS: Record<'status' | 'folder' | 'project', string> = {
+    const ICONS: Record<KanbanGroupBy, string> = {
       status: 'columns-3',
       folder: 'folder-tree',
       project: 'layout-panel-left',
+      gallery: 'layout-grid',
     };
-    const LABELS: Record<'status' | 'folder' | 'project', string> = {
+    const LABELS: Record<KanbanGroupBy, string> = {
       status: 'Group by folder',
       folder: 'Grouping by folder — click to group by project',
-      project: 'Grouping by project — click to group by status',
+      project: 'Grouping by project — click to group by gallery',
+      gallery: 'Group by: Gallery — click to group by status',
     };
     setIcon(this.groupByBtn, ICONS[mode]);
     this.groupByBtn.toggleClass('ct-kanban-groupby-active', mode !== 'status');
@@ -382,12 +403,7 @@ export class KanbanView extends ItemView {
   }
 
   private async toggleGroupBy(): Promise<void> {
-    const NEXT: Record<'status' | 'folder' | 'project', 'status' | 'folder' | 'project'> = {
-      status: 'folder',
-      folder: 'project',
-      project: 'status',
-    };
-    this.plugin.settings.kanbanGroupBy = NEXT[this.groupBy];
+    this.plugin.settings.kanbanGroupBy = nextKanbanGroupBy(this.plugin.settings.kanbanGroupBy);
     await this.plugin.saveSettings();
     this.updateGroupByBtn();
     this.render();
@@ -411,6 +427,7 @@ export class KanbanView extends ItemView {
     this.decisionEls.clear();
     this.notesEls.clear();
     this.cardPlacements.clear();
+    this.disposeGallery();
 
     const q = this.searchQuery;
     const allThreads = this.manager.getThreads().filter(isKanbanThread);
@@ -441,6 +458,8 @@ export class KanbanView extends ItemView {
       this.renderFolderBoard(threads);
     } else if (this.groupBy === 'project') {
       this.renderProjectColumnsBoard(threads);
+    } else if (this.groupBy === 'gallery') {
+      this.renderGalleryBoard(threads);
     } else {
       this.renderStatusBoard(threads);
     }
@@ -968,16 +987,7 @@ export class KanbanView extends ItemView {
     // proposed reply, answerable inline. Sub-blocks are persistent containers
     // (hidden when empty) so each event patches only its own block and never
     // wipes text typed into a sibling form.
-    const inbox = card.createDiv('ct-kanban-inbox');
-    inbox.addEventListener('click', (e) => e.stopPropagation());
-    if (hasQuestion) this.renderQuestionBlock(inbox.createDiv('ct-kanban-question'), thread);
-    const decisionsEl = inbox.createDiv('ct-kanban-decisions');
-    this.decisionEls.set(thread.id, decisionsEl);
-    this.patchDecisionsBlock(decisionsEl, thread);
-    const replyEl = inbox.createDiv('ct-kanban-reply');
-    this.replyEls.set(thread.id, replyEl);
-    this.patchReplyBlock(replyEl, thread);
-    this.syncInboxVisibility(thread);
+    this.renderInbox(card, thread, hasQuestion);
 
     // Task list (compact checklist from Claude Code's TodoWrite/TaskCreate).
     // Always created (even when there are no tasks yet) so a later
@@ -1000,29 +1010,7 @@ export class KanbanView extends ItemView {
       this.activityEls.set(thread.id, activityEl);
 
       const btns = card.createDiv('ct-kanban-perm-actions');
-      const deny = btns.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' });
-      deny.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, false); });
-      const allow = btns.createEl('button', { text: !!pendingInfo && isHostExecPermission(pendingInfo.toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
-      allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(thread.id, true); });
-      const hostExecPrefix = hostExecAlwaysAllowOffer(pendingInfo, hostExecState(this.plugin.managedPolicy?.peek()).allowAlways);
-      if (hostExecPrefix) {
-        const alwaysPrefix = btns.createEl('button', { text: `Always \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' });
-        alwaysPrefix.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          if (addHostExecPrefix(this.plugin.settings, hostExecPrefix)) await this.plugin.saveSettings();
-          this.manager.resolvePermission(thread.id, true);
-        });
-      }
-      if (!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) {
-        const always = btns.createEl('button', { text: 'Always', cls: 'ct-permission-btn ct-permission-always' });
-        always.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          if (pendingInfo) {
-            if (recordAlwaysAllow(this.plugin.settings, pendingInfo.toolName, this.manager.getRemoteScope(thread.id))) await this.plugin.saveSettings();
-          }
-          this.manager.resolvePermission(thread.id, true);
-        });
-      }
+      this.appendPermissionButtons(btns, thread.id, pendingInfo);
     } else {
       const activityEl = card.createDiv({ cls: 'ct-kanban-card-activity' });
       this.activityEls.set(thread.id, activityEl);
@@ -1050,6 +1038,256 @@ export class KanbanView extends ItemView {
     });
 
     attachThreadArchiveMenu(card, thread.id, this.archiveMenuDeps());
+  }
+
+  /**
+   * The orchestrator inbox for a card (question, decisions, proposed reply),
+   * with sub-blocks registered so each event patches only its own block. Shared
+   * by renderCard() and the Gallery's featured card.
+   */
+  private renderInbox(parent: HTMLElement, thread: Thread, hasQuestion: boolean): void {
+    const inbox = parent.createDiv('ct-kanban-inbox');
+    inbox.addEventListener('click', (e) => e.stopPropagation());
+    if (hasQuestion) this.renderQuestionBlock(inbox.createDiv('ct-kanban-question'), thread);
+    const decisionsEl = inbox.createDiv('ct-kanban-decisions');
+    this.decisionEls.set(thread.id, decisionsEl);
+    this.patchDecisionsBlock(decisionsEl, thread);
+    const replyEl = inbox.createDiv('ct-kanban-reply');
+    this.replyEls.set(thread.id, replyEl);
+    this.patchReplyBlock(replyEl, thread);
+    this.syncInboxVisibility(thread);
+  }
+
+  /**
+   * Deny / Allow (once) / Always buttons for a pending permission. The single
+   * implementation behind both the Needs-you lane cards and the Gallery's
+   * featured card, so the two can never drift apart.
+   */
+  private appendPermissionButtons(
+    btns: HTMLElement,
+    threadId: string,
+    pendingInfo: ReturnType<ThreadManager['getPendingPermission']>,
+  ): void {
+    const deny = btns.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' });
+    deny.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(threadId, false); });
+    const allow = btns.createEl('button', { text: !!pendingInfo && isHostExecPermission(pendingInfo.toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
+    allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(threadId, true); });
+    const hostExecPrefix = hostExecAlwaysAllowOffer(pendingInfo, hostExecState(this.plugin.managedPolicy?.peek()).allowAlways);
+    if (hostExecPrefix) {
+      const alwaysPrefix = btns.createEl('button', { text: `Always \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' });
+      alwaysPrefix.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (addHostExecPrefix(this.plugin.settings, hostExecPrefix)) await this.plugin.saveSettings();
+        this.manager.resolvePermission(threadId, true);
+      });
+    }
+    if (!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) {
+      const always = btns.createEl('button', { text: 'Always', cls: 'ct-permission-btn ct-permission-always' });
+      always.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (pendingInfo) {
+          if (recordAlwaysAllow(this.plugin.settings, pendingInfo.toolName, this.manager.getRemoteScope(threadId))) await this.plugin.saveSettings();
+        }
+        this.manager.resolvePermission(threadId, true);
+      });
+    }
+  }
+
+  // ── Gallery mode ───────────────────────────────────────────────────────────
+
+  /** Featured (large) cards shown at most this many at once; further Needs-you threads get a chip. */
+  private static readonly MAX_FEATURED = 2;
+  /** Debounce for live gallery card refreshes (same window as the activity line). */
+  private static readonly GALLERY_REFRESH_MS = 800;
+
+  /** A thread that earns the large featured card: it needs Rick, or has a permission waiting. */
+  private wantsFeatured(thread: Thread): boolean {
+    return this.needsYou(thread) || this.manager.hasPendingPermission(thread.id);
+  }
+
+  private disposeGallery(): void {
+    this.galleryObserver?.disconnect();
+    this.galleryObserver = null;
+    this.galleryCards.clear();
+  }
+
+  /**
+   * Gallery group-by: one larger card per thread. Needs-you threads become big
+   * featured cards (with the lane's own inbox / Allow / Deny controls) above a
+   * wrapping grid of the rest, sorted by recent activity. No horizontal scroll.
+   */
+  private renderGalleryBoard(threads: Thread[]): void {
+    const board = this.boardEl.createDiv('ct-gallery-board');
+    board.dataset.scrollKey = '__board__';
+
+    const sorted = threads.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+    const wanting = sorted.filter((t) => this.wantsFeatured(t));
+    const featuredIds = new Set(wanting.slice(0, KanbanView.MAX_FEATURED).map((t) => t.id));
+
+    if (wanting.length > 0) {
+      const banner = board.createDiv({ cls: 'ct-gallery-banner', attr: { role: 'status' } });
+      const icon = banner.createSpan('ct-gallery-banner-icon');
+      icon.setAttribute('aria-hidden', 'true');
+      setIcon(icon, 'lock');
+      banner.createSpan({ text: `${wanting.length} thread${wanting.length === 1 ? '' : 's'} ${wanting.length === 1 ? 'needs' : 'need'} you` });
+      banner.createSpan({ cls: 'ct-gallery-banner-sub', text: 'Others sorted by recent activity' });
+    }
+
+    const grid = board.createDiv('ct-gallery-grid');
+    // Single-column (narrow) boards have room for a 4th filmstrip slot per compact card.
+    const width = board.clientWidth;
+    const compactCap = width > 0 && width <= 640 ? 4 : 3;
+
+    this.galleryObserver = this.galleryObserverFactory((el, visible) => {
+      const id = (el as HTMLElement).dataset?.threadId;
+      if (id) this.galleryCards.get(id)?.setVisible(visible);
+    }) ?? null;
+
+    const ordered = [...sorted.filter((t) => featuredIds.has(t.id)), ...sorted.filter((t) => !featuredIds.has(t.id))];
+    for (const thread of ordered) {
+      this.renderGalleryCard(grid, thread, featuredIds.has(thread.id), featuredIds.has(thread.id) ? 5 : compactCap);
+    }
+
+    // Drop remembered positions for threads that no longer exist.
+    for (const id of Array.from(this.galleryPositions.keys())) {
+      if (!this.manager.getThread(id)) this.galleryPositions.delete(id);
+    }
+  }
+
+  private renderGalleryCard(parent: HTMLElement, thread: Thread, featured: boolean, stripCap: number): void {
+    const id = thread.id;
+    const card = new GalleryCard(this.buildGalleryModel(thread, featured, stripCap), {
+      resolveUrl: (img, kind) => this.galleryUrl(img, kind),
+      requestThumbnail: async (img) => {
+        const full = this.galleryUrl(img, 'full');
+        const thumbPath = await this.manager.ensureImageThumbnail?.(id, img.messageId, img.index, full ?? undefined);
+        return thumbPath ? vaultResourceUrl(this.app, thumbPath) : null;
+      },
+      openThread: () => {
+        const live = this.manager.getThread(id);
+        if (live && !live.reviewed && this.rowStateFor(live) === 'idle') this.markReviewed(id);
+        this.plugin.openThreadInChatView(id);
+      },
+      onPosition: (key, atNewest) => { this.galleryPositions.set(id, { key, atNewest }); },
+    });
+    parent.appendChild(card.el);
+
+    // Register in the same per-card maps the other boards use so the shared
+    // event paths (active card, stale spinner, inbox patching, activity line,
+    // patch-vs-rebuild placement) keep working unchanged.
+    this.galleryCards.set(id, card);
+    this.rowEls.set(id, card.el);
+    this.activityEls.set(id, card.messageEl);
+    this.cardPlacements.set(id, this.computeCardPlacement(thread));
+    card.el.toggleClass('ct-agents-row-active', id === this.activeThreadId);
+    card.el.toggleClass('ct-stale', this.manager.isRunStale(id));
+    attachThreadArchiveMenu(card.el, id, this.archiveMenuDeps());
+
+    if (featured) this.renderFeaturedControls(card, thread);
+
+    if (this.galleryObserver) this.galleryObserver.observe(card.el);
+    else card.setVisible(true);
+  }
+
+  /** Inbox blocks and Allow / Deny for a featured card: the Needs-you lane's own renderers. */
+  private renderFeaturedControls(card: GalleryCard, thread: Thread): void {
+    const hasQuestion = (thread.pendingQuestions?.length ?? 0) > 0 || this.manager.hasPendingQuestion(thread.id);
+    this.renderInbox(card.slotEl, thread, hasQuestion);
+    if (!this.manager.hasPendingPermission(thread.id) || hasQuestion) return;
+    const info = this.manager.getPendingPermission(thread.id);
+    const label = info?.toolName ? formatToolName(info.toolName) : 'permission';
+    const detail = info?.detail ? ` ${summarizePermissionDetail(info.detail)}` : '';
+    card.slotEl.createEl('pre', {
+      cls: 'ct-gallery-cmd',
+      text: `${label}${detail}`,
+      attr: { tabindex: '0', 'aria-label': 'Command awaiting approval' },
+    });
+    const btns = card.slotEl.createDiv('ct-kanban-perm-actions ct-gallery-actions');
+    this.appendPermissionButtons(btns, thread.id, info);
+  }
+
+  private buildGalleryModel(thread: Thread, featured: boolean, stripCap: number): GalleryCardModel {
+    const rowState = classifyThreadRow(this.rowFlags(thread));
+    const { label, state } = STATUS_COLUMN_MAP[rowState];
+    const needs = this.wantsFeatured(thread);
+    const KIND: Record<ThreadRowState, GalleryStatusKind> = {
+      running: 'working', awaiting: 'working', waiting: 'waiting', 'idle-new': 'new',
+      'idle-reviewed': 'reviewed', error: 'failed', empty: 'ready',
+    };
+    const images: GalleryImage[] = thread.private
+      ? []
+      : buildGalleryImages({
+          messages: thread.messages,
+          pending: this.manager.getPendingToolResultImages?.(thread.id),
+          isPrivate: thread.private,
+        });
+    const pos = this.galleryPositions.get(thread.id);
+    let projectName: string | undefined;
+    try {
+      const group = this.threadGroup(thread);
+      if (group.key !== 'unassigned') projectName = group.label;
+    } catch {
+      projectName = undefined;
+    }
+    return {
+      threadId: thread.id,
+      title: thread.title,
+      statusLabel: needs ? NEEDS_YOU_LABEL : label,
+      statusKind: needs ? 'needs' : KIND[rowState],
+      projectName,
+      message: this.getActivityText(thread, state),
+      excerpt: this.lastAssistantExcerpt(thread, 220),
+      updatedAt: thread.updatedAt,
+      images,
+      featured,
+      needsYouChip: needs && !featured,
+      kicker: featured && needs ? `${NEEDS_YOU_LABEL} · ${relativeTime(thread.updatedAt)}` : undefined,
+      stripCap,
+      placeholderTag: thread.private ? 'Private thread · images not shown' : 'No images yet',
+      startKey: pos && !pos.atNewest ? pos.key : undefined,
+      atNewest: pos?.atNewest ?? true,
+    };
+  }
+
+  private lastAssistantExcerpt(thread: Thread, max: number): string {
+    for (let i = thread.messages.length - 1; i >= 0; i--) {
+      const m = thread.messages[i];
+      if (m.role !== 'assistant') continue;
+      const text = m.content.replace(/```[\s\S]*?```/g, '[code]').replace(/\s+/g, ' ').trim();
+      if (text) return text.length > max ? text.slice(0, max) + '…' : text;
+    }
+    return 'No messages yet';
+  }
+
+  /** URL for a gallery image: the vault file when resolvable, else inline data, else null. */
+  private galleryUrl(img: GalleryImage, kind: 'full' | 'thumb'): string | null {
+    if (kind === 'thumb') return img.thumbPath ? vaultResourceUrl(this.app, img.thumbPath) : null;
+    if (img.path) {
+      const url = vaultResourceUrl(this.app, img.path);
+      if (url) return url;
+    }
+    return img.data ? `data:${img.mediaType};base64,${img.data}` : null;
+  }
+
+  /**
+   * Debounced per-thread refresh of one gallery card (hero, filmstrip, text)
+   * when a message or tool-result image arrives. Touches only that card, so it
+   * never adds a full board rebuild.
+   */
+  private scheduleGalleryRefresh(threadId: string): void {
+    if (this.groupBy !== 'gallery' || !this.galleryCards.has(threadId) || this.galleryTimers.has(threadId)) return;
+    const timer = setTimeout(() => {
+      this.galleryTimers.delete(threadId);
+      this.refreshGalleryCard(threadId);
+    }, KanbanView.GALLERY_REFRESH_MS);
+    this.galleryTimers.set(threadId, timer);
+  }
+
+  private refreshGalleryCard(threadId: string): void {
+    const card = this.galleryCards.get(threadId);
+    const thread = this.manager.getThread(threadId);
+    if (!card || !thread) return;
+    card.update(this.buildGalleryModel(thread, card.model.featured, card.model.stripCap));
   }
 
   private draftFor(key: string): QuestionDraft {
@@ -1299,6 +1537,14 @@ export class KanbanView extends ItemView {
     const rowState = classifyThreadRow(this.rowFlags(thread));
 
     const mode = this.groupBy;
+    if (mode === 'gallery') {
+      // Gallery has its own stable keys: the featured area vs the grid. Moving
+      // between them (a thread starts or stops needing the user) is a rebuild.
+      return {
+        bucketKey: this.wantsFeatured(thread) ? 'gallery::featured' : 'gallery::grid',
+        state: STATUS_COLUMN_MAP[rowState].state,
+      };
+    }
     if (mode === 'project') {
       const { label, state } = PROJECT_SECTION_MAP[rowState];
       return { bucketKey: `${this.threadGroup(thread).key}::${label}`, state };
@@ -1419,6 +1665,7 @@ export class KanbanView extends ItemView {
       const thread = this.manager.getThread(id);
       if (thread) el.setText(relativeTime(thread.updatedAt));
     }
+    for (const card of this.galleryCards.values()) card.refreshTimes();
     // Keep waiting-card countdowns roughly current without a full re-render.
     for (const [id, el] of this.activityEls) {
       if (!this.manager.isRunning(id) && this.plugin.hasPendingWakeup(id)) {
@@ -1530,6 +1777,12 @@ export class KanbanView extends ItemView {
 
     if (event.type === 'project_changed' || event.type === 'cwd_changed') {
       this.scheduleRender();
+      return;
+    }
+
+    // Gallery mode: new messages / tool-result images refresh only their own card.
+    if (event.type === 'message' || event.type === 'tool_result_images') {
+      this.scheduleGalleryRefresh(threadId);
       return;
     }
 
