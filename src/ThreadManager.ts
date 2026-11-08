@@ -25,7 +25,7 @@ import { stripLegacySandboxThreadFields } from './legacySandboxVm';
 import { resolveGitProjectName } from './pathUtils';
 import { legacyWorktreeRoot, resolveWorktreeRoot } from './worktreePaths';
 import { debugLog } from './logger';
-import { ThumbnailService, defaultThumbnailGenerator, type ThumbnailGenerator } from './thumbnails';
+import { ThumbnailService, NULL_THUMBNAIL_GENERATOR, type ThumbnailGenerator } from './thumbnails';
 import { codexSkillRoots, buildSkillPlugins } from './skillManager';
 import { pluginSkillsRootFrom } from './skillPaths';
 import { resolveLocalSkillsRoot, externalSkillRoots } from './localSkills';
@@ -400,7 +400,7 @@ export class ThreadManager {
   constructor(
     settings: PluginSettings,
     attachmentStore: AttachmentStore = NULL_ATTACHMENT_STORE,
-    thumbnailGenerator: ThumbnailGenerator = defaultThumbnailGenerator,
+    thumbnailGenerator: ThumbnailGenerator = NULL_THUMBNAIL_GENERATOR,
   ) {
     this.settings = settings;
     this.rawLogWriter = new RawLogWriter(

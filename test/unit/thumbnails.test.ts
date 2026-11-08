@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   ThumbnailService,
-  defaultThumbnailGenerator,
   THUMB_WIDTH,
   type ThumbnailGenerator,
 } from '../../src/thumbnails';
+import { canvasThumbnailGenerator as defaultThumbnailGenerator } from '../../src/thumbnailGenerator';
 import { buildAttachmentPath, buildThumbPath, serializeThreadForSave } from '../../src/imageExternalization';
 import type { AttachmentStore } from '../../src/host/AttachmentStore';
 import type { Thread } from '../../src/types';
