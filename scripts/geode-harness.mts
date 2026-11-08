@@ -4,7 +4,7 @@
  * Otherwise clones/fetches into .geode-harness/ (gitignored), checks out the pin, installs and builds.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,12 +21,12 @@ export function ensureGeode(): string {
     run('git', ['fetch', 'origin', pin.ref], dir);
     run('git', ['checkout', '--detach', pin.ref], dir);
   }
-  const stamp = path.join(dir, 'node_modules/.harness-pin');
+  const stamp = path.join(dir, '.harness-pin');
   const built = existsSync(stamp) && readFileSync(stamp, 'utf8') === pin.ref && existsSync(path.join(dir, 'dist/renderer.js'));
   if (!built) {
     run('npm', ['ci', '--no-audit', '--no-fund'], dir);
     run('npm', ['run', 'build'], dir);
-    execFileSync('sh', ['-c', `printf %s ${pin.ref} > node_modules/.harness-pin`], { cwd: dir });
+    writeFileSync(stamp, pin.ref);
   }
   return dir;
 }
