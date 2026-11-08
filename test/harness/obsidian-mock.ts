@@ -800,8 +800,9 @@ export class Menu {
       const left = Math.max(margin, Math.min(pos.x, window.innerWidth - width - margin));
       const flipUp = pos.y + height + margin > window.innerHeight && pos.y - height >= margin;
       const top = flipUp ? pos.y - height : Math.max(margin, Math.min(pos.y, window.innerHeight - height - margin));
-      menuEl.style.left = `${left}px`;
-      menuEl.style.top = `${top}px`;
+      // Whole pixels: fractional offsets render menu text with run-to-run sub-pixel differences.
+      menuEl.style.left = `${Math.round(left)}px`;
+      menuEl.style.top = `${Math.round(top)}px`;
     }
 
     // Dismiss on next outside click
