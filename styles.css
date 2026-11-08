@@ -6265,6 +6265,7 @@
 .ct-kanban-col-body {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior-y: contain; /* y only: full `contain` also stops horizontal trackpad swipes over cards from reaching the board */
   padding: 8px;
   display: flex;
   flex-direction: column;
@@ -8933,7 +8934,7 @@ body.ct-skills-resizing {
 .ct-agent-popover-list {
   padding: 4px 6px;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-y: contain; /* y only: full `contain` also stops horizontal trackpad swipes over cards from reaching the board */
 }
 
 .ct-agent-popover-empty {
@@ -9046,7 +9047,7 @@ body.ct-skills-resizing {
 .ct-tasklist-popover-list {
   padding: 4px 6px;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-y: contain; /* y only: full `contain` also stops horizontal trackpad swipes over cards from reaching the board */
   /* .ct-task-row used to inherit this from the removed .ct-task-card. */
   font-size: var(--font-ui-smaller);
 }
