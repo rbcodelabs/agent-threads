@@ -1,6 +1,6 @@
 import { gateHarness } from './remote/harnessSupport';
 import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
-import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, FileSystemAdapter, TFile, Platform } from 'obsidian';
+import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, TFile, Platform } from 'obsidian';
 import { RemoteImageCache, createRemoteImageLoader, hydrateRemoteImages } from './remote/remoteImages';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import { connectionPill } from './remote/connectionPill';
@@ -86,6 +86,7 @@ import { openProjectPicker } from './projectPickerHost';
 import type { ProjectPicker } from './ProjectPicker';
 import { dispatchNewConversation } from './newConversationDispatch';
 import { seedDocumentChatDraft } from './documentChat';
+import { resolveImageSrc } from './imageSrc';
 
 export const VIEW_TYPE = 'claude-threads:chat';
 
@@ -3723,26 +3724,9 @@ export class ThreadsView extends ItemView {
     return wrapper;
   }
 
-  /**
-   * Resolve an <img> src for a message image (ADR-0003, PR 1). When the image
-   * has been externalized to a vault file (`path` set) and we're on desktop,
-   * use the synchronous `app://` resource URL so the render stays synchronous
-   * and doesn't depend on the inline base64 (which is stripped from data.json
-   * after a restart). Otherwise fall back to the inline base64 data URL,
-   * including on mobile, where a desktop attachment path can't be resolved.
-   */
+  /** Resolve an <img> src for a message image; see {@link resolveImageSrc} (shared with the Agent Board gallery). */
   private imageSrc(ref: { path?: string; mediaType: string }, inlineData: string | undefined): string {
-    if (ref.path) {
-      const adapter = this.app.vault.adapter;
-      if (adapter instanceof FileSystemAdapter) {
-        try {
-          return adapter.getResourcePath(ref.path);
-        } catch {
-          // Fall through to base64 if the path can't be resolved.
-        }
-      }
-    }
-    return `data:${ref.mediaType};base64,${inlineData ?? ''}`;
+    return resolveImageSrc(this.app, ref, inlineData);
   }
 
   private async renderMessages(): Promise<void> {
