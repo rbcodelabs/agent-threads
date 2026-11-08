@@ -129,6 +129,10 @@ export class KanbanView extends ItemView {
   private cardPlacements: Map<string, { bucketKey: string; state: RowState }> = new Map();
 
   private renderPending = false;
+  /** True while a pointer is held down on an inbox form (between pointerdown and pointerup). */
+  private formPointerDown = false;
+  /** When a render was first held back for an in-progress form interaction (ms epoch), else null. */
+  private renderDeferredSince: number | null = null;
   /** Per-thread debounce timers for `scheduleActivityRefresh` (one 800ms window each). */
   private activityTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private timeInterval: ReturnType<typeof setInterval> | null = null;
@@ -224,6 +228,28 @@ export class KanbanView extends ItemView {
     }
   }
 
+  /**
+   * Hold board rebuilds while the user is mid-gesture on an inline form (see
+   * isInteractingWithInboxForm): a rebuild between pointerdown and click would
+   * otherwise eat the click.
+   */
+  private bindFormInteractionGuards(): void {
+    this.boardEl.addEventListener('pointerdown', (e) => {
+      if ((e.target as HTMLElement | null)?.closest?.('[data-draft-key]')) this.formPointerDown = true;
+    });
+    const releasePointer = (): void => {
+      if (!this.formPointerDown) return;
+      this.formPointerDown = false;
+      this.flushDeferredRender();
+    };
+    this.boardEl.addEventListener('pointerup', releasePointer);
+    this.boardEl.addEventListener('pointercancel', releasePointer);
+    this.boardEl.addEventListener('focusout', () => {
+      // Let focus settle (it may move to another field in the same form) before flushing.
+      setTimeout(() => this.flushDeferredRender(), 0);
+    });
+  }
+
   private buildUI(): void {
     const root = this.containerEl.children[1] as HTMLElement;
     root.empty();
@@ -231,7 +257,7 @@ export class KanbanView extends ItemView {
     root.toggleClass('ct-mobile', Platform.isMobile);
 
     this.boardEl = root.createDiv('ct-agents-list');
-
+    this.bindFormInteractionGuards();
     // Floating panel — centered at bottom of the board (count, New thread, group/search)
     const dispatchWrapper = root.createDiv('ct-kanban-dispatch');
 
@@ -1602,10 +1628,44 @@ export class KanbanView extends ItemView {
     // 120ms coalesces bursts of events that span multiple macrotasks (a plain
     // setTimeout(0) only debounces within a single macrotask, so back-to-back
     // events each on their own tick would still each trigger a full rebuild).
-    setTimeout(() => {
-      this.renderPending = false;
-      this.render();
-    }, 120);
+    setTimeout(() => this.runScheduledRender(), 120);
+  }
+
+  /** Max time a rebuild may be held back for a focused form before it runs anyway (drafts + focus are restored). */
+  private static readonly MAX_RENDER_DEFER_MS = 60_000;
+
+  private runScheduledRender(): void {
+    if (!this.renderPending) return; // a flush already ran the deferred rebuild
+    if (this.isInteractingWithInboxForm()) {
+      const since = this.renderDeferredSince ??= Date.now();
+      if (Date.now() - since < KanbanView.MAX_RENDER_DEFER_MS) {
+        // Keep renderPending set so further events fold into this one deferred
+        // rebuild; flushDeferredRender() (blur / pointer release) or the retry
+        // below runs it once the user is done.
+        setTimeout(() => this.runScheduledRender(), 500);
+        return;
+      }
+    }
+    this.renderDeferredSince = null;
+    this.renderPending = false;
+    this.render();
+  }
+
+  /** Runs a held-back rebuild right away once the interaction that blocked it ends. */
+  private flushDeferredRender(): void {
+    if (this.renderDeferredSince === null || this.isInteractingWithInboxForm()) return;
+    this.runScheduledRender();
+  }
+
+  /**
+   * True while the user is mid-gesture on an inline question/decision form: a
+   * pointer is down on one, or one of its inputs has focus. Rebuilding then
+   * would drop the click or the caret.
+   */
+  private isInteractingWithInboxForm(): boolean {
+    if (this.formPointerDown) return true;
+    const ae = document.activeElement;
+    return ae instanceof HTMLInputElement && this.boardEl.contains(ae) && !!ae.closest('[data-draft-key]');
   }
 
   private scheduleActivityRefresh(threadId: string): void {
