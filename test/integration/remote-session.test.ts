@@ -452,6 +452,26 @@ describe('client replaced mid-session: edge cases', () => {
     session.close();
   });
 
+  it('survives two client swaps inside one turn without loss or duplication', async () => {
+    const td = await daemon();
+    let current = client(td.daemon.url, td.adminToken);
+    const r = recorder();
+    const session = new RemoteHarnessSession(() => current, remoteThread('swap8'));
+    await session.start(optionsFor(r));
+    session.send('/tokens 60 burst=1 delay=40', undefined, 'u1');
+    await until(() => r.tokens.length >= 5, 'a few tokens');
+    current.dispose();
+    current = client(td.daemon.url, td.adminToken);
+    await session.getContextUsage().catch(() => undefined); // first re-attach, mid-turn
+    await until(() => r.tokens.length >= 15, 'tokens flowing on the second client');
+    current.dispose();
+    current = client(td.daemon.url, td.adminToken);
+    await session.getContextUsage().catch(() => undefined); // second re-attach, still mid-turn
+    await until(() => names(r).includes('onDone'), 'onDone after two swaps', 15000);
+    expect(r.tokens).toEqual(expectedTokens(60));
+    session.close();
+  });
+
   it('closes cleanly after a swap and releases the new client subscription', async () => {
     const td = await daemon();
     let current = client(td.daemon.url, td.adminToken);
