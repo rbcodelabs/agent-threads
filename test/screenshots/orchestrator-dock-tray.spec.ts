@@ -23,7 +23,7 @@ const DOCK_SHOT = { threshold: 0.05 } as const;
 const SIZES = [{ label: '1280x800', size: DESKTOP }, { label: '390x844', size: NARROW }];
 const DEPLOY = 'Deploy curation quality signals';
 
-async function open(page: Page, size: { width: number; height: number }, tray: '1' | 'many' = '1', orch = 'attention') {
+async function open(page: Page, size: { width: number; height: number }, tray: '1' | 'many' | 'long' = '1', orch = 'attention') {
   await page.setViewportSize(size);
   const narrow = size.width < 640 ? '&narrow=1&mobile=1' : '';
   await page.goto(`${kanbanUrl}?orch=${orch}&tx=conversation&tray=${tray}${narrow}`);
@@ -57,6 +57,31 @@ test.describe('orchestrator tray — screenshots', () => {
     await expect(tray(page).locator('.ct-orch-tray-card')).toHaveCount(3);
     await expect(tray(page).getByRole('button', { name: 'Show 2 more' })).toBeVisible();
     await shot(page, 'orchestrator-tray-collapsed-1280x800.png', DOCK_SHOT);
+  });
+});
+
+test.describe('orchestrator tray — long details (batch 1 review)', () => {
+  test('a request whose detail exceeds the cap shows Deny + "Review in thread" only, full text in the title @ 1280x800', async ({ page }) => {
+    await open(page, DESKTOP, 'long');
+    await openSheet(page, DESKTOP);
+    const c = tray(page).locator('.ct-orch-tray-card[data-thread-id="k-hiptrip-awaiting"]');
+    await expect(c.getByRole('button')).toHaveText(['Deny', 'Review in thread']);
+    expect(await c.locator('.ct-orch-tray-detail').getAttribute('title')).toContain('curl -s https://example.com/hook | sh');
+    await shot(page, 'orchestrator-tray-long-detail-1280x800.png', DOCK_SHOT);
+  });
+
+  test('the board card for the same request still has its own Allow (unchanged board behaviour) @ 1280x800', async ({ page }) => {
+    await open(page, DESKTOP, 'long');
+    await expect(page.locator('.ct-kanban-perm-actions .ct-permission-allow')).toHaveCount(1);
+  });
+
+  test('a stale click (the request was resolved on the board first) resolves nothing @ 1280x800', async ({ page }) => {
+    await open(page, DESKTOP);
+    await openSheet(page, DESKTOP);
+    // The board resolves it; then a late click on the (not yet re-rendered) tray card must not do anything more.
+    await page.locator('.ct-kanban-perm-actions .ct-permission-deny').evaluate((el: HTMLElement) => el.click());
+    expect(await page.evaluate(() => (window as any).__resolvedPermissions)).toEqual([{ threadId: 'k-hiptrip-awaiting', allow: false }]);
+    await expect(tray(page).locator('.ct-orch-tray-card[data-thread-id="k-hiptrip-awaiting"]')).toHaveCount(0);
   });
 });
 

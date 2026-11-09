@@ -91,3 +91,78 @@ describe('appendPermissionButtons', () => {
     expect(summarizePermissionDetail('plain')).toBe(summarizePermissionDetail('plain'));
   });
 });
+
+// ── optional guard (the tray turns it on; the board does not) ────────────────────────────────────────────────────────
+
+describe('appendPermissionButtons with a guard', () => {
+  type Info = { toolName: string; detail: string; promptId?: number } | undefined;
+  function guarded(initial: Info) {
+    const state: { pending: Info; onSave?: () => Promise<void> | void } = { pending: initial };
+    const order: string[] = [];
+    const manager = {
+      resolvePermission: vi.fn((_id: string, allow: boolean) => { order.push(`resolve:${allow}`); }),
+      getRemoteScope: vi.fn(() => null),
+    };
+    const settings = { alwaysAllowedTools: [] as string[], hostExecAlwaysAllowedPrefixes: [] as string[] };
+    const saveSettings = vi.fn(async () => { order.push('save'); await state.onSave?.(); });
+    const onStale = vi.fn();
+    const setBusy = vi.fn();
+    const el = document.createElement('div');
+    const snapshot = initial;
+    appendPermissionButtons(el, 't1', snapshot, {
+      manager, getSettings: () => settings, saveSettings, hostExecAllowAlways: true,
+      guard: { getPending: () => state.pending, onStale, setBusy },
+    });
+    return Object.assign(state, { el, manager, settings, saveSettings, order, onStale, setBusy, btns: Array.from(el.querySelectorAll('button')) });
+  }
+
+  it('unchanged: a guarded click resolves once and marks the card busy first', () => {
+    const g = guarded({ toolName: 'Edit', detail: '{}', promptId: 1 });
+    g.btns[1].click();
+    expect(g.manager.resolvePermission.mock.calls).toEqual([['t1', true]]);
+    expect(g.setBusy).toHaveBeenCalledWith(true);
+    expect(g.onStale).not.toHaveBeenCalled();
+  });
+
+  it('a different prompt id, a different tool or detail, or nothing pending is stale: no resolve, onStale', () => {
+    for (const now of [
+      { toolName: 'Edit', detail: '{}', promptId: 2 },
+      { toolName: 'Write', detail: '{}', promptId: 1 },
+      { toolName: 'Edit', detail: '{"x":1}', promptId: 1 },
+      undefined,
+    ] as Info[]) {
+      const g = guarded({ toolName: 'Edit', detail: '{}', promptId: 1 });
+      g.pending = now;
+      g.btns[0].click(); g.btns[1].click(); g.btns[2].click();
+      expect(g.manager.resolvePermission).not.toHaveBeenCalled();
+      expect(g.onStale).toHaveBeenCalled();
+      expect(g.saveSettings).not.toHaveBeenCalled();
+      expect(g.settings.alwaysAllowedTools).toEqual([]);
+    }
+  });
+
+  it('Always: re-checks AFTER the save await and resolves nothing if the queue advanced', async () => {
+    const g = guarded({ toolName: 'Edit', detail: '{}', promptId: 1 });
+    g.onSave = () => { g.pending = { toolName: 'Bash', detail: 'rm -rf /', promptId: 2 }; };
+    g.btns[2].click();
+    await flush();
+    expect(g.manager.resolvePermission).not.toHaveBeenCalled();
+    expect(g.onStale).toHaveBeenCalled();
+    expect(g.settings.alwaysAllowedTools).toEqual(['Edit']);
+  });
+
+  it('Always `prefix`: same re-check after the await', async () => {
+    const detail = `Run host_exec for a remote thread: ${JSON.stringify({ command: 'git status' })}`;
+    const g = guarded({ toolName: 'mcp__claude_threads__host_exec', detail, promptId: 1 });
+    g.onSave = () => { g.pending = { toolName: 'mcp__claude_threads__host_exec', detail, promptId: 2 }; }; // identical text, NEW prompt
+    g.btns[2].click();
+    await flush();
+    expect(g.manager.resolvePermission).not.toHaveBeenCalled();
+  });
+
+  it('without a guard nothing changes (the board keeps its behaviour)', async () => {
+    const { btns, manager } = setup({ toolName: 'Edit', detail: '{}' });
+    btns[1].click();
+    expect(manager.resolvePermission).toHaveBeenCalledWith('thread-1', true);
+  });
+});

