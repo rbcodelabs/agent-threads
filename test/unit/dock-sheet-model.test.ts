@@ -132,9 +132,8 @@ describe('trayLayout (K2 P5 batch 3: the composer wins; the tray scrolls inside 
     expect(l.cap).toBeLessThanOrEqual(600 - 140);
   });
   it('the cap never exceeds the room left after the fixed chrome (the composer is never clipped)', () => {
-    for (const max of [300, 260, 220, 200, 180, 160]) {
-      const l = trayLayout({ ...base, max });
-      expect(l.cap, `max ${max}`).toBeLessThanOrEqual(Math.max(MIN_TRAY_PX, max - 140));
+    for (const max of [300, 260, 220, 200, 192, 180, 160, 100]) {
+      expect(trayLayout({ ...base, max }).cap, `max ${max}`).toBeLessThanOrEqual(Math.max(0, max - 140));
     }
   });
   it('the first card does not fit (fixed + need > max): compact form, and its smaller need is used', () => {
@@ -146,8 +145,22 @@ describe('trayLayout (K2 P5 batch 3: the composer wins; the tray scrolls inside 
   it('a first card that fits stays full', () => {
     expect(trayLayout({ ...base, max: 330 }).compact).toBe(false); // room 190 = need
   });
-  it('is floored at a small constant so the tray never collapses to nothing', () => {
-    expect(trayLayout({ ...base, max: 150 }).cap).toBeGreaterThanOrEqual(MIN_TRAY_PX);
-    expect(trayLayout({ ...base, max: 100 }).cap).toBeGreaterThanOrEqual(MIN_TRAY_PX);
+  it('room smaller than the floor: the tray COLLAPSES (hand-off row) and never takes more than the room: the composer wins', () => {
+    for (const max of [190, 170, 150, 100]) {
+      const l = trayLayout({ ...base, max });
+      expect(l.collapsed, `max ${max}`).toBe(max - 140 < MIN_TRAY_PX);
+      expect(l.cap, `max ${max}`).toBeLessThanOrEqual(Math.max(0, max - 140));
+    }
+  });
+  it('negative room: cap 0, collapsed', () => {
+    const l = trayLayout({ ...base, max: 100, fixed: 160 });
+    expect(l.cap).toBe(0);
+    expect(l.collapsed).toBe(true);
+  });
+  it('room at or above the floor: never collapsed, cap within the room and at least the floor', () => {
+    const l = trayLayout({ ...base, max: 140 + MIN_TRAY_PX });
+    expect(l.collapsed).toBe(false);
+    expect(l.cap).toBeGreaterThanOrEqual(MIN_TRAY_PX);
+    expect(l.cap).toBeLessThanOrEqual(MIN_TRAY_PX);
   });
 });

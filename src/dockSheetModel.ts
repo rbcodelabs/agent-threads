@@ -113,10 +113,10 @@ export const MIN_TRAY_PX = 52; // a 44px button plus its padding: the smallest b
  * the transcript MIN_TRANSCRIPT_PX if it can. When even the first card does not fit, the COMPACT form (title and buttons,
  * detail collapsed, heading not sticky) is used. A first card that is partly clipped but scrollable beats a clipped composer.
  */
-export function trayLayout(i: { max: number; fixed: number; needFull: number; needCompact: number }): { cap: number; compact: boolean } {
+export function trayLayout(i: { max: number; fixed: number; needFull: number; needCompact: number }): { cap: number; compact: boolean; collapsed: boolean } {
   const room = i.max - i.fixed;
   const compact = i.needFull > room;
   const need = compact ? i.needCompact : i.needFull;
   const wanted = Math.max(need, Math.min(i.max * TRAY_SHARE, room - MIN_TRANSCRIPT_PX));
-  return { cap: Math.max(MIN_TRAY_PX, Math.min(wanted, room)), compact };
+  return { cap: Math.max(MIN_TRAY_PX, Math.min(wanted, room)), compact, collapsed: false };
 }

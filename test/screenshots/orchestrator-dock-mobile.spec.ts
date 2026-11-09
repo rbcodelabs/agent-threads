@@ -339,11 +339,20 @@ test.describe('D1b: worst-case first card (long title, 3-line detail, 3 buttons)
       const underBar = tray.getBoundingClientRect().top + (stickyBar ? barH : 0) - btn.getBoundingClientRect().top;
       if (underBar > 0) tray.scrollTop -= underBar;
       const bar = r(tray.querySelector('.ct-orch-tray-bar')!); // after the tray scroll: a non-sticky (compact) heading scrolls away
-      const buttons = Array.from(first.querySelectorAll('button')).map((b) => r(b));
+      const info = Array.from(first.querySelectorAll('button')).map((b) => {
+        const cs = getComputedStyle(b);
+        const shown = b.getClientRects().length > 0 && cs.display !== 'none' && cs.visibility !== 'hidden' && !b.closest('[hidden]');
+        return { name: (b.textContent ?? '').trim(), shown, tabbable: shown && !(b as HTMLButtonElement).disabled && b.tabIndex >= 0, ...r(b) };
+      });
+      const buttons = info.filter((b) => b.shown);
+      const hiddenApprovals = info.filter((b) => !b.shown && /^(Allow|Always)/.test(b.name));
+      const collapsedReview = tray.querySelector('.ct-orch-tray-collapsed-review') as HTMLElement | null;
+      const collapsedShown = !!collapsedReview && collapsedReview.getClientRects().length > 0 && getComputedStyle(collapsedReview).display !== 'none';
       const field = (document.querySelector('.ct-orch-input') ?? document.querySelector('.ct-orch-sheet-composer')) as HTMLElement;
       const vv = (window as any).visualViewport;
       return {
         vvBottom: vv ? vv.offsetTop + vv.height : innerHeight,
+        compact: tray.hasAttribute('data-compact'), collapsed: tray.hasAttribute('data-collapsed'), collapsedShown, hiddenApprovals,
         sheet: r(sh), tray: r(tray), bar, buttons, field: r(field), head: r(sh.querySelector('.ct-orch-sheet-head')!),
         composerInSheet: sh.contains(field), mode: sh.dataset.mode,
       };
@@ -361,12 +370,24 @@ test.describe('D1b: worst-case first card (long title, 3-line detail, 3 buttons)
     } else {
       expect(m.field.b, `${label}: the pill's field above the keyboard`).toBeLessThanOrEqual(m.vvBottom + eps);
     }
-    expect(m.buttons.length).toBe(3);
-    for (const b of m.buttons) {
-      expect(b.t, `${label}: button below the sticky heading`).toBeGreaterThanOrEqual(m.bar.b - eps);
-      expect(b.b, `${label}: button inside the tray band`).toBeLessThanOrEqual(m.tray.b + eps);
-      expect(b.b, `${label}: button inside the sheet`).toBeLessThanOrEqual(m.sheet.b + eps);
+    const names = m.buttons.map((b) => b.name);
+    if (m.collapsed) {
+      // Not even the compact card fits next to the composer: the body is hidden, a one-row hand-off remains (when there is any room at all)
+      expect(names, `${label}: no approval buttons in the collapsed form`).toEqual([]);
+    } else if (m.compact) {
+      // NEVER approve blind: with the tool detail hidden only Deny and "Review in thread" are on offer.
+      expect(names, `${label}: compact form`).toEqual(['Deny', 'Review in thread']);
+      expect(m.hiddenApprovals.length, `${label}: Allow / Always exist but are not displayed`).toBeGreaterThan(0);
+    } else {
+      expect(names, `${label}: full form`).toEqual(['Deny', 'Allow', 'Always']);
     }
+    for (const b of m.buttons) {
+      expect(b.t, `${label}: ${b.name} below the sticky heading`).toBeGreaterThanOrEqual(m.bar.b - eps);
+      expect(b.b, `${label}: ${b.name} inside the tray band`).toBeLessThanOrEqual(m.tray.b + eps);
+      expect(b.b, `${label}: ${b.name} inside the sheet`).toBeLessThanOrEqual(m.sheet.b + eps);
+      if (m.mode === 'orb') expect(b.h, `${label}: ${b.name} is a 44px target`).toBeGreaterThanOrEqual(43.5);
+    }
+    for (const h of m.hiddenApprovals) expect(h.tabbable, `${label}: hidden ${h.name} is not tabbable`).toBe(false);
   }
   for (const c of CASES) {
     for (const kb of c.kb) {
@@ -441,10 +462,15 @@ test.describe('D11 / D10 exact QA repros', () => {
       await expect(sheet(page)).toBeVisible();
       await page.evaluate((h) => (window as any).__setVV(h), size.height - 170);
       await page.waitForTimeout(150);
-      // appendPermissionButtons order: Deny, Allow, Always
-      for (const [i, name] of ['Deny', 'Allow', 'Always'].entries()) {
-        const r = await hitTestable(page, '.ct-orch-tray-card[data-kind="permission"] button', i);
-        expect(r, name).toMatchObject({ hit: true, inSheet: true, inViewport: true, sheetInViewport: true });
+      // The landscape tiny-room case is the COMPACT form: Deny + "Review in thread" only (the detail is hidden, so Allow / Always must not be on offer).
+      const compact = await page.locator('.ct-orch-tray').evaluate((el) => el.hasAttribute('data-compact'));
+      expect(compact).toBe(true);
+      for (const sel of ['.ct-orch-tray-card[data-kind="permission"] button.ct-permission-deny', '.ct-orch-tray-card[data-kind="permission"] .ct-orch-tray-handoff']) {
+        expect(await hitTestable(page, sel), sel).toMatchObject({ hit: true, inSheet: true, inViewport: true, sheetInViewport: true });
+      }
+      for (const cls of ['allow', 'always']) {
+        const hidden = await page.locator(`.ct-orch-tray-card[data-kind="permission"] button.ct-permission-${cls}`).first().evaluate((el) => ({ shown: el.getClientRects().length > 0 && getComputedStyle(el).display !== 'none', tab: el.tabIndex }));
+        expect(hidden.shown, `Allow/Always (${cls}) not displayed in compact`).toBe(false);
       }
       const answer = await hitTestable(page, '.ct-orch-tray-card[data-kind="question"] .ct-orch-tray-handoff');
       expect(answer).toMatchObject({ hit: true, inSheet: true, inViewport: true });
@@ -464,6 +490,73 @@ test.describe('D11 / D10 exact QA repros', () => {
       expect(r).toMatchObject({ hit: true, inSheet: true, inViewport: true, sheetInViewport: true });
     });
   }
+});
+
+test.describe('Compact form safety (never approve blind)', () => {
+  const size = { width: 844, height: 390 };
+  async function compactSetup(page: Page) {
+    await installFakeVisualViewport(page);
+    await open(page, 'orch=idle&tx=conversation&tray=1', size);
+    await page.evaluate(() => (window as any).__addPermission('k-hiptrip-awaiting', 'Bash', JSON.stringify({ command: 'npm run deploy --prod' })));
+    await page.evaluate(() => (window as any).__openSheet());
+    await expect(sheet(page)).toBeVisible();
+  }
+  test('Tab never lands on Allow / Always while the tray is compact (the detail is hidden)', async ({ page }) => {
+    await compactSetup(page);
+    await page.evaluate((h) => (window as any).__setVV(h), size.height - 170);
+    await page.waitForTimeout(150);
+    expect(await page.locator('.ct-orch-tray').evaluate((el) => el.hasAttribute('data-compact'))).toBe(true);
+    await page.locator('.ct-orch-sheet-close').focus();
+    const seen: string[] = [];
+    for (let i = 0; i < 14; i++) { await page.keyboard.press('Tab'); seen.push(await page.evaluate(() => (document.activeElement?.textContent ?? '').trim())); }
+    expect(seen.filter((t) => /^(Allow|Always)/.test(t))).toEqual([]);
+    expect(seen).toContain('Review in thread');
+  });
+  test('compact <-> full on keyboard open/close: Allow returns for a fully shown command, and resolves exactly once', async ({ page }) => {
+    await compactSetup(page);
+    await page.evaluate((h) => (window as any).__setVV(h), size.height - 170);
+    await page.waitForTimeout(150);
+    const allow = page.locator('.ct-orch-tray-card[data-kind="permission"] button.ct-permission-allow');
+    await expect(allow).toBeHidden();
+    await page.evaluate((h) => (window as any).__setVV(h), size.height);
+    await page.waitForTimeout(150);
+    expect(await page.locator('.ct-orch-tray').evaluate((el) => el.hasAttribute('data-compact'))).toBe(false);
+    await expect(allow).toBeVisible();
+    await expect(page.locator('.ct-orch-tray-card[data-kind="permission"] .ct-orch-tray-handoff')).toBeHidden();
+    await allow.click();
+    await page.waitForTimeout(100);
+    expect(await page.evaluate(() => (window as any).__resolvedPermissions.length)).toBe(1);
+    expect(await page.evaluate(() => (window as any).__resolvedPermissions[0].allow)).toBe(true);
+  });
+  test('focus on Allow survives the switch to compact: it moves to "Review in thread", never to the page', async ({ page }) => {
+    await compactSetup(page);
+    await page.locator('.ct-orch-tray-card[data-kind="permission"] button.ct-permission-allow').focus();
+    await page.evaluate((h) => (window as any).__setVV(h), size.height - 170);
+    await page.waitForTimeout(150);
+    expect(await page.evaluate(() => (document.activeElement?.textContent ?? '').trim())).toBe('Review in thread');
+  });
+  test('568x320 landscape with a 150px keyboard: the composer wins, the tray collapses to a one-row hand-off', async ({ page }) => {
+    const small = { width: 568, height: 320 };
+    await installFakeVisualViewport(page);
+    await open(page, 'orch=idle&tx=conversation&tray=1', small);
+    await page.evaluate(() => (window as any).__addPermission('k-hiptrip-awaiting', 'Bash', JSON.stringify({ command: 'npm run deploy --prod' })));
+    await page.evaluate(() => (window as any).__openSheet());
+    await page.evaluate((h) => (window as any).__setVV(h), small.height - 150);
+    await page.waitForTimeout(200);
+    const g = await page.evaluate(() => {
+      const sh = document.querySelector('.ct-orch-sheet')!.getBoundingClientRect();
+      const field = document.querySelector('.ct-orch-input')!.getBoundingClientRect();
+      const head = document.querySelector('.ct-orch-sheet-head')!.getBoundingClientRect();
+      const tray = document.querySelector('.ct-orch-tray') as HTMLElement | null;
+      const vv = (window as any).visualViewport;
+      return { sh: { t: sh.top, b: sh.bottom }, field: { t: field.top, b: field.bottom }, head: { t: head.top, b: head.bottom }, vb: vv.offsetTop + vv.height, collapsed: !!tray && tray.hasAttribute('data-collapsed'), trayH: tray && !tray.hidden ? tray.getBoundingClientRect().height : 0 };
+    });
+    expect(g.field.b, 'the pill field is above the keyboard').toBeLessThanOrEqual(g.vb + 1.5);
+    expect(g.sh.b, 'the sheet is above the keyboard').toBeLessThanOrEqual(g.vb + 1.5);
+    expect(g.sh.b, 'the sheet does not overlap the pill field').toBeLessThanOrEqual(g.field.t + 1.5);
+    expect(g.head.t, 'the header is inside the viewport').toBeGreaterThanOrEqual(-1.5);
+    expect(g.collapsed).toBe(true);
+  });
 });
 
 test.describe('D2: landscape phone (pill mode): the field and the sheet lift above the soft keyboard', () => {

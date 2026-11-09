@@ -253,3 +253,6 @@ export function joinAnnouncements(texts: string[]): string {
   if (texts.length <= 2) return texts.join('. ');
   return `${texts.slice(0, 2).join('. ')}, and ${texts.length - 2} more need attention`;
 }
+
+/** K2 P5 batch 4 scaffold: signature only (behaviour arrives with the fix). */
+export function applyTrayMode(_tray: HTMLElement, _mode: { compact: boolean; collapsed: boolean }): void {}

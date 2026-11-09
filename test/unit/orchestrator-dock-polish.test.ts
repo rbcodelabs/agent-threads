@@ -10,7 +10,9 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { OrchestratorDock, type OrchestratorDockDeps } from '../../src/orchestratorDock';
 import { createDraftStore, MAX_DRAFT_CHARS, type DraftStore } from '../../src/dockDraftStore';
 import type { Thread } from '../../src/types';
-import { Platform } from 'obsidian';
+import { Platform, Notice } from 'obsidian';
+import { readFileSync } from 'node:fs';
+import { PILL_BOTTOM_PX } from '../../src/orchestratorDock';
 
 type Ev = { type: string; [k: string]: unknown };
 type Listener = (threadId: string, event: Ev) => void;
@@ -1048,5 +1050,104 @@ describe('batch 3 advisories', () => {
     expect(history.entries).toEqual(['secret token']);
     t.dock.destroy();
     expect(history.entries).toEqual([]);
+  });
+});
+
+describe('batch 4 advisories', () => {
+  function fakeViewport(height: number) {
+    const vv = Object.assign(new EventTarget(), { height, offsetTop: 0, width: 390, scale: 1 });
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+    return vv;
+  }
+  function sized(t: T, h: number, pillH = 0) {
+    Object.defineProperty(t.root, 'clientHeight', { configurable: true, value: h });
+    t.root.getBoundingClientRect = () => ({ top: 0, left: 0, right: 390, bottom: h, width: 390, height: h, x: 0, y: 0, toJSON() {} }) as DOMRect;
+    if (pillH) Object.defineProperty(t.stage, 'offsetHeight', { configurable: true, value: pillH });
+  }
+  const rootInset = (t: T) => t.root.style.getPropertyValue('--ct-orch-kbd-inset');
+
+  it('2: a failed send after a swap is not dropped: the text is in the Notice and comes back when the user returns to that orchestrator', async () => {
+    const drafts = createDraftStore();
+    const t = setup({ drafts });
+    let fail!: (e: Error) => void;
+    t.manager.sendMessage.mockImplementationOnce(() => new Promise<void>((_r, rej) => { fail = rej; }));
+    type(t, 'precious words');
+    key(t.input(), 'Enter');
+    t.state.orchId = 'orch2';
+    t.dock.refresh();
+    fail(new Error('boom'));
+    await flush();
+    expect(drafts.get('orch2')).toBe('');
+    expect(Notice.messages.map((m) => m.message).join('\n')).toContain('precious words');
+    t.state.orchId = 'orch';
+    t.dock.refresh();
+    expect(t.input().value).toBe('precious words');
+    expect(drafts.get('orch')).toBe('precious words');
+  });
+
+  it('3: an orb -> pill flip while the keyboard is up clamps the lift at once (not at the next viewport event)', () => {
+    const vv = fakeViewport(390);
+    const t = setup({ mode: 'orb' });
+    sized(t, 390, 48);
+    t.dock.openSheet();
+    vv.height = 10; vv.dispatchEvent(new Event('resize')); // inset 380 in orb mode: unclamped
+    expect(rootInset(t)).toBe('380px');
+    t.state.mode = 'pill'; t.dock.relayout();
+    expect(rootInset(t)).toBe(`${390 - 48 - 8}px`);
+    t.state.mode = 'orb'; t.dock.relayout();
+    expect(rootInset(t)).toBe('380px');
+  });
+
+  it('5: the dock\'s pill offset constant equals the stylesheet variable (they cannot drift apart)', () => {
+    const css = readFileSync('styles.css', 'utf8');
+    const m = css.match(/--ct-kanban-pill-bottom:\s*(\d+)px/);
+    expect(m).not.toBeNull();
+    expect(Number(m![1])).toBe(PILL_BOTTOM_PX);
+  });
+
+  describe('6: the sheet\'s ResizeObserver and fitTray', () => {
+    class FakeRO {
+      static all: FakeRO[] = [];
+      observed: Element[] = []; disconnected = false;
+      constructor(public cb: () => void) { FakeRO.all.push(this); }
+      observe(el: Element) { this.observed.push(el); }
+      unobserve() {}
+      disconnect() { this.disconnected = true; }
+    }
+    afterEach(() => { vi.unstubAllGlobals(); FakeRO.all = []; });
+
+    it('observes only while open: close() disconnects, destroy() disconnects', () => {
+      vi.stubGlobal('ResizeObserver', FakeRO);
+      const t = setup({ mode: 'orb' });
+      expect(FakeRO.all.filter((o) => o.observed.length > 0)).toHaveLength(0);
+      t.dock.openSheet();
+      const open = FakeRO.all.filter((o) => o.observed.some((e) => e.closest('.ct-orch-sheet')));
+      expect(open).toHaveLength(1);
+      expect(open[0].observed.length).toBe(2); // header + composer slot
+      t.dock.closeSheet();
+      expect(open[0].disconnected).toBe(true);
+      t.dock.openSheet();
+      const again = FakeRO.all.filter((o) => o.observed.some((e) => e.closest('.ct-orch-sheet')) && !o.disconnected);
+      expect(again).toHaveLength(1);
+      t.dock.destroy();
+      expect(again[0].disconnected).toBe(true);
+    });
+
+    it('fitTray is idempotent: running it again (or after the tray re-rendered while compact) leaves the same attributes and cap', () => {
+      const t = setup({ mode: 'orb', permission: ['a'], question: ['b'] });
+      sized(t, 640);
+      t.dock.openSheet();
+      const sheet = t.q('.ct-orch-sheet')!;
+      const tray = () => t.q('.ct-orch-tray')!;
+      const snap = () => `${tray().hasAttribute('data-compact')}|${tray().hasAttribute('data-collapsed')}|${sheet.style.getPropertyValue('--ct-orch-tray-max')}`;
+      const fit = () => (t.dock as unknown as { sheet: { fitTray(): void } }).sheet.fitTray();
+      tray().setAttribute('data-compact', '1'); // as left by a previous fit
+      fit();
+      const first = snap();
+      fit(); fit();
+      expect(snap()).toBe(first);
+      t.dock.refresh(); // the tray re-renders
+      expect(snap()).toBe(first);
+    });
   });
 });

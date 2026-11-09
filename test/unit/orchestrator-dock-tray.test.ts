@@ -9,6 +9,7 @@
 import '../setup/obsidian-dom';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { OrchestratorDock, type OrchestratorDockDeps } from '../../src/orchestratorDock';
+import { applyTrayMode } from '../../src/orchestratorDockTray';
 import type { Thread } from '../../src/types';
 
 type Ev = { type: string; [k: string]: unknown };
@@ -820,5 +821,91 @@ describe('focus survives the busy / re-enable cycle (review advisory 2)', () => 
     await tick();
     expect(allow.disabled).toBe(false);
     expect(document.activeElement).toBe(allow);
+  });
+});
+
+describe('compact form (K2 P5 batch 4): never approve blind', () => {
+  const short = [{ id: 'p', title: 'Deploy curation', kind: 'permission' as const, tool: 'Bash', detail: JSON.stringify({ command: 'npm run deploy --prod' }) }];
+  const hidden = (el: Element | null | undefined) => !!el && (el as HTMLElement).hidden;
+
+  it('a fully shown command keeps inline Allow / Always in the full form; a hand-off exists but is hidden and named after tool + title', () => {
+    const t = setup({ specs: short });
+    expect(hidden(t.btn('p', 'Allow'))).toBe(false);
+    expect(hidden(t.btn('p', 'Always'))).toBe(false);
+    const review = t.btn('p', 'Review in thread')!;
+    expect(review.hasAttribute('data-compact-only')).toBe(true);
+    expect(review.hidden).toBe(true);
+    expect(review.getAttribute('aria-label')).toMatch(/Bash/);
+    expect(review.getAttribute('aria-label')).toContain('Deploy curation');
+    expect(t.btn('p', 'Allow')!.hasAttribute('data-hide-compact')).toBe(true);
+    expect(t.btn('p', 'Always')!.hasAttribute('data-hide-compact')).toBe(true);
+    expect(t.btn('p', 'Deny')!.hasAttribute('data-hide-compact')).toBe(false);
+  });
+
+  it('applyTrayMode(compact): Allow / Always are hidden (not focusable), Deny and "Review in thread" are shown; back to full restores', () => {
+    const t = setup({ specs: short });
+    const tray = t.tray()!;
+    applyTrayMode(tray, { compact: true, collapsed: false });
+    expect(tray.hasAttribute('data-compact')).toBe(true);
+    expect(hidden(t.btn('p', 'Allow'))).toBe(true);
+    expect(hidden(t.btn('p', 'Always'))).toBe(true);
+    expect(hidden(t.btn('p', 'Deny'))).toBe(false);
+    expect(hidden(t.btn('p', 'Review in thread'))).toBe(false);
+    applyTrayMode(tray, { compact: false, collapsed: false });
+    expect(tray.hasAttribute('data-compact')).toBe(false);
+    expect(hidden(t.btn('p', 'Allow'))).toBe(false);
+    expect(hidden(t.btn('p', 'Review in thread'))).toBe(true);
+  });
+
+  it('a detail that was NOT fully shown never had inline Allow; its Review button is always visible (not compact-only)', () => {
+    const t = setup({ specs: [{ id: 'l', title: 'Long', kind: 'permission', tool: 'Bash', detail: JSON.stringify({ command: 'x'.repeat(300) }) }] });
+    expect(t.btn('l', 'Allow')).toBeUndefined();
+    const review = t.btn('l', 'Review in thread')!;
+    expect(review.hasAttribute('data-compact-only')).toBe(false);
+    applyTrayMode(t.tray()!, { compact: true, collapsed: false });
+    expect(hidden(review)).toBe(false);
+    applyTrayMode(t.tray()!, { compact: false, collapsed: false });
+    expect(hidden(review)).toBe(false);
+  });
+
+  it('focus on a button that gets hidden moves to "Review in thread" of the same card (never to the page)', () => {
+    const t = setup({ specs: short });
+    t.btn('p', 'Allow')!.focus();
+    expect(document.activeElement).toBe(t.btn('p', 'Allow'));
+    applyTrayMode(t.tray()!, { compact: true, collapsed: false });
+    expect(document.activeElement).toBe(t.btn('p', 'Review in thread'));
+  });
+
+  it('compact -> full -> Allow resolves exactly once (the guard and the single resolve path are unchanged)', async () => {
+    const t = setup({ specs: short });
+    applyTrayMode(t.tray()!, { compact: true, collapsed: false });
+    applyTrayMode(t.tray()!, { compact: false, collapsed: false });
+    t.btn('p', 'Allow')!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(t.manager.resolvePermission).toHaveBeenCalledTimes(1);
+    expect(t.manager.resolvePermission.mock.calls[0][1]).toBe(true);
+  });
+
+  it('Review in thread (compact) opens the thread and resolves nothing', () => {
+    const t = setup({ specs: short });
+    applyTrayMode(t.tray()!, { compact: true, collapsed: false });
+    t.btn('p', 'Review in thread')!.click();
+    expect(t.deps.openThread).toHaveBeenCalledWith('p');
+    expect(t.manager.resolvePermission).not.toHaveBeenCalled();
+  });
+
+  it('collapsed: the list is hidden and a one-row "Review" hands off to the FIRST thread (no approval buttons)', () => {
+    const t = setup({ specs: short });
+    const tray = t.tray()!;
+    applyTrayMode(tray, { compact: true, collapsed: true });
+    expect(tray.hasAttribute('data-collapsed')).toBe(true);
+    const row = tray.querySelector<HTMLButtonElement>('.ct-orch-tray-collapsed-review')!;
+    expect(row.hidden).toBe(false);
+    expect(row.getAttribute('aria-label')).toMatch(/need you|Review/i);
+    row.click();
+    expect(t.deps.openThread).toHaveBeenCalledWith('p');
+    expect(t.manager.resolvePermission).not.toHaveBeenCalled();
+    applyTrayMode(tray, { compact: false, collapsed: false });
+    expect(row.hidden).toBe(true);
   });
 });

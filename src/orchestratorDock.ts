@@ -123,7 +123,7 @@ const MAX_BADGE = 9;
 /** The reply sheet never gets shorter than this, whatever the keyboard leaves (never 'uncapped'). */
 const MIN_SHEET_PX = 96;
 /** The pill's offset from the view bottom (styles.css --ct-kanban-pill-bottom), and the smaller gap it keeps above a keyboard. */
-const PILL_BOTTOM_PX = 36;
+export const PILL_BOTTOM_PX = 36; // keep equal to --ct-kanban-pill-bottom in styles.css (orchestrator-dock-polish.test.ts checks)
 const PILL_BOTTOM_KBD_PX = 8;
 /** A recovery is announced only once it has held this long. */
 export const RECOVERY_DEBOUNCE_MS = 1000;
