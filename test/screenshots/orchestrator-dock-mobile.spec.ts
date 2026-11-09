@@ -408,6 +408,64 @@ test.describe('D1b: worst-case first card (long title, 3-line detail, 3 buttons)
   });
 });
 
+/** Hit-testing: scroll INSIDE the tray (never the sheet) until the element is in its band, then ask the browser what sits at its centre. */
+async function hitTestable(page: Page, selector: string, nth = 0) {
+  return page.evaluate(({ selector, nth }) => {
+    const el = document.querySelectorAll(selector)[nth] as HTMLElement;
+    const tray = el.closest('.ct-orch-tray') as HTMLElement | null;
+    if (tray) {
+      for (let pass = 0; pass < 3; pass++) {
+        const t = tray.getBoundingClientRect(); const b = el.getBoundingClientRect();
+        const bar = tray.querySelector('.ct-orch-tray-bar') as HTMLElement;
+        const top = t.top + (getComputedStyle(bar).position === 'sticky' ? bar.getBoundingClientRect().height : 0);
+        if (b.bottom > t.bottom) tray.scrollTop += b.bottom - t.bottom; else if (b.top < top) tray.scrollTop -= top - b.top;
+      }
+    }
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    const sh = document.querySelector('.ct-orch-sheet')!.getBoundingClientRect();
+    const vv = (window as any).visualViewport;
+    const vb = vv ? vv.offsetTop + vv.height : innerHeight;
+    return { hit: !!hit && (hit === el || el.contains(hit)), inSheet: r.top >= sh.top - 1.5 && r.bottom <= sh.bottom + 1.5, inViewport: r.top >= -1.5 && r.bottom <= vb + 1.5, sheetInViewport: sh.top >= -1.5 && sh.bottom <= vb + 1.5, h: r.height };
+  }, { selector, nth });
+}
+
+test.describe('D11 / D10 exact QA repros', () => {
+  for (const size of [{ width: 844, height: 390 }, { width: 667, height: 375 }]) {
+    test(`D11 @ ${size.width}x${size.height}: ?tray=1 + a permission + keyboard 170px: Allow / Deny / Answer are hit-testable, the close button stays reachable`, async ({ page }) => {
+      await installFakeVisualViewport(page);
+      await open(page, 'orch=idle&tx=conversation&tray=1', size);
+      await page.evaluate(() => (window as any).__addPermission('k-hiptrip-awaiting', 'Bash', JSON.stringify({ command: 'npm run deploy --prod' })));
+      await page.evaluate(() => (window as any).__openSheet());
+      await expect(sheet(page)).toBeVisible();
+      await page.evaluate((h) => (window as any).__setVV(h), size.height - 170);
+      await page.waitForTimeout(150);
+      // appendPermissionButtons order: Deny, Allow, Always
+      for (const [i, name] of ['Deny', 'Allow', 'Always'].entries()) {
+        const r = await hitTestable(page, '.ct-orch-tray-card[data-kind="permission"] button', i);
+        expect(r, name).toMatchObject({ hit: true, inSheet: true, inViewport: true, sheetInViewport: true });
+      }
+      const answer = await hitTestable(page, '.ct-orch-tray-card[data-kind="question"] .ct-orch-tray-handoff');
+      expect(answer).toMatchObject({ hit: true, inSheet: true, inViewport: true });
+      const close = await hitTestable(page, '.ct-orch-sheet-close');
+      expect(close).toMatchObject({ hit: true, inSheet: true, inViewport: true, sheetInViewport: true });
+    });
+  }
+  for (const size of [{ width: 320, height: 640 }, { width: 360, height: 640 }]) {
+    test(`D10 @ ${size.width}x${size.height}: 8 replies, a long-permission first card, keyboard 300px: the textarea stays visible`, async ({ page }) => {
+      await installFakeVisualViewport(page);
+      await open(page, 'orch=attention&tx=conversation&tray=long', size);
+      await openSheet(page, size);
+      await fillTranscript(page, 8);
+      await page.evaluate((h) => (window as any).__setVV(h), size.height - 300);
+      await page.waitForTimeout(150);
+      const r = await hitTestable(page, '.ct-orch-input');
+      expect(r).toMatchObject({ hit: true, inSheet: true, inViewport: true, sheetInViewport: true });
+    });
+  }
+});
+
 test.describe('D2: landscape phone (pill mode): the field and the sheet lift above the soft keyboard', () => {
   for (const size of [{ width: 844, height: 390 }, { width: 667, height: 375 }]) {
     test(`@ ${size.width}x${size.height} with a 170px keyboard`, async ({ page }) => {
@@ -501,6 +559,19 @@ test.describe('prefers-reduced-motion: computed styles across dock, sheet, peek 
       await expect(page.locator('.ct-kanban-card-linked')).toHaveCount(1);
       await expect(page.locator('.ct-kanban-card-linked-flash')).toHaveCount(reduced ? 0 : 1);
       if (reduced) {
+        // D12: the REMOVAL path is instant too (un-highlight must not fade the border back)
+        const id = await page.locator('.ct-kanban-card-linked').first().evaluate((el) => { (el as HTMLElement).dataset.qaCard = '1'; return 1; });
+        expect(id).toBe(1);
+        await page.mouse.move(2, 2);
+        const gone = await page.evaluate(() => {
+          const card = document.querySelector('[data-qa-card="1"]') as HTMLElement;
+          return { linked: card.classList.contains('ct-kanban-card-linked'), d: getComputedStyle(card).transitionDuration, running: card.getAnimations().length };
+        });
+        expect(gone.linked).toBe(false);
+        expect(gone.d.split(',').every((x) => parseFloat(x) === 0)).toBe(true);
+        expect(gone.running).toBe(0);
+        await link.hover();
+        await expect(page.locator('.ct-kanban-card-linked')).toHaveCount(1);
         // D4: the highlighted card's border / glow must not fade either (the board-wide card transition is switched off for it)
         const t = await page.locator('.ct-kanban-card-linked').evaluate((el) => ({ d: getComputedStyle(el).transitionDuration, running: el.getAnimations().length }));
         expect(t.d.split(',').every((x) => parseFloat(x) === 0)).toBe(true);

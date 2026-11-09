@@ -101,6 +101,9 @@ describe('reduced-motion audit of the dock stylesheet rules', () => {
     expect(cardTransition, 'precondition: the board card transitions border/shadow').toBe(true);
     const override = rules.some((r) => isReduce(r.media) && r.selectors.some((x) => x.includes('ct-kanban-card-linked')) && NEUTRALISES.test(r.body));
     expect(override).toBe(true);
+    // D12: the REMOVAL of the highlight fades the BASE card's border back, so the base card rule needs its own override.
+    const baseOverride = rules.some((r) => isReduce(r.media) && r.selectors.includes('.ct-kanban-card') && NEUTRALISES.test(r.body));
+    expect(baseOverride, 'un-highlighting must be instant too: .ct-kanban-card needs transition: none under reduce').toBe(true);
   });
 
   it('no dock rule animates anything on state classes only for no-preference without a base rule leaking motion', () => {
