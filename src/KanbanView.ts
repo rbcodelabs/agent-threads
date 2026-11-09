@@ -9,6 +9,7 @@ import { approveProposedReply, discardProposedReply, takeProposedReplyForEdit } 
 import { answerPendingQuestions } from './questionActions';
 import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
 import { threadNeedsInput, splitNeedsInput } from './needsInput';
+import { OrchestratorDock, dockModeForWidth, type DockMode } from './orchestratorDock';
 import { decisionToQuestion } from './decisions';
 import { formatToolName } from './ClaudeSession';
 import { appendPermissionButtons, summarizePermissionDetail } from './permissionCard';
@@ -20,7 +21,7 @@ import { remoteGroup, threadCwdLabel } from './remote/threadLocation';
 import { parsePrUrlRepo } from './gitDiffUtils';
 import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks';
 import { appendOrchestratorBadge } from './orchestrator-badge';
-import { partitionThreads, classifyThreadRow, type ThreadRowState } from './threadRowState';
+import { liveRowFlags, partitionThreads, classifyThreadRow, type ThreadRowState } from './threadRowState';
 import { telemetry } from './telemetry';
 import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps } from './threadArchiveMenu';
 import { promptConfirm } from './confirmModal';
@@ -102,7 +103,9 @@ export class KanbanView extends ItemView {
   private inboxDrafts = new Map<string, QuestionDraft>();
 
   private boardEl!: HTMLElement;
-  private headerCountEl!: HTMLElement;
+  private dock: OrchestratorDock | null = null;
+  private dockMode: DockMode = 'pill';
+  private dockResizeObserver: ResizeObserver | null = null;
   private searchBarEl!: HTMLElement;
   private searchInputEl!: HTMLInputElement;
   private searchClearBtn!: HTMLButtonElement;
@@ -194,6 +197,10 @@ export class KanbanView extends ItemView {
 
   async onClose(): Promise<void> {
     this.unsubscribe?.();
+    this.dockResizeObserver?.disconnect();
+    this.dockResizeObserver = null;
+    this.dock?.destroy();
+    this.dock = null;
     for (const timer of this.activityTimers.values()) clearTimeout(timer);
     this.activityTimers.clear();
     for (const timer of this.galleryTimers.values()) clearTimeout(timer);
@@ -281,9 +288,8 @@ export class KanbanView extends ItemView {
     // Floating panel — centered at bottom of the board (count, New thread, group/search)
     const dispatchWrapper = root.createDiv('ct-kanban-dispatch');
 
-    // Meta strip: thread count (left) + search button (right)
+    // Meta strip: Ask-the-orchestrator dock (left, mounted below) + New thread / group-by / search (right)
     const metaRow = dispatchWrapper.createDiv('ct-agents-panel-meta');
-    this.headerCountEl = metaRow.createDiv('ct-agents-count');
     const metaActions = metaRow.createDiv('ct-agents-panel-actions');
 
     // The dispatch composer lives in the conversation panel now; this just opens it.
@@ -349,6 +355,53 @@ export class KanbanView extends ItemView {
     this.searchInputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.closeSearch();
     });
+
+    this.mountOrchestratorDock(root, metaRow);
+  }
+
+  /**
+   * The Ask-the-orchestrator dock leads the pill's meta row. It replaces the old
+   * "N running · N total" count text: that text now lives in the dock dot's tooltip.
+   */
+  private mountOrchestratorDock(root: HTMLElement, metaRow: HTMLElement): void {
+    this.dockResizeObserver?.disconnect();
+    this.dock?.destroy();
+    this.dockMode = dockModeForWidth(root.clientWidth);
+    const plugin = this.plugin;
+    this.dock = new OrchestratorDock(metaRow, {
+      manager: this.manager,
+      listThreads: () => this.manager.getThreads().filter(isKanbanThread),
+      hasPendingWakeup: (id) => plugin.hasPendingWakeup(id),
+      getOrchestratorThreadId: () => plugin.settings.orchestratorThreadId,
+      // open=false: set up without stealing focus into the chat view; the dock then focuses its own field.
+      ensureOrchestrator: () => plugin.ensureOrchestratorThread(false),
+      openThread: (id) => plugin.openThreadInChatView(id),
+      mode: () => this.dockMode,
+      daemons: plugin.daemonRegistry
+        ? {
+            stateOf: (id) => plugin.daemonRegistry?.stateOf(id),
+            onState: (l) => plugin.daemonRegistry?.onState(l) ?? (() => {}),
+            reconnect: (id) => { plugin.daemonRegistry?.clientFor(id)?.reconnectNow(); },
+          }
+        : null,
+    });
+    this.dock.mount();
+    // Narrow boards collapse the pill to the orb (+ New thread): re-derive when the view width crosses 640px.
+    if (typeof ResizeObserver !== 'undefined') {
+      this.dockResizeObserver = new ResizeObserver((entries) => {
+        const width = entries[entries.length - 1]?.contentRect.width ?? root.clientWidth;
+        const next = dockModeForWidth(width);
+        if (next === this.dockMode) return;
+        this.dockMode = next;
+        this.dock?.relayout();
+      });
+      this.dockResizeObserver.observe(root);
+    }
+  }
+
+  /** Cmd+J target (see orchestratorDockCommand.ts). */
+  focusOrchestratorDock(): void {
+    this.dock?.focusField();
   }
 
   private toggleSearch(): void {
@@ -448,7 +501,7 @@ export class KanbanView extends ItemView {
         emptyEl.createDiv({ text: 'No threads yet.' });
         emptyEl.createDiv({ cls: 'ct-agents-empty-sub', text: 'Use New thread to start a task.' });
       }
-      this.updateHeader(0, 0);
+      this.dock?.refresh();
       return;
     }
 
@@ -462,8 +515,7 @@ export class KanbanView extends ItemView {
       this.renderStatusBoard(threads);
     }
 
-    const runningCount = threads.filter(t => this.manager.isRunning(t.id)).length;
-    this.updateHeader(threads.length, runningCount);
+    this.dock?.refresh();
 
     this.restoreScrollState(scrollState);
     this.restoreInboxFocus(focus);
@@ -536,15 +588,7 @@ export class KanbanView extends ItemView {
 
   /** Classification flags for a thread, read live (shared by every bucketing path). */
   private rowFlags(t: Thread) {
-    return {
-      isRunning: this.manager.isRunning(t.id),
-      hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
-      hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
-      hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
-      lastError: t.lastError,
-      messageCount: t.messages.length,
-      reviewed: t.reviewed,
-    };
+    return liveRowFlags(this.manager, (id) => this.plugin.hasPendingWakeup(id), t);
   }
 
   /** True when an orchestrator staged something for Rick, or the agent is asking him a question. */
@@ -1662,14 +1706,6 @@ export class KanbanView extends ItemView {
         const thread = this.manager.getThread(id);
         if (thread) el.setText(this.getActivityText(thread, 'waiting'));
       }
-    }
-  }
-
-  private updateHeader(total: number, running: number): void {
-    if (running > 0) {
-      this.headerCountEl.setText(`${running} running · ${total} total`);
-    } else {
-      this.headerCountEl.setText(`${total} thread${total !== 1 ? 's' : ''}`);
     }
   }
 

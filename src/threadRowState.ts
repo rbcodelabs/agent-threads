@@ -92,3 +92,33 @@ export function partitionThreads<T>(
   }
   return result;
 }
+
+/** The live ThreadManager queries `liveRowFlags` reads; a structural subset so views and the dock share one builder. */
+export interface LiveRowFlagSource {
+  isRunning(id: string): boolean;
+  hasPendingPermission(id: string): boolean;
+  hasPendingQuestion(id: string): boolean;
+  hasPendingPlan(id: string): boolean;
+  hasActiveBackgroundTasks(id: string): boolean;
+}
+
+/**
+ * Classification flags for a thread, read live. The single builder behind the
+ * Agent Board's bucketing AND the OrchestratorDock's needs-you dot, so the two
+ * can never disagree about what is awaiting Rick.
+ */
+export function liveRowFlags(
+  source: LiveRowFlagSource,
+  hasPendingWakeup: (id: string) => boolean,
+  t: { id: string; lastError?: string; messages: readonly unknown[]; reviewed?: boolean },
+): ThreadClassificationFlags {
+  return {
+    isRunning: source.isRunning(t.id),
+    hasPendingPermission: source.hasPendingPermission(t.id) || source.hasPendingQuestion(t.id) || source.hasPendingPlan(t.id),
+    hasActiveBackgroundTasks: source.hasActiveBackgroundTasks(t.id),
+    hasPendingWakeup: hasPendingWakeup(t.id),
+    lastError: t.lastError,
+    messageCount: t.messages.length,
+    reviewed: t.reviewed,
+  };
+}

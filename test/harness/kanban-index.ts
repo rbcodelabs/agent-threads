@@ -20,6 +20,7 @@ import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
 import { createDesignSlashCommand } from './design-plugin/designSlashCommand';
 import { applyGalleryFixtures } from './gallery-fixtures';
 
+const KT_ORCH = Date.UTC(2025, 0, 15, 12, 0, 0); // pinned: never wall-clock
 const settings = { ...DEFAULT_SETTINGS, claudeBinaryPath: '/opt/homebrew/bin/claude' };
 const dashboardMode = new URLSearchParams(window.location.search).has('dashboard');
 if (new URLSearchParams(window.location.search).has('mobile')) Platform.isMobile = true;
@@ -82,6 +83,27 @@ if (new URLSearchParams(window.location.search).has('inbox')) {
 if (new URLSearchParams(window.location.search).has('gallery')) applyGalleryFixtures(kanbanFixtureThreads);
 // ?narrow=1 sizes #app to the viewport so a 390px screenshot is really 390px wide.
 if (new URLSearchParams(window.location.search).has('narrow')) document.body.classList.add('ct-harness-narrow');
+// ?orch=idle|attention|working|error|offline seeds the portfolio orchestrator for the OrchestratorDock
+// states (`first-run`, or no param, leaves settings.orchestratorThreadId unset: the "No portfolio
+// orchestrator yet" affordance). The orchestrator is a normal card on the board, as in production.
+const orchFixture = new URLSearchParams(window.location.search).get('orch');
+const orchestratorFixtureId = 'k-orchestrator';
+if (orchFixture && orchFixture !== 'first-run') {
+  kanbanFixtureThreads.push({
+    id: orchestratorFixtureId,
+    title: 'Portfolio Orchestrator',
+    cwd: '/Users/mock/projects',
+    messages: [{ id: 'k-orch-1', role: 'assistant', content: 'Two things are waiting on you.', timestamp: KT_ORCH }],
+    createdAt: KT_ORCH - 3_600_000,
+    updatedAt: KT_ORCH,
+    reviewed: true,
+    ...(orchFixture === 'error' ? { lastError: 'Claude process exited unexpectedly (code 1)' } : {}),
+    ...(orchFixture === 'offline'
+      ? { remote: { daemonId: 'd-offline', ownership: 'client' as const, remoteCwd: '/srv/workspaces', lastSeq: 0, ownerClientId: 'harness' } }
+      : {}),
+  } as (typeof kanbanFixtureThreads)[number]);
+  settings.orchestratorThreadId = orchestratorFixtureId;
+}
 manager.loadThreads(kanbanFixtureThreads);
 // Restore intentionally marks persisted non-terminal runs unavailable. Turn this
 // deterministic fixture back into a live run after hydration.
@@ -106,6 +128,14 @@ m.sessions.set(kanbanRunningThreadId, { turnInFlight: true });
 m.sessions.set(kanbanAwaitingThreadId, { turnInFlight: true });
 m.pendingPermissions.set(kanbanAwaitingThreadId, kanbanAwaitingPermission);
 m.threadActivity.set(kanbanRunningThreadId, kanbanRunningActivity);
+// `idle` / `working` orchestrator fixtures need a calm board: nothing else running or awaiting, so the
+// dot has nothing to report and deriveDockState reaches idle (or working, when the orchestrator runs).
+if (orchFixture === 'idle' || orchFixture === 'working') {
+  m.sessions.delete(kanbanRunningThreadId);
+  m.sessions.delete(kanbanAwaitingThreadId);
+  m.pendingPermissions.delete(kanbanAwaitingThreadId);
+  if (orchFixture === 'working') m.sessions.set(orchestratorFixtureId, { turnInFlight: true });
+}
 // Seed a fresh activity heartbeat so these actively-running demo threads are
 // NOT classified as stale (isRunStale) — they represent live, progressing work
 // whose spinners should keep animating. Without this the private-map seeding
@@ -145,7 +175,29 @@ const archivedFixtures = kanbanFixtureThreads
     agentRuns: [],
   }));
 
+/** `open` argument of every ensureOrchestratorThread call: the dock must pass false (set up without opening). */
+const ensureOrchestratorCalls: boolean[] = [];
+/** Messages the dock sent through manager.sendMessage (the real one would spawn a Claude session). */
+const sentMessages: Array<{ threadId: string; text: string }> = [];
+manager.sendMessage = async (threadId: string, text: string) => { sentMessages.push({ threadId, text }); };
+const reconnectCalls: string[] = [];
+const mockDaemonRegistry = {
+  nameOf: (id: string) => id,
+  // `?orch=offline`: the orchestrator's daemon is unreachable (a state deriveDockState treats as offline).
+  stateOf: (_id: string) => (orchFixture === 'offline' ? { status: 'unreachable' as const, attempt: 3 } : undefined),
+  onState: (_l: unknown) => () => {},
+  clientFor: (id: string) => ({ reconnectNow: () => { reconnectCalls.push(id); } }),
+};
+
 const mockPlugin = {
+  daemonRegistry: mockDaemonRegistry,
+  ensureOrchestratorThread: async (open = true) => {
+    ensureOrchestratorCalls.push(open);
+    if (!settings.orchestratorThreadId || !manager.getThread(settings.orchestratorThreadId)) {
+      settings.orchestratorThreadId = manager.createThread('Portfolio Orchestrator', '/Users/mock/projects').id;
+    }
+    if (open) openedThreadIds.push(settings.orchestratorThreadId);
+  },
   app: (mockLeaf as any).app,
   settings,
   manager,
@@ -197,6 +249,9 @@ void view.onOpen();
 (window as any).__dashboard = view;
 (window as any).__manager = manager;
 (window as any).__newConversationCalls = newConversationCalls;
+(window as any).__ensureOrchestratorCalls = ensureOrchestratorCalls;
+(window as any).__sentMessages = sentMessages;
+(window as any).__reconnectCalls = reconnectCalls;
 (window as any).__openedAgentTeams = openedAgentTeams;
 (window as any).__openedThreadIds = openedThreadIds;
 (window as any).__archivedThreadIds = archivedThreadIds;

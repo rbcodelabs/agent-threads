@@ -99,7 +99,7 @@ test.describe('orchestrator dock — functional (no baselines)', () => {
     await page.keyboard.press('Enter');
     await expect.poll(() => page.evaluate(() => (window as any).__openedThreadIds.length)).toBe(1);
     const sent = await page.evaluate(() => (window as any).__sentMessages);
-    expect(sent).toEqual([{ text: 'What needs me?' }].map((m) => expect.objectContaining(m)));
+    expect(sent).toEqual([expect.objectContaining({ text: 'What needs me?' })]);
   });
 
   test('Shift+Enter inserts a newline and sends nothing', async ({ page }) => {

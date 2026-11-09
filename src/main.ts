@@ -2,7 +2,7 @@ import type { AgentHarness, RemoteDaemonConfig, StorageAllocationOptions } from 
 import { resolveManagedClonePaths, skillSourcesForPersistence } from './skillSourcePersistence';
 import { saveThenAck } from './remote/persistAck';
 import { DaemonMcpStatusStore } from './mcpStatus';
-import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
+import { Plugin, ItemView, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { checkClaudeCli, createDefaultCliProbeDeps, describeCliProblems, findMissingKnownModels, type CliInfo, type CliProblem } from './cliVersion';
 import { FALLBACK_RESOLVED } from './modelOptions';
 import { createClaudeThreadsApiV1, ClaudeThreadsApiError, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
@@ -25,6 +25,7 @@ export type { ClaudeThreadsApiV1 } from './PublicApi';
 import type { ThreadsView } from './ThreadsView';
 import type { AgentDashboard } from './AgentDashboard';
 import type { KanbanView } from './KanbanView';
+import { orchestratorDockCommand } from './orchestratorDockCommand';
 import type { ThreadManager } from './ThreadManager';
 import type { VaultPersistence } from './VaultPersistence';
 import type { InProcessSummarizer } from './InProcessSummarizer';
@@ -2004,6 +2005,13 @@ export default class ClaudeThreadsPlugin extends Plugin {
         void handleWebViewerEvent(ev, this.compassHandoffHost(), this.compassHandoffDebouncer);
       }),
     );
+
+    // Cmd/Ctrl+J: focus the Agent Board's Ask field. Declared in orchestratorDockCommand.ts; a normal command, so it is
+    // listed (and rebindable) under Settings > Hotkeys. Falls through (explicit false) when no Board is the active view.
+    this.addCommand(orchestratorDockCommand(() => {
+      const view = this.app.workspace.getActiveViewOfType(ItemView);
+      return view?.getViewType() === KANBAN_VIEW_TYPE ? (view as unknown as KanbanView) : null;
+    }));
 
     this.addCommand({
       id: 'open-thread-orchestrator',

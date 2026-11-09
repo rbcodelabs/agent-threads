@@ -16,6 +16,7 @@
 | `src/ThreadsView.ts` | Main conversation panel UI |
 | `src/AgentDashboard.ts` | Agent dashboard sidebar panel |
 | `src/KanbanView.ts` | Kanban board view |
+| `src/orchestratorDock.ts` | Host-agnostic Ask-the-orchestrator dock (field, orb, needs-you dot, first-run/offline/error, narrow orb mode); mounted first in the Agent Board pill's meta row. State from `orchestratorDockModel.ts`; Cmd+J declared in `orchestratorDockCommand.ts` |
 | `src/orchestratorDockModel.ts` | Pure, host-free model for the Agent Board's OrchestratorDock: `deriveDockState` (none > offline > error > attention > working > idle), `attentionItems` (built on `classifyThreadRow` so the dot and the board columns cannot disagree), suggestion chips, `unreadState`, `dockTranscript` (a projection of `thread.messages`, never an append-only log), `splitThreadLinks`, and the count/tooltip text. Not in the daemon core closure |
 | `src/permissionCard.ts` | Shared Deny / Allow (once) / Always (+ host_exec `Always \`prefix\``) button builder; the single call site of `manager.resolvePermission` for cards (Kanban today, OrchestratorDock next) |
 | `src/ObsidianTools.ts` | All MCP tool definitions and TypeScript interfaces |
