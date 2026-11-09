@@ -80,9 +80,9 @@ test.describe('orchestrator dock — functional (no baselines)', () => {
     await expect(page.locator('.ct-orch-orb')).toHaveClass(/ct-orch-orb-spinning/);
   });
 
-  test('first run: dashed "No portfolio orchestrator yet" + Set up… creates it, then focuses the field', async ({ page }) => {
+  test('first run: dashed "No orchestrator yet" + Set up… creates it, then focuses the field', async ({ page }) => {
     await open(page, 'first-run', DESKTOP);
-    await expect(page.locator('.ct-orch-reason')).toHaveText('No portfolio orchestrator yet');
+    await expect(page.locator('.ct-orch-reason')).toHaveText('No orchestrator yet');
     await expect(page.locator('.ct-orch-input')).toHaveCount(0);
     await page.getByRole('button', { name: 'Set up…' }).click();
     await expect(page.locator('.ct-orch-input')).toBeFocused();
@@ -278,6 +278,62 @@ test.describe('orchestrator dock — functional (no baselines)', () => {
       expect(pad).toBeGreaterThanOrEqual(pill!.height + 36);
     });
   }
+
+  test('N1: at 640x800 a 160-char error wraps and the board still clears the (taller) pill', async ({ page }) => {
+    await open(page, 'error', { width: 640, height: 800 }, '&errlong=1');
+    const pill = await page.locator('.ct-kanban-dispatch').boundingBox();
+    const pad = await page.locator('.ct-kanban-board').first().evaluate((el) => parseFloat(getComputedStyle(el).paddingBottom));
+    expect(pill!.height).toBeGreaterThan(62);
+    expect(pad).toBeGreaterThanOrEqual(pill!.height + 36);
+  });
+
+  test('N1: at 320 a long error in the status row clears too', async ({ page }) => {
+    await open(page, 'error', { width: 320, height: 844 }, '&errlong=1');
+    const pill = await page.locator('.ct-kanban-dispatch').boundingBox();
+    const pad = await page.locator('.ct-kanban-board').first().evaluate((el) => parseFloat(getComputedStyle(el).paddingBottom));
+    expect(pad).toBeGreaterThanOrEqual(pill!.height + 36);
+  });
+
+  test('N4: first run at 640 shows the whole label (no ellipsis)', async ({ page }) => {
+    await open(page, 'first-run', { width: 640, height: 800 });
+    const r = await page.locator('.ct-orch-reason').evaluate((el) => ({ over: el.scrollWidth > el.clientWidth + 1, text: el.textContent }));
+    expect(r.text).toBe('No orchestrator yet');
+    expect(r.over).toBe(false);
+  });
+
+  for (const size of [{ width: 1280, height: 800, extra: '' }, { width: 700, height: 800, extra: '&mobile=1' }]) {
+    test(`D6: a full 4-line draft shows exactly 4 whole lines, no padding sliver (${size.width}px)`, async ({ page }) => {
+      await open(page, 'idle', size, size.extra);
+      const input = page.locator('.ct-orch-input');
+      await input.fill(Array.from({ length: 10 }, (_, i) => `line ${i}`).join('\n'));
+      await input.evaluate((el) => el.dispatchEvent(new Event('input')));
+      const m = await input.evaluate((el) => { const cs = getComputedStyle(el); return { h: el.clientHeight, lh: parseFloat(cs.lineHeight), pt: parseFloat(cs.paddingTop), pb: parseFloat(cs.paddingBottom) }; });
+      // Scrolled content shows through padding, so a clean clip needs ZERO vertical padding on the scroller.
+      expect(m.pt).toBe(0);
+      expect(m.pb).toBe(0);
+      expect(m.h).toBe(m.lh * 4);
+    });
+  }
+
+  test('N2: the glyph on the tinted orb has >= 3:1 contrast on both the error and the first-run tint', async ({ page }) => {
+    const ratio = async (fixture: Fixture) => {
+      await open(page, fixture, NARROW);
+      return page.evaluate(() => {
+        const parse = (c: string): number[] => {
+          const nums = (c.match(/-?[\d.]+/g) ?? []).map(Number);
+          return c.startsWith('color(') ? nums.slice(-3).map((n) => n * 255) : nums.slice(0, 3);
+        };
+        const lum = ([r, g, b]: number[]) => { const f = (v: number) => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+        const core = document.querySelector('.ct-orch-orb-core') as HTMLElement;
+        const bg = parse(getComputedStyle(core).backgroundColor);
+        const fg = parse(getComputedStyle(core).color);
+        const [hi, lo] = [lum(bg), lum(fg)].sort((a, b) => b - a);
+        return (hi + 0.05) / (lo + 0.05);
+      });
+    };
+    expect(await ratio('error')).toBeGreaterThanOrEqual(3);
+    expect(await ratio('first-run')).toBeGreaterThanOrEqual(3);
+  });
 
   test('narrow: tapping the orb opens the orchestrator thread (interim)', async ({ page }) => {
     await open(page, 'idle', NARROW);

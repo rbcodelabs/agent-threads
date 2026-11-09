@@ -97,7 +97,10 @@ if (orchFixture && orchFixture !== 'first-run') {
     createdAt: KT_ORCH - 3_600_000,
     updatedAt: KT_ORCH,
     reviewed: true,
-    ...(orchFixture === 'error' ? { lastError: 'Claude process exited unexpectedly (code 1)' } : {}),
+    // `&errlong=1`: a 160-char error, to exercise the widest wrapped reason (the dock shows the first 60 characters).
+    ...(orchFixture === 'error'
+      ? { lastError: new URLSearchParams(window.location.search).has('errlong') ? 'Claude process exited unexpectedly (code 1): connection reset by peer while streaming the response body from the upstream API gateway; retries exhausted'.padEnd(160, '.') : 'Claude process exited unexpectedly (code 1)' }
+      : {}),
     ...(orchFixture === 'offline'
       ? { remote: { daemonId: 'd-offline', ownership: 'client' as const, remoteCwd: '/srv/workspaces', lastSeq: 0, ownerClientId: 'harness' } }
       : {}),

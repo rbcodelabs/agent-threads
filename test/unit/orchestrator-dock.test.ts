@@ -143,7 +143,7 @@ describe('first run (no orchestrator or stale id)', () => {
   it('renders the dashed affordance with a Set up button and no textarea', () => {
     const t = setup({ orchestratorId: undefined });
     expect(t.root().dataset.state).toBe('none');
-    expect(t.host.querySelector('.ct-orch-reason')?.textContent).toBe('No portfolio orchestrator yet');
+    expect(t.host.querySelector('.ct-orch-reason')?.textContent).toBe('No orchestrator yet');
     expect(input(t.host)).toBeNull();
     expect((t.host.querySelector('.ct-orch-action') as HTMLElement).textContent).toBe('Set up…');
   });
@@ -459,7 +459,7 @@ describe('narrow status row (D2): none / error / offline stay visible in orb mod
     const row = status(t)!;
     expect(row.classList.contains('ct-orch-status')).toBe(true);
     expect(row.hidden).toBe(false);
-    expect(row.querySelector('.ct-orch-reason')?.textContent).toBe('No portfolio orchestrator yet');
+    expect(row.querySelector('.ct-orch-reason')?.textContent).toBe('No orchestrator yet');
     const orb = t.host.querySelector('.ct-orch-orb') as HTMLElement;
     expect(orb.classList.contains('ct-orch-orb-alert')).toBe(true);
     expect(orb.classList.contains('ct-orch-orb-spinning')).toBe(false);
@@ -569,5 +569,13 @@ describe('delta review follow-ups', () => {
     } finally {
       delete (HTMLTextAreaElement.prototype as unknown as Record<string, unknown>).scrollHeight;
     }
+  });
+});
+
+describe('N4 wording', () => {
+  it('keeps a parenthesised tail attached to its word (non-breaking spaces) so "(code 1)" cannot split', () => {
+    const t = setup({ threads: [thread('orch', { lastError: 'Claude process exited unexpectedly (code 1)' })] });
+    const text = t.host.querySelector('.ct-orch-reason')?.textContent ?? '';
+    expect(text).toBe('Orchestrator errored — Claude process exited unexpectedly\u00a0(code\u00a01)');
   });
 });
