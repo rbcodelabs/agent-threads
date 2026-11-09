@@ -77,3 +77,18 @@ describe('PeerSkillRegistry', () => {
     expect(fs.existsSync(path.join(root, 'none'))).toBe(false);
   });
 });
+
+describe('PeerSkillRegistry hardening', () => {
+  it.each([['vault'], ['local']])('rejects reserved name %s', (name) => {
+    expect(() => new PeerSkillRegistry().register({ pluginId: 'p' }, spec({ name }))).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+  });
+  it('caps registrations per owner at 16 but allows replacing, other owners, and reuse after dispose', () => {
+    const r = new PeerSkillRegistry();
+    const ds = Array.from({ length: 16 }, (_, i) => r.register({ pluginId: 'a' }, spec({ name: `s${i}` })));
+    expect(() => r.register({ pluginId: 'a' }, spec({ name: 'extra' }))).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    expect(() => r.register({ pluginId: 'a' }, spec({ name: 's3', content: 'new' }))).not.toThrow();
+    expect(() => r.register({ pluginId: 'b' }, spec({ name: 'extra' }))).not.toThrow();
+    ds[0]!.dispose();
+    expect(() => r.register({ pluginId: 'a' }, spec({ name: 'extra' }))).not.toThrow();
+  });
+});

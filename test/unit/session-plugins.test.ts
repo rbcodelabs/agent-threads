@@ -254,3 +254,18 @@ describe('ThreadManager.buildSessionOptions → opts.plugins', () => {
     expect(opts?.plugins).toBeUndefined();
   });
 });
+
+describe('peer skill temp-dir fallback is per vault', () => {
+  it('uses a different directory for different vault roots', () => {
+    const dirFor = (vault: string) => {
+      const m = new ThreadManager({ ...DEFAULT_SETTINGS });
+      m.vaultRoot = vault;
+      m.peerSkills.register({ pluginId: 'p' }, { name: 'thread-orchestrator', description: 'd', content: 'c' });
+      return (m.buildHostSkillPlugins().find(p => p.path.endsWith('thread-orchestrator'))!).path;
+    };
+    const a = dirFor('/vault/a'); const b = dirFor('/vault/b');
+    expect(a).not.toBe(b);
+    expect(dirFor('/vault/a')).toBe(a);
+    fs.rmSync(path.dirname(a), { recursive: true, force: true }); fs.rmSync(path.dirname(b), { recursive: true, force: true });
+  });
+});

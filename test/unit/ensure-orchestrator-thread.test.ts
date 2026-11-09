@@ -140,3 +140,21 @@ describe('ClaudeThreadsPlugin orchestrator thread lifecycle (no core heartbeat)'
     expect(plugin.manager.getProject(project.id)).toMatchObject({ orchestratorEnabled: true, orchestratorThreadId: orchestrator.id });
   });
 });
+
+describe('public ensure racing setEnabled(false) (real path)', () => {
+  it('never returns an enabled-looking snapshot without a thread: throws when disabled mid-ensure', async () => {
+    const { plugin } = makePlugin();
+    const project = plugin.manager.createProject('HipTrip', 'HipTrip');
+    plugin.manager.updateProject(project.id, { orchestratorEnabled: false });
+    const ensure = plugin.ensurePublicOrchestrator({ id: `project:${project.id}` });
+    const disable = plugin.setPublicOrchestratorEnabled({ id: `project:${project.id}` }, false);
+    await expect(ensure).rejects.toMatchObject({ name: 'ClaudeThreadsApiError' });
+    await expect(disable).resolves.toMatchObject({ enabled: false });
+    expect(plugin.manager.getProject(project.id)?.orchestratorEnabled).toBe(false);
+  });
+  it('a non-racing ensure still returns a snapshot with a thread', async () => {
+    const { plugin } = makePlugin();
+    const project = plugin.manager.createProject('HipTrip', 'HipTrip');
+    await expect(plugin.ensurePublicOrchestrator({ id: `project:${project.id}` })).resolves.toMatchObject({ enabled: true, threadId: expect.any(String) });
+  });
+});
