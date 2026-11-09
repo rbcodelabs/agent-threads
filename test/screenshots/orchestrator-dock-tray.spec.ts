@@ -404,3 +404,82 @@ test.describe('orchestrator tray — sticky heading (QA D2)', () => {
     expect(topmost).toMatch(/ct-orch-tray-(title|bar)/);
   });
 });
+
+
+// ── QA N1/N2: the card must stay inside its OWN column / lane viewport, not only out from under the sheet ────────────
+test.describe('orchestrator tray — hovered card is VISIBLE (clip + overlays) in nested scrollers (QA N1/N2)', () => {
+  const VIEWS = [
+    { label: '1280x800', size: DESKTOP },
+    { label: '390x844', size: NARROW },
+    { label: '320x640', size: { width: 320, height: 640 } },
+  ];
+
+  /** Visible fraction of the card: its rect clipped by every scrolling ancestor, minus the sheet and the pill. Waits for scroll end first. */
+  async function settledVisibility(page: Page) {
+    await page.evaluate(async () => {
+      const card = document.querySelector('.ct-kanban-card-linked') as HTMLElement | null;
+      if (!card) return;
+      let last = ''; let stable = 0;
+      for (let i = 0; i < 60 && stable < 3; i++) {
+        await new Promise((r) => setTimeout(r, 60));
+        const b = card.getBoundingClientRect();
+        const key = `${Math.round(b.top)}:${Math.round(b.left)}`;
+        stable = key === last ? stable + 1 : 0; last = key;
+      }
+    });
+    return page.evaluate(() => {
+      const card = document.querySelector('.ct-kanban-card-linked') as HTMLElement | null;
+      if (!card) return null;
+      const R = (el: Element) => { const b = el.getBoundingClientRect(); return { l: b.left, t: b.top, r: b.right, b: b.bottom }; };
+      let v = R(card);
+      const full = (v.r - v.l) * (v.b - v.t);
+      for (let n: HTMLElement | null = card.parentElement; n; n = n.parentElement) {
+        const cs = getComputedStyle(n);
+        if (/(auto|scroll|hidden)/.test(cs.overflowY) || /(auto|scroll|hidden)/.test(cs.overflowX)) {
+          const c = R(n);
+          v = { l: Math.max(v.l, c.l), t: Math.max(v.t, c.t), r: Math.min(v.r, c.r), b: Math.min(v.b, c.b) };
+        }
+      }
+      const clippedArea = Math.max(0, v.r - v.l) * Math.max(0, v.b - v.t);
+      let covered = 0;
+      for (const o of [document.querySelector('.ct-orch-sheet:not([hidden])'), document.querySelector('.ct-kanban-dispatch')].filter(Boolean).map((e) => R(e!))) {
+        const iw = Math.min(v.r, o.r) - Math.max(v.l, o.l); const ih = Math.min(v.b, o.b) - Math.max(v.t, o.t);
+        if (iw > 0 && ih > 0) covered += iw * ih;
+      }
+      const board = R(document.querySelector('.ct-agents-list')!);
+      const minTop = Math.min(...[document.querySelector('.ct-orch-sheet:not([hidden])'), document.querySelector('.ct-kanban-dispatch')].filter(Boolean).map((e) => R(e!).t));
+      return { fraction: Math.max(0, clippedArea - covered) / full, cardH: R(card).b - R(card).t, bandH: minTop - board.t, visibleH: Math.max(0, v.b - v.t), title: card.textContent?.slice(0, 40) };
+    });
+  }
+
+  for (const mode of ['folder', 'status', 'project'] as const) {
+    for (const { label, size } of VIEWS) {
+      test(`${mode}: all 8 links, visible fraction @ ${label}`, async ({ page }) => {
+        await page.setViewportSize(size);
+        const narrow = size.width < 640 ? '&narrow=1&mobile=1' : '';
+        await page.goto(`${kanbanUrl}?orch=idle&tx=empty&tray=1${narrow}`);
+        await page.waitForSelector('.ct-kanban-dispatch .ct-orch-dock');
+        if (mode !== 'status') await page.evaluate((m) => (window as any).__setGroupBy(m), mode);
+        await page.evaluate((titles) => (window as any).__orchSay(titles.map((t: string) => `[[thread:${t}]]`).join(' · ')), TITLES);
+        await openSheet(page, size);
+        const links = page.locator('.ct-orch-sheet a.ct-thread-link');
+        const n = await links.count();
+        expect(n).toBeGreaterThanOrEqual(6);
+        const report: string[] = [];
+        for (let i = 0; i < n; i++) {
+          await links.nth(i).scrollIntoViewIfNeeded();
+          await links.nth(i).hover();
+          await page.waitForTimeout(180); // hover intent
+          const m = await settledVisibility(page);
+          if (!m) continue;
+          // Physical limit: a card taller than the band above the sheet (or than its column) can only show as much as fits.
+          const attainable = Math.min(m.cardH, Math.max(m.bandH, 60));
+          const ok = m.fraction >= 0.9 || m.visibleH >= Math.min(attainable, m.cardH) * 0.9;
+          report.push(`${m.title}: ${(m.fraction * 100).toFixed(0)}% (h ${Math.round(m.visibleH)}/${Math.round(m.cardH)}, band ${Math.round(m.bandH)})`);
+          expect(ok, `link ${i} ${m.title}: ${(m.fraction * 100).toFixed(0)}% visible, ${Math.round(m.visibleH)}px of ${Math.round(m.cardH)}px (band ${Math.round(m.bandH)}px)\n${report.join('\n')}`).toBe(true);
+          await page.mouse.move(2, 2);
+        }
+      });
+    }
+  }
+});
