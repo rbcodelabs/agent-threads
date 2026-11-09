@@ -74,6 +74,8 @@ export interface OrchestratorDockDeps {
    */
   permissionCard?: Omit<PermissionButtonDeps, 'manager' | 'hostExecAllowAlways'> & { hostExecAllowAlways(): boolean };
   mode(): DockMode;
+  /** K2 P5 scaffold: in-memory draft store (absent: per-instance). */
+  drafts?: import('./dockDraftStore').DraftStore;
   /** Absent (or null) means local-only: the orchestrator can then never be offline. */
   daemons?: {
     stateOf(daemonId: string): ConnectionState | undefined;

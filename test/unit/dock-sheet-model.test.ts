@@ -6,7 +6,7 @@
  * built ON dockTranscript, and the one-line unread peek text.
  */
 import { describe, it, expect } from 'vitest';
-import { richnessOf, sheetTranscript, stripVisualizeLines, peekLine } from '../../src/dockSheetModel';
+import { richnessOf, sheetTranscript, stripVisualizeLines, peekLine, sheetBlock } from '../../src/dockSheetModel';
 
 const msg = (id: string, role: string, content: string, extra: Record<string, unknown> = {}) => ({ id, role, content, ...extra });
 
@@ -80,5 +80,40 @@ describe('peekLine', () => {
   });
   it('empty content yields an empty string', () => {
     expect(peekLine('  \n ', threads)).toBe('');
+  });
+});
+
+describe('sheetBlock (K2 P5: the sheet notice is shown only when the tray does not already list that thread)', () => {
+  const entry = (threadId: string, kind: 'permission' | 'question' | 'plan', withButtons = false) => ({ item: { threadId, kind }, permission: withButtons ? {} : undefined });
+  const base = { ownId: 'orch', pendingPlan: false, pendingQuestion: false, pendingPermission: false, tray: [] as ReturnType<typeof entry>[] };
+
+  it('nothing pending: no notice', () => {
+    expect(sheetBlock(base)).toBeNull();
+  });
+  it('a plan / question / permission the tray does not list keeps its notice', () => {
+    expect(sheetBlock({ ...base, pendingPlan: true })).toBe('plan');
+    expect(sheetBlock({ ...base, pendingQuestion: true })).toBe('question');
+    expect(sheetBlock({ ...base, pendingPermission: true })).toBe('permission');
+  });
+  it('plan and question notices are hidden when the tray lists the orchestrator with that kind', () => {
+    expect(sheetBlock({ ...base, pendingPlan: true, tray: [entry('orch', 'plan')] })).toBeNull();
+    expect(sheetBlock({ ...base, pendingQuestion: true, tray: [entry('orch', 'question')] })).toBeNull();
+  });
+  it('another thread in the tray does not hide the orchestrator notice', () => {
+    expect(sheetBlock({ ...base, pendingPlan: true, tray: [entry('other', 'plan')] })).toBe('plan');
+  });
+  it('a card hidden behind "Show N more" (past the first three) does not count as listed', () => {
+    const tray = [entry('a', 'permission', true), entry('b', 'permission', true), entry('c', 'permission', true), entry('orch', 'plan')];
+    expect(sheetBlock({ ...base, pendingPlan: true, tray })).toBe('plan');
+    expect(sheetBlock({ ...base, pendingPlan: true, tray: tray.slice(1) })).toBeNull();
+  });
+  it('P4 permission rule is unchanged: hidden only by the orchestrator\'s OWN permission entry that has buttons', () => {
+    expect(sheetBlock({ ...base, pendingPermission: true, tray: [entry('orch', 'permission', true)] })).toBeNull();
+    expect(sheetBlock({ ...base, pendingPermission: true, tray: [entry('orch', 'permission', false)] })).toBe('permission');
+    expect(sheetBlock({ ...base, pendingPermission: true, tray: [entry('other', 'permission', true)] })).toBe('permission');
+  });
+  it('falls through plan -> question -> permission, skipping the suppressed ones', () => {
+    expect(sheetBlock({ ...base, pendingPlan: true, pendingPermission: true, tray: [entry('orch', 'plan')] })).toBe('permission');
+    expect(sheetBlock({ ...base, pendingPlan: true, pendingQuestion: true })).toBe('plan');
   });
 });

@@ -71,3 +71,9 @@ export function peekLine(markdown: string, threads: readonly ThreadRef[]): strin
     .trim();
   return plain.length > MAX_PEEK_CHARS ? plain.slice(0, MAX_PEEK_CHARS) : plain;
 }
+
+// K2 P5 scaffold: signature only.
+export function sheetBlock(_i: {
+  ownId: string; pendingPlan: boolean; pendingQuestion: boolean; pendingPermission: boolean;
+  tray: readonly { item: { threadId: string; kind: string }; permission?: unknown }[];
+}): 'plan' | 'question' | 'permission' | null { return null; }
