@@ -68,7 +68,7 @@ test.describe('orchestrator tray — hidden fields are never approved blind', ()
     await expect(c.getByRole('button')).toHaveText(['Deny', 'Review in thread']);
     expect(await c.locator('.ct-orch-tray-detail').getAttribute('title')).toContain('dangerouslyDisableSandbox');
     await expect(page.locator('.ct-kanban-perm-actions .ct-permission-allow')).toHaveCount(1);
-    await c.getByRole('button', { name: 'Review in thread' }).click();
+    await c.locator('button', { hasText: 'Review in thread' }).click();
     expect(await page.evaluate(() => (window as any).__resolvedPermissions)).toEqual([]);
     expect(await page.evaluate(() => (window as any).__openedThreadIds)).toEqual(['k-hiptrip-awaiting']);
   });

@@ -14,6 +14,7 @@
  */
 import { setIcon } from 'obsidian';
 import type { ThreadManager } from './ThreadManager';
+import { isFullyShownDetail } from './permissionDetail';
 import { appendPermissionButtons, summarizePermissionDetail, type PendingPermissionInfo, type PermissionButtonDeps } from './permissionCard';
 import { formatToolName } from './toolNameUtils';
 import { announcementFor, handoffAriaLabel, handoffLabel, TRAY_COLLAPSE_AT, visibleTrayItems, type TrayItem } from './dockTrayModel';
@@ -189,13 +190,14 @@ export class DockTray {
     if (item.kind === 'permission' && permission && card) {
       const tool = main.createDiv('ct-orch-tray-tool');
       tool.createSpan({ cls: 'ct-agents-permission-tool', text: formatToolName(permission.toolName) });
-      const truncated = isTruncatedDetail(permission.detail);
+      const reviewInThread = !isFullyShownDetail(permission.detail);
       if (permission.detail) {
         // The full text is always reachable (title) and wraps to a few lines instead of a one-line ellipsis.
         tool.createSpan({ cls: 'ct-agents-permission-detail ct-orch-tray-detail', text: summarizePermissionDetail(permission.detail), attr: { title: permission.detail } });
       }
       const actions = li.createDiv('ct-orch-tray-actions');
       const threadId = item.threadId;
+      let heldFocus: HTMLElement | null = null;
       appendPermissionButtons(actions, threadId, permission, {
         manager: this.deps.manager,
         getSettings: card.getSettings,
@@ -205,14 +207,18 @@ export class DockTray {
           getPending: () => this.deps.manager.getPendingPermission(threadId),
           onStale: () => this.deps.refresh(),
           setBusy: (busy) => {
+            const doc = li.ownerDocument;
+            // Disabling the focused button drops keyboard focus: remember it and give it back when re-enabled.
+            if (busy && actions.contains(doc.activeElement)) heldFocus = doc.activeElement as HTMLElement;
             li.toggleAttribute('aria-busy', busy);
             for (const b of Array.from(actions.querySelectorAll('button'))) b.disabled = busy;
+            if (!busy && heldFocus) { if (heldFocus.isConnected) heldFocus.focus(); heldFocus = null; }
           },
         },
       });
       const toolLabel = formatToolName(permission.toolName);
-      if (truncated) {
-        // What the user cannot read in full is not approved blind: Deny stays, approving happens in the thread.
+      if (reviewInThread) {
+        // What the user cannot see in full (cut text, OR fields the summary leaves out) is not approved blind: Deny stays, approving happens in the thread.
         actions.querySelectorAll('.ct-permission-allow, .ct-permission-always').forEach((b) => b.remove());
         const review = actions.createEl('button', {
           cls: 'ct-orch-tray-handoff', text: 'Review in thread',
@@ -240,11 +246,6 @@ export class DockTray {
 /** A new prompt (even with identical tool + detail) rebuilds the card, so a queued request never inherits the previous one's disabled / clicked buttons. */
 function cardKey(e: TrayEntry): string {
   return `${e.item.kind}|${e.item.title}|${e.permission ? `${e.permission.toolName}|${e.permission.detail}|${e.permission.promptId ?? ''}` : '-'}`;
-}
-
-/** The summary shows at most ~120 characters: anything it had to cut is not approvable from the tray. */
-export function isTruncatedDetail(detail: string): boolean {
-  return summarizePermissionDetail(detail).endsWith('…');
 }
 
 /** Several arrivals at once: two named, the rest counted (one screen-reader utterance, not a wall of text). */

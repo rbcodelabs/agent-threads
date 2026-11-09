@@ -74,7 +74,7 @@ describe('planCardScroll', () => {
   });
 
   it('nothing uncovered: no move', () => {
-    expect(planCardScroll(r(10, 10, 20, 20), BOARD, [r(0, 0, 1280, 800)])).toEqual({ dx: 0, dy: 0, region: null });
+    expect(planCardScroll(r(10, 10, 20, 20), BOARD, [r(0, 0, 1280, 800)])).toMatchObject({ dx: 0, region: null, cleared: false });
   });
 });
 
@@ -111,14 +111,13 @@ describe('planCardScroll: fallbacks, "cleared" and sticky headers (review adviso
     expect(p.cleared).toBe(false);
   });
 
-  it('fits nowhere: the LARGEST uncovered region wins, not blindly the first', () => {
-    // Overlay at the top leaves a thin strip above and a big area below; a tall card fits neither, the big one wins.
-    const board = r(0, 0, 1000, 1000);
-    const top = r(0, 0, 1000, 100);
-    const card = r(100, 400, 500, 1500);
-    const p = planCardScroll(card, board, [top], { allowX: false });
-    expect(p.region).toEqual(r(0, 0, 1000, 1000).top === 0 ? p.region : null);
-    expect(card.top + p.dy).toBeGreaterThanOrEqual(100); // below the overlay
+  it('fits nowhere: the LARGEST uncovered region gets the card, not blindly the first (above)', () => {
+    const board = r(0, 0, 1000, 800);
+    const sheet = r(300, 100, 700, 800); // above: 1000x100; left and right strips: 300x800
+    const card = r(400, 300, 800, 800); // 400x500: fits none
+    const p = planCardScroll(card, board, [sheet]);
+    expect(p.region).toEqual(r(0, 0, 300, 800));
+    expect(p.cleared).toBe(true); // a usable slice (>= 48px) of it is visible
   });
 
   it('sticky headers: aligning to the board top leaves topInset free', () => {

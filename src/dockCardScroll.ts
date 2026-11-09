@@ -13,6 +13,19 @@ export interface CardScrollPlan {
   dy: number;
   /** The uncovered region chosen as the target, or null when nothing at all is uncovered. */
   region: Rect | null;
+  /** After the move the card (or, if it cannot fit anywhere, its top-left corner) is outside every overlay. False: the caller should fall back. */
+  cleared: boolean;
+}
+
+export interface PlanOptions {
+  /** False when nothing between the card and the board can scroll sideways (swimlanes, gallery). Default true. */
+  allowX?: boolean;
+  /**
+   * Height of sticky headers pinned to the top of the scroller: a card aligned to the board's top edge is aligned this far
+   * BELOW it, so it is not tucked under a header. Default 0 (the Agent Board currently has no sticky headers).
+   * Horizontal scrolling assumes LTR (positive scrollLeft to the right): RTL scrollers with negative scrollLeft are not handled.
+   */
+  topInset?: number;
 }
 
 const w = (r: Rect): number => r.right - r.left;
@@ -36,7 +49,9 @@ export function uncoveredRegions(board: Rect, obstacles: readonly Rect[]): Rect[
   return regions.filter((r) => w(r) > 0 && h(r) > 0);
 }
 
-function moveInto(card: Rect, region: Rect, allowX: boolean): { dx: number; dy: number; fits: boolean } {
+function moveInto(card: Rect, regionIn: Rect, allowX: boolean, topInset = 0, boardTop = 0): { dx: number; dy: number; fits: boolean } {
+  // A region that starts at the board's top edge starts below the sticky headers.
+  const region = regionIn.top === boardTop && topInset > 0 ? { ...regionIn, top: regionIn.top + topInset } : regionIn;
   const cw = w(card);
   const ch = h(card);
   let dx = 0;
@@ -61,28 +76,42 @@ function moveInto(card: Rect, region: Rect, allowX: boolean): { dx: number; dy: 
   return { dx, dy, fits: cw <= w(region) && ch <= h(region) };
 }
 
+/** Below this much visible card height a "cleared" claim would be a lie. */
+const MIN_VISIBLE_PX = 48;
+
+const inAny = (x: number, y: number, rects: readonly Rect[]): boolean => rects.some((o) => x >= o.left && x < o.right && y >= o.top && y < o.bottom);
+
 /** The smallest move that puts the card fully in an uncovered region (or, if it cannot fit, its top-left there). */
-export function planCardScroll(card: Rect, board: Rect, obstacles: readonly Rect[], opts: { allowX?: boolean } = {}): CardScrollPlan {
+export function planCardScroll(card: Rect, board: Rect, obstacles: readonly Rect[], opts: PlanOptions = {}): CardScrollPlan {
   const allowX = opts.allowX ?? true;
+  const topInset = opts.topInset ?? 0;
   const regions = uncoveredRegions(board, obstacles);
-  if (regions.length === 0) return { dx: 0, dy: 0, region: null };
+  const finish = (dx: number, dy: number, region: Rect | null, fits: boolean): CardScrollPlan => {
+    const moved = { x: card.left + dx, y: card.top + dy };
+    // A card that fits is cleared. One that does not fit only counts when a usable slice of it (>= MIN_VISIBLE_PX) is uncovered.
+    const cleared = fits || (region !== null && h(region) >= MIN_VISIBLE_PX && !inAny(moved.x + 1, moved.y + 1, obstacles) && moved.y >= board.top - 1);
+    return { dx: Math.round(dx), dy: Math.round(dy), region, cleared };
+  };
+  if (regions.length === 0) {
+    // Everything is covered: put the card's top as high as the board allows; the caller will know it is not cleared.
+    return { dx: 0, dy: Math.round(board.top + topInset - card.top), region: null, cleared: false };
+  }
   let best: { dx: number; dy: number; cost: number; region: Rect } | null = null;
   for (const region of regions) {
-    const m = moveInto(card, region, allowX);
+    const m = moveInto(card, region, allowX, topInset, board.top);
     if (!m.fits) continue; // a region the card does not fit in is no place to put it
     const cost = Math.abs(m.dx) + Math.abs(m.dy);
     if (!best || cost < best.cost) best = { dx: m.dx, dy: m.dy, cost, region };
   }
-  if (!best) {
-    // Fits nowhere (taller or wider than every uncovered region): align its top-left in the region ABOVE the overlays (the
-    // largest one, first in the list) so at least the top of the card is readable.
-    const region = regions[0];
-    const m = allowX ? moveInto(card, region, true) : { ...moveInto(card, { ...region, left: -Infinity, right: Infinity }, true), dx: 0 };
-    best = { dx: m.dx, dy: m.dy, cost: 0, region };
-  }
-  return { dx: Math.round(best.dx), dy: Math.round(best.dy), region: best.region };
+  if (best) return finish(best.dx, best.dy, best.region, true);
+  // Fits nowhere: the LARGEST uncovered region (among those the card can reach sideways) gets its top-left, so at least
+  // the top of the card is readable.
+  const reachable = regions.filter((r) => allowX || (card.left >= r.left && card.right <= r.right));
+  const pool = reachable.length > 0 ? reachable : regions;
+  const region = pool.reduce((a, b) => (w(b) * h(b) > w(a) * h(a) ? b : a));
+  const m = allowX ? moveInto(card, region, true, topInset, board.top) : { dx: 0, dy: region.top + (region.top === board.top ? topInset : 0) - card.top };
+  return finish(m.dx, m.dy, region, false);
 }
-
 /** Fraction (0..1) of the card's area that lies under any obstacle (overlaps counted once per obstacle, capped at 1). */
 export function coveredFraction(card: Rect, obstacles: readonly Rect[]): number {
   const area = w(card) * h(card);

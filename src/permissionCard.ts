@@ -41,10 +41,14 @@ export interface PermissionGuard {
   setBusy(busy: boolean): void;
 }
 
-/** Same prompt: same tool + detail and, when both sides carry one, the same prompt id. */
-export function samePermissionPrompt(a: PendingPermissionInfo, b: PendingPermissionInfo): boolean {
+/**
+ * Same prompt: same tool + detail and the same prompt id. With `requireId` (every guarded click) BOTH sides must carry
+ * one: a guard fails closed rather than guessing from text that a queued prompt can repeat exactly.
+ */
+export function samePermissionPrompt(a: PendingPermissionInfo, b: PendingPermissionInfo, requireId = false): boolean {
   if (!a || !b) return false;
   if (a.toolName !== b.toolName || a.detail !== b.detail) return false;
+  if (requireId && (a.promptId === undefined || b.promptId === undefined)) return false;
   return a.promptId === undefined || b.promptId === undefined || a.promptId === b.promptId;
 }
 
@@ -57,7 +61,7 @@ export function appendPermissionButtons(
 ): void {
   const { manager, saveSettings, guard } = deps;
   const snapshot = pendingInfo;
-  const stillPending = (): boolean => !guard || samePermissionPrompt(snapshot, guard.getPending());
+  const stillPending = (): boolean => !guard || samePermissionPrompt(snapshot, guard.getPending(), true);
   /** Guarded: a stale card does nothing and refreshes; otherwise the card goes busy. Unguarded: always proceeds. */
   const begin = (): boolean => {
     if (!guard) return true;
@@ -71,7 +75,7 @@ export function appendPermissionButtons(
     if (!guard) return;
     // Settled -> the card leaves on permission_resolved. If the prompt is still the pending one afterwards the action
     // did not take: let the user try again.
-    setTimeout(() => { if (samePermissionPrompt(snapshot, guard.getPending())) guard.setBusy(false); }, 0);
+    setTimeout(() => { if (samePermissionPrompt(snapshot, guard.getPending(), true)) guard.setBusy(false); }, 0);
   };
   const deny = btns.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' });
   deny.addEventListener('click', (e) => { e.stopPropagation(); if (begin()) resolve(false); });

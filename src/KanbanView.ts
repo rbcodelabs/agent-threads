@@ -102,6 +102,18 @@ const PROJECT_SECTION_MAP: Record<ThreadRowState, { label: string; state: RowSta
 /** Pointer must rest on a thread link this long before the board scrolls to its card. */
 const CARD_HOVER_INTENT_MS = 120;
 
+/** Height of `position: sticky` children pinned at the top of the card's scrollers (none today): the card is aligned below them. */
+function stickyTopInset(el: HTMLElement, host: HTMLElement): number {
+  let inset = 0;
+  for (let n: HTMLElement | null = el.parentElement; n; n = n === host ? null : n.parentElement) {
+    for (const c of Array.from(n.children) as HTMLElement[]) {
+      const cs = getComputedStyle(c);
+      if (cs.position === 'sticky' && parseFloat(cs.top || '0') <= 1) inset = Math.max(inset, c.offsetHeight);
+    }
+  }
+  return inset;
+}
+
 function rectOf(el: Element): Rect {
   const b = el.getBoundingClientRect();
   return { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
@@ -144,6 +156,8 @@ export class KanbanView extends ItemView {
   /** Card highlighted by a hovered / focused thread link in the dock's reply sheet. Tracked by id: render() rebuilds rowEls. */
   private linkedCardId: string | null = null;
   private cardScrollTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Re-measures the clearance while a link is hovered and the sheet / pill resize under it. */
+  private clearanceObserver: ResizeObserver | null = null;
   private taskEls: Map<string, HTMLElement> = new Map();
   private summaryEls: Map<string, HTMLElement> = new Map();
   /** Per-card orchestrator-inbox blocks, patched in place by their own events. */
@@ -492,8 +506,14 @@ export class KanbanView extends ItemView {
     return true;
   }
 
+  /**
+   * Removes the highlight AND the extra scroll room added under the cards while a link was hovered, so the board snaps back
+   * to its normal scroll extent (a scroll position inside the removed room is clamped by the browser).
+   */
   clearCardFocus(): void {
     this.cancelCardScroll();
+    this.clearanceObserver?.disconnect();
+    this.clearanceObserver = null;
     const id = this.linkedCardId;
     this.linkedCardId = null;
     const el = id ? this.rowEls.get(id) : undefined;
@@ -529,11 +549,12 @@ export class KanbanView extends ItemView {
     const covered = obstacles.length > 0 ? Math.max(0, Math.round(hostRect.bottom - Math.min(...obstacles.map((o) => o.top)) + 8)) : 0;
     host.style.setProperty('--ct-card-clearance', `${covered}px`);
     host.classList.add('ct-kanban-clearing');
+    this.observeClearance(pill);
     let allowX = false; // sideways moves only if something between the card and the board can actually scroll sideways
     for (let n: HTMLElement | null = el.parentElement; n; n = n === host ? null : n.parentElement) {
       if (/(auto|scroll)/.test(getComputedStyle(n).overflowX) && n.scrollWidth > n.clientWidth) { allowX = true; break; }
     }
-    const plan = planCardScroll(rectOf(el), hostRect, obstacles, { allowX });
+    const plan = planCardScroll(rectOf(el), hostRect, obstacles, { allowX, topInset: stickyTopInset(el, host) });
     let remX = plan.dx;
     let remY = plan.dy;
     for (let n: HTMLElement | null = el.parentElement; n && (remX !== 0 || remY !== 0); n = n === host ? null : n.parentElement) {
@@ -549,6 +570,25 @@ export class KanbanView extends ItemView {
         if (moved !== 0) { setScroll(n, 'left', next, reduced); remX -= moved; }
       }
     }
+    // The planner could not get the card out from under the overlays (they cover nearly everything): at least make it visible.
+    if (!plan.cleared && typeof el.scrollIntoView === 'function') el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'nearest', inline: 'nearest' });
+  }
+
+  /** The sheet can grow / shrink while a link stays hovered: keep the extra scroll room matched to what is covered. */
+  private observeClearance(pill: HTMLElement | null): void {
+    this.clearanceObserver?.disconnect();
+    this.clearanceObserver = null;
+    if (!pill || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      const host = this.boardEl;
+      if (!host || !this.linkedCardId) return;
+      const tops = [pill, pill.querySelector<HTMLElement>('.ct-orch-sheet:not([hidden])')].filter((n): n is HTMLElement => !!n).map((n) => n.getBoundingClientRect().top);
+      host.style.setProperty('--ct-card-clearance', `${Math.max(0, Math.round(host.getBoundingClientRect().bottom - Math.min(...tops) + 8))}px`);
+    });
+    ro.observe(pill);
+    const sheet = pill.querySelector<HTMLElement>('.ct-orch-sheet');
+    if (sheet) ro.observe(sheet);
+    this.clearanceObserver = ro;
   }
 
   /** Every place a card element is created registers it here, so a card rebuilt outside render() (gallery refresh) keeps the link highlight. */
