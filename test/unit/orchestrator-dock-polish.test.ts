@@ -6,7 +6,7 @@
  * count (summary line + narrow badge), de-duplicated sheet notices and the soft-keyboard inset. Fake manager; no KanbanView.
  */
 import '../setup/obsidian-dom';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { OrchestratorDock, type OrchestratorDockDeps } from '../../src/orchestratorDock';
 import { createDraftStore, MAX_DRAFT_CHARS, type DraftStore } from '../../src/dockDraftStore';
 import type { Thread } from '../../src/types';
@@ -34,17 +34,19 @@ interface Opts {
 function setup(opts: Opts = {}) {
   const orch = thread('orch', { title: 'Portfolio Orchestrator' });
   const threads: Thread[] = [orch, ...(opts.others ?? ['a', 'b']).map((id) => thread(id))];
+  const orch2 = thread('orch2', { title: 'Second Orchestrator' });
   const perms = new Map<string, { toolName: string; detail: string; promptId: number }>();
   let promptSeq = 0;
   for (const id of opts.permission ?? []) perms.set(id, { toolName: 'Bash', detail: JSON.stringify({ command: 'ls' }), promptId: ++promptSeq });
   const questions = new Set(opts.question ?? []);
   const plans = new Set(opts.plan ?? []);
   const running = new Set(opts.running ?? []);
-  const state = { mode: opts.mode ?? ('pill' as 'pill' | 'orb'), daemon: undefined as { status: string } | undefined };
+  const state = { mode: opts.mode ?? ('pill' as 'pill' | 'orb'), daemon: undefined as { status: string } | undefined, orchId: 'orch' };
   const listeners = new Set<Listener>();
   const emit = (id: string, type: string, extra: Record<string, unknown> = {}) => { for (const l of [...listeners]) l(id, { type, ...extra }); };
   const manager = {
-    getThread: (id: string) => threads.find((t) => t.id === id),
+    // 'orch2' is the swap target: known to the manager but not a board thread (does not change the counts)
+    getThread: (id: string) => threads.find((t) => t.id === id) ?? (id === 'orch2' ? orch2 : undefined),
     isRunning: (id: string) => running.has(id),
     hasPendingPermission: (id: string) => perms.has(id),
     hasPendingQuestion: (id: string) => questions.has(id),
@@ -65,7 +67,7 @@ function setup(opts: Opts = {}) {
     manager: manager as never,
     listThreads: () => threads,
     hasPendingWakeup: () => false,
-    getOrchestratorThreadId: () => 'orch',
+    getOrchestratorThreadId: () => state.orchId,
     ensureOrchestrator: vi.fn(async () => {}),
     openThread: vi.fn(),
     mode: () => state.mode,
@@ -113,6 +115,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
 beforeEach(() => { document.body.innerHTML = ''; });
+afterEach(() => { vi.useRealTimers(); });
 
 describe('1. input recall', () => {
   it('ArrowUp on an empty field recalls the last sent message; repeated ArrowUp goes back; ArrowDown goes forward', async () => {
@@ -220,7 +223,34 @@ describe('1. input recall', () => {
     expect(t.input().value).toBe('two edited');
   });
 
-  it('a multi-line recalled message only moves through history from its first (Up) / last (Down) line', async () => {
+  it('continuing through history needs the caret at the very start (Up) / very end (Down) once the caret has been moved: a long wrapped single line keeps normal caret movement', async () => {
+    const t = setup();
+    const long = 'word '.repeat(80).trim(); // soft-wraps over several visual lines in a real field
+    await sendText(t, 'older');
+    await sendText(t, long);
+    key(t.input(), 'ArrowUp');
+    expect(t.input().value).toBe(long);
+    t.input().setSelectionRange(100, 100); // somewhere in the middle: native caret movement
+    expect(key(t.input(), 'ArrowUp').defaultPrevented).toBe(false);
+    expect(key(t.input(), 'ArrowDown').defaultPrevented).toBe(false);
+    expect(t.input().value).toBe(long);
+    t.input().setSelectionRange(0, 0);
+    expect(key(t.input(), 'ArrowDown').defaultPrevented).toBe(false); // start is not the end
+    expect(key(t.input(), 'ArrowUp').defaultPrevented).toBe(true);
+    expect(t.input().value).toBe('older');
+  });
+
+  it('a long wrapped single-line DRAFT with the caret in its middle is never replaced by a recall', async () => {
+    const t = setup();
+    await sendText(t, 'old');
+    const long = 'word '.repeat(80).trim();
+    type(t, long);
+    t.input().setSelectionRange(150, 150);
+    expect(key(t.input(), 'ArrowUp').defaultPrevented).toBe(false);
+    expect(t.input().value).toBe(long);
+  });
+
+  it('a multi-line recalled message: Up only from the very start, Down only from the very end', async () => {
     const t = setup();
     await sendText(t, 'older');
     await sendText(t, 'a\nb\nc');
@@ -228,9 +258,34 @@ describe('1. input recall', () => {
     expect(t.input().value).toBe('a\nb\nc');
     t.input().setSelectionRange(3, 3); // middle line: native caret movement
     expect(key(t.input(), 'ArrowUp').defaultPrevented).toBe(false);
-    t.input().setSelectionRange(1, 1); // first line
+    t.input().setSelectionRange(1, 1); // first line but not the very start
+    expect(key(t.input(), 'ArrowUp').defaultPrevented).toBe(false);
+    t.input().setSelectionRange(0, 0);
     expect(key(t.input(), 'ArrowUp').defaultPrevented).toBe(true);
     expect(t.input().value).toBe('older');
+  });
+
+  it('recall is inert while a send is pending, and a failed-send restore does not add a second history entry', async () => {
+    const t = setup();
+    await sendText(t, 'a');
+    let release!: () => void;
+    t.manager.sendMessage.mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
+    type(t, 'b');
+    key(t.input(), 'Enter'); // field is cleared synchronously, send pending
+    expect(t.input().value).toBe('');
+    expect(key(t.input(), 'ArrowUp').defaultPrevented).toBe(false);
+    expect(t.input().value).toBe('');
+    release();
+    await flush();
+    // failed send of 'c' puts it back; sending it again must not duplicate it in the history
+    t.manager.sendMessage.mockImplementationOnce(async () => { throw new Error('boom'); });
+    await sendText(t, 'c');
+    expect(t.input().value).toBe('c');
+    key(t.input(), 'Enter');
+    await flush();
+    const seen: string[] = [];
+    for (let i = 0; i < 6; i++) { key(t.input(), 'ArrowUp'); if (seen.at(-1) === t.input().value) break; seen.push(t.input().value); }
+    expect(seen).toEqual(['c', 'b', 'a']);
   });
 
   it('Esc is unchanged: it blurs the field when the sheet is closed', () => {
@@ -315,14 +370,14 @@ describe('2. draft persistence (in memory only)', () => {
     const t = setup({ drafts });
     expect(t.input().maxLength).toBe(MAX_DRAFT_CHARS);
     type(t, 'x'.repeat(MAX_DRAFT_CHARS + 10));
-    expect(drafts.get()).toHaveLength(MAX_DRAFT_CHARS);
+    expect(drafts.get('orch')).toHaveLength(MAX_DRAFT_CHARS);
   });
 
   it('a successful send clears the stored draft', async () => {
     const drafts = createDraftStore();
     const t = setup({ drafts });
     await sendText(t, 'sent and gone');
-    expect(drafts.get()).toBe('');
+    expect(drafts.get('orch')).toBe('');
     expect(t.input().value).toBe('');
   });
 
@@ -331,7 +386,7 @@ describe('2. draft persistence (in memory only)', () => {
     const t = setup({ drafts, sendRejects: true });
     await sendText(t, 'will fail');
     expect(t.input().value).toBe('will fail');
-    expect(drafts.get()).toBe('will fail');
+    expect(drafts.get('orch')).toBe('will fail');
   });
 
   it('typing while a send is pending keeps both texts after a failure', async () => {
@@ -340,7 +395,73 @@ describe('2. draft persistence (in memory only)', () => {
     t.manager.sendMessage.mockImplementationOnce(async () => { type(t, 'new text'); throw new Error('boom'); });
     await sendText(t, 'original');
     expect(t.input().value).toBe('original\nnew text');
-    expect(drafts.get()).toBe('original\nnew text');
+    expect(drafts.get('orch')).toBe('original\nnew text');
+  });
+});
+
+describe('2b. draft ownership (A1: a stale writer must not resurrect a SENT draft)', () => {
+  /** Two boards of one window share the store (split pane / popout). */
+  function twoDocks() {
+    const drafts = createDraftStore();
+    const a = setup({ drafts });
+    const hostB = document.createElement('div');
+    a.root.appendChild(hostB);
+    const dockB = new OrchestratorDock(hostB, a.deps);
+    dockB.mount();
+    const inputB = () => hostB.querySelector('textarea.ct-orch-input') as HTMLTextAreaElement;
+    return { drafts, a, dockB, hostB, inputB };
+  }
+
+  it('A sends, then B rebuilds its body: the sent text does not come back', async () => {
+    const { drafts, a, dockB, inputB } = twoDocks();
+    inputB().value = 'ghp_secret_token';
+    inputB().dispatchEvent(new Event('input', { bubbles: true })); // B typed it: store = secret
+    // A picks the draft up on a rebuild (state flip) and sends it
+    a.orch.lastError = 'boom'; a.emit('orch', 'error');
+    a.orch.lastError = undefined; a.emit('orch', 'done');
+    expect(a.input().value).toBe('ghp_secret_token');
+    key(a.input(), 'Enter');
+    await flush();
+    expect(drafts.get('orch')).toBe('');
+    // B still holds the old text and now rebuilds (error flip and back): it must NOT write it back
+    a.orch.lastError = 'boom'; a.emit('orch', 'error');
+    a.orch.lastError = undefined; a.emit('orch', 'done');
+    dockB.refresh();
+    expect(drafts.get('orch')).toBe('');
+    expect(a.input().value).toBe('');
+    expect(inputB().value).toBe('');
+  });
+
+  it('typing in a dock keeps writing through (ownership is not lost by merely being mounted)', () => {
+    const { drafts, a } = twoDocks();
+    type(a, 'mine');
+    a.orch.lastError = 'boom'; a.emit('orch', 'error');
+    a.orch.lastError = undefined; a.emit('orch', 'done');
+    expect(drafts.get('orch')).toBe('mine');
+    expect(a.input().value).toBe('mine');
+  });
+
+  it('a swapped / re-set-up orchestrator thread never inherits the draft', () => {
+    const drafts = createDraftStore();
+    const t = setup({ drafts });
+    type(t, 'for the first orchestrator');
+    t.state.orchId = 'orch2';
+    t.dock.refresh();
+    expect(t.input().value).toBe('');
+    expect(drafts.get('orch2')).toBe('');
+    expect(drafts.get('orch')).toBe('');
+    type(t, 'for the second');
+    expect(drafts.get('orch2')).toBe('for the second');
+  });
+
+  it('a re-mount with the SAME orchestrator still restores the draft', () => {
+    const drafts = createDraftStore();
+    const t = setup({ drafts });
+    type(t, 'same thread');
+    t.dock.destroy();
+    const again = new OrchestratorDock(t.host, t.deps);
+    again.mount();
+    expect((t.q('textarea.ct-orch-input') as HTMLTextAreaElement).value).toBe('same thread');
   });
 });
 
@@ -391,27 +512,103 @@ describe('5. error / offline announcer', () => {
     expect(await announce(t)).toBe('SENTINEL');
   });
 
-  it('announces offline, then recovery, and error -> offline as a change', async () => {
+  /** Every non-empty text the node ever held, in order (the clear-then-set pattern writes '' in between). */
+  function watch(t: T): string[] {
+    const seen: string[] = [];
+    new MutationObserver(() => { const x = t.stateLive()!.textContent ?? ''; if (x) seen.push(x); }).observe(t.stateLive()!, { childList: true, characterData: true, subtree: true });
+    return seen;
+  }
+  const settle = async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); };
+
+  it('announces offline, and recovery only after it has held for about a second', async () => {
+    vi.useFakeTimers();
     const t = setup();
+    const seen = watch(t);
     t.orch.remote = { daemonId: 'd', ownership: 'client', remoteCwd: '/', lastSeq: 0, ownerClientId: 'x' } as never;
     t.state.daemon = { status: 'unreachable' }; t.dock.refresh();
-    expect(await announce(t)).toMatch(/disconnected|offline/i);
+    await settle(50);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/disconnected|offline/i);
     t.state.daemon = undefined; t.dock.refresh();
-    expect(await announce(t)).toMatch(/recovered|back/i);
+    await settle(500);
+    expect(seen).toHaveLength(1); // not yet: debounced
+    await settle(700);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toBe('Orchestrator recovered');
+  });
+
+  it('a daemon bounce offline -> ok -> offline announces offline once and never "recovered"', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const seen = watch(t);
+    t.orch.remote = { daemonId: 'd', ownership: 'client', remoteCwd: '/', lastSeq: 0, ownerClientId: 'x' } as never;
+    t.state.daemon = { status: 'unreachable' }; t.dock.refresh();
+    await settle(50);
+    t.state.daemon = undefined; t.dock.refresh();
+    await settle(300);
+    t.state.daemon = { status: 'unreachable' }; t.dock.refresh();
+    await settle(3000);
+    expect(seen).toHaveLength(1);
+    expect(seen.some((x) => /recovered/i.test(x))).toBe(false);
+  });
+
+  it('error -> retry (working) -> error again: ONE error announcement, no "recovered"', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const seen = watch(t);
     t.orch.lastError = 'boom'; t.emit('orch', 'error');
-    expect(await announce(t)).toMatch(/errored/i);
-    t.orch.lastError = undefined; t.emit('orch', 'done');
-    expect(await announce(t)).toMatch(/recovered|back/i);
+    await settle(50);
+    expect(seen).toHaveLength(1);
+    // the user retries: the orchestrator runs (deriveDockState reports working, not error)
+    t.running.add('orch'); t.emit('orch', 'streaming_start');
+    await settle(3000);
+    t.running.delete('orch'); t.emit('orch', 'error'); // fails again, lastError still set
+    await settle(3000);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('error -> retry (working) -> success: recovered, once, after the debounce', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const seen = watch(t);
+    t.orch.lastError = 'boom'; t.emit('orch', 'error');
+    await settle(50);
+    t.running.add('orch'); t.orch.lastError = undefined; t.emit('orch', 'streaming_start');
+    await settle(2000);
+    expect(seen).toHaveLength(1); // still working: neutral, nothing yet
+    t.running.delete('orch'); t.emit('orch', 'done');
+    await settle(500);
+    expect(seen).toHaveLength(1);
+    await settle(700);
+    expect(seen).toEqual([expect.stringMatching(/errored/i), 'Orchestrator recovered']);
+  });
+
+  it('error -> offline is announced as a change', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const seen = watch(t);
+    t.orch.lastError = 'boom'; t.emit('orch', 'error');
+    await settle(50);
+    t.orch.remote = { daemonId: 'd', ownership: 'client', remoteCwd: '/', lastSeq: 0, ownerClientId: 'x' } as never;
+    t.state.daemon = { status: 'unreachable' }; t.dock.refresh();
+    await settle(50);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toMatch(/disconnected|offline/i);
   });
 
   it('the same text twice is still announced (clear, then set on a tick)', async () => {
+    vi.useFakeTimers();
     const t = setup();
+    const seen = watch(t);
     t.orch.lastError = 'boom'; t.emit('orch', 'error');
-    const a = await announce(t);
-    t.orch.lastError = undefined; t.emit('orch', 'done'); await tick();
+    await settle(50);
+    t.orch.lastError = undefined; t.emit('orch', 'done');
+    await settle(1500); // recovered
     t.orch.lastError = 'boom'; t.emit('orch', 'error');
     expect(t.stateLive()!.textContent).toBe('');
-    expect(await announce(t)).toBe(a);
+    await settle(50);
+    expect(seen.filter((x) => /errored/i.test(x))).toHaveLength(2);
+    expect(seen[0]).toBe(seen[2]);
   });
 
   it('caps long reasons', async () => {
@@ -506,6 +703,14 @@ describe('6. sheet notices de-duplicated against the tray', () => {
     const t = setup({ others: ['a', 'b', 'c'], permission: ['a', 'b', 'c'], plan: ['orch'] });
     t.dock.openSheet();
     expect(t.q('.ct-orch-tray-card[data-thread-id="orch"]')).toBeNull();
+    expect(notice(t)!.textContent).toContain('plan waiting for your review');
+  });
+
+  it('A7 (conservative by design): with the tray EXPANDED, a notice for an orchestrator plan past the third card may repeat its card; it is never missing', () => {
+    const t = setup({ others: ['a', 'b', 'c'], permission: ['a', 'b', 'c'], plan: ['orch'] });
+    t.dock.openSheet();
+    (t.q('.ct-orch-tray-toggle') as HTMLButtonElement).click();
+    expect(t.q('.ct-orch-tray-card[data-thread-id="orch"]')).not.toBeNull();
     expect(notice(t)!.textContent).toContain('plan waiting for your review');
   });
 
@@ -619,6 +824,39 @@ describe('7. soft keyboard: the narrow sheet lifts above it', () => {
     sized(t, 600);
     t.dock.layoutChanged();
     expect(s.top()).toBe(dims.sh - dims.ch);
+  });
+
+  it('A4: a board resize while the keyboard is open re-measures the inset (layoutChanged calls measure)', () => {
+    const vv = fakeViewport(window, 844);
+    const t = setup({ mode: 'orb' });
+    sized(t, 844);
+    t.dock.openSheet();
+    vv.height = 508; vv.dispatchEvent(new Event('resize'));
+    expect(inset(t)).toBe('336px');
+    sized(t, 700); // the view shrank under the open keyboard; the visual viewport did not change
+    t.dock.layoutChanged();
+    expect(inset(t)).toBe('192px');
+  });
+
+  it('A4: pinch-zoom (scale > 1) is not a keyboard', () => {
+    const vv = fakeViewport(window, 844);
+    const t = setup({ mode: 'orb' });
+    sized(t, 844);
+    t.dock.openSheet();
+    vv.height = 400; (vv as unknown as { scale: number }).scale = 2; vv.dispatchEvent(new Event('resize'));
+    expect(inset(t)).toBe('0px');
+  });
+
+  it('A4: the composer drops the safe-area term while the keyboard lifts the sheet (data-kbd)', () => {
+    const vv = fakeViewport(window, 844);
+    const t = setup({ mode: 'orb' });
+    sized(t, 844);
+    t.dock.openSheet();
+    expect(t.q('.ct-orch-sheet')!.hasAttribute('data-kbd')).toBe(false);
+    vv.height = 508; vv.dispatchEvent(new Event('resize'));
+    expect(t.q('.ct-orch-sheet')!.hasAttribute('data-kbd')).toBe(true);
+    vv.height = 844; vv.dispatchEvent(new Event('resize'));
+    expect(t.q('.ct-orch-sheet')!.hasAttribute('data-kbd')).toBe(false);
   });
 
   it('without visualViewport nothing breaks', () => {

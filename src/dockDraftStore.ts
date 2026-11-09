@@ -10,14 +10,17 @@
 export const MAX_DRAFT_CHARS = 4000;
 
 export interface DraftStore {
-  get(): string;
-  set(text: string): void;
+  get(key?: string): string;
+  set(text: string, key?: string): void;
   clear(): void;
+  /** K2 P5 batch 1 scaffold: bumps on every write (behaviour arrives with the fix). */
+  readonly version: number;
 }
 
 export function createDraftStore(): DraftStore {
   let draft = '';
   return {
+    version: 0,
     get: () => draft,
     set: (text) => { draft = text.length > MAX_DRAFT_CHARS ? text.slice(0, MAX_DRAFT_CHARS) : text; },
     clear: () => { draft = ''; },

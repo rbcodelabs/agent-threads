@@ -6,7 +6,7 @@
  */
 
 /** Pixels of the view (its bottom edge at `rootBottom`, layout-viewport coordinates) that lie below the visual viewport. */
-export function keyboardInset(rootBottom: number, vvOffsetTop: number, vvHeight: number): number {
+export function keyboardInset(rootBottom: number, vvOffsetTop: number, vvHeight: number, _scale = 1): number {
   const px = rootBottom - (vvOffsetTop + vvHeight);
   return Number.isFinite(px) && px > 0 ? Math.round(px) : 0;
 }

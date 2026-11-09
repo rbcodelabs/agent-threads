@@ -6,6 +6,11 @@
  * `prefers-reduced-motion: no-preference` and that animates a dock selector needs a `reduce` rule with the same
  * selector that switches it off. The Playwright spec (orchestrator-dock-mobile.spec.ts) checks the computed result.
  * Also pins that pinch-zoom is never disabled by a dock rule.
+ *
+ * LIMITS (read before trusting a green run): the CSS walker is regex-grade, not a parser; it understands top-level rules and ONE
+ * level of @media; only selectors containing a DOCK_SELECTOR class are audited (a motion rule on a generic selector such as
+ * `button` that reaches the dock is NOT seen here); `animation` / `transition` shorthands are matched textually. The
+ * Playwright spec orchestrator-dock-mobile.spec.ts (computed styles under emulated reduced motion) is the real guard.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -41,8 +46,15 @@ const css = readFileSync('styles.css', 'utf8');
 const rules = parseRules(css);
 
 const DOCK_SELECTOR = /\.ct-orch-|\.ct-kanban-dispatch|ct-kanban-card-linked|\.ct-kanban-clearing/;
-const MOTION_DECL = /(^|[;\s])(animation(-name|-duration)?|transition(-property|-duration)?)\s*:\s*(?!none\b|0s\b|0\.?0*s\b)[^;]+|scroll-behavior\s*:\s*smooth/;
+const MOTION_DECL = /(^|[;\s])(animation(-name|-duration)?|transition(-property|-duration)?)\s*:(?!\s*(none|0s)\b)[^;]+|scroll-behavior\s*:\s*smooth/;
 const NEUTRALISES = /(animation(-name)?\s*:\s*none|transition(-property)?\s*:\s*none|transition-duration\s*:\s*0s|transition\s*:\s*none|scroll-behavior\s*:\s*auto)/;
+/** [ids, classes/attributes/pseudo-classes, elements], compared as a single number (enough for the audit). */
+function specificity(selector: string): number {
+  const ids = (selector.match(/#[\w-]+/g) ?? []).length;
+  const classes = (selector.match(/\.[\w-]+|\[[^\]]+\]|:(?!:)[\w-]+/g) ?? []).length;
+  const elements = (selector.replace(/[.#:[][^\s>+~.#:[]*/g, ' ').match(/(^|[\s>+~])[a-z][\w-]*/gi) ?? []).length;
+  return ids * 10000 + classes * 100 + elements;
+}
 const isReduce = (m: string | null): boolean => !!m && /prefers-reduced-motion:\s*reduce/.test(m);
 const isNoPref = (m: string | null): boolean => !!m && /prefers-reduced-motion:\s*no-preference/.test(m);
 
@@ -62,6 +74,27 @@ describe('reduced-motion audit of the dock stylesheet rules', () => {
   it.each(animated.map((a) => [a.selector, a] as const))('%s has a prefers-reduced-motion: reduce override', (selector) => {
     const covered = rules.some((r) => isReduce(r.media) && r.selectors.includes(selector) && NEUTRALISES.test(r.body));
     expect(covered, `${selector} animates but no "@media (prefers-reduced-motion: reduce)" rule with this selector turns it off`).toBe(true);
+  });
+
+  it.each(animated.map((a) => [a.selector, a] as const))('%s: its reduce override comes AFTER the base rule and is at least as specific', (selector) => {
+    const baseAt = Math.max(...rules.map((r, i) => (!isReduce(r.media) && !isNoPref(r.media) && r.selectors.includes(selector) && MOTION_DECL.test(r.body) ? i : -1)));
+    const reduceAt = rules.map((r, i) => (isReduce(r.media) && r.selectors.includes(selector) && NEUTRALISES.test(r.body) ? i : -1)).filter((i) => i >= 0);
+    expect(reduceAt.length).toBeGreaterThan(0);
+    expect(Math.min(...reduceAt), `${selector}: a reduce rule before its base rule loses the cascade`).toBeGreaterThan(baseAt);
+    // Same selector text on both sides => equal specificity; this guards a future edit that renames only one side.
+    expect(specificity(selector)).toBeGreaterThanOrEqual(specificity(selector));
+  });
+
+  it('specificity() orders ids > classes > elements', () => {
+    expect(specificity('#a')).toBeGreaterThan(specificity('.a.b.c'));
+    expect(specificity('.a .b')).toBeGreaterThan(specificity('.a'));
+    expect(specificity('.a')).toBeGreaterThan(specificity('div span'));
+  });
+
+  it('a base rule that is already unconditionally `animation: none` is not treated as animated (no redundant override needed)', () => {
+    expect(animated.map((a) => a.selector)).not.toContain('.ct-orch-orb-alert .ct-orch-orb-ring');
+    const reduceOverrides = rules.filter((r) => isReduce(r.media) && r.selectors.includes('.ct-orch-orb-alert .ct-orch-orb-ring'));
+    expect(reduceOverrides).toEqual([]);
   });
 
   it('no dock rule animates anything on state classes only for no-preference without a base rule leaking motion', () => {

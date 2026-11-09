@@ -34,6 +34,23 @@ describe('DraftStore', () => {
     windowDraftStore.clear();
   });
 
+  it('is keyed: a draft written for one orchestrator thread is invisible to another', () => {
+    const s = createDraftStore();
+    s.set('for a', 'a');
+    expect(s.get('a')).toBe('for a');
+    expect(s.get('b')).toBe('');
+  });
+
+  it('version bumps on every set and clear (a stale writer can tell the store changed under it)', () => {
+    const s = createDraftStore();
+    const v0 = s.version;
+    s.set('x', 'k');
+    const v1 = s.version;
+    expect(v1).toBeGreaterThan(v0);
+    s.clear();
+    expect(s.version).toBeGreaterThan(v1);
+  });
+
   it('is memory only: the module touches no storage, file system, settings or network', () => {
     const src = readFileSync('src/dockDraftStore.ts', 'utf8');
     for (const banned of [/localStorage/, /sessionStorage/, /indexedDB/, /require\(['"]fs/, /from ['"](?:node:)?fs/, /saveData|saveSettings|writeFile|fetch\(/]) {

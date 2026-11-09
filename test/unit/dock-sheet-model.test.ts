@@ -107,6 +107,11 @@ describe('sheetBlock (K2 P5: the sheet notice is shown only when the tray does n
     expect(sheetBlock({ ...base, pendingPlan: true, tray })).toBe('plan');
     expect(sheetBlock({ ...base, pendingPlan: true, tray: tray.slice(1) })).toBeNull();
   });
+  it('is conservative by design: an entry past the collapsed three is treated as not listed even if the tray is expanded (the notice may repeat the card, it is never missing)', () => {
+    // sheetBlock has no expanded-state input: the same answer for the same tray whatever the toggle says.
+    const tray = [entry('a', 'permission', true), entry('b', 'permission', true), entry('c', 'permission', true), entry('orch', 'question')];
+    expect(sheetBlock({ ...base, pendingQuestion: true, tray })).toBe('question');
+  });
   it('P4 permission rule is unchanged: hidden only by the orchestrator\'s OWN permission entry that has buttons', () => {
     expect(sheetBlock({ ...base, pendingPermission: true, tray: [entry('orch', 'permission', true)] })).toBeNull();
     expect(sheetBlock({ ...base, pendingPermission: true, tray: [entry('orch', 'permission', false)] })).toBe('permission');

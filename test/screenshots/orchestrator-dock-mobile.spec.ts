@@ -146,6 +146,43 @@ test.describe('mobile geometry — baseline-free, per viewport', () => {
   }
 });
 
+/** WCAG contrast of the badge's text on its own background, and no opacity anywhere up the tree. */
+async function badgeContrast(page: Page): Promise<{ ratio: number; opacity: number }> {
+  return page.evaluate(() => {
+    const dot = document.querySelector('.ct-orch-dot-has-count') as HTMLElement;
+    const count = dot.querySelector('.ct-orch-dot-count') as HTMLElement;
+    const parse = (c: string): [number, number, number] => {
+      const m = c.match(/color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)/);
+      if (m) return [+m[1] * 255, +m[2] * 255, +m[3] * 255];
+      const r = c.match(/rgba?\(([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)/)!;
+      return [+r[1], +r[2], +r[3]];
+    };
+    const lum = ([r, g, b]: [number, number, number]) => { const f = (v: number) => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+    const fg = lum(parse(getComputedStyle(count).color));
+    const bg = lum(parse(getComputedStyle(dot).backgroundColor));
+    let opacity = 1;
+    for (let n: HTMLElement | null = count; n; n = n.parentElement) opacity *= parseFloat(getComputedStyle(n).opacity);
+    return { ratio: (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05), opacity };
+  });
+}
+
+test.describe('count badge contrast (A6)', () => {
+  test('>= 4.5:1 on the dark harness palette, fully opaque @ 390x844', async ({ page }) => {
+    await open(page, 'orch=attention&tx=conversation', { width: 390, height: 844 });
+    await expect(page.locator('.ct-orch-dot-has-count')).toBeVisible();
+    const r = await badgeContrast(page);
+    expect(r.opacity).toBe(1);
+    expect(r.ratio).toBeGreaterThanOrEqual(4.5);
+  });
+  test('>= 4.5:1 on an injected light palette (Obsidian default light values) @ 390x844', async ({ page }) => {
+    await open(page, 'orch=attention&tx=conversation', { width: 390, height: 844 });
+    await page.addStyleTag({ content: ':root, body { --background-primary:#ffffff; --background-secondary:#f2f3f5; --text-normal:#222222; --text-on-accent:#ffffff; --color-orange:#e9973f; --interactive-accent:#7c3aed; }' });
+    const r = await badgeContrast(page);
+    expect(r.opacity).toBe(1);
+    expect(r.ratio).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
 test.describe('pinch / zoom stays enabled', () => {
   test('the harness viewport meta has no scale lock', async ({ page }) => {
     await open(page, 'orch=idle', { width: 375, height: 667 });

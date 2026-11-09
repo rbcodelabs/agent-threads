@@ -22,6 +22,12 @@ describe('keyboardInset(rootBottom, vvOffsetTop, vvHeight)', () => {
     expect(keyboardInset(600, 0, 800)).toBe(0);
     expect(keyboardInset(Number.NaN, 0, 800)).toBe(0);
   });
+  it('is 0 while pinch-zoomed (scale > 1.01): the zoom shrinks the visual viewport, it is not a keyboard', () => {
+    expect(keyboardInset(844, 0, 508, 2)).toBe(0);
+    expect(keyboardInset(844, 0, 508, 1.02)).toBe(0);
+    expect(keyboardInset(844, 0, 508, 1.005)).toBe(336);
+    expect(keyboardInset(844, 0, 508, 1)).toBe(336);
+  });
   it('ignores sub-pixel noise (rounds)', () => {
     expect(keyboardInset(800.4, 0, 799.9)).toBe(1);
   });
@@ -50,6 +56,28 @@ describe('KeyboardInsetTracker', () => {
     vv.height = 400; vv.dispatchEvent(new Event('resize'));
     expect(seen).toHaveLength(n + 1); // stop() reports the reset to 0 once, then nothing
     expect(seen.at(-1)).toBe(0);
+  });
+
+  it('a pinch-zoom (scale > 1) reports no inset and un-zooming brings the keyboard back', () => {
+    const vv = Object.assign(fakeViewport(500), { scale: 1 });
+    const seen: number[] = [];
+    const t = new KeyboardInsetTracker({ visualViewport: vv } as unknown as Window, () => 800, (px) => seen.push(px));
+    t.start();
+    expect(seen.at(-1)).toBe(300);
+    vv.scale = 2; vv.dispatchEvent(new Event('resize'));
+    expect(seen.at(-1)).toBe(0);
+    vv.scale = 1; vv.dispatchEvent(new Event('resize'));
+    expect(seen.at(-1)).toBe(300);
+  });
+
+  it('measure() re-reads the geometry (the view moved without the visual viewport changing)', () => {
+    const vv = fakeViewport(500);
+    let bottom = 800;
+    const seen: number[] = [];
+    const t = new KeyboardInsetTracker({ visualViewport: vv } as unknown as Window, () => bottom, (px) => seen.push(px));
+    t.start();
+    bottom = 700; t.measure();
+    expect(seen.at(-1)).toBe(200);
   });
 
   it('does not call back for an unchanged inset', () => {
