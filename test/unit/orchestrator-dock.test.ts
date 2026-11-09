@@ -450,3 +450,60 @@ describe('review follow-ups', () => {
     expect(orb.hasAttribute('tabindex')).toBe(false);
   });
 });
+
+describe('narrow status row (D2): none / error / offline stay visible in orb mode', () => {
+  const status = (t: ReturnType<typeof setup>) => t.host.previousElementSibling as HTMLElement | null;
+
+  it('first run in orb mode: a status row sits immediately before the host with reason + Set up…, and the orb is tinted, not spinning', async () => {
+    const t = setup({ orchestratorId: undefined, mode: 'orb', running: ['a'] });
+    const row = status(t)!;
+    expect(row.classList.contains('ct-orch-status')).toBe(true);
+    expect(row.hidden).toBe(false);
+    expect(row.querySelector('.ct-orch-reason')?.textContent).toBe('No portfolio orchestrator yet');
+    const orb = t.host.querySelector('.ct-orch-orb') as HTMLElement;
+    expect(orb.classList.contains('ct-orch-orb-alert')).toBe(true);
+    expect(orb.classList.contains('ct-orch-orb-spinning')).toBe(false);
+    (row.querySelector('.ct-orch-action') as HTMLElement).click();
+    await vi.waitFor(() => expect(t.deps.ensureOrchestrator).toHaveBeenCalledTimes(1));
+  });
+
+  it('error in orb mode shows the reason and Open thread; offline shows Reconnect', () => {
+    const e = setup({ threads: [thread('orch', { lastError: 'boom' })], mode: 'orb' });
+    expect(status(e)!.querySelector('.ct-orch-reason')?.textContent).toBe('Orchestrator errored — boom');
+    (status(e)!.querySelector('.ct-orch-action') as HTMLElement).click();
+    expect(e.deps.openThread).toHaveBeenCalledWith('orch');
+    document.body.innerHTML = '';
+    const o = setup({ threads: [thread('orch', { remote: { daemonId: 'd1' } as never })], daemon: { status: 'unreachable' }, mode: 'orb' });
+    expect(status(o)!.querySelector('.ct-orch-reason')?.textContent).toBe('Orchestrator stopped — daemon disconnected');
+    (status(o)!.querySelector('.ct-orch-action') as HTMLElement).click();
+    expect(o.deps.daemons!.reconnect).toHaveBeenCalledWith('d1');
+  });
+
+  it('idle / working / attention in orb mode: no status row, orb not tinted', () => {
+    const t = setup({ mode: 'orb', running: ['a'] });
+    expect(status(t)!.hidden).toBe(true);
+    expect((t.host.querySelector('.ct-orch-orb') as HTMLElement).classList.contains('ct-orch-orb-alert')).toBe(false);
+  });
+
+  it('pill mode never shows the status row (the field itself carries the reason)', () => {
+    const t = setup({ orchestratorId: undefined });
+    expect(status(t)!.hidden).toBe(true);
+    expect(t.host.querySelector('.ct-orch-reason')).toBeTruthy();
+  });
+
+  it('crossing the breakpoint moves the reason between the field and the status row without duplicating it', () => {
+    const t = setup({ orchestratorId: undefined });
+    t.state.mode = 'orb'; t.dock.relayout();
+    expect(document.querySelectorAll('.ct-orch-reason')).toHaveLength(1);
+    expect(status(t)!.querySelector('.ct-orch-reason')).toBeTruthy();
+    t.state.mode = 'pill'; t.dock.relayout();
+    expect(document.querySelectorAll('.ct-orch-reason')).toHaveLength(1);
+    expect(t.host.querySelector('.ct-orch-reason')).toBeTruthy();
+  });
+
+  it('destroy removes the status row too', () => {
+    const t = setup({ orchestratorId: undefined, mode: 'orb' });
+    t.dock.destroy();
+    expect(document.querySelector('.ct-orch-status')).toBeNull();
+  });
+});

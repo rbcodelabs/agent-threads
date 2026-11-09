@@ -151,6 +151,89 @@ test.describe('orchestrator dock — functional (no baselines)', () => {
     });
   }
 
+  test('D1: a long error/offline reason is fully visible in the 640px pill (wraps, never ellipsised) and the board still clears the pill', async ({ page }) => {
+    for (const fixture of ['offline', 'error'] as const) {
+      await open(page, fixture, DESKTOP);
+      const reason = page.locator('.ct-orch-reason');
+      const m = await reason.evaluate((el) => ({ over: el.scrollWidth > el.clientWidth + 1, clipped: getComputedStyle(el).textOverflow === 'ellipsis' && el.scrollWidth > el.clientWidth }));
+      expect(m.over, fixture).toBe(false);
+      await expect(reason).toHaveAttribute('title', /.+/);
+      const pill = await page.locator('.ct-kanban-dispatch').boundingBox();
+      const pad = await page.locator('.ct-kanban-board').first().evaluate((el) => parseFloat(getComputedStyle(el).paddingBottom));
+      expect(pad, fixture).toBeGreaterThanOrEqual(pill!.height + 36);
+    }
+  });
+
+  for (const width of [390, 320]) {
+    for (const fixture of ['first-run', 'error', 'offline'] as const) {
+      test(`D2: narrow @ ${width}px ${fixture}: a full-width status row above the orb row with a 44px action`, async ({ page }) => {
+        await open(page, fixture, { width, height: 844 });
+        const row = page.locator('.ct-orch-status');
+        await expect(row).toBeVisible();
+        const pill = await page.locator('.ct-kanban-dispatch').boundingBox();
+        const rowBox = await row.boundingBox();
+        const orb = await page.locator('.ct-orch-orb').boundingBox();
+        expect(rowBox!.y + rowBox!.height).toBeLessThanOrEqual(orb!.y + 1);
+        expect(rowBox!.width).toBeGreaterThan(pill!.width - 24);
+        const action = await row.locator('.ct-orch-action').boundingBox();
+        expect(action!.height).toBeGreaterThanOrEqual(44);
+        await expect(page.locator('.ct-orch-orb')).toHaveClass(/ct-orch-orb-alert/);
+        await expect(page.locator('.ct-orch-orb')).not.toHaveClass(/ct-orch-orb-spinning/);
+      });
+    }
+    test(`D2: narrow @ ${width}px idle keeps only the compact orb + New row`, async ({ page }) => {
+      await open(page, 'idle', { width, height: 844 });
+      await expect(page.locator('.ct-orch-status')).toBeHidden();
+    });
+  }
+
+  test('D2: narrow screenshots of the status row (first-run, offline) @ 390x844', async ({ page }) => {
+    await open(page, 'first-run', NARROW);
+    await shot(page.locator('.ct-kanban-dispatch'), 'orchestrator-dock-status-first-run-390x844.png');
+    await open(page, 'offline', NARROW);
+    await shot(page.locator('.ct-kanban-dispatch'), 'orchestrator-dock-status-offline-390x844.png');
+  });
+
+  for (const width of [320, 375, 390]) {
+    test(`D3: no overflow in the pill at ${width}px (meta row and every button inside the pill)`, async ({ page }) => {
+      for (const fixture of ['idle', 'offline'] as const) {
+        await open(page, fixture, { width, height: 844 });
+        const r = await page.evaluate(() => {
+          const pill = document.querySelector('.ct-kanban-dispatch') as HTMLElement;
+          const meta = pill.querySelector('.ct-agents-panel-meta') as HTMLElement;
+          const pr = pill.getBoundingClientRect();
+          const out = [...pill.querySelectorAll('button')].filter((b) => (b as HTMLElement).offsetParent).map((b) => b.getBoundingClientRect().right - pr.right);
+          return { metaOverflow: meta.scrollWidth - meta.clientWidth, maxRightOver: Math.max(...out) };
+        });
+        expect(r.metaOverflow, `${fixture} meta`).toBeLessThanOrEqual(0);
+        expect(r.maxRightOver, `${fixture} buttons`).toBeLessThanOrEqual(0);
+      }
+    });
+  }
+
+  test('D6: a long draft never half-clips a line (max height is a whole number of lines plus padding)', async ({ page }) => {
+    await open(page, 'idle', DESKTOP);
+    const input = page.locator('.ct-orch-input');
+    await input.fill(Array.from({ length: 10 }, (_, i) => `line ${i}`).join('\n'));
+    await input.evaluate((el) => el.dispatchEvent(new Event('input')));
+    const m = await input.evaluate((el) => { const cs = getComputedStyle(el); return { h: el.clientHeight, lh: parseFloat(cs.lineHeight), pad: parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) }; });
+    expect((m.h - m.pad) % m.lh).toBe(0);
+  });
+
+  test('D7: the placeholder uses --text-muted (readable on the dark pill)', async ({ page }) => {
+    await open(page, 'idle', DESKTOP);
+    const same = await page.evaluate(() => {
+      const input = document.querySelector('.ct-orch-input') as HTMLElement;
+      const probe = document.createElement('span');
+      probe.style.color = 'var(--text-muted)';
+      document.body.appendChild(probe);
+      const expected = getComputedStyle(probe).color;
+      probe.remove();
+      return getComputedStyle(input, '::placeholder').color === expected;
+    });
+    expect(same).toBe(true);
+  });
+
   test('narrow: tapping the orb opens the orchestrator thread (interim)', async ({ page }) => {
     await open(page, 'idle', NARROW);
     await page.locator('.ct-orch-orb').click();
