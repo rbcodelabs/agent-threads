@@ -2865,8 +2865,19 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
     const heading = detail.createDiv({ cls: 'ct-manager-detail-header' });
     heading.createEl('h2', { text: isNew ? 'New project' : project!.name });
     if (project) {
-      const orchestrator = heading.createEl('button', { text: project.orchestratorThreadId ? 'Open orchestrator' : 'Create orchestrator', attr: { type: 'button' } });
-      orchestrator.addEventListener('click', async () => { await this.plugin.ensureProjectOrchestratorThread(project.id, true); this.display(); });
+      const managed = this.plugin.isOrchestratorManagedByPlugin();
+      const thread = project.orchestratorThreadId ? this.plugin.manager.getThread(project.orchestratorThreadId) : undefined;
+      if (managed) {
+        // Read-only row: lifecycle (create / enable / disable) belongs to the Threads Orchestrator plugin; the thread stays openable.
+        heading.createEl('small', { cls: 'ct-orchestrator-managed', text: project.orchestratorEnabled === false ? 'Orchestrator disabled (managed by Threads Orchestrator)' : 'Orchestrator managed by Threads Orchestrator' });
+        if (thread) {
+          const open = heading.createEl('button', { text: 'Open orchestrator', attr: { type: 'button' } });
+          open.addEventListener('click', () => { void this.plugin.openThreadInChatView(thread.id); });
+        }
+      } else {
+        const orchestrator = heading.createEl('button', { text: project.orchestratorThreadId ? 'Open orchestrator' : 'Create orchestrator', attr: { type: 'button' } });
+        orchestrator.addEventListener('click', async () => { await this.plugin.ensureProjectOrchestratorThread(project.id, true); this.display(); });
+      }
     }
     const form = detail.createDiv({ cls: 'ct-manager-form' });
     const name = this.createManagerField(form, 'Project name', project?.name ?? '', { placeholder: 'Project name' }) as HTMLInputElement;
@@ -3204,7 +3215,9 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       if (!orchestratorId) {
         new Setting(containerEl)
           .setName('Not yet created')
-          .setDesc('Run "Open Portfolio Orchestrator" from the command palette (Cmd+P) to create it.');
+          .setDesc(this.plugin.isOrchestratorManagedByPlugin()
+            ? 'Managed by Threads Orchestrator. It is created when the plugin starts orchestrating, or run "Open Portfolio Orchestrator" from the command palette (Cmd+P). The Portfolio orchestrator cannot be disabled.'
+            : 'Run "Open Portfolio Orchestrator" from the command palette (Cmd+P) to create it.');
       } else if (orchestratorThread) {
         new Setting(containerEl)
           .setName(orchestratorThread.title)

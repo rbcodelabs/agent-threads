@@ -1,6 +1,7 @@
 import { agentHarnessLabel, type AgentHarness } from './types';
 import { buildProjectOverviewContext, composeAppendSystemPrompt, readProjectOverview } from './projectOverview';
 import { extractUrls } from './urlLinks';
+import { PeerSkillRegistry } from './PeerSkills';
 import { mergeDisallowedTools } from './toolRestrictions';
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
@@ -355,9 +356,8 @@ export class ThreadManager {
   /**
    * Absolute filesystem path to this plugin's installed directory (vaultRoot +
    * manifest.dir), set once from main.ts alongside vaultRoot. Used to resolve
-   * the bundled thread-orchestrator skill at <pluginResourceDir>/resources/skills/
-   * so it can be registered as a local SDK plugin without any manual install
-   * into ~/.claude/skills/. Empty until main.ts sets it (e.g. in tests).
+   * peer-contributed skills under <pluginResourceDir>/.peer-skills/. Empty until
+   * main.ts sets it (e.g. in tests).
    */
   pluginResourceDir = '';
   /**
@@ -3341,6 +3341,23 @@ export class ThreadManager {
     this.touch(thread);
   }
 
+  /** Skills registered by peer plugins, materialized under the plugin directory (or the OS temp dir when unresolvable). */
+  readonly peerSkills = new PeerSkillRegistry();
+
+  private peerSkillPlugins(): Array<{ type: 'local'; path: string }> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const path = require('path') as typeof import('path');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const os = require('os') as typeof import('os');
+      const root = this.pluginResourceDir ? path.join(this.pluginResourceDir, '.peer-skills') : path.join(os.tmpdir(), 'claude-threads-peer-skills');
+      return this.peerSkills.materialize(root);
+    } catch (error) {
+      console.warn('[ClaudeThreads] Peer skills unavailable:', error);
+      return [];
+    }
+  }
+
   /** Skill plugins as host paths. */
   buildHostSkillPlugins(): Array<{ type: 'local'; path: string }> {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -3349,13 +3366,7 @@ export class ThreadManager {
       localSkillsRoot: this.localSkillsRoot(),
       skillSources: this.settings.skillSources ?? [],
       pluginSkillsRoot: pluginSkillsRootFrom(this.pluginResourceDir ?? ''),
-      // Bundled thread-orchestrator skill — ships inside the plugin's own
-      // dist/ (copied there by esbuild.config.mjs from resources/skills/),
-      // so it is discoverable in every session. Registered unconditionally,
-      // not gated by any setting.
-      bundledSkillPath: this.pluginResourceDir
-        ? path.join(this.pluginResourceDir, 'resources', 'skills', 'thread-orchestrator')
-        : undefined,
+      peerSkillPlugins: this.peerSkillPlugins(),
     });
   }
 

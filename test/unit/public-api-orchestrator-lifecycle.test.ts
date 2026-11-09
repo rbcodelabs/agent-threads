@@ -156,3 +156,15 @@ describe('plugin wiring: ensurePublicOrchestrator / setPublicOrchestratorEnabled
     await expect(p.setPublicOrchestratorEnabled({ id: 'project:q' }, true)).resolves.toBeNull();
   });
 });
+
+describe('isOrchestratorManagedByPlugin (Settings read-only row)', () => {
+  it('is true only while the thread-orchestrator skill is registered', () => {
+    const peerSkills = new PeerSkillRegistry();
+    const p = Object.assign(Object.create(ClaudeThreadsPlugin.prototype), { manager: { peerSkills } }) as any;
+    expect(p.isOrchestratorManagedByPlugin()).toBe(false);
+    const d = peerSkills.register({ pluginId: 'orch' }, { name: 'thread-orchestrator', description: 'd', content: 'c' });
+    expect(p.isOrchestratorManagedByPlugin()).toBe(true);
+    d.dispose();
+    expect(p.isOrchestratorManagedByPlugin()).toBe(false);
+  });
+});

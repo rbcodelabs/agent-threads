@@ -87,13 +87,6 @@ const ctx = await esbuild.context({
 fs.copyFileSync('manifest.json', 'dist/manifest.json');
 if (fs.existsSync('styles.css')) fs.copyFileSync('styles.css', 'dist/styles.css');
 
-// Bundle the thread-orchestrator skill (and any future resources/skills/*) into
-// dist/ so it ships with the plugin and is discoverable with nothing manually
-// copied into ~/.claude/skills/. See ThreadManager.buildSessionOptions().
-if (fs.existsSync('resources/skills')) {
-  fs.cpSync('resources/skills', 'dist/resources/skills', { recursive: true });
-}
-
 if (isWatch) {
   await ctx.watch();
   console.log('Watching for changes...');

@@ -8,6 +8,7 @@ import type { RawLogTraceChunk, RawLogTraceMetadata } from './RawLogWriter';
 import type { McpRegistrationResult } from './mcpServerStore';
 import type { ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactProviderRegistry, ArtifactRegistrationResult, ArtifactStoreHost, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
 import { HOST_OWNED_ARTIFACT_FIELDS, PROVIDER_ID_PATTERN, toArtifactRef } from './ArtifactContributions';
+import type { PeerSkillRegistry, SkillContribution } from './PeerSkills';
 import { formatMessageContentReference } from './MessageContent';
 import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
 import type { MessageContentContribution, MessageContentProviderRegistry, MessageContentRef, MessageContentRegistrationResult } from './MessageContent';
@@ -153,13 +154,17 @@ export interface ClaudeThreadsApiV1 {
     list(): Promise<readonly OrchestratorSnapshot[]>;
     dispatch(target: OrchestratorTarget, input: DispatchInput): Promise<{ readonly runId: string }>;
     /**
-     * Takes over orchestrator wake-up (capability `orchestrators.wakeup.delegate`).
-     * While at least one delegate is live, core's built-in wake-up pings are
-     * suppressed and its pending batches discarded; they resume automatically
-     * when the last delegate is disposed or the API is stopped. Dispose is
-     * idempotent. `owner.pluginId` is advisory, like other `owner` arguments.
+     * Idempotently creates and designates the Portfolio (`portfolio`) or a Project (`project:<id>`)
+     * orchestrator thread (capability `orchestrators.ensure`). Re-enables a disabled Project.
+     * `INVALID_ARGUMENT` for a malformed target; `ORCHESTRATOR_NOT_FOUND` for an unknown Project.
      */
-    delegateWakeup(owner: PeerIdentity): Disposable;
+    ensure(target: OrchestratorTarget): Promise<OrchestratorSnapshot>;
+    /**
+     * Enables or disables a Project orchestrator (capability `orchestrators.setEnabled`). Disabling
+     * keeps the thread; enabling is `ensure`. The Portfolio orchestrator cannot be disabled
+     * (`INVALID_ARGUMENT`); unknown Project is `ORCHESTRATOR_NOT_FOUND`.
+     */
+    setEnabled(target: OrchestratorTarget, enabled: boolean): Promise<OrchestratorSnapshot>;
   };
   readonly agentTools: { createBundle(profile: 'voice-orchestration'): AgentToolBundle };
   readonly mcp: {
@@ -258,8 +263,11 @@ export interface PublicApiDependencies {
   getPublicState?(): PublicApiPersistedState | undefined; savePublicState?(state: PublicApiPersistedState): Promise<void>;
   runConstrainedQuery?(input: ConstrainedQueryInput): Promise<ConstrainedQueryOutput>;
   listOrchestrators(): OrchestratorSnapshot[]; resolveOrchestrator(target: OrchestratorTarget): Promise<string | null>;
-  /** Suppresses (true) or resumes (false) core's orchestrator wake-up; absent when the host cannot delegate. */
-  setWakeupDelegated?(delegated: boolean): void;
+  /** Explicit create+designate / enable toggle for orchestrators; resolve to null for an unknown Project. */
+  ensureOrchestrator?(target: OrchestratorTarget): Promise<OrchestratorSnapshot | null>;
+  setOrchestratorEnabled?(target: OrchestratorTarget, enabled: boolean): Promise<OrchestratorSnapshot | null>;
+  /** Host-owned registry of skills contributed by peers; absent when the host cannot inject skills. */
+  peerSkills?: PeerSkillRegistry;
   triggerHostEvent(name: 'claude-threads:api-ready' | 'claude-threads:api-stopping', payload: { apiVersion: 1; generation: string }): void;
   registerMcpServer?(input: unknown): Promise<McpRegistrationResult>;
   requestSecret?(secretName: string, reason: string, force?: boolean): Promise<boolean>;
@@ -296,7 +304,9 @@ function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   if (deps.getTraceMetadata && deps.readTraceChunk) capabilities.push('traces.listSources', 'traces.readChunk', 'traces.subscribe');
   if (deps.runConstrainedQuery) capabilities.push('constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel');
   capabilities.push('orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration');
-  if (deps.setWakeupDelegated) capabilities.push('orchestrators.wakeup.delegate');
+  if (deps.ensureOrchestrator) capabilities.push('orchestrators.ensure');
+  if (deps.setOrchestratorEnabled) capabilities.push('orchestrators.setEnabled');
+  if (deps.peerSkills) capabilities.push('extensions.registerSkill');
   capabilities.push('mcp.listPresets');
   if (deps.registerMcpServer) capabilities.push('mcp.register', 'mcp.registerPreset');
   if (deps.requestSecret) capabilities.push('mcp.requestSecret');
@@ -451,7 +461,6 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
    */
   const expectedTerminal = new Set<string>();
   /** Live wake-up delegations; core wake-up is suppressed while non-empty. */
-  const wakeupDelegates = new Set<symbol>();
   const serial = new Map<string, Promise<unknown>>();
   type ProvisionalState = {
     readonly threadId: string;
@@ -556,18 +565,28 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     const timeoutMs = boundedTimeout(options?.timeoutMs);
     return new Promise(resolve => { let done = false; const settleWait = (result: Exclude<RunResult, { status: 'timed_out' }>) => { if (done) return; done = true; clearTimeout(timer); record.waiters.delete(settleWait); resolve(result); }; const timer = setTimeout(() => { if (done) return; done = true; record.waiters.delete(settleWait); resolve(freeze({ status: 'timed_out', runId, threadId: record.threadId })); }, timeoutMs); record.waiters.add(settleWait); });
   };
-  const delegateWakeup = (owner: PeerIdentity): Disposable => {
-    guard();
-    if (!deps.setWakeupDelegated) throw unavailable();
-    boundedString(owner?.pluginId, 'owner.pluginId', MAX_OWNER_LENGTH, true);
-    const token = Symbol('wakeup-delegate'); wakeupDelegates.add(token);
-    if (wakeupDelegates.size === 1) deps.setWakeupDelegated(true);
-    let disposed = false;
-    return freeze({ dispose: () => {
-      if (disposed) return; disposed = true;
-      // After stop() the set is already cleared and core resumed, so a stale dispose is a no-op.
-      if (wakeupDelegates.delete(token) && wakeupDelegates.size === 0) deps.setWakeupDelegated?.(false);
-    } });
+  const parseOrchestratorTarget = (target: unknown): string => {
+    const id = (target as { id?: unknown } | null | undefined)?.id;
+    if (typeof id !== 'string' || id.length === 0 || id.length > MAX_KEY_LENGTH || (id !== 'portfolio' && !(id.startsWith('project:') && id.length > 'project:'.length))) {
+      throw new ClaudeThreadsApiError('INVALID_ARGUMENT', "target.id must be 'portfolio' or 'project:<projectId>'.");
+    }
+    return id;
+  };
+  const ensureOrchestrator = async (target: OrchestratorTarget): Promise<OrchestratorSnapshot> => {
+    guard(); const id = parseOrchestratorTarget(target);
+    if (!deps.ensureOrchestrator) throw unavailable();
+    const snapshot = await deps.ensureOrchestrator({ id });
+    if (!snapshot) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${id}`);
+    return freeze({ ...snapshot });
+  };
+  const setOrchestratorEnabled = async (target: OrchestratorTarget, enabled: boolean): Promise<OrchestratorSnapshot> => {
+    guard(); const id = parseOrchestratorTarget(target);
+    if (typeof enabled !== 'boolean') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'enabled must be a boolean.');
+    if (id === 'portfolio') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'The Portfolio orchestrator cannot be disabled.');
+    if (!deps.setOrchestratorEnabled) throw unavailable();
+    const snapshot = await deps.setOrchestratorEnabled({ id }, enabled);
+    if (!snapshot) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${id}`);
+    return freeze({ ...snapshot });
   };
   const list = async (query?: ThreadQuery): Promise<readonly ThreadSummary[]> => { guard(); let values = deps.getThreads(); if (query?.projectId !== undefined) values = values.filter(thread => (thread.projectId ?? null) === query.projectId); if (query?.status) values = values.filter(thread => (thread.status ?? 'waiting') === query.status); if (query?.limit !== undefined) values = values.slice(0, Math.max(0, Math.floor(query.limit))); return freeze(values.map(thread => snapshotSummary(thread, deps.isRunning(thread.id)))); };
   const get = async (threadId: string): Promise<ThreadSnapshot | null> => { guard(); const thread = deps.getThread(threadId); return thread ? snapshotThread(thread, deps.isRunning(threadId)) : null; };
@@ -884,6 +903,16 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     return freeze({ ...result, dispose: () => { slashCommandRegistrations.delete(tracked); result.dispose(); } });
   };
 
+  const skillRegistrations = new Set<{ dispose: () => void }>();
+  const registerSkill = (owner: PeerIdentity, spec: SkillContribution): Disposable => {
+    guard();
+    if (!deps.peerSkills) throw unavailable();
+    const inner = deps.peerSkills.register(owner, spec);
+    const tracked = { dispose: inner.dispose };
+    skillRegistrations.add(tracked);
+    return freeze({ dispose: () => { skillRegistrations.delete(tracked); inner.dispose(); } });
+  };
+
   const threadPermissions = async (threadId: string): Promise<ThreadPermissionSnapshot | null> => {
     guard();
     const thread = deps.getThread(threadId);
@@ -1146,7 +1175,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     traces: { listSources: listTraceSources, readChunk: readTraceChunk, subscribe: (listener: (event: PublicTraceEvent) => void) => { guard(); traceListeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; traceListeners.delete(listener); } }); } },
     constrainedRuns: { create: createConstrained, get: getConstrained, wait: waitConstrained, cancel: cancelConstrained },
     orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); if (input?.queueIfBusy !== undefined && typeof input.queueIfBusy !== 'boolean') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'queueIfBusy must be a boolean.'); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input, input.queueIfBusy === true); },
-      delegateWakeup },
+      ensure: ensureOrchestrator, setEnabled: setOrchestratorEnabled },
     agentTools: { createBundle: (profile) => {
       guard();
       if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`);
@@ -1156,12 +1185,12 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       return freeze({ tools, execute: executeTool });
     } },
     mcp: { register: registerMcp, listPresets: listMcpPresets, registerPreset: registerMcpPreset, requestSecret: requestSecretMcp },
-    extensions: { registerArtifactProvider, registerAgentTool, registerSlashCommand, registerMessageContentProvider },
+    extensions: { registerArtifactProvider, registerAgentTool, registerSlashCommand, registerMessageContentProvider, registerSkill },
     messageContent: { formatReference: (ref: MessageContentRef) => { guard(); try { return formatMessageContentReference(ref); } catch { throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'Invalid message content reference.'); } } },
     artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction, allocateStorage: allocateArtifactStorage },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
-    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); if (wakeupDelegates.size > 0) { wakeupDelegates.clear(); deps.setWakeupDelegated?.(false); } listeners.clear(); traceListeners.clear(); for (const state of [...provisionalThreads.values()]) { const cleanup = state.operation.catch(() => undefined).then(async () => { if (state.status !== 'pending') return; await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root))); forgetAllocations(state.threadId); await state.host.rollback(); state.status = 'rolled-back'; provisionalThreads.delete(state.threadId); }); state.operation = cleanup; void cleanup.catch(error => console.error('[ClaudeThreads] Provisional rollback failed during API stop:', error)); } for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
+    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); for (const registration of [...skillRegistrations]) registration.dispose(); skillRegistrations.clear(); listeners.clear(); traceListeners.clear(); for (const state of [...provisionalThreads.values()]) { const cleanup = state.operation.catch(() => undefined).then(async () => { if (state.status !== 'pending') return; await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root))); forgetAllocations(state.threadId); await state.host.rollback(); state.status = 'rolled-back'; provisionalThreads.delete(state.threadId); }); state.operation = cleanup; void cleanup.catch(error => console.error('[ClaudeThreads] Provisional rollback failed during API stop:', error)); } for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
 }
 
 function toolTimeout(args: Record<string, unknown>): number { return Math.min(Math.max(10, Number(args.timeout_secs) || 120), 300) * 1_000; }
