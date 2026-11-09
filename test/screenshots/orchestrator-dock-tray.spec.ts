@@ -160,7 +160,8 @@ test.describe('orchestrator tray — approvals (functional, no baselines)', () =
     test(`nothing is approved by rendering: opening, closing and reopening the sheet resolves nothing @ ${label}`, async ({ page }) => {
       await open(page, size);
       await openSheet(page, size);
-      await page.keyboard.press('Escape');
+      await sheet(page).getByRole('button', { name: 'Close' }).click();
+      await expect(sheet(page)).toBeHidden();
       await openSheet(page, size);
       expect(await page.evaluate(() => (window as any).__resolvedPermissions)).toEqual([]);
       await expect(page.locator('.ct-kanban-perm-actions')).toHaveCount(1);
