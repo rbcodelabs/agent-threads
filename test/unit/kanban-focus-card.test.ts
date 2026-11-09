@@ -282,12 +282,14 @@ describe('clearance follows the sheet while a link is hovered (review advisory 7
     expect(FakeRO.all.at(-1)!.disconnected).toBe(true);
   });
 
-  it('when the plan cannot clear the card, the caller falls back to scrollIntoView', () => {
+  it('when nothing can scroll and the overlays cover the card, the caller falls back to scrollIntoView', () => {
     vi.useFakeTimers();
     reduceMotion(true);
     const { view, card } = make();
     const el = card('t1');
-    geometry(view, el, { cardRect: { left: 400, top: 400, right: 660, bottom: 560 }, sheet: { left: 0, top: 0, right: 1280, bottom: 800 } }); // covers everything
+    const g = geometry(view, el, { cardRect: { left: 400, top: 400, right: 660, bottom: 560 }, sheet: { left: 0, top: 0, right: 1280, bottom: 800 } }); // covers everything
+    Object.defineProperty(g.board, 'scrollHeight', { configurable: true, get: () => 800 }); // nothing can scroll: the planner cannot clear it
+    Object.defineProperty(g.board, 'scrollWidth', { configurable: true, get: () => 1280 });
     view.focusCard('t1', { scroll: true, flash: false });
     vi.advanceTimersByTime(INTENT_MS);
     expect(el.scrollIntoView).toHaveBeenCalled();

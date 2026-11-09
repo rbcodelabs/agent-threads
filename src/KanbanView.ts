@@ -15,7 +15,8 @@ import { decisionToQuestion } from './decisions';
 import { formatToolName } from './ClaudeSession';
 import { appendPermissionButtons, summarizePermissionDetail } from './permissionCard';
 import { hostExecState } from './managedPolicy';
-import { planCardScroll, type Rect } from './dockCardScroll';
+import type { Rect } from './dockCardScroll';
+import { scrollCardIntoClearView } from './dockCardScrollDom';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
@@ -102,27 +103,9 @@ const PROJECT_SECTION_MAP: Record<ThreadRowState, { label: string; state: RowSta
 /** Pointer must rest on a thread link this long before the board scrolls to its card. */
 const CARD_HOVER_INTENT_MS = 120;
 
-/** Height of `position: sticky` children pinned at the top of the card's scrollers (none today): the card is aligned below them. */
-function stickyTopInset(el: HTMLElement, host: HTMLElement): number {
-  let inset = 0;
-  for (let n: HTMLElement | null = el.parentElement; n; n = n === host ? null : n.parentElement) {
-    for (const c of Array.from(n.children) as HTMLElement[]) {
-      const cs = getComputedStyle(c);
-      if (cs.position === 'sticky' && parseFloat(cs.top || '0') <= 1) inset = Math.max(inset, c.offsetHeight);
-    }
-  }
-  return inset;
-}
-
 function rectOf(el: Element): Rect {
   const b = el.getBoundingClientRect();
   return { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
-}
-
-/** Instant for reduced motion (or hosts without scrollTo); smooth otherwise. */
-function setScroll(el: HTMLElement, axis: 'top' | 'left', value: number, reduced: boolean): void {
-  if (reduced || typeof el.scrollTo !== 'function') { if (axis === 'top') el.scrollTop = value; else el.scrollLeft = value; return; }
-  el.scrollTo(axis === 'top' ? { top: value, behavior: 'smooth' } : { left: value, behavior: 'smooth' });
 }
 
 /** `matchMedia` is absent in some test hosts: treat that as "motion is fine". */
@@ -550,28 +533,10 @@ export class KanbanView extends ItemView {
     host.style.setProperty('--ct-card-clearance', `${covered}px`);
     host.classList.add('ct-kanban-clearing');
     this.observeClearance(pill);
-    let allowX = false; // sideways moves only if something between the card and the board can actually scroll sideways
-    for (let n: HTMLElement | null = el.parentElement; n; n = n === host ? null : n.parentElement) {
-      if (/(auto|scroll)/.test(getComputedStyle(n).overflowX) && n.scrollWidth > n.clientWidth) { allowX = true; break; }
-    }
-    const plan = planCardScroll(rectOf(el), hostRect, obstacles, { allowX, topInset: stickyTopInset(el, host) });
-    let remX = plan.dx;
-    let remY = plan.dy;
-    for (let n: HTMLElement | null = el.parentElement; n && (remX !== 0 || remY !== 0); n = n === host ? null : n.parentElement) {
-      const cs = getComputedStyle(n);
-      if (remY !== 0 && /(auto|scroll)/.test(cs.overflowY)) {
-        const next = Math.max(0, Math.min(n.scrollHeight - n.clientHeight, n.scrollTop - remY));
-        const moved = n.scrollTop - next; // how far the card moved
-        if (moved !== 0) { setScroll(n, 'top', next, reduced); remY -= moved; }
-      }
-      if (remX !== 0 && /(auto|scroll)/.test(cs.overflowX)) {
-        const next = Math.max(0, Math.min(n.scrollWidth - n.clientWidth, n.scrollLeft - remX));
-        const moved = n.scrollLeft - next;
-        if (moved !== 0) { setScroll(n, 'left', next, reduced); remX -= moved; }
-      }
-    }
-    // The planner could not get the card out from under the overlays (they cover nearly everything): at least make it visible.
-    if (!plan.cleared && typeof el.scrollIntoView === 'function') el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'nearest', inline: 'nearest' });
+    // Nested scrollers (board / lane / column body): dockCardScrollDom keeps the card inside its own column viewport AND
+    // outside the overlays. If it cannot clear the card (the overlays cover nearly everything), at least make it visible.
+    const cleared = scrollCardIntoClearView(el, host, obstacles, reduced);
+    if (!cleared && typeof el.scrollIntoView === 'function') el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'nearest', inline: 'nearest' });
   }
 
   /** The sheet can grow / shrink while a link stays hovered: keep the extra scroll room matched to what is covered. */

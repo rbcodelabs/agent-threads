@@ -20,6 +20,8 @@ export interface CardScrollPlan {
 export interface PlanOptions {
   /** False when nothing between the card and the board can scroll sideways (swimlanes, gallery). Default true. */
   allowX?: boolean;
+  /** False when the scroller cannot scroll vertically (a horizontal-only board). Default true. */
+  allowY?: boolean;
   /**
    * Height of sticky headers pinned to the top of the scroller: a card aligned to the board's top edge is aligned this far
    * BELOW it, so it is not tucked under a header. Default 0 (the Agent Board currently has no sticky headers).
@@ -49,7 +51,7 @@ export function uncoveredRegions(board: Rect, obstacles: readonly Rect[]): Rect[
   return regions.filter((r) => w(r) > 0 && h(r) > 0);
 }
 
-function moveInto(card: Rect, regionIn: Rect, allowX: boolean, topInset = 0, boardTop = 0): { dx: number; dy: number; fits: boolean } {
+function moveInto(card: Rect, regionIn: Rect, allowX: boolean, topInset = 0, boardTop = 0, allowY = true): { dx: number; dy: number; fits: boolean } {
   // A region that starts at the board's top edge starts below the sticky headers.
   const region = regionIn.top === boardTop && topInset > 0 ? { ...regionIn, top: regionIn.top + topInset } : regionIn;
   const cw = w(card);
@@ -67,7 +69,10 @@ function moveInto(card: Rect, regionIn: Rect, allowX: boolean, topInset = 0, boa
   } else {
     dx = region.left - card.left; // wider than the region: align its left edge
   }
-  if (ch <= h(region)) {
+  if (!allowY) {
+    // Cannot scroll vertically: only regions the card is ALREADY vertically inside are usable.
+    if (!(card.top >= region.top && card.bottom <= region.bottom)) return { dx, dy: 0, fits: false };
+  } else if (ch <= h(region)) {
     if (card.top < region.top) dy = region.top - card.top; // nearest
     else if (card.bottom > region.bottom) dy = region.bottom - card.bottom;
   } else {
@@ -84,6 +89,7 @@ const inAny = (x: number, y: number, rects: readonly Rect[]): boolean => rects.s
 /** The smallest move that puts the card fully in an uncovered region (or, if it cannot fit, its top-left there). */
 export function planCardScroll(card: Rect, board: Rect, obstacles: readonly Rect[], opts: PlanOptions = {}): CardScrollPlan {
   const allowX = opts.allowX ?? true;
+  const allowY = opts.allowY ?? true;
   const topInset = opts.topInset ?? 0;
   const regions = uncoveredRegions(board, obstacles);
   const finish = (dx: number, dy: number, region: Rect | null, fits: boolean): CardScrollPlan => {
@@ -98,7 +104,7 @@ export function planCardScroll(card: Rect, board: Rect, obstacles: readonly Rect
   }
   let best: { dx: number; dy: number; cost: number; region: Rect } | null = null;
   for (const region of regions) {
-    const m = moveInto(card, region, allowX, topInset, board.top);
+    const m = moveInto(card, region, allowX, topInset, board.top, allowY);
     if (!m.fits) continue; // a region the card does not fit in is no place to put it
     const cost = Math.abs(m.dx) + Math.abs(m.dy);
     if (!best || cost < best.cost) best = { dx: m.dx, dy: m.dy, cost, region };
@@ -106,10 +112,10 @@ export function planCardScroll(card: Rect, board: Rect, obstacles: readonly Rect
   if (best) return finish(best.dx, best.dy, best.region, true);
   // Fits nowhere: the LARGEST uncovered region (among those the card can reach sideways) gets its top-left, so at least
   // the top of the card is readable.
-  const reachable = regions.filter((r) => allowX || (card.left >= r.left && card.right <= r.right));
+  const reachable = regions.filter((r) => (allowX || (card.left >= r.left && card.right <= r.right)) && (allowY || (card.top >= r.top && card.bottom <= r.bottom)));
   const pool = reachable.length > 0 ? reachable : regions;
   const region = pool.reduce((a, b) => (w(b) * h(b) > w(a) * h(a) ? b : a));
-  const m = allowX ? moveInto(card, region, true, topInset, board.top) : { dx: 0, dy: region.top + (region.top === board.top ? topInset : 0) - card.top };
+  const m = allowX && allowY ? moveInto(card, region, true, topInset, board.top) : { dx: allowX ? moveInto(card, region, true, topInset, board.top).dx : 0, dy: allowY ? region.top + (region.top === board.top ? topInset : 0) - card.top : 0 };
   return finish(m.dx, m.dy, region, false);
 }
 /** Fraction (0..1) of the card's area that lies under any obstacle (overlaps counted once per obstacle, capped at 1). */
