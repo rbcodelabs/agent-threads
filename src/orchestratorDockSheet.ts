@@ -94,6 +94,8 @@ export class DockSheet {
   private scrollQueued = false;
   /** The user is at the bottom (updated by scroll events and programmatic pins): the pin survives content growing under it. */
   private stick = true;
+  /** Last time the user did something that scrolls (wheel / touch / scrollbar / scroll keys). Our own scrollTop writes and content growth are not intent. */
+  private lastIntentAt = -Infinity;
   /** Pin to the latest message on the next render (open, or the user's own send), however far up they had scrolled. */
   private pinNext = false;
   private closeBtn: HTMLButtonElement;
@@ -134,7 +136,18 @@ export class DockSheet {
     this.liveEl = this.el.createDiv({ cls: 'ct-orch-live', attr: { 'aria-live': 'polite', 'aria-atomic': 'true' } });
 
     this.logEl.addEventListener('click', (e) => this.onLogClick(e));
-    this.scrollEl.addEventListener('scroll', () => { this.stick = this.nearBottom(); });
+    const intent = (): void => { this.lastIntentAt = Date.now(); };
+    this.scrollEl.addEventListener('wheel', intent, { passive: true });
+    this.scrollEl.addEventListener('touchstart', intent, { passive: true });
+    this.scrollEl.addEventListener('touchmove', intent, { passive: true });
+    this.scrollEl.addEventListener('pointerdown', (e) => { if (e.target === this.scrollEl) intent(); }); // the scrollbar
+    this.scrollEl.addEventListener('keydown', (e) => { if (['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' '].includes(e.key)) intent(); });
+    // Only a scroll the USER caused can unpin. The pin write is followed by a scroll event that can land after the content grew
+    // by more than the near-bottom slack (a long first token): that must not read as "scrolled up".
+    this.scrollEl.addEventListener('scroll', () => {
+      if (Date.now() - this.lastIntentAt < 600) this.stick = this.nearBottom();
+      else if (this.nearBottom()) this.stick = true;
+    });
     // The sheet is a non-modal dialog: Escape inside it closes it (the dock returns focus to the field).
     this.el.addEventListener('keydown', (e) => {
       if (e.key === 'Tab' && this.view?.mode === 'orb') { this.trapTab(e); return; }

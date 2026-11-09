@@ -145,9 +145,13 @@ function scrubAttributes(node: Element): void {
 export async function renderDockMarkdown(markdown: string, el: HTMLElement, opts: DockMarkdownOptions): Promise<void> {
   const nonce = `${Math.random().toString(36).slice(2)}${(nonceSeq++).toString(36)}`;
   const html = await marked.parse(rewriteDockMarkup(markdown, opts.threads, nonce));
-  const fragment = sanitizeHTMLToDom(html);
-  el.appendChild(fragment);
-  el.querySelectorAll<HTMLImageElement>('img').forEach((img) => {
+  // ALL stripping happens on an INERT tree (a DOMParser document: nothing in it loads, runs or fetches). Appending a
+  // parsed fragment into the live document first would start image / media requests on adoption, before we replaced them.
+  // Only the cleaned markup then goes through sanitizeHTMLToDom into the live container.
+  const Parser = el.ownerDocument.defaultView?.DOMParser ?? DOMParser;
+  const inert = new Parser().parseFromString(html, 'text/html');
+  const root = inert.body;
+  root.querySelectorAll<HTMLImageElement>('img').forEach((img) => {
     const src = img.getAttribute('src') ?? '';
     const label = img.getAttribute('alt') || src || 'image';
     if (/^https?:\/\//i.test(src)) {
@@ -160,13 +164,13 @@ export async function renderDockMarkdown(markdown: string, el: HTMLElement, opts
       replaceWithText(img, 'ct-orch-image-omitted', label);
     }
   });
-  for (const node of Array.from(el.querySelectorAll('*'))) {
-    if (!el.contains(node)) continue; // inside an already removed element
+  for (const node of Array.from(root.querySelectorAll('*'))) {
+    if (!root.contains(node)) continue; // inside an already removed element
     if (!ALLOWED_TAGS.has(node.localName)) { node.remove(); continue; }
     scrubAttributes(node);
   }
   const known = new Set(opts.threads.map((t) => t.id));
-  el.querySelectorAll<HTMLAnchorElement>('a').forEach((a) => {
+  root.querySelectorAll<HTMLAnchorElement>('a').forEach((a) => {
     const ours = a.getAttribute('data-ct-n') === nonce && nonce !== '';
     const id = a.getAttribute('data-thread-id');
     const href = a.getAttribute('data-href');
@@ -187,6 +191,7 @@ export async function renderDockMarkdown(markdown: string, el: HTMLElement, opts
     a.setAttribute('data-href', href);
     a.textContent = label;
   });
+  el.appendChild(sanitizeHTMLToDom(root.innerHTML));
   // Wide tables scroll inside the bubble instead of widening it.
   el.querySelectorAll<HTMLTableElement>('table').forEach((table) => {
     const wrapper = el.ownerDocument.createElement('div');

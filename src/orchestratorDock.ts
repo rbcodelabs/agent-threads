@@ -402,7 +402,8 @@ export class OrchestratorDock {
     this.sheet = new DockSheet(parent, {
       close: () => this.closeSheet(),
       openFull: () => { const id = this.deps.getOrchestratorThreadId(); if (id) void this.openQuietly(id); },
-      openThread: (threadId) => { void this.openQuietly(threadId); },
+      // Defence in depth: an anchor injected into the DOM after render can carry any id; only threads the board knows open.
+      openThread: (threadId) => { if (this.deps.manager.getThread(threadId)) void this.openQuietly(threadId); },
       openLink: this.deps.openLink ? (href) => this.deps.openLink?.(href) : undefined,
       // Without an opener, wikilinks are inert text; with one, the host decides what resolves.
       resolveLink: (href) => !!this.deps.openLink && (this.deps.resolveLink ? this.deps.resolveLink(href) : true),
@@ -472,7 +473,9 @@ export class OrchestratorDock {
    */
   private focusIntoDialog(): void {
     const active = this.host.ownerDocument.activeElement;
-    if (active && active !== this.host.ownerDocument.body && (this.rootEl?.contains(active) || this.sheet?.el.contains(active))) return;
+    if (active && this.sheet?.el.contains(active)) return;
+    // Pill mode: focus already in the field stays there. Narrow: the orb / field is inert behind the modal sheet, so focus ALWAYS moves in.
+    if (this.currentMode === 'pill' && active && active !== this.host.ownerDocument.body && this.rootEl?.contains(active)) return;
     if (this.inputEl) this.inputEl.focus();
     else if (this.actionEl && this.sheet?.el.contains(this.actionEl)) this.actionEl.focus();
     else this.sheet?.focusClose();
