@@ -5,6 +5,7 @@
     "src/ClaudeSession.ts",
     "src/CodexSession.ts",
     "src/OpenCodeSession.ts",
+    "src/PeerSkills.ts",
     "src/Scheduler.ts",
     "src/HarnessFactory.ts",
     "src/protocol/index.ts",

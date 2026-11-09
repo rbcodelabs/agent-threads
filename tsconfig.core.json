@@ -25,6 +25,7 @@
     "src/HarnessSession.ts",
     "src/OpenCodeHostTools.ts",
     "src/OpenCodeSession.ts",
+    "src/PeerSkills.ts",
     "src/RawLogWriter.ts",
     "src/ReplaySession.ts",
     "src/ScheduleCoordinator.ts",

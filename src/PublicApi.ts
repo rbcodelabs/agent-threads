@@ -8,7 +8,7 @@ import type { RawLogTraceChunk, RawLogTraceMetadata } from './RawLogWriter';
 import type { McpRegistrationResult } from './mcpServerStore';
 import type { ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactProviderRegistry, ArtifactRegistrationResult, ArtifactStoreHost, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
 import { HOST_OWNED_ARTIFACT_FIELDS, PROVIDER_ID_PATTERN, toArtifactRef } from './ArtifactContributions';
-import type { PeerSkillRegistry, SkillContribution } from './PeerSkills';
+import { PeerSkillError, type PeerSkillRegistry, type SkillContribution } from './PeerSkills';
 import { formatMessageContentReference } from './MessageContent';
 import { OAUTH_MCP_PRESETS } from './oauthMcpPresets';
 import type { MessageContentContribution, MessageContentProviderRegistry, MessageContentRef, MessageContentRegistrationResult } from './MessageContent';
@@ -907,7 +907,9 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   const registerSkill = (owner: PeerIdentity, spec: SkillContribution): Disposable => {
     guard();
     if (!deps.peerSkills) throw unavailable();
-    const inner = deps.peerSkills.register(owner, spec);
+    let inner: { dispose(): void };
+    try { inner = deps.peerSkills.register(owner, spec); }
+    catch (error) { throw error instanceof PeerSkillError ? new ClaudeThreadsApiError('INVALID_ARGUMENT', error.message) : error; }
     const tracked = { dispose: inner.dispose };
     skillRegistrations.add(tracked);
     return freeze({ dispose: () => { skillRegistrations.delete(tracked); inner.dispose(); } });

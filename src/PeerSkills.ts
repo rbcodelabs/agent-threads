@@ -1,6 +1,5 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { ClaudeThreadsApiError } from './PublicApi';
 
 /** A skill a peer plugin contributes (`extensions.registerSkill`). `content` is the SKILL.md body; core writes the frontmatter. */
 export interface SkillContribution {
@@ -17,7 +16,12 @@ const MAX_OWNER_LENGTH = 128;
 
 interface Entry { readonly ownerId: string; readonly spec: SkillContribution; readonly token: symbol }
 
-const invalid = (message: string) => new ClaudeThreadsApiError('INVALID_ARGUMENT', message);
+/** Kept free of PublicApi imports so the daemon core closure stays small; the API layer maps it to ClaudeThreadsApiError. */
+export class PeerSkillError extends Error {
+  readonly code = 'INVALID_ARGUMENT' as const;
+  constructor(message: string) { super(message); this.name = 'PeerSkillError'; }
+}
+const invalid = (message: string) => new PeerSkillError(message);
 
 /**
  * Host-owned registry of skills contributed by peer plugins. Core injects them into
