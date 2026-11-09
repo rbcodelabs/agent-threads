@@ -216,7 +216,7 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
   });
 
   test('contrast: sheet text meets 4.5:1 against its background (dark harness theme)', async ({ page }) => {
-    await open(page, 'idle', 'conversation', DESKTOP);
+    await open(page, 'idle', 'rich', DESKTOP);
     await page.evaluate(() => (window as any).__orchQueue('held message'));
     await field(page).click();
     const ratios = await page.evaluate(() => {
@@ -226,7 +226,7 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
       const lum = ([r, g, b]: number[]) => { const f = (v: number) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
       const bgOf = (el: Element): number[] => { for (let n: Element | null = el; n; n = n.parentElement) { const c = parse(getComputedStyle(n).backgroundColor); if (c.length === 3 || (c.length === 4 && c[3] > 0.95)) return c; } return [30, 30, 30]; };
       const out: Record<string, number> = {};
-      for (const sel of ['.ct-orch-sheet-head h2', '.ct-orch-msg[data-role="user"] .ct-orch-bubble', '.ct-orch-msg[data-role="assistant"] .ct-orch-bubble', '.ct-orch-waiting', '.ct-orch-sheet a.ct-thread-link', '.ct-orch-sheet-head button']) {
+      for (const sel of ['.ct-orch-sheet-head h2', '.ct-orch-msg[data-role="user"] .ct-orch-bubble', '.ct-orch-msg[data-role="assistant"] .ct-orch-bubble', '.ct-orch-waiting', '.ct-orch-sheet a.ct-thread-link', '.ct-orch-sheet-head button', '.ct-orch-bubble a:not(.ct-thread-link)']) {
         const el = document.querySelector(sel); if (!el) continue;
         const fg = parse(getComputedStyle(el).color); const bg = bgOf(el);
         const [L1, L2] = [lum(fg), lum(bg)].sort((a, b) => b - a);
@@ -235,6 +235,66 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
       return out;
     });
     for (const [sel, r] of Object.entries(ratios)) expect(r, sel).toBeGreaterThanOrEqual(4.5);
+  });
+
+  test('QA D2/D6: a long code line scrolls inside the bubble; tables scroll and never break words', async ({ page }) => {
+    await open(page, 'idle', 'rich', DESKTOP);
+    await field(page).click();
+    const m = await page.evaluate(() => {
+      const scroll = document.querySelector('.ct-orch-sheet-scroll') as HTMLElement;
+      const pre = document.querySelector('.ct-orch-bubble pre') as HTMLElement;
+      const bubble = pre.closest('.ct-orch-bubble') as HTMLElement;
+      const th = [...document.querySelectorAll('.ct-orch-bubble th')].find((e) => e.textContent === 'Owner') as HTMLElement;
+      const lh = parseFloat(getComputedStyle(th).lineHeight) || 20;
+      return {
+        scrollOverflow: scroll.scrollWidth - scroll.clientWidth,
+        preScrolls: pre.scrollWidth > pre.clientWidth,
+        preOverflowX: getComputedStyle(pre).overflowX,
+        preInside: pre.getBoundingClientRect().right <= bubble.getBoundingClientRect().right + 1,
+        ownerOneLine: th.getBoundingClientRect().height < lh * 2,
+      };
+    });
+    expect(m.scrollOverflow).toBeLessThanOrEqual(0);
+    expect(m.preScrolls).toBe(true);
+    expect(m.preOverflowX).toBe('auto');
+    expect(m.preInside).toBe(true);
+    expect(m.ownerOneLine).toBe(true);
+  });
+
+  for (const { label, size } of SIZES) {
+    test(`QA D1: opening a long transcript lands on the latest message @ ${label}`, async ({ page }) => {
+      await open(page, 'idle', 'conversation', size);
+      await page.evaluate(() => { for (let i = 0; i < 16; i++) (window as any).__orchSay(`Reply number ${i} with enough words to take a line or two in the sheet.`); });
+      await focusComposer(page, size);
+      await expect(sheet(page)).toBeVisible();
+      await expect.poll(() => page.locator('.ct-orch-sheet-scroll').evaluate((e) => e.scrollHeight - e.clientHeight - e.scrollTop)).toBeLessThanOrEqual(1);
+      await page.locator('.ct-orch-sheet-scroll').evaluate((e) => { e.scrollTop = 0; });
+      await send(page, size, 'and now?');
+      await expect.poll(() => page.locator('.ct-orch-sheet-scroll').evaluate((e) => e.scrollHeight - e.clientHeight - e.scrollTop)).toBeLessThanOrEqual(1);
+    });
+  }
+
+  test('QA D5/D4: desktop Tab from the field reaches the sheet next; chips are reachable and stay visible', async ({ page }) => {
+    await open(page, 'idle', 'conversation', DESKTOP);
+    await field(page).click();
+    await expect(sheet(page)).toBeVisible();
+    await page.keyboard.press('Tab');
+    expect(await page.evaluate(() => !!document.activeElement?.closest('.ct-orch-sheet'))).toBe(true);
+    await open(page, 'attention', 'empty', DESKTOP);
+    await field(page).focus();
+    await page.keyboard.press('Tab');
+    await expect(page.locator('.ct-orch-chips')).toBeVisible();
+    expect(await page.evaluate(() => !!document.activeElement?.closest('.ct-orch-chips'))).toBe(true);
+  });
+
+  test('QA D5: narrow, Tab stays inside the modal bottom sheet', async ({ page }) => {
+    await open(page, 'idle', 'conversation', NARROW);
+    await page.locator('.ct-orch-orb').click();
+    await expect(sheet(page)).toHaveAttribute('aria-modal', 'true');
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press('Tab');
+      expect(await page.evaluate(() => !!document.activeElement?.closest('.ct-orch-sheet'))).toBe(true);
+    }
   });
 
   test('focus-visible ring on sheet controls', async ({ page }) => {

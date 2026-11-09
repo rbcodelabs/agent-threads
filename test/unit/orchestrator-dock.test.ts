@@ -211,10 +211,12 @@ describe('offline and error', () => {
     expect(t.deps.openThread).toHaveBeenCalledWith('orch');
   });
 
-  it('truncates a long error to 60 characters', () => {
+  it('caps an extreme error at 120 characters (QA D8: the reason wraps, so 60 was too tight)', () => {
     const o = thread('orch', { lastError: 'x'.repeat(200) });
     const t = setup({ threads: [o] });
-    expect((t.host.querySelector('.ct-orch-reason')?.textContent ?? '').length).toBeLessThan(100);
+    const len = (t.host.querySelector('.ct-orch-reason')?.textContent ?? '').length;
+    expect(len).toBeGreaterThan(100 + 'Orchestrator errored — '.length - 1);
+    expect(len).toBeLessThan(150);
   });
 });
 

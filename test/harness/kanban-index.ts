@@ -102,6 +102,16 @@ function orchTranscript() {
       },
     ];
   }
+  if (tx === 'rich') {
+    // Layout stress for the sheet: a long unbreakable code line, a table with a wide word column, a plain link.
+    return [
+      { id: 'k-orch-u1', role: 'user', content: 'Give me the status table', timestamp: KT_ORCH - 60_000 },
+      {
+        id: 'k-orch-a1', role: 'assistant', timestamp: KT_ORCH - 30_000,
+        content: `See [[thread:${kanbanAwaitingThreadId}|Deploy curation quality signals]] and the [docs](https://example.com/docs).\n\n| Thread | Owner | Status |\n|---|---|---|\n| Deploy curation quality signals | Owner | waiting on approval |\n| Mobile layout polish | Designer | question ready |\n\n\`\`\`\nnpm run deploy -- --env=production --region=us-east-1 --tag=release-candidate-2026-01-15 --verbose --dry-run=false\n\`\`\``,
+      },
+    ];
+  }
   return [{ id: 'k-orch-1', role: 'assistant', content: 'Two things are waiting on you.', timestamp: KT_ORCH }];
 }
 if (orchFixture && orchFixture !== 'first-run') {

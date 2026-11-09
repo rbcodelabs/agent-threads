@@ -119,7 +119,7 @@ describe('sheet shell', () => {
     const t = setup();
     const sheet = t.sheet();
     expect(sheet).toBeTruthy();
-    expect(sheet!.parentElement).toBe(t.stage);
+    expect(sheet!.closest('.ct-kanban-dispatch')).toBe(t.stage);
     expect(t.isOpen()).toBe(false);
   });
 
@@ -137,7 +137,7 @@ describe('sheet shell', () => {
   it('header: orb, title, "Open full thread ↗" (openThread) and a close button; no Dock button in v1', () => {
     const t = setup({ messages: [m('assistant', 'hi')] });
     t.dock.openSheet();
-    const open = t.qa('.ct-orch-sheet-head button').find((b) => b.textContent === 'Open full thread ↗')!;
+    const open = t.q<HTMLButtonElement>('.ct-orch-sheet-full')!;
     open.click();
     expect(t.deps.openThread).toHaveBeenCalledWith('orch');
     expect(t.sheet()!.textContent).not.toMatch(/Dock/);
@@ -987,5 +987,121 @@ describe('review: link clicks (A14)', () => {
     }
     expect(open).not.toHaveBeenCalled();
     open.mockRestore();
+  });
+});
+
+
+// ── QA round (#903 at 854b52c) ─────────────────────────────────────────────────────────────────────────────────────
+function metrics(scroll: HTMLElement, height: number, client = 200) {
+  Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => height });
+  Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => client });
+}
+
+describe('QA D1: the sheet lands on the latest message', () => {
+  it('opening a long transcript scrolls to the bottom', () => {
+    const t = setup({ messages: Array.from({ length: 30 }, (_, i) => m(i % 2 ? 'assistant' : 'user', `line ${i}`)) });
+    metrics(t.q('.ct-orch-sheet-scroll')!, 3000);
+    t.dock.openSheet();
+    expect(t.q('.ct-orch-sheet-scroll')!.scrollTop).toBe(3000);
+  });
+
+  it('sending while scrolled up scrolls to the new message, and following resumes', async () => {
+    const t = setup({ messages: Array.from({ length: 30 }, (_, i) => m(i % 2 ? 'assistant' : 'user', `line ${i}`)) });
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let h = 3000; Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    t.dock.openSheet();
+    scroll.scrollTop = 100; scroll.dispatchEvent(new Event('scroll')); // the user scrolled up
+    h = 3200; // the new user bubble adds height
+    t.enter(t.type('latest question'));
+    await vi.waitFor(() => expect(scroll.scrollTop).toBe(3200));
+  });
+
+  it('a reply arriving while the user is scrolled up does not yank them down', async () => {
+    const t = setup({ messages: [m('user', 'a')] });
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    metrics(scroll, 3000);
+    t.dock.openSheet();
+    scroll.scrollTop = 100; scroll.dispatchEvent(new Event('scroll'));
+    t.say('background reply');
+    await flush(); await flush();
+    expect(scroll.scrollTop).toBe(100);
+  });
+});
+
+describe('QA D4: chips stay reachable by keyboard', () => {
+  it('moving focus from the field to a chip keeps the strip; leaving both hides it', () => {
+    const t = setup();
+    t.input()!.focus();
+    const chip = t.q<HTMLButtonElement>('.ct-orch-chips button')!;
+    chip.focus();
+    expect(t.q('.ct-orch-chips')!.hidden).toBe(false);
+    const other = document.createElement('button'); document.body.appendChild(other);
+    other.focus();
+    expect(t.q('.ct-orch-chips')!.hidden).toBe(true);
+  });
+});
+
+describe('QA D5: tab order and the modal bottom sheet', () => {
+  it('the sheet, peek and chips live inside the dock root, right after the field (Tab reaches them next)', () => {
+    const t = setup({ messages: [m('assistant', 'x')] });
+    const root = t.q('.ct-orch-dock')!;
+    expect(root.contains(t.sheet())).toBe(true);
+    expect(root.contains(t.q('.ct-orch-chips'))).toBe(true);
+    expect(root.contains(t.q('.ct-orch-peek'))).toBe(true);
+    const field = t.q('.ct-orch-field')!;
+    expect(field.compareDocumentPosition(t.sheet()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('narrow: the bottom sheet is aria-modal and Tab wraps inside it in both directions; pill mode is non-modal', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    const sheet = t.sheet()!;
+    expect(sheet.getAttribute('aria-modal')).toBe('true');
+    const focusables = () => [...sheet.querySelectorAll<HTMLElement>('button, a[href], textarea')].filter((e) => !e.hidden && !(e as HTMLButtonElement).disabled && !e.closest('[hidden]'));
+    const list = focusables();
+    list[list.length - 1].focus();
+    const fwd = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    list[list.length - 1].dispatchEvent(fwd);
+    expect(fwd.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(list[0]);
+    const back = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+    list[0].dispatchEvent(back);
+    expect(back.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(list[list.length - 1]);
+    t.s.mode = 'pill'; t.dock.relayout();
+    expect(sheet.getAttribute('aria-modal')).not.toBe('true');
+  });
+
+  it('closing the narrow sheet restores focus to the orb', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    t.q<HTMLButtonElement>('.ct-orch-sheet-close')!.click();
+    expect(document.activeElement).toBe(t.q('.ct-orch-orb'));
+  });
+});
+
+describe('QA D7: no font-dependent glyphs in the sheet chrome', () => {
+  it('header, remove, peek and stop use icons + aria-labels, not ↗ ✕ ■ text', () => {
+    const t = setup({ running: true, messages: [m('assistant', 'x', { toolCalls: [{ name: 'Read' }] })] });
+    t.s.queue.push({ text: 'held' });
+    t.dock.openSheet();
+    t.emit('queued');
+    t.say('another');
+    expect(t.sheet()!.textContent).not.toMatch(/[↗✕■]/);
+    expect(t.q('.ct-orch-peek')?.textContent ?? '').not.toMatch(/[↗✕■]/);
+    expect(t.q('.ct-orch-sheet-full')!.getAttribute('aria-label')).toBe('Open full thread');
+    expect(t.q('.ct-orch-chip-full')!.getAttribute('aria-label')).toBe('Open full thread');
+  });
+});
+
+describe('QA D8: the full error reason is shown (wrapped), not cut at 60 characters', () => {
+  it('a 100-char error is complete in the reason text; only extreme lengths are capped', () => {
+    const msg = 'connection reset by peer while streaming the response from the upstream API after 3 retries, giving up now';
+    const t = setup({ mode: 'orb', lastError: msg });
+    expect(t.q('.ct-orch-reason')!.textContent).toBe(`Orchestrator errored — ${msg}`);
+    document.body.innerHTML = '';
+    const long = setup({ lastError: 'x'.repeat(1000) });
+    expect(long.q('.ct-orch-reason')!.textContent!.length).toBeLessThan(200);
   });
 });
