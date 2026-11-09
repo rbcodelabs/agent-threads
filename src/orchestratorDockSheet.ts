@@ -94,14 +94,16 @@ export class DockSheet {
   private scrollQueued = false;
   /** The user is at the bottom (updated by scroll events and programmatic pins): the pin survives content growing under it. */
   private stick = true;
-  /** Last time the user did something that scrolls (wheel / touch / scrollbar / scroll keys). Our own scrollTop writes and content growth are not intent. */
-  private lastIntentAt = -Infinity;
+  /** The scrollTop value the sheet itself last wrote, and the scrollHeight at that moment / at the last scroll event. */
+  private lastWrittenTop = -1;
+  private lastHeight = 0;
   /** Pin to the latest message on the next render (open, or the user's own send), however far up they had scrolled. */
   private pinNext = false;
   private closeBtn: HTMLButtonElement;
   private streamFrame = false;
   private stoppedRow: HTMLElement | null = null;
-  private inerted: Element[] = [];
+  /** Exactly the nodes WE made inert (an `inert` someone else set is never ours to remove). */
+  private readonly inerted = new Set<Element>();
   /** Content signatures: a section is rebuilt only when what it shows changed (focus + clicks survive refreshes). */
   private sig = { empty: '', notice: '', waiting: '' };
 
@@ -136,17 +138,19 @@ export class DockSheet {
     this.liveEl = this.el.createDiv({ cls: 'ct-orch-live', attr: { 'aria-live': 'polite', 'aria-atomic': 'true' } });
 
     this.logEl.addEventListener('click', (e) => this.onLogClick(e));
-    const intent = (): void => { this.lastIntentAt = Date.now(); };
-    this.scrollEl.addEventListener('wheel', intent, { passive: true });
-    this.scrollEl.addEventListener('touchstart', intent, { passive: true });
-    this.scrollEl.addEventListener('touchmove', intent, { passive: true });
-    this.scrollEl.addEventListener('pointerdown', (e) => { if (e.target === this.scrollEl) intent(); }); // the scrollbar
-    this.scrollEl.addEventListener('keydown', (e) => { if (['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' '].includes(e.key)) intent(); });
-    // Only a scroll the USER caused can unpin. The pin write is followed by a scroll event that can land after the content grew
-    // by more than the near-bottom slack (a long first token): that must not read as "scrolled up".
+    // Middle-click / auxclick must not navigate either (an anchor with an href would otherwise open in a new tab/window).
+    this.logEl.addEventListener('auxclick', (e) => { if ((e.target as HTMLElement | null)?.closest?.('a')) { e.preventDefault(); e.stopPropagation(); } });
+    // Pinned-ness is decided by WHO moved the scroll position, not by timing or input events: a scroll whose scrollTop equals the
+    // value the sheet last wrote is ours (or layout growth after it) and never unpins; any other position is the user (wheel, touch
+    // momentum, scrollbar, keys, selection autoscroll all end up here) and is judged against the content height they were looking
+    // at, so reaching the bottom while content is still growing keeps the pin.
     this.scrollEl.addEventListener('scroll', () => {
-      if (Date.now() - this.lastIntentAt < 600) this.stick = this.nearBottom();
-      else if (this.nearBottom()) this.stick = true;
+      const s = this.scrollEl;
+      if (s.scrollTop !== this.lastWrittenTop) {
+        const seenHeight = this.lastHeight > 0 ? Math.min(s.scrollHeight, this.lastHeight) : s.scrollHeight;
+        this.stick = seenHeight - s.scrollTop - s.clientHeight <= NEAR_BOTTOM_PX;
+      }
+      this.lastHeight = s.scrollHeight;
     });
     // The sheet is a non-modal dialog: Escape inside it closes it (the dock returns focus to the field).
     this.el.addEventListener('keydown', (e) => {
@@ -178,18 +182,19 @@ export class DockSheet {
    * ancestor up to the view root; the ancestors themselves stay live.
    */
   private setModal(on: boolean): void {
-    if (!on) { for (const n of this.inerted) n.removeAttribute('inert'); this.inerted = []; return; }
-    if (this.inerted.length > 0) return;
+    if (!on) { for (const n of this.inerted) n.removeAttribute('inert'); this.inerted.clear(); return; }
+    // Re-evaluated on every render: nodes the board added while the sheet is open become inert too.
     const doc = this.el.ownerDocument;
     const boundary = this.el.closest('.ct-agents-root') ?? doc.body;
     for (let node: Element = this.el; node !== boundary && node.parentElement; node = node.parentElement) {
       for (const sib of Array.from(node.parentElement.children)) {
-        if (sib === node || sib.hasAttribute('inert')) continue;
+        if (sib === node || this.inerted.has(sib) || sib.hasAttribute('inert')) continue;
         sib.setAttribute('inert', '');
-        this.inerted.push(sib);
+        this.inerted.add(sib);
       }
     }
   }
+
 
   /** Narrow bottom sheet is modal: Tab wraps inside it instead of walking into the covered board and pill. */
   private trapTab(e: KeyboardEvent): void {
@@ -299,9 +304,10 @@ export class DockSheet {
 
   private reconcileRows(view: SheetView): void {
     const seen = new Set<string>();
+    const resolvedLinks = new Map<string, boolean>();
     view.entries.forEach((entry, i) => {
       seen.add(entry.id);
-      const key = `${entry.role}|${entry.text}|${richKey(entry.rich)}|${entry.role === 'assistant' ? this.linkSignature(entry.text, view.threads) : ''}`;
+      const key = `${entry.role}|${entry.text}|${richKey(entry.rich)}|${entry.role === 'assistant' ? this.linkSignature(entry.text, view.threads, resolvedLinks) : ''}`;
       let st = this.rows.get(entry.id);
       if (!st || st.key !== key) {
         st?.row.remove();
@@ -325,7 +331,7 @@ export class DockSheet {
    * What link rendering depends on besides the text: whether each `[[note]]` currently resolves and the titles of
    * threads referenced by title-only `[[thread:...]]` links. A note created later or a renamed thread then re-renders the row.
    */
-  private linkSignature(text: string, threads: ThreadRef[]): string {
+  private linkSignature(text: string, threads: ThreadRef[], resolved: Map<string, boolean>): string {
     if (!text.includes('[[')) return '';
     const parts: string[] = [];
     for (const m of text.matchAll(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)) {
@@ -334,7 +340,9 @@ export class DockSheet {
         const ref = target.slice('thread:'.length).trim();
         parts.push(`${ref}=${threads.find((t) => t.id === ref)?.title ?? threads.filter((t) => t.title === ref).length}`);
       } else {
-        parts.push(`${target}=${this.h.resolveLink ? (this.h.resolveLink(target) ? 1 : 0) : 'x'}`);
+        // One resolver call per distinct target per render, however many rows mention it.
+        if (!resolved.has(target) && this.h.resolveLink) resolved.set(target, this.h.resolveLink(target));
+        parts.push(`${target}=${this.h.resolveLink ? (resolved.get(target) ? 1 : 0) : 'x'}`);
       }
     }
     return parts.join(';');
@@ -482,7 +490,12 @@ export class DockSheet {
     return s.scrollHeight - s.scrollTop - s.clientHeight <= NEAR_BOTTOM_PX;
   }
 
-  private scrollToBottom(): void { this.scrollEl.scrollTop = this.scrollEl.scrollHeight; this.stick = true; }
+  private scrollToBottom(): void {
+    this.scrollEl.scrollTop = this.scrollEl.scrollHeight;
+    this.lastWrittenTop = this.scrollEl.scrollTop; // read back: the browser clamps to the real maximum
+    this.lastHeight = this.scrollEl.scrollHeight;
+    this.stick = true;
+  }
 
   private queueScroll(): void {
     if (this.scrollQueued) return;

@@ -754,6 +754,9 @@ export class OrchestratorDock {
     try {
       await this.deps.manager.interrupt(id);
     } catch (err) {
+      // The turn carries on: no stale stop state may turn a later normal end into a "Stopped" row.
+      this.stopRequested = false;
+      this.stopSnapshot = '';
       new Notice(`Could not stop the orchestrator: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.stopping = false;

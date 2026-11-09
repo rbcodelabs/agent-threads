@@ -5,27 +5,29 @@
  * `[[thread:id|Title]]` and `[[note]]` links. Deliberately small: no visualize markers, no
  * tool-call UI (the sheet shows an "Open full thread" chip for those) and NO ThreadsView import.
  *
- * Link labels are model-controlled text. Anchors are therefore emitted EMPTY with the label in a
- * `data-label` attribute, and the label is written with `textContent` after sanitising: a label can
- * never become markup, and markdown punctuation in it (`*`, `_`) is not parsed. Click handling stays
- * outside this module (the sheet delegates it).
+ * Links never travel as markup. `[[...]]` is replaced by an inert alphanumeric token (carrying a
+ * per-render random nonce) BEFORE markdown runs, and the real anchors are built from the rewriter's own
+ * list, as DOM nodes, AFTER markdown and the allowlist: no attacker-controlled text can ever end up
+ * inside a tag, an attribute or a link we generate. Labels are written with `textContent`.
+ * Click handling stays outside this module (the sheet delegates it).
  */
 import { marked } from 'marked';
 import { sanitizeHTMLToDom } from 'obsidian';
 import { rewriteThreadLinks, type ThreadRef } from './orchestratorDockModel';
 
-const escapeAttr = (s: string): string =>
-  s.replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[c] ?? c));
+// ── Code detection: wikilinks inside code are literal ───────────────────────────────────────────────────────────────
 
-const FENCE_OPEN = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/;
+/** Optional blockquote markers, then optional indentation (a fence inside a list item or a blockquote). */
+const PREFIX = String.raw`(?:[ \t]*>)*[ \t]*`;
+const FENCE_OPEN = new RegExp(`^${PREFIX}(\`{3,}|~{3,})(.*)$`);
 const LIST_ITEM = /^[ \t]{0,3}(?:[-*+]|\d+[.)])[ \t]+/;
 const INDENTED = /^(?: {4}|\t)/;
 
-/** Inline code spans: wikilinks inside are literal. */
+/** Inline code spans, which may wrap across lines but never across a blank line. */
 function outsideInlineCode(prose: string, fn: (text: string) => string): string {
   let out = '';
   let cursor = 0;
-  for (const m of prose.matchAll(/(`+)[^\n]*?\1/g)) {
+  for (const m of prose.matchAll(/(`+)(?:(?!\n[ \t]*\n)[\s\S])*?\1/g)) {
     out += fn(prose.slice(cursor, m.index)) + m[0];
     cursor = m.index + m[0].length;
   }
@@ -34,8 +36,9 @@ function outsideInlineCode(prose: string, fn: (text: string) => string): string 
 
 /**
  * Applies `fn` to the prose of a markdown document, leaving code untouched: fenced blocks (``` or ~~~, to the closing
- * fence or the end; a line like "```code```" is NOT a fence opener), 4-space indented code after a blank line (not
- * inside a list, where it is a continuation paragraph) and inline code spans.
+ * fence or the end, also inside list items and blockquotes; a line like "```code```" is NOT a fence opener), 4-space
+ * indented code after a blank line (not inside a list) and inline code spans. This only improves fidelity: a token that
+ * still lands inside rendered code is restored to its literal `[[...]]` text at render time.
  */
 function outsideCode(markdown: string, fn: (prose: string) => string): string {
   const chunks: Array<{ code: boolean; lines: string[] }> = [];
@@ -50,7 +53,7 @@ function outsideCode(markdown: string, fn: (prose: string) => string): string {
   for (const line of markdown.split('\n')) {
     if (fence) {
       push(true, line);
-      const close = new RegExp(`^[ \\t]{0,3}\\${fence.ch}{${fence.len},}[ \\t]*$`);
+      const close = new RegExp(`^${PREFIX}\\${fence.ch}{${fence.len},}[ \\t]*$`);
       if (close.test(line)) fence = null;
       continue;
     }
@@ -75,24 +78,36 @@ function outsideCode(markdown: string, fn: (prose: string) => string): string {
   return chunks.map((c) => (c.code ? c.lines.join('\n') : outsideInlineCode(c.lines.join('\n'), fn))).join('\n');
 }
 
+// ── Link tokens ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+export interface DockLink {
+  /** Inert alphanumeric stand-in that travels through markdown. */
+  token: string;
+  kind: 'thread' | 'note';
+  /** Thread id (already resolved by the model) or the note's link target. */
+  ref: string;
+  label: string;
+  /** The original `[[...]]` text, restored when the token ends up somewhere it must stay literal (code, attributes). */
+  literal: string;
+}
+
 /**
- * Rewrites thread links (resolved + normalised by the model) and generic wikilinks into empty anchors carrying data
- * attributes and the per-render `nonce`, before markdown runs. ONLY anchors carrying the nonce are real links:
- * model-authored raw anchors cannot know it. `thread:` markers go first (same regex shape). Code is skipped.
+ * Replaces `[[thread:...]]` (resolved + normalised by the model) and `[[note]]` with tokens; returns the new markdown and
+ * the list the renderer builds the real links from. Pure. Code is skipped.
  */
-export function rewriteDockMarkup(markdown: string, threads: readonly ThreadRef[] = [], nonce = ''): string {
-  const n = escapeAttr(nonce);
-  return outsideCode(markdown, (prose) => rewriteThreadLinks(prose, threads).replace(
-    /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
-    (_m, target: string, alias?: string) => {
-      if (target.startsWith('thread:')) {
-        const id = target.slice('thread:'.length).trim();
-        return `<a class="ct-thread-link" data-ct-n="${n}" data-thread-id="${escapeAttr(id)}" data-label="${escapeAttr((alias ?? '').trim())}" href="#"></a>`;
-      }
-      const label = (alias ?? target.split('/').pop() ?? target).trim();
-      return `<a class="internal-link" data-ct-n="${n}" data-href="${escapeAttr(target.trim())}" data-label="${escapeAttr(label)}" href="#"></a>`;
+export function rewriteDockMarkup(markdown: string, threads: readonly ThreadRef[] = [], nonce = 'n'): { markdown: string; links: DockLink[] } {
+  const links: DockLink[] = [];
+  const tag = nonce.replace(/[^a-z0-9]/gi, '') || 'n';
+  const out = outsideCode(markdown, (prose) => rewriteThreadLinks(prose, threads).replace(
+    /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g,
+    (whole, target: string, alias?: string) => {
+      const token = `ctlnk${tag}x${links.length}x`;
+      if (target.startsWith('thread:')) links.push({ token, kind: 'thread', ref: target.slice('thread:'.length).trim(), label: (alias ?? '').trim(), literal: whole });
+      else links.push({ token, kind: 'note', ref: target.trim(), label: (alias ?? target.split('/').pop() ?? target).trim(), literal: whole });
+      return token;
     },
   ));
+  return { markdown: out, links };
 }
 
 export interface DockMarkdownOptions {
@@ -101,7 +116,9 @@ export interface DockMarkdownOptions {
   resolveLink?: (href: string) => boolean;
 }
 
-/** Prose elements only: everything else (media, embeds, forms, svg, style, script, unknown) is removed after sanitising. */
+// ── Allowlist ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Prose elements only: everything else (media, embeds, forms, svg, style, script, unknown) is removed. */
 const ALLOWED_TAGS: ReadonlySet<string> = new Set([
   'p', 'em', 'strong', 'ul', 'ol', 'li', 'code', 'pre', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'a', 'br', 'hr',
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'del', 's', 'span', 'div', 'b', 'i', 'sup', 'sub',
@@ -114,43 +131,84 @@ function replaceWithText(el: Element, className: string, text: string): void {
   el.replaceWith(span);
 }
 
-const SAFE_SCHEME = /^(?:https?|mailto):/i;
-const ANY_SCHEME = /^[a-z][a-z0-9+.\-]*:/i;
-let nonceSeq = 0;
+/**
+ * A strict allowlist applied to the value AS THE BROWSER WILL SEE IT: the WHATWG URL parser drops tabs, newlines and
+ * leading/trailing C0 controls and spaces before it reads the scheme, so test with all of those removed. Kept: http(s),
+ * mailto, and relative / anchor references (no ':' before the first '/', '?' or '#'). Everything else (javascript:, data:,
+ * vbscript:, file:, blob:, ...) is dropped.
+ */
+export function isSafeHref(href: string): boolean {
+  const h = href.replace(/[\u0000- \u007f-\u009f]/g, '');
+  if (/^(?:https?|mailto):/i.test(h)) return true;
+  return /^[^:/?#]*(?:[/?#]|$)/.test(h);
+}
 
-/** Default-deny attributes: only what a prose element needs survives. Anchors keep href (safe schemes) + our transport data. */
+/** Default-deny attributes: only what a prose element needs survives (no src / srcset / poster / style / on* / data-*). */
 function scrubAttributes(node: Element): void {
   const tag = node.localName;
   for (const attr of Array.from(node.attributes)) {
     const name = attr.name.toLowerCase();
     const keep =
-      (tag === 'a' && (name === 'href' || name === 'rel' || name === 'class' || name === 'data-ct-n' || name === 'data-thread-id' || name === 'data-href' || name === 'data-label'))
+      (tag === 'a' && (name === 'href' || name === 'rel'))
       || (tag === 'code' && name === 'class' && /^language-[\w-]+$/.test(attr.value))
+      || (tag === 'span' && name === 'class' && attr.value === 'ct-orch-image-omitted')
       || (tag === 'ol' && name === 'start');
     if (!keep) node.removeAttribute(attr.name);
   }
   if (tag === 'a') {
     const href = node.getAttribute('href');
-    if (href !== null && ANY_SCHEME.test(href.trim()) && !SAFE_SCHEME.test(href.trim())) node.removeAttribute('href');
+    if (href !== null && !isSafeHref(href)) node.removeAttribute('href');
   }
 }
+
+/** Builds the real link for a token, or inert text when it cannot be opened. */
+function buildLink(doc: Document, link: DockLink, opts: DockMarkdownOptions, known: ReadonlySet<string>): Node {
+  const inert = (text: string): HTMLElement => {
+    const span = doc.createElement('span');
+    span.className = 'ct-orch-wikilink-unresolved';
+    span.textContent = text;
+    return span;
+  };
+  if (link.kind === 'thread') {
+    const title = opts.threads.find((t) => t.id === link.ref)?.title;
+    const label = link.label || title || link.ref;
+    if (!known.has(link.ref)) return inert(label);
+    const a = doc.createElement('a');
+    a.className = 'ct-thread-link';
+    a.setAttribute('href', '#');
+    a.setAttribute('data-thread-id', link.ref);
+    a.textContent = label;
+    return a;
+  }
+  if (!link.ref || (opts.resolveLink && !opts.resolveLink(link.ref))) return inert(link.label || link.ref);
+  const a = doc.createElement('a');
+  a.className = 'internal-link';
+  a.setAttribute('href', '#');
+  a.setAttribute('data-href', link.ref);
+  a.textContent = link.label || link.ref;
+  return a;
+}
+
+let nonceSeq = 0;
 
 /**
  * Posture: the orchestrator reads untrusted thread content, so its replies are untrusted. Beyond the sanitizer (the real
  * `sanitizeHTMLToDom` was not run in tests; this is defence in depth) and unlike ThreadsView, which renders the user's own
- * transcript and relies on the sanitizer alone: only prose elements survive (no media, embeds, forms, svg, style), no
- * attribute outside the allowlist survives (no src / srcset / poster / style / on*), images become plain links, and ONLY
- * anchors the rewriter generated (they carry this render's nonce) can be thread links or wikilinks.
+ * transcript and relies on the sanitizer alone: ALL work happens on an INERT parsed tree (nothing in it loads, runs or
+ * fetches); only prose elements survive; no attribute outside the allowlist survives; images become plain links; hrefs are a
+ * strict allowlist; and links are built only from the rewriter's own token list, so a model-authored anchor is a plain link
+ * at most. Only the cleaned markup is then passed through sanitizeHTMLToDom into the live container.
  */
 export async function renderDockMarkdown(markdown: string, el: HTMLElement, opts: DockMarkdownOptions): Promise<void> {
-  const nonce = `${Math.random().toString(36).slice(2)}${(nonceSeq++).toString(36)}`;
-  const html = await marked.parse(rewriteDockMarkup(markdown, opts.threads, nonce));
-  // ALL stripping happens on an INERT tree (a DOMParser document: nothing in it loads, runs or fetches). Appending a
-  // parsed fragment into the live document first would start image / media requests on adoption, before we replaced them.
-  // Only the cleaned markup then goes through sanitizeHTMLToDom into the live container.
+  const nonce = `${Math.random().toString(36).slice(2, 10)}${(nonceSeq++).toString(36)}`;
+  const rewritten = rewriteDockMarkup(markdown, opts.threads, nonce);
+  const html = await marked.parse(rewritten.markdown);
   const Parser = el.ownerDocument.defaultView?.DOMParser ?? DOMParser;
   const inert = new Parser().parseFromString(html, 'text/html');
   const root = inert.body;
+  const byToken = new Map(rewritten.links.map((l) => [l.token, l]));
+  const tokenRe = new RegExp(`ctlnk${nonce.replace(/[^a-z0-9]/gi, '')}x\\d+x`, 'g');
+
   root.querySelectorAll<HTMLImageElement>('img').forEach((img) => {
     const src = img.getAttribute('src') ?? '';
     const label = img.getAttribute('alt') || src || 'image';
@@ -167,30 +225,34 @@ export async function renderDockMarkdown(markdown: string, el: HTMLElement, opts
   for (const node of Array.from(root.querySelectorAll('*'))) {
     if (!root.contains(node)) continue; // inside an already removed element
     if (!ALLOWED_TAGS.has(node.localName)) { node.remove(); continue; }
+    // A token inside an attribute value (raw HTML, a link destination) goes back to its literal text: it never becomes a link.
+    for (const attr of Array.from(node.attributes)) {
+      if (tokenRe.test(attr.value)) node.setAttribute(attr.name, attr.value.replace(tokenRe, (t) => byToken.get(t)?.literal ?? ''));
+      tokenRe.lastIndex = 0;
+    }
     scrubAttributes(node);
   }
+
+  // Tokens in text become real links, built here from the rewriter's list; inside code they go back to literal text.
   const known = new Set(opts.threads.map((t) => t.id));
-  root.querySelectorAll<HTMLAnchorElement>('a').forEach((a) => {
-    const ours = a.getAttribute('data-ct-n') === nonce && nonce !== '';
-    const id = a.getAttribute('data-thread-id');
-    const href = a.getAttribute('data-href');
-    const labelAttr = a.getAttribute('data-label');
-    for (const name of ['data-ct-n', 'data-thread-id', 'data-href', 'data-label', 'class']) a.removeAttribute(name);
-    if (!ours) return; // a model-authored anchor is a plain link at most
-    // If a sanitizer ever strips data-label the link must not go blank: fall back to the thread title.
-    const label = labelAttr || opts.threads.find((t) => t.id === id)?.title || id || href || '';
-    if (id !== null) {
-      if (!known.has(id)) { replaceWithText(a, 'ct-orch-wikilink-unresolved', label); return; }
-      a.className = 'ct-thread-link';
-      a.setAttribute('data-thread-id', id);
-      a.textContent = label;
-      return;
+  const walker = inert.createTreeWalker(root, 4 /* NodeFilter.SHOW_TEXT */);
+  const texts: Text[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) if (tokenRe.test((n as Text).data)) texts.push(n as Text);
+  tokenRe.lastIndex = 0;
+  for (const text of texts) {
+    const inCode = !!text.parentElement?.closest('code, pre');
+    const parts: Node[] = [];
+    let last = 0;
+    for (const m of text.data.matchAll(tokenRe)) {
+      if (m.index > last) parts.push(inert.createTextNode(text.data.slice(last, m.index)));
+      const link = byToken.get(m[0]);
+      if (link) parts.push(inCode ? inert.createTextNode(link.literal) : buildLink(inert, link, opts, known));
+      last = m.index + m[0].length;
     }
-    if (!href || (opts.resolveLink && !opts.resolveLink(href))) { replaceWithText(a, 'ct-orch-wikilink-unresolved', label); return; }
-    a.className = 'internal-link';
-    a.setAttribute('data-href', href);
-    a.textContent = label;
-  });
+    if (last < text.data.length) parts.push(inert.createTextNode(text.data.slice(last)));
+    text.replaceWith(...parts);
+  }
+
   el.appendChild(sanitizeHTMLToDom(root.innerHTML));
   // Wide tables scroll inside the bubble instead of widening it.
   el.querySelectorAll<HTMLTableElement>('table').forEach((table) => {

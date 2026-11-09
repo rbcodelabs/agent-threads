@@ -7379,7 +7379,8 @@ textarea.ct-settings-wide-input {
 /* Interrupted partial: not persisted by the manager, kept visible but clearly provisional. */
 .ct-orch-bubble-stopped { white-space: pre-wrap; opacity: 0.7; }
 .ct-orch-stopped-label { font-size: var(--font-ui-smaller); color: var(--text-muted); }
-.ct-orch-wikilink-unresolved { color: var(--text-muted); }
+.ct-orch-wikilink-unresolved,
+.ct-orch-image-omitted { color: var(--text-muted); }
 .ct-orch-bubble-streaming::after {
   content: ""; display: inline-block; width: 6px; height: 1em; margin-left: 2px; vertical-align: text-bottom;
   background: var(--interactive-accent); animation: ct-orch-blink 1s steps(2, start) infinite;
