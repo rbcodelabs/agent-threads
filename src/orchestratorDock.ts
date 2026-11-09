@@ -155,6 +155,8 @@ export class OrchestratorDock {
   private readonly drafts: DraftStore;
   /** The store version after this dock's last read / write: a different version means another dock changed the draft since. */
   private syncedVersion = 0;
+  /** The draft key (orchestrator id) the current textarea was built for. */
+  private inputKey = '';
   /** Caret position the dock itself set after the last recall (a freshly recalled single line keeps walking history). */
   private recallCaret = -1;
   /** Last health announced as a problem ('error' / 'offline'), or 'ok'. A recovery is announced only after one. */
@@ -163,6 +165,8 @@ export class OrchestratorDock {
 
   /** Orchestrator id the per-thread state below belongs to; a change resets it. */
   private trackedId: string | undefined;
+  /** The last defined orchestrator id seen (survives the thread being deleted, so a re-setup with a NEW id is a swap). */
+  private lastOrchestratorId: string | undefined;
   private streamBuf = '';
   /** Partial reply of an interrupted turn. The manager does not persist it (onInterrupted only rolls user messages back). */
   private stoppedText = '';
@@ -445,13 +449,15 @@ export class OrchestratorDock {
   private trackOrchestrator(id: string | undefined, thread: Thread | undefined): void {
     if (id !== this.trackedId) {
       // A swapped / re-set-up orchestrator thread must not inherit what was typed for the previous one.
-      if (this.trackedId !== undefined) {
+      // (Deleted and re-created with the SAME id keeps it: only a different, defined id clears.)
+      if (id !== undefined && this.lastOrchestratorId !== undefined && id !== this.lastOrchestratorId) {
         this.drafts.clear();
         this.syncedVersion = this.drafts.version;
         if (this.inputEl) { this.inputEl.value = ''; this.autosize(this.inputEl); }
         this.history.reset();
       }
       this.trackedId = id;
+      if (id !== undefined) this.lastOrchestratorId = id;
       this.streamBuf = '';
       this.stoppedText = '';
       this.txCache = null;
@@ -905,7 +911,11 @@ export class OrchestratorDock {
    */
   private stashDraft(): void {
     if (!this.inputEl || this.drafts.version !== this.syncedVersion) return;
-    if (this.inputEl.value !== this.draft) this.draft = this.inputEl.value;
+    // Under the key the field was built for: the orchestrator may be gone right now (state none), which must not re-key the draft.
+    if (this.inputEl.value !== this.drafts.get(this.inputKey)) {
+      if (this.inputEl.value) this.drafts.set(this.inputEl.value, this.inputKey); else this.drafts.clear();
+      this.syncedVersion = this.drafts.version;
+    }
   }
 
   private buildInputBody(): void {
@@ -917,6 +927,7 @@ export class OrchestratorDock {
       attr: { rows: '1', maxlength: String(MAX_DRAFT_CHARS), placeholder: 'Ask the orchestrator…', 'aria-label': 'Ask the portfolio orchestrator', 'data-testid': 'orchestrator-input' },
     });
     this.history.reset();
+    this.inputKey = this.draftKey;
     input.value = this.draft;
     this.syncedVersion = this.drafts.version;
     this.autosize(input);
