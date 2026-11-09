@@ -207,9 +207,9 @@ test.describe('orchestrator tray — approvals (functional, no baselines)', () =
     await openSheet(page, DESKTOP);
     await field(page).focus();
     await page.evaluate(() => (window as any).__addPermission('k-acme-tasks', 'Write', JSON.stringify({ file_path: '/r/a.ts' })));
-    await expect(page.locator('.ct-orch-live')).toHaveText('Migrate auth tokens to short-lived JWTs needs approval');
+    await expect(page.locator('.ct-orch-tray-live')).toHaveText('Migrate auth tokens to short-lived JWTs needs approval');
     await expect(field(page)).toBeFocused();
-    await expect(page.locator('.ct-orch-live')).toHaveAttribute('aria-live', 'polite');
+    await expect(page.locator('.ct-orch-tray-live')).toHaveAttribute('aria-live', 'polite');
   });
 
   test('a request arriving while the sheet is CLOSED does not open it @ 1280x800', async ({ page }) => {
