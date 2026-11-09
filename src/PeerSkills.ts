@@ -13,6 +13,9 @@ const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const MAX_SKILL_DESCRIPTION_LENGTH = 1024;
 export const MAX_SKILL_CONTENT_LENGTH = 100_000;
 const MAX_OWNER_LENGTH = 128;
+/** Collide with host-generated SDK plugin names (see VAULT_SKILLS_PLUGIN_NAME and the local skills manifest). */
+const RESERVED_NAMES = new Set(['vault', 'local']);
+export const MAX_SKILLS_PER_OWNER = 16;
 
 interface Entry { readonly ownerId: string; readonly spec: SkillContribution; readonly token: symbol }
 
@@ -43,8 +46,12 @@ export class PeerSkillRegistry {
     if (typeof content !== 'string' || !content.trim() || content.length > MAX_SKILL_CONTENT_LENGTH) {
       throw invalid(`content must be a non-empty string of at most ${MAX_SKILL_CONTENT_LENGTH} characters.`);
     }
+    if (RESERVED_NAMES.has(name)) throw invalid(`Skill name "${name}" is reserved.`);
     const existing = this.entries.get(name);
     if (existing && existing.ownerId !== ownerId) throw invalid(`Skill "${name}" is already registered by another plugin.`);
+    if (!existing && [...this.entries.values()].filter(entry => entry.ownerId === ownerId).length >= MAX_SKILLS_PER_OWNER) {
+      throw invalid(`A plugin may register at most ${MAX_SKILLS_PER_OWNER} skills.`);
+    }
     const token = Symbol(name);
     this.entries.set(name, { ownerId, spec: Object.freeze({ name, description, content }), token });
     return Object.freeze({ dispose: () => { if (this.entries.get(name)?.token === token) this.entries.delete(name); } });

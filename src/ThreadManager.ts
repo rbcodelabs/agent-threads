@@ -3350,7 +3350,9 @@ export class ThreadManager {
       const path = require('path') as typeof import('path');
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const os = require('os') as typeof import('os');
-      const root = this.pluginResourceDir ? path.join(this.pluginResourceDir, '.peer-skills') : path.join(os.tmpdir(), 'claude-threads-peer-skills');
+      const root = this.pluginResourceDir ? path.join(this.pluginResourceDir, '.peer-skills') : path.join(os.tmpdir(), `claude-threads-peer-skills-${
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        (require('crypto') as typeof import('crypto')).createHash('sha256').update(`${this.vaultRoot ?? ''}|${os.userInfo().username}`).digest('hex').slice(0, 12)}`);
       return this.peerSkills.materialize(root);
     } catch (error) {
       console.warn('[ClaudeThreads] Peer skills unavailable:', error);

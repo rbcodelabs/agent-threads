@@ -5,7 +5,7 @@ import { DaemonMcpStatusStore } from './mcpStatus';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { checkClaudeCli, createDefaultCliProbeDeps, describeCliProblems, findMissingKnownModels, type CliInfo, type CliProblem } from './cliVersion';
 import { FALLBACK_RESOLVED } from './modelOptions';
-import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
+import { createClaudeThreadsApiV1, ClaudeThreadsApiError, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createPublicThreadLifecycle } from './publicThreadLifecycle';
 import { promptConfirm } from './confirmModal';
 import { createConstrainedQueryRunner } from './ConstrainedRun';
@@ -3277,11 +3277,20 @@ export default class ClaudeThreadsPlugin extends Plugin {
       : { id, kind: 'project', projectId, threadId: '', title: `${project.name} orchestrator`, enabled: project.orchestratorEnabled !== false };
   }
 
+  /** An ensure must never report an enabled-looking orchestrator without a thread (creation failed, or setEnabled(false) interleaved). */
+  private requireLiveSnapshot(id: string): OrchestratorSnapshot {
+    const snapshot = this.publicOrchestratorSnapshot(id);
+    if (!snapshot || !snapshot.threadId || !snapshot.enabled) {
+      throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator could not be created or was disabled concurrently: ${id}`);
+    }
+    return snapshot;
+  }
+
   /** Explicit create + designate (idempotent). Returns null for an unknown Project. Never opens a chat view. */
   async ensurePublicOrchestrator(target: OrchestratorTarget): Promise<OrchestratorSnapshot | null> {
     if (target.id === 'portfolio') {
       await this.ensureOrchestratorThread(false);
-      return this.publicOrchestratorSnapshot('portfolio');
+      return this.requireLiveSnapshot('portfolio');
     }
     if (!target.id.startsWith('project:')) return null;
     const projectId = target.id.slice('project:'.length);
@@ -3292,7 +3301,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       await this.saveSettings();
     }
     await this.ensureProjectOrchestratorThread(projectId, false);
-    return this.publicOrchestratorSnapshot(target.id);
+    return this.requireLiveSnapshot(target.id);
   }
 
   /** Project orchestrators only. Disabling keeps the thread and its reference; enabling is ensure. */
