@@ -178,7 +178,9 @@ export class DockSheet {
     // bottom instead of the bottom at press time. Home is an explicit unpin. PageUp / PageDown stay native; the scroll events
     // they produce are judged like any other user scroll.
     this.scrollEl.addEventListener('keydown', (e) => {
-      if (e.target !== this.scrollEl) return;
+      // From ANY focus inside the log (the scroller, a thread link, a button in a bubble): a focused link must not fall through to the
+      // native End (which stops following). Editable controls keep their caret movement; modified keys stay native.
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isEditable(e.target)) return;
       if (e.key === 'End') { e.preventDefault(); this.scrollToBottom(); }
       else if (e.key === 'Home') { e.preventDefault(); this.scrollEl.scrollTop = 0; this.lastTop = 0; this.stick = false; }
     });
@@ -573,4 +575,10 @@ function fullChip(parent: HTMLElement): HTMLButtonElement {
   chip.createSpan({ text: 'Open full thread' });
   icon(chip, 'external-link');
   return chip;
+}
+
+function isEditable(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el || !el.closest) return false;
+  return !!el.closest('textarea, input, select, [contenteditable]:not([contenteditable="false"])');
 }

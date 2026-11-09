@@ -378,6 +378,23 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
     expect(distance).toBeLessThanOrEqual(2);
   });
 
+  test('QA N9: End with focus on a thread link inside the log re-pins during fast streaming', async ({ page }) => {
+    await open(page, 'working', 'conversation', DESKTOP);
+    await page.evaluate(() => { for (let i = 0; i < 20; i++) (window as any).__orchSay(`Earlier reply ${i} see [[thread:k-orchestrator|Portfolio Orchestrator]]`); });
+    await field(page).click();
+    await page.evaluate(() => { (window as any).__orchStream('Start. '); (window as any).__tokTimer = setInterval(() => (window as any).__orchToken('word '.repeat(12) + '\n\n'), 30); });
+    const box = (await page.locator('.ct-orch-sheet-scroll').boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, -400);
+    await page.waitForTimeout(200);
+    await page.locator('.ct-orch-sheet-scroll a.ct-thread-link').first().focus();
+    await page.keyboard.press('End');
+    await page.waitForTimeout(1200);
+    const distance = await page.locator('.ct-orch-sheet-scroll').evaluate((e) => e.scrollHeight - e.clientHeight - e.scrollTop);
+    await page.evaluate(() => clearInterval((window as any).__tokTimer));
+    expect(distance).toBeLessThanOrEqual(2);
+  });
+
   test('N2: narrow, Enter on the focused orb opens the sheet and typing lands in the composer', async ({ page }) => {
     await open(page, 'idle', 'conversation', NARROW);
     await page.locator('.ct-orch-orb').focus();
