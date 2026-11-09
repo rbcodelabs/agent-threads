@@ -7511,7 +7511,8 @@ textarea.ct-settings-wide-input {
 .ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-composer { padding-bottom: max(8px, env(safe-area-inset-bottom, 0px)); }
 
 /* Peek + suggestion strip on touch devices AND narrow boards: 44px targets (same rule as the pill's buttons). */
-.ct-kanban-dispatch:has(.ct-orch-dock[data-mode="orb"]) .ct-orch-peek button,
+/* the peek lives inside the dock root, so no :has() is needed for narrow boards */
+.ct-orch-dock[data-mode="orb"] .ct-orch-peek button,
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-peek button,
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-chips button.ct-orch-chip { min-height: 44px; min-width: 44px; }
 

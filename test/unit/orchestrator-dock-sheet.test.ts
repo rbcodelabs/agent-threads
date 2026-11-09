@@ -1202,13 +1202,13 @@ describe('delta (c): rollback then resend', () => {
 });
 
 describe('delta (d): programmatic close never drops focus to the page', () => {
-  it('thread_deleted while focus is inside the sheet moves focus to the orb', () => {
+  it('thread_deleted while focus is inside the sheet moves focus to the field (here the Set up button), not the page', () => {
     const t = setup({ messages: [m('assistant', 'x')] });
     t.dock.openSheet();
     t.q<HTMLButtonElement>('.ct-orch-sheet-close')!.focus();
     t.s.orchestratorId = undefined; t.emit('thread_deleted');
     expect(t.isOpen()).toBe(false);
-    expect(document.activeElement).toBe(t.q('.ct-orch-orb'));
+    expect(t.q('.ct-orch-field')!.contains(document.activeElement)).toBe(true);
   });
 });
 

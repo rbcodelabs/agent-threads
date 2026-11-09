@@ -50,6 +50,7 @@ export interface SheetHandlers {
 export const ANNOUNCE_MIN_INTERVAL_MS = 4000;
 const NEAR_BOTTOM_PX = 48;
 let sheetSeq = 0;
+const TABBABLE = 'button, a[href], textarea, input, select, summary, [tabindex]:not([tabindex="-1"])';
 
 interface RowState { row: HTMLElement; key: string; bubble: HTMLElement; pickupEl: HTMLElement | null }
 
@@ -96,9 +97,9 @@ export class DockSheet {
   /** Pin to the latest message on the next render (open, or the user's own send), however far up they had scrolled. */
   private pinNext = false;
   private closeBtn: HTMLButtonElement;
-  private streamPending: string | null = null;
   private streamFrame = false;
   private stoppedRow: HTMLElement | null = null;
+  private inerted: Element[] = [];
   /** Content signatures: a section is rebuilt only when what it shows changed (focus + clicks survive refreshes). */
   private sig = { empty: '', notice: '', waiting: '' };
 
@@ -155,11 +156,31 @@ export class DockSheet {
   close(): void {
     this.opened = false;
     this.el.hidden = true;
+    this.setModal(false);
+  }
+
+  /**
+   * The narrow bottom sheet is modal: everything it covers (the board, the pill's other controls, the dock's own field) is
+   * `inert` while it is open, so neither Tab nor assistive tech can reach behind it. Siblings of the sheet and of each
+   * ancestor up to the view root; the ancestors themselves stay live.
+   */
+  private setModal(on: boolean): void {
+    if (!on) { for (const n of this.inerted) n.removeAttribute('inert'); this.inerted = []; return; }
+    if (this.inerted.length > 0) return;
+    const doc = this.el.ownerDocument;
+    const boundary = this.el.closest('.ct-agents-root') ?? doc.body;
+    for (let node: Element = this.el; node !== boundary && node.parentElement; node = node.parentElement) {
+      for (const sib of Array.from(node.parentElement.children)) {
+        if (sib === node || sib.hasAttribute('inert')) continue;
+        sib.setAttribute('inert', '');
+        this.inerted.push(sib);
+      }
+    }
   }
 
   /** Narrow bottom sheet is modal: Tab wraps inside it instead of walking into the covered board and pill. */
   private trapTab(e: KeyboardEvent): void {
-    const list = Array.from(this.el.querySelectorAll<HTMLElement>('button, a[href], textarea, input'))
+    const list = Array.from(this.el.querySelectorAll<HTMLElement>(TABBABLE))
       .filter((n) => !n.hidden && !(n as HTMLButtonElement).disabled && !n.closest('[hidden]'));
     if (list.length === 0) return;
     const first = list[0];
@@ -188,6 +209,7 @@ export class DockSheet {
     const wasPinned = !this.opened || this.stick || this.pinNext;
     this.el.dataset.mode = view.mode;
     if (view.mode === 'orb') this.el.setAttribute('aria-modal', 'true'); else this.el.removeAttribute('aria-modal');
+    this.setModal(this.opened && view.mode === 'orb');
     this.composerSlot.hidden = view.mode !== 'orb';
     this.orbEl.classList.toggle('ct-orch-orb-spinning', view.running);
     this.reconcileRows(view);
@@ -206,16 +228,17 @@ export class DockSheet {
     if (this.destroyed || !this.view) return;
     this.view = { ...this.view, streaming: text };
     // Coalesce: one DOM write per frame however many tokens arrived (assigning the whole buffer per token is O(n^2)).
-    if (!text || !this.streamingRow) { this.streamPending = null; this.renderStreaming(text); if (text && this.stick) this.queueScroll(); return; }
-    this.streamPending = text;
+    if (!text || !this.streamingRow) { this.renderStreaming(text); if (text && this.stick) this.queueScroll(); return; }
     if (this.streamFrame) return;
     this.streamFrame = true;
     schedule(() => {
       this.streamFrame = false;
-      if (this.destroyed || this.streamPending === null) return;
+      // Always the CURRENT buffer: a render() between the token and the frame (message / interrupted / done) clears it, and a
+      // stale frame must never re-create the bubble it removed.
+      const current = this.view?.streaming ?? '';
+      if (this.destroyed || !current || !this.streamingRow) return;
       const pinned = this.stick;
-      this.renderStreaming(this.streamPending);
-      this.streamPending = null;
+      this.renderStreaming(current);
       if (pinned) this.scrollToBottom();
     });
   }
@@ -254,6 +277,7 @@ export class DockSheet {
     this.destroyed = true;
     if (this.announceTimer) clearTimeout(this.announceTimer);
     this.announceTimer = null;
+    this.setModal(false);
     this.el.remove();
     this.rows.clear();
   }
@@ -264,7 +288,7 @@ export class DockSheet {
     const seen = new Set<string>();
     view.entries.forEach((entry, i) => {
       seen.add(entry.id);
-      const key = `${entry.role}|${entry.text}|${richKey(entry.rich)}`;
+      const key = `${entry.role}|${entry.text}|${richKey(entry.rich)}|${entry.role === 'assistant' ? this.linkSignature(entry.text, view.threads) : ''}`;
       let st = this.rows.get(entry.id);
       if (!st || st.key !== key) {
         st?.row.remove();
@@ -282,6 +306,25 @@ export class DockSheet {
     }
     // The live bubble always trails the settled rows.
     if (this.streamingRow) this.logEl.append(this.streamingRow);
+  }
+
+  /**
+   * What link rendering depends on besides the text: whether each `[[note]]` currently resolves and the titles of
+   * threads referenced by title-only `[[thread:...]]` links. A note created later or a renamed thread then re-renders the row.
+   */
+  private linkSignature(text: string, threads: ThreadRef[]): string {
+    if (!text.includes('[[')) return '';
+    const parts: string[] = [];
+    for (const m of text.matchAll(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)) {
+      const target = m[1].trim();
+      if (target.startsWith('thread:')) {
+        const ref = target.slice('thread:'.length).trim();
+        parts.push(`${ref}=${threads.find((t) => t.id === ref)?.title ?? threads.filter((t) => t.title === ref).length}`);
+      } else {
+        parts.push(`${target}=${this.h.resolveLink ? (this.h.resolveLink(target) ? 1 : 0) : 'x'}`);
+      }
+    }
+    return parts.join(';');
   }
 
   private buildRow(entry: SheetRow, key: string, threads: ThreadRef[]): RowState {

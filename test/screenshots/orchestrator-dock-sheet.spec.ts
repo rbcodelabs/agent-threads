@@ -92,7 +92,8 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
       await open(page, 'idle', 'conversation', size);
       await focusComposer(page, size);
       await expect(sheet(page)).toBeVisible();
-      await page.locator('.ct-kanban-board').click({ position: { x: 60, y: 120 } });
+      // A raw mouse click at a board position: on narrow the board is inert behind the modal sheet, so an element click would wait forever.
+      await page.mouse.click(60, 120);
       await expect(sheet(page)).toBeVisible();
       if (isNarrow(size)) await field(page).focus(); else await field(page).focus();
       await page.keyboard.press('Escape');

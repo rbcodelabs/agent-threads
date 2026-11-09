@@ -120,8 +120,11 @@ export class OrchestratorDock {
   private stoppedText = '';
   /** A13: set when our own message was echoed (user_message_added) while its send was still pending. */
   private sendEcho = false;
+  /** Stop was clicked and not yet accounted for; with the snapshot of what was streaming at that moment. */
+  private stopRequested = false;
+  private stopSnapshot = '';
   private sendingText = '';
-  private txCache: { ref: unknown; len: number; lastId: string | undefined; entries: ReturnType<typeof sheetTranscript> } | null = null;
+  private txCache: { ref: unknown; len: number; lastId: string | undefined; lastLen: number; entries: ReturnType<typeof sheetTranscript> } | null = null;
   /** User message ids that landed while a turn was running (coalesced into it): "Sent, will be picked up". */
   private readonly pickupIds = new Set<string>();
   /** Latest assistant message id the user has seen; per dock instance, seeded when the thread is first seen. */
@@ -327,6 +330,7 @@ export class OrchestratorDock {
       case 'streaming_start':
         this.streamBuf = '';
         this.stoppedText = '';
+        this.stopRequested = false;
         break;
       case 'user_message_added': {
         // The event precedes streaming_start, so isRunning() still reflects the PRIOR state: true means the
@@ -336,11 +340,13 @@ export class OrchestratorDock {
         // A13: our own send was recorded: a later failure must not restore the draft (it would send a duplicate).
         if (this.sending && msg?.content === this.sendingText) { this.sendEcho = true; this.sheet?.pinOnNextRender(); }
         this.stoppedText = '';
+        this.stopRequested = false;
         break;
       }
       case 'message':
         this.streamBuf = '';
         this.stoppedText = '';
+        this.stopRequested = false; // the reply completed anyway: nothing was stopped
         this.onAssistantMessage(event.message as { role?: string; content?: string } | undefined);
         break;
       case 'interrupted':
@@ -348,7 +354,13 @@ export class OrchestratorDock {
       case 'error':
       case 'run_state_settled':
         // An interrupt drops the in-progress assistant text (never persisted): keep it visible, dimmed, until the next send.
-        if (event.type === 'interrupted' && this.streamBuf) this.stoppedText = this.streamBuf;
+        // Remote sessions may end a stopped turn with done / run_state_settled / error and no `interrupted`: when Stop was
+        // clicked, any end-of-turn event keeps the partial (from the buffer, or the snapshot taken at the click).
+        if (!this.stoppedText && (event.type === 'interrupted' || this.stopRequested)) {
+          const partial = this.streamBuf || (this.stopRequested ? this.stopSnapshot : '');
+          if (partial) this.stoppedText = partial;
+        }
+        if (event.type !== 'done') this.stopRequested = false;
         this.streamBuf = '';
         this.pickupIds.clear();
         if (event.type !== 'done') this.stopping = false;
@@ -427,11 +439,13 @@ export class OrchestratorDock {
   /** sheetTranscript per (messages array, length, last id): refresh() reads it several times per event. */
   private transcriptOf(thread: Thread): ReturnType<typeof sheetTranscript> {
     const msgs = thread.messages;
-    const last = msgs[msgs.length - 1]?.id;
+    const lastMsg = msgs[msgs.length - 1];
+    const last = lastMsg?.id;
+    const lastLen = lastMsg?.content.length ?? 0;
     const c = this.txCache;
-    if (c && c.ref === msgs && c.len === msgs.length && c.lastId === last) return c.entries;
+    if (c && c.ref === msgs && c.len === msgs.length && c.lastId === last && c.lastLen === lastLen) return c.entries;
     const entries = sheetTranscript(msgs);
-    this.txCache = { ref: msgs, len: msgs.length, lastId: last, entries };
+    this.txCache = { ref: msgs, len: msgs.length, lastId: last, lastLen, entries };
     return entries;
   }
 
@@ -466,9 +480,12 @@ export class OrchestratorDock {
 
   closeSheet(returnFocus = true): void {
     if (this.destroyed || !this.sheet?.isOpen) return;
+    const doc = this.host.ownerDocument;
+    // A programmatic close (orchestrator deleted, state none) must not drop focus from inside the sheet to the page.
+    const hadFocus = !!doc.activeElement && this.sheet.el.contains(doc.activeElement);
     this.sheet.close();
     this.refresh();
-    if (!returnFocus) return;
+    if (!returnFocus && !hadFocus) return;
     if (this.currentMode === 'orb') this.orbEl.focus();
     else (this.inputEl ?? this.actionEl)?.focus();
   }
@@ -728,6 +745,8 @@ export class OrchestratorDock {
     const id = this.deps.getOrchestratorThreadId();
     if (!id || this.stopping) return;
     this.stopping = true;
+    this.stopRequested = true;
+    this.stopSnapshot = this.streamBuf; // before interrupt(): the end-of-turn events may arrive in any order
     this.updateInputControls();
     try {
       await this.deps.manager.interrupt(id);
