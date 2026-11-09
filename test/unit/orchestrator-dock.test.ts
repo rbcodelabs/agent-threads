@@ -361,3 +361,92 @@ describe('lifecycle', () => {
     expect(t.root()).toBeTruthy();
   });
 });
+
+describe('review follow-ups', () => {
+  it('A1: only state-relevant events refresh (true allowlist); task_progress/token/tool_use do not', () => {
+    const t = setup();
+    const spy = vi.spyOn(t.deps, 'listThreads');
+    spy.mockClear();
+    for (const ev of ['task_progress', 'token', 'tool_use', 'usage', 'some_future_event']) t.emit(ev);
+    expect(spy).not.toHaveBeenCalled();
+    for (const ev of ['pending_plan_changed', 'pending_question_changed', 'plan_ready', 'question_ready', 'auth_retry', 'proposed_reply_changed', 'permission_request', 'done']) {
+      spy.mockClear();
+      t.emit(ev);
+      expect(spy, ev).toHaveBeenCalled();
+    }
+  });
+
+  it('A2: a setup that throws AFTER the id was set still refreshes into the field', async () => {
+    const t = setup({ orchestratorId: undefined });
+    (t.deps.ensureOrchestrator as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      t.state.orchestratorId = 'orch';
+      throw new Error('saveSettings failed');
+    });
+    (t.host.querySelector('.ct-orch-action') as HTMLElement).click();
+    await vi.waitFor(() => expect(t.root().dataset.state).toBe('idle'));
+    expect(input(t.host)).toBeTruthy();
+  });
+
+  it('A3: a failed send restores the draft into the CURRENT textarea even after a rebuild during the await', async () => {
+    let rejectSend: (e: Error) => void = () => {};
+    const t = setup();
+    t.manager.sendMessage.mockImplementationOnce(() => new Promise<void>((_r, rej) => { rejectSend = rej; }));
+    const el = input(t.host);
+    el.value = 'precious';
+    press(el, 'Enter');
+    // Orchestrator disappears then returns while the send is pending: the textarea node is rebuilt.
+    t.state.orchestratorId = undefined; t.emit('thread_deleted');
+    expect(input(t.host)).toBeNull();
+    t.state.orchestratorId = 'orch'; t.emit('thread_created');
+    const rebuilt = input(t.host);
+    expect(rebuilt).not.toBe(el);
+    rejectSend(new Error('boom'));
+    await vi.waitFor(() => expect(rebuilt.value).toBe('precious'));
+  });
+
+  it('A4: a restored multi-line draft is autosized when the textarea is rebuilt', () => {
+    const t = setup();
+    const el = input(t.host);
+    el.value = 'a\nb\nc';
+    el.dispatchEvent(new Event('input'));
+    t.state.orchestratorId = undefined; t.emit('thread_deleted');
+    const desc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight');
+    Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', { configurable: true, get: () => 64 });
+    try {
+      t.state.orchestratorId = 'orch'; t.emit('thread_created');
+      expect(input(t.host).value).toBe('a\nb\nc');
+      expect(input(t.host).style.height).toBe('64px');
+    } finally {
+      delete (HTMLTextAreaElement.prototype as unknown as Record<string, unknown>).scrollHeight;
+      if (desc) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', desc);
+    }
+  });
+
+  it('A5: keyCode 229 (IME) Enter never sends', () => {
+    const t = setup();
+    const el = input(t.host);
+    el.value = 'konnichiwa';
+    press(el, 'Enter', { keyCode: 229 });
+    expect(t.manager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('A6: Cmd+J with the field already focused selects its text', () => {
+    const t = setup();
+    const el = input(t.host);
+    el.value = 'draft text';
+    t.dock.focusField();
+    expect(document.activeElement).toBe(el);
+    t.dock.focusField();
+    expect(el.selectionStart).toBe(0);
+    expect(el.selectionEnd).toBe('draft text'.length);
+  });
+
+  it('A9: the orb is out of the tab order in pill mode (the field is the stop) and back in it in orb mode', () => {
+    const t = setup();
+    const orb = t.host.querySelector('.ct-orch-orb') as HTMLElement;
+    expect(orb.getAttribute('tabindex')).toBe('-1');
+    t.state.mode = 'orb';
+    t.dock.relayout();
+    expect(orb.hasAttribute('tabindex')).toBe(false);
+  });
+});
