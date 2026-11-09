@@ -12,6 +12,11 @@ import { shot } from './helpers';
  * Visual specs carry baselines (6 states, both widths); behaviour specs carry none.
  */
 const kanbanUrl = 'file://' + path.resolve('test/harness/kanban.html');
+// Same pin as ui.spec.ts / orchestrator-dock.spec.ts: the board's relative "Xd ago" chips drift with the wall clock.
+test.beforeEach(async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
+});
+
 const DESKTOP = { width: 1280, height: 800 };
 const NARROW = { width: 390, height: 844 };
 /** Same tight per-pixel colour tolerance as the P2 dock shots (Playwright's default 0.2 hides tint changes). */
