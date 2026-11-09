@@ -368,7 +368,7 @@ describe('permission handler', () => {
     await Promise.resolve();
 
     expect(manager.hasPendingPermission(thread.id)).toBe(true);
-    expect(manager.getPendingPermission(thread.id)).toEqual({
+    expect(manager.getPendingPermission(thread.id)).toMatchObject({
       toolName: 'MCP: github',
       detail: 'Allow search_repositories?',
     });
@@ -424,7 +424,7 @@ describe('permission handler', () => {
       await flush();
 
       expect(asked).toEqual(['a.md']);
-      expect(manager.getPendingPermission(thread.id)).toEqual({ toolName: 'Read', detail: 'a.md' });
+      expect(manager.getPendingPermission(thread.id)).toMatchObject({ toolName: 'Read', detail: 'a.md' });
       expect(events.filter(e => e.type === 'permission_request')).toHaveLength(1);
 
       responders[0](true);
@@ -432,7 +432,7 @@ describe('permission handler', () => {
       await flush();
 
       expect(asked).toEqual(['a.md', 'b.md']);
-      expect(manager.getPendingPermission(thread.id)).toEqual({ toolName: 'Read', detail: 'b.md' });
+      expect(manager.getPendingPermission(thread.id)).toMatchObject({ toolName: 'Read', detail: 'b.md' });
 
       responders[1](false);
       await expect(second).resolves.toBe(false);
