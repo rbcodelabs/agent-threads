@@ -11,7 +11,7 @@ import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
 import { threadNeedsInput, splitNeedsInput } from './needsInput';
 import { decisionToQuestion } from './decisions';
 import { formatToolName } from './ClaudeSession';
-import { appendPermissionButtons as appendPermissionButtonsShared, summarizePermissionDetail } from './permissionCard';
+import { appendPermissionButtons, summarizePermissionDetail } from './permissionCard';
 import { hostExecState } from './managedPolicy';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
@@ -1066,9 +1066,9 @@ export class KanbanView extends ItemView {
     threadId: string,
     pendingInfo: ReturnType<ThreadManager['getPendingPermission']>,
   ): void {
-    appendPermissionButtonsShared(btns, threadId, pendingInfo, {
+    appendPermissionButtons(btns, threadId, pendingInfo, {
       manager: this.manager,
-      settings: this.plugin.settings,
+      getSettings: () => this.plugin.settings,
       saveSettings: () => this.plugin.saveSettings(),
       hostExecAllowAlways: hostExecState(this.plugin.managedPolicy?.peek()).allowAlways,
     });

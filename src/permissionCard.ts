@@ -15,7 +15,8 @@ export { summarizePermissionDetail };
 
 export interface PermissionButtonDeps {
   manager: Pick<ThreadManager, 'resolvePermission' | 'getRemoteScope'>;
-  settings: AlwaysAllowSettings & { hostExecAlwaysAllowedPrefixes: string[] };
+  /** Read at click time, not build time: the settings object may be replaced after the buttons are built. */
+  getSettings(): AlwaysAllowSettings & { hostExecAlwaysAllowedPrefixes: string[] };
   saveSettings(): Promise<void>;
   /** hostExecState(managedPolicy.peek()).allowAlways, read when the buttons are built. */
   hostExecAllowAlways: boolean;
@@ -30,7 +31,7 @@ export function appendPermissionButtons(
   pendingInfo: PendingPermissionInfo,
   deps: PermissionButtonDeps,
 ): void {
-  const { manager, settings, saveSettings } = deps;
+  const { manager, saveSettings } = deps;
   const deny = btns.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' });
   deny.addEventListener('click', (e) => { e.stopPropagation(); manager.resolvePermission(threadId, false); });
   const allow = btns.createEl('button', { text: !!pendingInfo && isHostExecPermission(pendingInfo.toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
@@ -40,7 +41,7 @@ export function appendPermissionButtons(
     const alwaysPrefix = btns.createEl('button', { text: `Always \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' });
     alwaysPrefix.addEventListener('click', async (e) => {
       e.stopPropagation();
-      if (addHostExecPrefix(settings, hostExecPrefix)) await saveSettings();
+      if (addHostExecPrefix(deps.getSettings(), hostExecPrefix)) await saveSettings();
       manager.resolvePermission(threadId, true);
     });
   }
@@ -49,7 +50,7 @@ export function appendPermissionButtons(
     always.addEventListener('click', async (e) => {
       e.stopPropagation();
       if (pendingInfo) {
-        if (recordAlwaysAllow(settings, pendingInfo.toolName, manager.getRemoteScope(threadId))) await saveSettings();
+        if (recordAlwaysAllow(deps.getSettings(), pendingInfo.toolName, manager.getRemoteScope(threadId))) await saveSettings();
       }
       manager.resolvePermission(threadId, true);
     });

@@ -37,10 +37,13 @@ export interface DockStateInput {
 const DAEMON_DOWN: ReadonlySet<string> = new Set(['unreachable', 'closed', 'incompatible', 'unauthorized']);
 
 /**
- * Precedence: none > offline > error > attention > working > idle.
+ * Precedence: none > offline > error > attention > working > idle (attention
+ * outranks working: product decision, confirmed).
  * connecting/reconnecting/idle are transient (a running turn continues on the
- * daemon) so they are not offline. A running turn outranks a stale lastError,
- * matching classifyThreadRow, so the dot and the board cannot disagree.
+ * daemon) so they are not offline. Like classifyThreadRow, a running turn
+ * outranks a stale lastError. The error signals intentionally go beyond
+ * classifyThreadRow, which only looks at lastError: `status === 'error'` and
+ * `authRequired` count as errors here too.
  */
 export function deriveDockState(i: DockStateInput): DockState {
   if (!i.orchestratorId || !i.thread) return 'none';
@@ -74,7 +77,9 @@ export interface AttentionItem {
 
 /**
  * One item per thread that is awaiting Rick or failed. Mirrors the board: the
- * Needs you lane is pulled out first, then classifyThreadRow decides.
+ * Needs you lane is pulled out first, then classifyThreadRow decides. If a
+ * thread is awaiting but no pending flag is set (flags raced), it is reported
+ * as `permission`.
  */
 export function attentionItems(candidates: AttentionCandidate[]): AttentionItem[] {
   const items: AttentionItem[] = [];
@@ -92,7 +97,15 @@ export function attentionItems(candidates: AttentionCandidate[]): AttentionItem[
   return items;
 }
 
-/** Threads awaiting Rick (everything but failures); drives the attention dot. */
+/**
+ * Threads awaiting Rick (everything but failures); drives the attention dot.
+ * Product decisions: failed threads are excluded (they surface as the "Triage
+ * failed" chip); the orchestrator's own pending prompts DO count, because it
+ * needs the user, and callers decide whether to include the orchestrator thread
+ * in the "What needs me?" chip. This follows the board's Needs-you definition,
+ * but the Needs-you lane exists only in status-board mode, so in project/folder
+ * modes the dot can differ from the visible columns.
+ */
 export function needsYouCount(items: AttentionItem[]): number {
   return items.filter((i) => i.kind !== 'failed').length;
 }
@@ -152,19 +165,46 @@ export type LinkSegment =
   | { type: 'text'; text: string }
   | { type: 'thread'; threadId: string; label: string };
 
-const THREAD_LINK = /\[\[thread:([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+/**
+ * `[[thread:<ref>|label]]`. Single-line only (a marker spanning a newline is not
+ * a link), the ref cannot contain `|`, and a backslash before the pipe is
+ * accepted so a link survives a GFM table cell (`\|`). `[[thread:a|b|c]]` has
+ * ref `a` and label `b|c`.
+ */
+const THREAD_LINK = /\[\[thread:([^\]|\n]+?)(?:\\?\|([^\]\n]+))?\]\]/g;
 
-function uniqueByTitle(threads: ReadonlyArray<{ id: string; title: string }>, title: string): string | undefined {
+export interface ThreadRef { id: string; title: string }
+
+function uniqueByTitle(threads: readonly ThreadRef[], title: string): ThreadRef | undefined {
+  if (!title) return undefined; // never match an empty-titled thread on an empty string
   const hits = threads.filter((t) => t.title === title);
-  return hits.length === 1 ? hits[0].id : undefined;
+  return hits.length === 1 ? hits[0] : undefined;
 }
 
 /**
- * Splits markdown into text and resolved thread-link segments. `[[thread:<ref>|Label]]`
- * resolves by id, then by exact unique title (ref, then label); anything
- * unresolved degrades to its label as plain text. Other wikilinks stay text.
+ * Resolves one `[[thread:...]]` marker: by id, then by unique exact
+ * (case-sensitive) title of the ref, then of the label. An empty or blank ref
+ * never resolves; a blank label is never matched against titles.
  */
-export function splitThreadLinks(markdown: string, threads: ReadonlyArray<{ id: string; title: string }>): LinkSegment[] {
+export function resolveThreadLink(ref: string, label: string, threads: readonly ThreadRef[]): { threadId: string; title: string } | null {
+  const r = ref.trim();
+  if (!r) return null;
+  const hit = threads.find((t) => t.id === r) ?? uniqueByTitle(threads, r) ?? uniqueByTitle(threads, label.trim());
+  return hit ? { threadId: hit.id, title: hit.title } : null;
+}
+
+/**
+ * Splits markdown into text and resolved thread-link segments.
+ *
+ * FOR PLAIN-TEXT CONTEXTS ONLY (tooltips, notifications, search). Never render
+ * markdown per segment: a link inside `**bold**` or a table cell would cut the
+ * surrounding syntax in half. Markdown rendering must use
+ * {@link rewriteThreadLinks} and render the whole document once.
+ *
+ * Labels are model-controlled text: consumers must set them with `textContent`
+ * (never innerHTML). An unresolved marker degrades to its label (or ref) as text.
+ */
+export function splitThreadLinks(markdown: string, threads: readonly ThreadRef[]): LinkSegment[] {
   const segments: LinkSegment[] = [];
   const pushText = (text: string): void => {
     if (!text) return;
@@ -177,13 +217,37 @@ export function splitThreadLinks(markdown: string, threads: ReadonlyArray<{ id: 
     pushText(markdown.slice(cursor, m.index));
     cursor = m.index + m[0].length;
     const ref = m[1].trim();
-    const label = (m[2] ?? ref).trim();
-    const threadId = threads.find((t) => t.id === ref)?.id ?? uniqueByTitle(threads, ref) ?? uniqueByTitle(threads, label);
-    if (threadId) segments.push({ type: 'thread', threadId, label });
-    else pushText(label);
+    const alias = (m[2] ?? '').trim();
+    const hit = resolveThreadLink(ref, alias, threads);
+    if (hit) segments.push({ type: 'thread', threadId: hit.threadId, label: alias || hit.title });
+    else pushText(alias || ref);
   }
   pushText(markdown.slice(cursor));
   return segments;
+}
+
+/** Makes a model-supplied label safe inside a `[[thread:id|label]]` marker. */
+function markerLabel(label: string): string {
+  return label.replace(/[\[\]|\\\s]+/g, ' ').trim();
+}
+
+/**
+ * The supported path for markdown rendering. Resolvable markers become
+ * `[[thread:<id>|label]]` (normalised: real id, label = alias or the thread
+ * title, characters that would break the marker replaced by spaces); unresolvable
+ * ones become their plain label. Everything else, including surrounding
+ * `**bold**` and table syntax, is untouched. The renderer then turns the
+ * normalised markers into anchors before running markdown (dockMarkdown).
+ * Labels are model-controlled: set them via textContent / escape them.
+ */
+export function rewriteThreadLinks(markdown: string, threads: readonly ThreadRef[]): string {
+  return markdown.replace(THREAD_LINK, (_m, rawRef: string, rawAlias?: string) => {
+    const ref = rawRef.trim();
+    const alias = (rawAlias ?? '').trim();
+    const hit = resolveThreadLink(ref, alias, threads);
+    if (!hit) return alias || ref;
+    return `[[thread:${hit.threadId}|${markerLabel(alias || hit.title)}]]`;
+  });
 }
 
 // ── Count text ──────────────────────────────────────────────────────────────
