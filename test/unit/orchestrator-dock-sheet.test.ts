@@ -1724,3 +1724,56 @@ describe('QA low: the log scroller is keyboard reachable', () => {
     expect(document.activeElement).toBe(list[0]);
   });
 });
+
+
+describe('QA N9: End / Home work from any focus inside the log, not only the scroller itself', () => {
+  const rig = async (t: T) => {
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let h = 3000;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 0 });
+    t.dock.openSheet(); await frame();
+    scroll.scrollTop = 1000; scroll.dispatchEvent(new Event('scroll')); // scrolled up: unpinned
+    return { scroll, grow: (n: number) => { h = n; } };
+  };
+  const key = (target: Element, k: string, init: KeyboardEventInit = {}) => {
+    const ev = new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init });
+    target.dispatchEvent(ev);
+    return ev;
+  };
+
+  it('a focused thread link: End snaps to the live bottom, re-pins, and keeps following', async () => {
+    const t = setup({ running: true, messages: [m('assistant', 'see [[thread:a|Deploy]]')] });
+    t.dock.openSheet();
+    const link = await vi.waitFor(() => { const a = t.q('a.ct-thread-link'); expect(a).toBeTruthy(); return a!; });
+    const { scroll, grow } = await rig(t);
+    (link as HTMLElement).focus();
+    const ev = key(link, 'End');
+    expect(ev.defaultPrevented).toBe(true);
+    expect(scroll.scrollTop).toBe(3000);
+    grow(3200); t.emit('token', { text: 'more\n\n' }); await frame(); await frame();
+    expect(scroll.scrollTop).toBe(3200);
+  });
+
+  it('a focused button inside a bubble behaves the same; Home unpins and goes to the top', async () => {
+    const t = setup({ running: true, messages: [m('assistant', 'did work', { toolCalls: [{ name: 'Read' }] })] });
+    const { scroll } = await rig(t);
+    const btn = t.q<HTMLButtonElement>('.ct-orch-msg .ct-orch-chip-full')!;
+    btn.focus();
+    expect(key(btn, 'End').defaultPrevented).toBe(true);
+    expect(scroll.scrollTop).toBe(3000);
+    expect(key(btn, 'Home').defaultPrevented).toBe(true);
+    expect(scroll.scrollTop).toBe(0);
+  });
+
+  it('an editable control keeps its native Home/End (caret movement), and Ctrl/Meta/Alt combinations stay native', async () => {
+    const t = setup({ messages: [m('assistant', 'x')] });
+    const { scroll } = await rig(t);
+    const ta = document.createElement('textarea'); scroll.appendChild(ta);
+    expect(key(ta, 'End').defaultPrevented).toBe(false);
+    const ce = document.createElement('div'); ce.setAttribute('contenteditable', 'true'); scroll.appendChild(ce);
+    expect(key(ce, 'Home').defaultPrevented).toBe(false);
+    for (const mod of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }]) expect(key(scroll, 'End', mod).defaultPrevented).toBe(false);
+    expect(scroll.scrollTop).toBe(1000);
+  });
+});
