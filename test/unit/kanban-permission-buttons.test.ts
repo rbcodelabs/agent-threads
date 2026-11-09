@@ -67,7 +67,7 @@ function setup(opts: { pending: Pending; remote?: { daemonId: string }; allowAlw
   view.needsYouOnlyBtn = document.createElement('button');
   view.render();
   const actions = view.boardEl.querySelector<HTMLElement>('.ct-kanban-perm-actions')!;
-  return { actions, manager, plugin, settings, calls };
+  return { actions, manager, plugin, settings, calls, view };
 }
 
 const buttons = (actions: HTMLElement) => Array.from(actions.querySelectorAll('button'));
@@ -78,6 +78,17 @@ const HOST_EXEC = (cmd: string) => ({
 });
 
 describe('Kanban card permission buttons', () => {
+  it('reads plugin.settings at click time: a settings object reassigned after render is the one mutated', async () => {
+    const { actions, plugin, settings, calls } = setup({ pending: { toolName: 'Bash', detail: 'ls' } });
+    const replacement = { ...settings, alwaysAllowedTools: [] as string[] };
+    (plugin as { settings: unknown }).settings = replacement;
+    buttons(actions)[2].click();
+    await flush();
+    expect(replacement.alwaysAllowedTools).toEqual(['Bash']);
+    expect(settings.alwaysAllowedTools).toEqual([]);
+    expect(calls).toEqual(['save', 'resolve:true']);
+  });
+
   it('renders Deny, Allow, Always with the existing classes for an ordinary tool', () => {
     const { actions } = setup({ pending: { toolName: 'Bash', detail: 'ls' } });
     expect(buttons(actions).map((b) => [b.textContent, b.className])).toEqual([

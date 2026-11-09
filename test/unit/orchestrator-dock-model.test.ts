@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   deriveDockState, attentionItems, needsYouCount, suggestionChips, unreadState, dockTranscript,
-  splitThreadLinks, countText, tooltipText,
+  splitThreadLinks, resolveThreadLink, rewriteThreadLinks, countText, tooltipText,
   type AttentionCandidate,
 } from '../../src/orchestratorDockModel';
 import { classifyThreadRow, type ThreadClassificationFlags } from '../../src/threadRowState';
@@ -99,6 +99,11 @@ describe('attentionItems', () => {
     }
   });
 
+  it('falls back to permission when awaiting but every pending flag is false', () => {
+    const items = attentionItems([cand('w', { flags: flags({ hasPendingPermission: true }) })]);
+    expect(items).toEqual([{ threadId: 'w', title: 'T w', kind: 'permission' }]);
+  });
+
   it('needsYouCount excludes failed', () => {
     expect(needsYouCount([
       { threadId: 'a', title: 'a', kind: 'permission' }, { threadId: 'b', title: 'b', kind: 'failed' }, { threadId: 'c', title: 'c', kind: 'plan' },
@@ -182,6 +187,71 @@ describe('splitThreadLinks', () => {
   it('handles several links in one string', () => {
     const segs = splitThreadLinks('[[thread:abc-1|A]] and [[thread:def-2|B]]', threads);
     expect(segs.filter((s) => s.type === 'thread')).toHaveLength(2);
+  });
+});
+
+describe('resolveThreadLink', () => {
+  const ts = [{ id: 'abc-1', title: 'Deploy fix' }, { id: 'e1', title: '' }, { id: 'x1', title: 'Twin' }, { id: 'x2', title: 'Twin' }];
+  it('resolves by id, then unique exact title of ref, then of label, returning the real title', () => {
+    expect(resolveThreadLink('abc-1', 'whatever', ts)).toEqual({ threadId: 'abc-1', title: 'Deploy fix' });
+    expect(resolveThreadLink('Deploy fix', '', ts)).toEqual({ threadId: 'abc-1', title: 'Deploy fix' });
+    expect(resolveThreadLink('nope', 'Deploy fix', ts)).toEqual({ threadId: 'abc-1', title: 'Deploy fix' });
+  });
+  it('returns null for unknown, ambiguous, and empty refs; an empty label never matches an empty-titled thread', () => {
+    expect(resolveThreadLink('nope', 'nope', ts)).toBeNull();
+    expect(resolveThreadLink('Twin', 'Twin', ts)).toBeNull();
+    expect(resolveThreadLink('', 'Deploy fix', ts)).toBeNull();
+    expect(resolveThreadLink('   ', 'Deploy fix', ts)).toBeNull();
+    expect(resolveThreadLink('nope', '', ts)).toBeNull();
+    expect(resolveThreadLink('nope', '  ', ts)).toBeNull();
+  });
+});
+
+describe('splitThreadLinks edge cases', () => {
+  const ts = [{ id: 'abc-1', title: 'Deploy fix' }, { id: 'e1', title: '' }];
+  it('an empty or blank ref never resolves, even to an empty-titled thread', () => {
+    expect(splitThreadLinks('a [[thread: ]] b', ts)).toEqual([{ type: 'text', text: 'a  b' }]);
+    expect(splitThreadLinks('[[thread: |x]]', ts)).toEqual([{ type: 'text', text: 'x' }]);
+  });
+  it('a blank alias defaults the label to the resolved thread title', () => {
+    expect(splitThreadLinks('[[thread:abc-1| ]]', ts)).toEqual([{ type: 'thread', threadId: 'abc-1', label: 'Deploy fix' }]);
+  });
+  it('pins [[thread:a|b|c]]: ref is "a", the label is "b|c"', () => {
+    expect(splitThreadLinks('[[thread:abc-1|b|c]]', ts)).toEqual([{ type: 'thread', threadId: 'abc-1', label: 'b|c' }]);
+    expect(splitThreadLinks('[[thread:a|b|c]]', ts)).toEqual([{ type: 'text', text: 'b|c' }]);
+  });
+  it('a marker spanning a newline is not a link and stays literal text', () => {
+    const md = '[[thread:abc-1|Deploy\nfix]]';
+    expect(splitThreadLinks(md, ts)).toEqual([{ type: 'text', text: md }]);
+    const md2 = '[[thread:abc\n-1|Deploy fix]]';
+    expect(splitThreadLinks(md2, ts)).toEqual([{ type: 'text', text: md2 }]);
+  });
+  it('segments split inline formatting, which is why they are for plain-text contexts only', () => {
+    expect(splitThreadLinks('**[[thread:abc-1|Deploy fix]]**', ts)).toEqual([
+      { type: 'text', text: '**' }, { type: 'thread', threadId: 'abc-1', label: 'Deploy fix' }, { type: 'text', text: '**' },
+    ]);
+  });
+});
+
+describe('rewriteThreadLinks (the supported path for markdown rendering)', () => {
+  const ts = [{ id: 'abc-1', title: 'Deploy fix' }, { id: 'def-2', title: 'Docs' }];
+  it('normalises resolvable markers to [[thread:<id>|label]] and degrades the rest to plain labels', () => {
+    expect(rewriteThreadLinks('[[thread:Docs]] / [[thread:zz|Gone]]', ts)).toBe('[[thread:def-2|Docs]] / Gone');
+  });
+  it('keeps a bold-wrapped link intact', () => {
+    expect(rewriteThreadLinks('**[[thread:abc-1|Deploy fix]]**', ts)).toBe('**[[thread:abc-1|Deploy fix]]**');
+    expect(rewriteThreadLinks('**[[thread:zz|Gone]]**', ts)).toBe('**Gone**');
+  });
+  it('keeps a table-cell link in its cell, including an escaped pipe', () => {
+    expect(rewriteThreadLinks('| a | [[thread:abc-1|Deploy fix]] |', ts)).toBe('| a | [[thread:abc-1|Deploy fix]] |');
+    expect(rewriteThreadLinks('| a | [[thread:abc-1\\|Deploy fix]] |', ts)).toBe('| a | [[thread:abc-1|Deploy fix]] |');
+    expect(rewriteThreadLinks('| a | [[thread:zz\\|Gone]] |', ts)).toBe('| a | Gone |');
+  });
+  it('strips characters from labels that would break the marker', () => {
+    expect(rewriteThreadLinks('[[thread:abc-1|b|c]]', ts)).toBe('[[thread:abc-1|b c]]');
+  });
+  it('uses the thread title when no alias is given and leaves other text alone', () => {
+    expect(rewriteThreadLinks('see [[thread:abc-1]] and [[Note]]', ts)).toBe('see [[thread:abc-1|Deploy fix]] and [[Note]]');
   });
 });
 

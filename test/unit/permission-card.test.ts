@@ -20,8 +20,9 @@ function setup(pending: { toolName: string; detail: string } | undefined, over: 
   };
   const saveSettings = vi.fn(async () => { order.push('save'); });
   const el = document.createElement('div');
-  appendPermissionButtons(el, 'thread-1', pending, { manager, settings, saveSettings, hostExecAllowAlways: over.allowAlways ?? true });
-  return { el, manager, settings, saveSettings, order, btns: Array.from(el.querySelectorAll('button')) };
+  let current = settings;
+  appendPermissionButtons(el, 'thread-1', pending, { manager, getSettings: () => current, saveSettings, hostExecAllowAlways: over.allowAlways ?? true });
+  return { el, manager, settings, saveSettings, order, replaceSettings: (next: typeof settings) => { current = next; }, btns: Array.from(el.querySelectorAll('button')) };
 }
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -72,6 +73,17 @@ describe('appendPermissionButtons', () => {
     const detail = `Run host_exec for a remote thread: ${JSON.stringify({ command: 'git status' })}`;
     const { btns } = setup({ toolName: 'mcp__claude_threads__host_exec', detail }, { allowAlways: false });
     expect(btns.map((b) => b.textContent)).toEqual(['Deny', 'Allow once']);
+  });
+
+  it('reads settings lazily at click time (a replaced settings object is the one mutated)', async () => {
+    const { btns, settings, replaceSettings, saveSettings } = setup({ toolName: 'Edit', detail: '{}' });
+    const next = { alwaysAllowedTools: [] as string[], hostExecAlwaysAllowedPrefixes: [] as string[] };
+    replaceSettings(next);
+    btns[2].click();
+    await flush();
+    expect(next.alwaysAllowedTools).toEqual(['Edit']);
+    expect(settings.alwaysAllowedTools).toEqual([]);
+    expect(saveSettings).toHaveBeenCalledTimes(1);
   });
 
   it('re-exports summarizePermissionDetail', () => {
