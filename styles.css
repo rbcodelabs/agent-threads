@@ -7222,6 +7222,9 @@ textarea.ct-settings-wide-input {
 .ct-orch-dock[data-mode="orb"] .ct-orch-field { flex: none; padding: 0; border: none; background: transparent; min-height: 0; }
 .ct-orch-dock[data-mode="orb"] .ct-orch-field .ct-orch-body { display: none; }
 .ct-orch-dock[data-mode="orb"] { gap: 0; }
+/* Narrow row slack: CI's font metrics overflowed the 320px meta row by 2px, so drop the New button's trailing margin and the actions gap. */
+.ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-new-thread-btn { margin-right: 0; }
+.ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-agents-panel-actions { gap: 0; }
 .ct-orch-dock[data-mode="orb"] .ct-orch-dot { margin: 0 2px; }
 /* One row, as in the mock: the dot already reports needs-you, so the "Only needs you" chip yields its room to the orb. */
 /* Compound selectors outrank `.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-agents-panel-meta { flex-wrap: wrap }`. */
