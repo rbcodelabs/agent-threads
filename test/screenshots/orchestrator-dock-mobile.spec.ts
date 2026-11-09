@@ -319,6 +319,90 @@ test.describe('D1: the Needs-you tray keeps its first card and buttons under a l
   }
 });
 
+test.describe('D1b: worst-case first card (long title, 3-line detail, 3 buttons): the composer is never clipped, the buttons stay reachable', () => {
+  const CASES = [
+    { width: 320, height: 640, kb: [0, 290, 330] }, { width: 360, height: 640, kb: [0, 290, 330] }, { width: 375, height: 667, kb: [0, 300, 340] },
+    { width: 844, height: 390, kb: [0, 170, 200] }, { width: 667, height: 375, kb: [0, 170] },
+  ];
+  /** Everything measured against the sheet's own rect and the visual viewport. */
+  async function measure(page: Page) {
+    return page.evaluate(() => {
+      const r = (e: Element) => { const b = e.getBoundingClientRect(); return { t: b.top, b: b.bottom, l: b.left, r: b.right, h: b.height }; };
+      const sh = document.querySelector('.ct-orch-sheet') as HTMLElement;
+      const tray = sh.querySelector('.ct-orch-tray') as HTMLElement;
+      const bar = r(tray.querySelector('.ct-orch-tray-bar')!);
+      const first = tray.querySelector('.ct-orch-tray-card') as HTMLElement;
+      const btn = first.querySelector('button') as HTMLElement;
+      btn.scrollIntoView({ block: 'nearest' }); // reachable: scrolling INSIDE the tray is allowed, clipping by the sheet is not
+      const buttons = Array.from(first.querySelectorAll('button')).map((b) => r(b));
+      const field = (document.querySelector('.ct-orch-input') ?? document.querySelector('.ct-orch-sheet-composer')) as HTMLElement;
+      const vv = (window as any).visualViewport;
+      return {
+        vvBottom: vv ? vv.offsetTop + vv.height : innerHeight,
+        sheet: r(sh), tray: r(tray), bar, buttons, field: r(field), head: r(sh.querySelector('.ct-orch-sheet-head')!),
+        composerInSheet: sh.contains(field), mode: sh.dataset.mode,
+      };
+    });
+  }
+  type M = Awaited<ReturnType<typeof measure>>;
+  function expectFits(m: M, label: string) {
+    const eps = 0.75;
+    expect(m.sheet.t, `${label}: sheet top inside the viewport (header + close reachable)`).toBeGreaterThanOrEqual(-eps);
+    expect(m.sheet.b, `${label}: sheet bottom above the keyboard`).toBeLessThanOrEqual(m.vvBottom + eps);
+    expect(m.head.t, `${label}: header inside the sheet`).toBeGreaterThanOrEqual(m.sheet.t - eps);
+    if (m.composerInSheet) {
+      expect(m.field.b, `${label}: composer inside the sheet (not clipped)`).toBeLessThanOrEqual(m.sheet.b + eps);
+      expect(m.field.t, `${label}: composer below the tray`).toBeGreaterThanOrEqual(m.tray.b - eps);
+    } else {
+      expect(m.field.b, `${label}: the pill's field above the keyboard`).toBeLessThanOrEqual(m.vvBottom + eps);
+    }
+    expect(m.buttons.length).toBe(3);
+    for (const b of m.buttons) {
+      expect(b.t, `${label}: button below the sticky heading`).toBeGreaterThanOrEqual(m.bar.b - eps);
+      expect(b.b, `${label}: button inside the tray band`).toBeLessThanOrEqual(m.tray.b + eps);
+      expect(b.b, `${label}: button inside the sheet`).toBeLessThanOrEqual(m.sheet.b + eps);
+    }
+  }
+  for (const c of CASES) {
+    for (const kb of c.kb) {
+      test(`@ ${c.width}x${c.height}, keyboard ${kb}px`, async ({ page }) => {
+        const size = { width: c.width, height: c.height };
+        await installFakeVisualViewport(page);
+        await open(page, 'orch=attention&tx=conversation&tray=worst', size);
+        await openSheet(page, size);
+        await fillTranscript(page, 8);
+        if (kb) await page.evaluate((h) => (window as any).__setVV(h), c.height - kb);
+        await page.waitForTimeout(80);
+        expectFits(await measure(page), `${c.width}x${c.height} kb${kb}`);
+      });
+    }
+  }
+  test('with the composer grown to its maximum height @ 375x667, keyboard 300px', async ({ page }) => {
+    const size = { width: 375, height: 667 };
+    await installFakeVisualViewport(page);
+    await open(page, 'orch=attention&tx=conversation&tray=worst', size);
+    await openSheet(page, size);
+    await fillTranscript(page, 8);
+    await page.evaluate(() => (window as any).__setVV(667 - 300));
+    await page.locator('.ct-orch-input').fill(Array.from({ length: 8 }, (_, i) => `line ${i + 1}`).join('\n'));
+    await page.waitForTimeout(150);
+    expectFits(await measure(page), 'grown composer');
+  });
+  test('with a wrapped error reason in the composer slot @ 320x640, keyboard 290px', async ({ page }) => {
+    const size = { width: 320, height: 640 };
+    await installFakeVisualViewport(page);
+    await open(page, 'orch=error&errlong=1&tx=conversation&tray=worst', size);
+    await openSheet(page, size);
+    await page.evaluate(() => (window as any).__setVV(640 - 290));
+    await page.waitForTimeout(150);
+    const m = await measure(page);
+    const slot = await page.locator('.ct-orch-sheet-composer').evaluate((el) => { const b = el.getBoundingClientRect(); const s = document.querySelector('.ct-orch-sheet')!.getBoundingClientRect(); return { b: b.bottom, sb: s.bottom }; });
+    expect(slot.b).toBeLessThanOrEqual(slot.sb + 0.75);
+    expect(m.sheet.b).toBeLessThanOrEqual(m.vvBottom + 0.75);
+    expect(m.sheet.t).toBeGreaterThanOrEqual(-0.75);
+  });
+});
+
 test.describe('D2: landscape phone (pill mode): the field and the sheet lift above the soft keyboard', () => {
   for (const size of [{ width: 844, height: 390 }, { width: 667, height: 375 }]) {
     test(`@ ${size.width}x${size.height} with a 170px keyboard`, async ({ page }) => {

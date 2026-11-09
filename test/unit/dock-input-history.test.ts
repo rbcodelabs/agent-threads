@@ -86,4 +86,13 @@ describe('InputHistory', () => {
     h.next();
     expect(h.shown).toBeUndefined();
   });
+
+  it('clear() forgets everything (secrets typed into a message do not outlive the dock)', () => {
+    const h = filled('token abc', 'two');
+    h.previous('x');
+    h.clear();
+    expect(h.entries).toEqual([]);
+    expect(h.browsing).toBe(false);
+    expect(h.previous('')).toBeUndefined();
+  });
 });

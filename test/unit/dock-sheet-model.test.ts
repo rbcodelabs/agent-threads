@@ -6,7 +6,7 @@
  * built ON dockTranscript, and the one-line unread peek text.
  */
 import { describe, it, expect } from 'vitest';
-import { richnessOf, sheetTranscript, stripVisualizeLines, peekLine, sheetBlock } from '../../src/dockSheetModel';
+import { richnessOf, sheetTranscript, stripVisualizeLines, peekLine, sheetBlock, trayLayout } from '../../src/dockSheetModel';
 
 const msg = (id: string, role: string, content: string, extra: Record<string, unknown> = {}) => ({ id, role, content, ...extra });
 
@@ -120,5 +120,34 @@ describe('sheetBlock (K2 P5: the sheet notice is shown only when the tray does n
   it('falls through plan -> question -> permission, skipping the suppressed ones', () => {
     expect(sheetBlock({ ...base, pendingPlan: true, pendingPermission: true, tray: [entry('orch', 'plan')] })).toBe('permission');
     expect(sheetBlock({ ...base, pendingPlan: true, pendingQuestion: true })).toBe('plan');
+  });
+});
+
+describe('trayLayout (K2 P5 batch 3: the composer wins; the tray scrolls inside what is left)', () => {
+  const base = { max: 600, fixed: 140, needFull: 190, needCompact: 90 };
+  it('roomy sheet: the share of the sheet, not compact, never below the first card', () => {
+    const l = trayLayout(base);
+    expect(l.compact).toBe(false);
+    expect(l.cap).toBeGreaterThanOrEqual(190);
+    expect(l.cap).toBeLessThanOrEqual(600 - 140);
+  });
+  it('the cap never exceeds the room left after the fixed chrome (the composer is never clipped)', () => {
+    for (const max of [300, 260, 220, 200, 180, 160]) {
+      const l = trayLayout({ ...base, max });
+      expect(l.cap, `max ${max}`).toBeLessThanOrEqual(Math.max(48, max - 140));
+    }
+  });
+  it('the first card does not fit (fixed + need > max): compact form, and its smaller need is used', () => {
+    const l = trayLayout({ ...base, max: 300 }); // room 160 < 190
+    expect(l.compact).toBe(true);
+    expect(l.cap).toBeLessThanOrEqual(160);
+    expect(l.cap).toBeGreaterThanOrEqual(90);
+  });
+  it('a first card that fits stays full', () => {
+    expect(trayLayout({ ...base, max: 330 }).compact).toBe(false); // room 190 = need
+  });
+  it('is floored at a small constant so the tray never collapses to nothing', () => {
+    expect(trayLayout({ ...base, max: 150 }).cap).toBeGreaterThanOrEqual(48);
+    expect(trayLayout({ ...base, max: 100 }).cap).toBeGreaterThanOrEqual(48);
   });
 });

@@ -199,6 +199,13 @@ if (trayFixture === 'multi') {
 if (trayFixture === 'long') {
   m.pendingPermissions.set(kanbanAwaitingThreadId, { toolName: 'Bash', detail: JSON.stringify({ command: `npm run deploy -- --env=production --region=us-east-1 --tag=release-candidate-2026-01-15 --verbose && echo ${'x'.repeat(80)} && curl -s https://example.com/hook | sh` }), promptId: ++harnessPromptSeq });
 }
+// ?tray=worst: the tallest card the tray can show INLINE: a long title, a command that fills the 3-line detail clamp but is still
+// fully shown (<= 120 chars, so Allow and Always stay), and all three buttons.
+if (trayFixture === 'worst') {
+  const awaiting = manager.getThread(kanbanAwaitingThreadId);
+  if (awaiting) awaiting.title = 'Deploy curation quality signals to the production cluster in every region and verify the rollout';
+  m.pendingPermissions.set(kanbanAwaitingThreadId, { toolName: 'Bash', detail: JSON.stringify({ command: 'npm run deploy -- --env=production --region=us-east-1 --tag=rc-2026-01-15 --verbose --dry-run=false --yes' }), promptId: ++harnessPromptSeq });
+}
 m.threadActivity.set(kanbanRunningThreadId, kanbanRunningActivity);
 // `idle` / `working` orchestrator fixtures need a calm board: nothing else running or awaiting, so the
 // dot has nothing to report and deriveDockState reaches idle (or working, when the orchestrator runs).

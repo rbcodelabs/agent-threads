@@ -76,13 +76,12 @@ describe('reduced-motion audit of the dock stylesheet rules', () => {
     expect(covered, `${selector} animates but no "@media (prefers-reduced-motion: reduce)" rule with this selector turns it off`).toBe(true);
   });
 
-  it.each(animated.map((a) => [a.selector, a] as const))('%s: its reduce override comes AFTER the base rule and is at least as specific', (selector) => {
+  it.each(animated.map((a) => [a.selector, a] as const))('%s: its reduce override comes AFTER the base rule in source order', (selector) => {
     const baseAt = Math.max(...rules.map((r, i) => (!isReduce(r.media) && !isNoPref(r.media) && r.selectors.includes(selector) && MOTION_DECL.test(r.body) ? i : -1)));
     const reduceAt = rules.map((r, i) => (isReduce(r.media) && r.selectors.includes(selector) && NEUTRALISES.test(r.body) ? i : -1)).filter((i) => i >= 0);
     expect(reduceAt.length).toBeGreaterThan(0);
     expect(Math.min(...reduceAt), `${selector}: a reduce rule before its base rule loses the cascade`).toBeGreaterThan(baseAt);
-    // Same selector text on both sides => equal specificity; this guards a future edit that renames only one side.
-    expect(specificity(selector)).toBeGreaterThanOrEqual(specificity(selector));
+    // (The override is matched by the SAME selector text, so its specificity equals the base rule's by construction.)
   });
 
   it('specificity() orders ids > classes > elements', () => {

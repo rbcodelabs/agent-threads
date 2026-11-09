@@ -10,6 +10,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { OrchestratorDock, type OrchestratorDockDeps } from '../../src/orchestratorDock';
 import { createDraftStore, MAX_DRAFT_CHARS, type DraftStore } from '../../src/dockDraftStore';
 import type { Thread } from '../../src/types';
+import { Platform } from 'obsidian';
 
 type Ev = { type: string; [k: string]: unknown };
 type Listener = (threadId: string, event: Ev) => void;
@@ -909,5 +910,142 @@ describe('7. soft keyboard: the narrow sheet lifts above it', () => {
     Object.defineProperty(window, 'visualViewport', { configurable: true, value: undefined });
     const t = setup({ mode: 'orb' });
     expect(() => t.dock.openSheet()).not.toThrow();
+  });
+});
+
+describe('batch 3 advisories', () => {
+  function fakeViewport(height: number) {
+    const vv = Object.assign(new EventTarget(), { height, offsetTop: 0, width: 390, scale: 1 });
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: vv });
+    return vv;
+  }
+  function sized(t: T, h: number, pillH = 0) {
+    Object.defineProperty(t.root, 'clientHeight', { configurable: true, value: h });
+    t.root.getBoundingClientRect = () => ({ top: 0, left: 0, right: 390, bottom: h, width: 390, height: h, x: 0, y: 0, toJSON() {} }) as DOMRect;
+    if (pillH) Object.defineProperty(t.stage, 'offsetHeight', { configurable: true, value: pillH });
+  }
+  const rootInset = (t: T) => t.root.style.getPropertyValue('--ct-orch-kbd-inset');
+  afterEach(() => { Platform.isMobile = false; });
+
+  it('1: a keyboard taller than the room never leaves the sheet uncapped (floor, not 60vh)', () => {
+    const vv = fakeViewport(844);
+    const t = setup({ mode: 'pill' });
+    sized(t, 390, 48);
+    t.dock.openSheet();
+    vv.height = 20; vv.dispatchEvent(new Event('resize')); // a huge inset: room above the lifted pill <= 0
+    const max = t.q('.ct-orch-sheet')!.style.getPropertyValue('--ct-orch-sheet-max');
+    expect(max).not.toBe('');
+    expect(parseInt(max, 10)).toBeGreaterThanOrEqual(96);
+  });
+
+  describe('2: touch-focus keyboard tracking (Platform.isMobile)', () => {
+    it('focus starts tracking (sheet closed), blur stops it, moving into a chip does not', () => {
+      Platform.isMobile = true;
+      const vv = fakeViewport(844);
+      const remove = vi.spyOn(vv, 'removeEventListener');
+      const t = setup({ mode: 'pill' });
+      sized(t, 844, 48);
+      t.input().focus();
+      vv.height = 508; vv.dispatchEvent(new Event('resize'));
+      expect(rootInset(t)).toBe('336px'); // the sheet is CLOSED: tracking came from the focus
+      const chip = document.createElement('button');
+      t.q('.ct-orch-chips')!.appendChild(chip);
+      t.input().dispatchEvent(new FocusEvent('blur', { relatedTarget: chip }));
+      expect(remove).not.toHaveBeenCalled();
+      t.input().dispatchEvent(new FocusEvent('blur'));
+      expect(remove).toHaveBeenCalled();
+      expect(rootInset(t)).toBe('');
+    });
+
+    it('closing the sheet keeps tracking while the field is focused; destroy stops it', () => {
+      Platform.isMobile = true;
+      const vv = fakeViewport(844);
+      const remove = vi.spyOn(vv, 'removeEventListener');
+      const t = setup({ mode: 'pill' });
+      sized(t, 844, 48);
+      t.input().focus();
+      t.dock.openSheet();
+      t.dock.closeSheet();
+      expect(document.activeElement).toBe(t.input());
+      vv.height = 508; vv.dispatchEvent(new Event('resize'));
+      expect(rootInset(t)).toBe('336px');
+      expect(remove).not.toHaveBeenCalled();
+      t.dock.destroy();
+      expect(remove).toHaveBeenCalled();
+      expect(rootInset(t)).toBe('');
+    });
+
+    it('without Platform.isMobile focus does not start tracking', () => {
+      Platform.isMobile = false;
+      const vv = fakeViewport(844);
+      const add = vi.spyOn(vv, 'addEventListener');
+      const t = setup({ mode: 'pill' });
+      t.input().focus();
+      expect(add).not.toHaveBeenCalled();
+    });
+  });
+
+  it('3: a late second dock seeing the swap does not clear the draft already typed for the new orchestrator', () => {
+    const drafts = createDraftStore();
+    const a = setup({ drafts });
+    const hostB = document.createElement('div');
+    a.root.appendChild(hostB);
+    const dockB = new OrchestratorDock(hostB, a.deps);
+    dockB.mount();
+    type(a, 'for the first');
+    a.state.orchId = 'orch2';
+    a.dock.refresh(); // A notices the swap first: clears the old draft
+    type(a, 'new draft for orch2');
+    dockB.refresh(); // B notices late
+    expect(drafts.get('orch2')).toBe('new draft for orch2');
+    expect((hostB.querySelector('textarea.ct-orch-input') as HTMLTextAreaElement).value).toBe('new draft for orch2');
+  });
+
+  it('4: a failed send never restores its text into a different orchestrator\'s draft', async () => {
+    const drafts = createDraftStore();
+    const t = setup({ drafts });
+    let fail!: (e: Error) => void;
+    t.manager.sendMessage.mockImplementationOnce(() => new Promise<void>((_r, rej) => { fail = rej; }));
+    type(t, 'for the first orchestrator');
+    key(t.input(), 'Enter');
+    t.state.orchId = 'orch2';
+    t.dock.refresh();
+    fail(new Error('boom'));
+    await flush();
+    expect(drafts.get('orch2')).toBe('');
+    expect(t.input().value).toBe('');
+  });
+
+  it('5: the keyboard variable is removed from the view root even if the host was detached before destroy', () => {
+    const vv = fakeViewport(844);
+    const t = setup({ mode: 'orb' });
+    sized(t, 844);
+    t.dock.openSheet();
+    vv.height = 508; vv.dispatchEvent(new Event('resize'));
+    expect(rootInset(t)).toBe('336px');
+    t.stage.remove(); // the pill (and the dock host in it) was detached from the board root first
+    t.dock.destroy();
+    expect(rootInset(t)).toBe('');
+  });
+
+  it('6: the pill lift is clamped so the pill cannot leave a tiny view, and the pill carries a class (no :has() needed)', () => {
+    const vv = fakeViewport(390);
+    const t = setup({ mode: 'pill' });
+    sized(t, 390, 48);
+    expect(t.stage.classList.contains('ct-orch-pill-mode')).toBe(true);
+    t.dock.openSheet();
+    vv.height = 10; vv.dispatchEvent(new Event('resize')); // inset 380
+    expect(rootInset(t)).toBe(`${390 - 48 - 36}px`);
+    t.state.mode = 'orb'; t.dock.relayout();
+    expect(t.stage.classList.contains('ct-orch-pill-mode')).toBe(false);
+  });
+
+  it('8: the recall history is cleared when the dock is destroyed', async () => {
+    const t = setup();
+    await sendText(t, 'secret token');
+    const history = (t.dock as unknown as { history: { entries: readonly string[] } }).history;
+    expect(history.entries).toEqual(['secret token']);
+    t.dock.destroy();
+    expect(history.entries).toEqual([]);
   });
 });

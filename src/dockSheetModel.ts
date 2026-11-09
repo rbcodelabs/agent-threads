@@ -100,3 +100,8 @@ export function sheetBlock(i: {
   if (i.pendingPermission && !ownPermissionWithButtons) return 'permission';
   return null;
 }
+
+// K2 P5 batch 3 scaffold: signature only.
+export function trayLayout(_i: { max: number; fixed: number; needFull: number; needCompact: number }): { cap: number; compact: boolean } {
+  return { cap: 0, compact: false };
+}
