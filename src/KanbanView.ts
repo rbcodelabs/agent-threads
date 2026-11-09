@@ -383,6 +383,7 @@ export class KanbanView extends ItemView {
       // open=false: set up without stealing focus into the chat view; the dock then focuses its own field.
       ensureOrchestrator: () => plugin.ensureOrchestratorThread(false),
       openThread: (id) => plugin.openThreadInChatView(id),
+      openLink: (href) => { void this.app.workspace.openLinkText(href, '', false); },
       mode: () => this.dockMode,
       daemons: plugin.daemonRegistry
         ? {
@@ -396,6 +397,7 @@ export class KanbanView extends ItemView {
     // Narrow boards collapse the pill to the orb (+ New thread): re-derive when the view width crosses 640px.
     if (typeof ResizeObserver !== 'undefined') {
       this.dockResizeObserver = new ResizeObserver(() => {
+        this.dock?.layoutChanged(); // the sheet's max height follows the view height
         // One measure (clientWidth) for open AND resize: contentRect is fractional and padding-excluded, so mixing the two
         // could flip the mode at exactly 640px.
         const next = dockModeForWidth(root.clientWidth);

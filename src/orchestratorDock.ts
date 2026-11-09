@@ -6,8 +6,9 @@
  * element it is given and talks to the world only through `OrchestratorDockDeps`),
  * so the Agent Board's floating pill is host #1 and a list-view dock can reuse it.
  *
- * P2 scope: shell only (no reply sheet). State comes from orchestratorDockModel;
- * this class owns the DOM, the subscriptions and the interim send hand-off.
+ * State comes from orchestratorDockModel; this class owns the pill DOM, the subscriptions and the
+ * controller logic for the reply sheet (orchestratorDockSheet.ts is its presentation): sheet open
+ * state, the streaming buffer, the coalesced-message set, unread + peek, suggestion chips, Stop.
  */
 import { Notice, Platform, setIcon } from 'obsidian';
 import type { ThreadManager } from './ThreadManager';
@@ -19,10 +20,16 @@ import {
   attentionItems,
   deriveDockState,
   needsYouCount,
+  suggestionChips,
   tooltipText,
+  unreadState,
   type AttentionCandidate,
+  type AttentionItem,
   type DockState,
+  type SuggestionChip,
 } from './orchestratorDockModel';
+import { peekLine, sheetTranscript } from './dockSheetModel';
+import { DockSheet, type SheetBlock, type SheetView } from './orchestratorDockSheet';
 
 export type DockMode = 'pill' | 'orb';
 
@@ -37,7 +44,8 @@ export function dockModeForWidth(width: number): DockMode {
 export interface OrchestratorDockDeps {
   manager: Pick<ThreadManager,
     'getThread' | 'isRunning' | 'hasPendingPermission' | 'hasPendingQuestion' | 'hasPendingPlan'
-    | 'hasActiveBackgroundTasks' | 'sendMessage' | 'subscribe'>;
+    | 'hasActiveBackgroundTasks' | 'sendMessage' | 'subscribe' | 'interrupt' | 'getQueuedMessages'
+    | 'removeQueuedMessageAt' | 'getThreadActivity'>;
   /** Board threads (the host applies its own filter, e.g. isKanbanThread): the source of total/running/attention. */
   listThreads(): Thread[];
   hasPendingWakeup(threadId: string): boolean;
@@ -46,6 +54,8 @@ export interface OrchestratorDockDeps {
   ensureOrchestrator(): Promise<void>;
   /** plugin.openThreadInChatView */
   openThread(threadId: string): void | Promise<void>;
+  /** Opens a `[[note]]` wikilink from an orchestrator reply (workspace.openLinkText). Absent: wikilinks are inert. */
+  openLink?(href: string): void;
   mode(): DockMode;
   /** Absent (or null) means local-only: the orchestrator can then never be offline. */
   daemons?: {
@@ -73,6 +83,10 @@ const REFRESH_EVENTS: ReadonlySet<string> = new Set([
   'remote_pending_changed',
 ]);
 
+/** Orchestrator-thread events that only change the sheet (not the board-wide dock state). */
+const SHEET_EVENTS: ReadonlySet<string> = new Set(['queued', 'dequeued', 'tool_use', 'tool_progress', 'status', 'stream_reset']);
+
+const PEEK_MS = 8000;
 const MAX_ERROR_CHARS = 60;
 /** 4 lines at 20px with NO vertical padding on the scroller (scrolled text shows through padding): a long draft clips on a line boundary. */
 const MAX_INPUT_PX = 80;
@@ -88,6 +102,24 @@ export class OrchestratorDock {
   private inputEl: HTMLTextAreaElement | null = null;
   private actionEl: HTMLButtonElement | null = null;
   private reasonEl: HTMLElement | null = null;
+  private stopEl: HTMLButtonElement | null = null;
+  private sendEl: HTMLButtonElement | null = null;
+  private sheet: DockSheet | null = null;
+  private peekEl: HTMLElement | null = null;
+  private peekTextEl: HTMLElement | null = null;
+  private chipsEl: HTMLElement | null = null;
+  private peekTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Orchestrator id the per-thread state below belongs to; a change resets it. */
+  private trackedId: string | undefined;
+  private streamBuf = '';
+  /** User message ids that landed while a turn was running (coalesced into it): "Sent, will be picked up". */
+  private readonly pickupIds = new Set<string>();
+  /** Latest assistant message id the user has seen; per dock instance, seeded when the thread is first seen. */
+  private lastSeenId: string | undefined;
+  private seeded = false;
+  private stopping = false;
+  private attention: AttentionItem[] = [];
 
   private bodyKind: BodyKind | null = null;
   private state: DockState = 'none';
@@ -129,9 +161,16 @@ export class OrchestratorDock {
 
     this.dotEl = root.createSpan({ cls: 'ct-orch-dot', attr: { role: 'img', 'data-testid': 'orchestrator-dot' } });
 
-    this.unsubscribeManager = this.deps.manager.subscribe((_threadId, event) => {
-      if (!REFRESH_EVENTS.has(event.type)) return;
-      this.refresh();
+    this.mountSheetParts();
+    root.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.sheet?.isOpen) { e.stopPropagation(); this.closeSheet(); }
+    });
+
+    this.unsubscribeManager = this.deps.manager.subscribe((threadId, event) => {
+      const id = this.deps.getOrchestratorThreadId();
+      if (id && threadId === id) this.onOrchestratorEvent(event as { type: string; [k: string]: unknown });
+      if (REFRESH_EVENTS.has(event.type)) this.refresh();
+      else if (id && threadId === id && SHEET_EVENTS.has(event.type)) this.renderSheet();
     });
     this.unsubscribeDaemons = this.deps.daemons?.onState(() => this.refresh()) ?? null;
     this.refresh();
@@ -144,6 +183,13 @@ export class OrchestratorDock {
     this.unsubscribeDaemons?.();
     this.unsubscribeManager = null;
     this.unsubscribeDaemons = null;
+    if (this.peekTimer) clearTimeout(this.peekTimer);
+    this.peekTimer = null;
+    this.sheet?.destroy();
+    this.peekEl?.remove();
+    this.chipsEl?.remove();
+    this.sheet = this.peekEl = this.chipsEl = this.peekTextEl = null;
+    this.stopEl = this.sendEl = null;
     this.rootEl?.remove();
     this.statusEl?.remove();
     this.rootEl = null;
@@ -161,7 +207,7 @@ export class OrchestratorDock {
   /** Cmd+J target. Safe to call when already focused. */
   focusField(): void {
     if (this.destroyed || !this.rootEl) return;
-    if (this.currentMode === 'orb') { void this.handOff(); return; }
+    if (this.currentMode === 'orb') { void this.openOrSetUp(); return; }
     const input = this.inputEl;
     if (input && input.ownerDocument.activeElement === input) { input.select(); return; }
     (input ?? this.actionEl)?.focus();
@@ -183,11 +229,14 @@ export class OrchestratorDock {
         plan: manager.hasPendingPlan(t.id),
       },
     }));
-    const needsYou = needsYouCount(attentionItems(candidates));
+    this.attention = attentionItems(candidates);
+    const needsYou = needsYouCount(this.attention);
     const running = threads.filter((t) => manager.isRunning(t.id)).length;
 
     const orchestratorId = this.deps.getOrchestratorThreadId();
     const thread = orchestratorId ? manager.getThread(orchestratorId) : undefined;
+    this.trackOrchestrator(orchestratorId, thread);
+    const unread = thread ? unreadState(sheetTranscript(thread.messages), this.lastSeenId) : { hasUnread: false, latestAssistantId: undefined };
     const daemon = thread?.remote ? this.deps.daemons?.stateOf(thread.remote.daemonId) : undefined;
     this.state = deriveDockState({
       orchestratorId,
@@ -195,10 +244,10 @@ export class OrchestratorDock {
       isRunning: !!orchestratorId && manager.isRunning(orchestratorId),
       daemon,
       needsYouCount: needsYou,
-      // No sheet in P2 to "read" a reply in (the hand-off opens the full thread); P3 wires unreadState().
-      hasUnreadReply: false,
+      hasUnreadReply: unread.hasUnread,
     });
     const previousMode = this.currentMode;
+    if (this.state === 'none' && this.sheet?.isOpen) this.closeSheet(false);
     this.currentMode = this.deps.mode();
 
     const root = this.rootEl;
@@ -213,23 +262,255 @@ export class OrchestratorDock {
     this.orbEl.toggleClass('ct-orch-orb-spinning', !alertTint && (running > 0 || (!!orchestratorId && manager.isRunning(orchestratorId))));
 
     const tip = tooltipText({ running, total: threads.length, needsYou });
-    this.dotEl.toggleClass('ct-orch-dot-attention', needsYou > 0);
-    this.dotEl.setAttribute('title', tip);
-    this.dotEl.setAttribute('aria-label', tip);
+    const dotTip = unread.hasUnread ? `${tip} · unread reply` : tip;
+    this.dotEl.toggleClass('ct-orch-dot-attention', needsYou > 0 || unread.hasUnread);
+    this.dotEl.setAttribute('title', dotTip);
+    this.dotEl.setAttribute('aria-label', dotTip);
 
+    this.sheet?.el.setAttribute('data-mode', this.currentMode);
     this.renderBody(thread);
     this.placeBody();
     // A draft edited while the field was hidden (orb mode) was measured at scrollHeight 0: re-measure now it is visible.
     if (previousMode === 'orb' && this.currentMode === 'pill' && this.inputEl) this.autosize(this.inputEl);
+    this.updateInputControls();
+    this.renderSheet();
+    this.renderChips();
   }
+
+  // ── Per-orchestrator state ────────────────────────────────────────────────
+
+  /** A new orchestrator thread (first sight, re-setup) starts with a clean buffer, and its history counts as read. */
+  private trackOrchestrator(id: string | undefined, thread: Thread | undefined): void {
+    if (id !== this.trackedId) {
+      this.trackedId = id;
+      this.streamBuf = '';
+      this.pickupIds.clear();
+      this.seeded = false;
+      this.lastSeenId = undefined;
+      this.stopping = false;
+    }
+    if (!thread) return;
+    const latest = unreadState(sheetTranscript(thread.messages), undefined).latestAssistantId;
+    if (!this.seeded || this.sheet?.isOpen) { this.lastSeenId = latest; this.seeded = true; }
+  }
+
+  private onOrchestratorEvent(event: { type: string; [k: string]: unknown }): void {
+    const id = this.deps.getOrchestratorThreadId();
+    if (!id) return;
+    switch (event.type) {
+      case 'token': {
+        const first = this.streamBuf === '';
+        this.streamBuf += String(event.text ?? '');
+        if (this.sheet?.isOpen) {
+          this.sheet.setStreaming(this.streamBuf);
+          if (first) this.sheet.announce('Orchestrator is replying');
+        }
+        break;
+      }
+      case 'stream_reset':
+      case 'streaming_start':
+        this.streamBuf = '';
+        break;
+      case 'user_message_added': {
+        // The event precedes streaming_start, so isRunning() still reflects the PRIOR state: true means the
+        // manager coalesced this message into the turn in flight (ADR-0002), and it is not yet answered.
+        const msg = event.message as { id?: string } | undefined;
+        if (msg?.id && this.deps.manager.isRunning(id)) this.pickupIds.add(msg.id);
+        break;
+      }
+      case 'message':
+        this.streamBuf = '';
+        this.onAssistantMessage(event.message as { role?: string; content?: string } | undefined);
+        break;
+      case 'interrupted':
+      case 'done':
+      case 'error':
+      case 'run_state_settled':
+        this.streamBuf = '';
+        this.pickupIds.clear();
+        if (event.type !== 'done') this.stopping = false;
+        break;
+      case 'tool_use':
+      case 'tool_progress':
+      case 'status':
+        this.sheet?.setActivity(this.deps.manager.getThreadActivity(id) ?? '');
+        break;
+    }
+  }
+
+  /** Assistant text arrived: read at once when the sheet is open, otherwise unread + a one-line peek. */
+  private onAssistantMessage(message: { role?: string; content?: string } | undefined): void {
+    if (message?.role !== 'assistant') return;
+    const id = this.deps.getOrchestratorThreadId();
+    const thread = id ? this.deps.manager.getThread(id) : undefined;
+    if (!thread) return;
+    const u = unreadState(sheetTranscript(thread.messages), this.lastSeenId);
+    const line = peekLine(message.content ?? '', this.threadRefs());
+    if (this.sheet?.isOpen) {
+      this.lastSeenId = u.latestAssistantId;
+      if (line) this.sheet.announce(`Orchestrator replied: ${line}`, true);
+    } else if (u.hasUnread && line) {
+      this.showPeek(line);
+    }
+  }
+
+  private threadRefs(): { id: string; title: string }[] {
+    return this.deps.listThreads().map((t) => ({ id: t.id, title: t.title }));
+  }
+
+  // ── Sheet, peek, chips ────────────────────────────────────────────────────
+
+  private mountSheetParts(): void {
+    const parent = this.host.parentElement ?? this.host;
+    this.sheet = new DockSheet(parent, {
+      close: () => this.closeSheet(),
+      openFull: () => { const id = this.deps.getOrchestratorThreadId(); if (id) void this.openQuietly(id); },
+      openThread: (threadId) => { void this.openQuietly(threadId); },
+      openLink: this.deps.openLink ? (href) => this.deps.openLink?.(href) : undefined,
+      removeWaiting: (index, text) => this.removeWaiting(index, text),
+      pickChip: (chip) => { void this.submitText(chip.prompt); },
+    });
+    const peek = parent.createDiv({ cls: 'ct-orch-peek', attr: { role: 'status', 'data-testid': 'orchestrator-peek' } });
+    peek.hidden = true;
+    const orb = peek.createSpan({ cls: 'ct-orch-peek-orb', attr: { 'aria-hidden': 'true' } });
+    setIcon(orb, 'sparkles');
+    const text = peek.createSpan('ct-orch-peek-text');
+    this.peekTextEl = text;
+    peek.createEl('button', { cls: 'ct-orch-peek-open', text: 'Open', attr: { type: 'button' } })
+      .addEventListener('click', () => this.openSheet());
+    peek.createEl('button', { cls: 'ct-orch-peek-dismiss', text: '✕', attr: { type: 'button', 'aria-label': 'Dismiss' } })
+      .addEventListener('click', () => this.hidePeek());
+    this.peekEl = peek;
+
+    const chips = parent.createDiv({ cls: 'ct-orch-chips', attr: { 'data-testid': 'orchestrator-chips' } });
+    chips.hidden = true;
+    // Keep focus in the field while a chip is pressed, so the strip does not vanish before the click lands.
+    chips.addEventListener('mousedown', (e) => e.preventDefault());
+    this.chipsEl = chips;
+  }
+
+  private hasTranscript(): boolean {
+    const id = this.deps.getOrchestratorThreadId();
+    const thread = id ? this.deps.manager.getThread(id) : undefined;
+    return !!thread && sheetTranscript(thread.messages).length > 0;
+  }
+
+  openSheet(): void {
+    if (this.destroyed || !this.sheet || !this.deps.getOrchestratorThreadId()) return;
+    const wasOpen = this.sheet.isOpen;
+    this.sheet.open();
+    this.hidePeek();
+    this.layoutChanged();
+    this.refresh();
+    if (!wasOpen && this.currentMode === 'orb') this.inputEl?.focus();
+  }
+
+  closeSheet(returnFocus = true): void {
+    if (this.destroyed || !this.sheet?.isOpen) return;
+    this.sheet.close();
+    this.refresh();
+    if (!returnFocus) return;
+    if (this.currentMode === 'orb') this.orbEl.focus();
+    else (this.inputEl ?? this.actionEl)?.focus();
+  }
+
+  /** Re-measure the sheet's max height: 60% of the view, never taller than the space above the pill. */
+  layoutChanged(): void {
+    if (this.destroyed || !this.sheet) return;
+    const root = this.host.closest('.ct-agents-root') as HTMLElement | null;
+    const h = root?.clientHeight ?? 0;
+    if (!h) { this.sheet.setMaxHeight(null); return; }
+    const pill = (this.host.parentElement ?? this.host).offsetHeight;
+    // Narrow: the bottom sheet covers the pill, so only the 60% cap applies. Wide: it sits above the pill (36px offset + 8px gap).
+    const room = this.currentMode === 'orb' ? h : h - 36 - pill - 16;
+    this.sheet.setMaxHeight(Math.min(h * 0.6, room));
+  }
+
+  private renderSheet(): void {
+    const sheet = this.sheet;
+    if (!sheet || !sheet.isOpen) return;
+    const id = this.deps.getOrchestratorThreadId();
+    const thread = id ? this.deps.manager.getThread(id) : undefined;
+    if (!id || !thread) return;
+    const { manager } = this;
+    const entries = sheetTranscript(thread.messages);
+    const live = new Set(entries.map((e) => e.id));
+    for (const pid of [...this.pickupIds]) if (!live.has(pid)) this.pickupIds.delete(pid); // rolled back
+    const blocked: SheetBlock = manager.hasPendingPlan(id) ? 'plan' : manager.hasPendingQuestion(id) ? 'question' : manager.hasPendingPermission(id) ? 'permission' : null;
+    const view: SheetView = {
+      entries: entries.map((e) => ({ ...e, pickup: this.pickupIds.has(e.id) })),
+      streaming: this.streamBuf,
+      running: manager.isRunning(id),
+      activity: manager.getThreadActivity(id) ?? '',
+      waiting: manager.getQueuedMessages(id).map((q) => q.text),
+      blocked,
+      threads: this.threadRefs(),
+      chips: suggestionChips(this.attention),
+      mode: this.currentMode,
+    };
+    sheet.render(view);
+  }
+
+  private get manager(): OrchestratorDockDeps['manager'] { return this.deps.manager; }
+
+  private removeWaiting(index: number, text: string): void {
+    const id = this.deps.getOrchestratorThreadId();
+    if (!id) return;
+    // The manager emits no event on removal and indexes shift as items dequeue: verify the row is still what the user saw.
+    if (this.manager.getQueuedMessages(id)[index]?.text === text) this.manager.removeQueuedMessageAt(id, index);
+    this.renderSheet();
+  }
+
+  private showPeek(line: string): void {
+    if (!this.peekEl || !this.peekTextEl) return;
+    this.peekTextEl.empty();
+    this.peekTextEl.createEl('strong', { text: 'Orchestrator' });
+    this.peekTextEl.createSpan({ text: ` · ${line}` });
+    this.peekEl.hidden = false;
+    if (this.peekTimer) clearTimeout(this.peekTimer);
+    this.peekTimer = setTimeout(() => this.hidePeek(), PEEK_MS);
+  }
+
+  private hidePeek(): void {
+    if (this.peekTimer) clearTimeout(this.peekTimer);
+    this.peekTimer = null;
+    if (this.peekEl) this.peekEl.hidden = true;
+  }
+
+  /** The "Try:" strip above the pill: field focused, nothing said yet, sheet closed (narrow shows chips inside the sheet instead). */
+  private renderChips(): void {
+    const el = this.chipsEl;
+    if (!el) return;
+    const show = this.currentMode === 'pill' && this.bodyKind === 'input' && !!this.inputEl
+      && document.activeElement === this.inputEl && !this.sheet?.isOpen && !this.hasTranscript();
+    if (!show) { el.hidden = true; return; }
+    if (el.hidden || el.childElementCount === 0) {
+      el.empty();
+      el.createSpan({ cls: 'ct-orch-chips-label', text: 'Try:' });
+      for (const chip of suggestionChips(this.attention)) this.buildChip(el, chip);
+    }
+    el.hidden = false;
+  }
+
+  private buildChip(el: HTMLElement, chip: SuggestionChip): void {
+    el.createEl('button', { cls: 'ct-orch-chip', text: chip.label, attr: { type: 'button' } })
+      .addEventListener('click', () => { void this.submitText(chip.prompt); });
+  }
+
 
   /** Pill: the body lives in the field. Orb + none/error/offline: it moves to the full-width status row above the pill's row. */
   private placeBody(): void {
     const status = this.statusEl;
     if (!status) return;
-    const wantStatus = this.currentMode === 'orb' && this.bodyKind !== 'input';
-    const target = wantStatus ? status : this.fieldEl;
-    if (this.bodyEl.parentElement !== target) target.append(this.bodyEl);
+    const inSheet = this.currentMode === 'orb' && !!this.sheet?.isOpen;
+    const wantStatus = this.currentMode === 'orb' && !inSheet && this.bodyKind !== 'input';
+    // Narrow + sheet open: the ONE body (input, or P2's reason + action) lives in the bottom sheet's composer.
+    const target = inSheet && this.sheet ? this.sheet.composerSlot : wantStatus ? status : this.fieldEl;
+    if (this.bodyEl.parentElement !== target) {
+      const hadFocus = !!this.inputEl && document.activeElement === this.inputEl;
+      target.append(this.bodyEl);
+      if (hadFocus) this.inputEl?.focus();
+    }
     status.hidden = !wantStatus;
     status.dataset.body = wantStatus ? (this.bodyKind ?? '') : '';
   }
@@ -262,7 +543,7 @@ export class OrchestratorDock {
     const short = clipped.replace(/\s*\(([^)]*)\)/g, (_m, inner: string) => `\u00a0(${inner.replace(/\s/g, '\u00a0')})`);
     return {
       text: `Orchestrator errored — ${short || (thread?.authRequired ? 'sign-in needed' : 'see the thread')}`,
-      action: id ? { label: 'Open thread', run: () => { void this.handOff(); } } : undefined,
+      action: id ? { label: 'Open thread', run: () => { void this.openThreadFull(); } } : undefined,
     };
   }
 
@@ -279,6 +560,7 @@ export class OrchestratorDock {
     this.stashDraft();
     this.bodyEl.empty();
     this.inputEl = null;
+    this.stopEl = this.sendEl = null;
     this.reasonEl = this.bodyEl.createSpan({ cls: 'ct-orch-reason', text, attr: { title: text } });
     this.actionEl = null;
     if (action) {
@@ -308,8 +590,19 @@ export class OrchestratorDock {
       this.autosize(input);
     });
     input.addEventListener('keydown', (e) => this.onKeydown(e, input));
+    input.addEventListener('click', () => { if (this.currentMode === 'pill' && !this.sheet?.isOpen && this.hasTranscript()) this.openSheet(); });
+    input.addEventListener('focus', () => this.renderChips());
+    input.addEventListener('blur', () => this.renderChips());
     this.inputEl = input;
     this.bodyEl.createEl('kbd', { cls: 'ct-orch-kbd', text: Platform.isMacOS ? '⌘J' : 'Ctrl J', attr: { 'aria-hidden': 'true' } });
+    const send = this.bodyEl.createEl('button', { cls: 'ct-orch-send', text: 'Send', attr: { type: 'button' } });
+    send.hidden = true;
+    send.addEventListener('click', () => { void this.submitText(input.value); });
+    const stop = this.bodyEl.createEl('button', { cls: 'ct-orch-stop', text: 'Stop', attr: { type: 'button', 'aria-label': 'Stop the orchestrator' } });
+    stop.hidden = true;
+    stop.addEventListener('click', () => { void this.stop(); });
+    this.sendEl = send;
+    this.stopEl = stop;
     this.bodyKind = 'input';
   }
 
@@ -322,25 +615,28 @@ export class OrchestratorDock {
   // ── Actions ───────────────────────────────────────────────────────────────
 
   private onKeydown(e: KeyboardEvent, input: HTMLTextAreaElement): void {
-    if (e.key === 'Escape') { input.blur(); return; }
+    // With the sheet open Escape is handled by the sheet / dock-root listeners (close + focus back to the field).
+    if (e.key === 'Escape') { if (!this.sheet?.isOpen) input.blur(); return; }
     if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
-    void this.submit(input);
+    // Keyboard route to the transcript: Enter on an empty field opens the sheet (nothing is sent).
+    if (!input.value.trim()) { if (!this.sheet?.isOpen && this.hasTranscript()) this.openSheet(); return; }
+    void this.submitText(input.value);
   }
 
   /**
-   * INTERIM (P2): send then hand off to the full thread view. P3 replaces the
-   * hand-off with the reply sheet (the message is then shown in the sheet and
-   * the thread is not opened). Only ever called from the user's own keydown.
+   * Sends to the orchestrator and shows the reply in the sheet (no hand-off to the full thread). Only ever
+   * reached from the user's own action (Enter, Send, a chip): the dock never relays what it observes, and
+   * the manager does not dedupe, so the field is cleared synchronously and a pending send blocks another.
    */
-  private async submit(input: HTMLTextAreaElement): Promise<void> {
-    const text = input.value.trim();
+  private async submitText(raw: string): Promise<void> {
+    const text = raw.trim();
     const id = this.deps.getOrchestratorThreadId();
-    if (!text || !id || this.sending) return;
+    if (!text || !id || this.sending || this.bodyKind !== 'input') return;
     this.sending = true;
-    input.value = '';
     this.draft = '';
-    this.autosize(input);
+    if (this.inputEl) { this.inputEl.value = ''; this.autosize(this.inputEl); }
+    this.openSheet();
     try {
       await this.deps.manager.sendMessage(id, text);
     } catch (err) {
@@ -349,11 +645,39 @@ export class OrchestratorDock {
       this.draft = this.draft ? `${text}\n${this.draft}` : text;
       if (this.inputEl) { this.inputEl.value = this.draft; this.autosize(this.inputEl); }
       new Notice(`Could not send to the orchestrator: ${err instanceof Error ? err.message : String(err)}`);
-      return;
     } finally {
       this.sending = false;
     }
-    await this.openQuietly(id);
+  }
+
+  private async stop(): Promise<void> {
+    const id = this.deps.getOrchestratorThreadId();
+    if (!id || this.stopping) return;
+    this.stopping = true;
+    this.updateInputControls();
+    try {
+      await this.deps.manager.interrupt(id);
+    } catch (err) {
+      new Notice(`Could not stop the orchestrator: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.stopping = false;
+      this.refresh(); // the interrupt events already re-derived the transcript; this settles the controls
+    }
+  }
+
+  /** Stop replaces Send while the orchestrator runs (visible with the sheet open); Send exists only in the narrow sheet. */
+  private updateInputControls(): void {
+    const id = this.deps.getOrchestratorThreadId();
+    const running = !!id && this.deps.manager.isRunning(id);
+    const open = !!this.sheet?.isOpen;
+    if (this.stopEl) { this.stopEl.hidden = !(running && open); this.stopEl.disabled = this.stopping; }
+    if (this.sendEl) this.sendEl.hidden = !(this.currentMode === 'orb' && open && !running);
+    if (this.inputEl) this.inputEl.placeholder = open ? 'Reply…' : 'Ask the orchestrator…';
+  }
+
+  private async openThreadFull(): Promise<void> {
+    const id = this.deps.getOrchestratorThreadId();
+    if (id) await this.openQuietly(id);
   }
 
   private async openQuietly(id: string): Promise<void> {
@@ -363,22 +687,26 @@ export class OrchestratorDock {
   }
 
   private onOrbClick(): void {
-    if (this.currentMode === 'orb') void this.handOff();
-    else this.focusField();
+    if (this.currentMode === 'orb') {
+      if (this.sheet?.isOpen) this.closeSheet(); else void this.openOrSetUp();
+      return;
+    }
+    // Pill: the field is the control. When the field is a reason (error / offline) the orb is the way to the transcript.
+    if (this.bodyKind !== 'input' && !this.sheet?.isOpen && this.hasTranscript()) { this.openSheet(); return; }
+    this.focusField();
   }
 
-  /** Interim narrow/orb behaviour: open the orchestrator's full thread, setting it up first if needed. */
-  private async handOff(): Promise<void> {
-    let id = this.deps.getOrchestratorThreadId();
-    if (!id) {
+  /** Narrow mode / Cmd+J: open the bottom sheet, setting the orchestrator up first if there is none. */
+  private async openOrSetUp(): Promise<void> {
+    if (!this.deps.getOrchestratorThreadId()) {
       try { await this.deps.ensureOrchestrator(); } catch (err) {
         new Notice(`Could not set up the orchestrator: ${err instanceof Error ? err.message : String(err)}`);
+        this.refresh();
         return;
       }
-      id = this.deps.getOrchestratorThreadId();
       this.refresh();
     }
-    if (id) await this.openQuietly(id);
+    this.openSheet();
   }
 
   private async setUp(): Promise<void> {

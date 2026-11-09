@@ -256,6 +256,7 @@ describe('transcript is a projection of thread.messages', () => {
     t.dock.openSheet();
     t.s.running.add('orch');
     const el = t.type('first'); t.enter(el);
+    await flush();
     t.type('second'); t.enter(t.input()!);
     await vi.waitFor(() => expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(2));
     await t.manager.interrupt();
@@ -300,8 +301,8 @@ describe('streaming', () => {
     expect(live.textContent).toContain('Two things');
     t.say('Two things are waiting');
     expect(t.q('[data-streaming]')).toBeNull();
-    await vi.waitFor(() => expect(t.qa('.ct-orch-msg[data-role="assistant"]')).toHaveLength(1));
-    expect(t.qa('.ct-orch-msg[data-role="assistant"]')[0].textContent).toContain('Two things are waiting');
+    await vi.waitFor(() => expect(t.qa('.ct-orch-msg[data-role="assistant"]')[0]?.textContent).toContain('Two things are waiting'));
+    expect(t.qa('.ct-orch-msg[data-role="assistant"]')).toHaveLength(1);
   });
 
   it('streamed text is text, never markup', () => {
@@ -514,7 +515,7 @@ describe('suggestion chips', () => {
 describe('unread reply + peek', () => {
   it('history at mount is not unread', () => {
     const t = setup({ messages: [m('assistant', 'old news')] });
-    expect(t.q('.ct-orch-peek')).toBeNull();
+    expect(t.q('.ct-orch-peek')!.hidden).toBe(true);
     expect(t.dot().classList.contains('ct-orch-dot-attention')).toBe(false);
   });
 
@@ -588,7 +589,7 @@ describe('unread reply + peek', () => {
 });
 
 describe('offline / error / none with the sheet', () => {
-  it('orb mode, errored: the sheet shows P2\'s reason + action in the composer slot and no textarea', () => {
+  it('orb mode, errored: the sheet shows P2\'s reason + action in the composer slot and no textarea', async () => {
     const t = setup({ mode: 'orb', messages: [m('assistant', 'last words')], lastError: 'boom' });
     t.dock.openSheet();
     const slot = t.q('.ct-orch-sheet-composer')!;
@@ -596,15 +597,15 @@ describe('offline / error / none with the sheet', () => {
     expect(slot.querySelector('textarea')).toBeNull();
     slot.querySelector<HTMLElement>('.ct-orch-action')!.click();
     expect(t.deps.openThread).toHaveBeenCalledWith('orch');
-    expect(t.sheet()!.textContent).toContain('last words');
+    await vi.waitFor(() => expect(t.sheet()!.textContent).toContain('last words'));
   });
 
-  it('pill mode, errored: the field carries the reason; the orb opens the sheet so the transcript is reachable', () => {
+  it('pill mode, errored: the field carries the reason; the orb opens the sheet so the transcript is reachable', async () => {
     const t = setup({ messages: [m('assistant', 'last words')], lastError: 'boom' });
     expect(t.input()).toBeNull();
     t.q<HTMLElement>('.ct-orch-orb')!.click();
     expect(t.isOpen()).toBe(true);
-    expect(t.sheet()!.textContent).toContain('last words');
+    await vi.waitFor(() => expect(t.sheet()!.textContent).toContain('last words'));
     expect(t.q('.ct-orch-field .ct-orch-reason')).toBeTruthy();
   });
 
