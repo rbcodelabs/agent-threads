@@ -438,7 +438,7 @@ export class KanbanView extends ItemView {
           (t.recap ?? '').toLowerCase().includes(q)
         )
       : allThreads;
-    const threads = this.needsYouOnly ? searched.filter(t => this.needsYou(t)) : searched;
+    const threads = this.needsYouOnly ? searched.filter(t => this.matchesNeedsYouFilter(t)) : searched;
 
     if (threads.length === 0) {
       const emptyEl = this.boardEl.createDiv('ct-agents-empty');
@@ -1103,6 +1103,15 @@ export class KanbanView extends ItemView {
   /** A thread that earns the large featured card: it needs Rick, or has a permission waiting. */
   private wantsFeatured(thread: Thread): boolean {
     return this.needsYou(thread) || this.manager.hasPendingPermission(thread.id);
+  }
+
+  /**
+   * "Only needs you" predicate. Gallery counts a pending permission as needing
+   * you (same as its banner and featured card); the status board keeps its
+   * original needsYou()-only semantics (a permission shows in its own lane).
+   */
+  private matchesNeedsYouFilter(thread: Thread): boolean {
+    return this.groupBy === 'gallery' ? this.wantsFeatured(thread) : this.needsYou(thread);
   }
 
   private disposeGallery(): void {
@@ -1850,7 +1859,7 @@ export class KanbanView extends ItemView {
         return;
       }
     }
-    if (this.needsYouOnly && type !== 'manager_notes_changed' && !this.needsYou(thread)) {
+    if (this.needsYouOnly && type !== 'manager_notes_changed' && !this.matchesNeedsYouFilter(thread)) {
       this.scheduleRender();
       return;
     }

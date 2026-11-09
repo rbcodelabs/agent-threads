@@ -117,6 +117,27 @@ describe('Gallery mode: layout', () => {
     expect(cards(h.view.boardEl).map((c) => c.dataset.threadId)).toEqual(['b']);
   });
 
+  it('Only-needs-you keeps permission-pending threads, matching the banner and featured card', () => {
+    const h = makeHarness(
+      [makeThread('perm', { images: imgs(1) }), makeThread('other', { images: imgs(1) })],
+      { permission: new Set(['perm']), running: new Set(['perm']) },
+    );
+    expect(h.view.boardEl.querySelector('.ct-gallery-banner')?.textContent).toContain('1 thread needs you');
+    h.view.needsYouOnly = true; h.view.render();
+    expect(cards(h.view.boardEl).map((c) => c.dataset.threadId)).toEqual(['perm']);
+    expect(h.view.boardEl.querySelector('.ct-gallery-banner')?.textContent).toContain('1 thread needs you');
+    expect(h.view.boardEl.querySelector('.ct-agents-empty')).toBeNull();
+  });
+
+  it('status board Only-needs-you semantics are unchanged (permission alone does not match)', () => {
+    const h = makeHarness(
+      [makeThread('perm', { images: imgs(1) })],
+      { groupBy: 'status', permission: new Set(['perm']), running: new Set(['perm']) },
+    );
+    h.view.needsYouOnly = true; h.view.render();
+    expect(h.view.boardEl.querySelector('.ct-agents-empty')?.textContent).toContain('Nothing needs you right now.');
+  });
+
   it('records a stable gallery bucket key and never a status-board key', () => {
     const { view } = makeHarness([makeThread('a', { images: imgs(1) })]);
     expect(view.computeCardPlacement(makeThread('a')).bucketKey).toBe('gallery::grid');
