@@ -7144,7 +7144,7 @@ textarea.ct-settings-wide-input {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  max-height: 96px;
+  max-height: 92px;
   height: auto;
   margin: 0;
   padding: 6px 0;
@@ -7158,6 +7158,7 @@ textarea.ct-settings-wide-input {
   resize: none;
   overflow-y: auto;
 }
+.ct-orch-dock textarea.ct-orch-input::placeholder { color: var(--text-muted); opacity: 1; }
 .ct-orch-dock textarea.ct-orch-input:focus { box-shadow: none; border: none; }
 .ct-orch-kbd {
   flex: none;
@@ -7179,7 +7180,18 @@ textarea.ct-settings-wide-input {
   font-size: var(--font-ui-small);
 }
 .ct-orch-field[data-body="offline"] .ct-orch-reason,
-.ct-orch-field[data-body="error"] .ct-orch-reason { color: var(--text-error, var(--color-red)); }
+.ct-orch-field[data-body="error"] .ct-orch-reason,
+.ct-orch-status[data-body="offline"] .ct-orch-reason,
+.ct-orch-status[data-body="error"] .ct-orch-reason { color: var(--text-error, var(--color-red)); }
+/* The reason must be readable by everyone: error/offline wrap onto further lines instead of ellipsising (full text also in `title`). */
+.ct-orch-field[data-body="offline"] .ct-orch-reason,
+.ct-orch-field[data-body="error"] .ct-orch-reason,
+.ct-orch-status .ct-orch-reason { white-space: normal; overflow: visible; text-overflow: clip; line-height: 18px; padding: 6px 0; }
+.ct-orch-field[data-body="offline"] .ct-orch-body,
+.ct-orch-field[data-body="error"] .ct-orch-body { justify-content: space-between; }
+/* The pill grows upward from its bottom edge; keep the board's scroll end clear of it (up to 3 wrapped lines). */
+.ct-agents-root:has(.ct-orch-field:is([data-body="offline"], [data-body="error"])) .ct-kanban-board { padding-bottom: 124px; }
+.ct-agents-root:has(.ct-orch-status:not([hidden])) .ct-kanban-board { padding-bottom: 168px; }
 .ct-orch-dock button.ct-orch-action {
   flex: none;
   padding: 3px 10px;
@@ -7208,7 +7220,7 @@ textarea.ct-settings-wide-input {
 /* Narrow board (< 640px, set by KanbanView's ResizeObserver): the pill collapses to orb + dot + the action buttons. */
 .ct-orch-dock[data-mode="orb"] { --ct-orch-hit: 36px; --ct-orch-orb: 30px; flex: 0 0 auto; margin-right: 0; }
 .ct-orch-dock[data-mode="orb"] .ct-orch-field { flex: none; padding: 0; border: none; background: transparent; min-height: 0; }
-.ct-orch-dock[data-mode="orb"] .ct-orch-body { display: none; }
+.ct-orch-dock[data-mode="orb"] .ct-orch-field .ct-orch-body { display: none; }
 .ct-orch-dock[data-mode="orb"] { gap: 0; }
 .ct-orch-dock[data-mode="orb"] .ct-orch-dot { margin: 0 2px; }
 /* One row, as in the mock: the dot already reports needs-you, so the "Only needs you" chip yields its room to the orb. */
@@ -7217,6 +7229,37 @@ textarea.ct-settings-wide-input {
 .ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-kanban-needs-chip { display: none; }
 
 /* Mobile: 44px targets (same rule as the New thread button). */
+/* Narrow status row: same content as the pill's field, full width, ABOVE the orb / New row inside the pill. */
+.ct-orch-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  margin: 8px 10px 0;
+  padding: 0 6px 0 10px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 8px;
+}
+.ct-orch-status[hidden] { display: none; }
+.ct-orch-status[data-body="offline"],
+.ct-orch-status[data-body="error"] {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--text-error, var(--color-red)) 55%, var(--background-modifier-border));
+  background: color-mix(in srgb, var(--text-error, var(--color-red)) 7%, transparent);
+}
+.ct-orch-status .ct-orch-body { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.ct-orch-status button.ct-orch-action {
+  flex: none; padding: 3px 10px; border-radius: 6px; border: none; box-shadow: none;
+  background: var(--background-modifier-hover); color: var(--text-normal);
+  font-size: var(--font-ui-smaller); cursor: pointer; white-space: nowrap;
+}
+.ct-orch-status button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.ct-orch-orb-alert .ct-orch-orb-core { background: var(--text-error, var(--color-red)); }
+.ct-orch-orb-alert.ct-orch-orb-alert-warn .ct-orch-orb-core { background: var(--color-orange, var(--text-warning)); }
+.ct-orch-orb-alert .ct-orch-orb-ring { opacity: 0; animation: none; }
+.ct-agents-root.ct-mobile .ct-orch-status { min-height: 44px; }
+.ct-agents-root.ct-mobile .ct-orch-status button.ct-orch-action { min-height: 44px; }
+
 .ct-agents-root.ct-mobile .ct-orch-dock { --ct-orch-hit: 44px; --ct-orch-orb: 32px; }
 .ct-agents-root.ct-mobile .ct-orch-field { min-height: 44px; }
 .ct-agents-root.ct-mobile .ct-orch-dock button.ct-orch-action { min-height: 44px; }

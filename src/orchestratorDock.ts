@@ -72,10 +72,13 @@ const REFRESH_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 const MAX_ERROR_CHARS = 60;
-const MAX_INPUT_PX = 96;
+/** 4 lines at 20px + 12px vertical padding: a whole number of lines, so a long draft never half-clips one. */
+const MAX_INPUT_PX = 92;
 
 export class OrchestratorDock {
   private rootEl: HTMLElement | null = null;
+  /** Narrow-mode status row: sits immediately BEFORE the host (above the orb / New row) while none/error/offline. */
+  private statusEl: HTMLElement | null = null;
   private fieldEl!: HTMLElement;
   private orbEl!: HTMLButtonElement;
   private bodyEl!: HTMLElement;
@@ -115,6 +118,13 @@ export class OrchestratorDock {
     this.orbEl.addEventListener('click', () => this.onOrbClick());
     this.bodyEl = this.fieldEl.createDiv('ct-orch-body');
 
+    const status = this.host.ownerDocument.createElement('div');
+    status.className = 'ct-orch-status';
+    status.dataset.testid = 'orchestrator-status';
+    status.hidden = true;
+    if (this.host.parentNode) this.host.before(status); else root.prepend(status);
+    this.statusEl = status;
+
     this.dotEl = root.createSpan({ cls: 'ct-orch-dot', attr: { role: 'img', 'data-testid': 'orchestrator-dot' } });
 
     this.unsubscribeManager = this.deps.manager.subscribe((_threadId, event) => {
@@ -133,7 +143,9 @@ export class OrchestratorDock {
     this.unsubscribeManager = null;
     this.unsubscribeDaemons = null;
     this.rootEl?.remove();
+    this.statusEl?.remove();
     this.rootEl = null;
+    this.statusEl = null;
     this.inputEl = null;
     this.actionEl = null;
     this.reasonEl = null;
@@ -191,7 +203,11 @@ export class OrchestratorDock {
     root.dataset.mode = this.currentMode;
     // Pill mode: the field is the keyboard stop (the orb only calls focusField). Orb mode: the orb is the control.
     if (this.currentMode === 'pill') this.orbEl.setAttribute('tabindex', '-1'); else this.orbEl.removeAttribute('tabindex');
-    this.orbEl.toggleClass('ct-orch-orb-spinning', running > 0 || (!!orchestratorId && manager.isRunning(orchestratorId)));
+    // Narrow mode hides the field, so none/error/offline must show on the orb: a static tint, no spinning ring.
+    const alertTint = this.currentMode === 'orb' && (this.state === 'none' || this.state === 'error' || this.state === 'offline');
+    this.orbEl.toggleClass('ct-orch-orb-alert', alertTint);
+    this.orbEl.toggleClass('ct-orch-orb-alert-warn', alertTint && this.state === 'none');
+    this.orbEl.toggleClass('ct-orch-orb-spinning', !alertTint && (running > 0 || (!!orchestratorId && manager.isRunning(orchestratorId))));
 
     const tip = tooltipText({ running, total: threads.length, needsYou });
     this.dotEl.toggleClass('ct-orch-dot-attention', needsYou > 0);
@@ -199,6 +215,18 @@ export class OrchestratorDock {
     this.dotEl.setAttribute('aria-label', tip);
 
     this.renderBody(thread);
+    this.placeBody();
+  }
+
+  /** Pill: the body lives in the field. Orb + none/error/offline: it moves to the full-width status row above the pill's row. */
+  private placeBody(): void {
+    const status = this.statusEl;
+    if (!status) return;
+    const wantStatus = this.currentMode === 'orb' && this.bodyKind !== 'input';
+    const target = wantStatus ? status : this.fieldEl;
+    if (this.bodyEl.parentElement !== target) target.append(this.bodyEl);
+    status.hidden = !wantStatus;
+    status.dataset.body = wantStatus ? (this.bodyKind ?? '') : '';
   }
 
   // ── Body (field / setup affordance / reason) ──────────────────────────────
