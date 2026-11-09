@@ -340,7 +340,7 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
     await page.locator('.ct-orch-send').focus();
     await page.setViewportSize({ width: 700, height: 800 });
     await expect(page.locator('.ct-orch-dock')).toHaveAttribute('data-mode', 'pill');
-    expect(await page.evaluate(() => document.activeElement && document.activeElement !== document.body)).toBe(true);
+    await expect(field(page)).toBeFocused(); // the same target as the unit test: the composer / field
   });
 
   test('N2: narrow, Enter on the focused orb opens the sheet and typing lands in the composer', async ({ page }) => {

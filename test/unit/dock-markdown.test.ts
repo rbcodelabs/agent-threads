@@ -8,7 +8,7 @@
  */
 import '../setup/obsidian-dom';
 import { vi, describe, it, expect } from 'vitest';
-import { renderDockMarkdown, rewriteDockMarkup } from '../../src/dockMarkdown';
+import { renderDockMarkdown, rewriteDockMarkup, isSafeHref } from '../../src/dockMarkdown';
 
 const threads = [{ id: 't1', title: 'Deploy curation' }, { id: 't2', title: 'Mobile polish' }];
 async function render(md: string): Promise<HTMLElement> {
@@ -274,5 +274,83 @@ describe('delta E: an omitted image keeps its class', () => {
   it('a non-http image becomes a span carrying ct-orch-image-omitted', async () => {
     const el = await render('<img src="data:image/png;base64,AAAA" alt="inline">');
     expect(el.querySelector('span.ct-orch-image-omitted')!.textContent).toBe('inline');
+  });
+});
+
+
+describe('final delta B1: every token in every text node becomes a link (no sticky regex state)', () => {
+  const noLeftover = (el: HTMLElement) => expect(el.innerHTML).not.toMatch(/ctlnk/i);
+  it('a list, a following paragraph and a thread link first in an item', async () => {
+    const el = await render('- see [[Note]]\n- [[thread:t1|Deploy]] first\n\n[[Note]]');
+    noLeftover(el);
+    expect(el.querySelectorAll('a.internal-link, a.ct-thread-link')).toHaveLength(3);
+  });
+  it('adjacent text nodes with no whitespace node between them (token, then **bold token**)', async () => {
+    const el = await render('[[Note]]**bold [[thread:t1|Deploy]]** and `x` *[[Note]]*');
+    noLeftover(el);
+    expect(el.querySelectorAll('a')).toHaveLength(3);
+  });
+  it('a late token in one paragraph then an early token in the next', async () => {
+    const el = await render('see this surely long prefix [[Note]]\n\n[[thread:t1|Deploy]] first in item');
+    noLeftover(el);
+    expect(el.querySelectorAll('a')).toHaveLength(2);
+  });
+  it('a table', async () => {
+    const el = await render('| a | b |\n|---|---|\n| [[Note]] | x |\n| [[thread:t1|Deploy]] | [[Note]] |');
+    noLeftover(el);
+    expect(el.querySelectorAll('td a')).toHaveLength(3);
+  });
+  it('a blockquote', async () => {
+    const el = await render('> [[Note]] one\n>\n> [[thread:t2|Mobile]] two\n\n[[Note]]');
+    noLeftover(el);
+    expect(el.querySelectorAll('a')).toHaveLength(3);
+  });
+});
+
+describe('final delta B: defence in depth for the relative branch', () => {
+  const dropped = [
+    ['protocol-relative //host', '//evil.example/x'],
+    ['backslash host', '\\\\evil.example'],
+    ['slash-backslash', '/\\evil.example'],
+    ['backslash-slash', '\\/evil.example'],
+    ['NBSP inside the scheme', 'java\u00a0script:alert(1)'],
+    ['zero-width space inside the scheme', 'java\u200bscript:alert(1)'],
+    ['&Tab; named entity', 'java&Tab;script:alert(1)'],
+    ['&NewLine; named entity', 'java&NewLine;script:alert(1)'],
+    ['&colon; named entity', 'javascript&colon;alert(1)'],
+  ];
+  it.each(dropped)('drops %s', async (_n, href) => {
+    const el = await render(`<a href="${href}">x</a>`);
+    expect(el.querySelector('a')!.getAttribute('href')).toBeNull();
+  });
+  it('still keeps /rel, rel and #x', () => {
+    for (const h of ['/rel/path', 'rel/path', '#x', '?q=1']) expect(isSafeHref(h), h).toBe(true);
+    for (const h of ['//h', '\\h', '/\\h']) expect(isSafeHref(h), h).toBe(false);
+  });
+});
+
+describe('final delta C: inline code tokenising', () => {
+  it('many mismatched backtick runs stay linear (perf guard)', () => {
+    const para = Array.from({ length: 4000 }, (_, i) => '`'.repeat((i % 40) + 1) + 'x').join(' ');
+    const t0 = performance.now();
+    rewriteDockMarkup(`${para}\n\n[[Note]]`);
+    expect(performance.now() - t0).toBeLessThan(400);
+  });
+  it('a span needs a closing run of the SAME length: ``a`b`` is one span, a lone ` is literal', () => {
+    const one = rewriteDockMarkup('``a`b`` [[Note]]');
+    expect(one.links).toHaveLength(1);
+    const lone = rewriteDockMarkup('a ` b [[Note]] c');
+    expect(lone.links).toHaveLength(1);
+    const code = rewriteDockMarkup('`[[Note]]`');
+    expect(code.links).toHaveLength(0);
+  });
+});
+
+describe('final delta D: no anchor inside an anchor', () => {
+  it('a wikilink inside model-authored link text is plain text', async () => {
+    const el = await render('[see [[Note]] here](https://ok.example/x)');
+    expect(el.querySelector('a a')).toBeNull();
+    expect(el.querySelector('a')!.textContent).toContain('Note');
+    expect(el.innerHTML).not.toMatch(/ctlnk/i);
   });
 });

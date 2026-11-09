@@ -1546,3 +1546,95 @@ describe('N5: focus survives the mode changing under an open sheet', () => {
     expect(document.activeElement).not.toBe(document.body);
   });
 });
+
+
+// ── Final delta review of #903 (e232979..25b5a66) ──────────────────────────────────────────────────────────────────
+describe('final delta B2: the browser clamping scrollTop is not the user scrolling up', () => {
+  const pinned = async (t: T, start = 3000) => {
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let h = start;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    t.dock.openSheet(); await frame();
+    return { scroll, shrinkTo: (n: number) => { h = n; scroll.scrollTop = n - 200; /* the browser's clamp */ scroll.dispatchEvent(new Event('scroll')); }, grow: (n: number) => { h = n; } };
+  };
+
+  it('content shrinking under a pinned user (clamped scrollTop, event before the frame) keeps following the bottom', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll, shrinkTo } = await pinned(t);
+    shrinkTo(2500);
+    t.emit('token', { text: 'x' }); await frame(); await frame();
+    expect(scroll.scrollTop).toBe(2500);
+  });
+
+  it('streaming bubble swapped for the final row (shorter) while pinned: still pinned', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll, shrinkTo } = await pinned(t);
+    t.emit('token', { text: 'a long streamed reply' }); await frame();
+    shrinkTo(2700);
+    t.say('short final'); await frame(); await frame();
+    t.emit('token', { text: 'next' }); await frame();
+    expect(scroll.scrollTop).toBe(2700);
+  });
+
+  it('the Stopped row being removed while pinned: still pinned', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll, shrinkTo } = await pinned(t);
+    t.emit('token', { text: 'partial' }); await frame();
+    await t.manager.interrupt(); await frame();
+    expect(t.q('[data-stopped]')).toBeTruthy();
+    shrinkTo(2600); // the Stopped row goes away on the next send
+    t.enter(t.type('again')); await flush(); await frame();
+    expect(scroll.scrollTop).toBe(2600);
+  });
+
+  it('a genuine 12px scroll-up from the bottom still unpins (N4 holds)', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll } = await pinned(t);
+    scroll.scrollTop = 2788; scroll.dispatchEvent(new Event('scroll'));
+    t.emit('token', { text: 'a' }); await frame();
+    expect(scroll.scrollTop).toBe(2788);
+  });
+});
+
+describe('final delta A: lastHeight stays current while unpinned', () => {
+  it('content growing while the user is scrolled up and idle does not make a big jump look like reaching the old bottom', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let h = 3000;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    t.dock.openSheet(); await frame();
+    scroll.scrollTop = 2000; scroll.dispatchEvent(new Event('scroll')); // unpinned
+    h = 5000; t.emit('done'); // idle growth, then a render
+    scroll.scrollTop = 2800; scroll.dispatchEvent(new Event('scroll')); // PageDown / scrollbar drag to the OLD bottom
+    t.emit('token', { text: 'a' }); await frame(); await frame();
+    expect(scroll.scrollTop).toBe(2800);
+  });
+});
+
+describe('final delta E: inert bookkeeping', () => {
+  it('re-asserts inert a third party removed, and forgets nodes that left the DOM', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    const a = document.createElement('div'); const b = document.createElement('div');
+    document.body.append(a, b);
+    t.dock.openSheet();
+    expect(a.hasAttribute('inert')).toBe(true);
+    a.removeAttribute('inert'); b.remove();
+    t.emit('done');
+    expect(a.hasAttribute('inert')).toBe(true);
+    t.dock.closeSheet();
+    expect(a.hasAttribute('inert')).toBe(false);
+  });
+});
+
+describe('final delta F: focus is not pulled in when nothing held it', () => {
+  it('focus on the page (user clicked blank space) stays there across a mode change', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    t.s.mode = 'pill'; t.dock.relayout();
+    expect(document.activeElement).toBe(document.body);
+  });
+});
