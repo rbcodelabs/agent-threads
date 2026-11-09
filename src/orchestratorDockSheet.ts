@@ -49,6 +49,8 @@ export interface SheetHandlers {
 /** Screen-reader announcements for streaming are rate limited so a token stream cannot flood the reader. */
 export const ANNOUNCE_MIN_INTERVAL_MS = 4000;
 const NEAR_BOTTOM_PX = 48;
+/** Re-pin tolerance when the user scrolls down: they have to actually get to the bottom. */
+const BOTTOM_SLACK_PX = 4;
 let sheetSeq = 0;
 const TABBABLE = 'button, a[href], textarea, input, select, summary, [tabindex]:not([tabindex="-1"])';
 
@@ -96,6 +98,8 @@ export class DockSheet {
   private stick = true;
   /** The scrollTop value the sheet itself last wrote, and the scrollHeight at that moment / at the last scroll event. */
   private lastWrittenTop = -1;
+  /** scrollTop at the previous scroll event (or our last write): the reference for the direction of travel. */
+  private lastTop = 0;
   private lastHeight = 0;
   /** Pin to the latest message on the next render (open, or the user's own send), however far up they had scrolled. */
   private pinNext = false;
@@ -145,12 +149,18 @@ export class DockSheet {
     // momentum, scrollbar, keys, selection autoscroll all end up here) and is judged against the content height they were looking
     // at, so reaching the bottom while content is still growing keeps the pin.
     this.scrollEl.addEventListener('scroll', () => {
-      const s = this.scrollEl;
-      if (s.scrollTop !== this.lastWrittenTop) {
-        const seenHeight = this.lastHeight > 0 ? Math.min(s.scrollHeight, this.lastHeight) : s.scrollHeight;
-        this.stick = seenHeight - s.scrollTop - s.clientHeight <= NEAR_BOTTOM_PX;
+      const sc = this.scrollEl;
+      const top = sc.scrollTop;
+      if (top !== this.lastWrittenTop) {
+        if (top < this.lastTop) this.stick = false; // ANY upward movement unpins at once, however slow or small
+        else {
+          // Downward: re-pin only on reaching the bottom (a few px), judged against the content height the user was looking at.
+          const seenHeight = this.lastHeight > 0 ? Math.min(sc.scrollHeight, this.lastHeight) : sc.scrollHeight;
+          if (seenHeight - top - sc.clientHeight <= BOTTOM_SLACK_PX) this.stick = true;
+        }
       }
-      this.lastHeight = s.scrollHeight;
+      this.lastTop = top;
+      this.lastHeight = sc.scrollHeight;
     });
     // The sheet is a non-modal dialog: Escape inside it closes it (the dock returns focus to the field).
     this.el.addEventListener('keydown', (e) => {
@@ -210,6 +220,11 @@ export class DockSheet {
 
   /** Pin to the latest message on the next render. */
   pinOnNextRender(): void { this.pinNext = true; }
+
+  /** Whether focus can sit on this element now (connected, not hidden, not inert). */
+  isFocusable(node: Element | null): boolean {
+    return !!node && node.isConnected && !node.closest('[hidden], [inert]') && !(node as HTMLButtonElement).disabled;
+  }
 
   /** Moves focus to the first control of the dialog (used when it opens and the composer has nothing to focus). */
   focusClose(): void { this.closeBtn.focus(); }
@@ -493,6 +508,7 @@ export class DockSheet {
   private scrollToBottom(): void {
     this.scrollEl.scrollTop = this.scrollEl.scrollHeight;
     this.lastWrittenTop = this.scrollEl.scrollTop; // read back: the browser clamps to the real maximum
+    this.lastTop = this.lastWrittenTop;
     this.lastHeight = this.scrollEl.scrollHeight;
     this.stick = true;
   }

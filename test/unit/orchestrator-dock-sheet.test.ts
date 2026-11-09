@@ -816,10 +816,10 @@ describe('review: assistant row hand-off (A1, A2)', () => {
 
   it('does not yank the user down when they scrolled up', async () => {
     const t = setup({ messages: [m('user', 'hi')] });
-    t.dock.openSheet();
     const scroll = t.q('.ct-orch-sheet-scroll')!;
     Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => 2000 });
     Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    t.dock.openSheet(); // pinned to the bottom first, as in a real browser
     scroll.scrollTop = 100;
     userScrollsUp(scroll); // the user scrolled up
     t.say('later');
@@ -1506,12 +1506,12 @@ describe('N4: any upward movement unpins at once, however small', () => {
     const t = setup({ running: true, messages: [m('user', 'go')] });
     const { scroll, grow } = rig(t);
     t.dock.openSheet(); await frame();
-    scroll.scrollTop = 2988; scroll.dispatchEvent(new Event('scroll')); // 12px up: unpinned
-    grow(3100); t.emit('token', { text: 'a' }); await frame();
-    expect(scroll.scrollTop).toBe(2988);
-    scroll.scrollTop = 2900; scroll.dispatchEvent(new Event('scroll')); // the user scrolls down to the bottom of the grown content (3100 - 200)
-    grow(3300); t.emit('token', { text: 'b' }); await frame(); await frame();
-    expect(scroll.scrollTop).toBe(3300);
+    scroll.scrollTop = 2800; scroll.dispatchEvent(new Event('scroll')); // up from the bottom: unpinned
+    grow(3400); t.emit('token', { text: 'a' }); await frame();
+    expect(scroll.scrollTop).toBe(2800);
+    scroll.scrollTop = 3200; scroll.dispatchEvent(new Event('scroll')); // down to the bottom of the grown content (3400 - 200)
+    grow(3600); t.emit('token', { text: 'b' }); await frame(); await frame();
+    expect(scroll.scrollTop).toBe(3600);
   });
 });
 

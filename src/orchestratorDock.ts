@@ -252,6 +252,7 @@ export class OrchestratorDock {
     this.trackOrchestrator(orchestratorId, thread);
     const unread = thread ? unreadState(this.transcriptOf(thread), this.lastSeenId) : { hasUnread: false, latestAssistantId: undefined };
     const daemon = thread?.remote ? this.deps.daemons?.stateOf(thread.remote.daemonId) : undefined;
+    const focusBefore = this.host.ownerDocument.activeElement;
     this.state = deriveDockState({
       orchestratorId,
       thread,
@@ -290,6 +291,8 @@ export class OrchestratorDock {
     if (this.sheet?.isOpen) this.layoutChanged(); // after the mode update: the room above the pill differs per mode
     this.renderSheet();
     this.renderChips();
+    // After the sheet re-rendered (the modal inert state follows the mode): only then is it known what can hold focus.
+    if (previousMode !== this.currentMode && this.sheet?.isOpen) this.keepFocusAcrossModeChange(focusBefore);
   }
 
   // ── Per-orchestrator state ────────────────────────────────────────────────
@@ -491,6 +494,22 @@ export class OrchestratorDock {
     if (!returnFocus && !hadFocus) return;
     if (this.currentMode === 'orb') this.orbEl.focus();
     else (this.inputEl ?? this.actionEl)?.focus();
+  }
+
+  /**
+   * The mode flipped under an open sheet: the focused control may have moved, been hidden (Send exists only in the narrow
+   * sheet) or gone inert. Keep focus where it was if it can still hold it, else the composer / field, else the dialog.
+   */
+  private keepFocusAcrossModeChange(before: Element | null): void {
+    const doc = this.host.ownerDocument;
+    const sheet = this.sheet;
+    if (!sheet) return;
+    const active = doc.activeElement;
+    if (active && active !== doc.body && sheet.isFocusable(active)) return;
+    if (before && before !== doc.body && sheet.isFocusable(before)) { (before as HTMLElement).focus(); return; }
+    if (this.inputEl && sheet.isFocusable(this.inputEl)) this.inputEl.focus();
+    else if (this.actionEl && sheet.isFocusable(this.actionEl)) this.actionEl.focus();
+    else sheet.focusClose();
   }
 
   /** Re-measure the sheet's max height: 60% of the view, never taller than the space above the pill. */
