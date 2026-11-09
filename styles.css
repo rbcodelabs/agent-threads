@@ -7544,6 +7544,9 @@ textarea.ct-settings-wide-input {
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-peek button,
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-chips button.ct-orch-chip { min-height: 44px; min-width: 44px; }
 
+/* Landscape phones / tablets (pill mode): the whole pill lifts above the soft keyboard (--ct-orch-kbd-inset is set on the view root). */
+.ct-agents-root .ct-kanban-dispatch:has(.ct-orch-dock[data-mode="pill"]) { bottom: calc(var(--ct-kanban-pill-bottom) + var(--ct-orch-kbd-inset, 0px)); }
+
 /* Touch devices wider than the narrow breakpoint (tablets, phones in landscape) get the sheet's 44px targets too. */
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-sheet-btn,
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-chip,
@@ -7557,6 +7560,8 @@ textarea.ct-settings-wide-input {
   .ct-kanban-dispatch .ct-orch-peek { animation: none; }
   /* The pill's own border / glow fade (pre-existing) is motion too. */
   .ct-kanban-dispatch { transition: none; }
+  /* The highlighted board card: its border / glow must not fade either (the board-wide card transition). */
+  .ct-kanban-card.ct-kanban-card-linked { transition: none; }
 }
 
 /* ── Needs-you tray in the reply sheet + thread-link card highlight (K2 P4) ───────────────────────────────────────── */
@@ -7582,11 +7587,14 @@ textarea.ct-settings-wide-input {
 .ct-agents-list.ct-kanban-clearing .ct-gallery-board { padding-bottom: calc(76px + var(--ct-card-clearance, 0px)); }
 
 /* Between the transcript and the composer. The cap is a share of the sheet's own max height so the transcript keeps room. */
-.ct-orch-tray-slot { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.ct-orch-tray-slot { flex: 0 0 auto; min-height: 0; display: flex; flex-direction: column; }
 .ct-orch-tray-slot:empty { display: none; }
 .ct-orch-tray {
-  flex: 0 1 auto; min-height: 0; overflow-y: auto; box-sizing: border-box;
-  max-height: calc(var(--ct-orch-sheet-max, 60vh) * 0.55);
+  /* The tray never shrinks with the transcript (a long conversation used to crush it to a heading, with no buttons): it takes its
+     natural height up to --ct-orch-tray-max (set by the dock: a share of the sheet, but never less than the heading plus the FIRST
+     card with its buttons) and scrolls inside that; the transcript gives way first. */
+  flex: 0 0 auto; min-height: 0; overflow-y: auto; box-sizing: border-box; position: relative;
+  max-height: var(--ct-orch-tray-max, calc(var(--ct-orch-sheet-max, 60vh) * 0.55));
   display: flex; flex-direction: column; gap: 6px;
   padding: 8px 12px; border-top: 1px solid var(--background-modifier-border);
   background: color-mix(in srgb, var(--color-orange, var(--text-warning)) 6%, var(--background-secondary));

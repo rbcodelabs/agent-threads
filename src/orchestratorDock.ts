@@ -162,6 +162,8 @@ export class OrchestratorDock {
   /** Last health announced as a problem ('error' / 'offline'), or 'ok'. A recovery is announced only after one. */
   private announced: Health | null = null;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The announcement waiting to be written is a problem report (error / offline) that can still be withdrawn. */
+  private pendingProblem = false;
 
   /** Orchestrator id the per-thread state below belongs to; a change resets it. */
   private trackedId: string | undefined;
@@ -267,7 +269,7 @@ export class OrchestratorDock {
     if (this.stateLiveTimer) clearTimeout(this.stateLiveTimer);
     this.stateLiveTimer = null;
     this.cancelRecovery();
-    this.keyboard?.stop();
+    this.stopKeyboardTracking();
     this.keyboard = null;
     this.tray?.destroy();
     this.tray = null;
@@ -395,13 +397,21 @@ export class OrchestratorDock {
     if (h === prev) return;
     if (h === 'none') { this.cancelRecovery(); this.announced = 'ok'; return; }
     if (h === 'ok') {
+      if (this.stateLiveTimer && this.pendingProblem) {
+        // The problem recovered before its text was ever written: announce nothing (not a lone "recovered").
+        clearTimeout(this.stateLiveTimer);
+        this.stateLiveTimer = null;
+        this.pendingProblem = false;
+        this.announced = 'ok';
+        return;
+      }
       if (this.announced === 'error' || this.announced === 'offline') this.scheduleRecovery();
       return;
     }
     this.cancelRecovery();
     if (this.announced === h) return; // flapped back into the problem that was already announced
     this.announced = h;
-    this.announceState(this.reasonFor(h, thread).text);
+    this.announceState(this.reasonFor(h, thread).text, true);
   }
 
   private scheduleRecovery(): void {
@@ -420,15 +430,17 @@ export class OrchestratorDock {
   }
 
   /** Cleared first, then set on the next tick, so the same text twice is still read. */
-  private announceState(raw: string): void {
+  private announceState(raw: string, problem = false): void {
     const el = this.stateLiveEl;
     if (!el) return;
     const text = raw.replace(/\u00a0/g, ' ').trim();
     const capped = text.length > MAX_ANNOUNCE_CHARS ? `${text.slice(0, MAX_ANNOUNCE_CHARS - 1)}…` : text;
     if (this.stateLiveTimer) clearTimeout(this.stateLiveTimer);
     el.textContent = '';
+    this.pendingProblem = problem;
     this.stateLiveTimer = setTimeout(() => {
       this.stateLiveTimer = null;
+      this.pendingProblem = false;
       if (!this.destroyed) el.textContent = capped;
     }, 0);
   }
@@ -455,6 +467,11 @@ export class OrchestratorDock {
         this.syncedVersion = this.drafts.version;
         if (this.inputEl) { this.inputEl.value = ''; this.autosize(this.inputEl); }
         this.history.reset();
+      }
+      // First sight of an orchestrator (a board re-mount): whatever the store holds for ANOTHER orchestrator is dropped, not kept hidden.
+      if (id !== undefined && this.lastOrchestratorId === undefined && this.drafts.get(id) === '') {
+        this.drafts.clear();
+        this.syncedVersion = this.drafts.version;
       }
       this.trackedId = id;
       if (id !== undefined) this.lastOrchestratorId = id;
@@ -658,9 +675,8 @@ export class OrchestratorDock {
     // A programmatic close (orchestrator deleted, state none) must not drop focus from inside the sheet to the page.
     const hadFocus = !!doc.activeElement && this.sheet.el.contains(doc.activeElement);
     this.sheet.close(); // also clears the board-card highlight of a hovered link
-    this.keyboard?.stop();
-    this.keyboardPx = 0;
-    this.sheet.setKeyboardInset(null);
+    if (!this.touchFieldFocused()) this.stopKeyboardTracking();
+    else this.layoutChanged();
     this.tray?.reset();
     this.refresh();
     if (!returnFocus && !hadFocus) return;
@@ -686,7 +702,25 @@ export class OrchestratorDock {
     else sheet.focusClose();
   }
 
-  /** While the sheet is open the soft keyboard (visualViewport) lifts the narrow bottom sheet's composer above it. */
+  /** The inset goes on the sheet (narrow bottom sheet) and on the view root (so a pill-mode pill can lift, see styles.css). */
+  private setKeyboardVar(px: number | null): void {
+    this.sheet?.setKeyboardInset(px);
+    const root = this.host.closest<HTMLElement>('.ct-agents-root');
+    if (!root) return;
+    if (px === null) root.style.removeProperty('--ct-orch-kbd-inset'); else root.style.setProperty('--ct-orch-kbd-inset', `${px}px`);
+  }
+
+  private stopKeyboardTracking(): void {
+    this.keyboard?.stop();
+    this.keyboardPx = 0;
+    this.setKeyboardVar(null);
+  }
+
+  private touchFieldFocused(): boolean {
+    return Platform.isMobile && !!this.inputEl && this.host.ownerDocument.activeElement === this.inputEl;
+  }
+
+  /** While the sheet is open (or, on touch, the field is focused) the soft keyboard (visualViewport) lifts the narrow bottom sheet's composer above it. */
   private startKeyboardTracking(): void {
     if (this.keyboard) { this.keyboard.start(); return; }
     const win = this.host.ownerDocument.defaultView;
@@ -695,10 +729,10 @@ export class OrchestratorDock {
       win,
       () => (this.host.closest('.ct-agents-root') ?? this.rootEl)?.getBoundingClientRect().bottom ?? 0,
       (px) => {
-        if (this.destroyed || !this.sheet?.isOpen) return;
+        if (this.destroyed) return;
         this.keyboardPx = px;
-        this.sheet.setKeyboardInset(px);
-        this.layoutChanged();
+        this.setKeyboardVar(px);
+        if (this.sheet?.isOpen) this.layoutChanged();
       },
     );
     this.keyboard.start();
@@ -720,8 +754,10 @@ export class OrchestratorDock {
       const pill = (this.host.parentElement ?? this.host).offsetHeight;
       // Narrow: the bottom sheet covers the pill, so only the 60% cap and the keyboard apply (8px breathing room above the
       // keyboard-lifted sheet). Wide: it sits above the pill (36px offset + 8px gap).
-      const room = this.currentMode === 'orb' ? h - this.keyboardPx - (this.keyboardPx > 0 ? 8 : 0) : h - 36 - pill - 16;
+      // Pill mode (landscape phone, tablet): the whole pill lifts by the keyboard inset, so the room above it shrinks by it.
+      const room = this.currentMode === 'orb' ? h - this.keyboardPx - (this.keyboardPx > 0 ? 8 : 0) : h - 36 - this.keyboardPx - pill - 16;
       sheet.setMaxHeight(Math.min(h * 0.6, room));
+      sheet.fitTray();
     });
   }
 
@@ -780,7 +816,7 @@ export class OrchestratorDock {
     const sheet = this.sheet;
     if (!tray || !sheet?.isOpen) return;
     // The tray changes the transcript's height: stay on the latest message if we were on it.
-    sheet.keepPinned(() => tray.render(this.trayEntries));
+    sheet.keepPinned(() => { tray.render(this.trayEntries); sheet.fitTray(); });
   }
 
   private get manager(): OrchestratorDockDeps['manager'] { return this.deps.manager; }
@@ -938,10 +974,11 @@ export class OrchestratorDock {
     });
     input.addEventListener('keydown', (e) => this.onKeydown(e, input));
     input.addEventListener('click', () => { if (this.currentMode === 'pill' && !this.sheet?.isOpen && this.hasTranscript()) this.openSheet(); });
-    input.addEventListener('focus', () => this.renderChips());
+    input.addEventListener('focus', () => { if (Platform.isMobile) this.startKeyboardTracking(); this.renderChips(); });
     input.addEventListener('blur', (e) => {
       const to = e.relatedTarget as Node | null;
       if (to && this.chipsEl?.contains(to)) return; // moving into a chip
+      if (!this.sheet?.isOpen) this.stopKeyboardTracking();
       this.renderChips();
     });
     this.inputEl = input;

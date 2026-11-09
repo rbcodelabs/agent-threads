@@ -55,6 +55,10 @@ export interface SheetHandlers {
 /** Screen-reader announcements for streaming are rate limited so a token stream cannot flood the reader. */
 export const ANNOUNCE_MIN_INTERVAL_MS = 4000;
 const NEAR_BOTTOM_PX = 48;
+/** The tray's share of the sheet, the transcript room it tries to leave, and the padding under its first card. */
+const TRAY_SHARE = 0.55;
+const MIN_TRANSCRIPT_PX = 80;
+const TRAY_PAD_PX = 8;
 /** Re-pin tolerance when the user scrolls down: they have to actually get to the bottom. */
 const BOTTOM_SLACK_PX = 4;
 let sheetSeq = 0;
@@ -292,6 +296,25 @@ export class DockSheet {
     else this.el.style.setProperty('--ct-orch-kbd-inset', `${px}px`);
     // The composer's safe-area padding would be dead space under a sheet that is lifted above the keyboard.
     this.el.toggleAttribute('data-kbd', px !== null && px > 0);
+  }
+
+  /**
+   * Sizes the Needs-you tray: a share of the sheet, but never less than its heading plus the FIRST card with its buttons, so a
+   * long conversation (or the keyboard) can never leave a tray with no approval buttons visible; the transcript gives way first.
+   */
+  fitTray(): void {
+    const tray = this.trayHost.querySelector<HTMLElement>('.ct-orch-tray');
+    const max = parseFloat(this.el.style.getPropertyValue('--ct-orch-sheet-max'));
+    if (!tray || !(max > 0)) { this.el.style.removeProperty('--ct-orch-tray-max'); return; }
+    const first = tray.querySelector<HTMLElement>('.ct-orch-tray-card');
+    const need = first ? first.offsetTop + first.offsetHeight + TRAY_PAD_PX : 0;
+    let fixed = 0;
+    for (const child of Array.from(this.el.children) as HTMLElement[]) {
+      if (child === this.scrollEl || child === this.trayHost || child.hidden) continue;
+      fixed += child.offsetHeight; // the handle, the header, the composer; the live regions are absolutely positioned (0 in flow)
+    }
+    const cap = Math.max(need, Math.min(max * TRAY_SHARE, max - fixed - MIN_TRANSCRIPT_PX));
+    this.el.style.setProperty('--ct-orch-tray-max', `${Math.round(cap)}px`);
   }
 
   setMaxHeight(px: number | null): void {
