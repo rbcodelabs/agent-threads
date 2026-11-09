@@ -104,15 +104,16 @@ test.describe('orchestrator dock — functional (no baselines)', () => {
     expect(await page.evaluate(() => (window as any).__openedThreadIds.length)).toBe(0);
   });
 
-  test('Enter hands the message to the orchestrator and opens its thread (interim, P3 adds the sheet)', async ({ page }) => {
+  test('Enter sends to the orchestrator and opens the reply sheet, not the thread (P3)', async ({ page }) => {
     await open(page, 'idle', DESKTOP);
     const input = page.locator('.ct-orch-input');
     await input.click();
     await input.fill('What needs me?');
     await page.keyboard.press('Enter');
-    await expect.poll(() => page.evaluate(() => (window as any).__openedThreadIds.length)).toBe(1);
+    await expect(page.locator('.ct-orch-sheet')).toBeVisible();
     const sent = await page.evaluate(() => (window as any).__sentMessages);
     expect(sent).toEqual([expect.objectContaining({ text: 'What needs me?' })]);
+    expect(await page.evaluate(() => (window as any).__openedThreadIds.length)).toBe(0);
   });
 
   test('Shift+Enter inserts a newline and sends nothing', async ({ page }) => {
@@ -349,9 +350,10 @@ test.describe('orchestrator dock — functional (no baselines)', () => {
     expect(await ratio('first-run')).toBeGreaterThanOrEqual(3);
   });
 
-  test('narrow: tapping the orb opens the orchestrator thread (interim)', async ({ page }) => {
+  test('narrow: tapping the orb opens the bottom sheet (P3), not the thread', async ({ page }) => {
     await open(page, 'idle', NARROW);
     await page.locator('.ct-orch-orb').click();
-    await expect.poll(() => page.evaluate(() => (window as any).__openedThreadIds.length)).toBe(1);
+    await expect(page.locator('.ct-orch-sheet')).toBeVisible();
+    expect(await page.evaluate(() => (window as any).__openedThreadIds.length)).toBe(0);
   });
 });

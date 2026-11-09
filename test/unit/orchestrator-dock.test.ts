@@ -42,6 +42,10 @@ function setup(opts: {
     hasPendingQuestion: () => false,
     hasPendingPlan: () => false,
     hasActiveBackgroundTasks: () => false,
+    getQueuedMessages: () => [],
+    removeQueuedMessageAt: vi.fn(),
+    getThreadActivity: () => undefined,
+    interrupt: vi.fn(async () => {}),
     sendMessage: vi.fn(async (id: string, text: string) => { calls.push(`send:${id}:${text}`); if (opts.sendRejects) throw new Error('boom'); }),
     subscribe: vi.fn((l: Listener) => { listeners.add(l); return () => { listeners.delete(l); }; }),
   };
@@ -214,15 +218,17 @@ describe('offline and error', () => {
   });
 });
 
-describe('interim send hand-off (P3 replaces this with the sheet)', () => {
-  it('Enter sends to the orchestrator, then opens its thread, and clears the field', async () => {
+describe('send (P3: the sheet replaces the interim hand-off)', () => {
+  it('Enter sends to the orchestrator, opens the sheet (NOT the thread), and clears the field', async () => {
     const t = setup();
     const el = input(t.host);
     el.value = 'What needs me?';
     el.dispatchEvent(new Event('input'));
     const e = press(el, 'Enter');
     expect(e.defaultPrevented).toBe(true);
-    await vi.waitFor(() => expect(t.calls).toEqual(['send:orch:What needs me?', 'open:orch']));
+    await vi.waitFor(() => expect(t.calls).toEqual(['send:orch:What needs me?']));
+    expect(t.deps.openThread).not.toHaveBeenCalled();
+    expect((document.querySelector('.ct-orch-sheet') as HTMLElement).hidden).toBe(false);
     expect(el.value).toBe('');
   });
 
@@ -252,7 +258,7 @@ describe('interim send hand-off (P3 replaces this with the sheet)', () => {
     press(el, 'Enter');
     el.value = 'twice';
     press(el, 'Enter');
-    await vi.waitFor(() => expect(t.calls).toContain('open:orch'));
+    await Promise.resolve();
     expect(t.manager.sendMessage).toHaveBeenCalledTimes(1);
   });
 
@@ -303,10 +309,11 @@ describe('focusField (Cmd+J target)', () => {
     expect(document.activeElement).toBe(t.host.querySelector('.ct-orch-action'));
   });
 
-  it('orb mode: opens the orchestrator thread (interim) instead of focusing a hidden field', () => {
+  it('orb mode: opens the bottom sheet instead of focusing a hidden field', () => {
     const t = setup({ mode: 'orb' });
     t.dock.focusField();
-    expect(t.deps.openThread).toHaveBeenCalledWith('orch');
+    expect((document.querySelector('.ct-orch-sheet') as HTMLElement).hidden).toBe(false);
+    expect(t.deps.openThread).not.toHaveBeenCalled();
   });
 });
 
@@ -319,22 +326,25 @@ describe('narrow mode', () => {
     expect(t.root().dataset.mode).toBe('orb');
   });
 
-  it('tapping the orb in orb mode opens the thread; in pill mode it focuses the field', () => {
+  it('tapping the orb in orb mode opens the sheet; in pill mode it focuses the field', () => {
     const t = setup({ mode: 'orb' });
     (t.host.querySelector('.ct-orch-orb') as HTMLElement).click();
-    expect(t.deps.openThread).toHaveBeenCalledWith('orch');
+    expect((document.querySelector('.ct-orch-sheet') as HTMLElement).hidden).toBe(false);
+    expect(t.deps.openThread).not.toHaveBeenCalled();
     t.state.mode = 'pill';
     t.dock.relayout();
-    (t.deps.openThread as ReturnType<typeof vi.fn>).mockClear();
+    (document.querySelector('.ct-orch-sheet-head button[aria-label="Close"]') as HTMLElement).click();
     (t.host.querySelector('.ct-orch-orb') as HTMLElement).click();
     expect(t.deps.openThread).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(input(t.host));
   });
 
-  it('orb tap with no orchestrator sets one up first, then opens it', async () => {
+  it('orb tap with no orchestrator sets one up first, then opens the sheet (no thread hand-off)', async () => {
     const t = setup({ orchestratorId: undefined, mode: 'orb' });
     (t.host.querySelector('.ct-orch-orb') as HTMLElement).click();
-    await vi.waitFor(() => expect(t.calls).toEqual(['ensure', 'open:orch']));
+    await vi.waitFor(() => expect(t.calls).toEqual(['ensure']));
+    await vi.waitFor(() => expect((document.querySelector('.ct-orch-sheet') as HTMLElement).hidden).toBe(false));
+    expect(t.deps.openThread).not.toHaveBeenCalled();
   });
 });
 
