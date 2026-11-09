@@ -909,3 +909,60 @@ describe('compact form (K2 P5 batch 4): never approve blind', () => {
     expect(row.hidden).toBe(true);
   });
 });
+
+describe('D13: one focus-rescue routine for every tray form change (never <body>)', () => {
+  const short = [{ id: 'p', title: 'Deploy curation', kind: 'permission' as const, tool: 'Bash', detail: JSON.stringify({ command: 'npm run deploy --prod' }) }, { id: 'q', title: 'Mobile layout polish', kind: 'question' as const }];
+  const sheetOf = (t: ReturnType<typeof setup>) => (t.dock as unknown as { sheet: { keepTrayFocus(fn: () => void): void } }).sheet;
+  const active = () => document.activeElement;
+
+  it('full -> compact: Allow (hidden) -> the card\'s Review in thread', () => {
+    const t = setup({ specs: short });
+    const allow = t.btn('p', 'Allow')!;
+    allow.focus();
+    sheetOf(t).keepTrayFocus(() => { allow.blur(); applyTrayMode(t.tray()!, { compact: true, collapsed: false }, null); });
+    expect(active()).toBe(t.btn('p', 'Review in thread'));
+  });
+
+  it('compact -> compact (a different keyboard height): focus stays on the SAME logical control even though the measuring toggles dropped it', () => {
+    const t = setup({ specs: short });
+    applyTrayMode(t.tray()!, { compact: true, collapsed: false });
+    const review = t.btn('p', 'Review in thread')!;
+    review.focus();
+    sheetOf(t).keepTrayFocus(() => {
+      review.blur(); // the measuring toggles hide it for a moment...
+      applyTrayMode(t.tray()!, { compact: false, collapsed: false }, null);
+      applyTrayMode(t.tray()!, { compact: true, collapsed: false }, null);
+    });
+    expect(active()).toBe(t.btn('p', 'Review in thread'));
+  });
+
+  it('compact -> collapsed -> full -> hidden: never body, and always inside the sheet', () => {
+    const t = setup({ specs: short });
+    const tray = t.tray()!;
+    applyTrayMode(tray, { compact: true, collapsed: false });
+    const review = t.btn('p', 'Review in thread')!;
+    review.focus();
+    sheetOf(t).keepTrayFocus(() => { review.blur(); applyTrayMode(tray, { compact: true, collapsed: true }, null); });
+    const row = tray.querySelector<HTMLElement>('.ct-orch-tray-collapsed-review')!;
+    expect(active()).toBe(row);
+    sheetOf(t).keepTrayFocus(() => { row.blur(); applyTrayMode(tray, { compact: false, collapsed: false }, null); });
+    expect(active()).not.toBe(document.body);
+    expect(t.q('.ct-orch-sheet')!.contains(active())).toBe(true);
+    const deny = t.btn('p', 'Deny')!;
+    deny.focus();
+    sheetOf(t).keepTrayFocus(() => { deny.blur(); tray.hidden = true; });
+    expect(active()).not.toBe(document.body);
+    expect(t.q('.ct-orch-sheet')!.contains(active())).toBe(true);
+  });
+
+  it('a user who clicks away (focus leaves the tray on purpose) is NOT pulled back by a later form change', () => {
+    const t = setup({ specs: short });
+    t.btn('p', 'Deny')!.focus();
+    (t.q('.ct-orch-input') as HTMLElement | null)?.focus();
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+    sheetOf(t).keepTrayFocus(() => { applyTrayMode(t.tray()!, { compact: true, collapsed: false }, null); });
+    expect(active()).toBe(outside);
+  });
+});

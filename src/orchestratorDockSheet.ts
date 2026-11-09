@@ -310,6 +310,9 @@ export class DockSheet {
   /** Moves focus to the first control of the dialog (used when it opens and the composer has nothing to focus). */
   focusClose(): void { this.closeBtn.focus(); }
 
+  /** K2 P5 batch 5 scaffold. */
+  keepTrayFocus(fn: () => void): void { fn(); }
+
   /** The soft keyboard's height over the bottom of the view (narrow bottom sheet lifts by it); null removes the variable. */
   setKeyboardInset(px: number | null): void {
     if (px === null) this.el.style.removeProperty('--ct-orch-kbd-inset');

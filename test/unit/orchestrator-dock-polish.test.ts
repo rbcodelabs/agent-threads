@@ -929,15 +929,18 @@ describe('batch 3 advisories', () => {
   const rootInset = (t: T) => t.root.style.getPropertyValue('--ct-orch-kbd-inset');
   afterEach(() => { Platform.isMobile = false; });
 
-  it('1: a keyboard taller than the room never leaves the sheet uncapped (floor, not 60vh)', () => {
+  it('1/D14: a keyboard taller than the room never leaves the sheet uncapped NOR above the top: it is capped at the room and goes MICRO', () => {
     const vv = fakeViewport(844);
     const t = setup({ mode: 'pill' });
     sized(t, 390, 48);
     t.dock.openSheet();
-    vv.height = 20; vv.dispatchEvent(new Event('resize')); // a huge inset: room above the lifted pill <= 0
-    const max = t.q('.ct-orch-sheet')!.style.getPropertyValue('--ct-orch-sheet-max');
-    expect(max).not.toBe('');
-    expect(parseInt(max, 10)).toBeGreaterThanOrEqual(96);
+    vv.height = 150; vv.dispatchEvent(new Event('resize')); // inset 240 in a 390px view: the room above the lifted pill is far under the 96px floor
+    const sheet = t.q('.ct-orch-sheet')!;
+    const max = parseInt(sheet.style.getPropertyValue('--ct-orch-sheet-max'), 10);
+    const room = 390 - 8 - 240 - 48 - 16;
+    expect(sheet.style.getPropertyValue('--ct-orch-sheet-max')).not.toBe('');
+    expect(max).toBeLessThanOrEqual(Math.max(0, room));
+    expect(sheet.hasAttribute('data-micro')).toBe(true);
   });
 
   describe('2: touch-focus keyboard tracking (Platform.isMobile)', () => {

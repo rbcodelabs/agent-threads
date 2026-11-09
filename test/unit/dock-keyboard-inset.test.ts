@@ -28,6 +28,9 @@ describe('keyboardInset(rootBottom, vvOffsetTop, vvHeight)', () => {
     expect(keyboardInset(844, 0, 508, 1.005)).toBe(336);
     expect(keyboardInset(844, 0, 508, 1)).toBe(336);
   });
+  it('never under-lifts: a fractional inset rounds UP (a half pixel short leaves the composer 1px under the keyboard)', () => {
+    expect(keyboardInset(800, 0, 499.6)).toBe(301);
+  });
   it('ignores sub-pixel noise (rounds)', () => {
     expect(keyboardInset(800.4, 0, 799.9)).toBe(1);
   });

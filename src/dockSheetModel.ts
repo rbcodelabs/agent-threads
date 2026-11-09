@@ -122,3 +122,11 @@ export function trayLayout(i: { max: number; fixed: number; needFull: number; ne
   const wanted = Math.max(need, Math.min(i.max * TRAY_SHARE, room - MIN_TRANSCRIPT_PX));
   return { cap: Math.max(MIN_TRAY_PX, Math.min(wanted, room)), compact, collapsed: false };
 }
+
+/** The reply sheet never gets taller than the room it has; below this it renders MICRO (header + composer only). */
+export const MIN_SHEET_PX = 96;
+
+// K2 P5 batch 5 scaffold: signature only.
+export function sheetFit(_i: { max: number; chromeNeed: number }): { micro: boolean; hidden: boolean } {
+  return { micro: false, hidden: false };
+}

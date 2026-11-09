@@ -561,6 +561,122 @@ test.describe('Compact form safety (never approve blind)', () => {
   });
 });
 
+test.describe('D13: focus survives every tray form change @ 320x640', () => {
+  const size = { width: 320, height: 640 };
+  type Form = 'full' | 'compact' | 'collapsed' | 'hidden';
+  const formOf = (page: Page): Promise<Form> => page.evaluate(() => {
+    const t = document.querySelector('.ct-orch-tray') as HTMLElement | null;
+    if (!t || t.hidden) return 'hidden' as const;
+    if (t.hasAttribute('data-collapsed')) return 'collapsed' as const;
+    return t.hasAttribute('data-compact') ? 'compact' as const : 'full' as const;
+  });
+  const CONTROLS: Record<Form, string[]> = {
+    full: ['.ct-orch-tray-card[data-kind="permission"] button.ct-permission-deny', '.ct-orch-tray-card[data-kind="permission"] button.ct-permission-allow', '.ct-orch-tray-card[data-kind="permission"] button.ct-permission-always'],
+    compact: ['.ct-orch-tray-card[data-kind="permission"] button.ct-permission-deny', '.ct-orch-tray-card[data-kind="permission"] .ct-orch-tray-handoff'],
+    collapsed: ['.ct-orch-tray-collapsed-review'],
+    hidden: ['.ct-orch-input'],
+  };
+  test('every pairwise transition keeps focus inside the sheet (never <body>)', async ({ page }) => {
+    await installFakeVisualViewport(page);
+    await open(page, 'orch=attention&tx=conversation&tray=1', size);
+    await openSheet(page, size);
+    await fillTranscript(page, 8);
+    // Sweep the keyboard height to find a representative value for each form of the tray.
+    const kbFor: Partial<Record<Form, number>> = {};
+    const extra: Partial<Record<Form, number>> = {};
+    for (let kb = 0; kb <= 520; kb += 10) {
+      await page.evaluate((h) => (window as any).__setVV(h), size.height - kb);
+      await page.waitForTimeout(40);
+      const f = await formOf(page);
+      if (kbFor[f] === undefined) kbFor[f] = kb; else if (extra[f] === undefined && kb - kbFor[f]! >= 10) extra[f] = kb;
+    }
+    expect(Object.keys(kbFor).sort(), 'the sweep found all four forms').toEqual(['collapsed', 'compact', 'full', 'hidden']);
+    const set = async (kb: number) => { await page.evaluate((h) => (window as any).__setVV(h), size.height - kb); await page.waitForTimeout(120); };
+    const failures: string[] = [];
+    const forms = Object.keys(kbFor) as Form[];
+    for (const a of forms) for (const b of [...forms, ...(extra[a] !== undefined ? [`${a}*`] : [])]) {
+      const target = b.endsWith('*') ? extra[a]! : kbFor[b as Form]!;
+      for (const sel of CONTROLS[a]) {
+        await set(kbFor[a]!);
+        const loc = page.locator(sel).first();
+        if ((await loc.count()) === 0 || !(await loc.isVisible())) continue;
+        await loc.focus();
+        const before = await page.evaluate(() => (document.activeElement?.textContent ?? '').trim() || document.activeElement?.className);
+        await set(target);
+        const after = await page.evaluate(() => ({ body: document.activeElement === document.body, inSheet: !!document.activeElement?.closest('.ct-orch-sheet'), text: (document.activeElement?.textContent ?? '').trim().slice(0, 24) }));
+        if (after.body || !after.inSheet) failures.push(`${a} -> ${b} with focus on ${sel.split(' ').pop()} (${before}): ${JSON.stringify(after)}`);
+        if (b === `${a}*` && a === 'compact' && !after.body) {
+          const same = await page.evaluate(() => (document.activeElement?.textContent ?? '').trim());
+          if (same !== before) failures.push(`compact -> compact moved focus from "${before}" to "${same}"`);
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+});
+
+test.describe('D14 / D16: the sheet never starts above the top; a wrapped error reason fits to the pixel', () => {
+  const CASES = [
+    { width: 844, height: 390, kbs: [200, 260] }, { width: 667, height: 375, kbs: [200, 260] }, { width: 568, height: 320, kbs: [150, 200] },
+  ];
+  for (const c of CASES) for (const kb of c.kbs) {
+    test(`@ ${c.width}x${c.height}, keyboard ${kb}px: sheet top >= 0 (or hidden), close hit-testable, composer visible`, async ({ page }) => {
+      const size = { width: c.width, height: c.height };
+      await installFakeVisualViewport(page);
+      await open(page, 'orch=idle&tx=conversation&tray=1', size);
+      await page.evaluate(() => (window as any).__addPermission('k-hiptrip-awaiting', 'Bash', JSON.stringify({ command: 'npm run deploy --prod' })));
+      await page.evaluate(() => (window as any).__openSheet());
+      await page.evaluate((h) => (window as any).__setVV(h), c.height - kb);
+      await page.waitForTimeout(200);
+      const g = await page.evaluate(() => {
+        const sh = document.querySelector('.ct-orch-sheet') as HTMLElement;
+        const cs = getComputedStyle(sh);
+        const r = sh.getBoundingClientRect();
+        const vv = (window as any).visualViewport;
+        const field = document.querySelector('.ct-orch-input')!.getBoundingClientRect();
+        const close = sh.querySelector('.ct-orch-sheet-close') as HTMLElement;
+        const cr = close.getBoundingClientRect();
+        const hit = document.elementFromPoint(cr.left + cr.width / 2, cr.top + cr.height / 2);
+        return { hiddenSheet: cs.visibility === 'hidden' || cs.display === 'none', top: r.top, bottom: r.bottom, vb: vv.offsetTop + vv.height, closeHit: !!hit && (hit === close || close.contains(hit)), field: { b: field.bottom }, micro: sh.hasAttribute('data-micro') };
+      });
+      expect(g.field.b, 'composer / field above the keyboard').toBeLessThanOrEqual(g.vb + 0.5);
+      if (g.hiddenSheet) return; // no room at all: the sheet waits (hidden) instead of starting above the top
+      expect(g.top, 'sheet top inside the view').toBeGreaterThanOrEqual(-0.5);
+      expect(g.bottom, 'sheet above the keyboard').toBeLessThanOrEqual(g.vb + 0.5);
+      expect(g.closeHit, 'the close button is hit-testable').toBe(true);
+    });
+  }
+  test('orb -> pill flip with the keyboard at 340px: the header / close stay reachable', async ({ page }) => {
+    await installFakeVisualViewport(page);
+    await open(page, 'orch=idle&tx=conversation&tray=1', { width: 600, height: 640 });
+    await page.locator('.ct-orch-orb').click();
+    await page.evaluate(() => (window as any).__setVV(640 - 340));
+    await page.waitForTimeout(150);
+    await page.setViewportSize({ width: 700, height: 640 });
+    await page.waitForTimeout(250);
+    const g = await page.evaluate(() => {
+      const sh = document.querySelector('.ct-orch-sheet') as HTMLElement;
+      const r = sh.getBoundingClientRect();
+      const close = sh.querySelector('.ct-orch-sheet-close') as HTMLElement; const cr = close.getBoundingClientRect();
+      const hit = document.elementFromPoint(cr.left + cr.width / 2, cr.top + cr.height / 2);
+      return { mode: sh.dataset.mode, top: r.top, hidden: getComputedStyle(sh).visibility === 'hidden', closeHit: !!hit && (hit === close || close.contains(hit)) };
+    });
+    expect(g.mode).toBe('pill');
+    if (!g.hidden) { expect(g.top).toBeGreaterThanOrEqual(-0.5); expect(g.closeHit).toBe(true); }
+  });
+  test('D16: a wrapped error reason @ 320x640 with a 290px keyboard: the composer ends inside the visual viewport to the pixel', async ({ page }) => {
+    const size = { width: 320, height: 640 };
+    await installFakeVisualViewport(page);
+    await open(page, 'orch=error&errlong=1&tx=conversation&tray=worst', size);
+    await openSheet(page, size);
+    await page.evaluate(() => (window as any).__setVV(640 - 290));
+    await page.waitForTimeout(250);
+    const g = await page.evaluate(() => { const c = document.querySelector('.ct-orch-sheet-composer')!.getBoundingClientRect(); const s = document.querySelector('.ct-orch-sheet')!.getBoundingClientRect(); const vv = (window as any).visualViewport; return { cb: c.bottom, sb: s.bottom, vb: vv.offsetTop + vv.height }; });
+    expect(g.cb).toBeLessThanOrEqual(g.vb + 0.01);
+    expect(g.sb).toBeLessThanOrEqual(g.vb + 0.01);
+  });
+});
+
 test.describe('D2: landscape phone (pill mode): the field and the sheet lift above the soft keyboard', () => {
   for (const size of [{ width: 844, height: 390 }, { width: 667, height: 375 }]) {
     test(`@ ${size.width}x${size.height} with a 170px keyboard`, async ({ page }) => {

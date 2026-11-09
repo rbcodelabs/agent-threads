@@ -6,7 +6,7 @@
  * built ON dockTranscript, and the one-line unread peek text.
  */
 import { describe, it, expect } from 'vitest';
-import { richnessOf, sheetTranscript, stripVisualizeLines, peekLine, sheetBlock, trayLayout, MIN_TRAY_PX } from '../../src/dockSheetModel';
+import { richnessOf, sheetTranscript, stripVisualizeLines, peekLine, sheetBlock, trayLayout, MIN_TRAY_PX, sheetFit, MIN_SHEET_PX } from '../../src/dockSheetModel';
 
 const msg = (id: string, role: string, content: string, extra: Record<string, unknown> = {}) => ({ id, role, content, ...extra });
 
@@ -162,5 +162,20 @@ describe('trayLayout (K2 P5 batch 3: the composer wins; the tray scrolls inside 
     expect(l.collapsed).toBe(false);
     expect(l.cap).toBeGreaterThanOrEqual(MIN_TRAY_PX);
     expect(l.cap).toBeLessThanOrEqual(MIN_TRAY_PX);
+  });
+});
+
+describe('sheetFit (K2 P5 batch 5: the sheet never starts above the top of the view)', () => {
+  it('at or above the floor: normal sheet', () => {
+    expect(sheetFit({ max: MIN_SHEET_PX, chromeNeed: 107 })).toEqual({ micro: false, hidden: false });
+    expect(sheetFit({ max: 400, chromeNeed: 107 })).toEqual({ micro: false, hidden: false });
+  });
+  it('below the floor but enough for the header + composer: MICRO (no transcript, tray as hand-off or hidden)', () => {
+    expect(sheetFit({ max: 90, chromeNeed: 60 })).toEqual({ micro: true, hidden: false });
+  });
+  it('below what the header (+ composer) need: hidden until the room returns (never above the top)', () => {
+    expect(sheetFit({ max: 30, chromeNeed: 60 })).toEqual({ micro: true, hidden: true });
+    expect(sheetFit({ max: 0, chromeNeed: 60 })).toEqual({ micro: true, hidden: true });
+    expect(sheetFit({ max: -20, chromeNeed: 60 })).toEqual({ micro: true, hidden: true });
   });
 });
