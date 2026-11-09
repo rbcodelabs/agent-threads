@@ -98,7 +98,9 @@ export function attentionItems(candidates: AttentionCandidate[]): AttentionItem[
 }
 
 /**
- * Threads awaiting Rick (everything but failures); drives the attention dot.
+ * Threads awaiting Rick (everything but failures); drives the attention dot AND the sheet tray's "Needs you (N)" heading
+ * (dockTrayModel.trayItems filters the same items, so the two cannot disagree). N is the board's Needs-you lane PLUS its
+ * Awaiting lane (permission, question, plan), e.g. 1 + 2 = 3, not the Needs-you lane alone.
  * Product decisions: failed threads are excluded (they surface as the "Triage
  * failed" chip); the orchestrator's own pending prompts DO count, because it
  * needs the user, and callers decide whether to include the orchestrator thread

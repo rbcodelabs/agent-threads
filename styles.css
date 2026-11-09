@@ -7541,6 +7541,13 @@ textarea.ct-settings-wide-input {
   to { background: var(--background-primary); }
 }
 
+/* While a thread link is hovered the board gets extra scroll room below its cards (the sheet + pill cover that much), so a card
+   at the end of its column can still be scrolled up above them. Status columns / swimlanes / gallery only: the status board
+   itself must not shrink. */
+.ct-agents-list.ct-kanban-clearing .ct-kanban-col-body { padding-bottom: calc(8px + var(--ct-card-clearance, 0px)); }
+.ct-agents-list.ct-kanban-clearing .ct-kanban-board.ct-kanban-swimlanes,
+.ct-agents-list.ct-kanban-clearing .ct-gallery-board { padding-bottom: calc(76px + var(--ct-card-clearance, 0px)); }
+
 /* Between the transcript and the composer. The cap is a share of the sheet's own max height so the transcript keeps room. */
 .ct-orch-tray-slot { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .ct-orch-tray-slot:empty { display: none; }
@@ -7550,6 +7557,10 @@ textarea.ct-settings-wide-input {
   display: flex; flex-direction: column; gap: 6px;
   padding: 8px 12px; border-top: 1px solid var(--background-modifier-border);
   background: color-mix(in srgb, var(--color-orange, var(--text-warning)) 6%, var(--background-secondary));
+}
+.ct-orch-tray-bar {
+  position: sticky; top: -8px; z-index: 1; display: flex; align-items: center; gap: 8px;
+  margin: -8px -12px 0; padding: 8px 12px 4px; background: color-mix(in srgb, var(--color-orange, var(--text-warning)) 6%, var(--background-secondary));
 }
 .ct-orch-tray h3.ct-orch-tray-title {
   margin: 0; padding: 0; font-size: var(--font-ui-smaller); font-weight: 600; line-height: 1.3;
@@ -7588,7 +7599,7 @@ textarea.ct-settings-wide-input {
 .ct-kanban-dispatch .ct-orch-tray button.ct-permission-always { background: var(--interactive-accent); border-color: var(--interactive-accent); color: var(--text-on-accent); }
 .ct-kanban-dispatch .ct-orch-tray button.ct-permission-always:hover { background: var(--interactive-accent-hover, var(--interactive-accent)); }
 .ct-kanban-dispatch .ct-orch-tray button.ct-orch-tray-toggle {
-  align-self: flex-start; height: auto; min-height: 24px; padding: 1px 8px; border: none; border-radius: 6px; background: transparent; box-shadow: none;
+  margin-left: auto; height: auto; min-height: 24px; padding: 1px 8px; border: none; border-radius: 6px; background: transparent; box-shadow: none;
   color: var(--text-muted); font-size: var(--font-ui-smaller); cursor: pointer;
 }
 .ct-kanban-dispatch .ct-orch-tray button.ct-orch-tray-toggle:hover { background: var(--background-modifier-hover); color: var(--text-normal); }

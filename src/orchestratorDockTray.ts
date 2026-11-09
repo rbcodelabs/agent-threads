@@ -52,6 +52,7 @@ export class DockTray {
   private titleEl: HTMLElement | null = null;
   private listEl: HTMLElement | null = null;
   private toggleEl: HTMLButtonElement | null = null;
+  private barEl: HTMLElement | null = null;
   private readonly cards = new Map<string, Card>();
   private readonly listId = `ct-orch-tray-list-${++traySeq}`;
   private expanded = false;
@@ -73,7 +74,7 @@ export class DockTray {
   destroy(): void {
     this.destroyed = true;
     this.section?.remove();
-    this.section = this.titleEl = this.listEl = this.toggleEl = null;
+    this.section = this.titleEl = this.listEl = this.toggleEl = this.barEl = null;
     this.cards.clear();
   }
 
@@ -86,7 +87,7 @@ export class DockTray {
 
     if (entries.length === 0) {
       this.section?.remove();
-      this.section = this.titleEl = this.listEl = this.toggleEl = null;
+      this.section = this.titleEl = this.listEl = this.toggleEl = this.barEl = null;
       this.cards.clear();
       this.expanded = false;
       this.announceNew(entries);
@@ -128,7 +129,9 @@ export class DockTray {
       cls: 'ct-orch-tray',
       attr: { role: 'region', 'aria-label': 'Needs you', 'data-testid': 'orchestrator-tray' },
     });
-    this.titleEl = section.createEl('h3', { cls: 'ct-orch-tray-title' });
+    // One sticky unit: the heading and the Show more / fewer control stay at the top of the tray's own scroller.
+    this.barEl = section.createDiv('ct-orch-tray-bar');
+    this.titleEl = this.barEl.createEl('h3', { cls: 'ct-orch-tray-title' });
     this.listEl = section.createEl('ul', { cls: 'ct-orch-tray-list', attr: { id: this.listId } });
     this.section = section;
   }
@@ -137,7 +140,7 @@ export class DockTray {
     const needed = total > TRAY_COLLAPSE_AT;
     if (!needed) { this.toggleEl?.remove(); this.toggleEl = null; return; }
     if (!this.toggleEl) {
-      const btn = this.section!.createEl('button', { cls: 'ct-orch-tray-toggle', attr: { type: 'button', 'aria-controls': this.listId } });
+      const btn = this.barEl!.createEl('button', { cls: 'ct-orch-tray-toggle', attr: { type: 'button', 'aria-controls': this.listId } });
       btn.addEventListener('click', () => {
         this.expanded = !this.expanded;
         this.rerender();

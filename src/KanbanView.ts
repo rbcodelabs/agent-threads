@@ -15,6 +15,7 @@ import { decisionToQuestion } from './decisions';
 import { formatToolName } from './ClaudeSession';
 import { appendPermissionButtons, summarizePermissionDetail } from './permissionCard';
 import { hostExecState } from './managedPolicy';
+import { planCardScroll, type Rect } from './dockCardScroll';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
@@ -100,6 +101,17 @@ const PROJECT_SECTION_MAP: Record<ThreadRowState, { label: string; state: RowSta
 
 /** Pointer must rest on a thread link this long before the board scrolls to its card. */
 const CARD_HOVER_INTENT_MS = 120;
+
+function rectOf(el: Element): Rect {
+  const b = el.getBoundingClientRect();
+  return { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
+}
+
+/** Instant for reduced motion (or hosts without scrollTo); smooth otherwise. */
+function setScroll(el: HTMLElement, axis: 'top' | 'left', value: number, reduced: boolean): void {
+  if (reduced || typeof el.scrollTo !== 'function') { if (axis === 'top') el.scrollTop = value; else el.scrollLeft = value; return; }
+  el.scrollTo(axis === 'top' ? { top: value, behavior: 'smooth' } : { left: value, behavior: 'smooth' });
+}
 
 /** `matchMedia` is absent in some test hosts: treat that as "motion is fine". */
 function prefersReducedMotion(): boolean {
@@ -474,8 +486,7 @@ export class KanbanView extends ItemView {
       this.cardScrollTimer = setTimeout(() => {
         this.cardScrollTimer = null;
         if (this.linkedCardId !== threadId || this.rowEls.get(threadId) !== el || el.getClientRects().length === 0) return;
-        el.style.scrollMarginBottom = `${this.coveredBottomPx()}px`; // not under the pill / the open sheet
-        el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', inline: 'center', block: 'nearest' });
+        this.scrollCardIntoClearView(el, reduced);
       }, CARD_HOVER_INTENT_MS);
     }
     return true;
@@ -488,7 +499,8 @@ export class KanbanView extends ItemView {
     const el = id ? this.rowEls.get(id) : undefined;
     el?.removeClass('ct-kanban-card-linked');
     el?.removeClass('ct-kanban-card-linked-flash');
-    if (el) el.style.scrollMarginBottom = '';
+    this.boardEl?.classList.remove('ct-kanban-clearing');
+    this.boardEl?.style.removeProperty('--ct-card-clearance');
   }
 
   private cancelCardScroll(): void {
@@ -496,14 +508,47 @@ export class KanbanView extends ItemView {
     this.cardScrollTimer = null;
   }
 
-  /** How much of the board's bottom edge the pill and the open reply sheet cover (+ a gap), so a scrolled-to card lands above them. */
-  private coveredBottomPx(): number {
+  /**
+   * Scrolls the board (and the lane / column that holds the card) so the card lands OUTSIDE the open reply sheet and the
+   * pill, which float over the board: scrollIntoView ignores them, and 25 of 60 QA hovers left the card at least 70%
+   * covered. The geometry is dockCardScroll.planCardScroll; the extra scroll room below the cards is what lets a card
+   * at the end of its column rise above the sheet at all.
+   */
+  private scrollCardIntoClearView(el: HTMLElement, reduced: boolean): void {
+    const host = this.boardEl;
     const root = this.containerEl.children[1] as HTMLElement | undefined;
-    const pill = root?.querySelector<HTMLElement>('.ct-kanban-dispatch');
-    if (!root || !pill) return 0;
-    const sheet = pill.querySelector<HTMLElement>('.ct-orch-sheet:not([hidden])');
-    const top = Math.min(pill.getBoundingClientRect().top, sheet ? sheet.getBoundingClientRect().top : Infinity);
-    return Math.max(0, Math.round(root.getBoundingClientRect().bottom - top + 8));
+    if (!host || !root) return;
+    const obstacles: Rect[] = [];
+    const pill = root.querySelector<HTMLElement>('.ct-kanban-dispatch');
+    if (pill) {
+      obstacles.push(rectOf(pill));
+      const sheet = pill.querySelector<HTMLElement>('.ct-orch-sheet:not([hidden])');
+      if (sheet) obstacles.push(rectOf(sheet));
+    }
+    const hostRect = rectOf(host);
+    const covered = obstacles.length > 0 ? Math.max(0, Math.round(hostRect.bottom - Math.min(...obstacles.map((o) => o.top)) + 8)) : 0;
+    host.style.setProperty('--ct-card-clearance', `${covered}px`);
+    host.classList.add('ct-kanban-clearing');
+    let allowX = false; // sideways moves only if something between the card and the board can actually scroll sideways
+    for (let n: HTMLElement | null = el.parentElement; n; n = n === host ? null : n.parentElement) {
+      if (/(auto|scroll)/.test(getComputedStyle(n).overflowX) && n.scrollWidth > n.clientWidth) { allowX = true; break; }
+    }
+    const plan = planCardScroll(rectOf(el), hostRect, obstacles, { allowX });
+    let remX = plan.dx;
+    let remY = plan.dy;
+    for (let n: HTMLElement | null = el.parentElement; n && (remX !== 0 || remY !== 0); n = n === host ? null : n.parentElement) {
+      const cs = getComputedStyle(n);
+      if (remY !== 0 && /(auto|scroll)/.test(cs.overflowY)) {
+        const next = Math.max(0, Math.min(n.scrollHeight - n.clientHeight, n.scrollTop - remY));
+        const moved = n.scrollTop - next; // how far the card moved
+        if (moved !== 0) { setScroll(n, 'top', next, reduced); remY -= moved; }
+      }
+      if (remX !== 0 && /(auto|scroll)/.test(cs.overflowX)) {
+        const next = Math.max(0, Math.min(n.scrollWidth - n.clientWidth, n.scrollLeft - remX));
+        const moved = n.scrollLeft - next;
+        if (moved !== 0) { setScroll(n, 'left', next, reduced); remX -= moved; }
+      }
+    }
   }
 
   /** Every place a card element is created registers it here, so a card rebuilt outside render() (gallery refresh) keeps the link highlight. */

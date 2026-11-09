@@ -78,6 +78,18 @@ describe('planCardScroll', () => {
   });
 });
 
+describe('planCardScroll when the board cannot scroll sideways (swimlanes, gallery)', () => {
+  it('never plans a horizontal move: a card in the middle band goes UP above the overlays instead of sideways into a strip', () => {
+    const card = r(654, 1223, 918, 1306); // far below the fold, under the overlays' x range
+    const p = planCardScroll(card, BOARD, [SHEET, PILL], { allowX: false });
+    expect(p.dx).toBe(0);
+    expect(card.bottom + p.dy).toBeLessThanOrEqual(230);
+  });
+  it('a card already in a side strip stays', () => {
+    expect(planCardScroll(r(1150, 300, 1270, 400), BOARD, [SHEET, PILL], { allowX: false })).toMatchObject({ dx: 0, dy: 0 });
+  });
+});
+
 describe('coveredFraction', () => {
   it('0 when clear, 1 when hidden, partial in between', () => {
     expect(coveredFraction(r(0, 0, 100, 100), [r(200, 200, 300, 300)])).toBe(0);

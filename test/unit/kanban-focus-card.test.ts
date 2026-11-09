@@ -165,7 +165,9 @@ describe('KanbanView.focusCard: hover intent, visibility and clearance', () => {
 /** A board whose scroller we can read back: rects are stubbed from a mutable scroll offset. */
 function geometry(view: KanbanView, card: HTMLElement, opts: { cardRect: { left: number; top: number; right: number; bottom: number }; sheet?: { left: number; top: number; right: number; bottom: number } | null }) {
   const root = view.containerEl.children[1] as HTMLElement;
-  const board = (view as unknown as { boardEl: HTMLElement }).boardEl; // the real scroll host (.ct-agents-list)
+  const v = view as unknown as { boardEl?: HTMLElement };
+  const board = v.boardEl ?? (v.boardEl = Object.assign(document.createElement('div'), { className: 'ct-agents-list' })); // the real scroll host
+  if (!board.parentElement) root.appendChild(board);
   board.style.overflowY = 'auto';
   board.style.overflowX = 'auto';
   let top = 0; let left = 0;

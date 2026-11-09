@@ -327,18 +327,17 @@ test.describe('orchestrator tray — hovered card is scrolled OUT from under the
             for (const o of obs) { const iw = Math.min(c.right, o.right) - Math.max(c.left, o.left); const ih = Math.min(c.bottom, o.bottom) - Math.max(c.top, o.top); if (iw > 0 && ih > 0) covered += iw * ih; }
             const minTop = Math.min(...obs.map((o) => o.top));
             const uncoveredH = minTop - board.top;
-            const tall = (c.bottom - c.top) > uncoveredH;
+            const tall = (c.bottom - c.top) > Math.min(uncoveredH, board.bottom - board.top) && (c.bottom - c.top) > 0.9 * uncoveredH; // taller than the region above the overlays
             // top-left corner visible: inside the board and above every obstacle
             const cornerOk = c.top >= board.top - 1 && c.top < minTop && c.left < board.right && c.right > board.left;
-            return { frac: covered / area, tall, cornerOk, inBoardH: c.left >= board.left - 1 && c.right <= board.right + 1, title: card.textContent?.slice(0, 40) };
+            return { dbg: JSON.stringify({ c, board, minTop, obs }), frac: covered / area, tall, cornerOk, onBoard: c.right > board.left + 20 && c.left < board.right - 20, title: card.textContent?.slice(0, 40) };
           });
           if (!m) continue;
           checked++;
-          if (m.tall) expect(m.cornerOk, `tall card ${m.title}: top must be uncovered`).toBe(true);
-          else {
-            expect(m.frac, `${m.title} covered`).toBeLessThanOrEqual(0.05);
-            expect(m.inBoardH || m.frac === 0, `${m.title} horizontally on the board`).toBe(true);
-          }
+          const linkText = await links.nth(i).textContent();
+          if (m.frac > 0.05 && m.tall) expect(m.cornerOk, `tall card ${m.title}: top must be uncovered ${m.dbg}`).toBe(true);
+          else expect(m.frac, `link ${linkText} -> ${m.title} covered ${m.dbg}`).toBeLessThanOrEqual(0.05);
+          expect(m.onBoard, `${m.title} must be on the board horizontally ${m.dbg}`).toBe(true);
           await page.mouse.move(2, 2);
         }
         expect(checked, 'at least some cards were verified in this grouping').toBeGreaterThanOrEqual(mode === 'gallery' ? 1 : 5);

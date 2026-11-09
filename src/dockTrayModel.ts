@@ -4,8 +4,8 @@
  * Pure model for the reply sheet's Needs-you tray: which attention items it lists, the collapse beyond
  * three, the hand-off labels and the screen-reader text. No `obsidian` import and no manager access.
  *
- * The tray lists exactly what the dot and the board's Needs-you lane count (attentionItems minus failures),
- * so the heading number can never disagree with them.
+ * The tray lists exactly what the dot counts (attentionItems minus failures = orchestratorDockModel.needsYouCount): the board's
+ * Needs-you lane PLUS its Awaiting lane (e.g. 1 + 2 = 3), so the heading number can never disagree with the dot.
  */
 import type { AttentionItem } from './orchestratorDockModel';
 
