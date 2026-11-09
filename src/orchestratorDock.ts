@@ -57,13 +57,18 @@ export interface OrchestratorDockDeps {
 
 type BodyKind = 'input' | 'none' | 'offline' | 'error';
 
-/** High-frequency events that cannot change the dock's state; everything else re-derives. */
-const IGNORED_EVENTS: ReadonlySet<string> = new Set([
-  'token', 'tool_use', 'tool_progress', 'tool_result_status', 'tool_result_images', 'status', 'usage',
-  'active_model', 'task_progress', 'task_progress_summary', 'tasks_updated', 'files_edited', 'git_diff',
-  'git_operation', 'memory_recall', 'commands_changed', 'agent_runs_changed', 'message', 'compact', 'recap',
-  'summary_updated', 'status_tags', 'file_user_modified', 'stream_reset', 'rate_limit', 'rate_limit_retry',
-  'api_retry', 'user_message_added',
+/**
+ * The ONLY manager events that re-derive the dock. An allowlist (not a blocklist) so a new high-frequency
+ * event can never silently turn into a per-token refresh. Mirrors what KanbanView re-renders on, plus the
+ * connection/auth events deriveDockState reads through thread.lastError / status.
+ */
+const REFRESH_EVENTS: ReadonlySet<string> = new Set([
+  'done', 'interrupted', 'error', 'reconnecting', 'auth_retry', 'streaming_start', 'run_state_settled',
+  'permission_request', 'permission_resolved', 'pending_question_changed', 'pending_plan_changed',
+  'plan_ready', 'question_ready', 'proposed_reply_changed', 'pending_decisions_changed',
+  'thread_created', 'thread_deleted', 'threads_loaded', 'projects_changed', 'wakeup_changed',
+  'reviewed_changed', 'status_tags', 'summary_updated', 'agent_runs_changed', 'task_notification',
+  'background_tasks_pending', 'user_message_added', 'message',
 ]);
 
 const MAX_ERROR_CHARS = 60;
@@ -113,7 +118,7 @@ export class OrchestratorDock {
     this.dotEl = root.createSpan({ cls: 'ct-orch-dot', attr: { role: 'img', 'data-testid': 'orchestrator-dot' } });
 
     this.unsubscribeManager = this.deps.manager.subscribe((_threadId, event) => {
-      if (IGNORED_EVENTS.has(event.type)) return;
+      if (!REFRESH_EVENTS.has(event.type)) return;
       this.refresh();
     });
     this.unsubscribeDaemons = this.deps.daemons?.onState(() => this.refresh()) ?? null;
@@ -143,7 +148,9 @@ export class OrchestratorDock {
   focusField(): void {
     if (this.destroyed || !this.rootEl) return;
     if (this.currentMode === 'orb') { void this.handOff(); return; }
-    (this.inputEl ?? this.actionEl)?.focus();
+    const input = this.inputEl;
+    if (input && document.activeElement === input) { input.select(); return; }
+    (input ?? this.actionEl)?.focus();
   }
 
   /** Re-derive state from live manager values and patch the DOM in place. */
@@ -182,6 +189,8 @@ export class OrchestratorDock {
     const root = this.rootEl;
     root.dataset.state = this.state;
     root.dataset.mode = this.currentMode;
+    // Pill mode: the field is the keyboard stop (the orb only calls focusField). Orb mode: the orb is the control.
+    if (this.currentMode === 'pill') this.orbEl.setAttribute('tabindex', '-1'); else this.orbEl.removeAttribute('tabindex');
     this.orbEl.toggleClass('ct-orch-orb-spinning', running > 0 || (!!orchestratorId && manager.isRunning(orchestratorId)));
 
     const tip = tooltipText({ running, total: threads.length, needsYou });
@@ -258,6 +267,7 @@ export class OrchestratorDock {
       attr: { rows: '1', placeholder: 'Ask the orchestrator…', 'aria-label': 'Ask the portfolio orchestrator', 'data-testid': 'orchestrator-input' },
     });
     input.value = this.draft;
+    this.autosize(input);
     input.addEventListener('input', () => {
       this.draft = input.value;
       this.autosize(input);
@@ -278,7 +288,7 @@ export class OrchestratorDock {
 
   private onKeydown(e: KeyboardEvent, input: HTMLTextAreaElement): void {
     if (e.key === 'Escape') { input.blur(); return; }
-    if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     void this.submit(input);
   }
@@ -300,8 +310,9 @@ export class OrchestratorDock {
       await this.deps.manager.sendMessage(id, text);
     } catch (err) {
       // Never silently drop a message: put it back and say why.
-      input.value = text;
-      this.draft = text;
+      // The textarea may have been rebuilt while the send was pending: write to the CURRENT one, draft first.
+      this.draft = this.draft ? `${text}\n${this.draft}` : text;
+      if (this.inputEl) { this.inputEl.value = this.draft; this.autosize(this.inputEl); }
       new Notice(`Could not send to the orchestrator: ${err instanceof Error ? err.message : String(err)}`);
       return;
     } finally {
@@ -348,8 +359,9 @@ export class OrchestratorDock {
     } finally {
       this.settingUp = false;
       if (btn) btn.disabled = false;
+      // Even on failure: ensureOrchestrator may have persisted the id before throwing.
+      this.refresh();
     }
-    this.refresh();
     this.focusField();
   }
 }

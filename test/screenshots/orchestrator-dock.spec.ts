@@ -59,7 +59,6 @@ test.describe('orchestrator dock — functional (no baselines)', () => {
     await expect(page.getByRole('button', { name: 'New thread' })).toBeVisible();
     await expect(page.locator('.ct-kanban-groupby')).toBeVisible();
     await expect(page.locator('.ct-agents-search-btn')).toBeVisible();
-    await expect(page.locator('.ct-agents-count')).toHaveCount(0);
   });
 
   test('the pill is 640px wide on a wide board and no taller than before at rest', async ({ page }) => {
@@ -135,6 +134,22 @@ test.describe('orchestrator dock — functional (no baselines)', () => {
     await expect(page.locator('.ct-orch-dock')).toHaveAttribute('data-mode', 'pill');
     await expect(page.locator('.ct-orch-input')).toBeVisible();
   });
+
+  for (const width of [320, 375, 390]) {
+    test(`narrow @ ${width}px: the pill meta row stays on ONE line and inside the pill`, async ({ page }) => {
+      await open(page, 'idle', { width, height: 844 });
+      const rects = await page.evaluate(() => {
+        const pill = document.querySelector('.ct-kanban-dispatch')!.getBoundingClientRect();
+        const kids = [...document.querySelectorAll('.ct-kanban-dispatch .ct-agents-panel-meta button, .ct-kanban-dispatch .ct-orch-dot')]
+          .filter((el) => (el as HTMLElement).offsetParent !== null)
+          .map((el) => el.getBoundingClientRect());
+        return { left: pill.left, right: pill.right, kids: kids.map((r) => ({ top: r.top, bottom: r.bottom, left: r.left, right: r.right })) };
+      });
+      const tops = rects.kids.map((r) => Math.round((r.top + r.bottom) / 2));
+      expect(Math.max(...tops) - Math.min(...tops)).toBeLessThan(10);
+      for (const r of rects.kids) { expect(r.left).toBeGreaterThanOrEqual(rects.left - 1); expect(r.right).toBeLessThanOrEqual(rects.right + 1); }
+    });
+  }
 
   test('narrow: tapping the orb opens the orchestrator thread (interim)', async ({ page }) => {
     await open(page, 'idle', NARROW);

@@ -3027,12 +3027,6 @@
   font-size: var(--font-ui-small);
 }
 
-.ct-agents-count {
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
 /* Kanban still owns its floating-panel search control. AgentDashboard uses
    the host ItemView action and SearchComponent instead. */
 .ct-agents-search-btn {
@@ -3454,7 +3448,6 @@
     flex-wrap: wrap;
     gap: 4px 8px;
   }
-  .ct-agents-panel-meta > .ct-agents-count { flex: 1 1 auto; min-width: 0; }
   .ct-agents-panel-actions { margin-left: auto; flex: 0 0 auto; }
 }
 
@@ -7198,6 +7191,7 @@ textarea.ct-settings-wide-input {
   white-space: nowrap;
 }
 .ct-orch-dock button.ct-orch-action:hover { background: var(--background-modifier-border); }
+.ct-orch-dock button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
 .ct-orch-dock button.ct-orch-action:disabled { opacity: 0.5; cursor: default; }
 
 /* Needs-you dot: always present so its tooltip (running / total / needs you) is never lost; orange when something awaits. */
@@ -7215,9 +7209,12 @@ textarea.ct-settings-wide-input {
 .ct-orch-dock[data-mode="orb"] { --ct-orch-hit: 36px; --ct-orch-orb: 30px; flex: 0 0 auto; margin-right: 0; }
 .ct-orch-dock[data-mode="orb"] .ct-orch-field { flex: none; padding: 0; border: none; background: transparent; min-height: 0; }
 .ct-orch-dock[data-mode="orb"] .ct-orch-body { display: none; }
+.ct-orch-dock[data-mode="orb"] { gap: 0; }
+.ct-orch-dock[data-mode="orb"] .ct-orch-dot { margin: 0 2px; }
 /* One row, as in the mock: the dot already reports needs-you, so the "Only needs you" chip yields its room to the orb. */
-.ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) { flex-wrap: nowrap; }
-.ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-kanban-needs-chip { display: none; }
+/* Compound selectors outrank `.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-agents-panel-meta { flex-wrap: wrap }`. */
+.ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) { flex-wrap: nowrap; }
+.ct-agents-root .ct-kanban-dispatch .ct-agents-panel-meta:has(.ct-orch-dock[data-mode="orb"]) .ct-kanban-needs-chip { display: none; }
 
 /* Mobile: 44px targets (same rule as the New thread button). */
 .ct-agents-root.ct-mobile .ct-orch-dock { --ct-orch-hit: 44px; --ct-orch-orb: 32px; }
@@ -8345,8 +8342,6 @@ body.ct-skills-resizing {
 }
 .ct-kanban-dispatch .ct-agents-panel-meta { border-bottom-width: 0; }
 .ct-kanban-dispatch .ct-agents-search-bar:not(.ct-hidden) { border-top: 1px solid var(--background-modifier-border); }
-
-.ct-agents-root.ct-mobile .ct-agents-panel-meta > .ct-agents-count { display: block; }
 
 .ct-agents-root.ct-mobile .ct-agents-panel-meta > .ct-agents-panel-actions { display: flex; }
 

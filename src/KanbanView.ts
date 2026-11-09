@@ -388,9 +388,10 @@ export class KanbanView extends ItemView {
     this.dock.mount();
     // Narrow boards collapse the pill to the orb (+ New thread): re-derive when the view width crosses 640px.
     if (typeof ResizeObserver !== 'undefined') {
-      this.dockResizeObserver = new ResizeObserver((entries) => {
-        const width = entries[entries.length - 1]?.contentRect.width ?? root.clientWidth;
-        const next = dockModeForWidth(width);
+      this.dockResizeObserver = new ResizeObserver(() => {
+        // One measure (clientWidth) for open AND resize: contentRect is fractional and padding-excluded, so mixing the two
+        // could flip the mode at exactly 640px.
+        const next = dockModeForWidth(root.clientWidth);
         if (next === this.dockMode) return;
         this.dockMode = next;
         this.dock?.relayout();
