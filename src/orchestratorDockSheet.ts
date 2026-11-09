@@ -11,6 +11,7 @@
  */
 import { setIcon } from 'obsidian';
 import { renderDockMarkdown } from './dockMarkdown';
+import { applyTrayMode } from './orchestratorDockTray';
 import { trayLayout, type Richness, type SheetEntry } from './dockSheetModel';
 import type { SuggestionChip, ThreadRef } from './orchestratorDockModel';
 
@@ -57,6 +58,8 @@ export const ANNOUNCE_MIN_INTERVAL_MS = 4000;
 const NEAR_BOTTOM_PX = 48;
 /** Padding under the tray's first card (part of the room its floor needs). */
 const TRAY_PAD_PX = 8;
+/** The collapsed tray's one row: the heading (~26px) plus the tray's own 8px top and bottom padding. */
+const COLLAPSED_ROW_PX = 42;
 /** Below this sheet height the header's count line is dropped so the heading + a card still fit. */
 const TIGHT_SHEET_PX = 160;
 /** Re-pin tolerance when the user scrolls down: they have to actually get to the bottom. */
@@ -322,15 +325,23 @@ export class DockSheet {
    */
   fitTray(): void {
     const tray = this.trayHost.querySelector<HTMLElement>('.ct-orch-tray');
+    if (!tray) { this.el.style.removeProperty('--ct-orch-tray-max'); return; }
     const max = parseFloat(this.el.style.getPropertyValue('--ct-orch-sheet-max'));
-    if (!tray || !(max > 0)) { this.el.style.removeProperty('--ct-orch-tray-max'); tray?.removeAttribute('data-compact'); return; }
+    const focused = this.el.ownerDocument.activeElement; // before the measuring toggles below can drop it
+    if (!(max > 0)) {
+      this.el.style.removeProperty('--ct-orch-tray-max');
+      tray.hidden = false;
+      applyTrayMode(tray, { compact: false, collapsed: false }, focused);
+      return;
+    }
     const need = (): number => {
       const first = tray.querySelector<HTMLElement>('.ct-orch-tray-card');
       return first ? first.offsetTop + first.offsetHeight + TRAY_PAD_PX : 0;
     };
-    tray.removeAttribute('data-compact');
+    tray.hidden = false;
+    applyTrayMode(tray, { compact: false, collapsed: false }, null);
     const needFull = need();
-    tray.setAttribute('data-compact', '1');
+    applyTrayMode(tray, { compact: true, collapsed: false }, null);
     const needCompact = need();
     const view = this.el.ownerDocument.defaultView;
     let fixed = 0;
@@ -345,8 +356,15 @@ export class DockSheet {
     const sc = view?.getComputedStyle(this.scrollEl);
     if (sc) fixed += (parseFloat(sc.paddingTop) || 0) + (parseFloat(sc.paddingBottom) || 0);
     const layout = trayLayout({ max, fixed, needFull, needCompact });
-    if (!layout.compact) tray.removeAttribute('data-compact');
-    this.el.style.setProperty('--ct-orch-tray-max', `${Math.round(layout.cap)}px`);
+    applyTrayMode(tray, layout, focused);
+    // Math.ceil: a half pixel short would clip an edge at DPR 2.
+    this.el.style.setProperty('--ct-orch-tray-max', `${Math.ceil(layout.cap)}px`);
+    // Collapsed with less than one row of room (the row is the heading plus the tray's padding): hide the tray entirely, the composer
+    // keeps what little there is. The dot and the header count still say who needs you.
+    tray.hidden = layout.collapsed && layout.cap < COLLAPSED_ROW_PX;
+    // The sticky heading covers the top of the scrollport: scrolled-to elements must land below it.
+    const bar = tray.querySelector<HTMLElement>('.ct-orch-tray-bar');
+    tray.style.scrollPaddingTop = bar && !layout.compact ? `${bar.offsetHeight}px` : '0px';
   }
 
   setMaxHeight(px: number | null): void {

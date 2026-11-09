@@ -109,12 +109,14 @@ export const MIN_TRAY_PX = 52; // a 44px button plus its padding: the smallest b
 /**
  * How tall the Needs-you tray may be inside a sheet of `max` px whose fixed chrome (handle, header, composer) is `fixed` px.
  * The COMPOSER WINS: the tray never takes more than `max - fixed` (it scrolls inside that), so the sheet's overflow never
- * clips the composer. Within that room it wants a share of the sheet, at least the first card with its buttons, and leaves
+ * clips the composer (below MIN_TRAY_PX of room the tray COLLAPSES to a one-row hand-off and may take 0). Within that room it wants a share of the sheet, at least the first card with its buttons, and leaves
  * the transcript MIN_TRANSCRIPT_PX if it can. When even the first card does not fit, the COMPACT form (title and buttons,
  * detail collapsed, heading not sticky) is used. A first card that is partly clipped but scrollable beats a clipped composer.
  */
 export function trayLayout(i: { max: number; fixed: number; needFull: number; needCompact: number }): { cap: number; compact: boolean; collapsed: boolean } {
   const room = i.max - i.fixed;
+  // Not even a card's buttons fit: the body collapses to a one-row hand-off (or nothing at all) and the composer keeps its room.
+  if (room < MIN_TRAY_PX) return { cap: Math.max(0, room), compact: true, collapsed: true };
   const compact = i.needFull > room;
   const need = compact ? i.needCompact : i.needFull;
   const wanted = Math.max(need, Math.min(i.max * TRAY_SHARE, room - MIN_TRANSCRIPT_PX));

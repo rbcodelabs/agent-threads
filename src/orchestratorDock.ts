@@ -156,6 +156,10 @@ export class OrchestratorDock {
   private summaryText = '';
   private keyboard: KeyboardInsetTracker | null = null;
   private keyboardPx = 0;
+  /** The inset as visualViewport reports it, before the pill-mode clamp. */
+  private keyboardRaw = 0;
+  /** Sends that failed after the orchestrator was swapped: their text, per orchestrator id, comes back if the user returns. */
+  private readonly lostSends = new Map<string, string>();
   private keyboardRoot: HTMLElement | null = null;
   private readonly history = new InputHistory();
   private readonly drafts: DraftStore;
@@ -353,6 +357,7 @@ export class OrchestratorDock {
     const previousMode = this.currentMode;
     if (this.state === 'none' && this.sheet?.isOpen) this.closeSheet(false);
     this.currentMode = this.deps.mode();
+    if (previousMode !== this.currentMode && this.keyboard && this.keyboardRaw > 0) this.applyKeyboard(); // the clamp depends on the mode
 
     const root = this.rootEl;
     root.dataset.state = this.state;
@@ -486,6 +491,16 @@ export class OrchestratorDock {
       }
       this.trackedId = id;
       if (id !== undefined) this.lastOrchestratorId = id;
+      // A send that failed while the user was on another orchestrator comes back when they return to this one.
+      const lost = id ? this.lostSends.get(id) : undefined;
+      if (id && lost !== undefined) {
+        this.lostSends.delete(id);
+        if (this.drafts.get(id) === '') {
+          this.drafts.set(lost, id);
+          this.syncedVersion = this.drafts.version;
+          if (this.inputEl) { this.inputEl.value = lost; this.autosize(this.inputEl); }
+        }
+      }
       this.streamBuf = '';
       this.stoppedText = '';
       this.txCache = null;
@@ -714,6 +729,16 @@ export class OrchestratorDock {
   }
 
   /** The inset goes on the sheet (narrow bottom sheet) and on the view root (so a pill-mode pill can lift, see styles.css). */
+  /** Applies the raw keyboard inset under the CURRENT mode (also re-run when the mode flips under an open keyboard). */
+  private applyKeyboard(): void {
+    // Pill mode lifts the whole pill: never further than leaves the pill inside a small view.
+    const px = this.currentMode === 'pill' ? this.clampLift(this.keyboardRaw) : this.keyboardRaw;
+    this.keyboardPx = px;
+    this.host.parentElement?.classList.toggle('ct-orch-kbd-up', px > 0);
+    this.setKeyboardVar(px);
+    if (this.sheet?.isOpen) this.layoutChanged();
+  }
+
   private clampLift(px: number): number {
     const rootH = this.keyboardRoot?.clientHeight ?? 0;
     if (!rootH || px <= 0) return px;
@@ -731,6 +756,7 @@ export class OrchestratorDock {
   private stopKeyboardTracking(): void {
     this.keyboard?.stop();
     this.keyboardPx = 0;
+    this.keyboardRaw = 0;
     this.host.parentElement?.classList.remove('ct-orch-kbd-up');
     this.setKeyboardVar(null);
   }
@@ -751,12 +777,8 @@ export class OrchestratorDock {
       () => (this.host.closest('.ct-agents-root') ?? this.rootEl)?.getBoundingClientRect().bottom ?? 0,
       (raw) => {
         if (this.destroyed) return;
-        // Pill mode lifts the whole pill: never further than leaves the pill inside a small view.
-        const px = this.currentMode === 'pill' ? this.clampLift(raw) : raw;
-        this.keyboardPx = px;
-        this.host.parentElement?.classList.toggle('ct-orch-kbd-up', px > 0);
-        this.setKeyboardVar(px);
-        if (this.sheet?.isOpen) this.layoutChanged();
+        this.keyboardRaw = raw;
+        this.applyKeyboard();
       },
     );
     this.keyboard.start();
@@ -1094,8 +1116,10 @@ export class OrchestratorDock {
         return;
       }
       if (this.deps.getOrchestratorThreadId() !== id) {
-        // The orchestrator was swapped while the send was pending: this text belongs to the old one and must not land in the new one's draft.
-        new Notice(`Could not send to the previous orchestrator: ${err instanceof Error ? err.message : String(err)}`);
+        // The orchestrator was swapped while the send was pending: this text belongs to the old one and must not land in the new one's
+        // draft. It is never dropped: kept per orchestrator (it comes back if the user returns) and quoted in the notice.
+        this.lostSends.set(id, this.lostSends.has(id) ? `${this.lostSends.get(id)}\n${text}` : text);
+        new Notice(`Could not send to the previous orchestrator (${err instanceof Error ? err.message : String(err)}). Your message: "${text.length > 160 ? `${text.slice(0, 160)}…` : text}"`);
         return;
       }
       // Never silently drop a message: put it back and say why.

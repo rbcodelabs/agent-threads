@@ -7602,7 +7602,7 @@ textarea.ct-settings-wide-input {
   /* The tray never shrinks with the transcript (a long conversation used to crush it to a heading, with no buttons): it takes its
      natural height up to --ct-orch-tray-max (set by the dock: a share of the sheet, but never less than the heading plus the FIRST
      card with its buttons) and scrolls inside that; the transcript gives way first. */
-  flex: 0 0 auto; min-height: 0; overflow-y: auto; box-sizing: border-box; position: relative; scroll-padding-top: 36px;
+  flex: 0 0 auto; min-height: 0; overflow-y: auto; box-sizing: border-box; position: relative;
   max-height: var(--ct-orch-tray-max, calc(var(--ct-orch-sheet-max, 60vh) * 0.55));
   display: flex; flex-direction: column; gap: 6px;
   padding: 8px 12px; border-top: 1px solid var(--background-modifier-border);
@@ -7612,11 +7612,22 @@ textarea.ct-settings-wide-input {
   position: sticky; top: -8px; z-index: 1; display: flex; align-items: center; gap: 8px;
   margin: -8px -12px 0; padding: 8px 12px 4px; background: color-mix(in srgb, var(--color-orange, var(--text-warning)) 6%, var(--background-secondary));
 }
-.ct-orch-tray[data-compact] { scroll-padding-top: 0; }
-/* Compact form (the sheet cannot give the first card its full height without clipping the composer): title + buttons, detail
-   collapsed behind the title, heading scrolls with the list so the buttons can be scrolled fully into the small band. */
-.ct-orch-tray[data-compact] .ct-orch-tray-tool,
-.ct-orch-tray[data-compact] .ct-orch-tray-note { display: none; }
+/* Compact form (the sheet cannot give the first card its full height without clipping the composer): the tool DETAIL is hidden, so
+   Allow / Always hide with it ([data-hide-compact]) and only Deny + "Review in thread" stay (never approve what you cannot see).
+   The tool name stays (one short line); the heading scrolls with the list so the buttons can be scrolled fully into a small band. */
+.ct-orch-tray[data-compact] .ct-orch-tray-detail,
+.ct-orch-tray[data-compact] .ct-orch-tray-note,
+.ct-orch-tray[data-compact] [data-hide-compact] { display: none; }
+.ct-orch-tray:not([data-compact]) .ct-orch-tray-handoff[data-compact-only] { display: none; }
+.ct-orch-tray[data-collapsed] .ct-orch-tray-list,
+.ct-orch-tray[data-collapsed] .ct-orch-tray-toggle { display: none; }
+.ct-orch-tray [hidden] { display: none !important; }
+.ct-orch-tray[hidden] { display: none; }
+.ct-kanban-dispatch .ct-orch-tray button.ct-orch-tray-collapsed-review {
+  margin-left: auto; padding: 2px 10px; border: 1px solid var(--background-modifier-border); border-radius: 6px;
+  background: var(--background-primary); color: var(--text-normal); font-size: var(--font-ui-smaller); cursor: pointer;
+}
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-tray button.ct-orch-tray-collapsed-review { min-height: 44px; min-width: 44px; }
 .ct-orch-tray[data-compact] .ct-orch-tray-bar { position: static; }
 .ct-orch-tray h3.ct-orch-tray-title {
   margin: 0; padding: 0; font-size: var(--font-ui-smaller); font-weight: 600; line-height: 1.3;

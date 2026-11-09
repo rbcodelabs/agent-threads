@@ -54,6 +54,7 @@ export class DockTray {
   private listEl: HTMLElement | null = null;
   private toggleEl: HTMLButtonElement | null = null;
   private barEl: HTMLElement | null = null;
+  private collapsedEl: HTMLButtonElement | null = null;
   private readonly cards = new Map<string, Card>();
   private readonly listId = `ct-orch-tray-list-${++traySeq}`;
   private expanded = false;
@@ -75,7 +76,7 @@ export class DockTray {
   destroy(): void {
     this.destroyed = true;
     this.section?.remove();
-    this.section = this.titleEl = this.listEl = this.toggleEl = this.barEl = null;
+    this.section = this.titleEl = this.listEl = this.toggleEl = this.barEl = this.collapsedEl = null;
     this.cards.clear();
   }
 
@@ -88,7 +89,7 @@ export class DockTray {
 
     if (entries.length === 0) {
       this.section?.remove();
-      this.section = this.titleEl = this.listEl = this.toggleEl = this.barEl = null;
+      this.section = this.titleEl = this.listEl = this.toggleEl = this.barEl = this.collapsedEl = null;
       this.cards.clear();
       this.expanded = false;
       this.announceNew(entries);
@@ -98,6 +99,7 @@ export class DockTray {
     if (entries.length <= TRAY_COLLAPSE_AT) this.expanded = false;
     this.ensureSection();
     this.titleEl!.textContent = `Needs you (${entries.length})`;
+    this.collapsedEl?.setAttribute('aria-label', `${entries.length} need you: review ${entries[0].item.title} in its thread`);
 
     const { shown, hidden } = visibleTrayItems(entries, this.expanded);
     const wanted = new Set(shown.map((e) => e.item.threadId));
@@ -133,6 +135,10 @@ export class DockTray {
     // One sticky unit: the heading and the Show more / fewer control stay at the top of the tray's own scroller.
     this.barEl = section.createDiv('ct-orch-tray-bar');
     this.titleEl = this.barEl.createEl('h3', { cls: 'ct-orch-tray-title' });
+    // The collapsed form (no room for even one card next to the composer): a one-row hand-off to the first thread, no buttons.
+    this.collapsedEl = this.barEl.createEl('button', { cls: 'ct-orch-tray-collapsed-review', text: 'Review', attr: { type: 'button', 'data-collapsed-only': '' } });
+    this.collapsedEl.hidden = true;
+    this.collapsedEl.addEventListener('click', (e) => { e.stopPropagation(); const first = this.lastEntries[0]; if (first) this.deps.openThread(first.item.threadId); });
     this.listEl = section.createEl('ul', { cls: 'ct-orch-tray-list', attr: { id: this.listId } });
     this.section = section;
   }
@@ -217,15 +223,16 @@ export class DockTray {
         },
       });
       const toolLabel = formatToolName(permission.toolName);
-      if (reviewInThread) {
-        // What the user cannot see in full (cut text, OR fields the summary leaves out) is not approved blind: Deny stays, approving happens in the thread.
-        actions.querySelectorAll('.ct-permission-allow, .ct-permission-always').forEach((b) => b.remove());
-        const review = actions.createEl('button', {
-          cls: 'ct-orch-tray-handoff', text: 'Review in thread',
-          attr: { type: 'button', 'aria-label': `Review the full ${toolLabel} request for ${item.title} in its thread` },
-        });
-        review.addEventListener('click', (e) => { e.stopPropagation(); this.deps.openThread(threadId); });
-      }
+      // What the user cannot see in full (cut text, OR fields the summary leaves out) is not approved blind: Deny stays, approving happens in the thread.
+      // The same rule holds when the tray goes COMPACT (the detail is hidden): Allow / Always are marked to hide with it, and the hand-off appears.
+      if (reviewInThread) actions.querySelectorAll('.ct-permission-allow, .ct-permission-always').forEach((b) => b.remove());
+      else actions.querySelectorAll('.ct-permission-allow, .ct-permission-always').forEach((b) => b.setAttribute('data-hide-compact', ''));
+      const review = actions.createEl('button', {
+        cls: 'ct-orch-tray-handoff', text: 'Review in thread',
+        attr: { type: 'button', 'aria-label': `Review the full ${toolLabel} request for ${item.title} in its thread` },
+      });
+      if (!reviewInThread) { review.setAttribute('data-compact-only', ''); review.hidden = true; }
+      review.addEventListener('click', (e) => { e.stopPropagation(); this.deps.openThread(threadId); });
       for (const btn of Array.from(actions.querySelectorAll('button.ct-permission-btn'))) {
         btn.setAttribute('aria-label', `${btn.textContent ?? ''} ${toolLabel} for ${item.title}`);
       }
@@ -254,5 +261,33 @@ export function joinAnnouncements(texts: string[]): string {
   return `${texts.slice(0, 2).join('. ')}, and ${texts.length - 2} more need attention`;
 }
 
-/** K2 P5 batch 4 scaffold: signature only (behaviour arrives with the fix). */
-export function applyTrayMode(_tray: HTMLElement, _mode: { compact: boolean; collapsed: boolean }): void {}
+/**
+ * Applies the tray's layout form (chosen by trayLayout) to its DOM:
+ *  - compact (the sheet cannot give the first card its full height): the tool DETAIL is hidden, so nothing that would let the
+ *    user approve it may stay on offer: Allow / Always (`data-hide-compact`) are hidden (display none AND the `hidden` attribute:
+ *    never visible, never focusable) and "Review in thread" (`data-compact-only`) takes their place beside Deny;
+ *  - collapsed (not even that fits): the list is hidden and the one-row "Review" hand-off in the heading is shown.
+ * `active`: the focused element from BEFORE any measuring toggles (undefined: read it now; null: no focus handling). If it ends
+ * up hidden, focus moves to the same card's "Review in thread" (never to the page); if it is still shown it gets focus back.
+ */
+export function applyTrayMode(tray: HTMLElement, mode: { compact: boolean; collapsed: boolean }, active?: Element | null): void {
+  const doc = tray.ownerDocument;
+  const focused = active === undefined ? doc.activeElement : active;
+  const inTray = !!focused && tray.contains(focused);
+  const compact = mode.compact || mode.collapsed;
+  tray.toggleAttribute('data-compact', compact);
+  tray.toggleAttribute('data-collapsed', mode.collapsed);
+  tray.querySelectorAll<HTMLElement>('[data-hide-compact]').forEach((el) => { el.hidden = compact; });
+  tray.querySelectorAll<HTMLElement>('[data-compact-only]').forEach((el) => { el.hidden = !compact; });
+  tray.querySelectorAll<HTMLElement>('[data-collapsed-only]').forEach((el) => { el.hidden = !mode.collapsed; });
+  const list = tray.querySelector<HTMLElement>('.ct-orch-tray-list');
+  if (list) list.hidden = mode.collapsed;
+  if (!inTray || !focused || active === null) return;
+  const el = focused as HTMLElement;
+  if (!el.closest('[hidden]')) { if (doc.activeElement !== el) el.focus({ preventScroll: true }); return; }
+  const card = el.closest('.ct-orch-tray-card');
+  const target = card?.querySelector<HTMLElement>('.ct-orch-tray-handoff:not([hidden])')
+    ?? tray.querySelector<HTMLElement>('.ct-orch-tray-collapsed-review:not([hidden])')
+    ?? tray.querySelector<HTMLElement>('.ct-orch-tray-toggle');
+  target?.focus({ preventScroll: true });
+}

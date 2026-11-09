@@ -549,11 +549,13 @@ test.describe('Compact form safety (never approve blind)', () => {
       const head = document.querySelector('.ct-orch-sheet-head')!.getBoundingClientRect();
       const tray = document.querySelector('.ct-orch-tray') as HTMLElement | null;
       const vv = (window as any).visualViewport;
-      return { sh: { t: sh.top, b: sh.bottom }, field: { t: field.top, b: field.bottom }, head: { t: head.top, b: head.bottom }, vb: vv.offsetTop + vv.height, collapsed: !!tray && tray.hasAttribute('data-collapsed'), trayH: tray && !tray.hidden ? tray.getBoundingClientRect().height : 0 };
+      return { inSheet: !!document.querySelector('.ct-orch-sheet')!.contains(document.querySelector('.ct-orch-input')), sh: { t: sh.top, b: sh.bottom }, field: { t: field.top, b: field.bottom }, head: { t: head.top, b: head.bottom }, vb: vv.offsetTop + vv.height, collapsed: !!tray && tray.hasAttribute('data-collapsed'), trayH: tray && !tray.hidden ? tray.getBoundingClientRect().height : 0 };
     });
     expect(g.field.b, 'the pill field is above the keyboard').toBeLessThanOrEqual(g.vb + 1.5);
     expect(g.sh.b, 'the sheet is above the keyboard').toBeLessThanOrEqual(g.vb + 1.5);
-    expect(g.sh.b, 'the sheet does not overlap the pill field').toBeLessThanOrEqual(g.field.t + 1.5);
+    // 568px wide is the narrow (orb) mode: the composer is INSIDE the bottom sheet there; in pill mode it is the pill's field below the sheet.
+    if (g.inSheet) expect(g.field.b, 'the composer is inside the sheet (not clipped)').toBeLessThanOrEqual(g.sh.b + 1.5);
+    else expect(g.sh.b, 'the sheet does not overlap the pill field').toBeLessThanOrEqual(g.field.t + 1.5);
     expect(g.head.t, 'the header is inside the viewport').toBeGreaterThanOrEqual(-1.5);
     expect(g.collapsed).toBe(true);
   });
