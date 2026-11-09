@@ -89,7 +89,8 @@ const REFRESH_EVENTS: ReadonlySet<string> = new Set([
 const SHEET_EVENTS: ReadonlySet<string> = new Set(['queued', 'dequeued', 'tool_use', 'tool_progress', 'status', 'stream_reset']);
 
 const PEEK_MS = 8000;
-const MAX_ERROR_CHARS = 60;
+/** The reason wraps (P2 D1), so only a stack-trace-sized error is cut; the full text is in the tooltip. */
+const MAX_ERROR_CHARS = 120;
 /** 4 lines at 20px with NO vertical padding on the scroller (scrolled text shows through padding): a long draft clips on a line boundary. */
 const MAX_INPUT_PX = 80;
 
@@ -333,7 +334,7 @@ export class OrchestratorDock {
         const msg = event.message as { id?: string; content?: string } | undefined;
         if (msg?.id && this.deps.manager.isRunning(id)) this.pickupIds.add(msg.id);
         // A13: our own send was recorded: a later failure must not restore the draft (it would send a duplicate).
-        if (this.sending && msg?.content === this.sendingText) this.sendEcho = true;
+        if (this.sending && msg?.content === this.sendingText) { this.sendEcho = true; this.sheet?.pinOnNextRender(); }
         this.stoppedText = '';
         break;
       }
@@ -383,7 +384,9 @@ export class OrchestratorDock {
   // ── Sheet, peek, chips ────────────────────────────────────────────────────
 
   private mountSheetParts(): void {
-    const parent = this.host.parentElement ?? this.host;
+    // Inside the dock root (absolutely positioned: the pill is still the containing block) so Tab reaches the sheet and
+    // the chips right after the field instead of after every pill button.
+    const parent = this.rootEl ?? this.host.parentElement ?? this.host;
     this.sheet = new DockSheet(parent, {
       close: () => this.closeSheet(),
       openFull: () => { const id = this.deps.getOrchestratorThreadId(); if (id) void this.openQuietly(id); },
@@ -402,14 +405,22 @@ export class OrchestratorDock {
     this.peekTextEl = text;
     peek.createEl('button', { cls: 'ct-orch-peek-open', text: 'Open', attr: { type: 'button' } })
       .addEventListener('click', () => this.openSheet());
-    peek.createEl('button', { cls: 'ct-orch-peek-dismiss', text: '✕', attr: { type: 'button', 'aria-label': 'Dismiss' } })
-      .addEventListener('click', () => this.hidePeek());
+    const dismiss = peek.createEl('button', { cls: 'ct-orch-peek-dismiss', attr: { type: 'button', 'aria-label': 'Dismiss' } });
+    const dx = dismiss.createSpan({ cls: 'ct-orch-icon', attr: { 'aria-hidden': 'true' } });
+    setIcon(dx, 'x');
+    dismiss.addEventListener('click', () => this.hidePeek());
     this.peekEl = peek;
 
     const chips = parent.createDiv({ cls: 'ct-orch-chips', attr: { 'data-testid': 'orchestrator-chips' } });
     chips.hidden = true;
     // Keep focus in the field while a chip is pressed, so the strip does not vanish before the click lands.
     chips.addEventListener('mousedown', (e) => e.preventDefault());
+    // Tab from the field into the strip keeps it open; focus leaving both closes it.
+    chips.addEventListener('focusout', (e) => {
+      const to = e.relatedTarget as Node | null;
+      if (to && (chips.contains(to) || to === this.inputEl)) return;
+      chips.hidden = true;
+    });
     this.chipsEl = chips;
   }
 
@@ -532,7 +543,8 @@ export class OrchestratorDock {
     const el = this.chipsEl;
     if (!el) return;
     const show = this.currentMode === 'pill' && this.bodyKind === 'input' && !!this.inputEl
-      && this.host.ownerDocument.activeElement === this.inputEl && !this.sheet?.isOpen && !this.hasTranscript();
+      && (this.host.ownerDocument.activeElement === this.inputEl || el.contains(this.host.ownerDocument.activeElement))
+      && !this.sheet?.isOpen && !this.hasTranscript();
     if (!show) { el.hidden = true; return; }
     if (el.hidden || el.childElementCount === 0) {
       el.empty();
@@ -643,7 +655,11 @@ export class OrchestratorDock {
     input.addEventListener('keydown', (e) => this.onKeydown(e, input));
     input.addEventListener('click', () => { if (this.currentMode === 'pill' && !this.sheet?.isOpen && this.hasTranscript()) this.openSheet(); });
     input.addEventListener('focus', () => this.renderChips());
-    input.addEventListener('blur', () => this.renderChips());
+    input.addEventListener('blur', (e) => {
+      const to = e.relatedTarget as Node | null;
+      if (to && this.chipsEl?.contains(to)) return; // moving into a chip
+      this.renderChips();
+    });
     this.inputEl = input;
     this.bodyEl.createEl('kbd', { cls: 'ct-orch-kbd', text: Platform.isMacOS ? '⌘J' : 'Ctrl J', attr: { 'aria-hidden': 'true' } });
     const send = this.bodyEl.createEl('button', { cls: 'ct-orch-send', text: 'Send', attr: { type: 'button' } });

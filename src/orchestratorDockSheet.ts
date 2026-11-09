@@ -9,6 +9,7 @@
  * Every model-controlled string (message text while streaming, queued text, activity,
  * link labels) is written with textContent; assistant markdown goes through dockMarkdown.
  */
+import { setIcon } from 'obsidian';
 import { renderDockMarkdown } from './dockMarkdown';
 import type { Richness, SheetEntry } from './dockSheetModel';
 import type { SuggestionChip, ThreadRef } from './orchestratorDockModel';
@@ -92,6 +93,8 @@ export class DockSheet {
   private scrollQueued = false;
   /** The user is at the bottom (updated by scroll events and programmatic pins): the pin survives content growing under it. */
   private stick = true;
+  /** Pin to the latest message on the next render (open, or the user's own send), however far up they had scrolled. */
+  private pinNext = false;
   private closeBtn: HTMLButtonElement;
   private streamPending: string | null = null;
   private streamFrame = false;
@@ -112,10 +115,11 @@ export class DockSheet {
     head.createEl('h2', { cls: 'ct-orch-sheet-title', text: 'Portfolio orchestrator', attr: { id } });
     // Narrow mode hides the label (mock k2-9 shows just the arrow): the aria-label keeps the name.
     const full = head.createEl('button', { cls: 'ct-orch-sheet-btn ct-orch-sheet-full', attr: { type: 'button', 'aria-label': 'Open full thread' } });
-    full.createSpan({ cls: 'ct-orch-sheet-full-label', text: 'Open full thread ' });
-    full.createSpan({ text: '↗' });
+    full.createSpan({ cls: 'ct-orch-sheet-full-label', text: 'Open full thread' });
+    icon(full, 'external-link');
     full.addEventListener('click', () => this.h.openFull());
-    const close = head.createEl('button', { cls: 'ct-orch-sheet-btn ct-orch-sheet-close', text: '✕', attr: { type: 'button', 'aria-label': 'Close' } });
+    const close = head.createEl('button', { cls: 'ct-orch-sheet-btn ct-orch-sheet-close', attr: { type: 'button', 'aria-label': 'Close' } });
+    icon(close, 'x');
     close.addEventListener('click', () => this.h.close());
     this.closeBtn = close;
 
@@ -132,6 +136,7 @@ export class DockSheet {
     this.scrollEl.addEventListener('scroll', () => { this.stick = this.nearBottom(); });
     // The sheet is a non-modal dialog: Escape inside it closes it (the dock returns focus to the field).
     this.el.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab' && this.view?.mode === 'orb') { this.trapTab(e); return; }
       if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return; // Escape cancels an IME composition, not the sheet
       e.stopPropagation();
       this.h.close();
@@ -142,6 +147,7 @@ export class DockSheet {
 
   open(): void {
     if (this.destroyed) return;
+    if (!this.opened) { this.stick = true; this.pinNext = true; } // opening lands on the latest message
     this.opened = true;
     this.el.hidden = false;
   }
@@ -150,6 +156,21 @@ export class DockSheet {
     this.opened = false;
     this.el.hidden = true;
   }
+
+  /** Narrow bottom sheet is modal: Tab wraps inside it instead of walking into the covered board and pill. */
+  private trapTab(e: KeyboardEvent): void {
+    const list = Array.from(this.el.querySelectorAll<HTMLElement>('button, a[href], textarea, input'))
+      .filter((n) => !n.hidden && !(n as HTMLButtonElement).disabled && !n.closest('[hidden]'));
+    if (list.length === 0) return;
+    const first = list[0];
+    const last = list[list.length - 1];
+    const active = this.el.ownerDocument.activeElement;
+    if (e.shiftKey && (active === first || !this.el.contains(active))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (active === last || !this.el.contains(active))) { e.preventDefault(); first.focus(); }
+  }
+
+  /** Pin to the latest message on the next render. */
+  pinOnNextRender(): void { this.pinNext = true; }
 
   /** Moves focus to the first control of the dialog (used when it opens and the composer has nothing to focus). */
   focusClose(): void { this.closeBtn.focus(); }
@@ -164,8 +185,9 @@ export class DockSheet {
   render(view: SheetView): void {
     if (this.destroyed) return;
     this.view = view;
-    const wasPinned = !this.opened || this.stick;
+    const wasPinned = !this.opened || this.stick || this.pinNext;
     this.el.dataset.mode = view.mode;
+    if (view.mode === 'orb') this.el.setAttribute('aria-modal', 'true'); else this.el.removeAttribute('aria-modal');
     this.composerSlot.hidden = view.mode !== 'orb';
     this.orbEl.classList.toggle('ct-orch-orb-spinning', view.running);
     this.reconcileRows(view);
@@ -176,6 +198,8 @@ export class DockSheet {
     this.renderNotice(view);
     this.renderWaiting(view);
     if (wasPinned) this.scrollToBottom();
+    // Layout (fonts, the markdown swap) settles after this frame: pin again once it has.
+    if (this.pinNext) { this.pinNext = false; this.queueScroll(); }
   }
 
   setStreaming(text: string): void {
@@ -283,7 +307,7 @@ export class DockSheet {
       bubble.textContent = entry.text;
     }
     if (rich) {
-      const chip = row.createEl('button', { cls: 'ct-orch-chip-full', text: 'Open full thread ↗', attr: { type: 'button' } });
+      const chip = fullChip(row);
       chip.addEventListener('click', () => this.h.openFull());
     }
     return st;
@@ -357,7 +381,7 @@ export class DockSheet {
     if (!view.blocked) return;
     const box = this.noticeHost.createDiv('ct-orch-notice');
     box.createSpan({ text: BLOCK_TEXT[view.blocked] });
-    const chip = box.createEl('button', { cls: 'ct-orch-chip-full', text: 'Open full thread ↗', attr: { type: 'button' } });
+    const chip = fullChip(box);
     chip.addEventListener('click', () => this.h.openFull());
   }
 
@@ -374,9 +398,10 @@ export class DockSheet {
       const li = list.createEl('li');
       li.createSpan({ cls: 'ct-orch-waiting-text', text });
       const rm = li.createEl('button', {
-        cls: 'ct-orch-sheet-btn ct-orch-waiting-remove', text: '✕',
+        cls: 'ct-orch-sheet-btn ct-orch-waiting-remove',
         attr: { type: 'button', 'aria-label': `Remove "${text.length > 40 ? `${text.slice(0, 40)}…` : text}" from waiting to send` },
       });
+      icon(rm, 'x');
       rm.addEventListener('click', () => this.h.removeWaiting(index, text));
     });
   }
@@ -406,7 +431,7 @@ export class DockSheet {
   private queueScroll(): void {
     if (this.scrollQueued) return;
     this.scrollQueued = true;
-    const run = (): void => { this.scrollQueued = false; if (!this.destroyed) this.scrollToBottom(); };
+    const run = (): void => { this.scrollQueued = false; if (!this.destroyed && this.stick) this.scrollToBottom(); }; // not if the user scrolled up meanwhile
     schedule(run);
   }
 }
@@ -417,4 +442,17 @@ function schedule(fn: () => void): void {
 
 function createRow(log: HTMLElement, role: 'user' | 'assistant', id: string): HTMLElement {
   return log.createDiv({ cls: 'ct-orch-msg', attr: { 'data-role': role, 'data-id': id } });
+}
+
+function icon(parent: HTMLElement, name: string): void {
+  const span = parent.createSpan({ cls: 'ct-orch-icon', attr: { 'aria-hidden': 'true' } });
+  setIcon(span, name);
+}
+
+/** The quiet "Open full thread" chip: lucide icon, not a font-dependent arrow glyph. */
+function fullChip(parent: HTMLElement): HTMLButtonElement {
+  const chip = parent.createEl('button', { cls: 'ct-orch-chip-full', attr: { type: 'button', 'aria-label': 'Open full thread' } });
+  chip.createSpan({ text: 'Open full thread' });
+  icon(chip, 'external-link');
+  return chip;
 }

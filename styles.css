@@ -7364,6 +7364,14 @@ textarea.ct-settings-wide-input {
 .ct-orch-bubble p { margin: 0 0 6px; }
 .ct-orch-bubble ul, .ct-orch-bubble ol { margin: 0 0 6px; padding-left: 20px; }
 .ct-orch-bubble pre, .ct-orch-bubble code { font-size: var(--font-ui-smaller); }
+/* QA D2/D6: long code lines and wide tables scroll INSIDE the bubble; table cells keep whole words. */
+.ct-orch-bubble pre { max-width: 100%; overflow-x: auto; white-space: pre; }
+.ct-orch-bubble .ct-table-scroll { max-width: 100%; overflow-x: auto; }
+.ct-orch-bubble table { border-collapse: collapse; }
+.ct-orch-bubble th, .ct-orch-bubble td { padding: 2px 8px; overflow-wrap: normal; word-break: normal; white-space: nowrap; text-align: left; }
+.ct-orch-bubble a { color: color-mix(in srgb, var(--text-accent) 45%, var(--text-normal)); }
+.ct-orch-icon { display: inline-flex; align-items: center; }
+.ct-orch-icon svg { width: 14px; height: 14px; }
 .ct-orch-bubble a.ct-thread-link,
 .ct-orch-bubble a.internal-link { color: color-mix(in srgb, var(--text-accent) 45%, var(--text-normal)); text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
 .ct-orch-bubble-streaming { white-space: pre-wrap; }
@@ -7442,7 +7450,7 @@ textarea.ct-settings-wide-input {
   font-size: var(--font-ui-smaller); cursor: pointer; white-space: nowrap;
 }
 .ct-kanban-dispatch button.ct-orch-stop { background: var(--background-modifier-hover); color: var(--text-normal); }
-.ct-kanban-dispatch button.ct-orch-stop::before { content: "■"; margin-right: 6px; font-size: 0.8em; }
+.ct-kanban-dispatch button.ct-orch-stop::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; background: currentColor; border-radius: 1px; }
 .ct-kanban-dispatch button.ct-orch-stop:disabled { opacity: 0.5; cursor: default; }
 .ct-kanban-dispatch button.ct-orch-send { background: var(--interactive-accent); color: var(--text-on-accent); }
 .ct-orch-sheet-composer button.ct-orch-action { background: var(--background-modifier-hover); color: var(--text-normal); }
