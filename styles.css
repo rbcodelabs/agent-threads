@@ -7144,10 +7144,12 @@ textarea.ct-settings-wide-input {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  max-height: 92px;
+  max-height: 80px;      /* exactly 4 lines */
   height: auto;
-  margin: 0;
-  padding: 6px 0;
+  /* Vertical spacing is MARGIN, not padding: a scroll container shows scrolled text through its padding, which
+     left a sliver of the next line. With zero padding the clip falls on a line boundary. */
+  margin: 6px 0;
+  padding: 0;
   border: none;
   box-shadow: none;
   outline: none;
@@ -7257,8 +7259,9 @@ textarea.ct-settings-wide-input {
   font-size: var(--font-ui-smaller); cursor: pointer; white-space: nowrap;
 }
 .ct-orch-status button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
-.ct-orch-orb-alert .ct-orch-orb-core { background: var(--text-error, var(--color-red)); }
-.ct-orch-orb-alert.ct-orch-orb-alert-warn .ct-orch-orb-core { background: var(--color-orange, var(--text-warning)); }
+/* Darkened tints keep the white glyph at >= 3:1 (non-text UI); the status text stays the primary signal. */
+.ct-orch-orb-alert .ct-orch-orb-core { background: color-mix(in srgb, var(--text-error, var(--color-red)) 70%, black); }
+.ct-orch-orb-alert.ct-orch-orb-alert-warn .ct-orch-orb-core { background: color-mix(in srgb, var(--color-orange, var(--text-warning)) 58%, black); }
 .ct-orch-orb-alert .ct-orch-orb-ring { opacity: 0; animation: none; }
 .ct-agents-root.ct-mobile .ct-orch-status { min-height: 44px; }
 .ct-agents-root.ct-mobile .ct-orch-status button.ct-orch-action { min-height: 44px; }

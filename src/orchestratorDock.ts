@@ -74,8 +74,8 @@ const REFRESH_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 const MAX_ERROR_CHARS = 60;
-/** 4 lines at 20px + 12px vertical padding: a whole number of lines, so a long draft never half-clips one. */
-const MAX_INPUT_PX = 92;
+/** 4 lines at 20px with NO vertical padding on the scroller (scrolled text shows through padding): a long draft clips on a line boundary. */
+const MAX_INPUT_PX = 80;
 
 export class OrchestratorDock {
   private rootEl: HTMLElement | null = null;
@@ -246,7 +246,7 @@ export class OrchestratorDock {
   private reasonFor(kind: BodyKind, thread: Thread | undefined): { text: string; action?: { label: string; run: () => void } } {
     const id = this.deps.getOrchestratorThreadId();
     if (kind === 'none') {
-      return { text: 'No portfolio orchestrator yet', action: { label: 'Set up…', run: () => { void this.setUp(); } } };
+      return { text: 'No orchestrator yet', action: { label: 'Set up…', run: () => { void this.setUp(); } } };
     }
     if (kind === 'offline') {
       const daemonId = thread?.remote?.daemonId;
@@ -257,7 +257,9 @@ export class OrchestratorDock {
       };
     }
     const err = (thread?.lastError ?? '').trim();
-    const short = err.length > MAX_ERROR_CHARS ? `${err.slice(0, MAX_ERROR_CHARS)}…` : err;
+    const clipped = err.length > MAX_ERROR_CHARS ? `${err.slice(0, MAX_ERROR_CHARS)}…` : err;
+    // Keep a parenthesised tail attached to its word ("exited unexpectedly (code 1)") so it never splits across lines.
+    const short = clipped.replace(/\s*\(([^)]*)\)/g, (_m, inner: string) => `\u00a0(${inner.replace(/\s/g, '\u00a0')})`);
     return {
       text: `Orchestrator errored — ${short || (thread?.authRequired ? 'sign-in needed' : 'see the thread')}`,
       action: id ? { label: 'Open thread', run: () => { void this.handOff(); } } : undefined,
