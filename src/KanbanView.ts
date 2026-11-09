@@ -11,9 +11,7 @@ import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
 import { threadNeedsInput, splitNeedsInput } from './needsInput';
 import { decisionToQuestion } from './decisions';
 import { formatToolName } from './ClaudeSession';
-import { canAlwaysAllow, summarizePermissionDetail, isHostExecPermission } from './permissionDetail';
-import { recordAlwaysAllow } from './remoteAlwaysAllow';
-import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
+import { appendPermissionButtons as appendPermissionButtonsShared, summarizePermissionDetail } from './permissionCard';
 import { hostExecState } from './managedPolicy';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
@@ -1068,29 +1066,12 @@ export class KanbanView extends ItemView {
     threadId: string,
     pendingInfo: ReturnType<ThreadManager['getPendingPermission']>,
   ): void {
-    const deny = btns.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' });
-    deny.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(threadId, false); });
-    const allow = btns.createEl('button', { text: !!pendingInfo && isHostExecPermission(pendingInfo.toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
-    allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(threadId, true); });
-    const hostExecPrefix = hostExecAlwaysAllowOffer(pendingInfo, hostExecState(this.plugin.managedPolicy?.peek()).allowAlways);
-    if (hostExecPrefix) {
-      const alwaysPrefix = btns.createEl('button', { text: `Always \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' });
-      alwaysPrefix.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (addHostExecPrefix(this.plugin.settings, hostExecPrefix)) await this.plugin.saveSettings();
-        this.manager.resolvePermission(threadId, true);
-      });
-    }
-    if (!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) {
-      const always = btns.createEl('button', { text: 'Always', cls: 'ct-permission-btn ct-permission-always' });
-      always.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (pendingInfo) {
-          if (recordAlwaysAllow(this.plugin.settings, pendingInfo.toolName, this.manager.getRemoteScope(threadId))) await this.plugin.saveSettings();
-        }
-        this.manager.resolvePermission(threadId, true);
-      });
-    }
+    appendPermissionButtonsShared(btns, threadId, pendingInfo, {
+      manager: this.manager,
+      settings: this.plugin.settings,
+      saveSettings: () => this.plugin.saveSettings(),
+      hostExecAllowAlways: hostExecState(this.plugin.managedPolicy?.peek()).allowAlways,
+    });
   }
 
   // ── Gallery mode ───────────────────────────────────────────────────────────
