@@ -58,7 +58,7 @@ export function scrollCardIntoClearView(card: HTMLElement, host: HTMLElement, ob
     const x = SCROLLABLE.test(cs.overflowX) && n.scrollWidth > n.clientWidth;
     if (x || y) chain.push({ el: n, x, y });
   }
-  if (chain.length === 0) return coveredFraction(rectOf(card), obstacles) <= 0.05;
+  if (chain.length === 0) return area(visibleRect(card, host)) > 0 && coveredFraction(rectOf(card), obstacles) <= 0.05; // nothing can scroll: only report what is already true
 
   const start = new Map(chain.map((s) => [s.el, { top: s.el.scrollTop, left: s.el.scrollLeft }]));
 
@@ -99,13 +99,16 @@ export function scrollCardIntoClearView(card: HTMLElement, host: HTMLElement, ob
     ok = good();
   }
 
+  // The result is read from the PLANNED geometry, BEFORE the start offsets are restored for the smooth animation: afterwards a
+  // card that began off-screen reads as invisible and the caller's fallback scroll would override the animation (QA N3).
+  // `ok` false only matters to the caller when the card cannot be brought into view at all (then it falls back to scrollIntoView).
+  const result = ok || area(visibleRect(card, host)) > 0;
+
   if (!reduced) {
     // Same task: restore the start offsets and animate every scroller to where it ended up.
     const finals = chain.map((s) => ({ s, top: s.el.scrollTop, left: s.el.scrollLeft }));
     for (const s of chain) { const o = start.get(s.el)!; s.el.scrollTop = o.top; s.el.scrollLeft = o.left; }
     for (const f of finals) setOffsets(f.s.el, f.top, f.left, true);
   }
-  // `ok` false only matters to the caller when the card is not visible at all (then it falls back to scrollIntoView).
-  const vis = visibleRect(card, host);
-  return ok || area(vis) > 0;
+  return result;
 }

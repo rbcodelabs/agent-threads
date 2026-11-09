@@ -95,9 +95,11 @@ export function isFullyShownDetail(detail: string): boolean {
   const text = (detail ?? '').trim();
   if (!text) return true;
   const parsed = parsePermissionDetail(detail);
-  if (!parsed.fields) return flat(parsed.summary) === flat(text);
+  // The one-line summary flattens line breaks, which can hide whole lines: anything spanning lines is reviewed in the thread.
+  if (!parsed.fields) return !/[\r\n]/.test(text) && flat(parsed.summary) === flat(text);
   if (parsed.fields.length !== 1) return false;
   const only = parsed.fields[0];
+  if (/[\r\n]/.test(only.value)) return false;
   const remote = REMOTE_CALL_DETAIL.exec(text);
   const prefix = remote ? `${remote[1]}: ` : '';
   const expected = PRIMARY_KEYS.includes(only.key) ? only.value : `${only.key}: ${only.value}`;
