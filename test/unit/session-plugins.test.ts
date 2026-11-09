@@ -167,14 +167,13 @@ describe('buildSkillPlugins', () => {
     expect(fs.existsSync(path.join(pluginResourceDir, '.claude-plugin'))).toBe(false);
   });
 
-  it('appends the bundled skill only when its SKILL.md exists', () => {
-    const bundled = path.join(pluginResourceDir, 'resources', 'skills', 'thread-orchestrator');
-    expect(buildSkillPlugins({ bundledSkillPath: bundled })).toEqual([]);
+  it('appends peer-registered skill plugin paths after the other roots', () => {
+    const peer = [{ type: 'local' as const, path: '/x/peer/thread-orchestrator' }];
+    expect(buildSkillPlugins({ peerSkillPlugins: peer })).toEqual(peer);
+  });
 
-    fs.mkdirSync(bundled, { recursive: true });
-    fs.writeFileSync(path.join(bundled, 'SKILL.md'), '---\nname: thread-orchestrator\n---\n', 'utf-8');
-    expect(buildSkillPlugins({ bundledSkillPath: bundled }))
-      .toEqual([{ type: 'local', path: bundled }]);
+  it('never injects the retired bundled thread-orchestrator skill', () => {
+    expect(buildSkillPlugins({ bundledSkillPath: path.join(pluginResourceDir, 'resources', 'skills', 'thread-orchestrator') } as never)).toEqual([]);
   });
 
   it("pluginResourceDir: '' yields no vault plugin and no bundled skill", () => {
@@ -237,9 +236,36 @@ describe('ThreadManager.buildSessionOptions → opts.plugins', () => {
     expect(opts?.plugins).toContainEqual({ type: 'local', path: localRoot });
   });
 
+  it('injects peer-registered skills into a real session and drops them on dispose', async () => {
+    let d: { dispose(): void } | undefined;
+    const opts = await optionsFor((m) => {
+      m.pluginResourceDir = pluginResourceDir;
+      d = m.peerSkills.register({ pluginId: 'orch' }, { name: 'thread-orchestrator', description: 'd', content: 'body' });
+    });
+    const plugins = (opts?.plugins ?? []) as Array<{ path: string }>;
+    expect(plugins).toHaveLength(1);
+    expect(fs.readFileSync(path.join(plugins[0]!.path, 'SKILL.md'), 'utf8')).toContain('name: thread-orchestrator');
+    d!.dispose();
+  });
+
   it('registers nothing when pluginResourceDir is unset (mobile / no FileSystemAdapter)', async () => {
     writeSkill(path.join(tmpHome, '.claude', 'skills'), 'home-one');
     const opts = await optionsFor(() => { /* pluginResourceDir left undefined */ });
     expect(opts?.plugins).toBeUndefined();
+  });
+});
+
+describe('peer skill temp-dir fallback is per vault', () => {
+  it('uses a different directory for different vault roots', () => {
+    const dirFor = (vault: string) => {
+      const m = new ThreadManager({ ...DEFAULT_SETTINGS });
+      m.vaultRoot = vault;
+      m.peerSkills.register({ pluginId: 'p' }, { name: 'thread-orchestrator', description: 'd', content: 'c' });
+      return (m.buildHostSkillPlugins().find(p => p.path.endsWith('thread-orchestrator'))!).path;
+    };
+    const a = dirFor('/vault/a'); const b = dirFor('/vault/b');
+    expect(a).not.toBe(b);
+    expect(dirFor('/vault/a')).toBe(a);
+    fs.rmSync(path.dirname(a), { recursive: true, force: true }); fs.rmSync(path.dirname(b), { recursive: true, force: true });
   });
 });

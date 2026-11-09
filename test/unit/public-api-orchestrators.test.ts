@@ -1,5 +1,5 @@
 /**
- * Public API v1: orchestrator wake-up delegation, `enabled`, dispatch
+ * Public API v1: orchestrator `enabled`, dispatch
  * `queueIfBusy`, and run events for runs not started through the API.
  */
 import { describe, expect, it, vi } from 'vitest';
@@ -8,11 +8,9 @@ import ClaudeThreadsPlugin from '../../src/main';
 
 type Ev = { type: string; message?: Record<string, unknown>; error?: Error };
 
-function harness(opts: { withDelegate?: boolean; orchestrators?: any[]; resolve?: (t: { id: string }) => Promise<string | null> } = {}) {
-  const withDelegate = opts.withDelegate ?? true;
+function harness(opts: { orchestrators?: any[]; resolve?: (t: { id: string }) => Promise<string | null> } = {}) {
   const listeners = new Set<(id: string, e: Ev) => void>();
   const threads = new Map<string, any>();
-  const setWakeupDelegated = vi.fn();
   const sendMessage = vi.fn(async (_id: string, _p: string) => {});
   const interruptThread = vi.fn(async (_id: string) => {});
   const resolveOrchestrator = vi.fn(opts.resolve ?? (async (t: { id: string }) => t.id === 'portfolio' ? 'orch' : null));
@@ -29,107 +27,12 @@ function harness(opts: { withDelegate?: boolean; orchestrators?: any[]; resolve?
     subscribe: (l: any) => { listeners.add(l); return () => listeners.delete(l); },
     listOrchestrators: () => opts.orchestrators ?? [{ id: 'portfolio', kind: 'portfolio', threadId: 'orch', title: 'P', enabled: true }],
     resolveOrchestrator, triggerHostEvent: vi.fn(),
-    ...(withDelegate ? { setWakeupDelegated } : {}),
   } as any);
   const events: any[] = [];
   service.api.threads.subscribe((e: unknown) => events.push(e));
-  return { service, api: service.api as any, emit, add, threads, events, setWakeupDelegated, sendMessage, interruptThread, resolveOrchestrator };
+  return { service, api: service.api as any, emit, add, threads, events, sendMessage, interruptThread, resolveOrchestrator };
 }
 const flush = () => new Promise<void>(r => setTimeout(r, 0));
-
-describe('orchestrators.delegateWakeup', () => {
-  it('is advertised only when the host can delegate, and throws PLUGIN_UNAVAILABLE otherwise', () => {
-    const on = harness(); const off = harness({ withDelegate: false });
-    expect(on.api.capabilities).toContain('orchestrators.wakeup.delegate');
-    expect(off.api.capabilities).not.toContain('orchestrators.wakeup.delegate');
-    expect(() => off.api.orchestrators.delegateWakeup({ pluginId: 'p' })).toThrowError(expect.objectContaining({ code: 'PLUGIN_UNAVAILABLE' }));
-  });
-
-  it('suppresses on first delegate and resumes exactly once on dispose', () => {
-    const h = harness();
-    const d = h.api.orchestrators.delegateWakeup({ pluginId: 'p' });
-    expect(h.setWakeupDelegated.mock.calls).toEqual([[true]]);
-    d.dispose();
-    expect(h.setWakeupDelegated.mock.calls).toEqual([[true], [false]]);
-  });
-
-  it('dispose is idempotent', () => {
-    const h = harness();
-    const d = h.api.orchestrators.delegateWakeup({ pluginId: 'p' });
-    d.dispose(); d.dispose();
-    expect(h.setWakeupDelegated.mock.calls).toEqual([[true], [false]]);
-  });
-
-  it('with two delegates, stays suppressed until the last one disposes', () => {
-    const h = harness();
-    const a = h.api.orchestrators.delegateWakeup({ pluginId: 'a' });
-    const b = h.api.orchestrators.delegateWakeup({ pluginId: 'b' });
-    expect(h.setWakeupDelegated.mock.calls).toEqual([[true]]);
-    a.dispose();
-    expect(h.setWakeupDelegated).toHaveBeenCalledTimes(1);
-    b.dispose();
-    expect(h.setWakeupDelegated.mock.calls).toEqual([[true], [false]]);
-  });
-
-  it('a double dispose of one delegate cannot release another delegate\'s hold', () => {
-    const h = harness();
-    const a = h.api.orchestrators.delegateWakeup({ pluginId: 'a' });
-    h.api.orchestrators.delegateWakeup({ pluginId: 'b' });
-    a.dispose(); a.dispose();
-    expect(h.setWakeupDelegated.mock.calls).toEqual([[true]]);
-  });
-
-  it('can be re-claimed after a full release', () => {
-    const h = harness();
-    h.api.orchestrators.delegateWakeup({ pluginId: 'p' }).dispose();
-    h.api.orchestrators.delegateWakeup({ pluginId: 'p' });
-    expect(h.setWakeupDelegated.mock.calls).toEqual([[true], [false], [true]]);
-  });
-
-  it('stop() while delegated resumes core, and a stale dispose afterwards is a no-op', () => {
-    const h = harness();
-    const d = h.api.orchestrators.delegateWakeup({ pluginId: 'p' });
-    h.service.stop();
-    expect(h.setWakeupDelegated.mock.calls).toEqual([[true], [false]]);
-    d.dispose();
-    expect(h.setWakeupDelegated).toHaveBeenCalledTimes(2);
-  });
-
-  it('stop() with no delegate does not touch wake-up', () => {
-    const h = harness();
-    h.service.stop();
-    expect(h.setWakeupDelegated).not.toHaveBeenCalled();
-  });
-
-  it('rejects delegation after stop()', () => {
-    const h = harness(); h.service.stop();
-    expect(() => h.api.orchestrators.delegateWakeup({ pluginId: 'p' })).toThrowError(expect.objectContaining({ code: 'PLUGIN_UNAVAILABLE' }));
-    expect(h.setWakeupDelegated).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ['missing owner', undefined], ['missing pluginId', {}], ['empty', { pluginId: '' }], ['whitespace', { pluginId: '   ' }],
-    ['non-string', { pluginId: 7 }], ['129 chars', { pluginId: 'x'.repeat(129) }],
-  ])('rejects invalid owner (%s) without delegating', (_n, owner) => {
-    const h = harness();
-    expect(() => h.api.orchestrators.delegateWakeup(owner)).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
-    expect(h.setWakeupDelegated).not.toHaveBeenCalled();
-  });
-
-  it('accepts a 128 character pluginId', () => {
-    const h = harness();
-    h.api.orchestrators.delegateWakeup({ pluginId: 'x'.repeat(128) });
-    expect(h.setWakeupDelegated).toHaveBeenCalledWith(true);
-  });
-
-  it('API run lifecycle is unaffected by delegation', async () => {
-    const h = harness(); h.add('t');
-    h.api.orchestrators.delegateWakeup({ pluginId: 'p' });
-    const { runId } = await h.api.threads.send('t', { prompt: 'x' });
-    h.emit('t', { type: 'done' });
-    await expect(h.api.threads.wait(runId)).resolves.toMatchObject({ status: 'completed' });
-  });
-});
 
 describe('orchestrators.list / dispatch targets', () => {
   it('passes the enabled flag through, frozen', async () => {
@@ -338,7 +241,7 @@ describe('run events for runs not started through the API', () => {
   });
 });
 
-describe('plugin wiring (listPublicOrchestrators / resolvePublicOrchestrator / setWakeupDelegated)', () => {
+describe('plugin wiring (listPublicOrchestrators / resolvePublicOrchestrator )', () => {
   function plugin(projects: any[], extra: Record<string, unknown> = {}) {
     const threads: Record<string, any> = { orch: { id: 'orch', title: 'Port' }, pa: { id: 'pa', title: 'A' }, pb: { id: 'pb', title: 'B' } };
     const ensureProjectOrchestratorThread = vi.fn(async (id: string) => `p${id}`);
@@ -450,19 +353,4 @@ describe('plugin wiring (listPublicOrchestrators / resolvePublicOrchestrator / s
     p.revokePublicApi();
   });
 
-  it('delegateWakeup toggles plugin.wakeupDelegated, discards batches on claim, and resumes on dispose and on revoke', () => {
-    const discardAll = vi.fn();
-    const { p } = plugin([], { orchestratorWakeup: { discardAll }, app: { workspace: { trigger: vi.fn() } }, openThreadInChatView: async () => {}, getEffectiveCwd: () => '/v', saveSettings: async () => {} });
-    Object.assign(p.manager, { getThreads: () => [], isRunning: () => false, createThread: vi.fn(), sendMessage: vi.fn(), subscribe: () => () => {}, assertLaunchAllowedNow: async () => {} });
-    p.initializePublicApi();
-    expect(p.api.v1.capabilities).toContain('orchestrators.wakeup.delegate');
-    const d = p.api.v1.orchestrators.delegateWakeup({ pluginId: 'x' });
-    expect(p.wakeupDelegated).toBe(true); expect(discardAll).toHaveBeenCalledTimes(1);
-    d.dispose();
-    expect(p.wakeupDelegated).toBe(false);
-    p.api.v1.orchestrators.delegateWakeup({ pluginId: 'x' });
-    expect(p.wakeupDelegated).toBe(true);
-    p.revokePublicApi();
-    expect(p.wakeupDelegated).toBe(false);
-  });
 });

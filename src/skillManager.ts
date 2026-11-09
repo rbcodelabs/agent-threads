@@ -78,8 +78,8 @@ export function buildSkillPlugins(options: {
   skillSources?: SkillSource[];
   /** `<vault>/<plugin-dir>/skills`, or '' when unresolvable. */
   pluginSkillsRoot?: string;
-  /** Absolute path to the bundled thread-orchestrator skill directory. */
-  bundledSkillPath?: string;
+  /** SDK plugin entries for skills registered by peer plugins (`extensions.registerSkill`), already materialized. */
+  peerSkillPlugins?: Array<{ type: 'local'; path: string }>;
   fsModule?: typeof import('fs');
 }): Array<{ type: 'local'; path: string }> {
   const fsModule = options.fsModule ?? fs;
@@ -107,7 +107,7 @@ export function buildSkillPlugins(options: {
     if (vaultPluginRoot) plugins.push({ type: 'local', path: vaultPluginRoot });
   }
 
-  // Bundled thread-orchestrator skill — ships inside the plugin's own dist/
+  // Authored skills folder
   if (options.localSkillsRoot && enumerateSkillDirs(options.localSkillsRoot, fsModule).length > 0) {
     const root = options.localSkillsRoot;
     const manifestDir = path.join(root, '.claude-plugin');
@@ -127,15 +127,8 @@ export function buildSkillPlugins(options: {
     plugins.push({ type: 'local', path: root });
   }
 
-  // (copied there by esbuild.config.mjs from resources/skills/), so it is
-  // discoverable in every session with nothing copied into ~/.claude/skills/.
-  if (options.bundledSkillPath) {
-    try {
-      if (fsModule.existsSync(path.join(options.bundledSkillPath, 'SKILL.md'))) {
-        plugins.push({ type: 'local', path: options.bundledSkillPath });
-      }
-    } catch { /* bundled skill missing — plugin dist may be stale, skip silently */ }
-  }
+  // Skills contributed by peer plugins (e.g. the Threads Orchestrator's thread-orchestrator skill).
+  for (const plugin of options.peerSkillPlugins ?? []) plugins.push(plugin);
 
   return plugins;
 }

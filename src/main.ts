@@ -5,7 +5,7 @@ import { DaemonMcpStatusStore } from './mcpStatus';
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, Notice, Platform, normalizePath, TFile, Modal, type EventRef, type Menu } from 'obsidian';
 import { checkClaudeCli, createDefaultCliProbeDeps, describeCliProblems, findMissingKnownModels, type CliInfo, type CliProblem } from './cliVersion';
 import { FALLBACK_RESOLVED } from './modelOptions';
-import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
+import { createClaudeThreadsApiV1, ClaudeThreadsApiError, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
 import { createPublicThreadLifecycle } from './publicThreadLifecycle';
 import { promptConfirm } from './confirmModal';
 import { createConstrainedQueryRunner } from './ConstrainedRun';
@@ -106,6 +106,7 @@ import { telemetry, buildDiagnosticsReport, type DiagnosticsInput } from './tele
 import { secretStorageKey, isSecretVisibleToProject, pruneSecretEnvScopesForProject } from './secretUtils';
 import { scheduleVaultThreadRecovery } from './vaultThreadRecovery';
 import { resolveProjectVaultRoot } from './projectPaths';
+import { stripLegacyOrchestratorHeartbeats } from './legacyHeartbeats';
 import { assertProposalOwnership, authorizeProjectAssignment, authorizeThreadAccess, canWriteManagerNotes, repairStaleProjectOrchestrators, resolveCoordinationRole } from './coordinationScope';
 import {
   sharedPersistenceWriterFence,
@@ -316,9 +317,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
   scheduler!: import('./Scheduler').Scheduler;
   statusLine: import('./StatusLineService').StatusLineService | null = null;
   gitDiff: import('./GitDiffService').GitDiffService | null = null;
-  orchestratorWakeup: import('./OrchestratorWakeup').OrchestratorWakeup | null = null;
-  /** True while a peer plugin holds a public-API wake-up delegation; core wake-up pings are suppressed. */
-  wakeupDelegated = false;
   documentWatch: import('./DocumentWatchService').DocumentWatchService | null = null;
   agentBrowser: import('./agentBrowser/AgentBrowserPool').AgentBrowserPool | null = null;
   /**
@@ -1191,7 +1189,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // that derivation.
     this.manager.vaultRoot = resolveProjectVaultRoot(this.app.vault.adapter);
     // Absolute path to this plugin's installed dist/ dir, used to resolve the
-    // bundled thread-orchestrator skill (see ThreadManager.buildSessionOptions()).
+    // peer-contributed skills (see ThreadManager.peerSkills).
     {
       const adapter = this.app.vault.adapter;
       if (adapter instanceof FileSystemAdapter) {
@@ -1376,6 +1374,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.settings.orchestratorThreadId,
     );
     if (repairedOrchestrators) this.manager.loadProjects(this.manager.getProjects());
+    // Orchestrator heartbeats now belong to the Threads Orchestrator plugin. Drop any hourly
+    // heartbeat items an older core created; nothing recreates them, so this is a one-time cleanup.
+    const legacyHeartbeats = stripLegacyOrchestratorHeartbeats(this.settings.scheduledItems ?? []);
+    if (legacyHeartbeats.removed > 0) this.settings.scheduledItems = legacyHeartbeats.items;
 
     // Initialize the built-in scheduler
     this.scheduler = new Scheduler({
@@ -1413,7 +1415,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       },
       threadExists: (threadId) => !!this.manager.getThread(threadId),
       isThreadBusy: (threadId) => this.manager.isRunning(threadId),
-      onOrchestratorHeartbeatStale: () => console.warn('[ClaudeThreads] Orchestrator heartbeat target missing — run "Open Thread Orchestrator" to recreate it.'),
       // Resolve the PATH-augmented base env and keychain values once per gate
       // evaluation. The bundle is passed only to the subprocess and diagnostic
       // redactor; Scheduler never stores it on a scheduled item.
@@ -1433,7 +1434,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
           })(),
     });
     this.scheduler.start(this.settings.scheduledItems ?? []);
-    if (repairedOrchestrators) await this.saveSettings();
+    if (repairedOrchestrators || legacyHeartbeats.removed > 0) await this.saveSettings();
 
     // Status-line service: polls statusLineCommand per thread cwd so every
     // thread's footer pills + derived prUrl stay fresh (desktop only).
@@ -1513,50 +1514,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
         );
       },
     });
-
-    // Event-driven wake-up: pings the thread-orchestrator thread shortly after
-    // any other thread finishes a turn, so it feels continuously running
-    // rather than polling on a fixed schedule. The heartbeat CronCreate item
-    // set up in ensureOrchestratorThread() is a backstop for missed events
-    // only — this is the primary trigger. See OrchestratorWakeup.ts.
-    {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { OrchestratorWakeup } = require('./OrchestratorWakeup') as typeof import('./OrchestratorWakeup');
-      this.orchestratorWakeup = new OrchestratorWakeup(this.manager, {
-        resolveBucket: (threadId) => {
-          const thread = this.manager.getThread(threadId);
-          if (!thread) return undefined;
-          if (threadId === this.settings.orchestratorThreadId) return undefined;
-          if (!thread.projectId) return 'portfolio';
-          const project = this.manager.getProject(thread.projectId);
-          if (project?.orchestratorThreadId === threadId) return 'portfolio';
-          if (project?.orchestratorEnabled === false) return undefined;
-          return `project:${thread.projectId}`;
-        },
-        resolveTarget: async (bucket, isCurrent) => {
-          if (bucket === 'portfolio') return this.settings.orchestratorThreadId;
-          if (!bucket.startsWith('project:')) return undefined;
-          const projectId = bucket.slice('project:'.length);
-          if (this.manager.getProject(projectId)?.orchestratorEnabled === false) return undefined;
-          try {
-            return await this.ensureProjectOrchestratorThread(projectId, false, isCurrent);
-          } catch (error) {
-            console.warn(`[ClaudeThreads] Project orchestrator creation failed for ${bucket}:`, error);
-            if (this.manager.getProject(projectId)?.orchestratorEnabled === false) return undefined;
-            return this.settings.orchestratorThreadId
-              ? { threadId: this.settings.orchestratorThreadId, summaryOnly: true as const }
-              : undefined;
-          }
-        },
-        threadExists: (id) => !!this.manager.getThread(id),
-        sendMessage: (id, text) => this.manager.sendMessage(id, text),
-        isSuspended: () => this.wakeupDelegated,
-        onWarn: (message) => console.warn(`[ClaudeThreads] ${message}`),
-        onError: (err) => console.error('[ClaudeThreads] Orchestrator wake-up sendMessage failed:', err),
-      });
-      this.orchestratorWakeup.start();
-      this.register(() => this.orchestratorWakeup?.stop());
-    }
 
     // Document watch service: alerts the owning thread whenever a watched vault
     // document's content changes. Works on both desktop and mobile — vault.on()
@@ -3207,10 +3164,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
       subscribe: (listener) => this.manager.subscribe(listener),
       listOrchestrators: () => this.listPublicOrchestrators(),
       resolveOrchestrator: (target) => this.resolvePublicOrchestrator(target),
-      setWakeupDelegated: (delegated) => {
-        this.wakeupDelegated = delegated;
-        if (delegated) this.orchestratorWakeup?.discardAll();
-      },
+      ensureOrchestrator: (target) => this.ensurePublicOrchestrator(target),
+      setOrchestratorEnabled: (target, enabled) => this.setPublicOrchestratorEnabled(target, enabled),
+      peerSkills: this.manager.peerSkills,
       triggerHostEvent: (name, payload) => {
         const workspace = this.app.workspace as unknown as { trigger(event: string, payload: unknown): void };
         workspace.trigger(name, payload);
@@ -3304,16 +3260,75 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return result;
   }
 
-  private async resolvePublicOrchestrator(target: OrchestratorTarget): Promise<string | null> {
+  /** True while a peer plugin (Threads Orchestrator) has registered the thread-orchestrator skill, i.e. owns orchestrator lifecycle. */
+  isOrchestratorManagedByPlugin(): boolean {
+    return this.manager.peerSkills.list().some(skill => skill.name === 'thread-orchestrator');
+  }
+
+  private publicOrchestratorSnapshot(id: string): OrchestratorSnapshot | null {
+    if (id === 'portfolio') {
+      const portfolio = this.settings.orchestratorThreadId ? this.manager.getThread(this.settings.orchestratorThreadId) : undefined;
+      return portfolio ? { id: 'portfolio', kind: 'portfolio', threadId: portfolio.id, title: portfolio.title, enabled: true } : null;
+    }
+    const projectId = id.startsWith('project:') ? id.slice('project:'.length) : '';
+    const project = projectId ? this.manager.getProject(projectId) : undefined;
+    if (!project) return null;
+    const thread = project.orchestratorThreadId ? this.manager.getThread(project.orchestratorThreadId) : undefined;
+    return thread
+      ? { id, kind: 'project', projectId, threadId: thread.id, title: thread.title, enabled: project.orchestratorEnabled !== false }
+      : { id, kind: 'project', projectId, threadId: '', title: `${project.name} orchestrator`, enabled: project.orchestratorEnabled !== false };
+  }
+
+  /** An ensure must never report an enabled-looking orchestrator without a thread (creation failed, or setEnabled(false) interleaved). */
+  private requireLiveSnapshot(id: string): OrchestratorSnapshot {
+    const snapshot = this.publicOrchestratorSnapshot(id);
+    if (!snapshot || !snapshot.threadId || !snapshot.enabled) {
+      throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator could not be created or was disabled concurrently: ${id}`);
+    }
+    return snapshot;
+  }
+
+  /** Explicit create + designate (idempotent). Returns null for an unknown Project. Never opens a chat view. */
+  async ensurePublicOrchestrator(target: OrchestratorTarget): Promise<OrchestratorSnapshot | null> {
     if (target.id === 'portfolio') {
-      await this.ensureOrchestratorThread();
-      return this.settings.orchestratorThreadId ?? null;
+      await this.ensureOrchestratorThread(false);
+      return this.requireLiveSnapshot('portfolio');
     }
     if (!target.id.startsWith('project:')) return null;
     const projectId = target.id.slice('project:'.length);
     const project = projectId ? this.manager.getProject(projectId) : undefined;
     if (!project) return null;
-    // Refuse before ensureProjectOrchestratorThread: it would create a thread for a Project whose orchestrator is switched off.
+    if (project.orchestratorEnabled === false) {
+      this.manager.updateProject(projectId, { orchestratorEnabled: true });
+      await this.saveSettings();
+    }
+    await this.ensureProjectOrchestratorThread(projectId, false);
+    return this.requireLiveSnapshot(target.id);
+  }
+
+  /** Project orchestrators only. Disabling keeps the thread and its reference; enabling is ensure. */
+  async setPublicOrchestratorEnabled(target: OrchestratorTarget, enabled: boolean): Promise<OrchestratorSnapshot | null> {
+    if (enabled) return this.ensurePublicOrchestrator(target);
+    if (!target.id.startsWith('project:')) return null;
+    const projectId = target.id.slice('project:'.length);
+    const project = projectId ? this.manager.getProject(projectId) : undefined;
+    if (!project) return null;
+    if (project.orchestratorEnabled !== false) {
+      this.manager.updateProject(projectId, { orchestratorEnabled: false });
+      await this.saveSettings();
+    }
+    return this.publicOrchestratorSnapshot(target.id);
+  }
+
+  private async resolvePublicOrchestrator(target: OrchestratorTarget): Promise<string | null> {
+    if (target.id === 'portfolio') {
+      return (await this.ensurePublicOrchestrator(target))?.threadId || null;
+    }
+    if (!target.id.startsWith('project:')) return null;
+    const projectId = target.id.slice('project:'.length);
+    const project = projectId ? this.manager.getProject(projectId) : undefined;
+    if (!project) return null;
+    // Refuse before creating anything: dispatch never re-enables a Project whose orchestrator is switched off.
     if (project.orchestratorEnabled === false) return null;
     return (await this.ensureProjectOrchestratorThread(projectId, false)) ?? null;
   }
@@ -3340,7 +3355,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       // This must happen before vault persistence: that write is asynchronous,
       // and a completion notification may otherwise recreate the orchestrator.
       this.manager.updateProject(project.id, { orchestratorEnabled: false, orchestratorThreadId: undefined });
-      this.orchestratorWakeup?.invalidateBucket(`project:${project.id}`);
     }
     const shouldPersist = !onlyIfHasMessages || thread.messages.some(message => message.role !== 'compact' && message.role !== 'notice');
     const persistedArchive = shouldPersist && !thread.private && this.settings.saveThreadsToVault && this.persistence;
@@ -3364,7 +3378,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
         console.error('[ClaudeThreads] Failed to restore live thread note after orchestrator retirement failure:', rollbackError);
       });
       if (retired && (project || wasPortfolio)) {
-        throw new Error(`Archive stopped after orchestrator retirement; the thread remains live but its heartbeat may be disabled. ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`Archive stopped after orchestrator retirement; the thread remains live. ${error instanceof Error ? error.message : String(error)}`);
       }
       throw error;
     }
@@ -3404,26 +3418,17 @@ export default class ClaudeThreadsPlugin extends Plugin {
       : this.manager.getProjects().find(candidate => candidate.orchestratorThreadId === threadId);
     const isPortfolio = this.settings.orchestratorThreadId === threadId;
     if (!project && !isPortfolio) return;
-    const heartbeats = (this.settings.scheduledItems ?? []).filter(item => item.isOrchestratorHeartbeat && item.targetThreadId === threadId);
-    const deleted: ScheduledItem[] = [];
     const wasProjectEnabled = prepared?.priorEnabled ?? project?.orchestratorEnabled;
     if (project && !prepared) {
-      // Disable and invalidate synchronously so no debounce or in-flight target
-      // resolution can recreate/message this orchestrator while cleanup awaits.
+      // Disable synchronously so nothing can recreate this orchestrator while cleanup awaits.
       this.manager.updateProject(project.id, { orchestratorEnabled: false, orchestratorThreadId: undefined });
-      this.orchestratorWakeup?.invalidateBucket(`project:${project.id}`);
     }
     try {
-      for (const item of heartbeats) {
-        await this.scheduler.deleteItem(item.id);
-        deleted.push(item);
-      }
       if (!project) this.settings.orchestratorThreadId = undefined;
       await this.saveSettings();
     } catch (error) {
       if (project) this.manager.updateProject(project.id, { orchestratorEnabled: wasProjectEnabled ?? true, orchestratorThreadId: threadId });
       else this.settings.orchestratorThreadId = threadId;
-      for (const item of deleted) await this.scheduler.createItem(item).catch(console.error);
       throw error;
     }
   }
@@ -3788,46 +3793,19 @@ export default class ClaudeThreadsPlugin extends Plugin {
   }
 
   /**
-   * Creates the persistent thread-orchestrator thread if none is set yet (or if
-   * the previously stored one no longer exists), then opens it. Also ensures a
-   * 60-minute heartbeat cron item targets it — a resilience backstop for the
-   * event-driven wake-up subscriber below, not the primary trigger.
+   * Creates the Portfolio orchestrator thread if none is set yet (or if the stored one no longer
+   * exists) and, unless `open` is false, opens it. Wake-up and heartbeat scheduling belong to the
+   * Threads Orchestrator plugin; core only owns the thread and its id.
    */
-  async ensureOrchestratorThread(): Promise<void> {
-    const staleThreadId = this.settings.orchestratorThreadId;
-    let threadId = staleThreadId;
+  async ensureOrchestratorThread(open = true): Promise<void> {
+    let threadId = this.settings.orchestratorThreadId;
     if (!threadId || !this.manager.getThread(threadId)) {
       const thread = this.manager.createThread('Portfolio Orchestrator', this.getEffectiveCwd());
       threadId = thread.id;
       this.settings.orchestratorThreadId = threadId;
       await this.saveSettings();
-
-      // Clean up any heartbeat items still targeting the stale/orphaned
-      // orchestrator thread (e.g. it was deleted/archived out from under us)
-      // so they don't keep firing into a thread that no longer exists.
-      if (staleThreadId) {
-        const stale = (this.settings.scheduledItems ?? [])
-          .filter((item) => item.isOrchestratorHeartbeat && item.targetThreadId === staleThreadId);
-        for (const item of stale) await this.scheduler.deleteItem(item.id);
-      }
     }
-
-    // Idempotent: only create the heartbeat once per orchestrator thread.
-    const hasHeartbeat = (this.settings.scheduledItems ?? []).some(
-      (item) => item.targetThreadId === threadId,
-    );
-    if (!hasHeartbeat) {
-      this.scheduler.createItem({
-        name: 'Portfolio Orchestrator Heartbeat',
-        prompt: 'Heartbeat: reconcile activity missed by targeted event reviews across all threads. Do not reopen concluded work whose updatedAt is unchanged.',
-        schedule: { type: 'interval', intervalSeconds: 3600 },
-        enabled: true,
-        targetThreadId: threadId,
-        isOrchestratorHeartbeat: true,
-      });
-    }
-
-    await this.openThreadInChatView(threadId);
+    if (open) await this.openThreadInChatView(threadId);
   }
 
   async ensureProjectOrchestratorThread(
@@ -3856,19 +3834,6 @@ export default class ClaudeThreadsPlugin extends Plugin {
       this.manager.updateProject(projectId, { orchestratorThreadId: threadId });
       await this.saveSettings();
       if (!isCurrent()) return undefined;
-    }
-    const hasHeartbeat = (this.settings.scheduledItems ?? []).some(item => item.isOrchestratorHeartbeat && item.targetThreadId === threadId);
-    if (!hasHeartbeat) {
-      if (!isCurrent()) return undefined;
-      await this.scheduler.createItem({
-        name: `${project.name} Orchestrator Heartbeat`,
-        prompt: 'Heartbeat: reconcile Project activity missed by targeted event reviews. Do not reopen concluded work whose updatedAt is unchanged.',
-        schedule: { type: 'interval', intervalSeconds: 3600 },
-        enabled: true,
-        targetThreadId: threadId,
-        projectId,
-        isOrchestratorHeartbeat: true,
-      });
     }
     if (open) await this.openThreadInChatView(threadId);
     return threadId;
