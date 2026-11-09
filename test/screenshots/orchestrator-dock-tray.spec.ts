@@ -412,6 +412,8 @@ test.describe('orchestrator tray — hovered card is VISIBLE (clip + overlays) i
     { label: '1280x800', size: DESKTOP },
     { label: '390x844', size: NARROW },
     { label: '320x640', size: { width: 320, height: 640 } },
+    { label: '360x640', size: { width: 360, height: 640 } }, // short viewports, NORMAL motion (QA N3: the smooth path used to be overridden by a fallback scroll)
+    { label: '375x667', size: { width: 375, height: 667 } },
   ];
 
   /** Visible fraction of the card: its rect clipped by every scrolling ancestor, minus the sheet and the pill. Waits for scroll end first. */
@@ -452,7 +454,7 @@ test.describe('orchestrator tray — hovered card is VISIBLE (clip + overlays) i
     });
   }
 
-  for (const mode of ['folder', 'status', 'project'] as const) {
+  for (const mode of ['folder', 'status', 'project', 'gallery'] as const) {
     for (const { label, size } of VIEWS) {
       test(`${mode}: all 8 links, visible fraction @ ${label}`, async ({ page }) => {
         await page.setViewportSize(size);
@@ -474,7 +476,7 @@ test.describe('orchestrator tray — hovered card is VISIBLE (clip + overlays) i
           if (!m) continue;
           // Physical limit: a card taller than the band above the sheet (or than its column) can only show as much as fits.
           const attainable = Math.min(m.cardH, Math.max(m.bandH, 60));
-          const ok = m.fraction >= 0.9 || m.visibleH >= Math.min(attainable, m.cardH) * 0.9;
+          const ok = (m.fraction >= 0.9 || m.visibleH >= Math.min(attainable, m.cardH) * 0.9) && (m.fraction > 0 || m.bandH < 20);
           report.push(`${m.title}: ${(m.fraction * 100).toFixed(0)}% (h ${Math.round(m.visibleH)}/${Math.round(m.cardH)}, band ${Math.round(m.bandH)})`);
           expect(ok, `link ${i} ${m.title}: ${(m.fraction * 100).toFixed(0)}% visible, ${Math.round(m.visibleH)}px of ${Math.round(m.cardH)}px (band ${Math.round(m.bandH)}px)\n${report.join('\n')}`).toBe(true);
           await page.mouse.move(2, 2);

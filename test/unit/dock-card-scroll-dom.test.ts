@@ -107,4 +107,27 @@ describe('scrollCardIntoClearView with nested scrollers', () => {
     card.getBoundingClientRect = () => rect(10, 300, 100, 360);
     expect(scrollCardIntoClearView(card, host, [SHEET], true)).toBe(false);
   });
+
+  it('QA N3: the result is computed on the PLANNED geometry, not after the smooth animation restored the start offsets (a card that starts off-screen)', () => {
+    // The column starts far below the board (off-screen); the outer scroller can only bring it to y 600, under the sheet: partly visible, not "good".
+    const mk = () => {
+      const w = world({ colY: 1300, cardY: 100, cardH: 200, colContent: 400 });
+      Object.defineProperty(w.outer.el, 'scrollHeight', { configurable: true, get: () => 1500 }); // max scroll 700
+      return w;
+    };
+    const reduced = mk();
+    const smooth = mk();
+    for (const s of [smooth.outer, smooth.col]) s.el.scrollTo = (() => {}) as never;
+    const a = scrollCardIntoClearView(reduced.card, reduced.host, [SHEET, PILL], true);
+    const b = scrollCardIntoClearView(smooth.card, smooth.host, [SHEET, PILL], false);
+    expect(a).toBe(true); // the card is (partly) visible after the move
+    expect(b).toBe(a); // and smooth mode must say the same: it used to read the restored, off-screen start state and report false
+  });
+
+  it('a card that genuinely cannot be brought into view reports false in both modes', () => {
+    const w = world({ colY: 1300, cardY: 100, cardH: 200, colContent: 400 });
+    Object.defineProperty(w.outer.el, 'scrollHeight', { configurable: true, get: () => 800 }); // nothing to scroll
+    Object.defineProperty(w.col.el, 'scrollHeight', { configurable: true, get: () => 460 });
+    expect(scrollCardIntoClearView(w.card, w.host, [SHEET, PILL], false)).toBe(false);
+  });
 });

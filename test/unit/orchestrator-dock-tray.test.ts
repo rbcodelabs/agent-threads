@@ -792,6 +792,7 @@ describe('"never approved blind" covers hidden FIELDS, not only length (review: 
   it('non-JSON text: approvable only when fully shown', () => {
     expect(names(setup({ specs: spec('npm run deploy --prod') }))).toEqual(['Deny', 'Allow', 'Always']);
     expect(names(setup({ specs: spec('q'.repeat(300)) }))).toEqual(['Deny', 'Review in thread']);
+    expect(names(setup({ specs: spec('first line\nsecond line') }))).toEqual(['Deny', 'Review in thread']); // multi-line plain text can hide lines when flattened
   });
 
   it('host_exec: command only keeps Allow once / Always `prefix`; an extra field does not', () => {

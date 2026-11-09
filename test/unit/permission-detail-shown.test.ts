@@ -33,11 +33,15 @@ describe('isFullyShownDetail', () => {
     expect(isFullyShownDetail(json({ command: `echo ${'x'.repeat(200)}` }))).toBe(false);
   });
 
-  it('non-JSON text: fully shown when short, not when cut, multi-line text is compared on its flattened form', () => {
+  it('non-JSON text: fully shown when short and on one line; not when cut or when it spans lines (the flattened summary can hide lines)', () => {
     expect(isFullyShownDetail('npm run deploy --prod')).toBe(true);
     expect(isFullyShownDetail('x'.repeat(300))).toBe(false);
-    expect(isFullyShownDetail('line one\nline two')).toBe(true);
+    expect(isFullyShownDetail('line one\nline two')).toBe(false); // flattened, a newline can hide lines
     expect(isFullyShownDetail(`line one\n${'y'.repeat(300)}`)).toBe(false);
+  });
+
+  it('a single JSON field whose value contains a newline is not fully shown (the one-line summary flattens it)', () => {
+    expect(isFullyShownDetail(json({ command: 'ls\nrm -rf /tmp/x' }))).toBe(false);
   });
 
   it('empty or {} has nothing to hide', () => {
