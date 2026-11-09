@@ -25,6 +25,9 @@ export type LayoutDensity = 'compact' | 'comfortable' | 'spacious';
 /** How tool-call groups render in the chat. See toolNameUtils.ToolCallStyle. */
 export type ToolCallStyle = 'chips' | 'tree' | 'cards';
 
+/** How the Agent Board groups threads. Cycle order lives in kanbanGroupBy.ts. */
+export type KanbanGroupBy = 'status' | 'folder' | 'project' | 'gallery';
+
 export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
 
 export interface ImageAttachment {
@@ -131,7 +134,13 @@ export interface ChatMessage {
    * dropped from the serialized data.json copy once the image is externalized
    * to `path`, but kept in the live object for render/relay.
    */
-  toolResultImages?: Array<{ mediaType: string; data?: string; path?: string }>;
+  toolResultImages?: Array<{
+    mediaType: string;
+    data?: string;
+    path?: string;
+    /** Vault-relative 160px WebP sidecar (`<id>-<n>.thumb.webp`) used by the Agent Board gallery. Kept in data.json. */
+    thumbPath?: string;
+  }>;
   /** For role 'notice': the completion status of the background task, drives the icon. */
   noticeStatus?: 'completed' | 'failed' | 'stopped';
   /** Harness that produced an assistant message. Enables accurate mixed-provider archives. */
@@ -1418,8 +1427,10 @@ export interface PluginSettings {
    * status columns nested inside each lane. 'project' renders one vertical
    * column per app/project, with threads inside each column grouped under
    * status section headers (matching the Agent Dashboard sidebar's grouping).
+   * 'gallery' renders one larger card per thread with its newest images (desktop only).
+   * Unknown stored values are treated as 'status' (see normalizeKanbanGroupBy).
    */
-  kanbanGroupBy?: 'status' | 'folder' | 'project';
+  kanbanGroupBy?: KanbanGroupBy;
   /**
    * Which sidebar panel(s) to auto-collapse when the Kanban board tab is
    * opened, and restore when it is closed. Defaults to 'none' (no change).

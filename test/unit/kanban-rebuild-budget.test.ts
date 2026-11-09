@@ -14,6 +14,7 @@
 
 import '../setup/obsidian-dom'; // Polyfill Obsidian's HTMLElement extensions for jsdom
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { FileSystemAdapter } from 'obsidian';
 
 // Mirror the stubs from kanban-incremental-patch.test.ts: KanbanView transitively
 // pulls in the heavy agent SDK (via ClaudeSession) and stt/fs (via DispatchInput).
@@ -58,6 +59,8 @@ function makeManager(threads: Thread[], running: Set<string>) {
     isAwaitingSandboxDecision: () => false,
     getThreadActivity: () => 'Working...',
     getProject: () => undefined,
+    getProjects: () => [],
+    getPendingToolResultImages: () => [],
     subscribe: () => () => {},
   };
 }
@@ -81,15 +84,19 @@ function makePlugin(manager: ReturnType<typeof makeManager>) {
   };
 }
 
-function makeView(threads: Thread[], running: Set<string>) {
+function makeView(threads: Thread[], running: Set<string>, groupBy = 'status') {
   const manager = makeManager(threads, running);
   const plugin = makePlugin(manager);
+  plugin.settings.kanbanGroupBy = groupBy;
   const view = new KanbanView({} as never, plugin as never) as unknown as {
     boardEl: HTMLElement;
     headerCountEl: HTMLElement;
     render: () => void;
     handleEvent: (id: string, ev: { type: string }) => void;
+    galleryTimers: Map<string, unknown>;
+    app: unknown;
   };
+  view.app = { vault: { adapter: Object.assign(new FileSystemAdapter(), { getResourcePath: (p: string) => p }) } };
   view.boardEl = document.createElement('div');
   view.headerCountEl = document.createElement('div');
   return view;
@@ -158,5 +165,77 @@ describe('KanbanView — full-rebuild budget under an event burst', () => {
     }
     vi.advanceTimersByTime(200);
     expect(telemetry.snapshot().counters.kanbanFullRebuilds).toBe(2);
+  });
+});
+
+describe('KanbanView gallery — live card refresh does not add full rebuilds', () => {
+  beforeEach(() => {
+    telemetry.reset();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const withImages = (id: string, n: number): Thread =>
+    makeThread(id, {
+      reviewed: true,
+      messages: [{
+        id: `${id}-m1`, role: 'assistant', content: 'hello', timestamp: 0,
+        toolResultImages: Array.from({ length: n }, (_, i) => ({ mediaType: 'image/png', path: `a/${id}-${i}.png` })),
+      }] as never,
+    });
+
+  it('a burst of message / tool_result_images events across N threads causes zero full rebuilds', () => {
+    const N = 12;
+    const threads = Array.from({ length: N }, (_, i) => withImages(`t${i}`, 1));
+    const view = makeView(threads, new Set(), 'gallery');
+    view.render();
+    const baseline = telemetry.snapshot().counters.kanbanFullRebuilds;
+    expect(view.boardEl.querySelectorAll('.ct-gallery-card')).toHaveLength(N);
+    expect(view.boardEl.querySelector('[data-thread-id="t0"] .ct-gallery-count')?.textContent).toBe('1 / 1');
+
+    for (const t of threads) {
+      t.messages.push({
+        id: `${t.id}-m2`, role: 'assistant', content: 'newer', timestamp: 5,
+        toolResultImages: [{ mediaType: 'image/png', path: `a/${t.id}-new.png` }],
+      } as never);
+      view.handleEvent(t.id, { type: 'tool_result_images' });
+      view.handleEvent(t.id, { type: 'message' });
+      view.handleEvent(t.id, { type: 'message' });
+    }
+    // One debounce timer per thread, never one per event; no render was requested.
+    expect(view.galleryTimers.size).toBe(N);
+    expect(telemetry.snapshot().counters.rendersScheduled).toBe(0);
+
+    vi.advanceTimersByTime(1000);
+
+    expect(telemetry.snapshot().counters.kanbanFullRebuilds).toBe(baseline);
+    expect(telemetry.snapshot().counters.rendersScheduled).toBe(0);
+    expect(view.galleryTimers.size).toBe(0);
+    // ...and the cards themselves picked the new image up in place.
+    expect(view.boardEl.querySelector('[data-thread-id="t0"] .ct-gallery-count')?.textContent).toBe('1 / 2');
+    expect(view.boardEl.querySelector('[data-thread-id="t0"] .ct-gallery-hero')?.getAttribute('src')).toBe('a/t0-new.png');
+  });
+
+  it('keeps the same card element (no rebuild of the article) across a refresh', () => {
+    const t = withImages('solo', 1);
+    const view = makeView([t], new Set(), 'gallery');
+    view.render();
+    const before = view.boardEl.querySelector('.ct-gallery-card');
+    view.handleEvent('solo', { type: 'message' });
+    vi.advanceTimersByTime(1000);
+    expect(view.boardEl.querySelector('.ct-gallery-card')).toBe(before);
+  });
+
+  it('ignores message events outside gallery mode (no timers, no renders)', () => {
+    const t = withImages('solo', 1);
+    const view = makeView([t], new Set(), 'status');
+    view.render();
+    telemetry.reset();
+    view.handleEvent('solo', { type: 'message' });
+    vi.advanceTimersByTime(1000);
+    expect(telemetry.snapshot().counters.rendersScheduled).toBe(0);
+    expect(view.galleryTimers.size).toBe(0);
   });
 });

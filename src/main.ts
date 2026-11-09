@@ -40,6 +40,7 @@ import { setGitAuthProvider } from './gitClient';
 import { createGithubGitAuth } from './skillSourceGithubAuth';
 import { createRequestUrlFetch } from './requestUrlFetch';
 import { obsidianHttpFetch, obsidianYamlParser } from './host/obsidianHost';
+import { canvasThumbnailGenerator } from './thumbnailGenerator';
 import { AttachmentWriter } from './AttachmentWriter';
 import { DOCUMENT_CHAT_LABEL, isChattableDocument } from './documentChat';
 import {
@@ -672,6 +673,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager = new ThreadManager(
       this.settings,
       new AttachmentWriter(() => this.app, () => this.settings.vaultFolder),
+      canvasThumbnailGenerator,
     );
     // Remote daemons: one client per configured daemon, tokens read from the keychain at each (re)connect.
     this.daemonRegistry = new DaemonRegistry({

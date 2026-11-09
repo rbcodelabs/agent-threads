@@ -3223,6 +3223,165 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'kanban-project-columns.png', { fullPage: true });
   });
 
+  // ── Gallery mode (Agent Board group-by: gallery) ──────────────────────────
+  // ?gallery=1 decorates existing kanban fixture threads with inline-SVG images
+  // (test/harness/gallery-fixtures.ts). The permission-awaiting HipTrip thread is
+  // the featured Needs-you card; k-hiptrip-done has 5 images (filmstrip +3).
+
+  async function openGallery(page: import('@playwright/test').Page, size: { width: number; height: number }, query = '?gallery=1') {
+    await page.setViewportSize(size);
+    await page.goto(kanbanUrl + query);
+    await page.waitForSelector('.ct-kanban-board');
+    await page.evaluate(() => (window as any).__setGroupBy('gallery'));
+    await page.waitForSelector('.ct-gallery-card');
+  }
+
+  /** Expands #app to its content so a full-page capture shows every card, then waits for every image. */
+  async function expandAndSettle(page: import('@playwright/test').Page) {
+    await page.addStyleTag({ content: `
+      #app { height: auto !important; overflow: visible !important; }
+      #app > div, #app > div > div:last-child { overflow: visible !important; }
+      .ct-agents-list, .ct-gallery-board { height: auto !important; overflow: visible !important; }
+      .ct-kanban-dispatch { position: static !important; transform: none !important; }
+    ` });
+    // A full-page capture does not scroll, so grow the viewport to the content: that way the
+    // visibility observer activates every card exactly as it would while scrolling.
+    const height = await page.evaluate(() => Math.ceil(document.querySelector('#app')!.getBoundingClientRect().height) + 40);
+    await page.setViewportSize({ width: page.viewportSize()!.width, height: Math.min(height, 12000) });
+    // Native lazy loading would otherwise still skip images outside the original viewport.
+    await page.evaluate(() => document.querySelectorAll<HTMLImageElement>('.ct-gallery-hero, .ct-gallery-thumb img').forEach((img) => { img.loading = 'eager'; }));
+    await page.waitForFunction(() => {
+      const heroes = Array.from(document.querySelectorAll<HTMLImageElement>('.ct-gallery-hero'));
+      const imgs = [...heroes, ...Array.from(document.querySelectorAll<HTMLImageElement>('.ct-gallery-thumb img'))];
+      // Every hero has been activated by the visibility observer and decoded.
+      return heroes.length > 0 && imgs.every((img) => img.getAttribute('src') && img.complete && img.naturalWidth > 0);
+    });
+    await page.waitForTimeout(200);
+  }
+
+  test('kanban board — gallery mode (desktop 1280x800)', async ({ page }) => {
+    await openGallery(page, { width: 1280, height: 800 });
+    // One card per thread: the featured Needs-you card first, then recent activity.
+    await expect(page.locator('.ct-gallery-card')).toHaveCount(14);
+    const featured = page.locator('.ct-gallery-featured');
+    await expect(featured).toHaveCount(1);
+    await expect(featured.locator('.ct-gallery-title-link')).toHaveText('Deploy curation quality signals');
+    await expect(featured.locator('.ct-permission-allow')).toBeVisible();
+    await expect(featured.locator('.ct-permission-deny')).toBeVisible();
+    await expect(page.locator('.ct-gallery-banner')).toContainText('1 thread needs you');
+    // Source badges: Browser for the screenshot-paired image, Image otherwise.
+    await expect(page.locator('[data-thread-id="k-hiptrip-running"] .ct-gallery-badge')).toHaveText('Browser');
+    await expect(page.locator('[data-thread-id="k-hiptrip-new"] .ct-gallery-badge')).toHaveText('Image');
+    // 5 images -> 3-slot filmstrip with +3.
+    const done = page.locator('[data-thread-id="k-hiptrip-done"]');
+    await expect(done.locator('.ct-gallery-count')).toHaveText('1 / 5');
+    await expect(done.locator('.ct-gallery-strip button.ct-gallery-thumb')).toHaveCount(3);
+    await expect(done.locator('.ct-gallery-more')).toHaveText('+3');
+    // Private thread with images and threads without any: text placeholders, no <img>.
+    for (const id of ['k-acme-tasks', 'k-threads-failed']) {
+      const c = page.locator(`[data-thread-id="${id}"]`);
+      await expect(c).toHaveClass(/is-placeholder/);
+      await expect(c.locator('img')).toHaveCount(0);
+    }
+    await expandAndSettle(page);
+    await shot(page, 'kanban-gallery.png', { fullPage: true });
+  });
+
+  test('kanban board — gallery mode (narrow 390x844, single column)', async ({ page }) => {
+    await openGallery(page, { width: 390, height: 844 }, '?gallery=1&narrow=1');
+    const boxes = await page.locator('.ct-gallery-card').evaluateAll((els) =>
+      els.map((el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x), w: Math.round(r.width) }; }));
+    expect(new Set(boxes.map((b) => b.x)).size).toBe(1);
+    expect(new Set(boxes.map((b) => b.w)).size).toBe(1);
+    // 44px tap targets for Allow / Deny and the hero arrows.
+    for (const sel of ['.ct-gallery-featured .ct-permission-allow', '.ct-gallery-featured .ct-permission-deny', '[data-thread-id="k-hiptrip-done"] .ct-gallery-next']) {
+      const box = await page.locator(sel).boundingBox();
+      expect(box!.height, sel).toBeGreaterThanOrEqual(44);
+      expect(box!.width, sel).toBeGreaterThanOrEqual(44);
+    }
+    // No horizontal scroll anywhere in the board.
+    expect(await page.locator('.ct-gallery-board').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await expandAndSettle(page);
+    await shot(page, 'kanban-gallery-narrow.png', { fullPage: true });
+  });
+
+  test('kanban board — gallery filmstrip stepped state', async ({ page }) => {
+    await openGallery(page, { width: 1280, height: 800 });
+    const done = page.locator('[data-thread-id="k-hiptrip-done"]');
+    await done.scrollIntoViewIfNeeded();
+    await done.locator('.ct-gallery-next').click();
+    await done.locator('.ct-gallery-next').click();
+    await done.locator('.ct-gallery-next').click();
+    await expect(done.locator('.ct-gallery-count')).toHaveText('4 / 5');
+    // Past the visible slots, the last (+N) thumb carries the current marker.
+    await expect(done.locator('.ct-gallery-thumb[aria-current="true"]')).toHaveCount(1);
+    await expect(done.locator('.ct-gallery-thumb[data-i="2"]')).toHaveAttribute('aria-current', 'true');
+    await page.waitForFunction(() => {
+      const img = document.querySelector<HTMLImageElement>('[data-thread-id="k-hiptrip-done"] .ct-gallery-hero');
+      return !!img && img.complete && img.naturalWidth > 0;
+    });
+    // The floating board panel would overlap the element capture; it is covered by the full-page shots.
+    await page.addStyleTag({ content: '.ct-kanban-dispatch { visibility: hidden !important; }' });
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(150);
+    await shot(done, 'kanban-gallery-stepped.png');
+  });
+
+  test('kanban board — gallery placeholder cards (no images, private)', async ({ page }) => {
+    await openGallery(page, { width: 1280, height: 800 });
+    const plain = page.locator('[data-thread-id="k-threads-failed"]');
+    const priv = page.locator('[data-thread-id="k-acme-tasks"]');
+    await expect(plain.locator('.ct-gallery-ph-tag')).toHaveText('No images yet');
+    await expect(priv.locator('.ct-gallery-ph-tag')).toContainText('Private thread');
+    await page.addStyleTag({ content: '.ct-kanban-dispatch { visibility: hidden !important; }' });
+    await plain.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(150);
+    await shot(plain, 'kanban-gallery-placeholder.png');
+  });
+
+  test('kanban board — gallery keyboard: arrows on the hero, tab order, Enter on the title', async ({ page }) => {
+    await openGallery(page, { width: 1280, height: 800 });
+    const done = page.locator('[data-thread-id="k-hiptrip-done"]');
+    await done.scrollIntoViewIfNeeded();
+    const hero = done.locator('.ct-gallery-media');
+    await hero.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(done.locator('.ct-gallery-count')).toHaveText('2 / 5');
+    await page.keyboard.press('ArrowRight');
+    await expect(done.locator('.ct-gallery-count')).toHaveText('3 / 5');
+    await page.keyboard.press('ArrowLeft');
+    await expect(done.locator('.ct-gallery-count')).toHaveText('2 / 5');
+    await page.keyboard.press('ArrowLeft');
+    await page.keyboard.press('ArrowLeft'); // wraps to the oldest
+    await expect(done.locator('.ct-gallery-count')).toHaveText('5 / 5');
+
+    // Tab order inside a card: hero, prev, next, three thumbs, then the title link.
+    await hero.focus();
+    const order: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      order.push(await page.evaluate(() => {
+        const el = document.activeElement as HTMLElement;
+        return el.classList.contains('ct-gallery-media') ? 'hero'
+          : el.classList.contains('ct-gallery-prev') ? 'prev'
+          : el.classList.contains('ct-gallery-next') ? 'next'
+          : el.classList.contains('ct-gallery-thumb') ? `thumb${el.dataset.i}`
+          : el.classList.contains('ct-gallery-title-link') ? 'title' : el.tagName;
+      }));
+      await page.keyboard.press('Tab');
+    }
+    expect(order).toEqual(['hero', 'prev', 'next', 'thumb0', 'thumb1', 'thumb2', 'title']);
+
+    // Enter on the focused title link opens the thread.
+    await done.locator('.ct-gallery-title-link').focus();
+    await page.keyboard.press('Enter');
+    expect(await page.evaluate(() => (window as any).__openedThreadIds)).toContain('k-hiptrip-done');
+    // Thumbs are real buttons: Space/Enter jump to that image and mark it current.
+    await done.locator('.ct-gallery-thumb[data-i="1"]').focus();
+    await page.keyboard.press('Enter');
+    await expect(done.locator('.ct-gallery-count')).toHaveText('2 / 5');
+    await expect(done.locator('.ct-gallery-thumb[data-i="1"]')).toHaveAttribute('aria-current', 'true');
+  });
+
   test('agents list — project-first adaptive rows', async ({ page }) => {
     await page.setViewportSize({ width: 760, height: 820 });
     await page.goto(kanbanUrl + '?dashboard=1');

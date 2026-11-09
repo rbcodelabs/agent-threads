@@ -21,6 +21,12 @@ export interface AttachmentStore {
     mediaType: string,
     base64: string,
   ): Promise<string | null>;
+  /**
+   * Write the 160px WebP thumbnail sidecar for an image and return its
+   * store-relative path, or null. Optional: hosts without it simply get no
+   * thumbnails (the gallery falls back to the full image).
+   */
+  writeThumbnail?(threadId: string, messageId: string, index: number, base64: string): Promise<string | null>;
   /** Remove a thread's whole attachment directory. Best effort, never throws. */
   removeThreadDir(threadId: string): Promise<void>;
 }

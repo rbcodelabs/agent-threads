@@ -83,6 +83,7 @@
     "src/skillPaths.ts",
     "src/skillSourcePersistence.ts",
     "src/statusLine.ts",
+    "src/thumbnails.ts",
     "src/toolNameUtils.ts",
     "src/toolRestrictions.ts",
     "src/toolRouting.ts",

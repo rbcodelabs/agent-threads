@@ -1,5 +1,5 @@
 import { App, FileSystemAdapter, TFile, base64ToArrayBuffer } from 'obsidian';
-import { attachmentDirForThread, attachmentRoot, buildAttachmentPath } from './imageExternalization';
+import { attachmentDirForThread, attachmentRoot, buildAttachmentPath, buildThumbPath } from './imageExternalization';
 import { debugLog } from './logger';
 import type { AttachmentStore } from './host/AttachmentStore';
 
@@ -162,10 +162,25 @@ export class AttachmentWriter implements AttachmentStore {
     mediaType: string,
     base64: string,
   ): Promise<string | null> {
+    return this.writeAt(buildAttachmentPath(this.getVaultFolder(), threadId, messageId, index, mediaType), base64);
+  }
+
+  /**
+   * Write the 160px WebP gallery thumbnail next to the full-size image
+   * (`<messageId>-<index>.thumb.webp`). Same three-rung ladder as `write`.
+   */
+  async writeThumbnail(
+    threadId: string,
+    messageId: string,
+    index: number,
+    base64: string,
+  ): Promise<string | null> {
+    return this.writeAt(buildThumbPath(this.getVaultFolder(), threadId, messageId, index), base64);
+  }
+
+  private async writeAt(rel: string, base64: string): Promise<string | null> {
     const app = this.getApp();
     if (!app || !(app.vault.adapter instanceof FileSystemAdapter)) return null;
-
-    const rel = buildAttachmentPath(this.getVaultFolder(), threadId, messageId, index, mediaType);
 
     // Rung 1: native host bridge. Takes an ArrayBuffer, never the base64
     // string (see HostBinaryWriteBridge). Decoded per rung because an IPC
