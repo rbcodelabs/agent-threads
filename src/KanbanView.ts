@@ -9,6 +9,7 @@ import { approveProposedReply, discardProposedReply, takeProposedReplyForEdit } 
 import { answerPendingQuestions } from './questionActions';
 import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
 import { threadNeedsInput, splitNeedsInput } from './needsInput';
+import { canOpenDockLink, openDockLink, type DockLinkDeps } from './dockLinkOpener';
 import { OrchestratorDock, dockModeForWidth, type DockMode } from './orchestratorDock';
 import { decisionToQuestion } from './decisions';
 import { formatToolName } from './ClaudeSession';
@@ -383,7 +384,9 @@ export class KanbanView extends ItemView {
       // open=false: set up without stealing focus into the chat view; the dock then focuses its own field.
       ensureOrchestrator: () => plugin.ensureOrchestratorThread(false),
       openThread: (id) => plugin.openThreadInChatView(id),
-      openLink: (href) => { void this.app.workspace.openLinkText(href, '', false); },
+      // Never the active leaf (the board): see dockLinkOpener.ts.
+      openLink: (href) => openDockLink(this.dockLinkDeps(), href),
+      resolveLink: (href) => canOpenDockLink(this.dockLinkDeps(), href),
       mode: () => this.dockMode,
       daemons: plugin.daemonRegistry
         ? {
@@ -397,13 +400,12 @@ export class KanbanView extends ItemView {
     // Narrow boards collapse the pill to the orb (+ New thread): re-derive when the view width crosses 640px.
     if (typeof ResizeObserver !== 'undefined') {
       this.dockResizeObserver = new ResizeObserver(() => {
-        this.dock?.layoutChanged(); // the sheet's max height follows the view height
         // One measure (clientWidth) for open AND resize: contentRect is fractional and padding-excluded, so mixing the two
         // could flip the mode at exactly 640px.
         const next = dockModeForWidth(root.clientWidth);
-        if (next === this.dockMode) return;
+        if (next === this.dockMode) { this.dock?.layoutChanged(); return; } // the sheet's max height follows the view height
         this.dockMode = next;
-        this.dock?.relayout();
+        this.dock?.relayout(); // re-measures with the NEW mode
       });
       this.dockResizeObserver.observe(root);
       // The pill grows (wrapped reason, narrow status row): keep the board's scroll end clear of it, driven by the
@@ -419,6 +421,16 @@ export class KanbanView extends ItemView {
         this.pillObserver.observe(pill);
       }
     }
+  }
+
+  private dockLinkDeps(): DockLinkDeps {
+    const plugin = this.plugin;
+    return {
+      getFirstLinkpathDest: (path, source) => this.app.metadataCache.getFirstLinkpathDest(path, source),
+      isConversationFirst: () => plugin.isConversationFirst(),
+      openInContextPanel: (href, source) => { void plugin.contextPanel.openLinkText(href, source); },
+      openLinkText: (href, source, newLeaf) => { void this.app.workspace.openLinkText(href, source, newLeaf); },
+    };
   }
 
   /** Cmd+J target (see orchestratorDockCommand.ts). */

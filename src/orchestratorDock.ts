@@ -56,6 +56,8 @@ export interface OrchestratorDockDeps {
   openThread(threadId: string): void | Promise<void>;
   /** Opens a `[[note]]` wikilink from an orchestrator reply (workspace.openLinkText). Absent: wikilinks are inert. */
   openLink?(href: string): void;
+  /** Whether a `[[note]]` can be opened (resolves to a file). Absent with `openLink` present: assume yes. */
+  resolveLink?(href: string): boolean;
   mode(): DockMode;
   /** Absent (or null) means local-only: the orchestrator can then never be offline. */
   daemons?: {
@@ -113,6 +115,12 @@ export class OrchestratorDock {
   /** Orchestrator id the per-thread state below belongs to; a change resets it. */
   private trackedId: string | undefined;
   private streamBuf = '';
+  /** Partial reply of an interrupted turn. The manager does not persist it (onInterrupted only rolls user messages back). */
+  private stoppedText = '';
+  /** A13: set when our own message was echoed (user_message_added) while its send was still pending. */
+  private sendEcho = false;
+  private sendingText = '';
+  private txCache: { ref: unknown; len: number; lastId: string | undefined; entries: ReturnType<typeof sheetTranscript> } | null = null;
   /** User message ids that landed while a turn was running (coalesced into it): "Sent, will be picked up". */
   private readonly pickupIds = new Set<string>();
   /** Latest assistant message id the user has seen; per dock instance, seeded when the thread is first seen. */
@@ -163,7 +171,9 @@ export class OrchestratorDock {
 
     this.mountSheetParts();
     root.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.sheet?.isOpen) { e.stopPropagation(); this.closeSheet(); }
+      if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229 || !this.sheet?.isOpen) return; // Escape cancels an IME composition
+      e.stopPropagation();
+      this.closeSheet();
     });
 
     this.unsubscribeManager = this.deps.manager.subscribe((threadId, event) => {
@@ -236,7 +246,7 @@ export class OrchestratorDock {
     const orchestratorId = this.deps.getOrchestratorThreadId();
     const thread = orchestratorId ? manager.getThread(orchestratorId) : undefined;
     this.trackOrchestrator(orchestratorId, thread);
-    const unread = thread ? unreadState(sheetTranscript(thread.messages), this.lastSeenId) : { hasUnread: false, latestAssistantId: undefined };
+    const unread = thread ? unreadState(this.transcriptOf(thread), this.lastSeenId) : { hasUnread: false, latestAssistantId: undefined };
     const daemon = thread?.remote ? this.deps.daemons?.stateOf(thread.remote.daemonId) : undefined;
     this.state = deriveDockState({
       orchestratorId,
@@ -273,6 +283,7 @@ export class OrchestratorDock {
     // A draft edited while the field was hidden (orb mode) was measured at scrollHeight 0: re-measure now it is visible.
     if (previousMode === 'orb' && this.currentMode === 'pill' && this.inputEl) this.autosize(this.inputEl);
     this.updateInputControls();
+    if (this.sheet?.isOpen) this.layoutChanged(); // after the mode update: the room above the pill differs per mode
     this.renderSheet();
     this.renderChips();
   }
@@ -284,13 +295,15 @@ export class OrchestratorDock {
     if (id !== this.trackedId) {
       this.trackedId = id;
       this.streamBuf = '';
+      this.stoppedText = '';
+      this.txCache = null;
       this.pickupIds.clear();
       this.seeded = false;
       this.lastSeenId = undefined;
       this.stopping = false;
     }
     if (!thread) return;
-    const latest = unreadState(sheetTranscript(thread.messages), undefined).latestAssistantId;
+    const latest = unreadState(this.transcriptOf(thread), undefined).latestAssistantId;
     if (!this.seeded || this.sheet?.isOpen) { this.lastSeenId = latest; this.seeded = true; }
   }
 
@@ -308,24 +321,33 @@ export class OrchestratorDock {
         break;
       }
       case 'stream_reset':
+        this.streamBuf = '';
+        break;
       case 'streaming_start':
         this.streamBuf = '';
+        this.stoppedText = '';
         break;
       case 'user_message_added': {
         // The event precedes streaming_start, so isRunning() still reflects the PRIOR state: true means the
         // manager coalesced this message into the turn in flight (ADR-0002), and it is not yet answered.
-        const msg = event.message as { id?: string } | undefined;
+        const msg = event.message as { id?: string; content?: string } | undefined;
         if (msg?.id && this.deps.manager.isRunning(id)) this.pickupIds.add(msg.id);
+        // A13: our own send was recorded: a later failure must not restore the draft (it would send a duplicate).
+        if (this.sending && msg?.content === this.sendingText) this.sendEcho = true;
+        this.stoppedText = '';
         break;
       }
       case 'message':
         this.streamBuf = '';
+        this.stoppedText = '';
         this.onAssistantMessage(event.message as { role?: string; content?: string } | undefined);
         break;
       case 'interrupted':
       case 'done':
       case 'error':
       case 'run_state_settled':
+        // An interrupt drops the in-progress assistant text (never persisted): keep it visible, dimmed, until the next send.
+        if (event.type === 'interrupted' && this.streamBuf) this.stoppedText = this.streamBuf;
         this.streamBuf = '';
         this.pickupIds.clear();
         if (event.type !== 'done') this.stopping = false;
@@ -344,7 +366,7 @@ export class OrchestratorDock {
     const id = this.deps.getOrchestratorThreadId();
     const thread = id ? this.deps.manager.getThread(id) : undefined;
     if (!thread) return;
-    const u = unreadState(sheetTranscript(thread.messages), this.lastSeenId);
+    const u = unreadState(this.transcriptOf(thread), this.lastSeenId);
     const line = peekLine(message.content ?? '', this.threadRefs());
     if (this.sheet?.isOpen) {
       this.lastSeenId = u.latestAssistantId;
@@ -367,6 +389,8 @@ export class OrchestratorDock {
       openFull: () => { const id = this.deps.getOrchestratorThreadId(); if (id) void this.openQuietly(id); },
       openThread: (threadId) => { void this.openQuietly(threadId); },
       openLink: this.deps.openLink ? (href) => this.deps.openLink?.(href) : undefined,
+      // Without an opener, wikilinks are inert text; with one, the host decides what resolves.
+      resolveLink: (href) => !!this.deps.openLink && (this.deps.resolveLink ? this.deps.resolveLink(href) : true),
       removeWaiting: (index, text) => this.removeWaiting(index, text),
       pickChip: (chip) => { void this.submitText(chip.prompt); },
     });
@@ -389,10 +413,21 @@ export class OrchestratorDock {
     this.chipsEl = chips;
   }
 
+  /** sheetTranscript per (messages array, length, last id): refresh() reads it several times per event. */
+  private transcriptOf(thread: Thread): ReturnType<typeof sheetTranscript> {
+    const msgs = thread.messages;
+    const last = msgs[msgs.length - 1]?.id;
+    const c = this.txCache;
+    if (c && c.ref === msgs && c.len === msgs.length && c.lastId === last) return c.entries;
+    const entries = sheetTranscript(msgs);
+    this.txCache = { ref: msgs, len: msgs.length, lastId: last, entries };
+    return entries;
+  }
+
   private hasTranscript(): boolean {
     const id = this.deps.getOrchestratorThreadId();
     const thread = id ? this.deps.manager.getThread(id) : undefined;
-    return !!thread && sheetTranscript(thread.messages).length > 0;
+    return !!thread && this.transcriptOf(thread).length > 0;
   }
 
   openSheet(): void {
@@ -402,7 +437,20 @@ export class OrchestratorDock {
     this.hidePeek();
     this.layoutChanged();
     this.refresh();
-    if (!wasOpen && this.currentMode === 'orb') this.inputEl?.focus();
+    if (!wasOpen) this.focusIntoDialog();
+  }
+
+  /**
+   * The dialog sits last in the DOM, so Tab would otherwise walk the whole pill first. Opening moves focus to the
+   * composer (the field in the pill, the textarea in the bottom sheet) or, when there is no input (error / offline),
+   * to a control inside the dialog. Focus already inside the dock or the sheet is left alone.
+   */
+  private focusIntoDialog(): void {
+    const active = this.host.ownerDocument.activeElement;
+    if (active && active !== this.host.ownerDocument.body && (this.rootEl?.contains(active) || this.sheet?.el.contains(active))) return;
+    if (this.inputEl) this.inputEl.focus();
+    else if (this.actionEl && this.sheet?.el.contains(this.actionEl)) this.actionEl.focus();
+    else this.sheet?.focusClose();
   }
 
   closeSheet(returnFocus = true): void {
@@ -433,19 +481,21 @@ export class OrchestratorDock {
     const thread = id ? this.deps.manager.getThread(id) : undefined;
     if (!id || !thread) return;
     const { manager } = this;
-    const entries = sheetTranscript(thread.messages);
+    const entries = this.transcriptOf(thread);
     const live = new Set(entries.map((e) => e.id));
     for (const pid of [...this.pickupIds]) if (!live.has(pid)) this.pickupIds.delete(pid); // rolled back
     const blocked: SheetBlock = manager.hasPendingPlan(id) ? 'plan' : manager.hasPendingQuestion(id) ? 'question' : manager.hasPendingPermission(id) ? 'permission' : null;
     const view: SheetView = {
       entries: entries.map((e) => ({ ...e, pickup: this.pickupIds.has(e.id) })),
       streaming: this.streamBuf,
+      stopped: this.stoppedText,
       running: manager.isRunning(id),
       activity: manager.getThreadActivity(id) ?? '',
       waiting: manager.getQueuedMessages(id).map((q) => q.text),
       blocked,
       threads: this.threadRefs(),
-      chips: suggestionChips(this.attention),
+      // Chips send text: offer them only while the body is an input (not an error / offline reason).
+      chips: this.bodyKind === 'input' ? suggestionChips(this.attention) : [],
       mode: this.currentMode,
     };
     sheet.render(view);
@@ -482,7 +532,7 @@ export class OrchestratorDock {
     const el = this.chipsEl;
     if (!el) return;
     const show = this.currentMode === 'pill' && this.bodyKind === 'input' && !!this.inputEl
-      && document.activeElement === this.inputEl && !this.sheet?.isOpen && !this.hasTranscript();
+      && this.host.ownerDocument.activeElement === this.inputEl && !this.sheet?.isOpen && !this.hasTranscript();
     if (!show) { el.hidden = true; return; }
     if (el.hidden || el.childElementCount === 0) {
       el.empty();
@@ -507,7 +557,7 @@ export class OrchestratorDock {
     // Narrow + sheet open: the ONE body (input, or P2's reason + action) lives in the bottom sheet's composer.
     const target = inSheet && this.sheet ? this.sheet.composerSlot : wantStatus ? status : this.fieldEl;
     if (this.bodyEl.parentElement !== target) {
-      const hadFocus = !!this.inputEl && document.activeElement === this.inputEl;
+      const hadFocus = !!this.inputEl && this.host.ownerDocument.activeElement === this.inputEl;
       target.append(this.bodyEl);
       if (hadFocus) this.inputEl?.focus();
     }
@@ -617,7 +667,7 @@ export class OrchestratorDock {
 
   private onKeydown(e: KeyboardEvent, input: HTMLTextAreaElement): void {
     // With the sheet open Escape is handled by the sheet / dock-root listeners (close + focus back to the field).
-    if (e.key === 'Escape') { if (!this.sheet?.isOpen) input.blur(); return; }
+    if (e.key === 'Escape') { if (!this.sheet?.isOpen && !e.isComposing && e.keyCode !== 229) input.blur(); return; }
     if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     // Keyboard route to the transcript: Enter on an empty field opens the sheet (nothing is sent).
@@ -635,12 +685,19 @@ export class OrchestratorDock {
     const id = this.deps.getOrchestratorThreadId();
     if (!text || !id || this.sending || this.bodyKind !== 'input') return;
     this.sending = true;
+    this.sendEcho = false;
+    this.sendingText = text;
     this.draft = '';
     if (this.inputEl) { this.inputEl.value = ''; this.autosize(this.inputEl); }
     this.openSheet();
     try {
       await this.deps.manager.sendMessage(id, text);
     } catch (err) {
+      if (this.sendEcho) {
+        // The message is already in the transcript (user_message_added was seen): restoring the draft would invite a duplicate send.
+        new Notice(`The orchestrator could not start working on your message: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
       // Never silently drop a message: put it back and say why.
       // The textarea may have been rebuilt while the send was pending: write to the CURRENT one, draft first.
       this.draft = this.draft ? `${text}\n${this.draft}` : text;

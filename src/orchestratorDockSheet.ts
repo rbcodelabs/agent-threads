@@ -23,6 +23,8 @@ export type SheetBlock = 'plan' | 'question' | 'permission' | null;
 export interface SheetView {
   entries: SheetRow[];
   streaming: string;
+  /** Partial reply of an interrupted turn (the manager does not persist it): shown dimmed, labelled "Stopped". */
+  stopped: string;
   running: boolean;
   activity: string;
   waiting: string[];
@@ -37,6 +39,8 @@ export interface SheetHandlers {
   openFull(): void;
   openThread(threadId: string): void;
   openLink?(href: string): void;
+  /** False: a `[[note]]` renders as inert text (unresolved, or the host cannot open links). */
+  resolveLink?(href: string): boolean;
   removeWaiting(index: number, text: string): void;
   pickChip(chip: SuggestionChip): void;
 }
@@ -46,7 +50,7 @@ export const ANNOUNCE_MIN_INTERVAL_MS = 4000;
 const NEAR_BOTTOM_PX = 48;
 let sheetSeq = 0;
 
-interface RowState { row: HTMLElement; key: string; bubble: HTMLElement; pickupEl: HTMLElement | null; renders: number }
+interface RowState { row: HTMLElement; key: string; bubble: HTMLElement; pickupEl: HTMLElement | null }
 
 function richKey(r: Richness): string { return `${r.images ? 1 : 0}${r.visualize ? 1 : 0}${r.tools}`; }
 
@@ -86,6 +90,14 @@ export class DockSheet {
   private announceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingAnnounce: string | null = null;
   private scrollQueued = false;
+  /** The user is at the bottom (updated by scroll events and programmatic pins): the pin survives content growing under it. */
+  private stick = true;
+  private closeBtn: HTMLButtonElement;
+  private streamPending: string | null = null;
+  private streamFrame = false;
+  private stoppedRow: HTMLElement | null = null;
+  /** Content signatures: a section is rebuilt only when what it shows changed (focus + clicks survive refreshes). */
+  private sig = { empty: '', notice: '', waiting: '' };
 
   constructor(parent: HTMLElement, private readonly h: SheetHandlers) {
     const id = `ct-orch-sheet-title-${++sheetSeq}`;
@@ -105,6 +117,7 @@ export class DockSheet {
     full.addEventListener('click', () => this.h.openFull());
     const close = head.createEl('button', { cls: 'ct-orch-sheet-btn ct-orch-sheet-close', text: '✕', attr: { type: 'button', 'aria-label': 'Close' } });
     close.addEventListener('click', () => this.h.close());
+    this.closeBtn = close;
 
     this.scrollEl = this.el.createDiv('ct-orch-sheet-scroll');
     this.logEl = this.scrollEl.createDiv('ct-orch-sheet-log');
@@ -116,8 +129,13 @@ export class DockSheet {
     this.liveEl = this.el.createDiv({ cls: 'ct-orch-live', attr: { 'aria-live': 'polite', 'aria-atomic': 'true' } });
 
     this.logEl.addEventListener('click', (e) => this.onLogClick(e));
+    this.scrollEl.addEventListener('scroll', () => { this.stick = this.nearBottom(); });
     // The sheet is a non-modal dialog: Escape inside it closes it (the dock returns focus to the field).
-    this.el.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); this.h.close(); } });
+    this.el.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return; // Escape cancels an IME composition, not the sheet
+      e.stopPropagation();
+      this.h.close();
+    });
   }
 
   get isOpen(): boolean { return this.opened && !this.destroyed; }
@@ -133,6 +151,9 @@ export class DockSheet {
     this.el.hidden = true;
   }
 
+  /** Moves focus to the first control of the dialog (used when it opens and the composer has nothing to focus). */
+  focusClose(): void { this.closeBtn.focus(); }
+
   setMaxHeight(px: number | null): void {
     if (px && px > 0) this.el.style.setProperty('--ct-orch-sheet-max', `${Math.round(px)}px`);
     else this.el.style.removeProperty('--ct-orch-sheet-max');
@@ -143,12 +164,13 @@ export class DockSheet {
   render(view: SheetView): void {
     if (this.destroyed) return;
     this.view = view;
-    const wasPinned = !this.opened || this.nearBottom();
+    const wasPinned = !this.opened || this.stick;
     this.el.dataset.mode = view.mode;
     this.composerSlot.hidden = view.mode !== 'orb';
     this.orbEl.classList.toggle('ct-orch-orb-spinning', view.running);
     this.reconcileRows(view);
     this.renderStreaming(view.streaming);
+    this.renderStopped(view.stopped);
     this.renderEmpty(view);
     this.renderActivity(view);
     this.renderNotice(view);
@@ -159,9 +181,19 @@ export class DockSheet {
   setStreaming(text: string): void {
     if (this.destroyed || !this.view) return;
     this.view = { ...this.view, streaming: text };
-    const pinned = this.nearBottom();
-    this.renderStreaming(text);
-    if (pinned) this.queueScroll();
+    // Coalesce: one DOM write per frame however many tokens arrived (assigning the whole buffer per token is O(n^2)).
+    if (!text || !this.streamingRow) { this.streamPending = null; this.renderStreaming(text); if (text && this.stick) this.queueScroll(); return; }
+    this.streamPending = text;
+    if (this.streamFrame) return;
+    this.streamFrame = true;
+    schedule(() => {
+      this.streamFrame = false;
+      if (this.destroyed || this.streamPending === null) return;
+      const pinned = this.stick;
+      this.renderStreaming(this.streamPending);
+      this.streamPending = null;
+      if (pinned) this.scrollToBottom();
+    });
   }
 
   setActivity(text: string): void {
@@ -231,18 +263,22 @@ export class DockSheet {
   private buildRow(entry: SheetRow, key: string, threads: ThreadRef[]): RowState {
     const row = createRow(this.logEl, entry.role, entry.id);
     const bubble = row.createDiv('ct-orch-bubble');
-    const st: RowState = { row, key, bubble, pickupEl: null, renders: 0 };
+    const st: RowState = { row, key, bubble, pickupEl: null };
     const rich = describeRich(entry.rich);
     if (entry.text.trim() === '') {
       // Never a blank bubble: say what the message holds.
       bubble.textContent = rich ? `This message has ${rich}.` : '';
     } else if (entry.role === 'assistant') {
-      const token = ++st.renders;
+      // Seeded with the plain text so the row is never empty while markdown renders (the streamed text it replaces
+      // is removed in the same render); swapped for markdown when it resolves. An empty result keeps the text.
+      bubble.textContent = entry.text;
       const target = bubble.ownerDocument.createElement('div');
-      void renderDockMarkdown(entry.text, target, { threads }).then(() => {
-        if (this.destroyed || token !== st.renders) return;
+      void renderDockMarkdown(entry.text, target, { threads, resolveLink: this.h.resolveLink }).then(() => {
+        if (this.destroyed || this.rows.get(entry.id) !== st || target.childNodes.length === 0) return;
+        const pinned = this.stick;
         bubble.replaceChildren(...Array.from(target.childNodes));
-      }).catch(() => { if (token === st.renders && !this.destroyed) bubble.textContent = entry.text; });
+        if (pinned) this.scrollToBottom();
+      }).catch(() => { /* keep the plain-text seed */ });
     } else {
       bubble.textContent = entry.text;
     }
@@ -271,9 +307,25 @@ export class DockSheet {
     (this.streamingRow.firstElementChild as HTMLElement).textContent = text;
   }
 
+  private renderStopped(text: string): void {
+    if (!text) { this.stoppedRow?.remove(); this.stoppedRow = null; return; }
+    if (!this.stoppedRow) {
+      this.stoppedRow = createRow(this.logEl, 'assistant', 'stopped');
+      this.stoppedRow.dataset.stopped = 'true';
+      this.stoppedRow.createDiv('ct-orch-bubble ct-orch-bubble-stopped');
+      this.stoppedRow.createDiv({ cls: 'ct-orch-stopped-label', text: 'Stopped' });
+    }
+    this.logEl.append(this.stoppedRow);
+    (this.stoppedRow.firstElementChild as HTMLElement).textContent = text;
+  }
+
   private renderEmpty(view: SheetView): void {
+    const showing = view.entries.length === 0 && !view.streaming && !view.stopped;
+    const sig = showing ? `${view.mode}|${view.chips.map((c) => c.id).join(',')}` : '';
+    if (sig === this.sig.empty) return;
+    this.sig.empty = sig;
     this.emptyHost.empty();
-    if (view.entries.length > 0 || view.streaming) return;
+    if (!showing) return;
     if (view.mode === 'orb' && view.chips.length > 0) {
       const box = this.emptyHost.createDiv('ct-orch-empty');
       box.createSpan({ cls: 'ct-orch-empty-label', text: 'Try:' });
@@ -298,6 +350,9 @@ export class DockSheet {
   }
 
   private renderNotice(view: SheetView): void {
+    const sig = view.blocked ?? '';
+    if (sig === this.sig.notice) return;
+    this.sig.notice = sig;
     this.noticeHost.empty();
     if (!view.blocked) return;
     const box = this.noticeHost.createDiv('ct-orch-notice');
@@ -307,6 +362,9 @@ export class DockSheet {
   }
 
   private renderWaiting(view: SheetView): void {
+    const sig = JSON.stringify(view.waiting);
+    if (sig === this.sig.waiting) return;
+    this.sig.waiting = sig;
     this.waitingHost.empty();
     if (view.waiting.length === 0) return;
     const box = this.waitingHost.createEl('section', { cls: 'ct-orch-waiting' });
@@ -343,14 +401,18 @@ export class DockSheet {
     return s.scrollHeight - s.scrollTop - s.clientHeight <= NEAR_BOTTOM_PX;
   }
 
-  private scrollToBottom(): void { this.scrollEl.scrollTop = this.scrollEl.scrollHeight; }
+  private scrollToBottom(): void { this.scrollEl.scrollTop = this.scrollEl.scrollHeight; this.stick = true; }
 
   private queueScroll(): void {
     if (this.scrollQueued) return;
     this.scrollQueued = true;
     const run = (): void => { this.scrollQueued = false; if (!this.destroyed) this.scrollToBottom(); };
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run); else setTimeout(run, 16);
+    schedule(run);
   }
+}
+
+function schedule(fn: () => void): void {
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn); else setTimeout(fn, 16);
 }
 
 function createRow(log: HTMLElement, role: 'user' | 'assistant', id: string): HTMLElement {

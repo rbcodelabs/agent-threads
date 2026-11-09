@@ -7038,10 +7038,13 @@ textarea.ct-settings-wide-input {
 /* The floating panel itself */
 .ct-kanban-dispatch {
   position: absolute;
-  bottom: 36px;
+  /* The pill's offsets are variables: the narrow bottom sheet reaches the view's edges from them. */
+  --ct-kanban-pill-inset: 16px;
+  --ct-kanban-pill-bottom: 36px;
+  bottom: var(--ct-kanban-pill-bottom);
   left: 50%;
   transform: translateX(-50%);
-  width: min(640px, calc(100% - 32px));
+  width: min(640px, calc(100% - 2 * var(--ct-kanban-pill-inset)));
   z-index: 20;
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
@@ -7285,6 +7288,10 @@ textarea.ct-settings-wide-input {
   box-sizing: border-box;
   color: var(--text-normal);
 }
+/* Explicit stacking inside the pill (its own stacking context, z-index 20): sheet above peek / strip, all above the in-flow search bar. */
+.ct-kanban-dispatch .ct-orch-sheet { z-index: 3; }
+.ct-kanban-dispatch .ct-orch-peek,
+.ct-kanban-dispatch .ct-orch-chips { z-index: 2; }
 .ct-kanban-dispatch .ct-orch-sheet[hidden],
 .ct-kanban-dispatch .ct-orch-peek[hidden],
 .ct-kanban-dispatch .ct-orch-chips[hidden],
@@ -7360,6 +7367,10 @@ textarea.ct-settings-wide-input {
 .ct-orch-bubble a.ct-thread-link,
 .ct-orch-bubble a.internal-link { color: color-mix(in srgb, var(--text-accent) 45%, var(--text-normal)); text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
 .ct-orch-bubble-streaming { white-space: pre-wrap; }
+/* Interrupted partial: not persisted by the manager, kept visible but clearly provisional. */
+.ct-orch-bubble-stopped { white-space: pre-wrap; opacity: 0.7; }
+.ct-orch-stopped-label { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.ct-orch-wikilink-unresolved { color: var(--text-muted); }
 .ct-orch-bubble-streaming::after {
   content: ""; display: inline-block; width: 6px; height: 1em; margin-left: 2px; vertical-align: text-bottom;
   background: var(--interactive-accent); animation: ct-orch-blink 1s steps(2, start) infinite;
@@ -7473,9 +7484,11 @@ textarea.ct-settings-wide-input {
 /* Narrow (< 640px): a bottom sheet over the pill with a grab handle, 44px targets and safe-area padding (mock k2-9). The
    pill is 16px inset from each side and 36px above the board's bottom edge, so -17px / -37px reach the view's edges. */
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] {
-  left: -17px; right: -17px; bottom: -37px;
+  /* pill inset + its 1px border out to the view's side edges; pill bottom offset + border down to the view's bottom edge */
+  left: calc(-1 * var(--ct-kanban-pill-inset) - 1px);
+  right: calc(-1 * var(--ct-kanban-pill-inset) - 1px);
+  bottom: calc(-1 * var(--ct-kanban-pill-bottom) - 1px);
   border-radius: 16px 16px 0 0;
-  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 .ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-handle { display: block; flex: none; width: 36px; height: 4px; margin: 8px auto 0; border-radius: 2px; background: var(--text-faint); }
 .ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-full-label { display: none; }
@@ -7485,9 +7498,11 @@ textarea.ct-settings-wide-input {
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-send,
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-stop,
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-action { min-height: 44px; min-width: 44px; }
+/* The safe-area inset is applied ONCE, here (not also on the sheet). */
 .ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-composer { padding-bottom: max(8px, env(safe-area-inset-bottom, 0px)); }
 
-/* Peek + suggestion strip on touch devices: 44px targets (same rule as the pill's buttons). */
+/* Peek + suggestion strip on touch devices AND narrow boards: 44px targets (same rule as the pill's buttons). */
+.ct-kanban-dispatch:has(.ct-orch-dock[data-mode="orb"]) .ct-orch-peek button,
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-peek button,
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-chips button.ct-orch-chip { min-height: 44px; min-width: 44px; }
 

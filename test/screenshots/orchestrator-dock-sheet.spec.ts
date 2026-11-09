@@ -9,7 +9,7 @@ import { shot } from './helpers';
  * Harness hooks (window): __orchSay, __orchStream, __orchSettle, __orchQueue, __orchTool, __openSheet, __sentMessages,
  * __interruptCalls, __openedThreadIds. The harness sendMessage appends the user message and emits
  * `user_message_added` like the real manager; interrupt rolls unresolved user messages back with no per-message event.
- * Visual specs carry baselines (6 states, both widths); behaviour specs carry none.
+ * Visual specs carry baselines (5 states x 2 widths = 10); behaviour specs carry none.
  */
 const kanbanUrl = 'file://' + path.resolve('test/harness/kanban.html');
 // Same pin as ui.spec.ts / orchestrator-dock.spec.ts: the board's relative "Xd ago" chips drift with the wall clock.

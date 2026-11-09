@@ -816,6 +816,7 @@ describe('review: assistant row hand-off (A1, A2)', () => {
     Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => 2000 });
     Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
     scroll.scrollTop = 100;
+    scroll.dispatchEvent(new Event('scroll')); // the user scrolled up
     t.say('later');
     await flush(); await flush();
     expect(scroll.scrollTop).toBe(100);
