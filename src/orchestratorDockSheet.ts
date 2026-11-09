@@ -98,6 +98,8 @@ export class DockSheet {
   private stick = true;
   /** The scrollTop value the sheet itself last wrote, and the scrollHeight at that moment / at the last scroll event. */
   private lastWrittenTop = -1;
+  /** Our last scrollTop assignment really moved the position, so exactly one scroll event is its echo. */
+  private echoPending = false;
   /** scrollTop at the previous scroll event (or our last write): the reference for the direction of travel. */
   private lastTop = 0;
   private lastHeight = 0;
@@ -132,7 +134,8 @@ export class DockSheet {
     close.addEventListener('click', () => this.h.close());
     this.closeBtn = close;
 
-    this.scrollEl = this.el.createDiv('ct-orch-sheet-scroll');
+    // Keyboard reachable (it scrolls): a labelled region, not role=log (a log is implicitly aria-live and would read every token).
+    this.scrollEl = this.el.createDiv({ cls: 'ct-orch-sheet-scroll', attr: { tabindex: '0', role: 'region', 'aria-label': 'Conversation with the portfolio orchestrator' } });
     this.logEl = this.scrollEl.createDiv('ct-orch-sheet-log');
     this.emptyHost = this.scrollEl.createDiv('ct-orch-sheet-slot');
     this.activityHost = this.scrollEl.createDiv('ct-orch-sheet-slot');
@@ -151,7 +154,11 @@ export class DockSheet {
     this.scrollEl.addEventListener('scroll', () => {
       const sc = this.scrollEl;
       const top = sc.scrollTop;
-      if (top !== this.lastWrittenTop) {
+      // The echo of OUR assignment (one event per assignment that moved the position) never changes the pin. Anything else is the
+      // user, including arriving at a scrollTop that equals our last write: with no content added since, the bottom IS that value.
+      const echo = this.echoPending && top === this.lastWrittenTop;
+      this.echoPending = false;
+      if (!echo) {
         const distance = sc.scrollHeight - top - sc.clientHeight;
         if (top < this.lastTop) {
           // Upward movement unpins at once, however small, but only if it LEAVES a real distance from the bottom: the browser
@@ -159,13 +166,21 @@ export class DockSheet {
           // a resize, iOS rubber-banding) also lowers scrollTop, with the user still at the bottom.
           if (distance > BOTTOM_SLACK_PX) this.stick = false;
         } else {
-          // Downward: re-pin only on reaching the bottom (a few px), judged against the content height the user was looking at.
+          // Downward / unchanged: re-pin on reaching the bottom (a few px), judged against the content height the user was looking at.
           const seenHeight = this.lastHeight > 0 ? Math.min(sc.scrollHeight, this.lastHeight) : sc.scrollHeight;
           if (seenHeight - top - sc.clientHeight <= BOTTOM_SLACK_PX) this.stick = true;
         }
       }
       this.lastTop = top;
       this.lastHeight = sc.scrollHeight;
+    });
+    // End is an explicit re-pin: it cancels any in-flight smooth scroll (a programmatic assignment does) and snaps to the LIVE
+    // bottom instead of the bottom at press time. Home is an explicit unpin. PageUp / PageDown stay native; the scroll events
+    // they produce are judged like any other user scroll.
+    this.scrollEl.addEventListener('keydown', (e) => {
+      if (e.target !== this.scrollEl) return;
+      if (e.key === 'End') { e.preventDefault(); this.scrollToBottom(); }
+      else if (e.key === 'Home') { e.preventDefault(); this.scrollEl.scrollTop = 0; this.lastTop = 0; this.stick = false; }
     });
     // The sheet is a non-modal dialog: Escape inside it closes it (the dock returns focus to the field).
     this.el.addEventListener('keydown', (e) => {
@@ -522,8 +537,10 @@ export class DockSheet {
   }
 
   private scrollToBottom(): void {
+    const before = this.scrollEl.scrollTop;
     this.scrollEl.scrollTop = this.scrollEl.scrollHeight;
     this.lastWrittenTop = this.scrollEl.scrollTop; // read back: the browser clamps to the real maximum
+    if (this.lastWrittenTop !== before) this.echoPending = true; // a scroll event will follow; assigning the same value fires none
     this.lastTop = this.lastWrittenTop;
     this.lastHeight = this.scrollEl.scrollHeight;
     this.stick = true;

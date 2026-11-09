@@ -7346,7 +7346,8 @@ textarea.ct-settings-wide-input {
 }
 .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-sheet-btn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
 
-.ct-orch-sheet-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.ct-orch-sheet-scroll:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+.ct-orch-sheet-scroll { scroll-behavior: auto; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
 .ct-orch-sheet-log { display: flex; flex-direction: column; gap: 8px; }
 .ct-orch-sheet-slot:empty { display: none; }
 .ct-orch-msg { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
