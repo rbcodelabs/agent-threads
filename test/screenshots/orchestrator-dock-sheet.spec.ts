@@ -14,6 +14,8 @@ import { shot } from './helpers';
 const kanbanUrl = 'file://' + path.resolve('test/harness/kanban.html');
 const DESKTOP = { width: 1280, height: 800 };
 const NARROW = { width: 390, height: 844 };
+/** Same tight per-pixel colour tolerance as the P2 dock shots (Playwright's default 0.2 hides tint changes). */
+const DOCK_SHOT = { threshold: 0.05 } as const;
 const SIZES = [{ label: '1280x800', size: DESKTOP }, { label: '390x844', size: NARROW }];
 
 async function open(page: Page, orch: string, tx: string, size: { width: number; height: number }) {
@@ -41,7 +43,7 @@ test.describe('orchestrator sheet — screenshots', () => {
       await open(page, 'attention', 'empty', size);
       if (isNarrow(size)) await page.locator('.ct-orch-orb').click(); else await field(page).focus();
       await expect(page.locator(isNarrow(size) ? '.ct-orch-sheet .ct-orch-empty button' : '.ct-orch-chips button').first()).toBeVisible();
-      await shot(page, `orchestrator-sheet-chips-${label}.png`);
+      await shot(page, `orchestrator-sheet-chips-${label}.png`, DOCK_SHOT);
     });
 
     test(`streaming reply with activity line and Stop @ ${label}`, async ({ page }) => {
@@ -50,7 +52,7 @@ test.describe('orchestrator sheet — screenshots', () => {
       await focusComposer(page, size);
       await expect(sheet(page)).toBeVisible();
       await expect(page.locator('.ct-orch-stop')).toBeVisible();
-      await shot(page, `orchestrator-sheet-streaming-${label}.png`);
+      await shot(page, `orchestrator-sheet-streaming-${label}.png`, DOCK_SHOT);
     });
 
     test(`conversation with thread links and a waiting-to-send list @ ${label}`, async ({ page }) => {
@@ -59,14 +61,14 @@ test.describe('orchestrator sheet — screenshots', () => {
       await focusComposer(page, size);
       await expect(page.locator('.ct-orch-sheet a.ct-thread-link').first()).toBeVisible();
       await expect(page.locator('.ct-orch-waiting')).toBeVisible();
-      await shot(page, `orchestrator-sheet-conversation-${label}.png`);
+      await shot(page, `orchestrator-sheet-conversation-${label}.png`, DOCK_SHOT);
     });
 
     test(`unread reply: peek above the pill and the dot @ ${label}`, async ({ page }) => {
       await open(page, 'idle', 'conversation', size);
       await page.evaluate(() => (window as any).__orchSay('Deploy approval and 1 mobile question need you.'));
       await expect(page.locator('.ct-orch-peek')).toBeVisible();
-      await shot(page, `orchestrator-sheet-unread-${label}.png`);
+      await shot(page, `orchestrator-sheet-unread-${label}.png`, DOCK_SHOT);
     });
 
     test(`offline with the sheet open: reason + action, input disabled @ ${label}`, async ({ page }) => {
@@ -74,7 +76,7 @@ test.describe('orchestrator sheet — screenshots', () => {
       await page.evaluate(() => (window as any).__openSheet());
       await expect(sheet(page)).toBeVisible();
       await expect(page.locator('.ct-orch-reason').first()).toBeVisible();
-      await shot(page, `orchestrator-sheet-offline-${label}.png`);
+      await shot(page, `orchestrator-sheet-offline-${label}.png`, DOCK_SHOT);
     });
   }
 });
