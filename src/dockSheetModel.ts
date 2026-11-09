@@ -123,10 +123,15 @@ export function trayLayout(i: { max: number; fixed: number; needFull: number; ne
   return { cap: Math.max(MIN_TRAY_PX, Math.min(wanted, room)), compact, collapsed: false };
 }
 
-/** The reply sheet never gets taller than the room it has; below this it renders MICRO (header + composer only). */
+/** Below this much room the reply sheet renders MICRO (header + composer only: no transcript, no tray). */
 export const MIN_SHEET_PX = 96;
 
-// K2 P5 batch 5 scaffold: signature only.
-export function sheetFit(_i: { max: number; chromeNeed: number }): { micro: boolean; hidden: boolean } {
-  return { micro: false, hidden: false };
+/**
+ * What the sheet does with `max` px of room (the space above the lifted pill / keyboard; it can be 0 or negative): normal
+ * at or above the floor; MICRO below it; HIDDEN (it waits until the room returns) when even the header + composer
+ * (`chromeNeed`) do not fit. The sheet is never taller than its room, so it never starts above the top of the view.
+ */
+export function sheetFit(i: { max: number; chromeNeed: number }): { micro: boolean; hidden: boolean } {
+  const micro = i.max < MIN_SHEET_PX;
+  return { micro, hidden: micro && i.max < i.chromeNeed };
 }

@@ -7350,6 +7350,11 @@ textarea.ct-settings-wide-input {
 /* The count the old header text carried, readable without hover (touch). Same string as the dot's tooltip. */
 .ct-orch-sheet-summary { font-size: var(--font-ui-smaller); line-height: 1.3; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ct-orch-sheet-summary:empty { display: none; }
+/* MICRO (less room than the floor above the pill / keyboard): header + composer only; no room at all: wait, hidden. */
+.ct-orch-sheet[data-micro] .ct-orch-sheet-scroll,
+.ct-orch-sheet[data-micro] .ct-orch-tray-slot,
+.ct-orch-sheet[data-micro] .ct-orch-sheet-handle { display: none; }
+.ct-orch-sheet[data-nospace] { visibility: hidden; }
 .ct-orch-sheet[data-tight] .ct-orch-sheet-summary { display: none; }
 /* Tight (a landscape phone with the keyboard up): the header shrinks to its 44px buttons so a tray card still fits. */
 .ct-orch-sheet[data-tight] .ct-orch-sheet-head { padding-top: 0; padding-bottom: 0; }

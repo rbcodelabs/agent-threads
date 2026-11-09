@@ -120,8 +120,6 @@ const MAX_INPUT_PX = 80;
 const MAX_ANNOUNCE_CHARS = 160;
 /** The numeric badge on the narrow attention dot: more than this shows `9+`. */
 const MAX_BADGE = 9;
-/** The reply sheet never gets shorter than this, whatever the keyboard leaves (never 'uncapped'). */
-const MIN_SHEET_PX = 96;
 /** The pill's offset from the view bottom (styles.css --ct-kanban-pill-bottom), and the smaller gap it keeps above a keyboard. */
 export const PILL_BOTTOM_PX = 36; // keep equal to --ct-kanban-pill-bottom in styles.css (orchestrator-dock-polish.test.ts checks)
 const PILL_BOTTOM_KBD_PX = 8;
@@ -802,7 +800,7 @@ export class OrchestratorDock {
       // keyboard-lifted sheet). Wide: it sits above the pill (36px offset + 8px gap).
       // Pill mode (landscape phone, tablet): the whole pill lifts by the keyboard inset, so the room above it shrinks by it.
       const room = this.currentMode === 'orb' ? h - this.keyboardPx - (this.keyboardPx > 0 ? 8 : 0) : h - (this.keyboardPx > 0 ? PILL_BOTTOM_KBD_PX : PILL_BOTTOM_PX) - this.keyboardPx - pill - 16;
-      sheet.setMaxHeight(Math.max(MIN_SHEET_PX, Math.min(h * 0.6, room)));
+      sheet.setMaxHeight(Math.min(h * 0.6, room)); // never above the room: no floor that could start the sheet off-screen
       sheet.fitTray();
     });
   }
@@ -862,7 +860,7 @@ export class OrchestratorDock {
     const sheet = this.sheet;
     if (!tray || !sheet?.isOpen) return;
     // The tray changes the transcript's height: stay on the latest message if we were on it.
-    sheet.keepPinned(() => { tray.render(this.trayEntries); sheet.fitTray(); });
+    sheet.keepPinned(() => sheet.keepTrayFocus(() => { tray.render(this.trayEntries); sheet.fitTray(); }));
   }
 
   private get manager(): OrchestratorDockDeps['manager'] { return this.deps.manager; }

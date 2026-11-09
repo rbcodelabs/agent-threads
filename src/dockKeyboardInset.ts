@@ -12,7 +12,8 @@
 export function keyboardInset(rootBottom: number, vvOffsetTop: number, vvHeight: number, scale = 1): number {
   if (scale > 1.01) return 0;
   const px = rootBottom - (vvOffsetTop + vvHeight);
-  return Number.isFinite(px) && px > 0 ? Math.round(px) : 0;
+  // Rounded UP: a half pixel short leaves the composer 1px under the keyboard.
+  return Number.isFinite(px) && px > 0 ? Math.ceil(px - 1e-6) : 0;
 }
 
 export class KeyboardInsetTracker {

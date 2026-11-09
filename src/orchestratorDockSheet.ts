@@ -12,7 +12,7 @@
 import { setIcon } from 'obsidian';
 import { renderDockMarkdown } from './dockMarkdown';
 import { applyTrayMode } from './orchestratorDockTray';
-import { trayLayout, type Richness, type SheetEntry } from './dockSheetModel';
+import { sheetFit, trayLayout, type Richness, type SheetEntry } from './dockSheetModel';
 import type { SuggestionChip, ThreadRef } from './orchestratorDockModel';
 
 export interface SheetRow extends SheetEntry {
@@ -104,6 +104,10 @@ export class DockSheet {
   private readonly orbEl: HTMLElement;
   private readonly summaryEl: HTMLElement;
   private chromeObserver: ResizeObserver | null = null;
+  private trayFocus: { threadId: string | null; role: string } | null = null;
+  private focusGuard = 0;
+  private onDocFocusIn: (e: Event) => void = () => {};
+  private onDocPointerDown: (e: Event) => void = () => {};
   private readonly headEl: HTMLElement;
   private readonly rows = new Map<string, RowState>();
   private streamingRow: HTMLElement | null = null;
@@ -173,6 +177,12 @@ export class DockSheet {
     this.trayLiveEl = this.el.createDiv({ cls: 'ct-orch-tray-live', attr: { 'aria-live': 'polite', 'aria-atomic': 'true' } });
 
     this.headEl = head;
+    // Which tray control holds focus (by card + role), so a re-form of the tray can put focus back; forgotten when the user moves on.
+    const doc = this.el.ownerDocument;
+    this.onDocFocusIn = (e) => { this.trayFocus = this.identify(e.target); };
+    this.onDocPointerDown = (e) => { if (!this.trayHost.contains(e.target as Node | null)) this.trayFocus = null; };
+    doc.addEventListener('focusin', this.onDocFocusIn, true);
+    doc.addEventListener('pointerdown', this.onDocPointerDown, true);
     this.logEl.addEventListener('click', (e) => this.onLogClick(e));
     // Delegated, so rows rebuilt by the keyed reconcile / markdown swap need no re-binding.
     this.logEl.addEventListener('mouseover', (e) => this.onLinkOver(e));
@@ -310,8 +320,75 @@ export class DockSheet {
   /** Moves focus to the first control of the dialog (used when it opens and the composer has nothing to focus). */
   focusClose(): void { this.closeBtn.focus(); }
 
-  /** K2 P5 batch 5 scaffold. */
-  keepTrayFocus(fn: () => void): void { fn(); }
+  /**
+   * Runs a change that can hide, rebuild or re-form the tray (full / compact / collapsed / hidden) and keeps keyboard focus
+   * from falling to <body>. The focused tray control is remembered by LOGICAL identity (its card + its role) from the
+   * focusin that put it there; afterwards the same control is focused if it is still shown, else its card's "Review in
+   * thread", else the collapsed row's hand-off, else the show-more toggle, else the composer / the close button. Focus the
+   * user moved elsewhere (focus or a pointer press outside the tray) is forgotten, so it is never pulled back.
+   */
+  keepTrayFocus(fn: () => void): void {
+    this.focusGuard++;
+    try { fn(); } finally {
+      this.focusGuard--;
+      if (this.focusGuard === 0) this.restoreTrayFocus();
+    }
+  }
+
+  private identify(target: EventTarget | null): { threadId: string | null; role: string } | null {
+    const el = target as HTMLElement | null;
+    if (!el || !this.trayHost.contains(el)) return null;
+    const card = el.closest<HTMLElement>('.ct-orch-tray-card');
+    const role = el.closest('.ct-permission-deny') ? 'deny' : el.closest('.ct-permission-allow') ? 'allow' : el.closest('.ct-permission-always') ? 'always'
+      : el.closest('.ct-orch-tray-handoff') ? 'review' : el.closest('.ct-orch-tray-collapsed-review') ? 'collapsed' : el.closest('.ct-orch-tray-toggle') ? 'toggle' : 'other';
+    return { threadId: card?.dataset.threadId ?? null, role };
+  }
+
+  private isShown(el: HTMLElement | null): el is HTMLElement {
+    return !!el && el.isConnected && !el.closest('[hidden], [data-nospace]');
+  }
+
+  private restoreTrayFocus(): void {
+    const want = this.trayFocus;
+    if (!want || this.destroyed) return;
+    const doc = this.el.ownerDocument;
+    const active = doc.activeElement as HTMLElement | null;
+    if (active && active !== doc.body && this.isShown(active)) return; // focus is fine where it is
+    const tray = this.trayHost.querySelector<HTMLElement>('.ct-orch-tray');
+    const card = want.threadId && tray ? Array.from(tray.querySelectorAll<HTMLElement>('.ct-orch-tray-card')).find((c) => c.dataset.threadId === want.threadId) ?? null : null;
+    const ROLE: Record<string, string> = { deny: '.ct-permission-deny', allow: '.ct-permission-allow', always: '.ct-permission-always', review: '.ct-orch-tray-handoff', collapsed: '.ct-orch-tray-collapsed-review', toggle: '.ct-orch-tray-toggle' };
+    const sel = ROLE[want.role];
+    const candidates: Array<HTMLElement | null | undefined> = [
+      sel ? (card ?? tray)?.querySelector<HTMLElement>(sel) : null,
+      card?.querySelector<HTMLElement>('.ct-orch-tray-handoff'),
+      tray?.querySelector<HTMLElement>('.ct-orch-tray-collapsed-review'),
+      tray?.querySelector<HTMLElement>('.ct-orch-tray-toggle'),
+      this.el.querySelector<HTMLElement>('.ct-orch-input'),
+      this.closeBtn,
+    ];
+    const target = candidates.find((c): c is HTMLElement => this.isShown(c ?? null));
+    target?.focus({ preventScroll: true });
+  }
+
+  /** Header + composer (+ the handle when shown) in px: what a MICRO sheet needs, margins included. */
+  private chromeHeight(includeTranscriptPadding: boolean): number {
+    const view = this.el.ownerDocument.defaultView;
+    const own = view?.getComputedStyle(this.el);
+    // The sheet's own border sits inside its max-height (border-box): 1px top + 1px bottom are chrome too.
+    let fixed = own ? (parseFloat(own.borderTopWidth) || 0) + (parseFloat(own.borderBottomWidth) || 0) : 0;
+    for (const child of Array.from(this.el.children) as HTMLElement[]) {
+      if (child === this.scrollEl || child === this.trayHost || child.hidden) continue;
+      const cs = view?.getComputedStyle(child);
+      if (cs?.position === 'absolute' || cs?.display === 'none') continue; // the live regions, a hidden handle
+      fixed += child.offsetHeight + (cs ? (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0) : 0);
+    }
+    if (includeTranscriptPadding) {
+      // The transcript cannot shrink below its own padding: that is chrome too.
+      const sc = view?.getComputedStyle(this.scrollEl);
+      if (sc) fixed += (parseFloat(sc.paddingTop) || 0) + (parseFloat(sc.paddingBottom) || 0);
+    }
+    return fixed;
+  }
 
   /** The soft keyboard's height over the bottom of the view (narrow bottom sheet lifts by it); null removes the variable. */
   setKeyboardInset(px: number | null): void {
@@ -326,15 +403,17 @@ export class DockSheet {
    * compact form when even its first card does not fit. Re-run when the tray changes, the sheet's height changes and
    * (ResizeObserver) when the header or the composer grows (a taller textarea, a wrapped error reason).
    */
-  fitTray(): void {
+  fitTray(): void { this.keepTrayFocus(() => this.fitTrayNow()); }
+
+  private fitTrayNow(): void {
     const tray = this.trayHost.querySelector<HTMLElement>('.ct-orch-tray');
     if (!tray) { this.el.style.removeProperty('--ct-orch-tray-max'); return; }
     const max = parseFloat(this.el.style.getPropertyValue('--ct-orch-sheet-max'));
-    const focused = this.el.ownerDocument.activeElement; // before the measuring toggles below can drop it
-    if (!(max > 0)) {
+    if (!(max > 0) || this.el.hasAttribute('data-micro')) {
+      // Unknown layout (no measured view) or a MICRO sheet (the tray slot is not shown): nothing to size.
       this.el.style.removeProperty('--ct-orch-tray-max');
       tray.hidden = false;
-      applyTrayMode(tray, { compact: false, collapsed: false }, focused);
+      applyTrayMode(tray, { compact: false, collapsed: false }, null);
       return;
     }
     const need = (): number => {
@@ -346,34 +425,35 @@ export class DockSheet {
     const needFull = need();
     applyTrayMode(tray, { compact: true, collapsed: false }, null);
     const needCompact = need();
-    const view = this.el.ownerDocument.defaultView;
-    let fixed = 0;
-    for (const child of Array.from(this.el.children) as HTMLElement[]) {
-      if (child === this.scrollEl || child === this.trayHost || child.hidden) continue;
-      if (view?.getComputedStyle(child).position === 'absolute') continue; // the live regions
-      // The handle, the header, the composer: with their margins (the handle's 8px top margin is part of what the tray cannot use).
-      const cs = view?.getComputedStyle(child);
-      fixed += child.offsetHeight + (cs ? (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0) : 0);
-    }
-    // The transcript cannot shrink below its own padding: that is chrome too.
-    const sc = view?.getComputedStyle(this.scrollEl);
-    if (sc) fixed += (parseFloat(sc.paddingTop) || 0) + (parseFloat(sc.paddingBottom) || 0);
-    const layout = trayLayout({ max, fixed, needFull, needCompact });
-    applyTrayMode(tray, layout, focused);
+    const layout = trayLayout({ max, fixed: this.chromeHeight(true), needFull, needCompact });
+    applyTrayMode(tray, layout, null);
     // Math.ceil: a half pixel short would clip an edge at DPR 2.
     this.el.style.setProperty('--ct-orch-tray-max', `${Math.ceil(layout.cap)}px`);
-    // Collapsed with less than one row of room (the row is the heading plus the tray's padding): hide the tray entirely, the composer
-    // keeps what little there is. The dot and the header count still say who needs you.
+    // Collapsed with less than one row of room (the row is the heading plus the tray's own 8px top and bottom padding): hide the
+    // tray entirely, the composer keeps what little there is. The dot and the header count still say who needs you.
     tray.hidden = layout.collapsed && layout.cap < COLLAPSED_ROW_PX;
     // The sticky heading covers the top of the scrollport: scrolled-to elements must land below it.
     const bar = tray.querySelector<HTMLElement>('.ct-orch-tray-bar');
     tray.style.scrollPaddingTop = bar && !layout.compact ? `${bar.offsetHeight}px` : '0px';
   }
 
+  /**
+   * The sheet's height cap: never taller than the room it has (it can be 0 or negative with a tall keyboard), so it never starts
+   * above the top of the view. Floored to whole pixels (a rounded-up cap could end half a pixel past the keyboard). Below
+   * MIN_SHEET_PX the sheet renders MICRO (header + composer only) and below what those need it waits, hidden. null: layout unknown.
+   */
   setMaxHeight(px: number | null): void {
-    if (px && px > 0) this.el.style.setProperty('--ct-orch-sheet-max', `${Math.round(px)}px`);
-    else this.el.style.removeProperty('--ct-orch-sheet-max');
-    this.el.toggleAttribute('data-tight', !!px && px > 0 && px < TIGHT_SHEET_PX);
+    if (px === null || !Number.isFinite(px)) {
+      this.el.style.removeProperty('--ct-orch-sheet-max');
+      this.el.removeAttribute('data-tight'); this.el.removeAttribute('data-micro'); this.el.removeAttribute('data-nospace');
+      return;
+    }
+    const max = Math.max(0, Math.floor(px));
+    this.el.style.setProperty('--ct-orch-sheet-max', `${max}px`);
+    this.el.toggleAttribute('data-tight', max < TIGHT_SHEET_PX);
+    const micro = sheetFit({ max, chromeNeed: 0 }).micro;
+    this.el.toggleAttribute('data-micro', micro);
+    this.el.toggleAttribute('data-nospace', micro && sheetFit({ max, chromeNeed: this.chromeHeight(false) }).hidden);
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -474,6 +554,8 @@ export class DockSheet {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.el.ownerDocument.removeEventListener('focusin', this.onDocFocusIn, true);
+    this.el.ownerDocument.removeEventListener('pointerdown', this.onDocPointerDown, true);
     this.chromeObserver?.disconnect();
     this.chromeObserver = null;
     if (this.announceTimer) clearTimeout(this.announceTimer);
