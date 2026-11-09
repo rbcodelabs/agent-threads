@@ -1469,7 +1469,8 @@ describe('N4: any upward movement unpins at once, however small', () => {
     const scroll = t.q('.ct-orch-sheet-scroll')!;
     let h = 3000;
     Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
-    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    // jsdom does not clamp scrollTop: a zero-height viewport makes the pin write (scrollHeight) the real maximum, as a browser would
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 0 });
     return { scroll, grow: (n: number) => { h = n; } };
   };
 

@@ -152,8 +152,13 @@ export class DockSheet {
       const sc = this.scrollEl;
       const top = sc.scrollTop;
       if (top !== this.lastWrittenTop) {
-        if (top < this.lastTop) this.stick = false; // ANY upward movement unpins at once, however slow or small
-        else {
+        const distance = sc.scrollHeight - top - sc.clientHeight;
+        if (top < this.lastTop) {
+          // Upward movement unpins at once, however small, but only if it LEAVES a real distance from the bottom: the browser
+          // clamping scrollTop when content shrinks under a pinned user (bubble swapped for the final row, a Stopped row removed,
+          // a resize, iOS rubber-banding) also lowers scrollTop, with the user still at the bottom.
+          if (distance > BOTTOM_SLACK_PX) this.stick = false;
+        } else {
           // Downward: re-pin only on reaching the bottom (a few px), judged against the content height the user was looking at.
           const seenHeight = this.lastHeight > 0 ? Math.min(sc.scrollHeight, this.lastHeight) : sc.scrollHeight;
           if (seenHeight - top - sc.clientHeight <= BOTTOM_SLACK_PX) this.stick = true;
@@ -193,7 +198,12 @@ export class DockSheet {
    */
   private setModal(on: boolean): void {
     if (!on) { for (const n of this.inerted) n.removeAttribute('inert'); this.inerted.clear(); return; }
-    // Re-evaluated on every render: nodes the board added while the sheet is open become inert too.
+    // Re-evaluated on every render: nodes the board added while the sheet is open become inert too, and an `inert` a third
+    // party removed from a node we own is put back; nodes that left the DOM are forgotten.
+    for (const n of Array.from(this.inerted)) {
+      if (!n.isConnected) this.inerted.delete(n);
+      else if (!n.hasAttribute('inert')) n.setAttribute('inert', '');
+    }
     const doc = this.el.ownerDocument;
     const boundary = this.el.closest('.ct-agents-root') ?? doc.body;
     for (let node: Element = this.el; node !== boundary && node.parentElement; node = node.parentElement) {
@@ -204,7 +214,6 @@ export class DockSheet {
       }
     }
   }
-
 
   /** Narrow bottom sheet is modal: Tab wraps inside it instead of walking into the covered board and pill. */
   private trapTab(e: KeyboardEvent): void {
@@ -223,7 +232,13 @@ export class DockSheet {
 
   /** Whether focus can sit on this element now (connected, not hidden, not inert). */
   isFocusable(node: Element | null): boolean {
-    return !!node && node.isConnected && !node.closest('[hidden], [inert]') && !(node as HTMLButtonElement).disabled;
+    if (!node || !node.isConnected || node.closest('[hidden], [inert]') || (node as HTMLButtonElement).disabled) return false;
+    const view = node.ownerDocument.defaultView;
+    for (let n: Element | null = node; n; n = n.parentElement) {
+      const cs = view?.getComputedStyle(n);
+      if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return false;
+    }
+    return true;
   }
 
   /** Moves focus to the first control of the dialog (used when it opens and the composer has nothing to focus). */
@@ -253,6 +268,7 @@ export class DockSheet {
     this.renderNotice(view);
     this.renderWaiting(view);
     if (wasPinned) this.scrollToBottom();
+    else this.lastHeight = this.scrollEl.scrollHeight; // unpinned: keep the reference height current as content grows
     // Layout (fonts, the markdown swap) settles after this frame: pin again once it has.
     if (this.pinNext) { this.pinNext = false; this.queueScroll(); }
   }

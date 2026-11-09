@@ -23,13 +23,36 @@ const FENCE_OPEN = new RegExp(`^${PREFIX}(\`{3,}|~{3,})(.*)$`);
 const LIST_ITEM = /^[ \t]{0,3}(?:[-*+]|\d+[.)])[ \t]+/;
 const INDENTED = /^(?: {4}|\t)/;
 
-/** Inline code spans, which may wrap across lines but never across a blank line. */
+/**
+ * Inline code spans, CommonMark-style: a maximal run of N backticks opens a span that a later run of exactly N backticks
+ * closes. A span may wrap across lines but never across a blank line. Linear: runs are tokenised once and matched through a
+ * right-to-left "next run of the same length" table (no regex backtracking over long mismatched runs).
+ */
 function outsideInlineCode(prose: string, fn: (text: string) => string): string {
+  const runs: Array<{ start: number; len: number }> = [];
+  for (const m of prose.matchAll(/`+/g)) runs.push({ start: m.index, len: m[0].length });
+  const nextSame: number[] = new Array<number>(runs.length).fill(-1);
+  const lastOfLen = new Map<number, number>();
+  for (let k = runs.length - 1; k >= 0; k--) {
+    nextSame[k] = lastOfLen.get(runs[k].len) ?? -1;
+    lastOfLen.set(runs[k].len, k);
+  }
   let out = '';
   let cursor = 0;
-  for (const m of prose.matchAll(/(`+)(?:(?!\n[ \t]*\n)[\s\S])*?\1/g)) {
-    out += fn(prose.slice(cursor, m.index)) + m[0];
-    cursor = m.index + m[0].length;
+  let k = 0;
+  while (k < runs.length) {
+    const j = nextSame[k];
+    if (j >= 0) {
+      const from = runs[k].start + runs[k].len;
+      if (!/\n[ \t]*\n/.test(prose.slice(from, runs[j].start))) {
+        const end = runs[j].start + runs[j].len;
+        out += fn(prose.slice(cursor, runs[k].start)) + prose.slice(runs[k].start, end);
+        cursor = end;
+        k = j + 1;
+        continue;
+      }
+    }
+    k++;
   }
   return out + fn(prose.slice(cursor));
 }
@@ -140,6 +163,7 @@ function replaceWithText(el: Element, className: string, text: string): void {
 export function isSafeHref(href: string): boolean {
   const h = href.replace(/[\u0000- \u007f-\u009f]/g, '');
   if (/^(?:https?|mailto):/i.test(h)) return true;
+  if (/^(?:\/\/|\\|\/\\)/.test(h)) return false; // protocol-relative or backslash host (the URL parser treats a backslash as a slash)
   return /^[^:/?#]*(?:[/?#]|$)/.test(h);
 }
 
@@ -207,7 +231,9 @@ export async function renderDockMarkdown(markdown: string, el: HTMLElement, opts
   const inert = new Parser().parseFromString(html, 'text/html');
   const root = inert.body;
   const byToken = new Map(rewritten.links.map((l) => [l.token, l]));
-  const tokenRe = new RegExp(`ctlnk${nonce.replace(/[^a-z0-9]/gi, '')}x\\d+x`, 'g');
+  const tokenSource = `ctlnk${nonce.replace(/[^a-z0-9]/gi, '')}x\\d+x`;
+  const tokenRe = new RegExp(tokenSource, 'g'); // matchAll / replace only: a global regex must never be used with test()
+  const hasToken = new RegExp(tokenSource); // non-global: no lastIndex state between calls
 
   root.querySelectorAll<HTMLImageElement>('img').forEach((img) => {
     const src = img.getAttribute('src') ?? '';
@@ -227,8 +253,7 @@ export async function renderDockMarkdown(markdown: string, el: HTMLElement, opts
     if (!ALLOWED_TAGS.has(node.localName)) { node.remove(); continue; }
     // A token inside an attribute value (raw HTML, a link destination) goes back to its literal text: it never becomes a link.
     for (const attr of Array.from(node.attributes)) {
-      if (tokenRe.test(attr.value)) node.setAttribute(attr.name, attr.value.replace(tokenRe, (t) => byToken.get(t)?.literal ?? ''));
-      tokenRe.lastIndex = 0;
+      if (hasToken.test(attr.value)) node.setAttribute(attr.name, attr.value.replace(tokenRe, (t) => byToken.get(t)?.literal ?? ''));
     }
     scrubAttributes(node);
   }
@@ -237,16 +262,16 @@ export async function renderDockMarkdown(markdown: string, el: HTMLElement, opts
   const known = new Set(opts.threads.map((t) => t.id));
   const walker = inert.createTreeWalker(root, 4 /* NodeFilter.SHOW_TEXT */);
   const texts: Text[] = [];
-  for (let n = walker.nextNode(); n; n = walker.nextNode()) if (tokenRe.test((n as Text).data)) texts.push(n as Text);
-  tokenRe.lastIndex = 0;
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) if (hasToken.test((n as Text).data)) texts.push(n as Text);
   for (const text of texts) {
     const inCode = !!text.parentElement?.closest('code, pre');
+    const inLink = !!text.parentElement?.closest('a'); // never nest an anchor inside model-authored link text
     const parts: Node[] = [];
     let last = 0;
     for (const m of text.data.matchAll(tokenRe)) {
       if (m.index > last) parts.push(inert.createTextNode(text.data.slice(last, m.index)));
       const link = byToken.get(m[0]);
-      if (link) parts.push(inCode ? inert.createTextNode(link.literal) : buildLink(inert, link, opts, known));
+      if (link) parts.push(inCode ? inert.createTextNode(link.literal) : inLink ? inert.createTextNode(link.label || opts.threads.find((t) => t.id === link.ref)?.title || link.ref) : buildLink(inert, link, opts, known));
       last = m.index + m[0].length;
     }
     if (last < text.data.length) parts.push(inert.createTextNode(text.data.slice(last)));

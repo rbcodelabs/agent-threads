@@ -504,6 +504,8 @@ export class OrchestratorDock {
     const doc = this.host.ownerDocument;
     const sheet = this.sheet;
     if (!sheet) return;
+    // Focus on the page (the user clicked blank space) was not ours to begin with: do not pull it into the dialog.
+    if (!before || before === doc.body) return;
     const active = doc.activeElement;
     if (active && active !== doc.body && sheet.isFocusable(active)) return;
     if (before && before !== doc.body && sheet.isFocusable(before)) { (before as HTMLElement).focus(); return; }
