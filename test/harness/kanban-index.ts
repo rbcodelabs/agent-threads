@@ -20,7 +20,7 @@ import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
 import { createDesignSlashCommand } from './design-plugin/designSlashCommand';
 import { applyGalleryFixtures } from './gallery-fixtures';
 
-const KT_ORCH = Date.UTC(2025, 0, 15, 12, 0, 0); // pinned: never wall-clock
+const KT_ORCH = Date.UTC(2026, 0, 15, 9, 0, 0); // one hour before the spec's pinned clock (2026-01-15T10:00Z)
 const settings = { ...DEFAULT_SETTINGS, claudeBinaryPath: '/opt/homebrew/bin/claude' };
 const dashboardMode = new URLSearchParams(window.location.search).has('dashboard');
 if (new URLSearchParams(window.location.search).has('mobile')) Platform.isMobile = true;

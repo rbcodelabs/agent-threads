@@ -19,6 +19,12 @@ const kanbanUrl = 'file://' + path.resolve('test/harness/kanban.html');
  */
 const DOCK_SHOT = { threshold: 0.05 } as const;
 
+// Same pin as ui.spec.ts: relative labels ("Xd ago") on the board shot otherwise drift with the wall clock
+// (the board-in-context baseline failed at the tightened threshold for exactly that reason).
+test.beforeEach(async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
+});
+
 const DESKTOP = { width: 1280, height: 800 };
 const NARROW = { width: 390, height: 844 };
 
