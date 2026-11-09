@@ -1105,3 +1105,179 @@ describe('QA D8: the full error reason is shown (wrapped), not cut at 60 charact
     expect(long.q('.ct-orch-reason')!.textContent!.length).toBeLessThan(200);
   });
 });
+
+
+// ── Delta review of #903 at cccfa3e ────────────────────────────────────────────────────────────────────────────────
+describe('delta B1: a queued streaming frame never resurrects a ghost bubble', () => {
+  const twoTokens = (t: T) => { t.emit('token', { text: 'He' }); t.emit('token', { text: 'llo' }); };
+
+  it('tokens immediately followed by the final message leave exactly one assistant bubble and no streaming row', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    t.dock.openSheet();
+    twoTokens(t);
+    t.say('Hello there');
+    await frame(); await frame();
+    expect(t.q('[data-streaming]')).toBeNull();
+    await vi.waitFor(() => expect(t.qa('.ct-orch-msg[data-role="assistant"]')).toHaveLength(1));
+  });
+
+  it('tokens followed by interrupted leave one Stopped partial, not a duplicate live bubble', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    t.dock.openSheet();
+    twoTokens(t);
+    await t.manager.interrupt();
+    await frame(); await frame();
+    expect(t.q('[data-streaming]')).toBeNull();
+    expect(t.qa('[data-stopped]')).toHaveLength(1);
+  });
+
+  it('tokens followed by done leave no streaming row', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    t.dock.openSheet();
+    twoTokens(t);
+    t.s.running.delete('orch'); t.emit('done'); t.emit('run_state_settled');
+    await frame(); await frame();
+    expect(t.q('[data-streaming]')).toBeNull();
+  });
+});
+
+describe('delta (b): the Stopped partial survives event-order variants', () => {
+  const stopWith = async (t: T, events: string[]) => {
+    t.manager.interrupt.mockImplementation(async () => { t.s.running.delete('orch'); for (const e of events) t.emit(e); });
+    t.dock.openSheet();
+    t.emit('token', { text: 'Partial answ' });
+    await frame();
+    t.q<HTMLButtonElement>('.ct-orch-stop')!.click();
+    await flush();
+  };
+
+  it.each([['done only', ['done']], ['run_state_settled only', ['run_state_settled']], ['error only', ['error']], ['interrupted', ['interrupted', 'run_state_settled']]])('Stop then %s keeps the partial, labelled', async (_n, events) => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    await stopWith(t, events as string[]);
+    expect(t.q('[data-stopped]')!.textContent).toContain('Partial answ');
+    expect(t.q('[data-streaming]')).toBeNull();
+  });
+
+  it('a turn that ends on its own (no Stop) leaves no Stopped row', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    t.dock.openSheet();
+    t.emit('token', { text: 'whole' });
+    t.s.running.delete('orch'); t.emit('done'); t.emit('run_state_settled');
+    expect(t.q('[data-stopped]')).toBeNull();
+  });
+
+  it('Stop, but the reply completes anyway (message arrives): no Stopped row', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    t.manager.interrupt.mockImplementation(async () => { t.say('Finished anyway'); t.s.running.delete('orch'); t.emit('done'); });
+    t.dock.openSheet();
+    t.emit('token', { text: 'Finished' });
+    await frame();
+    t.q<HTMLButtonElement>('.ct-orch-stop')!.click();
+    await flush();
+    expect(t.q('[data-stopped]')).toBeNull();
+  });
+});
+
+describe('delta (c): rollback then resend', () => {
+  it('after an interrupt rolls the message back, a resend shows only the new message (memo is not stale)', async () => {
+    const t = setup({ running: true, messages: [m('assistant', 'hi')] });
+    t.dock.openSheet();
+    t.enter(t.type('first try')); await flush();
+    expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(1);
+    await t.manager.interrupt();
+    expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(0);
+    t.enter(t.type('second try')); await flush();
+    const users = t.qa('.ct-orch-msg[data-role="user"]');
+    expect(users).toHaveLength(1);
+    expect(users[0].textContent).toContain('second try');
+  });
+
+  it('an in-place edit of the last message is picked up (content is part of the memo key)', async () => {
+    const t = setup({ messages: [m('assistant', 'short')] });
+    t.dock.openSheet();
+    (t.orch.messages as unknown as Msg[])[0].content = 'much longer replacement';
+    t.emit('done');
+    await vi.waitFor(() => expect(t.sheet()!.textContent).toContain('much longer replacement'));
+  });
+});
+
+describe('delta (d): programmatic close never drops focus to the page', () => {
+  it('thread_deleted while focus is inside the sheet moves focus to the orb', () => {
+    const t = setup({ messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    t.q<HTMLButtonElement>('.ct-orch-sheet-close')!.focus();
+    t.s.orchestratorId = undefined; t.emit('thread_deleted');
+    expect(t.isOpen()).toBe(false);
+    expect(document.activeElement).toBe(t.q('.ct-orch-orb'));
+  });
+});
+
+describe('delta (e): the narrow modal sheet inerts what it covers', () => {
+  it('orb mode: siblings of the sheet and its ancestors are inert while open; restored on close and on destroy', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    const board = document.createElement('div'); board.className = 'board'; document.body.appendChild(board);
+    t.dock.openSheet();
+    expect(board.hasAttribute('inert')).toBe(true);
+    expect(t.q('.ct-orch-field')!.hasAttribute('inert')).toBe(true);
+    expect(t.sheet()!.hasAttribute('inert')).toBe(false);
+    expect(t.sheet()!.closest('[inert]')).toBeNull();
+    t.dock.closeSheet();
+    expect(document.querySelector('[inert]')).toBeNull();
+    t.dock.openSheet();
+    t.dock.destroy();
+    expect(document.querySelector('[inert]')).toBeNull();
+  });
+
+  it('pill mode never sets inert', () => {
+    const t = setup({ messages: [m('assistant', 'x')] });
+    const board = document.createElement('div'); document.body.appendChild(board);
+    t.dock.openSheet();
+    expect(document.querySelector('[inert]')).toBeNull();
+  });
+
+  it('crossing to pill mode with the sheet open removes inert', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    expect(document.querySelector('[inert]')).not.toBeNull();
+    t.s.mode = 'pill'; t.dock.relayout();
+    expect(document.querySelector('[inert]')).toBeNull();
+  });
+
+  it('the Tab trap also covers tabindex and select elements', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    const extra = document.createElement('div'); extra.tabIndex = 0; extra.className = 'ct-orch-extra';
+    t.q('.ct-orch-sheet-log')!.appendChild(extra);
+    const last = t.sheet()!.querySelector<HTMLElement>('textarea')!;
+    last.focus();
+    // forward from the last control wraps to the first; backward from the first reaches the last, which must be the textarea or a later tabbable
+    const back = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+    t.q<HTMLElement>('.ct-orch-sheet-full')!.focus();
+    t.q('.ct-orch-sheet-full')!.dispatchEvent(back);
+    expect(document.activeElement).not.toBe(extra); // extra is mid-list, never an end
+    const list = [...t.sheet()!.querySelectorAll<HTMLElement>('button, a[href], textarea, input, select, summary, [tabindex]:not([tabindex="-1"])')].filter((n) => !n.hidden && !n.closest('[hidden]'));
+    expect(list).toContain(extra);
+  });
+});
+
+describe('delta (f): links follow the world, not just the text', () => {
+  it('a note created later turns an inert wikilink into a link on the next refresh', async () => {
+    let exists = false;
+    const t = setup({ messages: [m('assistant', 'see [[Later note]]')] });
+    t.deps.resolveLink = vi.fn(() => exists);
+    t.dock.openSheet();
+    await vi.waitFor(() => expect(t.q('.ct-orch-wikilink-unresolved')).toBeTruthy());
+    exists = true; t.emit('done');
+    await vi.waitFor(() => expect(t.q('a.internal-link')).toBeTruthy());
+  });
+
+  it('a renamed thread updates a title-only thread link', async () => {
+    const t = setup({ messages: [m('assistant', 'open [[thread:a]]')] });
+    t.dock.openSheet();
+    await vi.waitFor(() => expect(t.q('a.ct-thread-link')?.textContent).toBe('Deploy curation'));
+    t.deps.listThreads().find((x) => x.id === 'a')!.title = 'Deploy curation v2';
+    t.emit('thread_renamed');
+    t.emit('done');
+    await vi.waitFor(() => expect(t.q('a.ct-thread-link')?.textContent).toBe('Deploy curation v2'));
+  });
+});

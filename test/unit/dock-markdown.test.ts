@@ -101,11 +101,12 @@ describe('review: untrusted content posture (A12)', () => {
     expect(hrefs).toContain('https://evil.example/x.png');
     expect(el.textContent).toContain('pic');
   });
-  it('a model-authored raw thread anchor is honoured only for an id that exists', async () => {
-    const el = await render('<a class="ct-thread-link" data-thread-id="t2" href="#">ok</a> <a class="ct-thread-link" data-thread-id="nope" href="#">bad</a>');
-    const anchors = [...el.querySelectorAll('a.ct-thread-link')];
-    expect(anchors.map((a) => a.getAttribute('data-thread-id'))).toEqual(['t2']);
-    expect(el.textContent).toContain('bad');
+  it('a model-authored raw anchor is NEVER a thread link, classed or not, known id or not (delta B2)', async () => {
+    const el = await render('<a class="ct-thread-link" data-thread-id="t2" href="#">classed</a> <a data-thread-id="t1" href="#">unclassed</a> <a class="internal-link" data-href="Secret" href="#">wiki</a> <a data-thread-id="nope" data-label="x" href="#">unknown</a>');
+    expect(el.querySelectorAll('a.ct-thread-link, a.internal-link')).toHaveLength(0);
+    expect(el.querySelectorAll('[data-thread-id], [data-href], [data-label]')).toHaveLength(0);
+    expect(el.textContent).toContain('classed');
+    expect(el.textContent).toContain('unclassed');
   });
   it('script / iframe / style elements are removed even if the sanitizer lets them through', async () => {
     const el = await render('x <script>alert(1)</script><iframe src="https://e.example"></iframe><style>a{}</style> y');
@@ -116,6 +117,71 @@ describe('review: untrusted content posture (A12)', () => {
     await renderDockMarkdown('[[Ghost]] [[Real]]', el, { threads, resolveLink: (h) => h === 'Real' });
     expect(el.querySelectorAll('a.internal-link')).toHaveLength(1);
     expect(el.querySelector('.ct-orch-wikilink-unresolved')!.textContent).toBe('Ghost');
+  });
+});
+
+describe('delta B3: allowlist after sanitising (defence in depth; the real sanitizeHTMLToDom was not run)', () => {
+  const html = [
+    '<video poster="https://x.example/p.png" src="https://x.example/v.mp4"></video>',
+    '<picture><source srcset="https://x.example/a.png 1x"><img src="https://x.example/b.png"></picture>',
+    '<svg><image href="https://x.example/c.png"></image></svg>',
+    '<p style="background:url(https://x.example/d.png)" onclick="alert(1)" background="https://x.example/e.png">styled</p>',
+    '<img src="https://x.example/f.png" alt="pic">',
+    '<iframe src="https://x.example"></iframe><object data="https://x.example"></object><embed src="https://x.example">',
+    '<link rel="stylesheet" href="https://x.example/s.css"><style>p{background:url(https://x.example/g.png)}</style>',
+    '<audio src="https://x.example/a.mp3"></audio><input value="x"><button>b</button><form action="https://x.example"></form>',
+    '<a href="javascript:alert(1)" onmouseover="x()">js</a> <a href="https://ok.example/page">ok</a>',
+  ].join('\n');
+
+  it('removes every element outside the prose set', async () => {
+    const el = await render(html);
+    for (const sel of ['video', 'picture', 'source', 'svg', 'image', 'img', 'iframe', 'object', 'embed', 'link', 'style', 'audio', 'input', 'button', 'form', 'script']) {
+      expect(el.querySelector(sel), sel).toBeNull();
+    }
+    expect(el.textContent).toContain('styled');
+  });
+
+  it('strips src, srcset, poster, background, style and on* from everything that is left', async () => {
+    const el = await render(html);
+    for (const attr of ['src', 'srcset', 'poster', 'background', 'style', 'onclick', 'onmouseover']) {
+      expect(el.querySelector(`[${attr}]`), attr).toBeNull();
+    }
+    for (const node of el.querySelectorAll('*')) {
+      expect([...node.attributes].some((a) => a.name.startsWith('on')), node.tagName).toBe(false);
+    }
+  });
+
+  it('keeps ordinary prose: headings, lists, tables, code, blockquote, links with a safe href', async () => {
+    const el = await render('# T\n\n> quote\n\n- a\n- b\n\n`c`\n\n[ok](https://ok.example/page)\n\n| h |\n|---|\n| v |');
+    for (const sel of ['h1', 'blockquote', 'ul li', 'code', 'table td']) expect(el.querySelector(sel), sel).toBeTruthy();
+    expect(el.querySelector('a')!.getAttribute('href')).toBe('https://ok.example/page');
+  });
+
+  it('a javascript: href is dropped', async () => {
+    const el = await render('[bad](javascript:alert(1))');
+    const a = el.querySelector('a');
+    expect(a?.getAttribute('href') ?? null).toBeNull();
+  });
+});
+
+describe('delta (a): code detection edge cases', () => {
+  it('a fence-like inline span (```code```) does not swallow the rest of the document', async () => {
+    const el = await render('```code``` then\n\n[[thread:t1|Deploy]] after');
+    expect(el.querySelector('a.ct-thread-link')).toBeTruthy();
+  });
+  it('4-space indented code after a blank line skips the wikilink rewrite', async () => {
+    const el = await render('text\n\n    [[thread:t1|Deploy]]\n    [[Note]]\n\nand [[thread:t2|Mobile]]');
+    expect(el.querySelectorAll('a.ct-thread-link')).toHaveLength(1);
+    expect(el.querySelector('pre')!.textContent).toContain('[[thread:t1|Deploy]]');
+  });
+  it('an unclosed fence runs to the end; a ~~~ fence works too', async () => {
+    const el = await render('~~~\n[[Note]]\n~~~\n\n[[thread:t1|Deploy]]\n\n```\n[[thread:t2|Mobile]]');
+    expect(el.querySelectorAll('a.ct-thread-link')).toHaveLength(1);
+    expect(el.querySelector('a.internal-link')).toBeNull();
+  });
+  it('a list continuation indented four spaces is still prose (links work)', async () => {
+    const el = await render('- item\n\n    [[thread:t1|Deploy]]');
+    expect(el.querySelector('a.ct-thread-link')).toBeTruthy();
   });
 });
 
