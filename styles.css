@@ -7342,6 +7342,7 @@ textarea.ct-settings-wide-input {
   flex: none; height: auto; min-height: 28px; padding: 2px 8px; border: none; border-radius: 6px;
   background: transparent; box-shadow: none; color: var(--text-muted);
   font-size: var(--font-ui-smaller); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px;
 }
 .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-sheet-btn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
 
@@ -7386,7 +7387,7 @@ textarea.ct-settings-wide-input {
 @keyframes ct-orch-blink { to { visibility: hidden; } }
 .ct-orch-pickup { font-size: var(--font-ui-smaller); color: var(--text-muted); }
 .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-chip-full {
-  align-self: flex-start; height: auto; min-height: 24px; padding: 1px 10px; border: 1px solid var(--background-modifier-border);
+  display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; height: auto; min-height: 24px; padding: 1px 10px; border: 1px solid var(--background-modifier-border);
   border-radius: 999px; background: transparent; box-shadow: none; color: var(--text-muted);
   font-size: var(--font-ui-smaller); cursor: pointer;
 }
