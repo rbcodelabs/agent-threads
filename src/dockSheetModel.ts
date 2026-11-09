@@ -79,7 +79,9 @@ export type SheetBlockKind = 'plan' | 'question' | 'permission';
  * Which "waiting for you" notice the sheet shows for the orchestrator's OWN pending prompt, or null. The tray already
  * hands off plans / questions ("Review plan…" / "Answer…") and gives the orchestrator's own permission real buttons, so a
  * notice would only repeat them. A plan / question notice is hidden only when the tray visibly lists the orchestrator
- * with that kind: the first TRAY_COLLAPSE_AT entries, which hold whether the tray is expanded or collapsed. The
+ * with that kind: the first TRAY_COLLAPSE_AT entries, which are shown whether the tray is expanded or collapsed. CONSERVATIVE
+ * by design: the expanded state is not an input, so an entry past the third is treated as not listed even when the tray is
+ * expanded and shows it (the notice may then repeat the card; it is never missing). The
  * permission notice is hidden only by the orchestrator's own permission entry that has buttons (P4 rule).
  * Order plan -> question -> permission; a suppressed notice falls through to the next pending one.
  */

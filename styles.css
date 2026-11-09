@@ -7227,6 +7227,9 @@ textarea.ct-settings-wide-input {
   position: relative; z-index: 1; align-self: flex-start; box-sizing: border-box;
   width: auto; min-width: 16px; height: 16px; margin: 2px 2px 0 -16px; padding: 0 4px;
   display: inline-flex; align-items: center; justify-content: center; border-radius: 8px;
+  /* Black on the theme's orange is a deliberate exception to theme text variables: --text-on-accent (white) on a bright orange
+     is ~2.3:1. Measured (Playwright, orchestrator-dock-mobile.spec.ts) 8.5:1 on the dark harness palette and 9.0:1 on the
+     Obsidian light values; fully opaque. The spec fails below 4.5:1. */
   background: var(--color-orange, var(--text-warning)); color: #000; pointer-events: none;
   box-shadow: 0 0 0 2px var(--background-secondary);
 }
@@ -7532,6 +7535,8 @@ textarea.ct-settings-wide-input {
 .ct-orch-sheet[data-mode="orb"] .ct-orch-tray { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); }
 /* The safe-area inset is applied ONCE, here (not also on the sheet). */
 .ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-composer { padding-bottom: max(8px, env(safe-area-inset-bottom, 0px)); }
+/* Lifted above the soft keyboard (data-kbd, set by the dock): the home-indicator inset is under the keyboard, not under the sheet. */
+.ct-orch-sheet[data-mode="orb"][data-kbd] .ct-orch-sheet-composer { padding-bottom: 8px; }
 
 /* Peek + suggestion strip on touch devices AND narrow boards: 44px targets (same rule as the pill's buttons). */
 /* the peek lives inside the dock root, so no :has() is needed for narrow boards */
@@ -7552,7 +7557,6 @@ textarea.ct-settings-wide-input {
   .ct-kanban-dispatch .ct-orch-peek { animation: none; }
   /* The pill's own border / glow fade (pre-existing) is motion too. */
   .ct-kanban-dispatch { transition: none; }
-  .ct-orch-orb-alert .ct-orch-orb-ring { animation: none; }
 }
 
 /* ── Needs-you tray in the reply sheet + thread-link card highlight (K2 P4) ───────────────────────────────────────── */

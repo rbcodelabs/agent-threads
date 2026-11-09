@@ -290,6 +290,8 @@ export class DockSheet {
   setKeyboardInset(px: number | null): void {
     if (px === null) this.el.style.removeProperty('--ct-orch-kbd-inset');
     else this.el.style.setProperty('--ct-orch-kbd-inset', `${px}px`);
+    // The composer's safe-area padding would be dead space under a sheet that is lifted above the keyboard.
+    this.el.toggleAttribute('data-kbd', px !== null && px > 0);
   }
 
   setMaxHeight(px: number | null): void {

@@ -5,8 +5,12 @@
  * of the view that lies below the visual viewport is covered, and the narrow bottom sheet lifts its composer by that much.
  */
 
-/** Pixels of the view (its bottom edge at `rootBottom`, layout-viewport coordinates) that lie below the visual viewport. */
-export function keyboardInset(rootBottom: number, vvOffsetTop: number, vvHeight: number, _scale = 1): number {
+/**
+ * Pixels of the view (its bottom edge at `rootBottom`, layout-viewport coordinates) that lie below the visual viewport.
+ * 0 while pinch-zoomed (scale > 1.01): zooming shrinks the visual viewport too, and that is not a keyboard.
+ */
+export function keyboardInset(rootBottom: number, vvOffsetTop: number, vvHeight: number, scale = 1): number {
+  if (scale > 1.01) return 0;
   const px = rootBottom - (vvOffsetTop + vvHeight);
   return Number.isFinite(px) && px > 0 ? Math.round(px) : 0;
 }
@@ -46,7 +50,7 @@ export class KeyboardInsetTracker {
   measure(force = false): void {
     if (!this.active) return;
     const vv = this.win.visualViewport;
-    const px = vv ? keyboardInset(this.getRootBottom(), vv.offsetTop, vv.height) : 0;
+    const px = vv ? keyboardInset(this.getRootBottom(), vv.offsetTop, vv.height, vv.scale) : 0;
     if (px === this.current && !force) return;
     const changed = px !== this.current;
     this.current = px;

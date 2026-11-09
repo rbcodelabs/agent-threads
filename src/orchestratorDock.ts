@@ -120,6 +120,8 @@ const MAX_INPUT_PX = 80;
 const MAX_ANNOUNCE_CHARS = 160;
 /** The numeric badge on the narrow attention dot: more than this shows `9+`. */
 const MAX_BADGE = 9;
+/** A recovery is announced only once it has held this long. */
+export const RECOVERY_DEBOUNCE_MS = 1000;
 type Health = 'ok' | 'error' | 'offline' | 'none';
 
 export class OrchestratorDock {
@@ -151,6 +153,13 @@ export class OrchestratorDock {
   private keyboardPx = 0;
   private readonly history = new InputHistory();
   private readonly drafts: DraftStore;
+  /** The store version after this dock's last read / write: a different version means another dock changed the draft since. */
+  private syncedVersion = 0;
+  /** Caret position the dock itself set after the last recall (a freshly recalled single line keeps walking history). */
+  private recallCaret = -1;
+  /** Last health announced as a problem ('error' / 'offline'), or 'ok'. A recovery is announced only after one. */
+  private announced: Health | null = null;
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Orchestrator id the per-thread state below belongs to; a change resets it. */
   private trackedId: string | undefined;
@@ -187,8 +196,13 @@ export class OrchestratorDock {
   }
 
   /** Write-through: every change reaches the (in-memory) store, so a re-mounted dock starts from it. */
-  private get draft(): string { return this.drafts.get(); }
-  private set draft(text: string) { if (text) this.drafts.set(text); else this.drafts.clear(); }
+  private get draft(): string { return this.drafts.get(this.draftKey); }
+  private set draft(text: string) {
+    if (text) this.drafts.set(text, this.draftKey); else this.drafts.clear();
+    this.syncedVersion = this.drafts.version;
+  }
+  /** The draft belongs to one orchestrator thread: a swapped / re-set-up orchestrator never reads it. */
+  private get draftKey(): string { return this.deps.getOrchestratorThreadId() ?? ''; }
 
   mount(): void {
     if (this.rootEl) return;
@@ -248,6 +262,7 @@ export class OrchestratorDock {
     this.peekTimer = null;
     if (this.stateLiveTimer) clearTimeout(this.stateLiveTimer);
     this.stateLiveTimer = null;
+    this.cancelRecovery();
     this.keyboard?.stop();
     this.keyboard = null;
     this.tray?.destroy();
@@ -360,13 +375,44 @@ export class OrchestratorDock {
 
   // ── Error / offline announcer, count badge ────────────────────────────────
 
-  /** A CHANGE of health announces (to error / offline, back to ok); mount, repeats and setup (none) are silent. */
+  /**
+   * A CHANGE of health announces (to error / offline); mount, repeats and setup (none) are silent. `working` is neutral: a
+   * retry runs the orchestrator (deriveDockState reports error only while idle), and the error stands until it ends one
+   * way or the other. A recovery is announced only after it has held for RECOVERY_DEBOUNCE_MS, so a flap (retry that fails
+   * again, a daemon bounce) is never announced as "recovered".
+   */
   private trackHealth(thread: Thread | undefined): void {
+    if (this.state === 'working') return;
     const h: Health = this.state === 'error' ? 'error' : this.state === 'offline' ? 'offline' : this.state === 'none' ? 'none' : 'ok';
     const prev = this.health;
     this.health = h;
-    if (prev === null || prev === h || h === 'none' || prev === 'none') return;
-    this.announceState(h === 'ok' ? 'Orchestrator recovered' : this.reasonFor(h, thread).text);
+    const bad = h === 'error' || h === 'offline';
+    if (prev === null || prev === 'none') { this.announced = bad ? h : 'ok'; return; } // first sight / setup: not news
+    if (h === prev) return;
+    if (h === 'none') { this.cancelRecovery(); this.announced = 'ok'; return; }
+    if (h === 'ok') {
+      if (this.announced === 'error' || this.announced === 'offline') this.scheduleRecovery();
+      return;
+    }
+    this.cancelRecovery();
+    if (this.announced === h) return; // flapped back into the problem that was already announced
+    this.announced = h;
+    this.announceState(this.reasonFor(h, thread).text);
+  }
+
+  private scheduleRecovery(): void {
+    this.cancelRecovery();
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      if (this.destroyed || this.health !== 'ok') return;
+      this.announced = 'ok';
+      this.announceState('Orchestrator recovered');
+    }, RECOVERY_DEBOUNCE_MS);
+  }
+
+  private cancelRecovery(): void {
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
   }
 
   /** Cleared first, then set on the next tick, so the same text twice is still read. */
@@ -398,6 +444,13 @@ export class OrchestratorDock {
   /** A new orchestrator thread (first sight, re-setup) starts with a clean buffer, and its history counts as read. */
   private trackOrchestrator(id: string | undefined, thread: Thread | undefined): void {
     if (id !== this.trackedId) {
+      // A swapped / re-set-up orchestrator thread must not inherit what was typed for the previous one.
+      if (this.trackedId !== undefined) {
+        this.drafts.clear();
+        this.syncedVersion = this.drafts.version;
+        if (this.inputEl) { this.inputEl.value = ''; this.autosize(this.inputEl); }
+        this.history.reset();
+      }
       this.trackedId = id;
       this.streamBuf = '';
       this.stoppedText = '';
@@ -655,6 +708,7 @@ export class OrchestratorDock {
     const root = this.host.closest('.ct-agents-root') as HTMLElement | null;
     const h = root?.clientHeight ?? 0;
     const sheet = this.sheet;
+    this.keyboard?.measure(); // the view may have moved under an open keyboard (it reports only a change)
     sheet.keepPinned(() => {
       if (!h) { sheet.setMaxHeight(null); return; }
       const pill = (this.host.parentElement ?? this.host).offsetHeight;
@@ -845,8 +899,13 @@ export class OrchestratorDock {
     this.bodyKind = kind;
   }
 
+  /**
+   * Keep what the field holds across a body rebuild, but only if no other dock changed the draft since this one last read or
+   * wrote it: a second board still holding text that was meanwhile SENT (and cleared) must not write it back (a pasted token).
+   */
   private stashDraft(): void {
-    if (this.inputEl) this.draft = this.inputEl.value;
+    if (!this.inputEl || this.drafts.version !== this.syncedVersion) return;
+    if (this.inputEl.value !== this.draft) this.draft = this.inputEl.value;
   }
 
   private buildInputBody(): void {
@@ -859,6 +918,7 @@ export class OrchestratorDock {
     });
     this.history.reset();
     input.value = this.draft;
+    this.syncedVersion = this.drafts.version;
     this.autosize(input);
     input.addEventListener('input', () => {
       this.history.reset(); // typing in a recalled message makes it the draft
@@ -911,25 +971,28 @@ export class OrchestratorDock {
    * and ArrowDown goes forward, ending on the draft that was being typed. Never during IME composition or with a modifier.
    */
   private recall(e: KeyboardEvent, input: HTMLTextAreaElement): void {
-    if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing || e.keyCode === 229) return;
+    if (this.sending || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing || e.keyCode === 229) return;
     if (input.selectionStart !== input.selectionEnd) return;
     const caret = input.selectionStart ?? 0;
     const value = input.value;
     const h = this.history;
     let next: string | undefined;
+    // A freshly recalled single line keeps walking (the caret is where the recall put it); once the caret has been moved,
+    // only its very start (Up) / very end (Down) continue, so a long wrapped paragraph keeps normal caret movement.
+    const fresh = h.browsing && value === h.shown && !value.includes('\n') && caret === this.recallCaret;
     if (e.key === 'ArrowUp') {
-      const firstLine = !value.slice(0, caret).includes('\n');
-      const can = h.browsing ? value === h.shown && firstLine : value === '' || (caret === 0 && !value.includes('\n'));
+      const can = h.browsing ? value === h.shown && (caret === 0 || fresh) : value === '' || (caret === 0 && !value.includes('\n'));
       if (!can) return;
       next = h.previous(value);
     } else {
-      if (!h.browsing || value !== h.shown || value.slice(caret).includes('\n')) return;
+      if (!h.browsing || value !== h.shown || !(caret === value.length || fresh)) return;
       next = h.next();
     }
     if (next === undefined) return;
     e.preventDefault();
     input.value = next;
     input.setSelectionRange(next.length, next.length);
+    this.recallCaret = next.length;
     this.draft = next;
     this.autosize(input);
   }
