@@ -30,6 +30,7 @@ function setup(opts: {
   lastError?: string;
   plan?: boolean; question?: boolean; permission?: boolean;
   deferSend?: boolean;
+  sendThrowsAfterEcho?: boolean;
   activity?: string;
 } = {}) {
   const orch = thread('orch', { messages: (opts.messages ?? []) as never, ...(opts.lastError ? { lastError: opts.lastError } : {}) });
@@ -67,6 +68,7 @@ function setup(opts: {
       (orch.messages as unknown as Msg[]).push(user);
       emit('user_message_added', { message: user }, id); // precedes streaming_start: isRunning is still the PRIOR state
       if (opts.deferSend) await new Promise<void>((r) => { pendingResolve = r; });
+      if (opts.sendThrowsAfterEcho) throw new Error('turn failed to start');
     }),
     subscribe: vi.fn((l: Listener) => { listeners.add(l); return () => { listeners.delete(l); }; }),
   };
@@ -78,6 +80,7 @@ function setup(opts: {
     ensureOrchestrator: vi.fn(async () => { s.orchestratorId = 'orch'; }),
     openThread: vi.fn(),
     openLink: vi.fn(),
+    resolveLink: vi.fn(() => true),
     mode: () => s.mode,
     daemons: null,
   };
@@ -106,6 +109,7 @@ function setup(opts: {
 }
 type T = ReturnType<typeof setup>;
 const flush = () => new Promise((r) => setTimeout(r, 0));
+const frame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
 
 beforeEach(() => { document.body.innerHTML = ''; seq = 0; });
 afterEach(() => { vi.useRealTimers(); });
@@ -297,6 +301,7 @@ describe('streaming', () => {
     t.dock.openSheet();
     t.emit('streaming_start');
     t.emit('token', { text: 'Two ' }); t.emit('token', { text: 'things' });
+    await frame();
     const live = t.q('[data-streaming]')!;
     expect(live.textContent).toContain('Two things');
     t.say('Two things are waiting');
@@ -305,11 +310,13 @@ describe('streaming', () => {
     expect(t.qa('.ct-orch-msg[data-role="assistant"]')).toHaveLength(1);
   });
 
-  it('streamed text is text, never markup', () => {
+  it('streamed text is text, never markup', async () => {
     const t = setup({ running: true, messages: [m('user', 'go')] });
     t.dock.openSheet();
     t.emit('token', { text: '<img src=x onerror=alert(1)>' });
+    await frame();
     expect(t.q('[data-streaming] img')).toBeNull();
+    expect(t.q('[data-streaming]')!.textContent).toContain('<img');
   });
 
   it('stream_reset and interrupted clear the live bubble', () => {
@@ -750,5 +757,234 @@ describe('lifecycle', () => {
     t.s.orchestratorId = 'orch'; t.emit('thread_created');
     t.dock.openSheet();
     expect(t.dot().classList.contains('ct-orch-dot-attention')).toBe(false);
+  });
+});
+
+
+// ── Review round (#903 at 854b52c) ─────────────────────────────────────────────────────────────────────────────────
+describe('review: wikilinks never navigate the board (B1)', () => {
+  it('an unresolvable [[note]] renders as inert text: no anchor, no click target', async () => {
+    const t = setup({ messages: [m('assistant', 'see [[Ghost note]] and [[Real note]]')] });
+    t.deps.resolveLink = vi.fn((href: string) => href === 'Real note');
+    t.dock.destroy(); document.body.innerHTML = '';
+    const u = setup({ messages: [m('assistant', 'see [[Ghost note]] and [[Real note]]')] });
+    u.deps.resolveLink = vi.fn((href: string) => href === 'Real note');
+    u.dock.openSheet();
+    await vi.waitFor(() => expect(u.qa('a.internal-link').length + u.qa('.ct-orch-wikilink-unresolved').length).toBe(2));
+    expect(u.qa('a.internal-link').map((a) => a.textContent)).toEqual(['Real note']);
+    expect(u.qa('.ct-orch-wikilink-unresolved').map((a) => a.textContent)).toEqual(['Ghost note']);
+    u.q('a.internal-link')!.click();
+    expect(u.deps.openLink).toHaveBeenCalledWith('Real note');
+  });
+
+  it('without an openLink dependency wikilinks are inert text (nothing to click)', async () => {
+    const t = setup({ messages: [m('assistant', 'see [[Note]]')] });
+    (t.deps as { openLink?: unknown }).openLink = undefined;
+    t.dock.openSheet();
+    await vi.waitFor(() => expect(t.sheet()!.textContent).toContain('Note'));
+    expect(t.q('a.internal-link')).toBeNull();
+  });
+});
+
+describe('review: assistant row hand-off (A1, A2)', () => {
+  it('the new assistant row is seeded with its text immediately (never empty while markdown renders)', () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    t.dock.openSheet();
+    t.emit('token', { text: 'Done' });
+    t.say('**Done** and dusted');
+    const row = t.qa('.ct-orch-msg[data-role="assistant"]').find((r) => !r.dataset.streaming)!;
+    expect(row.querySelector('.ct-orch-bubble')!.textContent).toBe('**Done** and dusted');
+  });
+
+  it('re-pins to the bottom after the async markdown lands, if the user was pinned', async () => {
+    const t = setup({ messages: [m('user', 'hi')] });
+    t.dock.openSheet();
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let height = 400;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => height });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    scroll.scrollTop = 200;
+    t.say('first');
+    height = 900; // markdown swap makes the row taller
+    await vi.waitFor(() => expect(scroll.scrollTop).toBe(900));
+  });
+
+  it('does not yank the user down when they scrolled up', async () => {
+    const t = setup({ messages: [m('user', 'hi')] });
+    t.dock.openSheet();
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => 2000 });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    scroll.scrollTop = 100;
+    t.say('later');
+    await flush(); await flush();
+    expect(scroll.scrollTop).toBe(100);
+  });
+});
+
+describe('review: streaming writes are coalesced (A4)', () => {
+  it('a burst of tokens in one frame produces at most one text write', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    t.dock.openSheet();
+    t.emit('token', { text: 'a' });
+    await frame();
+    const bubble = t.q('[data-streaming] .ct-orch-bubble')!;
+    let writes = 0;
+    new MutationObserver((rs) => { writes += rs.length; }).observe(bubble, { childList: true, characterData: true, subtree: true });
+    for (let i = 0; i < 200; i++) t.emit('token', { text: 'x' });
+    expect(bubble.textContent).toBe('a');
+    await frame(); await flush();
+    expect(bubble.textContent!.length).toBe(201);
+    expect(writes).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('review: a stopped partial stays visible (A5; the manager does not persist partial text on interrupt)', () => {
+  it('after interrupt the partial streamed text remains, labelled Stopped, until the next send', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    t.dock.openSheet();
+    t.emit('token', { text: 'Half an answ' });
+    await frame();
+    await t.manager.interrupt();
+    const row = t.q('[data-stopped]')!;
+    expect(row.textContent).toContain('Half an answ');
+    expect(row.textContent).toContain('Stopped');
+    expect(t.q('[data-streaming]')).toBeNull();
+    t.enter(t.type('try again'));
+    await vi.waitFor(() => expect(t.q('[data-stopped]')).toBeNull());
+  });
+
+  it('a normally finished turn leaves no Stopped row', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    t.dock.openSheet();
+    t.emit('token', { text: 'full' });
+    t.say('full'); t.s.running.delete('orch'); t.emit('done');
+    expect(t.q('[data-stopped]')).toBeNull();
+  });
+});
+
+describe('review: chips only when they can send (A6)', () => {
+  it('orb mode + error: the empty sheet offers no chips (the input is a reason, not a field)', () => {
+    const t = setup({ mode: 'orb', lastError: 'boom' });
+    t.dock.openSheet();
+    expect(t.q('.ct-orch-sheet .ct-orch-empty button')).toBeNull();
+  });
+
+  it('chips on screen when the orchestrator errors are hidden, and a stale chip click sends nothing', () => {
+    const t = setup();
+    t.input()!.focus();
+    const chip = t.q('.ct-orch-chips button')!;
+    t.orch.lastError = 'boom'; t.emit('error');
+    expect(t.q('.ct-orch-chips')!.hidden).toBe(true);
+    chip.click();
+    expect(t.manager.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('review: Escape during IME composition (A7)', () => {
+  it('does not close the sheet from the field, the dock root or the sheet', () => {
+    const t = setup({ messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    const field = t.input()!;
+    for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+      field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init }));
+      expect(t.isOpen()).toBe(true);
+      t.q('.ct-orch-sheet-close')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...init }));
+      expect(t.isOpen()).toBe(true);
+    }
+  });
+});
+
+describe('review: no rebuild churn (A8)', () => {
+  it('a focused Remove button keeps its node and focus across refreshes', () => {
+    const t = setup({ messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    t.s.queue.push({ text: 'one' }); t.emit('queued');
+    const btn = t.q<HTMLButtonElement>('.ct-orch-waiting button')!;
+    btn.focus();
+    t.emit('done'); t.emit('message', { message: m('user', 'noise') }); t.emit('queued');
+    expect(t.q('.ct-orch-waiting button')).toBe(btn);
+    expect(document.activeElement).toBe(btn);
+  });
+
+  it('the notice and the empty-state chips keep their nodes while unchanged', () => {
+    const t = setup({ mode: 'orb', plan: true });
+    t.dock.openSheet();
+    const chip = t.q('.ct-orch-notice button')!;
+    const sug = t.q('.ct-orch-empty button')!;
+    t.emit('done'); t.emit('queued');
+    expect(t.q('.ct-orch-notice button')).toBe(chip);
+    expect(t.q('.ct-orch-empty button')).toBe(sug);
+  });
+});
+
+describe('review: max height follows the CURRENT mode (A9)', () => {
+  it('crossing the breakpoint with the sheet open re-measures with the new mode', () => {
+    const t = setup({ messages: [m('assistant', 'x')] });
+    const root = document.createElement('div'); root.className = 'ct-agents-root';
+    Object.defineProperty(root, 'clientHeight', { value: 500 });
+    document.body.appendChild(root); root.appendChild(t.stage);
+    Object.defineProperty(t.stage, 'offsetHeight', { value: 300 });
+    t.dock.openSheet();
+    const max = () => parseFloat(t.sheet()!.style.getPropertyValue('--ct-orch-sheet-max'));
+    expect(max()).toBe(148); // pill: room above the pill (500 - 36 - 300 - 16)
+    t.s.mode = 'orb'; t.dock.relayout();
+    expect(max()).toBe(300); // bottom sheet: the 60% cap only
+  });
+});
+
+describe('review: focus moves into the dialog (A11)', () => {
+  it('peek Open in pill mode puts focus in the composer field', () => {
+    const t = setup({ messages: [m('assistant', 'old')] });
+    t.say('new');
+    t.qa('.ct-orch-peek button').find((b) => b.textContent === 'Open')!.click();
+    expect(document.activeElement).toBe(t.input());
+  });
+
+  it('pill + error (no input): opening the sheet focuses a control inside the dialog, and closing returns to the field area', () => {
+    const t = setup({ messages: [m('assistant', 'x')], lastError: 'boom' });
+    t.q<HTMLElement>('.ct-orch-orb')!.click();
+    expect(t.sheet()!.contains(document.activeElement)).toBe(true);
+    t.q<HTMLButtonElement>('.ct-orch-sheet-close')!.click();
+    expect(t.sheet()!.contains(document.activeElement)).toBe(false);
+  });
+
+  it('orb + offline-style reason in the sheet: focus lands on the action, not the page', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')], lastError: 'boom' });
+    t.dock.openSheet();
+    expect(t.sheet()!.contains(document.activeElement)).toBe(true);
+  });
+});
+
+describe('review: a failure AFTER the user message was recorded does not duplicate it (A13)', () => {
+  it('sendMessage that throws after user_message_added keeps the draft empty (the message is in the transcript)', async () => {
+    const t = setup({ sendThrowsAfterEcho: true, messages: [m('assistant', 'x')] });
+    t.enter(t.type('already recorded'));
+    await vi.waitFor(() => expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(1));
+    await flush();
+    expect(t.input()!.value).toBe('');
+  });
+});
+
+describe('review: link clicks (A14)', () => {
+  it('an https link opens externally with noopener; javascript: never does', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const t = setup({ messages: [m('assistant', '[ext](https://example.com/x) [bad](javascript:alert(1))')] });
+    t.dock.openSheet();
+    await vi.waitFor(() => expect(t.qa('.ct-orch-bubble a').length).toBeGreaterThan(0));
+    const links = t.qa('.ct-orch-bubble a') as HTMLAnchorElement[];
+    const ext = links.find((a) => a.getAttribute('href')?.startsWith('https'))!;
+    const ev = new MouseEvent('click', { bubbles: true, cancelable: true });
+    ext.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(open).toHaveBeenCalledWith('https://example.com/x', '_blank', 'noopener,noreferrer');
+    open.mockClear();
+    for (const a of links.filter((l) => !l.getAttribute('href')?.startsWith('https'))) {
+      const e2 = new MouseEvent('click', { bubbles: true, cancelable: true });
+      a.dispatchEvent(e2);
+      expect(e2.defaultPrevented).toBe(true);
+    }
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
   });
 });

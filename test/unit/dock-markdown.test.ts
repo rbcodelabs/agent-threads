@@ -77,6 +77,48 @@ describe('renderDockMarkdown', () => {
   });
 });
 
+describe('review: code is literal (A3)', () => {
+  it('a thread link inside inline code or a fenced block stays literal text', async () => {
+    const el = await render('use `[[thread:t1|Deploy]]` here\n\n```\n[[thread:t1|Deploy]]\n[[Note]]\n```\n\nand [[thread:t1|Deploy]] outside');
+    expect(el.querySelectorAll('a.ct-thread-link')).toHaveLength(1);
+    expect(el.querySelector('code')!.textContent).toContain('[[thread:t1|Deploy]]');
+    expect(el.querySelector('pre')!.textContent).toContain('[[Note]]');
+    expect(el.querySelector('a.internal-link')).toBeNull();
+  });
+  it('a table-cell link outside code still works', async () => {
+    const el = await render('| a | b |\n|---|---|\n| `[[Note]]` | [[thread:t1\\|Deploy]] |');
+    const cells = el.querySelectorAll('td');
+    expect(cells[0].querySelector('a')).toBeNull();
+    expect(cells[1].querySelector('a.ct-thread-link')).toBeTruthy();
+  });
+});
+
+describe('review: untrusted content posture (A12)', () => {
+  it('images (markdown and raw) never load: they become plain text links', async () => {
+    const el = await render('![pic](https://evil.example/x.png) and <img src="https://evil.example/y.png" alt="raw">');
+    expect(el.querySelector('img')).toBeNull();
+    const hrefs = [...el.querySelectorAll('a')].map((a) => a.getAttribute('href'));
+    expect(hrefs).toContain('https://evil.example/x.png');
+    expect(el.textContent).toContain('pic');
+  });
+  it('a model-authored raw thread anchor is honoured only for an id that exists', async () => {
+    const el = await render('<a class="ct-thread-link" data-thread-id="t2" href="#">ok</a> <a class="ct-thread-link" data-thread-id="nope" href="#">bad</a>');
+    const anchors = [...el.querySelectorAll('a.ct-thread-link')];
+    expect(anchors.map((a) => a.getAttribute('data-thread-id'))).toEqual(['t2']);
+    expect(el.textContent).toContain('bad');
+  });
+  it('script / iframe / style elements are removed even if the sanitizer lets them through', async () => {
+    const el = await render('x <script>alert(1)</script><iframe src="https://e.example"></iframe><style>a{}</style> y');
+    expect(el.querySelector('script, iframe, style')).toBeNull();
+  });
+  it('an unresolvable wikilink renders as inert text when a resolver says so', async () => {
+    const el = document.createElement('div');
+    await renderDockMarkdown('[[Ghost]] [[Real]]', el, { threads, resolveLink: (h) => h === 'Real' });
+    expect(el.querySelectorAll('a.internal-link')).toHaveLength(1);
+    expect(el.querySelector('.ct-orch-wikilink-unresolved')!.textContent).toBe('Ghost');
+  });
+});
+
 describe('rewriteDockMarkup', () => {
   it('is pure and leaves plain text alone', () => {
     expect(rewriteDockMarkup('no links here')).toBe('no links here');
