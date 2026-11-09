@@ -123,3 +123,41 @@ describe('Gallery mode contrast (WCAG 2.x)', () => {
     expect(contrast('#777777', '#ffffff')).toBeCloseTo(4.48, 1);
   });
 });
+
+describe('Gallery mode controls (CSS presence)', () => {
+  const ruleBody = (selector: string): string => {
+    const i = gallery.indexOf(selector + ' {');
+    expect(i, `${selector} rule`).toBeGreaterThanOrEqual(0);
+    return gallery.slice(i, gallery.indexOf('}', i));
+  };
+
+  it('uses a two-tone focus ring (light + dark) that is >= 3:1 against itself', () => {
+    const light = locals['--ct-gallery-ring-light'];
+    const dark = locals['--ct-gallery-ring-dark'];
+    expect(light && dark).toBeTruthy();
+    expect(contrast(light, dark)).toBeGreaterThanOrEqual(UI);
+    const ring = ruleBody('.ct-gallery-card :focus-visible');
+    expect(ring).toContain('var(--ct-gallery-ring-light)');
+    expect(ring).toContain('var(--ct-gallery-ring-dark)');
+    expect(ring).toMatch(/box-shadow:/);
+  });
+
+  it('draws the hero ring as an overlay (an inset shadow would sit under the image)', () => {
+    const hero = ruleBody('.ct-gallery-card .ct-gallery-media:focus-visible::after');
+    expect(hero).toContain('var(--ct-gallery-ring-light)');
+    expect(hero).toContain('var(--ct-gallery-ring-dark)');
+    expect(hero).toContain('pointer-events: none');
+  });
+
+  it('gives the title link a >= 44px hit area at narrow widths', () => {
+    const narrow = gallery.slice(gallery.indexOf('@container ct-gallery (max-width: 640px)'));
+    const m = /\.ct-gallery-title-link \{([^}]*)\}/.exec(narrow);
+    expect(m, 'narrow title-link rule').not.toBeNull();
+    const body = m![1];
+    const pad = Number(/padding-block:\s*(\d+)px/.exec(body)?.[1]);
+    expect(body).toMatch(/margin-block:\s*-\d+px/);
+    expect(body).toMatch(/display:\s*block/);
+    const lineHeight = 14 * 1.3; // .ct-gallery-title narrow font-size x line-height
+    expect(lineHeight + 2 * pad).toBeGreaterThanOrEqual(44);
+  });
+});

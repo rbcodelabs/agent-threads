@@ -10576,6 +10576,9 @@ button.ct-agent-crumb:focus-visible {
   --ct-gallery-scrim: #0e0e10;
   --ct-gallery-scrim-text: #ececf0;
   --ct-gallery-image-well: #121214;
+  /* Two-tone focus ring: light ring + dark halo, visible over light AND dark screenshots. */
+  --ct-gallery-ring-light: #ffffff;
+  --ct-gallery-ring-dark: #000000;
   container-type: inline-size;
   container-name: ct-gallery;
   height: 100%;
@@ -10629,10 +10632,21 @@ button.ct-agent-crumb:focus-visible {
 .ct-gallery-featured { grid-column: span 2; grid-row: span 2; }
 
 .ct-gallery-card :focus-visible {
-  outline: 2px solid var(--text-normal);
-  outline-offset: 2px;
+  outline: 2px solid var(--ct-gallery-ring-light);
+  outline-offset: 0;
+  box-shadow: 0 0 0 4px var(--ct-gallery-ring-dark);
 }
-.ct-gallery-card .ct-gallery-media:focus-visible { outline-offset: -3px; }
+/* The hero is filled by an <img>, so its ring is an overlay (dark | light | dark bands). */
+.ct-gallery-card .ct-gallery-media:focus-visible { outline: none; box-shadow: none; }
+.ct-gallery-card .ct-gallery-media:focus-visible::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  border: 2px solid var(--ct-gallery-ring-dark);
+  box-shadow: inset 0 0 0 2px var(--ct-gallery-ring-light), inset 0 0 0 4px var(--ct-gallery-ring-dark);
+}
 
 /* ── Hero ── */
 .ct-gallery-media {
@@ -10893,7 +10907,9 @@ button.ct-agent-crumb:focus-visible {
   .ct-gallery-featured .ct-gallery-title { font-size: 20px; }
   .ct-gallery-banner-sub { display: none; }
   .ct-gallery-body { padding: 10px 12px 12px; }
-  .ct-gallery-title { font-size: 14px; }
+  .ct-gallery-title { font-size: 14px; overflow: visible; }
+  /* >= 44px tap target: 14px x 1.3 line + 2 x 13px padding, cancelled by the negative margin so the look is unchanged. */
+  .ct-gallery-title-link { display: block; padding-block: 13px; margin-block: -13px; overflow: hidden; text-overflow: ellipsis; }
   .ct-gallery-strip { gap: 6px; padding: 8px 8px 0; }
   /* 44px tap targets */
   .ct-gallery-nav { width: 44px; height: 44px; opacity: 1; }
