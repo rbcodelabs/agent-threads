@@ -704,9 +704,8 @@ describe('the transcript stays pinned across the tray appearing / disappearing',
   it('the user had scrolled up: the tray changing does not yank them back down', async () => {
     const t = setup({ specs: [] });
     const s = stubScroll(t);
-    s.scroll.dispatchEvent(new WheelEvent('wheel'));
-    s.setTop(100);
-    s.scroll.dispatchEvent(new Event('scroll'));
+    s.setTop(700); s.scroll.dispatchEvent(new Event('scroll')); // at the bottom
+    s.setTop(100); s.scroll.dispatchEvent(new Event('scroll')); // then up, well away from it: unpinned (#903's rule)
     t.addPermission({ id: 'n', title: 'Ship it', kind: 'permission' });
     expect(s.top()).toBe(100);
   });
