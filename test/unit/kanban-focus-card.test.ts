@@ -67,7 +67,7 @@ describe('KanbanView.focusCard', () => {
     const el = card('t1');
     view.focusCard('t1', { scroll: true, flash: false });
     vi.advanceTimersByTime(INTENT_MS);
-    expect(el.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    expect(el.scrollIntoView).not.toHaveBeenCalled(); // the board is scrolled by the overlay-aware planner, not scrollIntoView
     expect(el.classList.contains('ct-kanban-card-linked-flash')).toBe(false);
   });
 
@@ -78,7 +78,6 @@ describe('KanbanView.focusCard', () => {
     const el = card('t1');
     view.focusCard('t1', { scroll: true, flash: true });
     vi.advanceTimersByTime(INTENT_MS);
-    expect(el.scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', inline: 'center', block: 'nearest' });
     expect(el.classList.contains('ct-kanban-card-linked')).toBe(true);
     expect(el.classList.contains('ct-kanban-card-linked-flash')).toBe(false);
   });
@@ -139,44 +138,6 @@ describe('KanbanView.focusCard', () => {
 });
 
 describe('KanbanView.focusCard: hover intent, visibility and clearance', () => {
-  it('the highlight is immediate but the SCROLL waits ~120ms, and leaving before that cancels it', () => {
-    vi.useFakeTimers();
-    reduceMotion(false);
-    const { view, card } = make();
-    const el = card('t1');
-    view.focusCard('t1', { scroll: true, flash: true });
-    expect(el.classList.contains('ct-kanban-card-linked')).toBe(true);
-    vi.advanceTimersByTime(INTENT_MS - 1);
-    expect(el.scrollIntoView).not.toHaveBeenCalled();
-    view.clearCardFocus();
-    vi.advanceTimersByTime(1000);
-    expect(el.scrollIntoView).not.toHaveBeenCalled();
-  });
-
-  it('moving to another link cancels the first link\'s pending scroll', () => {
-    vi.useFakeTimers();
-    reduceMotion(false);
-    const { view, card } = make();
-    const a = card('a'); const b = card('b');
-    view.focusCard('a', { scroll: true, flash: false });
-    vi.advanceTimersByTime(50);
-    view.focusCard('b', { scroll: true, flash: false });
-    vi.advanceTimersByTime(1000);
-    expect(a.scrollIntoView).not.toHaveBeenCalled();
-    expect(b.scrollIntoView).toHaveBeenCalledTimes(1);
-  });
-
-  it('onClose cancels a pending scroll (no timer outlives the view)', async () => {
-    vi.useFakeTimers();
-    reduceMotion(false);
-    const { view, card } = make();
-    const el = card('a');
-    view.focusCard('a', { scroll: true, flash: false });
-    await view.onClose();
-    vi.advanceTimersByTime(1000);
-    expect(el.scrollIntoView).not.toHaveBeenCalled();
-  });
-
   it('a card with no layout box (collapsed lane, display:none) returns false and is not highlighted', () => {
     reduceMotion(false);
     const { view, card } = make();
@@ -184,49 +145,6 @@ describe('KanbanView.focusCard: hover intent, visibility and clearance', () => {
     el.getClientRects = () => [] as unknown as DOMRectList;
     expect(view.focusCard('t1', { scroll: true, flash: true })).toBe(false);
     expect(el.classList.contains('ct-kanban-card-linked')).toBe(false);
-  });
-
-  it('keeps the card clear of the pill and the open sheet: scroll-margin-bottom = the covered height + 8px', () => {
-    vi.useFakeTimers();
-    reduceMotion(false);
-    const { view, card } = make();
-    const el = card('t1');
-    const root = view.containerEl.children[1] as HTMLElement;
-    root.getBoundingClientRect = () => ({ top: 0, bottom: 800, left: 0, right: 1280, width: 1280, height: 800 } as DOMRect);
-    const pill = document.createElement('div');
-    pill.className = 'ct-kanban-dispatch';
-    pill.getBoundingClientRect = () => ({ top: 700, bottom: 748, left: 0, right: 600, width: 600, height: 48 } as DOMRect);
-    const sheet = document.createElement('div');
-    sheet.className = 'ct-orch-sheet';
-    sheet.getBoundingClientRect = () => ({ top: 400, bottom: 690, left: 0, right: 600, width: 600, height: 290 } as DOMRect);
-    pill.appendChild(sheet);
-    root.appendChild(pill);
-    view.focusCard('t1', { scroll: true, flash: false });
-    vi.advanceTimersByTime(INTENT_MS);
-    expect(el.style.scrollMarginBottom).toBe('408px');
-    view.clearCardFocus();
-    expect(el.style.scrollMarginBottom).toBe('');
-  });
-
-  it('only the pill (sheet closed or hidden): the clearance is the pill height + gap', () => {
-    vi.useFakeTimers();
-    reduceMotion(false);
-    const { view, card } = make();
-    const el = card('t1');
-    const root = view.containerEl.children[1] as HTMLElement;
-    root.getBoundingClientRect = () => ({ top: 0, bottom: 800, left: 0, right: 1280, width: 1280, height: 800 } as DOMRect);
-    const pill = document.createElement('div');
-    pill.className = 'ct-kanban-dispatch';
-    pill.getBoundingClientRect = () => ({ top: 700, bottom: 748, left: 0, right: 600, width: 600, height: 48 } as DOMRect);
-    const sheet = document.createElement('div');
-    sheet.className = 'ct-orch-sheet';
-    sheet.hidden = true;
-    sheet.getBoundingClientRect = () => ({ top: 400, bottom: 690, left: 0, right: 600, width: 600, height: 290 } as DOMRect);
-    pill.appendChild(sheet);
-    root.appendChild(pill);
-    view.focusCard('t1', { scroll: true, flash: false });
-    vi.advanceTimersByTime(INTENT_MS);
-    expect(el.style.scrollMarginBottom).toBe('108px');
   });
 
   it('every place that registers a card re-applies the highlight (gallery re-registration, rebuilt card outside render())', () => {
@@ -241,5 +159,95 @@ describe('KanbanView.focusCard: hover intent, visibility and clearance', () => {
     (view as unknown as { registerCard(id: string, el: HTMLElement): void }).registerCard('zzz', other);
     expect(other.classList.contains('ct-kanban-card-linked')).toBe(false);
     expect((view as unknown as { rowEls: Map<string, HTMLElement> }).rowEls.get('a')).toBe(fresh);
+  });
+});
+
+/** A board whose scroller we can read back: rects are stubbed from a mutable scroll offset. */
+function geometry(view: KanbanView, card: HTMLElement, opts: { cardRect: { left: number; top: number; right: number; bottom: number }; sheet?: { left: number; top: number; right: number; bottom: number } | null }) {
+  const root = view.containerEl.children[1] as HTMLElement;
+  const board = (view as unknown as { boardEl: HTMLElement }).boardEl; // the real scroll host (.ct-agents-list)
+  board.style.overflowY = 'auto';
+  board.style.overflowX = 'auto';
+  let top = 0; let left = 0;
+  Object.defineProperty(board, 'scrollHeight', { configurable: true, get: () => 5000 });
+  Object.defineProperty(board, 'clientHeight', { configurable: true, get: () => 800 });
+  Object.defineProperty(board, 'scrollWidth', { configurable: true, get: () => 5000 });
+  Object.defineProperty(board, 'clientWidth', { configurable: true, get: () => 1280 });
+  Object.defineProperty(board, 'scrollTop', { configurable: true, get: () => top, set: (v: number) => { top = v; } });
+  Object.defineProperty(board, 'scrollLeft', { configurable: true, get: () => left, set: (v: number) => { left = v; } });
+  board.scrollTo = (() => {}) as never; // force the assignment path
+  board.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1280, bottom: 800, width: 1280, height: 800 } as DOMRect);
+  root.getBoundingClientRect = board.getBoundingClientRect;
+  board.appendChild(card);
+  card.getBoundingClientRect = () => ({ ...opts.cardRect, top: opts.cardRect.top - top, bottom: opts.cardRect.bottom - top, left: opts.cardRect.left - left, right: opts.cardRect.right - left, width: opts.cardRect.right - opts.cardRect.left, height: opts.cardRect.bottom - opts.cardRect.top } as DOMRect);
+  const pill = document.createElement('div');
+  pill.className = 'ct-kanban-dispatch';
+  pill.getBoundingClientRect = () => ({ left: 140, top: 740, right: 1140, bottom: 788, width: 1000, height: 48 } as DOMRect);
+  if (opts.sheet) {
+    const sh = document.createElement('div');
+    sh.className = 'ct-orch-sheet';
+    sh.getBoundingClientRect = () => ({ ...opts.sheet!, width: opts.sheet!.right - opts.sheet!.left, height: opts.sheet!.bottom - opts.sheet!.top } as DOMRect);
+    pill.appendChild(sh);
+  }
+  root.appendChild(pill);
+  return { board, scrollTop: () => top, scrollLeft: () => left };
+}
+
+describe('KanbanView.focusCard scrolls the board out from under the sheet and pill (QA D1)', () => {
+  it('a card hidden behind the sheet is scrolled up into the uncovered region; the highlight is immediate', () => {
+    vi.useFakeTimers();
+    reduceMotion(true);
+    const { view, card } = make();
+    const el = card('t1');
+    const g = geometry(view, el, { cardRect: { left: 400, top: 400, right: 660, bottom: 560 }, sheet: { left: 140, top: 230, right: 1140, bottom: 730 } });
+    view.focusCard('t1', { scroll: true, flash: false });
+    expect(el.classList.contains('ct-kanban-card-linked')).toBe(true);
+    expect(g.scrollTop()).toBe(0); // not before the hover intent
+    vi.advanceTimersByTime(INTENT_MS);
+    // the card's bottom (560) must end at or above the sheet top (230): it moved up by >= 330, i.e. the board scrolled down
+    expect(g.scrollTop()).toBeGreaterThanOrEqual(330);
+  });
+
+  it('a card already clear of the overlays does not scroll', () => {
+    vi.useFakeTimers();
+    reduceMotion(true);
+    const { view, card } = make();
+    const el = card('t1');
+    const g = geometry(view, el, { cardRect: { left: 300, top: 20, right: 560, bottom: 200 }, sheet: { left: 140, top: 230, right: 1140, bottom: 730 } });
+    view.focusCard('t1', { scroll: true, flash: false });
+    vi.advanceTimersByTime(INTENT_MS);
+    expect(g.scrollTop()).toBe(0);
+    expect(g.scrollLeft()).toBe(0);
+  });
+
+  it('leaving before the hover intent elapses cancels the scroll; moving to another link replaces it; onClose cancels it', async () => {
+    vi.useFakeTimers();
+    reduceMotion(true);
+    const { view, card } = make();
+    const el = card('t1');
+    const g = geometry(view, el, { cardRect: { left: 400, top: 400, right: 660, bottom: 560 }, sheet: { left: 140, top: 230, right: 1140, bottom: 730 } });
+    view.focusCard('t1', { scroll: true, flash: false });
+    vi.advanceTimersByTime(INTENT_MS - 1);
+    view.clearCardFocus();
+    vi.advanceTimersByTime(1000);
+    expect(g.scrollTop()).toBe(0);
+    view.focusCard('t1', { scroll: true, flash: false });
+    await view.onClose();
+    vi.advanceTimersByTime(1000);
+    expect(g.scrollTop()).toBe(0);
+  });
+
+  it('adds scroll room below the cards while linked (so a card at the end of its column can still rise above the sheet) and removes it on clear', () => {
+    vi.useFakeTimers();
+    reduceMotion(true);
+    const { view, card } = make();
+    const el = card('t1');
+    const g = geometry(view, el, { cardRect: { left: 400, top: 400, right: 660, bottom: 560 }, sheet: { left: 140, top: 230, right: 1140, bottom: 730 } });
+    view.focusCard('t1', { scroll: true, flash: false });
+    vi.advanceTimersByTime(INTENT_MS);
+    expect(g.board.classList.contains('ct-kanban-clearing')).toBe(true);
+    expect(g.board.style.getPropertyValue('--ct-card-clearance')).toMatch(/^\d+px$/);
+    view.clearCardFocus();
+    expect(g.board.classList.contains('ct-kanban-clearing')).toBe(false);
   });
 });

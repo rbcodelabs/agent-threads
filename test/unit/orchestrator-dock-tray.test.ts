@@ -711,3 +711,59 @@ describe('the transcript stays pinned across the tray appearing / disappearing',
     expect(s.top()).toBe(100);
   });
 });
+
+
+describe('QA O1: the heading count is the dot count', () => {
+  it('"Needs you (N)" equals the number the dot tooltip reports as needing you (Needs-you lane + Awaiting lane, failures excluded)', () => {
+    const t = setup({ specs: [...DEFAULT, { id: 'f', title: 'Failed', kind: 'failed' }] });
+    const heading = Number(/\((\d+)\)/.exec(t.q('.ct-orch-tray-title')!.textContent!)![1]);
+    const dot = Number(/(\d+) needs? you/.exec(t.q('[data-testid="orchestrator-dot"]')!.getAttribute('title')!)![1]);
+    expect(heading).toBe(3);
+    expect(heading).toBe(dot);
+  });
+});
+
+describe('QA O3: repeated clicks resolve exactly once', () => {
+  it('three SYNCHRONOUS clicks on one button in one task: one resolvePermission call', async () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    t.manager.resolvePermission.mockImplementation(() => {}); // the prompt stays pending (the worst case)
+    const allow = t.btn('p', 'Allow')!;
+    allow.click(); allow.click(); allow.click();
+    await flush();
+    expect(t.manager.resolvePermission).toHaveBeenCalledTimes(1);
+  });
+
+  it('three clicks across microtasks: still one call', async () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    t.manager.resolvePermission.mockImplementation(() => {});
+    const allow = t.btn('p', 'Allow')!;
+    allow.click();
+    await Promise.resolve(); allow.click();
+    await Promise.resolve(); await Promise.resolve(); allow.click();
+    expect(t.manager.resolvePermission).toHaveBeenCalledTimes(1);
+  });
+
+  it('clicking different buttons of the same card in one task: one call (Deny then Allow)', () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    t.manager.resolvePermission.mockImplementation(() => {});
+    t.btn('p', 'Deny')!.click(); t.btn('p', 'Allow')!.click(); t.btn('p', 'Always')!.click();
+    expect(t.manager.resolvePermission).toHaveBeenCalledTimes(1);
+    expect(t.manager.resolvePermission).toHaveBeenCalledWith('p', false);
+  });
+});
+
+describe('QA D2: the heading bar (title + Show more / fewer) is one sticky unit above the list', () => {
+  const five: Spec[] = Array.from({ length: 5 }, (_, i) => ({ id: `t${i}`, title: `Thread ${i}`, kind: 'permission' as const, tool: 'Bash', detail: `cmd ${i}` }));
+  it('the heading and the toggle share .ct-orch-tray-bar, which precedes the list', () => {
+    const t = setup({ specs: five });
+    const bar = t.q('.ct-orch-tray-bar')!;
+    expect(bar.querySelector('.ct-orch-tray-title')).toBeTruthy();
+    expect(bar.querySelector('.ct-orch-tray-toggle')).toBeTruthy();
+    expect(bar.nextElementSibling).toBe(t.q('.ct-orch-tray-list'));
+  });
+  it('three or fewer: the bar has just the heading', () => {
+    const t = setup();
+    expect(t.q('.ct-orch-tray-bar .ct-orch-tray-toggle')).toBeNull();
+    expect(t.q('.ct-orch-tray-bar .ct-orch-tray-title')).toBeTruthy();
+  });
+});

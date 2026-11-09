@@ -290,3 +290,98 @@ test.describe('orchestrator tray — approvals (functional, no baselines)', () =
     for (const [sel, r] of Object.entries(ratios)) expect(r, sel).toBeGreaterThanOrEqual(4.5);
   });
 });
+
+
+// ── QA D1: the highlighted card must not be hidden behind the sheet / pill ───────────────────────────────────────────
+const TITLES = [
+  'Kanban folder swimlanes', 'Migrate auth tokens to short-lived JWTs', 'Add rate limiting to /v1/search', 'Draft Q3 planning notes',
+  'Fix auth middleware 401s', 'Relay reconnect backoff', 'Mobile layout polish', 'Add "why this place" provenance layer',
+];
+
+test.describe('orchestrator tray — hovered card is scrolled OUT from under the sheet and pill (QA D1)', () => {
+  for (const mode of ['status', 'folder', 'project', 'gallery'] as const) {
+    for (const { label, size } of SIZES) {
+      test(`${mode} grouping @ ${label}`, async ({ page }) => {
+        await page.emulateMedia({ reducedMotion: 'reduce' }); // instant scroll: deterministic geometry
+        await open(page, size, '1', 'idle');
+        if (mode !== 'status') await page.evaluate((m) => (window as any).__setGroupBy(m), mode);
+        await page.evaluate((titles) => (window as any).__orchSay(titles.map((t: string) => `[[thread:${t}]]`).join(' · ')), TITLES);
+        await openSheet(page, size);
+        const links = page.locator('.ct-orch-sheet a.ct-thread-link');
+        const n = await links.count();
+        expect(n).toBeGreaterThanOrEqual(6);
+        let checked = 0;
+        for (let i = 0; i < n; i++) {
+          await links.nth(i).scrollIntoViewIfNeeded();
+          await links.nth(i).hover();
+          await page.waitForTimeout(260); // hover intent (120ms) + the scroll
+          const m = await page.evaluate(() => {
+            const card = document.querySelector('.ct-kanban-card-linked') as HTMLElement | null;
+            if (!card) return null; // no layout box in this grouping (e.g. not a featured gallery card): nothing to verify
+            const R = (el: Element) => { const b = el.getBoundingClientRect(); return { left: b.left, top: b.top, right: b.right, bottom: b.bottom }; };
+            const c = R(card);
+            const board = R(document.querySelector('.ct-agents-list')!);
+            const obs = [document.querySelector('.ct-orch-sheet:not([hidden])'), document.querySelector('.ct-kanban-dispatch')].filter(Boolean).map((e) => R(e!));
+            const area = (c.right - c.left) * (c.bottom - c.top);
+            let covered = 0;
+            for (const o of obs) { const iw = Math.min(c.right, o.right) - Math.max(c.left, o.left); const ih = Math.min(c.bottom, o.bottom) - Math.max(c.top, o.top); if (iw > 0 && ih > 0) covered += iw * ih; }
+            const minTop = Math.min(...obs.map((o) => o.top));
+            const uncoveredH = minTop - board.top;
+            const tall = (c.bottom - c.top) > uncoveredH;
+            // top-left corner visible: inside the board and above every obstacle
+            const cornerOk = c.top >= board.top - 1 && c.top < minTop && c.left < board.right && c.right > board.left;
+            return { frac: covered / area, tall, cornerOk, inBoardH: c.left >= board.left - 1 && c.right <= board.right + 1, title: card.textContent?.slice(0, 40) };
+          });
+          if (!m) continue;
+          checked++;
+          if (m.tall) expect(m.cornerOk, `tall card ${m.title}: top must be uncovered`).toBe(true);
+          else {
+            expect(m.frac, `${m.title} covered`).toBeLessThanOrEqual(0.05);
+            expect(m.inBoardH || m.frac === 0, `${m.title} horizontally on the board`).toBe(true);
+          }
+          await page.mouse.move(2, 2);
+        }
+        expect(checked, 'at least some cards were verified in this grouping').toBeGreaterThanOrEqual(mode === 'gallery' ? 1 : 5);
+      });
+    }
+  }
+
+  test('the 60-trial repro: ?orch=idle&tx=empty&tray=1, link to Kanban folder swimlanes, hover @ 1280x800', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.setViewportSize(DESKTOP);
+    await page.goto(`${kanbanUrl}?orch=idle&tx=empty&tray=1`);
+    await page.waitForSelector('.ct-kanban-dispatch .ct-orch-dock');
+    await page.evaluate(() => (window as any).__orchSay('[[thread:Kanban folder swimlanes]]'));
+    await openSheet(page, DESKTOP);
+    await page.locator('.ct-orch-sheet a.ct-thread-link').first().hover();
+    await page.waitForTimeout(300);
+    const covered = await page.evaluate(() => {
+      const c = document.querySelector('.ct-kanban-card-linked')!.getBoundingClientRect();
+      const s = document.querySelector('.ct-orch-sheet')!.getBoundingClientRect();
+      const iw = Math.min(c.right, s.right) - Math.max(c.left, s.left); const ih = Math.min(c.bottom, s.bottom) - Math.max(c.top, s.top);
+      return iw > 0 && ih > 0 ? (iw * ih) / (c.width * c.height) : 0;
+    });
+    expect(covered).toBeLessThanOrEqual(0.05);
+  });
+});
+
+// ── QA D2: the tray heading (+ Show more / fewer) stays visible when the tray scrolls ───────────────────────────────
+test.describe('orchestrator tray — sticky heading (QA D2)', () => {
+  test('narrow, expanded: the "Needs you (N)" heading and its toggle stay at the top of the scrolling tray @ 390x844', async ({ page }) => {
+    await open(page, NARROW, 'many');
+    await openSheet(page, NARROW);
+    await tray(page).getByRole('button', { name: 'Show 2 more' }).click();
+    await expect(tray(page).locator('.ct-orch-tray-card')).toHaveCount(5);
+    const scrolls = await tray(page).evaluate((el) => { el.scrollTop = el.scrollHeight; return el.scrollHeight > el.clientHeight; });
+    expect(scrolls, 'the tray really scrolls here').toBe(true);
+    const box = (await tray(page).boundingBox())!;
+    const head = (await tray(page).getByRole('heading', { name: 'Needs you (5)' }).boundingBox())!;
+    expect(head.y).toBeGreaterThanOrEqual(box.y - 1);
+    expect(head.y + head.height).toBeLessThanOrEqual(box.y + box.height);
+    const toggle = (await tray(page).getByRole('button', { name: 'Show fewer' }).boundingBox())!;
+    expect(toggle.y).toBeGreaterThanOrEqual(box.y - 1);
+    // nothing paints over the heading
+    const topmost = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.className ?? '', { x: head.x + 8, y: head.y + head.height / 2 });
+    expect(topmost).toMatch(/ct-orch-tray-(title|bar)/);
+  });
+});
