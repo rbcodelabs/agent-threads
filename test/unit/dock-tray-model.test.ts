@@ -16,6 +16,11 @@ describe('trayItems', () => {
     expect(trayItems(items).map((i) => i.threadId)).toEqual(['a', 'b', 'c']);
   });
 
+  it('puts permissions first (inline-actionable), keeping attention order within each group', () => {
+    const items = [item('q1', 'question'), item('p1', 'permission'), item('pl', 'plan'), item('p2', 'permission'), item('q2', 'question')];
+    expect(trayItems(items).map((i) => i.threadId)).toEqual(['p1', 'p2', 'q1', 'pl', 'q2']);
+  });
+
   it('has exactly needsYouCount(...) entries, so the heading matches the dot and the board lane', () => {
     const items = [item('a', 'permission'), item('f', 'failed'), item('b', 'question'), item('f2', 'failed')];
     expect(trayItems(items)).toHaveLength(needsYouCount(items));

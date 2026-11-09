@@ -180,15 +180,15 @@ test.describe('orchestrator tray — approvals (functional, no baselines)', () =
     await open(page, DESKTOP);
     await openSheet(page, DESKTOP);
     await field(page).focus();
-    await page.evaluate(() => (window as any).__addPermission('k-threads-ready', 'Write', JSON.stringify({ file_path: '/r/a.ts' })));
-    await expect(page.locator('.ct-orch-live')).toHaveText('Mobile layout polish needs approval');
+    await page.evaluate(() => (window as any).__addPermission('k-acme-tasks', 'Write', JSON.stringify({ file_path: '/r/a.ts' })));
+    await expect(page.locator('.ct-orch-live')).toHaveText('Migrate auth tokens to short-lived JWTs needs approval');
     await expect(field(page)).toBeFocused();
     await expect(page.locator('.ct-orch-live')).toHaveAttribute('aria-live', 'polite');
   });
 
   test('a request arriving while the sheet is CLOSED does not open it @ 1280x800', async ({ page }) => {
     await open(page, DESKTOP);
-    await page.evaluate(() => (window as any).__addPermission('k-threads-ready', 'Write', '{}'));
+    await page.evaluate(() => (window as any).__addPermission('k-acme-tasks', 'Write', '{}'));
     await expect(page.locator('.ct-orch-dot')).toHaveClass(/ct-orch-dot-attention/);
     await expect(sheet(page)).toBeHidden();
   });

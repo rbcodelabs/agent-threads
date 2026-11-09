@@ -167,14 +167,15 @@ export class DockTray {
   private buildCard(entry: TrayEntry): HTMLElement {
     const { item, permission } = entry;
     const li = this.listEl!.createEl('li', { cls: 'ct-orch-tray-card', attr: { 'data-thread-id': item.threadId, 'data-kind': item.kind } });
-    const head = li.createDiv('ct-orch-tray-head');
+    const main = li.createDiv('ct-orch-tray-main');
+    const head = main.createDiv('ct-orch-tray-head');
     const icon = head.createSpan({ cls: 'ct-orch-tray-icon', attr: { 'aria-hidden': 'true' } });
     setIcon(icon, ICONS[item.kind]);
     head.createSpan({ cls: 'ct-orch-tray-name', text: item.title, attr: { title: item.title } });
 
     const card = this.deps.permissionCard;
     if (item.kind === 'permission' && permission && card) {
-      const tool = li.createDiv('ct-orch-tray-tool');
+      const tool = main.createDiv('ct-orch-tray-tool');
       tool.createSpan({ cls: 'ct-agents-permission-tool', text: formatToolName(permission.toolName) });
       if (permission.detail) tool.createSpan({ cls: 'ct-agents-permission-detail ct-orch-tray-detail', text: summarizePermissionDetail(permission.detail) });
       const actions = li.createDiv('ct-orch-tray-actions');
@@ -190,7 +191,7 @@ export class DockTray {
       }
       return li;
     }
-    li.createDiv({ cls: 'ct-orch-tray-note', text: NOTES[item.kind] });
+    main.createDiv({ cls: 'ct-orch-tray-note', text: NOTES[item.kind] });
     const actions = li.createDiv('ct-orch-tray-actions');
     const btn = actions.createEl('button', {
       cls: 'ct-orch-tray-handoff',

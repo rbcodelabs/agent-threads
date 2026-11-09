@@ -15,9 +15,14 @@ export type TrayItem = AttentionItem & { kind: TrayKind };
 /** More than this many items collapse behind "Show N more". */
 export const TRAY_COLLAPSE_AT = 3;
 
-/** Everything awaiting the user, in attentionItems (board) order. Failures are triage, not approvals. */
+/**
+ * Everything awaiting the user (the same set the dot and the board's Needs-you lane count). Failures are triage, not
+ * approvals. Permissions come first (the only inline-actionable kind, so they stay visible when the tray collapses);
+ * within a kind the attentionItems (board) order is kept.
+ */
 export function trayItems(items: readonly AttentionItem[]): TrayItem[] {
-  return items.filter((i): i is TrayItem => i.kind !== 'failed');
+  const awaiting = items.filter((i): i is TrayItem => i.kind !== 'failed');
+  return [...awaiting.filter((i) => i.kind === 'permission'), ...awaiting.filter((i) => i.kind !== 'permission')];
 }
 
 export function visibleTrayItems<T>(items: readonly T[], expanded: boolean): { shown: T[]; hidden: number } {
