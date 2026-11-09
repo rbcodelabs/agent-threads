@@ -7189,9 +7189,9 @@ textarea.ct-settings-wide-input {
 .ct-orch-status .ct-orch-reason { white-space: normal; overflow: visible; text-overflow: clip; line-height: 18px; padding: 6px 0; }
 .ct-orch-field[data-body="offline"] .ct-orch-body,
 .ct-orch-field[data-body="error"] .ct-orch-body { justify-content: space-between; }
-/* The pill grows upward from its bottom edge; keep the board's scroll end clear of it (up to 3 wrapped lines). */
-.ct-agents-root:has(.ct-orch-field:is([data-body="offline"], [data-body="error"])) .ct-kanban-board { padding-bottom: 124px; }
-.ct-agents-root:has(.ct-orch-status:not([hidden])) .ct-kanban-board { padding-bottom: 168px; }
+/* The pill grows upward from its bottom edge when the reason wraps or the narrow status row shows. KanbanView measures it
+   (--ct-pill-clearance = pill height + 36px offset + 4px); the resting 76px is the floor so the idle board is unchanged. */
+.ct-agents-root .ct-kanban-board { padding-bottom: max(76px, var(--ct-pill-clearance, 0px)); }
 .ct-orch-dock button.ct-orch-action {
   flex: none;
   padding: 3px 10px;

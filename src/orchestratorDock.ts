@@ -69,6 +69,8 @@ const REFRESH_EVENTS: ReadonlySet<string> = new Set([
   'thread_created', 'thread_deleted', 'threads_loaded', 'projects_changed', 'wakeup_changed',
   'reviewed_changed', 'status_tags', 'summary_updated', 'agent_runs_changed', 'task_notification',
   'background_tasks_pending', 'user_message_added', 'message',
+  // A remote thread's turnInFlight / queue flipped: isRunning() (ring, working) can change with no paired done/streaming_start.
+  'remote_pending_changed',
 ]);
 
 const MAX_ERROR_CHARS = 60;
@@ -161,7 +163,7 @@ export class OrchestratorDock {
     if (this.destroyed || !this.rootEl) return;
     if (this.currentMode === 'orb') { void this.handOff(); return; }
     const input = this.inputEl;
-    if (input && document.activeElement === input) { input.select(); return; }
+    if (input && input.ownerDocument.activeElement === input) { input.select(); return; }
     (input ?? this.actionEl)?.focus();
   }
 
@@ -196,6 +198,7 @@ export class OrchestratorDock {
       // No sheet in P2 to "read" a reply in (the hand-off opens the full thread); P3 wires unreadState().
       hasUnreadReply: false,
     });
+    const previousMode = this.currentMode;
     this.currentMode = this.deps.mode();
 
     const root = this.rootEl;
@@ -216,6 +219,8 @@ export class OrchestratorDock {
 
     this.renderBody(thread);
     this.placeBody();
+    // A draft edited while the field was hidden (orb mode) was measured at scrollHeight 0: re-measure now it is visible.
+    if (previousMode === 'orb' && this.currentMode === 'pill' && this.inputEl) this.autosize(this.inputEl);
   }
 
   /** Pill: the body lives in the field. Orb + none/error/offline: it moves to the full-width status row above the pill's row. */
@@ -377,8 +382,9 @@ export class OrchestratorDock {
   private async setUp(): Promise<void> {
     if (this.settingUp) return;
     this.settingUp = true;
+    // aria-disabled (not `disabled`): a disabled button drops keyboard focus, so a failed setup would strand the user.
     const btn = this.actionEl;
-    if (btn) btn.disabled = true;
+    btn?.setAttribute('aria-disabled', 'true');
     try {
       await this.deps.ensureOrchestrator();
     } catch (err) {
@@ -386,7 +392,7 @@ export class OrchestratorDock {
       return;
     } finally {
       this.settingUp = false;
-      if (btn) btn.disabled = false;
+      btn?.removeAttribute('aria-disabled');
       // Even on failure: ensureOrchestrator may have persisted the id before throwing.
       this.refresh();
     }

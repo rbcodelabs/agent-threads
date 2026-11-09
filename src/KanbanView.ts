@@ -35,6 +35,9 @@ import { vaultResourceUrl } from './imageSrc';
 
 export const KANBAN_VIEW_TYPE = 'claude-threads:kanban';
 
+/** The floating pill at rest is ~48px (desktop) / ~58px (44px mobile targets); taller means a wrapped reason or the status row. */
+const RESTING_PILL_MAX_PX = 62;
+
 export function isKanbanThread(thread: Pick<Thread, 'background'>): boolean {
   return !thread.background;
 }
@@ -106,6 +109,7 @@ export class KanbanView extends ItemView {
   private dock: OrchestratorDock | null = null;
   private dockMode: DockMode = 'pill';
   private dockResizeObserver: ResizeObserver | null = null;
+  private pillObserver: ResizeObserver | null = null;
   private searchBarEl!: HTMLElement;
   private searchInputEl!: HTMLInputElement;
   private searchClearBtn!: HTMLButtonElement;
@@ -199,6 +203,8 @@ export class KanbanView extends ItemView {
     this.unsubscribe?.();
     this.dockResizeObserver?.disconnect();
     this.dockResizeObserver = null;
+    this.pillObserver?.disconnect();
+    this.pillObserver = null;
     this.dock?.destroy();
     this.dock = null;
     for (const timer of this.activityTimers.values()) clearTimeout(timer);
@@ -365,6 +371,7 @@ export class KanbanView extends ItemView {
    */
   private mountOrchestratorDock(root: HTMLElement, metaRow: HTMLElement): void {
     this.dockResizeObserver?.disconnect();
+    this.pillObserver?.disconnect();
     this.dock?.destroy();
     this.dockMode = dockModeForWidth(root.clientWidth);
     const plugin = this.plugin;
@@ -397,6 +404,18 @@ export class KanbanView extends ItemView {
         this.dock?.relayout();
       });
       this.dockResizeObserver.observe(root);
+      // The pill grows (wrapped reason, narrow status row): keep the board's scroll end clear of it, driven by the
+      // measured height rather than fixed paddings. Only set when taller than the resting pill (see styles.css).
+      const pill = metaRow.parentElement;
+      if (pill) {
+        this.pillObserver?.disconnect();
+        // Above RESTING_PILL_MAX_PX the pill has grown; at rest the variable is unset so the board keeps its 76px.
+        this.pillObserver = new ResizeObserver(() => {
+          if (pill.offsetHeight > RESTING_PILL_MAX_PX) root.style.setProperty('--ct-pill-clearance', `${pill.offsetHeight + 36 + 4}px`);
+          else root.style.removeProperty('--ct-pill-clearance');
+        });
+        this.pillObserver.observe(pill);
+      }
     }
   }
 
