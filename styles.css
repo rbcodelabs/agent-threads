@@ -7483,7 +7483,8 @@ textarea.ct-settings-wide-input {
 }
 
 /* Screen-reader-only live region (throttled announcements). */
-.ct-orch-live { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.ct-orch-live,
+.ct-orch-tray-live { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 .ct-orch-sheet button:focus-visible,
 .ct-orch-peek button:focus-visible,
@@ -7565,9 +7566,9 @@ textarea.ct-settings-wide-input {
 .ct-orch-tray-icon { flex: none; display: inline-flex; color: var(--color-orange, var(--text-warning)); }
 .ct-orch-tray-icon svg { width: 14px; height: 14px; }
 .ct-orch-tray-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-ui-small); font-weight: 600; color: var(--text-normal); }
-.ct-orch-tray-tool { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ct-orch-tray-tool { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
 .ct-orch-tray-tool .ct-agents-permission-tool { flex: none; margin-right: 0; }
-.ct-orch-tray-tool .ct-orch-tray-detail { min-width: 0; color: color-mix(in srgb, var(--text-muted) 40%, var(--text-normal)); }
+.ct-orch-tray-tool .ct-orch-tray-detail { min-width: 0; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; color: color-mix(in srgb, var(--text-muted) 40%, var(--text-normal)); }
 .ct-orch-tray-note { font-size: var(--font-ui-smaller); color: color-mix(in srgb, var(--text-muted) 40%, var(--text-normal)); }
 .ct-orch-tray-actions { flex: none; display: flex; flex-wrap: wrap; gap: 6px; }
 /* Compound selectors outrank the pill's button chrome strip (`.ct-kanban-dispatch button:not(.ct-new-thread-btn)`). */

@@ -82,6 +82,9 @@ export class DockSheet {
   readonly composerSlot: HTMLElement;
   /** The Needs-you tray lives here: inside the dialog (so inside the narrow focus trap), between the transcript and the composer. */
   readonly trayHost: HTMLElement;
+  /** Needs-you arrivals have their OWN polite region: the one below carries streaming / finished-reply text and identical repeats are silent. */
+  private readonly trayLiveEl: HTMLElement;
+  private trayLiveTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly scrollEl: HTMLElement;
   private readonly logEl: HTMLElement;
   private readonly activityHost: HTMLElement;
@@ -152,6 +155,7 @@ export class DockSheet {
     this.trayHost = this.el.createDiv('ct-orch-tray-slot');
     this.composerSlot = this.el.createDiv('ct-orch-sheet-composer');
     this.liveEl = this.el.createDiv({ cls: 'ct-orch-live', attr: { 'aria-live': 'polite', 'aria-atomic': 'true' } });
+    this.trayLiveEl = this.el.createDiv({ cls: 'ct-orch-tray-live', attr: { 'aria-live': 'polite', 'aria-atomic': 'true' } });
 
     this.logEl.addEventListener('click', (e) => this.onLogClick(e));
     // Delegated, so rows rebuilt by the keyed reconcile / markdown swap need no re-binding.
@@ -345,6 +349,27 @@ export class DockSheet {
       this.announceTimer = null;
       if (this.pendingAnnounce !== null) this.writeLive(this.pendingAnnounce);
     }, ANNOUNCE_MIN_INTERVAL_MS - (now - this.lastAnnounceAt));
+  }
+
+  /** Tray announcement: cleared first, then set on the next tick, so the same text twice is still read. */
+  announceTray(text: string): void {
+    if (this.destroyed) return;
+    if (this.trayLiveTimer) clearTimeout(this.trayLiveTimer);
+    this.trayLiveEl.textContent = '';
+    this.trayLiveTimer = setTimeout(() => {
+      this.trayLiveTimer = null;
+      if (!this.destroyed) this.trayLiveEl.textContent = text;
+    }, 0);
+  }
+
+  /**
+   * Runs `fn` (which can change the transcript's height: the tray appearing / disappearing) and keeps the transcript on
+   * the latest message if it was there before. Someone who scrolled up is left where they are.
+   */
+  keepPinned(fn: () => void): void {
+    const wasPinned = this.stick;
+    fn();
+    if (wasPinned && this.opened && !this.destroyed) { this.scrollToBottom(); this.queueScroll(); }
   }
 
   private writeLive(text: string): void {

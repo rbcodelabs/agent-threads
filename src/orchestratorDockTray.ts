@@ -25,11 +25,18 @@ export interface TrayEntry {
 }
 
 export interface TrayDeps {
-  manager: Pick<ThreadManager, 'resolvePermission' | 'getRemoteScope'>;
+  /**
+   * Resolution goes through resolvePermission exactly like the board's cards (also for remote threads: the
+   * ...ByRequestId variant is the relay client's path for mobile clients, not a card path). getPendingPermission feeds
+   * the stale-click guard.
+   */
+  manager: Pick<ThreadManager, 'resolvePermission' | 'getRemoteScope' | 'getPendingPermission'>;
   permissionCard?: Omit<PermissionButtonDeps, 'manager' | 'hostExecAllowAlways'> & { hostExecAllowAlways(): boolean };
   openThread(threadId: string): void;
   /** Polite screen-reader text for cards that arrived after the tray was first shown. */
   announce(text: string): void;
+  /** A click found its request no longer pending: re-derive the dock so the card shows what is pending now (or leaves). */
+  refresh(): void;
   /** Where focus goes when the focused card disappears and no other card is left. */
   focusFallback(): void;
 }
@@ -146,10 +153,12 @@ export class DockTray {
 
   private announceNew(entries: readonly TrayEntry[]): void {
     this.lastEntries = entries;
-    const now = new Set(entries.map((e) => `${e.item.threadId}|${e.item.kind}`));
+    const idOf = (e: TrayEntry): string => `${e.item.threadId}|${e.item.kind}|${e.permission?.promptId ?? ''}`;
+    const now = new Set(entries.map(idOf));
     if (this.primed) {
-      const fresh = entries.filter((e) => !this.known.has(`${e.item.threadId}|${e.item.kind}`));
-      if (fresh.length > 0) this.deps.announce(fresh.map((e) => announcementFor(e.item)).join('. '));
+      // A new PROMPT on a thread that already had a card (queued permissions) is news; an unchanged card is not.
+      const fresh = entries.filter((e) => !this.known.has(idOf(e)));
+      if (fresh.length > 0) this.deps.announce(joinAnnouncements(fresh.map((e) => announcementFor(e.item))));
     }
     this.known = now;
     this.primed = true;
@@ -177,16 +186,38 @@ export class DockTray {
     if (item.kind === 'permission' && permission && card) {
       const tool = main.createDiv('ct-orch-tray-tool');
       tool.createSpan({ cls: 'ct-agents-permission-tool', text: formatToolName(permission.toolName) });
-      if (permission.detail) tool.createSpan({ cls: 'ct-agents-permission-detail ct-orch-tray-detail', text: summarizePermissionDetail(permission.detail) });
+      const truncated = isTruncatedDetail(permission.detail);
+      if (permission.detail) {
+        // The full text is always reachable (title) and wraps to a few lines instead of a one-line ellipsis.
+        tool.createSpan({ cls: 'ct-agents-permission-detail ct-orch-tray-detail', text: summarizePermissionDetail(permission.detail), attr: { title: permission.detail } });
+      }
       const actions = li.createDiv('ct-orch-tray-actions');
-      appendPermissionButtons(actions, item.threadId, permission, {
+      const threadId = item.threadId;
+      appendPermissionButtons(actions, threadId, permission, {
         manager: this.deps.manager,
         getSettings: card.getSettings,
         saveSettings: card.saveSettings,
         hostExecAllowAlways: card.hostExecAllowAlways(),
+        guard: {
+          getPending: () => this.deps.manager.getPendingPermission(threadId),
+          onStale: () => this.deps.refresh(),
+          setBusy: (busy) => {
+            li.toggleAttribute('aria-busy', busy);
+            for (const b of Array.from(actions.querySelectorAll('button'))) b.disabled = busy;
+          },
+        },
       });
       const toolLabel = formatToolName(permission.toolName);
-      for (const btn of Array.from(actions.querySelectorAll('button'))) {
+      if (truncated) {
+        // What the user cannot read in full is not approved blind: Deny stays, approving happens in the thread.
+        actions.querySelectorAll('.ct-permission-allow, .ct-permission-always').forEach((b) => b.remove());
+        const review = actions.createEl('button', {
+          cls: 'ct-orch-tray-handoff', text: 'Review in thread',
+          attr: { type: 'button', 'aria-label': `Review the full ${toolLabel} request for ${item.title} in its thread` },
+        });
+        review.addEventListener('click', (e) => { e.stopPropagation(); this.deps.openThread(threadId); });
+      }
+      for (const btn of Array.from(actions.querySelectorAll('button.ct-permission-btn'))) {
         btn.setAttribute('aria-label', `${btn.textContent ?? ''} ${toolLabel} for ${item.title}`);
       }
       return li;
@@ -203,6 +234,18 @@ export class DockTray {
   }
 }
 
+/** A new prompt (even with identical tool + detail) rebuilds the card, so a queued request never inherits the previous one's disabled / clicked buttons. */
 function cardKey(e: TrayEntry): string {
-  return `${e.item.kind}|${e.item.title}|${e.permission ? `${e.permission.toolName}|${e.permission.detail}` : '-'}`;
+  return `${e.item.kind}|${e.item.title}|${e.permission ? `${e.permission.toolName}|${e.permission.detail}|${e.permission.promptId ?? ''}` : '-'}`;
+}
+
+/** The summary shows at most ~120 characters: anything it had to cut is not approvable from the tray. */
+export function isTruncatedDetail(detail: string): boolean {
+  return summarizePermissionDetail(detail).endsWith('…');
+}
+
+/** Several arrivals at once: two named, the rest counted (one screen-reader utterance, not a wall of text). */
+export function joinAnnouncements(texts: string[]): string {
+  if (texts.length <= 2) return texts.join('. ');
+  return `${texts.slice(0, 2).join('. ')}, and ${texts.length - 2} more need attention`;
 }

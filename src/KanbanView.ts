@@ -98,6 +98,9 @@ const PROJECT_SECTION_MAP: Record<ThreadRowState, { label: string; state: RowSta
   empty:           { label: 'Ready', state: 'empty' },
 };
 
+/** Pointer must rest on a thread link this long before the board scrolls to its card. */
+const CARD_HOVER_INTENT_MS = 120;
+
 /** `matchMedia` is absent in some test hosts: treat that as "motion is fine". */
 function prefersReducedMotion(): boolean {
   return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -128,6 +131,7 @@ export class KanbanView extends ItemView {
   private rowEls: Map<string, HTMLElement> = new Map();
   /** Card highlighted by a hovered / focused thread link in the dock's reply sheet. Tracked by id: render() rebuilds rowEls. */
   private linkedCardId: string | null = null;
+  private cardScrollTimer: ReturnType<typeof setTimeout> | null = null;
   private taskEls: Map<string, HTMLElement> = new Map();
   private summaryEls: Map<string, HTMLElement> = new Map();
   /** Per-card orchestrator-inbox blocks, patched in place by their own events. */
@@ -456,22 +460,56 @@ export class KanbanView extends ItemView {
    */
   focusCard(threadId: string, opts: { scroll: boolean; flash: boolean }): boolean {
     const el = this.rowEls.get(threadId);
-    if (!el) return false;
+    // No layout box (a collapsed lane, display:none): nothing to highlight or scroll to.
+    if (!el || el.getClientRects().length === 0) return false;
     if (this.linkedCardId && this.linkedCardId !== threadId) this.clearCardFocus();
+    this.cancelCardScroll();
     this.linkedCardId = threadId;
     const reduced = prefersReducedMotion();
     el.addClass('ct-kanban-card-linked');
     el.toggleClass('ct-kanban-card-linked-flash', opts.flash && !reduced);
-    if (opts.scroll) el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', inline: 'center', block: 'nearest' });
+    // The highlight is immediate; the SCROLL waits for hover intent so sweeping the pointer across a list of links
+    // does not make the board lurch to every card on the way.
+    if (opts.scroll) {
+      this.cardScrollTimer = setTimeout(() => {
+        this.cardScrollTimer = null;
+        if (this.linkedCardId !== threadId || this.rowEls.get(threadId) !== el || el.getClientRects().length === 0) return;
+        el.style.scrollMarginBottom = `${this.coveredBottomPx()}px`; // not under the pill / the open sheet
+        el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', inline: 'center', block: 'nearest' });
+      }, CARD_HOVER_INTENT_MS);
+    }
     return true;
   }
 
   clearCardFocus(): void {
+    this.cancelCardScroll();
     const id = this.linkedCardId;
     this.linkedCardId = null;
     const el = id ? this.rowEls.get(id) : undefined;
     el?.removeClass('ct-kanban-card-linked');
     el?.removeClass('ct-kanban-card-linked-flash');
+    if (el) el.style.scrollMarginBottom = '';
+  }
+
+  private cancelCardScroll(): void {
+    if (this.cardScrollTimer) clearTimeout(this.cardScrollTimer);
+    this.cardScrollTimer = null;
+  }
+
+  /** How much of the board's bottom edge the pill and the open reply sheet cover (+ a gap), so a scrolled-to card lands above them. */
+  private coveredBottomPx(): number {
+    const root = this.containerEl.children[1] as HTMLElement | undefined;
+    const pill = root?.querySelector<HTMLElement>('.ct-kanban-dispatch');
+    if (!root || !pill) return 0;
+    const sheet = pill.querySelector<HTMLElement>('.ct-orch-sheet:not([hidden])');
+    const top = Math.min(pill.getBoundingClientRect().top, sheet ? sheet.getBoundingClientRect().top : Infinity);
+    return Math.max(0, Math.round(root.getBoundingClientRect().bottom - top + 8));
+  }
+
+  /** Every place a card element is created registers it here, so a card rebuilt outside render() (gallery refresh) keeps the link highlight. */
+  private registerCard(threadId: string, el: HTMLElement): void {
+    this.rowEls.set(threadId, el);
+    if (threadId === this.linkedCardId) el.addClass('ct-kanban-card-linked');
   }
 
   /** After a full board rebuild the card element is new: re-apply the highlight (never scrolls). */
@@ -1080,7 +1118,7 @@ export class KanbanView extends ItemView {
         hasPending ? 'ct-kanban-card-permission' : '',
       ].filter(Boolean).join(' '),
     });
-    this.rowEls.set(thread.id, card);
+    this.registerCard(thread.id, card);
     card.toggleClass('ct-stale', this.manager.isRunStale(thread.id));
     // Record where this card lives so handleEvent can patch-vs-rebuild. The key
     // is the same combined bucket+group scopeKey the column was rendered under.
@@ -1293,7 +1331,7 @@ export class KanbanView extends ItemView {
     // event paths (active card, stale spinner, inbox patching, activity line,
     // patch-vs-rebuild placement) keep working unchanged.
     this.galleryCards.set(id, card);
-    this.rowEls.set(id, card.el);
+    this.registerCard(id, card.el);
     this.activityEls.set(id, card.messageEl);
     this.cardPlacements.set(id, this.computeCardPlacement(thread));
     card.el.toggleClass('ct-agents-row-active', id === this.activeThreadId);

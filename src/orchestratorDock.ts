@@ -148,6 +148,7 @@ export class OrchestratorDock {
   private seeded = false;
   private stopping = false;
   private attention: AttentionItem[] = [];
+  private trayEntries: TrayEntry[] = [];
 
   private bodyKind: BodyKind | null = null;
   private state: DockState = 'none';
@@ -249,7 +250,11 @@ export class OrchestratorDock {
   refresh(): void {
     if (this.destroyed || !this.rootEl) return;
     const { manager } = this.deps;
-    const threads = this.deps.listThreads();
+    const listed = this.deps.listThreads();
+    // The orchestrator needs the user too, even if the board's filter hides it (e.g. a peer plugin flagged it `background`).
+    const ownId = this.deps.getOrchestratorThreadId();
+    const own = ownId && !listed.some((t) => t.id === ownId) ? manager.getThread(ownId) : undefined;
+    const threads = own ? [...listed, own] : listed;
     const candidates: AttentionCandidate[] = threads.map((t) => ({
       threadId: t.id,
       title: t.title,
@@ -262,6 +267,7 @@ export class OrchestratorDock {
       },
     }));
     this.attention = attentionItems(candidates);
+    this.trayEntries = this.computeTrayEntries();
     const needsYou = needsYouCount(this.attention);
     const running = threads.filter((t) => manager.isRunning(t.id)).length;
 
@@ -438,7 +444,8 @@ export class OrchestratorDock {
       manager: this.deps.manager,
       permissionCard: this.deps.permissionCard,
       openThread: (threadId) => { void this.openQuietly(threadId); },
-      announce: (text) => this.sheet?.announce(text, true),
+      announce: (text) => this.sheet?.announceTray(text),
+      refresh: () => this.refresh(),
       focusFallback: () => { if (this.inputEl) this.inputEl.focus(); else this.sheet?.focusClose(); },
     });
     const peek = parent.createDiv({ cls: 'ct-orch-peek', attr: { role: 'status', 'data-testid': 'orchestrator-peek' } });
@@ -566,7 +573,7 @@ export class OrchestratorDock {
     const live = new Set(entries.map((e) => e.id));
     for (const pid of [...this.pickupIds]) if (!live.has(pid)) this.pickupIds.delete(pid); // rolled back
     // The tray gives the orchestrator's own permission real buttons, so the "waiting for a decision" notice would only repeat it.
-    const ownPermissionInTray = !!this.deps.permissionCard && !!manager.getPendingPermission(id);
+    const ownPermissionInTray = this.trayEntries.some((e) => e.item.threadId === id && !!e.permission);
     const blocked: SheetBlock = manager.hasPendingPlan(id) ? 'plan' : manager.hasPendingQuestion(id) ? 'question' : manager.hasPendingPermission(id) && !ownPermissionInTray ? 'permission' : null;
     const view: SheetView = {
       entries: entries.map((e) => ({ ...e, pickup: this.pickupIds.has(e.id) })),
@@ -584,17 +591,26 @@ export class OrchestratorDock {
     sheet.render(view);
   }
 
-  /** The Needs-you tray: every awaiting thread (the list the dot and the board lane count), permission cards with real buttons. */
-  private renderTray(): void {
-    const tray = this.tray;
-    if (!tray || !this.sheet?.isOpen) return;
+  /**
+   * The Needs-you tray's entries: every awaiting thread (the set the dot and the board's Needs-you lane count), the
+   * orchestrator's own included. Permissions are listed first (the only inline-actionable kind, so they stay visible
+   * when the tray collapses); within a kind the attentionItems (board) order is kept.
+   */
+  private computeTrayEntries(): TrayEntry[] {
     const { manager } = this;
-    const entries: TrayEntry[] = trayItems(this.attention).map((item) => ({
+    return trayItems(this.attention).map((item) => ({
       item,
       // Buttons only for a live permission that the host can persist an "Always" for; otherwise the card hands off.
       permission: item.kind === 'permission' && this.deps.permissionCard ? manager.getPendingPermission(item.threadId) : undefined,
     }));
-    tray.render(entries);
+  }
+
+  private renderTray(): void {
+    const tray = this.tray;
+    const sheet = this.sheet;
+    if (!tray || !sheet?.isOpen) return;
+    // The tray changes the transcript's height: stay on the latest message if we were on it.
+    sheet.keepPinned(() => tray.render(this.trayEntries));
   }
 
   private get manager(): OrchestratorDockDeps['manager'] { return this.deps.manager; }

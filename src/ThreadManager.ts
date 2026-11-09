@@ -244,7 +244,9 @@ export class ThreadManager {
   /** Threads draining rejected-plan feedback in FIFO order. */
   private releasingPlanFeedback = new Set<string>();
   private threadActivity: Map<string, string> = new Map();
-  private pendingPermissions: Map<string, { toolName: string; detail: string }> = new Map();
+  private pendingPermissions: Map<string, { toolName: string; detail: string; promptId?: number }> = new Map();
+  /** Monotonic per-prompt id: tells the prompt a UI showed from the next queued one with identical tool + detail. */
+  private permissionPromptSeq = 0;
   private permissionResolvers: Map<string, (allow: boolean) => void> = new Map();
   /**
    * Tail of each thread's permission-prompt chain. `pendingPermissions` and
@@ -1616,7 +1618,7 @@ export class ThreadManager {
 
   /** Shared by harness permission requests. */
   private async promptPermission(threadId: string, toolName: string, detail: string): Promise<boolean> {
-    this.pendingPermissions.set(threadId, { toolName, detail });
+    this.pendingPermissions.set(threadId, { toolName, detail, promptId: ++this.permissionPromptSeq });
     this.emit(threadId, { type: 'permission_request', toolName, detail });
     try {
       return await this.permissionHandler(threadId, toolName, detail);
@@ -1659,7 +1661,7 @@ export class ThreadManager {
     return this.pendingPermissions.has(threadId);
   }
 
-  getPendingPermission(threadId: string): { toolName: string; detail: string } | undefined {
+  getPendingPermission(threadId: string): { toolName: string; detail: string; promptId?: number } | undefined {
     return this.pendingPermissions.get(threadId);
   }
 

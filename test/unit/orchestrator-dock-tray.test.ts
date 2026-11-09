@@ -613,7 +613,8 @@ describe('announcements: their own region, re-announced, capped', () => {
     const seen: string[] = [];
     new MutationObserver(() => seen.push(t.live())).observe(t.q('.ct-orch-tray-live')!, { childList: true, characterData: true, subtree: true });
     t.resolveElsewhere('n');
-    t.addPermission({ id: 'n', title: 'Ship it', kind: 'permission' });
+    t.perms.set('n', { toolName: 'Bash', detail: '{}', promptId: 50 }); // a new prompt, same thread
+    t.emit('n', 'permission_request');
     await tick();
     expect(t.live()).toBe('Ship it needs approval');
     expect(seen).toContain(''); // cleared in between, so assistive tech sees a change
@@ -621,7 +622,8 @@ describe('announcements: their own region, re-announced, capped', () => {
 
   it('several arriving at once are capped: two named, the rest counted', async () => {
     const t = setup({ specs: [] });
-    for (let i = 0; i < 5; i++) t.addPermission({ id: `n${i}`, title: `T${i}`, kind: 'permission' });
+    for (let i = 0; i < 5; i++) { t.threads.push({ id: `n${i}`, title: `T${i}`, cwd: '/r', messages: [{ id: `m${i}`, role: 'assistant', content: 'x', timestamp: 0 }], createdAt: 0, updatedAt: 0, status: 'waiting', reviewed: true } as never); t.perms.set(`n${i}`, { toolName: 'Bash', detail: '{}', promptId: 100 + i }); }
+    t.emit('n0', 'permission_request'); // ONE refresh sees all five arrive
     await tick();
     const text = t.live();
     expect(text.length).toBeLessThan(120);
