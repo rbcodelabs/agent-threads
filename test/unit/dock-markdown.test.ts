@@ -201,7 +201,78 @@ describe('delta (a): code detection edge cases', () => {
 });
 
 describe('rewriteDockMarkup', () => {
-  it('is pure and leaves plain text alone', () => {
-    expect(rewriteDockMarkup('no links here')).toBe('no links here');
+  it('is pure: plain text is returned untouched with no links', () => {
+    expect(rewriteDockMarkup('no links here')).toEqual({ markdown: 'no links here', links: [] });
+  });
+  it('replaces [[...]] with inert alphanumeric tokens (no markup, no nonce-bearing attribute ever enters the text stream)', () => {
+    const out = rewriteDockMarkup('see [[thread:t1|Deploy]] and [[Note]]', threads, 'abc123');
+    expect(out.links).toHaveLength(2);
+    expect(out.markdown).not.toMatch(/[<>"\[\]]/);
+    expect(out.markdown).toContain(out.links[0].token);
+  });
+});
+
+describe('delta: href filtering is a strict allowlist on a normalised value', () => {
+  const dropped = [
+    ['tab in the scheme', 'java&#9;script:alert(1)'],
+    ['newline in the scheme', 'java&#10;script:alert(1)'],
+    ['leading control char', '&#1;javascript:alert(1)'],
+    ['entity-encoded first letter', '&#x6A;avascript:alert(1)'],
+    ['mixed case and a leading space', ' JaVaScRiPt:alert(1)'],
+    ['data:', 'data:text/html,x'],
+    ['vbscript:', 'vbscript:x'],
+    ['file:', 'file:///etc/passwd'],
+    ['blob:', 'blob:https://x.example/y'],
+  ];
+  it.each(dropped)('drops the href: %s', async (_n, href) => {
+    const el = await render(`<a href="${href}">x</a>`);
+    expect(el.querySelector('a')!.getAttribute('href')).toBeNull();
+  });
+  const kept = ['https://ok.example/p', 'http://ok.example', 'mailto:a@b.example', '/rel/path', 'rel/path.md', '#anchor', '../up?x=1:2'];
+  it.each(kept)('keeps the safe href %s', async (href) => {
+    const el = await render(`<a href="${href}">x</a>`);
+    expect(el.querySelector('a')!.getAttribute('href')).toBe(href);
+  });
+});
+
+describe('delta A: [[...]] can never forge a link from inside markup or code', () => {
+  const clean = (el: HTMLElement) => {
+    expect(el.innerHTML).not.toMatch(/ctlnk|data-ct-n/i);
+    expect(el.querySelector('a.ct-thread-link, a.internal-link, [data-thread-id], [data-href]')).toBeNull();
+  };
+  it('inside a raw tag attribute value: no anchor gains link attributes', async () => {
+    const el = await render('<a href="https://x.example" title="[[Note]]">t</a>');
+    clean(el);
+    expect(el.querySelector('a')!.getAttribute('href')).toBe('https://x.example');
+  });
+  it('quote break-out attempts inside an attribute value cannot add data attributes', async () => {
+    const el = await render('<a title="[[Note|&quot; data-thread-id=&quot;t1&quot; x=&quot;]]" href="#">x</a> <a title=\'[[thread:t1|" data-thread-id="t2]]\' href="#">y</a>');
+    clean(el);
+  });
+  it('inside a multi-line inline code span: literal text', async () => {
+    const el = await render('see `line one\n[[Note]]\nline three` end');
+    clean(el);
+    expect(el.querySelector('code')!.textContent).toContain('[[Note]]');
+  });
+  it('inside a fenced block indented in a list item: literal text', async () => {
+    const el = await render('- item\n\n      ```\n      [[Note]]\n      ```\n\nafter');
+    clean(el);
+    expect(el.textContent).toContain('[[Note]]');
+  });
+  it('inside a fenced block in a blockquote: literal text', async () => {
+    const el = await render('> ```\n> [[Note]]\n> ```');
+    clean(el);
+    expect(el.textContent).toContain('[[Note]]');
+  });
+  it('a real link next to all of that still works', async () => {
+    const el = await render('<a title="[[Note]]">x</a> and [[thread:t1|Deploy]]');
+    expect(el.querySelectorAll('a.ct-thread-link')).toHaveLength(1);
+  });
+});
+
+describe('delta E: an omitted image keeps its class', () => {
+  it('a non-http image becomes a span carrying ct-orch-image-omitted', async () => {
+    const el = await render('<img src="data:image/png;base64,AAAA" alt="inline">');
+    expect(el.querySelector('span.ct-orch-image-omitted')!.textContent).toBe('inline');
   });
 });

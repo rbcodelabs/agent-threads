@@ -1361,3 +1361,103 @@ describe('observation: openThread never opens an id the board does not know', ()
     expect(t.deps.openThread).toHaveBeenCalledWith('a');
   });
 });
+
+
+// ── Delta review of #903 at e232979 ────────────────────────────────────────────────────────────────────────────────
+describe('delta: middle-click / auxclick on a plain link is handled like click', () => {
+  it('is prevented and never navigates', async () => {
+    const t = setup({ messages: [m('assistant', '[ext](https://example.com/x)')] });
+    t.dock.openSheet();
+    await vi.waitFor(() => expect(t.q('.ct-orch-bubble a')).toBeTruthy());
+    const ev = new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 });
+    t.q('.ct-orch-bubble a')!.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+  });
+});
+
+describe('delta B: inert follows the board while the modal sheet is open', () => {
+  it('a node added behind the sheet while it is open becomes inert on the next render; closing removes only OUR inert', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    const theirs = document.createElement('div'); theirs.setAttribute('inert', ''); document.body.appendChild(theirs);
+    t.dock.openSheet();
+    const late = document.createElement('div'); document.body.appendChild(late);
+    t.emit('done');
+    expect(late.hasAttribute('inert')).toBe(true);
+    t.dock.closeSheet();
+    expect(late.hasAttribute('inert')).toBe(false);
+    expect(theirs.hasAttribute('inert')).toBe(true); // not ours: left alone
+  });
+});
+
+describe('delta C: the pin is decided by what the sheet last wrote, not by a time window', () => {
+  const rig = (t: T, start = 3000) => {
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let h = start;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    return { scroll, grow: (n: number) => { h = n; } };
+  };
+
+  it('a touch fling long after any input (no intent signal at all) still unpins', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll } = rig(t);
+    t.dock.openSheet(); await frame();
+    scroll.scrollTop = 500; scroll.dispatchEvent(new Event('scroll')); // momentum scroll: no wheel/touch event nearby
+    t.emit('token', { text: 'a' }); await frame();
+    t.emit('token', { text: 'b' }); await frame(); await frame();
+    expect(scroll.scrollTop).toBe(500);
+  });
+
+  it('keyboard PageUp / End and a scrollbar drag are just scrollTop changes: unpin on PageUp, re-pin on End', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll, grow } = rig(t);
+    t.dock.openSheet(); await frame();
+    scroll.scrollTop = 2000; scroll.dispatchEvent(new Event('scroll')); // PageUp
+    grow(3400); t.emit('token', { text: 'x' }); await frame(); await frame();
+    expect(scroll.scrollTop).toBe(2000);
+    scroll.scrollTop = 3200; scroll.dispatchEvent(new Event('scroll')); // End: back at the bottom
+    grow(3600); t.emit('token', { text: 'y' }); await frame(); await frame();
+    expect(scroll.scrollTop).toBe(3600);
+  });
+
+  it('the opposite case: the user reaches the bottom while content is growing, and stays pinned', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll, grow } = rig(t);
+    t.dock.openSheet(); await frame();
+    scroll.scrollTop = 1000; scroll.dispatchEvent(new Event('scroll')); // scrolled up
+    t.emit('token', { text: 'a' }); await frame();
+    scroll.scrollTop = 2800; // wheels down to the old bottom (3000 - 200)
+    grow(3500); // ...and the content grew before the scroll event was handled
+    scroll.dispatchEvent(new Event('scroll'));
+    t.emit('token', { text: 'b' }); await frame(); await frame();
+    expect(scroll.scrollTop).toBe(3500);
+  });
+});
+
+describe('delta D: a failed interrupt leaves no stale stop state', () => {
+  it('after interrupt() throws, a later normal end of turn does not invent a Stopped row', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    t.manager.interrupt.mockRejectedValueOnce(new Error('cannot stop'));
+    t.dock.openSheet();
+    t.emit('token', { text: 'Partial' });
+    await frame();
+    t.q<HTMLButtonElement>('.ct-orch-stop')!.click();
+    await flush(); await flush();
+    t.emit('token', { text: ' more' }); // the turn carries on: Stop failed
+    t.s.running.delete('orch'); t.emit('done'); t.emit('run_state_settled'); // ends with no `message` and no `interrupted`
+    expect(t.q('[data-stopped]')).toBeNull();
+  });
+});
+
+describe('delta G: resolveLink is not called per row per render', () => {
+  it('N rows with the same wikilink resolve it once per render', async () => {
+    const t = setup({ messages: Array.from({ length: 5 }, () => m('assistant', 'see [[Same note]]')) });
+    const spy = vi.fn(() => true);
+    t.deps.resolveLink = spy;
+    t.dock.openSheet();
+    await flush();
+    spy.mockClear();
+    t.emit('done');
+    expect(spy.mock.calls.filter((c) => c[0] === 'Same note').length).toBeLessThanOrEqual(1);
+  });
+});
