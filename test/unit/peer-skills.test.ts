@@ -89,6 +89,6 @@ describe('PeerSkillRegistry hardening', () => {
     expect(() => r.register({ pluginId: 'a' }, spec({ name: 's3', content: 'new' }))).not.toThrow();
     expect(() => r.register({ pluginId: 'b' }, spec({ name: 'extra' }))).not.toThrow();
     ds[0]!.dispose();
-    expect(() => r.register({ pluginId: 'a' }, spec({ name: 'extra' }))).not.toThrow();
+    expect(() => r.register({ pluginId: 'a' }, spec({ name: 'extra2' }))).not.toThrow();
   });
 });
