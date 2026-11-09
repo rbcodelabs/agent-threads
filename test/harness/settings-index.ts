@@ -314,6 +314,7 @@ const mockPlugin = {
   initMobileRelayClient: () => {},
   saveSettings: async () => {},
   ensureProjectOrchestratorThread: async () => {},
+  isOrchestratorManagedByPlugin: () => false,
   deleteProject: async (id: string) => { settings.projects = settings.projects.filter(project => project.id !== id); },
   offerDaemonUpdateIfMountsChanged: async () => {},
   getView: () => null,
