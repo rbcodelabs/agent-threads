@@ -354,3 +354,25 @@ describe('final delta D: no anchor inside an anchor', () => {
     expect(el.innerHTML).not.toMatch(/ctlnk/i);
   });
 });
+
+
+describe('QA N8: the exact reported inputs (verified against the sticky-regex fix)', () => {
+  const cases: Array<[string, string]> = [
+    ['**[[thread:t1|B]]** and [[thread:t2|C]]', 'B and C'],
+    ['*[[thread:t1|B]]* and [[thread:t2|C]]', 'B and C'],
+    ['_[[thread:t1|B]]_ and [[thread:t2|C]]', 'B and C'],
+    ['**[[thread:t1|B]]** and [[Note]]', 'B and Note'],
+  ];
+  it.each(cases)('%s', async (md, text) => {
+    const el = await render(md);
+    expect(el.innerHTML).not.toMatch(/ctlnk/i);
+    expect(el.textContent?.trim()).toBe(text);
+    expect(el.querySelectorAll('a')).toHaveLength(2);
+  });
+  it('protocol-relative and backslash hrefs from the QA list are dropped', async () => {
+    for (const href of ['//evil.example/x', '/\\evil.example', '\\\\evil.example/x']) {
+      const el = await render(`<a href="${href}">x</a>`);
+      expect(el.querySelector('a')!.getAttribute('href'), href).toBeNull();
+    }
+  });
+});

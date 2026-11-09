@@ -1639,3 +1639,88 @@ describe('final delta F: focus is not pulled in when nothing held it', () => {
     expect(document.activeElement).toBe(document.body);
   });
 });
+
+
+// ── Targeted QA on 25b5a66: N6 / N7 / keyboard-focusable scroller ──────────────────────────────────────────────────
+describe('QA N6: returning to the exact bottom while the stream is idle re-pins', () => {
+  const rig = (t: T) => {
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let h = 3000;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 0 }); // jsdom does not clamp: max == scrollHeight
+    return { scroll, grow: (n: number) => { h = n; } };
+  };
+
+  it('wheel/touch back to the very bottom (scrollTop equals the sheet\'s last write) then tokens resume: follows', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll, grow } = rig(t);
+    t.dock.openSheet(); await frame();
+    scroll.dispatchEvent(new Event('scroll')); // the echo of the sheet's own pin write
+    scroll.scrollTop = 2700; scroll.dispatchEvent(new Event('scroll')); // up, during a pause
+    scroll.scrollTop = 3000; scroll.dispatchEvent(new Event('scroll')); // back to the exact bottom: nothing was added meanwhile
+    grow(3400); t.emit('token', { text: 'resumed' }); await frame(); await frame();
+    expect(scroll.scrollTop).toBe(3400);
+  });
+
+  it('an echo of our own write never counts as the user returning (content grew after the pin)', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll, grow } = rig(t);
+    t.dock.openSheet(); await frame();
+    scroll.scrollTop = 2500; scroll.dispatchEvent(new Event('scroll')); // unpinned
+    grow(3400); t.emit('token', { text: 'a' }); await frame();
+    expect(scroll.scrollTop).toBe(2500); // still where the user left it
+  });
+});
+
+describe('QA N7: End is an explicit re-pin that snaps to the live bottom', () => {
+  it('End while unpinned during fast streaming snaps to the bottom and keeps following across paragraph breaks', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let h = 3000;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 0 });
+    t.dock.openSheet(); await frame();
+    scroll.scrollTop = 1000; scroll.dispatchEvent(new Event('scroll')); // scrolled up
+    const end = new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true });
+    scroll.dispatchEvent(end);
+    expect(end.defaultPrevented).toBe(true);
+    expect(scroll.scrollTop).toBe(3000);
+    for (const [i, chunk] of ['one ', 'two\n\n', 'three ', 'four\n\n'].entries()) {
+      h = 3000 + (i + 1) * 80;
+      t.emit('token', { text: chunk }); await frame(); await frame();
+      expect(scroll.scrollTop).toBe(h);
+    }
+  });
+
+  it('Home unpins and goes to the top', () => {
+    const t = setup({ messages: [m('user', 'go')] });
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => 3000 });
+    t.dock.openSheet();
+    scroll.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+    expect(scroll.scrollTop).toBe(0);
+  });
+});
+
+describe('QA low: the log scroller is keyboard reachable', () => {
+  it('is a labelled, focusable region (not role=log: that would announce every token)', () => {
+    const t = setup({ messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    expect(scroll.getAttribute('tabindex')).toBe('0');
+    expect(scroll.getAttribute('role')).toBe('region');
+    expect(scroll.getAttribute('aria-label')).toMatch(/orchestrator/i);
+  });
+
+  it('the narrow focus trap still wraps with the scroller in the tab order', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    const sheet = t.sheet()!;
+    const list = [...sheet.querySelectorAll<HTMLElement>('button, a[href], textarea, [tabindex]:not([tabindex="-1"])')].filter((n) => !n.hidden && !n.closest('[hidden]'));
+    expect(list).toContain(t.q('.ct-orch-sheet-scroll'));
+    list[list.length - 1].focus();
+    const fwd = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    list[list.length - 1].dispatchEvent(fwd);
+    expect(document.activeElement).toBe(list[0]);
+  });
+});

@@ -343,6 +343,41 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
     await expect(field(page)).toBeFocused(); // the same target as the unit test: the composer / field
   });
 
+  for (const { label, size } of SIZES) {
+    test(`QA N6: back to the exact bottom while the stream is idle, then tokens resume: follows @ ${label}`, async ({ page }) => {
+      await open(page, 'working', 'conversation', size);
+      await page.evaluate(() => { for (let i = 0; i < 20; i++) (window as any).__orchSay(`Earlier reply ${i} with a few words so the sheet scrolls.`); });
+      await focusComposer(page, size);
+      await expect(sheet(page)).toBeVisible();
+      await page.evaluate(() => (window as any).__orchStream('Streaming '));
+      const box = (await page.locator('.ct-orch-sheet-scroll').boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.wheel(0, -300);
+      await page.waitForTimeout(150);
+      await page.mouse.wheel(0, 5000); // back to the exact bottom; nothing was added meanwhile
+      await page.waitForTimeout(150);
+      await page.evaluate(() => (window as any).__orchToken('tokens resume here '.repeat(20)));
+      await expect.poll(() => page.locator('.ct-orch-sheet-scroll').evaluate((e) => e.scrollHeight - e.clientHeight - e.scrollTop)).toBeLessThanOrEqual(1);
+    });
+  }
+
+  test('QA N7: End during fast streaming (200ms tokens with paragraph breaks) re-pins and keeps following', async ({ page }) => {
+    await open(page, 'working', 'conversation', DESKTOP);
+    await page.evaluate(() => { for (let i = 0; i < 20; i++) (window as any).__orchSay(`Earlier reply ${i} with a few words so the sheet scrolls.`); });
+    await field(page).click();
+    await page.evaluate(() => { (window as any).__orchStream('Start. '); (window as any).__tokTimer = setInterval(() => (window as any).__orchToken('Some streamed words here.\n\nNext paragraph begins. '), 200); });
+    const box = (await page.locator('.ct-orch-sheet-scroll').boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, -500);
+    await page.waitForTimeout(300);
+    await page.locator('.ct-orch-sheet-scroll').focus();
+    await page.keyboard.press('End');
+    await page.waitForTimeout(1500); // several paragraph breaks later
+    const distance = await page.locator('.ct-orch-sheet-scroll').evaluate((e) => e.scrollHeight - e.clientHeight - e.scrollTop);
+    await page.evaluate(() => clearInterval((window as any).__tokTimer));
+    expect(distance).toBeLessThanOrEqual(2);
+  });
+
   test('N2: narrow, Enter on the focused orb opens the sheet and typing lands in the composer', async ({ page }) => {
     await open(page, 'idle', 'conversation', NARROW);
     await page.locator('.ct-orch-orb').focus();
