@@ -6,6 +6,7 @@ import { ArtifactProviderRegistry } from '../../src/ArtifactContributions';
 import { MessageContentProviderRegistry } from '../../src/MessageContent';
 import { AgentToolRegistry } from '../../src/AgentToolContributions';
 import { SlashCommandRegistry } from '../../src/SlashCommandContributions';
+import { PeerSkillRegistry } from '../../src/PeerSkills';
 import { createArtifactStore } from '../../src/artifactStore';
 
 const artifactStore = () => createArtifactStore({
@@ -80,6 +81,7 @@ function runtimeSurface(): Record<string, string[]> {
     requestSecret: async () => true,
     artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(), messageContentProviders: new MessageContentProviderRegistry(),
     agentTools: new AgentToolRegistry(), slashCommands: new SlashCommandRegistry(), getDefaultPermissionMode: () => 'default',
+    ensureOrchestrator: async () => null, setOrchestratorEnabled: async () => null, peerSkills: new PeerSkillRegistry(),
   } as never).api;
   const surface: Record<string, string[]> = {};
   for (const [key, value] of Object.entries(api as unknown as Record<string, unknown>)) {
@@ -99,7 +101,7 @@ describe('checked-in consumer declaration', () => {
 
   it('still declares the mcp namespace that once drifted out of it', () => {
     expect(declaredSurface().mcp).toEqual(['listPresets', 'register', 'registerPreset', 'requestSecret']);
-    expect(declaredSurface().extensions).toEqual(['registerAgentTool', 'registerArtifactProvider', 'registerMessageContentProvider', 'registerSlashCommand']);
+    expect(declaredSurface().extensions).toEqual(['registerAgentTool', 'registerArtifactProvider', 'registerMessageContentProvider', 'registerSkill', 'registerSlashCommand']);
   });
 
   it('advertises one capability string per public operation', () => {
@@ -112,7 +114,7 @@ describe('checked-in consumer declaration', () => {
       getTraceMetadata: async () => null, readTraceChunk: async () => null,
       runConstrainedQuery: vi.fn(),
       registerMcpServer: vi.fn(), requestSecret: vi.fn(),
-      archiveThread: vi.fn(), markThreadReviewed: vi.fn(), setWakeupDelegated: vi.fn(),
+      archiveThread: vi.fn(), markThreadReviewed: vi.fn(), ensureOrchestrator: vi.fn(), setOrchestratorEnabled: vi.fn(), peerSkills: new PeerSkillRegistry(),
       artifactProviders: new ArtifactProviderRegistry(), artifactStore: artifactStore(), messageContentProviders: new MessageContentProviderRegistry(),
       agentTools: new AgentToolRegistry(), slashCommands: new SlashCommandRegistry(), getDefaultPermissionMode: () => 'default',
     } as never).api;
@@ -121,7 +123,7 @@ describe('checked-in consumer declaration', () => {
     // flag for an option of `artifacts.allocateStorage`, not an operation.
     const expected = [
       ...Object.entries(runtimeSurface())
-        .flatMap(([namespace, methods]) => namespace === 'agentTools' ? ['agentTools.voice-orchestration'] : methods.map(method => `${namespace}.${method === 'delegateWakeup' ? 'wakeup.delegate' : method}`)),
+        .flatMap(([namespace, methods]) => namespace === 'agentTools' ? ['agentTools.voice-orchestration'] : methods.map(method => `${namespace}.${method}`)),
       'artifacts.visibleStorage',
     ].sort();
     expect([...api.capabilities].sort()).toEqual(expected);
