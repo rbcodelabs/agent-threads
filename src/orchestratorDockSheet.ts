@@ -44,6 +44,10 @@ export interface SheetHandlers {
   resolveLink?(href: string): boolean;
   removeWaiting(index: number, text: string): void;
   pickChip(chip: SuggestionChip): void;
+  /** Pointer hover or keyboard focus entered a `[[thread:...]]` link: the host highlights that thread's card. */
+  linkEnter(threadId: string): void;
+  /** The pointer / focus left it, it was removed from the DOM, or the sheet closed. */
+  linkLeave(): void;
 }
 
 /** Screen-reader announcements for streaming are rate limited so a token stream cannot flood the reader. */
@@ -76,6 +80,8 @@ export class DockSheet {
   readonly el: HTMLElement;
   /** The dock moves its single input body here in narrow (bottom sheet) mode. */
   readonly composerSlot: HTMLElement;
+  /** The Needs-you tray lives here: inside the dialog (so inside the narrow focus trap), between the transcript and the composer. */
+  readonly trayHost: HTMLElement;
   private readonly scrollEl: HTMLElement;
   private readonly logEl: HTMLElement;
   private readonly activityHost: HTMLElement;
@@ -112,6 +118,8 @@ export class DockSheet {
   private readonly inerted = new Set<Element>();
   /** Content signatures: a section is rebuilt only when what it shows changed (focus + clicks survive refreshes). */
   private sig = { empty: '', notice: '', waiting: '' };
+  /** The thread-link anchor currently hovered / focused (its card is highlighted on the board). */
+  private hoverEl: HTMLElement | null = null;
 
   constructor(parent: HTMLElement, private readonly h: SheetHandlers) {
     const id = `ct-orch-sheet-title-${++sheetSeq}`;
@@ -141,10 +149,16 @@ export class DockSheet {
     this.activityHost = this.scrollEl.createDiv('ct-orch-sheet-slot');
     this.noticeHost = this.scrollEl.createDiv('ct-orch-sheet-slot');
     this.waitingHost = this.scrollEl.createDiv('ct-orch-sheet-slot');
+    this.trayHost = this.el.createDiv('ct-orch-tray-slot');
     this.composerSlot = this.el.createDiv('ct-orch-sheet-composer');
     this.liveEl = this.el.createDiv({ cls: 'ct-orch-live', attr: { 'aria-live': 'polite', 'aria-atomic': 'true' } });
 
     this.logEl.addEventListener('click', (e) => this.onLogClick(e));
+    // Delegated, so rows rebuilt by the keyed reconcile / markdown swap need no re-binding.
+    this.logEl.addEventListener('mouseover', (e) => this.onLinkOver(e));
+    this.logEl.addEventListener('mouseout', (e) => this.onLinkOut(e));
+    this.logEl.addEventListener('focusin', (e) => this.onLinkOver(e));
+    this.logEl.addEventListener('focusout', (e) => this.onLinkOut(e));
     // Middle-click / auxclick must not navigate either (an anchor with an href would otherwise open in a new tab/window).
     this.logEl.addEventListener('auxclick', (e) => { if ((e.target as HTMLElement | null)?.closest?.('a')) { e.preventDefault(); e.stopPropagation(); } });
     // Pinned-ness is decided by WHO moved the scroll position, not by timing or input events: a scroll whose scrollTop equals the
@@ -206,6 +220,7 @@ export class DockSheet {
     this.opened = false;
     this.el.hidden = true;
     this.setModal(false);
+    this.leaveLink();
   }
 
   /**
@@ -284,6 +299,7 @@ export class DockSheet {
     this.renderActivity(view);
     this.renderNotice(view);
     this.renderWaiting(view);
+    this.checkHoveredLink();
     if (wasPinned) this.scrollToBottom();
     else this.lastHeight = this.scrollEl.scrollHeight; // unpinned: keep the reference height current as content grows
     // Layout (fonts, the markdown swap) settles after this frame: pin again once it has.
@@ -344,6 +360,7 @@ export class DockSheet {
     if (this.announceTimer) clearTimeout(this.announceTimer);
     this.announceTimer = null;
     this.setModal(false);
+    this.leaveLink();
     this.el.remove();
     this.rows.clear();
   }
@@ -413,6 +430,7 @@ export class DockSheet {
         if (this.destroyed || this.rows.get(entry.id) !== st || target.childNodes.length === 0) return;
         const pinned = this.stick;
         bubble.replaceChildren(...Array.from(target.childNodes));
+        this.checkHoveredLink();
         if (pinned) this.scrollToBottom();
       }).catch(() => { /* keep the plain-text seed */ });
     } else {
@@ -531,6 +549,39 @@ export class DockSheet {
     if (href) { this.h.openLink?.(href); return; }
     const plain = a.getAttribute('href') ?? '';
     if (/^https?:\/\//i.test(plain)) window.open(plain, '_blank', 'noopener,noreferrer');
+  }
+
+  private linkAnchor(target: EventTarget | null): HTMLElement | null {
+    return (target as HTMLElement | null)?.closest?.('a[data-thread-id]') as HTMLElement | null;
+  }
+
+  private onLinkOver(e: Event): void {
+    const a = this.linkAnchor(e.target);
+    if (!a || a === this.hoverEl || !this.logEl.contains(a)) return;
+    const id = a.getAttribute('data-thread-id');
+    if (!id) return;
+    this.hoverEl = a;
+    this.h.linkEnter(id);
+  }
+
+  private onLinkOut(e: Event): void {
+    const a = this.linkAnchor(e.target);
+    if (!a || a !== this.hoverEl) return;
+    const to = (e as MouseEvent | FocusEvent).relatedTarget as Node | null;
+    if (to && a.contains(to)) return; // moving inside the same link
+    if (to && this.linkAnchor(to)) return; // straight onto another link: its own enter switches the highlight
+    this.leaveLink();
+  }
+
+  private leaveLink(): void {
+    if (!this.hoverEl) return;
+    this.hoverEl = null;
+    this.h.linkLeave();
+  }
+
+  /** The hovered anchor can be re-rendered away under a still pointer: no mouseout fires for a removed node. */
+  private checkHoveredLink(): void {
+    if (this.hoverEl && !this.hoverEl.isConnected) this.leaveLink();
   }
 
   private nearBottom(): boolean {

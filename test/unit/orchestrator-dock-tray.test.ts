@@ -373,7 +373,7 @@ describe('announcements and focus', () => {
   });
 
   it('arrivals while the sheet is CLOSED do not open it and do not announce on reopen', () => {
-    const t = setup({ open: false });
+    const t = setup({ open: false, specs: [DEFAULT[1]] });
     t.addPermission({ id: 'n', title: 'Ship the thing', kind: 'permission' });
     expect(t.q('.ct-orch-sheet')!.hidden).toBe(true);
     t.dock.openSheet();

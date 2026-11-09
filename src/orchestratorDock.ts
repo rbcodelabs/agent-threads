@@ -30,6 +30,9 @@ import {
 } from './orchestratorDockModel';
 import { peekLine, sheetTranscript } from './dockSheetModel';
 import { DockSheet, type SheetBlock, type SheetView } from './orchestratorDockSheet';
+import { DockTray, type TrayEntry } from './orchestratorDockTray';
+import { trayItems } from './dockTrayModel';
+import type { PermissionButtonDeps } from './permissionCard';
 
 export type DockMode = 'pill' | 'orb';
 
@@ -45,7 +48,7 @@ export interface OrchestratorDockDeps {
   manager: Pick<ThreadManager,
     'getThread' | 'isRunning' | 'hasPendingPermission' | 'hasPendingQuestion' | 'hasPendingPlan'
     | 'hasActiveBackgroundTasks' | 'sendMessage' | 'subscribe' | 'interrupt' | 'getQueuedMessages'
-    | 'removeQueuedMessageAt' | 'getThreadActivity'>;
+    | 'removeQueuedMessageAt' | 'getThreadActivity' | 'getPendingPermission' | 'resolvePermission' | 'getRemoteScope'>;
   /** Board threads (the host applies its own filter, e.g. isKanbanThread): the source of total/running/attention. */
   listThreads(): Thread[];
   hasPendingWakeup(threadId: string): boolean;
@@ -58,6 +61,18 @@ export interface OrchestratorDockDeps {
   openLink?(href: string): void;
   /** Whether a `[[note]]` can be opened (resolves to a file). Absent with `openLink` present: assume yes. */
   resolveLink?(href: string): boolean;
+  /**
+   * Highlights a thread's card on the board while its `[[thread:...]]` link is hovered / focused in the sheet. Returns
+   * false when the thread has no card (archived, filtered out): then nothing happens. Absent: links do not highlight.
+   */
+  focusCard?(threadId: string, opts: { scroll: boolean; flash: boolean }): boolean;
+  /** Removes that highlight (leave, blur, sheet close, destroy). */
+  clearCardFocus?(): void;
+  /**
+   * What the tray's permission buttons need (the board card's own deps). Absent: a permission card hands off to its
+   * thread instead of offering buttons.
+   */
+  permissionCard?: Omit<PermissionButtonDeps, 'manager' | 'hostExecAllowAlways'> & { hostExecAllowAlways(): boolean };
   mode(): DockMode;
   /** Absent (or null) means local-only: the orchestrator can then never be offline. */
   daemons?: {
@@ -108,6 +123,7 @@ export class OrchestratorDock {
   private stopEl: HTMLButtonElement | null = null;
   private sendEl: HTMLButtonElement | null = null;
   private sheet: DockSheet | null = null;
+  private tray: DockTray | null = null;
   private peekEl: HTMLElement | null = null;
   private peekTextEl: HTMLElement | null = null;
   private chipsEl: HTMLElement | null = null;
@@ -199,6 +215,8 @@ export class OrchestratorDock {
     this.unsubscribeDaemons = null;
     if (this.peekTimer) clearTimeout(this.peekTimer);
     this.peekTimer = null;
+    this.tray?.destroy();
+    this.tray = null;
     this.sheet?.destroy();
     this.peekEl?.remove();
     this.chipsEl?.remove();
@@ -290,6 +308,7 @@ export class OrchestratorDock {
     this.updateInputControls();
     if (this.sheet?.isOpen) this.layoutChanged(); // after the mode update: the room above the pill differs per mode
     this.renderSheet();
+    this.renderTray();
     this.renderChips();
     // After the sheet re-rendered (the modal inert state follows the mode): only then is it known what can hold focus.
     if (previousMode !== this.currentMode && this.sheet?.isOpen) this.keepFocusAcrossModeChange(focusBefore);
@@ -412,6 +431,15 @@ export class OrchestratorDock {
       resolveLink: (href) => !!this.deps.openLink && (this.deps.resolveLink ? this.deps.resolveLink(href) : true),
       removeWaiting: (index, text) => this.removeWaiting(index, text),
       pickChip: (chip) => { void this.submitText(chip.prompt); },
+      linkEnter: (threadId) => { this.deps.focusCard?.(threadId, { scroll: true, flash: true }); },
+      linkLeave: () => { this.deps.clearCardFocus?.(); },
+    });
+    this.tray = new DockTray(this.sheet.trayHost, {
+      manager: this.deps.manager,
+      permissionCard: this.deps.permissionCard,
+      openThread: (threadId) => { void this.openQuietly(threadId); },
+      announce: (text) => this.sheet?.announce(text, true),
+      focusFallback: () => { if (this.inputEl) this.inputEl.focus(); else this.sheet?.focusClose(); },
     });
     const peek = parent.createDiv({ cls: 'ct-orch-peek', attr: { role: 'status', 'data-testid': 'orchestrator-peek' } });
     peek.hidden = true;
@@ -489,7 +517,8 @@ export class OrchestratorDock {
     const doc = this.host.ownerDocument;
     // A programmatic close (orchestrator deleted, state none) must not drop focus from inside the sheet to the page.
     const hadFocus = !!doc.activeElement && this.sheet.el.contains(doc.activeElement);
-    this.sheet.close();
+    this.sheet.close(); // also clears the board-card highlight of a hovered link
+    this.tray?.reset();
     this.refresh();
     if (!returnFocus && !hadFocus) return;
     if (this.currentMode === 'orb') this.orbEl.focus();
@@ -536,7 +565,9 @@ export class OrchestratorDock {
     const entries = this.transcriptOf(thread);
     const live = new Set(entries.map((e) => e.id));
     for (const pid of [...this.pickupIds]) if (!live.has(pid)) this.pickupIds.delete(pid); // rolled back
-    const blocked: SheetBlock = manager.hasPendingPlan(id) ? 'plan' : manager.hasPendingQuestion(id) ? 'question' : manager.hasPendingPermission(id) ? 'permission' : null;
+    // The tray gives the orchestrator's own permission real buttons, so the "waiting for a decision" notice would only repeat it.
+    const ownPermissionInTray = !!this.deps.permissionCard && !!manager.getPendingPermission(id);
+    const blocked: SheetBlock = manager.hasPendingPlan(id) ? 'plan' : manager.hasPendingQuestion(id) ? 'question' : manager.hasPendingPermission(id) && !ownPermissionInTray ? 'permission' : null;
     const view: SheetView = {
       entries: entries.map((e) => ({ ...e, pickup: this.pickupIds.has(e.id) })),
       streaming: this.streamBuf,
@@ -551,6 +582,19 @@ export class OrchestratorDock {
       mode: this.currentMode,
     };
     sheet.render(view);
+  }
+
+  /** The Needs-you tray: every awaiting thread (the list the dot and the board lane count), permission cards with real buttons. */
+  private renderTray(): void {
+    const tray = this.tray;
+    if (!tray || !this.sheet?.isOpen) return;
+    const { manager } = this;
+    const entries: TrayEntry[] = trayItems(this.attention).map((item) => ({
+      item,
+      // Buttons only for a live permission that the host can persist an "Always" for; otherwise the card hands off.
+      permission: item.kind === 'permission' && this.deps.permissionCard ? manager.getPendingPermission(item.threadId) : undefined,
+    }));
+    tray.render(entries);
   }
 
   private get manager(): OrchestratorDockDeps['manager'] { return this.deps.manager; }

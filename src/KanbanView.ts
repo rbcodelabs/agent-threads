@@ -98,6 +98,10 @@ const PROJECT_SECTION_MAP: Record<ThreadRowState, { label: string; state: RowSta
   empty:           { label: 'Ready', state: 'empty' },
 };
 
+/** `matchMedia` is absent in some test hosts: treat that as "motion is fine". */
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
 
 export class KanbanView extends ItemView {
   private plugin: ClaudeThreadsPlugin;
@@ -122,6 +126,8 @@ export class KanbanView extends ItemView {
   private activityEls: Map<string, HTMLElement> = new Map();
   private timeEls: Map<string, HTMLElement> = new Map();
   private rowEls: Map<string, HTMLElement> = new Map();
+  /** Card highlighted by a hovered / focused thread link in the dock's reply sheet. Tracked by id: render() rebuilds rowEls. */
+  private linkedCardId: string | null = null;
   private taskEls: Map<string, HTMLElement> = new Map();
   private summaryEls: Map<string, HTMLElement> = new Map();
   /** Per-card orchestrator-inbox blocks, patched in place by their own events. */
@@ -208,6 +214,7 @@ export class KanbanView extends ItemView {
     this.pillObserver = null;
     this.dock?.destroy();
     this.dock = null;
+    this.clearCardFocus();
     for (const timer of this.activityTimers.values()) clearTimeout(timer);
     this.activityTimers.clear();
     for (const timer of this.galleryTimers.values()) clearTimeout(timer);
@@ -384,6 +391,14 @@ export class KanbanView extends ItemView {
       // open=false: set up without stealing focus into the chat view; the dock then focuses its own field.
       ensureOrchestrator: () => plugin.ensureOrchestratorThread(false),
       openThread: (id) => plugin.openThreadInChatView(id),
+      focusCard: (id, opts) => this.focusCard(id, opts),
+      clearCardFocus: () => this.clearCardFocus(),
+      // The tray's permission buttons are the board card's own (permissionCard.ts), fed the same deps.
+      permissionCard: {
+        getSettings: () => plugin.settings,
+        saveSettings: () => plugin.saveSettings(),
+        hostExecAllowAlways: () => hostExecState(plugin.managedPolicy?.peek()).allowAlways,
+      },
       // Never the active leaf (the board): see dockLinkOpener.ts.
       openLink: (href) => openDockLink(this.dockLinkDeps(), href),
       resolveLink: (href) => canOpenDockLink(this.dockLinkDeps(), href),
@@ -431,6 +446,39 @@ export class KanbanView extends ItemView {
       openInContextPanel: (href, source) => { void plugin.contextPanel.openLinkText(href, source); },
       openLinkText: (href, source, newLeaf) => { void this.app.workspace.openLinkText(href, source, newLeaf); },
     };
+  }
+
+  /**
+   * Highlights a thread's card while its link is hovered / focused in the dock's reply sheet. `scroll` brings it into
+   * view (`inline: 'center'` for swimlane / project columns that are off-screen horizontally, `block: 'nearest'` so the
+   * board does not jump vertically); `flash` adds a one-off pulse. prefers-reduced-motion: instant scroll, no pulse.
+   * Returns false (and does nothing) when the thread has no card on the board (archived, filtered out).
+   */
+  focusCard(threadId: string, opts: { scroll: boolean; flash: boolean }): boolean {
+    const el = this.rowEls.get(threadId);
+    if (!el) return false;
+    if (this.linkedCardId && this.linkedCardId !== threadId) this.clearCardFocus();
+    this.linkedCardId = threadId;
+    const reduced = prefersReducedMotion();
+    el.addClass('ct-kanban-card-linked');
+    el.toggleClass('ct-kanban-card-linked-flash', opts.flash && !reduced);
+    if (opts.scroll) el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', inline: 'center', block: 'nearest' });
+    return true;
+  }
+
+  clearCardFocus(): void {
+    const id = this.linkedCardId;
+    this.linkedCardId = null;
+    const el = id ? this.rowEls.get(id) : undefined;
+    el?.removeClass('ct-kanban-card-linked');
+    el?.removeClass('ct-kanban-card-linked-flash');
+  }
+
+  /** After a full board rebuild the card element is new: re-apply the highlight (never scrolls). */
+  private reapplyCardFocus(): void {
+    const el = this.linkedCardId ? this.rowEls.get(this.linkedCardId) : undefined;
+    if (!el) return;
+    el.addClass('ct-kanban-card-linked');
   }
 
   /** Cmd+J target (see orchestratorDockCommand.ts). */
@@ -550,6 +598,7 @@ export class KanbanView extends ItemView {
     }
 
     this.dock?.refresh();
+    this.reapplyCardFocus();
 
     this.restoreScrollState(scrollState);
     this.restoreInboxFocus(focus);
