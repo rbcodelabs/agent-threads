@@ -11,6 +11,14 @@ import { shot } from './helpers';
  */
 const kanbanUrl = 'file://' + path.resolve('test/harness/kanban.html');
 
+/**
+ * Playwright's default per-pixel colour tolerance (threshold 0.2) is wide enough to hide the orb tint change
+ * rgb(224,108,117) -> rgb(157,76,82): the offline-390 baseline was stale yet passed (measured: 3213 differing
+ * pixels at threshold 0, 3108 at 0.05, 2993 at 0.1, 0 at 0.2). The dock's whole point is colour state (orb tint,
+ * dot, reason text), so its shots use a tight per-pixel threshold.
+ */
+const DOCK_SHOT = { threshold: 0.05 } as const;
+
 const DESKTOP = { width: 1280, height: 800 };
 const NARROW = { width: 390, height: 844 };
 
@@ -40,14 +48,14 @@ test.describe('orchestrator dock — screenshots', () => {
       test(`dock pill — ${name} @ ${label}`, async ({ page }) => {
         await open(page, fixture, size);
         await expect(page.locator('.ct-orch-dock')).toHaveAttribute('data-state', fixture === 'first-run' ? 'none' : fixture);
-        await shot(page.locator('.ct-kanban-dispatch'), `orchestrator-dock-${name}-${label}.png`);
+        await shot(page.locator('.ct-kanban-dispatch'), `orchestrator-dock-${name}-${label}.png`, DOCK_SHOT);
       });
     }
   }
 
   test('board with the idle dock in context @ 1280x800', async ({ page }) => {
     await open(page, 'attention', DESKTOP);
-    await shot(page, 'orchestrator-dock-board-1280x800.png');
+    await shot(page, 'orchestrator-dock-board-1280x800.png', DOCK_SHOT);
   });
 });
 
@@ -189,9 +197,9 @@ test.describe('orchestrator dock — functional (no baselines)', () => {
 
   test('D2: narrow screenshots of the status row (first-run, offline) @ 390x844', async ({ page }) => {
     await open(page, 'first-run', NARROW);
-    await shot(page.locator('.ct-kanban-dispatch'), 'orchestrator-dock-status-first-run-390x844.png');
+    await shot(page.locator('.ct-kanban-dispatch'), 'orchestrator-dock-status-first-run-390x844.png', DOCK_SHOT);
     await open(page, 'offline', NARROW);
-    await shot(page.locator('.ct-kanban-dispatch'), 'orchestrator-dock-status-offline-390x844.png');
+    await shot(page.locator('.ct-kanban-dispatch'), 'orchestrator-dock-status-offline-390x844.png', DOCK_SHOT);
   });
 
   for (const width of [320, 375, 390]) {
