@@ -330,10 +330,15 @@ test.describe('D1b: worst-case first card (long title, 3-line detail, 3 buttons)
       const r = (e: Element) => { const b = e.getBoundingClientRect(); return { t: b.top, b: b.bottom, l: b.left, r: b.right, h: b.height }; };
       const sh = document.querySelector('.ct-orch-sheet') as HTMLElement;
       const tray = sh.querySelector('.ct-orch-tray') as HTMLElement;
-      const bar = r(tray.querySelector('.ct-orch-tray-bar')!);
       const first = tray.querySelector('.ct-orch-tray-card') as HTMLElement;
       const btn = first.querySelector('button') as HTMLElement;
-      btn.scrollIntoView({ block: 'nearest' }); // reachable: scrolling INSIDE the tray is allowed, clipping by the sheet is not
+      // Reachable: scrolling INSIDE the tray is allowed (never the sheet itself: it clips), clipping by the sheet is not.
+      const barH = tray.querySelector('.ct-orch-tray-bar')!.getBoundingClientRect().height;
+      const stickyBar = getComputedStyle(tray.querySelector('.ct-orch-tray-bar')!).position === 'sticky';
+      for (let pass = 0; pass < 2; pass++) { const over = btn.getBoundingClientRect().bottom - tray.getBoundingClientRect().bottom; if (over > 0) tray.scrollTop += over; }
+      const underBar = tray.getBoundingClientRect().top + (stickyBar ? barH : 0) - btn.getBoundingClientRect().top;
+      if (underBar > 0) tray.scrollTop -= underBar;
+      const bar = r(tray.querySelector('.ct-orch-tray-bar')!); // after the tray scroll: a non-sticky (compact) heading scrolls away
       const buttons = Array.from(first.querySelectorAll('button')).map((b) => r(b));
       const field = (document.querySelector('.ct-orch-input') ?? document.querySelector('.ct-orch-sheet-composer')) as HTMLElement;
       const vv = (window as any).visualViewport;
@@ -346,7 +351,7 @@ test.describe('D1b: worst-case first card (long title, 3-line detail, 3 buttons)
   }
   type M = Awaited<ReturnType<typeof measure>>;
   function expectFits(m: M, label: string) {
-    const eps = 0.75;
+    const eps = 1.5; // fractional layout at DPR 2 (sub-pixel scroll snapping), not a visible clip
     expect(m.sheet.t, `${label}: sheet top inside the viewport (header + close reachable)`).toBeGreaterThanOrEqual(-eps);
     expect(m.sheet.b, `${label}: sheet bottom above the keyboard`).toBeLessThanOrEqual(m.vvBottom + eps);
     expect(m.head.t, `${label}: header inside the sheet`).toBeGreaterThanOrEqual(m.sheet.t - eps);
@@ -397,9 +402,9 @@ test.describe('D1b: worst-case first card (long title, 3-line detail, 3 buttons)
     await page.waitForTimeout(150);
     const m = await measure(page);
     const slot = await page.locator('.ct-orch-sheet-composer').evaluate((el) => { const b = el.getBoundingClientRect(); const s = document.querySelector('.ct-orch-sheet')!.getBoundingClientRect(); return { b: b.bottom, sb: s.bottom }; });
-    expect(slot.b).toBeLessThanOrEqual(slot.sb + 0.75);
-    expect(m.sheet.b).toBeLessThanOrEqual(m.vvBottom + 0.75);
-    expect(m.sheet.t).toBeGreaterThanOrEqual(-0.75);
+    expect(slot.b).toBeLessThanOrEqual(slot.sb + 1.5);
+    expect(m.sheet.b).toBeLessThanOrEqual(m.vvBottom + 1.5);
+    expect(m.sheet.t).toBeGreaterThanOrEqual(-1.5);
   });
 });
 

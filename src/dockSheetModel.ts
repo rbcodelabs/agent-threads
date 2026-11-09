@@ -101,7 +101,22 @@ export function sheetBlock(i: {
   return null;
 }
 
-// K2 P5 batch 3 scaffold: signature only.
-export function trayLayout(_i: { max: number; fixed: number; needFull: number; needCompact: number }): { cap: number; compact: boolean } {
-  return { cap: 0, compact: false };
+/** The tray's share of the sheet, the transcript room it tries to leave, and the floor below which it never shrinks. */
+export const TRAY_SHARE = 0.55;
+export const MIN_TRANSCRIPT_PX = 80;
+export const MIN_TRAY_PX = 52; // a 44px button plus its padding: the smallest band a card's buttons can be scrolled into
+
+/**
+ * How tall the Needs-you tray may be inside a sheet of `max` px whose fixed chrome (handle, header, composer) is `fixed` px.
+ * The COMPOSER WINS: the tray never takes more than `max - fixed` (it scrolls inside that), so the sheet's overflow never
+ * clips the composer. Within that room it wants a share of the sheet, at least the first card with its buttons, and leaves
+ * the transcript MIN_TRANSCRIPT_PX if it can. When even the first card does not fit, the COMPACT form (title and buttons,
+ * detail collapsed, heading not sticky) is used. A first card that is partly clipped but scrollable beats a clipped composer.
+ */
+export function trayLayout(i: { max: number; fixed: number; needFull: number; needCompact: number }): { cap: number; compact: boolean } {
+  const room = i.max - i.fixed;
+  const compact = i.needFull > room;
+  const need = compact ? i.needCompact : i.needFull;
+  const wanted = Math.max(need, Math.min(i.max * TRAY_SHARE, room - MIN_TRANSCRIPT_PX));
+  return { cap: Math.max(MIN_TRAY_PX, Math.min(wanted, room)), compact };
 }

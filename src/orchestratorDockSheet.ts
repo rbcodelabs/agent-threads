@@ -11,7 +11,7 @@
  */
 import { setIcon } from 'obsidian';
 import { renderDockMarkdown } from './dockMarkdown';
-import type { Richness, SheetEntry } from './dockSheetModel';
+import { trayLayout, type Richness, type SheetEntry } from './dockSheetModel';
 import type { SuggestionChip, ThreadRef } from './orchestratorDockModel';
 
 export interface SheetRow extends SheetEntry {
@@ -55,10 +55,10 @@ export interface SheetHandlers {
 /** Screen-reader announcements for streaming are rate limited so a token stream cannot flood the reader. */
 export const ANNOUNCE_MIN_INTERVAL_MS = 4000;
 const NEAR_BOTTOM_PX = 48;
-/** The tray's share of the sheet, the transcript room it tries to leave, and the padding under its first card. */
-const TRAY_SHARE = 0.55;
-const MIN_TRANSCRIPT_PX = 80;
+/** Padding under the tray's first card (part of the room its floor needs). */
 const TRAY_PAD_PX = 8;
+/** Below this sheet height the header's count line is dropped so the heading + a card still fit. */
+const TIGHT_SHEET_PX = 160;
 /** Re-pin tolerance when the user scrolls down: they have to actually get to the bottom. */
 const BOTTOM_SLACK_PX = 4;
 let sheetSeq = 0;
@@ -100,6 +100,8 @@ export class DockSheet {
   private readonly liveEl: HTMLElement;
   private readonly orbEl: HTMLElement;
   private readonly summaryEl: HTMLElement;
+  private chromeObserver: ResizeObserver | null = null;
+  private readonly headEl: HTMLElement;
   private readonly rows = new Map<string, RowState>();
   private streamingRow: HTMLElement | null = null;
   private activityText: HTMLElement | null = null;
@@ -167,6 +169,7 @@ export class DockSheet {
     this.liveEl = this.el.createDiv({ cls: 'ct-orch-live', attr: { 'aria-live': 'polite', 'aria-atomic': 'true' } });
     this.trayLiveEl = this.el.createDiv({ cls: 'ct-orch-tray-live', attr: { 'aria-live': 'polite', 'aria-atomic': 'true' } });
 
+    this.headEl = head;
     this.logEl.addEventListener('click', (e) => this.onLogClick(e));
     // Delegated, so rows rebuilt by the keyed reconcile / markdown swap need no re-binding.
     this.logEl.addEventListener('mouseover', (e) => this.onLinkOver(e));
@@ -228,10 +231,24 @@ export class DockSheet {
     if (!this.opened) { this.stick = true; this.pinNext = true; } // opening lands on the latest message
     this.opened = true;
     this.el.hidden = false;
+    this.observeChrome();
+  }
+
+  /**
+   * While open, the composer (a taller textarea, a wrapped error reason) and the header change what is left for the tray:
+   * re-fit it when they resize. Not observed while closed.
+   */
+  private observeChrome(): void {
+    if (this.chromeObserver || typeof ResizeObserver === 'undefined') return;
+    this.chromeObserver = new ResizeObserver(() => { if (this.opened && !this.destroyed) this.keepPinned(() => this.fitTray()); });
+    this.chromeObserver.observe(this.headEl);
+    this.chromeObserver.observe(this.composerSlot);
   }
 
   close(): void {
     this.opened = false;
+    this.chromeObserver?.disconnect();
+    this.chromeObserver = null;
     this.el.hidden = true;
     this.setModal(false);
     this.leaveLink();
@@ -299,27 +316,43 @@ export class DockSheet {
   }
 
   /**
-   * Sizes the Needs-you tray: a share of the sheet, but never less than its heading plus the FIRST card with its buttons, so a
-   * long conversation (or the keyboard) can never leave a tray with no approval buttons visible; the transcript gives way first.
+   * Sizes the Needs-you tray (see trayLayout): the composer wins, the tray scrolls inside what is left and falls back to the
+   * compact form when even its first card does not fit. Re-run when the tray changes, the sheet's height changes and
+   * (ResizeObserver) when the header or the composer grows (a taller textarea, a wrapped error reason).
    */
   fitTray(): void {
     const tray = this.trayHost.querySelector<HTMLElement>('.ct-orch-tray');
     const max = parseFloat(this.el.style.getPropertyValue('--ct-orch-sheet-max'));
-    if (!tray || !(max > 0)) { this.el.style.removeProperty('--ct-orch-tray-max'); return; }
-    const first = tray.querySelector<HTMLElement>('.ct-orch-tray-card');
-    const need = first ? first.offsetTop + first.offsetHeight + TRAY_PAD_PX : 0;
+    if (!tray || !(max > 0)) { this.el.style.removeProperty('--ct-orch-tray-max'); tray?.removeAttribute('data-compact'); return; }
+    const need = (): number => {
+      const first = tray.querySelector<HTMLElement>('.ct-orch-tray-card');
+      return first ? first.offsetTop + first.offsetHeight + TRAY_PAD_PX : 0;
+    };
+    tray.removeAttribute('data-compact');
+    const needFull = need();
+    tray.setAttribute('data-compact', '1');
+    const needCompact = need();
+    const view = this.el.ownerDocument.defaultView;
     let fixed = 0;
     for (const child of Array.from(this.el.children) as HTMLElement[]) {
       if (child === this.scrollEl || child === this.trayHost || child.hidden) continue;
-      fixed += child.offsetHeight; // the handle, the header, the composer; the live regions are absolutely positioned (0 in flow)
+      if (view?.getComputedStyle(child).position === 'absolute') continue; // the live regions
+      // The handle, the header, the composer: with their margins (the handle's 8px top margin is part of what the tray cannot use).
+      const cs = view?.getComputedStyle(child);
+      fixed += child.offsetHeight + (cs ? (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0) : 0);
     }
-    const cap = Math.max(need, Math.min(max * TRAY_SHARE, max - fixed - MIN_TRANSCRIPT_PX));
-    this.el.style.setProperty('--ct-orch-tray-max', `${Math.round(cap)}px`);
+    // The transcript cannot shrink below its own padding: that is chrome too.
+    const sc = view?.getComputedStyle(this.scrollEl);
+    if (sc) fixed += (parseFloat(sc.paddingTop) || 0) + (parseFloat(sc.paddingBottom) || 0);
+    const layout = trayLayout({ max, fixed, needFull, needCompact });
+    if (!layout.compact) tray.removeAttribute('data-compact');
+    this.el.style.setProperty('--ct-orch-tray-max', `${Math.round(layout.cap)}px`);
   }
 
   setMaxHeight(px: number | null): void {
     if (px && px > 0) this.el.style.setProperty('--ct-orch-sheet-max', `${Math.round(px)}px`);
     else this.el.style.removeProperty('--ct-orch-sheet-max');
+    this.el.toggleAttribute('data-tight', !!px && px > 0 && px < TIGHT_SHEET_PX);
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -420,6 +453,8 @@ export class DockSheet {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.chromeObserver?.disconnect();
+    this.chromeObserver = null;
     if (this.announceTimer) clearTimeout(this.announceTimer);
     this.announceTimer = null;
     this.setModal(false);

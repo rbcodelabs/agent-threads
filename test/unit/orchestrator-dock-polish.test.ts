@@ -880,7 +880,7 @@ describe('7. soft keyboard: the narrow sheet lifts above it', () => {
     t.dock.openSheet();
     vv.height = 220; vv.dispatchEvent(new Event('resize'));
     expect(t.root.style.getPropertyValue('--ct-orch-kbd-inset')).toBe('170px');
-    expect(parseInt(t.q('.ct-orch-sheet')!.style.getPropertyValue('--ct-orch-sheet-max'), 10)).toBeLessThanOrEqual(390 - 170 - 36);
+    expect(parseInt(t.q('.ct-orch-sheet')!.style.getPropertyValue('--ct-orch-sheet-max'), 10)).toBeLessThanOrEqual(390 - 170 - 8);
     t.dock.closeSheet();
     expect(t.root.style.getPropertyValue('--ct-orch-kbd-inset')).toBe('');
   });
@@ -1035,7 +1035,8 @@ describe('batch 3 advisories', () => {
     expect(t.stage.classList.contains('ct-orch-pill-mode')).toBe(true);
     t.dock.openSheet();
     vv.height = 10; vv.dispatchEvent(new Event('resize')); // inset 380
-    expect(rootInset(t)).toBe(`${390 - 48 - 36}px`);
+    expect(rootInset(t)).toBe(`${390 - 48 - 8}px`);
+    expect(t.stage.classList.contains('ct-orch-kbd-up')).toBe(true);
     t.state.mode = 'orb'; t.dock.relayout();
     expect(t.stage.classList.contains('ct-orch-pill-mode')).toBe(false);
   });

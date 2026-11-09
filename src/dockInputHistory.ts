@@ -42,8 +42,8 @@ export class InputHistory {
     return this.typed;
   }
 
-  /** Batch 3 scaffold. */
-  clear(): void {}
+  /** Forget everything (the dock is going away: what was typed may have held a secret). */
+  clear(): void { this.list = []; this.reset(); }
 
   /** Leave browsing without touching the entries (the user edited the recalled text, or the field was rebuilt). */
   reset(): void { this.index = -1; this.typed = ''; }

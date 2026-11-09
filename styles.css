@@ -7350,6 +7350,10 @@ textarea.ct-settings-wide-input {
 /* The count the old header text carried, readable without hover (touch). Same string as the dot's tooltip. */
 .ct-orch-sheet-summary { font-size: var(--font-ui-smaller); line-height: 1.3; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ct-orch-sheet-summary:empty { display: none; }
+.ct-orch-sheet[data-tight] .ct-orch-sheet-summary { display: none; }
+/* Tight (a landscape phone with the keyboard up): the header shrinks to its 44px buttons so a tray card still fits. */
+.ct-orch-sheet[data-tight] .ct-orch-sheet-head { padding-top: 0; padding-bottom: 0; }
+.ct-orch-sheet[data-tight] .ct-orch-sheet-scroll { padding-top: 0; padding-bottom: 0; }
 .ct-kanban-dispatch .ct-orch-sheet h2.ct-orch-sheet-title {
   flex: 1 1 auto; min-width: 0; margin: 0; padding: 0;
   font-size: var(--font-ui-medium); font-weight: 600; line-height: 1.3; color: var(--text-normal);
@@ -7544,8 +7548,11 @@ textarea.ct-settings-wide-input {
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-peek button,
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-chips button.ct-orch-chip { min-height: 44px; min-width: 44px; }
 
-/* Landscape phones / tablets (pill mode): the whole pill lifts above the soft keyboard (--ct-orch-kbd-inset is set on the view root). */
-.ct-agents-root .ct-kanban-dispatch:has(.ct-orch-dock[data-mode="pill"]) { bottom: calc(var(--ct-kanban-pill-bottom) + var(--ct-orch-kbd-inset, 0px)); }
+/* Landscape phones / tablets (pill mode): the whole pill lifts above the soft keyboard (--ct-orch-kbd-inset is set on the view root).
+   A class set by the dock, not :has(): no dependence on the WebView supporting it. */
+.ct-agents-root .ct-kanban-dispatch.ct-orch-pill-mode { bottom: calc(var(--ct-kanban-pill-bottom) + var(--ct-orch-kbd-inset, 0px)); }
+/* With the keyboard up the usual 36px gap under the pill is wasted height: keep 8px above the keyboard. */
+.ct-agents-root .ct-kanban-dispatch.ct-orch-pill-mode.ct-orch-kbd-up { bottom: calc(8px + var(--ct-orch-kbd-inset, 0px)); }
 
 /* Touch devices wider than the narrow breakpoint (tablets, phones in landscape) get the sheet's 44px targets too. */
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-sheet-btn,
@@ -7593,7 +7600,7 @@ textarea.ct-settings-wide-input {
   /* The tray never shrinks with the transcript (a long conversation used to crush it to a heading, with no buttons): it takes its
      natural height up to --ct-orch-tray-max (set by the dock: a share of the sheet, but never less than the heading plus the FIRST
      card with its buttons) and scrolls inside that; the transcript gives way first. */
-  flex: 0 0 auto; min-height: 0; overflow-y: auto; box-sizing: border-box; position: relative;
+  flex: 0 0 auto; min-height: 0; overflow-y: auto; box-sizing: border-box; position: relative; scroll-padding-top: 36px;
   max-height: var(--ct-orch-tray-max, calc(var(--ct-orch-sheet-max, 60vh) * 0.55));
   display: flex; flex-direction: column; gap: 6px;
   padding: 8px 12px; border-top: 1px solid var(--background-modifier-border);
@@ -7603,6 +7610,12 @@ textarea.ct-settings-wide-input {
   position: sticky; top: -8px; z-index: 1; display: flex; align-items: center; gap: 8px;
   margin: -8px -12px 0; padding: 8px 12px 4px; background: color-mix(in srgb, var(--color-orange, var(--text-warning)) 6%, var(--background-secondary));
 }
+.ct-orch-tray[data-compact] { scroll-padding-top: 0; }
+/* Compact form (the sheet cannot give the first card its full height without clipping the composer): title + buttons, detail
+   collapsed behind the title, heading scrolls with the list so the buttons can be scrolled fully into the small band. */
+.ct-orch-tray[data-compact] .ct-orch-tray-tool,
+.ct-orch-tray[data-compact] .ct-orch-tray-note { display: none; }
+.ct-orch-tray[data-compact] .ct-orch-tray-bar { position: static; }
 .ct-orch-tray h3.ct-orch-tray-title {
   margin: 0; padding: 0; font-size: var(--font-ui-smaller); font-weight: 600; line-height: 1.3;
   color: color-mix(in srgb, var(--color-orange, var(--text-warning)) 65%, var(--text-normal));

@@ -6,7 +6,7 @@
  * built ON dockTranscript, and the one-line unread peek text.
  */
 import { describe, it, expect } from 'vitest';
-import { richnessOf, sheetTranscript, stripVisualizeLines, peekLine, sheetBlock, trayLayout } from '../../src/dockSheetModel';
+import { richnessOf, sheetTranscript, stripVisualizeLines, peekLine, sheetBlock, trayLayout, MIN_TRAY_PX } from '../../src/dockSheetModel';
 
 const msg = (id: string, role: string, content: string, extra: Record<string, unknown> = {}) => ({ id, role, content, ...extra });
 
@@ -134,7 +134,7 @@ describe('trayLayout (K2 P5 batch 3: the composer wins; the tray scrolls inside 
   it('the cap never exceeds the room left after the fixed chrome (the composer is never clipped)', () => {
     for (const max of [300, 260, 220, 200, 180, 160]) {
       const l = trayLayout({ ...base, max });
-      expect(l.cap, `max ${max}`).toBeLessThanOrEqual(Math.max(48, max - 140));
+      expect(l.cap, `max ${max}`).toBeLessThanOrEqual(Math.max(MIN_TRAY_PX, max - 140));
     }
   });
   it('the first card does not fit (fixed + need > max): compact form, and its smaller need is used', () => {
@@ -147,7 +147,7 @@ describe('trayLayout (K2 P5 batch 3: the composer wins; the tray scrolls inside 
     expect(trayLayout({ ...base, max: 330 }).compact).toBe(false); // room 190 = need
   });
   it('is floored at a small constant so the tray never collapses to nothing', () => {
-    expect(trayLayout({ ...base, max: 150 }).cap).toBeGreaterThanOrEqual(48);
-    expect(trayLayout({ ...base, max: 100 }).cap).toBeGreaterThanOrEqual(48);
+    expect(trayLayout({ ...base, max: 150 }).cap).toBeGreaterThanOrEqual(MIN_TRAY_PX);
+    expect(trayLayout({ ...base, max: 100 }).cap).toBeGreaterThanOrEqual(MIN_TRAY_PX);
   });
 });

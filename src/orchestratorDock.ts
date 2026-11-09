@@ -120,6 +120,11 @@ const MAX_INPUT_PX = 80;
 const MAX_ANNOUNCE_CHARS = 160;
 /** The numeric badge on the narrow attention dot: more than this shows `9+`. */
 const MAX_BADGE = 9;
+/** The reply sheet never gets shorter than this, whatever the keyboard leaves (never 'uncapped'). */
+const MIN_SHEET_PX = 96;
+/** The pill's offset from the view bottom (styles.css --ct-kanban-pill-bottom), and the smaller gap it keeps above a keyboard. */
+const PILL_BOTTOM_PX = 36;
+const PILL_BOTTOM_KBD_PX = 8;
 /** A recovery is announced only once it has held this long. */
 export const RECOVERY_DEBOUNCE_MS = 1000;
 type Health = 'ok' | 'error' | 'offline' | 'none';
@@ -151,6 +156,7 @@ export class OrchestratorDock {
   private summaryText = '';
   private keyboard: KeyboardInsetTracker | null = null;
   private keyboardPx = 0;
+  private keyboardRoot: HTMLElement | null = null;
   private readonly history = new InputHistory();
   private readonly drafts: DraftStore;
   /** The store version after this dock's last read / write: a different version means another dock changed the draft since. */
@@ -271,6 +277,8 @@ export class OrchestratorDock {
     this.cancelRecovery();
     this.stopKeyboardTracking();
     this.keyboard = null;
+    this.history.clear();
+    this.host.parentElement?.classList.remove('ct-orch-pill-mode', 'ct-orch-kbd-up');
     this.tray?.destroy();
     this.tray = null;
     this.sheet?.destroy();
@@ -349,6 +357,8 @@ export class OrchestratorDock {
     const root = this.rootEl;
     root.dataset.state = this.state;
     root.dataset.mode = this.currentMode;
+    // A class on the pill (not :has()) lets styles.css lift it above the soft keyboard in pill mode.
+    this.host.parentElement?.classList.toggle('ct-orch-pill-mode', this.currentMode === 'pill');
     // Pill mode: the field is the keyboard stop (the orb only calls focusField). Orb mode: the orb is the control.
     if (this.currentMode === 'pill') this.orbEl.setAttribute('tabindex', '-1'); else this.orbEl.removeAttribute('tabindex');
     // Narrow mode hides the field, so none/error/offline must show on the orb: a static tint, no spinning ring.
@@ -461,11 +471,12 @@ export class OrchestratorDock {
   private trackOrchestrator(id: string | undefined, thread: Thread | undefined): void {
     if (id !== this.trackedId) {
       // A swapped / re-set-up orchestrator thread must not inherit what was typed for the previous one.
-      // (Deleted and re-created with the SAME id keeps it: only a different, defined id clears.)
+      // (Deleted and re-created with the SAME id keeps it: only a different, defined id clears, and only a draft that is NOT
+      // already the new orchestrator's: a second board noticing the swap late must not wipe what was typed for it meanwhile.)
       if (id !== undefined && this.lastOrchestratorId !== undefined && id !== this.lastOrchestratorId) {
-        this.drafts.clear();
+        if (this.drafts.get(id) === '') this.drafts.clear();
         this.syncedVersion = this.drafts.version;
-        if (this.inputEl) { this.inputEl.value = ''; this.autosize(this.inputEl); }
+        if (this.inputEl) { this.inputEl.value = this.drafts.get(id); this.autosize(this.inputEl); }
         this.history.reset();
       }
       // First sight of an orchestrator (a board re-mount): whatever the store holds for ANOTHER orchestrator is dropped, not kept hidden.
@@ -703,9 +714,16 @@ export class OrchestratorDock {
   }
 
   /** The inset goes on the sheet (narrow bottom sheet) and on the view root (so a pill-mode pill can lift, see styles.css). */
+  private clampLift(px: number): number {
+    const rootH = this.keyboardRoot?.clientHeight ?? 0;
+    if (!rootH || px <= 0) return px;
+    const pill = (this.host.parentElement ?? this.host).offsetHeight;
+    return Math.min(px, Math.max(0, rootH - pill - PILL_BOTTOM_KBD_PX));
+  }
+
   private setKeyboardVar(px: number | null): void {
     this.sheet?.setKeyboardInset(px);
-    const root = this.host.closest<HTMLElement>('.ct-agents-root');
+    const root = this.keyboardRoot ?? this.host.closest<HTMLElement>('.ct-agents-root');
     if (!root) return;
     if (px === null) root.style.removeProperty('--ct-orch-kbd-inset'); else root.style.setProperty('--ct-orch-kbd-inset', `${px}px`);
   }
@@ -713,6 +731,7 @@ export class OrchestratorDock {
   private stopKeyboardTracking(): void {
     this.keyboard?.stop();
     this.keyboardPx = 0;
+    this.host.parentElement?.classList.remove('ct-orch-kbd-up');
     this.setKeyboardVar(null);
   }
 
@@ -725,12 +744,17 @@ export class OrchestratorDock {
     if (this.keyboard) { this.keyboard.start(); return; }
     const win = this.host.ownerDocument.defaultView;
     if (!win) return;
+    // Cached: destroy() may run after the host was detached from the board root, and the variable must still come off it.
+    this.keyboardRoot = this.host.closest<HTMLElement>('.ct-agents-root');
     this.keyboard = new KeyboardInsetTracker(
       win,
       () => (this.host.closest('.ct-agents-root') ?? this.rootEl)?.getBoundingClientRect().bottom ?? 0,
-      (px) => {
+      (raw) => {
         if (this.destroyed) return;
+        // Pill mode lifts the whole pill: never further than leaves the pill inside a small view.
+        const px = this.currentMode === 'pill' ? this.clampLift(raw) : raw;
         this.keyboardPx = px;
+        this.host.parentElement?.classList.toggle('ct-orch-kbd-up', px > 0);
         this.setKeyboardVar(px);
         if (this.sheet?.isOpen) this.layoutChanged();
       },
@@ -755,8 +779,8 @@ export class OrchestratorDock {
       // Narrow: the bottom sheet covers the pill, so only the 60% cap and the keyboard apply (8px breathing room above the
       // keyboard-lifted sheet). Wide: it sits above the pill (36px offset + 8px gap).
       // Pill mode (landscape phone, tablet): the whole pill lifts by the keyboard inset, so the room above it shrinks by it.
-      const room = this.currentMode === 'orb' ? h - this.keyboardPx - (this.keyboardPx > 0 ? 8 : 0) : h - 36 - this.keyboardPx - pill - 16;
-      sheet.setMaxHeight(Math.min(h * 0.6, room));
+      const room = this.currentMode === 'orb' ? h - this.keyboardPx - (this.keyboardPx > 0 ? 8 : 0) : h - (this.keyboardPx > 0 ? PILL_BOTTOM_KBD_PX : PILL_BOTTOM_PX) - this.keyboardPx - pill - 16;
+      sheet.setMaxHeight(Math.max(MIN_SHEET_PX, Math.min(h * 0.6, room)));
       sheet.fitTray();
     });
   }
@@ -1067,6 +1091,11 @@ export class OrchestratorDock {
       if (this.sendEcho) {
         // The message is already in the transcript (user_message_added was seen): restoring the draft would invite a duplicate send.
         new Notice(`The orchestrator could not start working on your message: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+      if (this.deps.getOrchestratorThreadId() !== id) {
+        // The orchestrator was swapped while the send was pending: this text belongs to the old one and must not land in the new one's draft.
+        new Notice(`Could not send to the previous orchestrator: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
       // Never silently drop a message: put it back and say why.
