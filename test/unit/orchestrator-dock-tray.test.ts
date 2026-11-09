@@ -766,3 +766,58 @@ describe('QA D2: the heading bar (title + Show more / fewer) is one sticky unit 
     expect(t.q('.ct-orch-tray-bar .ct-orch-tray-title')).toBeTruthy();
   });
 });
+
+
+describe('"never approved blind" covers hidden FIELDS, not only length (review: required)', () => {
+  const spec = (detail: string, tool = 'Bash'): Spec[] => [{ id: 'h', title: 'Hidden stuff', kind: 'permission', tool, detail }];
+  const names = (t: ReturnType<typeof setup>) => [...t.card('h')!.querySelectorAll('.ct-orch-tray-actions button')].map((b) => b.textContent);
+
+  it('{command, dangerouslyDisableSandbox}: Deny + Review in thread only, the full JSON in the title', () => {
+    const detail = JSON.stringify({ command: 'ls', dangerouslyDisableSandbox: true });
+    const t = setup({ specs: spec(detail) });
+    expect(names(t)).toEqual(['Deny', 'Review in thread']);
+    expect(t.card('h')!.querySelector('.ct-orch-tray-detail')!.getAttribute('title')).toContain('dangerouslyDisableSandbox');
+  });
+
+  it('a Write with file_path + content: Deny + Review in thread only', () => {
+    const t = setup({ specs: spec(JSON.stringify({ file_path: '/r/a.ts', content: 'rm -rf /' }), 'Write') });
+    expect(names(t)).toEqual(['Deny', 'Review in thread']);
+  });
+
+  it('a single short command is still approvable inline (Deny / Allow / Always)', () => {
+    const t = setup({ specs: spec(JSON.stringify({ command: 'ls -la' })) });
+    expect(names(t)).toEqual(['Deny', 'Allow', 'Always']);
+  });
+
+  it('non-JSON text: approvable only when fully shown', () => {
+    expect(names(setup({ specs: spec('npm run deploy --prod') }))).toEqual(['Deny', 'Allow', 'Always']);
+    expect(names(setup({ specs: spec('q'.repeat(300)) }))).toEqual(['Deny', 'Review in thread']);
+  });
+
+  it('host_exec: command only keeps Allow once / Always `prefix`; an extra field does not', () => {
+    const only = `Run host_exec for a remote thread: ${JSON.stringify({ command: 'git status' })}`;
+    const more = `Run host_exec for a remote thread: ${JSON.stringify({ command: 'git status', cwd: '/etc' })}`;
+    expect(names(setup({ specs: spec(only, 'mcp__claude_threads__host_exec') }))).toEqual(['Deny', 'Allow once', 'Always `git status`']);
+    expect(names(setup({ specs: spec(more, 'mcp__claude_threads__host_exec') }))).toEqual(['Deny', 'Review in thread']);
+  });
+
+  it('Review in thread opens the thread and resolves nothing', () => {
+    const t = setup({ specs: spec(JSON.stringify({ command: 'ls', dangerouslyDisableSandbox: true })) });
+    t.btn('h', 'Review in thread')!.click();
+    expect(t.deps.openThread).toHaveBeenCalledWith('h');
+    expect(t.manager.resolvePermission).not.toHaveBeenCalled();
+  });
+});
+
+describe('focus survives the busy / re-enable cycle (review advisory 2)', () => {
+  it('the clicked button gets focus back when the action did not take and the card is re-enabled', async () => {
+    const t = setup({ specs: [DEFAULT[0]] });
+    t.manager.resolvePermission.mockImplementation(() => {}); // still pending: re-enabled afterwards
+    const allow = t.btn('p', 'Allow')!;
+    allow.focus();
+    allow.click();
+    await tick();
+    expect(allow.disabled).toBe(false);
+    expect(document.activeElement).toBe(allow);
+  });
+});

@@ -253,3 +253,43 @@ describe('KanbanView.focusCard scrolls the board out from under the sheet and pi
     expect(g.board.classList.contains('ct-kanban-clearing')).toBe(false);
   });
 });
+
+describe('clearance follows the sheet while a link is hovered (review advisory 7)', () => {
+  class FakeRO {
+    static all: FakeRO[] = [];
+    observed: Element[] = []; disconnected = false;
+    constructor(public cb: () => void) { FakeRO.all.push(this); }
+    observe(e: Element) { this.observed.push(e); }
+    disconnect() { this.disconnected = true; }
+  }
+
+  it('re-measures --ct-card-clearance when the sheet resizes, and stops observing on clear', () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('ResizeObserver', FakeRO);
+    reduceMotion(true);
+    const { view, card } = make();
+    const el = card('t1');
+    const g = geometry(view, el, { cardRect: { left: 400, top: 400, right: 660, bottom: 560 }, sheet: { left: 140, top: 230, right: 1140, bottom: 730 } });
+    view.focusCard('t1', { scroll: true, flash: false });
+    vi.advanceTimersByTime(INTENT_MS);
+    const before = g.board.style.getPropertyValue('--ct-card-clearance');
+    const sheet = view.containerEl.querySelector('.ct-orch-sheet') as HTMLElement;
+    sheet.getBoundingClientRect = () => ({ left: 140, top: 100, right: 1140, bottom: 730, width: 1000, height: 630 } as DOMRect); // grew
+    FakeRO.all.at(-1)!.cb();
+    const after = g.board.style.getPropertyValue('--ct-card-clearance');
+    expect(parseInt(after)).toBeGreaterThan(parseInt(before));
+    view.clearCardFocus();
+    expect(FakeRO.all.at(-1)!.disconnected).toBe(true);
+  });
+
+  it('when the plan cannot clear the card, the caller falls back to scrollIntoView', () => {
+    vi.useFakeTimers();
+    reduceMotion(true);
+    const { view, card } = make();
+    const el = card('t1');
+    geometry(view, el, { cardRect: { left: 400, top: 400, right: 660, bottom: 560 }, sheet: { left: 0, top: 0, right: 1280, bottom: 800 } }); // covers everything
+    view.focusCard('t1', { scroll: true, flash: false });
+    vi.advanceTimersByTime(INTENT_MS);
+    expect(el.scrollIntoView).toHaveBeenCalled();
+  });
+});

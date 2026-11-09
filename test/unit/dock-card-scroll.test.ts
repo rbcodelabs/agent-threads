@@ -90,6 +90,52 @@ describe('planCardScroll when the board cannot scroll sideways (swimlanes, galle
   });
 });
 
+describe('planCardScroll: fallbacks, "cleared" and sticky headers (review advisory 6)', () => {
+  it('reports cleared=true when the card ends up inside an uncovered region', () => {
+    expect(planCardScroll(r(400, 400, 660, 560), BOARD, [SHEET, PILL]).cleared).toBe(true);
+    expect(planCardScroll(r(300, 20, 560, 200), BOARD, [SHEET, PILL]).cleared).toBe(true);
+  });
+
+  it('a narrow sheet covering nearly everything: nothing above, the card cannot be cleared, aligns to the nearest board edge and says so', () => {
+    const board = r(0, 0, 390, 844);
+    const sheet = r(0, 8, 390, 844); // leaves a 8px sliver above
+    const card = r(20, 500, 280, 640);
+    const p = planCardScroll(card, board, [sheet], { allowX: false });
+    expect(p.cleared).toBe(false);
+    expect(p.dx).toBe(0);
+    expect(card.top + p.dy).toBe(0); // top aligned to the board top: as visible as it can be
+  });
+
+  it('everything covered: not cleared, no sideways move', () => {
+    const p = planCardScroll(r(10, 10, 20, 20), BOARD, [r(0, 0, 1280, 800)]);
+    expect(p.cleared).toBe(false);
+  });
+
+  it('fits nowhere: the LARGEST uncovered region wins, not blindly the first', () => {
+    // Overlay at the top leaves a thin strip above and a big area below; a tall card fits neither, the big one wins.
+    const board = r(0, 0, 1000, 1000);
+    const top = r(0, 0, 1000, 100);
+    const card = r(100, 400, 500, 1500);
+    const p = planCardScroll(card, board, [top], { allowX: false });
+    expect(p.region).toEqual(r(0, 0, 1000, 1000).top === 0 ? p.region : null);
+    expect(card.top + p.dy).toBeGreaterThanOrEqual(100); // below the overlay
+  });
+
+  it('sticky headers: aligning to the board top leaves topInset free', () => {
+    const board = r(0, 0, 1280, 800);
+    const card = r(300, 900, 560, 1400); // taller than the region: align top
+    const p = planCardScroll(card, board, [SHEET, PILL], { topInset: 40 });
+    expect(card.top + p.dy).toBe(40);
+  });
+
+  it('topInset also applies when a card just needs to come down from under the header', () => {
+    const board = r(0, 0, 1280, 800);
+    const card = r(300, 10, 560, 110); // top 10 is under a 40px sticky header
+    const p = planCardScroll(card, board, [SHEET, PILL], { topInset: 40 });
+    expect(card.top + p.dy).toBeGreaterThanOrEqual(40);
+  });
+});
+
 describe('coveredFraction', () => {
   it('0 when clear, 1 when hidden, partial in between', () => {
     expect(coveredFraction(r(0, 0, 100, 100), [r(200, 200, 300, 300)])).toBe(0);

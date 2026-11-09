@@ -160,6 +160,17 @@ describe('appendPermissionButtons with a guard', () => {
     expect(g.manager.resolvePermission).not.toHaveBeenCalled();
   });
 
+  it('fails CLOSED without prompt ids: a guard needs promptId on both sides, otherwise the click does nothing', () => {
+    const g = guarded({ toolName: 'Edit', detail: '{}' }); // snapshot has no promptId
+    g.btns[1].click();
+    expect(g.manager.resolvePermission).not.toHaveBeenCalled();
+    expect(g.onStale).toHaveBeenCalled();
+    const g2 = guarded({ toolName: 'Edit', detail: '{}', promptId: 1 });
+    g2.pending = { toolName: 'Edit', detail: '{}' }; // live side has none
+    g2.btns[1].click();
+    expect(g2.manager.resolvePermission).not.toHaveBeenCalled();
+  });
+
   it('without a guard nothing changes (the board keeps its behaviour)', async () => {
     const { btns, manager } = setup({ toolName: 'Edit', detail: '{}' });
     btns[1].click();
