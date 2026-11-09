@@ -342,6 +342,14 @@ describe('Gallery mode: lazy loading', () => {
     expect(c.querySelector('.ct-gallery-thumb img')!.getAttribute('src')).toBeNull();
   });
 
+  it('hands the board element to the observer factory as the scroll root', () => {
+    const roots: Array<Element | null | undefined> = [];
+    const factory: VisibilityObserverFactory = (_cb, root) => { roots.push(root); return { observe() {}, disconnect() {} }; };
+    const { view } = makeHarness([makeThread('a', { images: imgs(1) })], { observer: factory });
+    expect(roots).toHaveLength(1);
+    expect(roots[0]).toBe(view.boardEl.querySelector('.ct-gallery-board'));
+  });
+
   it('does not backfill thumbnails for cards that were never visible', () => {
     const { factory } = mockObserver();
     const { ensureImageThumbnail } = makeHarness([makeThread('a', { images: imgs(2) })], { observer: factory });

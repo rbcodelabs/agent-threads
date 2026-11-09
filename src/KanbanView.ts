@@ -1141,7 +1141,7 @@ export class KanbanView extends ItemView {
     this.galleryObserver = this.galleryObserverFactory((el, visible) => {
       const id = (el as HTMLElement).dataset?.threadId;
       if (id) this.galleryCards.get(id)?.setVisible(visible);
-    }) ?? null;
+    }, board) ?? null;
 
     const ordered = [...sorted.filter((t) => featuredIds.has(t.id)), ...sorted.filter((t) => !featuredIds.has(t.id))];
     for (const thread of ordered) {
