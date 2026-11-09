@@ -513,6 +513,7 @@ export class OrchestratorDock {
     }
     status.hidden = !wantStatus;
     status.dataset.body = wantStatus ? (this.bodyKind ?? '') : '';
+    if (this.sheet) this.sheet.composerSlot.dataset.body = inSheet ? (this.bodyKind ?? '') : '';
   }
 
   // ── Body (field / setup affordance / reason) ──────────────────────────────

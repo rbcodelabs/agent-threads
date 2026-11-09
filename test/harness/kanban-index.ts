@@ -88,12 +88,28 @@ if (new URLSearchParams(window.location.search).has('narrow')) document.body.cla
 // orchestrator yet" affordance). The orchestrator is a normal card on the board, as in production.
 const orchFixture = new URLSearchParams(window.location.search).get('orch');
 const orchestratorFixtureId = 'k-orchestrator';
+// ?tx=empty|conversation seeds the orchestrator transcript for the reply sheet (default: one short assistant line).
+// The conversation names board threads by id and by exact title, so [[thread:...]] links resolve like production.
+function orchTranscript() {
+  const tx = new URLSearchParams(window.location.search).get('tx');
+  if (tx === 'empty') return [];
+  if (tx === 'conversation') {
+    return [
+      { id: 'k-orch-u1', role: 'user', content: 'What needs me right now?', timestamp: KT_ORCH - 60_000 },
+      {
+        id: 'k-orch-a1', role: 'assistant', timestamp: KT_ORCH - 30_000,
+        content: `Two things are waiting on you:\n\n- [[thread:${kanbanAwaitingThreadId}|Deploy curation quality signals]] — prod-deploy approval\n- [[thread:Mobile layout polish]] — question ready\n\nEverything else is **on track**.`,
+      },
+    ];
+  }
+  return [{ id: 'k-orch-1', role: 'assistant', content: 'Two things are waiting on you.', timestamp: KT_ORCH }];
+}
 if (orchFixture && orchFixture !== 'first-run') {
   kanbanFixtureThreads.push({
     id: orchestratorFixtureId,
     title: 'Portfolio Orchestrator',
     cwd: '/Users/mock/projects',
-    messages: [{ id: 'k-orch-1', role: 'assistant', content: 'Two things are waiting on you.', timestamp: KT_ORCH }],
+    messages: orchTranscript(),
     createdAt: KT_ORCH - 3_600_000,
     updatedAt: KT_ORCH,
     reviewed: true,
@@ -182,7 +198,27 @@ const archivedFixtures = kanbanFixtureThreads
 const ensureOrchestratorCalls: boolean[] = [];
 /** Messages the dock sent through manager.sendMessage (the real one would spawn a Claude session). */
 const sentMessages: Array<{ threadId: string; text: string }> = [];
-manager.sendMessage = async (threadId: string, text: string) => { sentMessages.push({ threadId, text }); };
+/** Faithful to the real manager (spike S4): the user message is appended and announced by `user_message_added`. */
+const emitEvent = (threadId: string, event: { type: string; [k: string]: unknown }) =>
+  (manager as unknown as { emit(threadId: string, event: unknown): void }).emit(threadId, event);
+const interruptCalls: string[] = [];
+manager.sendMessage = async (threadId: string, text: string) => {
+  sentMessages.push({ threadId, text });
+  const thread = manager.getThread(threadId);
+  if (!thread) return;
+  const message = { id: `k-sent-${sentMessages.length}`, role: 'user', content: text, timestamp: KT_ORCH, unresolved: true };
+  (thread.messages as unknown[]).push(message);
+  emitEvent(threadId, { type: 'user_message_added', message });
+};
+// interrupt() removes every unresolved user message with NO per-message event, then emits interrupted + run_state_settled.
+manager.interrupt = async (threadId: string) => {
+  interruptCalls.push(threadId);
+  const thread = manager.getThread(threadId);
+  if (thread) thread.messages = (thread.messages as unknown as Array<{ unresolved?: boolean }>).filter((msg) => !msg.unresolved) as never;
+  (manager as unknown as { sessions: Map<string, unknown> }).sessions.delete(threadId);
+  emitEvent(threadId, { type: 'interrupted' });
+  emitEvent(threadId, { type: 'run_state_settled' });
+};
 const reconnectCalls: string[] = [];
 const mockDaemonRegistry = {
   nameOf: (id: string) => id,
@@ -317,4 +353,32 @@ void view.onOpen();
 };
 (window as any).__fireRunStateSettled = (threadId: string) => {
   (manager as unknown as { emit(threadId: string, event: { type: string }): void }).emit(threadId, { type: 'run_state_settled' });
+};
+
+// ── OrchestratorDock reply-sheet hooks (orchestrator-dock-sheet.spec.ts) ─────────────────────────────────────────────
+(window as any).__interruptCalls = interruptCalls;
+(window as any).__openSheet = () => (view as unknown as { dock: { openSheet(): void } }).dock.openSheet();
+let orchSeq = 0;
+(window as any).__orchSay = (text: string) => {
+  const thread = manager.getThread(orchestratorFixtureId)!;
+  const message = { id: `k-say-${++orchSeq}`, role: 'assistant', content: text, timestamp: KT_ORCH };
+  (thread.messages as unknown[]).push(message);
+  emitEvent(orchestratorFixtureId, { type: 'message', message });
+};
+(window as any).__orchStream = (text: string, activity?: string) => {
+  m.sessions.set(orchestratorFixtureId, { turnInFlight: true });
+  if (activity) m.threadActivity.set(orchestratorFixtureId, activity);
+  emitEvent(orchestratorFixtureId, { type: 'streaming_start' });
+  emitEvent(orchestratorFixtureId, { type: 'token', text });
+};
+(window as any).__orchSettle = () => {
+  m.sessions.delete(orchestratorFixtureId);
+  emitEvent(orchestratorFixtureId, { type: 'done' });
+  emitEvent(orchestratorFixtureId, { type: 'run_state_settled' });
+};
+// Local queue (plan gate / harness switch / goal-context refresh): the only path that emits `queued`.
+(window as any).__orchQueue = (text: string) => {
+  const queues = (manager as unknown as { queuedMessages: Map<string, Array<{ text: string }>> }).queuedMessages;
+  queues.set(orchestratorFixtureId, [...(queues.get(orchestratorFixtureId) ?? []), { text }]);
+  emitEvent(orchestratorFixtureId, { type: 'queued', text });
 };

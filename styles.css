@@ -7271,6 +7271,233 @@ textarea.ct-settings-wide-input {
 .ct-agents-root.ct-mobile .ct-orch-dock button.ct-orch-action { min-height: 44px; }
 .ct-agents-root.ct-mobile .ct-orch-kbd { display: none; }
 
+/* ── OrchestratorDock reply sheet (K2 P3) ─────────────────────────────────────────────────────────────────────────
+   The sheet, the unread peek and the suggestion strip are CHILDREN of the pill, so they follow it when the search bar
+   expands or the status row wraps. Compound selectors (`.ct-kanban-dispatch .x button.y`) outrank the pill's button
+   chrome strip `.ct-kanban-dispatch button:not(.ct-new-thread-btn)` (0,2,1) and the mobile pill rules (PR #890). */
+.ct-kanban-dispatch .ct-orch-sheet,
+.ct-kanban-dispatch .ct-orch-peek,
+.ct-kanban-dispatch .ct-orch-chips {
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  bottom: calc(100% + 8px);
+  box-sizing: border-box;
+  color: var(--text-normal);
+}
+.ct-kanban-dispatch .ct-orch-sheet[hidden],
+.ct-kanban-dispatch .ct-orch-peek[hidden],
+.ct-kanban-dispatch .ct-orch-chips[hidden],
+.ct-kanban-dispatch .ct-orch-sheet-composer[hidden],
+.ct-kanban-dispatch button.ct-orch-stop[hidden],
+.ct-kanban-dispatch button.ct-orch-send[hidden] { display: none; }
+
+.ct-kanban-dispatch .ct-orch-sheet {
+  display: flex;
+  flex-direction: column;
+  max-height: var(--ct-orch-sheet-max, 60vh);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+.ct-orch-sheet-handle { display: none; }
+.ct-orch-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ct-orch-sheet-orb { position: relative; display: grid; place-items: center; flex: none; width: 28px; height: 28px; }
+.ct-orch-sheet-orb-core,
+.ct-orch-sheet-orb-ring { grid-area: 1 / 1; border-radius: 50%; }
+.ct-orch-sheet-orb-core {
+  width: 20px; height: 20px;
+  background: linear-gradient(135deg, var(--interactive-accent), color-mix(in srgb, var(--interactive-accent) 55%, var(--color-blue, var(--text-accent))));
+}
+.ct-orch-sheet-orb-ring {
+  width: 26px; height: 26px;
+  background: conic-gradient(from 0deg, var(--interactive-accent), transparent 72%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
+  opacity: 0;
+}
+.ct-orch-sheet-orb.ct-orch-orb-spinning .ct-orch-sheet-orb-ring { opacity: 1; animation: ct-orch-spin 1.1s linear infinite; }
+.ct-kanban-dispatch .ct-orch-sheet h2.ct-orch-sheet-title {
+  flex: 1 1 auto; min-width: 0; margin: 0; padding: 0;
+  font-size: var(--font-ui-medium); font-weight: 600; line-height: 1.3; color: var(--text-normal);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ct-kanban-dispatch .ct-orch-sheet button.ct-orch-sheet-btn {
+  flex: none; height: auto; min-height: 28px; padding: 2px 8px; border: none; border-radius: 6px;
+  background: transparent; box-shadow: none; color: var(--text-muted);
+  font-size: var(--font-ui-smaller); cursor: pointer;
+}
+.ct-kanban-dispatch .ct-orch-sheet button.ct-orch-sheet-btn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+
+.ct-orch-sheet-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.ct-orch-sheet-log { display: flex; flex-direction: column; gap: 8px; }
+.ct-orch-sheet-slot:empty { display: none; }
+.ct-orch-msg { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
+.ct-orch-msg[data-role="user"] { align-self: flex-end; align-items: flex-end; max-width: 85%; }
+.ct-orch-bubble {
+  padding: 8px 12px; border-radius: 10px; min-width: 0; max-width: 100%;
+  font-size: var(--font-ui-small); line-height: 1.45; overflow-wrap: anywhere; color: var(--text-normal);
+}
+.ct-orch-msg[data-role="user"] .ct-orch-bubble { background: var(--background-modifier-hover); white-space: pre-wrap; }
+.ct-orch-msg[data-role="assistant"] .ct-orch-bubble {
+  background: color-mix(in srgb, var(--interactive-accent) 12%, var(--background-secondary));
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 30%, var(--background-modifier-border));
+}
+.ct-orch-bubble > :first-child { margin-top: 0; }
+.ct-orch-bubble > :last-child { margin-bottom: 0; }
+.ct-orch-bubble p { margin: 0 0 6px; }
+.ct-orch-bubble ul, .ct-orch-bubble ol { margin: 0 0 6px; padding-left: 20px; }
+.ct-orch-bubble pre, .ct-orch-bubble code { font-size: var(--font-ui-smaller); }
+.ct-orch-bubble a.ct-thread-link,
+.ct-orch-bubble a.internal-link { color: color-mix(in srgb, var(--text-accent) 45%, var(--text-normal)); text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
+.ct-orch-bubble-streaming { white-space: pre-wrap; }
+.ct-orch-bubble-streaming::after {
+  content: ""; display: inline-block; width: 6px; height: 1em; margin-left: 2px; vertical-align: text-bottom;
+  background: var(--interactive-accent); animation: ct-orch-blink 1s steps(2, start) infinite;
+}
+@keyframes ct-orch-blink { to { visibility: hidden; } }
+.ct-orch-pickup { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.ct-kanban-dispatch .ct-orch-sheet button.ct-orch-chip-full {
+  align-self: flex-start; height: auto; min-height: 24px; padding: 1px 10px; border: 1px solid var(--background-modifier-border);
+  border-radius: 999px; background: transparent; box-shadow: none; color: var(--text-muted);
+  font-size: var(--font-ui-smaller); cursor: pointer;
+}
+.ct-kanban-dispatch .ct-orch-sheet button.ct-orch-chip-full:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.ct-orch-activity { display: flex; align-items: center; gap: 8px; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.ct-orch-activity-spin {
+  flex: none; width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid var(--background-modifier-border); border-top-color: var(--interactive-accent);
+  animation: ct-orch-spin 0.9s linear infinite;
+}
+.ct-orch-notice {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--color-orange, var(--text-warning)) 55%, var(--background-modifier-border));
+  background: color-mix(in srgb, var(--color-orange, var(--text-warning)) 8%, transparent);
+  font-size: var(--font-ui-small); color: var(--text-normal);
+}
+.ct-orch-waiting { padding: 6px 0 0; }
+.ct-orch-waiting h3.ct-orch-waiting-title { margin: 0 0 4px; padding: 0; font-size: var(--font-ui-smaller); font-weight: 600; color: var(--text-muted); }
+.ct-orch-waiting ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.ct-orch-waiting li {
+  display: flex; align-items: center; gap: 8px; padding: 2px 4px 2px 10px; border-radius: 6px;
+  background: var(--background-modifier-hover); font-size: var(--font-ui-small); color: var(--text-normal);
+}
+.ct-orch-waiting-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-orch-empty { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ct-orch-empty-label, .ct-orch-chips-label, .ct-orch-empty-note { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.ct-kanban-dispatch .ct-orch-sheet button.ct-orch-chip,
+.ct-kanban-dispatch .ct-orch-chips button.ct-orch-chip {
+  height: auto; min-height: 24px; padding: 2px 10px; border: 1px solid var(--background-modifier-border); border-radius: 999px;
+  background: var(--background-primary); box-shadow: none; color: var(--text-normal); font-size: var(--font-ui-smaller); cursor: pointer;
+}
+.ct-kanban-dispatch .ct-orch-sheet button.ct-orch-chip:hover,
+.ct-kanban-dispatch .ct-orch-chips button.ct-orch-chip:hover { border-color: var(--interactive-accent); }
+
+/* Composer slot (narrow bottom sheet): the dock moves its ONE body (input, or P2's reason + action) in here. */
+.ct-orch-sheet-composer { flex: none; padding: 8px 12px; border-top: 1px solid var(--background-modifier-border); }
+.ct-orch-sheet-composer .ct-orch-body {
+  min-height: 44px; padding: 0 8px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-primary);
+}
+.ct-orch-sheet-composer .ct-orch-body:focus-within { border-color: var(--interactive-accent); }
+.ct-orch-sheet-composer[data-body="error"] .ct-orch-body,
+.ct-orch-sheet-composer[data-body="offline"] .ct-orch-body {
+  border-color: color-mix(in srgb, var(--text-error, var(--color-red)) 55%, var(--background-modifier-border));
+  background: color-mix(in srgb, var(--text-error, var(--color-red)) 7%, transparent);
+  justify-content: space-between;
+}
+.ct-orch-sheet-composer[data-body="error"] .ct-orch-reason,
+.ct-orch-sheet-composer[data-body="offline"] .ct-orch-reason { color: var(--text-error, var(--color-red)); }
+.ct-orch-sheet-composer .ct-orch-reason { white-space: normal; overflow: visible; text-overflow: clip; line-height: 18px; padding: 6px 0; }
+.ct-orch-sheet-composer textarea.ct-orch-input {
+  flex: 1 1 auto; min-width: 0; min-height: 0; max-height: 92px; height: auto; margin: 0; padding: 12px 0;
+  border: none; box-shadow: none; outline: none; background: transparent; color: var(--text-normal);
+  font-size: var(--font-ui-small); line-height: 20px; resize: none; overflow-y: auto;
+}
+.ct-orch-sheet-composer textarea.ct-orch-input::placeholder { color: var(--text-muted); opacity: 1; }
+.ct-orch-sheet-composer .ct-orch-kbd { display: none; }
+.ct-kanban-dispatch button.ct-orch-stop,
+.ct-kanban-dispatch button.ct-orch-send,
+.ct-orch-sheet-composer button.ct-orch-action {
+  flex: none; height: auto; padding: 3px 10px; border: none; border-radius: 6px; box-shadow: none;
+  font-size: var(--font-ui-smaller); cursor: pointer; white-space: nowrap;
+}
+.ct-kanban-dispatch button.ct-orch-stop { background: var(--background-modifier-hover); color: var(--text-normal); }
+.ct-kanban-dispatch button.ct-orch-stop::before { content: "■"; margin-right: 6px; font-size: 0.8em; }
+.ct-kanban-dispatch button.ct-orch-stop:disabled { opacity: 0.5; cursor: default; }
+.ct-kanban-dispatch button.ct-orch-send { background: var(--interactive-accent); color: var(--text-on-accent); }
+.ct-orch-sheet-composer button.ct-orch-action { background: var(--background-modifier-hover); color: var(--text-normal); }
+
+/* Unread peek (one line above the pill; latest wins; auto-dismisses) and the empty-transcript suggestion strip. */
+.ct-kanban-dispatch .ct-orch-peek {
+  display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 10px; border-radius: 10px; font-size: var(--font-ui-small);
+  background: color-mix(in srgb, var(--interactive-accent) 14%, var(--background-secondary));
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 35%, var(--background-modifier-border));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+  animation: ct-orch-rise 0.16s ease-out;
+}
+@keyframes ct-orch-rise { from { opacity: 0; transform: translateY(4px); } }
+.ct-orch-peek-orb {
+  display: grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; color: var(--text-on-accent);
+  background: linear-gradient(135deg, var(--interactive-accent), color-mix(in srgb, var(--interactive-accent) 55%, var(--color-blue, var(--text-accent))));
+}
+.ct-orch-peek-orb svg { width: 13px; height: 13px; }
+.ct-orch-peek-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-normal); }
+.ct-kanban-dispatch .ct-orch-peek button { height: auto; min-height: 24px; padding: 2px 8px; border: none; border-radius: 6px; box-shadow: none; cursor: pointer; font-size: var(--font-ui-smaller); }
+.ct-kanban-dispatch .ct-orch-peek button.ct-orch-peek-open { background: var(--interactive-accent); color: var(--text-on-accent); }
+.ct-kanban-dispatch .ct-orch-peek button.ct-orch-peek-dismiss { background: transparent; color: var(--text-muted); }
+.ct-kanban-dispatch .ct-orch-chips {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 10px;
+  background: color-mix(in srgb, var(--interactive-accent) 8%, var(--background-secondary));
+  border: 1px solid var(--background-modifier-border);
+}
+
+/* Screen-reader-only live region (throttled announcements). */
+.ct-orch-live { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.ct-orch-sheet button:focus-visible,
+.ct-orch-peek button:focus-visible,
+.ct-orch-chips button:focus-visible,
+.ct-orch-sheet-composer button:focus-visible,
+.ct-orch-dock button.ct-orch-stop:focus-visible,
+.ct-orch-dock button.ct-orch-send:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+
+/* Narrow (< 640px): a bottom sheet over the pill with a grab handle, 44px targets and safe-area padding (mock k2-9). The
+   pill is 16px inset from each side and 36px above the board's bottom edge, so -17px / -37px reach the view's edges. */
+.ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] {
+  left: -17px; right: -17px; bottom: -37px;
+  border-radius: 16px 16px 0 0;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-handle { display: block; flex: none; width: 36px; height: 4px; margin: 8px auto 0; border-radius: 2px; background: var(--text-faint); }
+.ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-full-label { display: none; }
+.ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-sheet-btn,
+.ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-chip,
+.ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-chip-full,
+.ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-send,
+.ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-stop,
+.ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-action { min-height: 44px; min-width: 44px; }
+.ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-composer { padding-bottom: max(8px, env(safe-area-inset-bottom, 0px)); }
+
+/* Peek + suggestion strip on touch devices: 44px targets (same rule as the pill's buttons). */
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-peek button,
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-chips button.ct-orch-chip { min-height: 44px; min-width: 44px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-orch-sheet-orb.ct-orch-orb-spinning .ct-orch-sheet-orb-ring,
+  .ct-orch-activity-spin,
+  .ct-orch-bubble-streaming::after,
+  .ct-kanban-dispatch .ct-orch-peek { animation: none; }
+}
+
 /* Extra bottom padding on the board so cards don't hide under the floating action panel */
 .ct-kanban-board {
   padding-bottom: 76px;

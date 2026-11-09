@@ -98,7 +98,10 @@ export class DockSheet {
     this.orbEl.createSpan('ct-orch-sheet-orb-ring');
     this.orbEl.createSpan('ct-orch-sheet-orb-core');
     head.createEl('h2', { cls: 'ct-orch-sheet-title', text: 'Portfolio orchestrator', attr: { id } });
-    const full = head.createEl('button', { cls: 'ct-orch-sheet-btn ct-orch-sheet-full', text: 'Open full thread ↗', attr: { type: 'button' } });
+    // Narrow mode hides the label (mock k2-9 shows just the arrow): the aria-label keeps the name.
+    const full = head.createEl('button', { cls: 'ct-orch-sheet-btn ct-orch-sheet-full', attr: { type: 'button', 'aria-label': 'Open full thread' } });
+    full.createSpan({ cls: 'ct-orch-sheet-full-label', text: 'Open full thread ' });
+    full.createSpan({ text: '↗' });
     full.addEventListener('click', () => this.h.openFull());
     const close = head.createEl('button', { cls: 'ct-orch-sheet-btn ct-orch-sheet-close', text: '✕', attr: { type: 'button', 'aria-label': 'Close' } });
     close.addEventListener('click', () => this.h.close());

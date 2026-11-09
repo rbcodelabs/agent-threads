@@ -213,7 +213,9 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
     await page.evaluate(() => (window as any).__orchQueue('held message'));
     await field(page).click();
     const ratios = await page.evaluate(() => {
-      const parse = (c: string) => (c.match(/[\d.]+/g) ?? []).slice(0, 4).map(Number);
+      // Computed colours may be `color(srgb ...)` (color-mix): rasterise through a canvas to get plain RGBA.
+      const ctx = document.createElement('canvas').getContext('2d', { willReadFrequently: true })!;
+      const parse = (c: string) => { ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = '#000'; ctx.fillStyle = c; ctx.fillRect(0, 0, 1, 1); const d = ctx.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
       const lum = ([r, g, b]: number[]) => { const f = (v: number) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
       const bgOf = (el: Element): number[] => { for (let n: Element | null = el; n; n = n.parentElement) { const c = parse(getComputedStyle(n).backgroundColor); if (c.length === 3 || (c.length === 4 && c[3] > 0.95)) return c; } return [30, 30, 30]; };
       const out: Record<string, number> = {};
