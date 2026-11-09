@@ -1,0 +1,76 @@
+import { describe, expect, it, vi } from "vitest";
+import { CommandRegistry, type Command } from "../../src/renderer/commands";
+
+// SPIKE: agent-threads OrchestratorDock Mod+J registration forms. Throwaway; copied into agent-threads spike branch.
+function keyEvent(extra: Partial<KeyboardEvent>): KeyboardEvent {
+  return { key: "j", code: "KeyJ", ctrlKey: false, metaKey: false, shiftKey: false, altKey: false,
+    preventDefault: vi.fn(), stopPropagation: vi.fn(), ...extra } as unknown as KeyboardEvent;
+}
+function attach(registry: CommandRegistry) {
+  let listener!: (e: KeyboardEvent) => void;
+  registry.attach({ addEventListener: (_t: string, cb: any) => { listener = cb; }, removeEventListener: vi.fn() } as unknown as Document);
+  return listener;
+}
+// Linux/jsdom-less node: navigator undefined => platform "other" => Mod === Ctrl.
+const press = { ctrlKey: true };
+
+describe("Mod+J declaration forms (geode CommandRegistry)", () => {
+  const forms: Record<string, Partial<Command>> = {
+    "legacy hotkey string": { hotkey: "Mod+J" },
+    "structured {modifiers, code}": { hotkeys: [{ modifiers: ["Mod"], code: "KeyJ" }] },
+    // Obsidian-shaped {modifiers,key} PLUS code: one declaration for both hosts
+    "dual {modifiers, key, code}": { hotkeys: [{ modifiers: ["Mod"], key: "j", code: "KeyJ" } as any] },
+    "both hotkey and hotkeys (hotkeys wins, no duplicate owner)": { hotkey: "Mod+J", hotkeys: [{ modifiers: ["Mod"], code: "KeyJ" }] },
+  };
+  for (const [name, form] of Object.entries(forms)) {
+    it(`binds Mod+J: ${name}`, () => {
+      const r = new CommandRegistry();
+      const run = vi.fn();
+      r.add({ id: "dock", name: "dock", callback: run, ...form });
+      expect(r.snapshot().dispatchable).toEqual(["Mod+KeyJ"]);
+      const listener = attach(r);
+      const ev = keyEvent(press);
+      listener(ev);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(ev.preventDefault).toHaveBeenCalled();
+    });
+  }
+  it("Obsidian-only shape {modifiers, key} (no code) is NOT bound in Geode", () => {
+    const r = new CommandRegistry();
+    r.add({ id: "dock", name: "dock", callback: () => {}, hotkeys: [{ modifiers: ["Mod"], key: "J" } as any] });
+    expect(r.snapshot().dispatchable).toEqual([]);
+  });
+  it("checkCallback(true)===false => keydown falls through (no preventDefault/stopPropagation), command not run", () => {
+    const r = new CommandRegistry();
+    const body = vi.fn();
+    r.add({ id: "dock", name: "dock", hotkeys: [{ modifiers: ["Mod"], code: "KeyJ" }],
+      checkCallback: (checking) => { if (checking) return false; body(); } });
+    const listener = attach(r);
+    const ev = keyEvent(press);
+    listener(ev);
+    expect(body).not.toHaveBeenCalled();
+    expect(ev.preventDefault).not.toHaveBeenCalled();
+    expect(ev.stopPropagation).not.toHaveBeenCalled();
+  });
+  it("checkCallback returning undefined in checking mode counts as AVAILABLE (must return explicit false)", () => {
+    const r = new CommandRegistry();
+    const body = vi.fn();
+    r.add({ id: "dock", name: "dock", hotkeys: [{ modifiers: ["Mod"], code: "KeyJ" }],
+      checkCallback: (checking) => { if (!checking) body(); } });
+    const ev = keyEvent(press);
+    attach(r)(ev);
+    expect(body).toHaveBeenCalledTimes(1);
+    expect(ev.preventDefault).toHaveBeenCalled();
+  });
+  it("a second owner of Mod+J makes it non-dispatchable for BOTH (silent)", () => {
+    const r = new CommandRegistry();
+    const a = vi.fn(); const b = vi.fn();
+    r.add({ id: "a", name: "a", hotkey: "Mod+J", callback: a });
+    r.add({ id: "b", name: "b", hotkey: "Mod+J", callback: b });
+    const ev = keyEvent(press);
+    attach(r)(ev);
+    expect(a).not.toHaveBeenCalled(); expect(b).not.toHaveBeenCalled();
+    expect(ev.preventDefault).not.toHaveBeenCalled();
+    expect(r.conflictsFor("a")[0].owners.sort()).toEqual(["a", "b"]);
+  });
+});
