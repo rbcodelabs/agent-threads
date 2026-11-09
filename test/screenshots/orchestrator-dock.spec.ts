@@ -234,6 +234,51 @@ test.describe('orchestrator dock — functional (no baselines)', () => {
     expect(same).toBe(true);
   });
 
+  async function tabTo(page: Page, selector: string) {
+    for (let i = 0; i < 40; i++) {
+      await page.keyboard.press('Tab');
+      if (await page.evaluate((sel) => document.activeElement?.matches(sel) ?? false, selector)) return;
+    }
+    throw new Error(`Tab never reached ${selector}`);
+  }
+
+  test('a11y: keyboard focus on the orb (orb mode) and on Set up… (pill) shows a visible outline', async ({ page }) => {
+    await open(page, 'idle', NARROW);
+    await tabTo(page, '.ct-orch-orb');
+    let o = await page.evaluate(() => { const cs = getComputedStyle(document.activeElement!); return { style: cs.outlineStyle, width: cs.outlineWidth }; });
+    expect(o.style).not.toBe('none');
+    expect(parseFloat(o.width)).toBeGreaterThanOrEqual(2);
+    await open(page, 'first-run', DESKTOP);
+    await tabTo(page, '.ct-orch-action');
+    o = await page.evaluate(() => { const cs = getComputedStyle(document.activeElement!); return { style: cs.outlineStyle, width: cs.outlineWidth }; });
+    expect(o.style).not.toBe('none');
+    expect(parseFloat(o.width)).toBeGreaterThanOrEqual(2);
+  });
+
+  test('a11y: in pill mode the orb is not a tab stop', async ({ page }) => {
+    await open(page, 'idle', DESKTOP);
+    await expect(page.locator('.ct-orch-orb')).toHaveAttribute('tabindex', '-1');
+  });
+
+  test('prefers-reduced-motion: the spinning ring has no animation', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await open(page, 'working', DESKTOP);
+    await expect(page.locator('.ct-orch-orb')).toHaveClass(/ct-orch-orb-spinning/);
+    expect(await page.locator('.ct-orch-orb-ring').evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await open(page, 'working', DESKTOP);
+    expect(await page.locator('.ct-orch-orb-ring').evaluate((el) => getComputedStyle(el).animationName)).not.toBe('none');
+  });
+
+  for (const fixture of ['error', 'offline'] as const) {
+    test(`board bottom padding clears the pill at 320px (${fixture}, long reason)`, async ({ page }) => {
+      await open(page, fixture, { width: 320, height: 844 });
+      const pill = await page.locator('.ct-kanban-dispatch').boundingBox();
+      const pad = await page.locator('.ct-kanban-board').first().evaluate((el) => parseFloat(getComputedStyle(el).paddingBottom));
+      expect(pad).toBeGreaterThanOrEqual(pill!.height + 36);
+    });
+  }
+
   test('narrow: tapping the orb opens the orchestrator thread (interim)', async ({ page }) => {
     await open(page, 'idle', NARROW);
     await page.locator('.ct-orch-orb').click();

@@ -26,13 +26,16 @@ class FakeResizeObserver {
 }
 
 function make(rootWidth = 0) {
-  const unsubManager = vi.fn();
+  // buildUI mounts the dock (subscribes first), then onOpen subscribes the view: distinct spies tell them apart.
+  const unsubDock = vi.fn();
+  const unsubView = vi.fn();
+  const unsubs = [unsubDock, unsubView];
   const unsubDaemon = vi.fn();
   const manager = {
     vaultRoot: '/v', getThreads: () => [], getThread: () => undefined, isRunning: () => false,
     hasPendingPermission: () => false, hasPendingQuestion: () => false, hasPendingPlan: () => false,
     hasActiveBackgroundTasks: () => false, isRunStale: () => false, getProjects: () => [], getProject: () => undefined,
-    subscribe: vi.fn(() => unsubManager),
+    subscribe: vi.fn(() => unsubs.shift() ?? vi.fn()),
   };
   const plugin = {
     manager,
@@ -45,7 +48,7 @@ function make(rootWidth = 0) {
   (view as unknown as { app: unknown }).app = { workspace: { leftSplit: { collapsed: true }, rightSplit: { collapsed: true } } };
   const root = view.containerEl.children[1] as HTMLElement;
   Object.defineProperty(root, 'clientWidth', { configurable: true, get: () => rootWidth });
-  return { view, root, manager, plugin, unsubManager, unsubDaemon };
+  return { view, root, manager, plugin, unsubDock, unsubView, unsubDaemon };
 }
 
 afterEach(() => { FakeResizeObserver.instances = []; vi.unstubAllGlobals(); });
@@ -58,14 +61,16 @@ describe('KanbanView dock lifecycle', () => {
     const meta = t.root.querySelector('.ct-kanban-dispatch .ct-agents-panel-meta')!;
     expect(meta.firstElementChild?.classList.contains('ct-orch-dock')).toBe(true);
     expect(t.plugin.daemonRegistry.onState).toHaveBeenCalledTimes(1);
-    expect(FakeResizeObserver.instances).toHaveLength(1);
+    // Two observers: the view root (breakpoint) and the pill (board bottom clearance).
+    expect(FakeResizeObserver.instances).toHaveLength(2);
     expect(FakeResizeObserver.instances[0].observed).toEqual([t.root]);
+    expect(FakeResizeObserver.instances[1].observed[0]).toBe(t.root.querySelector('.ct-kanban-dispatch'));
 
     await t.view.onClose();
-    expect(t.unsubManager).toHaveBeenCalled(); // KanbanView's own + the dock's both return this spy
-    expect(t.unsubManager.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(t.unsubDock).toHaveBeenCalledTimes(1);
+    expect(t.unsubView).toHaveBeenCalledTimes(1);
     expect(t.unsubDaemon).toHaveBeenCalledTimes(1);
-    expect(FakeResizeObserver.instances[0].disconnected).toBe(true);
+    expect(FakeResizeObserver.instances.every((o) => o.disconnected)).toBe(true);
     expect(t.root.querySelector('.ct-orch-dock')).toBeNull();
   });
 

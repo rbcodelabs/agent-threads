@@ -507,3 +507,67 @@ describe('narrow status row (D2): none / error / offline stay visible in orb mod
     expect(document.querySelector('.ct-orch-status')).toBeNull();
   });
 });
+
+describe('delta review follow-ups', () => {
+  it('remote_pending_changed refreshes (a remote turn flips isRunning without a paired done/streaming_start)', () => {
+    const t = setup();
+    const spy = vi.spyOn(t.deps, 'listThreads');
+    spy.mockClear();
+    t.emit('remote_pending_changed');
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it('setUp uses aria-disabled + early return (keeps keyboard focus), not the disabled attribute', async () => {
+    const t = setup({ orchestratorId: undefined });
+    let release: () => void = () => {};
+    (t.deps.ensureOrchestrator as ReturnType<typeof vi.fn>).mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
+    const btn = t.host.querySelector('.ct-orch-action') as HTMLButtonElement;
+    btn.focus();
+    btn.click();
+    expect(btn.disabled).toBe(false);
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(btn);
+    btn.click(); // second click while pending is a no-op
+    expect(t.deps.ensureOrchestrator).toHaveBeenCalledTimes(1);
+    t.state.orchestratorId = 'orch';
+    release();
+    await vi.waitFor(() => expect(t.root().dataset.state).toBe('idle'));
+  });
+
+  it('a failed setup leaves the button focused and re-enabled (aria-disabled cleared)', async () => {
+    const t = setup({ orchestratorId: undefined });
+    (t.deps.ensureOrchestrator as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('nope'));
+    const btn = t.host.querySelector('.ct-orch-action') as HTMLButtonElement;
+    btn.focus();
+    btn.click();
+    await vi.waitFor(() => expect(btn.hasAttribute('aria-disabled')).toBe(false));
+    expect(document.activeElement).toBe(btn);
+  });
+
+  it('focusField reads activeElement from the input\'s own document (popout windows)', () => {
+    const t = setup();
+    const el = input(t.host);
+    el.value = 'draft';
+    const spy = vi.spyOn(el, 'ownerDocument', 'get').mockReturnValue({ activeElement: el } as unknown as Document);
+    const select = vi.spyOn(el, 'select');
+    t.dock.focusField();
+    expect(select).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('a draft typed while the field is hidden (orb mode, scrollHeight 0) is autosized when the pill returns', () => {
+    const t = setup({ mode: 'orb' });
+    const el = input(t.host);
+    el.value = 'a\nb\nc';
+    el.dispatchEvent(new Event('input'));
+    expect(el.style.height).not.toBe('64px');
+    Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', { configurable: true, get: () => 64 });
+    try {
+      t.state.mode = 'pill';
+      t.dock.relayout();
+      expect(el.style.height).toBe('64px');
+    } finally {
+      delete (HTMLTextAreaElement.prototype as unknown as Record<string, unknown>).scrollHeight;
+    }
+  });
+});
