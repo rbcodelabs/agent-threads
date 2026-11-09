@@ -1461,3 +1461,88 @@ describe('delta G: resolveLink is not called per row per render', () => {
     expect(spy.mock.calls.filter((c) => c[0] === 'Same note').length).toBeLessThanOrEqual(1);
   });
 });
+
+
+// ── Targeted QA on e232979: N4 slow scroll-up, N5 focus across a mode change ───────────────────────────────────────
+describe('N4: any upward movement unpins at once, however small', () => {
+  const rig = (t: T) => {
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let h = 3000;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    return { scroll, grow: (n: number) => { h = n; } };
+  };
+
+  it('a slow wheel (-12px per frame) while tokens arrive is never pulled back', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll, grow } = rig(t);
+    t.dock.openSheet(); await frame();
+    expect(scroll.scrollTop).toBe(3000);
+    let top = scroll.scrollTop;
+    for (let i = 0; i < 6; i++) {
+      top -= 12;
+      scroll.scrollTop = top; scroll.dispatchEvent(new Event('wheel')); scroll.dispatchEvent(new Event('scroll'));
+      grow(3000 + (i + 1) * 20);
+      t.emit('token', { text: 'tok ' }); await frame();
+      expect(scroll.scrollTop).toBe(top);
+    }
+  });
+
+  it('a slow touch drag (no wheel events, 6px steps) is the same', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll, grow } = rig(t);
+    t.dock.openSheet(); await frame();
+    let top = scroll.scrollTop;
+    for (let i = 0; i < 8; i++) {
+      top -= 6;
+      scroll.scrollTop = top; scroll.dispatchEvent(new Event('touchmove')); scroll.dispatchEvent(new Event('scroll'));
+      grow(3000 + (i + 1) * 15);
+      t.emit('token', { text: 't ' }); await frame();
+      expect(scroll.scrollTop).toBe(top);
+    }
+  });
+
+  it('the pin returns only when the user gets back to the bottom', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const { scroll, grow } = rig(t);
+    t.dock.openSheet(); await frame();
+    scroll.scrollTop = 2988; scroll.dispatchEvent(new Event('scroll')); // 12px up: unpinned
+    grow(3100); t.emit('token', { text: 'a' }); await frame();
+    expect(scroll.scrollTop).toBe(2988);
+    scroll.scrollTop = 2900; scroll.dispatchEvent(new Event('scroll')); // the user scrolls down to the bottom of the grown content (3100 - 200)
+    grow(3300); t.emit('token', { text: 'b' }); await frame(); await frame();
+    expect(scroll.scrollTop).toBe(3300);
+  });
+});
+
+describe('N5: focus survives the mode changing under an open sheet', () => {
+  it('a focused control that disappears (Send in the narrow sheet) hands focus to the composer, not the page', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    const send = t.q<HTMLButtonElement>('.ct-orch-send')!;
+    send.focus();
+    expect(document.activeElement).toBe(send);
+    t.s.mode = 'pill'; t.dock.relayout();
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).not.toBe(send);
+    expect(document.activeElement).toBe(t.input());
+  });
+
+  it('a focused control that is still usable keeps focus', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    t.dock.openSheet();
+    const close = t.q<HTMLButtonElement>('.ct-orch-sheet-close')!;
+    close.focus();
+    t.s.mode = 'pill'; t.dock.relayout();
+    expect(document.activeElement).toBe(close);
+  });
+
+  it('no input (error): the dialog close button takes it', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')], lastError: 'boom' });
+    t.dock.openSheet();
+    const action = t.q<HTMLButtonElement>('.ct-orch-sheet-composer .ct-orch-action')!;
+    action.focus();
+    t.s.mode = 'pill'; t.dock.relayout();
+    expect(document.activeElement).not.toBe(document.body);
+  });
+});

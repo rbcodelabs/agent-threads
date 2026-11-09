@@ -313,6 +313,36 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
     }
   });
 
+  test('N4: a slow wheel scroll-up (-12px per frame) while tokens stream every 40ms stays where the user put it', async ({ page }) => {
+    await open(page, 'working', 'conversation', DESKTOP);
+    await page.evaluate(() => { for (let i = 0; i < 20; i++) (window as any).__orchSay(`Earlier reply ${i} with a few words so the sheet scrolls.`); });
+    await field(page).click();
+    await expect(sheet(page)).toBeVisible();
+    await page.evaluate(() => { (window as any).__orchStream('Streaming '); (window as any).__tokTimer = setInterval(() => (window as any).__orchToken('more tokens arrive here '), 40); });
+    const box = await page.locator('.ct-orch-sheet-scroll').boundingBox();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    const frames = 40; // ~2s
+    for (let i = 0; i < frames; i++) {
+      await page.mouse.wheel(0, -12);
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+      await page.waitForTimeout(30);
+    }
+    const distance = await page.locator('.ct-orch-sheet-scroll').evaluate((e) => e.scrollHeight - e.clientHeight - e.scrollTop);
+    await page.evaluate(() => clearInterval((window as any).__tokTimer));
+    // The user moved up 12px x 40 frames; the stream growing below must not have pulled them back toward the bottom.
+    expect(distance).toBeGreaterThanOrEqual(12 * frames * 0.8);
+  });
+
+  test('N5: resizing 390 -> 700 with the sheet open never drops focus to the page', async ({ page }) => {
+    await open(page, 'idle', 'conversation', NARROW);
+    await page.locator('.ct-orch-orb').click();
+    await expect(sheet(page)).toBeVisible();
+    await page.locator('.ct-orch-send').focus();
+    await page.setViewportSize({ width: 700, height: 800 });
+    await expect(page.locator('.ct-orch-dock')).toHaveAttribute('data-mode', 'pill');
+    expect(await page.evaluate(() => document.activeElement && document.activeElement !== document.body)).toBe(true);
+  });
+
   test('N2: narrow, Enter on the focused orb opens the sheet and typing lands in the composer', async ({ page }) => {
     await open(page, 'idle', 'conversation', NARROW);
     await page.locator('.ct-orch-orb').focus();

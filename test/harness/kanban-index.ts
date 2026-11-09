@@ -411,6 +411,7 @@ let orchSeq = 0;
   emitEvent(orchestratorFixtureId, { type: 'streaming_start' });
   emitEvent(orchestratorFixtureId, { type: 'token', text });
 };
+(window as any).__orchToken = (text: string) => emitEvent(orchestratorFixtureId, { type: 'token', text });
 (window as any).__orchSettle = () => {
   m.sessions.delete(orchestratorFixtureId);
   emitEvent(orchestratorFixtureId, { type: 'done' });
