@@ -108,7 +108,24 @@ function orchTranscript() {
       { id: 'k-orch-u1', role: 'user', content: 'Give me the status table', timestamp: KT_ORCH - 60_000 },
       {
         id: 'k-orch-a1', role: 'assistant', timestamp: KT_ORCH - 30_000,
-        content: `See [[thread:${kanbanAwaitingThreadId}|Deploy curation quality signals]] and the [docs](https://example.com/docs).\n\n| Thread | Owner | Status |\n|---|---|---|\n| Deploy curation quality signals | Owner | waiting on approval |\n| Mobile layout polish | Designer | question ready |\n\n\`\`\`\nnpm run deploy -- --env=production --region=us-east-1 --tag=release-candidate-2026-01-15 --verbose --dry-run=false\n\`\`\``,
+        content: `See [[thread:${kanbanAwaitingThreadId}|Deploy curation quality signals]], [[Real note]], [[Ghost note]] and the [docs](https://example.com/docs).\n\n| Thread | Owner | Status |\n|---|---|---|\n| Deploy curation quality signals | Owner | waiting on approval |\n| Mobile layout polish | Designer | question ready |\n\n\`\`\`\nnpm run deploy -- --env=production --region=us-east-1 --tag=release-candidate-2026-01-15 --verbose --dry-run=false\n\`\`\``,
+      },
+    ];
+  }
+  if (tx === 'evil') {
+    // Every way an untrusted reply could make the browser fetch remote content; all point at https://evil.example/.
+    return [
+      { id: 'k-orch-u1', role: 'user', content: 'Show me everything', timestamp: KT_ORCH - 60_000 },
+      {
+        id: 'k-orch-a1', role: 'assistant', timestamp: KT_ORCH - 30_000,
+        content: [
+          'Evil reply text.', '', '![md](https://evil.example/md.png)', '',
+          '<img src="https://evil.example/raw.png" alt="raw">', '',
+          '<video poster="https://evil.example/poster.png"></video>', '',
+          '<picture><source srcset="https://evil.example/srcset.png 1x"><img src="https://evil.example/pic.png"></picture>', '',
+          '<svg><image href="https://evil.example/svg.png"></image></svg>', '',
+          '<p style="background:url(https://evil.example/bg.png)">styled</p>',
+        ].join('\n'),
       },
     ];
   }
@@ -238,7 +255,20 @@ const mockDaemonRegistry = {
   clientFor: (id: string) => ({ reconnectNow: () => { reconnectCalls.push(id); } }),
 };
 
+/** Wikilink opening is recorded, never performed: a spec asserts WHERE a [[note]] would open (never the board's own leaf). */
+const openedLinks: Array<{ via: 'workspace' | 'contextPanel'; href: string; sourcePath: string; newLeaf?: unknown }> = [];
+const resolvableNotes = new Set<string>(['Real note']);
+{
+  const app = (mockLeaf as any).app;
+  app.metadataCache = { getFirstLinkpathDest: (linkpath: string) => (resolvableNotes.has(linkpath) ? { path: `${linkpath}.md` } : null) };
+  app.workspace.openLinkText = (href: string, sourcePath: string, newLeaf?: unknown) => { openedLinks.push({ via: 'workspace', href, sourcePath, newLeaf }); };
+}
+(window as any).__openedLinks = openedLinks;
+(window as any).__resolvableNotes = resolvableNotes;
+
 const mockPlugin = {
+  isConversationFirst: () => new URLSearchParams(window.location.search).has('convfirst'),
+  contextPanel: { openLinkText: async (href: string, sourcePath: string) => { openedLinks.push({ via: 'contextPanel', href, sourcePath }); } },
   daemonRegistry: mockDaemonRegistry,
   ensureOrchestratorThread: async (open = true) => {
     ensureOrchestratorCalls.push(open);

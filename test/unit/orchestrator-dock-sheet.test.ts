@@ -109,6 +109,11 @@ function setup(opts: {
 }
 type T = ReturnType<typeof setup>;
 const flush = () => new Promise((r) => setTimeout(r, 0));
+/** A real user scroll: input intent (wheel) followed by the scroll event. A bare scroll event is programmatic / layout. */
+function userScrollsUp(scroll: HTMLElement): void {
+  scroll.dispatchEvent(new Event('wheel', { bubbles: true }));
+  scroll.dispatchEvent(new Event('scroll'));
+}
 const frame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
 
 beforeEach(() => { document.body.innerHTML = ''; seq = 0; });
@@ -816,7 +821,7 @@ describe('review: assistant row hand-off (A1, A2)', () => {
     Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => 2000 });
     Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
     scroll.scrollTop = 100;
-    scroll.dispatchEvent(new Event('scroll')); // the user scrolled up
+    userScrollsUp(scroll); // the user scrolled up
     t.say('later');
     await flush(); await flush();
     expect(scroll.scrollTop).toBe(100);
@@ -1011,7 +1016,7 @@ describe('QA D1: the sheet lands on the latest message', () => {
     let h = 3000; Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
     Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
     t.dock.openSheet();
-    scroll.scrollTop = 100; scroll.dispatchEvent(new Event('scroll')); // the user scrolled up
+    scroll.scrollTop = 100; userScrollsUp(scroll); // the user scrolled up
     h = 3200; // the new user bubble adds height
     t.enter(t.type('latest question'));
     await vi.waitFor(() => expect(scroll.scrollTop).toBe(3200));
@@ -1022,7 +1027,7 @@ describe('QA D1: the sheet lands on the latest message', () => {
     const scroll = t.q('.ct-orch-sheet-scroll')!;
     metrics(scroll, 3000);
     t.dock.openSheet();
-    scroll.scrollTop = 100; scroll.dispatchEvent(new Event('scroll'));
+    scroll.scrollTop = 100; userScrollsUp(scroll);
     t.say('background reply');
     await flush(); await flush();
     expect(scroll.scrollTop).toBe(100);
@@ -1279,5 +1284,80 @@ describe('delta (f): links follow the world, not just the text', () => {
     t.emit('thread_renamed');
     t.emit('done');
     await vi.waitFor(() => expect(t.q('a.ct-thread-link')?.textContent).toBe('Deploy curation v2'));
+  });
+});
+
+
+// ── Final QA round on cccfa3e (N1, N2, observation) ───────────────────────────────────────────────────────────────
+describe('N1: the pin survives content growing under it (streaming_start + a long first token in one task)', () => {
+  it('a programmatic scroll event after the content grew by more than 48px does not unpin', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let h = 400;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    t.dock.openSheet();
+    await frame();
+    expect(scroll.scrollTop).toBe(400);
+    t.emit('streaming_start'); t.emit('token', { text: 'x'.repeat(600) });
+    h = 900; // the long first token made the bubble much taller
+    scroll.dispatchEvent(new Event('scroll')); // fired by OUR scroll, after the growth: no user intent
+    t.emit('token', { text: ' more' });
+    await frame(); await frame();
+    expect(scroll.scrollTop).toBe(900);
+  });
+
+  it('but a real user scroll up mid-stream still stops the following', async () => {
+    const t = setup({ running: true, messages: [m('user', 'go')] });
+    const scroll = t.q('.ct-orch-sheet-scroll')!;
+    let h = 400;
+    Object.defineProperty(scroll, 'scrollHeight', { configurable: true, get: () => h });
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, get: () => 200 });
+    t.dock.openSheet();
+    t.emit('token', { text: 'a' });
+    await frame();
+    scroll.scrollTop = 50; userScrollsUp(scroll);
+    h = 900;
+    t.emit('token', { text: 'bcd' });
+    await frame(); await frame();
+    expect(scroll.scrollTop).toBe(50);
+  });
+});
+
+describe('N2: opening the narrow sheet from the orb moves focus into it', () => {
+  it('orb focused + activated: the composer takes focus (typing lands in it)', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')] });
+    const orb = t.q<HTMLButtonElement>('.ct-orch-orb')!;
+    orb.focus();
+    orb.click();
+    expect(t.isOpen()).toBe(true);
+    expect(document.activeElement).toBe(t.input());
+  });
+
+  it('no input (error): focus goes to a control inside the dialog, never stays on the covered orb', () => {
+    const t = setup({ mode: 'orb', messages: [m('assistant', 'x')], lastError: 'boom' });
+    const orb = t.q<HTMLButtonElement>('.ct-orch-orb')!;
+    orb.focus(); orb.click();
+    expect(t.sheet()!.contains(document.activeElement)).toBe(true);
+  });
+
+  it('pill mode keeps focus in the field it was typed in', () => {
+    const t = setup({ messages: [m('assistant', 'x')] });
+    t.input()!.focus();
+    t.dock.openSheet();
+    expect(document.activeElement).toBe(t.input());
+  });
+});
+
+describe('observation: openThread never opens an id the board does not know', () => {
+  it('a thread anchor injected after render with an unknown id opens nothing; a known id still opens', async () => {
+    const t = setup({ messages: [m('assistant', 'hello')] });
+    t.dock.openSheet();
+    await vi.waitFor(() => expect(t.qa('.ct-orch-bubble').length).toBe(1));
+    const mk = (id: string) => { const a = document.createElement('a'); a.setAttribute('data-thread-id', id); a.href = '#'; a.textContent = id; t.q('.ct-orch-sheet-log')!.appendChild(a); return a; };
+    mk('ghost-id').click();
+    expect(t.deps.openThread).not.toHaveBeenCalled();
+    mk('a').click();
+    expect(t.deps.openThread).toHaveBeenCalledWith('a');
   });
 });

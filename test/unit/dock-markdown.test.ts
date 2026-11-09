@@ -7,7 +7,7 @@
  * rewriting and that model-controlled labels never reach the DOM as markup.
  */
 import '../setup/obsidian-dom';
-import { describe, it, expect } from 'vitest';
+import { vi, describe, it, expect } from 'vitest';
 import { renderDockMarkdown, rewriteDockMarkup } from '../../src/dockMarkdown';
 
 const threads = [{ id: 't1', title: 'Deploy curation' }, { id: 't2', title: 'Mobile polish' }];
@@ -161,6 +161,21 @@ describe('delta B3: allowlist after sanitising (defence in depth; the real sanit
     const el = await render('[bad](javascript:alert(1))');
     const a = el.querySelector('a');
     expect(a?.getAttribute('href') ?? null).toBeNull();
+  });
+});
+
+describe('N3: nothing remote ever touches the live DOM (an inert tree does all the stripping)', () => {
+  it('the sanitizer (and so the live container) only ever sees allowlisted, remote-free HTML', async () => {
+    const obsidian = await import('obsidian');
+    const spy = vi.spyOn(obsidian, 'sanitizeHTMLToDom');
+    const el = document.createElement('div');
+    await renderDockMarkdown('![x](https://evil.example/a.png)\n\n<img src="https://evil.example/b.png">\n\n<video poster="https://evil.example/p.png"></video><picture><source srcset="https://evil.example/s.png 1x"></picture><svg><image href="https://evil.example/i.png"/></svg><p style="background:url(https://evil.example/bg.png)">t</p>', el, { threads });
+    expect(spy).toHaveBeenCalled();
+    const seen = spy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(seen).not.toMatch(/<(img|video|picture|source|svg|image)\b/i);
+    expect(seen).not.toMatch(/\b(src|srcset|poster|style|background)=/i);
+    expect(el.querySelector('img, video, picture, source, svg, [src], [srcset], [poster], [style]')).toBeNull();
+    spy.mockRestore();
   });
 });
 

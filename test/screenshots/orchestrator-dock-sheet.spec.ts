@@ -275,6 +275,53 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
     });
   }
 
+  test('N3: an untrusted reply makes ZERO requests to a remote host (markdown img, raw img, video poster, srcset, svg image, style url)', async ({ page }) => {
+    const hits: string[] = [];
+    await page.route(/evil\.example/, (route) => { hits.push(route.request().url()); return route.abort(); });
+    page.on('request', (r) => { if (r.url().includes('evil.example')) hits.push(`seen:${r.url()}`); });
+    await open(page, 'idle', 'evil', DESKTOP);
+    await field(page).click();
+    await expect(page.locator('.ct-orch-bubble').filter({ hasText: 'Evil reply text.' })).toBeVisible();
+    await expect(page.locator('.ct-orch-bubble').filter({ hasText: 'styled' })).toBeVisible();
+    await page.waitForTimeout(800);
+    expect(hits).toEqual([]);
+    expect(await page.locator('.ct-orch-sheet img, .ct-orch-sheet video, .ct-orch-sheet picture, .ct-orch-sheet svg image, .ct-orch-sheet [style*="url("]').count()).toBe(0);
+  });
+
+  test('B1 (harness mocks): a resolvable [[note]] opens in a NEW tab, an unresolved one is inert, and the board and sheet stay', async ({ page }) => {
+    await open(page, 'idle', 'rich', DESKTOP);
+    await field(page).click();
+    await expect(page.locator('.ct-orch-sheet a.internal-link')).toHaveCount(1);
+    await expect(page.locator('.ct-orch-sheet .ct-orch-wikilink-unresolved')).toHaveText('Ghost note');
+    await page.locator('.ct-orch-sheet a.internal-link').click();
+    expect(await page.evaluate(() => (window as any).__openedLinks)).toEqual([{ via: 'workspace', href: 'Real note', sourcePath: '', newLeaf: 'tab' }]);
+    await expect(sheet(page)).toBeVisible();
+    await expect(page.locator('.ct-kanban-board')).toBeVisible();
+    await page.locator('.ct-orch-sheet .ct-orch-wikilink-unresolved').click();
+    expect((await page.evaluate(() => (window as any).__openedLinks)).length).toBe(1);
+  });
+
+  test('N1: streaming_start + a long first token in the same task keeps the sheet pinned to the bottom', async ({ page }) => {
+    for (const size of [DESKTOP, NARROW]) {
+      await open(page, 'idle', 'conversation', size);
+      await focusComposer(page, size);
+      await expect(sheet(page)).toBeVisible();
+      await page.evaluate(() => (window as any).__orchStream('A long first token. '.repeat(40), 'Working'));
+      await expect.poll(() => page.locator('.ct-orch-sheet-scroll').evaluate((e) => e.scrollHeight - e.clientHeight - e.scrollTop)).toBeLessThanOrEqual(1);
+      await page.evaluate(() => (window as any).__orchStream(' and more', 'Working'));
+      await expect.poll(() => page.locator('.ct-orch-sheet-scroll').evaluate((e) => e.scrollHeight - e.clientHeight - e.scrollTop)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  test('N2: narrow, Enter on the focused orb opens the sheet and typing lands in the composer', async ({ page }) => {
+    await open(page, 'idle', 'conversation', NARROW);
+    await page.locator('.ct-orch-orb').focus();
+    await page.keyboard.press('Enter');
+    await expect(sheet(page)).toBeVisible();
+    await page.keyboard.type('typed with no click');
+    await expect(field(page)).toHaveValue('typed with no click');
+  });
+
   test('QA D5/D4: desktop Tab from the field reaches the sheet next; chips are reachable and stay visible', async ({ page }) => {
     await open(page, 'idle', 'conversation', DESKTOP);
     await field(page).click();
