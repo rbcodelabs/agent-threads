@@ -33,6 +33,8 @@ export interface SheetView {
   threads: ThreadRef[];
   chips: SuggestionChip[];
   mode: 'pill' | 'orb';
+  /** tooltipText({running,total,needsYou}): the same string as the dot's tooltip. */
+  summary: string;
 }
 
 export interface SheetHandlers {
@@ -93,6 +95,7 @@ export class DockSheet {
   private readonly emptyHost: HTMLElement;
   private readonly liveEl: HTMLElement;
   private readonly orbEl: HTMLElement;
+  private readonly summaryEl: HTMLElement;
   private readonly rows = new Map<string, RowState>();
   private streamingRow: HTMLElement | null = null;
   private activityText: HTMLElement | null = null;
@@ -134,7 +137,10 @@ export class DockSheet {
     this.orbEl = head.createSpan({ cls: 'ct-orch-sheet-orb', attr: { 'aria-hidden': 'true' } });
     this.orbEl.createSpan('ct-orch-sheet-orb-ring');
     this.orbEl.createSpan('ct-orch-sheet-orb-core');
-    head.createEl('h2', { cls: 'ct-orch-sheet-title', text: 'Portfolio orchestrator', attr: { id } });
+    const heading = head.createDiv('ct-orch-sheet-heading');
+    heading.createEl('h2', { cls: 'ct-orch-sheet-title', text: 'Portfolio orchestrator', attr: { id } });
+    // The old header count text, readable without hover (touch): the SAME text as the dot tooltip. Plain text, not a live region.
+    this.summaryEl = heading.createDiv({ cls: 'ct-orch-sheet-summary', attr: { 'data-testid': 'orchestrator-summary' } });
     // Narrow mode hides the label (mock k2-9 shows just the arrow): the aria-label keeps the name.
     const full = head.createEl('button', { cls: 'ct-orch-sheet-btn ct-orch-sheet-full', attr: { type: 'button', 'aria-label': 'Open full thread' } });
     full.createSpan({ cls: 'ct-orch-sheet-full-label', text: 'Open full thread' });
@@ -280,6 +286,12 @@ export class DockSheet {
   /** Moves focus to the first control of the dialog (used when it opens and the composer has nothing to focus). */
   focusClose(): void { this.closeBtn.focus(); }
 
+  /** The soft keyboard's height over the bottom of the view (narrow bottom sheet lifts by it); null removes the variable. */
+  setKeyboardInset(px: number | null): void {
+    if (px === null) this.el.style.removeProperty('--ct-orch-kbd-inset');
+    else this.el.style.setProperty('--ct-orch-kbd-inset', `${px}px`);
+  }
+
   setMaxHeight(px: number | null): void {
     if (px && px > 0) this.el.style.setProperty('--ct-orch-sheet-max', `${Math.round(px)}px`);
     else this.el.style.removeProperty('--ct-orch-sheet-max');
@@ -296,6 +308,7 @@ export class DockSheet {
     this.setModal(this.opened && view.mode === 'orb');
     this.composerSlot.hidden = view.mode !== 'orb';
     this.orbEl.classList.toggle('ct-orch-orb-spinning', view.running);
+    if (this.summaryEl.textContent !== view.summary) this.summaryEl.textContent = view.summary;
     this.reconcileRows(view);
     this.renderStreaming(view.streaming);
     this.renderStopped(view.stopped);

@@ -28,8 +28,11 @@ import {
   type DockState,
   type SuggestionChip,
 } from './orchestratorDockModel';
-import { peekLine, sheetTranscript } from './dockSheetModel';
-import { DockSheet, type SheetBlock, type SheetView } from './orchestratorDockSheet';
+import { peekLine, sheetBlock, sheetTranscript } from './dockSheetModel';
+import { InputHistory } from './dockInputHistory';
+import { createDraftStore, MAX_DRAFT_CHARS, type DraftStore } from './dockDraftStore';
+import { KeyboardInsetTracker } from './dockKeyboardInset';
+import { DockSheet, type SheetView } from './orchestratorDockSheet';
 import { DockTray, type TrayEntry } from './orchestratorDockTray';
 import { trayItems } from './dockTrayModel';
 import type { PermissionButtonDeps } from './permissionCard';
@@ -74,8 +77,11 @@ export interface OrchestratorDockDeps {
    */
   permissionCard?: Omit<PermissionButtonDeps, 'manager' | 'hostExecAllowAlways'> & { hostExecAllowAlways(): boolean };
   mode(): DockMode;
-  /** K2 P5 scaffold: in-memory draft store (absent: per-instance). */
-  drafts?: import('./dockDraftStore').DraftStore;
+  /**
+   * Where the Ask field's draft lives (IN MEMORY ONLY, see dockDraftStore). The host passes a long-lived one so a board
+   * re-mount keeps the draft; absent: private to this dock instance.
+   */
+  drafts?: DraftStore;
   /** Absent (or null) means local-only: the orchestrator can then never be offline. */
   daemons?: {
     stateOf(daemonId: string): ConnectionState | undefined;
@@ -110,6 +116,11 @@ const PEEK_MS = 8000;
 const MAX_ERROR_CHARS = 120;
 /** 4 lines at 20px with NO vertical padding on the scroller (scrolled text shows through padding): a long draft clips on a line boundary. */
 const MAX_INPUT_PX = 80;
+/** The error / offline announcement is one short sentence; a stack trace is cut. */
+const MAX_ANNOUNCE_CHARS = 160;
+/** The numeric badge on the narrow attention dot: more than this shows `9+`. */
+const MAX_BADGE = 9;
+type Health = 'ok' | 'error' | 'offline' | 'none';
 
 export class OrchestratorDock {
   private rootEl: HTMLElement | null = null;
@@ -130,6 +141,16 @@ export class OrchestratorDock {
   private peekTextEl: HTMLElement | null = null;
   private chipsEl: HTMLElement | null = null;
   private peekTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Persistent visually hidden polite status for error / offline / recovered (separate from the sheet's and the tray's regions). */
+  private stateLiveEl: HTMLElement | null = null;
+  private stateLiveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** null until the first refresh: what is already true at mount is not news. */
+  private health: Health | null = null;
+  private summaryText = '';
+  private keyboard: KeyboardInsetTracker | null = null;
+  private keyboardPx = 0;
+  private readonly history = new InputHistory();
+  private readonly drafts: DraftStore;
 
   /** Orchestrator id the per-thread state below belongs to; a change resets it. */
   private trackedId: string | undefined;
@@ -155,14 +176,19 @@ export class OrchestratorDock {
   private bodyKind: BodyKind | null = null;
   private state: DockState = 'none';
   private currentMode: DockMode = 'pill';
-  private draft = '';
   private sending = false;
   private settingUp = false;
   private destroyed = false;
   private unsubscribeManager: (() => void) | null = null;
   private unsubscribeDaemons: (() => void) | null = null;
 
-  constructor(private readonly host: HTMLElement, private readonly deps: OrchestratorDockDeps) {}
+  constructor(private readonly host: HTMLElement, private readonly deps: OrchestratorDockDeps) {
+    this.drafts = deps.drafts ?? createDraftStore();
+  }
+
+  /** Write-through: every change reaches the (in-memory) store, so a re-mounted dock starts from it. */
+  private get draft(): string { return this.drafts.get(); }
+  private set draft(text: string) { if (text) this.drafts.set(text); else this.drafts.clear(); }
 
   mount(): void {
     if (this.rootEl) return;
@@ -191,6 +217,8 @@ export class OrchestratorDock {
     this.statusEl = status;
 
     this.dotEl = root.createSpan({ cls: 'ct-orch-dot', attr: { role: 'img', 'data-testid': 'orchestrator-dot' } });
+    // In the dock root (always rendered), not in the sheet: a closed sheet is `hidden` and would never announce.
+    this.stateLiveEl = root.createDiv({ cls: 'ct-orch-state-live', attr: { role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true', 'data-testid': 'orchestrator-state-live' } });
 
     this.mountSheetParts();
     root.addEventListener('keydown', (e) => {
@@ -218,6 +246,10 @@ export class OrchestratorDock {
     this.unsubscribeDaemons = null;
     if (this.peekTimer) clearTimeout(this.peekTimer);
     this.peekTimer = null;
+    if (this.stateLiveTimer) clearTimeout(this.stateLiveTimer);
+    this.stateLiveTimer = null;
+    this.keyboard?.stop();
+    this.keyboard = null;
     this.tray?.destroy();
     this.tray = null;
     this.sheet?.destroy();
@@ -228,6 +260,7 @@ export class OrchestratorDock {
     this.rootEl?.remove();
     this.statusEl?.remove();
     this.rootEl = null;
+    this.stateLiveEl = null;
     this.statusEl = null;
     this.inputEl = null;
     this.actionEl = null;
@@ -287,6 +320,7 @@ export class OrchestratorDock {
       needsYouCount: needsYou,
       hasUnreadReply: unread.hasUnread,
     });
+    this.trackHealth(thread);
     const previousMode = this.currentMode;
     if (this.state === 'none' && this.sheet?.isOpen) this.closeSheet(false);
     this.currentMode = this.deps.mode();
@@ -307,6 +341,8 @@ export class OrchestratorDock {
     this.dotEl.toggleClass('ct-orch-dot-attention', needsYou > 0 || unread.hasUnread);
     this.dotEl.setAttribute('title', dotTip);
     this.dotEl.setAttribute('aria-label', dotTip);
+    this.summaryText = tip;
+    this.renderBadge(needsYou);
 
     this.sheet?.el.setAttribute('data-mode', this.currentMode);
     this.renderBody(thread);
@@ -320,6 +356,41 @@ export class OrchestratorDock {
     this.renderChips();
     // After the sheet re-rendered (the modal inert state follows the mode): only then is it known what can hold focus.
     if (previousMode !== this.currentMode && this.sheet?.isOpen) this.keepFocusAcrossModeChange(focusBefore);
+  }
+
+  // ── Error / offline announcer, count badge ────────────────────────────────
+
+  /** A CHANGE of health announces (to error / offline, back to ok); mount, repeats and setup (none) are silent. */
+  private trackHealth(thread: Thread | undefined): void {
+    const h: Health = this.state === 'error' ? 'error' : this.state === 'offline' ? 'offline' : this.state === 'none' ? 'none' : 'ok';
+    const prev = this.health;
+    this.health = h;
+    if (prev === null || prev === h || h === 'none' || prev === 'none') return;
+    this.announceState(h === 'ok' ? 'Orchestrator recovered' : this.reasonFor(h, thread).text);
+  }
+
+  /** Cleared first, then set on the next tick, so the same text twice is still read. */
+  private announceState(raw: string): void {
+    const el = this.stateLiveEl;
+    if (!el) return;
+    const text = raw.replace(/\u00a0/g, ' ').trim();
+    const capped = text.length > MAX_ANNOUNCE_CHARS ? `${text.slice(0, MAX_ANNOUNCE_CHARS - 1)}…` : text;
+    if (this.stateLiveTimer) clearTimeout(this.stateLiveTimer);
+    el.textContent = '';
+    this.stateLiveTimer = setTimeout(() => {
+      this.stateLiveTimer = null;
+      if (!this.destroyed) el.textContent = capped;
+    }, 0);
+  }
+
+  /** Narrow mode has no hover: the needs-you count shows on the dot as a number (aria-hidden; the dot keeps its label). */
+  private renderBadge(needsYou: number): void {
+    const text = this.currentMode === 'orb' && needsYou > 0 ? (needsYou > MAX_BADGE ? `${MAX_BADGE}+` : String(needsYou)) : '';
+    let badge = this.dotEl.querySelector<HTMLElement>('.ct-orch-dot-count');
+    if (!text) { badge?.remove(); this.dotEl.toggleClass('ct-orch-dot-has-count', false); return; }
+    if (!badge) badge = this.dotEl.createSpan({ cls: 'ct-orch-dot-count', attr: { 'aria-hidden': 'true' } });
+    if (badge.textContent !== text) badge.textContent = text;
+    this.dotEl.toggleClass('ct-orch-dot-has-count', true);
   }
 
   // ── Per-orchestrator state ────────────────────────────────────────────────
@@ -500,6 +571,7 @@ export class OrchestratorDock {
     if (this.destroyed || !this.sheet || !this.deps.getOrchestratorThreadId()) return;
     const wasOpen = this.sheet.isOpen;
     this.sheet.open();
+    this.startKeyboardTracking();
     this.hidePeek();
     this.layoutChanged();
     this.refresh();
@@ -527,6 +599,9 @@ export class OrchestratorDock {
     // A programmatic close (orchestrator deleted, state none) must not drop focus from inside the sheet to the page.
     const hadFocus = !!doc.activeElement && this.sheet.el.contains(doc.activeElement);
     this.sheet.close(); // also clears the board-card highlight of a hovered link
+    this.keyboard?.stop();
+    this.keyboardPx = 0;
+    this.sheet.setKeyboardInset(null);
     this.tray?.reset();
     this.refresh();
     if (!returnFocus && !hadFocus) return;
@@ -552,16 +627,42 @@ export class OrchestratorDock {
     else sheet.focusClose();
   }
 
-  /** Re-measure the sheet's max height: 60% of the view, never taller than the space above the pill. */
+  /** While the sheet is open the soft keyboard (visualViewport) lifts the narrow bottom sheet's composer above it. */
+  private startKeyboardTracking(): void {
+    if (this.keyboard) { this.keyboard.start(); return; }
+    const win = this.host.ownerDocument.defaultView;
+    if (!win) return;
+    this.keyboard = new KeyboardInsetTracker(
+      win,
+      () => (this.host.closest('.ct-agents-root') ?? this.rootEl)?.getBoundingClientRect().bottom ?? 0,
+      (px) => {
+        if (this.destroyed || !this.sheet?.isOpen) return;
+        this.keyboardPx = px;
+        this.sheet.setKeyboardInset(px);
+        this.layoutChanged();
+      },
+    );
+    this.keyboard.start();
+  }
+
+  /**
+   * Re-measure the sheet's max height: 60% of the view, never taller than the space above the pill (narrow: or above the
+   * keyboard). A pinned transcript stays on its latest message when the height shrinks (QA N10): the pin is read BEFORE the
+   * change, so a user who scrolled up is left where they are.
+   */
   layoutChanged(): void {
     if (this.destroyed || !this.sheet) return;
     const root = this.host.closest('.ct-agents-root') as HTMLElement | null;
     const h = root?.clientHeight ?? 0;
-    if (!h) { this.sheet.setMaxHeight(null); return; }
-    const pill = (this.host.parentElement ?? this.host).offsetHeight;
-    // Narrow: the bottom sheet covers the pill, so only the 60% cap applies. Wide: it sits above the pill (36px offset + 8px gap).
-    const room = this.currentMode === 'orb' ? h : h - 36 - pill - 16;
-    this.sheet.setMaxHeight(Math.min(h * 0.6, room));
+    const sheet = this.sheet;
+    sheet.keepPinned(() => {
+      if (!h) { sheet.setMaxHeight(null); return; }
+      const pill = (this.host.parentElement ?? this.host).offsetHeight;
+      // Narrow: the bottom sheet covers the pill, so only the 60% cap and the keyboard apply (8px breathing room above the
+      // keyboard-lifted sheet). Wide: it sits above the pill (36px offset + 8px gap).
+      const room = this.currentMode === 'orb' ? h - this.keyboardPx - (this.keyboardPx > 0 ? 8 : 0) : h - 36 - pill - 16;
+      sheet.setMaxHeight(Math.min(h * 0.6, room));
+    });
   }
 
   private renderSheet(): void {
@@ -574,9 +675,15 @@ export class OrchestratorDock {
     const entries = this.transcriptOf(thread);
     const live = new Set(entries.map((e) => e.id));
     for (const pid of [...this.pickupIds]) if (!live.has(pid)) this.pickupIds.delete(pid); // rolled back
-    // The tray gives the orchestrator's own permission real buttons, so the "waiting for a decision" notice would only repeat it.
-    const ownPermissionInTray = this.trayEntries.some((e) => e.item.threadId === id && !!e.permission);
-    const blocked: SheetBlock = manager.hasPendingPlan(id) ? 'plan' : manager.hasPendingQuestion(id) ? 'question' : manager.hasPendingPermission(id) && !ownPermissionInTray ? 'permission' : null;
+    // The tray already lists the orchestrator's own plan / question (hand-off button) and gives its own permission real
+    // buttons, so a notice would only repeat them (dockSheetModel.sheetBlock).
+    const blocked = sheetBlock({
+      ownId: id,
+      pendingPlan: manager.hasPendingPlan(id),
+      pendingQuestion: manager.hasPendingQuestion(id),
+      pendingPermission: manager.hasPendingPermission(id),
+      tray: this.trayEntries,
+    });
     const view: SheetView = {
       entries: entries.map((e) => ({ ...e, pickup: this.pickupIds.has(e.id) })),
       streaming: this.streamBuf,
@@ -589,6 +696,7 @@ export class OrchestratorDock {
       // Chips send text: offer them only while the body is an input (not an error / offline reason).
       chips: this.bodyKind === 'input' ? suggestionChips(this.attention) : [],
       mode: this.currentMode,
+      summary: this.summaryText,
     };
     sheet.render(view);
   }
@@ -747,11 +855,13 @@ export class OrchestratorDock {
     this.actionEl = null;
     const input = this.bodyEl.createEl('textarea', {
       cls: 'ct-orch-input',
-      attr: { rows: '1', placeholder: 'Ask the orchestrator…', 'aria-label': 'Ask the portfolio orchestrator', 'data-testid': 'orchestrator-input' },
+      attr: { rows: '1', maxlength: String(MAX_DRAFT_CHARS), placeholder: 'Ask the orchestrator…', 'aria-label': 'Ask the portfolio orchestrator', 'data-testid': 'orchestrator-input' },
     });
+    this.history.reset();
     input.value = this.draft;
     this.autosize(input);
     input.addEventListener('input', () => {
+      this.history.reset(); // typing in a recalled message makes it the draft
       this.draft = input.value;
       this.autosize(input);
     });
@@ -787,11 +897,41 @@ export class OrchestratorDock {
   private onKeydown(e: KeyboardEvent, input: HTMLTextAreaElement): void {
     // With the sheet open Escape is handled by the sheet / dock-root listeners (close + focus back to the field).
     if (e.key === 'Escape') { if (!this.sheet?.isOpen && !e.isComposing && e.keyCode !== 229) input.blur(); return; }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { this.recall(e, input); return; }
     if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     // Keyboard route to the transcript: Enter on an empty field opens the sheet (nothing is sent).
     if (!input.value.trim()) { if (!this.sheet?.isOpen && this.hasTranscript()) this.openSheet(); return; }
     void this.submitText(input.value);
+  }
+
+  /**
+   * ArrowUp / ArrowDown walk the last sent messages. ArrowUp starts from an empty field, or a collapsed caret at the start
+   * of a single-line draft; once a message is recalled it keeps going back (a multi-line one only from its first line)
+   * and ArrowDown goes forward, ending on the draft that was being typed. Never during IME composition or with a modifier.
+   */
+  private recall(e: KeyboardEvent, input: HTMLTextAreaElement): void {
+    if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing || e.keyCode === 229) return;
+    if (input.selectionStart !== input.selectionEnd) return;
+    const caret = input.selectionStart ?? 0;
+    const value = input.value;
+    const h = this.history;
+    let next: string | undefined;
+    if (e.key === 'ArrowUp') {
+      const firstLine = !value.slice(0, caret).includes('\n');
+      const can = h.browsing ? value === h.shown && firstLine : value === '' || (caret === 0 && !value.includes('\n'));
+      if (!can) return;
+      next = h.previous(value);
+    } else {
+      if (!h.browsing || value !== h.shown || value.slice(caret).includes('\n')) return;
+      next = h.next();
+    }
+    if (next === undefined) return;
+    e.preventDefault();
+    input.value = next;
+    input.setSelectionRange(next.length, next.length);
+    this.draft = next;
+    this.autosize(input);
   }
 
   /**
@@ -806,6 +946,7 @@ export class OrchestratorDock {
     this.sending = true;
     this.sendEcho = false;
     this.sendingText = text;
+    this.history.push(text);
     this.draft = '';
     if (this.inputEl) { this.inputEl.value = ''; this.autosize(this.inputEl); }
     this.openSheet();

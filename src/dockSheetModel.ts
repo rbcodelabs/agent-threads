@@ -7,6 +7,7 @@
  * (guarded by orchestrator-dock-purity.test.ts).
  */
 import { dockTranscript, splitThreadLinks, type ThreadRef } from './orchestratorDockModel';
+import { TRAY_COLLAPSE_AT } from './dockTrayModel';
 
 export interface SheetSourceMessage {
   id: string;
@@ -72,8 +73,28 @@ export function peekLine(markdown: string, threads: readonly ThreadRef[]): strin
   return plain.length > MAX_PEEK_CHARS ? plain.slice(0, MAX_PEEK_CHARS) : plain;
 }
 
-// K2 P5 scaffold: signature only.
-export function sheetBlock(_i: {
-  ownId: string; pendingPlan: boolean; pendingQuestion: boolean; pendingPermission: boolean;
+export type SheetBlockKind = 'plan' | 'question' | 'permission';
+
+/**
+ * Which "waiting for you" notice the sheet shows for the orchestrator's OWN pending prompt, or null. The tray already
+ * hands off plans / questions ("Review plan…" / "Answer…") and gives the orchestrator's own permission real buttons, so a
+ * notice would only repeat them. A plan / question notice is hidden only when the tray visibly lists the orchestrator
+ * with that kind: the first TRAY_COLLAPSE_AT entries, which hold whether the tray is expanded or collapsed. The
+ * permission notice is hidden only by the orchestrator's own permission entry that has buttons (P4 rule).
+ * Order plan -> question -> permission; a suppressed notice falls through to the next pending one.
+ */
+export function sheetBlock(i: {
+  ownId: string;
+  pendingPlan: boolean;
+  pendingQuestion: boolean;
+  pendingPermission: boolean;
   tray: readonly { item: { threadId: string; kind: string }; permission?: unknown }[];
-}): 'plan' | 'question' | 'permission' | null { return null; }
+}): SheetBlockKind | null {
+  const visible = i.tray.slice(0, TRAY_COLLAPSE_AT);
+  const listed = (kind: string): boolean => visible.some((e) => e.item.threadId === i.ownId && e.item.kind === kind);
+  if (i.pendingPlan && !listed('plan')) return 'plan';
+  if (i.pendingQuestion && !listed('question')) return 'question';
+  const ownPermissionWithButtons = i.tray.some((e) => e.item.threadId === i.ownId && e.item.kind === 'permission' && !!e.permission);
+  if (i.pendingPermission && !ownPermissionWithButtons) return 'permission';
+  return null;
+}

@@ -11,6 +11,7 @@ import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
 import { threadNeedsInput, splitNeedsInput } from './needsInput';
 import { canOpenDockLink, openDockLink, type DockLinkDeps } from './dockLinkOpener';
 import { OrchestratorDock, dockModeForWidth, type DockMode } from './orchestratorDock';
+import { windowDraftStore } from './dockDraftStore';
 import { decisionToQuestion } from './decisions';
 import { formatToolName } from './ClaudeSession';
 import { appendPermissionButtons, summarizePermissionDetail } from './permissionCard';
@@ -416,6 +417,8 @@ export class KanbanView extends ItemView {
       openLink: (href) => openDockLink(this.dockLinkDeps(), href),
       resolveLink: (href) => canOpenDockLink(this.dockLinkDeps(), href),
       mode: () => this.dockMode,
+      // In memory only (drafts can hold secrets): survives this view being rebuilt, not an app restart.
+      drafts: windowDraftStore,
       daemons: plugin.daemonRegistry
         ? {
             stateOf: (id) => plugin.daemonRegistry?.stateOf(id),

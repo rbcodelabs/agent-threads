@@ -712,15 +712,23 @@ describe('content the sheet cannot draw', () => {
     expect(row.querySelector('.ct-orch-bubble')?.textContent ?? '').toMatch(/\S/);
   });
 
-  it('a pending plan / question / permission on the orchestrator shows a notice with the chip', () => {
-    for (const k of ['plan', 'question', 'permission'] as const) {
+  it('a pending permission on the orchestrator shows a notice with the chip (no inline buttons in this setup)', () => {
+    const t = setup({ messages: [m('assistant', 'x')], permission: true });
+    t.dock.openSheet();
+    const n = t.q('.ct-orch-notice')!;
+    expect(n.textContent).toContain('permission');
+    n.querySelector<HTMLElement>('.ct-orch-chip-full')!.click();
+    expect(t.deps.openThread).toHaveBeenCalledWith('orch');
+  });
+
+  // K2 P5: the tray's Answer… / Review plan… hand-off buttons already cover these, so the notice would only repeat them.
+  it('a pending plan / question is NOT repeated as a notice while the tray lists the orchestrator (P5 de-dup)', () => {
+    for (const k of ['plan', 'question'] as const) {
       document.body.innerHTML = '';
       const t = setup({ messages: [m('assistant', 'x')], [k]: true });
       t.dock.openSheet();
-      const n = t.q('.ct-orch-notice')!;
-      expect(n.textContent, k).toContain(k);
-      n.querySelector<HTMLElement>('.ct-orch-chip-full')!.click();
-      expect(t.deps.openThread).toHaveBeenCalledWith('orch');
+      expect(t.q(`.ct-orch-tray-card[data-thread-id="orch"][data-kind="${k}"]`), k).not.toBeNull();
+      expect(t.q('.ct-orch-notice'), k).toBeNull();
     }
   });
 });

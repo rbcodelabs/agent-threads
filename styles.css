@@ -7221,6 +7221,16 @@ textarea.ct-settings-wide-input {
   background: var(--text-faint);
 }
 .ct-orch-dot.ct-orch-dot-attention { background: var(--color-orange, var(--text-warning)); }
+/* Narrow: the needs-you count as a badge on the orb's top-right corner (no extra row width: the 320px meta row is already tight).
+   The dot stays a non-interactive, labelled status image; the number is aria-hidden. */
+.ct-orch-dock[data-mode="orb"] .ct-orch-dot.ct-orch-dot-has-count {
+  position: relative; z-index: 1; align-self: flex-start; box-sizing: border-box;
+  width: auto; min-width: 16px; height: 16px; margin: 2px 2px 0 -16px; padding: 0 4px;
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 8px;
+  background: var(--color-orange, var(--text-warning)); color: #000; pointer-events: none;
+  box-shadow: 0 0 0 2px var(--background-secondary);
+}
+.ct-orch-dot-count { font-size: 10px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
 
 /* Narrow board (< 640px, set by KanbanView's ResizeObserver): the pill collapses to orb + dot + the action buttons. */
 .ct-orch-dock[data-mode="orb"] { --ct-orch-hit: 36px; --ct-orch-orb: 30px; flex: 0 0 auto; margin-right: 0; }
@@ -7333,6 +7343,10 @@ textarea.ct-settings-wide-input {
   opacity: 0;
 }
 .ct-orch-sheet-orb.ct-orch-orb-spinning .ct-orch-sheet-orb-ring { opacity: 1; animation: ct-orch-spin 1.1s linear infinite; }
+.ct-orch-sheet-heading { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+/* The count the old header text carried, readable without hover (touch). Same string as the dot's tooltip. */
+.ct-orch-sheet-summary { font-size: var(--font-ui-smaller); line-height: 1.3; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-orch-sheet-summary:empty { display: none; }
 .ct-kanban-dispatch .ct-orch-sheet h2.ct-orch-sheet-title {
   flex: 1 1 auto; min-width: 0; margin: 0; padding: 0;
   font-size: var(--font-ui-medium); font-weight: 600; line-height: 1.3; color: var(--text-normal);
@@ -7484,6 +7498,7 @@ textarea.ct-settings-wide-input {
 
 /* Screen-reader-only live region (throttled announcements). */
 .ct-orch-live,
+.ct-orch-state-live,
 .ct-orch-tray-live { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 .ct-orch-sheet button:focus-visible,
@@ -7499,7 +7514,8 @@ textarea.ct-settings-wide-input {
   /* pill inset + its 1px border out to the view's side edges; pill bottom offset + border down to the view's bottom edge */
   left: calc(-1 * var(--ct-kanban-pill-inset) - 1px);
   right: calc(-1 * var(--ct-kanban-pill-inset) - 1px);
-  bottom: calc(-1 * var(--ct-kanban-pill-bottom) - 1px);
+  /* + the soft keyboard's height (visualViewport, set by the dock while the sheet is open) so the composer stays above it */
+  bottom: calc(-1 * var(--ct-kanban-pill-bottom) - 1px + var(--ct-orch-kbd-inset, 0px));
   border-radius: 16px 16px 0 0;
 }
 .ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-handle { display: block; flex: none; width: 36px; height: 4px; margin: 8px auto 0; border-radius: 2px; background: var(--text-faint); }
@@ -7510,6 +7526,10 @@ textarea.ct-settings-wide-input {
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-send,
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-stop,
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-action { min-height: 44px; min-width: 44px; }
+/* Landscape phones: keep the sheet's content out from under the notch / rounded corners. */
+.ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-head,
+.ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-scroll,
+.ct-orch-sheet[data-mode="orb"] .ct-orch-tray { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); }
 /* The safe-area inset is applied ONCE, here (not also on the sheet). */
 .ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-composer { padding-bottom: max(8px, env(safe-area-inset-bottom, 0px)); }
 
@@ -7519,11 +7539,20 @@ textarea.ct-settings-wide-input {
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-peek button,
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-chips button.ct-orch-chip { min-height: 44px; min-width: 44px; }
 
+/* Touch devices wider than the narrow breakpoint (tablets, phones in landscape) get the sheet's 44px targets too. */
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-sheet-btn,
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-chip,
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-chip-full,
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-stop { min-height: 44px; min-width: 44px; }
+
 @media (prefers-reduced-motion: reduce) {
   .ct-orch-sheet-orb.ct-orch-orb-spinning .ct-orch-sheet-orb-ring,
   .ct-orch-activity-spin,
   .ct-orch-bubble-streaming::after,
   .ct-kanban-dispatch .ct-orch-peek { animation: none; }
+  /* The pill's own border / glow fade (pre-existing) is motion too. */
+  .ct-kanban-dispatch { transition: none; }
+  .ct-orch-orb-alert .ct-orch-orb-ring { animation: none; }
 }
 
 /* ── Needs-you tray in the reply sheet + thread-link card highlight (K2 P4) ───────────────────────────────────────── */

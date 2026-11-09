@@ -26,8 +26,8 @@ type Size = { width: number; height: number };
 
 async function open(page: Page, query: string, size: Size) {
   await page.setViewportSize(size);
-  const narrow = size.width < 640 ? '&narrow=1' : '';
-  await page.goto(`${kanbanUrl}?${query}${narrow}&mobile=1`);
+  // narrow=1 sizes the harness app to the viewport (also in landscape, where the dock is still a pill); mobile=1 is the touch platform.
+  await page.goto(`${kanbanUrl}?${query}&narrow=1&mobile=1`);
   await page.waitForSelector('.ct-kanban-dispatch .ct-orch-dock');
 }
 const sheet = (page: Page) => page.locator('.ct-orch-sheet');
