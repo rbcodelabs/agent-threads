@@ -6167,10 +6167,19 @@
 }
 
 /* ── Project columns ───────────────────────────────────────────────────── */
-/* .ct-kanban-project-col renders in the plain (non-swimlane) .ct-kanban-board,
-   so it already gets full-height sizing for free from the base .ct-kanban-col
-   rule above (flex: 1 1 230px; min-width: 230px; max-width: 380px; max-height: 100%) —
-   no override needed. */
+/* Fixed-width columns: the base .ct-kanban-col (flex: 1 1 230px; max-width: 380px)
+   lets project columns grow/shrink with the viewport, so their width varies with
+   the column count. Pin them to 300px so the board scrolls horizontally instead.
+   The column still gets full-height sizing and its own vertical scroll from the
+   base .ct-kanban-col / .ct-kanban-col-body rules. The compound selector is
+   required: the base .ct-kanban-col rule is declared later in this file, so a
+   bare .ct-kanban-project-col (same specificity) would lose the cascade. */
+.ct-kanban-col.ct-kanban-project-col {
+  flex: 0 0 300px;
+  width: 300px;
+  min-width: 300px;
+  max-width: 300px;
+}
 
 .ct-kanban-project-section {
   display: flex;
@@ -6256,6 +6265,7 @@
 .ct-kanban-col-body {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior-y: contain; /* y only: full `contain` also stops horizontal trackpad swipes over cards from reaching the board */
   padding: 8px;
   display: flex;
   flex-direction: column;
@@ -8924,7 +8934,7 @@ body.ct-skills-resizing {
 .ct-agent-popover-list {
   padding: 4px 6px;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-y: contain; /* y only: full `contain` also stops horizontal trackpad swipes over cards from reaching the board */
 }
 
 .ct-agent-popover-empty {
@@ -9037,7 +9047,7 @@ body.ct-skills-resizing {
 .ct-tasklist-popover-list {
   padding: 4px 6px;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-y: contain; /* y only: full `contain` also stops horizontal trackpad swipes over cards from reaching the board */
   /* .ct-task-row used to inherit this from the removed .ct-task-card. */
   font-size: var(--font-ui-smaller);
 }

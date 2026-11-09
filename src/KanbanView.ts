@@ -1,4 +1,5 @@
 import { ItemView, WorkspaceLeaf, setIcon, Notice, Platform } from 'obsidian';
+import { handleKanbanWheel } from './kanbanWheel';
 import type ClaudeThreadsPlugin from './main';
 import type { ThreadManager, ThreadEvent } from './ThreadManager';
 import type { Thread, TaskItem } from './types';
@@ -242,6 +243,8 @@ export class KanbanView extends ItemView {
       this.formPointerDown = false;
       this.flushDeferredRender();
     };
+    // Non-passive so a vertical wheel can be turned into horizontal board scroll.
+    this.boardEl.addEventListener('wheel', handleKanbanWheel, { passive: false });
     this.boardEl.addEventListener('pointerup', releasePointer);
     this.boardEl.addEventListener('pointercancel', releasePointer);
     this.boardEl.addEventListener('focusout', () => {
