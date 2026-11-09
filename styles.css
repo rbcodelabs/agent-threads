@@ -7569,6 +7569,8 @@ textarea.ct-settings-wide-input {
   .ct-kanban-dispatch { transition: none; }
   /* The highlighted board card: its border / glow must not fade either (the board-wide card transition). */
   .ct-kanban-card.ct-kanban-card-linked { transition: none; }
+  /* ...and the BASE card: un-highlighting fades its border / glow back through this transition. */
+  .ct-kanban-card { transition: none; }
 }
 
 /* ── Needs-you tray in the reply sheet + thread-link card highlight (K2 P4) ───────────────────────────────────────── */
