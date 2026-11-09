@@ -79,6 +79,23 @@ if (new URLSearchParams(window.location.search).has('inbox')) {
   const noted = byTitle('Fix auth middleware 401s');
   if (noted) noted.managerNotes = 'Goal: fix 401s\nStatus: done, PR merged';
 }
+// ?tray=1 seeds the sheet's Needs-you tray with one of each kind (the awaiting-permission thread already exists on the
+// board; this adds a pending question and a pending plan); ?tray=many adds two more questions (5 items: the tray collapses).
+const trayFixture = new URLSearchParams(window.location.search).get('tray');
+if (trayFixture) {
+  const byTitle = (title: string) => kanbanFixtureThreads.find(thread => thread.title === title);
+  const asked = (title: string, question: string) => {
+    const t = byTitle(title);
+    if (t) t.pendingQuestions = [{ question, header: 'Question', multiSelect: false, options: [{ label: 'Yes', description: 'Go ahead' }, { label: 'No', description: 'Hold off' }] }];
+  };
+  asked('Mobile layout polish', 'Should the dock collapse below 640px?');
+  const planned = byTitle('Social "Going too?" nudge');
+  if (planned) planned.pendingPlan = 'Approve the rollout plan';
+  if (trayFixture === 'many') {
+    asked('Kanban folder swimlanes', 'Sort swimlanes by recency or alphabetically?');
+    asked('Fix auth middleware 401s', 'Backfill the old sessions?');
+  }
+}
 // ?gallery=1 gives existing fixture threads tool-result images for Gallery mode.
 if (new URLSearchParams(window.location.search).has('gallery')) applyGalleryFixtures(kanbanFixtureThreads);
 // ?narrow=1 sizes #app to the viewport so a 390px screenshot is really 390px wide.
@@ -229,6 +246,15 @@ const sentMessages: Array<{ threadId: string; text: string }> = [];
 const emitEvent = (threadId: string, event: { type: string; [k: string]: unknown }) =>
   (manager as unknown as { emit(threadId: string, event: unknown): void }).emit(threadId, event);
 const interruptCalls: string[] = [];
+/** ?tray: approving / denying the awaiting thread's permission settles it like the real manager (clears it, emits permission_resolved). */
+const resolvedPermissions: Array<{ threadId: string; allow: boolean }> = [];
+if (trayFixture) {
+  manager.registerPermissionResolver(kanbanAwaitingThreadId, (allow) => {
+    resolvedPermissions.push({ threadId: kanbanAwaitingThreadId, allow });
+    m.pendingPermissions.delete(kanbanAwaitingThreadId);
+    emitEvent(kanbanAwaitingThreadId, { type: 'permission_resolved' });
+  });
+}
 manager.sendMessage = async (threadId: string, text: string) => {
   sentMessages.push({ threadId, text });
   const thread = manager.getThread(threadId);
@@ -397,6 +423,12 @@ void view.onOpen();
 
 // ── OrchestratorDock reply-sheet hooks (orchestrator-dock-sheet.spec.ts) ─────────────────────────────────────────────
 (window as any).__interruptCalls = interruptCalls;
+(window as any).__resolvedPermissions = resolvedPermissions;
+// A permission request arriving live (orchestrator-dock-tray.spec.ts): same state + event the real manager produces.
+(window as any).__addPermission = (threadId: string, toolName: string, detail: string) => {
+  m.pendingPermissions.set(threadId, { toolName, detail });
+  emitEvent(threadId, { type: 'permission_request', toolName, detail });
+};
 (window as any).__openSheet = () => (view as unknown as { dock: { openSheet(): void } }).dock.openSheet();
 let orchSeq = 0;
 (window as any).__orchSay = (text: string) => {
