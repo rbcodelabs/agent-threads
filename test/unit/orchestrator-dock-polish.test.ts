@@ -454,6 +454,19 @@ describe('2b. draft ownership (A1: a stale writer must not resurrect a SENT draf
     expect(drafts.get('orch2')).toBe('for the second');
   });
 
+  it('D8 (QA scenario): a board re-mount after the orchestrator setting changed shows an empty field and drops the old draft', () => {
+    const drafts = createDraftStore();
+    const t = setup({ drafts });
+    type(t, 'secret for the first orchestrator');
+    t.dock.destroy();
+    t.state.orchId = 'orch2'; // settings.orchestratorThreadId changed; the board re-renders and re-mounts the dock
+    const again = new OrchestratorDock(t.host, t.deps);
+    again.mount();
+    expect((t.q('textarea.ct-orch-input') as HTMLTextAreaElement).value).toBe('');
+    expect(drafts.get('orch')).toBe('');
+    expect(drafts.get('orch2')).toBe('');
+  });
+
   it('a re-mount with the SAME orchestrator still restores the draft', () => {
     const drafts = createDraftStore();
     const t = setup({ drafts });
@@ -580,6 +593,27 @@ describe('5. error / offline announcer', () => {
     await settle(500);
     expect(seen).toHaveLength(1);
     await settle(700);
+    expect(seen).toEqual([expect.stringMatching(/errored/i), 'Orchestrator recovered']);
+  });
+
+  it('D7: an error that recovers before it was ever announced announces nothing (not a lone "recovered")', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const seen = watch(t);
+    t.orch.lastError = 'boom'; t.emit('orch', 'error');
+    t.orch.lastError = undefined; t.emit('orch', 'done'); // same tick: the error text was never written
+    await settle(3000);
+    expect(seen).toEqual([]);
+  });
+
+  it('D7: an error that WAS announced still gets its "recovered"', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const seen = watch(t);
+    t.orch.lastError = 'boom'; t.emit('orch', 'error');
+    await settle(50);
+    t.orch.lastError = undefined; t.emit('orch', 'done');
+    await settle(1500);
     expect(seen).toEqual([expect.stringMatching(/errored/i), 'Orchestrator recovered']);
   });
 
@@ -836,6 +870,18 @@ describe('7. soft keyboard: the narrow sheet lifts above it', () => {
     sized(t, 700); // the view shrank under the open keyboard; the visual viewport did not change
     t.dock.layoutChanged();
     expect(inset(t)).toBe('192px');
+  });
+
+  it('D2: in pill mode too the inset reaches the board root (the pill lifts) and caps the sheet', () => {
+    const vv = fakeViewport(window, 390);
+    const t = setup({ mode: 'pill' });
+    sized(t, 390);
+    t.dock.openSheet();
+    vv.height = 220; vv.dispatchEvent(new Event('resize'));
+    expect(t.root.style.getPropertyValue('--ct-orch-kbd-inset')).toBe('170px');
+    expect(parseInt(t.q('.ct-orch-sheet')!.style.getPropertyValue('--ct-orch-sheet-max'), 10)).toBeLessThanOrEqual(390 - 170 - 36);
+    t.dock.closeSheet();
+    expect(t.root.style.getPropertyValue('--ct-orch-kbd-inset')).toBe('');
   });
 
   it('A4: pinch-zoom (scale > 1) is not a keyboard', () => {

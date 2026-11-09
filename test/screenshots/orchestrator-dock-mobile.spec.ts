@@ -269,6 +269,75 @@ test.describe('soft keyboard (fake visualViewport) and height shrink (QA N10)', 
   });
 });
 
+test.describe('D1: the Needs-you tray keeps its first card and buttons under a long conversation', () => {
+  const SIZES = [
+    { width: 320, height: 640 }, { width: 375, height: 667 }, { width: 390, height: 844 }, { width: 1280, height: 800 },
+  ];
+  /** Geometry of the first tray card's action buttons against the tray's visible band (below its sticky heading). */
+  const firstCard = (page: Page) => page.evaluate(() => {
+    const tray = document.querySelector('.ct-orch-tray') as HTMLElement;
+    const bar = tray.querySelector('.ct-orch-tray-bar')!.getBoundingClientRect();
+    const t = tray.getBoundingClientRect();
+    const buttons = Array.from(tray.querySelectorAll('.ct-orch-tray-card')[0].querySelectorAll('button')).map((b) => { const r = b.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, h: r.height, w: r.width }; });
+    const sc = document.querySelector('.ct-orch-sheet-scroll') as HTMLElement;
+    const composer = (document.querySelector('.ct-orch-input') as HTMLElement).getBoundingClientRect();
+    return { trayH: t.height, barBottom: bar.bottom, trayBottom: t.bottom, buttons, scrollable: sc.scrollHeight > sc.clientHeight, transcriptH: sc.clientHeight, composerBottom: composer.bottom, vh: innerHeight };
+  });
+  function expectButtonsVisible(g: Awaited<ReturnType<typeof firstCard>>, narrow: boolean) {
+    expect(g.buttons.length, 'the first card has action buttons').toBeGreaterThan(0);
+    for (const b of g.buttons) {
+      expect(b.top, 'button below the sticky heading').toBeGreaterThanOrEqual(g.barBottom - 0.5);
+      expect(b.bottom, 'button inside the tray band').toBeLessThanOrEqual(g.trayBottom + 0.5);
+      if (narrow) expect(b.h).toBeGreaterThanOrEqual(43.5);
+    }
+  }
+  for (const size of SIZES) {
+    test(`8 long replies: the first card's buttons are fully visible, the transcript still scrolls @ ${size.width}x${size.height}`, async ({ page }) => {
+      await open(page, 'orch=idle&tx=conversation&tray=1', size);
+      await openSheet(page, size);
+      await fillTranscript(page, 8);
+      const g = await firstCard(page);
+      expectButtonsVisible(g, isNarrow(size));
+      expect(g.scrollable).toBe(true);
+      expect(g.transcriptH).toBeGreaterThan(0);
+      expect(g.composerBottom).toBeLessThanOrEqual(g.vh);
+    });
+  }
+  for (const size of [{ width: 320, height: 640 }, { width: 375, height: 667 }, { width: 390, height: 844 }]) {
+    test(`with the keyboard open: still heading + first card with buttons; the transcript gives way first @ ${size.width}x${size.height}`, async ({ page }) => {
+      await installFakeVisualViewport(page);
+      await open(page, 'orch=idle&tx=conversation&tray=1', size);
+      await openSheet(page, size);
+      await fillTranscript(page, 8);
+      const kb = Math.round(size.height * 0.42);
+      await page.evaluate((h) => (window as any).__setVV(h), size.height - kb);
+      await expect.poll(() => page.locator('.ct-orch-sheet').evaluate((el) => (el as HTMLElement).style.getPropertyValue('--ct-orch-kbd-inset'))).toBe(`${kb}px`);
+      const g = await firstCard(page);
+      expectButtonsVisible(g, true);
+      expect(g.composerBottom).toBeLessThanOrEqual(size.height - kb + 0.5);
+    });
+  }
+});
+
+test.describe('D2: landscape phone (pill mode): the field and the sheet lift above the soft keyboard', () => {
+  for (const size of [{ width: 844, height: 390 }, { width: 667, height: 375 }]) {
+    test(`@ ${size.width}x${size.height} with a 170px keyboard`, async ({ page }) => {
+      await installFakeVisualViewport(page);
+      await open(page, 'orch=idle&tx=conversation&tray=1', size);
+      await page.evaluate(() => (window as any).__openSheet());
+      await expect(sheet(page)).toBeVisible();
+      await page.evaluate((h) => (window as any).__setVV(h), size.height - 170);
+      const visualBottom = size.height - 170;
+      await expect.poll(() => page.locator('.ct-orch-input').evaluate((el) => el.getBoundingClientRect().bottom)).toBeLessThanOrEqual(visualBottom + 0.5);
+      const sh = await sheet(page).evaluate((el) => el.getBoundingClientRect());
+      expect(sh.top).toBeGreaterThanOrEqual(-0.5);
+      expect(sh.bottom).toBeLessThanOrEqual(visualBottom + 0.5);
+      await page.evaluate((h) => (window as any).__setVV(h), size.height);
+      await expect.poll(() => page.locator('.ct-orch-input').evaluate((el) => el.getBoundingClientRect().bottom)).toBeGreaterThan(visualBottom);
+    });
+  }
+});
+
 test.describe('prefers-reduced-motion: computed styles across dock, sheet, peek and tray', () => {
   const MOTION = `
     (() => {
@@ -342,6 +411,12 @@ test.describe('prefers-reduced-motion: computed styles across dock, sheet, peek 
       await link.hover();
       await expect(page.locator('.ct-kanban-card-linked')).toHaveCount(1);
       await expect(page.locator('.ct-kanban-card-linked-flash')).toHaveCount(reduced ? 0 : 1);
+      if (reduced) {
+        // D4: the highlighted card's border / glow must not fade either (the board-wide card transition is switched off for it)
+        const t = await page.locator('.ct-kanban-card-linked').evaluate((el) => ({ d: getComputedStyle(el).transitionDuration, running: el.getAnimations().length }));
+        expect(t.d.split(',').every((x) => parseFloat(x) === 0)).toBe(true);
+        expect(t.running).toBe(0);
+      }
     });
   }
 });

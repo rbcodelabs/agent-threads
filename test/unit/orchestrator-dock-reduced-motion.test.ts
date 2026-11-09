@@ -97,6 +97,13 @@ describe('reduced-motion audit of the dock stylesheet rules', () => {
     expect(reduceOverrides).toEqual([]);
   });
 
+  it('D4: the highlighted board card has its own reduce override for the board-wide card transition', () => {
+    const cardTransition = rules.some((r) => r.selectors.includes('.ct-kanban-card') && /transition\s*:/.test(r.body) && !isReduce(r.media));
+    expect(cardTransition, 'precondition: the board card transitions border/shadow').toBe(true);
+    const override = rules.some((r) => isReduce(r.media) && r.selectors.some((x) => x.includes('ct-kanban-card-linked')) && NEUTRALISES.test(r.body));
+    expect(override).toBe(true);
+  });
+
   it('no dock rule animates anything on state classes only for no-preference without a base rule leaking motion', () => {
     // The card flash is the one rule that exists ONLY under no-preference: it must not also appear outside it.
     const flashOutside = rules.filter((r) => !isNoPref(r.media) && r.selectors.some((s) => s.includes('ct-kanban-card-linked-flash')) && /animation/.test(r.body));
