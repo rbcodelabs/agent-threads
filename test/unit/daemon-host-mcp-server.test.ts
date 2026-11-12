@@ -8,7 +8,10 @@ describe('host MCP server tool loading', () => {
     const handle = createHostMcpServer({
       name: 'claude_threads',
       local: [{ name: 'enter_worktree', description: 'd', inputSchema: {}, handler: async () => ({ content: [] }) } as never],
-      proxied: () => [{ name: 'vault_search', description: 'search', inputSchema: { type: 'object' }, requiresApproval: false, server: 'claude_threads' }],
+      proxied: () => [
+        { name: 'vault_search', description: 'search', inputSchema: { type: 'object' }, requiresApproval: false, server: 'claude_threads' },
+        { name: 'design_x', description: 'design', inputSchema: { type: 'object' }, requiresApproval: true, server: 'claude_threads', alwaysLoad: true },
+      ],
       call: async () => ({ success: true, text: 'x' }),
     });
     const [a, b] = InMemoryTransport.createLinkedPair();
@@ -21,6 +24,8 @@ describe('host MCP server tool loading', () => {
     expect(meta('enter_worktree')?.['anthropic/alwaysLoad']).toBe(true);
     expect(tools.some((t) => t.name === 'vault_search')).toBe(true);
     expect(meta('vault_search')?.['anthropic/alwaysLoad']).toBeUndefined();
+    // A proxied tool the host marked alwaysLoad (a contributed tool that asked for it) is not deferred.
+    expect(meta('design_x')?.['anthropic/alwaysLoad']).toBe(true);
     expect((handle.config as unknown as { alwaysLoad?: boolean }).alwaysLoad).toBeUndefined();
     await client.close();
   });

@@ -15,6 +15,8 @@ export interface RemoteHostToolSpec {
   description: string;
   inputSchema: Record<string, unknown>;
   requiresApproval: boolean;
+  /** Load into the model's tool list from the first turn instead of behind tool search. Absent = deferred. */
+  alwaysLoad?: boolean;
   /** MCP server name the tool is exposed under (`claude_threads`, `google-docs`, ...). */
   server: string;
 }
