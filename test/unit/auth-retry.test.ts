@@ -206,6 +206,47 @@ describe('ThreadSession — expired Claude sign-in recovery', () => {
     session.close();
   });
 
+  it('daemon with a blank Claude login: skips the pointless restart and goes straight to the sign-in card', async () => {
+    const out0 = makeThrowableChannel();
+    sdk.nextIterable = out0;
+    const events: string[] = [];
+    const required: string[] = [];
+    const session = new ThreadSession('/fake/claude');
+    await session.start({
+      ...options(callbacks({
+        onAuthRetry: () => events.push('auth_retry'),
+        onAuthRequired: (m) => { events.push('auth_required'); required.push(m); },
+        onError: () => events.push('error'),
+      })),
+      claude: { credentialsBlank: () => true },
+    });
+    session.send('do the thing');
+    emitAuthFailure(out0);
+    await flush();
+
+    expect(sdk.generations).toHaveLength(1); // no restart
+    expect(events).toEqual(['auth_required']);
+    expect(isClaudeSignInExpiredError(required[0])).toBe(true);
+  });
+
+  it('daemon whose login is present (credentialsBlank false) keeps the one silent retry', async () => {
+    const out0 = makeThrowableChannel();
+    sdk.nextIterable = out0;
+    const events: string[] = [];
+    const session = new ThreadSession('/fake/claude');
+    await session.start({
+      ...options(callbacks({ onAuthRetry: () => events.push('auth_retry'), onAuthRequired: () => events.push('auth_required') })),
+      claude: { credentialsBlank: () => false },
+    });
+    session.send('do the thing');
+    sdk.nextIterable = makeThrowableChannel();
+    emitAuthFailure(out0);
+    await flush();
+    expect(sdk.generations).toHaveLength(2);
+    expect(events).toEqual(['auth_retry']);
+    session.close();
+  });
+
   it('never retries twice for one turn: a second auth failure surfaces the sign-in-expired error', async () => {
     const out0 = makeThrowableChannel();
     sdk.nextIterable = out0;

@@ -83,6 +83,8 @@
     "src/remoteAlwaysAllow.ts",
     "src/resumeFailureRecovery.ts",
     "src/secretRedaction.ts",
+    "src/setupTokenParse.ts",
+    "src/setupTokenSession.ts",
     "src/skillManager.ts",
     "src/skillPaths.ts",
     "src/skillSourcePersistence.ts",

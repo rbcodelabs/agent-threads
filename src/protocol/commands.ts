@@ -104,7 +104,32 @@ export type ClientCommand =
    * whenever they send an empty set; it is invalid together with a non-empty `servers`). A daemon from before this
    * field treats an empty `servers` as a clear whether or not `clear` is present.
    */
-  | { type: 'mcp.sync'; servers: SyncedMcpServers; clear?: boolean; wait?: boolean };
+  | { type: 'mcp.sync'; servers: SyncedMcpServers; clear?: boolean; wait?: boolean }
+  // Claude sign-in on the daemon's own machine (admin: the minted token comes back over this connection). Additive within
+  // v1; advertised as the `auth.signin` capability. Progress arrives as `auth.signin.event` frames on this connection.
+  /** Start `claude setup-token` on the daemon's machine. One flow per daemon at a time. Replies `{ flowId }`. */
+  | { type: 'auth.signin.start' }
+  /** The login code the user copied from the browser page. */
+  | { type: 'auth.signin.code'; flowId: string; code: string }
+  /** Abandon the flow (default: the one this connection started). */
+  | { type: 'auth.signin.cancel'; flowId?: string };
+
+/** Advertised by a daemon that can run a Claude sign-in for its client (`auth.signin.*`). */
+export const AUTH_SIGNIN_CAPABILITY = 'auth.signin';
+
+/** Longest login code accepted (a real one is ~90 characters). */
+export const MAX_SIGNIN_CODE_CHARS = 1024;
+
+/**
+ * One step of a daemon-side sign-in, pushed to the connection that started it. `token` is the minted long-lived
+ * token: it crosses the wire exactly once, to an admin client, and is never logged or journaled.
+ */
+export type SigninEvent =
+  | { kind: 'progress'; flowId: string; text: string }
+  | { kind: 'url'; flowId: string; url: string }
+  | { kind: 'prompt'; flowId: string }
+  | { kind: 'token'; flowId: string; token: string }
+  | { kind: 'error'; flowId: string; message: string };
 
 /** One repository the daemon keeps cloned. The authentication token comes from the daemon's `creds/`, never from here. */
 export interface RepoSpec {
@@ -297,4 +322,7 @@ export const CLIENT_COMMAND_TYPES: Record<ClientCommandType, true> = {
   'skills.put': true,
   'skills.commit': true,
   'mcp.sync': true,
+  'auth.signin.start': true,
+  'auth.signin.code': true,
+  'auth.signin.cancel': true,
 };

@@ -421,6 +421,12 @@ test.describe('Agent Threads UI', () => {
 
     const userMessages = page.locator('.ct-message-user');
     await expect(userMessages).toHaveCount(3);
+    // Start from a fixed scroll position. Whether the list has already pinned itself to the bottom when the first
+    // right-click lands is a timing race, and Playwright only scrolls the first row into view when it is NOT visible,
+    // so the final scroll offset (and the baseline) differed by ~19px between runs. Forcing the bottom makes the
+    // click always scroll the first row into view.
+    await page.evaluate(() => { const m = document.querySelector('.ct-messages') as HTMLElement; m.scrollTop = m.scrollHeight; });
+    await expect.poll(() => page.evaluate(() => { const m = document.querySelector('.ct-messages') as HTMLElement; return m.scrollHeight - m.clientHeight - m.scrollTop; })).toBeLessThan(2);
 
     // Older rows offer Retry only; Set as goal is limited to the latest
     // canonical text-bearing user row.
@@ -3046,7 +3052,8 @@ test.describe('Agent Threads UI', () => {
     await page.setViewportSize({ width: 1240, height: 820 });
     await page.goto(kanbanUrl);
     await page.waitForSelector('.ct-kanban-board');
-    await expect(page.locator('.ct-kanban-dispatch textarea')).toHaveCount(0);
+    // The Ask-the-orchestrator field is a textarea (Shift+Enter = newline); only a dispatch composer must be absent.
+    await expect(page.locator('.ct-kanban-dispatch textarea:not(.ct-orch-input)')).toHaveCount(0);
     await expect(page.getByLabel('Dispatch Project')).toHaveCount(0);
     const button = page.getByRole('button', { name: 'New thread' });
     await expect(button).toBeVisible();

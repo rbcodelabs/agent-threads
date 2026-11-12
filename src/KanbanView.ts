@@ -9,12 +9,15 @@ import { approveProposedReply, discardProposedReply, takeProposedReplyForEdit } 
 import { answerPendingQuestions } from './questionActions';
 import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
 import { threadNeedsInput, splitNeedsInput } from './needsInput';
+import { canOpenDockLink, openDockLink, type DockLinkDeps } from './dockLinkOpener';
+import { OrchestratorDock, dockModeForWidth, type DockMode } from './orchestratorDock';
+import { windowDraftStore } from './dockDraftStore';
 import { decisionToQuestion } from './decisions';
 import { formatToolName } from './ClaudeSession';
-import { canAlwaysAllow, summarizePermissionDetail, isHostExecPermission } from './permissionDetail';
-import { recordAlwaysAllow } from './remoteAlwaysAllow';
-import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
+import { appendPermissionButtons, summarizePermissionDetail } from './permissionCard';
 import { hostExecState } from './managedPolicy';
+import type { Rect } from './dockCardScroll';
+import { scrollCardIntoClearView } from './dockCardScrollDom';
 import { relativeTime, buildCwdLabel, isAwsSsoError, formatWakeupCountdown } from './dashboardUtils';
 import { renderAwsReauthButton } from './awsReauthButton';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
@@ -22,7 +25,7 @@ import { remoteGroup, threadCwdLabel } from './remote/threadLocation';
 import { parsePrUrlRepo } from './gitDiffUtils';
 import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks';
 import { appendOrchestratorBadge } from './orchestrator-badge';
-import { partitionThreads, classifyThreadRow, type ThreadRowState } from './threadRowState';
+import { liveRowFlags, partitionThreads, classifyThreadRow, type ThreadRowState } from './threadRowState';
 import { telemetry } from './telemetry';
 import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps } from './threadArchiveMenu';
 import { promptConfirm } from './confirmModal';
@@ -35,6 +38,9 @@ import { defaultVisibilityObserverFactory, type VisibilityObserver, type Visibil
 import { vaultResourceUrl } from './imageSrc';
 
 export const KANBAN_VIEW_TYPE = 'claude-threads:kanban';
+
+/** The floating pill at rest is ~48px (desktop) / ~58px (44px mobile targets); taller means a wrapped reason or the status row. */
+const RESTING_PILL_MAX_PX = 62;
 
 export function isKanbanThread(thread: Pick<Thread, 'background'>): boolean {
   return !thread.background;
@@ -95,6 +101,18 @@ const PROJECT_SECTION_MAP: Record<ThreadRowState, { label: string; state: RowSta
   empty:           { label: 'Ready', state: 'empty' },
 };
 
+/** Pointer must rest on a thread link this long before the board scrolls to its card. */
+const CARD_HOVER_INTENT_MS = 120;
+
+function rectOf(el: Element): Rect {
+  const b = el.getBoundingClientRect();
+  return { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
+}
+
+/** `matchMedia` is absent in some test hosts: treat that as "motion is fine". */
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
 
 export class KanbanView extends ItemView {
   private plugin: ClaudeThreadsPlugin;
@@ -104,7 +122,10 @@ export class KanbanView extends ItemView {
   private inboxDrafts = new Map<string, QuestionDraft>();
 
   private boardEl!: HTMLElement;
-  private headerCountEl!: HTMLElement;
+  private dock: OrchestratorDock | null = null;
+  private dockMode: DockMode = 'pill';
+  private dockResizeObserver: ResizeObserver | null = null;
+  private pillObserver: ResizeObserver | null = null;
   private searchBarEl!: HTMLElement;
   private searchInputEl!: HTMLInputElement;
   private searchClearBtn!: HTMLButtonElement;
@@ -116,6 +137,11 @@ export class KanbanView extends ItemView {
   private activityEls: Map<string, HTMLElement> = new Map();
   private timeEls: Map<string, HTMLElement> = new Map();
   private rowEls: Map<string, HTMLElement> = new Map();
+  /** Card highlighted by a hovered / focused thread link in the dock's reply sheet. Tracked by id: render() rebuilds rowEls. */
+  private linkedCardId: string | null = null;
+  private cardScrollTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Re-measures the clearance while a link is hovered and the sheet / pill resize under it. */
+  private clearanceObserver: ResizeObserver | null = null;
   private taskEls: Map<string, HTMLElement> = new Map();
   private summaryEls: Map<string, HTMLElement> = new Map();
   /** Per-card orchestrator-inbox blocks, patched in place by their own events. */
@@ -196,6 +222,13 @@ export class KanbanView extends ItemView {
 
   async onClose(): Promise<void> {
     this.unsubscribe?.();
+    this.dockResizeObserver?.disconnect();
+    this.dockResizeObserver = null;
+    this.pillObserver?.disconnect();
+    this.pillObserver = null;
+    this.dock?.destroy();
+    this.dock = null;
+    this.clearCardFocus();
     for (const timer of this.activityTimers.values()) clearTimeout(timer);
     this.activityTimers.clear();
     for (const timer of this.galleryTimers.values()) clearTimeout(timer);
@@ -283,9 +316,8 @@ export class KanbanView extends ItemView {
     // Floating panel — centered at bottom of the board (count, New thread, group/search)
     const dispatchWrapper = root.createDiv('ct-kanban-dispatch');
 
-    // Meta strip: thread count (left) + search button (right)
+    // Meta strip: Ask-the-orchestrator dock (left, mounted below) + New thread / group-by / search (right)
     const metaRow = dispatchWrapper.createDiv('ct-agents-panel-meta');
-    this.headerCountEl = metaRow.createDiv('ct-agents-count');
     const metaActions = metaRow.createDiv('ct-agents-panel-actions');
 
     // The dispatch composer lives in the conversation panel now; this just opens it.
@@ -351,6 +383,198 @@ export class KanbanView extends ItemView {
     this.searchInputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.closeSearch();
     });
+
+    this.mountOrchestratorDock(root, metaRow);
+  }
+
+  /**
+   * The Ask-the-orchestrator dock leads the pill's meta row. It replaces the old
+   * "N running · N total" count text: that text now lives in the dock dot's tooltip.
+   */
+  private mountOrchestratorDock(root: HTMLElement, metaRow: HTMLElement): void {
+    this.dockResizeObserver?.disconnect();
+    this.pillObserver?.disconnect();
+    this.dock?.destroy();
+    this.dockMode = dockModeForWidth(root.clientWidth);
+    const plugin = this.plugin;
+    this.dock = new OrchestratorDock(metaRow, {
+      manager: this.manager,
+      listThreads: () => this.manager.getThreads().filter(isKanbanThread),
+      hasPendingWakeup: (id) => plugin.hasPendingWakeup(id),
+      getOrchestratorThreadId: () => plugin.settings.orchestratorThreadId,
+      // open=false: set up without stealing focus into the chat view; the dock then focuses its own field.
+      ensureOrchestrator: () => plugin.ensureOrchestratorThread(false),
+      openThread: (id) => plugin.openThreadInChatView(id),
+      focusCard: (id, opts) => this.focusCard(id, opts),
+      clearCardFocus: () => this.clearCardFocus(),
+      // The tray's permission buttons are the board card's own (permissionCard.ts), fed the same deps.
+      permissionCard: {
+        getSettings: () => plugin.settings,
+        saveSettings: () => plugin.saveSettings(),
+        hostExecAllowAlways: () => hostExecState(plugin.managedPolicy?.peek()).allowAlways,
+      },
+      // Never the active leaf (the board): see dockLinkOpener.ts.
+      openLink: (href) => openDockLink(this.dockLinkDeps(), href),
+      resolveLink: (href) => canOpenDockLink(this.dockLinkDeps(), href),
+      mode: () => this.dockMode,
+      // In memory only (drafts can hold secrets): survives this view being rebuilt, not an app restart.
+      drafts: windowDraftStore,
+      daemons: plugin.daemonRegistry
+        ? {
+            stateOf: (id) => plugin.daemonRegistry?.stateOf(id),
+            onState: (l) => plugin.daemonRegistry?.onState(l) ?? (() => {}),
+            reconnect: (id) => { plugin.daemonRegistry?.clientFor(id)?.reconnectNow(); },
+          }
+        : null,
+    });
+    this.dock.mount();
+    // Narrow boards collapse the pill to the orb (+ New thread): re-derive when the view width crosses 640px.
+    if (typeof ResizeObserver !== 'undefined') {
+      this.dockResizeObserver = new ResizeObserver(() => {
+        // One measure (clientWidth) for open AND resize: contentRect is fractional and padding-excluded, so mixing the two
+        // could flip the mode at exactly 640px.
+        const next = dockModeForWidth(root.clientWidth);
+        if (next === this.dockMode) { this.dock?.layoutChanged(); return; } // the sheet's max height follows the view height
+        this.dockMode = next;
+        this.dock?.relayout(); // re-measures with the NEW mode
+      });
+      this.dockResizeObserver.observe(root);
+      // The pill grows (wrapped reason, narrow status row): keep the board's scroll end clear of it, driven by the
+      // measured height rather than fixed paddings. Only set when taller than the resting pill (see styles.css).
+      const pill = metaRow.parentElement;
+      if (pill) {
+        this.pillObserver?.disconnect();
+        // Above RESTING_PILL_MAX_PX the pill has grown; at rest the variable is unset so the board keeps its 76px.
+        this.pillObserver = new ResizeObserver(() => {
+          if (pill.offsetHeight > RESTING_PILL_MAX_PX) root.style.setProperty('--ct-pill-clearance', `${pill.offsetHeight + 36 + 4}px`);
+          else root.style.removeProperty('--ct-pill-clearance');
+        });
+        this.pillObserver.observe(pill);
+      }
+    }
+  }
+
+  private dockLinkDeps(): DockLinkDeps {
+    const plugin = this.plugin;
+    return {
+      getFirstLinkpathDest: (path, source) => this.app.metadataCache.getFirstLinkpathDest(path, source),
+      isConversationFirst: () => plugin.isConversationFirst(),
+      openInContextPanel: (href, source) => { void plugin.contextPanel.openLinkText(href, source); },
+      openLinkText: (href, source, newLeaf) => { void this.app.workspace.openLinkText(href, source, newLeaf); },
+    };
+  }
+
+  /**
+   * Highlights a thread's card while its link is hovered / focused in the dock's reply sheet. `scroll` brings it into
+   * view (`inline: 'center'` for swimlane / project columns that are off-screen horizontally, `block: 'nearest'` so the
+   * board does not jump vertically); `flash` adds a one-off pulse. prefers-reduced-motion: instant scroll, no pulse.
+   * Returns false (and does nothing) when the thread has no card on the board (archived, filtered out).
+   */
+  focusCard(threadId: string, opts: { scroll: boolean; flash: boolean }): boolean {
+    const el = this.rowEls.get(threadId);
+    // No layout box (a collapsed lane, display:none): nothing to highlight or scroll to.
+    if (!el || el.getClientRects().length === 0) return false;
+    if (this.linkedCardId && this.linkedCardId !== threadId) this.clearCardFocus();
+    this.cancelCardScroll();
+    this.linkedCardId = threadId;
+    const reduced = prefersReducedMotion();
+    el.addClass('ct-kanban-card-linked');
+    el.toggleClass('ct-kanban-card-linked-flash', opts.flash && !reduced);
+    // The highlight is immediate; the SCROLL waits for hover intent so sweeping the pointer across a list of links
+    // does not make the board lurch to every card on the way.
+    if (opts.scroll) {
+      this.cardScrollTimer = setTimeout(() => {
+        this.cardScrollTimer = null;
+        if (this.linkedCardId !== threadId || this.rowEls.get(threadId) !== el || el.getClientRects().length === 0) return;
+        this.scrollCardIntoClearView(el, reduced);
+      }, CARD_HOVER_INTENT_MS);
+    }
+    return true;
+  }
+
+  /**
+   * Removes the highlight AND the extra scroll room added under the cards while a link was hovered, so the board snaps back
+   * to its normal scroll extent (a scroll position inside the removed room is clamped by the browser).
+   */
+  clearCardFocus(): void {
+    this.cancelCardScroll();
+    this.clearanceObserver?.disconnect();
+    this.clearanceObserver = null;
+    const id = this.linkedCardId;
+    this.linkedCardId = null;
+    const el = id ? this.rowEls.get(id) : undefined;
+    el?.removeClass('ct-kanban-card-linked');
+    el?.removeClass('ct-kanban-card-linked-flash');
+    this.boardEl?.classList.remove('ct-kanban-clearing');
+    this.boardEl?.style.removeProperty('--ct-card-clearance');
+  }
+
+  private cancelCardScroll(): void {
+    if (this.cardScrollTimer) clearTimeout(this.cardScrollTimer);
+    this.cardScrollTimer = null;
+  }
+
+  /**
+   * Scrolls the board (and the lane / column that holds the card) so the card lands OUTSIDE the open reply sheet and the
+   * pill, which float over the board: scrollIntoView ignores them, and 25 of 60 QA hovers left the card at least 70%
+   * covered. The geometry is dockCardScroll.planCardScroll; the extra scroll room below the cards is what lets a card
+   * at the end of its column rise above the sheet at all.
+   */
+  private scrollCardIntoClearView(el: HTMLElement, reduced: boolean): void {
+    const host = this.boardEl;
+    const root = this.containerEl.children[1] as HTMLElement | undefined;
+    if (!host || !root) return;
+    const obstacles: Rect[] = [];
+    const pill = root.querySelector<HTMLElement>('.ct-kanban-dispatch');
+    if (pill) {
+      obstacles.push(rectOf(pill));
+      const sheet = pill.querySelector<HTMLElement>('.ct-orch-sheet:not([hidden])');
+      if (sheet) obstacles.push(rectOf(sheet));
+    }
+    const hostRect = rectOf(host);
+    const covered = obstacles.length > 0 ? Math.max(0, Math.round(hostRect.bottom - Math.min(...obstacles.map((o) => o.top)) + 8)) : 0;
+    host.style.setProperty('--ct-card-clearance', `${covered}px`);
+    host.classList.add('ct-kanban-clearing');
+    this.observeClearance(pill);
+    // Nested scrollers (board / lane / column body): dockCardScrollDom keeps the card inside its own column viewport AND
+    // outside the overlays. If it cannot clear the card (the overlays cover nearly everything), at least make it visible.
+    const cleared = scrollCardIntoClearView(el, host, obstacles, reduced);
+    if (!cleared && typeof el.scrollIntoView === 'function') el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'nearest', inline: 'nearest' });
+  }
+
+  /** The sheet can grow / shrink while a link stays hovered: keep the extra scroll room matched to what is covered. */
+  private observeClearance(pill: HTMLElement | null): void {
+    this.clearanceObserver?.disconnect();
+    this.clearanceObserver = null;
+    if (!pill || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      const host = this.boardEl;
+      if (!host || !this.linkedCardId) return;
+      const tops = [pill, pill.querySelector<HTMLElement>('.ct-orch-sheet:not([hidden])')].filter((n): n is HTMLElement => !!n).map((n) => n.getBoundingClientRect().top);
+      host.style.setProperty('--ct-card-clearance', `${Math.max(0, Math.round(host.getBoundingClientRect().bottom - Math.min(...tops) + 8))}px`);
+    });
+    ro.observe(pill);
+    const sheet = pill.querySelector<HTMLElement>('.ct-orch-sheet');
+    if (sheet) ro.observe(sheet);
+    this.clearanceObserver = ro;
+  }
+
+  /** Every place a card element is created registers it here, so a card rebuilt outside render() (gallery refresh) keeps the link highlight. */
+  private registerCard(threadId: string, el: HTMLElement): void {
+    this.rowEls.set(threadId, el);
+    if (threadId === this.linkedCardId) el.addClass('ct-kanban-card-linked');
+  }
+
+  /** After a full board rebuild the card element is new: re-apply the highlight (never scrolls). */
+  private reapplyCardFocus(): void {
+    const el = this.linkedCardId ? this.rowEls.get(this.linkedCardId) : undefined;
+    if (!el) return;
+    el.addClass('ct-kanban-card-linked');
+  }
+
+  /** Cmd+J target (see orchestratorDockCommand.ts). */
+  focusOrchestratorDock(): void {
+    this.dock?.focusField();
   }
 
   private toggleSearch(): void {
@@ -450,7 +674,7 @@ export class KanbanView extends ItemView {
         emptyEl.createDiv({ text: 'No threads yet.' });
         emptyEl.createDiv({ cls: 'ct-agents-empty-sub', text: 'Use New thread to start a task.' });
       }
-      this.updateHeader(0, 0);
+      this.dock?.refresh();
       return;
     }
 
@@ -464,8 +688,8 @@ export class KanbanView extends ItemView {
       this.renderStatusBoard(threads);
     }
 
-    const runningCount = threads.filter(t => this.manager.isRunning(t.id)).length;
-    this.updateHeader(threads.length, runningCount);
+    this.dock?.refresh();
+    this.reapplyCardFocus();
 
     this.restoreScrollState(scrollState);
     this.restoreInboxFocus(focus);
@@ -538,15 +762,7 @@ export class KanbanView extends ItemView {
 
   /** Classification flags for a thread, read live (shared by every bucketing path). */
   private rowFlags(t: Thread) {
-    return {
-      isRunning: this.manager.isRunning(t.id),
-      hasPendingPermission: this.manager.hasPendingPermission(t.id) || this.manager.hasPendingQuestion(t.id) || this.manager.hasPendingPlan(t.id),
-      hasActiveBackgroundTasks: this.manager.hasActiveBackgroundTasks(t.id),
-      hasPendingWakeup: this.plugin.hasPendingWakeup(t.id),
-      lastError: t.lastError,
-      messageCount: t.messages.length,
-      reviewed: t.reviewed,
-    };
+    return liveRowFlags(this.manager, (id) => this.plugin.hasPendingWakeup(id), t);
   }
 
   /** True when an orchestrator staged something for Rick, or the agent is asking him a question. */
@@ -955,7 +1171,7 @@ export class KanbanView extends ItemView {
         hasPending ? 'ct-kanban-card-permission' : '',
       ].filter(Boolean).join(' '),
     });
-    this.rowEls.set(thread.id, card);
+    this.registerCard(thread.id, card);
     card.toggleClass('ct-stale', this.manager.isRunStale(thread.id));
     // Record where this card lives so handleEvent can patch-vs-rebuild. The key
     // is the same combined bucket+group scopeKey the column was rendered under.
@@ -1068,29 +1284,12 @@ export class KanbanView extends ItemView {
     threadId: string,
     pendingInfo: ReturnType<ThreadManager['getPendingPermission']>,
   ): void {
-    const deny = btns.createEl('button', { text: 'Deny', cls: 'ct-permission-btn ct-permission-deny' });
-    deny.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(threadId, false); });
-    const allow = btns.createEl('button', { text: !!pendingInfo && isHostExecPermission(pendingInfo.toolName) ? 'Allow once' : 'Allow', cls: 'ct-permission-btn ct-permission-allow' });
-    allow.addEventListener('click', (e) => { e.stopPropagation(); this.manager.resolvePermission(threadId, true); });
-    const hostExecPrefix = hostExecAlwaysAllowOffer(pendingInfo, hostExecState(this.plugin.managedPolicy?.peek()).allowAlways);
-    if (hostExecPrefix) {
-      const alwaysPrefix = btns.createEl('button', { text: `Always \`${hostExecPrefix}\``, cls: 'ct-permission-btn ct-permission-always' });
-      alwaysPrefix.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (addHostExecPrefix(this.plugin.settings, hostExecPrefix)) await this.plugin.saveSettings();
-        this.manager.resolvePermission(threadId, true);
-      });
-    }
-    if (!pendingInfo || canAlwaysAllow(pendingInfo.toolName)) {
-      const always = btns.createEl('button', { text: 'Always', cls: 'ct-permission-btn ct-permission-always' });
-      always.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (pendingInfo) {
-          if (recordAlwaysAllow(this.plugin.settings, pendingInfo.toolName, this.manager.getRemoteScope(threadId))) await this.plugin.saveSettings();
-        }
-        this.manager.resolvePermission(threadId, true);
-      });
-    }
+    appendPermissionButtons(btns, threadId, pendingInfo, {
+      manager: this.manager,
+      getSettings: () => this.plugin.settings,
+      saveSettings: () => this.plugin.saveSettings(),
+      hostExecAllowAlways: hostExecState(this.plugin.managedPolicy?.peek()).allowAlways,
+    });
   }
 
   // ── Gallery mode ───────────────────────────────────────────────────────────
@@ -1185,7 +1384,7 @@ export class KanbanView extends ItemView {
     // event paths (active card, stale spinner, inbox patching, activity line,
     // patch-vs-rebuild placement) keep working unchanged.
     this.galleryCards.set(id, card);
-    this.rowEls.set(id, card.el);
+    this.registerCard(id, card.el);
     this.activityEls.set(id, card.messageEl);
     this.cardPlacements.set(id, this.computeCardPlacement(thread));
     card.el.toggleClass('ct-agents-row-active', id === this.activeThreadId);
@@ -1681,14 +1880,6 @@ export class KanbanView extends ItemView {
         const thread = this.manager.getThread(id);
         if (thread) el.setText(this.getActivityText(thread, 'waiting'));
       }
-    }
-  }
-
-  private updateHeader(total: number, running: number): void {
-    if (running > 0) {
-      this.headerCountEl.setText(`${running} running · ${total} total`);
-    } else {
-      this.headerCountEl.setText(`${total} thread${total !== 1 ? 's' : ''}`);
     }
   }
 

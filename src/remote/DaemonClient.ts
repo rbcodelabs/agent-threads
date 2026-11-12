@@ -44,6 +44,7 @@ import {
   type WorkspaceInfo,
   type WorkspacesListReply,
   type ResyncFrame,
+  type SigninEvent,
   type WelcomeFrame,
 } from '../protocol';
 import { randomHex } from './randomId';
@@ -278,6 +279,7 @@ export class DaemonClient {
   private readonly pending = new Map<string, PendingCommand>();
   private readonly channels = new Map<Channel, ChannelSubscriptionImpl>();
   private readonly stateListeners = new Set<(s: ConnectionState) => void>();
+  private readonly signinListeners = new Set<(e: SigninEvent) => void>();
 
   constructor(options: DaemonClientOptions) {
     this.opts = {
@@ -482,6 +484,21 @@ export class DaemonClient {
       case 'err': this.settleErr(frame, gen); return;
       case 'event':
       case 'resync': this.onChannelFrame(frame); return;
+      case 'auth.signin.event': this.onSigninFrame(frame); return;
+    }
+  }
+
+  /** Steps of the sign-in this connection started (`auth.signin.start`). */
+  onSigninEvent(listener: (e: SigninEvent) => void): () => void {
+    this.signinListeners.add(listener);
+    return () => this.signinListeners.delete(listener);
+  }
+
+  private onSigninFrame(frame: { type: 'auth.signin.event' } & SigninEvent): void {
+    const { type: _type, ...event } = frame as { type: string } & SigninEvent;
+    void _type;
+    for (const l of [...this.signinListeners]) {
+      try { l(event as SigninEvent); } catch (err) { this.log(`sign-in listener threw: ${errText(err)}`); }
     }
   }
 
@@ -603,9 +620,10 @@ export class DaemonClient {
   command<K extends Exclude<ClientCommandType, 'hello'>>(
     type: K,
     payload: Omit<Extract<ClientCommand, { type: K }>, 'type'>,
-    opts: { timeoutMs?: number } = {},
+    /** `resend: false` for a command bound to this connection (a sign-in flow): never replayed on a new socket. */
+    opts: { timeoutMs?: number; resend?: boolean } = {},
   ): Promise<CommandResult> {
-    return this.request(type, payload as Record<string, unknown>, { resend: true, timeoutMs: opts.timeoutMs ?? this.opts.commandTimeoutMs });
+    return this.request(type, payload as Record<string, unknown>, { resend: opts.resend ?? true, timeoutMs: opts.timeoutMs ?? this.opts.commandTimeoutMs });
   }
 
   private request(
