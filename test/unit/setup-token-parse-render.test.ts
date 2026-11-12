@@ -5,7 +5,7 @@ import { extractToken, renderTerminal, stripAnsi, TOKEN_PREFIX_PATTERN } from '.
 describe('renderTerminal', () => {
   it('recovers a character the TUI skipped repainting (cursor-forward over an unchanged cell)', () => {
     // Previous frame had an "o" in that cell; the repaint moves the cursor over it instead of resending it.
-    const raw = '\x1b[2Bxxxxxxxo\r' + '\x1b[1Csk-ant-\x1b[1C' + 'at01-AbC_d-e\x1b[K';
+    const raw = '\x1b[2Bxxxxxxxxo\r' + '\x1b[1Csk-ant-\x1b[1C' + 'at01-AbC_d-e\x1b[K';
     const stripped = stripAnsi(raw);
     expect(stripped.match(TOKEN_PREFIX_PATTERN)).toBeNull();
     expect(extractToken(renderTerminal(raw))).toBe('sk-ant-oat01-AbC_d-e');
