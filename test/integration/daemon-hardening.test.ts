@@ -264,6 +264,9 @@ describe('L. scopes and request ownership', () => {
     'skills.put': { upload: 'upload-0001', dir: 'demo-0123456789ab', seq: 0, files: [] },
     'skills.commit': { upload: 'upload-0001', dir: 'demo-0123456789ab', hash: '0123456789ab'.padEnd(64, '0'), files: 0, bytes: 0 },
     'mcp.sync': { servers: {} },
+    'auth.signin.start': {},
+    'auth.signin.code': { flowId: 'f', code: 'x' },
+    'auth.signin.cancel': {},
   };
 
   it('REQUIRED_SCOPE lists exactly every command except hello, and each sample is a valid frame', () => {

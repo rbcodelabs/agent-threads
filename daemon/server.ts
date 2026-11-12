@@ -6,6 +6,7 @@
  * from the first `hello` frame or an `Authorization: Bearer` header, never the
  * URL, so tokens do not end up in proxy logs.
  */
+import { spawn as nodeSpawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
@@ -13,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { PROTOCOL_VERSION } from '../src/protocol';
+import type { SpawnLike } from '../src/setupTokenSession';
 import { AuditLog } from './auditLog';
 import { CommandCache } from './cmdCache';
 import { isLoopbackAddress, isWildcardAddress, loadOrCreateDaemonId, updateConfigFile, type DaemonConfig } from './config';
@@ -38,6 +40,7 @@ import { ThreadHost } from './threadHost';
 import { RawLogWriter } from '../src/RawLogWriter';
 import { setKnownSecretsProvider } from '../src/secretRedaction';
 import { TokenStore } from './tokenStore';
+import { SigninManager } from './signin';
 import { DAEMON_VERSION } from './version';
 import { createAutoUpdater, type AutoUpdateOverrides } from './update';
 import type { AutoUpdater } from './update/autoUpdater';
@@ -62,6 +65,8 @@ export interface DaemonOptions {
   /** How often journals are compacted for TTL/size regardless of acks (default 5 min). */
   maintenanceMs?: number;
   throttle?: FailureThrottle;
+  /** Test seam: the Claude sign-in provider. Production builds one for a real daemon that has the claude harness enabled. */
+  signin?: SigninManager;
   /**
    * Apply the per-address failure throttle to loopback peers too (default false). Behind `tailscale serve`
    * or a reverse proxy every client arrives from 127.0.0.1, so throttling loopback would let one peer's
@@ -213,6 +218,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     ...(options.autoUpdate ? { overrides: options.autoUpdate } : {}),
   });
 
+  const signin = options.signin ?? (real && config.harnesses.includes('claude')
+    ? new SigninManager({ spawn: nodeSpawn as unknown as SpawnLike, env: process.env, claudeBinary: () => findHarnessBinary('claude', config.claudeBinaryPath, process.env), audit })
+    : undefined);
   const ctx: ServerContext = {
     host,
     tokens,
@@ -220,12 +228,13 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     cmdCache: new CommandCache(),
     daemonId,
     epoch,
-    capabilities: capabilitiesFor(config.harness, config.harnesses, config.allowSyncedStdio, updater.autoEnabled),
+    capabilities: capabilitiesFor(config.harness, config.harnesses, config.allowSyncedStdio, updater.autoEnabled, !!signin),
     controllers,
     creds,
     repos,
     skills,
     syncedMcp,
+    ...(signin ? { signin } : {}),
     configuredMcpNames: () => new Set(Object.keys(config.mcpServers)),
     checkPath: (path) => describePathAccess(path, sessionPolicy),
     listWorkspaces: () => listWorkspaces(existsSync(config.repoRoot) ? sessionPolicy : configuredPolicy),
@@ -356,6 +365,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     updater,
     async stop() {
       updater.stop();
+      signin?.dispose();
       clearInterval(sweep);
       clearInterval(maintenance);
       if (reaper) clearInterval(reaper);
@@ -367,6 +377,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     },
     async crash() {
       updater.stop();
+      signin?.dispose();
       clearInterval(sweep);
       clearInterval(maintenance);
       if (reaper) clearInterval(reaper);
