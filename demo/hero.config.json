@@ -109,10 +109,6 @@
           "cue": "Ask an agent"
         },
         {
-          "type": "click",
-          "selector": ".menu-item:has-text(\"Fieldnotes Launch\")"
-        },
-        {
           "type": "type",
           "text": "Draft the release notes for the November launch",
           "delayMs": 16,
@@ -161,7 +157,8 @@
         {
           "type": "click",
           "selector": ".ct-agent-row-button",
-          "cue": "follow each one"
+          "cue": "follow each one",
+          "optional": true
         },
         {
           "type": "pause",
