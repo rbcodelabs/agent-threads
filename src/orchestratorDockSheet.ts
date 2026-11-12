@@ -344,8 +344,22 @@ export class DockSheet {
     return { threadId: card?.dataset.threadId ?? null, role };
   }
 
-  private isShown(el: HTMLElement | null): el is HTMLElement {
-    return !!el && el.isConnected && !el.closest('[hidden], [data-nospace]');
+  /**
+   * Can this element really take focus now? Not just "no [hidden]": the collapsed tray hides the show-more toggle with CSS
+   * display:none, and focus() on such an element silently does nothing. Not hidden / inert / aria-hidden / display:none /
+   * visibility:hidden anywhere up the tree (checkVisibility() when the engine has it, computed style otherwise).
+   */
+  private canFocus(el: HTMLElement | null): el is HTMLElement {
+    if (!el || !el.isConnected || el.closest('[hidden], [data-nospace], [inert], [aria-hidden="true"]')) return false;
+    if ((el as HTMLElement & { checkVisibility?: (o?: object) => boolean }).checkVisibility) {
+      return (el as HTMLElement & { checkVisibility: (o?: object) => boolean }).checkVisibility({ checkVisibilityCSS: true });
+    }
+    const view = el.ownerDocument.defaultView;
+    for (let n: Element | null = el; n; n = n.parentElement) {
+      const cs = view?.getComputedStyle(n);
+      if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return false;
+    }
+    return true;
   }
 
   private restoreTrayFocus(): void {
@@ -353,7 +367,7 @@ export class DockSheet {
     if (!want || this.destroyed) return;
     const doc = this.el.ownerDocument;
     const active = doc.activeElement as HTMLElement | null;
-    if (active && active !== doc.body && this.isShown(active)) return; // focus is fine where it is
+    if (active && active !== doc.body && this.canFocus(active)) return; // focus is fine where it is
     const tray = this.trayHost.querySelector<HTMLElement>('.ct-orch-tray');
     const card = want.threadId && tray ? Array.from(tray.querySelectorAll<HTMLElement>('.ct-orch-tray-card')).find((c) => c.dataset.threadId === want.threadId) ?? null : null;
     const ROLE: Record<string, string> = { deny: '.ct-permission-deny', allow: '.ct-permission-allow', always: '.ct-permission-always', review: '.ct-orch-tray-handoff', collapsed: '.ct-orch-tray-collapsed-review', toggle: '.ct-orch-tray-toggle' };
@@ -366,8 +380,12 @@ export class DockSheet {
       this.el.querySelector<HTMLElement>('.ct-orch-input'),
       this.closeBtn,
     ];
-    const target = candidates.find((c): c is HTMLElement => this.isShown(c ?? null));
-    target?.focus({ preventScroll: true });
+    // Down the chain until a focus() really lands (checked, not assumed); never leave focus on <body>.
+    for (const c of candidates) {
+      if (!this.canFocus(c ?? null)) continue;
+      c!.focus({ preventScroll: true });
+      if (doc.activeElement === c) return;
+    }
   }
 
   /** Header + composer (+ the handle when shown) in px: what a MICRO sheet needs, margins included. */

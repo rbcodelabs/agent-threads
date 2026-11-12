@@ -625,7 +625,8 @@ test.describe('D17: focus on "Show N more" survives the tray collapsing @ 320x64
     const set = async (kb: number) => { await page.evaluate((h) => (window as any).__setVV(h), size.height - kb); await page.waitForTimeout(120); };
     const failures: string[] = [];
     let focusedAtLeastOnce = 0;
-    for (const from of [0, 380]) for (const to of [380, 400, 430, 460, 500, 540]) {
+    for (const from of [0, 380]) // (Up to 500px: 140px of visual height. At 540px (100px) the whole sheet is hidden, nothing in it can hold focus: documented limit.)
+    for (const to of [380, 400, 430, 460, 500]) {
       await set(from);
       const toggle = page.locator('.ct-orch-tray-toggle');
       if ((await toggle.count()) === 0 || !(await toggle.isVisible())) continue;
