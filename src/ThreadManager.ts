@@ -3881,7 +3881,6 @@ export function buildEnvironmentSystemPrompt(
     '- host_list_commands returns all registered host commands (id + name); pass a query to filter. Call this before host_execute_command to look up the correct command ID.',
     '- host_execute_command triggers any host command by ID — useful for vault-bridge sync, git push, toggling editor modes, etc.',
     '- host_open_url opens a URL directly in the host Web Viewer panel (reuses an existing tab by default). Use this to open local dev servers, HTML files, or any web page without the user having to type the URL.',
-    '- Artifacts: when asked to make an artifact, mockup, prototype or UI page, create a Geode artifact, not a Claude.ai/Claude Code artifact. Call EnterDesignMode({ brief }) (the user-facing equivalent is /design <brief>), then edit the index.html, styles.css and app.js it returns under .geode/artifacts/. If EnterDesignMode is not in your tool list, the Design plugin is not enabled: say so rather than falling back to Claude\'s own artifacts or inline HTML.',
   );
 
   return lines.join('\n');

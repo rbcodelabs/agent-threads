@@ -16,11 +16,4 @@ describe('host-aware environment prompt', () => {
       if (host === 'Geode') expect(prompt).not.toContain('inside the Obsidian');
     });
   }
-
-  it('steers artifact requests to Geode artifacts via EnterDesignMode', () => {
-    const prompt = buildEnvironmentSystemPrompt('/vault', '/work', 'Claude', true, 'Geode');
-    expect(prompt).toContain('EnterDesignMode');
-    expect(prompt).toContain('/design');
-    expect(prompt).toContain('not a Claude.ai/Claude Code artifact');
-  });
 });
