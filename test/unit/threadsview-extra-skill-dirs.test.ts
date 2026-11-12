@@ -1,27 +1,37 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const ctor = vi.fn();
+vi.mock('../../src/DispatchInput', async (orig) => {
+  const actual = await orig<typeof import('../../src/DispatchInput')>();
+  return {
+    ...actual,
+    DispatchInput: class {
+      constructor(options: unknown) { ctor(options); }
+      mount() {}
+    },
+  };
+});
+
 import { ThreadsView } from '../../src/ThreadsView';
 
 // The thread composer and the new-conversation (Dispatch) composer must offer
-// the same /skill list. Both get it from computeExtraSkillDirs(); the new
-// composer previously received none, so only ~/.claude/skills showed up.
-type Host = { plugin: unknown };
-const compute = (plugin: unknown) =>
-  (ThreadsView.prototype as unknown as { computeExtraSkillDirs(this: Host): Array<{ dir: string; prefix?: string }> })
-    .computeExtraSkillDirs.call({ plugin });
+// the same /skill list. The new composer previously received no
+// extraSkillDirs, so typing "/" only listed ~/.claude/skills and built-ins.
+describe('ThreadsView new-conversation composer', () => {
+  it('passes the shared extra skill dirs to DispatchInput', () => {
+    const dirs = [{ dir: '/vault/Skills', prefix: 'local' }, { dir: '/src/skills' }];
+    const host = {
+      app: {},
+      plugin: { settings: {} },
+      computeExtraSkillDirs: vi.fn(() => dirs),
+      refreshNewConversationContext: vi.fn(),
+    };
+    const panel = { createDiv: () => ({}) } as unknown as HTMLElement;
+    (ThreadsView.prototype as unknown as { buildNewConversationComposer(this: unknown, p: HTMLElement): void })
+      .buildNewConversationComposer.call(host, panel);
 
-describe('ThreadsView.computeExtraSkillDirs', () => {
-  it('includes local-source, local-skills and vault-skills roots with their namespaces', () => {
-    const dirs = compute({
-      settings: { skillSources: [{ type: 'local', skillsPath: '/src/skills' }] },
-      getPluginSkillsRoot: () => '/vault/.geode/skills',
-      getLocalSkillsRoot: () => '/vault/Skills',
-    });
-    expect(dirs[0]).toEqual({ dir: '/src/skills' });
-    expect(dirs.find(d => d.dir === '/vault/Skills')?.prefix).toBe('local');
-    expect(dirs.find(d => d.dir === '/vault/.geode/skills')?.prefix).toBeTruthy();
-  });
-
-  it('returns an empty list when nothing is configured', () => {
-    expect(compute({ settings: {}, getPluginSkillsRoot: () => '', getLocalSkillsRoot: () => '' })).toEqual([]);
+    expect(host.computeExtraSkillDirs).toHaveBeenCalledTimes(1);
+    expect(ctor).toHaveBeenCalledTimes(1);
+    expect((ctor.mock.calls[0][0] as { extraSkillDirs?: unknown }).extraSkillDirs).toBe(dirs);
   });
 });
