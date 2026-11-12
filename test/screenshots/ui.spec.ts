@@ -425,6 +425,21 @@ test.describe('Agent Threads UI', () => {
     // right-click lands is a timing race, and Playwright only scrolls the first row into view when it is NOT visible,
     // so the final scroll offset (and the baseline) differed by ~19px between runs. Forcing the bottom makes the
     // click always scroll the first row into view.
+    //
+    // Wait for the layout to settle before pinning. The composer panel keeps growing for a few frames after fonts load
+    // (about 108px -> 119px+), which shrinks the message viewport by ~18px. Pinning before that leaves the list ~18px
+    // short of the bottom, so the "at bottom" poll below times out or the screenshot shifts by that much.
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      const m = document.querySelector('.ct-messages') as HTMLElement;
+      let last = '', stable = 0;
+      while (stable < 12) {
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        const now = `${m.clientHeight}x${m.scrollHeight}`;
+        stable = now === last ? stable + 1 : 0;
+        last = now;
+      }
+    });
     await page.evaluate(() => { const m = document.querySelector('.ct-messages') as HTMLElement; m.scrollTop = m.scrollHeight; });
     await expect.poll(() => page.evaluate(() => { const m = document.querySelector('.ct-messages') as HTMLElement; return m.scrollHeight - m.clientHeight - m.scrollTop; })).toBeLessThan(2);
 
@@ -437,6 +452,22 @@ test.describe('Agent Threads UI', () => {
     // The menu opens at the pointer. Dispatch the event at fixed integer coordinates instead of clicking:
     // a click lands on the row's centre, which moves by sub-pixels with layout and made this baseline flaky.
     await userMessages.last().dispatchEvent('contextmenu', { clientX: 660, clientY: 520, button: 2, bubbles: true, cancelable: true });
+    await expect(page.locator('.menu .menu-item')).toHaveText(['Retry', 'Set as goal']);
+    // The right-click above scrolls the first row into view and the list then settles on its own, and where it lands
+    // (and how tall the composer is by then) is timing dependent. Put the view in the baseline's state explicitly: the
+    // first user row flush with the top of the message list, after the composer has stopped resizing.
+    await page.evaluate(async () => {
+      const m = document.querySelector('.ct-messages') as HTMLElement;
+      let last = '', stable = 0;
+      while (stable < 12) {
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        const now = `${m.clientHeight}x${m.scrollHeight}`;
+        stable = now === last ? stable + 1 : 0;
+        last = now;
+      }
+      const row = m.querySelector('.ct-message-user') as HTMLElement;
+      m.scrollTop += row.getBoundingClientRect().top - m.getBoundingClientRect().top;
+    });
     await expect(page.locator('.menu .menu-item')).toHaveText(['Retry', 'Set as goal']);
     await shot(page, 'set-as-goal-context-menu.png', { fullPage: true });
   });
