@@ -666,7 +666,8 @@ export class ThreadSession {
     const turn = this.lastUserTurn;
     // A restart only helps a raced Claude OAuth refresh; an expired AWS SSO
     // session can only be fixed by `aws sso login`, so go straight to sign-in.
-    if (turn && !this.interrupted && !isAwsCredentialErrorText(detail) && shouldAutoRetryAuthError(this.authRetryCount)) {
+    // A daemon whose Claude login is blank cannot be fixed by a restart, so it skips straight to the sign-in card.
+    if (turn && !this.interrupted && !isAwsCredentialErrorText(detail) && shouldAutoRetryAuthError(this.authRetryCount) && !this.currentOptions?.claude?.credentialsBlank?.()) {
       this.authRetryCount++;
       console.warn('[ClaudeThreads] Claude authentication failed — restarting the CLI process and retrying once:', detail);
       callbacks.onAuthRetry?.(detail);

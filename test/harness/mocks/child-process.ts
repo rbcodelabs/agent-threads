@@ -22,7 +22,12 @@ interface StubSpawnedProcess extends StubChildProcess {
   kill: () => boolean;
 }
 
-export const spawn = (_command: string, _args?: string[], _options?: unknown): StubSpawnedProcess => ({
+export const spawn = (_command: string, _args?: string[], _options?: unknown): StubSpawnedProcess => {
+  // Lets a spec assert which CLI the host sign-in flow launched (`claude auth login`).
+  (globalThis as { __spawnCalls?: string[][] }).__spawnCalls?.push([_command, ...(_args ?? [])]);
+  return stubSpawned();
+};
+const stubSpawned = (): StubSpawnedProcess => ({
   stdin: { write: () => {}, end: () => {} },
   stdout: { on: () => {} },
   stderr: { on: () => {} },

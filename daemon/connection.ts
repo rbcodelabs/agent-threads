@@ -21,6 +21,7 @@
 import type { IncomingMessage } from 'node:http';
 import type { RawData, WebSocket } from 'ws';
 import {
+  AUTH_SIGNIN_CAPABILITY,
   CLOSE_SLOW_CONSUMER,
   CLOSE_UNAUTHORIZED,
   MCP_SYNC_CAPABILITY,
@@ -40,6 +41,7 @@ import {
   type JournalEntry,
   type FileReadReply,
   type PathListReply,
+  type SigninEvent,
   type WelcomeFrame,
   type WireEvent,
   type WorkspaceInfo,
@@ -49,6 +51,7 @@ import { CredError, type CredStore } from './credStore';
 import { RepoError, type ReposManager } from './repos';
 import { SkillError, type SkillStore } from './skillStore';
 import type { SyncedMcpStore } from './syncedMcp';
+import { SigninError, type SigninManager } from './signin';
 import type { PathAccess } from './sessionPolicy';
 import type { ControlRegistry } from './controlRegistry';
 import type { FailureThrottle } from './failureThrottle';
@@ -84,13 +87,15 @@ export const BASE_CAPABILITIES = ['session.channel', 'journal.resume', 'cmd.idem
  * `harness.<kind>` for each harness a client may request, plus `harness.<kind>.<feature>` for what that harness
  * supports (see `HARNESS_FEATURES`). The scripted fake advertises only `harness.fake`.
  */
-export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = [], syncedStdio = false, autoUpdate = false): string[] => [
+export const capabilitiesFor = (harness: string, enabled: readonly RealHarness[] = [], syncedStdio = false, autoUpdate = false, authSignin = false): string[] => [
   ...BASE_CAPABILITIES,
   // Tells the app, before it syncs anything, that stdio definitions will not be refused by policy.
   ...(syncedStdio ? [MCP_SYNC_STDIO_CAPABILITY] : []),
   ...(harness === 'fake' ? ['harness.fake'] : harnessCapabilities(enabled.length ? enabled : isRealHarness(harness) ? [harness] : [])),
   // Additive: this daemon replaces its own bundle and restarts when idle, so a version change can appear between sessions.
   ...(autoUpdate ? ['update.auto'] : []),
+  // Additive: this daemon can run `claude setup-token` for its client (`auth.signin.*`).
+  ...(authSignin ? [AUTH_SIGNIN_CAPABILITY] : []),
 ];
 
 export interface Timings {
@@ -125,6 +130,8 @@ export interface ServerContext {
   skills: SkillStore;
   /** MCP server definitions synced by the app (`mcp.sync`). */
   syncedMcp: SyncedMcpStore;
+  /** Claude sign-in on this machine (`auth.signin.*`); absent = not offered (and not advertised). */
+  signin?: SigninManager;
   /** Names of the servers in the operator's config.json, which override a synced server of the same name. */
   configuredMcpNames(): ReadonlySet<string>;
   /** Answers `path.check` from the configured workspaces (set even when the session host is not policed). */
@@ -179,6 +186,10 @@ export const REQUIRED_SCOPE: Record<string, TokenScope> = {
   'skills.commit': 'admin',
   // Defines programs and endpoints sessions will start, with the credentials pushed beside them.
   'mcp.sync': 'admin',
+  // Mints a long-lived credential and returns it over this connection.
+  'auth.signin.start': 'admin',
+  'auth.signin.code': 'admin',
+  'auth.signin.cancel': 'admin',
 };
 
 /** Commands whose reply must be re-evaluated, not replayed from the idempotency cache. */
@@ -316,6 +327,8 @@ export class Connection {
     this.controlBytes = 0;
     this.dropSubscriptions();
     this.ctx.controllers.releaseAll(this.id);
+    // A sign-in answers only to the connection that started it: when that goes, so does the flow (and its process).
+    this.ctx.signin?.connectionGone(this.id);
     if (this.helloTimer) { clearTimeout(this.helloTimer); this.helloTimer = null; }
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
     if (this.pongTimer) { clearTimeout(this.pongTimer); this.pongTimer = null; }
@@ -463,6 +476,25 @@ export class Connection {
     }
   }
 
+  private signinOp(): SigninManager {
+    if (!this.ctx.signin) throw new CommandError('unknown_command', 'signing in is not supported by this daemon');
+    return this.ctx.signin;
+  }
+
+  private signinCall<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (err) {
+      if (err instanceof SigninError) throw new CommandError(err.code, err.message);
+      throw err;
+    }
+  }
+
+  /** The token rides this frame once; it is never audited, logged or journaled. */
+  private sendSigninEvent(event: SigninEvent): void {
+    this.guarded('signin', () => this.queueControl(encodeFrame({ v: PROTOCOL_VERSION, type: 'auth.signin.event', ...event })));
+  }
+
   private async reposSync(repos: unknown, wait: boolean, auth: VerifiedToken): Promise<unknown> {
     let reply;
     try {
@@ -605,6 +637,17 @@ export class Connection {
         this.ctx.audit({ event: 'mcp_sync', tokenId: auth.id, names: change.accepted, added: change.added, removed: change.removed });
         return { accepted: change.accepted, rejected: change.rejected, requiredCreds: change.requiredCreds, shadowed: change.shadowed };
       }
+      case 'auth.signin.start': {
+        const signin = this.signinOp();
+        // Cannot be a retry of an earlier start: a flow is bound to the connection that began it.
+        return this.signinCall(() => signin.start(this.id, (event) => this.sendSigninEvent(event)));
+      }
+      case 'auth.signin.code':
+        this.signinCall(() => this.signinOp().code(this.id, frame.flowId, frame.code));
+        return {};
+      case 'auth.signin.cancel':
+        this.signinCall(() => this.signinOp().cancel(this.id, frame.flowId));
+        return {};
       case 'resolve.openTab':
         // OpenNewTab is refused when the harness asks (daemon sessions cannot create Geode threads), so nothing is ever pending.
         throw new CommandError('unknown_command', 'open-tab requests are not supported by this daemon build');

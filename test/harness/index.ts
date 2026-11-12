@@ -4,6 +4,9 @@ import { ThreadManager } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS } from '../../src/types';
 import { fixtureThreads, inlineContentMessages, kanbanFixtureProjects } from './fixtures';
 import { fakeRemoteFolders, remoteFixtureDaemons } from './remote-fixtures';
+import { runRemoteSignIn } from '../../src/remote/remoteSignIn';
+import { manualRemoteSignInHint } from '../../src/remote/signInFlow';
+import { AUTH_SIGNIN_CAPABILITY } from '../../src/protocol/commands';
 import { createAgentThreadCallback } from '../../src/agentThreadCreation';
 import { browserFixtureMessages, PRICING_IMAGE, type BrowserFixtureKind } from './browser-fixtures';
 import { LoginHandoffController } from '../../src/agentBrowser/LoginHandoffController';
@@ -182,19 +185,48 @@ loginHandoff.start();
 type FakeConn = { status: string; attempt: number; detail?: string };
 let fakeConn: FakeConn = { status: 'connected', attempt: 0 };
 const fakeConnListeners = new Set<(id: string, s: FakeConn) => void>();
+// Remote Claude sign-in (`auth.signin.*`): a test can advertise the capability per daemon and drive the daemon's side
+// of the exchange. The REAL client flow (runRemoteSignIn) and the REAL card run; only the socket is faked.
+const capOverride: Record<string, string[] | null> = {};
+(window as any).__setDaemonCaps = (id: string, caps: string[] | null) => { capOverride[id] = caps; };
+const signinListeners = new Set<(e: any) => void>();
+const signinStateListeners = new Set<(s: any) => void>();
+(window as any).__signinCommands = [] as Array<{ type: string; payload: Record<string, unknown> }>;
+(window as any).__openedUrls = [] as string[];
+window.open = ((url?: string | URL) => { (window as any).__openedUrls.push(String(url)); return null; }) as typeof window.open;
+/** The daemon side: emit an `auth.signin.event` to the card's client. */
+(window as any).__emitSignin = (e: Record<string, unknown>) => signinListeners.forEach((l) => l({ flowId: 'flow-1', ...e }));
+/** Make the next `auth.signin.start` fail with a daemon error code. */
+(window as any).__signinStartError = null as null | { code: string; message: string };
+const fakeSigninClient = {
+  command: async (type: string, payload: Record<string, unknown>) => {
+    (window as any).__signinCommands.push({ type, payload });
+    if (type === 'auth.signin.start') {
+      const failure = (window as any).__signinStartError;
+      if (failure) { const { DaemonCommandError } = await import('../../src/remote/DaemonClient'); throw new DaemonCommandError(failure.code as never, failure.message); }
+      return { flowId: 'flow-1' };
+    }
+    return {};
+  },
+  onSigninEvent: (l: (e: any) => void) => { signinListeners.add(l); return () => signinListeners.delete(l); },
+  onState: (l: (s: any) => void) => { signinStateListeners.add(l); return () => signinStateListeners.delete(l); },
+};
+(window as any).__storedRemoteToken = null as string | null;
+(window as any).__localSignInCalls = [] as unknown[];
+(window as any).__spawnCalls = [] as string[][];
 const fakeDaemonRegistry = {
   nameOf: (id: string) => (id === 'my-server' ? 'my-server' : id),
   // my-server offers every harness; plain-box is an older daemon (no harness.*: Claude only).
-  capabilitiesOf: (id: string) => (id === 'my-server' ? ['host.tools', 'harness.claude', 'harness.codex', 'harness.opencode'] : id === 'plain-box' ? ['host.tools'] : undefined),
+  capabilitiesOf: (id: string) => id in capOverride ? (capOverride[id] ?? undefined) : (id === 'my-server' ? ['host.tools', 'harness.claude', 'harness.codex', 'harness.opencode'] : id === 'plain-box' ? ['host.tools'] : undefined),
   warm: async () => {},
   clientFor: () => ({ connect() {}, get connection() { return fakeConn; } }),
   stateOf: () => fakeConn,
   onState: (l: (id: string, s: FakeConn) => void) => { fakeConnListeners.add(l); return () => fakeConnListeners.delete(l); },
 };
 (window as any).__setRemoteState = (state: FakeConn) => { fakeConn = state; fakeConnListeners.forEach((l) => l('my-server', fakeConn)); };
-(window as any).__markRemote = (threadId: string) => {
+(window as any).__markRemote = (threadId: string, daemonId = 'my-server') => {
   const t = manager.getThread(threadId)!;
-  t.remote = { daemonId: 'my-server', ownership: 'client', remoteCwd: '/srv/workspaces/agent-threads', lastSeq: 0, ownerClientId: 'harness' };
+  t.remote = { daemonId, ownership: 'client', remoteCwd: '/srv/workspaces/agent-threads', lastSeq: 0, ownerClientId: 'harness' };
   t.cwd = '/srv/workspaces/agent-threads';
 };
 
@@ -204,8 +236,26 @@ const fakeDaemonRegistry = {
   (window as any).__view.focusThread(threadId);
 };
 
+/** The managed local daemon (a container on this computer): its own sign-in, never the remote one. */
+(window as any).__addLocalContainerDaemon = () => {
+  (settings.remoteDaemons ??= []).push({ id: 'local-box', name: 'This computer (container)', url: 'ws://127.0.0.1:9', tokenSecretName: 'L', managed: 'local-container' } as never);
+};
 const mockPlugin = {
   daemonRegistry: fakeDaemonRegistry,
+  localDaemon: { signIn: async (_h: unknown, opts: unknown) => { (window as any).__localSignInCalls.push(opts); return { ok: true as const }; } },
+  // Mirrors ClaudeThreadsPlugin.signInToRemoteDaemon (src/main.ts) without the keychain / socket: the capability check,
+  // the real client flow, and storing the minted token on success.
+  signInToRemoteDaemon: async (daemonId: string, handlers: Parameters<typeof runRemoteSignIn>[1]) => {
+    const daemon = (settings.remoteDaemons ?? []).find((d: any) => d.id === daemonId);
+    if (!daemon) return { ok: false as const, error: 'This daemon is no longer configured.' };
+    const caps = fakeDaemonRegistry.capabilitiesOf(daemonId);
+    // Capabilities unknown (daemon not reached yet): the real method learns them on connecting, so try.
+    if (caps && !caps.includes(AUTH_SIGNIN_CAPABILITY)) return { ok: false as const, error: manualRemoteSignInHint(daemon.name, daemon.url) };
+    const result = await runRemoteSignIn(fakeSigninClient as never, handlers);
+    if (!result.ok) return result;
+    (window as any).__storedRemoteToken = result.token;
+    return { ok: true as const };
+  },
   remoteFolders: fakeRemoteFolders,
   // Creates a real thread so the view's switch-to-the-new-thread step has something to render.
   dispatchNewThread: async (text: string, images: unknown, titleHint: string, opts?: { projectId?: string }) => {

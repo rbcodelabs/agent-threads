@@ -14,7 +14,7 @@ import { daemonUseDenial, harnessDenyReason, hostExecState, mobileRemoteAccessAl
 import { LOCAL_DAEMON_ID } from './localDaemon/spec';
 import { connectionPill } from './remote/connectionPill';
 import { resolveSkillsSyncMode } from './remote/skillsSync';
-import { adminTokenSecretNameFor, checkDaemonInput, checkVaultMappingInput, describeTest, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
+import { adminTokenSecretNameFor, remoteOAuthTokenSecretNameFor, checkDaemonInput, checkVaultMappingInput, describeTest, plainTransportWarning, tokenSecretNameFor, uniqueDaemonId, type DaemonTestOutcome } from './remote/daemonConfig';
 import { addNamedRow, buildPickerRows, checkAddByName, mergeSavedEntries, selectedEntries, type PickerRow, type PushableSecretSources } from './remote/pushedSecretPicker';
 import { applyDiscovery, describeVaultPick, pickVaultWorkspace, workspaceLabel } from './remote/workspaceChoice';
 import { createPluginWebSocketFactory } from './remote/pluginWebSocket';
@@ -3602,6 +3602,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
         await this.plugin.remoteSecretPush?.reconcile();
         this.app.secretStorage.setSecret(secretStorageKey(daemon.tokenSecretName), '');
         this.app.secretStorage.setSecret(secretStorageKey(adminTokenSecretNameFor(daemon.id)), '');
+        this.app.secretStorage.setSecret(secretStorageKey(remoteOAuthTokenSecretNameFor(daemon.id)), '');
         await this.plugin.saveSettings();
         this.plugin.daemonRegistry?.refresh();
         this.display();

@@ -16,10 +16,11 @@
  *   - `onRawEvent` goes to the daemon's own JSONL log and is never on the wire.
  */
 import { randomUUID } from 'node:crypto';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionCallbacks } from '../src/ClaudeSession';
+import { claudeCredentialsLookBlank } from '../src/claudeAuthRecovery';
 import { createHarnessSession } from '../src/HarnessFactory';
 import { OPENCODE_HOST_TOOLS_SERVER } from '../src/OpenCodeHostTools';
 import {
@@ -65,6 +66,8 @@ export interface ClaudeDriverDeps {
    * session starts, so a credential pushed since the last session is picked up.
    */
   daemonMcp?: () => ResolvedMcpServers;
+  /** Does the Claude login on this machine look absent, given the env this session was given? Lazy: asked when an auth failure arrives. */
+  credentialsBlank?: (sessionEnv: Record<string, string>) => boolean;
   /** Environment for the agent's own process only (a repository token for `gh` and `git push`); read when a session starts. */
   sessionEnv?: (spec: RemoteSessionSpec) => Record<string, string>;
   /** A session is starting in this folder (lets the daemon refresh a stale clone in the background). */
@@ -90,6 +93,7 @@ export interface SessionOptionParts {
   hostServerNames?: string[];
   daemonServers?: DaemonMcpServers;
   preApprove?: (toolName: string) => boolean;
+  credentialsBlank?: () => boolean;
 }
 
 /**
@@ -154,6 +158,7 @@ export function specToSessionOptions(spec: RemoteSessionSpec, parts: SessionOpti
 
   const claude: ClaudeHarnessOptions = {};
   if (parts.preApprove) claude.preApprove = parts.preApprove;
+  if (parts.credentialsBlank) claude.credentialsBlank = parts.credentialsBlank;
   if (spec.disallowedTools?.length) claude.disallowedTools = spec.disallowedTools;
   const so = spec.sessionOptions;
   if (so) {
@@ -276,10 +281,12 @@ export class HarnessSessionDriver implements SessionDriver {
     this.emitState();
     const daemonMcp = deps.daemonMcp?.();
     this.unresolvedMcp = daemonMcp?.unresolved ?? [];
+    const sessionSecretEnv = { ...(harnessKind === 'claude' ? deps.secretEnv : {}), ...(deps.sessionEnv?.(ctx.spec) ?? {}) };
     const options = specToSessionOptions(ctx.spec, {
       resume: ctx.resume,
       callbacks: this.buildCallbacks(),
-      secretEnv: { ...(harnessKind === 'claude' ? deps.secretEnv : {}), ...(deps.sessionEnv?.(ctx.spec) ?? {}) },
+      secretEnv: sessionSecretEnv,
+      ...(deps.credentialsBlank ? { credentialsBlank: () => deps.credentialsBlank!(sessionSecretEnv) } : {}),
       hostServers: this.hostServers.servers,
       ...(harnessKind === 'claude' ? {} : { dynamicTools, hostServerNames: hostServerNames(ctx, dynamicTools.length > 0) }),
       ...(daemonMcp ? { daemonServers: daemonMcp.servers } : {}),
@@ -661,7 +668,13 @@ export function createClaudeDriverFactory(opts: ClaudeDriverFactoryOptions = {})
   const daemonMcp = Object.keys(configured).length || synced
     ? () => resolveDaemonMcpServers(mergeDaemonMcpServers(synced?.active() ?? {}, configured).servers, (name) => opts.creds?.lookup(name))
     : undefined;
-  return (ctx) => new HarnessSessionDriver(ctx, { createHarness, secretEnv, requestTimeoutMs: opts.requestTimeoutMs, ...(daemonMcp ? { daemonMcp } : {}), ...(opts.sessionEnv ? { sessionEnv: opts.sessionEnv } : {}), ...(opts.onSessionStart ? { onSessionStart: opts.onSessionStart } : {}), ...(opts.authPreflight ? { authPreflight: opts.authPreflight } : {}) }, opts.now);
+  const credentialsBlank = (sessionEnv: Record<string, string>): boolean => claudeCredentialsLookBlank({
+    env: { ...env, ...sessionEnv },
+    platform: process.platform,
+    home: homedir(),
+    readFile: (path) => { try { return readFileSync(path, 'utf8'); } catch { return undefined; } },
+  });
+  return (ctx) => new HarnessSessionDriver(ctx, { createHarness, secretEnv, credentialsBlank, requestTimeoutMs: opts.requestTimeoutMs, ...(daemonMcp ? { daemonMcp } : {}), ...(opts.sessionEnv ? { sessionEnv: opts.sessionEnv } : {}), ...(opts.onSessionStart ? { onSessionStart: opts.onSessionStart } : {}), ...(opts.authPreflight ? { authPreflight: opts.authPreflight } : {}) }, opts.now);
 }
 
 /** Neutral names for the generalized driver; the Claude-named exports stay for existing callers. */

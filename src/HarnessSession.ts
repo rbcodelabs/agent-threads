@@ -120,6 +120,11 @@ export interface ClaudeHarnessOptions {
    * second card written here would only be a second, weaker prompt. Never set for a local session.
    */
   preApprove?: (toolName: string) => boolean;
+  /**
+   * Daemon-hosted sessions only: true when the Claude login on that machine looks absent, so an expired-sign-in
+   * restart-and-retry is pointless and the sign-in card should show at once. Read at failure time.
+   */
+  credentialsBlank?: () => boolean;
   sessionOptions?: {
     thinking?: Options['thinking'];
     effort?: Options['effort'];
