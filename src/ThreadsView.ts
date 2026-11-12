@@ -1,7 +1,7 @@
 import { gateHarness } from './remote/harnessSupport';
 import { AGENT_HARNESSES, agentHarnessLabel, type AgentHarness } from './types';
-import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, sanitizeHTMLToDom, App, TFile, Platform } from 'obsidian';
-import { RemoteImageCache, createRemoteImageLoader, hydrateRemoteImages } from './remote/remoteImages';
+import { ItemView, WorkspaceLeaf, Modal, Menu, arrayBufferToBase64, setIcon, setTooltip, Notice, App, TFile, Platform } from 'obsidian';
+import { RemoteImageCache, createRemoteImageLoader } from './remote/remoteImages';
 import { hasVisibleDirectViewHeader } from './headerPresentation';
 import { connectionPill } from './remote/connectionPill';
 import { describeComposerSettings, PERMISSION_MODE_OPTIONS, type ComposerSettingsDescription, type RemoteConnection } from './composerSettings';
@@ -18,8 +18,8 @@ import { forkBlockedReason } from './remote/threadLocation';
 import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import { isPermissionPreApprovedForThread, recordAlwaysAllow } from './remoteAlwaysAllow';
 import type { ViewStateResult } from 'obsidian';
-import { marked } from 'marked';
-import { splitTextWithUrls, isHttpUrl, urlChipLabel } from './urlLinks';
+import { renderMarkdown as renderSharedMarkdown, linkifyUrls, type MessageRenderHost } from './messageRenderer';
+import { isHttpUrl, urlChipLabel } from './urlLinks';
 import { effectiveExtraEnv } from './types';
 import { parseLoopArgs, formatLoopInterval } from './loopUtils';
 import { buildClaudeModelOptions, aliasLabel, activeModelLabel, formatModelId, type ModelOption } from './modelOptions';
@@ -62,7 +62,7 @@ import { resolveTagIcon, planFooter, derivePrUrl } from './statusLine';
 import { isWebViewerEnabled } from './SettingsTab';
 import { ContextPanelViewError } from './ContextPanelController';
 import { OutsideVaultLinkModal } from './OutsideVaultLinkModal';
-import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openLocalFileViaHost, openUrlPreferringWebViewer, resolveAbsoluteVaultHref } from './linkUtils';
+import { openLocalFileViaHost, openUrlPreferringWebViewer } from './linkUtils';
 import type { StatusTag } from './types';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { promptConfirm } from './confirmModal';
@@ -76,8 +76,6 @@ import { HOST_OWNED_ARTIFACT_FIELDS, toArtifactRef } from './ArtifactContributio
 import type {
   ArtifactActionHost, ArtifactActionResult, ArtifactPresentation, ArtifactViewPlacement, ThreadArtifactRef,
 } from './ArtifactContributions';
-import { extractVisualizeMarkers } from './visualizeMarker';
-import { extractMessageContent } from './MessageContent';
 import { MessageContentMountManager } from './messageContentRenderer';
 import { VisualizeMountManager, resolveVisualizeTokens, toFileUrl, type VisualizeFs } from './visualizeRenderer';
 import { deleteScheduledActivity, scheduledActivityForThread, scheduledActivitySummary, type ScheduledActivity } from './scheduledActivity';
@@ -3231,251 +3229,62 @@ export class ThreadsView extends ItemView {
 
   private readonly remoteImageCache = new RemoteImageCache();
 
-  private async renderMarkdown(
+  private renderMarkdown(
     markdown: string,
     el: HTMLElement,
     options: { streaming?: boolean; messageId?: string } = {},
   ): Promise<void> {
-    const threadId = this.activeThreadId;
-    const signal = this.messageContentController?.signal ?? new AbortController().signal;
-    const transcriptMessage = options.messageId && threadId ? this.manager.getThread(threadId)?.messages.find(message => message.id === options.messageId && message.role === 'assistant' && message.content === markdown) : undefined;
-    const inline = transcriptMessage || options.streaming ? extractMessageContent(markdown, options) : { text: markdown, markers: [] };
-    // Codex's `visualize` skill puts a wrapped content reference on its own line
-    // where an inline visual belongs. Rewrite those lines into anchor
-    // placeholders here, before marked runs, so the markdown is parsed exactly
-    // once — splitting into segments and parsing each would break ordered-list
-    // numbering, reference links, and footnotes that span a marker.
-    const visualize = this.plugin.settings.enableInlineVisualizations !== false
-      ? extractVisualizeMarkers(inline.text, { streaming: options.streaming })
-      : { text: inline.text, markers: [] };
-
-    // Pre-process [[wikilinks]] and [[target|alias]] into inline HTML anchors
-    // before handing off to marked. marked passes inline HTML through unchanged,
-    // so GFM table parsing (and all other markdown features) work correctly.
-    // This replaces the previous MarkdownRenderer.render() approach which did not
-    // render GFM pipe tables in this non-document context.
-    const processed = visualize.text.replace(
-      /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
-      (_match, target: string, alias?: string) => {
-        const label = (alias ?? target.split('/').pop() ?? target).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c] ?? c));
-        const escapedTarget = target.replace(/"/g, '&quot;');
-        return `<a class="internal-link" data-href="${escapedTarget}" href="#">${label}</a>`;
-      },
-    );
-    el.appendChild(sanitizeHTMLToDom(await marked.parse(processed)));
-    // Swap the placeholders for live cards. Iframes mount only on settled
-    // messages — during streaming the marker renders as inert card chrome, so
-    // a frame is never rebuilt on every token.
-    this.visualizeManager?.hydrate(el, visualize.markers, { interactive: !options.streaming });
-    if (threadId && !signal.aborted) void this.messageContentManager?.hydrate(el, inline.markers, { threadId, messageId: transcriptMessage?.id ?? 'streaming', signal }, options);
-    // `![alt](/abs/path)` in a remote thread names a file on the daemon's machine: fetch it with file.read.
-    const remote = threadId ? this.manager.getThread(threadId)?.remote : undefined;
-    if (remote && this.plugin.daemonRegistry) {
-      hydrateRemoteImages(el, { load: createRemoteImageLoader(this.plugin.daemonRegistry, this.remoteImageCache, remote.daemonId), signal });
-    }
-    // Wrap tables in a scrollable container so wide tables don't overflow.
-    el.querySelectorAll<HTMLTableElement>('table').forEach((table) => {
-      const wrapper = document.createElement('div');
-      wrapper.className = 'ct-table-scroll';
-      table.parentNode?.insertBefore(wrapper, table);
-      wrapper.appendChild(table);
-    });
-    // Wire up click handlers for [[wikilink]] anchors.
-    el.querySelectorAll<HTMLAnchorElement>('a.internal-link').forEach((a) => {
-      a.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const href = a.getAttribute('data-href') ?? a.getAttribute('href') ?? '';
-        // Both placements resolve against the thread's own note, so a wikilink
-        // lands on the same target regardless of where the conversation is
-        // docked — and matches the plain-markdown-link handler below.
-        const sourcePath = this.activeThreadId ? this.manager.getThread(this.activeThreadId)?.noteFile ?? '' : '';
-        if (this.plugin.isConversationFirst()) {
-          void this.plugin.contextPanel.openLinkText(href, sourcePath);
-        } else {
-          void this.app.workspace.openLinkText(href, sourcePath, false);
-        }
-      });
-    });
-    // marked renders ordinary `[label](path.md#heading)` links without the
-    // custom wikilink class. Intercept only relative/vault-shaped hrefs;
-    // protocols and same-page anchors retain the browser/host's standard
-    // behavior. Some hrefs are OS-absolute paths that happen to fall under the
-    // vault root (e.g. a fragment written from outside Obsidian) — resolve
-    // those to a vault-relative path before handing them to the open calls,
-    // which expect vault linktext, not filesystem paths.
-    el.querySelectorAll<HTMLAnchorElement>('a:not(.internal-link):not(.ct-visualize-slot)').forEach((a) => {
-      const href = a.getAttribute('href') ?? '';
-      if (classifyRenderedMarkdownLink(href) !== 'vault') return;
-      const absolute = isOsAbsoluteHref(href);
-      a.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        // Resolved on click, not at render: an agent frequently writes a file
-        // and links to it in the same turn, so the vault copy may only appear
-        // (or finish syncing) after this message was rendered. Probing here
-        // means the link starts working as soon as the target exists.
-        //
-        // Only absolute paths need rewriting; marked percent-encodes the hrefs
-        // it emits, which resolveAbsoluteVaultHref accounts for when probing.
-        // An ordinary relative href is forwarded untouched — the open calls
-        // parse the `#subpath` and do their own decoding, so decoding it here
-        // would both double-decode and strip that responsibility from its
-        // rightful owner.
-        const resolved = resolveAbsoluteVaultHref(href, (p) => !!this.app.vault.getAbstractFileByPath(p));
-        // An absolute filesystem path we could not map into the vault is NOT
-        // vault linktext. Forwarding it would ask the host to open an
-        // unresolved link, which can create a stray note named after the
-        // path — the same hazard linkifyBridgePaths guards against below.
-        if (absolute && !resolved) {
-          this.confirmOpenOutsideVaultLink(href);
-          return;
-        }
-        const target = resolved ?? href;
-        const sourcePath = this.activeThreadId ? this.manager.getThread(this.activeThreadId)?.noteFile ?? '' : '';
-        if (this.plugin.isConversationFirst()) {
-          void this.plugin.contextPanel.openLinkText(target, sourcePath);
-        } else {
-          void this.app.workspace.openLinkText(target, sourcePath, false);
-        }
-      });
-    });
-    // http(s) links get no listener above (classifyRenderedMarkdownLink calls
-    // them 'external'), so they fall through to the host's default anchor
-    // click behavior. That default does not know about conversation-first
-    // placement: it does not route through the Web Viewer's destination-leaf
-    // logic, so the page can open in the wrong tab (or the system browser)
-    // instead of the adjacent context panel. Wire these through the same
-    // openLink() the footer pills use, which already branches correctly.
-    // Only http(s) is intercepted — mailto:, obsidian:, and other
-    // custom-protocol links keep the host/OS's own handler.
-    el.querySelectorAll<HTMLAnchorElement>('a:not(.internal-link):not(.ct-visualize-slot)').forEach((a) => {
-      const href = a.getAttribute('href') ?? '';
-      if (classifyRenderedMarkdownLink(href) !== 'external') return;
-      if (!/^https?:\/\//i.test(href.trim())) return;
-      a.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        // Cmd-click (Mac) / Ctrl-click (other) forces the system browser even
-        // when the Web Viewer is enabled — matching the footer pill and
-        // Obsidian's own "open in default app" modifier convention.
-        this.openLink(href, event.metaKey || event.ctrlKey);
-      });
-    });
-    this.linkifyBridgePaths(el);
-    this.linkifyUrls(el);
+    return renderSharedMarkdown(markdown, el, this.buildMessageRenderHost(), options);
   }
 
   /**
-   * Turn bare http(s) URLs in rendered text into clickable anchors. Marked's
-   * GFM autolink misses URLs inside inline code and plain-text user messages;
-   * this walks text nodes (excluding <pre> blocks and existing anchors) and
-   * wires clicks through openLink() like every other external link.
+   * Host for the shared markdown renderer. Built per render call (the abort
+   * signal is the current render generation's); every method reads view state
+   * lazily so link clicks use the thread and placement active at click time.
    */
+  private buildMessageRenderHost(): MessageRenderHost {
+    const threadId = this.activeThreadId ?? undefined;
+    return {
+      signal: this.messageContentController?.signal ?? new AbortController().signal,
+      threadId: () => threadId,
+      getThread: (id) => this.manager.getThread(id),
+      sourcePath: () => (this.activeThreadId ? this.manager.getThread(this.activeThreadId)?.noteFile ?? '' : ''),
+      // Conversation-first resolves against the context panel; both placements
+      // resolve against the same source note, so a link lands on one target.
+      openLinkText: (target, sourcePath) => {
+        if (this.plugin.isConversationFirst()) {
+          void (sourcePath === undefined
+            ? this.plugin.contextPanel.openLinkText(target)
+            : this.plugin.contextPanel.openLinkText(target, sourcePath));
+        } else {
+          void this.app.workspace.openLinkText(target, sourcePath ?? '', false);
+        }
+      },
+      openExternal: (href, forceExternal) => { void this.openLink(href, forceExternal); },
+      confirmOutsideVault: (href) => this.confirmOpenOutsideVaultLink(href),
+      vaultHas: (p) => !!this.app.vault.getAbstractFileByPath(p),
+      bridges: () => this.getBridges(),
+      visualize: {
+        enabled: this.plugin.settings.enableInlineVisualizations !== false,
+        streamingAware: true,
+        hydrate: (el, markers, o) => this.visualizeManager?.hydrate(el, markers, o),
+      },
+      hydrateMessageContent: (el, markers, context, o) => {
+        if (context.threadId && !context.signal.aborted) {
+          void this.messageContentManager?.hydrate(el, markers, { threadId: context.threadId, messageId: context.messageId, signal: context.signal }, o);
+        }
+      },
+      remoteImageLoader: () => {
+        const remote = threadId ? this.manager.getThread(threadId)?.remote : undefined;
+        return remote && this.plugin.daemonRegistry
+          ? createRemoteImageLoader(this.plugin.daemonRegistry, this.remoteImageCache, remote.daemonId)
+          : undefined;
+      },
+    };
+  }
+
   private linkifyUrls(root: HTMLElement): void {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode: (node) => {
-        const parent = (node as Text).parentElement;
-        if (!parent || parent.closest('pre, a')) return NodeFilter.FILTER_REJECT;
-        return /https?:\/\//i.test(node.textContent ?? '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-      },
-    });
-    const nodes: Text[] = [];
-    for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n as Text);
-    for (const tn of nodes) {
-      const segments = splitTextWithUrls(tn.textContent ?? '');
-      if (!segments.some(sg => sg.url)) continue;
-      const frag = document.createDocumentFragment();
-      for (const seg of segments) {
-        if (!seg.url) { frag.appendChild(document.createTextNode(seg.text)); continue; }
-        const url = seg.url;
-        const a = document.createElement('a');
-        a.className = 'ct-auto-link';
-        a.setAttribute('href', url);
-        a.textContent = url;
-        a.addEventListener('click', (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          this.openLink(url, event.metaKey || event.ctrlKey);
-        });
-        frag.appendChild(a);
-      }
-      tn.replaceWith(frag);
-    }
-  }
-
-  /**
-   * Convert absolute file paths that fall inside a configured Vault Bridge's
-   * source repo into clickable internal links targeting the synced vault copy.
-   * Walks rendered text nodes (including inline code, excluding <pre> blocks
-   * and existing anchors) so markdown structure is never disturbed. Only paths
-   * whose vault copy actually exists are linkified, so clicking can never
-   * create a stray note.
-   */
-  private linkifyBridgePaths(root: HTMLElement): void {
-    const bridges = this.getBridges();
-    if (bridges.length === 0) return;
-
-    // One regex matching any bridge root prefix followed by a path tail.
-    // Longer prefixes first so nested roots resolve to the deepest match.
-    const prefixes = new Set<string>();
-    for (const b of bridges) {
-      for (const base of [b.repoPath, b.activeWorktreePath]) {
-        if (base) prefixes.add(base.replace(/\\/g, '/').replace(/\/+$/, ''));
-      }
-    }
-    if (prefixes.size === 0) return;
-    const escaped = [...prefixes]
-      .sort((a, b) => b.length - a.length)
-      .map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-    const pathRe = new RegExp(`(?:${escaped.join('|')})(?:/[^\\s)\\]}"'\`<>:]+)+`, 'g');
-
-    // Collect text nodes first; mutating the tree during the walk is unsafe.
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode: (node) => {
-        const parent = (node as Text).parentElement;
-        if (!parent || parent.closest('pre, a')) return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
-    const textNodes: Text[] = [];
-    for (let n = walker.nextNode(); n; n = walker.nextNode()) textNodes.push(n as Text);
-
-    for (const tn of textNodes) {
-      const text = tn.textContent ?? '';
-      let last = 0;
-      let frag: DocumentFragment | null = null;
-      pathRe.lastIndex = 0;
-      for (let m = pathRe.exec(text); m; m = pathRe.exec(text)) {
-        // Trim trailing sentence punctuation picked up by the greedy tail.
-        const matchText = m[0].replace(/[.,;:!?]+$/, '');
-        const mapped = mapToVaultPath(matchText, bridges);
-        if (!mapped || !this.app.vault.getAbstractFileByPath(mapped.vaultRelPath)) continue;
-        if (!frag) frag = document.createDocumentFragment();
-        frag.appendChild(document.createTextNode(text.slice(last, m.index)));
-        const a = document.createElement('a');
-        a.className = 'internal-link';
-        a.setAttribute('data-href', mapped.vaultRelPath);
-        a.setAttribute('href', '#');
-        a.textContent = matchText;
-        setTooltip(a, mapped.vaultRelPath);
-        a.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (this.plugin.isConversationFirst()) {
-            void this.plugin.contextPanel.openLinkText(mapped.vaultRelPath);
-          } else {
-            void this.app.workspace.openLinkText(mapped.vaultRelPath, '', false);
-          }
-        });
-        frag.appendChild(a);
-        last = m.index + matchText.length;
-      }
-      if (frag) {
-        frag.appendChild(document.createTextNode(text.slice(last)));
-        tn.replaceWith(frag);
-      }
-    }
+    linkifyUrls(root, (url, forceExternal) => { void this.openLink(url, forceExternal); });
   }
 
   /**
