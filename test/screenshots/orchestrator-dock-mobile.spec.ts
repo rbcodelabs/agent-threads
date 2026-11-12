@@ -615,6 +615,31 @@ test.describe('D13: focus survives every tray form change @ 320x640', () => {
   });
 });
 
+test.describe('D17: focus on "Show N more" survives the tray collapsing @ 320x640', () => {
+  const size = { width: 320, height: 640 };
+  test('every keyboard height that collapses or hides the tray, from focus at keyboard 0 and 380: never <body>', async ({ page }) => {
+    await installFakeVisualViewport(page);
+    await open(page, 'orch=idle&tx=conversation&tray=many', size);
+    await openSheet(page, size);
+    await fillTranscript(page, 8);
+    const set = async (kb: number) => { await page.evaluate((h) => (window as any).__setVV(h), size.height - kb); await page.waitForTimeout(120); };
+    const failures: string[] = [];
+    let focusedAtLeastOnce = 0;
+    for (const from of [0, 380]) for (const to of [380, 400, 430, 460, 500, 540]) {
+      await set(from);
+      const toggle = page.locator('.ct-orch-tray-toggle');
+      if ((await toggle.count()) === 0 || !(await toggle.isVisible())) continue;
+      await toggle.focus();
+      focusedAtLeastOnce++;
+      await set(to);
+      const a = await page.evaluate(() => ({ body: document.activeElement === document.body || !document.activeElement, inSheet: !!document.activeElement?.closest('.ct-orch-sheet'), text: (document.activeElement?.textContent ?? '').trim().slice(0, 20) }));
+      if (a.body || !a.inSheet) failures.push(`show-more focused at kb ${from}, then kb ${to}: ${JSON.stringify(a)}`);
+    }
+    expect(focusedAtLeastOnce, 'the repro really focused "Show N more"').toBeGreaterThan(0);
+    expect(failures).toEqual([]);
+  });
+});
+
 test.describe('D14 / D16: the sheet never starts above the top; a wrapped error reason fits to the pixel', () => {
   const CASES = [
     { width: 844, height: 390, kbs: [200, 260] }, { width: 667, height: 375, kbs: [200, 260] }, { width: 568, height: 320, kbs: [150, 200] },

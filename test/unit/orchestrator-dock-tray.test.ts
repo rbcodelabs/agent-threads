@@ -965,4 +965,38 @@ describe('D13: one focus-rescue routine for every tray form change (never <body>
     sheetOf(t).keepTrayFocus(() => { applyTrayMode(t.tray()!, { compact: true, collapsed: false }, null); });
     expect(active()).toBe(outside);
   });
+
+  it('D17: a fallback target that is display:none (hidden by CSS, not [hidden]) is skipped: focus falls through to the next real target', () => {
+    const t = setup({ specs: short });
+    const tray = t.tray()!;
+    const toggle = document.createElement('button');
+    toggle.className = 'ct-orch-tray-toggle';
+    toggle.textContent = 'Show 2 more';
+    tray.querySelector('.ct-orch-tray-bar')!.appendChild(toggle);
+    toggle.focus();
+    expect(active()).toBe(toggle);
+    sheetOf(t).keepTrayFocus(() => {
+      toggle.blur();
+      toggle.style.display = 'none'; // what the collapsed form's CSS does to the toggle: not [hidden], still connected
+      tray.hidden = true; // and the whole tray is gone: nothing in it can take focus
+    });
+    expect(active()).not.toBe(document.body);
+    expect(active()).not.toBe(toggle);
+    expect(t.q('.ct-orch-sheet')!.contains(active())).toBe(true);
+  });
+
+  it('D17: when focus() does nothing for a chosen target the chain continues (verified by document.activeElement)', () => {
+    const t = setup({ specs: short });
+    const tray = t.tray()!;
+    applyTrayMode(tray, { compact: true, collapsed: false });
+    const review = t.btn('p', 'Review in thread')!;
+    review.focus();
+    const original = review.focus.bind(review);
+    review.focus = () => { /* a target that silently refuses focus */ };
+    sheetOf(t).keepTrayFocus(() => { review.blur(); });
+    review.focus = original;
+    expect(active()).not.toBe(document.body);
+    expect(active()).not.toBe(review);
+  });
 });
+
