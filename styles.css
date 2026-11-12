@@ -6638,7 +6638,7 @@
 .ct-settings-page-header button, .ct-manager-detail button { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); background: var(--interactive-normal); color: var(--text-normal); padding: 6px 12px; cursor: pointer; }
 .ct-settings-page-header button.mod-cta, .ct-manager-detail button.mod-cta { background: var(--interactive-accent); border-color: transparent; color: var(--text-on-accent); }
 .ct-manager-detail button.mod-warning { color: var(--color-red); }
-.ct-settings-manager { display: grid; grid-template-columns: minmax(190px, .78fr) minmax(300px, 1.35fr); border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; min-height: 360px; height: clamp(360px, calc(100vh - 150px), 640px); }
+.ct-settings-manager { display: grid; grid-template-columns: minmax(190px, .78fr) minmax(300px, 1.35fr); grid-template-rows: minmax(0, 1fr); border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; min-height: 360px; height: clamp(360px, calc(100vh - 150px), 640px); }
 .vertical-tab-content-container:has(.ct-settings-tab-body.is-compact) { display: flex; flex-direction: column; overflow: hidden; }
 .vertical-tab-content-container:has(.ct-settings-tab-body.is-compact) > .vertical-tab-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .vertical-tab-content-container:has(.ct-settings-tab-body.is-compact) .ct-settings-tab-body.is-compact { flex: 1; height: auto; min-height: 0; }
@@ -6706,7 +6706,7 @@
 .ct-secret-storage-notice { margin-top: 0; }
 
 @container ct-settings (max-width: 620px) {
-  .ct-settings-manager { grid-template-columns: 1fr; height: auto; }
+  .ct-settings-manager { grid-template-columns: 1fr; grid-template-rows: none; height: auto; }
   .ct-manager-form { grid-template-columns: 1fr; }
   .ct-manager-list { border-right: 0; border-bottom: 1px solid var(--background-modifier-border); max-height: 250px; }
   .ct-manager-detail { min-height: 500px; }
