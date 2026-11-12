@@ -47,7 +47,7 @@ export function buildSetupTokenPtyCommand(tool: PtyTool): { command: string; arg
   }
   // util-linux `script` (verified with plain pipes on Linux). BSD `script` insists on a real terminal for stdin, so
   // `findPtyTool` never offers it on macOS/FreeBSD, where `expect` ships standard.
-  const inner = `stty rows 50 columns 500 2>/dev/null; exec "${SIGNIN_CLAUDE_BIN_ENV}" setup-token`;
+  const inner = `stty rows 50 columns 500 2>/dev/null; exec "\$${SIGNIN_CLAUDE_BIN_ENV}" setup-token`;
   return { command: tool.path, args: ['-q', '-e', '-c', inner, '/dev/null'] };
 }
 

@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SigninEvent } from '../../src/protocol';
@@ -76,7 +77,11 @@ describe('buildSetupTokenPtyCommand', () => {
     const { command, args } = buildSetupTokenPtyCommand({ kind: 'script', path: '/usr/bin/script' });
     expect(command).toBe('/usr/bin/script');
     expect(args.slice(0, 3)).toEqual(['-q', '-e', '-c']);
-    expect(args[3]).toContain(`"${SIGNIN_CLAUDE_BIN_ENV}" setup-token`);
+    // The shell must EXPAND the variable (a bare name would be "exec: CT_CLAUDE_BIN: not found").
+    expect(args[3]).toContain(`exec "$${SIGNIN_CLAUDE_BIN_ENV}" setup-token`);
+    // Actually run the shell snippet: the env var's path is what gets exec'd.
+    const out = spawnSync('/bin/sh', ['-c', args[3]!.replace(/^stty[^;]*;\s*/, '')], { env: { ...process.env, [SIGNIN_CLAUDE_BIN_ENV]: '/bin/echo' }, encoding: 'utf8' });
+    expect(out.stdout.trim()).toBe('setup-token');
     expect(args[4]).toBe('/dev/null');
   });
 });
