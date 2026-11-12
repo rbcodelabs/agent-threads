@@ -6377,6 +6377,7 @@ export class ThreadsView extends ItemView {
       message,
       canSignIn: Platform.isDesktopApp,
       flavor: isAwsSignInExpiredError(message) ? 'aws' : 'claude',
+      onGrow: () => this.scrollToBottom(),
       signIn: async (onProgress, onUrl, onCodePrompt) => {
         // Bedrock credential failure: native AWS SSO device-flow sign-in on the
         // host (opens the browser itself; the URL is the manual fallback).

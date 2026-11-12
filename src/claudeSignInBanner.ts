@@ -24,6 +24,8 @@ export interface ClaudeSignInBannerDeps {
     onUrl: (url: string) => void,
     onCodePrompt: () => Promise<string | null>,
   ) => Promise<SignInResult>;
+  /** Called after the card grows (status text, code field) so the host can keep it in view above the composer. */
+  onGrow?: () => void;
   /** Resends the thread's pending message on a fresh CLI session. */
   retry: () => Promise<unknown> | void;
 }
@@ -70,6 +72,7 @@ export function renderClaudeSignInBanner(parent: HTMLElement, deps: ClaudeSignIn
   const setStatus = (text: string, isError = false) => {
     status.setText(text);
     status.toggleClass('is-error', isError);
+    deps.onGrow?.();
   };
 
   let busy = false;
@@ -109,6 +112,7 @@ export function renderClaudeSignInBanner(parent: HTMLElement, deps: ClaudeSignIn
       const input = row.createEl('input', { cls: 'ct-auth-code-input', attr: { type: 'text', placeholder: 'Login code' } });
       const submitBtn = row.createEl('button', { cls: 'ct-auth-btn ct-auth-code-submit mod-cta', text: 'Submit' });
       const cancelBtn = row.createEl('button', { cls: 'ct-auth-btn ct-auth-code-cancel', text: 'Cancel' });
+      deps.onGrow?.();
       codePromptEl = wrap;
       const finish = (value: string | null) => {
         removeCodePrompt();
