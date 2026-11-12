@@ -160,9 +160,11 @@ export const lstatSync = (p: string) => {
   if (!existsSync(p)) throw Object.assign(new Error('Missing fixture'), { code: 'ENOENT' });
   return { isDirectory: () => !p.endsWith('/SKILL.md'), isFile: () => p.endsWith('/SKILL.md'), isSymbolicLink: () => false };
 };
-export const readdirSync = (p: string) => fixtureFor(p).map((s) => `${s.name}.md`);
+export const readdirSync = (p: string) =>
+  p === LOCAL_SKILLS_DIR ? [...authoredSkills.keys()] : fixtureFor(p).map((s) => `${s.name}.md`);
 export const readFileSync = (p: string, _enc: string): string => resolveContent(p);
-export const statSync = (_p: string) => ({ isDirectory: () => false });
+// Seeded authored skills are directories (DispatchInput's extra-dir scan skips anything else).
+export const statSync = (p: string) => ({ isDirectory: () => p.startsWith(LOCAL_SKILLS_DIR + '/') && existsSync(p) && !p.endsWith('.md') });
 // realpathSync/mkdirSync/writeFileSync are no-ops in the harness — the MCP
 // settings tab reads via readFileSync above; writes (Add/Edit/Remove) are
 // exercised by the unit tests against the real fs, not this browser harness.
