@@ -30,6 +30,9 @@ const PUSH_TIMEOUT_MS = 10_000;
 const REVOKE_TIMEOUT_MS = 3_000;
 const REVOKE_TTL_SEC = 60;
 
+/** The one name pushed without being in the user's allowlist: the token a sign-in on this daemon minted. */
+export const MANAGED_CLAUDE_TOKEN_ENV = 'CLAUDE_CODE_OAUTH_TOKEN';
+
 /** The part of `DaemonClient` this module uses; lets tests (and a differently authenticated client) stand in. */
 export interface PushClient {
   command(type: 'creds.push', payload: { kind: string; ttlSec: number; fields: Record<string, string> }, opts?: { timeoutMs?: number }): Promise<unknown>;
@@ -107,6 +110,11 @@ export interface RemoteSecretPushDeps {
   daemons(): readonly RemoteDaemonConfig[];
   /** The separate admin token from the keychain; undefined when none is stored. */
   adminToken(daemon: RemoteDaemonConfig): string | undefined;
+  /**
+   * The Claude token "Sign in to Claude" minted for this daemon, if any. Always delivered (as `CLAUDE_CODE_OAUTH_TOKEN`)
+   * regardless of the allowlist, to this daemon only; a pushed value overrides the daemon's own login at the next session start.
+   */
+  managedClaudeToken?(daemon: RemoteDaemonConfig): string | undefined;
   /** Extra environment variables plus the keychain secrets visible to `projectId`, as a host session would get them. */
   resolveEnv(projectId: string | undefined): Record<string, string>;
   /** A client authenticated with `adminToken` for `daemon`. Disposed by this class. */
@@ -142,13 +150,14 @@ export class RemoteSecretPush {
   async prepare(daemonId: string, projectId: string | undefined): Promise<RemoteSecretPrep> {
     const cfg = this.deps.daemons().find((d) => d.id === daemonId);
     const allowlist = cfg?.pushedSecrets ?? [];
+    const managed = cfg ? this.deps.managedClaudeToken?.(cfg) : undefined;
     // A daemon the administrator disallowed is never contacted, not even to revoke: the pushed kind's TTL covers that.
     const denied = cfg ? this.deps.policyDenial?.(cfg) : undefined;
     if (cfg && denied) {
       this.dropState(daemonId);
       return { warnings: [`Secrets for "${cfg.name}" were not sent: ${denied}`] };
     }
-    if (!cfg || allowlist.length === 0) {
+    if (!cfg || (allowlist.length === 0 && !managed)) {
       await this.revokeDaemon(daemonId);
       return { warnings: [] };
     }
@@ -162,7 +171,7 @@ export class RemoteSecretPush {
       assertSecureTransportForPush(cfg.url);
       if (!admin) return fail('no admin token is stored for this daemon. Pushing needs one (agent-threads token create --scope admin); add it in Settings, Remote daemons, Edit.');
       this.knownAdmin.add(admin);
-      env = filterAllowlisted(this.deps.resolveEnv(projectId), allowlist, projectId);
+      env = this.envFor(projectId, allowlist, managed);
       const state = this.stateFor(cfg, admin);
       const kind = sessionEnvKind(projectId);
       state.projects.set(kind, projectId);
@@ -183,11 +192,12 @@ export class RemoteSecretPush {
       const cfg = this.deps.daemons().find((d) => d.id === daemonId);
       if (cfg && this.deps.policyDenial?.(cfg)) { this.dropState(daemonId); continue; }
       const allowlist = cfg?.pushedSecrets ?? [];
+      const managed = cfg ? this.deps.managedClaudeToken?.(cfg) : undefined;
       const admin = cfg ? this.deps.adminToken(cfg) : undefined;
       for (const [kind, projectId] of [...state.projects]) {
         let env: Record<string, string> = {};
         try {
-          if (cfg && admin && allowlist.length > 0) env = filterAllowlisted(this.deps.resolveEnv(projectId), allowlist, projectId);
+          if (cfg && admin && (allowlist.length > 0 || managed)) env = this.envFor(projectId, allowlist, managed);
           await state.delivery.deliver(kind, env, REMOTE_SECRET_TTL_SEC);
           if (Object.keys(env).length === 0) state.projects.delete(kind);
         } catch (err) {
@@ -208,6 +218,13 @@ export class RemoteSecretPush {
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
+
+  /** The allowlisted part of the project's environment, plus the managed Claude token (which wins over a same-named allowlisted value). */
+  private envFor(projectId: string | undefined, allowlist: readonly string[], managed: string | undefined): Record<string, string> {
+    const env = allowlist.length > 0 ? filterAllowlisted(this.deps.resolveEnv(projectId), allowlist, projectId) : {};
+    if (managed) env[MANAGED_CLAUDE_TOKEN_ENV] = managed;
+    return env;
+  }
 
   private stateFor(cfg: RemoteDaemonConfig, admin: string): DaemonState {
     const signature = `${cfg.url}\n${admin}`;

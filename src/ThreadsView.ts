@@ -56,6 +56,7 @@ import { isAwsSignInExpiredError } from './awsAuthRecovery';
 import { isSignInExpiredError } from './claudeAuthRecovery';
 import { signInToClaude, type SpawnLike } from './claudeAuthCli';
 import { renderClaudeSignInBanner } from './claudeSignInBanner';
+import { chooseClaudeSignInFlow, manualRemoteSignInHint } from './remote/signInFlow';
 import { getVaultBridgesAPI, mapToVaultPath, type BridgeInfo } from './bridgeUtils';
 import { resolveTagIcon, planFooter, derivePrUrl } from './statusLine';
 import { isWebViewerEnabled } from './SettingsTab';
@@ -6385,7 +6386,8 @@ export class ThreadsView extends ItemView {
         // The flow is chosen when the button is clicked: this card is also rebuilt from saved state after a reload.
         const remote = this.manager.getThread(threadId)?.remote;
         const daemon = remote ? (this.plugin.settings.remoteDaemons ?? []).find((d) => d.id === remote.daemonId) : undefined;
-        if (daemon?.managed === 'local-container') {
+        const flow = chooseClaudeSignInFlow({ awsExpired: false, daemon, capabilities: daemon ? this.plugin.daemonRegistry?.capabilitiesOf(daemon.id) : undefined });
+        if (flow === 'local-container') {
           const controller = this.plugin.localDaemon;
           if (!controller) return { ok: false as const, error: 'The local daemon is not available on this platform.' };
           onProgress('Signing in inside the local daemon…');
@@ -6399,6 +6401,18 @@ export class ThreadsView extends ItemView {
             onCodePrompt,
           }, { force: true });
         }
+        if (flow === 'remote' && daemon) {
+          // `claude auth login` on this computer would fix nothing on the daemon: sign in ON it, then the minted token is pushed back.
+          return this.plugin.signInToRemoteDaemon(daemon.id, {
+            onProgress,
+            onUrl: (url) => {
+              onUrl(url);
+              try { window.open(url, '_blank'); } catch { /* link is the fallback */ }
+            },
+            onCodePrompt,
+          });
+        }
+        if (flow === 'remote-manual' && daemon) return { ok: false as const, error: manualRemoteSignInHint(daemon.name, daemon.url) };
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { spawn } = require('child_process') as typeof import('child_process');
         return signInToClaude(this.plugin.settings.claudeBinaryPath || 'claude', {

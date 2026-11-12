@@ -34,6 +34,15 @@ export function adminTokenSecretNameFor(id: string): string {
   return `AGENT_THREADS_PUSHADMIN_${id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_TOKEN`;
 }
 
+/**
+ * Keychain entry for the Claude token minted by "Sign in to Claude" on a remote daemon (`auth.signin.*`). Not
+ * `CLAUDE_CODE_OAUTH_TOKEN` and not in the user's secret list: it is managed, per daemon, and pushed by name from
+ * `secretPush.ts` as `CLAUDE_CODE_OAUTH_TOKEN` to that daemon only. Same shape as the local container's token secret.
+ */
+export function remoteOAuthTokenSecretNameFor(id: string): string {
+  return `CLAUDE_THREADS_REMOTE_OAUTH_TOKEN_${id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
+}
+
 export const PUSHED_SECRET_ENTRY = /^(?:[^/\s,]{1,64}\/)?[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
 /**

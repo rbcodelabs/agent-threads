@@ -6,8 +6,9 @@
 import { describe, expect, it } from 'vitest';
 import { EnvKindDelivery, type CredsSink } from '../../src/credsDelivery';
 import { CredsPusher } from '../../src/localDaemon/credsPusher';
-import { adminTokenSecretNameFor, parsePushedSecrets, tokenSecretNameFor } from '../../src/remote/daemonConfig';
+import { adminTokenSecretNameFor, parsePushedSecrets, remoteOAuthTokenSecretNameFor, tokenSecretNameFor } from '../../src/remote/daemonConfig';
 import {
+  MANAGED_CLAUDE_TOKEN_ENV,
   REMOTE_SECRET_TTL_SEC,
   RemoteSecretPush,
   RemoteWsSink,
@@ -142,14 +143,15 @@ describe('EnvKindDelivery (shared hashing / refresh)', () => {
 });
 
 describe('RemoteSecretPush', () => {
-  function fixture(over: { daemons?: RemoteDaemonConfig[]; admin?: string | undefined; env?: Record<string, string> } = {}) {
+  function fixture(over: { daemons?: RemoteDaemonConfig[]; admin?: string | undefined; env?: Record<string, string>; managed?: string } = {}) {
     const clients: FakeClient[] = [];
     const logs: string[] = [];
     let now = 1_000_000;
-    const state = { daemons: over.daemons ?? [daemon()], admin: 'admin' in over ? over.admin : ADMIN, env: over.env ?? { GH_TOKEN: SECRET, OTHER: 'nope', PATH: '/mac' } };
+    const state = { daemons: over.daemons ?? [daemon()], admin: 'admin' in over ? over.admin : ADMIN, env: over.env ?? { GH_TOKEN: SECRET, OTHER: 'nope', PATH: '/mac' }, managed: over.managed as string | undefined };
     const push = new RemoteSecretPush({
       daemons: () => state.daemons,
       adminToken: () => state.admin,
+      managedClaudeToken: () => state.managed,
       resolveEnv: () => state.env,
       createClient: () => { const c = new FakeClient(); clients.push(c); return c; },
       now: () => now,
@@ -169,6 +171,64 @@ describe('RemoteSecretPush', () => {
     expect(REMOTE_SECRET_TTL_SEC).toBeLessThanOrEqual(3600);
     expect(JSON.stringify(r)).not.toContain(SECRET);
     expect(f.logs.join('\n')).not.toContain(SECRET);
+  });
+
+  describe('managed Claude token (Sign in to Claude on a remote daemon)', () => {
+    const MANAGED = 'sk-ant-oat01-MANAGEDTOKENVALUE_abc-123';
+
+    it('is pushed as CLAUDE_CODE_OAUTH_TOKEN in the sessenv kind even with an empty allowlist', async () => {
+      const f = fixture({ daemons: [daemon({ pushedSecrets: [] })], managed: MANAGED });
+      const r = await f.push.prepare('box', 'p');
+      expect(r).toEqual({ envKind: 'sessenv-p', warnings: [] });
+      expect(sent(f)).toHaveLength(1);
+      expect(sent(f)[0].payload).toEqual({ kind: 'sessenv-p', ttlSec: REMOTE_SECRET_TTL_SEC, fields: { [MANAGED_CLAUDE_TOKEN_ENV]: MANAGED } });
+      expect(MANAGED_CLAUDE_TOKEN_ENV).toBe('CLAUDE_CODE_OAUTH_TOKEN');
+      expect(JSON.stringify(r)).not.toContain(MANAGED);
+      expect(f.logs.join('\n')).not.toContain(MANAGED);
+    });
+
+    it('rides along with allowlisted secrets and wins over a same-named allowlisted value from this Mac', async () => {
+      const f = fixture({ daemons: [daemon({ pushedSecrets: ['GH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'] })], env: { GH_TOKEN: SECRET, CLAUDE_CODE_OAUTH_TOKEN: 'mac-local-value' }, managed: MANAGED });
+      await f.push.prepare('box', 'p');
+      expect(sent(f)[0].payload.fields).toEqual({ GH_TOKEN: SECRET, CLAUDE_CODE_OAUTH_TOKEN: MANAGED });
+    });
+
+    it('still needs an admin token and a secure transport', async () => {
+      const noAdmin = fixture({ daemons: [daemon({ pushedSecrets: [] })], admin: undefined, managed: MANAGED });
+      expect((await noAdmin.push.prepare('box', 'p')).warnings.join(' ')).toMatch(/admin token/i);
+      expect(noAdmin.clients).toEqual([]);
+      const plain = fixture({ daemons: [daemon({ pushedSecrets: [], url: 'ws://box.example.com:8080' })], managed: MANAGED });
+      expect((await plain.push.prepare('box', 'p')).warnings.join(' ')).toMatch(/wss/);
+      expect(plain.clients).toEqual([]);
+    });
+
+    it('a new token is re-pushed; clearing it revokes the kind', async () => {
+      const f = fixture({ daemons: [daemon({ pushedSecrets: [] })], managed: MANAGED });
+      await f.push.prepare('box', 'p');
+      f.state.managed = 'sk-ant-oat01-ROTATED_abc-123';
+      await f.push.prepare('box', 'p');
+      expect(sent(f).map((c) => c.payload.fields.CLAUDE_CODE_OAUTH_TOKEN)).toEqual([MANAGED, 'sk-ant-oat01-ROTATED_abc-123']);
+      f.state.managed = undefined;
+      await f.push.prepare('box', 'p');
+      expect(sent(f).at(-1)!.payload.fields).toEqual({});
+    });
+
+    it('reconcile keeps the managed token in the kind', async () => {
+      const f = fixture({ daemons: [daemon({ pushedSecrets: [] })], managed: MANAGED });
+      await f.push.prepare('box', 'p');
+      f.advance((REMOTE_SECRET_TTL_SEC * 1000) / 2 + 1);
+      await f.push.reconcile();
+      expect(sent(f)).toHaveLength(2);
+      expect(sent(f)[1].payload.fields).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: MANAGED });
+    });
+
+    it('its keychain name is per daemon and distinct from the token names', () => {
+      expect(remoteOAuthTokenSecretNameFor('my-box')).toBe('CLAUDE_THREADS_REMOTE_OAUTH_TOKEN_MY_BOX');
+      expect(remoteOAuthTokenSecretNameFor('a')).not.toBe(remoteOAuthTokenSecretNameFor('b'));
+      expect(remoteOAuthTokenSecretNameFor('x')).not.toBe(adminTokenSecretNameFor('x'));
+      expect(remoteOAuthTokenSecretNameFor('x')).not.toBe(tokenSecretNameFor('x'));
+      expect(remoteOAuthTokenSecretNameFor('x')).not.toBe('CLAUDE_CODE_OAUTH_TOKEN');
+    });
   });
 
   it('default (empty allowlist) does nothing and never connects', async () => {
