@@ -988,36 +988,7 @@ export class ThreadsView extends ItemView {
 
     this.inputRowEl = floatingPanel.createDiv('ct-input-row');
 
-    // Compute skill dirs from every configured plugin source plus the vault
-    // skills root, so they appear in /command autocomplete immediately, without
-    // waiting for commands_changed from the first session message. These must
-    // mirror what ThreadManager registers in opts.plugins — including the
-    // namespace each one ends up under — or autocomplete offers names the
-    // session cannot resolve.
-    const extraSkillDirs: ExtraSkillDir[] = [];
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getSkillsDirForSource } = require('./claudeSettings') as typeof import('./claudeSettings');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { expandHome, VAULT_SKILLS_PLUGIN_NAME } = require('./skillPaths') as typeof import('./skillPaths');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const osNode = require('os') as typeof import('os');
-      for (const src of (this.plugin.settings.skillSources ?? [])) {
-        // No prefix: source skills register as one local plugin each, which
-        // the SDK names after the skill itself.
-        if (src.type === 'github' && src.clonePath) {
-          extraSkillDirs.push({ dir: getSkillsDirForSource(src.clonePath) });
-        } else if (src.type === 'local' && src.skillsPath) {
-          extraSkillDirs.push({ dir: expandHome(src.skillsPath, osNode.homedir()) });
-        }
-      }
-      const vaultSkillsRoot = this.plugin.getPluginSkillsRoot();
-      const localSkillsRoot = this.plugin.getLocalSkillsRoot();
-      if (localSkillsRoot) extraSkillDirs.push({ dir: localSkillsRoot, prefix: 'local' });
-      if (vaultSkillsRoot) {
-        extraSkillDirs.push({ dir: vaultSkillsRoot, prefix: VAULT_SKILLS_PLUGIN_NAME });
-      }
-    } catch { /* ignore */ }
+    const extraSkillDirs = this.computeExtraSkillDirs();
 
     this.dispatchInput = new DispatchInput({
       app: this.app,
@@ -1408,6 +1379,41 @@ export class ThreadsView extends ItemView {
     if (fallback) void this.setActiveThread(fallback.id);
   }
 
+  /** Skill dirs for /command autocomplete; shared by the thread and new-conversation composers. */
+  private computeExtraSkillDirs(): ExtraSkillDir[] {
+    // Compute skill dirs from every configured plugin source plus the vault
+    // skills root, so they appear in /command autocomplete immediately, without
+    // waiting for commands_changed from the first session message. These must
+    // mirror what ThreadManager registers in opts.plugins — including the
+    // namespace each one ends up under — or autocomplete offers names the
+    // session cannot resolve.
+    const extraSkillDirs: ExtraSkillDir[] = [];
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getSkillsDirForSource } = require('./claudeSettings') as typeof import('./claudeSettings');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { expandHome, VAULT_SKILLS_PLUGIN_NAME } = require('./skillPaths') as typeof import('./skillPaths');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const osNode = require('os') as typeof import('os');
+      for (const src of (this.plugin.settings.skillSources ?? [])) {
+        // No prefix: source skills register as one local plugin each, which
+        // the SDK names after the skill itself.
+        if (src.type === 'github' && src.clonePath) {
+          extraSkillDirs.push({ dir: getSkillsDirForSource(src.clonePath) });
+        } else if (src.type === 'local' && src.skillsPath) {
+          extraSkillDirs.push({ dir: expandHome(src.skillsPath, osNode.homedir()) });
+        }
+      }
+      const vaultSkillsRoot = this.plugin.getPluginSkillsRoot();
+      const localSkillsRoot = this.plugin.getLocalSkillsRoot();
+      if (localSkillsRoot) extraSkillDirs.push({ dir: localSkillsRoot, prefix: 'local' });
+      if (vaultSkillsRoot) {
+        extraSkillDirs.push({ dir: vaultSkillsRoot, prefix: VAULT_SKILLS_PLUGIN_NAME });
+      }
+    } catch { /* ignore */ }
+    return extraSkillDirs;
+  }
+
   private buildNewConversationComposer(floatingPanel: HTMLElement): void {
     this.newConvRowEl = floatingPanel.createDiv({ cls: 'ct-input-row ct-new-conv-row', attr: { 'data-testid': 'new-conversation-composer' } });
     this.newConvInput = new DispatchInput({
@@ -1428,6 +1434,7 @@ export class ThreadsView extends ItemView {
       subscribeCommands: listener => this.plugin.slashCommands?.subscribe(listener) ?? (() => {}),
       argCompletions: DISPATCH_ARG_COMPLETIONS,
       peerArgCompletions: name => this.plugin.slashCommands?.argCompletionsFor(name, 'dispatch'),
+      extraSkillDirs: this.computeExtraSkillDirs(),
       harnessPicker: {
         initialHarness: this.plugin.settings.agentHarness ?? 'claude',
         getModelOptions: (harness) => this.modelOptionsFor(harness),
