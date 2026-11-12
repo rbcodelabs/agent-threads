@@ -8,7 +8,7 @@
  * Pure orchestration: the child process is injected (`SpawnLike`), so it is testable with fake timers and runs in
  * both the plugin and the daemon. Every secret is redacted from the failure text; the token is only ever returned.
  */
-import { extractOAuthError, extractSignInUrl, extractToken, redactToken, stripAnsi, TOKEN_PREFIX_PATTERN } from './setupTokenParse';
+import { extractOAuthError, extractSignInUrl, extractToken, redactToken, renderTerminal, stripAnsi, TOKEN_PREFIX_PATTERN } from './setupTokenParse';
 
 export type ChildLike = {
   stdout?: { on(event: 'data', cb: (chunk: Buffer | string) => void): unknown } | null;
@@ -103,13 +103,20 @@ export function runSetupTokenSession(opts: SetupTokenSessionOptions): Promise<Se
 
     /** Last ~400 chars of readable output, token-redacted - so a stall or failure explains itself instead of a silent spinner. */
     function tailForError(): string {
-      const clean = stripAnsi(buffer);
-      return redactToken(clean.trim().slice(-400), extractToken(clean));
+      const clean = renderTerminal(buffer);
+      return redactToken(clean.trim().slice(-400), extractToken(clean) ?? extractToken(stripAnsi(buffer)));
     }
 
     /** What the CLI printed since we wrote the code, escape-free. */
     function afterSubmit(): string {
       return submittedAt < 0 ? '' : stripAnsi(buffer.slice(submittedAt));
+    }
+
+    /** The last `sk-ant-oat...` token on the rendered screen (see `renderTerminal`), else in the escape-stripped text. */
+    function screenToken(): string | undefined {
+      if (submittedAt < 0) return undefined;
+      const rendered = renderTerminal(buffer).match(TOKEN_PREFIX_PATTERN) ?? afterSubmit().match(TOKEN_PREFIX_PATTERN);
+      return rendered && rendered.length > 0 ? rendered[rendered.length - 1] : undefined;
     }
 
     /** Runs on every chunk once a code has been written: notices a finished token or a server-side rejection without waiting for the process to exit. */
@@ -120,14 +127,14 @@ export function runSetupTokenSession(opts: SetupTokenSessionOptions): Promise<Se
         finish({ ok: false, error: `${reason} Click “Sign in to Claude” to try again.` });
         return;
       }
-      const prefixed = out.match(TOKEN_PREFIX_PATTERN);
-      if (prefixed && prefixed.length > 0) {
+      // Read the screen as a terminal shows it: the TUI skips repainting cells that did not change, so the byte stream alone can lose characters of the token.
+      if (screenToken()) {
         // The token arrives in one burst, but give any trailing characters a moment to land before taking the last
         // match. Debounced, so a token still mid-stream keeps extending until output settles.
         if (tokenTimer) clearTimeout(tokenTimer);
         tokenTimer = setTimeout(() => {
-          const latest = afterSubmit().match(TOKEN_PREFIX_PATTERN);
-          if (latest && latest.length > 0) finish({ ok: true, token: latest[latest.length - 1] });
+          const latest = screenToken();
+          if (latest) finish({ ok: true, token: latest });
         }, TOKEN_SETTLE_MS);
       }
     }
@@ -217,8 +224,8 @@ export function runSetupTokenSession(opts: SetupTokenSessionOptions): Promise<Se
 
     started.on('close', (code) => {
       // Extract from escape-stripped text: raw TUI output interleaves cursor and color codes that can split a token.
-      const clean = stripAnsi(buffer);
-      const token = extractToken(clean);
+      const clean = renderTerminal(buffer);
+      const token = extractToken(clean) ?? extractToken(stripAnsi(buffer));
       if (code !== 0 && code !== null) {
         const tail = redactToken(clean.trim().split('\n').slice(-3).join('\n'), token);
         finish({ ok: false, error: tail || `${opts.command.split('/').pop() || 'sign-in'} exited with code ${code}` });
