@@ -61,3 +61,14 @@ Useful selectors, all verified against the running app: composer `.ct-input` (in
   clicks fires late; the recorder warns `late by Nms`. Move setup clicks into the end of the previous scene.
 - The dispatch box loses focus after Enter, so each dispatch needs its own click.
 - Geode re-adds its core sidebar tabs when they are missing, so the fixture lists them and marks Agents active.
+
+## Launch hero clip (no narration)
+
+`demo/hero.config.json` is a short, silent clip for the README (`voice.provider: "none"`). It reuses the same fixture and replay script.
+
+```sh
+npm run demo:fixture
+node demo/engine/run.mts all --config demo/hero.config.json
+```
+
+The recording host needs a built Geode checkout at `~/geode-gate` (see Recording host above). Geode names the Agents sidebar tab "N threads", so the first scene clicks it. Convert `demo/out/agent-threads-hero.mp4` to `docs/images/agent-threads-hero.gif` with ffmpeg (`fps=8`, `scale=800`, `palettegen`/`paletteuse`).

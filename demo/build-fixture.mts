@@ -26,7 +26,8 @@ for (const file of ["main.js", "manifest.json", "styles.css"]) {
 fs.rmSync(pluginDir, { recursive: true, force: true });
 fs.mkdirSync(pluginDir, { recursive: true });
 for (const file of ["main.js", "manifest.json", "styles.css"]) fs.copyFileSync(path.join(root, "dist", file), path.join(pluginDir, file));
-fs.cpSync(path.join(root, "dist", "resources"), path.join(pluginDir, "resources"), { recursive: true });
+// dist/resources only exists in builds that bundle extra assets; the current build does not emit it.
+if (fs.existsSync(path.join(root, "dist", "resources"))) fs.cpSync(path.join(root, "dist", "resources"), path.join(pluginDir, "resources"), { recursive: true });
 fs.copyFileSync(path.join(root, "demo", "replay-script.json"), path.join(pluginDir, "demo-script.json"));
 
 // ---------------------------------------------------------------------------
