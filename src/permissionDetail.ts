@@ -81,6 +81,31 @@ export function parsePermissionDetail(detail: string): ParsedPermissionDetail {
   return { summary: truncate(text, SUMMARY_MAX), fields: null };
 }
 
+const flat = (s: string): string => s.replace(/\s+/g, ' ').trim();
+
+/**
+ * Does the one-line summary show EVERYTHING the user would be approving? Length is not the only way to hide something:
+ * a JSON detail with a primary key summarises to that field's value alone (`{"command":"ls","dangerouslyDisableSandbox":
+ * true}` reads "ls"). Small approval surfaces only offer inline Allow / Always when this is true; otherwise the request
+ * is reviewed in its thread. True for: plain text that is not cut, and a SINGLE-field JSON object whose summary is
+ * exactly that field (value for a primary key, `key: value` otherwise) without truncation. Remote-call details
+ * (`Run <tool> for a remote thread: {...}`) are judged on their inner object.
+ */
+export function isFullyShownDetail(detail: string): boolean {
+  const text = (detail ?? '').trim();
+  if (!text) return true;
+  const parsed = parsePermissionDetail(detail);
+  // The one-line summary flattens line breaks, which can hide whole lines: anything spanning lines is reviewed in the thread.
+  if (!parsed.fields) return !/[\r\n]/.test(text) && flat(parsed.summary) === flat(text);
+  if (parsed.fields.length !== 1) return false;
+  const only = parsed.fields[0];
+  if (/[\r\n]/.test(only.value)) return false;
+  const remote = REMOTE_CALL_DETAIL.exec(text);
+  const prefix = remote ? `${remote[1]}: ` : '';
+  const expected = PRIMARY_KEYS.includes(only.key) ? only.value : `${only.key}: ${only.value}`;
+  return flat(parsed.summary) === flat(`${prefix}${expected}`);
+}
+
 /** One-line summary for compact surfaces (dashboard, kanban). */
 export function summarizePermissionDetail(detail: string): string {
   return parsePermissionDetail(detail).summary;

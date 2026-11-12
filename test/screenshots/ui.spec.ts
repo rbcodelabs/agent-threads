@@ -3052,7 +3052,8 @@ test.describe('Agent Threads UI', () => {
     await page.setViewportSize({ width: 1240, height: 820 });
     await page.goto(kanbanUrl);
     await page.waitForSelector('.ct-kanban-board');
-    await expect(page.locator('.ct-kanban-dispatch textarea')).toHaveCount(0);
+    // The Ask-the-orchestrator field is a textarea (Shift+Enter = newline); only a dispatch composer must be absent.
+    await expect(page.locator('.ct-kanban-dispatch textarea:not(.ct-orch-input)')).toHaveCount(0);
     await expect(page.getByLabel('Dispatch Project')).toHaveCount(0);
     const button = page.getByRole('button', { name: 'New thread' });
     await expect(button).toBeVisible();
