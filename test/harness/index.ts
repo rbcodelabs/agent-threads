@@ -3,6 +3,7 @@ import { ThreadsView } from '../../src/ThreadsView';
 import { ThreadManager } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS } from '../../src/types';
 import { fixtureThreads, inlineContentMessages, kanbanFixtureProjects } from './fixtures';
+import { LOCAL_SKILLS_DIR, seedAuthoredSkill } from './mocks/fs';
 import { fakeRemoteFolders, remoteFixtureDaemons } from './remote-fixtures';
 import { runRemoteSignIn } from '../../src/remote/remoteSignIn';
 import { manualRemoteSignInHint } from '../../src/remote/signInFlow';
@@ -61,6 +62,9 @@ if (harnessParams.has('remote')) {
 // Explicit picks the Project picker has recorded: Golden Wealth most recent, then Agent Threads.
 if (harnessParams.has('projects') || harnessParams.has('remote')) {
   settings.projectLastUsed = { 'proj-golden': 3_000, 'proj-threads': 2_000 };
+}
+if (harnessParams.has('localskills')) {
+  seedAuthoredSkill('demo-skill', '---\nname: demo-skill\ndescription: Demo skill from the local skills root\n---\n\n# demo-skill\n');
 }
 const manager = new ThreadManager(settings);
 // `?projects=1` (implied by `remote`): Projects for the new-conversation Project picker. Opt-in so the
@@ -317,6 +321,9 @@ const mockPlugin = {
   // screenshotted. Must still be present — ThreadsView calls it while
   // building the /-autocomplete skill dirs.
   getPluginSkillsRoot: () => '',
+  // `?localskills=1` seeds one authored skill so the /-autocomplete extra-skill-dir scan
+  // (computeExtraSkillDirs -> DispatchInput) has something to find; default is no local root.
+  getLocalSkillsRoot: () => (harnessParams.has('localskills') ? LOCAL_SKILLS_DIR : ''),
   getPendingWakeups: (threadId: string) => [...loopItems.values()]
     .filter((item: any) => item.origin === 'wakeup' && item.enabled && item.targetThreadId === threadId)
     .map((item: any) => ({ fireAt: item.nextRun ?? item.schedule.fireAt, reason: item.name.replace(/^Wakeup: /, '') }))
