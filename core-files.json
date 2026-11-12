@@ -8,6 +8,7 @@
     "src/Scheduler.ts",
     "src/HarnessFactory.ts",
     "src/protocol/index.ts",
+    "src/setupTokenSession.ts",
     "src/toolRouting.ts",
     "src/tools/worktree.ts",
     "src/tools/cwdTracker.ts"
@@ -79,6 +80,8 @@
     "src/remoteAlwaysAllow.ts",
     "src/resumeFailureRecovery.ts",
     "src/secretRedaction.ts",
+    "src/setupTokenParse.ts",
+    "src/setupTokenSession.ts",
     "src/skillManager.ts",
     "src/skillPaths.ts",
     "src/skillSourcePersistence.ts",
