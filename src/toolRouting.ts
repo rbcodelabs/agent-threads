@@ -9,7 +9,7 @@
  * table is the contract; the drift test (test/unit/tool-routing.test.ts) fails if `createMcpToolSurfaces`
  * produces a tool this file does not classify, so a new tool must be placed deliberately.
  *
- * It is default-deny: with host tools on and nothing else chosen, no tool reaches back to this computer. The
+ * It is default-deny, except the read-only `help` domain (documentation lookup, on by default): with host tools on and nothing else chosen, no tool reaches back to this computer. The
  * user opts a GROUP in per daemon (`RouteOverrides`: vault, workspace, threads, skills, browser, mcp), and a group
  * only ever contains read tools; the tools that write, execute, schedule, install, send or touch secrets are in
  * `NEVER_OFFERED` and cannot be promoted. A `local` tool is never overridable (it must run beside the repo).
@@ -39,6 +39,8 @@ export const DEFAULT_DOMAIN_ROUTES: Readonly<Record<ToolDomain, ToolRoute>> = Ob
   misc: 'absent',
   exec: 'absent',
   browser: 'absent',
+  // The one default-on domain: read-only, bounded text, served from the app's registered providers (src/help/).
+  help: 'host',
 });
 
 /**
@@ -138,6 +140,10 @@ export function routeFor(
   }
   if (DEFAULT_DOMAIN_ROUTES[domain] === 'local') return 'local';
   const canonical = canonicalToolName(toolName);
+  if (DEFAULT_DOMAIN_ROUTES[domain] === 'host' && !NEVER_OFFERED.has(canonical)) {
+    // Default-on domain (help): offered unless the user names the tool or its domain `absent`.
+    return (overrides?.[canonical] ?? overrides?.[toolName] ?? overrides?.[domain]) === 'absent' ? 'absent' : 'host';
+  }
   if (NEVER_OFFERED.has(canonical) || !OPT_IN_GROUPS.includes(domain)) {
     // The one way past NEVER_OFFERED: the managed local daemon's explicit, per-group opt-in (localDaemon/optionalTools.ts).
     // The tool must be named in `optional` AND routed 'host' by name; a domain or group switch never reaches it.

@@ -1,8 +1,8 @@
 # ADR: Pluggable `help` tool for agents
 
 **Date:** 2026-11-12
-**Status:** Proposed
-**Note:** `CLAUDE.md` says ADRs live in Compass. This file is in the repo at the requester's explicit request; migrate it to Compass on acceptance and leave a pointer, as `acp-hybrid-harness-driver.md` does.
+**Status:** Accepted (decisions below, 2026-11-12); slices 1-3 implemented on `feat/agent-threads-help`
+**Note:** `CLAUDE.md` says ADRs live in Compass. This file is in the repo at the requester's explicit request; the orchestrator will move it to Compass later and leave a pointer, as `acp-hybrid-harness-driver.md` does.
 
 ## Context
 
@@ -154,13 +154,26 @@ Preferred: Geode registers a provider through the same API (`geode.docs`), ideal
 3. **Remote.** Route `help` to `host`, manifest and proxy tests, daemon-offline behavior, optional bundled static fallback. Add the prompt pointer and run the eval; decide on default-on.
 4. **Geode provider.** Geode registers `geode.docs` (or the fallback path), after the Geode-side decision.
 
-## Open Questions for the Requester
+## Decisions (resolving the open questions)
 
-1. Should `help` be default-on for remote daemon sessions, or follow the opt-in group pattern (`routes: { help: 'host' }`) like vault and threads? I assumed default-on because it is read-only and bounded.
-2. Can Geode register a provider through this API (and ship a docs folder), or should Agent Threads read a Geode docs path itself?
-3. Should the `docRoots` path be restricted to the owner's plugin directory and the vault, or are arbitrary absolute directories acceptable?
-4. Is a per-provider `allowRemote` flag wanted, so a peer can keep its content off daemon-hosted sessions?
-5. Do we want an offline fallback by bundling Agent Threads docs into the daemon, at the cost of a second copy of the docs?
-6. Tool name: `help` is short but generic and may collide with a peer or MCP server tool name. Is `help` acceptable, or prefer `docs_help` / `agent_threads_help`?
-7. Is the "call `help` first" nudge in the base system prompt acceptable, given it costs a line in every session?
-8. This ADR lives in the repo per the request, though `CLAUDE.md` says Compass. Should I migrate it to Compass now?
+The requester answered the open questions on 2026-11-12. These override the recommendations above wherever they differ.
+
+1. **Remote routing:** `help` is **on by default for remote daemon sessions**, with no opt-in group. A user can still switch it off per daemon with `routes: { help: 'absent' }` (or by tool name).
+2. **Geode content:** Geode contributes through its **own registered provider** (`registerHelpProvider`, `geode.*` id). Agent Threads does **not** read any Geode docs path. The "fallback" in "Geode supplies its docs" is dropped.
+3. **`docRoots`:** restricted to the **owner's plugin directory and the vault**. Arbitrary absolute directories are refused.
+4. **Per-provider remote exclusion (`allowRemote`):** **not built.** Providers must not return user-derived content (documented in `docs/public-api.md`).
+5. **Offline fallback:** **none.** No Agent Threads docs are bundled into the daemon; offline, the call fails with the standard host-tool unavailable error.
+6. **Tool name:** **`agent_threads_help`** (not `help`). The domain in `toolNames.ts` / `toolRouting.ts` is still `help`. It is also reserved against peer agent tools.
+7. **System-prompt nudge:** **none.** Discovery relies on the tool description, which says when to call it (before guessing about a feature, setting, tool, slash command, daemon or plugin API).
+8. **No setting:** slice 1's "behind a setting" is dropped; the tool is simply on.
+9. **ADR location:** stays in `docs/adr/` on the implementing branch; the orchestrator moves it to Compass later.
+
+Consequences for the sections above: the "Bet" mitigation (prompt pointer) and rollout slice 3's "optional bundled static fallback" and "prompt pointer" are dropped; the eval remains a non-gating follow-up.
+
+### Implementation notes
+
+- Built-in provider `agent-threads.docs` serves `README.md` and top-level `docs/*.md` (no `adr/`, `qa/`, `mockups/`, images). They are inlined into `main.js` at build time (`esbuild.config.mjs` `define`), so no extra release asset is needed. Sections are split on H2/H3; ids are `agent-threads.docs:<path>#<slug>`, `...#top` for text before the first H2/H3, or a bare path for the whole file.
+- Capabilities: `extensions.registerHelpProvider`, plus the feature flag `help.docRoots`.
+- Ranking: provider-local score (or position) plus a 0.25 title-match boost, per-provider sort, then round-robin across providers ordered by best score, then Agent Threads, Geode, peers by id.
+- Slice 3 reduces to a routing-table change: `DEFAULT_DOMAIN_ROUTES.help = 'host'`, a default-on branch in `routeFor`, and manifest/proxy tests. The daemon needed no change because the tool already appears in the host-tool manifest like any `host` tool.
+- Not done: the reference peer provider (Design) from slice 2, the Geode provider (Geode-side, slice 4), the E2E test and the eval.

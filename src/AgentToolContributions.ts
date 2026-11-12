@@ -111,6 +111,8 @@ export const RESERVED_AGENT_TOOL_NAMES: readonly string[] = Object.freeze([
   'Agent', 'AskUserQuestion', 'Bash', 'BashOutput', 'Edit', 'ExitPlanMode', 'Glob',
   'Grep', 'KillShell', 'ListMcpResources', 'NotebookEdit', 'Read', 'ReadMcpResource',
   'Skill', 'SlashCommand', 'Task', 'TodoWrite', 'WebFetch', 'WebSearch', 'Write',
+  // Built-in help tool: reserved even in hosts that do not construct a help registry, so a peer cannot claim it.
+  'agent_threads_help',
 ]);
 
 function errorMessage(error: unknown): string {

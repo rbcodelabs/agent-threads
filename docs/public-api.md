@@ -85,6 +85,32 @@ The former `orchestrators.delegateWakeup` / capability `orchestrators.wakeup.del
 
 The API serializes correlated operations and awaits atomic host persistence before returning their handles. Idempotency mappings and results are retained and evicted as pairs. A provider reload marks an in-flight operation interrupted; a consumer can reacquire v1 and reconcile it by run ID without duplicating work. Cancellation, completion, and provider shutdown use first-terminal-wins semantics.
 
+## Contributing help
+
+`extensions.registerHelpProvider(owner, contribution)` adds reference documentation to the read-only `agent_threads_help` agent tool, so a session can search and read your plugin's guidance on demand. Nothing is injected into the prompt: content costs context only when an agent asks for it.
+
+Check `api.capabilities.includes('extensions.registerHelpProvider')` first; an older host has no such member and calling it throws. `help.docRoots` is a second capability for the `docRoots` option.
+
+```ts
+if (api.capabilities.includes('extensions.registerHelpProvider')) {
+  const registration = api.extensions.registerHelpProvider({ pluginId: 'example.boards' }, {
+    providerId: 'example.boards',             // '<publisher>.<capability>', lowercase, at most 64 characters
+    title: 'Boards',
+    summary: 'How to build and automate boards.',
+    docRoots: ['/path/to/vault/.geode/plugins/example.boards/docs'], // zero-code path: the host indexes the .md files
+  });
+  if (registration.success) this.register(() => registration.dispose());
+}
+```
+
+- **Two ways to supply content, or both.** `docRoots` (absolute directories of Markdown) is indexed by the host and split on H2/H3 headings; or implement `search(query, signal)` and `get(docId, { offset, maxChars }, signal)` (plus optional `topics()`). With both, search hits are merged and `get` tries your callback first.
+- **`docRoots` are restricted** to your own plugin directory (`<vault>/<config dir>/plugins/<pluginId>`) and the vault. The real path must lie inside; `/`, `/etc`, `..` and symlinks pointing out are refused with `status: 'invalid'`. Only plain, non-hidden `.md` files up to 2 MB are read, at most 2,000 per root; symlinked entries are skipped.
+- **Ids and ownership.** A duplicate `providerId` is `status: 'conflict'` and the incumbent always wins; a stale `dispose()` cannot retract a later registration. `agent-threads.*` and `geode.*` ids are reserved for their publishers (`invalid` otherwise). Owner identity is self-declared, like the rest of the API.
+- **Host-enforced limits.** Providers are never trusted: 20 hits per call, 240-character snippets, 200-character titles, 16,000-character `get` pages, 40,000 characters per response, 500 hits accepted per provider, 64 providers. Callbacks time out after 2 s (`search`) or 5 s (`get`) and receive an `AbortSignal`; a throw, timeout or malformed result marks only your provider unavailable for that call.
+- **Ranking is the host's.** Your `score` (0..1) is only a provider-local hint; the host adds a title-match boost and interleaves providers round-robin so one cannot fill the page.
+- **Content is untrusted reference text.** It reaches the model only as a tool result, framed with its source, and is never executed or fetched. Do not return content derived from user data (vault search, thread logs): the tool is on by default for remote daemon sessions too.
+- **Lifetime.** Registrations are dropped on `dispose()`, on peer unload and on host `stop()`. Unlike agent tools, providers are resolved on every call, so a provider added or removed mid-session is visible to the next `agent_threads_help` call.
+
 ## Contributing a slash command
 
 Check `api.capabilities.includes('extensions.registerSlashCommand')`, then register one lowercase token (1–64 characters, letters/digits/hyphens, beginning with a letter), without a leading slash:

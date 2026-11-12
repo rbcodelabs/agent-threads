@@ -549,3 +549,21 @@ describe('RemoteHostTools contributed plugin tools', () => {
     expect((await tools.invoke('claude_threads', 'vault_search', {})).success).toBe(false);
   });
 });
+
+describe('agent_threads_help on remote sessions (default-on)', () => {
+  const builtIn = [dyn('agent_threads_help', false, 'docs text'), dyn('vault_search'), dyn('threads_list')];
+
+  it('is offered with no routes configured, alone among the host tools, without an approval gate', async () => {
+    const tools = new RemoteHostTools({ builtIn });
+    const manifest = await tools.manifest();
+    expect(manifest.claude_threads.map((t) => t.name)).toEqual(['agent_threads_help']);
+    expect(manifest.claude_threads[0].requiresApproval).toBe(false);
+    const result = await tools.invoke('claude_threads', 'agent_threads_help', { query: 'x' });
+    expect(result).toMatchObject({ success: true, text: 'docs text' });
+  });
+
+  it('can be switched off per daemon by tool or domain', async () => {
+    expect(await new RemoteHostTools({ builtIn, overrides: { help: 'absent' } }).manifest()).toEqual({});
+    expect(await new RemoteHostTools({ builtIn, overrides: { agent_threads_help: 'absent' } }).manifest()).toEqual({});
+  });
+});
