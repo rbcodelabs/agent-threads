@@ -301,3 +301,52 @@ describe('a data volume that is reset while the app stays open', () => {
     expect(copies(f.calls).length).toBeGreaterThan(firstCopies);
   });
 });
+
+describe('refreshEnv (a secret saved mid-thread by request_secret)', () => {
+  it('pushes only the session environment, over stdin; no skills or AWS copy; the value stays out of argv, logs and the result', async () => {
+    let env: Record<string, string> = { AWS_PROFILE: 'deploy' };
+    const calls: Call[] = [];
+    const logs: string[] = [];
+    const run: VmCommandRunner = async (args, opts) => { calls.push({ args: [...args], input: opts.input }); return { exitCode: 0, stdout: '', stderr: '' }; };
+    const prep = new LocalDaemonSessionPrep({
+      vaultPath: () => VAULT, runner: () => run, resolveEnv: () => env, skillPlugins: () => [], homeDir: () => '/h',
+      awsProfiles: () => [], fs: treeFs({}), awsFs: { readFile: () => null, sha1Hex: sha1 }, log: (m) => logs.push(m),
+    });
+    await prep.prepare('p');
+    env = { AWS_PROFILE: 'deploy', NEW_TOKEN: 'tok_super_secret' };
+    const before = calls.length;
+    const result = await prep.refreshEnv('p');
+    expect(result.envKind).toBe('sessenv-p');
+    expect(result.warnings).toEqual([]);
+    const fresh = calls.slice(before);
+    const [push] = pushes(fresh);
+    expect(JSON.parse(push.input!)).toEqual({ AWS_PROFILE: 'deploy', NEW_TOKEN: 'tok_super_secret' });
+    expect(copies(fresh)).toEqual([]);
+    expect(argvOf(calls)).not.toContain('tok_super_secret');
+    expect(logs.join('\n')).not.toContain('tok_super_secret');
+    expect(JSON.stringify(result)).not.toContain('tok_super_secret');
+  });
+
+  it('never throws: a failed push is a redacted warning and no envKind', async () => {
+    const run: VmCommandRunner = async (args) => (args.includes('--stdin')
+      ? { exitCode: 1, stdout: '', stderr: 'denied for tok_super_secret' }
+      : { exitCode: 0, stdout: '', stderr: '' });
+    const logs: string[] = [];
+    const prep = new LocalDaemonSessionPrep({
+      vaultPath: () => VAULT, runner: () => run, resolveEnv: () => ({ NEW_TOKEN: 'tok_super_secret' }), skillPlugins: () => [], homeDir: () => '/h',
+      awsProfiles: () => [], fs: treeFs({}), awsFs: { readFile: () => null, sha1Hex: sha1 }, log: (m) => logs.push(m),
+    });
+    const result = await prep.refreshEnv('p');
+    expect(result.envKind).toBeUndefined();
+    expect(result.warnings).toHaveLength(1);
+    expect(JSON.stringify(result) + logs.join('\n')).not.toContain('tok_super_secret');
+  });
+
+  it('returns nothing when there is no vault (no local daemon)', async () => {
+    const prep = new LocalDaemonSessionPrep({
+      vaultPath: () => null, runner: () => (async () => ({ exitCode: 0, stdout: '', stderr: '' })), resolveEnv: () => ({ K: 'v' }), skillPlugins: () => [],
+      homeDir: () => '/h', awsProfiles: () => [], fs: treeFs({}), awsFs: { readFile: () => null, sha1Hex: sha1 },
+    });
+    expect(await prep.refreshEnv('p')).toEqual({ warnings: [] });
+  });
+});
