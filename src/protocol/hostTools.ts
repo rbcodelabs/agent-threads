@@ -62,6 +62,7 @@ export function validateHostToolSpec(t: unknown, path = 'tool'): string | null {
   if (typeof t.server !== 'string' || !HOST_TOOL_SERVER_NAME.test(t.server)) return `${path}.server must match ${HOST_TOOL_SERVER_NAME}`;
   if (typeof t.description !== 'string' || t.description.length > L.maxDescriptionChars) return `${path}.description must be a string of at most ${L.maxDescriptionChars} characters`;
   if (typeof t.requiresApproval !== 'boolean') return `${path}.requiresApproval must be a boolean`;
+  if (t.alwaysLoad !== undefined && typeof t.alwaysLoad !== 'boolean') return `${path}.alwaysLoad must be a boolean`;
   if (!isPlainObject(t.inputSchema)) return `${path}.inputSchema must be an object (JSON Schema)`;
   if (jsonBytes(t.inputSchema) > L.maxSchemaBytes) return `${path}.inputSchema is too large (limit ${L.maxSchemaBytes} bytes)`;
   return null;
@@ -128,7 +129,7 @@ export function specsFromManifest(servers: Readonly<Record<string, readonly Remo
 
 /** Cheap change detector for "re-send the manifest": same tools, schemas and flags => same signature. */
 export function manifestSignature(servers: Readonly<Record<string, readonly RemoteHostToolSpec[]>>): string {
-  return JSON.stringify(Object.keys(servers).sort().map((name) => [name, servers[name].map((t) => [t.name, t.description, t.requiresApproval, t.inputSchema])]));
+  return JSON.stringify(Object.keys(servers).sort().map((name) => [name, servers[name].map((t) => [t.name, t.description, t.requiresApproval, t.alwaysLoad === true, t.inputSchema])]));
 }
 
 /** Look one tool up in a manifest; the plugin and the daemon both gate on this. */

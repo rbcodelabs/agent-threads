@@ -128,6 +128,7 @@ export class RemoteHostTools {
       const spec: RemoteHostToolSpec = {
         name: t.name, description: t.description, inputSchema: t.inputSchema,
         requiresApproval: t.requiresApproval, server: CLAUDE_THREADS_SERVER,
+        ...(t.alwaysLoad === true ? { alwaysLoad: true } : {}),
       };
       const problem = validateHostToolSpec(spec);
       if (problem) { this.deps.log?.(`host tool ${t.name} not offered: ${problem}`); continue; }

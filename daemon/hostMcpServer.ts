@@ -46,7 +46,8 @@ export interface HostMcpServerOptions {
 
 /**
  * Only the daemon's own worktree tools are always loaded (a handful, needed to work in a repo). Proxied tools, which
- * can be many and come from third parties, are deferred: the model finds them through tool search when it needs one.
+ * can be many and come from third parties, are deferred: the model finds them through tool search when it needs one,
+ * unless the host marked one `alwaysLoad` (a peer plugin's contributed tool that asked for it).
  */
 const ALWAYS_LOAD = { 'anthropic/alwaysLoad': true } as const;
 
@@ -73,7 +74,10 @@ export function createHostMcpServer(opts: HostMcpServerOptions): HostMcpServerHa
     }));
     for (const t of opts.proxied()) {
       if (local.has(t.name)) continue; // a local tool is never shadowed by a proxied one
-      tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema as { type: 'object' } } as (typeof tools)[number]);
+      tools.push({
+        name: t.name, description: t.description, inputSchema: t.inputSchema as { type: 'object' },
+        ...(t.alwaysLoad === true ? { _meta: ALWAYS_LOAD } : {}),
+      } as (typeof tools)[number]);
     }
     return { tools };
   });

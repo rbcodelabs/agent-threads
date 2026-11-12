@@ -478,6 +478,9 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   const contributedReadOnlyNames = contributions
     .filter(binding => !builtInNames.has(binding.name) && !binding.requiresApproval)
     .map(binding => binding.name);
+  const contributedAlwaysLoadNames = contributions
+    .filter(binding => !builtInNames.has(binding.name) && binding.alwaysLoad)
+    .map(binding => binding.name);
 
   const exposedTools = tools;
   // host_exec is newer than the deprecated `obsidian` alias server, which is frozen at its legacy roster: exposing a
@@ -497,8 +500,8 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     alwaysLoad: true,
   });
   return {
-    claude_threads: Object.assign(canonicalServer, { harnessTools: toHarnessDynamicTools(canonicalTools, contributedReadOnlyNames) }),
-    obsidian: Object.assign(legacyServer, { harnessTools: toHarnessDynamicTools(legacyTools, contributedReadOnlyNames) }),
+    claude_threads: Object.assign(canonicalServer, { harnessTools: toHarnessDynamicTools(canonicalTools, contributedReadOnlyNames, contributedAlwaysLoadNames) }),
+    obsidian: Object.assign(legacyServer, { harnessTools: toHarnessDynamicTools(legacyTools, contributedReadOnlyNames, contributedAlwaysLoadNames) }),
     // Canonical *and* legacy built-in names, so the contribution registry can
     // reject a name that would shadow either. Captured before contributions
     // were appended, so a contributed tool never counts as a built-in — which
@@ -630,6 +633,8 @@ export function toHarnessDynamicTools(
    * for a genuinely read-only tool.
    */
   contributedReadOnlyNames: readonly string[] = [],
+  /** Contributed tools that asked to be always loaded; the remote proxy keeps that so they are not deferred there. */
+  contributedAlwaysLoadNames: readonly string[] = [],
 ): HarnessDynamicTool[] {
   // Reuse the canonical MCP definitions for every harness. The conservative
   // read-only set bypasses prompts; every other operation is presented through
@@ -658,6 +663,7 @@ export function toHarnessDynamicTools(
     description: toolDefinition.description,
     inputSchema: z.toJSONSchema(z.object(toolDefinition.inputSchema)) as Record<string, unknown>,
     requiresApproval: !readOnlyToolNames.has(toolDefinition.name),
+    ...(contributedAlwaysLoadNames.includes(toolDefinition.name) ? { alwaysLoad: true } : {}),
     async invoke(args: Record<string, unknown>) {
       try {
         const result = await toolDefinition.handler(args as never, {});

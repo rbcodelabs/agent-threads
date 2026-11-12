@@ -180,6 +180,11 @@ export interface HarnessDynamicTool {
   inputSchema: Record<string, unknown>;
   /** Whether this host operation changes state or needs an explicit user decision. */
   requiresApproval: boolean;
+  /**
+   * The tool asked to be in the model's tool list from the first turn instead of behind tool search (a contributed
+   * tool's `alwaysLoad`). Carried to a remote daemon so a proxied tool keeps it; absent = deferred when proxied.
+   */
+  alwaysLoad?: boolean;
   invoke(args: Record<string, unknown>): Promise<{ success: boolean; text: string }>;
   /**
    * Same call, but returning the tool's structured content (images included) instead of flattening it to text.

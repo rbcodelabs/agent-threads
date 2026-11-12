@@ -27,6 +27,8 @@ describe('protocol host-tool rules', () => {
     expect(validateHostToolSpecs([{ ...spec('a'), inputSchema: { x: 'y'.repeat(70_000) } }])).toContain('too large');
     expect(validateHostToolSpecs(Array.from({ length: HOST_TOOL_LIMITS.maxTools + 1 }, (_, i) => spec(`t${i}`)))).toContain('too many');
     expect(validateHostToolSpecs('x')).toContain('array');
+    expect(validateHostToolSpecs([{ ...spec('a'), alwaysLoad: true }])).toBeNull();
+    expect(validateHostToolSpecs([{ ...spec('a'), alwaysLoad: 'yes' }])).toContain('alwaysLoad');
   });
   it('validates the manifest form and that keys match', () => {
     expect(validateManifestServers({ claude_threads: [spec('a')], 'google-docs': [spec('r', 'google-docs')] })).toBeNull();
@@ -70,6 +72,18 @@ describe('protocol host-tool rules', () => {
 });
 
 describe('RemoteHostTools manifest', () => {
+  it('carries a contributed tool\'s alwaysLoad to the daemon, and only when it is set', async () => {
+    const eager = { ...dyn('design_x'), alwaysLoad: true };
+    const tools = new RemoteHostTools({
+      builtIn: [eager, dyn('other_x')],
+      contributedTools: new Set(['design_x', 'other_x']),
+      overrides: { plugins: 'host' },
+    });
+    const m = await tools.manifest();
+    expect(m.claude_threads.find((t) => t.name === 'design_x')?.alwaysLoad).toBe(true);
+    expect(m.claude_threads.find((t) => t.name === 'other_x')).not.toHaveProperty('alwaysLoad');
+  });
+
   it('offers host-routed built-ins only, honours overrides, and runs the handler', async () => {
     const tools = new RemoteHostTools({
       builtIn: [dyn('vault_search', false, 'found'), dyn('enter_worktree'), dyn('vm_exec'), dyn('github_list_access'), dyn('contributed_x'), dyn('threads_list'), dyn('threads_archive'), dyn('request_secret')],
