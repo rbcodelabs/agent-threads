@@ -10,7 +10,7 @@
  *
  * Additive-only within `v:1`: receivers ignore fields they do not know.
  */
-import type { ClientCommand } from './commands';
+import type { ClientCommand, SigninEvent } from './commands';
 import type { Checkpoint } from './journal';
 import type { WireEvent } from './sessionEvents';
 
@@ -110,7 +110,10 @@ export interface WelcomeFrame {
   epoch: string;
 }
 
-export type ServerFrame = EventFrame | ResyncFrame | AckFrame | ErrFrame | WelcomeFrame;
+/** A step of the sign-in this connection started (`auth.signin.start`). Not journaled, not replayed, never sent to another connection. */
+export type SigninEventFrame = { v: typeof PROTOCOL_VERSION; type: 'auth.signin.event' } & SigninEvent;
+
+export type ServerFrame = EventFrame | ResyncFrame | AckFrame | ErrFrame | WelcomeFrame | SigninEventFrame;
 
 // ── client -> server ───────────────────────────────────────────────────────
 

@@ -90,8 +90,12 @@ import { MobileView, MOBILE_VIEW_TYPE } from './MobileView';
 import { setDebugLogging, debugLog, getLogRing } from './logger';
 import { DaemonRegistry, warmClient } from './remote/DaemonRegistry';
 import { DaemonClient, daemonWsUrl } from './remote/DaemonClient';
-import { adminTokenSecretNameFor } from './remote/daemonConfig';
-import { RemoteSecretPush } from './remote/secretPush';
+import { adminTokenSecretNameFor, remoteOAuthTokenSecretNameFor } from './remote/daemonConfig';
+import { RemoteSecretPush, assertSecureTransportForPush } from './remote/secretPush';
+import { AUTH_SIGNIN_CAPABILITY } from './protocol/commands';
+import { runRemoteSignIn, type RemoteSignInHandlers } from './remote/remoteSignIn';
+import { manualRemoteSignInHint } from './remote/signInFlow';
+import type { SignInResult } from './claudeAuthCli';
 import { McpSyncEngine, normalizeDaemonMcpSync, wireTransport, type McpSyncTransport } from './remote/mcpSync';
 import { LOCAL_DAEMON_ID } from './localDaemon/spec';
 import {
@@ -693,6 +697,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       daemons: () => this.settings.remoteDaemons ?? [],
       // A separate, optional admin token: `creds.push` needs admin scope, the everyday token is control.
       adminToken: (daemon) => this.app.secretStorage.getSecret(secretStorageKey(adminTokenSecretNameFor(daemon.id))) || undefined,
+      // The Claude token "Sign in to Claude" minted on that daemon: always pushed, to that daemon only.
+      managedClaudeToken: (daemon) => this.app.secretStorage.getSecret(secretStorageKey(remoteOAuthTokenSecretNameFor(daemon.id))) || undefined,
       // What a host session would get: Extra environment variables, then the keychain secrets visible to the project.
       resolveEnv: (projectId) => ({ ...parseExtraEnv(effectiveExtraEnv(this.settings)), ...(this.manager.secretEnvResolver?.(projectId) ?? {}) }),
       createClient: (daemon, adminToken) => this.createAdminDaemonClient(daemon, adminToken),
@@ -2832,6 +2838,45 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // Auto-recovers a wedged daemon; the timer is cleared on unload (the container itself keeps running).
     controller.startWatchdog();
     this.register(() => { controller.stopWatchdog(); });
+  }
+
+  /**
+   * "Sign in to Claude" for a thread on a plain remote daemon: runs `claude setup-token` ON the daemon (admin scope),
+   * stores the minted token in the keychain and leaves delivery to `RemoteSecretPush`, which pushes it as
+   * `CLAUDE_CODE_OAUTH_TOKEN` at the next session start. The token never touches a log or the vault.
+   */
+  async signInToRemoteDaemon(daemonId: string, handlers: RemoteSignInHandlers): Promise<SignInResult> {
+    const daemon = (this.settings.remoteDaemons ?? []).find((d) => d.id === daemonId);
+    if (!daemon) return { ok: false, error: 'This daemon is no longer configured.' };
+    const admin = this.app.secretStorage.getSecret(secretStorageKey(adminTokenSecretNameFor(daemon.id))) || undefined;
+    if (!admin) return { ok: false, error: `Signing in on "${daemon.name}" needs an admin token (agent-threads token create --scope admin). Add it in Settings, Remote daemons, Edit.` };
+    try {
+      // The minted token comes back over this connection and is later pushed over it: never in the clear to another host.
+      assertSecureTransportForPush(daemon.url);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    let client: DaemonClient;
+    try {
+      client = this.createAdminDaemonClient(daemon, admin, { reconnect: false });
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    try {
+      await warmClient(client, 10_000);
+      if (!client.isConnected) return { ok: false, error: `Could not connect to "${daemon.name}"${client.connection.detail ? `: ${client.connection.detail}` : ''}.` };
+      if (!client.daemonInfo?.capabilities.includes(AUTH_SIGNIN_CAPABILITY)) return { ok: false, error: manualRemoteSignInHint(daemon.name, daemon.url) };
+      const result = await runRemoteSignIn(client, handlers);
+      if (!result.ok) return result;
+      try {
+        this.app.secretStorage.setSecret(secretStorageKey(remoteOAuthTokenSecretNameFor(daemon.id)), result.token);
+      } catch (err) {
+        return { ok: false, error: `Signed in, but saving the token failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      return { ok: true };
+    } finally {
+      client.dispose();
+    }
   }
 
   /** A client authenticated with the separate admin token, for the commands the everyday control token cannot send. */

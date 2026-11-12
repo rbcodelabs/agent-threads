@@ -11,7 +11,7 @@
  * silently mis-parsed.
  */
 import { validateSkillManifest, validateSkillWireFiles } from './skills';
-import { CLIENT_COMMAND_TYPES, validateRepoSpecs, validateWireImages, type ClientCommandType } from './commands';
+import { CLIENT_COMMAND_TYPES, MAX_SIGNIN_CODE_CHARS, validateRepoSpecs, validateWireImages, type ClientCommandType } from './commands';
 import { validateManifestServers, validateToolResultPayload } from './hostTools';
 import { validateSyncedMcpShape } from './mcpSync';
 import { validateSpecShape } from './spec';
@@ -137,14 +137,18 @@ const COMMAND_FIELDS: Record<ClientCommandType, FieldSpec> = {
   'skills.put': { upload: 'S', dir: 'S', seq: 'i', files: 'a' },
   'skills.commit': { upload: 'S', dir: 'S', hash: 'S', files: 'i', bytes: 'i' },
   'mcp.sync': { servers: 'o', clear: 'b?', wait: 'b?' },
+  'auth.signin.start': {},
+  'auth.signin.code': { flowId: 'S', code: 'S' },
+  'auth.signin.cancel': { flowId: 's?' },
 };
 
-const SERVER_FIELDS: Record<'event' | 'resync' | 'ack' | 'err' | 'welcome', FieldSpec> = {
+const SERVER_FIELDS: Record<'event' | 'resync' | 'ack' | 'err' | 'welcome' | 'auth.signin.event', FieldSpec> = {
   event: { ch: 'c', seq: 'i', ts: 'n', name: 'S' },
   resync: { ch: 'c', seq: 'i', ts: 'n', checkpoint: 'o' },
   ack: { cmdId: 'S' },
   err: { cmdId: 'S', code: 'S', message: 's' },
   welcome: { cmdId: 'S', protocol: 'i', daemonVersion: 's', minClientVersion: 's', capabilities: 'a', daemonId: 'S', epoch: 'S' },
+  'auth.signin.event': { flowId: 'S', kind: 'S', text: 's?', url: 's?', token: 's?', message: 's?' },
 };
 
 const CHECKPOINT_FIELDS: FieldSpec = { seq: 'i', ts: 'n', inFlightText: 's', openRequests: 'a', recentMessages: 'a' };
@@ -189,6 +193,8 @@ function validateDeep(type: string, obj: Record<string, unknown>): string | null
       return validateSkillWireFiles(obj.files);
     case 'mcp.sync':
       return validateSyncedMcpShape(obj.servers, obj.clear === true);
+    case 'auth.signin.code':
+      return (obj.code as string).length > MAX_SIGNIN_CODE_CHARS ? `code is too long (limit ${MAX_SIGNIN_CODE_CHARS} characters)` : null;
     case 'tool.manifest':
       return validateManifestServers(obj.servers);
     case 'tool.result':

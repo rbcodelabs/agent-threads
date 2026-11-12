@@ -28,6 +28,10 @@ const clientSamples: ClientFrame[] = [
   { v: 1, cmdId: 'c12', type: 'repos.sync', repos: [{ name: 'proj', url: 'https://github.com/o/proj.git', branch: 'main' }], wait: true },
   { v: 1, cmdId: 'c13', type: 'repos.sync' },
   { v: 1, cmdId: 'c14', type: 'repos.status' },
+  { v: 1, cmdId: 'c16', type: 'auth.signin.start' },
+  { v: 1, cmdId: 'c17', type: 'auth.signin.code', flowId: 'f1', code: 'abc#def' },
+  { v: 1, cmdId: 'c18', type: 'auth.signin.cancel' },
+  { v: 1, cmdId: 'c19', type: 'auth.signin.cancel', flowId: 'f1' },
 ];
 
 describe('client frame codec', () => {
@@ -73,11 +77,21 @@ describe('client frame codec', () => {
 
   it('has a validator for every command type (no command is accept-anything)', () => {
     // A frame with only the envelope must be rejected for every command that has required fields.
-    const noFields = new Set(['session.list', 'workspaces.list', 'repos.sync', 'repos.status']);
+    const noFields = new Set(['session.list', 'workspaces.list', 'repos.sync', 'repos.status', 'auth.signin.start', 'auth.signin.cancel']);
     for (const type of Object.keys(CLIENT_COMMAND_TYPES)) {
       const r = decodeClientFrame(JSON.stringify({ v: 1, cmdId: 'x', type }));
       expect(r.ok, type).toBe(noFields.has(type));
     }
+  });
+});
+
+describe('sign-in command validation', () => {
+  it('requires a flow id and a code, and caps the code length', () => {
+    expect(decodeClientFrame(JSON.stringify({ v: 1, cmdId: 'c', type: 'auth.signin.code', flowId: 'f' })).ok).toBe(false);
+    expect(decodeClientFrame(JSON.stringify({ v: 1, cmdId: 'c', type: 'auth.signin.code', flowId: 'f', code: '' })).ok).toBe(false);
+    const long = decodeClientFrame(JSON.stringify({ v: 1, cmdId: 'c', type: 'auth.signin.code', flowId: 'f', code: 'x'.repeat(2000) }));
+    expect(long.ok).toBe(false);
+    if (!long.ok) expect(long.error.message).toContain('too long');
   });
 });
 
@@ -94,6 +108,9 @@ describe('server frame codec', () => {
     { v: 1, ch: 't:abc', seq: checkpoint.seq, ts: 9, type: 'resync', checkpoint },
     { v: 1, type: 'ack', cmdId: 'c1', result: { lastSeq: 3 } },
     { v: 1, type: 'err', cmdId: 'c1', code: 'not_found', message: 'no such thread', retryable: false },
+    { v: 1, type: 'auth.signin.event', kind: 'url', flowId: 'f1', url: 'https://claude.ai/oauth/authorize?x=1' },
+    { v: 1, type: 'auth.signin.event', kind: 'prompt', flowId: 'f1' },
+    { v: 1, type: 'auth.signin.event', kind: 'token', flowId: 'f1', token: 'sk-ant-oat01-x' },
     { v: 1, type: 'welcome', cmdId: 'c0', protocol: 1, daemonVersion: '0.1.0', minClientVersion: '0.62.0', capabilities: ['resume'], daemonId: 'd', epoch: 'e1' },
   ];
 

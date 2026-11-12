@@ -848,6 +848,24 @@ By default no secret leaves your computer for a remote daemon. To send some, ope
 - Removing a name re-sends the kind without it. Emptying the list, removing the daemon or quitting Geode deletes the kind from the daemon.
 - Values are redacted from logs and errors and are never put in command arguments.
 
+## Signing in to Claude on a remote daemon
+
+A daemon that has no Claude login of its own (a fresh box, or a login that expired) cannot be fixed by signing in on your Mac: `claude auth login` there only signs the Mac in. A thread on a plain remote daemon therefore shows a **Sign in to Claude** card that signs in **on the daemon**, the same way the managed local daemon does inside its container.
+
+1. **Sign in** asks the daemon to run `claude setup-token` in a pseudo-terminal (the `auth.signin.start` command, `auth.signin` capability). Your browser opens the Claude page; the page shows a login code.
+2. Paste the code into the card (`auth.signin.code`). The daemon returns the long-lived token it minted over the same connection (an `auth.signin.event` frame, to the connection that started the flow and nobody else).
+3. The app keeps the token in your keychain as `CLAUDE_THREADS_REMOTE_OAUTH_TOKEN_<ID>` and, from then on, sends it to **that daemon only** as `CLAUDE_CODE_OAUTH_TOKEN` inside the `sessenv-<project>` kind (the same `creds.push` channel as "Secrets for your threads", whether or not the *Secrets to send* list is empty; this one name needs no allowlist entry). The daemon reads it when a session starts, so no daemon restart is needed; a pushed token takes precedence over the daemon's own login. **Retry** closes the thread's session on the daemon, opens a new one with the token, and resends your message.
+
+Requirements and behaviour:
+
+- It needs the **admin-scope** token (*Admin token for secrets and skills*) and a `wss://` (or loopback) address, because the minted token travels over that connection and is later pushed over it. Without them the card says what is missing.
+- `expect` (preferred) or util-linux `script` must be installed on the daemon machine to provide the pseudo-terminal (`apt install expect`). Neither is bundled; if both are missing the card says so. macOS daemons use `expect`, which ships with the system.
+- One sign-in runs per daemon at a time, limited to 5 minutes. Cancelling, timing out or closing the connection kills the `claude setup-token` process on the daemon and removes any straggler (Linux).
+- The token is never written to the daemon's disk by this flow, never logged and never in the audit log (`signin_start` / `signin` record only the flow id and the outcome). The daemon's `creds` store holds the pushed copy for the one-hour TTL like any other pushed credential.
+- An older daemon (no `auth.signin` capability) cannot do this. The card then shows an instruction instead: sign in on that machine with `ssh <host> -t claude /login`, then press **Retry**.
+- When a remote daemon has no Claude login at all (no token in its environment, no `~/.claude/.credentials.json` on Linux), the daemon skips the silent "restarting the session" retry, which cannot help, and the sign-in card appears straight away.
+- Removing the daemon from Settings deletes the stored token and the pushed kind.
+
 ## MCP servers synced from the app
 
 Settings, MCP lists a **Runs on** line under each Custom MCP server: This computer, plus a checkbox per remote daemon. Ticking
