@@ -129,6 +129,34 @@ export function classifyClaudeAuthFailure(msg: unknown): string | null {
   }
 }
 
+/**
+ * Does the Claude login on a Linux daemon look absent (no token in the environment, no usable `.credentials.json`)?
+ * A restart-and-retry cannot help then, so the daemon skips the silent retry and goes straight to the sign-in card
+ * instead of showing a "restarting the session" notice that always fails. Conservative: anything unknown (macOS keychain,
+ * a file that will not parse, an API key, Bedrock/Vertex) answers false and keeps the retry.
+ */
+export function claudeCredentialsLookBlank(input: {
+  env: Readonly<Record<string, string | undefined>>;
+  platform: string;
+  home: string;
+  /** Contents of the file, or undefined when it does not exist / cannot be read. */
+  readFile: (path: string) => string | undefined;
+}): boolean {
+  const { env } = input;
+  if (input.platform === 'darwin') return false;
+  if (env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_USE_BEDROCK || env.CLAUDE_CODE_USE_VERTEX) return false;
+  const dir = env.CLAUDE_CONFIG_DIR || `${env.HOME || input.home}/.claude`;
+  const text = input.readFile(`${dir}/.credentials.json`);
+  if (text === undefined || text.trim() === '') return true;
+  try {
+    const parsed = JSON.parse(text) as { claudeAiOauth?: { accessToken?: unknown; refreshToken?: unknown } } | null;
+    const oauth = parsed?.claudeAiOauth;
+    return !(oauth && typeof oauth === 'object' && (typeof oauth.accessToken === 'string' || typeof oauth.refreshToken === 'string') && (oauth.accessToken || oauth.refreshToken));
+  } catch {
+    return false;
+  }
+}
+
 /** Parses `claude auth status` (JSON by default) — true only for `loggedIn: true`. */
 export function parseClaudeAuthStatus(stdout: string): boolean {
   try {

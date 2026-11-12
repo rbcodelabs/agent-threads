@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   CLAUDE_SIGN_IN_EXPIRED_MESSAGE,
   MAX_AUTH_AUTO_RETRIES,
+  claudeCredentialsLookBlank,
   classifyClaudeAuthFailure,
   isClaudeAuthErrorText,
   isClaudeSignInExpiredError,
@@ -141,6 +142,32 @@ describe('claudeAuthRecovery', () => {
       expect(parseClaudeAuthStatus('')).toBe(false);
       expect(parseClaudeAuthStatus('Logged in')).toBe(false);
       expect(parseClaudeAuthStatus('{"loggedIn": "yes"}')).toBe(false);
+    });
+  });
+
+  describe('claudeCredentialsLookBlank (daemon with no Claude login: skip the pointless restart-and-retry)', () => {
+    const base = { env: {} as Record<string, string | undefined>, platform: 'linux', home: '/home/u' };
+    const files = (map: Record<string, string>) => (p: string) => map[p];
+    it('blank when the credentials file is missing, empty or has no oauth block', () => {
+      expect(claudeCredentialsLookBlank({ ...base, readFile: files({}) })).toBe(true);
+      expect(claudeCredentialsLookBlank({ ...base, readFile: files({ '/home/u/.claude/.credentials.json': '  ' }) })).toBe(true);
+      expect(claudeCredentialsLookBlank({ ...base, readFile: files({ '/home/u/.claude/.credentials.json': '{}' }) })).toBe(true);
+      expect(claudeCredentialsLookBlank({ ...base, readFile: files({ '/home/u/.claude/.credentials.json': '{"claudeAiOauth":{"accessToken":""}}' }) })).toBe(true);
+    });
+    it('not blank with a stored login, honouring CLAUDE_CONFIG_DIR and HOME', () => {
+      const login = '{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}';
+      expect(claudeCredentialsLookBlank({ ...base, readFile: files({ '/home/u/.claude/.credentials.json': login }) })).toBe(false);
+      expect(claudeCredentialsLookBlank({ ...base, env: { CLAUDE_CONFIG_DIR: '/cfg' }, readFile: files({ '/cfg/.credentials.json': login }) })).toBe(false);
+      expect(claudeCredentialsLookBlank({ ...base, env: { HOME: '/srv/u' }, readFile: files({ '/srv/u/.claude/.credentials.json': login }) })).toBe(false);
+    });
+    it('not blank with a token or key in the environment (including a pushed CLAUDE_CODE_OAUTH_TOKEN)', () => {
+      for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK']) {
+        expect(claudeCredentialsLookBlank({ ...base, env: { [k]: 'x' }, readFile: files({}) })).toBe(false);
+      }
+    });
+    it('unknown cases keep the retry: macOS (keychain) and an unparseable file', () => {
+      expect(claudeCredentialsLookBlank({ ...base, platform: 'darwin', readFile: files({}) })).toBe(false);
+      expect(claudeCredentialsLookBlank({ ...base, readFile: files({ '/home/u/.claude/.credentials.json': '{not json' }) })).toBe(false);
     });
   });
 });
