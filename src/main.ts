@@ -14,6 +14,8 @@ import { MessageContentProviderRegistry } from './MessageContent';
 import { createLegacyDesignArtifactContribution } from './legacyDesignArtifactProvider';
 import { createArtifactStore } from './artifactStore';
 import { AgentToolRegistry, type AgentToolHost } from './AgentToolContributions';
+import { HelpProviderRegistry } from './help/HelpRegistry';
+import { registerAgentThreadsDocs } from './help/bundledDocs';
 import { SlashCommandRegistry } from './SlashCommandContributions';
 import { THREAD_BUILTIN_COMMANDS, DISPATCH_BUILTIN_COMMANDS, escalationCommand } from './slashCommands';
 export { createClaudeThreadsApiV1 } from './PublicApi';
@@ -417,6 +419,21 @@ export default class ClaudeThreadsPlugin extends Plugin {
    * initialisation would run before `this.app` is usable.
    */
   readonly agentTools = new AgentToolRegistry({ reservedNames: () => this.reservedAgentToolNames() });
+  /**
+   * Providers behind the `agent_threads_help` tool. Peers write into it only through `extensions.registerHelpProvider`;
+   * the built-in `agent-threads.docs` provider is registered in onload. A peer's `docRoots` may only point into its
+   * own plugin directory or the vault.
+   */
+  readonly helpProviders = new HelpProviderRegistry({
+    host: () => detectHostName(window as unknown as { geode?: unknown }) === 'Geode' ? 'geode' : 'obsidian',
+    allowedRootBases: (owner) => {
+      const root = this.manager?.vaultRoot;
+      if (!root) return [];
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const pathNode = require('path') as typeof import('path');
+      return [root, pathNode.join(root, this.app.vault.configDir, 'plugins', owner.pluginId)];
+    },
+  });
   readonly slashCommands = new SlashCommandRegistry({ reservedNames: () => [
     ...THREAD_BUILTIN_COMMANDS.map(command => command.name),
     ...DISPATCH_BUILTIN_COMMANDS.map(command => command.name),
@@ -747,6 +764,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     );
     this.register(() => deferredThreadArchiver.dispose());
     this.manager.hostName = detectHostName(window as unknown as { geode?: unknown });
+    this.register(registerAgentThreadsDocs(this.helpProviders).dispose);
     // One callback instance means one transaction queue across every per-thread
     // MCP server. Project updates from separate threads cannot overlap saves or
     // rollbacks against the shared manager state.
@@ -791,6 +809,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
           // live session is deliberately not attempted: the agent's tool
           // catalog is already fixed for the turn in flight.
           contributedTools: this.agentTools.bindAll(threadId, this.agentToolHost(threadId)),
+          helpProviders: this.helpProviders,
+          harness: (h => h === 'claude' || h === 'codex' ? h : undefined)(this.manager.getThread(threadId)?.agentHarness),
           onWatchDocument: path => this.watchDocument(threadId, path),
           onUnwatchDocument: opts => this.unwatchDocument(threadId, opts),
           onListWatchedDocuments: () => this.listWatchedDocuments(threadId),
@@ -3268,6 +3288,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       artifactProviders: this.artifactProviders,
       messageContentProviders: this.messageContentProviders,
       agentTools: this.agentTools,
+      helpProviders: this.helpProviders,
       slashCommands: this.slashCommands,
       getDefaultPermissionMode: () => this.settings.permissionMode,
       artifactStore: createArtifactStore({

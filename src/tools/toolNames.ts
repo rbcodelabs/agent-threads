@@ -10,7 +10,7 @@
  */
 
 export type ToolDomain =
-  | 'worktree' | 'vault' | 'workspace' | 'threads' | 'schedule' | 'skills' | 'misc' | 'exec' | 'browser';
+  | 'worktree' | 'vault' | 'workspace' | 'threads' | 'schedule' | 'skills' | 'misc' | 'exec' | 'browser' | 'help';
 
 export const LEGACY_TO_CANONICAL_TOOL_NAMES: Readonly<Record<string, string>> = Object.freeze({
   obsidian_search_vault: 'vault_search',
@@ -83,6 +83,8 @@ export const TOOL_NAMES_BY_DOMAIN: Readonly<Record<ToolDomain, readonly string[]
   /** Runs a command on the user's computer after a per-call approval card; offered only to the managed local daemon. */
   exec: ['host_exec'],
   browser: BROWSER_TOOL_NAMES,
+  /** Read-only documentation lookup (src/help/). Canonical-only: no legacy `obsidian_` alias. On by default for remote sessions. */
+  help: ['agent_threads_help'],
 });
 
 /**
@@ -106,7 +108,7 @@ export const BUILT_IN_TOOL_ORDER: readonly string[] = Object.freeze([
   'sync_inspect_conflict', 'sync_resolve_conflict', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',
   'request_secret', 'mcp_register_server', 'skills_list_installed', 'skills_search', 'skills_get',
   'skills_list_sources', 'skills_check_updates', 'skills_install', 'skills_create_local', 'skills_update_local',
-  'skills_uninstall', 'skills_update',
+  'skills_uninstall', 'skills_update', 'agent_threads_help',
 ]);
 
 /** The canonical name of a tool (identity when it has no legacy alias). */

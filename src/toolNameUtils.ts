@@ -170,7 +170,7 @@ const LEGACY_BUILT_IN_TOOLS = new Set([
 const CANONICAL_BUILT_IN_TOOLS = new Set([
   'vault_search', 'vault_list', 'vault_get_note_metadata', 'vault_get_backlinks', 'vault_get_outgoing_links',
   'vault_get_file_history', 'vault_restore_file_version', 'vault_list_bridges', 'vault_add_bridge',
-  'sync_list_conflicts', 'sync_inspect_conflict',
+  'sync_list_conflicts', 'sync_inspect_conflict', 'agent_threads_help',
   'workspace_get_active_file', 'workspace_get_open_tabs', 'workspace_navigate_to_file',
   'workspace_insert_at_cursor', 'host_list_commands', 'host_execute_command', 'host_open_url',
   'threads_get_current', 'threads_list', 'threads_create', 'threads_list_projects', 'threads_create_project', 'threads_update_project',

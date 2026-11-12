@@ -1,5 +1,7 @@
 import type { AgentHarness } from './types';
 import type { ChatMessage, StorageAllocationOptions, StorageAllocationResult, Thread, ThreadArtifactRecord, ThreadPermissionSnapshot, ThreadStatus } from './types';
+import type { HelpProviderContribution, HelpProviderRegistrationResult } from './help/types';
+import type { HelpProviderRegistry } from './help/HelpRegistry';
 import type { AgentToolContribution, AgentToolRegistrationResult, AgentToolRegistry } from './AgentToolContributions';
 import type { SlashCommandContribution, SlashCommandRegistrationResult, SlashCommandRegistry } from './SlashCommandContributions';
 export type { SlashCommandContribution, SlashCommandRegistrationResult, SlashCommandContext, SlashCommandHost, SlashCommandResult, SlashCommandScope } from './SlashCommandContributions';
@@ -15,6 +17,7 @@ import type { MessageContentContribution, MessageContentProviderRegistry, Messag
 export type { MessageContentJson, MessageContentRef, MessageContentContext, MessageContentPresentation, MessageContentActionHost, MessageContentContribution, MessageContentRegistrationResult } from './MessageContent';
 
 export type { ArtifactAction, ArtifactActionHost, ArtifactActionResult, ArtifactAttachResult, ArtifactContribution, ArtifactMutationResult, ArtifactPatch, ArtifactPresentation, ArtifactRegistrationResult, ArtifactStoreHost, ArtifactViewPlacement, PeerIdentity, ThreadArtifactRef } from './ArtifactContributions';
+export type { HelpDoc, HelpHit, HelpProviderContribution, HelpProviderRegistrationResult, HelpQuery, HelpTopic } from './help/types';
 export type { AgentToolContribution, AgentToolHost, AgentToolRegistrationResult, AgentToolResult } from './AgentToolContributions';
 export type { StorageAllocationOptions, StorageAllocationResult, ThreadPermissionSnapshot } from './types';
 
@@ -197,6 +200,8 @@ export interface ClaudeThreadsApiV1 {
      * peers' tools, so a contribution can never shadow `Read` or `Bash`.
      */
     registerAgentTool(owner: PeerIdentity, contribution: AgentToolContribution): AgentToolRegistrationResult;
+    /** Contributes searchable reference docs to the `agent_threads_help` tool (capability `extensions.registerHelpProvider`). */
+    registerHelpProvider(owner: PeerIdentity, contribution: HelpProviderContribution): HelpProviderRegistrationResult;
     registerSlashCommand(owner: PeerIdentity, contribution: SlashCommandContribution): SlashCommandRegistrationResult;
   };
   /** Formats a bounded, durable inline content reference for an assistant message. */
@@ -281,6 +286,7 @@ export interface PublicApiDependencies {
    * peer contributes through it without ever seeing the factory.
    */
   agentTools?: AgentToolRegistry;
+  helpProviders?: HelpProviderRegistry;
   slashCommands?: SlashCommandRegistry;
   /** Default permission mode, for resolving a thread with no override. */
   getDefaultPermissionMode?(): Thread['permissionMode'];
@@ -314,6 +320,7 @@ function computeCapabilities(deps: PublicApiDependencies): readonly string[] {
   capabilities.push('messageContent.formatReference');
   if (deps.messageContentProviders) capabilities.push('extensions.registerMessageContentProvider');
   if (deps.agentTools) capabilities.push('extensions.registerAgentTool');
+  if (deps.helpProviders) capabilities.push('extensions.registerHelpProvider', 'help.docRoots');
   if (deps.slashCommands) capabilities.push('extensions.registerSlashCommand');
   if (deps.getDefaultPermissionMode) capabilities.push('threads.permissions');
   if (deps.artifactStore && deps.artifactProviders) capabilities.push('artifacts.list', 'artifacts.attach', 'artifacts.update', 'artifacts.detach', 'artifacts.invokeAction', 'artifacts.allocateStorage', 'artifacts.visibleStorage');
@@ -891,6 +898,21 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     });
   };
 
+  const helpProviderRegistrations = new Set<{ dispose: () => void }>();
+  const registerHelpProvider = (owner: PeerIdentity, contribution: HelpProviderContribution): HelpProviderRegistrationResult => {
+    guard();
+    const registry = deps.helpProviders;
+    if (!registry) {
+      return freeze({ success: false as const, status: 'unavailable' as const, providerId: String(contribution?.providerId ?? ''), message: 'Help providers are unavailable in this host context.', dispose: () => {} });
+    }
+    const result = registry.register(owner, contribution);
+    if (!result.success) return freeze(result);
+    // Tracked so stop() drops it with the peer's other contributions: a reloaded peer never leaves a stale provider.
+    const tracked = { dispose: result.dispose };
+    helpProviderRegistrations.add(tracked);
+    return freeze({ ...result, dispose: () => { helpProviderRegistrations.delete(tracked); result.dispose(); } });
+  };
+
   const slashCommandRegistrations = new Set<{ dispose: () => void }>();
   const registerSlashCommand = (owner: PeerIdentity, contribution: SlashCommandContribution): SlashCommandRegistrationResult => {
     guard();
@@ -1187,12 +1209,12 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       return freeze({ tools, execute: executeTool });
     } },
     mcp: { register: registerMcp, listPresets: listMcpPresets, registerPreset: registerMcpPreset, requestSecret: requestSecretMcp },
-    extensions: { registerArtifactProvider, registerAgentTool, registerSlashCommand, registerMessageContentProvider, registerSkill },
+    extensions: { registerArtifactProvider, registerAgentTool, registerHelpProvider, registerSlashCommand, registerMessageContentProvider, registerSkill },
     messageContent: { formatReference: (ref: MessageContentRef) => { guard(); try { return formatMessageContentReference(ref); } catch { throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'Invalid message content reference.'); } } },
     artifacts: { list: listArtifacts, attach: attachArtifact, update: updateArtifact, detach: detachArtifact, invokeAction: invokeArtifactAction, allocateStorage: allocateArtifactStorage },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
-    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); for (const registration of [...skillRegistrations]) registration.dispose(); skillRegistrations.clear(); listeners.clear(); traceListeners.clear(); for (const state of [...provisionalThreads.values()]) { const cleanup = state.operation.catch(() => undefined).then(async () => { if (state.status !== 'pending') return; await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root))); forgetAllocations(state.threadId); await state.host.rollback(); state.status = 'rolled-back'; provisionalThreads.delete(state.threadId); }); state.operation = cleanup; void cleanup.catch(error => console.error('[ClaudeThreads] Provisional rollback failed during API stop:', error)); } for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
+    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); for (const registration of [...skillRegistrations]) registration.dispose(); skillRegistrations.clear(); listeners.clear(); traceListeners.clear(); for (const state of [...provisionalThreads.values()]) { const cleanup = state.operation.catch(() => undefined).then(async () => { if (state.status !== 'pending') return; await Promise.allSettled([...state.allocatedRoots].map(root => deps.artifactStore?.releaseStorageRoot(root))); forgetAllocations(state.threadId); await state.host.rollback(); state.status = 'rolled-back'; provisionalThreads.delete(state.threadId); }); state.operation = cleanup; void cleanup.catch(error => console.error('[ClaudeThreads] Provisional rollback failed during API stop:', error)); } for (const registration of [...artifactRegistrations]) registration.dispose(); artifactRegistrations.clear(); for (const registration of [...agentToolRegistrations]) registration.dispose(); agentToolRegistrations.clear(); for (const registration of [...helpProviderRegistrations]) registration.dispose(); helpProviderRegistrations.clear(); for (const registration of [...slashCommandRegistrations]) registration.dispose(); slashCommandRegistrations.clear(); for (const [runId, controller] of constrainedControllers) { controller.abort(); void settleConstrained(runId, freeze({ status: 'failed', runId, error: publicFailure('PLUGIN_UNAVAILABLE') })); } for (const record of runs.values()) if (!record.result) void settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
 }
 
 function toolTimeout(args: Record<string, unknown>): number { return Math.min(Math.max(10, Number(args.timeout_secs) || 120), 300) * 1_000; }

@@ -79,7 +79,8 @@ const ALL_GROUPS = { vault: 'host', workspace: 'host', threads: 'host', skills: 
 describe('toolRouting routes', () => {
   it('runs the worktree tools on the daemon and offers nothing else by default', () => {
     for (const t of ['enter_worktree', 'exit_worktree', 'set_working_directory']) expect(routeFor(t)).toBe('local');
-    expect(toolsRouted('host')).toEqual([]);
+    // The one default-on tool: read-only documentation lookup (agent_threads_help).
+    expect(toolsRouted('host')).toEqual(['agent_threads_help']);
     for (const t of ['vault_search', 'obsidian_search_vault', 'workspace_get_open_tabs', 'host_open_url', 'threads_list', 'CronCreate',
       'ScheduleWakeup', 'skills_search', 'browser_navigate', 'request_secret', 'mcp_register_server', 'watch_document', 'threads_get_log']) {
       expect(routeFor(t), t).toBe('absent');
@@ -103,8 +104,19 @@ describe('toolRouting routes', () => {
     expect(routeFor('enter_worktree', { worktree: 'absent' })).toBe('local');
   });
 
+  it('agent_threads_help is host by default and can be switched off by tool or domain', () => {
+    expect(domainOf('agent_threads_help')).toBe('help');
+    expect(DEFAULT_DOMAIN_ROUTES.help).toBe('host');
+    expect(routeFor('agent_threads_help')).toBe('host');
+    expect(routeFor('agent_threads_help', { vault: 'host' })).toBe('host');
+    expect(routeFor('agent_threads_help', { help: 'absent' })).toBe('absent');
+    expect(routeFor('agent_threads_help', { agent_threads_help: 'absent' })).toBe('absent');
+    expect(routeFor('agent_threads_help', { help: 'absent', agent_threads_help: 'host' })).toBe('host');
+  });
+
   it('pins the exact read-only tool set every group can ever offer', () => {
     expect(toolsRouted('host', ALL_GROUPS).sort()).toEqual([
+      'agent_threads_help',
       'browser_click', 'browser_close', 'browser_console', 'browser_navigate', 'browser_network', 'browser_read_text', 'browser_resize',
       'browser_screenshot', 'browser_scroll', 'browser_snapshot', 'browser_status', 'browser_type',
       'list_watched_documents',
@@ -134,7 +146,7 @@ describe('toolRouting routes', () => {
     expect(routeFor('host_exec', { host_exec: 'host' })).toBe('host');
     expect(routeFor('host_exec', { vault: 'host', misc: 'host', threads: 'host' })).toBe('absent');
     expect(routeFor('host_exec', { exec: 'host', host_exec: 'absent' })).toBe('absent');
-    expect(toolsRouted('host', { exec: 'host' })).toEqual(['host_exec']);
+    expect(toolsRouted('host', { exec: 'host' }).sort()).toEqual(['agent_threads_help', 'host_exec']);
   });
 
   it('cannot turn on what has no backing on the daemon (the GitHub connection)', () => {

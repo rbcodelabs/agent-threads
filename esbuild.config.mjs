@@ -11,6 +11,13 @@ const outdir = path.join(__dirname, 'dist');
 
 if (!fs.existsSync(outdir)) fs.mkdirSync(outdir, { recursive: true });
 
+// Help docs shipped inside main.js (read by the `agent_threads_help` tool's built-in provider): README.md and the
+// top-level docs/*.md. No subfolders (adr/, qa/, mockups/) and no images.
+const helpDocs = {};
+for (const rel of ['README.md', ...fs.readdirSync(path.join(__dirname, 'docs')).filter((f) => f.endsWith('.md')).sort().map((f) => `docs/${f}`)]) {
+  helpDocs[rel] = fs.readFileSync(path.join(__dirname, rel), 'utf8');
+}
+
 const ctx = await esbuild.context({
   entryPoints: ['src/main.ts'],
   bundle: true,
@@ -80,6 +87,7 @@ const ctx = await esbuild.context({
   },
   define: {
     'import.meta.url': '__importMetaUrl',
+    __AGENT_THREADS_HELP_DOCS__: JSON.stringify(helpDocs),
   },
 });
 

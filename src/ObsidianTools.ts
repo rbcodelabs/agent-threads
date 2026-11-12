@@ -20,6 +20,7 @@ import { createMiscTools } from './tools/misc';
 import { createScheduleTools } from './tools/schedule';
 import { createSkillsTools } from './tools/skills';
 import { createThreadTools } from './tools/threads';
+import { createHelpTools } from './tools/help';
 import { createVaultTools } from './tools/vault';
 import { createWorkspaceTools } from './tools/workspace';
 import { createWorktreeTools } from './tools/worktree';
@@ -163,6 +164,13 @@ export interface ObsidianMcpServerOptions {
    * which is what lets a peer contribute a tool without reaching the factory.
    */
   contributedTools?: readonly import('./AgentToolContributions').BoundAgentTool[];
+  /**
+   * Registry behind the read-only `agent_threads_help` tool. Providers are resolved on every call (not frozen at
+   * session construction). Omitted: the tool is not offered.
+   */
+  helpProviders?: import('./help/HelpRegistry').HelpProviderRegistry;
+  /** The calling thread's harness, passed to help providers as a query hint. */
+  harness?: 'claude' | 'codex';
   onRegisterMcpServer?: (input: unknown) => Promise<McpRegistrationResult>;
   /** Route agent-triggered file navigation through the host's contextual panel policy. */
   openContextualFile?: (file: TFile, newLeaf: boolean) => Promise<boolean>;
@@ -426,6 +434,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
     ...createThreadTools({ options }),
     ...createSkillsTools({ options }),
     ...createMiscTools({ app, cwd, options }),
+    ...createHelpTools({ options }),
   };
 
   const tools: SdkMcpToolDefinition<any>[] = [];
@@ -646,7 +655,7 @@ export function toHarnessDynamicTools(
     'obsidian_list_projects', 'obsidian_get_thread_messages', 'obsidian_get_thread_log',
     'obsidian_list_vault_bridges', 'obsidian_get_file_history', 'CronList', 'vault_list',
     'skills_list_installed', 'skills_search', 'skills_get', 'skills_list_sources',
-    'skills_check_updates', 'github_list_access', 'github_check_repo',
+    'skills_check_updates', 'github_list_access', 'github_check_repo', 'agent_threads_help',
   ];
   const readOnlyToolNames = new Set([
     ...legacyReadOnlyToolNames,
