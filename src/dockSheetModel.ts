@@ -8,6 +8,8 @@
  * text for an unread reply. No `obsidian` import (guarded by orchestrator-dock-purity.test.ts).
  */
 import { dockTranscript, splitThreadLinks, type ThreadRef } from './orchestratorDockModel';
+import { mergeAdjacentToolOnlyMessages } from './toolNameUtils';
+import type { ChatMessage } from './types';
 import { TRAY_COLLAPSE_AT } from './dockTrayModel';
 
 export interface SheetSourceMessage {
@@ -54,7 +56,11 @@ const hasRich = (r: Richness): boolean => r.images || r.visualize || r.tools > 0
 /** What the sheet cannot draw even now: only an inline visual / contributed content reference needs the full thread. */
 export function needsFullThread(r: Richness): boolean { return r.visualize; }
 
-/** The sheet draws at most this many of the latest messages; an "Open full thread" row stands in for the rest. */
+/**
+ * The sheet draws at most this many of the latest ROWS (after the adjacent-tool merge); an "Open full thread" row stands in
+ * for the rest. The cap is sheet chrome, not a rendering difference: the sheet is a small container that re-renders on
+ * every event, and the full thread is one click away. Kept deliberately when the sheet became identical to the main panel.
+ */
 export const SHEET_MAX_MESSAGES = 50;
 
 export function capTranscript<T>(entries: readonly T[], max: number = SHEET_MAX_MESSAGES): { entries: T[]; older: number } {
@@ -63,12 +69,16 @@ export function capTranscript<T>(entries: readonly T[], max: number = SHEET_MAX_
 
 /**
  * The sheet transcript, re-derived from the thread's messages on every call (never an append-only
- * log: interrupt() rolls user messages back with no per-message event). Text entries come from
+ * log: interrupt() rolls user messages back with no per-message event). Adjacent tool-only assistant messages are first
+ * merged into single rows exactly as the main panel does (mergeAdjacentToolOnlyMessages), so the tool-call grouping
+ * matches and the cap below counts the rows that are actually drawn. Text entries come from
  * `dockTranscript`; a user/assistant message with NO text but rich content (an image-only reply, a bare tool-call
  * turn, a bare visualize marker) is kept so it is never silently hidden. Notices (failed / finished background
  * tasks) and compaction dividers are kept in place: a thread's error row must not vanish from the dock.
  */
-export function sheetTranscript(messages: readonly SheetSourceMessage[]): SheetEntry[] {
+export function sheetTranscript(source: readonly SheetSourceMessage[]): SheetEntry[] {
+  // Structural cast: the merge reads role, content, toolCalls, toolResultImages, id, timestamp and cost, all of which a real ChatMessage has.
+  const messages = mergeAdjacentToolOnlyMessages(source as unknown as ChatMessage[]) as unknown as SheetSourceMessage[];
   const withText = new Set(dockTranscript(messages).map((e) => e.id));
   const out: SheetEntry[] = [];
   for (const m of messages) {

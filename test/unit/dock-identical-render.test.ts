@@ -168,6 +168,7 @@ function openDock(messages: ChatMessage[], extra: Partial<OrchestratorDockDeps> 
     daemons: null,
     messageHost: {
       vaultHas: (p) => FIXTURE_VAULT_FILES.includes(p),
+      openExternal: () => {},
       bridges: () => [bridge()],
       formatTime: (t) => `t${t}`,
       toolPathContext: () => ({ vaultRoot: FIXTURE_VAULT_ROOT }),
@@ -282,12 +283,13 @@ describe('dock-only chrome on top of the identical rows', () => {
   it('the 50-message cap counts rows AFTER the adjacent-tool merge', async () => {
     // 60 tool-only steps merge into ONE row, so 49 text messages + 1 merged row = 50 rows: nothing is hidden.
     const messages: ChatMessage[] = [];
-    for (let i = 0; i < 25; i++) messages.push(ask(`q${i}`, `q ${i}`), say(`r${i}`, `r ${i}`));
+    for (let i = 0; i < 24; i++) messages.push(ask(`q${i}`, `q ${i}`), say(`r${i}`, `r ${i}`));
+    messages.push(ask('q-last', 'one more'));
     for (let i = 0; i < 60; i++) messages.push(say(`s${i}`, '', { toolCalls: [tool('Read', `Read: /f${i}.md`)] }));
     const dock = openDock(messages);
     await flush();
     expect(dock.log().querySelector('.ct-orch-older')).toBeNull();
-    expect(dock.log().querySelectorAll(':scope > .ct-message')).toHaveLength(51);
+    expect(dock.log().querySelectorAll(':scope > .ct-message')).toHaveLength(50);
   });
 
   it('past 50 rows it shows the LAST 50 and an "Open full thread" row first', async () => {

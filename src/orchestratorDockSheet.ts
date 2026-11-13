@@ -6,11 +6,18 @@
  * suggestion chips and the throttled screen-reader region. It knows nothing about the
  * manager: OrchestratorDock builds a `SheetView` and calls `render`.
  *
- * Every model-controlled string (message text while streaming, queued text, activity,
- * link labels) is written with textContent; assistant markdown (settled and streaming) goes through the shared renderer with the strict link policy.
+ * Messages render IDENTICALLY to the main panel: the sheet's rows are the shared renderer's `.ct-message` rows (density
+ * 'full', trusted link policy, the same tool-call renderer, the same merge of adjacent tool-only messages), inside a log
+ * that carries the main panel's tool-call style class. Only the container and the chrome around it are the sheet's:
+ * the streaming bubble's position, the activity line, suggestion chips, "Waiting to send", the "Open full thread" chip,
+ * the pickup label, the unread peek, the scroll pin and the link-hover highlight. Model-controlled text that is not
+ * markdown (queued text, activity, the stopped partial) is written with textContent.
  */
 import { setIcon } from 'obsidian';
 import { renderMarkdown, renderMessage } from './messageRenderer';
+import { applyToolCallStyleClass } from './toolCallDom';
+import { rewriteThreadLinks, threadIdOfHref } from './orchestratorDockModel';
+import type { DockMessageEnv } from './dockMessageEnv';
 import type { ChatMessage } from './types';
 import { applyTrayMode } from './orchestratorDockTray';
 import { SHEET_MAX_MESSAGES, needsFullThread, sheetFit, trayLayout, type SheetEntry } from './dockSheetModel';
@@ -44,12 +51,10 @@ export interface SheetView {
 export interface SheetHandlers {
   close(): void;
   openFull(): void;
-  openThread(threadId: string): void;
-  openLink?(href: string): void;
   /** Source for an attached / tool-result image (a vault resource URL or a data URL). Absent: a data URL. */
   imageSrc?(ref: { path?: string; mediaType: string }, inlineData: string | undefined): string;
-  /** False: a `[[note]]` renders as inert text (unresolved, or the host cannot open links). */
-  resolveLink?(href: string): boolean;
+  /** The shared renderer's host, tool-call renderer, clock and tool-call style (dockMessageEnv). */
+  messages: DockMessageEnv;
   removeWaiting(index: number, text: string): void;
   pickChip(chip: SuggestionChip): void;
   /** Pointer hover or keyboard focus entered a `[[thread:...]]` link: the host highlights that thread's card. */
@@ -79,7 +84,7 @@ function messageKey(entry: SheetRow): string {
   const msg = entry.message as Partial<ChatMessage>;
   const tools = (msg.toolCalls ?? []).map((t) => `${t.name}:${t.status ?? ''}:${t.summary ?? ''}`).join(',');
   const images = `${msg.images?.length ?? 0}/${msg.toolResultImages?.length ?? 0}`;
-  return `${tools}|${images}|${msg.noticeStatus ?? ''}|${msg.compactTrigger ?? ''}|${msg.preTokens ?? ''}|${needsFullThread(entry.rich) ? 1 : 0}`;
+  return `${tools}|${images}|${msg.cost ?? ''}|${msg.noticeStatus ?? ''}|${msg.compactTrigger ?? ''}|${msg.preTokens ?? ''}|${needsFullThread(entry.rich) ? 1 : 0}`;
 }
 
 const defaultImageSrc = (ref: { mediaType: string }, inline: string | undefined): string => `data:${ref.mediaType};base64,${inline ?? ''}`;
@@ -145,7 +150,7 @@ export class DockSheet {
   private readonly inerted = new Set<Element>();
   /** Content signatures: a section is rebuilt only when what it shows changed (focus + clicks survive refreshes). */
   private sig = { empty: '', notice: '', waiting: '' };
-  /** The thread-link anchor currently hovered / focused (its card is highlighted on the board). */
+  /** The thread-link anchor (`a.internal-link[data-href^="thread:"]`) currently hovered / focused (its card is highlighted on the board). */
   private hoverEl: HTMLElement | null = null;
 
   constructor(parent: HTMLElement, private readonly h: SheetHandlers) {
@@ -494,6 +499,8 @@ export class DockSheet {
     this.composerSlot.hidden = view.mode !== 'orb';
     this.orbEl.classList.toggle('ct-orch-orb-spinning', view.running);
     if (this.summaryEl.textContent !== view.summary) this.summaryEl.textContent = view.summary;
+    // The main panel carries `ct-tools-<style>` on its root; the tool-call CSS is scoped to it, so the log carries it too.
+    applyToolCallStyleClass(this.logEl, this.h.messages.toolCallStyle());
     this.reconcileRows(view);
     this.renderStreaming(view.streaming);
     this.renderStopped(view.stopped);
@@ -588,6 +595,7 @@ export class DockSheet {
     this.announceTimer = null;
     this.setModal(false);
     this.leaveLink();
+    this.h.messages.dispose();
     this.el.remove();
     this.rows.clear();
   }
@@ -596,11 +604,10 @@ export class DockSheet {
 
   private reconcileRows(view: SheetView): void {
     const seen = new Set<string>();
-    const resolvedLinks = new Map<string, boolean>();
     const offset = this.syncOlder(view.older);
     view.entries.forEach((entry, i) => {
       seen.add(entry.id);
-      const key = `${entry.role}|${entry.text}|${messageKey(entry)}|${entry.role === 'assistant' ? this.linkSignature(entry.text, view.threads, resolvedLinks) : ''}`;
+      const key = `${entry.role}|${entry.text}|${messageKey(entry)}|${entry.role === 'assistant' ? this.linkSignature(entry.text, view.threads) : ''}`;
       let st = this.rows.get(entry.id);
       if (!st || st.key !== key) {
         st?.row.remove();
@@ -621,22 +628,15 @@ export class DockSheet {
   }
 
   /**
-   * What link rendering depends on besides the text: whether each `[[note]]` currently resolves and the titles of
-   * threads referenced by title-only `[[thread:...]]` links. A note created later or a renamed thread then re-renders the row.
+   * What link rendering depends on besides the text: the titles of threads referenced by title-only `[[thread:...]]`
+   * links (a renamed thread re-renders the row). Notes are resolved when clicked (dockLinkOpener), never at render.
    */
-  private linkSignature(text: string, threads: ThreadRef[], resolved: Map<string, boolean>): string {
-    if (!text.includes('[[')) return '';
+  private linkSignature(text: string, threads: ThreadRef[]): string {
+    if (!text.includes('[[thread:')) return '';
     const parts: string[] = [];
-    for (const m of text.matchAll(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)) {
-      const target = m[1].trim();
-      if (target.startsWith('thread:')) {
-        const ref = target.slice('thread:'.length).trim();
-        parts.push(`${ref}=${threads.find((t) => t.id === ref)?.title ?? threads.filter((t) => t.title === ref).length}`);
-      } else {
-        // One resolver call per distinct target per render, however many rows mention it.
-        if (!resolved.has(target) && this.h.resolveLink) resolved.set(target, this.h.resolveLink(target));
-        parts.push(`${target}=${this.h.resolveLink ? (resolved.get(target) ? 1 : 0) : 'x'}`);
-      }
+    for (const m of text.matchAll(/\[\[thread:([^\]|\n]+)(?:\\?\|[^\]\n]*)?\]\]/g)) {
+      const ref = m[1].trim();
+      parts.push(`${ref}=${threads.find((t) => t.id === ref)?.title ?? threads.filter((t) => t.title === ref).length}`);
     }
     return parts.join(';');
   }
@@ -655,23 +655,21 @@ export class DockSheet {
   }
 
   private buildRow(entry: SheetRow, key: string, threads: ThreadRef[]): RowState {
-    // The shared item renderer draws the row (compact density, strict link policy); inline-visual lines were stripped from the text.
+    // The shared item renderer draws the main panel's row. Inline-visual lines were stripped from the text; assistant text
+    // gets its `[[thread:...]]` markers resolved against the board's threads first (see dockMessageEnv).
+    const env = this.h.messages;
     const source = entry.message as ChatMessage;
-    const msg = entry.role === 'user' || entry.role === 'assistant' ? { ...source, content: entry.text } : source;
+    const msg = entry.role === 'user' ? { ...source, content: entry.text }
+      : entry.role === 'assistant' ? { ...source, content: rewriteThreadLinks(entry.text, threads) }
+      : source;
+    const pinned = this.stick;
     const pending: { st: RowState | null } = { st: null };
-    const rendered = renderMessage(msg, this.logEl, undefined, {
-      density: 'compact',
-      linkPolicy: 'strict',
-      threadRefs: threads,
-      resolveLink: this.h.resolveLink,
+    const rendered = renderMessage(msg, this.logEl, env.host(), {
       imageSrc: this.h.imageSrc ?? defaultImageSrc,
-      seedPlainText: true,
-      isStale: () => this.destroyed || this.rows.get(entry.id) !== pending.st,
-      swap: (apply) => {
-        const pinned = this.stick;
-        apply();
-        this.checkHoveredLink();
-        if (pinned) this.scrollToBottom();
+      formatTime: env.formatTime,
+      openExternal: env.openExternal,
+      hooks: {
+        toolCalls: (el, tools) => { env.toolCalls.renderToolCalls(el, tools); },
       },
     });
     const row = rendered.el!;
@@ -679,9 +677,16 @@ export class DockSheet {
     row.dataset.id = entry.id;
     const st: RowState = { row, key, pickupEl: null };
     pending.st = st;
+    // Markdown lands in a microtask: re-pin a row that was pinned when it was built, unless it was replaced meanwhile.
+    void rendered.done.then(() => {
+      if (this.destroyed || this.rows.get(entry.id) !== pending.st) return;
+      this.checkHoveredLink();
+      if (pinned) this.scrollToBottom();
+    }, () => { /* the row keeps whatever rendered */ });
     if (needsFullThread(entry.rich)) {
-      // Never a blank bubble: a message that is only an inline visual says so, and keeps the way to the full thread.
-      if (entry.text.trim() === '' && !row.querySelector('.ct-orch-bubble')) row.createDiv({ cls: 'ct-orch-bubble', text: 'This message has a visualization.' });
+      // Never a blank row: a message that is only an inline visual says so, and keeps the way to the full thread.
+      const content = row.querySelector<HTMLElement>('.ct-message-content');
+      if (entry.text.trim() === '' && content && content.childNodes.length === 0) content.textContent = 'This message has a visualization.';
       fullChip(row).addEventListener('click', () => this.h.openFull());
     }
     return st;
@@ -695,28 +700,28 @@ export class DockSheet {
   private renderStreaming(text: string): void {
     if (!text) { this.streamRenderSeq++; this.streamingRow?.remove(); this.streamingRow = null; return; }
     if (!this.streamingRow) {
+      // The main panel's streaming row (`.ct-message-assistant.ct-streaming > .ct-message-content`, cursor at the end).
       // aria-live off: the throttled region below is what screen readers hear while tokens arrive.
       this.streamingRow = createRow(this.logEl, 'assistant', 'streaming');
+      this.streamingRow.addClass('ct-streaming');
       this.streamingRow.dataset.streaming = 'true';
       this.streamingRow.setAttribute('aria-live', 'off');
-      this.streamingRow.createDiv('ct-orch-bubble ct-orch-bubble-streaming');
+      this.streamingRow.createDiv('ct-message-content');
     }
     this.logEl.append(this.streamingRow);
-    const bubble = this.streamingRow.firstElementChild as HTMLElement;
-    // The current buffer is written as plain text at once (the bubble is never stale or empty, and nothing here awaits), then
-    // swapped for strict markdown in the same task's microtasks, before the next paint. Same policy as settled rows, with raw
-    // HTML shown as text.
-    bubble.textContent = text;
+    const content = this.streamingRow.firstElementChild as HTMLElement;
+    // The current buffer is written as plain text at once (the row is never stale or empty, and nothing here awaits), then
+    // swapped for markdown in the same task's microtasks, before the next paint: the main panel's streaming render with the
+    // trusted pipeline (the sanitizer still runs; raw HTML that survives it is what the main panel shows).
+    content.textContent = text;
+    content.createSpan({ cls: 'ct-cursor' });
     const seq = ++this.streamRenderSeq;
-    const target = bubble.ownerDocument.createElement('div');
-    void renderMarkdown(text, target, undefined, {
-      linkPolicy: 'strict', streaming: true, threadRefs: this.view?.threads ?? [], resolveLink: this.h.resolveLink,
-    }).then(() => {
-      if (this.destroyed || seq !== this.streamRenderSeq || this.streamingRow?.firstElementChild !== bubble || target.childNodes.length === 0) return;
+    const target = content.ownerDocument.createElement('div');
+    void renderMarkdown(rewriteThreadLinks(text, this.view?.threads ?? []), target, this.h.messages.host(), { streaming: true }).then(() => {
+      if (this.destroyed || seq !== this.streamRenderSeq || this.streamingRow?.firstElementChild !== content || target.childNodes.length === 0) return;
       const pinned = this.stick;
-      // marked separates blocks with newline text nodes; a trailing one would add a blank line to the bubble.
-      while (target.lastChild?.nodeType === 3 && (target.lastChild.textContent ?? '').trim() === '') target.lastChild.remove();
-      bubble.replaceChildren(...Array.from(target.childNodes));
+      content.replaceChildren(...Array.from(target.childNodes));
+      content.createSpan({ cls: 'ct-cursor' });
       this.checkHoveredLink();
       if (pinned) this.scrollToBottom();
     }).catch(() => { /* keep the plain text */ });
@@ -726,8 +731,9 @@ export class DockSheet {
     if (!text) { this.stoppedRow?.remove(); this.stoppedRow = null; return; }
     if (!this.stoppedRow) {
       this.stoppedRow = createRow(this.logEl, 'assistant', 'stopped');
+      this.stoppedRow.addClass('ct-orch-stopped');
       this.stoppedRow.dataset.stopped = 'true';
-      this.stoppedRow.createDiv('ct-orch-bubble ct-orch-bubble-stopped');
+      this.stoppedRow.createDiv('ct-message-content');
       this.stoppedRow.createDiv({ cls: 'ct-orch-stopped-label', text: 'Stopped' });
     }
     this.logEl.append(this.stoppedRow);
@@ -804,22 +810,20 @@ export class DockSheet {
     if (!a) return;
     e.preventDefault();
     e.stopPropagation();
-    const threadId = a.getAttribute('data-thread-id');
-    if (threadId) { this.h.openThread(threadId); return; }
-    const href = a.getAttribute('data-href');
-    if (href) { this.h.openLink?.(href); return; }
+    // Links the shared renderer wired (notes, thread links, http(s)) stop propagation themselves and never get here; this
+    // catches the rest (mailto:, a bare anchor, an http link when the host gave no opener): never navigate the board's window.
     const plain = a.getAttribute('href') ?? '';
-    if (/^https?:\/\//i.test(plain)) window.open(plain, '_blank', 'noopener,noreferrer');
+    if (!this.h.messages.openExternal && /^https?:\/\//i.test(plain)) window.open(plain, '_blank', 'noopener,noreferrer');
   }
 
   private linkAnchor(target: EventTarget | null): HTMLElement | null {
-    return (target as HTMLElement | null)?.closest?.('a[data-thread-id]') as HTMLElement | null;
+    return (target as HTMLElement | null)?.closest?.('a.internal-link[data-href^="thread:"]') as HTMLElement | null;
   }
 
   private onLinkOver(e: Event): void {
     const a = this.linkAnchor(e.target);
     if (!a || a === this.hoverEl || !this.logEl.contains(a)) return;
-    const id = a.getAttribute('data-thread-id');
+    const id = threadIdOfHref(a.getAttribute('data-href'));
     if (!id) return;
     this.hoverEl = a;
     this.h.linkEnter(id);
@@ -873,7 +877,7 @@ function schedule(fn: () => void): void {
 }
 
 function createRow(log: HTMLElement, role: 'user' | 'assistant', id: string): HTMLElement {
-  return log.createDiv({ cls: 'ct-orch-msg', attr: { 'data-role': role, 'data-id': id } });
+  return log.createDiv({ cls: `ct-message ct-message-${role}`, attr: { 'data-role': role, 'data-id': id } });
 }
 
 function icon(parent: HTMLElement, name: string): void {
