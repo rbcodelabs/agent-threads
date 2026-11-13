@@ -689,7 +689,9 @@ describe('orb mode (bottom sheet)', () => {
 });
 
 describe('content the sheet cannot draw', () => {
-  it('images, visualize markers and tool calls give that message a quiet "Open full thread ↗" chip', () => {
+  // Step 3 (deliberate change): images and tool calls are now DRAWN by the shared message renderer, so they no longer
+  // carry the chip; only an inline visual (visualize marker, contributed content) still needs the full thread.
+  it('only a visualize marker or contributed content gives that message a quiet "Open full thread" chip; images and tool calls are drawn', () => {
     const t = setup({ messages: [
       m('assistant', 'a picture', { toolResultImages: [{ mediaType: 'image/png' }] }),
       m('assistant', 'chart\nvisualize{"path":"/x.html"}'),
@@ -698,18 +700,29 @@ describe('content the sheet cannot draw', () => {
     ] });
     t.dock.openSheet();
     const rows = t.qa('.ct-orch-msg');
-    expect(rows.map((r) => !!r.querySelector('.ct-orch-chip-full'))).toEqual([true, true, true, false]);
-    rows[0].querySelector<HTMLElement>('.ct-orch-chip-full')!.click();
+    expect(rows.map((r) => !!r.querySelector('.ct-orch-chip-full'))).toEqual([false, true, false, false]);
+    rows[1].querySelector<HTMLElement>('.ct-orch-chip-full')!.click();
     expect(t.deps.openThread).toHaveBeenCalledWith('orch');
     expect(rows[1].textContent).not.toContain('visualize{');
+    expect(rows[0].querySelector('.ct-tool-result-images img')).not.toBeNull();
+    expect(rows[2].querySelector('.ct-orch-tools-toggle')).not.toBeNull();
   });
 
-  it('a text-less message with an image is a row with the chip, not a blank bubble and not hidden', () => {
-    const t = setup({ messages: [m('assistant', '', { toolResultImages: [{ mediaType: 'image/png' }] })] });
+  it('a text-less message with an image is a row with its thumbnail, not a blank bubble and not hidden', () => {
+    const t = setup({ messages: [m('assistant', '', { toolResultImages: [{ mediaType: 'image/png', data: 'AAAA' }] })] });
     t.dock.openSheet();
     const row = t.q('.ct-orch-msg')!;
+    expect(row.querySelector('.ct-tool-result-images img')).toBeTruthy();
+    expect(row.querySelector('.ct-orch-chip-full')).toBeNull();
+    expect(row.querySelector('.ct-orch-bubble')).toBeNull();
+  });
+
+  it('a text-less message that is only a visualization says so and keeps the chip', () => {
+    const t = setup({ messages: [m('assistant', 'visualize{"path":"/x.html"}')] });
+    t.dock.openSheet();
+    const row = t.q('.ct-orch-msg')!;
+    expect(row.querySelector('.ct-orch-bubble')?.textContent).toBe('This message has a visualization.');
     expect(row.querySelector('.ct-orch-chip-full')).toBeTruthy();
-    expect(row.querySelector('.ct-orch-bubble')?.textContent ?? '').toMatch(/\S/);
   });
 
   it('a pending permission on the orchestrator shows a notice with the chip (no inline buttons in this setup)', () => {
@@ -1096,7 +1109,7 @@ describe('QA D5: tab order and the modal bottom sheet', () => {
 
 describe('QA D7: no font-dependent glyphs in the sheet chrome', () => {
   it('header, remove, peek and stop use icons + aria-labels, not ↗ ✕ ■ text', () => {
-    const t = setup({ running: true, messages: [m('assistant', 'x', { toolCalls: [{ name: 'Read' }] })] });
+    const t = setup({ running: true, messages: [m('assistant', 'x\nvisualize{"path":"/x.html"}')] });
     t.s.queue.push({ text: 'held' });
     t.dock.openSheet();
     t.emit('queued');
@@ -1766,7 +1779,7 @@ describe('QA N9: End / Home work from any focus inside the log, not only the scr
   it('a focused button inside a bubble behaves the same; Home unpins and goes to the top', async () => {
     const t = setup({ running: true, messages: [m('assistant', 'did work', { toolCalls: [{ name: 'Read' }] })] });
     const { scroll } = await rig(t);
-    const btn = t.q<HTMLButtonElement>('.ct-orch-msg .ct-orch-chip-full')!;
+    const btn = t.q<HTMLButtonElement>('.ct-orch-msg .ct-orch-tools-toggle')!;
     btn.focus();
     expect(key(btn, 'End').defaultPrevented).toBe(true);
     expect(scroll.scrollTop).toBe(3000);
@@ -1783,5 +1796,90 @@ describe('QA N9: End / Home work from any focus inside the log, not only the scr
     expect(key(ce, 'Home').defaultPrevented).toBe(false);
     for (const mod of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }]) expect(key(scroll, 'End', mod).defaultPrevented).toBe(false);
     expect(scroll.scrollTop).toBe(1000);
+  });
+});
+
+describe('step 3: the sheet draws real messages through the shared item renderer (compact density)', () => {
+  const settle = async () => { await flush(); await flush(); };
+
+  it('tool calls are ONE collapsed summary row per message, expandable; no "N tool calls" chip', async () => {
+    const t = setup({ messages: [m('assistant', 'did work', { toolCalls: [{ name: 'Read', summary: 'Read: a' }, { name: 'Read', summary: 'Read: b' }, { name: 'Bash', summary: 'ls' }] })] });
+    t.dock.openSheet(); await settle();
+    const row = t.q('.ct-orch-msg')!;
+    expect(row.querySelectorAll('.ct-orch-tools')).toHaveLength(1);
+    expect(row.querySelector('.ct-orch-tools-toggle')!.textContent).toContain('3 tool calls');
+    expect(row.querySelector<HTMLElement>('.ct-orch-tools-list')!.hidden).toBe(true);
+    expect(row.querySelector('.ct-orch-chip-full')).toBeNull();
+    expect(row.textContent).not.toContain('This message has');
+  });
+
+  it('notices and compact dividers are shown (they used to be dropped)', async () => {
+    const t = setup({ messages: [
+      m('user', 'go'),
+      m('notice', 'Background task "build" failed', { noticeStatus: 'failed' }),
+      m('compact', '', { compactTrigger: 'auto', preTokens: 90000 }),
+      m('assistant', 'done'),
+    ] });
+    t.dock.openSheet(); await settle();
+    expect(t.q('.ct-orch-msg[data-role="notice"] .ct-notice-text')!.textContent).toBe('Background task "build" failed');
+    expect(t.q('.ct-orch-msg[data-role="compact"] .ct-compact-divider')!.textContent).toContain('Context auto-compacted');
+    expect(t.qa('.ct-orch-msg').map((r) => r.dataset.role)).toEqual(['user', 'notice', 'compact', 'assistant']);
+  });
+
+  it('a user message with a URL gets a link, handled by the log (no new tab from the anchor itself)', async () => {
+    const t = setup({ messages: [m('user', 'look at https://example.com/page now')] });
+    t.dock.openSheet(); await settle();
+    const a = t.q<HTMLAnchorElement>('.ct-orch-msg[data-role="user"] a.ct-auto-link')!;
+    expect(a.getAttribute('href')).toBe('https://example.com/page');
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    a.click();
+    expect(open).toHaveBeenCalledWith('https://example.com/page', '_blank', 'noopener,noreferrer');
+    open.mockRestore();
+  });
+
+  it('attached and tool-result images render as local thumbnails; a remote markdown image never does', async () => {
+    const t = setup({ messages: [
+      m('user', 'see', { images: [{ name: 's.png', mediaType: 'image/png', base64: 'AAAA' }] }),
+      m('assistant', 'pic ![r](https://evil.example/p.png)', { toolResultImages: [{ mediaType: 'image/png', data: 'BBBB' }] }),
+    ] });
+    t.dock.openSheet(); await settle();
+    expect(t.qa('.ct-orch-msg img').map((i) => i.getAttribute('src'))).toEqual(['data:image/png;base64,AAAA', 'data:image/png;base64,BBBB']);
+    expect(t.q('.ct-orch-bubble img[src*="evil"]')).toBeNull();
+    expect(t.q('.ct-orch-chip-full')).toBeNull();
+  });
+
+  it('only a visualize marker keeps the "Open full thread" chip, and the marker line is not shown', async () => {
+    const t = setup({ messages: [m('assistant', 'chart\nvisualize{"path":"/x.html"}'), m('assistant', 'plain', { toolCalls: [{ name: 'Read' }] })] });
+    t.dock.openSheet(); await settle();
+    const rows = t.qa('.ct-orch-msg');
+    expect(rows.map((r) => !!r.querySelector('.ct-orch-chip-full'))).toEqual([true, false]);
+    expect(rows[0].textContent).not.toContain('visualize{');
+  });
+
+  it('caps at the last 50 messages with a "Showing last 50 messages" row that opens the full thread', async () => {
+    const msgs = Array.from({ length: 60 }, (_, i) => m(i % 2 ? 'assistant' : 'user', `message ${i}`));
+    const t = setup({ messages: msgs });
+    t.dock.openSheet(); await settle();
+    const rows = t.qa('.ct-orch-msg');
+    expect(rows).toHaveLength(50);
+    expect(rows[0].textContent).toContain('message 10');
+    expect(rows[49].textContent).toContain('message 59');
+    const older = t.q('.ct-orch-older')!;
+    expect(older.textContent).toContain('Showing last 50 messages');
+    expect(t.q('.ct-orch-sheet-log')!.firstElementChild).toBe(older);
+    older.querySelector<HTMLElement>('.ct-orch-chip-full')!.click();
+    expect(t.deps.openThread).toHaveBeenCalledWith('orch');
+  });
+
+  it('the older row is absent at or under the cap and the keyed reconcile keeps unchanged nodes', async () => {
+    const t = setup({ messages: [m('user', 'a'), m('assistant', 'b')] });
+    t.dock.openSheet(); await settle();
+    expect(t.q('.ct-orch-older')).toBeNull();
+    const before = t.qa('.ct-orch-msg');
+    t.say('c'); await settle();
+    const after = t.qa('.ct-orch-msg');
+    expect(after).toHaveLength(3);
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[1]);
   });
 });

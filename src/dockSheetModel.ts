@@ -1,10 +1,11 @@
 /**
  * dockSheetModel.ts
  *
- * Pure, host-free projection helpers for the OrchestratorDock reply sheet: what a message holds
- * that the sheet cannot draw (it then shows a quiet "Open full thread" chip), the sheet transcript
- * built ON `dockTranscript`, and the one-line peek text for an unread reply. No `obsidian` import
- * (guarded by orchestrator-dock-purity.test.ts).
+ * Pure, host-free projection helpers for the OrchestratorDock reply sheet: the sheet transcript built ON
+ * `dockTranscript` (real messages, plus notices and compaction dividers), the cap on how much of it is drawn, which
+ * content the sheet still cannot draw (an inline visual or contributed content reference, which gets a quiet
+ * "Open full thread" chip; tool calls and images are drawn by the shared message renderer), and the one-line peek
+ * text for an unread reply. No `obsidian` import (guarded by orchestrator-dock-purity.test.ts).
  */
 import { dockTranscript, splitThreadLinks, type ThreadRef } from './orchestratorDockModel';
 import { TRAY_COLLAPSE_AT } from './dockTrayModel';
@@ -20,8 +21,11 @@ export interface SheetSourceMessage {
 
 export interface Richness { images: boolean; visualize: boolean; tools: number }
 
-/** A `visualize{...}` content reference on its own line (the Codex visualize skill; see visualizeMarker.ts). */
-const VISUALIZE_LINE = /^[ \t]*visualize\{.*\}[ \t]*(?:\n|$)/gm;
+/**
+ * An inline visual the sheet cannot draw, on its own line: a `visualize{...}` content reference (the Codex visualize skill; see
+ * visualizeMarker.ts) or a contributed `agent-content{...}` reference (MessageContent.ts). Both set `Richness.visualize`.
+ */
+const VISUALIZE_LINE = /^[ \t]*(?:visualize|agent-content)\{.*\}[ \t]*(?:\n|$)/gm;
 
 export function stripVisualizeLines(content: string): string {
   return content.replace(VISUALIZE_LINE, '').replace(/^\n+|\n+$/g, '');
@@ -35,25 +39,48 @@ export function richnessOf(m: Pick<SheetSourceMessage, 'content' | 'images' | 't
   };
 }
 
-export interface SheetEntry { id: string; role: 'user' | 'assistant'; text: string; rich: Richness }
+export interface SheetEntry {
+  id: string;
+  role: 'user' | 'assistant' | 'notice' | 'compact';
+  /** The text shown for a user / assistant message (inline-visual lines stripped); '' for notices and dividers. */
+  text: string;
+  rich: Richness;
+  /** The real message, handed to the shared message renderer. */
+  message: SheetSourceMessage;
+}
 
 const hasRich = (r: Richness): boolean => r.images || r.visualize || r.tools > 0;
+
+/** What the sheet cannot draw even now: only an inline visual / contributed content reference needs the full thread. */
+export function needsFullThread(r: Richness): boolean { return r.visualize; }
+
+/** The sheet draws at most this many of the latest messages; an "Open full thread" row stands in for the rest. */
+export const SHEET_MAX_MESSAGES = 50;
+
+export function capTranscript<T>(entries: readonly T[], max: number = SHEET_MAX_MESSAGES): { entries: T[]; older: number } {
+  return entries.length <= max ? { entries: [...entries], older: 0 } : { entries: entries.slice(entries.length - max), older: entries.length - max };
+}
 
 /**
  * The sheet transcript, re-derived from the thread's messages on every call (never an append-only
  * log: interrupt() rolls user messages back with no per-message event). Text entries come from
- * `dockTranscript`; a user/assistant message with NO text but rich content (an image-only reply, a
- * bare visualize marker) is kept as a chip-only entry so it is never silently hidden.
+ * `dockTranscript`; a user/assistant message with NO text but rich content (an image-only reply, a bare tool-call
+ * turn, a bare visualize marker) is kept so it is never silently hidden. Notices (failed / finished background
+ * tasks) and compaction dividers are kept in place: a thread's error row must not vanish from the dock.
  */
 export function sheetTranscript(messages: readonly SheetSourceMessage[]): SheetEntry[] {
   const withText = new Set(dockTranscript(messages).map((e) => e.id));
   const out: SheetEntry[] = [];
   for (const m of messages) {
+    if (m.role === 'notice' || m.role === 'compact') {
+      out.push({ id: m.id, role: m.role, text: '', rich: richnessOf(m), message: m });
+      continue;
+    }
     if (m.role !== 'user' && m.role !== 'assistant') continue;
     const rich = richnessOf(m);
     const text = stripVisualizeLines(m.content);
     if (withText.has(m.id) ? (text.trim() === '' && !hasRich(rich)) : !hasRich(rich)) continue;
-    out.push({ id: m.id, role: m.role, text, rich });
+    out.push({ id: m.id, role: m.role, text, rich, message: m });
   }
   return out;
 }

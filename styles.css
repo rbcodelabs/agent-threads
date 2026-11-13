@@ -7402,7 +7402,10 @@ textarea.ct-settings-wide-input {
 .ct-orch-icon svg { width: 14px; height: 14px; }
 .ct-orch-bubble a.ct-thread-link,
 .ct-orch-bubble a.internal-link { color: color-mix(in srgb, var(--text-accent) 45%, var(--text-normal)); text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
-.ct-orch-bubble-streaming { white-space: pre-wrap; }
+/* Streaming text is rendered as markdown (see DockSheet.renderStreaming); block whitespace comes from the elements, not pre-wrap.
+   The last paragraph flows inline so the cursor sits at the end of the text instead of on a line of its own. */
+.ct-orch-bubble-streaming { white-space: normal; }
+.ct-orch-bubble-streaming > p:last-child { display: inline; margin: 0; }
 /* Interrupted partial: not persisted by the manager, kept visible but clearly provisional. */
 .ct-orch-bubble-stopped { white-space: pre-wrap; opacity: 0.7; }
 .ct-orch-stopped-label { font-size: var(--font-ui-smaller); color: var(--text-muted); }
@@ -7420,6 +7423,31 @@ textarea.ct-settings-wide-input {
   font-size: var(--font-ui-smaller); cursor: pointer;
 }
 .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-chip-full:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+/* Rows drawn by the shared message renderer (compact density): notices, compaction dividers, tool summary, images. */
+.ct-orch-msg[data-role="notice"], .ct-orch-msg[data-role="compact"] { align-self: stretch; }
+.ct-orch-msg .ct-notice-row, .ct-orch-msg .ct-compact-divider { margin: 2px 0; }
+.ct-orch-msg .ct-compact-divider { margin-left: 0; margin-right: 0; }
+.ct-orch-msg .ct-message-images, .ct-orch-msg .ct-tool-result-images { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.ct-orch-msg .ct-tool-result-images img { width: 120px; height: 90px; object-fit: cover; margin: 0; border-radius: 6px; }
+.ct-orch-bubble .ct-message-img-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--background-modifier-border); }
+.ct-orch-tools { align-self: flex-start; max-width: 100%; display: flex; flex-direction: column; gap: 4px; }
+.ct-kanban-dispatch .ct-orch-sheet button.ct-orch-tools-toggle {
+  display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; height: auto; min-height: 24px; padding: 1px 10px;
+  border: 1px solid var(--background-modifier-border); border-radius: 999px; background: transparent; box-shadow: none;
+  color: var(--text-muted); font-size: var(--font-ui-smaller); cursor: pointer;
+}
+.ct-kanban-dispatch .ct-orch-sheet button.ct-orch-tools-toggle:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.ct-kanban-dispatch .ct-orch-sheet button.ct-orch-tools-toggle.ct-orch-tools-error { color: var(--text-error); }
+.ct-orch-tools-icon, .ct-orch-tools-chevron { display: inline-flex; }
+.ct-orch-tools-list { display: flex; flex-direction: column; gap: 2px; padding-left: 6px; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.ct-orch-tools-list[hidden] { display: none; }
+.ct-orch-tools-item { display: flex; gap: 6px; min-width: 0; }
+.ct-orch-tools-name { flex: none; font-weight: 600; }
+.ct-orch-tools-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-orch-tools-item-error { color: var(--text-error); }
+.ct-orch-older { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; padding: 4px 0; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-tools-toggle,
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-tools-toggle { min-height: 44px; min-width: 44px; }
 .ct-orch-activity { display: flex; align-items: center; gap: 8px; font-size: var(--font-ui-smaller); color: var(--text-muted); }
 .ct-orch-activity-spin {
   flex: none; width: 10px; height: 10px; border-radius: 50%;

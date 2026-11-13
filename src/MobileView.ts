@@ -9,8 +9,7 @@
  */
 
 import { agentHarnessLabel } from './types';
-import { ItemView, WorkspaceLeaf, Notice, sanitizeHTMLToDom, setIcon } from 'obsidian';
-import { marked } from 'marked';
+import { ItemView, WorkspaceLeaf, Notice, setIcon } from 'obsidian';
 import type { RelayClient } from './RelayClient';
 import type { MobileThreadStore } from './MobileThreadStore';
 import type { SerializedThread, SerializedMessage, PendingPermission, PendingQuestion } from './relay-protocol';
@@ -18,16 +17,14 @@ import type { ToolCallRecord, ImageAttachment } from './types';
 import { formatToolName, getToolIcon, groupToolRuns, normalizeToolCallStyle, type ToolCallGroup, type ToolCallStyle } from './toolNameUtils';
 import { applyToolCallStyleClass, renderToolGroupShell, renderToolRow } from './toolCallDom';
 import { splitErrorMessage } from './dashboardUtils';
-import { extractMessageContent } from './MessageContent';
 import { outsideVaultLinkPath } from './OutsideVaultLinkModal';
-import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from './linkUtils';
+import { renderMarkdown as renderSharedMarkdown, type MessageRenderHost } from './messageRenderer';
 import { canAlwaysAllow, summarizePermissionDetail } from './permissionDetail';
 import { renderQuestionFields, MOBILE_QUESTION_CLASSES } from './QuestionForm';
 import {
   VISUALIZE_SLOT_ATTR,
   VISUALIZE_SLOT_CLASS,
   basename,
-  extractVisualizeMarkers,
   type VisualizeMarker,
 } from './visualizeMarker';
 
@@ -545,86 +542,51 @@ export class MobileView extends ItemView {
     this.scrollToBottom();
   }
 
-  private async renderMarkdown(markdown: string, el: HTMLElement, options: { streaming?: boolean } = {}): Promise<void> {
-    // Codex's wrapped `visualize` content references become inert cards here. The
-    // mobile client is a relay: the fragment lives on the desktop machine's
-    // disk, and renderConversation() rebuilds the whole list on every finalized
-    // message with no throttle, so mounting sandboxed iframes is doubly wrong.
-    const inline = extractMessageContent(markdown, options);
-    const visualize = extractVisualizeMarkers(inline.text);
+  private renderMarkdown(markdown: string, el: HTMLElement, options: { streaming?: boolean } = {}): Promise<void> {
+    return renderSharedMarkdown(markdown, el, this.buildMessageRenderHost(), options);
+  }
 
-    // Pre-process [[wikilinks]] and [[target|alias]] into inline HTML anchors
-    // before handing off to marked. Mirrors the ThreadsView approach — see that
-    // method for the full rationale (short version: MarkdownRenderer.render()
-    // does not parse GFM pipe tables in this non-document context).
-    const processed = visualize.text.replace(
-      /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
-      (_match, target: string, alias?: string) => {
-        const label = (alias ?? target.split('/').pop() ?? target).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c] ?? c));
-        const escapedTarget = target.replace(/"/g, '&quot;');
-        return `<a class="internal-link" data-href="${escapedTarget}" href="#">${label}</a>`;
+  /**
+   * Host for the shared markdown renderer. The mobile client is a relay, so it
+   * has no thread manager, no remote-image daemon, no bridges and no
+   * conversation-first placement: links open through the classic workspace,
+   * and external http(s) links keep the browser's default behavior.
+   */
+  private buildMessageRenderHost(): MessageRenderHost {
+    return {
+      signal: new AbortController().signal,
+      threadId: () => undefined,
+      getThread: () => undefined,
+      sourcePath: () => '',
+      openLinkText: (target) => { void this.app.workspace.openLinkText(target, '', false); },
+      // An absolute desktop path with no synced vault copy is not vault
+      // linktext; forwarding it risks creating a stray note named after the
+      // path. Say so instead — the file genuinely isn't on this device.
+      confirmOutsideVault: (href) => { new Notice(`That file is not in this vault: ${outsideVaultLinkPath(href)}`); },
+      // Callback preserves resolveVaultCopy's relay-client guard, where the
+      // client has no vault index at all.
+      vaultHas: (p) => {
+        try { return !!this.app.vault.getAbstractFileByPath(p); } catch { return false; }
       },
-    );
-    el.appendChild(sanitizeHTMLToDom(await marked.parse(processed)));
-    this.hydrateVisualizeSlots(el, visualize.markers);
-    // Relay clients have no local peer provider or remote action protocol.
-    for (const marker of inline.markers) {
-      const slots = Array.from(el.querySelectorAll<HTMLElement>('.ct-message-content-slot')).filter(slot => slot.getAttribute('data-ct-content') === marker.token);
-      if (slots.length !== 1) continue;
-      const card = document.createElement('section'); card.className = 'ct-inline-content'; card.dataset.kind = 'fallback';
-      const title = document.createElement('div'); title.className = 'ct-inline-content-title'; title.textContent = marker.ref.title; card.appendChild(title);
-      const status = document.createElement('div'); status.className = 'ct-inline-content-status'; status.textContent = options.streaming ? 'Content will be available when the response finishes.' : 'Content unavailable on this device'; card.appendChild(status);
-      const slot = slots[0];
-      if (slot.parentElement?.tagName === 'P' && slot.parentElement.childNodes.length === 1) slot.parentElement.replaceWith(card); else slot.replaceWith(card);
-    }
-    // Wrap tables in a scrollable container so wide tables don't overflow.
-    el.querySelectorAll<HTMLTableElement>('table').forEach((table) => {
-      const wrapper = document.createElement('div');
-      wrapper.className = 'ct-table-scroll';
-      table.parentNode?.insertBefore(wrapper, table);
-      wrapper.appendChild(table);
-    });
-    el.querySelectorAll<HTMLAnchorElement>('a.internal-link').forEach((a) => {
-      a.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const href = a.getAttribute('data-href') ?? a.getAttribute('href') ?? '';
-        void this.app.workspace.openLinkText(href, '', false);
-      });
-    });
-    // marked renders ordinary `[label](path.md#heading)` links without the
-    // custom wikilink class, so — unlike the block above — they never got a
-    // click handler at all: mobile is always classic placement, and this view
-    // had no equivalent of ThreadsView's plain-markdown-link wiring. Some
-    // hrefs are OS-absolute paths that happen to fall under the synced vault
-    // (e.g. a fragment written from outside Obsidian) — resolve those first.
-    // This uses the shared helper rather than resolveVaultCopy because marked
-    // percent-encodes hrefs and only the helper probes the decoded form; the
-    // callback preserves resolveVaultCopy's relay-client guard, where the
-    // client has no vault index at all. A non-absolute href is forwarded
-    // untouched so openLinkText keeps ownership of subpath parsing/decoding.
-    el.querySelectorAll<HTMLAnchorElement>(`a:not(.internal-link):not(.${VISUALIZE_SLOT_CLASS})`).forEach((a) => {
-      const href = a.getAttribute('href') ?? '';
-      if (classifyRenderedMarkdownLink(href) !== 'vault') return;
-      const absolute = isOsAbsoluteHref(href);
-      a.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        // Resolved on click rather than at render, so a target that finishes
-        // syncing to the phone after this message rendered still opens.
-        const resolved = resolveAbsoluteVaultHref(href, (p) => {
-          try { return !!this.app.vault.getAbstractFileByPath(p); } catch { return false; }
-        });
-        // An absolute desktop path with no synced vault copy is not vault
-        // linktext; forwarding it risks creating a stray note named after the
-        // path. Say so instead — the file genuinely isn't on this device.
-        if (absolute && !resolved) {
-          new Notice(`That file is not in this vault: ${outsideVaultLinkPath(href)}`);
-          return;
+      // Codex's wrapped `visualize` content references become inert cards here.
+      // The fragment lives on the desktop machine's disk, and renderConversation()
+      // rebuilds the whole list on every finalized message with no throttle, so
+      // mounting sandboxed iframes is doubly wrong.
+      visualize: { enabled: true, streamingAware: false, hydrate: (el, markers) => this.hydrateVisualizeSlots(el, markers) },
+      alwaysExtractMessageContent: true,
+      // Relay clients have no local peer provider or remote action protocol.
+      hydrateMessageContent: (el, markers, _context, options) => {
+        for (const marker of markers) {
+          const slots = Array.from(el.querySelectorAll<HTMLElement>('.ct-message-content-slot')).filter(slot => slot.getAttribute('data-ct-content') === marker.token);
+          if (slots.length !== 1) continue;
+          const card = document.createElement('section'); card.className = 'ct-inline-content'; card.dataset.kind = 'fallback';
+          const title = document.createElement('div'); title.className = 'ct-inline-content-title'; title.textContent = marker.ref.title; card.appendChild(title);
+          const status = document.createElement('div'); status.className = 'ct-inline-content-status'; status.textContent = options.streaming ? 'Content will be available when the response finishes.' : 'Content unavailable on this device'; card.appendChild(status);
+          const slot = slots[0];
+          if (slot.parentElement?.tagName === 'P' && slot.parentElement.childNodes.length === 1) slot.parentElement.replaceWith(card); else slot.replaceWith(card);
         }
-        void this.app.workspace.openLinkText(resolved ?? href, '', false);
-      });
-    });
+      },
+    };
   }
 
   /**

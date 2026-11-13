@@ -5,7 +5,7 @@ import { shot } from './helpers';
 /**
  * K2 OrchestratorDock P3 (the reply sheet). Served from test/harness/kanban.html.
  *   ?orch=idle|working|error|offline ...   as in orchestrator-dock.spec.ts
- *   &tx=empty|conversation                 seeds the orchestrator transcript (default: one short assistant line)
+ *   &tx=empty|conversation|transcript|long seeds the orchestrator transcript (default: one short assistant line)
  * Harness hooks (window): __orchSay, __orchStream, __orchSettle, __orchQueue, __orchTool, __openSheet, __sentMessages,
  * __interruptCalls, __openedThreadIds. The harness sendMessage appends the user message and emits
  * `user_message_added` like the real manager; interrupt rolls unresolved user messages back with no per-message event.
@@ -41,6 +41,81 @@ async function send(page: Page, size: { width: number }, text: string) {
   await field(page).fill(text);
   await page.keyboard.press('Enter');
 }
+
+/** The harness is dark by default; this switches it to the light theme with the variables the sheet reads. */
+async function setLight(page: Page) {
+  await page.evaluate(() => {
+    document.body.classList.remove('theme-dark');
+    document.body.classList.add('theme-light');
+    const root = document.documentElement.style;
+    for (const [k, v] of Object.entries({
+      '--background-primary': '#ffffff', '--background-secondary': '#f3f4f6', '--background-secondary-alt': '#eceef1',
+      '--background-modifier-border': '#d4d7dd', '--background-modifier-hover': 'rgba(0,0,0,0.05)',
+      '--text-normal': '#222226', '--text-muted': '#5c5c64', '--text-faint': '#85858e',
+    })) root.setProperty(k, v);
+  });
+}
+
+const STREAM_MARKDOWN = [
+  'Here is the plan so far:', '',
+  '- first item with a [[thread:k-hiptrip-awaiting|link]]', '- second item with **bold**', '',
+  '| Thread | State |', '|---|---|', '| Deploy | waiting |', '| Mobile | question |', '',
+  '```', 'npm run deploy -- --env=production',
+].join('\n');
+
+// Step 3: real messages (tool summary row, thumbnails, notice, divider, cap) and multi-block markdown while streaming,
+// each at both widths in the dark (default) and light themes.
+test.describe('orchestrator sheet — step 3 states (shared message renderer)', () => {
+  for (const theme of ['dark', 'light'] as const) {
+    for (const { label, size } of SIZES) {
+      test(`rich transcript: tool summary row, thumbnails, notice, divider, markdown @ ${theme} ${label}`, async ({ page }) => {
+        await open(page, 'idle', 'transcript', size);
+        if (theme === 'light') await setLight(page);
+        await focusComposer(page, size);
+        await expect(sheet(page)).toBeVisible();
+        await expect(page.locator('.ct-orch-msg[data-role="notice"]')).toBeVisible();
+        await expect(page.locator('.ct-orch-tools-toggle').first()).toBeVisible();
+        await shot(page, `orchestrator-sheet-transcript-${theme}-${label}.png`, DOCK_SHOT);
+      });
+
+      test(`multi-block markdown while streaming (list, table, open code block) @ ${theme} ${label}`, async ({ page }) => {
+        await open(page, 'working', 'conversation', size);
+        if (theme === 'light') await setLight(page);
+        await page.evaluate((text) => (window as any).__orchStream(text, 'Reading 14 threads…'), STREAM_MARKDOWN);
+        await focusComposer(page, size);
+        await expect(sheet(page)).toBeVisible();
+        await expect(page.locator('[data-streaming] table')).toBeVisible();
+        await expect(page.locator('[data-streaming] pre')).toBeVisible();
+        await shot(page, `orchestrator-sheet-streaming-markdown-${theme}-${label}.png`, DOCK_SHOT);
+      });
+    }
+  }
+
+  for (const { label, size } of SIZES) {
+    test(`a long thread shows the last 50 messages and a "Showing last 50 messages" row @ ${label}`, async ({ page }) => {
+      await open(page, 'idle', 'long', size);
+      await focusComposer(page, size);
+      await expect(sheet(page)).toBeVisible();
+      await expect(page.locator('.ct-orch-msg')).toHaveCount(50);
+      await page.locator('.ct-orch-sheet-scroll').evaluate((el) => { el.scrollTop = 0; });
+      await expect(page.locator('.ct-orch-older')).toBeVisible();
+      await shot(page, `orchestrator-sheet-older-${label}.png`, DOCK_SHOT);
+    });
+  }
+
+  test('the tool summary row expands to the plain list and collapses again', async ({ page }) => {
+    await open(page, 'idle', 'transcript', DESKTOP);
+    await focusComposer(page, DESKTOP);
+    const toggle = page.locator('.ct-orch-tools-toggle').first();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.locator('.ct-orch-tools-list').first()).toBeHidden();
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('.ct-orch-tools-item').first()).toBeVisible();
+    await toggle.click();
+    await expect(page.locator('.ct-orch-tools-list').first()).toBeHidden();
+  });
+});
 
 test.describe('orchestrator sheet — screenshots', () => {
   for (const { label, size } of SIZES) {

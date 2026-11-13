@@ -105,7 +105,7 @@ if (new URLSearchParams(window.location.search).has('narrow')) document.body.cla
 // orchestrator yet" affordance). The orchestrator is a normal card on the board, as in production.
 const orchFixture = new URLSearchParams(window.location.search).get('orch');
 const orchestratorFixtureId = 'k-orchestrator';
-// ?tx=empty|conversation seeds the orchestrator transcript for the reply sheet (default: one short assistant line).
+// ?tx=empty|conversation|rich|evil|transcript|long seeds the orchestrator transcript for the reply sheet (default: one short assistant line).
 // The conversation names board threads by id and by exact title, so [[thread:...]] links resolve like production.
 function orchTranscript() {
   const tx = new URLSearchParams(window.location.search).get('tx');
@@ -128,6 +128,25 @@ function orchTranscript() {
         content: `See [[thread:${kanbanAwaitingThreadId}|Deploy curation quality signals]], [[Real note]], [[Ghost note]] and the [docs](https://example.com/docs).\n\n| Thread | Owner | Status |\n|---|---|---|\n| Deploy curation quality signals | Owner | waiting on approval |\n| Mobile layout polish | Designer | question ready |\n\n\`\`\`\nnpm run deploy -- --env=production --region=us-east-1 --tag=release-candidate-2026-01-15 --verbose --dry-run=false\n\`\`\``,
       },
     ];
+  }
+  if (tx === 'transcript' || tx === 'long') {
+    // Step 3: real messages in the sheet. A user message with a URL and an attached image, an assistant turn with tool calls
+    // (collapsed into one summary row), a tool-result image, a failed-task notice, a compaction divider and a markdown reply.
+    const PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    const tools = (n: number) => Array.from({ length: n }, (_, i) => ({ name: i === 2 ? 'Grep' : 'Read', summary: i === 2 ? 'Grep: TODO' : `Read: Notes/file-${i}.md`, status: i === 2 ? 'error' : 'success', toolUseId: `tu-${i}` }));
+    const rich = [
+      { id: 'k-orch-u1', role: 'user', content: 'Check https://example.com/status and compare with the attached screenshot', timestamp: KT_ORCH - 120_000, images: [{ name: 'shot.png', mediaType: 'image/png', base64: PIXEL }] },
+      { id: 'k-orch-a1', role: 'assistant', content: '', timestamp: KT_ORCH - 110_000, toolCalls: tools(3), toolResultImages: [{ mediaType: 'image/png', data: PIXEL }] },
+      { id: 'k-orch-n1', role: 'notice', content: 'Background task "nightly build" failed', timestamp: KT_ORCH - 100_000, noticeStatus: 'failed' },
+      { id: 'k-orch-c1', role: 'compact', content: '', timestamp: KT_ORCH - 90_000, compactTrigger: 'auto', preTokens: 120_000 },
+      {
+        id: 'k-orch-a2', role: 'assistant', timestamp: KT_ORCH - 30_000, toolCalls: tools(2),
+        content: `Two things are waiting on you:\n\n- [[thread:${kanbanAwaitingThreadId}|Deploy curation quality signals]] — prod-deploy approval\n- [[thread:Mobile layout polish]] — question ready\n\n| Thread | State |\n|---|---|\n| Deploy | waiting |\n\nEverything else is **on track**. Remote image: ![r](https://evil.example/x.png)`,
+      },
+    ];
+    if (tx === 'transcript') return rich;
+    // 'long': 60 plain messages, so the sheet shows the last 50 and the "Showing last 50 messages" row.
+    return Array.from({ length: 60 }, (_, i) => ({ id: `k-orch-l${i}`, role: i % 2 ? 'assistant' : 'user', content: `Message number ${i + 1}`, timestamp: KT_ORCH - (60 - i) * 1000 }));
   }
   if (tx === 'evil') {
     // Every way an untrusted reply could make the browser fetch remote content; all point at https://evil.example/.

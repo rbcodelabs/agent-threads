@@ -1,0 +1,985 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ThreadsView golden output (current renderer) > classic placement, local thread > full transcript through appendMessage 1`] = `
+"div.ct-message.ct-message-user
+  div.ct-message-content
+    p
+      "Please review"
+      a.ct-auto-link [href="https://user.example.com/page?x=1"]
+        "https://user.example.com/page?x=1"
+      "and the notes."
+    div.ct-message-images
+      img.ct-message-img-thumb [src="data:image/png;base64,iVBORw0KGgo=" title="shot.png"]
+  div.ct-message-footer
+    span.ct-message-ts
+      "t1700000000000"
+div.ct-message.ct-message-assistant
+  div.ct-tools
+    div.ct-tool-group.ct-tool-group-error
+      button.ct-compressed-row.ct-tool-error.ct-tool-group-header [aria-expanded="false" type="button"]
+        span.ct-tool-group-status.ct-tool-state-error [aria-label="failed" data-icon="x" role="img"]
+        span.ct-tool-group-icon.ct-tool-pill-icon [data-icon="file-text"]
+        span.ct-compressed-summary
+          "Read 2 files, searched 1 pattern"
+        span.ct-tool-group-count [data-count-in-label="true"]
+          "3"
+        span.ct-expand-btn [aria-hidden="true" data-icon="chevron-down"]
+      div.ct-full-content.ct-hidden
+        div.ct-tool-pill.ct-tool-success [data-tool-use-id="t1" tabindex="0"]
+          span.ct-tool-state-success.ct-tool-status [aria-label="done" data-icon="check" role="img"]
+          span.ct-tool-pill-icon [data-icon="file-text"]
+          span.ct-tool-pill-name
+            "Read"
+          span.ct-tool-pill-text.ct-tool-pill-text-path [title="Read: /Users/test/Vault/Notes/a.md"]
+            span.ct-tool-path-dir
+              "Read: /Users/test/Vault/Notes/"
+            span.ct-tool-path-file
+              "a.md"
+          span.ct-tool-pill-ts
+            "t1700000000500"
+        div.ct-tool-pill.ct-tool-success [data-tool-use-id="t2" tabindex="0"]
+          span.ct-tool-state-success.ct-tool-status [aria-label="done" data-icon="check" role="img"]
+          span.ct-tool-pill-icon [data-icon="file-text"]
+          span.ct-tool-pill-name
+            "Read"
+          span.ct-tool-pill-text.ct-tool-pill-text-path [title="Read: /Users/test/Vault/Notes/b.md"]
+            span.ct-tool-path-dir
+              "Read: /Users/test/Vault/Notes/"
+            span.ct-tool-path-file
+              "b.md"
+          span.ct-tool-pill-ts
+            "t1700000000600"
+        div.ct-tool-error.ct-tool-pill [data-tool-use-id="t3" tabindex="0"]
+          span.ct-tool-state-error.ct-tool-status [aria-label="failed" data-icon="x" role="img"]
+          span.ct-tool-pill-icon [data-icon="search-code"]
+          span.ct-tool-pill-name
+            "Grep"
+          span.ct-tool-pill-text [title="Grep: TODO"]
+            "Grep: TODO"
+          span.ct-tool-pill-ts
+            "t1700000000700"
+  div.ct-message-content
+    h1
+      "Status report"
+    p
+      "Intro with"
+      strong
+        "bold"
+      ","
+      em
+        "emphasis"
+      "and"
+      code
+        "inline code"
+      ", a"
+      a.internal-link [data-href="Project Plan" href="#"]
+        "Project Plan"
+      "wikilink and an"
+      a.internal-link [data-href="folder/Deep Note" href="#"]
+        "Aliased note"
+      "."
+    div.ct-table-scroll
+      table
+        thead
+          tr
+            th
+              "Column A"
+            th
+              "Column B"
+        tbody
+          tr
+            td
+              "1"
+            td
+              "two"
+          tr
+            td
+              "3"
+            td
+              "four"
+    ul
+      li
+        "bullet one"
+      li
+        input [checked="" disabled="" type="checkbox"]
+        "finished task"
+      li
+        input [disabled="" type="checkbox"]
+        "open task"
+    ol
+      li
+        "first"
+      li
+        "second"
+    pre
+      code.language-ts
+        "const url = "https://in-code.example.com/block";"
+    blockquote
+      p
+        "quoted line"
+    p
+      "Links:"
+      a [href="docs/design.md#Overview"]
+        "design"
+      ","
+      a [href="/Users/test/Vault/Notes/abs.md#Heading%20One"]
+        "abs"
+      ","
+      a [href="/Users/elsewhere/secret.txt"]
+        "outside"
+      ","
+      a [href="https://example.com/page"]
+        "site"
+      ","
+      a [href="mailto:a@b.co"]
+        "mail"
+      ","
+      a [href="#top"]
+        "anchor"
+      "."
+    p
+      "Bridge path"
+      a.internal-link [data-href="Bridge/src/index.ts" data-tooltip="Bridge/src/index.ts" href="#"]
+        "/Users/test/repo/src/index.ts"
+      "exists, /Users/test/repo/src/missing.ts does not. Bare"
+      a [href="https://bare.example.com/x"]
+        "https://bare.example.com/x"
+      "and"
+      code
+        a.ct-auto-link [href="https://code.example.com/inline"]
+          "https://code.example.com/inline"
+      "."
+    p
+      img [alt="remote image" src="https://example.com/pic.png"]
+      img [alt="local image" src="/Users/test/pic.png"]
+    p
+      a.ct-visualize-slot [data-ct-viz="0" href="#"]
+        "Chart"
+    section.ct-inline-content [aria-label="Reference card" data-kind="card"]
+      div.ct-inline-content-heading
+        div.ct-inline-content-title
+          "Hydrated card"
+  button.ct-copy-btn [data-icon="copy" title="Copy response"]
+  div.ct-message-footer
+    span.ct-message-ts
+      "t1700000001000"
+    span.ct-cost
+      "$0.0123"
+div.ct-message.ct-message-assistant
+  div.ct-tools
+    div.ct-tool-group.ct-tool-group-success
+      button.ct-compressed-row.ct-tool-group-header [aria-expanded="false" type="button"]
+        span.ct-tool-group-status.ct-tool-state-success [aria-label="done" data-icon="check" role="img"]
+        span.ct-tool-group-icon.ct-tool-pill-icon [data-icon="terminal"]
+        span.ct-compressed-summary
+          "Ran 1 command"
+        span.ct-tool-group-count [data-count-in-label="true"]
+          "1"
+        span.ct-expand-btn [aria-hidden="true" data-icon="chevron-down"]
+      div.ct-full-content.ct-hidden
+        div.ct-tool-pill.ct-tool-success [data-tool-use-id="t4" tabindex="0"]
+          span.ct-tool-state-success.ct-tool-status [aria-label="done" data-icon="check" role="img"]
+          span.ct-tool-pill-icon [data-icon="terminal"]
+          span.ct-tool-pill-name
+            "Bash"
+          span.ct-tool-pill-text [title="Bash: npm test"]
+            "Bash: npm test"
+          span.ct-tool-pill-ts
+            "t1700000001900"
+  div.ct-tool-result-images
+    img [src="data:image/png;base64,iVBORw0KGgo=" style="max-width:100%;border-radius:4px;margin-bottom:6px;display:block;"]
+  div.ct-message-content
+div.ct-message.ct-message-assistant
+  div.ct-message-content
+    p
+      "Follow-up assistant message with a"
+      a.internal-link [data-href="Project Plan" href="#"]
+        "Project Plan"
+      "link."
+  button.ct-copy-btn [data-icon="copy" title="Copy response"]
+div.ct-compact-divider
+  span.ct-compact-label
+    "Context auto-compacted"
+  span.ct-compact-tokens
+    "123k tokens"
+div.ct-notice-row
+  span.ct-notice-icon [data-icon="check-circle"]
+  span.ct-notice-text
+    "Background task "build" completed"
+div.ct-notice-row
+  span.ct-notice-icon [data-icon="x-circle"]
+  span.ct-notice-text
+    "Background task "lint" failed"
+--- clicks
+0 ct-auto-link https://user.example.com/page?x=1 "https://user.example.com/page?x=1" plain -> prevented=true openLink(https://user.example.com/page?x=1, force=false)
+0 ct-auto-link https://user.example.com/page?x=1 "https://user.example.com/page?x=1" meta -> prevented=true openLink(https://user.example.com/page?x=1, force=true)
+1 internal-link Project Plan "Project Plan" plain -> prevented=true workspace.openLinkText(Project Plan, Threads/thread-1.md, false)
+1 internal-link Project Plan "Project Plan" meta -> prevented=true workspace.openLinkText(Project Plan, Threads/thread-1.md, false)
+2 internal-link folder/Deep Note "Aliased note" plain -> prevented=true workspace.openLinkText(folder/Deep Note, Threads/thread-1.md, false)
+2 internal-link folder/Deep Note "Aliased note" meta -> prevented=true workspace.openLinkText(folder/Deep Note, Threads/thread-1.md, false)
+3 - docs/design.md#Overview "design" plain -> prevented=true workspace.openLinkText(docs/design.md#Overview, Threads/thread-1.md, false)
+3 - docs/design.md#Overview "design" meta -> prevented=true workspace.openLinkText(docs/design.md#Overview, Threads/thread-1.md, false)
+4 - /Users/test/Vault/Notes/abs.md#Heading%20One "abs" plain -> prevented=true workspace.openLinkText(Notes/abs.md#Heading One, Threads/thread-1.md, false)
+4 - /Users/test/Vault/Notes/abs.md#Heading%20One "abs" meta -> prevented=true workspace.openLinkText(Notes/abs.md#Heading One, Threads/thread-1.md, false)
+5 - /Users/elsewhere/secret.txt "outside" plain -> prevented=true confirmOpenOutsideVaultLink(/Users/elsewhere/secret.txt)
+5 - /Users/elsewhere/secret.txt "outside" meta -> prevented=true confirmOpenOutsideVaultLink(/Users/elsewhere/secret.txt)
+6 - https://example.com/page "site" plain -> prevented=true openLink(https://example.com/page, force=false)
+6 - https://example.com/page "site" meta -> prevented=true openLink(https://example.com/page, force=true)
+7 - mailto:a@b.co "mail" plain -> prevented=false (no routing)
+7 - mailto:a@b.co "mail" meta -> prevented=false (no routing)
+8 - #top "anchor" plain -> prevented=false (no routing)
+8 - #top "anchor" meta -> prevented=false (no routing)
+9 internal-link Bridge/src/index.ts "/Users/test/repo/src/index.ts" plain -> prevented=true workspace.openLinkText(Bridge/src/index.ts, , false)
+9 internal-link Bridge/src/index.ts "/Users/test/repo/src/index.ts" meta -> prevented=true workspace.openLinkText(Bridge/src/index.ts, , false)
+10 - https://bare.example.com/x "https://bare.example.com/x" plain -> prevented=true openLink(https://bare.example.com/x, force=false)
+10 - https://bare.example.com/x "https://bare.example.com/x" meta -> prevented=true openLink(https://bare.example.com/x, force=true)
+11 ct-auto-link https://code.example.com/inline "https://code.example.com/inline" plain -> prevented=true openLink(https://code.example.com/inline, force=false)
+11 ct-auto-link https://code.example.com/inline "https://code.example.com/inline" meta -> prevented=true openLink(https://code.example.com/inline, force=true)
+12 ct-visualize-slot # "Chart" plain -> prevented=false (no routing)
+12 ct-visualize-slot # "Chart" meta -> prevented=false (no routing)
+13 internal-link Project Plan "Project Plan" plain -> prevented=true workspace.openLinkText(Project Plan, Threads/thread-1.md, false)
+13 internal-link Project Plan "Project Plan" meta -> prevented=true workspace.openLinkText(Project Plan, Threads/thread-1.md, false)"
+`;
+
+exports[`ThreadsView golden output (current renderer) > classic placement, local thread > renderMarkdown of the rich assistant message 1`] = `
+"h1
+  "Status report"
+p
+  "Intro with"
+  strong
+    "bold"
+  ","
+  em
+    "emphasis"
+  "and"
+  code
+    "inline code"
+  ", a"
+  a.internal-link [data-href="Project Plan" href="#"]
+    "Project Plan"
+  "wikilink and an"
+  a.internal-link [data-href="folder/Deep Note" href="#"]
+    "Aliased note"
+  "."
+div.ct-table-scroll
+  table
+    thead
+      tr
+        th
+          "Column A"
+        th
+          "Column B"
+    tbody
+      tr
+        td
+          "1"
+        td
+          "two"
+      tr
+        td
+          "3"
+        td
+          "four"
+ul
+  li
+    "bullet one"
+  li
+    input [checked="" disabled="" type="checkbox"]
+    "finished task"
+  li
+    input [disabled="" type="checkbox"]
+    "open task"
+ol
+  li
+    "first"
+  li
+    "second"
+pre
+  code.language-ts
+    "const url = "https://in-code.example.com/block";"
+blockquote
+  p
+    "quoted line"
+p
+  "Links:"
+  a [href="docs/design.md#Overview"]
+    "design"
+  ","
+  a [href="/Users/test/Vault/Notes/abs.md#Heading%20One"]
+    "abs"
+  ","
+  a [href="/Users/elsewhere/secret.txt"]
+    "outside"
+  ","
+  a [href="https://example.com/page"]
+    "site"
+  ","
+  a [href="mailto:a@b.co"]
+    "mail"
+  ","
+  a [href="#top"]
+    "anchor"
+  "."
+p
+  "Bridge path"
+  a.internal-link [data-href="Bridge/src/index.ts" data-tooltip="Bridge/src/index.ts" href="#"]
+    "/Users/test/repo/src/index.ts"
+  "exists, /Users/test/repo/src/missing.ts does not. Bare"
+  a [href="https://bare.example.com/x"]
+    "https://bare.example.com/x"
+  "and"
+  code
+    a.ct-auto-link [href="https://code.example.com/inline"]
+      "https://code.example.com/inline"
+  "."
+p
+  img [alt="remote image" src="https://example.com/pic.png"]
+  img [alt="local image" src="/Users/test/pic.png"]
+p
+  a.ct-visualize-slot [data-ct-viz="0" href="#"]
+    "Chart"
+section.ct-inline-content [aria-label="Reference card" data-kind="card"]
+  div.ct-inline-content-heading
+    div.ct-inline-content-title
+      "Hydrated card"
+--- visualize
+hydrate([{"index":0,"path":"/tmp/viz/chart.html","title":"Chart"}], interactive=true)
+--- clicks
+0 internal-link Project Plan "Project Plan" plain -> prevented=true workspace.openLinkText(Project Plan, Threads/thread-1.md, false)
+0 internal-link Project Plan "Project Plan" meta -> prevented=true workspace.openLinkText(Project Plan, Threads/thread-1.md, false)
+1 internal-link folder/Deep Note "Aliased note" plain -> prevented=true workspace.openLinkText(folder/Deep Note, Threads/thread-1.md, false)
+1 internal-link folder/Deep Note "Aliased note" meta -> prevented=true workspace.openLinkText(folder/Deep Note, Threads/thread-1.md, false)
+2 - docs/design.md#Overview "design" plain -> prevented=true workspace.openLinkText(docs/design.md#Overview, Threads/thread-1.md, false)
+2 - docs/design.md#Overview "design" meta -> prevented=true workspace.openLinkText(docs/design.md#Overview, Threads/thread-1.md, false)
+3 - /Users/test/Vault/Notes/abs.md#Heading%20One "abs" plain -> prevented=true workspace.openLinkText(Notes/abs.md#Heading One, Threads/thread-1.md, false)
+3 - /Users/test/Vault/Notes/abs.md#Heading%20One "abs" meta -> prevented=true workspace.openLinkText(Notes/abs.md#Heading One, Threads/thread-1.md, false)
+4 - /Users/elsewhere/secret.txt "outside" plain -> prevented=true confirmOpenOutsideVaultLink(/Users/elsewhere/secret.txt)
+4 - /Users/elsewhere/secret.txt "outside" meta -> prevented=true confirmOpenOutsideVaultLink(/Users/elsewhere/secret.txt)
+5 - https://example.com/page "site" plain -> prevented=true openLink(https://example.com/page, force=false)
+5 - https://example.com/page "site" meta -> prevented=true openLink(https://example.com/page, force=true)
+6 - mailto:a@b.co "mail" plain -> prevented=false (no routing)
+6 - mailto:a@b.co "mail" meta -> prevented=false (no routing)
+7 - #top "anchor" plain -> prevented=false (no routing)
+7 - #top "anchor" meta -> prevented=false (no routing)
+8 internal-link Bridge/src/index.ts "/Users/test/repo/src/index.ts" plain -> prevented=true workspace.openLinkText(Bridge/src/index.ts, , false)
+8 internal-link Bridge/src/index.ts "/Users/test/repo/src/index.ts" meta -> prevented=true workspace.openLinkText(Bridge/src/index.ts, , false)
+9 - https://bare.example.com/x "https://bare.example.com/x" plain -> prevented=true openLink(https://bare.example.com/x, force=false)
+9 - https://bare.example.com/x "https://bare.example.com/x" meta -> prevented=true openLink(https://bare.example.com/x, force=true)
+10 ct-auto-link https://code.example.com/inline "https://code.example.com/inline" plain -> prevented=true openLink(https://code.example.com/inline, force=false)
+10 ct-auto-link https://code.example.com/inline "https://code.example.com/inline" meta -> prevented=true openLink(https://code.example.com/inline, force=true)
+11 ct-visualize-slot # "Chart" plain -> prevented=false (no routing)
+11 ct-visualize-slot # "Chart" meta -> prevented=false (no routing)"
+`;
+
+exports[`ThreadsView golden output (current renderer) > compressed view groups consecutive assistant rows 1`] = `
+"div.ct-message.ct-message-user
+  div.ct-message-content
+    p
+      "Please review"
+      a.ct-auto-link [href="https://user.example.com/page?x=1"]
+        "https://user.example.com/page?x=1"
+      "and the notes."
+    div.ct-message-images
+      img.ct-message-img-thumb [src="data:image/png;base64,iVBORw0KGgo=" title="shot.png"]
+  div.ct-message-footer
+    span.ct-message-ts
+      "t1700000000000"
+div.ct-message.ct-message-assistant.ct-message-compressed
+  div.ct-message-content
+    div.ct-compressed-row
+      span.ct-compressed-summary
+        "Summarizing…"
+      button.ct-expand-btn [data-icon="chevron-down" title="Expand"]
+    div.ct-full-content.ct-hidden
+      div.ct-message.ct-message-assistant
+        div.ct-tools
+          div.ct-tool-group.ct-tool-group-error
+            button.ct-compressed-row.ct-tool-error.ct-tool-group-header [aria-expanded="false" type="button"]
+              span.ct-tool-group-status.ct-tool-state-error [aria-label="failed" data-icon="x" role="img"]
+              span.ct-tool-group-icon.ct-tool-pill-icon [data-icon="file-text"]
+              span.ct-compressed-summary
+                "Read 2 files, searched 1 pattern"
+              span.ct-tool-group-count [data-count-in-label="true"]
+                "3"
+              span.ct-expand-btn [aria-hidden="true" data-icon="chevron-down"]
+            div.ct-full-content.ct-hidden
+              div.ct-tool-pill.ct-tool-success [data-tool-use-id="t1" tabindex="0"]
+                span.ct-tool-state-success.ct-tool-status [aria-label="done" data-icon="check" role="img"]
+                span.ct-tool-pill-icon [data-icon="file-text"]
+                span.ct-tool-pill-name
+                  "Read"
+                span.ct-tool-pill-text.ct-tool-pill-text-path [title="Read: /Users/test/Vault/Notes/a.md"]
+                  span.ct-tool-path-dir
+                    "Read: /Users/test/Vault/Notes/"
+                  span.ct-tool-path-file
+                    "a.md"
+                span.ct-tool-pill-ts
+                  "t1700000000500"
+              div.ct-tool-pill.ct-tool-success [data-tool-use-id="t2" tabindex="0"]
+                span.ct-tool-state-success.ct-tool-status [aria-label="done" data-icon="check" role="img"]
+                span.ct-tool-pill-icon [data-icon="file-text"]
+                span.ct-tool-pill-name
+                  "Read"
+                span.ct-tool-pill-text.ct-tool-pill-text-path [title="Read: /Users/test/Vault/Notes/b.md"]
+                  span.ct-tool-path-dir
+                    "Read: /Users/test/Vault/Notes/"
+                  span.ct-tool-path-file
+                    "b.md"
+                span.ct-tool-pill-ts
+                  "t1700000000600"
+              div.ct-tool-error.ct-tool-pill [data-tool-use-id="t3" tabindex="0"]
+                span.ct-tool-state-error.ct-tool-status [aria-label="failed" data-icon="x" role="img"]
+                span.ct-tool-pill-icon [data-icon="search-code"]
+                span.ct-tool-pill-name
+                  "Grep"
+                span.ct-tool-pill-text [title="Grep: TODO"]
+                  "Grep: TODO"
+                span.ct-tool-pill-ts
+                  "t1700000000700"
+        div.ct-message-content
+          h1
+            "Status report"
+          p
+            "Intro with"
+            strong
+              "bold"
+            ","
+            em
+              "emphasis"
+            "and"
+            code
+              "inline code"
+            ", a"
+            a.internal-link [data-href="Project Plan" href="#"]
+              "Project Plan"
+            "wikilink and an"
+            a.internal-link [data-href="folder/Deep Note" href="#"]
+              "Aliased note"
+            "."
+          div.ct-table-scroll
+            table
+              thead
+                tr
+                  th
+                    "Column A"
+                  th
+                    "Column B"
+              tbody
+                tr
+                  td
+                    "1"
+                  td
+                    "two"
+                tr
+                  td
+                    "3"
+                  td
+                    "four"
+          ul
+            li
+              "bullet one"
+            li
+              input [checked="" disabled="" type="checkbox"]
+              "finished task"
+            li
+              input [disabled="" type="checkbox"]
+              "open task"
+          ol
+            li
+              "first"
+            li
+              "second"
+          pre
+            code.language-ts
+              "const url = "https://in-code.example.com/block";"
+          blockquote
+            p
+              "quoted line"
+          p
+            "Links:"
+            a [href="docs/design.md#Overview"]
+              "design"
+            ","
+            a [href="/Users/test/Vault/Notes/abs.md#Heading%20One"]
+              "abs"
+            ","
+            a [href="/Users/elsewhere/secret.txt"]
+              "outside"
+            ","
+            a [href="https://example.com/page"]
+              "site"
+            ","
+            a [href="mailto:a@b.co"]
+              "mail"
+            ","
+            a [href="#top"]
+              "anchor"
+            "."
+          p
+            "Bridge path"
+            a.internal-link [data-href="Bridge/src/index.ts" data-tooltip="Bridge/src/index.ts" href="#"]
+              "/Users/test/repo/src/index.ts"
+            "exists, /Users/test/repo/src/missing.ts does not. Bare"
+            a [href="https://bare.example.com/x"]
+              "https://bare.example.com/x"
+            "and"
+            code
+              a.ct-auto-link [href="https://code.example.com/inline"]
+                "https://code.example.com/inline"
+            "."
+          p
+            img [alt="remote image" src="https://example.com/pic.png"]
+            img [alt="local image" src="/Users/test/pic.png"]
+          p
+            a.ct-visualize-slot [data-ct-viz="0" href="#"]
+              "Chart"
+          section.ct-inline-content [aria-label="Reference card" data-kind="card"]
+            div.ct-inline-content-heading
+              div.ct-inline-content-title
+                "Hydrated card"
+      div.ct-message.ct-message-assistant
+        div.ct-tools
+          div.ct-tool-group.ct-tool-group-success
+            button.ct-compressed-row.ct-tool-group-header [aria-expanded="false" type="button"]
+              span.ct-tool-group-status.ct-tool-state-success [aria-label="done" data-icon="check" role="img"]
+              span.ct-tool-group-icon.ct-tool-pill-icon [data-icon="terminal"]
+              span.ct-compressed-summary
+                "Ran 1 command"
+              span.ct-tool-group-count [data-count-in-label="true"]
+                "1"
+              span.ct-expand-btn [aria-hidden="true" data-icon="chevron-down"]
+            div.ct-full-content.ct-hidden
+              div.ct-tool-pill.ct-tool-success [data-tool-use-id="t4" tabindex="0"]
+                span.ct-tool-state-success.ct-tool-status [aria-label="done" data-icon="check" role="img"]
+                span.ct-tool-pill-icon [data-icon="terminal"]
+                span.ct-tool-pill-name
+                  "Bash"
+                span.ct-tool-pill-text [title="Bash: npm test"]
+                  "Bash: npm test"
+                span.ct-tool-pill-ts
+                  "t1700000001900"
+        div.ct-message-content
+      div.ct-message.ct-message-assistant
+        div.ct-message-content
+          p
+            "Follow-up assistant message with a"
+            a.internal-link [data-href="Project Plan" href="#"]
+              "Project Plan"
+            "link."
+div.ct-compact-divider
+  span.ct-compact-label
+    "Context auto-compacted"
+  span.ct-compact-tokens
+    "123k tokens"
+div.ct-notice-row
+  span.ct-notice-icon [data-icon="check-circle"]
+  span.ct-notice-text
+    "Background task "build" completed"
+div.ct-notice-row
+  span.ct-notice-icon [data-icon="x-circle"]
+  span.ct-notice-text
+    "Background task "lint" failed""
+`;
+
+exports[`ThreadsView golden output (current renderer) > conversation-first placement, remote thread > full transcript through appendMessage 1`] = `
+"div.ct-message.ct-message-user
+  div.ct-message-content
+    p
+      "Please review"
+      a.ct-auto-link [href="https://user.example.com/page?x=1"]
+        "https://user.example.com/page?x=1"
+      "and the notes."
+    div.ct-message-images
+      img.ct-message-img-thumb [src="data:image/png;base64,iVBORw0KGgo=" title="shot.png"]
+  div.ct-message-footer
+    span.ct-message-ts
+      "t1700000000000"
+div.ct-message.ct-message-assistant
+  div.ct-tools
+    div.ct-tool-group.ct-tool-group-error
+      button.ct-compressed-row.ct-tool-error.ct-tool-group-header [aria-expanded="false" type="button"]
+        span.ct-tool-group-status.ct-tool-state-error [aria-label="failed" data-icon="x" role="img"]
+        span.ct-tool-group-icon.ct-tool-pill-icon [data-icon="file-text"]
+        span.ct-compressed-summary
+          "Read 2 files, searched 1 pattern"
+        span.ct-tool-group-count [data-count-in-label="true"]
+          "3"
+        span.ct-expand-btn [aria-hidden="true" data-icon="chevron-down"]
+      div.ct-full-content.ct-hidden
+        div.ct-tool-pill.ct-tool-success [data-tool-use-id="t1" tabindex="0"]
+          span.ct-tool-state-success.ct-tool-status [aria-label="done" data-icon="check" role="img"]
+          span.ct-tool-pill-icon [data-icon="file-text"]
+          span.ct-tool-pill-name
+            "Read"
+          span.ct-tool-pill-text.ct-tool-pill-text-path [title="Read: /Users/test/Vault/Notes/a.md"]
+            span.ct-tool-path-dir
+              "Read: /Users/test/Vault/Notes/"
+            span.ct-tool-path-file
+              "a.md"
+          span.ct-tool-pill-ts
+            "t1700000000500"
+        div.ct-tool-pill.ct-tool-success [data-tool-use-id="t2" tabindex="0"]
+          span.ct-tool-state-success.ct-tool-status [aria-label="done" data-icon="check" role="img"]
+          span.ct-tool-pill-icon [data-icon="file-text"]
+          span.ct-tool-pill-name
+            "Read"
+          span.ct-tool-pill-text.ct-tool-pill-text-path [title="Read: /Users/test/Vault/Notes/b.md"]
+            span.ct-tool-path-dir
+              "Read: /Users/test/Vault/Notes/"
+            span.ct-tool-path-file
+              "b.md"
+          span.ct-tool-pill-ts
+            "t1700000000600"
+        div.ct-tool-error.ct-tool-pill [data-tool-use-id="t3" tabindex="0"]
+          span.ct-tool-state-error.ct-tool-status [aria-label="failed" data-icon="x" role="img"]
+          span.ct-tool-pill-icon [data-icon="search-code"]
+          span.ct-tool-pill-name
+            "Grep"
+          span.ct-tool-pill-text [title="Grep: TODO"]
+            "Grep: TODO"
+          span.ct-tool-pill-ts
+            "t1700000000700"
+  div.ct-message-content
+    h1
+      "Status report"
+    p
+      "Intro with"
+      strong
+        "bold"
+      ","
+      em
+        "emphasis"
+      "and"
+      code
+        "inline code"
+      ", a"
+      a.internal-link [data-href="Project Plan" href="#"]
+        "Project Plan"
+      "wikilink and an"
+      a.internal-link [data-href="folder/Deep Note" href="#"]
+        "Aliased note"
+      "."
+    div.ct-table-scroll
+      table
+        thead
+          tr
+            th
+              "Column A"
+            th
+              "Column B"
+        tbody
+          tr
+            td
+              "1"
+            td
+              "two"
+          tr
+            td
+              "3"
+            td
+              "four"
+    ul
+      li
+        "bullet one"
+      li
+        input [checked="" disabled="" type="checkbox"]
+        "finished task"
+      li
+        input [disabled="" type="checkbox"]
+        "open task"
+    ol
+      li
+        "first"
+      li
+        "second"
+    pre
+      code.language-ts
+        "const url = "https://in-code.example.com/block";"
+    blockquote
+      p
+        "quoted line"
+    p
+      "Links:"
+      a [href="docs/design.md#Overview"]
+        "design"
+      ","
+      a [href="/Users/test/Vault/Notes/abs.md#Heading%20One"]
+        "abs"
+      ","
+      a [href="/Users/elsewhere/secret.txt"]
+        "outside"
+      ","
+      a [href="https://example.com/page"]
+        "site"
+      ","
+      a [href="mailto:a@b.co"]
+        "mail"
+      ","
+      a [href="#top"]
+        "anchor"
+      "."
+    p
+      "Bridge path"
+      a.internal-link [data-href="Bridge/src/index.ts" data-tooltip="Bridge/src/index.ts" href="#"]
+        "/Users/test/repo/src/index.ts"
+      "exists, /Users/test/repo/src/missing.ts does not. Bare"
+      a [href="https://bare.example.com/x"]
+        "https://bare.example.com/x"
+      "and"
+      code
+        a.ct-auto-link [href="https://code.example.com/inline"]
+          "https://code.example.com/inline"
+      "."
+    p
+      img [alt="remote image" src="https://example.com/pic.png"]
+      span.ct-remote-img-unavailable [title="local image"]
+        "Image unavailable"
+    p
+      a.ct-visualize-slot [data-ct-viz="0" href="#"]
+        "Chart"
+    section.ct-inline-content [aria-label="Reference card" data-kind="card"]
+      div.ct-inline-content-heading
+        div.ct-inline-content-title
+          "Hydrated card"
+  button.ct-copy-btn [data-icon="copy" title="Copy response"]
+  div.ct-message-footer
+    span.ct-message-ts
+      "t1700000001000"
+    span.ct-cost
+      "$0.0123"
+div.ct-message.ct-message-assistant
+  div.ct-tools
+    div.ct-tool-group.ct-tool-group-success
+      button.ct-compressed-row.ct-tool-group-header [aria-expanded="false" type="button"]
+        span.ct-tool-group-status.ct-tool-state-success [aria-label="done" data-icon="check" role="img"]
+        span.ct-tool-group-icon.ct-tool-pill-icon [data-icon="terminal"]
+        span.ct-compressed-summary
+          "Ran 1 command"
+        span.ct-tool-group-count [data-count-in-label="true"]
+          "1"
+        span.ct-expand-btn [aria-hidden="true" data-icon="chevron-down"]
+      div.ct-full-content.ct-hidden
+        div.ct-tool-pill.ct-tool-success [data-tool-use-id="t4" tabindex="0"]
+          span.ct-tool-state-success.ct-tool-status [aria-label="done" data-icon="check" role="img"]
+          span.ct-tool-pill-icon [data-icon="terminal"]
+          span.ct-tool-pill-name
+            "Bash"
+          span.ct-tool-pill-text [title="Bash: npm test"]
+            "Bash: npm test"
+          span.ct-tool-pill-ts
+            "t1700000001900"
+  div.ct-tool-result-images
+    img [src="data:image/png;base64,iVBORw0KGgo=" style="max-width:100%;border-radius:4px;margin-bottom:6px;display:block;"]
+  div.ct-message-content
+div.ct-message.ct-message-assistant
+  div.ct-message-content
+    p
+      "Follow-up assistant message with a"
+      a.internal-link [data-href="Project Plan" href="#"]
+        "Project Plan"
+      "link."
+  button.ct-copy-btn [data-icon="copy" title="Copy response"]
+div.ct-compact-divider
+  span.ct-compact-label
+    "Context auto-compacted"
+  span.ct-compact-tokens
+    "123k tokens"
+div.ct-notice-row
+  span.ct-notice-icon [data-icon="check-circle"]
+  span.ct-notice-text
+    "Background task "build" completed"
+div.ct-notice-row
+  span.ct-notice-icon [data-icon="x-circle"]
+  span.ct-notice-text
+    "Background task "lint" failed"
+--- clicks
+0 ct-auto-link https://user.example.com/page?x=1 "https://user.example.com/page?x=1" plain -> prevented=true openLink(https://user.example.com/page?x=1, force=false)
+0 ct-auto-link https://user.example.com/page?x=1 "https://user.example.com/page?x=1" meta -> prevented=true openLink(https://user.example.com/page?x=1, force=true)
+1 internal-link Project Plan "Project Plan" plain -> prevented=true contextPanel.openLinkText(Project Plan, Threads/thread-1.md)
+1 internal-link Project Plan "Project Plan" meta -> prevented=true contextPanel.openLinkText(Project Plan, Threads/thread-1.md)
+2 internal-link folder/Deep Note "Aliased note" plain -> prevented=true contextPanel.openLinkText(folder/Deep Note, Threads/thread-1.md)
+2 internal-link folder/Deep Note "Aliased note" meta -> prevented=true contextPanel.openLinkText(folder/Deep Note, Threads/thread-1.md)
+3 - docs/design.md#Overview "design" plain -> prevented=true contextPanel.openLinkText(docs/design.md#Overview, Threads/thread-1.md)
+3 - docs/design.md#Overview "design" meta -> prevented=true contextPanel.openLinkText(docs/design.md#Overview, Threads/thread-1.md)
+4 - /Users/test/Vault/Notes/abs.md#Heading%20One "abs" plain -> prevented=true contextPanel.openLinkText(Notes/abs.md#Heading One, Threads/thread-1.md)
+4 - /Users/test/Vault/Notes/abs.md#Heading%20One "abs" meta -> prevented=true contextPanel.openLinkText(Notes/abs.md#Heading One, Threads/thread-1.md)
+5 - /Users/elsewhere/secret.txt "outside" plain -> prevented=true confirmOpenOutsideVaultLink(/Users/elsewhere/secret.txt)
+5 - /Users/elsewhere/secret.txt "outside" meta -> prevented=true confirmOpenOutsideVaultLink(/Users/elsewhere/secret.txt)
+6 - https://example.com/page "site" plain -> prevented=true openLink(https://example.com/page, force=false)
+6 - https://example.com/page "site" meta -> prevented=true openLink(https://example.com/page, force=true)
+7 - mailto:a@b.co "mail" plain -> prevented=false (no routing)
+7 - mailto:a@b.co "mail" meta -> prevented=false (no routing)
+8 - #top "anchor" plain -> prevented=false (no routing)
+8 - #top "anchor" meta -> prevented=false (no routing)
+9 internal-link Bridge/src/index.ts "/Users/test/repo/src/index.ts" plain -> prevented=true contextPanel.openLinkText(Bridge/src/index.ts)
+9 internal-link Bridge/src/index.ts "/Users/test/repo/src/index.ts" meta -> prevented=true contextPanel.openLinkText(Bridge/src/index.ts)
+10 - https://bare.example.com/x "https://bare.example.com/x" plain -> prevented=true openLink(https://bare.example.com/x, force=false)
+10 - https://bare.example.com/x "https://bare.example.com/x" meta -> prevented=true openLink(https://bare.example.com/x, force=true)
+11 ct-auto-link https://code.example.com/inline "https://code.example.com/inline" plain -> prevented=true openLink(https://code.example.com/inline, force=false)
+11 ct-auto-link https://code.example.com/inline "https://code.example.com/inline" meta -> prevented=true openLink(https://code.example.com/inline, force=true)
+12 ct-visualize-slot # "Chart" plain -> prevented=false (no routing)
+12 ct-visualize-slot # "Chart" meta -> prevented=false (no routing)
+13 internal-link Project Plan "Project Plan" plain -> prevented=true contextPanel.openLinkText(Project Plan, Threads/thread-1.md)
+13 internal-link Project Plan "Project Plan" meta -> prevented=true contextPanel.openLinkText(Project Plan, Threads/thread-1.md)"
+`;
+
+exports[`ThreadsView golden output (current renderer) > conversation-first placement, remote thread > renderMarkdown of the rich assistant message 1`] = `
+"h1
+  "Status report"
+p
+  "Intro with"
+  strong
+    "bold"
+  ","
+  em
+    "emphasis"
+  "and"
+  code
+    "inline code"
+  ", a"
+  a.internal-link [data-href="Project Plan" href="#"]
+    "Project Plan"
+  "wikilink and an"
+  a.internal-link [data-href="folder/Deep Note" href="#"]
+    "Aliased note"
+  "."
+div.ct-table-scroll
+  table
+    thead
+      tr
+        th
+          "Column A"
+        th
+          "Column B"
+    tbody
+      tr
+        td
+          "1"
+        td
+          "two"
+      tr
+        td
+          "3"
+        td
+          "four"
+ul
+  li
+    "bullet one"
+  li
+    input [checked="" disabled="" type="checkbox"]
+    "finished task"
+  li
+    input [disabled="" type="checkbox"]
+    "open task"
+ol
+  li
+    "first"
+  li
+    "second"
+pre
+  code.language-ts
+    "const url = "https://in-code.example.com/block";"
+blockquote
+  p
+    "quoted line"
+p
+  "Links:"
+  a [href="docs/design.md#Overview"]
+    "design"
+  ","
+  a [href="/Users/test/Vault/Notes/abs.md#Heading%20One"]
+    "abs"
+  ","
+  a [href="/Users/elsewhere/secret.txt"]
+    "outside"
+  ","
+  a [href="https://example.com/page"]
+    "site"
+  ","
+  a [href="mailto:a@b.co"]
+    "mail"
+  ","
+  a [href="#top"]
+    "anchor"
+  "."
+p
+  "Bridge path"
+  a.internal-link [data-href="Bridge/src/index.ts" data-tooltip="Bridge/src/index.ts" href="#"]
+    "/Users/test/repo/src/index.ts"
+  "exists, /Users/test/repo/src/missing.ts does not. Bare"
+  a [href="https://bare.example.com/x"]
+    "https://bare.example.com/x"
+  "and"
+  code
+    a.ct-auto-link [href="https://code.example.com/inline"]
+      "https://code.example.com/inline"
+  "."
+p
+  img [alt="remote image" src="https://example.com/pic.png"]
+  span.ct-remote-img-unavailable [title="local image"]
+    "Image unavailable"
+p
+  a.ct-visualize-slot [data-ct-viz="0" href="#"]
+    "Chart"
+section.ct-inline-content [aria-label="Reference card" data-kind="card"]
+  div.ct-inline-content-heading
+    div.ct-inline-content-title
+      "Hydrated card"
+--- visualize
+hydrate([{"index":0,"path":"/tmp/viz/chart.html","title":"Chart"}], interactive=true)
+--- clicks
+0 internal-link Project Plan "Project Plan" plain -> prevented=true contextPanel.openLinkText(Project Plan, Threads/thread-1.md)
+0 internal-link Project Plan "Project Plan" meta -> prevented=true contextPanel.openLinkText(Project Plan, Threads/thread-1.md)
+1 internal-link folder/Deep Note "Aliased note" plain -> prevented=true contextPanel.openLinkText(folder/Deep Note, Threads/thread-1.md)
+1 internal-link folder/Deep Note "Aliased note" meta -> prevented=true contextPanel.openLinkText(folder/Deep Note, Threads/thread-1.md)
+2 - docs/design.md#Overview "design" plain -> prevented=true contextPanel.openLinkText(docs/design.md#Overview, Threads/thread-1.md)
+2 - docs/design.md#Overview "design" meta -> prevented=true contextPanel.openLinkText(docs/design.md#Overview, Threads/thread-1.md)
+3 - /Users/test/Vault/Notes/abs.md#Heading%20One "abs" plain -> prevented=true contextPanel.openLinkText(Notes/abs.md#Heading One, Threads/thread-1.md)
+3 - /Users/test/Vault/Notes/abs.md#Heading%20One "abs" meta -> prevented=true contextPanel.openLinkText(Notes/abs.md#Heading One, Threads/thread-1.md)
+4 - /Users/elsewhere/secret.txt "outside" plain -> prevented=true confirmOpenOutsideVaultLink(/Users/elsewhere/secret.txt)
+4 - /Users/elsewhere/secret.txt "outside" meta -> prevented=true confirmOpenOutsideVaultLink(/Users/elsewhere/secret.txt)
+5 - https://example.com/page "site" plain -> prevented=true openLink(https://example.com/page, force=false)
+5 - https://example.com/page "site" meta -> prevented=true openLink(https://example.com/page, force=true)
+6 - mailto:a@b.co "mail" plain -> prevented=false (no routing)
+6 - mailto:a@b.co "mail" meta -> prevented=false (no routing)
+7 - #top "anchor" plain -> prevented=false (no routing)
+7 - #top "anchor" meta -> prevented=false (no routing)
+8 internal-link Bridge/src/index.ts "/Users/test/repo/src/index.ts" plain -> prevented=true contextPanel.openLinkText(Bridge/src/index.ts)
+8 internal-link Bridge/src/index.ts "/Users/test/repo/src/index.ts" meta -> prevented=true contextPanel.openLinkText(Bridge/src/index.ts)
+9 - https://bare.example.com/x "https://bare.example.com/x" plain -> prevented=true openLink(https://bare.example.com/x, force=false)
+9 - https://bare.example.com/x "https://bare.example.com/x" meta -> prevented=true openLink(https://bare.example.com/x, force=true)
+10 ct-auto-link https://code.example.com/inline "https://code.example.com/inline" plain -> prevented=true openLink(https://code.example.com/inline, force=false)
+10 ct-auto-link https://code.example.com/inline "https://code.example.com/inline" meta -> prevented=true openLink(https://code.example.com/inline, force=true)
+11 ct-visualize-slot # "Chart" plain -> prevented=false (no routing)
+11 ct-visualize-slot # "Chart" meta -> prevented=false (no routing)"
+`;
+
+exports[`ThreadsView golden output (current renderer) > streaming partial renders through the streaming path 1`] = `
+"div.ct-message.ct-message-assistant.ct-streaming
+  div.ct-message-content
+    p
+      "Partial"
+      strong
+        "bold"
+      "with a"
+      a.internal-link [data-href="Project Plan" href="#"]
+        "Project Plan"
+      "link and a table so far"
+    div.ct-table-scroll
+      table
+        thead
+          tr
+            th
+              "a"
+            th
+              "b"
+        tbody
+          tr
+            td
+              "1"
+            td
+              "2"
+    span.ct-cursor
+--- visualize
+hydrate([], interactive=false)"
+`;

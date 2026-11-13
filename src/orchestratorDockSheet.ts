@@ -7,12 +7,13 @@
  * manager: OrchestratorDock builds a `SheetView` and calls `render`.
  *
  * Every model-controlled string (message text while streaming, queued text, activity,
- * link labels) is written with textContent; assistant markdown goes through dockMarkdown.
+ * link labels) is written with textContent; assistant markdown (settled and streaming) goes through the shared renderer with the strict link policy.
  */
 import { setIcon } from 'obsidian';
-import { renderDockMarkdown } from './dockMarkdown';
+import { renderMarkdown, renderMessage } from './messageRenderer';
+import type { ChatMessage } from './types';
 import { applyTrayMode } from './orchestratorDockTray';
-import { sheetFit, trayLayout, type Richness, type SheetEntry } from './dockSheetModel';
+import { SHEET_MAX_MESSAGES, needsFullThread, sheetFit, trayLayout, type SheetEntry } from './dockSheetModel';
 import type { SuggestionChip, ThreadRef } from './orchestratorDockModel';
 
 export interface SheetRow extends SheetEntry {
@@ -24,6 +25,8 @@ export type SheetBlock = 'plan' | 'question' | 'permission' | null;
 
 export interface SheetView {
   entries: SheetRow[];
+  /** How many older messages are not drawn (the sheet shows the last SHEET_MAX_MESSAGES). */
+  older: number;
   streaming: string;
   /** Partial reply of an interrupted turn (the manager does not persist it): shown dimmed, labelled "Stopped". */
   stopped: string;
@@ -43,6 +46,8 @@ export interface SheetHandlers {
   openFull(): void;
   openThread(threadId: string): void;
   openLink?(href: string): void;
+  /** Source for an attached / tool-result image (a vault resource URL or a data URL). Absent: a data URL. */
+  imageSrc?(ref: { path?: string; mediaType: string }, inlineData: string | undefined): string;
   /** False: a `[[note]]` renders as inert text (unresolved, or the host cannot open links). */
   resolveLink?(href: string): boolean;
   removeWaiting(index: number, text: string): void;
@@ -67,17 +72,17 @@ const BOTTOM_SLACK_PX = 4;
 let sheetSeq = 0;
 const TABBABLE = 'button, a[href], textarea, input, select, summary, [tabindex]:not([tabindex="-1"])';
 
-interface RowState { row: HTMLElement; key: string; bubble: HTMLElement; pickupEl: HTMLElement | null }
+interface RowState { row: HTMLElement; key: string; pickupEl: HTMLElement | null }
 
-function richKey(r: Richness): string { return `${r.images ? 1 : 0}${r.visualize ? 1 : 0}${r.tools}`; }
-
-function describeRich(r: Richness): string {
-  const parts: string[] = [];
-  if (r.images) parts.push('images');
-  if (r.visualize) parts.push('a visualization');
-  if (r.tools > 0) parts.push(`${r.tools} tool call${r.tools === 1 ? '' : 's'}`);
-  return parts.join(', ');
+/** What a row's DOM depends on besides its text: the tool calls (names, state), the images and the notice / divider fields. */
+function messageKey(entry: SheetRow): string {
+  const msg = entry.message as Partial<ChatMessage>;
+  const tools = (msg.toolCalls ?? []).map((t) => `${t.name}:${t.status ?? ''}:${t.summary ?? ''}`).join(',');
+  const images = `${msg.images?.length ?? 0}/${msg.toolResultImages?.length ?? 0}`;
+  return `${tools}|${images}|${msg.noticeStatus ?? ''}|${msg.compactTrigger ?? ''}|${msg.preTokens ?? ''}|${needsFullThread(entry.rich) ? 1 : 0}`;
 }
+
+const defaultImageSrc = (ref: { mediaType: string }, inline: string | undefined): string => `data:${ref.mediaType};base64,${inline ?? ''}`;
 
 const BLOCK_TEXT: Record<Exclude<SheetBlock, null>, string> = {
   plan: 'The orchestrator has a plan waiting for your review.',
@@ -110,6 +115,7 @@ export class DockSheet {
   private onDocPointerDown: (e: Event) => void = () => {};
   private readonly headEl: HTMLElement;
   private readonly rows = new Map<string, RowState>();
+  private olderEl: HTMLElement | null = null;
   private streamingRow: HTMLElement | null = null;
   private activityText: HTMLElement | null = null;
   private view: SheetView | null = null;
@@ -132,6 +138,8 @@ export class DockSheet {
   private pinNext = false;
   private closeBtn: HTMLButtonElement;
   private streamFrame = false;
+  /** Bumped per streaming markdown render and on teardown: only the latest result may touch the bubble. */
+  private streamRenderSeq = 0;
   private stoppedRow: HTMLElement | null = null;
   /** Exactly the nodes WE made inert (an `inert` someone else set is never ours to remove). */
   private readonly inerted = new Set<Element>();
@@ -589,9 +597,10 @@ export class DockSheet {
   private reconcileRows(view: SheetView): void {
     const seen = new Set<string>();
     const resolvedLinks = new Map<string, boolean>();
+    const offset = this.syncOlder(view.older);
     view.entries.forEach((entry, i) => {
       seen.add(entry.id);
-      const key = `${entry.role}|${entry.text}|${richKey(entry.rich)}|${entry.role === 'assistant' ? this.linkSignature(entry.text, view.threads, resolvedLinks) : ''}`;
+      const key = `${entry.role}|${entry.text}|${messageKey(entry)}|${entry.role === 'assistant' ? this.linkSignature(entry.text, view.threads, resolvedLinks) : ''}`;
       let st = this.rows.get(entry.id);
       if (!st || st.key !== key) {
         st?.row.remove();
@@ -599,7 +608,7 @@ export class DockSheet {
         this.rows.set(entry.id, st);
       }
       this.setPickup(st, entry.pickup);
-      const at = this.logEl.children[i] ?? null;
+      const at = this.logEl.children[i + offset] ?? null;
       if (at !== st.row) this.logEl.insertBefore(st.row, at);
     });
     for (const [id, st] of this.rows) {
@@ -632,32 +641,48 @@ export class DockSheet {
     return parts.join(';');
   }
 
+  /** The older-messages row: first child of the log, present only while the cap hides messages. Returns the index offset it causes. */
+  private syncOlder(older: number): number {
+    if (older <= 0) { this.olderEl?.remove(); this.olderEl = null; return 0; }
+    if (!this.olderEl) {
+      this.olderEl = this.logEl.ownerDocument.createElement('div');
+      this.olderEl.className = 'ct-orch-older';
+      this.olderEl.createSpan({ cls: 'ct-orch-older-text', text: `Showing last ${SHEET_MAX_MESSAGES} messages` });
+      fullChip(this.olderEl).addEventListener('click', () => this.h.openFull());
+    }
+    if (this.logEl.firstElementChild !== this.olderEl) this.logEl.prepend(this.olderEl);
+    return 1;
+  }
+
   private buildRow(entry: SheetRow, key: string, threads: ThreadRef[]): RowState {
-    const row = createRow(this.logEl, entry.role, entry.id);
-    const bubble = row.createDiv('ct-orch-bubble');
-    const st: RowState = { row, key, bubble, pickupEl: null };
-    const rich = describeRich(entry.rich);
-    if (entry.text.trim() === '') {
-      // Never a blank bubble: say what the message holds.
-      bubble.textContent = rich ? `This message has ${rich}.` : '';
-    } else if (entry.role === 'assistant') {
-      // Seeded with the plain text so the row is never empty while markdown renders (the streamed text it replaces
-      // is removed in the same render); swapped for markdown when it resolves. An empty result keeps the text.
-      bubble.textContent = entry.text;
-      const target = bubble.ownerDocument.createElement('div');
-      void renderDockMarkdown(entry.text, target, { threads, resolveLink: this.h.resolveLink }).then(() => {
-        if (this.destroyed || this.rows.get(entry.id) !== st || target.childNodes.length === 0) return;
+    // The shared item renderer draws the row (compact density, strict link policy); inline-visual lines were stripped from the text.
+    const source = entry.message as ChatMessage;
+    const msg = entry.role === 'user' || entry.role === 'assistant' ? { ...source, content: entry.text } : source;
+    const pending: { st: RowState | null } = { st: null };
+    const rendered = renderMessage(msg, this.logEl, undefined, {
+      density: 'compact',
+      linkPolicy: 'strict',
+      threadRefs: threads,
+      resolveLink: this.h.resolveLink,
+      imageSrc: this.h.imageSrc ?? defaultImageSrc,
+      seedPlainText: true,
+      isStale: () => this.destroyed || this.rows.get(entry.id) !== pending.st,
+      swap: (apply) => {
         const pinned = this.stick;
-        bubble.replaceChildren(...Array.from(target.childNodes));
+        apply();
         this.checkHoveredLink();
         if (pinned) this.scrollToBottom();
-      }).catch(() => { /* keep the plain-text seed */ });
-    } else {
-      bubble.textContent = entry.text;
-    }
-    if (rich) {
-      const chip = fullChip(row);
-      chip.addEventListener('click', () => this.h.openFull());
+      },
+    });
+    const row = rendered.el!;
+    row.dataset.role = entry.role;
+    row.dataset.id = entry.id;
+    const st: RowState = { row, key, pickupEl: null };
+    pending.st = st;
+    if (needsFullThread(entry.rich)) {
+      // Never a blank bubble: a message that is only an inline visual says so, and keeps the way to the full thread.
+      if (entry.text.trim() === '' && !row.querySelector('.ct-orch-bubble')) row.createDiv({ cls: 'ct-orch-bubble', text: 'This message has a visualization.' });
+      fullChip(row).addEventListener('click', () => this.h.openFull());
     }
     return st;
   }
@@ -668,7 +693,7 @@ export class DockSheet {
   }
 
   private renderStreaming(text: string): void {
-    if (!text) { this.streamingRow?.remove(); this.streamingRow = null; return; }
+    if (!text) { this.streamRenderSeq++; this.streamingRow?.remove(); this.streamingRow = null; return; }
     if (!this.streamingRow) {
       // aria-live off: the throttled region below is what screen readers hear while tokens arrive.
       this.streamingRow = createRow(this.logEl, 'assistant', 'streaming');
@@ -677,7 +702,24 @@ export class DockSheet {
       this.streamingRow.createDiv('ct-orch-bubble ct-orch-bubble-streaming');
     }
     this.logEl.append(this.streamingRow);
-    (this.streamingRow.firstElementChild as HTMLElement).textContent = text;
+    const bubble = this.streamingRow.firstElementChild as HTMLElement;
+    // The current buffer is written as plain text at once (the bubble is never stale or empty, and nothing here awaits), then
+    // swapped for strict markdown in the same task's microtasks, before the next paint. Same policy as settled rows, with raw
+    // HTML shown as text.
+    bubble.textContent = text;
+    const seq = ++this.streamRenderSeq;
+    const target = bubble.ownerDocument.createElement('div');
+    void renderMarkdown(text, target, undefined, {
+      linkPolicy: 'strict', streaming: true, threadRefs: this.view?.threads ?? [], resolveLink: this.h.resolveLink,
+    }).then(() => {
+      if (this.destroyed || seq !== this.streamRenderSeq || this.streamingRow?.firstElementChild !== bubble || target.childNodes.length === 0) return;
+      const pinned = this.stick;
+      // marked separates blocks with newline text nodes; a trailing one would add a blank line to the bubble.
+      while (target.lastChild?.nodeType === 3 && (target.lastChild.textContent ?? '').trim() === '') target.lastChild.remove();
+      bubble.replaceChildren(...Array.from(target.childNodes));
+      this.checkHoveredLink();
+      if (pinned) this.scrollToBottom();
+    }).catch(() => { /* keep the plain text */ });
   }
 
   private renderStopped(text: string): void {
