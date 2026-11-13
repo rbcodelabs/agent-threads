@@ -303,7 +303,8 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
       const lum = ([r, g, b]: number[]) => { const f = (v: number) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
       const bgOf = (el: Element): number[] => { for (let n: Element | null = el; n; n = n.parentElement) { const c = parse(getComputedStyle(n).backgroundColor); if (c.length === 3 || (c.length === 4 && c[3] > 0.95)) return c; } return [30, 30, 30]; };
       const out: Record<string, number> = {};
-      for (const sel of ['.ct-orch-sheet-head h2', '.ct-orch-sheet-log > [data-role="user"] .ct-message-content', '.ct-orch-sheet-log > [data-role="assistant"] .ct-message-content', '.ct-orch-waiting', '.ct-orch-sheet a.internal-link[data-href^="thread:"]', '.ct-orch-sheet-head button', '.ct-message-content a:not([data-href^="thread:"])']) {
+      // Links are not listed: the sheet no longer styles them (it renders like the main panel, whose links take the host theme's `a` colour; the harness does not model it).
+      for (const sel of ['.ct-orch-sheet-head h2', '.ct-orch-sheet-log > [data-role="user"] .ct-message-content', '.ct-orch-sheet-log > [data-role="assistant"] .ct-message-content', '.ct-orch-waiting', '.ct-orch-sheet-head button']) {
         const el = document.querySelector(sel); if (!el) continue;
         const fg = parse(getComputedStyle(el).color); const bg = bgOf(el);
         const [L1, L2] = [lum(fg), lum(bg)].sort((a, b) => b - a);

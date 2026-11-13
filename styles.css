@@ -7395,6 +7395,10 @@ textarea.ct-settings-wide-input {
 .ct-orch-older { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; padding: 4px 0; font-size: var(--font-ui-smaller); color: var(--text-muted); }
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-tool-group-header,
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet button.ct-tool-group-header { min-height: 44px; }
+/* The main panel's hover-revealed copy button has no place in the narrow / touch sheet: it would be a sub-44px target that
+   covers the corner of the message it sits on, and touch has no hover to reveal it. (Copying is one tap away in the full thread.) */
+.ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] .ct-copy-btn,
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet .ct-copy-btn { display: none; }
 .ct-orch-activity { display: flex; align-items: center; gap: 8px; font-size: var(--font-ui-smaller); color: var(--text-muted); }
 .ct-orch-activity-spin {
   flex: none; width: 10px; height: 10px; border-radius: 50%;
@@ -7546,6 +7550,8 @@ textarea.ct-settings-wide-input {
   .ct-kanban-dispatch .ct-orch-peek { animation: none; }
   /* The copy button's 0.1s fade (shared with the main panel's rule) is motion too. */
   .ct-orch-sheet-log .ct-copy-btn { transition: none; }
+  /* ...and the main panel's 0.15s row fade-in (`.ct-message`), which the sheet's rows carry. */
+  .ct-orch-sheet-log .ct-message { animation: none; }
   /* The pill's own border / glow fade (pre-existing) is motion too. */
   .ct-kanban-dispatch { transition: none; }
   /* The highlighted board card: its border / glow must not fade either (the board-wide card transition). */
