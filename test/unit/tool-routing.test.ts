@@ -131,7 +131,7 @@ describe('toolRouting routes', () => {
   it('never offers a tool that writes, executes, schedules, installs, sends or reads a secret, however it is configured', () => {
     const dangerous = ['request_secret', 'mcp_register_server', 'host_execute_command', 'obsidian_execute_command', 'host_list_commands',
       'host_open_url', 'workspace_navigate_to_file', 'workspace_insert_at_cursor', 'watch_document', 'unwatch_document',
-      'vault_restore_file_version', 'vault_add_bridge', 'sync_resolve_conflict', 'threads_create', 'threads_create_project', 'threads_update_project',
+      'vault_restore_file_version', 'vault_add_bridge', 'vault_move', 'sync_resolve_conflict', 'threads_create', 'threads_create_project', 'threads_update_project',
       'threads_set_project', 'threads_open', 'threads_send_message', 'threads_archive', 'threads_set_notes',
       'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision', 'threads_list_orchestrators', 'threads_set_orchestrator_enabled', 'skills_install', 'skills_create_local', 'skills_update_local',
       'skills_uninstall', 'skills_update', 'skills_check_updates', 'ScheduleWakeup', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',

@@ -19,6 +19,7 @@ export const LEGACY_TO_CANONICAL_TOOL_NAMES: Readonly<Record<string, string>> = 
   obsidian_get_outgoing_links: 'vault_get_outgoing_links',
   obsidian_get_file_history: 'vault_get_file_history',
   obsidian_restore_file_version: 'vault_restore_file_version',
+  obsidian_move_path: 'vault_move',
   obsidian_list_vault_bridges: 'vault_list_bridges',
   obsidian_add_vault_bridge: 'vault_add_bridge',
   obsidian_get_active_file: 'workspace_get_active_file',
@@ -59,7 +60,7 @@ export const TOOL_NAMES_BY_DOMAIN: Readonly<Record<ToolDomain, readonly string[]
   worktree: ['set_working_directory', 'enter_worktree', 'exit_worktree'],
   vault: [
     'obsidian_search_vault', 'obsidian_get_backlinks', 'obsidian_get_outgoing_links', 'obsidian_get_note_metadata',
-    'vault_list', 'obsidian_get_file_history', 'obsidian_restore_file_version', 'obsidian_list_vault_bridges',
+    'vault_list', 'obsidian_get_file_history', 'obsidian_restore_file_version', 'obsidian_move_path', 'obsidian_list_vault_bridges',
     'obsidian_add_vault_bridge', 'sync_list_conflicts', 'sync_inspect_conflict', 'sync_resolve_conflict',
   ],
   workspace: [
@@ -106,7 +107,7 @@ export const BUILT_IN_TOOL_ORDER: readonly string[] = Object.freeze([
   'obsidian_open_thread', 'obsidian_get_thread_log', 'obsidian_wait_for_thread', 'obsidian_send_message_to_thread',
   'obsidian_archive_thread', 'obsidian_set_thread_notes', 'obsidian_set_thread_proposed_reply',
   'obsidian_clear_thread_proposed_reply', 'obsidian_post_thread_decision', 'obsidian_clear_thread_decision', 'threads_list_orchestrators', 'threads_set_orchestrator_enabled', 'obsidian_list_vault_bridges', 'obsidian_add_vault_bridge',
-  'obsidian_get_file_history', 'obsidian_restore_file_version', 'sync_list_conflicts',
+  'obsidian_get_file_history', 'obsidian_restore_file_version', 'obsidian_move_path', 'sync_list_conflicts',
   'sync_inspect_conflict', 'sync_resolve_conflict', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',
   'request_secret', 'mcp_register_server', 'skills_list_installed', 'skills_search', 'skills_get',
   'skills_list_sources', 'skills_check_updates', 'skills_install', 'skills_create_local', 'skills_update_local',
