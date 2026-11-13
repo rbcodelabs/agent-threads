@@ -662,7 +662,6 @@ export class DockSheet {
     const msg = entry.role === 'user' ? { ...source, content: entry.text }
       : entry.role === 'assistant' ? { ...source, content: rewriteThreadLinks(entry.text, threads) }
       : source;
-    const pinned = this.stick;
     const pending: { st: RowState | null } = { st: null };
     const rendered = renderMessage(msg, this.logEl, env.host(), {
       imageSrc: this.h.imageSrc ?? defaultImageSrc,
@@ -677,11 +676,12 @@ export class DockSheet {
     row.dataset.id = entry.id;
     const st: RowState = { row, key, pickupEl: null };
     pending.st = st;
-    // Markdown lands in a microtask: re-pin a row that was pinned when it was built, unless it was replaced meanwhile.
+    // Markdown lands in a microtask and grows the row: re-pin if the user is following the bottom NOW (they may have scrolled
+    // up since the row was built), unless the row was replaced meanwhile.
     void rendered.done.then(() => {
       if (this.destroyed || this.rows.get(entry.id) !== pending.st) return;
       this.checkHoveredLink();
-      if (pinned) this.scrollToBottom();
+      if (this.stick) this.scrollToBottom();
     }, () => { /* the row keeps whatever rendered */ });
     if (needsFullThread(entry.rich)) {
       // Never a blank row: a message that is only an inline visual says so, and keeps the way to the full thread.

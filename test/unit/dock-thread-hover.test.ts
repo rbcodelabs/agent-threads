@@ -47,7 +47,7 @@ async function setup(opts: { focusCard?: boolean; mode?: 'pill' | 'orb' } = {}) 
   dock.mount();
   dock.openSheet();
   await new Promise((r) => setTimeout(r, 0)); // markdown swap
-  const link = (id: string) => stage.querySelector(`a.ct-thread-link[data-thread-id="${id}"]`) as HTMLAnchorElement;
+  const link = (id: string) => stage.querySelector(`a.internal-link[data-href="thread:${id}"]`) as HTMLAnchorElement;
   return { dock, deps, stage, focusCard, clearCardFocus, link, emit, orch, manager };
 }
 const over = (el: Element, rel: Element | null = null) => el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: rel }));
@@ -116,10 +116,10 @@ describe('thread-link hover', () => {
     const t = await setup();
     const a = document.createElement('a');
     a.href = '#';
-    t.stage.querySelector('.ct-orch-bubble')!.appendChild(a);
+    t.stage.querySelector('.ct-message-content')!.appendChild(a);
     over(a);
     focusIn(a);
-    over(t.stage.querySelector('.ct-orch-bubble')!);
+    over(t.stage.querySelector('.ct-message-content')!);
     expect(t.focusCard).not.toHaveBeenCalled();
   });
 
