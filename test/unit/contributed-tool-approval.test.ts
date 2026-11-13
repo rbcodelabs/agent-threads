@@ -12,6 +12,7 @@ import { AgentToolRegistry, type AgentToolContribution } from '../../src/AgentTo
 import { isPermissionPreApprovedForThread, type AlwaysAllowSettings } from '../../src/remoteAlwaysAllow';
 import {
   contributedToolNameFromPermissionRequest,
+  contributionApprovalPredicate,
   noApprovalContributionNames,
 } from '../../src/contributedToolApproval';
 import { ThreadManager } from '../../src/ThreadManager';
@@ -231,5 +232,51 @@ describe('permission handler wiring: no permission card for a no-approval contri
     void manager.requestToolApproval('t', 'mcp__claude_threads__asks', '{}');
     await new Promise((r) => setTimeout(r, 0));
     expect(cards).toEqual(['mcp__claude_threads__asks']);
+  });
+});
+
+describe('missing registry (stub plugin, e.g. the screenshot harness)', () => {
+  /** What ThreadsView does with `this.plugin.agentTools` when the plugin has none. */
+  const gate = (tool: string, remote?: { daemonId: string } | null, s = settings()) =>
+    isPermissionPreApprovedForThread(tool, remote, s, contributionApprovalPredicate(undefined));
+
+  it('does not throw and the contributed tool still prompts', () => {
+    expect(() => gate('mcp__claude_threads__notify_portfolio')).not.toThrow();
+    expect(gate('mcp__claude_threads__notify_portfolio')).toBe(false);
+    expect(contributionApprovalPredicate(null)('mcp__obsidian__notify_portfolio')).toBe(false);
+  });
+
+  it('local built-ins and the Always Allow list are still pre-approved', () => {
+    expect(gate('mcp__claude_threads__threads_list')).toBe(true);
+    expect(gate('mcp__obsidian__obsidian_search_vault')).toBe(true);
+    expect(gate('Bash')).toBe(false);
+    expect(gate('mcp__x__y', undefined, settings({ alwaysAllowedTools: ['mcp__x__y'] }))).toBe(true);
+  });
+
+  it('the remote branch is unaffected', () => {
+    const s = settings({ remoteAlwaysAllowedTools: { box: ['mcp__x__y'] } });
+    expect(gate('mcp__x__y', { daemonId: 'box' }, s)).toBe(true);
+    expect(gate('mcp__claude_threads__threads_list', { daemonId: 'box' }, s)).toBe(false);
+  });
+
+  it('a present registry still drives the predicate', () => {
+    const registry = new AgentToolRegistry();
+    registry.register(PLUGIN, contribution('notify_portfolio', false));
+    expect(contributionApprovalPredicate(registry)('mcp__claude_threads__notify_portfolio')).toBe(true);
+    expect(contributionApprovalPredicate(registry)('mcp__claude_threads__other')).toBe(false);
+  });
+
+  it('permission card is raised (not a throw) through a real ThreadManager when the registry is missing', async () => {
+    const manager = new ThreadManager({ ...DEFAULT_SETTINGS });
+    const cards: string[] = [];
+    manager.permissionHandler = (threadId, toolName) => {
+      if (isPermissionPreApprovedForThread(toolName, manager.getRemoteScope(threadId), settings(), contributionApprovalPredicate(undefined))) return Promise.resolve(true);
+      cards.push(toolName);
+      return new Promise<boolean>(() => {});
+    };
+    await expect(manager.requestToolApproval('t', 'mcp__claude_threads__threads_list', '{}')).resolves.toBe(true);
+    void manager.requestToolApproval('t', 'mcp__claude_threads__notify_portfolio', '{}');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(cards).toEqual(['mcp__claude_threads__notify_portfolio']);
   });
 });
