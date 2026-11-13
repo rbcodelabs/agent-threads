@@ -462,7 +462,7 @@ export class KanbanView extends ItemView {
     return {
       getFirstLinkpathDest: (path, source) => this.app.metadataCache.getFirstLinkpathDest(path, source),
       isConversationFirst: () => plugin.isConversationFirst(),
-      openInContextPanel: (href, source) => { void plugin.contextPanel.openLinkText(href, source); },
+      openInContextPanel: (href, source) => plugin.contextPanel.openLinkText(href, source),
       openLinkText: (href, source, newLeaf) => { void this.app.workspace.openLinkText(href, source, newLeaf); },
     };
   }

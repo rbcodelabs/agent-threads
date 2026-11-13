@@ -7397,6 +7397,11 @@ textarea.ct-settings-wide-input {
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet button.ct-tool-group-header { min-height: 44px; }
 /* The main panel's hover-revealed copy button has no place in the narrow / touch sheet: it would be a sub-44px target that
    covers the corner of the message it sits on, and touch has no hover to reveal it. (Copying is one tap away in the full thread.) */
+.ct-kanban-dispatch .ct-orch-sheet-log button.ct-copy-btn { /* beats the pill's button chrome strip (0,2,1): restore the shared rule's fill and border */
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+}
+.ct-kanban-dispatch .ct-orch-sheet-log button.ct-copy-btn:hover { background: var(--background-modifier-hover); }
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] .ct-copy-btn,
 .ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet .ct-copy-btn { display: none; }
 .ct-orch-activity { display: flex; align-items: center; gap: 8px; font-size: var(--font-ui-smaller); color: var(--text-muted); }

@@ -51,3 +51,23 @@ describe('openDockLink', () => {
     expect(d.openInContextPanel).not.toHaveBeenCalled();
   });
 });
+
+describe('openDockLink: a failing context panel (no chat leaf open) falls back to a new tab', () => {
+  it('a synchronous throw falls back', () => {
+    const d = deps({ isConversationFirst: () => true, openInContextPanel: vi.fn(() => { throw new Error('chat must be open'); }) });
+    expect(() => openDockLink(d, 'Real')).not.toThrow();
+    expect(d.openLinkText).toHaveBeenCalledWith('Real', '', 'tab');
+  });
+  it('a rejected promise falls back, with no unhandled rejection', async () => {
+    const d = deps({ isConversationFirst: () => true, openInContextPanel: vi.fn(async () => { throw new Error('chat must be open'); }) });
+    openDockLink(d, 'Real');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(d.openLinkText).toHaveBeenCalledWith('Real', '', 'tab');
+  });
+  it('a working context panel is used and nothing else opens', async () => {
+    const d = deps({ isConversationFirst: () => true, openInContextPanel: vi.fn(async () => {}) });
+    openDockLink(d, 'Real');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(d.openLinkText).not.toHaveBeenCalled();
+  });
+});

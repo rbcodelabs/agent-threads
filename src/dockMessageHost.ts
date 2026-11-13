@@ -13,37 +13,52 @@ import type { DockMessageHostDeps } from './dockMessageEnv';
 import { formatShortTime } from './dockMessageEnv';
 import { getVaultBridgesAPI, type BridgeInfo } from './bridgeUtils';
 import { isWebViewerEnabled } from './SettingsTab';
-import { ContextPanelViewError } from './ContextPanelController';
 import { openLocalFileViaHost, openUrlPreferringWebViewer } from './linkUtils';
 import { OutsideVaultLinkModal } from './OutsideVaultLinkModal';
 import { RemoteImageCache, createRemoteImageLoader } from './remote/remoteImages';
 import { normalizeToolCallStyle } from './toolNameUtils';
 
-export function createDockMessageHostDeps(app: App, plugin: ClaudeThreadsPlugin, manager: Pick<ThreadManager, 'getThread'>): DockMessageHostDeps {
+/** Side effects the host does not own, injectable for tests. */
+export interface DockHostIo {
+  /** The system browser (electron shell.openExternal). */
+  openSystem(url: string): void;
+}
+
+const defaultIo: DockHostIo = {
+  openSystem: (u) => {
+    const { shell } = require('electron') as { shell: { openExternal: (url: string) => void } };
+    shell.openExternal(u);
+  },
+};
+
+export function createDockMessageHostDeps(
+  app: App,
+  plugin: ClaudeThreadsPlugin,
+  manager: Pick<ThreadManager, 'getThread'>,
+  io: DockHostIo = defaultIo,
+): DockMessageHostDeps {
   const remoteImageCache = new RemoteImageCache();
 
-  /** ThreadsView.openLink: the Web Viewer (or the context panel in conversation-first layouts) unless Cmd/Ctrl-click, else the system browser. */
+  /**
+   * ThreadsView.openLink: the Web Viewer (or the context panel in conversation-first layouts) unless Cmd/Ctrl-click, else the
+   * system browser. Unlike ThreadsView, ANY failure of the Web Viewer / context-panel path (the context panel throws a plain
+   * Error when no chat leaf is open, not only ContextPanelViewError) falls back to the system browser, and nothing throws out:
+   * a link in the sheet must always reach a browser (QA B2).
+   */
   const openExternal = async (url: string, forceExternal: boolean): Promise<void> => {
-    let webViewerEnabled = !forceExternal && isWebViewerEnabled(app);
-    if (webViewerEnabled && plugin.isConversationFirst()) {
-      try {
+    const system = (): void => {
+      try { io.openSystem(url); } catch (error) { new Notice(`Could not open link: ${error instanceof Error ? error.message : String(error)}`); }
+    };
+    try {
+      const webViewerEnabled = !forceExternal && isWebViewerEnabled(app);
+      if (webViewerEnabled && plugin.isConversationFirst()) {
         await plugin.contextPanel.setViewStateInNewTab({ type: 'webviewer', active: true, state: { url } });
         return;
-      } catch (error) {
-        if (error instanceof ContextPanelViewError) webViewerEnabled = false;
-        else {
-          new Notice(`Could not open contextual link: ${error instanceof Error ? error.message : String(error)}`);
-          return;
-        }
       }
+      openUrlPreferringWebViewer(app, url, { webViewerEnabled, openExternal: (u) => io.openSystem(u) });
+    } catch {
+      system();
     }
-    openUrlPreferringWebViewer(app, url, {
-      webViewerEnabled,
-      openExternal: (u) => {
-        const { shell } = require('electron') as { shell: { openExternal: (url: string) => void } };
-        shell.openExternal(u);
-      },
-    });
   };
 
   return {
