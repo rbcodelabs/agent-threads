@@ -80,6 +80,8 @@ Discover, read, and message other running threads. Project threads coordinate on
 | `threads_clear_proposed_reply` | `threadId` | Clears a stale proposed reply. |
 | `threads_post_decision` | `threadId?`, `question`, `header?`, `options` (2-4), `multiSelect?`, `allowOther?` | Asks Rick to decide, inline on the thread's Agent Board card (default: the calling thread). Rick's answer is delivered to the **calling** thread as a user message, never to the target thread. Returns a `decisionId`. |
 | `threads_clear_decision` | `threadId?`, `decisionId` | Withdraws a decision the caller posted. Only the author can clear it. |
+| `threads_list_orchestrators` | none | **Portfolio orchestrator only.** Lists the Portfolio and every Project orchestrator as `{ id, kind, title, enabled, threadId, projectId? }`. Any other caller gets an error that discloses nothing. |
+| `threads_set_orchestrator_enabled` | `projectId`, `enabled?` (default true), `open?` | **Portfolio orchestrator only.** Enables (creating the thread if needed, idempotent) or disables a Project orchestrator; `open: true` also opens its thread when enabling. The Portfolio itself cannot be disabled. Returns the snapshot. Canonical-only (no `obsidian_` alias); in `NEVER_OFFERED` and the `threads` optional-tool group. |
 
 On the Agent Board, cards show an orchestrator's proposed reply (Approve & Send / Edit / Discard), its read-only notes, pending questions and decisions, and a leading **Needs you** lane (with an **Only needs you** filter) collects every thread waiting on you.
 

@@ -13,7 +13,7 @@ import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 type ToolDef = SdkMcpToolDefinition<any>;
 
 export interface ThreadToolsPort {
-  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
+  options: Pick<ObsidianMcpServerOptions, 'archiveThread' | 'authorizeOrchestratorManagement' | 'authorizeProjectDestination' | 'authorizeThread' | 'clearThreadDecision' | 'clearThreadProposedReply' | 'createProject' | 'createThread' | 'getAllProjects' | 'getAllThreads' | 'getOrchestratorThreadId' | 'getThreadDetail' | 'isOrchestratorThread' | 'isThreadRunning' | 'listOrchestrators' | 'openThread' | 'postThreadDecision' | 'readThreadLog' | 'requestDeferredArchive' | 'sendMessageToThread' | 'setProjectOrchestratorEnabled' | 'setThreadNotes' | 'setThreadProject' | 'setThreadProposedReply' | 'threadId' | 'updateProject'>;
 }
 
 
@@ -619,6 +619,51 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
   );
 
 
+  const ORCHESTRATOR_DENIED = 'Only the Portfolio orchestrator can manage Project orchestrators.';
+  const toolError = (message: string) => ({ content: [{ type: 'text' as const, text: JSON.stringify({ error: message }) }], isError: true });
+
+  const boundListOrchestrators = tool(
+    'threads_list_orchestrators',
+    'Portfolio orchestrator only. Lists the Portfolio orchestrator and every Project orchestrator as { id, kind, title, enabled, threadId, projectId }. A disabled or not-yet-created Project orchestrator has an empty threadId.',
+    {},
+    async (_args, _extra) => {
+      try {
+        if (!options.listOrchestrators || !options.authorizeOrchestratorManagement) return toolError('Orchestrator management is not available in this context.');
+        if (!options.authorizeOrchestratorManagement()) return toolError(ORCHESTRATOR_DENIED);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(options.listOrchestrators(), null, 2) }] };
+      } catch (err: unknown) {
+        return toolError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    { alwaysLoad: true },
+  );
+
+  const boundSetOrchestratorEnabled = tool(
+    'threads_set_orchestrator_enabled',
+    'Portfolio orchestrator only. Enables or disables a Project orchestrator. Enabling creates its thread if needed (idempotent); with open: true it also opens that thread for the user. Disabling keeps the thread. Use only when the user asks for it or their stated goal requires it. The Portfolio orchestrator itself cannot be disabled. Returns the orchestrator snapshot.',
+    {
+      projectId: z.string().trim().min(1).describe('ID of the Project whose orchestrator to enable or disable'),
+      enabled: z.boolean().default(true).describe('true (default) enables, false disables'),
+      open: z.boolean().optional().describe('When enabling, also open the orchestrator thread in the UI'),
+    },
+    async (args, _extra) => {
+      try {
+        if (!options.setProjectOrchestratorEnabled || !options.authorizeOrchestratorManagement) return toolError('Orchestrator management is not available in this context.');
+        if (!options.authorizeOrchestratorManagement()) return toolError(ORCHESTRATOR_DENIED);
+        const enabled = args.enabled ?? true;
+        const snapshot = await options.setProjectOrchestratorEnabled(args.projectId, enabled);
+        if (!snapshot) return toolError(`Project not found: ${args.projectId}`);
+        if (enabled && args.open && snapshot.threadId) {
+          if (!options.openThread) return toolError('Thread navigation is not available in this context.');
+          await options.openThread(snapshot.threadId);
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(snapshot, null, 2) }] };
+      } catch (err: unknown) {
+        return toolError(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
   const toolDefs: Array<ToolDef | undefined> = [
     boundCreateThread as ToolDef | undefined,
     boundGetCurrentThread as ToolDef | undefined,
@@ -638,6 +683,8 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     boundClearThreadProposedReply as ToolDef | undefined,
     boundPostThreadDecision as ToolDef | undefined,
     boundClearThreadDecision as ToolDef | undefined,
+    boundListOrchestrators as ToolDef | undefined,
+    boundSetOrchestratorEnabled as ToolDef | undefined,
   ];
   const toolNames = [
     'threads_create',
@@ -658,6 +705,8 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
     'obsidian_clear_thread_proposed_reply',
     'obsidian_post_thread_decision',
     'obsidian_clear_thread_decision',
+    'threads_list_orchestrators',
+    'threads_set_orchestrator_enabled',
   ];
   return Object.fromEntries(toolNames.flatMap((name, i): Array<[string, ToolDef]> => (toolDefs[i] ? [[name, toolDefs[i]!]] : [])));
 }

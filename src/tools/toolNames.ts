@@ -73,6 +73,8 @@ export const TOOL_NAMES_BY_DOMAIN: Readonly<Record<ToolDomain, readonly string[]
     'obsidian_open_thread', 'obsidian_get_thread_log', 'obsidian_wait_for_thread', 'obsidian_send_message_to_thread',
     'obsidian_archive_thread', 'obsidian_set_thread_notes', 'obsidian_set_thread_proposed_reply',
     'obsidian_clear_thread_proposed_reply', 'obsidian_post_thread_decision', 'obsidian_clear_thread_decision',
+    // Canonical-only (never exposed under an obsidian_ name).
+    'threads_list_orchestrators', 'threads_set_orchestrator_enabled',
   ],
   schedule: ['ScheduleWakeup', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete'],
   skills: [
@@ -103,7 +105,7 @@ export const BUILT_IN_TOOL_ORDER: readonly string[] = Object.freeze([
   'obsidian_create_project', 'obsidian_update_project', 'obsidian_set_thread_project', 'obsidian_get_thread_messages',
   'obsidian_open_thread', 'obsidian_get_thread_log', 'obsidian_wait_for_thread', 'obsidian_send_message_to_thread',
   'obsidian_archive_thread', 'obsidian_set_thread_notes', 'obsidian_set_thread_proposed_reply',
-  'obsidian_clear_thread_proposed_reply', 'obsidian_post_thread_decision', 'obsidian_clear_thread_decision', 'obsidian_list_vault_bridges', 'obsidian_add_vault_bridge',
+  'obsidian_clear_thread_proposed_reply', 'obsidian_post_thread_decision', 'obsidian_clear_thread_decision', 'threads_list_orchestrators', 'threads_set_orchestrator_enabled', 'obsidian_list_vault_bridges', 'obsidian_add_vault_bridge',
   'obsidian_get_file_history', 'obsidian_restore_file_version', 'sync_list_conflicts',
   'sync_inspect_conflict', 'sync_resolve_conflict', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',
   'request_secret', 'mcp_register_server', 'skills_list_installed', 'skills_search', 'skills_get',

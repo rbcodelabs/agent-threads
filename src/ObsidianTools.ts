@@ -9,6 +9,7 @@ import type { HarnessDynamicTool } from './HarnessSession';
 import { App, TFile } from 'obsidian';
 import type { PendingDecision, ScheduledItem } from './types';
 import type { SchedulerItemPatch } from './Scheduler';
+import type { OrchestratorSnapshot } from './PublicApi';
 import path from 'path';
 import type { ThreadBrowser } from './agentBrowser/ThreadBrowser';
 import { type GithubCredentialBroker } from './githubCredentials';
@@ -240,6 +241,12 @@ export interface ObsidianMcpServerOptions {
   getThreadDetail?: (id: string) => ThreadDetail | undefined;
   /** Opens and focuses a thread by ID through the host UI. */
   openThread?: (id: string) => Promise<void>;
+  /** True only when the calling thread is the Portfolio orchestrator. Gates the orchestrator-management tools. */
+  authorizeOrchestratorManagement?: () => boolean;
+  /** Snapshots of the Portfolio orchestrator and every Project's orchestrator. */
+  listOrchestrators?: () => OrchestratorSnapshot[];
+  /** Enables (ensure, creating the thread if needed) or disables a Project's orchestrator. Null for an unknown Project. */
+  setProjectOrchestratorEnabled?: (projectId: string, enabled: boolean) => Promise<OrchestratorSnapshot | null>;
   /** Returns metadata snapshots for all threads. */
   getAllThreads?: () => ThreadSnapshot[];
   /** Central coordination boundary. False must be reported without target disclosure. */

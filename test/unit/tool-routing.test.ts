@@ -133,7 +133,7 @@ describe('toolRouting routes', () => {
       'host_open_url', 'workspace_navigate_to_file', 'workspace_insert_at_cursor', 'watch_document', 'unwatch_document',
       'vault_restore_file_version', 'vault_add_bridge', 'sync_resolve_conflict', 'threads_create', 'threads_create_project', 'threads_update_project',
       'threads_set_project', 'threads_open', 'threads_send_message', 'threads_archive', 'threads_set_notes',
-      'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision', 'skills_install', 'skills_create_local', 'skills_update_local',
+      'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision', 'threads_list_orchestrators', 'threads_set_orchestrator_enabled', 'skills_install', 'skills_create_local', 'skills_update_local',
       'skills_uninstall', 'skills_update', 'skills_check_updates', 'ScheduleWakeup', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',
       'browser_eval', 'browser_save_page'];
     const everything = { ...ALL_GROUPS, ...Object.fromEntries(dangerous.map((t) => [t, 'host'])) } as Record<string, 'host'>;

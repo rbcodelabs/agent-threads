@@ -950,6 +950,13 @@ export default class ClaudeThreadsPlugin extends Plugin {
             };
           },
           openThread: (id: string) => this.openThreadInChatView(id),
+          authorizeOrchestratorManagement: () => {
+            const caller = this.manager.getThread(threadId);
+            if (!caller) return false;
+            return resolveCoordinationRole(threadId, this.settings.orchestratorThreadId, caller.projectId, this.manager.getProjects()).kind === 'portfolio';
+          },
+          listOrchestrators: () => this.listPublicOrchestrators(),
+          setProjectOrchestratorEnabled: (projectId: string, enabled: boolean) => this.setPublicOrchestratorEnabled({ id: `project:${projectId}` }, enabled),
           getAllThreads: () => this.manager.getThreads().map((t: { id: string; title: string; status?: string; lastError?: string; reviewed?: boolean; projectId?: string; cwd?: string; originRepoPath?: string; projectNameOverride?: string; prUrl?: string; scheduledItemId?: string; scheduledItemName?: string; updatedAt: number; rawLogPath?: string; managerNotes?: string; proposedReply?: { text: string; generatedAt: number; sourceThreadId?: string }; pendingDecisions?: import("./types").PendingDecision[]; messages: Array<{ role: string }> }) => {
             const isRunning = this.manager.isRunning(t.id);
             const messageCount = t.messages.filter((m: { role: string }) => m.role !== 'compact').length;

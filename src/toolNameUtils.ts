@@ -178,6 +178,7 @@ const CANONICAL_BUILT_IN_TOOLS = new Set([
   'threads_open',
   'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_proposed_reply',
   'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision',
+  'threads_list_orchestrators', 'threads_set_orchestrator_enabled',
   // Agent browser. Canonical-only: these are new tools, so they were never
   // exposed under the legacy obsidian_ names and need no compatibility alias.
   'browser_navigate', 'browser_snapshot', 'browser_read_text', 'browser_click',
