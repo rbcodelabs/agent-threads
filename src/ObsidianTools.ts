@@ -2,6 +2,7 @@ import { z } from 'zod';
 // Import from the browser entry point to avoid Node.js-only APIs (e.g. setTimeout().unref())
 // that crash in Electron's renderer context.
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk/browser';
+import { noApprovalContributionNames } from './contributedToolApproval';
 import { type McpRegistrationResult } from './mcpServerStore';
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
@@ -491,9 +492,8 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       { alwaysLoad: binding.alwaysLoad },
     ));
   tools.push(...contributedTools);
-  const contributedReadOnlyNames = contributions
-    .filter(binding => !builtInNames.has(binding.name) && !binding.requiresApproval)
-    .map(binding => binding.name);
+  // Shared with the Claude path's permission pre-approval (contributedToolApproval.ts) so the two cannot drift.
+  const contributedReadOnlyNames = [...noApprovalContributionNames(contributions, builtInNames)];
   const contributedAlwaysLoadNames = contributions
     .filter(binding => !builtInNames.has(binding.name) && binding.alwaysLoad)
     .map(binding => binding.name);

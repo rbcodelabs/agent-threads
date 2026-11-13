@@ -26,6 +26,7 @@
 
 import { z } from 'zod';
 import type { PeerIdentity } from './ArtifactContributions';
+import { isNoApprovalContributedToolRequest, noApprovalContributionNames } from './contributedToolApproval';
 import type { StorageAllocationOptions, StorageAllocationResult, ThreadPermissionSnapshot } from './types';
 
 /** A tool result, in the same shape the built-in MCP handlers already return. */
@@ -420,6 +421,20 @@ export class AgentToolRegistry {
   /** Everything the MCP server factory needs to bind, in registration order. */
   list(): readonly RegisteredAgentTool[] {
     return Object.freeze([...this.entries.values()].map(entry => entry.resolved));
+  }
+
+  /**
+   * Names of live contributions that declared `requiresApproval: false`, minus anything that is (or collides with) a
+   * built-in. Read at decision time, so disposing a registration or stopping its plugin removes the bypass at once.
+   */
+  noApprovalToolNames(): ReadonlySet<string> {
+    const reserved = new Set<string>([...RESERVED_AGENT_TOOL_NAMES, ...this.reservedNames()]);
+    return noApprovalContributionNames(this.list(), reserved);
+  }
+
+  /** True when a Claude-path permission request (`mcp__claude_threads__x` / `mcp__obsidian__x`) is for a no-approval contribution. */
+  isNoApprovalPermissionRequest(toolName: string): boolean {
+    return isNoApprovalContributedToolRequest(toolName, this.noApprovalToolNames());
   }
 
   /** Drops every registration. Called when the public API stops. */
