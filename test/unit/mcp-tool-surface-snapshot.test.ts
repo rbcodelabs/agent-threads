@@ -255,7 +255,6 @@ const HARNESS_READ_ONLY_TOOLS = [
   'threads_get_log',
   'threads_get_messages',
   'threads_list',
-  'threads_list_orchestrators',
   'threads_list_projects',
   'vault_get_backlinks',
   'vault_get_file_history',
