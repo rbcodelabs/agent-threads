@@ -17,6 +17,7 @@ import {
 import { forkBlockedReason } from './remote/threadLocation';
 import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import { isPermissionPreApprovedForThread, recordAlwaysAllow } from './remoteAlwaysAllow';
+import { contributionApprovalPredicate } from './contributedToolApproval';
 import type { ViewStateResult } from 'obsidian';
 import { renderMarkdown as renderSharedMarkdown, renderMessage, renderToolResultImages, linkifyUrls, type MessageRenderHost } from './messageRenderer';
 import { isHttpUrl, urlChipLabel } from './urlLinks';
@@ -520,7 +521,7 @@ export class ThreadsView extends ItemView {
       if (isPermissionPreApprovedForThread(
         toolName, this.manager.getRemoteScope(threadId), this.plugin.settings,
         // A contribution that declared requiresApproval:false is honoured here as on the Codex/OpenCode path.
-        (name) => this.plugin.agentTools.isNoApprovalPermissionRequest(name),
+        contributionApprovalPredicate(this.plugin.agentTools),
       )) return Promise.resolve(true);
 
       return new Promise((resolve) => {

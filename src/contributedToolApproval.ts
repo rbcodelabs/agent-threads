@@ -50,3 +50,14 @@ export function isNoApprovalContributedToolRequest(toolName: string, noApprovalN
   const name = contributedToolNameFromPermissionRequest(toolName);
   return name !== null && noApprovalNames.has(name);
 }
+
+/**
+ * The predicate ThreadsView hands to the pre-approval decision. The registry can be absent (a stub plugin in the
+ * screenshot harness, or a host context without agent tools); a missing registry means nothing opted out of
+ * approval, so every contributed tool prompts as before.
+ */
+export function contributionApprovalPredicate(
+  registry: { isNoApprovalPermissionRequest(toolName: string): boolean } | undefined | null,
+): (toolName: string) => boolean {
+  return (toolName) => registry?.isNoApprovalPermissionRequest(toolName) === true;
+}
