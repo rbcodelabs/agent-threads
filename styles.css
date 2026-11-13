@@ -7402,7 +7402,10 @@ textarea.ct-settings-wide-input {
 .ct-orch-icon svg { width: 14px; height: 14px; }
 .ct-orch-bubble a.ct-thread-link,
 .ct-orch-bubble a.internal-link { color: color-mix(in srgb, var(--text-accent) 45%, var(--text-normal)); text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
-.ct-orch-bubble-streaming { white-space: pre-wrap; }
+/* Streaming text is rendered as markdown (see DockSheet.renderStreaming); block whitespace comes from the elements, not pre-wrap.
+   The last paragraph flows inline so the cursor sits at the end of the text instead of on a line of its own. */
+.ct-orch-bubble-streaming { white-space: normal; }
+.ct-orch-bubble-streaming > p:last-child { display: inline; margin: 0; }
 /* Interrupted partial: not persisted by the manager, kept visible but clearly provisional. */
 .ct-orch-bubble-stopped { white-space: pre-wrap; opacity: 0.7; }
 .ct-orch-stopped-label { font-size: var(--font-ui-smaller); color: var(--text-muted); }
