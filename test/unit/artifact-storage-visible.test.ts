@@ -352,7 +352,7 @@ describe('real filesystem', () => {
     expect((await stat(join(vault, 'Artifacts', 'example.plugin', 'Board-2'))).isDirectory()).toBe(true);
   });
 
-  it('garbage-collects a visible root on thread deletion, leaving the root, namespace and siblings', async () => {
+  it('never garbage-collects a visible root on thread deletion: the artifact, siblings, namespace and root all survive', async () => {
     const vault = await tmpVault();
     const mine = join(vault, 'Artifacts', 'p', 'Mine');
     const sibling = join(vault, 'Artifacts', 'p', 'Sibling');
@@ -373,7 +373,8 @@ describe('real filesystem', () => {
     manager.deleteThread(thread.id);
     await manager.artifactCleanupSettled;
 
-    await expect(stat(mine)).rejects.toThrow();
+    // Visible-root artifacts are user files; only the hidden .geode/artifacts root is GC'd.
+    expect((await stat(join(mine, 'index.html'))).isFile()).toBe(true);
     expect((await stat(sibling)).isDirectory()).toBe(true);
     expect((await stat(join(vault, 'Artifacts', 'p'))).isDirectory()).toBe(true);
     expect((await stat(join(vault, 'Artifacts'))).isDirectory()).toBe(true);
