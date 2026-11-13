@@ -1127,7 +1127,12 @@ export class ThreadManager {
     this.sessions.get(id)?.notifyPersisted?.(seq);
   }
 
-  deleteThread(id: string): void {
+  /**
+   * `artifactStorage` controls artifact directories: 'remove' (default, hard
+   * delete / provisional rollback) garbage-collects hidden-root storage only;
+   * 'keep' (archive) leaves all storage on disk so a restore finds its files.
+   */
+  deleteThread(id: string, options: { artifactStorage?: 'remove' | 'keep' } = {}): void {
     const thread = this.threads.get(id);
     // Hard-delete of a thread with no markdown note: remove its attachment dir.
     // On archive the thread has a `noteFile` (persistence.saveThread set it), and
@@ -1136,7 +1141,7 @@ export class ThreadManager {
     if (thread && !thread.noteFile) {
       void this.attachmentWriter.removeThreadDir(id);
     }
-    if (thread) this.removeArtifactStorage(thread);
+    if (thread && options.artifactStorage !== 'keep') this.removeArtifactStorage(thread);
     const session = this.sessions.get(id);
     if (session) {
       session.close();
@@ -1156,7 +1161,9 @@ export class ThreadManager {
   }
 
   /**
-   * Garbage-collects artifact storage belonging to a deleted thread (ADR-0010).
+   * Garbage-collects artifact storage belonging to a hard-deleted thread (ADR-0010).
+   * Only roots under the hidden `.geode/artifacts/` are removed; roots in the
+   * user-visible Artifacts folder are skipped (fail safe). Archive never calls this.
    *
    * Until `storageRoot` became host-visible, nothing owned these directories:
    * deleting a thread removed its attachment directory but left
@@ -1170,7 +1177,7 @@ export class ThreadManager {
     const vaultRoot = this.vaultRoot;
     const roots = (thread.artifacts ?? []).map(artifact => artifact.storageRoot).filter((root): root is string => !!root);
     if (!vaultRoot || roots.length === 0) return;
-    const pending = roots.map(root => removeStorageRoot(vaultRoot, root, this.artifactStorageFs, this.settings.visibleArtifactRoot).catch(() => undefined));
+    const pending = roots.map(root => removeStorageRoot(vaultRoot, root, this.artifactStorageFs, this.settings.visibleArtifactRoot, { hiddenOnly: true }).catch(() => undefined));
     // Chained rather than replaced, so awaiting after several deletions covers
     // all of them rather than only the most recent.
     this.artifactCleanupSettled = this.artifactCleanupSettled

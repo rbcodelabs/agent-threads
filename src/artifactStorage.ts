@@ -3,8 +3,11 @@
  *
  * `data` on an artifact is opaque to the host. `storageRoot` deliberately is
  * not, because the host has to be able to delete an artifact's directory when
- * the owning thread goes away — deletion needs an owner, and the peer cannot
- * be it.
+ * the owning thread is hard-deleted — deletion needs an owner, and the peer
+ * cannot be it. Thread deletion only garbage-collects roots under the hidden
+ * `.geode/artifacts/`; visible-root artifacts are user files and are never
+ * removed by thread deletion, and archiving a thread keeps all storage (the
+ * recovery sidecar restores records, not files).
  *
  * That makes `storageRoot` the one peer-supplied value the host later hands to
  * a *recursive delete*, so it is the sharp edge of this contribution type. A
@@ -394,15 +397,27 @@ export async function allocateStorageRoot(
  * bypassed `resolveStorageRoot` on the way in still cannot be acted on. A
  * missing or already-deleted directory is not an error — thread deletion must
  * never fail because storage was cleaned up some other way.
+ *
+ * `options.hiddenOnly` additionally requires the root to lie inside the
+ * host-hidden `<vault>/.geode/artifacts/`; a root in the visible Artifacts
+ * folder is then left untouched (returns false). Thread deletion uses this:
+ * visible artifacts are user-facing files that must outlive their thread.
  */
 export async function removeStorageRoot(
   vaultRoot: string,
   candidate: unknown,
   storageFs: ArtifactStorageFs = nodeStorageFs(),
   visibleRoot?: string,
+  options: { readonly hiddenOnly?: boolean } = {},
 ): Promise<boolean> {
   const resolved = resolveStorageRoot(vaultRoot, candidate, storageFs, visibleRoot);
   if (resolved.status !== 'ok' || !storageFs.rm) return false;
+  if (options.hiddenOnly) {
+    const pathModule = nodePath();
+    if (!pathModule) return false;
+    const hidden = resolveDeep(pathModule, storageFs, artifactStorageRoot(vaultRoot));
+    if (!resolved.path.startsWith(hidden + pathModule.sep)) return false;
+  }
   try {
     await storageFs.rm(resolved.path, { recursive: true, force: true });
     return true;
