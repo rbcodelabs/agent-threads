@@ -24,6 +24,7 @@ export const OPTIONAL_TOOL_GROUPS: readonly OptionalToolGroup[] = Object.freeze(
   { id: 'threads', label: 'Create and manage threads', description: 'start, message, archive and edit other threads and projects', tools: [
     'threads_create', 'threads_create_project', 'threads_update_project', 'threads_set_project', 'threads_open',
     'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision',
+    'threads_list_orchestrators', 'threads_set_orchestrator_enabled',
   ] },
   { id: 'schedule', label: 'Schedule work', description: 'create, change and delete scheduled and recurring work, and wake this thread later', tools: [
     'ScheduleWakeup', 'CronCreate', 'CronList', 'CronUpdate', 'CronDelete',

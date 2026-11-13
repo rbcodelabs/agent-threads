@@ -79,6 +79,8 @@ export const NEVER_OFFERED: ReadonlySet<string> = new Set([
   // thread creation, messaging, archiving and every setter
   'threads_create', 'threads_create_project', 'threads_update_project', 'threads_set_project', 'threads_open',
   'threads_send_message', 'threads_archive', 'threads_set_notes', 'threads_set_proposed_reply', 'threads_clear_proposed_reply', 'threads_post_decision', 'threads_clear_decision',
+  // Portfolio-only orchestrator management (reads and mutates local orchestrator state)
+  'threads_list_orchestrators', 'threads_set_orchestrator_enabled',
   // skills that install, create, update, uninstall or fetch
   'skills_install', 'skills_create_local', 'skills_update_local', 'skills_uninstall', 'skills_update', 'skills_check_updates',
   // scheduling
