@@ -2,6 +2,7 @@ import type { BridgeInfo } from '../bridgeUtils';
 import type { MessageContentMarker } from '../MessageContent';
 import type { VisualizeMarker } from '../visualizeMarker';
 import type { ChatMessage } from '../types';
+import type { ThreadRef } from '../orchestratorDockModel';
 
 /**
  * Everything a conversation surface (main panel, mobile, a future dock sheet)
@@ -59,4 +60,14 @@ export interface MessageRenderOptions {
   streaming?: boolean;
   /** Transcript message being rendered; enables message-content hydration when it matches. */
   messageId?: string;
+  /**
+   * 'trusted' (default) renders the user's own transcript through the host (links, visualizations, remote images).
+   * 'strict' is the OrchestratorDock posture for untrusted content: it needs no host, links are built only from the
+   * rewriter's tokens, images become links or text, and nothing outside a prose allowlist survives. See strict.ts.
+   */
+  linkPolicy?: 'trusted' | 'strict';
+  /** Strict only: threads that `[[thread:id|Title]]` may resolve to. */
+  threadRefs?: readonly ThreadRef[];
+  /** Strict only: false makes a `[[note]]` that cannot be opened render as inert text. */
+  resolveLink?: (href: string) => boolean;
 }

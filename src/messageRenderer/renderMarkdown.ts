@@ -4,6 +4,7 @@ import { extractMessageContent } from '../MessageContent';
 import { extractVisualizeMarkers, VISUALIZE_SLOT_CLASS } from '../visualizeMarker';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from '../linkUtils';
 import { hydrateRemoteImages } from '../remote/remoteImages';
+import { renderStrictMarkdown } from './strict';
 import { linkifyBridgePaths, linkifyUrls } from './links';
 import type { MessageRenderHost, MessageRenderOptions } from './types';
 
@@ -17,9 +18,13 @@ import type { MessageRenderHost, MessageRenderOptions } from './types';
 export async function renderMarkdown(
   markdown: string,
   el: HTMLElement,
-  host: MessageRenderHost,
+  host: MessageRenderHost | undefined,
   options: MessageRenderOptions = {},
 ): Promise<void> {
+  if (options.linkPolicy === 'strict') {
+    return renderStrictMarkdown(markdown, el, { threads: options.threadRefs ?? [], resolveLink: options.resolveLink, streaming: options.streaming });
+  }
+  if (!host) throw new Error('renderMarkdown: the trusted link policy needs a MessageRenderHost');
   const threadId = host.threadId();
   const signal = host.signal;
   const transcriptMessage = options.messageId && threadId

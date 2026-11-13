@@ -7,10 +7,10 @@
  * manager: OrchestratorDock builds a `SheetView` and calls `render`.
  *
  * Every model-controlled string (message text while streaming, queued text, activity,
- * link labels) is written with textContent; assistant markdown goes through dockMarkdown.
+ * link labels) is written with textContent; assistant markdown (settled and streaming) goes through the shared renderer with the strict link policy.
  */
 import { setIcon } from 'obsidian';
-import { renderDockMarkdown } from './dockMarkdown';
+import { renderMarkdown } from './messageRenderer';
 import { applyTrayMode } from './orchestratorDockTray';
 import { sheetFit, trayLayout, type Richness, type SheetEntry } from './dockSheetModel';
 import type { SuggestionChip, ThreadRef } from './orchestratorDockModel';
@@ -132,6 +132,8 @@ export class DockSheet {
   private pinNext = false;
   private closeBtn: HTMLButtonElement;
   private streamFrame = false;
+  /** Bumped per streaming markdown render and on teardown: only the latest result may touch the bubble. */
+  private streamRenderSeq = 0;
   private stoppedRow: HTMLElement | null = null;
   /** Exactly the nodes WE made inert (an `inert` someone else set is never ours to remove). */
   private readonly inerted = new Set<Element>();
@@ -645,7 +647,7 @@ export class DockSheet {
       // is removed in the same render); swapped for markdown when it resolves. An empty result keeps the text.
       bubble.textContent = entry.text;
       const target = bubble.ownerDocument.createElement('div');
-      void renderDockMarkdown(entry.text, target, { threads, resolveLink: this.h.resolveLink }).then(() => {
+      void renderMarkdown(entry.text, target, undefined, { linkPolicy: 'strict', threadRefs: threads, resolveLink: this.h.resolveLink }).then(() => {
         if (this.destroyed || this.rows.get(entry.id) !== st || target.childNodes.length === 0) return;
         const pinned = this.stick;
         bubble.replaceChildren(...Array.from(target.childNodes));
@@ -668,7 +670,7 @@ export class DockSheet {
   }
 
   private renderStreaming(text: string): void {
-    if (!text) { this.streamingRow?.remove(); this.streamingRow = null; return; }
+    if (!text) { this.streamRenderSeq++; this.streamingRow?.remove(); this.streamingRow = null; return; }
     if (!this.streamingRow) {
       // aria-live off: the throttled region below is what screen readers hear while tokens arrive.
       this.streamingRow = createRow(this.logEl, 'assistant', 'streaming');
@@ -677,7 +679,24 @@ export class DockSheet {
       this.streamingRow.createDiv('ct-orch-bubble ct-orch-bubble-streaming');
     }
     this.logEl.append(this.streamingRow);
-    (this.streamingRow.firstElementChild as HTMLElement).textContent = text;
+    const bubble = this.streamingRow.firstElementChild as HTMLElement;
+    // The current buffer is written as plain text at once (the bubble is never stale or empty, and nothing here awaits), then
+    // swapped for strict markdown in the same task's microtasks, before the next paint. Same policy as settled rows, with raw
+    // HTML shown as text.
+    bubble.textContent = text;
+    const seq = ++this.streamRenderSeq;
+    const target = bubble.ownerDocument.createElement('div');
+    void renderMarkdown(text, target, undefined, {
+      linkPolicy: 'strict', streaming: true, threadRefs: this.view?.threads ?? [], resolveLink: this.h.resolveLink,
+    }).then(() => {
+      if (this.destroyed || seq !== this.streamRenderSeq || this.streamingRow?.firstElementChild !== bubble || target.childNodes.length === 0) return;
+      const pinned = this.stick;
+      // marked separates blocks with newline text nodes; a trailing one would add a blank line to the bubble.
+      while (target.lastChild?.nodeType === 3 && (target.lastChild.textContent ?? '').trim() === '') target.lastChild.remove();
+      bubble.replaceChildren(...Array.from(target.childNodes));
+      this.checkHoveredLink();
+      if (pinned) this.scrollToBottom();
+    }).catch(() => { /* keep the plain text */ });
   }
 
   private renderStopped(text: string): void {
