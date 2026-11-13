@@ -491,9 +491,8 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       { alwaysLoad: binding.alwaysLoad },
     ));
   tools.push(...contributedTools);
-  const contributedReadOnlyNames = contributions
-    .filter(binding => !builtInNames.has(binding.name) && !binding.requiresApproval)
-    .map(binding => binding.name);
+  // Shared with the Claude path's permission pre-approval (contributedToolApproval.ts) so the two cannot drift.
+  const contributedReadOnlyNames = [...noApprovalContributionNames(contributions, builtInNames)];
   const contributedAlwaysLoadNames = contributions
     .filter(binding => !builtInNames.has(binding.name) && binding.alwaysLoad)
     .map(binding => binding.name);

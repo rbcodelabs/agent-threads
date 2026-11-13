@@ -72,16 +72,22 @@ export function removeRemoteAlwaysAllow(settings: AlwaysAllowSettings, daemonId:
 }
 
 /**
- * True when a permission request may be resolved without a card. Local threads: trusted built-ins or the local
- * list. Remote threads: only their own daemon's list.
+ * True when a permission request may be resolved without a card. Local threads: trusted built-ins, the local
+ * list, or a peer-contributed tool that declared `requiresApproval: false` (`isNoApprovalContribution`, the same
+ * flag the Codex/OpenCode path honours). Remote threads: only their own daemon's list; the contribution flag never
+ * applies there, because the host cannot vouch for a tool a daemon runs.
  */
 export function isPermissionPreApprovedForThread(
   toolName: string,
   remote: AlwaysAllowScope | undefined | null,
   settings: AlwaysAllowSettings,
+  isNoApprovalContribution?: (toolName: string) => boolean,
 ): boolean {
   const scope = alwaysAllowScopeFor(remote);
-  if (!scope) return isPermissionPreApproved(toolName, settings.alwaysAllowedTools);
+  if (!scope) {
+    return isPermissionPreApproved(toolName, settings.alwaysAllowedTools)
+      || (canAlwaysAllow(toolName) && isNoApprovalContribution?.(toolName) === true);
+  }
   return canAlwaysAllow(toolName) && daemonList(settings, scope.daemonId).includes(toolName);
 }
 

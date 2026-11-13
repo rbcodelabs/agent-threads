@@ -517,7 +517,11 @@ export class ThreadsView extends ItemView {
       // First-party host tools are always trusted; classification is an explicit
       // capability allowlist, not a forgeable naming-prefix convention.
       // A remote thread is pre-approved only by its own daemon's list, never the local one (see isRemoteThread).
-      if (isPermissionPreApprovedForThread(toolName, this.manager.getRemoteScope(threadId), this.plugin.settings)) return Promise.resolve(true);
+      if (isPermissionPreApprovedForThread(
+        toolName, this.manager.getRemoteScope(threadId), this.plugin.settings,
+        // A contribution that declared requiresApproval:false is honoured here as on the Codex/OpenCode path.
+        (name) => this.plugin.agentTools.isNoApprovalPermissionRequest(name),
+      )) return Promise.resolve(true);
 
       return new Promise((resolve) => {
         let resolved = false;
