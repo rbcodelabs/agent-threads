@@ -62,15 +62,15 @@ Then open the **Agents List**, press **New thread**, type what you want and hit 
 The complete list is in the [feature reference](docs/features.md).
 
 <p align="center">
-  <img src="docs/screenshot-main.png" width="800" alt="Main view: conversation panel with tool calls and the Agents List showing thread summaries" />
+  <img src="docs/images/screenshot-main.png" width="800" alt="Main view: a thread with an expanded tool call, and the Agents list with thread summaries" />
 </p>
 
 <p align="center">
-  <img src="docs/screenshot-kanban-status.png" width="800" alt="Agent Board grouped by status: Working, Awaiting, Waiting, New, Done, Failed and Ready columns, each holding thread cards" />
+  <img src="docs/images/screenshot-board.png" width="800" alt="Agent Board with Working, New and Done columns, each holding thread cards" />
 </p>
 
 <p align="center">
-  <img src="docs/screenshot-permission.png" width="800" alt="Inline permission dialog: Deny, Allow or Always Allow before Claude writes a file" />
+  <img src="docs/images/screenshot-permission.png" width="800" alt="Inline permission request: Deny, Allow or Always Allow before the agent edits a file" />
 </p>
 
 ## Prerequisites
