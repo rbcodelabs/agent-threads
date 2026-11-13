@@ -30,6 +30,20 @@ describe('coordination tool scoping', () => {
     expect(denied.content[0]!.text).toContain('outside coordination scope');
   });
 
+  it('names elevatedProjectId in the out-of-scope error only when it was omitted', async () => {
+    const server = createClaudeThreadsMcpServers(app, { authorizeThread: vi.fn().mockReturnValue(false) }).claude_threads as unknown as { tools: Array<{ name: string; handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }> }> };
+    const messages = server.tools.find(tool => tool.name === 'threads_get_messages')!;
+
+    const omitted = await messages.handler({ threadId: 'a' });
+    expect(omitted.isError).toBe(true);
+    expect(omitted.content[0]!.text).toContain('Target is outside coordination scope.');
+    expect(omitted.content[0]!.text).toContain('elevatedProjectId');
+
+    const supplied = await messages.handler({ threadId: 'a', elevatedProjectId: 'project-a' });
+    expect(supplied.content[0]!.text).toContain('Target is outside coordination scope.');
+    expect(supplied.content[0]!.text).not.toContain('retry with elevatedProjectId');
+  });
+
   it('requires authorization for both reassignment source and destination', async () => {
     const authorizeThread = vi.fn().mockReturnValue(true);
     const authorizeProjectDestination = vi.fn().mockReturnValue(false);
