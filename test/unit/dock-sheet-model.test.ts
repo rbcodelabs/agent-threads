@@ -6,7 +6,7 @@
  * built ON dockTranscript, and the one-line unread peek text.
  */
 import { describe, it, expect } from 'vitest';
-import { richnessOf, sheetTranscript, stripVisualizeLines, peekLine, sheetBlock, trayLayout, MIN_TRAY_PX, sheetFit, MIN_SHEET_PX } from '../../src/dockSheetModel';
+import { capTranscript, needsFullThread, SHEET_MAX_MESSAGES, richnessOf, sheetTranscript, stripVisualizeLines, peekLine, sheetBlock, trayLayout, MIN_TRAY_PX, sheetFit, MIN_SHEET_PX } from '../../src/dockSheetModel';
 
 const msg = (id: string, role: string, content: string, extra: Record<string, unknown> = {}) => ({ id, role, content, ...extra });
 
@@ -35,11 +35,13 @@ describe('stripVisualizeLines', () => {
 });
 
 describe('sheetTranscript', () => {
-  it('is dockTranscript for plain conversations: user/assistant only, in order, blank content skipped', () => {
+  // Step 3 (deliberate change): a notice (failed / finished background task) is kept in place instead of dropped, so a thread's
+  // error row cannot vanish from the dock. Everything else in this test is unchanged.
+  it('is dockTranscript for plain conversations plus notices: in order, blank content skipped', () => {
     const out = sheetTranscript([
       msg('u1', 'user', 'hello'), msg('n1', 'notice', 'bg done'), msg('a1', 'assistant', 'hi there'), msg('a2', 'assistant', '   '),
     ]);
-    expect(out.map((e) => [e.id, e.role, e.text])).toEqual([['u1', 'user', 'hello'], ['a1', 'assistant', 'hi there']]);
+    expect(out.map((e) => [e.id, e.role, e.text])).toEqual([['u1', 'user', 'hello'], ['n1', 'notice', ''], ['a1', 'assistant', 'hi there']]);
   });
   it('keeps a text-less message that has rich content (never silently hidden), and marks the chip', () => {
     const out = sheetTranscript([
@@ -177,5 +179,39 @@ describe('sheetFit (K2 P5 batch 5: the sheet never starts above the top of the v
     expect(sheetFit({ max: 30, chromeNeed: 60 })).toEqual({ micro: true, hidden: true });
     expect(sheetFit({ max: 0, chromeNeed: 60 })).toEqual({ micro: true, hidden: true });
     expect(sheetFit({ max: -20, chromeNeed: 60 })).toEqual({ micro: true, hidden: true });
+  });
+});
+
+describe('step 3: the sheet transcript carries real messages, notices and dividers, and is capped', () => {
+  const msgs = [
+    { id: 'u', role: 'user', content: 'hi' },
+    { id: 'n', role: 'notice', content: 'task done', noticeStatus: 'completed' },
+    { id: 'a', role: 'assistant', content: 'yo', toolCalls: [{ name: 'Read' }] },
+    { id: 'c', role: 'compact', content: '', preTokens: 5 },
+    { id: 's', role: 'system', content: 'ignored' },
+  ];
+
+  it('keeps notice and compact rows in order, with the source message attached', () => {
+    const out = sheetTranscript(msgs);
+    expect(out.map((e) => `${e.role}:${e.id}`)).toEqual(['user:u', 'notice:n', 'assistant:a', 'compact:c']);
+    expect(out[2].message).toBe(msgs[2]);
+  });
+
+  it('capTranscript keeps the LAST max entries and says how many were left out', () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({ id: `m${i}`, role: 'user' as const, content: `t${i}` }));
+    const { entries, older } = capTranscript(sheetTranscript(many));
+    expect(SHEET_MAX_MESSAGES).toBe(50);
+    expect(entries).toHaveLength(50);
+    expect(entries[0].id).toBe('m10');
+    expect(entries[49].id).toBe('m59');
+    expect(older).toBe(10);
+    expect(capTranscript(sheetTranscript(many.slice(0, 50))).older).toBe(0);
+  });
+
+  it('only a visualize marker or contributed content still needs the full thread; tool calls and images are drawn', () => {
+    expect(needsFullThread(richnessOf({ content: 'x', toolCalls: [{}], images: [{}], toolResultImages: [{}] }))).toBe(false);
+    expect(needsFullThread(richnessOf({ content: 'chart\nvisualize{"path":"/x.html"}' }))).toBe(true);
+    expect(needsFullThread(richnessOf({ content: 'card\nagent-content{"providerId":"a.b"}' }))).toBe(true);
+    expect(stripVisualizeLines('hi\nagent-content{"providerId":"a.b"}\nbye')).toBe('hi\nbye');
   });
 });

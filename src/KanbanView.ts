@@ -35,7 +35,7 @@ import type { KanbanGroupBy } from './types';
 import { buildGalleryImages, type GalleryImage } from './galleryImages';
 import { GalleryCard, type GalleryCardModel, type GalleryStatusKind } from './galleryCard';
 import { defaultVisibilityObserverFactory, type VisibilityObserver, type VisibilityObserverFactory } from './galleryLazy';
-import { vaultResourceUrl } from './imageSrc';
+import { resolveImageSrc, vaultResourceUrl } from './imageSrc';
 
 export const KANBAN_VIEW_TYPE = 'claude-threads:kanban';
 
@@ -416,6 +416,7 @@ export class KanbanView extends ItemView {
       // Never the active leaf (the board): see dockLinkOpener.ts.
       openLink: (href) => openDockLink(this.dockLinkDeps(), href),
       resolveLink: (href) => canOpenDockLink(this.dockLinkDeps(), href),
+      imageSrc: (ref, inline) => resolveImageSrc(this.app, ref, inline),
       mode: () => this.dockMode,
       // In memory only (drafts can hold secrets): survives this view being rebuilt, not an app restart.
       drafts: windowDraftStore,

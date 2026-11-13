@@ -7,9 +7,10 @@ import type { MessageRenderHost } from './types';
  * Turn bare http(s) URLs in rendered text into clickable anchors. Marked's
  * GFM autolink misses URLs inside inline code and plain-text user messages;
  * this walks text nodes (excluding <pre> blocks and existing anchors) and
- * wires clicks through `open` like every other external link.
+ * wires clicks through `open` like every other external link. With `open` null the anchors are plain links and the
+ * surface (the dock) handles the click itself.
  */
-export function linkifyUrls(root: HTMLElement, open: (url: string, forceExternal: boolean) => void): void {
+export function linkifyUrls(root: HTMLElement, open: ((url: string, forceExternal: boolean) => void) | null): void {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => {
       const parent = (node as Text).parentElement;
@@ -30,11 +31,15 @@ export function linkifyUrls(root: HTMLElement, open: (url: string, forceExternal
       a.className = 'ct-auto-link';
       a.setAttribute('href', url);
       a.textContent = url;
-      a.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        open(url, event.metaKey || event.ctrlKey);
-      });
+      if (open) {
+        a.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          open(url, event.metaKey || event.ctrlKey);
+        });
+      } else {
+        a.setAttribute('rel', 'noopener noreferrer');
+      }
       frag.appendChild(a);
     }
     tn.replaceWith(frag);

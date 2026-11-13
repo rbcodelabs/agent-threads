@@ -28,7 +28,7 @@ import {
   type DockState,
   type SuggestionChip,
 } from './orchestratorDockModel';
-import { peekLine, sheetBlock, sheetTranscript } from './dockSheetModel';
+import { capTranscript, peekLine, sheetBlock, sheetTranscript } from './dockSheetModel';
 import { InputHistory } from './dockInputHistory';
 import { createDraftStore, MAX_DRAFT_CHARS, type DraftStore } from './dockDraftStore';
 import { KeyboardInsetTracker } from './dockKeyboardInset';
@@ -64,6 +64,8 @@ export interface OrchestratorDockDeps {
   openLink?(href: string): void;
   /** Whether a `[[note]]` can be opened (resolves to a file). Absent with `openLink` present: assume yes. */
   resolveLink?(href: string): boolean;
+  /** Source for an attached / tool-result image: a vault resource URL when it has a path, else a data URL. Absent: data URLs. */
+  imageSrc?(ref: { path?: string; mediaType: string }, inlineData: string | undefined): string;
   /**
    * Highlights a thread's card on the board while its `[[thread:...]]` link is hovered / focused in the sheet. Returns
    * false when the thread has no card (archived, filtered out): then nothing happens. Absent: links do not highlight.
@@ -606,6 +608,7 @@ export class OrchestratorDock {
       // Defence in depth: an anchor injected into the DOM after render can carry any id; only threads the board knows open.
       openThread: (threadId) => { if (this.deps.manager.getThread(threadId)) void this.openQuietly(threadId); },
       openLink: this.deps.openLink ? (href) => this.deps.openLink?.(href) : undefined,
+      imageSrc: this.deps.imageSrc ? (ref, inline) => this.deps.imageSrc!(ref, inline) : undefined,
       // Without an opener, wikilinks are inert text; with one, the host decides what resolves.
       resolveLink: (href) => !!this.deps.openLink && (this.deps.resolveLink ? this.deps.resolveLink(href) : true),
       removeWaiting: (index, text) => this.removeWaiting(index, text),
@@ -812,8 +815,9 @@ export class OrchestratorDock {
     const thread = id ? this.deps.manager.getThread(id) : undefined;
     if (!id || !thread) return;
     const { manager } = this;
-    const entries = this.transcriptOf(thread);
-    const live = new Set(entries.map((e) => e.id));
+    const all = this.transcriptOf(thread);
+    const live = new Set(all.map((e) => e.id));
+    const { entries, older } = capTranscript(all);
     for (const pid of [...this.pickupIds]) if (!live.has(pid)) this.pickupIds.delete(pid); // rolled back
     // The tray already lists the orchestrator's own plan / question (hand-off button) and gives its own permission real
     // buttons, so a notice would only repeat them (dockSheetModel.sheetBlock).
@@ -826,6 +830,7 @@ export class OrchestratorDock {
     });
     const view: SheetView = {
       entries: entries.map((e) => ({ ...e, pickup: this.pickupIds.has(e.id) })),
+      older,
       streaming: this.streamBuf,
       stopped: this.stoppedText,
       running: manager.isRunning(id),

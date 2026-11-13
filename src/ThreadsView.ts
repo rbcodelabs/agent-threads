@@ -18,7 +18,7 @@ import { forkBlockedReason } from './remote/threadLocation';
 import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import { isPermissionPreApprovedForThread, recordAlwaysAllow } from './remoteAlwaysAllow';
 import type { ViewStateResult } from 'obsidian';
-import { renderMarkdown as renderSharedMarkdown, linkifyUrls, type MessageRenderHost } from './messageRenderer';
+import { renderMarkdown as renderSharedMarkdown, renderMessage, renderToolResultImages, linkifyUrls, type MessageRenderHost } from './messageRenderer';
 import { isHttpUrl, urlChipLabel } from './urlLinks';
 import { effectiveExtraEnv } from './types';
 import { parseLoopArgs, formatLoopInterval } from './loopUtils';
@@ -4070,121 +4070,67 @@ export class ThreadsView extends ItemView {
   }
 
   private async appendMessage(msg: ChatMessage): Promise<HTMLElement | null> {
-    if (msg.role === 'compact') {
-      const divider = this.messagesEl.createDiv('ct-compact-divider');
-      const label = msg.compactTrigger === 'manual' ? 'Context compacted' : 'Context auto-compacted';
-      divider.createSpan({ cls: 'ct-compact-label', text: label });
-      if (msg.preTokens && msg.preTokens > 0) {
-        divider.createSpan({ cls: 'ct-compact-tokens', text: `${(msg.preTokens / 1000).toFixed(0)}k tokens` });
-      }
-      return null;
-    }
+    // The message item itself (row, user text, thumbnails, footer, copy button, notices, dividers) is the shared
+    // renderer's; what depends on this view's state is injected: the user-message menu, live tool rendering with the
+    // browser-row registry, tool images a browser card may have claimed, and the compressed view.
+    const rendered = renderMessage(msg, this.messagesEl, this.buildMessageRenderHost(), {
+      density: 'full',
+      linkPolicy: 'trusted',
+      imageSrc: (ref, inline) => this.imageSrc(ref, inline),
+      formatTime: (timestamp) => this.formatShortTime(timestamp),
+      openExternal: (url, forceExternal) => { void this.openLink(url, forceExternal); },
+      hooks: {
+        onRow: (el, message) => { if (message.role === 'user') this.attachUserMessageMenu(el, message); },
+        toolCalls: (el, tools, message) => {
+          this.renderToolCalls(el, tools);
+          // Remember rows that carry a browser session so later state changes
+          // (a result arriving, the turn ending, a handoff) can rebuild them.
+          if (tools.some((t) => isBrowserTool(t.name))) this.browserRowEls.set(message.id, el);
+        },
+        toolImages: (el, message) => { this.renderRowToolImages(el, message); },
+        assistantBody: this.compressedView ? (content, message) => this.renderCompressedAssistantBody(content, message) : undefined,
+      },
+    });
+    await rendered.done;
+    return msg.role === 'compact' || msg.role === 'notice' ? null : rendered.el;
+  }
 
-    if (msg.role === 'notice') {
-      const row = this.messagesEl.createDiv('ct-notice-row');
-      const iconEl = row.createSpan('ct-notice-icon');
-      setIcon(iconEl, msg.noticeStatus === 'completed' ? 'check-circle' : 'x-circle');
-      row.createSpan({ cls: 'ct-notice-text', text: msg.content });
-      return null;
-    }
+  /** Compressed view: a one-line summary row with an expand button over the (hidden) full markdown. */
+  private async renderCompressedAssistantBody(content: HTMLElement, msg: ChatMessage): Promise<void> {
+    content.parentElement?.addClass('ct-message-compressed');
+    // Collapsed row: summary text + expand button inline
+    const collapsedRow = content.createDiv('ct-compressed-row');
+    const summaryTextEl = collapsedRow.createSpan({
+      cls: 'ct-compressed-summary',
+      text: msg.summary ?? 'Summarizing…',
+    });
+    this.summaryTextEls.set(msg.id, summaryTextEl);
 
-    const el = this.messagesEl.createDiv(`ct-message ct-message-${msg.role}`);
-    if (msg.role === 'user') this.attachUserMessageMenu(el, msg);
+    // Expand button is inside collapsedRow so it sits inline with the summary text
+    const expandBtn = collapsedRow.createEl('button', { cls: 'ct-expand-btn', attr: { title: 'Expand' } });
+    setIcon(expandBtn, 'chevron-down');
 
-    if (msg.toolCalls && msg.toolCalls.length > 0) {
-      this.renderToolCalls(el, msg.toolCalls);
-      // Remember rows that carry a browser session so later state changes
-      // (a result arriving, the turn ending, a handoff) can rebuild them.
-      if (msg.toolCalls.some((t) => isBrowserTool(t.name))) this.browserRowEls.set(msg.id, el);
-    }
+    // Full content (hidden by default)
+    const fullContent = content.createDiv('ct-full-content ct-hidden');
+    await this.renderMarkdown(msg.content, fullContent, { messageId: msg.id });
 
-    this.renderRowToolImages(el, msg);
-
-    const content = el.createDiv('ct-message-content');
-    if (msg.role === 'assistant') {
-      if (this.compressedView) {
-        el.addClass('ct-message-compressed');
-        // Collapsed row: summary text + expand button inline
-        const collapsedRow = content.createDiv('ct-compressed-row');
-        const summaryTextEl = collapsedRow.createSpan({
-          cls: 'ct-compressed-summary',
-          text: msg.summary ?? 'Summarizing…',
-        });
-        this.summaryTextEls.set(msg.id, summaryTextEl);
-
-        // Expand button is inside collapsedRow so it sits inline with the summary text
-        const expandBtn = collapsedRow.createEl('button', { cls: 'ct-expand-btn', attr: { title: 'Expand' } });
-        setIcon(expandBtn, 'chevron-down');
-
-        // Full content (hidden by default)
-        const fullContent = content.createDiv('ct-full-content ct-hidden');
-        await this.renderMarkdown(msg.content, fullContent, { messageId: msg.id });
-
-        let expanded = false;
-        expandBtn.addEventListener('click', () => {
-          expanded = !expanded;
-          if (expanded) {
-            summaryTextEl.addClass('ct-hidden');
-            fullContent.removeClass('ct-hidden');
-          } else {
-            summaryTextEl.removeClass('ct-hidden');
-            fullContent.addClass('ct-hidden');
-          }
-          setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
-        });
-
-        // Enqueue lazy summary generation if not cached (serial — never concurrent)
-        if (!msg.summary) {
-          this.generateMessageSummary(msg);
-        }
+    let expanded = false;
+    expandBtn.addEventListener('click', () => {
+      expanded = !expanded;
+      if (expanded) {
+        summaryTextEl.addClass('ct-hidden');
+        fullContent.removeClass('ct-hidden');
       } else {
-        await this.renderMarkdown(msg.content, content, { messageId: msg.id });
+        summaryTextEl.removeClass('ct-hidden');
+        fullContent.addClass('ct-hidden');
       }
-      // Only render the copy button when there is actual text to copy. Desktop
-      // hides this button by default (opacity: 0, revealed on hover), so an
-      // empty-content tool-only turn is cosmetically harmless today, but guard
-      // it anyway for correctness/consistency and so it doesn't regress if the
-      // hover-hide CSS ever changes (see the mobile equivalent above).
-      if (msg.content && msg.content.trim().length > 0) {
-        const copyBtn = el.createEl('button', { cls: 'ct-copy-btn', attr: { title: 'Copy response' } });
-        setIcon(copyBtn, 'copy');
-        copyBtn.addEventListener('click', () => {
-          navigator.clipboard.writeText(msg.content);
-          setIcon(copyBtn, 'check');
-          setTimeout(() => setIcon(copyBtn, 'copy'), 1500);
-        });
-      }
-    } else {
-      this.linkifyUrls(content.createEl('p', { text: msg.content }));
-      // Render image thumbnails attached to user messages (e.g. sent from
-      // the dispatch box or conversation input). The live-streaming path
-      // renders these via the 'sending' event; this covers the renderMessages()
-      // path (thread switch, initial load, view rebuild).
-      if (msg.images && msg.images.length > 0) {
-        const imgRow = content.createDiv('ct-message-images');
-        for (const img of msg.images) {
-          const thumb = imgRow.createEl('img', { cls: 'ct-message-img-thumb' });
-          thumb.src = this.imageSrc(img, img.base64);
-          thumb.title = img.name;
-        }
-      }
-    }
+      setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
+    });
 
-    // Show the footer row only for:
-    //  - user messages (always — marks when the user sent)
-    //  - assistant messages that carry a cost (the terminal message of a turn)
-    // Intermediate assistant messages in a multi-step response have no cost
-    // and get no footer, keeping the view clean.
-    const hasCost = !!msg.cost && msg.cost > 0;
-    if (msg.role === 'user' || hasCost) {
-      const footer = el.createDiv('ct-message-footer');
-      footer.createSpan({ cls: 'ct-message-ts', text: this.formatShortTime(msg.timestamp) });
-      if (hasCost) {
-        footer.createSpan({ cls: 'ct-cost', text: `$${msg.cost!.toFixed(4)}` });
-      }
+    // Enqueue lazy summary generation if not cached (serial — never concurrent)
+    if (!msg.summary) {
+      this.generateMessageSummary(msg);
     }
-
-    return el;
   }
 
   /**
@@ -4434,20 +4380,7 @@ export class ThreadsView extends ItemView {
    * appears once, inside its card.
    */
   private renderRowToolImages(rowEl: HTMLElement, msg: ChatMessage): HTMLElement | null {
-    if (!msg.toolResultImages || msg.toolResultImages.length === 0) return null;
-    const claimed = this.browser?.claimedImageIndexes(msg.id);
-    const visible = msg.toolResultImages.filter((_, i) => !claimed?.has(i));
-    if (visible.length === 0) return null;
-    const imgWrap = rowEl.createDiv('ct-tool-result-images');
-    for (const img of visible) {
-      imgWrap.createEl('img', {
-        attr: {
-          src: this.imageSrc(img, img.data),
-          style: 'max-width:100%;border-radius:4px;margin-bottom:6px;display:block;',
-        },
-      });
-    }
-    return imgWrap;
+    return renderToolResultImages(rowEl, msg, (ref, inline) => this.imageSrc(ref, inline), this.browser?.claimedImageIndexes(msg.id));
   }
 
   /**
