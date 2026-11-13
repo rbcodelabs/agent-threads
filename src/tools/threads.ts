@@ -8,6 +8,18 @@ import { tool } from '@anthropic-ai/claude-agent-sdk/browser';
 import path from 'path';
 import { isValidOverviewPath } from '../projectOverview';
 import type { ObsidianMcpServerOptions, ProjectUpdatePatch } from '../ObsidianTools';
+
+/**
+ * Out-of-scope error. The Portfolio orchestrator reaches Project threads only with an explicit
+ * per-call `elevatedProjectId`, but the plain message never said so and callers misdiagnosed it as a
+ * role limit. Name the parameter when it was omitted. Elevation stays explicit by design: applying it
+ * automatically would remove the per-call scope boundary.
+ */
+function outOfScopeError(what: 'Target' | 'Destination Project', elevatedProjectId: string | undefined): Error {
+  const base = `${what} is outside coordination scope.`;
+  if (elevatedProjectId) return new Error(base);
+  return new Error(`${base} If you are the Portfolio orchestrator, retry with elevatedProjectId set to the target's Project ID (see threads_list_projects).`);
+}
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 
 type ToolDef = SdkMcpToolDefinition<any>;
@@ -184,7 +196,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'updateProject is not available in this context.' }) }], isError: true };
         }
         if (options.authorizeProjectDestination && !options.authorizeProjectDestination(args.projectId, args.elevatedProjectId)) {
-          throw new Error('Target is outside coordination scope.');
+          throw outOfScopeError('Target', args.elevatedProjectId);
         }
         const hasName = args.name !== undefined;
         const hasDescription = args.description !== undefined;
@@ -243,8 +255,8 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (!options.setThreadProject) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'setThreadProject is not available in this context.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw new Error('Target is outside coordination scope.');
-        if (options.authorizeProjectDestination && !options.authorizeProjectDestination(args.projectId ?? undefined, args.elevatedProjectId, args.threadId)) throw new Error('Destination Project is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw outOfScopeError('Target', args.elevatedProjectId);
+        if (options.authorizeProjectDestination && !options.authorizeProjectDestination(args.projectId ?? undefined, args.elevatedProjectId, args.threadId)) throw outOfScopeError('Destination Project', args.elevatedProjectId);
         options.setThreadProject(args.threadId, args.projectId, args.alignCwd ?? false);
         return {
           content: [
@@ -275,7 +287,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (!options.getThreadDetail) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Thread state not available in this context.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'read')) throw new Error('Target is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'read')) throw outOfScopeError('Target', args.elevatedProjectId);
         const detail = options.getThreadDetail(args.threadId);
         if (!detail) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: `Thread not found: ${args.threadId}` }) }], isError: true };
@@ -302,7 +314,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (!options.openThread) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Thread navigation is not available in this context.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'read')) throw new Error('Target is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'read')) throw outOfScopeError('Target', args.elevatedProjectId);
         const detail = options.getThreadDetail?.(args.threadId);
         if (!detail) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: `Thread not found: ${args.threadId}` }) }], isError: true };
@@ -334,7 +346,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (!threadId) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'No threadId provided and no current thread in context.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(threadId, args.elevatedProjectId, 'read')) throw new Error('Target is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(threadId, args.elevatedProjectId, 'read')) throw outOfScopeError('Target', args.elevatedProjectId);
         const result = await options.readThreadLog(threadId, { limit: args.limit, type: args.type });
         if (!result) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: `No raw log found for thread: ${threadId}. Raw logging may be disabled, or the thread has not produced any events yet.` }) }], isError: true };
@@ -360,7 +372,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (!options.isThreadRunning) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Thread state not available in this context.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'read')) throw new Error('Target is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'read')) throw outOfScopeError('Target', args.elevatedProjectId);
         const timeoutMs = Math.min((args.timeoutSeconds ?? 120) * 1000, 600_000);
         const start = Date.now();
         const pollMs = 1_000;
@@ -402,7 +414,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (args.threadId === options.threadId) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Cannot send a message to the current thread.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw new Error('Target is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw outOfScopeError('Target', args.elevatedProjectId);
         await options.sendMessageToThread(args.threadId, args.message);
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, threadId: args.threadId }) }] };
       } catch (err: unknown) {
@@ -431,7 +443,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (!options.archiveThread) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Thread archiving not available in this context.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw new Error('Target is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw outOfScopeError('Target', args.elevatedProjectId);
         if (args.threadId === options.threadId) {
           if ((options.isOrchestratorThread?.(args.threadId) ?? args.threadId === options.getOrchestratorThreadId?.()) && !args.confirm) {
             return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'This is the Thread Orchestrator. Pass confirm: true to archive it anyway — doing so stops automatic thread review until "Open Thread Orchestrator" is run again.' }) }], isError: true };
@@ -477,7 +489,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (!options.setThreadNotes) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'setThreadNotes is not available in this context.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'notes')) throw new Error('Target is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'notes')) throw outOfScopeError('Target', args.elevatedProjectId);
         options.setThreadNotes(args.threadId, args.notes);
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, threadId: args.threadId }) }] };
       } catch (err: unknown) {
@@ -509,7 +521,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (args.threadId === options.threadId) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Cannot set a proposed reply on the current thread.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw new Error('Target is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw outOfScopeError('Target', args.elevatedProjectId);
         options.setThreadProposedReply(args.threadId, args.text);
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, threadId: args.threadId }) }] };
       } catch (err: unknown) {
@@ -532,7 +544,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         if (!options.clearThreadProposedReply) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'clearThreadProposedReply is not available in this context.' }) }], isError: true };
         }
-        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw new Error('Target is outside coordination scope.');
+        if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw outOfScopeError('Target', args.elevatedProjectId);
         options.clearThreadProposedReply(args.threadId);
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, threadId: args.threadId }) }] };
       } catch (err: unknown) {
@@ -572,7 +584,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         const target = args.threadId ?? options.threadId;
         if (!target) throw new Error('No target thread.');
         if (target !== options.threadId && options.authorizeThread && !options.authorizeThread(target, args.elevatedProjectId, 'write')) {
-          throw new Error('Target is outside coordination scope.');
+          throw outOfScopeError('Target', args.elevatedProjectId);
         }
         const decisionId = options.postThreadDecision(target, {
           question: args.question,
@@ -606,7 +618,7 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
         const target = args.threadId ?? options.threadId;
         if (!target) throw new Error('No target thread.');
         if (target !== options.threadId && options.authorizeThread && !options.authorizeThread(target, args.elevatedProjectId, 'write')) {
-          throw new Error('Target is outside coordination scope.');
+          throw outOfScopeError('Target', args.elevatedProjectId);
         }
         const cleared = options.clearThreadDecision(target, args.decisionId);
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, threadId: target, cleared }) }] };
