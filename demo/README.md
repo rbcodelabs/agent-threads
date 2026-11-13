@@ -83,3 +83,7 @@ What the four scenes do, in order:
 `target.readySelector` waits for the chat leaf (`.workspace-leaf-content[data-type="claude-threads:chat"]`) before the first scene starts.
 
 A raw take is about 33 s with a long idle stretch while the replay finishes. Trim the idle part and speed the rest up about 1.1x, then convert to `docs/images/agent-threads-hero.gif` (880 px wide, 10 fps, `palettegen`/`paletteuse`, looping) and keep the trimmed `docs/images/agent-threads-hero.mp4` for X. The text in the clip is scripted replay content from `replay-script.json`, not live Claude output.
+
+## README screenshots
+
+`docs/images/screenshot-{main,permission,board}.png` are 1280x800 frames from the raw capture (`demo/out/raw/recording.mp4`) of `demo/stills.config.json`, a silent run of the full demo scenes (intro, first-thread, streaming, permissions, board) in real Geode on dev-builder. Same hero setup applies (Agents tab click first, no project menu click). Run it like the hero clip, then pull frames with `ffmpeg -ss <t> -i demo/out/raw/recording.mp4 -frames:v 1`. Known gaps: the board frame has an empty Working column (the thread is Done by then), and adding the "parallel" scene or opening the board while the permission card is pending both failed on this Geode (element not stable, then page closed), so they are not in the config. The text is scripted replay content, not live Claude output.
