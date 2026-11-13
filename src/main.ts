@@ -3489,7 +3489,8 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }
       throw error;
     }
-    this.manager.deleteThread(id);
+    // Archive keeps artifact storage: the recovery sidecar restores records, not files.
+    this.manager.deleteThread(id, { artifactStorage: 'keep' });
   }
 
   /** Archived threads still on disk (vault notes) that are not live in memory. Empty when vault persistence is off. */

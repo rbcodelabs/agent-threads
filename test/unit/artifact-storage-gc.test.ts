@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ThreadManager } from '../../src/ThreadManager';
 import { DEFAULT_SETTINGS } from '../../src/types';
-import { artifactStorageRoot } from '../../src/artifactStorage';
+import { artifactStorageRoot, visibleArtifactRoot } from '../../src/artifactStorage';
+import ClaudeThreadsPlugin from '../../src/main';
 
 /**
  * ADR-0010's live defect: deleting a thread removed its attachment directory
@@ -112,5 +113,75 @@ describe('artifact storage garbage collection', () => {
     expect(() => manager.deleteThread(thread.id)).not.toThrow();
     await settle(manager);
     expect(rmSpy).not.toHaveBeenCalled();
+  });
+});
+
+async function seedVisibleArtifact(vaultRoot: string, rootName: string, slug: string): Promise<string> {
+  const target = join(visibleArtifactRoot(vaultRoot, rootName), 'threads-design', slug);
+  await mkdir(target, { recursive: true });
+  await writeFile(join(target, 'index.html'), '<!doctype html>');
+  return target;
+}
+
+function record(id: string, storageRoot: string) {
+  return { id, kind: 'design-static', title: id, providerId: 'agent-threads.design', schemaVersion: 1, storageRoot, createdAt: 1, updatedAt: 1 };
+}
+
+describe('artifact storage survives archive and visible-root deletion', () => {
+  it('archive (keep) preserves hidden-root and visible-root artifact directories', async () => {
+    const vaultRoot = await vault();
+    const hidden = await seedArtifact(vaultRoot, 'design-keep-1');
+    const visible = await seedVisibleArtifact(vaultRoot, 'Artifacts', 'my-design');
+    const manager = managerFor(vaultRoot);
+    const thread = manager.createThread('Design');
+    thread.artifacts = [record('design-keep-1', hidden), record('my-design', visible)];
+
+    manager.deleteThread(thread.id, { artifactStorage: 'keep' });
+    await settle(manager);
+
+    expect((await stat(join(hidden, 'index.html'))).isFile()).toBe(true);
+    expect((await stat(join(visible, 'index.html'))).isFile()).toBe(true);
+  });
+
+  it('hard delete (default) removes hidden-root dirs but never visible-root dirs, including a custom root', async () => {
+    const vaultRoot = await vault();
+    const hidden = await seedArtifact(vaultRoot, 'design-del-1');
+    const visibleDefault = await seedVisibleArtifact(vaultRoot, 'Artifacts', 'default-root');
+    const visibleCustom = await seedVisibleArtifact(vaultRoot, 'My Designs', 'custom-root');
+    const manager = new ThreadManager({ ...DEFAULT_SETTINGS, visibleArtifactRoot: 'My Designs' });
+    manager.vaultRoot = vaultRoot;
+    const thread = manager.createThread('Design');
+    thread.artifacts = [record('a', hidden), record('b', visibleDefault), record('c', visibleCustom)];
+
+    manager.deleteThread(thread.id);
+    await settle(manager);
+
+    await expect(stat(hidden)).rejects.toThrow();
+    expect((await stat(join(visibleDefault, 'index.html'))).isFile()).toBe(true);
+    expect((await stat(join(visibleCustom, 'index.html'))).isFile()).toBe(true);
+  });
+
+  it('archiveThreadById passes keep: artifact directories survive the real archive path', async () => {
+    const vaultRoot = await vault();
+    const hidden = await seedArtifact(vaultRoot, 'design-arch-1');
+    const visible = await seedVisibleArtifact(vaultRoot, 'Artifacts', 'archived-design');
+    const settings = { ...DEFAULT_SETTINGS, saveThreadsToVault: true };
+    const manager = new ThreadManager(settings);
+    manager.vaultRoot = vaultRoot;
+    const thread = manager.createThread('Design', '/tmp');
+    manager.createThread('Other', '/tmp');
+    thread.artifacts = [record('a', hidden), record('b', visible)];
+    const plugin = Object.assign(Object.create(ClaudeThreadsPlugin.prototype), {
+      app: { workspace: { trigger: vi.fn() } }, settings, manager,
+      persistence: { saveThread: vi.fn(async () => {}) },
+      saveSettings: vi.fn(async () => {}),
+    }) as ClaudeThreadsPlugin;
+
+    await plugin.archiveThreadById(thread.id);
+    await settle(manager);
+
+    expect(manager.getThread(thread.id)).toBeUndefined();
+    expect((await stat(join(hidden, 'index.html'))).isFile()).toBe(true);
+    expect((await stat(join(visible, 'index.html'))).isFile()).toBe(true);
   });
 });
