@@ -510,6 +510,13 @@ export function createThreadTools(port: ThreadToolsPort): Record<string, ToolDef
           return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Cannot set a proposed reply on the current thread.' }) }], isError: true };
         }
         if (options.authorizeThread && !options.authorizeThread(args.threadId, args.elevatedProjectId, 'write')) throw new Error('Target is outside coordination scope.');
+        // One pending item per thread: an open decision already asks Rick this question. Enforced here
+        // (agent callers only) so Rick's own UI actions and Approve & Send are unaffected. An answered or
+        // cleared decision is removed from pendingDecisions, so it no longer blocks and the answer can be relayed.
+        const openDecisions = options.getThreadDetail?.(args.threadId)?.pendingDecisions;
+        if (openDecisions && openDecisions.length > 0) {
+          throw new Error(`Thread ${args.threadId} has an open decision awaiting Rick (${openDecisions.map(d => d.id).join(', ')}). Clear it with threads_clear_decision or wait for his answer, then stage a reply built from that answer.`);
+        }
         options.setThreadProposedReply(args.threadId, args.text);
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: true, threadId: args.threadId }) }] };
       } catch (err: unknown) {
