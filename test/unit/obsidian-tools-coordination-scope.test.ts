@@ -31,7 +31,7 @@ describe('coordination tool scoping', () => {
   });
 
   it('names elevatedProjectId in the out-of-scope error only when it was omitted', async () => {
-    const server = createClaudeThreadsMcpServers(app, { authorizeThread: vi.fn().mockReturnValue(false) }).claude_threads as unknown as { tools: Array<{ name: string; handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }> }> };
+    const server = createClaudeThreadsMcpServers(app, { getThreadDetail: () => ({ id: 'a', title: 'A', projectId: 'project-a', messages: [] } as never), authorizeThread: vi.fn().mockReturnValue(false) }).claude_threads as unknown as { tools: Array<{ name: string; handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }> }> };
     const messages = server.tools.find(tool => tool.name === 'threads_get_messages')!;
 
     const omitted = await messages.handler({ threadId: 'a' });
