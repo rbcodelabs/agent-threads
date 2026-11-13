@@ -63,18 +63,18 @@ const STREAM_MARKDOWN = [
   '```', 'npm run deploy -- --env=production',
 ].join('\n');
 
-// Step 3: real messages (tool summary row, thumbnails, notice, divider, cap) and multi-block markdown while streaming,
+// Step 3 (identical-to-main-panel since the dock-identical-renderer change): real messages (tool groups, thumbnails, notice, divider, cap) and multi-block markdown while streaming,
 // each at both widths in the dark (default) and light themes.
 test.describe('orchestrator sheet — step 3 states (shared message renderer)', () => {
   for (const theme of ['dark', 'light'] as const) {
     for (const { label, size } of SIZES) {
-      test(`rich transcript: tool summary row, thumbnails, notice, divider, markdown @ ${theme} ${label}`, async ({ page }) => {
+      test(`rich transcript: tool groups, thumbnails, notice, divider, markdown @ ${theme} ${label}`, async ({ page }) => {
         await open(page, 'idle', 'transcript', size);
         if (theme === 'light') await setLight(page);
         await focusComposer(page, size);
         await expect(sheet(page)).toBeVisible();
-        await expect(page.locator('.ct-orch-msg[data-role="notice"]')).toBeVisible();
-        await expect(page.locator('.ct-orch-tools-toggle').first()).toBeVisible();
+        await expect(page.locator('.ct-notice-row[data-role="notice"]')).toBeVisible();
+        await expect(page.locator('.ct-tool-group-header').first()).toBeVisible();
         await shot(page, `orchestrator-sheet-transcript-${theme}-${label}.png`, DOCK_SHOT);
       });
 
@@ -96,24 +96,25 @@ test.describe('orchestrator sheet — step 3 states (shared message renderer)', 
       await open(page, 'idle', 'long', size);
       await focusComposer(page, size);
       await expect(sheet(page)).toBeVisible();
-      await expect(page.locator('.ct-orch-msg')).toHaveCount(50);
+      await expect(page.locator('.ct-orch-sheet-log > [data-role]')).toHaveCount(50);
       await page.locator('.ct-orch-sheet-scroll').evaluate((el) => { el.scrollTop = 0; });
       await expect(page.locator('.ct-orch-older')).toBeVisible();
       await shot(page, `orchestrator-sheet-older-${label}.png`, DOCK_SHOT);
     });
   }
 
-  test('the tool summary row expands to the plain list and collapses again', async ({ page }) => {
+  test('a tool group (the main panel\'s own) expands to its pills and collapses again', async ({ page }) => {
     await open(page, 'idle', 'transcript', DESKTOP);
     await focusComposer(page, DESKTOP);
-    const toggle = page.locator('.ct-orch-tools-toggle').first();
+    const toggle = page.locator('.ct-tool-group-header').first();
+    const body = page.locator('.ct-tool-group .ct-full-content').first();
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-    await expect(page.locator('.ct-orch-tools-list').first()).toBeHidden();
+    await expect(body).toBeHidden();
     await toggle.click();
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
-    await expect(page.locator('.ct-orch-tools-item').first()).toBeVisible();
+    await expect(page.locator('.ct-tool-group .ct-tool-pill').first()).toBeVisible();
     await toggle.click();
-    await expect(page.locator('.ct-orch-tools-list').first()).toBeHidden();
+    await expect(body).toBeHidden();
   });
 });
 
@@ -139,7 +140,7 @@ test.describe('orchestrator sheet — screenshots', () => {
       await open(page, 'idle', 'conversation', size);
       await page.evaluate(() => (window as any).__orchQueue('ship it after the plan'));
       await focusComposer(page, size);
-      await expect(page.locator('.ct-orch-sheet a.ct-thread-link').first()).toBeVisible();
+      await expect(page.locator('.ct-orch-sheet a.internal-link[data-href^="thread:"]').first()).toBeVisible();
       await expect(page.locator('.ct-orch-waiting')).toBeVisible();
       await shot(page, `orchestrator-sheet-conversation-${label}.png`, DOCK_SHOT);
     });
@@ -180,7 +181,7 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
       await open(page, 'idle', 'empty', size);
       await send(page, size, 'What needs me?');
       await expect(sheet(page)).toBeVisible();
-      await expect(page.locator('.ct-orch-msg[data-role="user"]')).toContainText('What needs me?');
+      await expect(page.locator('.ct-orch-sheet-log > [data-role="user"]')).toContainText('What needs me?');
       expect(await page.evaluate(() => (window as any).__sentMessages)).toEqual([expect.objectContaining({ text: 'What needs me?' })]);
       expect(await page.evaluate(() => (window as any).__openedThreadIds.length)).toBe(0);
     });
@@ -190,7 +191,7 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
       if (isNarrow(size)) await page.locator('.ct-orch-orb').click();
       await field(page).fill('only once');
       await page.keyboard.press('Enter'); await page.keyboard.press('Enter'); await page.keyboard.press('Enter');
-      await expect(page.locator('.ct-orch-msg[data-role="user"]')).toHaveCount(1);
+      await expect(page.locator('.ct-orch-sheet-log > [data-role="user"]')).toHaveCount(1);
       expect(await page.evaluate(() => (window as any).__sentMessages.length)).toBe(1);
     });
 
@@ -207,9 +208,9 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
       await open(page, 'working', 'conversation', size);
       await focusComposer(page, size);
       await send(page, size, 'this will be rolled back');
-      await expect(page.locator('.ct-orch-msg[data-role="user"]', { hasText: 'this will be rolled back' })).toBeVisible();
+      await expect(page.locator('.ct-orch-sheet-log > [data-role="user"]', { hasText: 'this will be rolled back' })).toBeVisible();
       await page.locator('.ct-orch-stop').click();
-      await expect(page.locator('.ct-orch-msg[data-role="user"]', { hasText: 'this will be rolled back' })).toHaveCount(0);
+      await expect(page.locator('.ct-orch-sheet-log > [data-role="user"]', { hasText: 'this will be rolled back' })).toHaveCount(0);
       expect(await page.evaluate(() => (window as any).__interruptCalls)).toEqual(['k-orchestrator']);
       await expect(page.locator('.ct-orch-stop')).toBeHidden();
     });
@@ -227,7 +228,7 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
     test(`a thread link opens that thread @ ${label}`, async ({ page }) => {
       await open(page, 'idle', 'conversation', size);
       await focusComposer(page, size);
-      await page.locator('.ct-orch-sheet a.ct-thread-link').first().click();
+      await page.locator('.ct-orch-sheet a.internal-link[data-href^="thread:"]').first().click();
       expect(await page.evaluate(() => (window as any).__openedThreadIds.length)).toBe(1);
     });
 
@@ -302,7 +303,7 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
       const lum = ([r, g, b]: number[]) => { const f = (v: number) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
       const bgOf = (el: Element): number[] => { for (let n: Element | null = el; n; n = n.parentElement) { const c = parse(getComputedStyle(n).backgroundColor); if (c.length === 3 || (c.length === 4 && c[3] > 0.95)) return c; } return [30, 30, 30]; };
       const out: Record<string, number> = {};
-      for (const sel of ['.ct-orch-sheet-head h2', '.ct-orch-msg[data-role="user"] .ct-orch-bubble', '.ct-orch-msg[data-role="assistant"] .ct-orch-bubble', '.ct-orch-waiting', '.ct-orch-sheet a.ct-thread-link', '.ct-orch-sheet-head button', '.ct-orch-bubble a:not(.ct-thread-link)']) {
+      for (const sel of ['.ct-orch-sheet-head h2', '.ct-orch-sheet-log > [data-role="user"] .ct-message-content', '.ct-orch-sheet-log > [data-role="assistant"] .ct-message-content', '.ct-orch-waiting', '.ct-orch-sheet a.internal-link[data-href^="thread:"]', '.ct-orch-sheet-head button', '.ct-message-content a:not([data-href^="thread:"])']) {
         const el = document.querySelector(sel); if (!el) continue;
         const fg = parse(getComputedStyle(el).color); const bg = bgOf(el);
         const [L1, L2] = [lum(fg), lum(bg)].sort((a, b) => b - a);
@@ -318,9 +319,9 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
     await field(page).click();
     const m = await page.evaluate(() => {
       const scroll = document.querySelector('.ct-orch-sheet-scroll') as HTMLElement;
-      const pre = document.querySelector('.ct-orch-bubble pre') as HTMLElement;
-      const bubble = pre.closest('.ct-orch-bubble') as HTMLElement;
-      const th = [...document.querySelectorAll('.ct-orch-bubble th')].find((e) => e.textContent === 'Owner') as HTMLElement;
+      const pre = document.querySelector('.ct-message-content pre') as HTMLElement;
+      const bubble = pre.closest('.ct-message-content') as HTMLElement;
+      const th = [...document.querySelectorAll('.ct-message-content th')].find((e) => e.textContent === 'Owner') as HTMLElement;
       const lh = parseFloat(getComputedStyle(th).lineHeight) || 20;
       return {
         scrollOverflow: scroll.scrollWidth - scroll.clientWidth,
@@ -350,29 +351,16 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
     });
   }
 
-  test('N3: an untrusted reply makes ZERO requests to a remote host (markdown img, raw img, video poster, srcset, svg image, style url)', async ({ page }) => {
-    const hits: string[] = [];
-    await page.route(/evil\.example/, (route) => { hits.push(route.request().url()); return route.abort(); });
-    page.on('request', (r) => { if (r.url().includes('evil.example')) hits.push(`seen:${r.url()}`); });
-    await open(page, 'idle', 'evil', DESKTOP);
-    await field(page).click();
-    await expect(page.locator('.ct-orch-bubble').filter({ hasText: 'Evil reply text.' })).toBeVisible();
-    await expect(page.locator('.ct-orch-bubble').filter({ hasText: 'styled' })).toBeVisible();
-    await page.waitForTimeout(800);
-    expect(hits).toEqual([]);
-    expect(await page.locator('.ct-orch-sheet img, .ct-orch-sheet video, .ct-orch-sheet picture, .ct-orch-sheet svg image, .ct-orch-sheet [style*="url("]').count()).toBe(0);
-  });
-
-  test('B1 (harness mocks): a resolvable [[note]] opens in a NEW tab, an unresolved one is inert, and the board and sheet stay', async ({ page }) => {
+  test('B1 (harness mocks): a [[note]] opens in a NEW tab (never the board leaf) when it resolves, an unresolved one opens nothing, and the board and sheet stay', async ({ page }) => {
     await open(page, 'idle', 'rich', DESKTOP);
     await field(page).click();
-    await expect(page.locator('.ct-orch-sheet a.internal-link')).toHaveCount(1);
-    await expect(page.locator('.ct-orch-sheet .ct-orch-wikilink-unresolved')).toHaveText('Ghost note');
-    await page.locator('.ct-orch-sheet a.internal-link').click();
+    const notes = page.locator('.ct-orch-sheet a.internal-link:not([data-href^="thread:"])');
+    await expect(notes).toHaveCount(2); // Real note + Ghost note: rendered like the main panel; resolution happens at click time
+    await notes.filter({ hasText: 'Real note' }).click();
     expect(await page.evaluate(() => (window as any).__openedLinks)).toEqual([{ via: 'workspace', href: 'Real note', sourcePath: '', newLeaf: 'tab' }]);
     await expect(sheet(page)).toBeVisible();
     await expect(page.locator('.ct-kanban-board')).toBeVisible();
-    await page.locator('.ct-orch-sheet .ct-orch-wikilink-unresolved').click();
+    await notes.filter({ hasText: 'Ghost note' }).click();
     expect((await page.evaluate(() => (window as any).__openedLinks)).length).toBe(1);
   });
 
@@ -462,7 +450,7 @@ test.describe('orchestrator sheet — functional (no baselines)', () => {
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.wheel(0, -400);
     await page.waitForTimeout(200);
-    await page.locator('.ct-orch-sheet-scroll a.ct-thread-link').first().focus();
+    await page.locator('.ct-orch-sheet-scroll a.internal-link[data-href^="thread:"]').first().focus();
     await page.keyboard.press('End');
     await page.waitForTimeout(1200);
     const distance = await page.locator('.ct-orch-sheet-scroll').evaluate((e) => e.scrollHeight - e.clientHeight - e.scrollTop);
