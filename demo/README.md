@@ -61,3 +61,25 @@ Useful selectors, all verified against the running app: composer `.ct-input` (in
   clicks fires late; the recorder warns `late by Nms`. Move setup clicks into the end of the previous scene.
 - The dispatch box loses focus after Enter, so each dispatch needs its own click.
 - Geode re-adds its core sidebar tabs when they are missing, so the fixture lists them and marks Agents active.
+
+## Launch hero clip (no narration)
+
+`demo/hero.config.json` is a short, silent clip for the README (`voice.provider: "none"`). It reuses the same fixture and replay script.
+
+```sh
+npm run demo:fixture
+node demo/engine/run.mts all --config demo/hero.config.json
+```
+
+The recording host needs a built Geode checkout at `~/geode-gate` (see Recording host above).
+
+What the four scenes do, in order:
+
+1. **ask**: click the Agents sidebar tab (Geode labels it "N threads", so the selector matches `aria-label*="thread"`), click **New thread**, and type the prompt. There is no project menu to pick from: on current Geode, New thread opens a composer you can type into straight away. An older config that clicked a project menu item will hang waiting for it.
+2. **work**: hover a tool pill (optional) while the replay streams.
+3. **subagents**: wait for the sub-agent pill, open its popover, and click the first sub-agent row (the row click is optional, so a missing row no longer fails the take).
+4. **board**: open the Agent Board from the ribbon and hover the running card.
+
+`target.readySelector` waits for the chat leaf (`.workspace-leaf-content[data-type="claude-threads:chat"]`) before the first scene starts.
+
+A raw take is about 33 s with a long idle stretch while the replay finishes. Trim the idle part and speed the rest up about 1.1x, then convert to `docs/images/agent-threads-hero.gif` (880 px wide, 10 fps, `palettegen`/`paletteuse`, looping) and keep the trimmed `docs/images/agent-threads-hero.mp4` for X. The text in the clip is scripted replay content from `replay-script.json`, not live Claude output.
