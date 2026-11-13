@@ -2,6 +2,7 @@ import { z } from 'zod';
 // Import from the browser entry point to avoid Node.js-only APIs (e.g. setTimeout().unref())
 // that crash in Electron's renderer context.
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk/browser';
+import { noApprovalContributionNames } from './contributedToolApproval';
 import { type McpRegistrationResult } from './mcpServerStore';
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
