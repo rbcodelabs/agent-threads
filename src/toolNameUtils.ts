@@ -156,7 +156,7 @@ export function getToolIcon(raw: string): string {
 
 const LEGACY_BUILT_IN_TOOLS = new Set([
   'obsidian_search_vault', 'obsidian_get_note_metadata', 'obsidian_get_backlinks',
-  'obsidian_get_outgoing_links', 'obsidian_get_file_history', 'obsidian_restore_file_version',
+  'obsidian_get_outgoing_links', 'obsidian_get_file_history', 'obsidian_restore_file_version', 'obsidian_move_path',
   'obsidian_list_vault_bridges', 'obsidian_add_vault_bridge', 'obsidian_get_active_file',
   'obsidian_get_open_tabs', 'obsidian_navigate_to_file', 'obsidian_insert_at_cursor',
   'obsidian_list_commands', 'obsidian_execute_command', 'obsidian_open_url',
@@ -169,7 +169,7 @@ const LEGACY_BUILT_IN_TOOLS = new Set([
 ]);
 const CANONICAL_BUILT_IN_TOOLS = new Set([
   'vault_search', 'vault_list', 'vault_get_note_metadata', 'vault_get_backlinks', 'vault_get_outgoing_links',
-  'vault_get_file_history', 'vault_restore_file_version', 'vault_list_bridges', 'vault_add_bridge',
+  'vault_get_file_history', 'vault_restore_file_version', 'vault_move', 'vault_list_bridges', 'vault_add_bridge',
   'sync_list_conflicts', 'sync_inspect_conflict', 'agent_threads_help',
   'workspace_get_active_file', 'workspace_get_open_tabs', 'workspace_navigate_to_file',
   'workspace_insert_at_cursor', 'host_list_commands', 'host_execute_command', 'host_open_url',

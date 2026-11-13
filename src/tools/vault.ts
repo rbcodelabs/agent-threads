@@ -62,6 +62,32 @@ const addVaultBridgeSchema = {
     .describe('Immediately sync after adding. Defaults to false.'),
 };
 
+const moveSchema = {
+  from: z.string().describe('Vault-relative path of the file or folder to move/rename'),
+  to: z.string().describe('Vault-relative destination path (must not exist; parent folders are created)'),
+};
+
+/**
+ * Client-side mirror of Geode's move-path rules, for a fast and clear error. Geode stays authoritative: it
+ * validates again before its first write. Returns an error message, or null when the path is acceptable.
+ */
+export function validateMovePath(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return 'path must be a non-empty string';
+  if (/[\u0000-\u001f\u007f]/.test(value)) return `path contains control characters: ${JSON.stringify(value)}`;
+  if (value.startsWith('/')) return `path must be vault-relative, not absolute: ${value}`;
+  if (value.includes('\\')) return `path must use "/" separators (no backslashes): ${value}`;
+  if (/^[A-Za-z]:/.test(value)) return `path must be vault-relative, not a drive path: ${value}`;
+  if (value.endsWith('/')) return `path must not end with "/": ${value}`;
+  if (value.includes('//')) return `path must not contain empty segments ("//"): ${value}`;
+  for (const segment of value.split('/')) {
+    if (segment === '..') return `path must not contain ".." segments: ${value}`;
+    if (segment.startsWith('.')) return `path must not contain "." or hidden (dot-prefixed) segments: ${value}`;
+  }
+  return null;
+}
+
+type MoveResult = { moved: Array<{ from: string; to: string }>; updatedNotes: string[] };
+
 export function createVaultTools(port: VaultToolsPort): Record<string, ToolDef> {
   const { app, options } = port;
   const boundSearchVault = tool(
@@ -601,6 +627,45 @@ export function createVaultTools(port: VaultToolsPort): Record<string, ToolDef> 
     },
   );
 
+  const boundMovePath = tool(
+    'obsidian_move_path',
+    [
+      'Moves or renames a file or folder in the vault and updates wikilinks, embeds and markdown links in other notes.',
+      'Refuses to overwrite an existing path; missing parent folders are created.',
+      'Returns { moved, updatedNotes }: the requested move and the notes (by their path after the move) whose content was rewritten.',
+      'Paths are vault-relative: no absolute paths, "..", backslashes, trailing "/" or dot-prefixed segments.',
+      'Requires a host with link-updating moves (Geode); there is deliberately no fallback to a plain rename.',
+    ].join(' '),
+    moveSchema,
+    async (args, _extra) => {
+      const fail = (text: string) => ({ content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true });
+      try {
+        const badFrom = validateMovePath(args.from);
+        if (badFrom) return fail(`invalid "from": ${badFrom}`);
+        const badTo = validateMovePath(args.to);
+        if (badTo) return fail(`invalid "to": ${badTo}`);
+        if (args.from === args.to) return fail('"from" and "to" are the same path');
+        if (args.to.startsWith(`${args.from}/`)) return fail(`cannot move a folder into itself: ${args.from} -> ${args.to}`);
+
+        const fileManager = (app as unknown as {
+          fileManager?: { moveWithLinkUpdate?: (from: string, to: string) => Promise<MoveResult> };
+        }).fileManager;
+        if (typeof fileManager?.moveWithLinkUpdate !== 'function') {
+          return fail(
+            'This host does not support link-updating moves (app.fileManager.moveWithLinkUpdate is missing; it needs a Geode version that provides it). '
+            + 'Nothing was moved. On older Geode or Obsidian, use the host rename command so links are updated, rather than a plain file move.',
+          );
+        }
+        // Paths are passed as validated, NOT through normalizePath(): Geode validates strictly and is authoritative.
+        const result = await fileManager.moveWithLinkUpdate(args.from, args.to);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return fail(msg);
+      }
+    },
+  );
+
   const boundAddVaultBridge = tool(
     'obsidian_add_vault_bridge',
     [
@@ -650,6 +715,7 @@ export function createVaultTools(port: VaultToolsPort): Record<string, ToolDef> 
     boundVaultList as ToolDef | undefined,
     boundGetFileHistory as ToolDef | undefined,
     boundRestoreFileVersion as ToolDef | undefined,
+    boundMovePath as ToolDef | undefined,
     boundListVaultBridges as ToolDef | undefined,
     boundAddVaultBridge as ToolDef | undefined,
   ];
@@ -661,6 +727,7 @@ export function createVaultTools(port: VaultToolsPort): Record<string, ToolDef> 
     'vault_list',
     'obsidian_get_file_history',
     'obsidian_restore_file_version',
+    'obsidian_move_path',
     'obsidian_list_vault_bridges',
     'obsidian_add_vault_bridge',
   ];
