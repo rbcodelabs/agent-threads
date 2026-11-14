@@ -158,6 +158,7 @@ function makeHarness(over: Partial<HarnessSessionOptions> & { env?: Record<strin
   const events: string[] = [];
   const tokens: string[] = [];
   const messages: string[] = [];
+  const messageTools: string[][] = [];
   const toolUses: any[] = [];
   const toolResults: Array<[string, string]> = [];
   const filesEdited: string[][] = [];
@@ -167,7 +168,7 @@ function makeHarness(over: Partial<HarnessSessionOptions> & { env?: Record<strin
   const callbacks = {
     onToken: (t: string) => tokens.push(t),
     onToolUse: (r: any) => { toolUses.push(r); },
-    onMessage: (content: string) => { messages.push(content); },
+    onMessage: (content: string, tools: Array<{ name: string }>) => { messages.push(content); messageTools.push(tools.map((t) => t.name)); },
     onRecap: () => undefined,
     onDone: (...args: unknown[]) => { events.push('done'); done(...args); },
     onInterrupted: () => { events.push('interrupted'); },
@@ -205,7 +206,7 @@ function makeHarness(over: Partial<HarnessSessionOptions> & { env?: Record<strin
     session.send(text);
     await vi.waitFor(() => expect(events.length).toBeGreaterThan(before), { timeout: 10_000 });
   };
-  return { session, options, callbacks, events, tokens, messages, toolUses, toolResults, filesEdited, permissionRequests, done, errors, received, turn };
+  return { session, options, callbacks, events, tokens, messages, messageTools, toolUses, toolResults, filesEdited, permissionRequests, done, errors, received, turn };
 }
 
 const permissionReplies = (h: Harness) => h.received().filter((m: any) => m.method === undefined && m.result?.outcome).map((m: any) => m.result.outcome);
@@ -271,7 +272,9 @@ describe('AntigravitySession edits and permissions', () => {
     expect(h.toolUses[0]).toMatchObject({ name: 'Write', summary: '/work/project/hello.txt', status: 'pending' });
     expect(h.toolResults).toEqual([[h.toolUses[0].toolUseId, 'success']]);
     expect(h.filesEdited).toEqual([['/work/project/hello.txt']]);
-    expect(h.messages).toEqual(['Created the file.']);
+    // The Write call rides with the message that closes it (as Claude's tool_use blocks do), so the card persists in the transcript.
+    expect(h.messages).toEqual(['', 'Created the file.']);
+    expect(h.messageTools).toEqual([['Write'], []]);
   });
 
   it('replies deny and marks the tool failed when the user refuses', async () => {
@@ -281,7 +284,7 @@ describe('AntigravitySession edits and permissions', () => {
     expect(permissionReplies(h)).toEqual([{ outcome: 'selected', optionId: 'deny' }]);
     expect(h.toolResults).toEqual([[h.toolUses[0].toolUseId, 'error']]);
     expect(h.filesEdited).toEqual([]);
-    expect(h.messages).toEqual(['The edit was refused.']);
+    expect(h.messages).toEqual(['', 'The edit was refused.']);
   });
 
   it('treats a rejected permission prompt as a deny', async () => {
@@ -491,6 +494,26 @@ describe('AntigravitySession MCP servers', () => {
     expect(servers[0]).toEqual({ type: 'http', name: 'docs', url: 'https://mcp.example.test', headers: [{ name: 'Authorization', value: 'Bearer t' }] });
     expect(servers[1]).toMatchObject({ type: 'http', name: 'agent-threads', url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/) });
     expect(servers[1].headers).toEqual([{ name: 'X-Capability-Token', value: expect.stringMatching(/^[0-9a-f]{64}$/) }]);
+  });
+});
+
+describe('AntigravitySession message segmentation', () => {
+  it('closes a message with the tools that followed its text, and starts the next one at the next text', async () => {
+    const h = makeHarness();
+    await h.session.start(h.options);
+    h.session.send('HANG');
+    await vi.waitFor(() => expect(h.tokens.join('')).toContain('working'), { timeout: 10_000 });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const feed = (update: Record<string, unknown>) => h.session.handleSessionUpdate({ sessionId, update });
+    const tool = { toolCallId: 't1', name: 'run_command', kind: 'execute', title: 'ls', rawInput: { CommandLine: 'ls' } };
+    feed({ sessionUpdate: 'tool_call', ...tool, status: 'in_progress' });
+    expect(h.messages).toEqual([]); // held: the message closes when the next text arrives or the turn ends
+    feed({ sessionUpdate: 'tool_call_update', ...tool, status: 'completed' });
+    feed({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'after' } });
+    expect(h.messages).toEqual(['working']);
+    expect(h.messageTools).toEqual([['Bash']]);
+    await h.session.interrupt();
+    await vi.waitFor(() => expect(h.events).toContain('interrupted'), { timeout: 10_000 });
   });
 });
 

@@ -21,7 +21,7 @@
  * Desktop only: the child process is spawned lazily by AcpClient, so importing this module is inert on mobile.
  */
 import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
-import type { AgentHarness, ImageAttachment } from './types';
+import type { AgentHarness, ImageAttachment, ToolCallRecord } from './types';
 import { parseExtraEnv } from './types';
 import { isEditDenied, isShellDenied } from './toolRestrictions';
 import type { SessionCallbacks } from './ClaudeSession';
@@ -240,6 +240,8 @@ export class AntigravitySession {
   private closed = true;
   private _turnInFlight = false;
   private turnText = '';
+  /** Tool calls made since the last finished message; they ride with the text that precedes them, as Claude's do. */
+  private pendingTools: ToolCallRecord[] = [];
   private queuedTurns: Array<{ text: string; images?: ImageAttachment[] }> = [];
   private resumeFallbackPending = false;
   private systemPromptPending = false;
@@ -442,6 +444,7 @@ export class AntigravitySession {
     if (!options || !client || !sessionId) return;
     this._turnInFlight = true;
     this.turnText = '';
+    this.pendingTools = [];
     const mode = options.permissionMode ?? 'default';
 
     let effectiveText = text;
@@ -497,6 +500,7 @@ export class AntigravitySession {
   private resetTurnState(): void {
     this._turnInFlight = false;
     this.turnText = '';
+    this.pendingTools = [];
     this.queuedTurns = [];
   }
 
@@ -534,6 +538,8 @@ export class AntigravitySession {
       case 'agent_message_chunk': {
         const text = update.content?.type === 'text' ? update.content.text : undefined;
         if (this._turnInFlight && typeof text === 'string' && text) {
+          // Text after tool calls starts a new message; the previous one closes with its tools.
+          if (this.pendingTools.length > 0) this.flushText(callbacks);
           this.turnText += text;
           callbacks.onToken(text);
         }
@@ -574,17 +580,18 @@ export class AntigravitySession {
     const known = this.announcedTools.get(callId);
     const merged: AcpToolCall = { ...known, ...tool, content: tool.content ?? known?.content };
     if (!known) {
-      // Text before a tool is a finished segment: flush it so the transcript keeps text/tool order.
-      this.flushText(callbacks);
       this.announcedTools.set(callId, merged);
       this.toolStartedAt.set(callId, Date.now());
-      callbacks.onToolUse({
+      const record: ToolCallRecord = {
         toolUseId: callId,
         name: antigravityToolName(merged.name, merged.kind),
         summary: antigravityToolSummary(merged),
         status: 'pending',
         timestamp: Date.now(),
-      });
+      };
+      // The same object the manager tracks: its status is updated in place when the result arrives.
+      this.pendingTools.push(record);
+      callbacks.onToolUse(record);
     } else {
       this.announcedTools.set(callId, merged);
     }
@@ -600,11 +607,14 @@ export class AntigravitySession {
     }
   }
 
+  /** Close the current assistant message: its text and the tool calls that followed it. */
   private flushText(callbacks: SessionCallbacks): void {
-    if (!this.turnText.trim()) { this.turnText = ''; return; }
     const text = this.turnText;
+    const tools = this.pendingTools;
     this.turnText = '';
-    callbacks.onMessage(text, []);
+    this.pendingTools = [];
+    if (!text.trim() && tools.length === 0) return;
+    callbacks.onMessage(text, tools);
   }
 
   private finishTurn(result: any): void {
