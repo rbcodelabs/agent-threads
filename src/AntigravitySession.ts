@@ -98,7 +98,8 @@ export function antigravityToolName(name: string | undefined, kind: string | und
   if (name && NAME_TOOL_NAMES[name]) return NAME_TOOL_NAMES[name];
   if (kind && KIND_TOOL_NAMES[kind]) return KIND_TOOL_NAMES[kind];
   if (kind === 'edit') return 'Edit';
-  const hostPrefix = `${OPENCODE_HOST_TOOLS_SERVER}_`;
+  // MCP tools surface as `mcp_<server>_<tool>` (recorded from agy 1.1.13); show the bare host-tool name.
+  const hostPrefix = `mcp_${OPENCODE_HOST_TOOLS_SERVER}_`;
   if (name?.startsWith(hostPrefix)) return name.slice(hostPrefix.length);
   return name || 'tool';
 }
@@ -702,7 +703,7 @@ export class AntigravitySession {
   private isBridgedHostTool(tool: AcpToolCall): boolean {
     if (!this.bridge) return false;
     const name = tool.name ?? '';
-    const prefix = `${OPENCODE_HOST_TOOLS_SERVER}_`;
-    return name.startsWith(prefix) || this.hostToolNames.has(name) || (tool.title ?? '').startsWith(`${OPENCODE_HOST_TOOLS_SERVER}`);
+    const prefix = `mcp_${OPENCODE_HOST_TOOLS_SERVER}_`;
+    return name.startsWith(prefix) && this.hostToolNames.has(name.slice(prefix.length));
   }
 }

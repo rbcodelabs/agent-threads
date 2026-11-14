@@ -9,6 +9,8 @@
  * of an SSE stream), and approval follows the same `resolveDynamicToolApproval`
  * rules Codex uses, surfaced through the host's permission prompt.
  *
+ * Dual-era: `server/discover` (MCP 2026-07-28, sent first by Antigravity) is answered alongside `initialize`.
+ *
  * Desktop only: Node's `http`/`crypto` are required lazily inside `start()`.
  */
 import type { Server } from 'http';
@@ -43,6 +45,18 @@ export async function handleHostToolsRpc(
           protocolVersion: typeof message.params?.protocolVersion === 'string' ? message.params.protocolVersion : '2025-06-18',
           capabilities: { tools: {} },
           serverInfo: { name: OPENCODE_HOST_TOOLS_SERVER, version: '1.0.0' },
+        },
+      };
+    case 'server/discover':
+      // MCP 2026-07-28: stateless discovery. The handlers below do not depend on a session, so the bridge serves the
+      // modern and the legacy (`initialize`) revisions side by side (a dual-era server). Verified against agy 1.1.13.
+      return {
+        jsonrpc: '2.0', id,
+        result: {
+          resultType: 'complete',
+          supportedVersions: ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'],
+          capabilities: { tools: {} },
+          _meta: { 'io.modelcontextprotocol/serverInfo': { name: OPENCODE_HOST_TOOLS_SERVER, version: '1.0.0' } },
         },
       };
     case 'ping':

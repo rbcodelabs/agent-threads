@@ -79,7 +79,8 @@ describe('tool mapping against recorded frames', () => {
     expect(antigravityToolName(shell.name, shell.kind)).toBe('Bash');
     expect(antigravityToolName('something_new', 'other')).toBe('something_new');
     expect(antigravityToolName(undefined, 'edit')).toBe('Edit');
-    expect(antigravityToolName('agent-threads_list_things', 'other')).toBe('list_things');
+    // Recorded from the real agy: an MCP tool arrives as mcp_<server>_<tool> with kind "other".
+    expect(antigravityToolName('mcp_agent-threads_host_echo', 'other')).toBe('host_echo');
   });
 
   it('summarises a shell call by its command and an edit by its file', () => {
@@ -490,6 +491,36 @@ describe('AntigravitySession MCP servers', () => {
     expect(servers[0]).toEqual({ type: 'http', name: 'docs', url: 'https://mcp.example.test', headers: [{ name: 'Authorization', value: 'Bearer t' }] });
     expect(servers[1]).toMatchObject({ type: 'http', name: 'agent-threads', url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/) });
     expect(servers[1].headers).toEqual([{ name: 'X-Capability-Token', value: expect.stringMatching(/^[0-9a-f]{64}$/) }]);
+  });
+});
+
+describe('AntigravitySession host tools', () => {
+  const hostTool = { name: 'host_echo', description: 'echo', inputSchema: { type: 'object' }, requiresApproval: true, invoke: async () => ({ success: true, text: 'ok' }) };
+  const recorded = fixture('host-tool-call.json').permissionRequest.params;
+  const call = (name: string) => ({ ...recorded, toolCall: { ...recorded.toolCall, name } });
+
+  it('matches the shape recorded from the real agy', () => {
+    expect(recorded.toolCall).toMatchObject({ name: 'mcp_agent-threads_host_echo', kind: 'other' });
+  });
+
+  it('lets the bridge own the approval: agy asks, the adapter allows without a second prompt', async () => {
+    const h = makeHarness({ antigravity: { dynamicTools: [hostTool] } });
+    await h.session.start(h.options);
+    const reply = await h.session.handlePermissionRequest(call('mcp_agent-threads_host_echo'));
+    expect(reply).toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } });
+    expect(h.permissionRequests).toHaveLength(0);
+  });
+
+  it('still prompts for a same-looking MCP tool the bridge does not own, and for any tool when there is no bridge', async () => {
+    const h = makeHarness({ antigravity: { dynamicTools: [hostTool] } });
+    await h.session.start(h.options);
+    await h.session.handlePermissionRequest(call('mcp_agent-threads_not_ours'));
+    await h.session.handlePermissionRequest(call('mcp_other_host_echo'));
+    expect(h.permissionRequests).toHaveLength(2);
+    const bare = makeHarness();
+    await bare.session.start(bare.options);
+    await bare.session.handlePermissionRequest(call('mcp_agent-threads_host_echo'));
+    expect(bare.permissionRequests).toHaveLength(1);
   });
 });
 
