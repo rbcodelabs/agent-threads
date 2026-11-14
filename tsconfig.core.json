@@ -36,6 +36,7 @@
     "src/ThreadSession.ts",
     "src/Usage.ts",
     "src/agentRuns/AgentRunStore.ts",
+    "src/antigravityBrain.ts",
     "src/artifactStorage.ts",
     "src/awsAuthRecovery.ts",
     "src/browserSession.ts",
