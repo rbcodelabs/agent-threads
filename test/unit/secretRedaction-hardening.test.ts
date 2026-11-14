@@ -1,7 +1,7 @@
 /**
  * Review fixes for redact-at-write-time: bounded patterns (no ReDoS), one known-secret lookup per
- * redaction, DAG-safe deep walk, and a KEY=value rule that leaves ordinary code and prose alone.
- * Fake secrets only.
+ * redaction, DAG-safe deep walk, and a KEY=value rule that preserves main's substring keyword match
+ * while scanning nested pairs linearly. Fake secrets only.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -205,17 +205,10 @@ describe('redactDeep shared references', () => {
 
 describe('KEY=value rule', () => {
   it.each([
-    'const key = foo(); if (key == other) { run(); }',
-    'let tokens = []',
-    'const author = "bob"',
-    'PASSENGER=3',
-    'MONKEY=banana',
-    'keyboard=us',
-    'const passthrough = true',
     'if (secretary == null) return',
-    'x.token = compute()',
-    'authors = ["a", "b"]',
     'while (key <= max) n >= key',
+    'API_KEY == other',
+    'key => val',
   ])('leaves %j alone', (text) => {
     expect(redactSecrets(text)).toBe(text);
   });
@@ -266,7 +259,8 @@ describe('KEY=value rule: nested pairs and name shapes (review blockers)', () =>
     expect(out).toContain('[REDACTED:secret]');
   });
 
-  // Names the pre-PR code masked: camelCase, fused, leading underscore, other auth words, INI-style spacing.
+  // Names main masked: substring keyword matches (digit-suffixed, plural, compound, camelCase,
+  // fused, leading underscore, spaced assignments, hyphenated, and path/escaped boundaries).
   it.each([
     ['//registry.npmjs.org/:_authToken=npm_abcdef123456', 'npm_abcdef123456'],
     ['accessToken=abcdef123456', 'abcdef123456'],
@@ -282,10 +276,28 @@ describe('KEY=value rule: nested pairs and name shapes (review blockers)', () =>
     [`${'N'.repeat(100)}_TOKEN=abcdef123456`, 'abcdef123456'],
     ['{"cmd":"x=1\\nTOKEN=abcdef123456"}', 'abcdef123456'],
     ['{"cmd":"x=1\\nprivateKey=abcdef123456"}', 'abcdef123456'],
+    ['TOKEN1=abcdef123456', 'abcdef123456'],
+    ['KEY1=abcdef123456', 'abcdef123456'],
+    ['SECRET2=abcdef123456', 'abcdef123456'],
+    ['KEYID=abcdef123456', 'abcdef123456'],
+    ['SECRETS=abcdef123456', 'abcdef123456'],
+    ['TOKENS=abcdef123456', 'abcdef123456'],
+    ['KEYS=abcdef123456', 'abcdef123456'],
+    ['APIKEYS=abcdef123456', 'abcdef123456'],
+    ['DBPASS=abcdef123456', 'abcdef123456'],
+    ['STOREPASS=abcdef123456', 'abcdef123456'],
+    ['KEYSTORE=abcdef123456', 'abcdef123456'],
+    ['const apiKey = "abcdef123456"', 'abcdef123456'],
+    ['apiKey = abcdef123456', 'abcdef123456'],
+    ['C:\\token=abcdef123456', 'abcdef123456'],
   ])('masks %j', (text, secret) => {
     const out = redactSecrets(text);
     expect(out).not.toContain(secret);
     expect(out).toContain('[REDACTED:secret]');
+  });
+
+  it('preserves a literal backslash before t/r/n path boundaries', () => {
+    expect(redactSecrets('C:\\token=abcdef123456')).toBe('C:\\token=[REDACTED:secret]');
   });
 
   it('keeps a serialized JSON line valid and the neighbouring text intact', () => {
@@ -303,15 +315,6 @@ describe('KEY=value rule: nested pairs and name shapes (review blockers)', () =>
   });
 
   it.each([
-    'const key = foo(); if (key == other) { run(); }',
-    'const author = "bob"',
-    'author = "bob"',
-    'let tokens = []',
-    'PASSENGER=3',
-    'MONKEY=banana',
-    'KEYBOARD=us',
-    'keyboard=us',
-    'monkey = "banana"',
     'https://x/cb?user=bob&next=/home',
     'a=1&b=2&c=3',
   ])('leaves %j alone', (text) => {
@@ -334,6 +337,13 @@ describe('KEY=value rule stays linear (200 KB)', () => {
     ['name then pairs', 'x=' + rep('a=1&')],
     ['\\nTOKEN repeats', rep('\\nTOKEN')],
     ['KEY=\\n repeats', rep('KEY=\\n')],
+    ['token=a& repeats', rep('token=a&')],
+    ['token=& empty-value repeats', rep('token=&')],
+    ['&secret=a repeats', rep('&secret=a')],
+    ['?token=a&a=b repeats', '?token=a&' + rep('a=b&')],
+    ['mixed query repeats', rep('user=bob&session=1&token=abc123&')],
+    ['escaped-quote mismatch repeats', rep('TOKEN=\\"a" ')],
+    ['bare & non-pair repeats', 'token=' + rep('&aaaaaa')],
   ];
   it.each(hostile)('%s', (_name, input) => {
     const t0 = performance.now();

@@ -100,99 +100,63 @@ const PEM_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[^-"]*(?:-----END [A-Z ]*PRIVA
 // `Authorization: Bearer xyz`, `Bearer xyz`, `Authorization: Basic xyz`
 const BEARER_RE = new RegExp(`${LEFT}(Bearer|Basic)(\\s+)[A-Za-z0-9._~+/=-]{8,}`, 'gi');
 
-// NAME=value where NAME looks like a credential name. Keeps the name, drops the value.
+// NAME=value where NAME contains a credential keyword (`main`'s substring rule). Keeps the name,
+// drops the value.
 //
-// This is a scan, not one big replace: `NAME_EQ_RE` finds `name=` and the loop in `maskAssignments`
-// decides what to do with the value. A pair whose name is not secret-ish does NOT swallow its value;
+// This is a linear scan rather than a single global replace: `NAME_EQ_RE` finds `name=` and the loop in
+// `maskAssignments` decides whether to mask its value. A non-secret `name=` does NOT swallow its value;
 // scanning resumes right after its `=`, so `?user=bob&password=x`, `env="A=1 TOKEN=x"` and
 // `opts=--token=x` still expose the nested `password=`/`TOKEN=`/`--token=`.
 //
-// The name must start at a boundary (so a long run is examined once, never from every offset inside
-// it) and is unbounded: a bounded name silently dropped `...<80 chars>_TOKEN=`. A name may follow a
-// literal backslash-n/r/t from serialized JSON (`x=1\nTOKEN=abc`), which is stripped from the name.
+// The name starts at a non-word boundary (so a long run is examined once, never from every offset inside
+// it) and is unbounded so `...<100 chars>_TOKEN=` is still caught. Hyphenated names (`client-secret=`),
+// paths (`C:\token=`) and serialized JSON newlines (`x=1\nTOKEN=`, where `nTOKEN` still matches
+// `SECRET_NAME_RE` and slicing up to `valueStart` preserves `\n`) all match without eating `\t`/`\r`/`\n`.
 // `(?![=>])` keeps `==` and `=>` out.
-const NAME_EQ_RE = /(\\[nrt]|^|[^A-Za-z0-9_-])([A-Za-z0-9_-]+)(\s*=(?![=>])\s*)/g;
+const NAME_EQ_RE = /(^|[^A-Za-z0-9_])([A-Za-z0-9_]+)(\s*=(?![=>])\s*)/g;
+const SECRET_NAME_RE = /TOKEN|KEY|SECRET|PASSWORD|PASSWD|PASS|AUTH|CREDENTIAL/i;
 
-// The value, matched sticky at its start: a quoted string (plain or JSON-escaped `\"...\"`) or a bare
-// run that never swallows the backslash of a JSON escape, so serialized lines stay valid.
-const VALUE_RE = /"[^"]*"|'[^']*'|\\"(?:[^"\\]|\\[^"])*\\"|(?:[^\s"'\\]|\\\\|\\(?!["'nrt]))+/y;
+// Quoted value matched sticky at its start: plain "...", '...', or JSON-escaped \"...\".
+const QUOTED_VALUE_RE = /"[^"]*"|'[^']*'|\\"(?:[^"\\]|\\[^"])*\\"/y;
 
-// A bare value ends where the next query-string pair starts (`&name=`), so the neighbours survive.
+// A bare value ends where the next query-string pair starts (`&name=`), so neighbours survive.
 const NEXT_PAIR_RE = /[A-Za-z0-9_.%[\]-]+=/y;
 
-const STRONG_WHOLE = new Set(['token', 'secret', 'password', 'passwd', 'passphrase', 'apikey', 'credential', 'credentials', 'authorization']);
-const WEAK_WHOLE = new Set(['key', 'auth', 'pass']);
-const PASSWORD_WORDS = ['password', 'passwd', 'passphrase'];
-// Fused words (GITHUBTOKEN, ACCESSKEY). Bare `key` is deliberately not a suffix: MONKEY, KEYBOARD, TURKEY.
-const FUSED_SUFFIXES = ['token', 'secret', 'apikey', 'accesskey', 'secretkey', 'privatekey', ...PASSWORD_WORDS];
-
-/** Split a name on `_`, `-` and camelCase boundaries in one linear pass: `_authToken` -> auth, Token. */
-function nameSegments(name: string): string[] {
-  const segs: string[] = [];
-  let cur = '';
-  const isUpper = (c: string | undefined): boolean => c !== undefined && c >= 'A' && c <= 'Z';
-  const isLower = (c: string | undefined): boolean => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'));
-  for (let i = 0; i < name.length; i++) {
-    const c = name[i];
-    if (c === '_' || c === '-') {
-      if (cur) segs.push(cur);
-      cur = '';
+/**
+ * Where a value starting at `start` ends. Quoted values match `QUOTED_VALUE_RE`; bare values scan
+ * character-by-character so stopping at `&name=` or JSON escapes (`\"`, `\n`, `\r`, `\t`) is O(value)
+ * instead of rescanning to the next whitespace on every `&`-separated pair.
+ */
+function valueEnd(text: string, start: number): number {
+  if (start >= text.length) return start;
+  const first = text[start];
+  if (first === '"' || first === "'" || (first === '\\' && text[start + 1] === '"')) {
+    QUOTED_VALUE_RE.lastIndex = start;
+    const m = QUOTED_VALUE_RE.exec(text);
+    return m ? start + m[0].length : start;
+  }
+  let i = start;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === ' ' || c === '\n' || c === '\r' || c === '\t' || c === '"' || c === "'") break;
+    if ((c.charCodeAt(0) > 127 || c === '\v' || c === '\f') && /\s/.test(c)) break;
+    if (c === '\\') {
+      const next = text[i + 1];
+      if (next === undefined || next === '"' || next === "'" || next === 'n' || next === 'r' || next === 't') break;
+      if (next === '\\') {
+        i += 2;
+        continue;
+      }
+      i += 1;
       continue;
     }
-    if (cur && isUpper(c) && (isLower(name[i - 1]) || (isUpper(name[i - 1]) && name[i + 1] !== undefined && name[i + 1] >= 'a' && name[i + 1] <= 'z'))) {
-      segs.push(cur);
-      cur = '';
+    if (c === '&') {
+      NEXT_PAIR_RE.lastIndex = i + 1;
+      if (NEXT_PAIR_RE.test(text)) break;
     }
-    cur += c;
+    i++;
   }
-  if (cur) segs.push(cur);
-  return segs;
-}
-
-const enum NameKind { None, Weak, Strong, Password }
-
-/**
- * How credential-like a name is. A keyword counts as a whole segment (`API_KEY`, `sessionKey`, `_authToken`)
- * or, for the long unambiguous ones, as the prefix/suffix of a fused segment (`GITHUBTOKEN`, `ACCESSKEY`,
- * `PASSWORDHASH`). PASSENGER, MONKEY, KEYBOARD, `author` and `tokens` are not.
- */
-function classifyName(name: string): NameKind {
-  let kind = NameKind.None;
-  for (const seg of nameSegments(name)) {
-    const w = seg.toLowerCase();
-    let k = NameKind.None;
-    if (PASSWORD_WORDS.some((pw) => w === pw || w.startsWith(pw) || w.endsWith(pw))) k = NameKind.Password;
-    else if (STRONG_WHOLE.has(w) || FUSED_SUFFIXES.some((suf) => w.endsWith(suf))) k = NameKind.Strong;
-    else if (WEAK_WHOLE.has(w)) k = NameKind.Weak;
-    if (k > kind) kind = k;
-  }
-  return kind;
-}
-
-function isSecretAssignment(kind: NameKind, name: string, eq: string, value: string): boolean {
-  // Env-var style (all caps) and the tight `key=value` of a query string or shell word are always masked.
-  if (eq === '=' || name === name.toUpperCase()) return true;
-  // Anything else is ordinary code or config with spaces around `=`: `const key = foo()`, `x.token = compute()`.
-  // Mask only what is clearly a literal credential: a strong name with a quoted value (`password = "hunter2"`),
-  // or a password name with a plain word (INI/TOML `password = hunter2`).
-  if (kind === NameKind.Weak) return false;
-  if (/^["'\\]/.test(value)) return true;
-  return kind === NameKind.Password && !/[()[\]{}]/.test(value);
-}
-
-/** Where a value that starts at `start` ends: the match end, cut at the next `&name=` for a bare value. */
-function valueEnd(text: string, start: number): number {
-  VALUE_RE.lastIndex = start;
-  const m = VALUE_RE.exec(text);
-  if (!m) return start;
-  const first = m[0][0];
-  const end = start + m[0].length;
-  if (first === '"' || first === "'" || first === '\\') return end;
-  for (let amp = text.indexOf('&', start); amp !== -1 && amp < end; amp = text.indexOf('&', amp + 1)) {
-    NEXT_PAIR_RE.lastIndex = amp + 1;
-    if (NEXT_PAIR_RE.test(text)) return amp;
-  }
-  return end;
+  return i;
 }
 
 function maskAssignments(text: string): string {
@@ -205,11 +169,9 @@ function maskAssignments(text: string): string {
     re.lastIndex = valueStart - 1;
     if (text.startsWith('[REDACTED', valueStart)) continue;
     // Decide on the name alone first: scanning a value that is then thrown away would be quadratic on `a=a=a=...`.
-    const kind = classifyName(m[2]);
-    if (kind === NameKind.None) continue;
+    if (!SECRET_NAME_RE.test(m[2])) continue;
     const end = valueEnd(text, valueStart);
     if (end === valueStart) continue;
-    if (!isSecretAssignment(kind, m[2], m[3], text.slice(valueStart, end))) continue;
     out += text.slice(copied, valueStart) + redactedMarker('secret');
     copied = end;
     re.lastIndex = end - 1;
