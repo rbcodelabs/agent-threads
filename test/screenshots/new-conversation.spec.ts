@@ -257,6 +257,18 @@ test.describe('kickoff harness picker (moved from the Kanban dispatch box)', () 
     await shot(composer(page), 'new-conversation-harness-picker-opencode.png');
   });
 
+  test('selecting Antigravity shows its mark and glyph and does not dispatch', async ({ page }) => {
+    await open(page, '?projects=1', 900, 760);
+    await sendBtn(page).click();
+    await drill(page, 'harness');
+    await expect(popover(page).getByRole('menuitemradio', { name: 'Antigravity' }).locator('.ct-sp-icon[data-icon="antigravity-mark"] svg')).toHaveCount(1);
+    await popover(page).getByRole('menuitemradio', { name: 'Antigravity' }).click();
+    await expect(popover(page)).toHaveCount(0);
+    await expect(sendBtn(page)).toHaveAttribute('aria-label', /Antigravity/);
+    await expect(sendBtn(page).locator('.ct-si-provider')).toHaveAttribute('data-glyph', 'antigravity');
+    expect((await dispatchCalls(page)).length).toBe(0);
+  });
+
   test('offers no per-thread "Run in" section (sandbox VMs were removed) and no Run on without daemons', async ({ page }) => {
     await open(page, '?projects=1', 900, 760);
     await sendBtn(page).click();
