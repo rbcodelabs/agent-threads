@@ -749,7 +749,9 @@ export class OrchestratorDock {
     if (this.sheet?.isOpen && id === this.activeId()) {
       st.lastSeenId = u.latestAssistantId;
       if (line) this.sheet.announce(`${labels.voice} replied: ${line}`, true);
-    } else if (u.hasUnread && line) {
+    } else if (u.hasUnread && line && !this.sheet?.isOpen) {
+      // Never while the sheet is open: the peek is anchored where the sheet is and would sit invisibly under it. The menu row's
+      // unread badge (and the dot) already tell the user another orchestrator replied.
       this.showPeek(line, id, labels.peekName);
     }
   }

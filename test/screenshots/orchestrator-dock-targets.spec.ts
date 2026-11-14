@@ -114,6 +114,25 @@ test.describe('orchestrator menu — behaviour in a real browser', () => {
     await expect(page.locator('[data-streaming="true"]')).toHaveCount(0);
   });
 
+  test('QA: at 390 the default title is not truncated, and a short viewport keeps the menu inside the sheet', async ({ page }) => {
+    await open(page, { width: 390, height: 420 });
+    await page.evaluate(() => (window as any).__openSheet());
+    const clipped = await page.locator('.ct-orch-title-label').evaluate((el) => el.scrollWidth > el.clientWidth);
+    expect(clipped).toBe(false);
+    await titleBtn(page).click();
+    const [s, m] = await Promise.all([sheet(page).boundingBox(), menu(page).boundingBox()]);
+    expect(m!.y + m!.height).toBeLessThanOrEqual(s!.y + s!.height + 1);
+    expect(m!.y).toBeGreaterThanOrEqual(s!.y);
+  });
+
+  test('QA: another orchestrator replying while the sheet is open shows no (hidden) peek', async ({ page }) => {
+    await open(page, DESKTOP);
+    await page.evaluate(() => { (window as any).__openSheet(); (window as any).__orchSayTo('k-orch-hiptrip', 'HipTrip finished'); });
+    await expect(page.locator('.ct-orch-peek')).toBeHidden();
+    await titleBtn(page).click();
+    await expect(page.locator('.ct-orch-menu [data-target-id="k-orch-hiptrip"] .ct-orch-opt-unread')).toHaveText('1');
+  });
+
   test('without a Project orchestrator the title stays a plain heading', async ({ page }) => {
     await page.setViewportSize(DESKTOP);
     await page.goto(`${kanbanUrl}?orch=idle&tx=conversation`);

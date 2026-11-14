@@ -7380,14 +7380,14 @@ textarea.ct-settings-wide-input {
    (inside the sheet, which clips overflow), so it scrolls itself when the sheet is short. No motion: nothing to switch off. */
 .ct-orch-sheet-head { position: relative; }
 .ct-kanban-dispatch .ct-orch-sheet h2.ct-orch-sheet-title button.ct-orch-title-btn {
-  display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; min-height: 28px;
-  margin: 0 0 0 -6px; padding: 2px 6px; border: none; border-radius: 6px; box-shadow: none; background: transparent;
+  display: inline-flex; align-items: center; gap: 2px; max-width: 100%; min-width: 0; min-height: 28px;
+  margin: 0 0 0 -4px; padding: 2px 4px; border: none; border-radius: 6px; box-shadow: none; background: transparent;
   color: inherit; font: inherit; line-height: inherit; cursor: pointer; text-align: left;
 }
 .ct-kanban-dispatch .ct-orch-sheet h2.ct-orch-sheet-title button.ct-orch-title-btn:hover { background: var(--background-modifier-hover); }
 .ct-orch-title-btn .ct-orch-title-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ct-orch-title-btn .ct-orch-icon { flex: none; display: inline-flex; color: var(--text-muted); }
-.ct-orch-title-btn .ct-orch-icon svg { width: 14px; height: 14px; }
+.ct-orch-title-btn .ct-orch-icon svg { width: 12px; height: 12px; }
 .ct-orch-title-btn[aria-expanded="true"] .ct-orch-icon svg { transform: rotate(180deg); }
 .ct-orch-title-btn:focus-visible,
 .ct-kanban-dispatch .ct-orch-sheet h2.ct-orch-sheet-title button.ct-orch-title-btn:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
@@ -7409,7 +7409,7 @@ textarea.ct-settings-wide-input {
 .ct-orch-menu-opt[data-kind="portfolio"] { margin-bottom: 2px; border-bottom: 1px solid var(--background-modifier-border); border-radius: 6px 6px 0 0; }
 .ct-orch-sdot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); }
 .ct-orch-sdot-running { background: var(--interactive-accent); }
-.ct-orch-sdot-error { background: var(--text-error); }
+.ct-orch-sdot-error { background: var(--text-error, var(--color-red)); }
 .ct-orch-opt-name { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
 .ct-orch-opt-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ct-orch-opt-sub { font-size: var(--font-ui-smaller); line-height: 1.3; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -7419,7 +7419,7 @@ textarea.ct-settings-wide-input {
   font-size: var(--font-ui-smaller); line-height: 1.2; white-space: nowrap;
 }
 .ct-orch-opt-unread { min-width: 18px; justify-content: center; background: var(--interactive-accent); color: var(--text-on-accent); }
-.ct-orch-opt-needs { background: color-mix(in srgb, var(--text-warning, #d9822b) 22%, transparent); color: var(--text-normal); }
+.ct-orch-opt-needs { background: color-mix(in srgb, var(--color-orange, var(--text-warning, #d9822b)) 22%, transparent); color: var(--text-normal); }
 .ct-orch-opt-draft { border: 1px solid var(--background-modifier-border); color: var(--text-muted); }
 /* A Needs-you card that belongs to an orchestrator other than the one on screen says whose it is. */
 .ct-orch-tray-owner { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; border-radius: 9px; background: var(--background-modifier-hover); color: var(--text-muted); font-size: var(--font-ui-smaller); line-height: 1.5; }

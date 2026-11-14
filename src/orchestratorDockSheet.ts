@@ -603,6 +603,7 @@ export class DockSheet {
     this.h.menuOpened();
     this.menuIsOpen = true;
     this.menuEl.hidden = false;
+    this.fitMenu();
     this.titleBtn.setAttribute('aria-expanded', 'true');
     const opts = this.optionEls();
     const target = opts.find((o) => o.getAttribute('aria-selected') === 'true') ?? opts[0];
@@ -614,7 +615,24 @@ export class DockSheet {
     this.menuIsOpen = false;
     if (this.menuEl) this.menuEl.hidden = true;
     this.titleBtn?.setAttribute('aria-expanded', 'false');
+    this.el.style.minHeight = '';
     if (returnFocus) this.titleBtn?.focus();
+  }
+
+  /**
+   * The menu lives inside the sheet, which clips: cap it to the room the sheet can ever have (its max-height minus what sits above
+   * the menu) so it scrolls inside itself, and lift the sheet's min-height while it is open so a short transcript does not clip it.
+   */
+  private fitMenu(): void {
+    const menu = this.menuEl;
+    if (!menu) return;
+    const view = this.el.ownerDocument.defaultView;
+    let max = parseFloat(view?.getComputedStyle(this.el).maxHeight ?? '');
+    if (!Number.isFinite(max)) max = (view?.innerHeight ?? 0) * 0.6;
+    const top = this.headEl.offsetTop + this.headEl.offsetHeight;
+    const room = Math.max(96, max - top - 8);
+    menu.style.maxHeight = `${room}px`;
+    this.el.style.minHeight = `${Math.min(max, top + Math.min(menu.scrollHeight, room) + 8)}px`;
   }
 
   /** Roving focus: only the focused option is in the tab order. */
@@ -622,6 +640,14 @@ export class DockSheet {
     if (!target) return;
     for (const o of opts) o.tabIndex = o === target ? 0 : -1;
     target.focus();
+    // A long menu scrolls inside itself: keep the focused option in view (instant, never smooth).
+    const menu = this.menuEl;
+    if (menu) {
+      const top = target.offsetTop;
+      const bottom = top + target.offsetHeight;
+      if (top < menu.scrollTop) menu.scrollTop = top;
+      else if (bottom > menu.scrollTop + menu.clientHeight) menu.scrollTop = bottom - menu.clientHeight;
+    }
   }
 
   private chooseTarget(id: string, currentId: string): void {
