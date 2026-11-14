@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('obsidian', async (importOriginal) => {
   const actual = await importOriginal<typeof import('obsidian')>();
+  (actual.ItemView.prototype as unknown as { setState?: () => Promise<void> }).setState ??= async () => {};
   return {
     ...actual,
     setIcon: (el: HTMLElement, icon: string) => { el.setAttribute('data-icon', icon); },
@@ -559,6 +560,203 @@ describe('ThreadsView active sub-agent / workflow task pills across parent messa
     expect(view.streamingBuffers.get('thread-1')?.subagentLabel).toBe('Sub-agent: Will interrupt turn');
     running.delete('thread-1');
     emit('thread-1', { type: 'interrupted' });
+    expect(view.streamingBuffers.has('thread-1')).toBe(false);
+  });
+
+  it('clears active taskPills and does not leak them onto destination thread when setState() switches threads', async () => {
+    const tA = makeThread('thread-a', [{ id: 'ua', role: 'user', content: 'Task A', timestamp: 1 }]);
+    const tB = makeThread('thread-b', [{ id: 'ub', role: 'user', content: 'Task B', timestamp: 1 }]);
+    harness = await createHarness([tA, tB]);
+    const { view, messagesEl, running, emit } = harness;
+    running.add('thread-a');
+    running.add('thread-b');
+
+    emit('thread-a', { type: 'streaming_start' });
+    emit('thread-a', {
+      type: 'task_started',
+      taskId: 'pill-a',
+      description: 'Thread A researcher',
+      skipTranscript: false,
+    });
+
+    expect(view.activeThreadId).toBe('thread-a');
+    expect(view.taskPills.size).toBe(1);
+    expect(messagesEl.querySelector('.ct-task-pill')).not.toBeNull();
+
+    // Host state transition switches the mounted view from thread-a to thread-b.
+    view.plugin.settings.activeThreadId = 'thread-b';
+    await view.setState({ activeThreadId: 'thread-b' }, { history: false } as never);
+    await flush();
+
+    expect(view.activeThreadId).toBe('thread-b');
+    expect(view.taskPills.size).toBe(0);
+    expect(messagesEl.querySelector('.ct-task-pill')).toBeNull();
+  });
+
+  it('keeps .ct-streaming with the buffered subagent label on intermediate prose-only message after a thread switch', async () => {
+    const t1 = makeThread('thread-1', [{ id: 'u1', role: 'user', content: 'Investigate', timestamp: 1 }]);
+    const t2 = makeThread('thread-2', [{ id: 'u2', role: 'user', content: 'Other', timestamp: 1 }]);
+    harness = await createHarness([t1, t2]);
+    const { view, messagesEl, running, emit } = harness;
+    running.add('thread-1');
+
+    emit('thread-1', { type: 'streaming_start' });
+    emit('thread-1', {
+      type: 'task_started',
+      taskId: 'sub-bg',
+      description: 'Deep researcher',
+      skipTranscript: false,
+    });
+
+    // Switch away to thread-2 and back to thread-1: live DOM taskPills is cleared,
+    // while streamingBuffers retains activeTasks for thread-1.
+    await view.setActiveThread('thread-2');
+    await flush();
+    await view.setActiveThread('thread-1');
+    await flush();
+
+    expect(view.taskPills.size).toBe(0);
+    expect(view.streamingBuffers.get('thread-1')?.activeTasks?.size).toBe(1);
+
+    // Parent emits an intermediate prose-only message (no Agent toolCall) while sub-bg is still running.
+    emit('thread-1', {
+      type: 'message',
+      message: {
+        id: 'a-prose',
+        role: 'assistant',
+        content: 'Still waiting on the deep researcher to finish…',
+        timestamp: 2,
+      },
+    });
+    await flush();
+
+    const streamingEl = messagesEl.querySelector<HTMLElement>('.ct-streaming');
+    expect(streamingEl).not.toBeNull();
+    expect(messagesEl.lastElementChild).toBe(streamingEl);
+    const spinner = streamingEl!.querySelector<HTMLElement>('.ct-thinking-spinner');
+    expect(spinner).not.toBeNull();
+    expect(spinner!.getAttribute('aria-label')).toBe('Sub-agent: Deep researcher');
+    expect(view.subagentWaiting).toBe(true);
+  });
+
+  it('does not inject .ct-streaming into ct-messages-agent-view on message and uses buffered subagentLabel when reattaching', async () => {
+    harness = await createHarness([makeThread('thread-1', [{ id: 'u1', role: 'user', content: 'Inspect child', timestamp: 1 }])]);
+    const { view, messagesEl, running, emit } = harness;
+    running.add('thread-1');
+
+    emit('thread-1', { type: 'streaming_start' });
+    emit('thread-1', {
+      type: 'task_started',
+      taskId: 'sub-1',
+      description: 'Focused inspector',
+      skipTranscript: false,
+    });
+
+    // When streamingEl is recreated via reattachActiveTaskPills in main view,
+    // it preserves the active subagentLabel from streamingBuffers.
+    emit('thread-1', { type: 'reconnecting' });
+    emit('thread-1', {
+      type: 'task_progress',
+      taskId: 'sub-1',
+      description: 'Reading files',
+    });
+    expect(
+      messagesEl.querySelector<HTMLElement>('.ct-streaming .ct-thinking-spinner')?.getAttribute('aria-label'),
+    ).toBe('Sub-agent: Focused inspector');
+
+    // Enter child agent activity view (`ct-messages-agent-view`).
+    messagesEl.innerHTML = '<div class="ct-agent-view-header"></div><div class="ct-agent-view-body"></div>';
+    messagesEl.classList.add('ct-messages-agent-view');
+    view.streamingEl = null;
+    view.streamingContentEl = null;
+
+    // Case A: live taskPills non-empty when parent emits an intermediate message.
+    expect(view.taskPills.size).toBe(1);
+    emit('thread-1', {
+      type: 'message',
+      message: {
+        id: 'a1',
+        role: 'assistant',
+        content: 'Checking progress…',
+        timestamp: 2,
+      },
+    });
+    await flush();
+    expect(messagesEl.querySelector('.ct-streaming')).toBeNull();
+    expect(messagesEl.querySelector('.ct-task-pill')).toBeNull();
+
+    // Case B: taskPills empty (e.g. after switch) while hasAgentCall + buffered activeTasks are truthy.
+    view.taskPills.clear();
+    emit('thread-1', {
+      type: 'message',
+      message: {
+        id: 'a2',
+        role: 'assistant',
+        content: '',
+        timestamp: 3,
+        toolCalls: [{
+          toolUseId: 'tu-agent-2',
+          name: 'Agent',
+          summary: 'Agent: Another helper',
+          status: 'pending',
+          timestamp: 3,
+        }],
+      },
+    });
+    await flush();
+    expect(messagesEl.querySelector('.ct-streaming')).toBeNull();
+  });
+
+  it('evicts unnotified child workflowAgentRows on workflow task_notification so subsequent prose message mounts no zombie .ct-streaming', async () => {
+    harness = await createHarness([makeThread('thread-1', [{ id: 'u1', role: 'user', content: 'Run deploy check', timestamp: 1 }])]);
+    const { view, messagesEl, running, emit } = harness;
+    running.add('thread-1');
+
+    emit('thread-1', { type: 'streaming_start' });
+    emit('thread-1', {
+      type: 'task_started',
+      taskId: 'wf-1',
+      description: 'Deploy check',
+      workflowName: 'deploy-check',
+      taskType: 'local_workflow',
+      skipTranscript: true,
+    });
+    emit('thread-1', {
+      type: 'task_started',
+      taskId: 'wf-child-orphan',
+      description: 'Aborted lint step',
+      skipTranscript: false,
+    });
+
+    expect(view.taskPills.has('wf-child-orphan')).toBe(true);
+    expect(view.workflowAgentRows.has('wf-child-orphan')).toBe(true);
+
+    // Workflow completes/fails before wf-child-orphan ever emits its own task_notification.
+    emit('thread-1', {
+      type: 'task_notification',
+      taskId: 'wf-1',
+      status: 'failed',
+      summary: 'Workflow aborted early',
+    });
+
+    expect(view.workflowAgentRows.size).toBe(0);
+    expect(view.taskPills.has('wf-child-orphan')).toBe(false);
+    expect(view.taskPills.size).toBe(0);
+    expect(view.taskStartTimes.has('wf-child-orphan')).toBe(false);
+
+    // Subsequent prose message must NOT resurrect a zombie .ct-streaming container.
+    emit('thread-1', {
+      type: 'message',
+      message: {
+        id: 'a-after-wf',
+        role: 'assistant',
+        content: 'The workflow aborted early due to config error.',
+        timestamp: 2,
+      },
+    });
+    await flush();
+
+    expect(messagesEl.querySelector('.ct-streaming')).toBeNull();
     expect(view.streamingBuffers.has('thread-1')).toBe(false);
   });
 });
