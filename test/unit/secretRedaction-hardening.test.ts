@@ -146,6 +146,21 @@ describe('known-secret lookup cost', () => {
   });
 });
 
+describe('stripe keys', () => {
+  it('masks secret and restricted keys and leaves publishable keys and prose alone', () => {
+    expect(redactSecrets('k sk_live_' + 'a1B2'.repeat(6))).toBe('k [REDACTED:stripe]');
+    expect(redactSecrets('rk_test_' + 'Z9'.repeat(12))).toBe('[REDACTED:stripe]');
+    expect(redactSecrets('pk_live_' + 'a1B2'.repeat(6))).toContain('pk_live_');
+    expect(redactSecrets('the sk_live_ prefix')).toBe('the sk_live_ prefix');
+  });
+  it('is linear on repeats', () => {
+    const t0 = performance.now();
+    redactSecrets(rep('sk_live_'));
+    redactSecrets(rep('sk_live_a'));
+    expect(performance.now() - t0).toBeLessThan(250);
+  });
+});
+
 describe('a failing known-secrets provider', () => {
   const SECRET = 'plain-value-no-shape-9f3a';
   it('is not cached as "no secrets": the last good list keeps masking and the next call retries', () => {

@@ -73,6 +73,8 @@ const SHAPE_PATTERNS: ShapePattern[] = [
   shape('atlassian', String.raw`AT(?:ATT|CTT)3[A-Za-z0-9_=-]{20,}|ATBB[A-Za-z0-9_=-]{28,}`),
   // Terraform Cloud / Enterprise API tokens: <14 chars>.atlasv1.<long>
   shape('terraform', String.raw`[A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9_-]{50,}`),
+  // Stripe secret/restricted keys (sk_live_..., rk_test_...); publishable pk_ keys are not secret
+  shape('stripe', String.raw`[sr]k_(?:live|test)_[A-Za-z0-9]{20,}`),
   // AWS access key ids
   shape('aws', String.raw`(?:AKIA|ASIA)[0-9A-Z]{16}`),
   // Slack tokens
