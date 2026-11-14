@@ -15,6 +15,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './fsutil';
+import { invalidateKnownSecrets } from '../src/secretRedaction';
 
 export const MAX_CRED_FIELDS = 64;
 export const MAX_CRED_VALUE_BYTES = 64 * 1024;
@@ -68,12 +69,15 @@ export class CredStore {
     if (entries.length === 0) {
       let removed = false;
       try { unlinkSync(file); removed = true; } catch { /* nothing stored */ }
+      invalidateKnownSecrets();
       return { kind, fields: [], removed };
     }
     const pushedAt = this.now();
     const record: StoredKind = { kind, fields: clean, pushedAt, ...(ttlSec > 0 ? { expiresAt: pushedAt + ttlSec * 1000 } : {}) };
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     writeFileAtomic(file, `${JSON.stringify(record)}\n`);
+    // The redactor caches the known-secret list for a moment; a value pushed now must be masked from the next write.
+    invalidateKnownSecrets();
     return { kind, fields: Object.keys(clean), removed: false, ...(record.expiresAt !== undefined ? { expiresAt: record.expiresAt } : {}) };
   }
 

@@ -1,6 +1,7 @@
 import { isAgentHarness } from './types';
 import type { ChatMessage, Thread } from './types';
 import { serializeThreadForSave } from './imageExternalization';
+import { redactForStorage } from './secretRedaction';
 
 export const THREAD_RECOVERY_SNAPSHOT_VERSION = 1;
 
@@ -58,7 +59,9 @@ function isCanonicalThread(value: unknown): value is Thread {
 export function encodeThreadRecoverySnapshot(thread: Thread): string {
   const snapshot: ThreadRecoverySnapshotV1 = {
     version: THREAD_RECOVERY_SNAPSHOT_VERSION,
-    thread: serializeThreadForSave(thread),
+    // Masked as a structure (before JSON.stringify) so the sidecar always stays parseable. This is
+    // the second archive writer next to the markdown note, so it gets the same write-time redaction.
+    thread: redactForStorage(serializeThreadForSave(thread)),
   };
   return JSON.stringify(snapshot);
 }
