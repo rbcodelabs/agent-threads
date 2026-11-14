@@ -9,6 +9,7 @@ import {
   handleHostToolsRpc,
   type OpenCodeHostToolsContext,
 } from '../../src/OpenCodeHostTools';
+import { ExternalMcpClientPool } from '../../src/antigravityMcpFallback';
 import {
   AntigravitySession,
   antigravityToolName,
@@ -468,9 +469,13 @@ describe('External HTTP & SSE MCP server fallback', () => {
       expect(remote.requests[0].headers.accept).toContain('application/json');
       expect(remote.requests[0].headers.accept).toContain('text/event-stream');
       const expectedSessionId = wireMode === 'sse' ? 'mcp-sse-session-42' : 'mcp-json-session-7';
+      expect(remote.requests[0].headers['mcp-protocol-version']).toBeUndefined();
       expect(remote.requests[1].headers['mcp-session-id']).toBe(expectedSessionId);
+      expect(remote.requests[1].headers['mcp-protocol-version']).toBe('2025-06-18');
       expect(remote.requests[2].headers['mcp-session-id']).toBe(expectedSessionId);
+      expect(remote.requests[2].headers['mcp-protocol-version']).toBe('2025-06-18');
       expect(remote.requests[3].headers['mcp-session-id']).toBe(expectedSessionId);
+      expect(remote.requests[3].headers['mcp-protocol-version']).toBe('2025-06-18');
 
       // 2. Default mode prompts with Antigravity: mcp_compass_move_task_status; denial prevents server call
       allowNext = false;
@@ -582,6 +587,185 @@ describe('External HTTP & SSE MCP server fallback', () => {
     const hungResult = JSON.parse(res.body).result;
     expect(hungResult.isError).toBe(true);
     expect(hungResult.content[0].text).toMatch(/timed out|timeout|aborted/i);
+  });
+
+  it('rejects cleanly without uncaught exceptions when a 307/308 response has a malformed Location header', async () => {
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(307, { location: 'http://[::1', 'content-type': 'text/plain' });
+        res.end('bad redirect');
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const port = (server.address() as { port: number }).port;
+
+    const uncaught: unknown[] = [];
+    const onUncaught = (err: unknown) => { uncaught.push(err); };
+    process.on('uncaughtException', onUncaught);
+    cleanup.push(() => { process.off('uncaughtException', onUncaught); });
+
+    const pool = new ExternalMcpClientPool({
+      servers: {
+        bad307: { type: 'http', url: `http://127.0.0.1:${port}/mcp`, timeout: 250 },
+      },
+    });
+    cleanup.push(() => pool.close());
+
+    await expect(pool.listTools('bad307')).rejects.toThrow(/HTTP 307/);
+    await expect(pool.callTool('bad307', 'ping', {})).rejects.toThrow(/HTTP 307/);
+    expect(uncaught).toEqual([]);
+  });
+
+  it('follows same-origin 307 redirects, rejects cross-origin 307 redirects without following, and stops redirect hops if closed', async () => {
+    const crossOriginHits: string[] = [];
+    const crossServer = http.createServer((req, res) => {
+      crossOriginHits.push(req.url ?? '');
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { protocolVersion: '2025-06-18', capabilities: {} } }));
+      });
+    });
+    await new Promise<void>((resolve) => crossServer.listen(0, '127.0.0.1', () => resolve()));
+    cleanup.push(() => new Promise<void>((resolve) => crossServer.close(() => resolve())));
+    const crossPort = (crossServer.address() as { port: number }).port;
+
+    let onCloseRaceRedirect: (() => void) | undefined;
+    const targetHits: Array<{ url: string; protocolHeader: string | string[] | undefined }> = [];
+    const mainServer = http.createServer((req, res) => {
+      let raw = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        if (req.url === '/same-origin') {
+          res.writeHead(307, { location: '/mcp-v2' });
+          res.end();
+          return;
+        }
+        if (req.url === '/cross-origin') {
+          res.writeHead(307, { location: `http://127.0.0.1:${crossPort}/mcp` });
+          res.end('cross origin');
+          return;
+        }
+        if (req.url === '/close-race') {
+          onCloseRaceRedirect?.();
+          res.writeHead(307, { location: '/mcp-v2' });
+          res.end();
+          return;
+        }
+        targetHits.push({ url: req.url ?? '', protocolHeader: req.headers['mcp-protocol-version'] });
+        const body = raw ? JSON.parse(raw) : {};
+        if (body.method === 'notifications/initialized') {
+          res.writeHead(202).end();
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        if (body.method === 'initialize') {
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'redir', version: '1.0.0' } },
+          }));
+          return;
+        }
+        if (body.method === 'tools/list') {
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: { tools: [{ name: 'echo', description: 'Echo' }] },
+          }));
+          return;
+        }
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id: body.id,
+          result: { content: [{ type: 'text', text: 'redirect-ok' }], isError: false },
+        }));
+      });
+    });
+    await new Promise<void>((resolve) => mainServer.listen(0, '127.0.0.1', () => resolve()));
+    cleanup.push(() => new Promise<void>((resolve) => mainServer.close(() => resolve())));
+    const mainPort = (mainServer.address() as { port: number }).port;
+
+    const pool = new ExternalMcpClientPool({
+      servers: {
+        same: { type: 'http', url: `http://127.0.0.1:${mainPort}/same-origin` },
+        cross: { type: 'http', url: `http://127.0.0.1:${mainPort}/cross-origin` },
+        closerace: { type: 'http', url: `http://127.0.0.1:${mainPort}/close-race` },
+      },
+    });
+    cleanup.push(() => pool.close());
+
+    // Valid same-origin 307 redirect succeeds and negotiates server's protocolVersion (2025-03-26)
+    expect(await pool.listTools('same')).toEqual([{ name: 'echo', description: 'Echo' }]);
+    expect(await pool.callTool('same', 'echo', {})).toEqual({ isError: false, text: 'redirect-ok' });
+    expect(targetHits.map((h) => h.protocolHeader)).toEqual([undefined, '2025-03-26', '2025-03-26', '2025-03-26']);
+
+    // Cross-origin 307 redirect is rejected without contacting crossServer
+    await expect(pool.callTool('cross', 'echo', {})).rejects.toThrow(/HTTP 307/);
+    expect(crossOriginHits).toEqual([]);
+
+    // Closed connection never starts a follow-up request on sendRpcToUrl
+    const hitsBeforeRace = targetHits.length;
+    onCloseRaceRedirect = () => {
+      // Mark connection closed while the 307 response is on the wire (without tearing down the active socket first,
+      // simulating a close racing right as the 307 response callback runs).
+      const conn = (pool as any).connections.get('closerace');
+      if (conn) conn.closed = true;
+    };
+    await expect(pool.listTools('closerace')).rejects.toThrow(/was closed/);
+    expect(targetHits).toHaveLength(hitsBeforeRace);
+  });
+
+  it('rejects non-JSON-RPC 200 OK JSON bodies instead of treating unrelated JSON as an empty RPC success', async () => {
+    let payload: unknown = { status: 'ok' };
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const port = (server.address() as { port: number }).port;
+
+    const pool = new ExternalMcpClientPool({
+      servers: {
+        notrpc: { type: 'http', url: `http://127.0.0.1:${port}/health` },
+      },
+    });
+    cleanup.push(() => pool.close());
+
+    await expect(pool.listTools('notrpc')).rejects.toThrow(/non-JSON-RPC/i);
+    payload = { id: 1, status: 'still-not-jsonrpc' };
+    await expect(pool.callTool('notrpc', 'ping', {})).rejects.toThrow(/non-JSON-RPC/i);
+  });
+});
+
+// ── 2b. ExternalMcpClientPool Object.prototype isolation ──────────────────
+
+describe('ExternalMcpClientPool Object.prototype isolation', () => {
+  it('rejects Object.prototype keys with Unknown MCP server without spawning processes', async () => {
+    const stdioLauncher = vi.fn() as unknown as AcpLauncher;
+    const pool = new ExternalMcpClientPool({
+      servers: {
+        real: { type: 'stdio', command: 'echo', args: ['hi'] },
+      },
+      stdioLauncher,
+    });
+    cleanup.push(() => pool.close());
+
+    expect(pool.hasServer('constructor')).toBe(false);
+    expect(pool.hasServer('toString')).toBe(false);
+    expect(pool.hasServer('__proto__')).toBe(false);
+
+    await expect(pool.listTools('constructor')).rejects.toThrow('Unknown MCP server "constructor".');
+    await expect(pool.listTools('toString')).rejects.toThrow('Unknown MCP server "toString".');
+    await expect(pool.callTool('__proto__', 'x', {})).rejects.toThrow('Unknown MCP server "__proto__".');
+    expect(stdioLauncher).not.toHaveBeenCalled();
   });
 });
 
@@ -956,5 +1140,73 @@ setInterval(() => {}, 1000);
     expect(respawnPrompts[0]).toContain('mcp_agent-threads_call_mcp_tool');
     expect(respawnPrompts[1]).toContain('mcp_agent-threads_call_mcp_tool');
     warn.mockRestore();
+  });
+
+  it('closes the loopback bridge and external stdio MCP children immediately when agy crashes unexpectedly', async () => {
+    const pidFile = path.join(os.tmpdir(), `agy-crash-stdio-${Date.now()}-${Math.random().toString(36).slice(2)}.pid`);
+    const scriptFile = `${pidFile}.mjs`;
+    cleanup.push(() => {
+      fs.rmSync(pidFile, { force: true });
+      fs.rmSync(scriptFile, { force: true });
+    });
+    fs.writeFileSync(
+      scriptFile,
+      `
+import fs from 'node:fs';
+import readline from 'node:readline';
+fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid), 'utf8');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.id === undefined || msg.id === null) return;
+  const reply = (result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\\n');
+  if (msg.method === 'initialize') reply({ protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'ext', version: '1.0.0' } });
+  else if (msg.method === 'tools/call') reply({ content: [{ type: 'text', text: 'pong' }], isError: false });
+});
+setInterval(() => {}, 1000);
+      `.trim(),
+      'utf8',
+    );
+
+    const h = makeSessionHarness({
+      permissionMode: 'bypassPermissions',
+      antigravity: {
+        mcpServers: {
+          ext: { type: 'stdio', command: process.execPath, args: [scriptFile] },
+        },
+      },
+    });
+    await h.session.start(h.options);
+
+    const mcpServers = h.received().find((m: any) => m.method === 'session/new').params.mcpServers as Array<any>;
+    const bridgeEntry = mcpServers.find((s) => s.name === OPENCODE_HOST_TOOLS_SERVER)!;
+    const bridgeHeaders = Object.fromEntries(bridgeEntry.headers.map((hdr: any) => [hdr.name, hdr.value]));
+
+    // Spawn the external stdio child via the bridge
+    const callRes = await postJson(bridgeEntry.url, bridgeHeaders, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'call_mcp_tool', arguments: { server: 'ext', tool: 'ping', argsJson: '{}' } },
+    });
+    expect(JSON.parse(callRes.body).result.isError).toBe(false);
+    const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    expect(pid).toBeGreaterThan(0);
+
+    // Crash agy mid-turn WITHOUT calling session.close()
+    await h.turn('CRASH');
+    expect(h.events).toContain('error');
+
+    // Bridge HTTP server and external stdio child must already be closed by handleClientClosed
+    await expect(
+      postJson(bridgeEntry.url, bridgeHeaders, { jsonrpc: '2.0', id: 2, method: 'ping' }),
+    ).rejects.toThrow();
+
+    await vi.waitFor(() => {
+      let alive = true;
+      try { process.kill(pid, 0); } catch { alive = false; }
+      expect(alive).toBe(false);
+    }, { timeout: 5_000 });
   });
 });

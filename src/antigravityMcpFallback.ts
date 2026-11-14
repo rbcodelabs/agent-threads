@@ -7,6 +7,9 @@
  * `call_mcp_tool` tool on the `agent-threads` loopback bridge guarantees it stays in `Eager:` and lets the model list
  * or invoke any non-eager host tool or external HTTP/SSE/stdio MCP tool after reading its cached schema file.
  *
+ * `HttpMcpConnection` speaks MCP Streamable HTTP (`POST` returning `application/json` or `text/event-stream`), matching
+ * `OAuthMcpProxy.ts`.
+ *
  * Core module: no Obsidian, Electron, or DOM imports. Node's `http`/`https` are required lazily inside the HTTP
  * transport, and stdio reuses `AcpClient` (which lazily requires `child_process`), so importing this module is inert
  * on mobile.
@@ -177,14 +180,18 @@ export function parseSseEventData(frame: string): string | null {
   return dataLines.length > 0 ? dataLines.join('\n') : null;
 }
 
+function isJsonRpcReplyEnvelope(value: unknown): value is Record<string, unknown> {
+  return isPlainObject(value) && ('result' in value || 'error' in value);
+}
+
 function findMatchingRpcReply(parsed: unknown, requestId: number): Record<string, unknown> | null {
   if (Array.isArray(parsed)) {
     for (const item of parsed) {
-      if (isPlainObject(item) && String(item.id) === String(requestId)) return item;
+      if (isJsonRpcReplyEnvelope(item) && String(item.id) === String(requestId)) return item;
     }
     return null;
   }
-  if (isPlainObject(parsed) && String(parsed.id) === String(requestId)) return parsed;
+  if (isJsonRpcReplyEnvelope(parsed) && String(parsed.id) === String(requestId)) return parsed;
   return null;
 }
 
@@ -224,6 +231,7 @@ async function paginateToolsList(
 class HttpMcpConnection implements ExternalMcpConnection {
   private nextId = 1;
   private sessionId: string | undefined;
+  private negotiatedProtocolVersion: string | undefined;
   private closed = false;
   private readonly activeRequests = new Set<ClientRequest>();
   private readyPromise: Promise<void> | null = null;
@@ -241,14 +249,19 @@ class HttpMcpConnection implements ExternalMcpConnection {
   private ensureInitialized(): Promise<void> {
     if (!this.readyPromise) {
       this.readyPromise = (async () => {
-        await this.sendRpc('initialize', {
+        const initRes = await this.sendRpc('initialize', {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
           clientInfo: MCP_CLIENT_INFO,
         }, true);
+        const negotiated = typeof initRes?.protocolVersion === 'string' && initRes.protocolVersion
+          ? initRes.protocolVersion
+          : MCP_PROTOCOL_VERSION;
+        this.negotiatedProtocolVersion = negotiated;
         await this.sendRpc('notifications/initialized', undefined, false);
       })().catch((error) => {
         this.readyPromise = null;
+        this.negotiatedProtocolVersion = undefined;
         this.onTransportFailed();
         throw error;
       });
@@ -290,6 +303,7 @@ class HttpMcpConnection implements ExternalMcpConnection {
     setHeader('content-type', 'application/json');
     setHeader('accept', 'application/json, text/event-stream');
     if (this.sessionId) setHeader('mcp-session-id', this.sessionId);
+    if (this.negotiatedProtocolVersion) setHeader('mcp-protocol-version', this.negotiatedProtocolVersion);
     return merged;
   }
 
@@ -305,7 +319,13 @@ class HttpMcpConnection implements ExternalMcpConnection {
     expectReply: boolean,
     redirectDepth: number,
   ): Promise<any> {
-    const parsedUrl = new URL(targetUrl);
+    if (this.closed) return Promise.reject(new Error(`MCP server "${this.serverName}" was closed.`));
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(targetUrl);
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
     // Lazy Node require so importing this module is completely inert on mobile.
     const requestFn = parsedUrl.protocol === 'https:'
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -357,8 +377,13 @@ class HttpMcpConnection implements ExternalMcpConnection {
           const status = res.statusCode ?? 0;
           const location = typeof res.headers.location === 'string' ? res.headers.location : undefined;
           if ((status === 307 || status === 308) && location && redirectDepth < 3) {
-            const nextUrl = new URL(location, parsedUrl);
-            if (nextUrl.origin === parsedUrl.origin) {
+            let nextUrl: URL | null = null;
+            try {
+              nextUrl = new URL(location, parsedUrl);
+            } catch {
+              nextUrl = null;
+            }
+            if (nextUrl && nextUrl.origin === parsedUrl.origin) {
               res.resume();
               if (timer) clearTimeout(timer);
               this.activeRequests.delete(req);
@@ -413,12 +438,12 @@ class HttpMcpConnection implements ExternalMcpConnection {
               }
               const reply = findMatchingRpcReply(decoded, requestId);
               if (!reply) return false;
-              res.destroy();
               if (isPlainObject(reply.error)) {
                 finishReject(new Error(String(reply.error.message ?? `MCP error from ${this.serverName}`)), false);
               } else {
                 finishResolve(reply.result);
               }
+              res.destroy();
               return true;
             };
 
@@ -426,8 +451,8 @@ class HttpMcpConnection implements ExternalMcpConnection {
               if (settled) return;
               receivedBytes += chunk.length;
               if (receivedBytes > MAX_HTTP_RESPONSE_BYTES) {
-                res.destroy();
                 finishReject(new Error(`MCP server "${this.serverName}" response exceeded size limit`), true);
+                res.destroy();
                 return;
               }
               sseBuffer += chunk;
@@ -455,8 +480,8 @@ class HttpMcpConnection implements ExternalMcpConnection {
             if (settled) return;
             receivedBytes += chunk.length;
             if (receivedBytes > MAX_HTTP_RESPONSE_BYTES) {
-              res.destroy();
               finishReject(new Error(`MCP server "${this.serverName}" response exceeded size limit`), true);
+              res.destroy();
               return;
             }
             jsonBody += chunk;
@@ -470,9 +495,10 @@ class HttpMcpConnection implements ExternalMcpConnection {
               finishReject(new Error(`MCP server "${this.serverName}" returned invalid JSON for ${method}`), true);
               return;
             }
-            const reply = findMatchingRpcReply(decoded, requestId) ?? (isPlainObject(decoded) ? decoded : null);
+            const reply = findMatchingRpcReply(decoded, requestId)
+              ?? (isPlainObject(decoded) && ('result' in decoded || 'error' in decoded) ? decoded : null);
             if (!reply) {
-              finishReject(new Error(`MCP server "${this.serverName}" did not answer ${method}`), true);
+              finishReject(new Error(`MCP server "${this.serverName}" returned a non-JSON-RPC response for ${method}`), true);
               return;
             }
             if (isPlainObject(reply.error)) {
@@ -490,8 +516,8 @@ class HttpMcpConnection implements ExternalMcpConnection {
       this.activeRequests.add(req);
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
-          req.destroy();
           finishReject(new Error(`MCP server "${this.serverName}" timed out after ${timeoutMs}ms on ${method}`), true);
+          req.destroy();
         }, timeoutMs);
       }
       req.on('error', (err) => {
@@ -610,8 +636,8 @@ export class ExternalMcpClientPool {
     if (this.closed) throw new Error('External MCP client pool is closed.');
     const existing = this.connections.get(name);
     if (existing) return existing;
-    const config = this.options.servers?.[name];
-    if (!config) throw new Error(`Unknown MCP server "${name}".`);
+    if (!this.hasServer(name)) throw new Error(`Unknown MCP server "${name}".`);
+    const config = this.options.servers![name]!;
 
     let created: ExternalMcpConnection;
     const evict = () => {
@@ -628,11 +654,11 @@ export class ExternalMcpClientPool {
     return created;
   }
 
-  listTools(serverName: string): Promise<ExternalMcpToolSummary[]> {
+  async listTools(serverName: string): Promise<ExternalMcpToolSummary[]> {
     return this.getOrCreate(serverName).listTools();
   }
 
-  callTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<ExternalMcpCallResult> {
+  async callTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<ExternalMcpCallResult> {
     return this.getOrCreate(serverName).callTool(toolName, args);
   }
 

@@ -824,6 +824,8 @@ export class AntigravitySession {
     this.closed = true;
     this.resetTurnState();
     this.pendingPermissions.clear();
+    this.bridge?.close();
+    this.bridge = null;
     callbacks?.onError(failure);
   }
 
