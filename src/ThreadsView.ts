@@ -403,6 +403,7 @@ export class ThreadsView extends ItemView {
   private streamingBuffers: Map<string, {
     content: string;
     tools: ToolCallRecord[];
+    thinkingSummary?: string;
     subagentLabel?: string;
     activeTasks?: Map<string, string>;
     workflowTaskId?: string;
@@ -654,20 +655,29 @@ export class ThreadsView extends ItemView {
           workflowTaskId: activeTasks ? prev?.workflowTaskId : undefined,
           workflowChildTaskIds: activeTasks ? prev?.workflowChildTaskIds : undefined,
         });
+      } else if (event.type === 'thinking') {
+        let buf = this.streamingBuffers.get(threadId);
+        if (!buf) { buf = { content: '', tools: [] }; this.streamingBuffers.set(threadId, buf); }
+        if (!buf.content) buf.thinkingSummary = event.text;
       } else if (event.type === 'token') {
         let buf = this.streamingBuffers.get(threadId);
         if (!buf) { buf = { content: '', tools: [] }; this.streamingBuffers.set(threadId, buf); }
         buf.content += event.text;
+        buf.thinkingSummary = undefined;
         // Once real tokens arrive, clear the sub-agent placeholder label —
         // the token content will replace it when the thread is restored.
         if (buf.subagentLabel) buf.subagentLabel = undefined;
       } else if (event.type === 'stream_reset') {
         // Remote resync: the text streamed so far for the unfinished message is stale.
         const buf = this.streamingBuffers.get(threadId);
-        if (buf) buf.content = '';
+        if (buf) {
+          buf.content = '';
+          buf.thinkingSummary = undefined;
+        }
       } else if (event.type === 'tool_use') {
         let buf = this.streamingBuffers.get(threadId);
         if (!buf) { buf = { content: '', tools: [] }; this.streamingBuffers.set(threadId, buf); }
+        buf.thinkingSummary = undefined;
         buf.tools.push(event.record);
       } else if (event.type === 'message') {
         // Keep the buffer alive across intermediate messages whenever this message
@@ -3607,6 +3617,23 @@ export class ThreadsView extends ItemView {
     this.streamingToolsEl = null;
   }
 
+  private renderThinkingPreview(text: string): void {
+    if (!this.streamingContentEl || this.streamingContent) return;
+    let previewEl = this.streamingContentEl.querySelector(':scope > .ct-thinking-preview') as HTMLElement | null;
+    if (!previewEl) {
+      previewEl = document.createElement('span');
+      previewEl.className = 'ct-thinking-preview';
+      const cursor = this.streamingContentEl.querySelector(':scope > .ct-cursor');
+      if (cursor) this.streamingContentEl.insertBefore(previewEl, cursor);
+      else this.streamingContentEl.appendChild(previewEl);
+    }
+    previewEl.textContent = text;
+  }
+
+  private clearThinkingPreview(): void {
+    this.streamingContentEl?.querySelector(':scope > .ct-thinking-preview')?.remove();
+  }
+
   private resetActiveTaskDomState(): void {
     this.taskPills?.clear();
     this.taskStartTimes?.clear();
@@ -3864,6 +3891,8 @@ export class ThreadsView extends ItemView {
         if (buf.content) {
           this.streamingContent = buf.content;
           this.scheduleStreamingRender();
+        } else if (buf.thinkingSummary) {
+          this.renderThinkingPreview(buf.thinkingSummary);
         }
       }
     }
@@ -5280,7 +5309,17 @@ export class ThreadsView extends ItemView {
       case 'stream_reset': {
         // Drop the half-rendered text; the daemon's checkpoint re-streams it as tokens.
         this.streamingContent = '';
+        this.clearThinkingPreview();
         this.scheduleStreamingRender();
+        break;
+      }
+
+      case 'thinking': {
+        if (!this.streamingEl) {
+          this.createStreamingEl();
+        }
+        this.renderThinkingPreview(event.text);
+        this.scrollToBottom();
         break;
       }
 
@@ -5288,6 +5327,7 @@ export class ThreadsView extends ItemView {
         if (!this.streamingEl) {
           this.createStreamingEl();
         }
+        this.clearThinkingPreview();
         this.streamingContent += event.text;
         this.scheduleStreamingRender();
         break;
@@ -5299,6 +5339,7 @@ export class ThreadsView extends ItemView {
         // this turn is tool-call-only (no prose before it), nothing else
         // would recreate it before we need to render into it. See #318.
         if (!this.streamingEl) this.createStreamingEl();
+        this.clearThinkingPreview();
         // The cross-thread subscribe listener above (outside the activeThreadId
         // guard) has already pushed event.record onto
         // streamingBuffers.get(threadId).tools by the time this fires. Debounce

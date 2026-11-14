@@ -26,12 +26,14 @@ const CODEX_TOOL_ALIASES: Record<string, NormalizedToolName> = {
   imageGeneration: { key: 'ImageGeneration', display: 'Generate Image' },
 };
 
-/** Normalize Claude and Codex tool-record names through one display path. */
+/** Normalize Claude, Codex, and Antigravity tool-record names through one display path. */
 function normalizeToolName(raw: string): NormalizedToolName {
   const claudeMcpMatch = raw.match(/^mcp__(.+?)__(.+)$/);
   const codexMcpMatch = claudeMcpMatch ? null : raw.match(/^([^:]+):(.+)$/);
-  const server = claudeMcpMatch?.[1] ?? codexMcpMatch?.[1] ?? null;
-  const bare = claudeMcpMatch?.[2] ?? codexMcpMatch?.[2] ?? raw;
+  const server = claudeMcpMatch?.[1] ?? codexMcpMatch?.[1]?.trim() ?? null;
+  const rawBare = (claudeMcpMatch?.[2] ?? codexMcpMatch?.[2] ?? raw).trim();
+  const hostBridgePrefixMatch = rawBare.match(/^mcp_(?:agent-threads|claude_threads)_(.+)$/);
+  const bare = hostBridgePrefixMatch ? hostBridgePrefixMatch[1] : rawBare;
   const key = (server && bare.startsWith(server + '_'))
     ? bare.slice(server.length + 1)
     : bare;
@@ -194,6 +196,11 @@ export function isTrustedBuiltInTool(raw: string): boolean {
     if (match[1] === 'obsidian') return LEGACY_BUILT_IN_TOOLS.has(match[2]);
     return false;
   }
+  const hostBridgeMatch = raw.match(/^Agent Threads:\s*(.+)$/);
+  if (hostBridgeMatch) {
+    const bare = hostBridgeMatch[1].trim();
+    return CANONICAL_BUILT_IN_TOOLS.has(bare) || LEGACY_BUILT_IN_TOOLS.has(bare);
+  }
   return CANONICAL_BUILT_IN_TOOLS.has(raw) || LEGACY_BUILT_IN_TOOLS.has(raw);
 }
 
@@ -242,13 +249,46 @@ export function buildPermissionDetail(
   return opts.description ?? opts.decisionReason ?? opts.blockedPath ?? JSON.stringify(input).slice(0, 4000);
 }
 
+function matchesAntigravityAndClaudeMcp(antigravityRest: string, claudeMcpName: string): boolean {
+  const m = claudeMcpName.match(/^mcp__(.+?)__(.+)$/);
+  if (!m) return false;
+  const [, claudeServer, claudeTool] = m;
+  if (!antigravityRest.endsWith(`_${claudeTool}`)) return false;
+  const agyServer = antigravityRest.slice(0, antigravityRest.length - claudeTool.length - 1);
+  if (!agyServer) return false;
+  const norm = (s: string) => s.replace(/-/g, '_');
+  if (norm(agyServer) === norm(claudeServer)) return true;
+  if (claudeServer === 'claude_threads' && norm(agyServer) === 'agent_threads') return true;
+  if (claudeServer.startsWith('claude_ai_')) {
+    const connectorSlug = claudeServer.slice('claude_ai_'.length);
+    if (connectorSlug && norm(agyServer).toLowerCase() === norm(connectorSlug).toLowerCase()) return true;
+  }
+  return false;
+}
+
+function isCrossHarnessEquivalentAllowed(requested: string, allowed: string): boolean {
+  if (requested === allowed) return true;
+  const agyReq = requested.match(/^Antigravity:\s*mcp_(.+)$/);
+  if (agyReq) return matchesAntigravityAndClaudeMcp(agyReq[1].trim(), allowed);
+  const agyAllowed = allowed.match(/^Antigravity:\s*mcp_(.+)$/);
+  if (agyAllowed) return matchesAntigravityAndClaudeMcp(agyAllowed[1].trim(), requested);
+
+  const hostReq = requested.match(/^Agent Threads:\s*(.+)$/);
+  if (hostReq) return allowed === `mcp__claude_threads__${hostReq[1].trim()}`;
+  const hostAllowed = allowed.match(/^Agent Threads:\s*(.+)$/);
+  if (hostAllowed) return requested === `mcp__claude_threads__${hostAllowed[1].trim()}`;
+
+  return false;
+}
+
 /**
  * True when a permission request may be resolved without showing a card:
  * first-party tools or a persisted "Always Allow".
  */
 export function isPermissionPreApproved(toolName: string, alwaysAllowedTools: readonly string[]): boolean {
   if (!canAlwaysAllow(toolName)) return false;
-  return isTrustedBuiltInTool(toolName) || alwaysAllowedTools.includes(toolName);
+  if (isTrustedBuiltInTool(toolName)) return true;
+  return alwaysAllowedTools.some((allowed) => isCrossHarnessEquivalentAllowed(toolName, allowed));
 }
 
 /**

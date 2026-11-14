@@ -157,7 +157,7 @@ async function runPrompt(sessionId, text) {
     }
     return stream.find((m) => m.result?.stopReason).result;
   }
-  if (text.includes('SHELL')) {
+  if (text.includes('SHELL') || (process.env.FAKE_ACP_WAKEUP_RESUME_MODE === 'SHELL' && text.includes('Resuming background wakeup'))) {
     const start = toolFrame('tool_call', 'run_command');
     update(sessionId, start);
     update(sessionId, { ...start, sessionUpdate: 'tool_call_update', status: 'pending' });

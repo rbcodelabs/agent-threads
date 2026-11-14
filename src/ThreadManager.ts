@@ -81,6 +81,7 @@ export type ThreadEvent =
   /** Expired Claude sign-in: the CLI process is being restarted and the turn replayed once. */
   | { type: 'auth_retry'; error: string }
   | { type: 'streaming_start' }
+  | { type: 'thinking'; text: string }
   | { type: 'escalated'; model: string }
   | { type: 'queued'; text: string; images?: ImageAttachment[] }
   | { type: 'dequeued'; text: string; images?: ImageAttachment[] }
@@ -2816,6 +2817,12 @@ export class ThreadManager {
         if (!isCurrentGeneration()) return;
         this.clearReconnectingStatus(thread);
         this.emit(threadId, { type: 'token', text });
+      },
+      onThinking: (text) => {
+        if (!isCurrentGeneration()) return;
+        this.clearReconnectingStatus(thread);
+        this.threadActivity.set(threadId, text);
+        this.emit(threadId, { type: 'thinking', text });
       },
       onStreamReset: () => {
         if (!isCurrentGeneration()) return;

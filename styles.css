@@ -1188,6 +1188,18 @@
   }
 }
 
+.ct-thinking-preview {
+  display: inline-block;
+  max-width: calc(100% - 28px);
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-ui-smaller);
+  font-style: italic;
+  color: var(--text-muted);
+}
+
 /* Slim animated cursor — replaces block blink */
 .ct-cursor {
   display: inline-block;

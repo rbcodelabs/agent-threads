@@ -78,20 +78,23 @@ describe('antigravityModeForPermission', () => {
 });
 
 describe('antigravityShouldSkipPermissions and antigravityCliArgs', () => {
-  it('passes --dangerously-skip-permissions only in bypassPermissions when no edit/shell denylist applies', () => {
-    expect(antigravityShouldSkipPermissions('bypassPermissions')).toBe(true);
-    expect(antigravityCliArgs('bypassPermissions')).toEqual(['acp', '--dangerously-skip-permissions']);
+  it('passes --dangerously-skip-permissions in bypassPermissions and auto when no edit/shell denylist applies', () => {
+    for (const mode of ['bypassPermissions', 'auto'] as const) {
+      expect(antigravityShouldSkipPermissions(mode)).toBe(true);
+      expect(antigravityCliArgs(mode)).toEqual(['acp', '--dangerously-skip-permissions']);
+    }
 
-    for (const mode of ['default', 'acceptEdits', 'auto', 'plan', 'dontAsk'] as const) {
+    for (const mode of ['default', 'acceptEdits', 'plan', 'dontAsk'] as const) {
       expect(antigravityShouldSkipPermissions(mode)).toBe(false);
       expect(antigravityCliArgs(mode)).toEqual(['acp']);
     }
 
     for (const denied of [['Write'], ['Edit'], ['Bash'], ['Write', 'Bash']] as const) {
       expect(antigravityShouldSkipPermissions('bypassPermissions', denied)).toBe(false);
+      expect(antigravityShouldSkipPermissions('auto', denied)).toBe(false);
       expect(antigravityCliArgs('bypassPermissions', denied)).toEqual(['acp']);
     }
-    expect(antigravityShouldSkipPermissions('bypassPermissions', ['WebFetch'])).toBe(true);
+    expect(antigravityShouldSkipPermissions('bypassPermissions', ['WebFetch', 'CronCreate', 'CronDelete'])).toBe(true);
   });
 });
 
@@ -253,6 +256,7 @@ function makeHarness(over: Partial<HarnessSessionOptions> & {
   const spawnedArgs: string[][] = [];
   const events: string[] = [];
   const tokens: string[] = [];
+  const thoughts: string[] = [];
   const messages: string[] = [];
   const messageTools: string[][] = [];
   const toolUses: any[] = [];
@@ -267,6 +271,7 @@ function makeHarness(over: Partial<HarnessSessionOptions> & {
   const errors: Error[] = [];
   const callbacks = {
     onToken: (t: string) => tokens.push(t),
+    onThinking: (t: string) => thoughts.push(t),
     onToolUse: (r: any) => { toolUses.push(r); },
     onMessage: (content: string, tools: Array<{ name: string }>) => { messages.push(content); messageTools.push(tools.map((t) => t.name)); },
     onRecap: () => undefined,
@@ -330,7 +335,7 @@ function makeHarness(over: Partial<HarnessSessionOptions> & {
     fs.appendFileSync(path.join(logsDir, 'transcript_full.jsonl'), steps.map((s) => JSON.stringify(s)).join('\n') + '\n', 'utf8');
   };
   return {
-    session, options, callbacks, brainDir, spawnedArgs, events, tokens, messages, messageTools,
+    session, options, callbacks, brainDir, spawnedArgs, events, tokens, thoughts, messages, messageTools,
     toolUses, toolResults, filesEdited, permissionRequests, tasksStarted, tasksProgress, tasksUpdated, tasksNotified,
     done, errors, received, turn, appendBrain,
   };
@@ -1160,5 +1165,187 @@ describe('AntigravitySession subagents and post-turn brain wakeups', () => {
     }));
     expect(h.messages).toContain('Late review complete.');
     expect(h.messages[h.messages.length - 1]).toBe('Hello from Antigravity.');
+  });
+});
+
+describe('AntigravitySession permission respawn, wakeup stall recovery, and live thinking', () => {
+  it('respawns agy with --dangerously-skip-permissions after mid-turn setPermissionMode + interrupt (both ACP and post-ACP)', async () => {
+    const h = makeHarness({ permissionMode: 'default' });
+    await h.session.start(h.options);
+    expect(h.spawnedArgs).toEqual([['acp']]);
+
+    // Case 1: switch to bypassPermissions during an in-flight ACP prompt, then interrupt.
+    h.session.send('HANG');
+    await vi.waitFor(() => expect(h.tokens.join('')).toContain('working'), { timeout: 10_000 });
+    await h.session.setPermissionMode('bypassPermissions');
+    expect(h.spawnedArgs).toEqual([['acp']]); // deferred while turn is running
+    await h.session.interrupt();
+    await vi.waitFor(() => expect(h.events).toContain('interrupted'), { timeout: 10_000 });
+    await vi.waitFor(() => expect(h.spawnedArgs).toEqual([['acp'], ['acp', '--dangerously-skip-permissions']]), { timeout: 10_000 });
+
+    // Next turn runs on the respawned skip-permissions process.
+    await h.turn('TEXT after bypass');
+    expect(h.done).toHaveBeenCalledTimes(1);
+
+    // Case 2: switch back to acceptEdits while held open post-ACP waiting on a subagent, then interrupt.
+    const sessionId = (h.received().filter((m: any) => m.method === 'session/prompt').pop() as any).params.sessionId;
+    h.appendBrain(sessionId, [
+      { step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Hello from Antigravity.' },
+    ]);
+    await h.turn('TEXT prime baseline');
+    expect(h.done).toHaveBeenCalledTimes(2);
+
+    const subHeader = 'Created the ' + 'following subagent:';
+    h.appendBrain(sessionId, [
+      {
+        step_index: 1,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [{ id: 'sub-hold', name: 'invoke_subagent', args: { Role: 'Worker', TypeName: 'research' } }],
+      },
+      { step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: `${subHeader}\n{\n  "conversationId": "hold-sub-1"\n}` },
+    ]);
+    h.session.send('TEXT launch worker');
+    await vi.waitFor(() => expect(h.tasksStarted).toContainEqual(expect.objectContaining({ taskId: 'hold-sub-1' })), { timeout: 10_000 });
+    expect(h.session.turnInFlight).toBe(true);
+
+    await h.session.setPermissionMode('acceptEdits');
+    await h.session.interrupt();
+    await vi.waitFor(() => expect(h.spawnedArgs).toEqual([
+      ['acp'],
+      ['acp', '--dangerously-skip-permissions'],
+      ['acp'],
+    ]), { timeout: 10_000 });
+  });
+
+  it('does not re-inject <system-instructions> when cold session/load succeeds with replayed history', async () => {
+    const h = makeHarness({
+      resume: 'saved-1',
+      appendSystemPrompt: 'Follow repo rules.',
+      resumeFallbackHistory: 'TRANSCRIPT\n',
+      env: { FAKE_ACP_KNOWN_SESSIONS: 'saved-1' },
+    });
+    await h.session.start(h.options);
+    await h.turn('TEXT go on');
+    const prompt = h.received().find((m: any) => m.method === 'session/prompt');
+    expect(prompt.params.prompt[0].text).toBe('TEXT go on');
+  });
+
+  it('promotes stalled post-ACP wakeup tool calls to an active session/prompt so agy can request permission and finish', async () => {
+    const h = makeHarness({
+      permissionMode: 'acceptEdits',
+      env: { FAKE_ACP_WAKEUP_RESUME_MODE: 'SHELL' },
+      brainOptions: { wakeupGraceMs: 60, wakeupToolStallMs: 70, wakeupCancelSettleMs: 15 },
+    });
+    await h.session.start(h.options);
+
+    h.session.send('TEXT coordinate subagent');
+    await vi.waitFor(() => expect(h.received().some((m: any) => m.method === 'session/prompt')), { timeout: 10_000 });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const subHeader = 'Created the ' + 'following subagent:';
+
+    h.appendBrain(sessionId, [
+      {
+        step_index: 0,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [{ id: 's1', name: 'invoke_subagent', args: { Role: 'Tester', TypeName: 'research' } }],
+      },
+      { step_index: 1, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: `${subHeader}\n{\n  "conversationId": "tester-sub-1"\n}` },
+    ]);
+
+    await vi.waitFor(() => expect(h.tasksStarted).toContainEqual(expect.objectContaining({ taskId: 'tester-sub-1' })), { timeout: 10_000 });
+    expect(h.done).not.toHaveBeenCalled();
+
+    // Subagent finishes; parent wakes up via <SYSTEM_MESSAGE> and attempts run_command without --dangerously-skip-permissions, stalling with no GENERIC result.
+    h.appendBrain('tester-sub-1', [
+      { step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Ready to verify.' },
+    ]);
+    h.appendBrain(sessionId, [
+      { step_index: 2, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=tester-sub-1\nReady to verify.' },
+      {
+        step_index: 3,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: 'Running verification command.',
+        tool_calls: [{ id: 'stalled-cmd-1', name: 'run_command', args: { CommandLine: 'npm test' } }],
+      },
+    ]);
+
+    // Session detects stalled post-ACP wakeup tool call, cancels internal wakeup, promotes to session/prompt, requests Bash permission over ACP, and completes!
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    expect(h.received().some((m: any) => m.method === 'session/cancel')).toBe(true);
+    const prompts = h.received().filter((m: any) => m.method === 'session/prompt');
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1].params.prompt[0].text).toContain('Resuming background wakeup');
+    expect(h.permissionRequests).toContainEqual(expect.objectContaining({ tool: 'Antigravity: Bash' }));
+    expect(h.messages).toContain('Ran the command.');
+  });
+
+  it('emits cleaned onThinking summaries from live agent_thought_chunk and post-ACP step.thinking, and injects execution guidance with host bridge', async () => {
+    const h = makeHarness({
+      appendSystemPrompt: 'Vault instructions.',
+      antigravity: {
+        dynamicTools: [{ name: 'ping_host', description: 'pong', inputSchema: { type: 'object' }, requiresApproval: false, invoke: async () => ({ success: true, text: 'pong' }) }],
+      },
+    });
+    await h.session.start(h.options);
+    await h.turn('TEXT hello');
+    // Recorded agent_thought_chunk fixture emits a thought during normal prompt turns.
+    expect(h.thoughts.length).toBeGreaterThan(0);
+    expect(h.thoughts[0].length).toBeGreaterThan(0);
+
+    const firstPrompt = h.received().find((m: any) => m.method === 'session/prompt').params.prompt[0].text as string;
+    expect(firstPrompt).toContain('Antigravity execution note:');
+    expect(firstPrompt).toContain('parallel');
+
+    // Also emits onThinking for post-ACP wakeup step.thinking when content is empty.
+    let releasePerm: (allow: boolean) => void = () => undefined;
+    h.options.callbacks.onPermissionRequest = () => new Promise<boolean>((resolve) => { releasePerm = resolve; });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const subHeader = 'Created the ' + 'following subagent:';
+    h.thoughts.length = 0;
+    h.session.send('EDIT spawn reader');
+    await vi.waitFor(() => expect(h.session.hasPendingPermission).toBe(true), { timeout: 10_000 });
+    h.appendBrain(sessionId, [
+      {
+        step_index: 0,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [{ id: 's-think', name: 'invoke_subagent', args: { Role: 'Reader', TypeName: 'research' } }],
+      },
+      { step_index: 1, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: `${subHeader}\n{\n  "conversationId": "think-sub-1"\n}` },
+      { step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Created the file.' },
+    ]);
+    releasePerm(true);
+    await vi.waitFor(() => expect(h.tasksStarted).toContainEqual(expect.objectContaining({ taskId: 'think-sub-1' })), { timeout: 10_000 });
+
+    h.appendBrain('think-sub-1', [
+      { step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Read 10 files.' },
+    ]);
+    h.appendBrain(sessionId, [
+      { step_index: 3, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=think-sub-1\nRead 10 files.' },
+      {
+        step_index: 4,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        thinking: 'Synthesizing findings across the 10 inspected files before summarizing.',
+        content: '',
+        tool_calls: [{ id: 'rf-1', name: 'read_file', args: { Path: '/repo/README.md' } }],
+      },
+      { step_index: 5, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'README contents' },
+      { step_index: 6, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Summary ready.' },
+    ]);
+
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(2), { timeout: 10_000 });
+    expect(h.thoughts).toContain('Synthesizing findings across the 10 inspected files before summarizing.');
   });
 });

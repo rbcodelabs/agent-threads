@@ -42,12 +42,13 @@ import type {
 import { mergeUsageSnapshot, type UsageSnapshot, type UsageTokenTotals } from './Usage';
 import { AcpClient, type AcpClientOptions, type AcpLauncher } from './AcpClient';
 import { OPENCODE_HOST_TOOLS_SERVER, OpenCodeHostToolsBridge } from './OpenCodeHostTools';
-import { ANTIGRAVITY_MCP_FALLBACK_NOTE, CALL_MCP_TOOL_NAME } from './antigravityMcpFallback';
+import { ANTIGRAVITY_EXECUTION_NOTE, ANTIGRAVITY_MCP_FALLBACK_NOTE, CALL_MCP_TOOL_NAME } from './antigravityMcpFallback';
 import {
   BrainTranscriptReader,
   cleanBrainArgString,
   cleanBrainArgStringArray,
   describeSubagentSpawn,
+  extractAntigravityThoughtSummary,
   extractSubagentSpawnMeta,
   isAntigravityBgCapableTool,
   parseAntigravityBackgroundTask,
@@ -68,6 +69,18 @@ const HARNESS: AgentHarness = 'antigravity';
 const ACP_PROTOCOL_VERSION = 1;
 const DEFAULT_BRAIN_POLL_MS = 250;
 const DEFAULT_WAKEUP_GRACE_MS = 2500;
+const DEFAULT_WAKEUP_TOOL_STALL_MS = 2500;
+const DEFAULT_WAKEUP_CANCEL_SETTLE_MS = 150;
+const INTERNAL_ORCHESTRATION_TOOLS = new Set([
+  'invoke_subagent',
+  'define_subagent',
+  'manage_subagents',
+  'send_message',
+  'manage_task',
+  'schedule',
+  'run_workflow',
+  'swarm',
+]);
 export const ANTIGRAVITY_INSTALL_HINT = 'Install the Antigravity CLI (agy) and sign in once with it, or set its path under Settings, Antigravity binary path.';
 
 // ── Pure mapping helpers (unit tested) ─────────────────────────────────────
@@ -124,7 +137,7 @@ export function antigravityModeForPermission(mode: HarnessPermissionMode, disall
  * edits or shell execution, this stays `false` so `agy` still asks `ACPServer` and `handlePermissionRequest` refuses.
  */
 export function antigravityShouldSkipPermissions(mode: HarnessPermissionMode, disallowedTools?: readonly string[]): boolean {
-  return mode === 'bypassPermissions' && !isEditDenied(disallowedTools) && !isShellDenied(disallowedTools);
+  return (mode === 'bypassPermissions' || mode === 'auto') && !isEditDenied(disallowedTools) && !isShellDenied(disallowedTools);
 }
 
 /** CLI argv passed to `agy` for a given permission mode and tool denylist. */
@@ -385,6 +398,8 @@ export class AntigravitySession {
   private acpPromptInFlight = false;
   private acpTurnBrainEnded = false;
   private turnText = '';
+  private turnThought = '';
+  private lastEmittedThoughtSummary = '';
   /** Tool calls made since the last finished message; they ride with the text that precedes them, as Claude's do. */
   private pendingTools: ToolCallRecord[] = [];
   private queuedTurns: Array<{ text: string; images?: ImageAttachment[] }> = [];
@@ -419,6 +434,9 @@ export class AntigravitySession {
   private wakeupDeadlineMs = 0;
   private parentWakeupInFlight = false;
   private wakeupPendingTools: Array<{ callId: string; tool: AcpToolCall; startedAt: number }> = [];
+  private bridgeCallsInFlight = 0;
+  private wakeupToolStallDeadlineMs = 0;
+  private promotingWakeup = false;
 
   /**
    * `launcher` replaces process spawning (tests); `startTimeoutMs` bounds the handshake and session setup, which on a
@@ -461,6 +479,7 @@ export class AntigravitySession {
     this.restartForPermissionFlagPending = false;
     this.restartingClient = null;
     this.replayedHistory = 0;
+    this.bridgeCallsInFlight = 0;
     this.subagents.clear();
     this.activeBgTaskIds.clear();
 
@@ -474,11 +493,31 @@ export class AntigravitySession {
     this.hostToolNames = new Set(hostTools.map((tool) => tool.name));
     if (hostTools.length > 0 || Object.keys(externalServers).length > 0) {
       this.hostToolNames.add(CALL_MCP_TOOL_NAME);
+      const trackedHostTools = hostTools.map((tool) => ({
+        ...tool,
+        invoke: async (args: Record<string, unknown>) => {
+          this.bridgeCallsInFlight++;
+          try {
+            return await tool.invoke(args);
+          } finally {
+            this.bridgeCallsInFlight = Math.max(0, this.bridgeCallsInFlight - 1);
+            this.refreshWakeupToolStallDeadline();
+          }
+        },
+      }));
       const bridge = new OpenCodeHostToolsBridge(
-        hostTools,
+        trackedHostTools,
         {
           permissionMode: () => this.options?.permissionMode ?? 'default',
-          requestPermission: (toolName, detail) => this.options?.callbacks.onPermissionRequest(toolName, detail) ?? Promise.resolve(false),
+          requestPermission: async (toolName, detail) => {
+            this.bridgeCallsInFlight++;
+            try {
+              return await (this.options?.callbacks.onPermissionRequest(toolName, detail) ?? Promise.resolve(false));
+            } finally {
+              this.bridgeCallsInFlight = Math.max(0, this.bridgeCallsInFlight - 1);
+              this.refreshWakeupToolStallDeadline();
+            }
+          },
         },
         {
           enableMcpDispatcher: true,
@@ -544,6 +583,10 @@ export class AntigravitySession {
     let setup: any;
     if (resumeSessionId && canLoad) {
       setup = await this.loadSession(client, resumeSessionId, options.cwd, this.mcpServers, phase, expectHistory);
+      if (setup && phase === 'initial' && !this.resumeFallbackPending) {
+        // Replayed history succeeded: the saved conversation already carries `<system-instructions>`.
+        this.systemPromptPending = false;
+      }
     }
     if (!setup) {
       if (phase === 'initial' && resumeSessionId) this.resumeFallbackPending = true;
@@ -701,6 +744,16 @@ export class AntigravitySession {
       this.queuedTurns.push({ text, images });
       return;
     }
+    const wantedSkip = this.options
+      ? antigravityShouldSkipPermissions(this.options.permissionMode ?? 'default', this.options.disallowedTools)
+      : this.spawnedWithSkipPermissions;
+    if (this.restartForPermissionFlagPending || wantedSkip !== this.spawnedWithSkipPermissions) {
+      this.queuedTurns.push({ text, images });
+      void this.ensurePermissionFlagSynced().catch((error) => {
+        if (!this.closed) this.options?.callbacks.onError(error instanceof Error ? error : new Error(String(error)));
+      });
+      return;
+    }
     this.startTurn(text, images);
   }
 
@@ -726,11 +779,15 @@ export class AntigravitySession {
       }
     }
     this.turnText = '';
+    this.turnThought = '';
+    this.lastEmittedThoughtSummary = '';
     this.pendingTools = [];
     this.parentPendingSpawns = [];
     this.parentPendingBgCapableCalls = 0;
     this.parentWakeupInFlight = false;
     this.wakeupPendingTools = [];
+    this.wakeupToolStallDeadlineMs = 0;
+    this.promotingWakeup = false;
     const mode = options.permissionMode ?? 'default';
 
     if (this.brainReader) {
@@ -782,6 +839,7 @@ export class AntigravitySession {
       }
       this.resetTurnState();
       callbacks?.onInterrupted(sessionId);
+      if (callbacks) this.maybeSyncPermissionFlagAfterTurn(callbacks);
     }
   }
 
@@ -812,6 +870,8 @@ export class AntigravitySession {
     this.acpPromptInFlight = false;
     this.acpTurnBrainEnded = false;
     this.turnText = '';
+    this.turnThought = '';
+    this.lastEmittedThoughtSummary = '';
     this.pendingTools = [];
     this.queuedTurns = [];
     this.parentPendingSpawns = [];
@@ -820,14 +880,16 @@ export class AntigravitySession {
     this.wakeupDeadlineMs = 0;
     this.parentWakeupInFlight = false;
     this.wakeupPendingTools = [];
+    this.wakeupToolStallDeadlineMs = 0;
+    this.promotingWakeup = false;
     this.brainReader?.stopWatching();
   }
 
   private effectiveSystemPrompt(): string | undefined {
     const base = this.options?.appendSystemPrompt ? this.options.appendSystemPrompt : undefined;
-    const mcpNote = this.bridge ? ANTIGRAVITY_MCP_FALLBACK_NOTE : undefined;
-    if (base && mcpNote) return `${base}\n\n${mcpNote}`;
-    return base ?? mcpNote;
+    const agyNotes = this.bridge ? `${ANTIGRAVITY_MCP_FALLBACK_NOTE}\n\n${ANTIGRAVITY_EXECUTION_NOTE}` : undefined;
+    if (base && agyNotes) return `${base}\n\n${agyNotes}`;
+    return base ?? agyNotes;
   }
 
   private compatibilityHint(): string {
@@ -868,10 +930,24 @@ export class AntigravitySession {
       case 'agent_message_chunk': {
         const text = update.content?.type === 'text' ? update.content.text : undefined;
         if (this._turnInFlight && typeof text === 'string' && text) {
+          this.turnThought = '';
+          this.lastEmittedThoughtSummary = '';
           // Text after tool calls starts a new message; the previous one closes with its tools.
           if (this.pendingTools.length > 0) this.flushText(callbacks);
           this.turnText += text;
           callbacks.onToken(text);
+        }
+        break;
+      }
+      case 'agent_thought_chunk': {
+        const thought = update.content?.type === 'text' ? update.content.text : undefined;
+        if (this._turnInFlight && !this.turnText && typeof thought === 'string' && thought) {
+          this.turnThought += thought;
+          const summary = extractAntigravityThoughtSummary(this.turnThought);
+          if (summary && summary !== this.lastEmittedThoughtSummary) {
+            this.lastEmittedThoughtSummary = summary;
+            callbacks.onThinking?.(summary);
+          }
         }
         break;
       }
@@ -888,9 +964,7 @@ export class AntigravitySession {
       case 'current_mode_update':
         if (typeof update.currentModeId === 'string') this.currentMode = update.currentModeId;
         break;
-      // agent_thought_chunk: the existing UI has no thinking affordance for non-Claude harnesses, so it is dropped (kept
-      // out of the raw log too, like the other streaming chunks). user_message_chunk is an echo of our own prompt.
-      // session_info_update and config_option_update carry nothing the thread needs.
+      // user_message_chunk is an echo of our own prompt; session_info_update and config_option_update carry nothing the thread needs.
       default:
         break;
     }
@@ -916,6 +990,8 @@ export class AntigravitySession {
       args: tool.args ?? known?.args,
     };
     if (!known) {
+      this.turnThought = '';
+      this.lastEmittedThoughtSummary = '';
       this.announcedTools.set(callId, merged);
       this.toolStartedAt.set(callId, Date.now());
       const record: ToolCallRecord = {
@@ -953,9 +1029,21 @@ export class AntigravitySession {
     const text = this.turnText;
     const tools = this.pendingTools;
     this.turnText = '';
+    this.turnThought = '';
+    this.lastEmittedThoughtSummary = '';
     this.pendingTools = [];
     if (!text.trim() && tools.length === 0) return;
     callbacks.onMessage(text, tools);
+  }
+
+  private maybeSyncPermissionFlagAfterTurn(callbacks: SessionCallbacks): boolean {
+    if (this.closed || !this.options) return false;
+    const wantedSkip = antigravityShouldSkipPermissions(this.options.permissionMode ?? 'default', this.options.disallowedTools);
+    if (!this.restartForPermissionFlagPending && wantedSkip === this.spawnedWithSkipPermissions) return false;
+    void this.ensurePermissionFlagSynced().catch((error) => {
+      if (!this.closed) callbacks.onError(error instanceof Error ? error : new Error(String(error)));
+    });
+    return true;
   }
 
   private finishTurn(result: any): void {
@@ -976,12 +1064,14 @@ export class AntigravitySession {
       this.abortBackgroundWork(callbacks, 'Interrupted');
       this.resetTurnState();
       callbacks.onInterrupted(sessionId);
+      this.maybeSyncPermissionFlagAfterTurn(callbacks);
       return;
     }
     if (stopReason === 'refusal') {
       this.abortBackgroundWork(callbacks, 'Stopped');
       this.resetTurnState();
       callbacks.onError(new Error('Antigravity declined to continue with this request.'));
+      this.maybeSyncPermissionFlagAfterTurn(callbacks);
       return;
     }
 
@@ -1019,16 +1109,13 @@ export class AntigravitySession {
     this.wakeupDeadlineMs = 0;
     this.parentWakeupInFlight = false;
     this.wakeupPendingTools = [];
+    this.wakeupToolStallDeadlineMs = 0;
+    this.promotingWakeup = false;
     this.brainReader?.stopWatching();
     this.turns++;
     callbacks.onDone(sessionId, 0, 1);
 
-    if (this.restartForPermissionFlagPending && !this.closed) {
-      void this.ensurePermissionFlagSynced().catch((error) => {
-        if (!this.closed) callbacks.onError(error instanceof Error ? error : new Error(String(error)));
-      });
-      return;
-    }
+    if (this.maybeSyncPermissionFlagAfterTurn(callbacks)) return;
     const next = this.queuedTurns.shift();
     if (next && !this.closed) this.startTurn(next.text, next.images);
   }
@@ -1043,11 +1130,25 @@ export class AntigravitySession {
   }
 
   private hasPendingBackgroundActivity(now: number): boolean {
+    if (this.promotingWakeup) return true;
     if (this.hasRunningSubagents()) return true;
     if (this.activeBgTaskIds.size > 0) return true;
     if (this.parentWakeupInFlight) return true;
     if (this.pendingWakeups > 0 && now < this.wakeupDeadlineMs) return true;
     return false;
+  }
+
+  private hasPermissionSensitiveWakeupTool(): boolean {
+    return this.wakeupPendingTools.some((entry) => !INTERNAL_ORCHESTRATION_TOOLS.has(entry.tool.name ?? ''));
+  }
+
+  private refreshWakeupToolStallDeadline(): void {
+    if (this.spawnedWithSkipPermissions || this.acpPromptInFlight || !this.hasPermissionSensitiveWakeupTool()) {
+      this.wakeupToolStallDeadlineMs = 0;
+      return;
+    }
+    const stallMs = this.brainOptions?.wakeupToolStallMs ?? DEFAULT_WAKEUP_TOOL_STALL_MS;
+    this.wakeupToolStallDeadlineMs = Date.now() + stallMs;
   }
 
   private noteExpectedParentWakeup(): void {
@@ -1060,6 +1161,7 @@ export class AntigravitySession {
     const callbacks = this.options?.callbacks;
     if (this.closed || !this._turnInFlight || !callbacks || !this.sessionId || !this.brainReader) return;
     this.brainReader.watchConversation(this.sessionId, () => this.onBrainTick());
+    if (this.promotingWakeup) return;
     if (this.acpPromptInFlight) {
       this.syncParentDuringAcp(callbacks);
       this.syncSubagentTranscripts(callbacks);
@@ -1068,6 +1170,16 @@ export class AntigravitySession {
     this.syncSubagentTranscripts(callbacks);
     this.syncParentPostAcp(callbacks);
     this.syncSubagentTranscripts(callbacks);
+    if (
+      !this.spawnedWithSkipPermissions &&
+      this.wakeupToolStallDeadlineMs > 0 &&
+      this.bridgeCallsInFlight === 0 &&
+      this.hasPermissionSensitiveWakeupTool() &&
+      Date.now() >= this.wakeupToolStallDeadlineMs
+    ) {
+      void this.promoteStalledWakeupToPrompt(callbacks);
+      return;
+    }
     if (!this.hasPendingBackgroundActivity(Date.now())) {
       this.completeTurn(callbacks);
     }
@@ -1117,9 +1229,17 @@ export class AntigravitySession {
         this.parentPendingSpawns = [];
         this.parentPendingBgCapableCalls = 0;
         if (typeof step.content === 'string' && step.content) {
+          this.turnThought = '';
+          this.lastEmittedThoughtSummary = '';
           if (this.pendingTools.length > 0) this.flushText(callbacks);
           this.turnText += step.content;
           callbacks.onToken(step.content);
+        } else if (typeof step.thinking === 'string' && step.thinking) {
+          const summary = extractAntigravityThoughtSummary(step.thinking);
+          if (summary && summary !== this.lastEmittedThoughtSummary) {
+            this.lastEmittedThoughtSummary = summary;
+            callbacks.onThinking?.(summary);
+          }
         }
         const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
         if (calls.length > 0) {
@@ -1139,6 +1259,7 @@ export class AntigravitySession {
             this.wakeupPendingTools.push({ callId, tool, startedAt: Date.now() });
             callbacks.onToolUse(record);
           }
+          if (this.wakeupToolStallDeadlineMs === 0) this.refreshWakeupToolStallDeadline();
         } else if (step.status === 'DONE') {
           this.settleWakeupTools(callbacks, 'success');
           this.flushText(callbacks);
@@ -1155,6 +1276,7 @@ export class AntigravitySession {
           }
           callbacks.onToolResult?.(pending.callId, ok ? 'success' : 'error', Math.max(0, Date.now() - pending.startedAt));
         }
+        this.refreshWakeupToolStallDeadline();
       } else if (step.type === 'ERROR_MESSAGE' && this.parentWakeupInFlight) {
         // `agy` often retries stream hiccups on the next step; bound the wait if no retry arrives.
         const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
@@ -1386,10 +1508,66 @@ export class AntigravitySession {
       const pending = this.wakeupPendingTools.shift()!;
       callbacks.onToolResult?.(pending.callId, outcome, Math.max(0, Date.now() - pending.startedAt));
     }
+    this.wakeupToolStallDeadlineMs = 0;
   }
 
   private settleWakeupToolsAsError(callbacks: SessionCallbacks): void {
     this.settleWakeupTools(callbacks, 'error');
+  }
+
+  /**
+   * When `agy acp` runs without `--dangerously-skip-permissions`, post-ACP `<SYSTEM_MESSAGE>` wakeups have no open
+   * `session/prompt` RPC stream on which to emit `session/request_permission`, so permission-gated tools (`run_command`,
+   * external MCP calls, or out-of-workspace file edits) wedge internally. Cancel the wedged internal wakeup and promote
+   * continuation onto an active `session/prompt` RPC so `agy` can request permission normally.
+   */
+  private async promoteStalledWakeupToPrompt(callbacks: SessionCallbacks): Promise<void> {
+    if (this.promotingWakeup || this.closed || !this._turnInFlight || this.acpPromptInFlight) return;
+    const client = this.client;
+    const sessionId = this.sessionId;
+    if (!client || !sessionId) return;
+
+    this.promotingWakeup = true;
+    this.wakeupToolStallDeadlineMs = 0;
+    callbacks.onRawEvent?.({
+      type: 'antigravity/wakeup_promoted_to_prompt',
+      sessionId,
+      stalledTools: this.wakeupPendingTools.map((t) => t.tool.name ?? 'unknown'),
+    });
+    this.settleWakeupToolsAsError(callbacks);
+    this.flushText(callbacks);
+    this.parentWakeupInFlight = false;
+
+    client.notify('session/cancel', { sessionId });
+    const settleMs = this.brainOptions?.wakeupCancelSettleMs ?? DEFAULT_WAKEUP_CANCEL_SETTLE_MS;
+    await new Promise((resolve) => setTimeout(resolve, settleMs));
+
+    this.promotingWakeup = false;
+    if (this.closed || !this._turnInFlight || this.client !== client || this.sessionId !== sessionId) return;
+
+    if (this.brainReader) {
+      const maxIdx = this.brainReader.peekMaxStepIndex(sessionId);
+      if (maxIdx > this.brainReader.getLastStepIndex(sessionId)) {
+        this.brainReader.setBaselineStepIndex(sessionId, maxIdx);
+      }
+    }
+
+    this.acpPromptInFlight = true;
+    this.acpTurnBrainEnded = false;
+    const prompt = [
+      {
+        type: 'text',
+        text: '[System: Resuming background wakeup over active ACP session so pending tool calls can request permission and execute. Continue from your last step without repeating completed work.]',
+      },
+    ];
+    client.request('session/prompt', { sessionId, prompt })
+      .then((result) => this.finishTurn(result))
+      .catch((error) => {
+        if (this.closed || !this._turnInFlight) return;
+        this.abortBackgroundWork(callbacks, 'Failed');
+        this.resetTurnState();
+        callbacks.onError(error instanceof Error ? error : new Error(String(error)));
+      });
   }
 
   private abortBackgroundWork(callbacks: SessionCallbacks, reason: string): void {

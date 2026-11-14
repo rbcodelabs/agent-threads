@@ -38,6 +38,9 @@ export const CALL_MCP_TOOL_DEFINITION = {
 export const ANTIGRAVITY_MCP_FALLBACK_NOTE =
   'Antigravity MCP note: agy acp omits call_mcp_tool and tools above its ~128-declaration eager cap, but caches every connected server\'s schemas under <appDataDir>/mcp/<serverName>/<toolName>.json. When an Agent Threads tool (server "agent-threads", e.g. vault_search, enter_worktree, threads_get_messages, ScheduleWakeup) or configured MCP server tool is missing from Eager, read its schema file (or call mcp_agent-threads_call_mcp_tool with {"server":"<serverName>"} to list tools) and invoke it via mcp_agent-threads_call_mcp_tool with {"server":"<serverName>","tool":"<toolName>","argsJson":"{...}"}.';
 
+export const ANTIGRAVITY_EXECUTION_NOTE =
+  'Antigravity execution note: Before multi-step tool runs and between major phases, emit a brief 1-sentence prose status update so the user can follow progress live instead of seeing only silent tool calls. Batch independent read, search, and MCP tool calls in parallel within the same turn whenever one call does not depend on another\'s output.';
+
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 const MCP_CLIENT_INFO = { name: 'agent-threads-antigravity-bridge', version: '1.0.0' };
 const DEFAULT_MCP_TIMEOUT_MS = 30_000;
