@@ -41,4 +41,16 @@ describe('AgentRunStore', () => {
     expect(AgentRunStore.isAgentTask({ skipTranscript: false, taskType: 'agent' })).toBe(true);
     expect(AgentRunStore.isAgentTask({ skipTranscript: false, subagentType: 'Explore' })).toBe(true);
   });
+
+  it('clears completedAt when a completed agent run is revived to working or waiting', () => {
+    const store = new AgentRunStore();
+    store.observeStart({ threadId: 't', harness: 'antigravity', nativeAgentId: 'sub-1', description: 'Worker' }, 10);
+    store.observeStatus('t', 'antigravity', 'sub-1', 'completed', 'Finished pass 1', undefined, 20);
+    expect(store.getByNativeId('t', 'antigravity', 'sub-1')?.completedAt).toBe(20);
+
+    store.observeStatus('t', 'antigravity', 'sub-1', 'working', 'Worker', undefined, 30);
+    const revived = store.getByNativeId('t', 'antigravity', 'sub-1');
+    expect(revived?.status).toBe('working');
+    expect(revived?.completedAt).toBeUndefined();
+  });
 });

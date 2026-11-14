@@ -44,8 +44,11 @@ import { AcpClient, type AcpClientOptions, type AcpLauncher } from './AcpClient'
 import { OPENCODE_HOST_TOOLS_SERVER, OpenCodeHostToolsBridge } from './OpenCodeHostTools';
 import {
   BrainTranscriptReader,
+  cleanBrainArgString,
+  cleanBrainArgStringArray,
   describeSubagentSpawn,
   extractSubagentSpawnMeta,
+  isAntigravityBgCapableTool,
   parseAntigravityBackgroundTask,
   parseAntigravityCreatedSubagent,
   parseAntigravityWakeupMessage,
@@ -360,6 +363,7 @@ export class AntigravitySession {
   private closed = true;
   private _turnInFlight = false;
   private acpPromptInFlight = false;
+  private acpTurnBrainEnded = false;
   private turnText = '';
   /** Tool calls made since the last finished message; they ride with the text that precedes them, as Claude's do. */
   private pendingTools: ToolCallRecord[] = [];
@@ -388,6 +392,7 @@ export class AntigravitySession {
   // Brain transcript tracking for subagent progress and post-ACP parent reactive wakeups
   private brainReader: BrainTranscriptReader | null = null;
   private parentPendingSpawns: PendingSubagentSpawnMeta[] = [];
+  private parentPendingBgCapableCalls = 0;
   private subagents = new Map<string, TrackedSubagent>();
   private activeBgTaskIds = new Set<string>();
   private pendingWakeups = 0;
@@ -674,17 +679,29 @@ export class AntigravitySession {
     if (!options || !client || !sessionId) return;
     this._turnInFlight = true;
     this.acpPromptInFlight = true;
+    this.acpTurnBrainEnded = false;
+    // Snapshot the brain transcript's pre-turn step index on the session's first turn so prior history is never replayed;
+    // on subsequent turns, flush any late post-ACP wakeups or subagent steps that landed while idle between turns.
+    if (this.brainReader) {
+      if (this.brainReader.getLastStepIndex(sessionId) < 0) {
+        const existingMax = this.brainReader.peekMaxStepIndex(sessionId);
+        if (existingMax >= 0) this.brainReader.setBaselineStepIndex(sessionId, existingMax);
+      } else {
+        this.syncSubagentTranscripts(options.callbacks);
+        this.syncParentPostAcp(options.callbacks);
+        this.syncSubagentTranscripts(options.callbacks);
+        this.flushText(options.callbacks);
+      }
+    }
     this.turnText = '';
     this.pendingTools = [];
     this.parentPendingSpawns = [];
+    this.parentPendingBgCapableCalls = 0;
     this.parentWakeupInFlight = false;
     this.wakeupPendingTools = [];
     const mode = options.permissionMode ?? 'default';
 
-    // Snapshot the brain transcript's pre-turn step index before `session/prompt` goes out so prior turns are never replayed.
     if (this.brainReader) {
-      const existingMax = this.brainReader.peekMaxStepIndex(sessionId);
-      if (existingMax >= 0) this.brainReader.setBaselineStepIndex(sessionId, existingMax);
       this.brainReader.startPolling(() => this.onBrainTick());
       this.brainReader.watchConversation(sessionId, () => this.onBrainTick());
     }
@@ -760,10 +777,12 @@ export class AntigravitySession {
   private resetTurnState(): void {
     this._turnInFlight = false;
     this.acpPromptInFlight = false;
+    this.acpTurnBrainEnded = false;
     this.turnText = '';
     this.pendingTools = [];
     this.queuedTurns = [];
     this.parentPendingSpawns = [];
+    this.parentPendingBgCapableCalls = 0;
     this.pendingWakeups = 0;
     this.wakeupDeadlineMs = 0;
     this.parentWakeupInFlight = false;
@@ -921,7 +940,7 @@ export class AntigravitySession {
     // Catch up synchronously to the end of the ACP turn in `<brainDir>/<sessionId>` BEFORE transitioning out of
     // `acpPromptInFlight`, so any subagent or background task created during the turn is registered without duplicating
     // the ACP turn's own streamed text/tools.
-    this.syncParentDuringAcp(callbacks, true);
+    this.syncParentDuringAcp(callbacks);
     this.syncSubagentTranscripts(callbacks);
 
     this.flushText(callbacks);
@@ -994,7 +1013,7 @@ export class AntigravitySession {
     if (this.closed || !this._turnInFlight || !callbacks || !this.sessionId || !this.brainReader) return;
     this.brainReader.watchConversation(this.sessionId, () => this.onBrainTick());
     if (this.acpPromptInFlight) {
-      this.syncParentDuringAcp(callbacks, false);
+      this.syncParentDuringAcp(callbacks);
       this.syncSubagentTranscripts(callbacks);
       return;
     }
@@ -1010,18 +1029,22 @@ export class AntigravitySession {
    * Harvest omitted metadata (`invoke_subagent` child IDs, background task IDs, revivals, kills) from parent steps
    * written during the ACP turn without re-emitting ACP's own text/tool stream.
    */
-  private syncParentDuringAcp(callbacks: SessionCallbacks, stopAtTurnEnd: boolean): void {
+  private syncParentDuringAcp(callbacks: SessionCallbacks): void {
     const sessionId = this.sessionId;
-    if (!sessionId || !this.brainReader) return;
+    if (!sessionId || !this.brainReader || this.acpTurnBrainEnded) return;
     const steps = this.brainReader.readNewSteps(sessionId);
     for (let idx = 0; idx < steps.length; idx++) {
       const step = steps[idx];
       if (step.type === 'PLANNER_RESPONSE') {
+        this.parentPendingSpawns = [];
+        this.parentPendingBgCapableCalls = 0;
         const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
         for (const tc of calls) this.trackParentToolCallMeta(tc.name, tc.args, callbacks);
         // An LLM tool loop ends a `session/prompt` turn on the first `PLANNER_RESPONSE` with zero tool calls; anything
-        // written after that belongs to a post-ACP wakeup and must be left for `syncParentPostAcp`.
-        if (stopAtTurnEnd && calls.length === 0 && step.status === 'DONE') {
+        // written after that belongs to a post-ACP wakeup and must be left for `syncParentPostAcp` even if `onBrainTick`
+        // ran before `session/prompt` resolved over stdio.
+        if (calls.length === 0 && step.status === 'DONE') {
+          this.acpTurnBrainEnded = true;
           if (idx < steps.length - 1) this.brainReader.rewindCursorToStep(sessionId, step.step_index);
           break;
         }
@@ -1043,6 +1066,8 @@ export class AntigravitySession {
         this.consumeParentWakeupStep(step, callbacks, true);
       } else if (step.type === 'PLANNER_RESPONSE') {
         this.parentWakeupInFlight = true;
+        this.parentPendingSpawns = [];
+        this.parentPendingBgCapableCalls = 0;
         if (typeof step.content === 'string' && step.content) {
           if (this.pendingTools.length > 0) this.flushText(callbacks);
           this.turnText += step.content;
@@ -1096,8 +1121,10 @@ export class AntigravitySession {
   private trackParentToolCallMeta(name: string | undefined, args: Record<string, unknown> | undefined, callbacks: SessionCallbacks): void {
     if (name === 'invoke_subagent') {
       this.parentPendingSpawns.push(extractSubagentSpawnMeta(args));
+    } else if (isAntigravityBgCapableTool(name)) {
+      this.parentPendingBgCapableCalls++;
     } else if (name === 'send_message') {
-      const recipient = typeof args?.Recipient === 'string' ? args.Recipient.trim() : '';
+      const recipient = cleanBrainArgString(args?.Recipient) ?? '';
       const child = recipient ? this.subagents.get(recipient) : undefined;
       if (child && !child.running) {
         child.running = true;
@@ -1108,22 +1135,32 @@ export class AntigravitySession {
       }
     } else if (name === 'manage_subagents') {
       this.handleManageSubagentsCall(args, callbacks);
+    } else if (name === 'manage_task') {
+      const action = cleanBrainArgString(args?.Action);
+      const taskId = cleanBrainArgString(args?.TaskId);
+      if (action === 'kill' && taskId && this.activeBgTaskIds.delete(taskId)) {
+        callbacks.onTaskUpdated?.(taskId, { status: 'killed' });
+        callbacks.onTaskNotification?.(taskId, 'stopped', 'Killed');
+      }
     }
   }
 
   private handleManageSubagentsCall(args: Record<string, unknown> | undefined, callbacks: SessionCallbacks): void {
-    const action = typeof args?.Action === 'string' ? args.Action.trim() : '';
+    const action = cleanBrainArgString(args?.Action) ?? '';
     if (action === 'kill_all') {
       for (const child of this.subagents.values()) this.markSubagentKilled(child, callbacks, 'Killed');
-    } else if (action === 'kill' && Array.isArray(args?.ConversationIds)) {
-      for (const rawId of args.ConversationIds) {
-        const child = typeof rawId === 'string' ? this.subagents.get(rawId.trim()) : undefined;
+    } else if (action === 'kill') {
+      for (const id of cleanBrainArgStringArray(args?.ConversationIds)) {
+        const child = this.subagents.get(id);
         if (child) this.markSubagentKilled(child, callbacks, 'Killed');
       }
     }
   }
 
   private markSubagentKilled(child: TrackedSubagent, callbacks: SessionCallbacks, reason: string): void {
+    child.activeBgTaskIds.clear();
+    child.pendingBgCapableCalls = 0;
+    child.pendingSpawns = [];
     if (!child.running) return;
     child.running = false;
     this.brainReader?.unwatchConversation(child.id);
@@ -1132,15 +1169,22 @@ export class AntigravitySession {
   }
 
   private harvestParentGenericStep(step: BrainTranscriptStep, callbacks: SessionCallbacks): void {
-    const created = parseAntigravityCreatedSubagent(step.content);
-    if (created) {
-      const meta = this.parentPendingSpawns.shift();
-      this.registerSubagent(created.conversationId, meta, callbacks);
+    if (this.parentPendingSpawns.length > 0) {
+      const created = parseAntigravityCreatedSubagent(step.content);
+      if (created) {
+        const meta = this.parentPendingSpawns.shift();
+        this.registerSubagent(created.conversationId, meta, callbacks);
+      }
     }
-    const bg = parseAntigravityBackgroundTask(step.content);
-    if (bg && !this.activeBgTaskIds.has(bg.taskId)) {
-      this.activeBgTaskIds.add(bg.taskId);
-      callbacks.onTaskStarted?.(bg.taskId, 'Background task', false, 'bash');
+    if (this.parentPendingBgCapableCalls > 0) {
+      const bg = parseAntigravityBackgroundTask(step.content);
+      if (bg) {
+        this.parentPendingBgCapableCalls = Math.max(0, this.parentPendingBgCapableCalls - 1);
+        if (!this.activeBgTaskIds.has(bg.taskId)) {
+          this.activeBgTaskIds.add(bg.taskId);
+          callbacks.onTaskStarted?.(bg.taskId, 'Background task', false, 'bash');
+        }
+      }
     }
   }
 
@@ -1164,6 +1208,8 @@ export class AntigravitySession {
       running: true,
       sentMessageThisRun: false,
       pendingSpawns: [],
+      pendingBgCapableCalls: 0,
+      activeBgTaskIds: new Set<string>(),
     };
     this.subagents.set(id, tracked);
     this.brainReader?.watchConversation(id, () => this.onBrainTick());
@@ -1172,6 +1218,9 @@ export class AntigravitySession {
 
   private consumeParentWakeupStep(step: BrainTranscriptStep, callbacks: SessionCallbacks, startWakeupTurn: boolean): void {
     const parsed = parseAntigravityWakeupMessage(step.content);
+    if (parsed.senders.some((sender) => this.subagents.get(sender)?.running)) {
+      this.syncSubagentTranscripts(callbacks);
+    }
     const consumedCount = Math.max(1, parsed.senders.length);
     this.pendingWakeups = Math.max(0, this.pendingWakeups - consumedCount);
     for (const sender of parsed.senders) {
@@ -1206,6 +1255,10 @@ export class AntigravitySession {
         const steps = this.brainReader.readNewSteps(subagent.id);
         for (const step of steps) {
           if (step.type === 'SYSTEM_MESSAGE') {
+            const parsedWakeup = parseAntigravityWakeupMessage(step.content);
+            for (const sender of parsedWakeup.senders) {
+              subagent.activeBgTaskIds.delete(sender);
+            }
             subagent.lastStepError = undefined;
             if (!subagent.running) {
               subagent.running = true;
@@ -1217,6 +1270,8 @@ export class AntigravitySession {
             subagent.lastStepError = firstSummaryLine(step.content, 200) ?? 'Subagent error';
           } else if (step.type === 'PLANNER_RESPONSE') {
             subagent.lastStepError = undefined;
+            subagent.pendingSpawns = [];
+            subagent.pendingBgCapableCalls = 0;
             if (typeof step.model === 'string' && step.model && !subagent.model) subagent.model = step.model;
             const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
             if (calls.length > 0) {
@@ -1224,32 +1279,53 @@ export class AntigravitySession {
               for (const tc of calls) {
                 if (tc.name === 'invoke_subagent') {
                   subagent.pendingSpawns.push(extractSubagentSpawnMeta(tc.args, subagent.id));
-                } else if (tc.name === 'send_message' && tc.args?.Recipient === this.sessionId) {
+                } else if (isAntigravityBgCapableTool(tc.name)) {
+                  subagent.pendingBgCapableCalls++;
+                } else if (tc.name === 'send_message' && cleanBrainArgString(tc.args?.Recipient) === this.sessionId) {
                   subagent.sentMessageThisRun = true;
-                  subagent.lastSentMessage = typeof tc.args?.Message === 'string' ? tc.args.Message : undefined;
+                  subagent.lastSentMessage = cleanBrainArgString(tc.args?.Message);
                   this.noteExpectedParentWakeup();
                 } else if (tc.name === 'manage_subagents') {
                   this.handleManageSubagentsCall(tc.args, callbacks);
+                } else if (tc.name === 'manage_task') {
+                  const action = cleanBrainArgString(tc.args?.Action);
+                  const taskId = cleanBrainArgString(tc.args?.TaskId);
+                  if (action === 'kill' && taskId) subagent.activeBgTaskIds.delete(taskId);
                 }
               }
               const lastTool = calls[calls.length - 1];
               callbacks.onTaskProgress?.(subagent.id, subagent.description, antigravityToolName(lastTool?.name, undefined));
             } else if (step.status === 'DONE' && subagent.running) {
-              subagent.running = false;
-              const summary = firstSummaryLine(step.content, 240)
-                ?? firstSummaryLine(subagent.lastSentMessage, 240)
-                ?? subagent.description;
-              callbacks.onTaskNotification?.(subagent.id, 'completed', summary);
-              if (!subagent.sentMessageThisRun && !subagent.parentAgentId) {
-                this.noteExpectedParentWakeup();
+              if (subagent.activeBgTaskIds.size > 0) {
+                // Child yielded its LLM turn while waiting on its own background command/timer; keep it running until woken.
+                const waitingSummary = firstSummaryLine(step.content, 240);
+                if (waitingSummary) callbacks.onTaskProgress?.(subagent.id, waitingSummary);
+              } else {
+                subagent.running = false;
+                const summary = firstSummaryLine(step.content, 240)
+                  ?? firstSummaryLine(subagent.lastSentMessage, 240)
+                  ?? subagent.description;
+                callbacks.onTaskNotification?.(subagent.id, 'completed', summary);
+                if (!subagent.sentMessageThisRun && !subagent.parentAgentId) {
+                  this.noteExpectedParentWakeup();
+                }
               }
             }
           } else if (step.type === 'GENERIC') {
-            const created = parseAntigravityCreatedSubagent(step.content);
-            if (created) {
-              const meta = subagent.pendingSpawns.shift() ?? { parentAgentId: subagent.id };
-              this.registerSubagent(created.conversationId, meta, callbacks);
-              progress = true;
+            if (subagent.pendingSpawns.length > 0) {
+              const created = parseAntigravityCreatedSubagent(step.content);
+              if (created) {
+                const meta = subagent.pendingSpawns.shift() ?? { parentAgentId: subagent.id };
+                this.registerSubagent(created.conversationId, meta, callbacks);
+                progress = true;
+              }
+            }
+            if (subagent.pendingBgCapableCalls > 0) {
+              const bg = parseAntigravityBackgroundTask(step.content);
+              if (bg) {
+                subagent.pendingBgCapableCalls = Math.max(0, subagent.pendingBgCapableCalls - 1);
+                subagent.activeBgTaskIds.add(bg.taskId);
+              }
             }
           }
         }
@@ -1270,6 +1346,9 @@ export class AntigravitySession {
 
   private abortBackgroundWork(callbacks: SessionCallbacks, reason: string): void {
     for (const subagent of this.subagents.values()) {
+      subagent.activeBgTaskIds.clear();
+      subagent.pendingBgCapableCalls = 0;
+      subagent.pendingSpawns = [];
       if (subagent.running) {
         subagent.running = false;
         callbacks.onTaskUpdated?.(subagent.id, { status: 'killed' });

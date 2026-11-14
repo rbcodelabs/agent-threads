@@ -68,6 +68,8 @@ export interface TrackedSubagent {
   lastSentMessage?: string;
   lastStepError?: string;
   pendingSpawns: PendingSubagentSpawnMeta[];
+  pendingBgCapableCalls: number;
+  activeBgTaskIds: Set<string>;
 }
 
 interface TranscriptCursor {
@@ -76,40 +78,123 @@ interface TranscriptCursor {
   lastStepIndex: number;
 }
 
-// ── Pure step parsers (exported for unit tests) ────────────────────────────
+// ── Pure step & argument parsers (exported for unit tests) ─────────────────
+
+const CREATED_SUBAGENT_PREFIX = 'Created the ' + 'following subagent:';
+const BG_TASK_PREFIX = 'Tool is running as a ' + 'background task with task id:';
+const VALID_CONVERSATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{1,127}$/;
+const VALID_BG_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_/-]{1,160}$/;
+
+/**
+ * Normalize a string tool-call argument from an Antigravity brain transcript.
+ * When `transcript.jsonl` (compact) truncates `tool_calls`, `agy` may serialize string arguments as JSON-encoded
+ * strings (e.g. `"\"ecf60001-...\""`). Unwrap one layer of JSON string quoting when valid.
+ */
+export function cleanBrainArgString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed === 'string') return parsed.trim() || undefined;
+    } catch {
+      return trimmed.slice(1, -1).trim() || undefined;
+    }
+  }
+  return trimmed;
+}
+
+/**
+ * Normalize a `string[]` tool-call argument (such as `manage_subagents.ConversationIds`), unwrapping compact-log
+ * JSON-encoded arrays (`"[\"id-1\",\"id-2\"]"`) as well as individually quoted elements.
+ */
+export function cleanBrainArgStringArray(value: unknown): string[] {
+  let items: unknown[] | undefined;
+  if (Array.isArray(value)) {
+    items = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) items = parsed;
+      } catch {
+        items = undefined;
+      }
+    }
+  }
+  if (!items) return [];
+  const out: string[] = [];
+  for (const item of items) {
+    const cleaned = cleanBrainArgString(item);
+    if (cleaned) out.push(cleaned);
+  }
+  return out;
+}
+
+export function isAntigravityBgCapableTool(name: string | undefined): boolean {
+  return name === 'run_command' || name === 'schedule' || name === 'run_workflow';
+}
 
 function firstCleanLine(value: unknown, maxChars = 200): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const line = value
+  const unwrapped = cleanBrainArgString(value);
+  if (!unwrapped) return undefined;
+  const line = unwrapped
     .split('\n')
     .map((part) => part.trim())
     .find(Boolean);
   return line ? line.slice(0, maxChars) : undefined;
 }
 
-/** Parse `Created the following subagent: { "conversationId": "..." }` from a `MODEL/GENERIC` step. */
+function stripBrainGenericTimestampHeader(content: string): string {
+  return content.replace(/^(?:(?:Created|Completed) At:[^\r\n]*\r?\n)+/, '');
+}
+
+/**
+ * Extract the child `conversationId` from an `invoke_subagent` `GENERIC` step output.
+ * Anchored to the start of the step payload (after optional `Created At:` / `Completed At:` header lines) and validated
+ * against `VALID_CONVERSATION_ID_RE` so file reads, diffs, and placeholder strings never register phantom subagents.
+ */
 export function parseAntigravityCreatedSubagent(content: string | undefined): { conversationId: string } | null {
-  if (typeof content !== 'string' || !content.includes('Created the following subagent:')) return null;
-  const match = content.match(/Created the following subagent:\s*(\{[\s\S]*?\})/);
-  if (!match) return null;
+  if (typeof content !== 'string' || !content) return null;
+  const body = stripBrainGenericTimestampHeader(content).trimStart();
+  if (!body.startsWith(CREATED_SUBAGENT_PREFIX)) return null;
+  const rest = body.slice(CREATED_SUBAGENT_PREFIX.length).trimStart();
+  if (!rest.startsWith('{')) return null;
+  const closeBrace = rest.indexOf('}');
+  if (closeBrace < 0) return null;
+  const jsonBlock = rest.slice(0, closeBrace + 1);
   try {
-    const parsed = JSON.parse(match[1]);
-    const id = typeof parsed?.conversationId === 'string' ? parsed.conversationId.trim() : '';
-    return id ? { conversationId: id } : null;
+    const parsed = JSON.parse(jsonBlock) as { conversationId?: unknown };
+    const id = cleanBrainArgString(parsed?.conversationId);
+    if (id && VALID_CONVERSATION_ID_RE.test(id)) return { conversationId: id };
   } catch {
-    return null;
+    const m = jsonBlock.match(/"conversationId"\s*:\s*"([^"]+)"/);
+    const id = m?.[1]?.trim();
+    if (id && VALID_CONVERSATION_ID_RE.test(id)) return { conversationId: id };
   }
+  return null;
 }
 
-/** Parse `Tool is running as a background task with task id: <id>` from a `MODEL/GENERIC` step. */
+/**
+ * Extract a background task ID (`<conversationId>/<taskId>`) from an async `GENERIC` step output (`run_command`,
+ * `schedule`, `run_workflow`). Anchored to the start of the step payload (after optional timestamp lines).
+ */
 export function parseAntigravityBackgroundTask(content: string | undefined): { taskId: string } | null {
-  if (typeof content !== 'string' || !content.includes('Tool is running as a background task with task id:')) return null;
-  const match = content.match(/Tool is running as a background task with task id:\s*([^\s\n]+)/);
-  const taskId = match?.[1]?.trim();
-  return taskId ? { taskId } : null;
+  if (typeof content !== 'string' || !content) return null;
+  const body = stripBrainGenericTimestampHeader(content).trimStart();
+  if (!body.startsWith(BG_TASK_PREFIX)) return null;
+  const firstLine = body.slice(BG_TASK_PREFIX.length).split(/\r?\n/, 1)[0]?.trim() ?? '';
+  const token = firstLine.split(/\s+/, 1)[0] ?? '';
+  if (token && VALID_BG_TASK_ID_RE.test(token)) return { taskId: token };
+  return null;
 }
 
-/** Extract sender IDs and a short summary from a `<SYSTEM_MESSAGE>` wakeup step. */
+/**
+ * Parse a `<SYSTEM_MESSAGE>` step delivered to a conversation when a child subagent or background task reports back.
+ * Handles both `[Message] ... sender=<id>` envelopes and `"Subagent <id> has gone idle"` notifications.
+ */
 export function parseAntigravityWakeupMessage(content: string | undefined): { senders: string[]; summary: string } {
   if (typeof content !== 'string' || !content.trim()) return { senders: [], summary: '' };
   const senders: string[] = [];
