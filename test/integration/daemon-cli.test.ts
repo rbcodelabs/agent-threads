@@ -32,17 +32,21 @@ afterEach(async () => {
 
 interface Captured { code: number; out: string; err: string }
 
-async function cli(argv: string[], rt: Partial<CliRuntime> = {}, token = controlToken, url = td.daemon.url): Promise<Captured> {
+function cliLive(argv: string[], rt: Partial<CliRuntime> = {}, token = controlToken, url = td.daemon.url) {
   let out = ''; let err = '';
   const io: Io = {
     out: (l) => { out += `${l}\n`; }, err: (l) => { err += `${l}\n`; },
     write: (t) => { out += t; }, writeErr: (t) => { err += t; },
   };
-  const code = await runCli(argv, io, {
+  const done = runCli(argv, io, {
     env: { AGENT_THREADS_URL: url, AGENT_THREADS_TOKEN: token }, stdinIsTTY: false, cwd: '/tmp',
     onInterrupt: () => () => {}, ...rt,
-  });
-  return { code, out, err };
+  }).then((code): Captured => ({ code, out, err }));
+  return { done, out: () => out, err: () => err };
+}
+
+async function cli(argv: string[], rt: Partial<CliRuntime> = {}, token = controlToken, url = td.daemon.url): Promise<Captured> {
+  return cliLive(argv, rt, token, url).done;
 }
 
 /** A scripted terminal: answers prompts in order and records what it was asked. */
@@ -181,32 +185,32 @@ describe('run', () => {
   it('--json: a request is answered by an NDJSON command on stdin', async () => {
     const { PassThrough } = await import('node:stream');
     const stdin = new PassThrough();
-    const p = cli(['run', '--json', '--cwd', '/srv/workspaces/x', '/permission'], { stdin });
-    await new Promise((r) => setTimeout(r, 400));
+    const live = cliLive(['run', '--json', '--cwd', '/srv/workspaces/x', '/permission'], { stdin });
+    await until(() => live.out().includes('"requestId":"permission-1"'), 10_000);
     stdin.write('{"cmd":"resolve.permission","requestId":"permission-1","allow":true}\n');
-    const r = await p;
+    const r = await live.done;
     expect(r.code).toBe(0);
     expect(r.out).toContain('"kind":"command_result","cmd":"resolve.permission","requestId":"permission-1","ok":true');
-  });
+  }, 15_000);
 
   it('--json: stdin closing with a request open refuses it (exit 7)', async () => {
     const { PassThrough } = await import('node:stream');
     const stdin = new PassThrough();
-    const p = cli(['run', '--json', '--cwd', '/srv/workspaces/x', '/permission'], { stdin });
-    await new Promise((r) => setTimeout(r, 300));
+    const live = cliLive(['run', '--json', '--cwd', '/srv/workspaces/x', '/permission'], { stdin });
+    await until(() => live.out().includes('"requestId":"permission-1"'), 10_000);
     stdin.end();
-    expect((await p).code).toBe(7);
-  });
+    expect((await live.done).code).toBe(7);
+  }, 15_000);
 
   it('Ctrl-C interrupts the turn, exits 130, and the session is still listed', async () => {
     let fire: () => void = () => {};
-    const p = cli(['run', '--cwd', '/srv/workspaces/x', '--thread', 'hang-1', '/hang'], { onInterrupt: (h) => { fire = h; return () => {}; } });
-    await new Promise((r) => setTimeout(r, 400));
+    const live = cliLive(['run', '--cwd', '/srv/workspaces/x', '--thread', 'hang-1', '/hang'], { onInterrupt: (h) => { fire = h; return () => {}; } });
+    await until(() => td.daemon.threads.list().some((t) => t.threadId === 'hang-1' && t.turnInFlight), 10_000);
     fire();
-    const r = await p;
+    const r = await live.done;
     expect(r.code).toBe(130);
     expect(r.out).toContain('[interrupted]');
-  });
+  }, 15_000);
 });
 
 describe('run and the thread it did not make', () => {
