@@ -30,7 +30,7 @@ export interface RunArgs extends ConnectionFlags {
   cwd?: string;
   permissionMode?: string;
   model?: string;
-  /** claude (default), codex or opencode; the daemon refuses one it has not enabled. */
+  /** claude (default), codex, opencode or antigravity; the daemon refuses one it has not enabled. */
   harness?: string;
   thread?: string;
   detach: boolean;

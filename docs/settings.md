@@ -11,6 +11,7 @@ In **Secrets**, choose **Add secret** or select an existing entry. Save the valu
 | Setting | Description |
 |---|---|
 | Claude binary path | Path to the `claude` executable (auto-detected). Below it, Settings shows the detected CLI version and a warning with the exact upgrade command (and a **Copy command** button) when the CLI is older than the plugin's pinned minimum, or a quiet notice when a model the plugin knows about is not reported by your CLI's catalog. The plugin never upgrades the CLI for you. Desktop only; skipped when threads always run in the sandbox VM. |
+| Antigravity binary path | Path to the `agy` executable (auto-detected in `~/.local/bin`, Homebrew and PATH). Antigravity threads run `agy acp` per session and use the CLI's own Google sign-in; the model menu is filled from the CLI when a thread starts. Pick **Antigravity** under Agent harness; it is greyed out while `agy` cannot be found. Desktop only. |
 | Agent harness | Initial Claude or Codex default for new kickoff selectors. A selection made in the Agents List or Agent Board is local to that mounted view and does not rewrite this setting. |
 | Codex computer use | Off by default. Disables bundled Codex desktop-control capabilities for newly initialized sessions. On inherits local Codex configuration. Existing sessions require a restart; shared Codex browser REPL capabilities may also be unavailable while off. |
 | Default working directory | `cwd` for new threads; defaults to vault root |

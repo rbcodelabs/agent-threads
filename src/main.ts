@@ -393,6 +393,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     claude: [],
     codex: [],
     opencode: [],
+    antigravity: [],
   };
 
 
@@ -682,6 +683,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     void this.refreshClaudeCliInfo();
     this.detectCodexBinary();
     this.detectOpenCodeBinary();
+    this.detectAntigravityBinary();
     this.resolveSkillSourceClonePaths();
     this.scheduleGithubSourceClonePass();
     this.registerInterval(window.setInterval(() => { void this.runSkillSourceAutoUpdate(); }, 6 * 60 * 60 * 1000));
@@ -2205,18 +2207,29 @@ export default class ClaudeThreadsPlugin extends Plugin {
     return source;
   }
 
+  /**
+   * Why `harness` cannot start on this computer, or undefined. Only Antigravity is gated: it is the one harness whose
+   * CLI most users do not have, and the other pickers have always offered theirs unconditionally.
+   */
+  localHarnessUnavailableReason(harness: AgentHarness): string | undefined {
+    if (harness !== 'antigravity') return undefined;
+    return this.isHarnessResolvable(harness) ? undefined : 'agy not found (set its path in Settings)';
+  }
+
   /** Whether `harness`'s configured binary can be found, so a first turn can start. */
   private isHarnessResolvable(harness: AgentHarness): boolean {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const pathNode = require('path') as typeof import('path');
-    const binary = harness === 'codex'
-      ? this.settings.codexBinaryPath
-      : harness === 'opencode'
-        ? this.settings.opencodeBinaryPath
-        : this.settings.claudeBinaryPath;
-    return isBinaryResolvable(binary ?? '', {
+    // A Record, not a ternary chain: a new harness is a compile error here instead of silently probing Claude's binary.
+    const binaries: Record<AgentHarness, string | undefined> = {
+      claude: this.settings.claudeBinaryPath,
+      codex: this.settings.codexBinaryPath,
+      opencode: this.settings.opencodeBinaryPath,
+      antigravity: this.settings.antigravityBinaryPath,
+    };
+    return isBinaryResolvable(binaries[harness] ?? '', {
       exists: p => { try { return fs.existsSync(p); } catch { return false; } },
       pathEnv: process.env.PATH,
       pathSeparator: pathNode.delimiter,
@@ -3726,6 +3739,27 @@ export default class ClaudeThreadsPlugin extends Plugin {
     }
     // `opencode` on PATH is the CLI's documented invocation.
     this.settings.opencodeBinaryPath = 'opencode';
+  }
+
+  private detectAntigravityBinary(): void {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    if (this.settings.antigravityBinaryPath && fs.existsSync(this.settings.antigravityBinaryPath)) return;
+    // A customized value that is not a path (e.g. a PATH-resolved name) is respected.
+    if (this.settings.antigravityBinaryPath && this.settings.antigravityBinaryPath !== 'agy') return;
+    for (const candidate of [
+      `${process.env.HOME}/.local/bin/agy`,
+      '/opt/homebrew/bin/agy',
+      '/usr/local/bin/agy',
+      `${process.env.HOME}/.antigravity/bin/agy`,
+    ]) {
+      if (fs.existsSync(candidate)) {
+        this.settings.antigravityBinaryPath = candidate;
+        return;
+      }
+    }
+    // `agy` on PATH is the CLI's documented invocation.
+    this.settings.antigravityBinaryPath = 'agy';
   }
 
   private detectCodexBinary(): void {

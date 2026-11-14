@@ -84,7 +84,8 @@ export interface DoctorTarget {
   claudeBinaryPath?: string;
   codexBinaryPath?: string;
   opencodeBinaryPath?: string;
-  /** Harnesses the daemon is configured to host; absent = all three. */
+  antigravityBinaryPath?: string;
+  /** Harnesses the daemon is configured to host; absent = all of them. */
   harnesses?: RealHarness[];
   /** Files that may carry the Claude credential for a systemd-run daemon. */
   credentialFiles: string[];
@@ -410,6 +411,7 @@ export async function runChecks(p: Probes, t: DoctorTarget): Promise<CheckResult
   if (enabled.includes('claude')) results.push(await checkClaude(p, t.claudeBinaryPath));
   if (enabled.includes('codex')) results.push(await checkHarnessCli(p, 'codex', t.codexBinaryPath));
   if (enabled.includes('opencode')) results.push(await checkHarnessCli(p, 'opencode', t.opencodeBinaryPath));
+  if (enabled.includes('antigravity')) results.push(await checkHarnessCli(p, 'antigravity', t.antigravityBinaryPath));
   results.push(await checkGit(p));
   results.push(...(await checkGh(p)));
   results.push(await checkRipgrep(p));
@@ -546,6 +548,7 @@ export interface DoctorFlags {
   claudeBinaryPath?: string;
   codexBinaryPath?: string;
   opencodeBinaryPath?: string;
+  antigravityBinaryPath?: string;
 }
 
 /**
@@ -556,7 +559,7 @@ export function resolveDoctorTarget(flags: DoctorFlags, p: Probes): DoctorTarget
   const env = p.env;
   const dirs = [env.DATA_DIR, '/var/lib/agent-threads', join(p.home, '.agent-threads'), join(p.home, '.local/state/agent-threads')].filter((d): d is string => !!d);
   const dataDir = flags.dataDir ?? dirs.find((d) => p.stat(d)?.isDirectory) ?? dirs[0] ?? join(p.home, '.agent-threads');
-  let file: { autoUpdate?: unknown; listen?: unknown; port?: unknown; workspaces?: unknown; claudeBinaryPath?: unknown; codexBinaryPath?: unknown; opencodeBinaryPath?: unknown; harness?: unknown; harnesses?: unknown } = {};
+  let file: { autoUpdate?: unknown; listen?: unknown; port?: unknown; workspaces?: unknown; claudeBinaryPath?: unknown; codexBinaryPath?: unknown; opencodeBinaryPath?: unknown; antigravityBinaryPath?: unknown; harness?: unknown; harnesses?: unknown } = {};
   try {
     const raw = p.readFile(join(dataDir, 'config.json'));
     if (raw) file = JSON.parse(raw) as typeof file;
@@ -579,10 +582,11 @@ export function resolveDoctorTarget(flags: DoctorFlags, p: Probes): DoctorTarget
     flag ?? (env[envVar] || undefined) ?? (typeof fileValue === 'string' ? fileValue : undefined);
   const codexBinaryPath = pathFor(flags.codexBinaryPath, 'AGENT_THREADS_CODEX_BINARY', file.codexBinaryPath);
   const opencodeBinaryPath = pathFor(flags.opencodeBinaryPath, 'AGENT_THREADS_OPENCODE_BINARY', file.opencodeBinaryPath);
-  // Same rule as `serve`: an explicit set wins; an explicit single harness restricts to it; otherwise all three.
+  const antigravityBinaryPath = pathFor(flags.antigravityBinaryPath, 'AGENT_THREADS_ANTIGRAVITY_BINARY', file.antigravityBinaryPath);
+  // Same rule as `serve`: an explicit set wins; an explicit single harness restricts to it; otherwise all of them.
   const listed = env.AGENT_THREADS_HARNESSES ? env.AGENT_THREADS_HARNESSES.split(/[,:]/).map((x) => x.trim()).filter(Boolean) : Array.isArray(file.harnesses) ? file.harnesses : undefined;
   const single = env.AGENT_THREADS_HARNESS || (typeof file.harness === 'string' ? file.harness : undefined);
   const harnesses: RealHarness[] = listed?.length ? [...new Set(listed.filter(isRealHarness))] : isRealHarness(single) ? [single] : [...REAL_HARNESSES];
   const autoUpdate = parseBoolEnv(env.AGENT_THREADS_AUTO_UPDATE) ?? file.autoUpdate === true;
-  return { dataDir, listen, port, baseUrl, workspaces, harnesses, autoUpdate, ...(claudeBinaryPath ? { claudeBinaryPath } : {}), ...(codexBinaryPath ? { codexBinaryPath } : {}), ...(opencodeBinaryPath ? { opencodeBinaryPath } : {}), credentialFiles: defaultCredentialFiles(p.home) };
+  return { dataDir, listen, port, baseUrl, workspaces, harnesses, autoUpdate, ...(claudeBinaryPath ? { claudeBinaryPath } : {}), ...(codexBinaryPath ? { codexBinaryPath } : {}), ...(opencodeBinaryPath ? { opencodeBinaryPath } : {}), ...(antigravityBinaryPath ? { antigravityBinaryPath } : {}), credentialFiles: defaultCredentialFiles(p.home) };
 }

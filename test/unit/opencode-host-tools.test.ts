@@ -23,6 +23,26 @@ describe('handleHostToolsRpc', () => {
     expect(list?.result).toEqual({ tools: [{ name: 'threads_list', description: 'threads_list tool', inputSchema: { type: 'object', properties: {} } }] });
   });
 
+  it('answers server/discover (MCP 2026-07-28) with versions, tools capability and serverInfo, and still serves initialize', async () => {
+    // Shape per modelcontextprotocol.io/specification/draft/server/discover; the request is the one agy 1.1.13 sends.
+    const request = {
+      jsonrpc: '2.0' as const, id: 1, method: 'server/discover',
+      params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientInfo': { name: 'antigravity-client', version: 'v1.0.0' }, 'io.modelcontextprotocol/clientCapabilities': { roots: { listChanged: true } } } },
+    };
+    const reply = await handleHostToolsRpc(request, [tool('threads_list', false)], context('default'));
+    expect(reply?.id).toBe(1);
+    expect(reply?.error).toBeUndefined();
+    expect(reply?.result).toMatchObject({
+      resultType: 'complete',
+      supportedVersions: expect.arrayContaining(['2026-07-28', '2025-11-25']),
+      capabilities: { tools: {} },
+      _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'agent-threads' } },
+    });
+    // The legacy handshake keeps working for OpenCode and for clients that fall back.
+    const init = await handleHostToolsRpc({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2025-11-25' } }, [], context('default'));
+    expect(init?.result).toMatchObject({ protocolVersion: '2025-11-25' });
+  });
+
   it('never answers notifications and rejects unknown methods', async () => {
     expect(await handleHostToolsRpc({ jsonrpc: '2.0', method: 'notifications/initialized' }, [], context('default'))).toBeNull();
     expect((await handleHostToolsRpc({ jsonrpc: '2.0', id: 3, method: 'resources/list' }, [], context('default')))?.error?.code).toBe(-32601);

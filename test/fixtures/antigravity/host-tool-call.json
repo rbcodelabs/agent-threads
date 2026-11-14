@@ -1,0 +1,133 @@
+{
+  "note": "Recorded from agy 1.1.13 calling a tool served by the loopback bridge (server/discover then initialize fallback not shown)",
+  "permissionRequest": {
+    "jsonrpc": "2.0",
+    "method": "session/request_permission",
+    "params": {
+      "sessionId": "SESSION-ID",
+      "toolCall": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call_1306223850604422545",
+        "name": "mcp_agent-threads_host_echo",
+        "args": {
+          "text": "banana-42",
+          "toolSummary": "Echo text via MCP tool"
+        },
+        "status": "pending",
+        "kind": "other",
+        "title": "Run mcp_agent-threads_host_echo",
+        "rawInput": {
+          "text": "banana-42",
+          "toolSummary": "Echo text via MCP tool"
+        }
+      },
+      "options": [
+        {
+          "optionId": "allow",
+          "name": "Allow",
+          "kind": "allow_once"
+        },
+        {
+          "optionId": "deny",
+          "name": "Deny",
+          "kind": "reject_once"
+        }
+      ]
+    },
+    "id": "1"
+  },
+  "updates": [
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_1306223850604422545",
+          "name": "mcp_agent-threads_host_echo",
+          "args": {
+            "text": "banana-42",
+            "toolSummary": "Echo text via MCP tool"
+          },
+          "status": "in_progress",
+          "kind": "other",
+          "title": "Run mcp_agent-threads_host_echo",
+          "rawInput": {
+            "text": "banana-42",
+            "toolSummary": "Echo text via MCP tool"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_1306223850604422545",
+          "name": "mcp_agent-threads_host_echo",
+          "args": {
+            "text": "banana-42",
+            "toolSummary": "Echo text via MCP tool"
+          },
+          "status": "pending",
+          "kind": "other",
+          "title": "Run mcp_agent-threads_host_echo",
+          "rawInput": {
+            "text": "banana-42",
+            "toolSummary": "Echo text via MCP tool"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_1306223850604422545",
+          "name": "mcp_agent-threads_host_echo",
+          "args": {
+            "text": "banana-42",
+            "toolSummary": "Echo text via MCP tool"
+          },
+          "status": "in_progress",
+          "kind": "other",
+          "title": "Run mcp_agent-threads_host_echo",
+          "rawInput": {
+            "text": "banana-42",
+            "toolSummary": "Echo text via MCP tool"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_1306223850604422545",
+          "name": "mcp_agent-threads_host_echo",
+          "args": {
+            "text": "banana-42",
+            "toolSummary": "Echo text via MCP tool"
+          },
+          "status": "completed",
+          "kind": "other",
+          "title": "Run mcp_agent-threads_host_echo",
+          "rawInput": {
+            "text": "banana-42",
+            "toolSummary": "Echo text via MCP tool"
+          }
+        }
+      }
+    }
+  ]
+}

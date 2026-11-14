@@ -1,5 +1,5 @@
 /**
- * The agent harnesses the daemon can host (claude, codex, opencode): which ones an operator enabled, where each
+ * The agent harnesses the daemon can host (claude, codex, opencode, antigravity): which ones an operator enabled, where each
  * one's CLI lives, which credential it will use, and what each supports (advertised in `welcome.capabilities`).
  *
  * The scripted `fake` harness is not listed here: it is a test stand-in chosen with `config.harness`, never
@@ -9,7 +9,7 @@ import { accessSync, constants, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
-export const REAL_HARNESSES = ['claude', 'codex', 'opencode'] as const;
+export const REAL_HARNESSES = ['claude', 'codex', 'opencode', 'antigravity'] as const;
 export type RealHarness = (typeof REAL_HARNESSES)[number];
 
 export const isRealHarness = (v: unknown): v is RealHarness => typeof v === 'string' && (REAL_HARNESSES as readonly string[]).includes(v);
@@ -19,6 +19,7 @@ export const HARNESS_BINARY: Record<RealHarness, { exe: string; envVar: string; 
   claude: { exe: 'claude', envVar: 'AGENT_THREADS_CLAUDE_BINARY', flag: '--claude-binary', configKey: 'claudeBinaryPath', installHint: 'install Claude Code for the daemon user' },
   codex: { exe: 'codex', envVar: 'AGENT_THREADS_CODEX_BINARY', flag: '--codex-binary', configKey: 'codexBinaryPath', installHint: 'install Codex for the daemon user (npm i -g @openai/codex)' },
   opencode: { exe: 'opencode', envVar: 'AGENT_THREADS_OPENCODE_BINARY', flag: '--opencode-binary', configKey: 'opencodeBinaryPath', installHint: 'install OpenCode for the daemon user (npm i -g opencode-ai)' },
+  antigravity: { exe: 'agy', envVar: 'AGENT_THREADS_ANTIGRAVITY_BINARY', flag: '--antigravity-binary', configKey: 'antigravityBinaryPath', installHint: 'install the Antigravity CLI (agy) for the daemon user and sign in once with it' },
 };
 
 /** Where an operator's CLI usually lives, after PATH. */
@@ -58,6 +59,12 @@ const readable = (p: string): boolean => {
  * inherit the daemon's environment and HOME, so a login made once as the daemon user is reused.
  */
 export function describeHarnessCredential(harness: Exclude<RealHarness, 'claude'>, env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
+  if (harness === 'antigravity') {
+    // OAuth credentials live under ~/.gemini/antigravity-cli. A headless host cannot run the browser sign-in, so the
+    // API-key route (`authenticate` with `gemini-api-key`) is Phase 3 and not wired yet; this only reports what exists.
+    const agyHome = join(env.HOME || home, '.gemini', 'antigravity-cli');
+    return readable(agyHome) ? `existing Antigravity login (${agyHome})` : 'none found: run `agy` once as the daemon user to sign in (the daemon cannot complete a browser sign-in itself)';
+  }
   if (harness === 'codex') {
     if (env.CODEX_API_KEY) return 'CODEX_API_KEY (environment)';
     if (env.OPENAI_API_KEY) return 'OPENAI_API_KEY (environment)';
@@ -81,7 +88,7 @@ export function readClaudeCredentialFile(dir: string | undefined): string | unde
 
 /**
  * What each harness supports on a daemon session, checked against its adapter (`src/CodexSession.ts`,
- * `src/OpenCodeSession.ts`, `src/ThreadSession.ts`). No local harness implements the optional child-agent controls
+ * `src/OpenCodeSession.ts`, `src/AntigravitySession.ts`, `src/ThreadSession.ts`). No local harness implements the optional child-agent controls
  * (`sendAgentMessage` / `interruptAgent`), so there is no `child_agents` feature. Advertised as `harness.<kind>.<feature>`:
  *   set_model, set_permission_mode  live switching (`session.setModel` / `session.setPermissionMode`)
  *   usage, context_usage            usage snapshot and context-window breakdown
@@ -96,6 +103,9 @@ export const HARNESS_FEATURES: Record<RealHarness, readonly string[]> = {
   claude: ['set_model', 'set_permission_mode', 'usage', 'context_usage', 'mcp_status', 'host_tools', 'session_options'],
   codex: ['set_model', 'set_permission_mode', 'usage', 'context_usage', 'host_tools'],
   opencode: ['set_model', 'set_permission_mode', 'usage', 'context_usage', 'host_tools'],
+  // Host tools ride the same loopback MCP bridge as OpenCode; whether agy completes its handshake is verified in the
+  // adapter's tests and recorded in the PR, and the feature is dropped here if it cannot.
+  antigravity: ['set_model', 'set_permission_mode', 'usage', 'context_usage', 'host_tools'],
 };
 
 export function harnessCapabilities(harnesses: readonly RealHarness[]): string[] {

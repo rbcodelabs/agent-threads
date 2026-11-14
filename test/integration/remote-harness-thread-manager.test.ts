@@ -39,7 +39,7 @@ async function until(pred: () => boolean, what: string, ms = 8000): Promise<void
 const recipe = (td: TestDaemon, id: string) => JSON.parse(readFileSync(join(td.dataDir, 'sessions', `${id}.json`), 'utf8')) as { spec: Record<string, unknown>; nativeSessionId?: string };
 
 describe('createRemoteThread carries the harness', () => {
-  it.each(['claude', 'codex', 'opencode'] as const)('%s', async (harness) => {
+  it.each(['claude', 'codex', 'opencode', 'antigravity'] as const)('%s', async (harness) => {
     const { td, manager } = await setup({ codexEffort: 'high', defaultModel: 'sonnet' });
     const thread = manager.createRemoteThread('t', { daemonId: 'box', remoteCwd: '/srv/workspaces/x', clientId: 'c', agentHarness: harness });
     expect(thread.agentHarness).toBe(harness);
@@ -50,7 +50,17 @@ describe('createRemoteThread carries the harness', () => {
     expect(spec.harness).toBe(harness);
     // Claude's default model alias means nothing to the others; Codex's configured effort is the one option it takes.
     if (harness === 'claude') expect(spec.model).toBe('sonnet'); else expect(spec.model).toBeUndefined();
-    if (harness === 'codex') expect(spec.sessionOptions).toEqual({ effort: 'high' }); else if (harness === 'opencode') expect(spec.sessionOptions).toBeUndefined();
+    if (harness === 'codex') expect(spec.sessionOptions).toEqual({ effort: 'high' }); else if (harness !== 'claude') expect(spec.sessionOptions).toBeUndefined();
+    manager.destroy();
+  });
+
+  it.each([['claude', 'claude'], ['codex', 'codex'], ['opencode', 'opencode'], ['antigravity', 'antigravity']] as const)('builds the %s option block and no other for a remote thread', async (harness, block) => {
+    const { manager } = await setup();
+    const thread = manager.createRemoteThread('t', { daemonId: 'box', remoteCwd: '/srv/w', clientId: 'c', agentHarness: harness });
+    const options = (manager as unknown as { buildRemoteSessionOptions(id: string, t: unknown, m: undefined, latest: boolean): Record<string, unknown> }).buildRemoteSessionOptions(thread.id, thread, undefined, false);
+    for (const other of ['codex', 'opencode', 'antigravity']) {
+      if (other === block) expect(options[other]).toBeDefined(); else expect(options[other]).toBeUndefined();
+    }
     manager.destroy();
   });
 
@@ -82,7 +92,7 @@ describe('capability gating in ThreadManager', () => {
     manager.remoteDaemons = resolver(caps);
     return manager;
   };
-  const create = (m: ThreadManager, agentHarness: 'claude' | 'codex' | 'opencode') =>
+  const create = (m: ThreadManager, agentHarness: 'claude' | 'codex' | 'opencode' | 'antigravity') =>
     m.createRemoteThread('t', { daemonId: 'box', remoteCwd: '/srv/w', clientId: 'c', agentHarness });
 
   it('refuses a harness the daemon does not offer, naming the daemon and what it offers', () => {

@@ -1,6 +1,6 @@
 # Agent Threads
 
-**Run many Claude Code, Codex and OpenCode agents in parallel, right inside your notes. A free, open-source plugin for Geode and Obsidian.**
+**Run many Claude Code, Codex, OpenCode and Antigravity agents in parallel, right inside your notes. A free, open-source plugin for Geode and Obsidian.**
 Every thread is its own agent session with streaming replies, visible tool calls and inline permission prompts, and everything stays local in your vault.
 
 [![Latest release](https://img.shields.io/github/v/release/rbcodelabs/agent-threads?label=release)](https://github.com/rbcodelabs/agent-threads/releases)
@@ -13,7 +13,7 @@ Every thread is its own agent session with streaming replies, visible tool calls
 ## Why Agent Threads
 
 - **Parallel by default.** Run as many sessions as you like at once. The Agents List shows what each thread is doing and whether it needs you.
-- **Bring your own agent.** Claude Code, OpenAI Codex or OpenCode drive a thread, picked per install in Settings.
+- **Bring your own agent.** Claude Code, OpenAI Codex, OpenCode or Google Antigravity drive a thread, picked per install in Settings.
 - **Agent Board.** See every thread as a card, grouped by status or by project, from idle to running to waiting to done.
 - **Sub-agents you can follow.** A pill in the composer counts background agents. Open the tree and read any agent's activity timeline.
 - **You stay in control.** Claude and Codex ask before they write files or run commands, inline in the conversation. Plan Mode lets you approve a plan first.
@@ -80,6 +80,7 @@ The complete list is in the [feature reference](docs/features.md).
   - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (auto-detected in the usual install locations; Amazon Bedrock is supported).
   - [OpenAI Codex CLI](https://developers.openai.com/codex/cli/): select **OpenAI Codex** in Settings → Agent → Agent harness.
   - [OpenCode](https://opencode.ai) (desktop only), with a provider configured: select **OpenCode** in the same setting.
+  - [Antigravity CLI](https://antigravity.google) (`agy`, desktop only), signed in once: select **Antigravity** in the same setting.
 
 Sign-in, Bedrock and per-harness details are in [Prerequisites and harness setup](docs/prerequisites.md).
 

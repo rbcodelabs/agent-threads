@@ -166,7 +166,7 @@ test.describe('existing thread: Run on is its own popover row', () => {
       await page.locator('[data-ct-key="row:harness"]').click();
       // The Harness level no longer carries a "Run on" group.
       await expect(popover(page).locator('.ct-sp-group-title')).toHaveCount(0);
-      await expect(popover(page).getByRole('menuitemradio')).toHaveCount(3);
+      await expect(popover(page).getByRole('menuitemradio')).toHaveCount(4);
       await popover(page).locator('.ct-sp-back').click();
 
       await page.locator('[data-ct-key="row:runon"]').click();

@@ -16,6 +16,7 @@ import { PolicyError, isReadOnlyDenylist, validateSpec, filterClientEnv } from '
 import { CodexSession } from '../../src/CodexSession';
 import { openCodePermissionConfig } from '../../src/OpenCodeSession';
 import { OpenCodeSession } from '../../src/OpenCodeSession';
+import { AntigravitySession } from '../../src/AntigravitySession';
 import { ThreadSession } from '../../src/ThreadSession';
 import type { SessionCallbacks } from '../../src/ClaudeSession';
 import type { RemoteSessionSpec } from '../../src/protocol';
@@ -73,20 +74,21 @@ describe('binary discovery per harness', () => {
 
   it('createRealHarness throws the clear error instead of constructing a session without a CLI', () => {
     const spec = (harness: string) => ({ harness, cwd: ws, permissionMode: 'default', extraEnvRaw: '' }) as RemoteSessionSpec;
-    for (const [h, re] of [['claude', /claude CLI not found/], ['codex', /codex CLI not found/], ['opencode', /opencode CLI not found/]] as const) {
-      expect(() => createRealHarness(spec(h), { claude: '/nonexistent/claude', codex: '/nonexistent/codex', opencode: '/nonexistent/opencode' }, { PATH: '' })).toThrow(re);
+    for (const [h, re] of [['claude', /claude CLI not found/], ['codex', /codex CLI not found/], ['opencode', /opencode CLI not found/], ['antigravity', /agy CLI not found.*antigravityBinaryPath.*AGENT_THREADS_ANTIGRAVITY_BINARY/]] as const) {
+      expect(() => createRealHarness(spec(h), { claude: '/nonexistent/claude', codex: '/nonexistent/codex', opencode: '/nonexistent/opencode', antigravity: '/nonexistent/agy' }, { PATH: '' })).toThrow(re);
     }
     expect(() => createRealHarness(spec('fake'), {}, { PATH: '' })).toThrow(/cannot be started/);
   });
 
   it('createRealHarness builds the adapter that matches the spec', () => {
     const bin = join(root, 'bin-d');
-    const binaries = Object.fromEntries(['claude', 'codex', 'opencode'].map((n) => [n, exe(bin, n)]));
+    const binaries = Object.fromEntries(['claude', 'codex', 'opencode', 'antigravity'].map((n) => [n, exe(bin, n === 'antigravity' ? 'agy' : n)]));
     const env = { PATH: '' };
     const spec = (harness: string) => ({ harness, cwd: ws, permissionMode: 'default', extraEnvRaw: '' }) as RemoteSessionSpec;
     expect(createRealHarness(spec('claude'), binaries, env)).toBeInstanceOf(ThreadSession);
     expect(createRealHarness(spec('codex'), binaries, env)).toBeInstanceOf(CodexSession);
     expect(createRealHarness(spec('opencode'), binaries, env)).toBeInstanceOf(OpenCodeSession);
+    expect(createRealHarness(spec('antigravity'), binaries, env)).toBeInstanceOf(AntigravitySession);
   });
 });
 
@@ -120,7 +122,7 @@ describe('credential discovery for the startup log', () => {
 
 describe('capabilities', () => {
   it('each harness advertises its own feature set', () => {
-    const caps = harnessCapabilities(['claude', 'codex', 'opencode']);
+    const caps = harnessCapabilities(['claude', 'codex', 'opencode', 'antigravity']);
     for (const [h, features] of Object.entries(HARNESS_FEATURES)) {
       expect(caps).toContain(`harness.${h}`);
       for (const f of features) expect(caps).toContain(`harness.${h}.${f}`);
@@ -156,8 +158,8 @@ describe('capabilities', () => {
 describe('config: harness selection', () => {
   const cfg = (flags: object = {}, env: NodeJS.ProcessEnv = {}) => resolveConfig({ flags: { dataDir: join(root, 'cfg'), workspaces: [ws], ...flags }, env });
 
-  it('defaults to all three harnesses with claude as the default', () => {
-    expect(cfg()).toMatchObject({ harness: 'claude', harnesses: ['claude', 'codex', 'opencode'] });
+  it('defaults to all four harnesses with claude as the default', () => {
+    expect(cfg()).toMatchObject({ harness: 'claude', harnesses: ['claude', 'codex', 'opencode', 'antigravity'] });
   });
   it('an explicit single harness restricts the daemon to it (the old meaning of AGENT_THREADS_HARNESS)', () => {
     expect(cfg({}, { AGENT_THREADS_HARNESS: 'claude' })).toMatchObject({ harness: 'claude', harnesses: ['claude'] });
@@ -205,7 +207,7 @@ describe('policy: harness admission', () => {
   });
   it('the read-only denylist is the same for every harness and recognised as such', () => {
     for (const harness of ['claude', 'codex', 'opencode'] as const) {
-      const out = validateSpec(spec({ harness }), { workspaces: [], readOnlyWorkspaces: [ws], allowBypass: false, harnesses: ['claude', 'codex', 'opencode'] });
+      const out = validateSpec(spec({ harness }), { workspaces: [], readOnlyWorkspaces: [ws], allowBypass: false, harnesses: ['claude', 'codex', 'opencode', 'antigravity'] });
       expect(isReadOnlyDenylist(out.disallowedTools)).toBe(true);
     }
     expect(isReadOnlyDenylist(['Edit'])).toBe(false);

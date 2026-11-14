@@ -68,7 +68,7 @@ run options:
   --cwd <dir>            folder ON THE DAEMON MACHINE (default: the shell's folder for a local daemon, else the daemon's default workspace)
   --permission-mode <m>  default | acceptEdits | plan | dontAsk | auto | bypassPermissions (default: default; dontAsk with --unattended)
   --model <m>            model for the session
-  --harness <kind>       claude (default), codex or opencode; the daemon must have it enabled
+  --harness <kind>       claude (default), codex, opencode or antigravity; the daemon must have it enabled
   --thread <id>          continue an existing thread instead of starting a new one
   --detach               send the prompt, print the thread id, exit; the turn keeps running (attach to watch it)
   --unattended           nobody to answer: dontAsk mode DENIES tools that are not pre-approved; a request that
@@ -92,11 +92,12 @@ serve options:
   --max-connections <n>        sockets accepted at once (default 64)
   --max-live-sessions <n>      sessions with a live claude process at once (default 8)
   --request-timeout-minutes <n>  cancel a permission/question nobody answers after this long (default 60, 0 = never)
-  --harness <kind>       default harness: claude, codex or opencode (env AGENT_THREADS_HARNESS). Alone it also restricts the daemon to that one
+  --harness <kind>       default harness: claude, codex, opencode or antigravity (env AGENT_THREADS_HARNESS). Alone it also restricts the daemon to that one
   --harnesses <a,b,..>   harnesses a client may request (env AGENT_THREADS_HARNESSES, comma separated; config.json harnesses; default: all three)
   --claude-binary <path> path to the claude CLI (env AGENT_THREADS_CLAUDE_BINARY; default: PATH, ~/.npm-global/bin, ~/.local/bin)
   --codex-binary <path>  path to the codex CLI (env AGENT_THREADS_CODEX_BINARY; same default dirs)
   --opencode-binary <path>  path to the opencode CLI (env AGENT_THREADS_OPENCODE_BINARY; same default dirs)
+  --antigravity-binary <path>  path to the agy (Antigravity) CLI (env AGENT_THREADS_ANTIGRAVITY_BINARY; same default dirs)
   --auto-update          opt in: replace this daemon's own bundle with the newest stable release and restart when idle
                          (env AGENT_THREADS_AUTO_UPDATE=1, config.json autoUpdate). Only on a systemd install it can update safely;
                          never in a container. See docs/remote-daemon.md, "Automatic updates"
@@ -315,6 +316,8 @@ export async function runCli(argv: string[], io: Io = consoleIo, runtime?: Parti
     if (codexBinary) flags.codexBinaryPath = codexBinary;
     const opencodeBinary = one(p, 'opencode-binary');
     if (opencodeBinary) flags.opencodeBinaryPath = opencodeBinary;
+    const antigravityBinary = one(p, 'antigravity-binary');
+    if (antigravityBinary) flags.antigravityBinaryPath = antigravityBinary;
 
     let config;
     try { config = resolveConfig({ flags }); } catch (e) { io.err((e as Error).message); return 2; }
@@ -449,6 +452,7 @@ async function runClientCommand(cmd: string, p: Parsed, io: Io, raw: RawIo, rt: 
         ...(one(p, 'claude-binary') ? { claudeBinaryPath: one(p, 'claude-binary') } : {}),
         ...(one(p, 'codex-binary') ? { codexBinaryPath: one(p, 'codex-binary') } : {}),
         ...(one(p, 'opencode-binary') ? { opencodeBinaryPath: one(p, 'opencode-binary') } : {}),
+        ...(one(p, 'antigravity-binary') ? { antigravityBinaryPath: one(p, 'antigravity-binary') } : {}),
       }, probes);
       const results = await runChecks(probes, target);
       const code = doctorExitCode(results, p.bools.has('strict'));

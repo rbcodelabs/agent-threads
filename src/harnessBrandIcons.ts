@@ -6,6 +6,7 @@ export const HARNESS_BRAND_ICONS: Record<AgentHarness, string> = {
   claude: 'claude-spark',
   codex: 'openai-blossom',
   opencode: 'opencode-mark',
+  antigravity: 'antigravity-mark',
 };
 
 // Official Claude Spark supplied in Anthropic's press kit. Scale converts its
@@ -26,3 +27,7 @@ addIcon('openai-blossom', `<g transform="scale(2.43902439)"><path d="M37.5324 16
 // glyph bounds (x 128–384, y 96–416 of a 512 × 512 viewbox) to fill
 // Obsidian's 100 × 100 addIcon() wrapper, centred like the other marks.
 addIcon('opencode-mark', `<g transform="translate(-30 -30) scale(0.3125)"><path d="M320 224V352H192V224H320Z" fill="currentColor" opacity="0.45"/><path fill-rule="evenodd" clip-rule="evenodd" d="M384 416H128V96H384V416ZM320 160H192V352H320V160Z" fill="currentColor"/></g>`);
+
+// An original, simple mark (not Google's logo): an open arch with a mote floating above it, nodding to "anti-gravity".
+// Monochrome via currentColor like the other marks, drawn to fill Obsidian's 100 × 100 addIcon() wrapper.
+addIcon('antigravity-mark', `<g fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 86 L50 36 L82 86"/><path d="M33 86 H67" opacity="0.45"/></g><circle cx="50" cy="16" r="7" fill="currentColor"/>`);

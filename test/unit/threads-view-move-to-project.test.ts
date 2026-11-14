@@ -49,7 +49,8 @@ function makeView(opts: {
     },
     plugin: {
       settings: { orchestratorThreadId: opts.portfolioOrchestratorThreadId },
-      discoveredModelsByHarness: { claude: [], codex: [], opencode: [] },
+      discoveredModelsByHarness: { claude: [], codex: [], opencode: [], antigravity: [] },
+      localHarnessUnavailableReason: () => undefined,
       getClaudeCliProblems: () => [],
       saveSettings,
     },
