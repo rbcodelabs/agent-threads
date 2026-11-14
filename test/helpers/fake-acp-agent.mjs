@@ -63,9 +63,72 @@ function requestPermission(toolCall) {
   return new Promise((resolve) => pendingClientReplies.set(id, resolve));
 }
 
+function hasPriorPromptInLog(sessionId) {
+  if (!log || !fs.existsSync(log)) return false;
+  try {
+    return fs.readFileSync(log, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .some((line) => {
+        const entry = JSON.parse(line);
+        return entry?.method === 'session/prompt' && entry?.params?.sessionId === sessionId;
+      });
+  } catch {
+    return false;
+  }
+}
+
+function appendBrainSteps(brainDir, conversationId, steps) {
+  const dir = path.join(brainDir, conversationId, '.system_generated', 'logs');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'transcript_full.jsonl');
+  const payload = steps.map((step) => JSON.stringify(step)).join('\n') + '\n';
+  fs.appendFileSync(file, payload, 'utf8');
+}
+
 async function runPrompt(sessionId, text) {
   update(sessionId, { sessionUpdate: 'user_message_chunk', content: { type: 'text', text } });
   update(sessionId, { sessionUpdate: 'usage_update', used: 100, size: 1048576 });
+  if (text.includes('SUBAGENT')) {
+    const subTool = {
+      toolCallId: 'sub-call-1',
+      name: 'invoke_subagent',
+      kind: 'other',
+      title: 'Invoke subagent',
+      rawInput: { TypeName: 'research', Role: 'Auth Researcher', Prompt: 'Inspect auth flow', Model: 'flash' },
+    };
+    update(sessionId, { sessionUpdate: 'tool_call', ...subTool, status: 'in_progress' });
+    if (text.includes('SUBAGENT_BRAIN') && process.env.FAKE_ACP_BRAIN_DIR) {
+      appendBrainSteps(process.env.FAKE_ACP_BRAIN_DIR, sessionId, [
+        { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: text },
+        {
+          step_index: 1,
+          source: 'MODEL',
+          type: 'PLANNER_RESPONSE',
+          status: 'DONE',
+          content: '',
+          tool_calls: [{ id: 'sub-call-1', name: 'invoke_subagent', args: subTool.rawInput }],
+        },
+        {
+          step_index: 2,
+          source: 'MODEL',
+          type: 'GENERIC',
+          status: 'DONE',
+          content: 'Created the following subagent:\n{\n  "conversationId": "child-sub-1",\n  "logAbsoluteUri": "file:///tmp/transcript.jsonl"\n}',
+        },
+        {
+          step_index: 3,
+          source: 'MODEL',
+          type: 'PLANNER_RESPONSE',
+          status: 'DONE',
+          content: 'Waiting on Auth Researcher.',
+        },
+      ]);
+    }
+    update(sessionId, { sessionUpdate: 'tool_call_update', ...subTool, status: 'completed' });
+    update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Waiting on Auth Researcher.' } });
+    return stream.find((m) => m.result?.stopReason).result;
+  }
   if (text.includes('CRASH')) {
     update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'about to crash' } });
     await sleep(20);
@@ -141,7 +204,7 @@ async function handle(message) {
     case 'session/load': {
       if (process.env.FAKE_ACP_FAIL_LOAD) { write({ jsonrpc: '2.0', id, error: { code: -32602, message: 'session not found' } }); return; }
       currentSession = String(params.sessionId);
-      if (known.has(currentSession)) {
+      if (known.has(currentSession) || hasPriorPromptInLog(currentSession)) {
         // Real behaviour: history replays BEFORE the load response arrives.
         for (const frame of loadReplay.replay) update(currentSession, frame.params.update);
         ok(withSession(loadReplay.response.result, currentSession));

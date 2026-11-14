@@ -2,23 +2,31 @@
  * Antigravity harness adapter (Google's Antigravity CLI, `agy acp`).
  *
  * Each session launches its own `agy acp` child and drives it over the Agent Client Protocol (see AcpClient):
- * NDJSON JSON-RPC on stdio, protocol version 1. Verified against the real CLI 1.1.13 (ACP server 1.5.8); frames
+ * NDJSON JSON-RPC on stdio, protocol version 1. Verified against the real CLI 1.1.13 (ACP server 1.5.8 / 1.5.9); frames
  * recorded from it live in test/fixtures/antigravity and drive the fake agent the unit tests use.
  *
- * What the recording showed, and what this adapter does about it:
+ * What the recording and binary inspection showed, and what this adapter does about it:
  * - Model catalog is dynamic (it differs between `agy models` and `session/new`): the menu comes from `session/new`,
  *   never a hard-coded list.
  * - Edits arrive as `tool_call` with `kind: edit` and `content: [{type: 'diff', path, oldText?, newText}]`. A
  *   permission request carries the same diff, so the approval card can show it before anything is written.
- * - Permissions are `session/request_permission` with `allow_once` / `reject_once` only. The adapter owns the
- *   decision (resolveAntigravityPermission) so the thread's permission mode and denylist behave as for other harnesses.
+ * - Permissions are `session/request_permission` with `allow_once` / `reject_once` only, and `agy acp` 1.5.8/1.5.9
+ *   forwards permission prompts ONLY for the parent session's active `session/prompt` turn — never for child subagents.
+ *   In `bypassPermissions` mode (when no edit/shell denylist applies), the adapter launches `agy acp
+ *   --dangerously-skip-permissions` (respawning and resuming via `session/load` when toggled mid-session) so both parent
+ *   and child subagents run unattended without 60s approval timeouts.
+ * - Subagent progress and reactive wakeups: `agy acp` omits child `conversationId`s and closes the ACP turn stream as
+ *   soon as `session/prompt` returns, before background subagents finish and wake the parent up. When `<brainDir>/<id>`
+ *   is present on disk, the adapter tails the parent and child JSONL transcripts to emit `onTaskStarted`,
+ *   `onTaskProgress`, `onTaskUpdated`, `onTaskNotification`, and post-ACP wakeup messages before closing the turn.
  * - `session/cancel` is a notification; the in-flight `session/prompt` then resolves `stopReason: cancelled`.
  * - `session/load` REPLAYS history as ordinary updates BEFORE its response, and a bad session id does not error (it
  *   quietly creates a fresh session under that id). So replay is swallowed, and "zero replayed history" is the only
  *   signal a resume failed; the thread's transcript is then prepended to the first prompt (`resumeFallbackHistory`).
  * - Mode/model switching: `session/set_mode {modeId}` and `session/set_model {modelId}` (recorded).
  *
- * Desktop only: the child process is spawned lazily by AcpClient, so importing this module is inert on mobile.
+ * Desktop only: the child process and filesystem brain reader are loaded lazily, so importing this module is inert on
+ * mobile.
  */
 import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
 import type { AgentHarness, ImageAttachment, ToolCallRecord } from './types';
@@ -34,11 +42,28 @@ import type {
 import { mergeUsageSnapshot, type UsageSnapshot, type UsageTokenTotals } from './Usage';
 import { AcpClient, type AcpClientOptions, type AcpLauncher } from './AcpClient';
 import { OPENCODE_HOST_TOOLS_SERVER, OpenCodeHostToolsBridge } from './OpenCodeHostTools';
+import {
+  BrainTranscriptReader,
+  describeSubagentSpawn,
+  extractSubagentSpawnMeta,
+  parseAntigravityBackgroundTask,
+  parseAntigravityCreatedSubagent,
+  parseAntigravityWakeupMessage,
+  resolveDefaultAntigravityBrainDir,
+  type AntigravityBrainOptions,
+  type BrainTranscriptStep,
+  type PendingSubagentSpawnMeta,
+  type TrackedSubagent,
+} from './antigravityBrain';
+
+export type { AntigravityBrainOptions } from './antigravityBrain';
 
 /** The ACP server release this adapter was verified against (`agentInfo.version` of `agy acp`). */
 export const ANTIGRAVITY_VERIFIED_VERSION = '1.5.8';
 const HARNESS: AgentHarness = 'antigravity';
 const ACP_PROTOCOL_VERSION = 1;
+const DEFAULT_BRAIN_POLL_MS = 250;
+const DEFAULT_WAKEUP_GRACE_MS = 2500;
 export const ANTIGRAVITY_INSTALL_HINT = 'Install the Antigravity CLI (agy) and sign in once with it, or set its path under Settings, Antigravity binary path.';
 
 // ── Pure mapping helpers (unit tested) ─────────────────────────────────────
@@ -86,12 +111,46 @@ export function antigravityModeForPermission(mode: HarnessPermissionMode, disall
   }
 }
 
-/** Antigravity tool names/kinds mapped to the plugin's display names (drives tool icons). */
+/**
+ * Whether `agy acp` should launch with `--dangerously-skip-permissions`.
+ *
+ * `agy acp` 1.5.8/1.5.9 does not forward subagent permission prompts over ACP, and ACP `auto` mode still prompts on
+ * external paths and unsandboxed commands (causing 60s subagent timeouts). Passing `--dangerously-skip-permissions`
+ * enables `always-proceed` + non-workspace access across parent and child subagents. When a per-thread denylist blocks
+ * edits or shell execution, this stays `false` so `agy` still asks `ACPServer` and `handlePermissionRequest` refuses.
+ */
+export function antigravityShouldSkipPermissions(mode: HarnessPermissionMode, disallowedTools?: readonly string[]): boolean {
+  return mode === 'bypassPermissions' && !isEditDenied(disallowedTools) && !isShellDenied(disallowedTools);
+}
+
+/** CLI argv passed to `agy` for a given permission mode and tool denylist. */
+export function antigravityCliArgs(mode: HarnessPermissionMode, disallowedTools?: readonly string[]): string[] {
+  return antigravityShouldSkipPermissions(mode, disallowedTools)
+    ? ['acp', '--dangerously-skip-permissions']
+    : ['acp'];
+}
+
+/** Antigravity tool names/kinds mapped to the plugin's display names (drives tool icons in `toolNameUtils.ts`). */
 const KIND_TOOL_NAMES: Record<string, string> = {
   execute: 'Bash', read: 'Read', search: 'Grep', fetch: 'WebFetch', think: 'Think', delete: 'Edit', move: 'Edit',
 };
 const NAME_TOOL_NAMES: Record<string, string> = {
-  write_file: 'Write', edit_file: 'Edit', run_command: 'Bash',
+  write_file: 'Write',
+  edit_file: 'Edit',
+  read_file: 'Read',
+  view_file_outline: 'Read',
+  view_code_item: 'Read',
+  grep_search: 'Grep',
+  find_by_name: 'Glob',
+  list_dir: 'Glob',
+  run_command: 'Bash',
+  invoke_subagent: 'Agent',
+  run_workflow: 'Workflow',
+  search_web: 'WebSearch',
+  ask_question: 'AskUserQuestion',
+  schedule: 'ScheduleWakeup',
+  list_resources: 'ListMcpResources',
+  read_resource: 'ReadMcpResource',
 };
 
 export function antigravityToolName(name: string | undefined, kind: string | undefined): string {
@@ -116,24 +175,81 @@ export interface AcpToolCall {
   content?: Array<Record<string, any>>;
 }
 
+function firstSummaryLine(value: unknown, maxChars = 200): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const line = value
+    .split('\n')
+    .map((part) => part.trim())
+    .find(Boolean);
+  return line ? line.slice(0, maxChars) : undefined;
+}
+
 /** One-line card summary: the command for a shell call, the file for an edit, else the agent's own title. */
 export function antigravityToolSummary(tool: AcpToolCall): string {
   const input = tool.rawInput ?? tool.args ?? {};
   const command = input.CommandLine ?? input.command;
   // An MCP tool's title is "Run mcp_<server>_<tool>"; agy's own one-line description of the call reads better.
   if (tool.name?.startsWith('mcp_') && typeof input.toolSummary === 'string' && input.toolSummary.trim()) return input.toolSummary.trim();
-  if (tool.kind === 'execute' && typeof command === 'string' && command.trim()) return command.trim().split('\n')[0].slice(0, 200);
-  const file = tool.locations?.find((location) => typeof location.path === 'string' && location.path)?.path;
-  if (EDIT_KINDS.has(tool.kind ?? '') && file) return file;
+  if ((tool.kind === 'execute' || tool.name === 'run_command') && typeof command === 'string' && command.trim()) {
+    return command.trim().split('\n')[0].slice(0, 200);
+  }
+  switch (tool.name) {
+    case 'invoke_subagent':
+      return firstSummaryLine(input.Role) ?? firstSummaryLine(input.TypeName) ?? firstSummaryLine(input.Prompt) ?? 'Subagent';
+    case 'define_subagent': {
+      const name = firstSummaryLine(input.Name, 80);
+      return name ? `Define subagent: ${name}` : 'Define subagent';
+    }
+    case 'manage_subagents': {
+      const action = firstSummaryLine(input.Action, 40);
+      return action ? `Subagents: ${action}` : 'Manage subagents';
+    }
+    case 'send_message': {
+      const recipient = firstSummaryLine(input.Recipient, 48);
+      return recipient ? `Message to ${recipient}` : 'Send message';
+    }
+    case 'swarm': {
+      const action = firstSummaryLine(input.action, 40);
+      const name = firstSummaryLine(input.name, 60);
+      return action ? `Swarm: ${action}${name ? ` (${name})` : ''}` : 'Swarm';
+    }
+    case 'run_workflow':
+      return firstSummaryLine(input.Description) ?? firstSummaryLine(input.ScriptPath) ?? 'Run workflow';
+    case 'schedule':
+      return firstSummaryLine(input.Prompt) ?? firstSummaryLine(input.CronExpression) ?? 'Schedule';
+    case 'manage_task': {
+      const action = firstSummaryLine(input.Action, 40);
+      const taskId = firstSummaryLine(input.TaskId, 60);
+      return action ? `Task: ${action}${taskId ? ` (${taskId})` : ''}` : 'Manage task';
+    }
+    case 'search_web':
+      return firstSummaryLine(input.query) ?? 'Web search';
+    case 'ask_question': {
+      const firstQuestion = Array.isArray(input.questions) ? (input.questions[0] as Record<string, unknown> | undefined)?.question : undefined;
+      return firstSummaryLine(firstQuestion) ?? 'Ask user';
+    }
+    default:
+      break;
+  }
+  const file = tool.locations?.find((location) => typeof location.path === 'string' && location.path)?.path
+    ?? firstSummaryLine(input.Path ?? input.TargetFile ?? input.DirectoryPath);
+  if ((EDIT_KINDS.has(tool.kind ?? '') || tool.name === 'write_file' || tool.name === 'edit_file' || tool.name === 'read_file') && file) return file;
+  if (tool.name === 'grep_search') return firstSummaryLine(input.Query) ?? file ?? 'grep_search';
+  if (tool.name === 'find_by_name') return firstSummaryLine(input.Pattern ?? input.SearchDirectory) ?? file ?? 'find_by_name';
+  if (tool.name === 'list_dir' && file) return file;
   if (tool.title?.trim()) return tool.title.trim();
   return file ?? tool.name ?? 'tool';
 }
 
-/** Every file path a tool call touches, from its diffs first and its locations second. */
+/** Every file path a tool call touches, from its diffs first, locations second, and `Path` argument third. */
 export function antigravityEditedPaths(tool: AcpToolCall): string[] {
   const paths = new Set<string>();
   for (const item of tool.content ?? []) if (item?.type === 'diff' && typeof item.path === 'string' && item.path) paths.add(item.path);
   if (paths.size === 0) for (const location of tool.locations ?? []) if (typeof location.path === 'string' && location.path) paths.add(location.path);
+  if (paths.size === 0 && (tool.name === 'write_file' || tool.name === 'edit_file')) {
+    const rawPath = (tool.rawInput ?? tool.args)?.Path;
+    if (typeof rawPath === 'string' && rawPath.trim()) paths.add(rawPath.trim());
+  }
   return [...paths];
 }
 
@@ -237,10 +353,13 @@ export type AntigravityClientFactory = (options: AcpClientOptions) => AcpClient;
 export class AntigravitySession {
   private client: AcpClient | null = null;
   private bridge: OpenCodeHostToolsBridge | null = null;
+  private mcpServers: Array<Record<string, unknown>> = [];
+  private resolvedEnv: Record<string, string | undefined> = {};
   private options: HarnessSessionOptions | null = null;
   private sessionId: string | undefined;
   private closed = true;
   private _turnInFlight = false;
+  private acpPromptInFlight = false;
   private turnText = '';
   /** Tool calls made since the last finished message; they ride with the text that precedes them, as Claude's do. */
   private pendingTools: ToolCallRecord[] = [];
@@ -248,8 +367,11 @@ export class AntigravitySession {
   private resumeFallbackPending = false;
   private systemPromptPending = false;
   private loading = false;
-  /** True from `start()` until the handshake completes: failures then reject `start()` instead of calling onError. */
+  /** True from `start()` (or mid-session permission respawn) until the handshake completes. */
   private starting = false;
+  private spawnedWithSkipPermissions = false;
+  private restartForPermissionFlagPending = false;
+  private restartingClient: Promise<void> | null = null;
   private replayedHistory = 0;
   private announcedTools = new Map<string, AcpToolCall>();
   private settledTools = new Set<string>();
@@ -263,20 +385,33 @@ export class AntigravitySession {
   private turns = 0;
   private hostToolNames = new Set<string>();
 
+  // Brain transcript tracking for subagent progress and post-ACP parent reactive wakeups
+  private brainReader: BrainTranscriptReader | null = null;
+  private parentPendingSpawns: PendingSubagentSpawnMeta[] = [];
+  private subagents = new Map<string, TrackedSubagent>();
+  private activeBgTaskIds = new Set<string>();
+  private pendingWakeups = 0;
+  private wakeupDeadlineMs = 0;
+  private parentWakeupInFlight = false;
+  private wakeupPendingTools: Array<{ callId: string; tool: AcpToolCall; startedAt: number }> = [];
+
   /**
    * `launcher` replaces process spawning (tests); `startTimeoutMs` bounds the handshake and session setup, which on a
-   * cold start of the real agent exceeds 20s.
+   * cold start of the real agent exceeds 20s; `brainOptions` overrides the local brain log directory/cadence in tests.
    */
   constructor(
     private binaryPath: string,
     private launcher?: AcpLauncher,
     private startTimeoutMs?: number,
+    private brainOptions?: AntigravityBrainOptions,
   ) {}
 
   get turnInFlight(): boolean { return this._turnInFlight; }
   get cwd(): string | undefined { return this.options?.cwd; }
   get hasPendingPermission(): boolean { return this.pendingPermissions.size > 0; }
-  canIdleReap(): boolean { return !this._turnInFlight && !this.hasPendingPermission; }
+  canIdleReap(): boolean {
+    return !this._turnInFlight && !this.hasPendingPermission && !this.restartingClient && !this.hasRunningSubagents();
+  }
 
   async start(options: HarnessSessionOptions): Promise<void> {
     this.close();
@@ -297,7 +432,16 @@ export class AntigravitySession {
     this.sessionId = undefined;
     this.loading = false;
     this.starting = true;
+    this.spawnedWithSkipPermissions = false;
+    this.restartForPermissionFlagPending = false;
+    this.restartingClient = null;
     this.replayedHistory = 0;
+    this.subagents.clear();
+    this.activeBgTaskIds.clear();
+
+    this.resolvedEnv = { ...process.env, ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) };
+    const brainDir = this.brainOptions?.brainDir ?? resolveDefaultAntigravityBrainDir(this.resolvedEnv);
+    this.brainReader = new BrainTranscriptReader(brainDir, this.brainOptions?.pollIntervalMs ?? DEFAULT_BRAIN_POLL_MS);
 
     const mcpServers = antigravityMcpServers(options.antigravity?.mcpServers);
     const hostTools = options.antigravity?.dynamicTools ?? [];
@@ -316,46 +460,10 @@ export class AntigravitySession {
         headers: Object.entries(bridge.headers).map(([name, value]) => ({ name, value })),
       });
     }
-
-    const client = new AcpClient({
-      binaryPath: this.binaryPath,
-      args: ['acp'],
-      cwd: options.cwd,
-      env: { ...process.env, ...parseExtraEnv(options.extraEnvRaw), ...(options.secretEnv ?? {}) },
-      launcher: this.launcher,
-      startTimeoutMs: this.startTimeoutMs,
-      installHint: ANTIGRAVITY_INSTALL_HINT,
-      label: 'Antigravity',
-    });
-    this.client = client;
-    client.onNotification('session/update', (params) => this.handleSessionUpdate(params));
-    client.onRequest('session/request_permission', (params) => this.handlePermissionRequest(params));
-    client.onProtocolError((line, error) => console.warn('[ClaudeThreads] Unparseable Antigravity line:', line.slice(0, 200), error.message));
-    client.onClose((error) => this.handleClientClosed(client, error));
-    client.spawn();
+    this.mcpServers = mcpServers;
 
     try {
-      const init = await client.request('initialize', {
-        protocolVersion: ACP_PROTOCOL_VERSION,
-        // agy owns its tools and file access; nothing is delegated to the client.
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      }, client.startTimeoutMs);
-      options.callbacks.onRawEvent?.({ type: 'antigravity/initialize', agentInfo: init?.agentInfo, protocolVersion: init?.protocolVersion });
-      const canLoad = Boolean(init?.agentCapabilities?.loadSession ?? init?.agentCapabilities?.load_session);
-      let setup: any;
-      if (options.resume && canLoad) setup = await this.loadSession(client, options.resume, options.cwd, mcpServers);
-      if (!setup) {
-        if (options.resume) this.resumeFallbackPending = true;
-        setup = await client.request('session/new', { cwd: options.cwd, mcpServers }, client.startTimeoutMs);
-      }
-      const sessionId = typeof setup?.sessionId === 'string' ? setup.sessionId : undefined;
-      if (!sessionId) throw new Error(`Antigravity did not return a session id.${this.compatibilityHint()}`);
-      this.sessionId = sessionId;
-      this.currentMode = setup?.modes?.currentModeId;
-      if (!this.activeModel) this.activeModel = String(setup?.models?.currentModelId ?? '');
-      const models = antigravityModels(setup);
-      if (models.length > 0) options.callbacks.onCapabilitiesDiscovered?.(models as any, []);
-      await this.applyInitialSettings(setup);
+      await this.connectClient(options.resume, 'initial');
     } catch (error) {
       this.starting = false;
       this.close();
@@ -364,17 +472,82 @@ export class AntigravitySession {
     this.starting = false;
   }
 
-  /** `session/load`, swallowing replayed history. Returns undefined when the load fails or the id is unknown. */
-  private async loadSession(client: AcpClient, resume: string, cwd: string, mcpServers: Array<Record<string, unknown>>): Promise<any | undefined> {
+  /** Spawn an `AcpClient`, run `initialize`, and create or `session/load` the conversation. */
+  private async connectClient(resumeSessionId: string | undefined, phase: 'initial' | 'respawn'): Promise<void> {
+    const options = this.options;
+    if (!options) return;
+    const mode = options.permissionMode ?? 'default';
+    const skipPermissions = antigravityShouldSkipPermissions(mode, options.disallowedTools);
+    const client = new AcpClient({
+      binaryPath: this.binaryPath,
+      args: antigravityCliArgs(mode, options.disallowedTools),
+      cwd: options.cwd,
+      env: this.resolvedEnv,
+      launcher: this.launcher,
+      startTimeoutMs: this.startTimeoutMs,
+      installHint: ANTIGRAVITY_INSTALL_HINT,
+      label: 'Antigravity',
+    });
+    this.client = client;
+    this.spawnedWithSkipPermissions = skipPermissions;
+    client.onNotification('session/update', (params) => this.handleSessionUpdate(params));
+    client.onRequest('session/request_permission', (params) => this.handlePermissionRequest(params));
+    client.onProtocolError((line, error) => console.warn('[ClaudeThreads] Unparseable Antigravity line:', line.slice(0, 200), error.message));
+    client.onClose((error) => this.handleClientClosed(client, error));
+    client.spawn();
+
+    const init = await client.request('initialize', {
+      protocolVersion: ACP_PROTOCOL_VERSION,
+      // agy owns its tools and file access; nothing is delegated to the client.
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+    }, client.startTimeoutMs);
+    options.callbacks.onRawEvent?.({ type: 'antigravity/initialize', agentInfo: init?.agentInfo, protocolVersion: init?.protocolVersion });
+    const canLoad = Boolean(init?.agentCapabilities?.loadSession ?? init?.agentCapabilities?.load_session);
+    const expectHistory = phase === 'initial' ? Boolean(resumeSessionId) : (this.turns > 0 || Boolean(options.resume && !this.resumeFallbackPending));
+    let setup: any;
+    if (resumeSessionId && canLoad) {
+      setup = await this.loadSession(client, resumeSessionId, options.cwd, this.mcpServers, phase, expectHistory);
+    }
+    if (!setup) {
+      if (phase === 'initial' && resumeSessionId) this.resumeFallbackPending = true;
+      if (phase === 'respawn') this.systemPromptPending = Boolean(options.appendSystemPrompt);
+      setup = await client.request('session/new', { cwd: options.cwd, mcpServers: this.mcpServers }, client.startTimeoutMs);
+    }
+    const sessionId = typeof setup?.sessionId === 'string' ? setup.sessionId : undefined;
+    if (!sessionId) throw new Error(`Antigravity did not return a session id.${this.compatibilityHint()}`);
+    this.sessionId = sessionId;
+    this.currentMode = setup?.modes?.currentModeId;
+    if (phase === 'initial') {
+      if (!this.activeModel) this.activeModel = String(setup?.models?.currentModelId ?? '');
+      const models = antigravityModels(setup);
+      if (models.length > 0) options.callbacks.onCapabilitiesDiscovered?.(models as any, []);
+    }
+    await this.applyInitialSettings(setup);
+  }
+
+  /** `session/load`, swallowing replayed history. Returns undefined when the load fails. */
+  private async loadSession(
+    client: AcpClient,
+    resume: string,
+    cwd: string,
+    mcpServers: Array<Record<string, unknown>>,
+    phase: 'initial' | 'respawn',
+    expectHistory: boolean,
+  ): Promise<any | undefined> {
     this.loading = true;
     this.replayedHistory = 0;
     this.sessionId = resume; // so replayed updates are recognised as ours and dropped
     try {
       const response = await client.request('session/load', { sessionId: resume, cwd, mcpServers }, client.startTimeoutMs);
-      // A bad id "succeeds" as a fresh session. No replayed history therefore means the resume did not find anything.
-      if (this.replayedHistory === 0) {
-        this.resumeFallbackPending = true;
-        console.warn('[ClaudeThreads] Antigravity replayed no history for the saved session; the transcript will be sent with the next prompt.');
+      // A bad id "succeeds" as a fresh session. No replayed history when history was expected means the resume missed.
+      if (this.replayedHistory === 0 && expectHistory) {
+        if (phase === 'initial') {
+          this.resumeFallbackPending = true;
+          console.warn('[ClaudeThreads] Antigravity replayed no history for the saved session; the transcript will be sent with the next prompt.');
+        } else {
+          // A mid-session respawn whose session vanished on disk starts clean under the same id; re-arm system prompt.
+          this.systemPromptPending = Boolean(this.options?.appendSystemPrompt);
+        }
       }
       return { ...response, sessionId: typeof response?.sessionId === 'string' ? response.sessionId : resume };
     } catch (error) {
@@ -386,7 +559,7 @@ export class AntigravitySession {
     }
   }
 
-  /** Put a fresh session in the thread's permission mode and model, when they differ from agy's defaults. */
+  /** Put a session in the thread's permission mode and model, when they differ from agy's defaults. */
   private async applyInitialSettings(setup: any): Promise<void> {
     const options = this.options;
     if (!options || !this.sessionId) return;
@@ -426,13 +599,68 @@ export class AntigravitySession {
 
   async setPermissionMode(mode: HarnessPermissionMode): Promise<void> {
     if (this.options) this.options.permissionMode = mode;
-    const wanted = antigravityModeForPermission(mode, this.options?.disallowedTools);
-    if (wanted !== this.currentMode) await this.setAgentMode(wanted);
+    if (this.closed || !this.options) return;
+    const wantedMode = antigravityModeForPermission(mode, this.options.disallowedTools);
+    const wantedSkip = antigravityShouldSkipPermissions(mode, this.options.disallowedTools);
+    if (wantedSkip !== this.spawnedWithSkipPermissions) {
+      if (this._turnInFlight) {
+        // Defer process respawn until the active turn settles; still apply the ACP mode immediately.
+        this.restartForPermissionFlagPending = true;
+        if (wantedMode !== this.currentMode) await this.setAgentMode(wantedMode);
+        return;
+      }
+      await this.ensurePermissionFlagSynced();
+      return;
+    }
+    this.restartForPermissionFlagPending = false;
+    if (wantedMode !== this.currentMode) await this.setAgentMode(wantedMode);
+  }
+
+  /** Respawn `AcpClient` and `session/load` the current session when `--dangerously-skip-permissions` needs to change. */
+  private async ensurePermissionFlagSynced(): Promise<void> {
+    if (this.restartingClient) {
+      await this.restartingClient;
+      return;
+    }
+    const run = (async () => {
+      while (!this.closed && this.options && this.sessionId) {
+        const currentMode = this.options.permissionMode ?? 'default';
+        const wantedSkip = antigravityShouldSkipPermissions(currentMode, this.options.disallowedTools);
+        if (wantedSkip === this.spawnedWithSkipPermissions) {
+          const wantedMode = antigravityModeForPermission(currentMode, this.options.disallowedTools);
+          if (wantedMode !== this.currentMode) await this.setAgentMode(wantedMode);
+          break;
+        }
+        this.restartForPermissionFlagPending = false;
+        const resumeId = this.sessionId;
+        const oldClient = this.client;
+        this.client = null;
+        oldClient?.close();
+        this.starting = true;
+        try {
+          await this.connectClient(resumeId, 'respawn');
+        } finally {
+          this.starting = false;
+        }
+      }
+    })();
+    this.restartingClient = run;
+    try {
+      await run;
+    } finally {
+      if (this.restartingClient === run) this.restartingClient = null;
+      if (!this.closed && !this._turnInFlight && this.queuedTurns.length > 0) {
+        const next = this.queuedTurns.shift()!;
+        this.startTurn(next.text, next.images);
+      }
+    }
   }
 
   send(text: string, images?: ImageAttachment[], _userMessageUuid?: string): void {
-    if (this.closed || !this.sessionId || !this.client) throw new Error('Antigravity session is not running');
-    if (this._turnInFlight) {
+    if (this.closed || (!this.restartingClient && (!this.sessionId || !this.client))) {
+      throw new Error('Antigravity session is not running');
+    }
+    if (this._turnInFlight || this.restartingClient) {
       this.queuedTurns.push({ text, images });
       return;
     }
@@ -445,16 +673,28 @@ export class AntigravitySession {
     const sessionId = this.sessionId;
     if (!options || !client || !sessionId) return;
     this._turnInFlight = true;
+    this.acpPromptInFlight = true;
     this.turnText = '';
     this.pendingTools = [];
+    this.parentPendingSpawns = [];
+    this.parentWakeupInFlight = false;
+    this.wakeupPendingTools = [];
     const mode = options.permissionMode ?? 'default';
+
+    // Snapshot the brain transcript's pre-turn step index before `session/prompt` goes out so prior turns are never replayed.
+    if (this.brainReader) {
+      const existingMax = this.brainReader.peekMaxStepIndex(sessionId);
+      if (existingMax >= 0) this.brainReader.setBaselineStepIndex(sessionId, existingMax);
+      this.brainReader.startPolling(() => this.onBrainTick());
+      this.brainReader.watchConversation(sessionId, () => this.onBrainTick());
+    }
 
     let effectiveText = text;
     const history = options.resumeFallbackHistory;
     if (this.resumeFallbackPending && history) effectiveText = history + effectiveText;
     this.resumeFallbackPending = false;
     // `_meta.antigravity.systemPrompt.append` is advertised but its request shape is unobserved, so the system prompt
-    // rides the first prompt of each process instead (a resumed process has lost it).
+    // rides the first prompt of each fresh conversation instead (a resumed conversation already has it in history).
     if (this.systemPromptPending && options.appendSystemPrompt) {
       effectiveText = `<system-instructions>\n${options.appendSystemPrompt}\n</system-instructions>\n\n${effectiveText}`;
       this.systemPromptPending = false;
@@ -469,6 +709,7 @@ export class AntigravitySession {
       .then((result) => this.finishTurn(result))
       .catch((error) => {
         if (this.closed || !this._turnInFlight) return;
+        this.abortBackgroundWork(options.callbacks, 'Failed');
         this.resetTurnState();
         options.callbacks.onError(error instanceof Error ? error : new Error(String(error)));
       });
@@ -480,17 +721,34 @@ export class AntigravitySession {
     // A pending approval would otherwise keep the agent waiting on us: answer it as cancelled first.
     for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
     this.client.notify('session/cancel', { sessionId: this.sessionId });
+    // When `session/prompt` already ended and we are holding the turn open for background subagents/wakeups, there is
+    // no pending `session/prompt` RPC left to resolve `stopReason: cancelled` — settle the interrupted turn right here.
+    if (!this.acpPromptInFlight) {
+      const callbacks = this.options?.callbacks;
+      const sessionId = this.sessionId;
+      if (callbacks) {
+        this.settleWakeupToolsAsError(callbacks);
+        this.abortBackgroundWork(callbacks, 'Interrupted');
+      }
+      this.resetTurnState();
+      callbacks?.onInterrupted(sessionId);
+    }
   }
 
   close(): void {
     this.closed = true;
     this.resetTurnState();
+    this.brainReader?.reset();
+    this.brainReader = null;
+    this.subagents.clear();
+    this.activeBgTaskIds.clear();
     for (const resolve of [...this.pendingPermissions.values()]) resolve({ outcome: 'cancelled' });
     this.pendingPermissions.clear();
     // `session/close` is advertised but not called: the process is killed instead, and the saved session must stay
     // loadable for resume.
-    this.client?.close();
+    const oldClient = this.client;
     this.client = null;
+    oldClient?.close();
     this.bridge?.close();
     this.bridge = null;
   }
@@ -501,9 +759,16 @@ export class AntigravitySession {
 
   private resetTurnState(): void {
     this._turnInFlight = false;
+    this.acpPromptInFlight = false;
     this.turnText = '';
     this.pendingTools = [];
     this.queuedTurns = [];
+    this.parentPendingSpawns = [];
+    this.pendingWakeups = 0;
+    this.wakeupDeadlineMs = 0;
+    this.parentWakeupInFlight = false;
+    this.wakeupPendingTools = [];
+    this.brainReader?.stopWatching();
   }
 
   private compatibilityHint(): string {
@@ -513,11 +778,13 @@ export class AntigravitySession {
   private handleClientClosed(client: AcpClient, error?: Error): void {
     if (this.client !== client || this.closed || this.starting) return;
     const failure = error ?? new Error('Antigravity exited unexpectedly.');
+    const callbacks = this.options?.callbacks;
+    if (callbacks) this.abortBackgroundWork(callbacks, 'Antigravity exited unexpectedly');
     // The process is gone: further sends fail fast so the manager starts a fresh session instead of writing to a dead pipe.
     this.closed = true;
     this.resetTurnState();
     this.pendingPermissions.clear();
-    this.options?.callbacks.onError(failure);
+    callbacks?.onError(failure);
   }
 
   // ── Updates ──────────────────────────────────────────────────────────────
@@ -606,6 +873,11 @@ export class AntigravitySession {
       }
       const started = this.toolStartedAt.get(callId);
       callbacks.onToolResult?.(callId, status === 'completed' ? 'success' : 'error', started ? Math.max(0, Date.now() - started) : undefined);
+      // When `invoke_subagent` or a background task settles over ACP, check the brain transcript right away so the
+      // subagent pill appears without waiting for the next timer tick.
+      if (status === 'completed' && (merged.name === 'invoke_subagent' || merged.name === 'schedule' || merged.name === 'run_command' || merged.name === 'manage_subagents' || merged.name === 'send_message')) {
+        this.onBrainTick();
+      }
     }
   }
 
@@ -634,24 +906,381 @@ export class AntigravitySession {
     }
     if (stopReason === 'cancelled') {
       // The streamed tokens already cover any partial text, so no late message is appended.
+      this.abortBackgroundWork(callbacks, 'Interrupted');
       this.resetTurnState();
       callbacks.onInterrupted(sessionId);
       return;
     }
     if (stopReason === 'refusal') {
+      this.abortBackgroundWork(callbacks, 'Stopped');
       this.resetTurnState();
       callbacks.onError(new Error('Antigravity declined to continue with this request.'));
       return;
     }
+
+    // Catch up synchronously to the end of the ACP turn in `<brainDir>/<sessionId>` BEFORE transitioning out of
+    // `acpPromptInFlight`, so any subagent or background task created during the turn is registered without duplicating
+    // the ACP turn's own streamed text/tools.
+    this.syncParentDuringAcp(callbacks, true);
+    this.syncSubagentTranscripts(callbacks);
+
     this.flushText(callbacks);
     if (stopReason === 'max_tokens' || stopReason === 'max_turn_requests') {
       callbacks.onNotification?.(`Antigravity stopped early (${stopReason.replace(/_/g, ' ')}).`, 'medium');
     }
+    this.acpPromptInFlight = false;
+
+    // Stream any post-ACP wakeup steps that already landed, and hold the turn open while subagents or wakeups remain.
+    this.syncParentPostAcp(callbacks);
+    this.syncSubagentTranscripts(callbacks);
+    if (this.brainReader?.hasTranscript(sessionId) && this.hasPendingBackgroundActivity(Date.now())) {
+      this.brainReader.startPolling(() => this.onBrainTick());
+      this.brainReader.watchConversation(sessionId, () => this.onBrainTick());
+      return;
+    }
+
+    this.completeTurn(callbacks);
+  }
+
+  private completeTurn(callbacks: SessionCallbacks): void {
+    if (this.closed || !this._turnInFlight) return;
+    const sessionId = this.sessionId ?? '';
+    this.flushText(callbacks);
     this._turnInFlight = false;
+    this.acpPromptInFlight = false;
+    this.pendingWakeups = 0;
+    this.wakeupDeadlineMs = 0;
+    this.parentWakeupInFlight = false;
+    this.wakeupPendingTools = [];
+    this.brainReader?.stopWatching();
     this.turns++;
     callbacks.onDone(sessionId, 0, 1);
+
+    if (this.restartForPermissionFlagPending && !this.closed) {
+      void this.ensurePermissionFlagSynced().catch((error) => {
+        if (!this.closed) callbacks.onError(error instanceof Error ? error : new Error(String(error)));
+      });
+      return;
+    }
     const next = this.queuedTurns.shift();
     if (next && !this.closed) this.startTurn(next.text, next.images);
+  }
+
+  // ── Brain transcript subagent & wakeup tracking ──────────────────────────
+
+  private hasRunningSubagents(): boolean {
+    for (const subagent of this.subagents.values()) {
+      if (subagent.running) return true;
+    }
+    return false;
+  }
+
+  private hasPendingBackgroundActivity(now: number): boolean {
+    if (this.hasRunningSubagents()) return true;
+    if (this.activeBgTaskIds.size > 0) return true;
+    if (this.parentWakeupInFlight) return true;
+    if (this.pendingWakeups > 0 && now < this.wakeupDeadlineMs) return true;
+    return false;
+  }
+
+  private noteExpectedParentWakeup(): void {
+    this.pendingWakeups++;
+    const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
+    this.wakeupDeadlineMs = Date.now() + graceMs;
+  }
+
+  private onBrainTick(): void {
+    const callbacks = this.options?.callbacks;
+    if (this.closed || !this._turnInFlight || !callbacks || !this.sessionId || !this.brainReader) return;
+    this.brainReader.watchConversation(this.sessionId, () => this.onBrainTick());
+    if (this.acpPromptInFlight) {
+      this.syncParentDuringAcp(callbacks, false);
+      this.syncSubagentTranscripts(callbacks);
+      return;
+    }
+    this.syncSubagentTranscripts(callbacks);
+    this.syncParentPostAcp(callbacks);
+    this.syncSubagentTranscripts(callbacks);
+    if (!this.hasPendingBackgroundActivity(Date.now())) {
+      this.completeTurn(callbacks);
+    }
+  }
+
+  /**
+   * Harvest omitted metadata (`invoke_subagent` child IDs, background task IDs, revivals, kills) from parent steps
+   * written during the ACP turn without re-emitting ACP's own text/tool stream.
+   */
+  private syncParentDuringAcp(callbacks: SessionCallbacks, stopAtTurnEnd: boolean): void {
+    const sessionId = this.sessionId;
+    if (!sessionId || !this.brainReader) return;
+    const steps = this.brainReader.readNewSteps(sessionId);
+    for (let idx = 0; idx < steps.length; idx++) {
+      const step = steps[idx];
+      if (step.type === 'PLANNER_RESPONSE') {
+        const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
+        for (const tc of calls) this.trackParentToolCallMeta(tc.name, tc.args, callbacks);
+        // An LLM tool loop ends a `session/prompt` turn on the first `PLANNER_RESPONSE` with zero tool calls; anything
+        // written after that belongs to a post-ACP wakeup and must be left for `syncParentPostAcp`.
+        if (stopAtTurnEnd && calls.length === 0 && step.status === 'DONE') {
+          if (idx < steps.length - 1) this.brainReader.rewindCursorToStep(sessionId, step.step_index);
+          break;
+        }
+      } else if (step.type === 'GENERIC') {
+        this.harvestParentGenericStep(step, callbacks);
+      } else if (step.type === 'SYSTEM_MESSAGE') {
+        this.consumeParentWakeupStep(step, callbacks, false);
+      }
+    }
+  }
+
+  /** Stream reactive wakeup steps written to `<brainDir>/<sessionId>` after `session/prompt` returned. */
+  private syncParentPostAcp(callbacks: SessionCallbacks): void {
+    const sessionId = this.sessionId;
+    if (!sessionId || !this.brainReader) return;
+    const steps = this.brainReader.readNewSteps(sessionId);
+    for (const step of steps) {
+      if (step.type === 'SYSTEM_MESSAGE') {
+        this.consumeParentWakeupStep(step, callbacks, true);
+      } else if (step.type === 'PLANNER_RESPONSE') {
+        this.parentWakeupInFlight = true;
+        if (typeof step.content === 'string' && step.content) {
+          if (this.pendingTools.length > 0) this.flushText(callbacks);
+          this.turnText += step.content;
+          callbacks.onToken(step.content);
+        }
+        const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
+        if (calls.length > 0) {
+          for (let i = 0; i < calls.length; i++) {
+            const tc = calls[i];
+            this.trackParentToolCallMeta(tc.name, tc.args, callbacks);
+            const callId = typeof tc.id === 'string' && tc.id ? tc.id : `wakeup-${step.step_index}-${i}`;
+            const tool: AcpToolCall = { toolCallId: callId, name: tc.name, args: tc.args };
+            const record: ToolCallRecord = {
+              toolUseId: callId,
+              name: antigravityToolName(tool.name, tool.kind),
+              summary: antigravityToolSummary(tool),
+              status: 'pending',
+              timestamp: Date.now(),
+            };
+            this.pendingTools.push(record);
+            this.wakeupPendingTools.push({ callId, tool, startedAt: Date.now() });
+            callbacks.onToolUse(record);
+          }
+        } else if (step.status === 'DONE') {
+          this.settleWakeupTools(callbacks, 'success');
+          this.flushText(callbacks);
+          this.parentWakeupInFlight = false;
+        }
+      } else if (step.type === 'GENERIC') {
+        this.harvestParentGenericStep(step, callbacks);
+        const pending = this.wakeupPendingTools.shift();
+        if (pending) {
+          const ok = step.status !== 'ERROR';
+          if (ok && (pending.tool.name === 'write_file' || pending.tool.name === 'edit_file')) {
+            const paths = antigravityEditedPaths(pending.tool);
+            if (paths.length > 0) callbacks.onFilesEdited?.(paths);
+          }
+          callbacks.onToolResult?.(pending.callId, ok ? 'success' : 'error', Math.max(0, Date.now() - pending.startedAt));
+        }
+      } else if (step.type === 'ERROR_MESSAGE' && this.parentWakeupInFlight) {
+        // `agy` often retries stream hiccups on the next step; bound the wait if no retry arrives.
+        const graceMs = this.brainOptions?.wakeupGraceMs ?? DEFAULT_WAKEUP_GRACE_MS;
+        this.wakeupDeadlineMs = Date.now() + graceMs;
+      }
+    }
+    if (this.parentWakeupInFlight && this.wakeupDeadlineMs > 0 && !this.hasRunningSubagents() && this.activeBgTaskIds.size === 0 && Date.now() >= this.wakeupDeadlineMs && this.wakeupPendingTools.length === 0) {
+      this.parentWakeupInFlight = false;
+    }
+  }
+
+  private trackParentToolCallMeta(name: string | undefined, args: Record<string, unknown> | undefined, callbacks: SessionCallbacks): void {
+    if (name === 'invoke_subagent') {
+      this.parentPendingSpawns.push(extractSubagentSpawnMeta(args));
+    } else if (name === 'send_message') {
+      const recipient = typeof args?.Recipient === 'string' ? args.Recipient.trim() : '';
+      const child = recipient ? this.subagents.get(recipient) : undefined;
+      if (child && !child.running) {
+        child.running = true;
+        child.sentMessageThisRun = false;
+        child.lastStepError = undefined;
+        callbacks.onTaskStarted?.(child.id, child.description, false, 'subagent', undefined, child.subagentType, child.parentAgentId, child.model);
+        callbacks.onTaskUpdated?.(child.id, { status: 'in_progress', description: child.description });
+      }
+    } else if (name === 'manage_subagents') {
+      this.handleManageSubagentsCall(args, callbacks);
+    }
+  }
+
+  private handleManageSubagentsCall(args: Record<string, unknown> | undefined, callbacks: SessionCallbacks): void {
+    const action = typeof args?.Action === 'string' ? args.Action.trim() : '';
+    if (action === 'kill_all') {
+      for (const child of this.subagents.values()) this.markSubagentKilled(child, callbacks, 'Killed');
+    } else if (action === 'kill' && Array.isArray(args?.ConversationIds)) {
+      for (const rawId of args.ConversationIds) {
+        const child = typeof rawId === 'string' ? this.subagents.get(rawId.trim()) : undefined;
+        if (child) this.markSubagentKilled(child, callbacks, 'Killed');
+      }
+    }
+  }
+
+  private markSubagentKilled(child: TrackedSubagent, callbacks: SessionCallbacks, reason: string): void {
+    if (!child.running) return;
+    child.running = false;
+    this.brainReader?.unwatchConversation(child.id);
+    callbacks.onTaskUpdated?.(child.id, { status: 'killed' });
+    callbacks.onTaskNotification?.(child.id, 'stopped', reason);
+  }
+
+  private harvestParentGenericStep(step: BrainTranscriptStep, callbacks: SessionCallbacks): void {
+    const created = parseAntigravityCreatedSubagent(step.content);
+    if (created) {
+      const meta = this.parentPendingSpawns.shift();
+      this.registerSubagent(created.conversationId, meta, callbacks);
+    }
+    const bg = parseAntigravityBackgroundTask(step.content);
+    if (bg && !this.activeBgTaskIds.has(bg.taskId)) {
+      this.activeBgTaskIds.add(bg.taskId);
+      callbacks.onTaskStarted?.(bg.taskId, 'Background task', false, 'bash');
+    }
+  }
+
+  private registerSubagent(id: string, meta: PendingSubagentSpawnMeta | undefined, callbacks: SessionCallbacks): void {
+    const description = describeSubagentSpawn(meta);
+    const existing = this.subagents.get(id);
+    if (existing) {
+      existing.running = true;
+      existing.sentMessageThisRun = false;
+      existing.lastStepError = undefined;
+      callbacks.onTaskStarted?.(id, existing.description, false, 'subagent', undefined, existing.subagentType, existing.parentAgentId, existing.model);
+      callbacks.onTaskUpdated?.(id, { status: 'in_progress', description: existing.description });
+      return;
+    }
+    const tracked: TrackedSubagent = {
+      id,
+      description,
+      subagentType: meta?.subagentType,
+      parentAgentId: meta?.parentAgentId,
+      model: meta?.model,
+      running: true,
+      sentMessageThisRun: false,
+      pendingSpawns: [],
+    };
+    this.subagents.set(id, tracked);
+    this.brainReader?.watchConversation(id, () => this.onBrainTick());
+    callbacks.onTaskStarted?.(id, description, false, 'subagent', undefined, tracked.subagentType, tracked.parentAgentId, tracked.model);
+  }
+
+  private consumeParentWakeupStep(step: BrainTranscriptStep, callbacks: SessionCallbacks, startWakeupTurn: boolean): void {
+    const parsed = parseAntigravityWakeupMessage(step.content);
+    const consumedCount = Math.max(1, parsed.senders.length);
+    this.pendingWakeups = Math.max(0, this.pendingWakeups - consumedCount);
+    for (const sender of parsed.senders) {
+      if (this.activeBgTaskIds.delete(sender)) {
+        callbacks.onTaskNotification?.(sender, 'completed', parsed.summary || 'Background task completed');
+      }
+      const subagent = this.subagents.get(sender);
+      // If a child terminated fatally without a final PLANNER_RESPONSE, settle its pill when its wakeup reaches parent.
+      if (subagent && subagent.running && subagent.lastStepError) {
+        subagent.running = false;
+        callbacks.onTaskUpdated?.(subagent.id, { status: 'failed', error: subagent.lastStepError });
+        callbacks.onTaskNotification?.(subagent.id, 'failed', subagent.lastStepError);
+      }
+    }
+    if (startWakeupTurn) {
+      this.parentWakeupInFlight = true;
+      this.wakeupDeadlineMs = 0;
+      callbacks.onRawEvent?.({ type: 'antigravity/wakeup_system_message', stepIndex: step.step_index, senders: parsed.senders });
+    }
+  }
+
+  private syncSubagentTranscripts(callbacks: SessionCallbacks): void {
+    if (!this.brainReader || this.subagents.size === 0) return;
+    const visited = new Set<string>();
+    let progress = true;
+    while (progress) {
+      progress = false;
+      for (const subagent of [...this.subagents.values()]) {
+        if (visited.has(subagent.id)) continue;
+        visited.add(subagent.id);
+        this.brainReader.watchConversation(subagent.id, () => this.onBrainTick());
+        const steps = this.brainReader.readNewSteps(subagent.id);
+        for (const step of steps) {
+          if (step.type === 'SYSTEM_MESSAGE') {
+            subagent.lastStepError = undefined;
+            if (!subagent.running) {
+              subagent.running = true;
+              subagent.sentMessageThisRun = false;
+              callbacks.onTaskStarted?.(subagent.id, subagent.description, false, 'subagent', undefined, subagent.subagentType, subagent.parentAgentId, subagent.model);
+              callbacks.onTaskUpdated?.(subagent.id, { status: 'in_progress', description: subagent.description });
+            }
+          } else if (step.type === 'ERROR_MESSAGE') {
+            subagent.lastStepError = firstSummaryLine(step.content, 200) ?? 'Subagent error';
+          } else if (step.type === 'PLANNER_RESPONSE') {
+            subagent.lastStepError = undefined;
+            if (typeof step.model === 'string' && step.model && !subagent.model) subagent.model = step.model;
+            const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
+            if (calls.length > 0) {
+              subagent.running = true;
+              for (const tc of calls) {
+                if (tc.name === 'invoke_subagent') {
+                  subagent.pendingSpawns.push(extractSubagentSpawnMeta(tc.args, subagent.id));
+                } else if (tc.name === 'send_message' && tc.args?.Recipient === this.sessionId) {
+                  subagent.sentMessageThisRun = true;
+                  subagent.lastSentMessage = typeof tc.args?.Message === 'string' ? tc.args.Message : undefined;
+                  this.noteExpectedParentWakeup();
+                } else if (tc.name === 'manage_subagents') {
+                  this.handleManageSubagentsCall(tc.args, callbacks);
+                }
+              }
+              const lastTool = calls[calls.length - 1];
+              callbacks.onTaskProgress?.(subagent.id, subagent.description, antigravityToolName(lastTool?.name, undefined));
+            } else if (step.status === 'DONE' && subagent.running) {
+              subagent.running = false;
+              const summary = firstSummaryLine(step.content, 240)
+                ?? firstSummaryLine(subagent.lastSentMessage, 240)
+                ?? subagent.description;
+              callbacks.onTaskNotification?.(subagent.id, 'completed', summary);
+              if (!subagent.sentMessageThisRun && !subagent.parentAgentId) {
+                this.noteExpectedParentWakeup();
+              }
+            }
+          } else if (step.type === 'GENERIC') {
+            const created = parseAntigravityCreatedSubagent(step.content);
+            if (created) {
+              const meta = subagent.pendingSpawns.shift() ?? { parentAgentId: subagent.id };
+              this.registerSubagent(created.conversationId, meta, callbacks);
+              progress = true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private settleWakeupTools(callbacks: SessionCallbacks, outcome: 'success' | 'error'): void {
+    while (this.wakeupPendingTools.length > 0) {
+      const pending = this.wakeupPendingTools.shift()!;
+      callbacks.onToolResult?.(pending.callId, outcome, Math.max(0, Date.now() - pending.startedAt));
+    }
+  }
+
+  private settleWakeupToolsAsError(callbacks: SessionCallbacks): void {
+    this.settleWakeupTools(callbacks, 'error');
+  }
+
+  private abortBackgroundWork(callbacks: SessionCallbacks, reason: string): void {
+    for (const subagent of this.subagents.values()) {
+      if (subagent.running) {
+        subagent.running = false;
+        callbacks.onTaskUpdated?.(subagent.id, { status: 'killed' });
+        callbacks.onTaskNotification?.(subagent.id, 'stopped', reason);
+      }
+    }
+    for (const taskId of [...this.activeBgTaskIds]) {
+      this.activeBgTaskIds.delete(taskId);
+      callbacks.onTaskUpdated?.(taskId, { status: 'killed' });
+      callbacks.onTaskNotification?.(taskId, 'stopped', reason);
+    }
   }
 
   private applyTurnUsage(usage: any, callbacks: SessionCallbacks): void {
