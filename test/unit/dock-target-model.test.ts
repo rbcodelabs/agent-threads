@@ -96,6 +96,8 @@ describe('targetLabels', () => {
     expect(l.askPlaceholder).toBe('Ask the orchestrator…');
     expect(l.stopLabel).toBe('Stop the orchestrator');
     expect(l.peekName).toBe('Orchestrator');
+    expect(l.voice).toBe('Orchestrator');
+    expect(l.ownerName).toBe('Portfolio');
   });
 
   it('a Project target names itself everywhere', () => {
@@ -106,6 +108,7 @@ describe('targetLabels', () => {
     expect(l.replyPlaceholder).toBe('Reply to Compass orchestrator…');
     expect(l.stopLabel).toBe('Stop the Compass orchestrator');
     expect(l.peekName).toBe('Compass');
+    expect(l.voice).toBe('Compass orchestrator');
   });
 
   it('no target (nothing set up) falls back to the Portfolio strings', () => {

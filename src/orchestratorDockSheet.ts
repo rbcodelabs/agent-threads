@@ -22,6 +22,7 @@ import type { ChatMessage } from './types';
 import { applyTrayMode } from './orchestratorDockTray';
 import { SHEET_MAX_MESSAGES, needsFullThread, sheetFit, trayLayout, type SheetEntry } from './dockSheetModel';
 import type { SuggestionChip, ThreadRef } from './orchestratorDockModel';
+import { rowAriaLabel, type TargetRow } from './dockTargetModel';
 
 export interface SheetRow extends SheetEntry {
   /** The message coalesced into a running turn: show "Sent, will be picked up". */
@@ -46,11 +47,26 @@ export interface SheetView {
   mode: 'pill' | 'orb';
   /** tooltipText({running,total,needsYou}): the same string as the dot's tooltip. */
   summary: string;
+  /** The heading text: "Portfolio orchestrator" or "<Project> orchestrator" (targetLabels). */
+  title: string;
+  /** aria-label of the scrolling transcript region. */
+  regionLabel: string;
+  /** The orchestrator menu behind the title; null = the title is a plain heading (no Project orchestrator exists). */
+  menu: SheetMenu | null;
+}
+
+export interface SheetMenu {
+  rows: TargetRow[];
+  selectedId: string;
 }
 
 export interface SheetHandlers {
   close(): void;
   openFull(): void;
+  /** The user picked an orchestrator in the title menu (the dock switches the whole sheet to it). */
+  selectTarget(threadId: string): void;
+  /** The title menu is about to show: the dock re-renders so its rows (draft marks, unread, status) are current. */
+  menuOpened(): void;
   /** Source for an attached / tool-result image (a vault resource URL or a data URL). Absent: a data URL. */
   imageSrc?(ref: { path?: string; mediaType: string }, inlineData: string | undefined): string;
   /** The shared renderer's host, tool-call renderer, clock and tool-call style (dockMessageEnv). */
@@ -119,6 +135,15 @@ export class DockSheet {
   private onDocFocusIn: (e: Event) => void = () => {};
   private onDocPointerDown: (e: Event) => void = () => {};
   private readonly headEl: HTMLElement;
+  private readonly titleEl: HTMLElement;
+  private readonly headingEl: HTMLElement;
+  private readonly menuId: string;
+  /** The title menu (button + listbox), present only while the view carries a menu. */
+  private titleBtn: HTMLButtonElement | null = null;
+  private menuEl: HTMLElement | null = null;
+  private menuIsOpen = false;
+  private menuSig = '';
+  private onDocPointerDownMenu: (e: Event) => void = () => {};
   private readonly rows = new Map<string, RowState>();
   private olderEl: HTMLElement | null = null;
   private streamingRow: HTMLElement | null = null;
@@ -164,7 +189,9 @@ export class DockSheet {
     this.orbEl.createSpan('ct-orch-sheet-orb-ring');
     this.orbEl.createSpan('ct-orch-sheet-orb-core');
     const heading = head.createDiv('ct-orch-sheet-heading');
-    heading.createEl('h2', { cls: 'ct-orch-sheet-title', text: 'Portfolio orchestrator', attr: { id } });
+    this.headingEl = heading;
+    this.menuId = `${id}-menu`;
+    this.titleEl = heading.createEl('h2', { cls: 'ct-orch-sheet-title', text: 'Portfolio orchestrator', attr: { id } });
     // The old header count text, readable without hover (touch): the SAME text as the dot tooltip. Plain text, not a live region.
     this.summaryEl = heading.createDiv({ cls: 'ct-orch-sheet-summary', attr: { 'data-testid': 'orchestrator-summary' } });
     // Narrow mode hides the label (mock k2-9 shows just the arrow): the aria-label keeps the name.
@@ -196,6 +223,9 @@ export class DockSheet {
     this.onDocPointerDown = (e) => { if (!this.trayHost.contains(e.target as Node | null)) this.trayFocus = null; };
     doc.addEventListener('focusin', this.onDocFocusIn, true);
     doc.addEventListener('pointerdown', this.onDocPointerDown, true);
+    // A press outside the title button and the menu closes the menu (the sheet stays); focus is left where the press put it.
+    this.onDocPointerDownMenu = (e) => { if (this.menuIsOpen && !this.headEl.contains(e.target as Node | null)) this.closeMenu(false); };
+    doc.addEventListener('pointerdown', this.onDocPointerDownMenu, true);
     this.logEl.addEventListener('click', (e) => this.onLogClick(e));
     // Delegated, so rows rebuilt by the keyed reconcile / markdown swap need no re-binding.
     this.logEl.addEventListener('mouseover', (e) => this.onLinkOver(e));
@@ -272,6 +302,7 @@ export class DockSheet {
   }
 
   close(): void {
+    this.closeMenu(false);
     this.opened = false;
     this.chromeObserver?.disconnect();
     this.chromeObserver = null;
@@ -487,6 +518,152 @@ export class DockSheet {
     this.el.toggleAttribute('data-nospace', micro && sheetFit({ max, chromeNeed: this.chromeHeight(false) }).hidden);
   }
 
+  // ── Title menu (the orchestrator switcher) ───────────────────────────────
+
+  /**
+   * The title is the plain `h2` text while no Project orchestrator exists (DOM identical to before the menu), and a menu button
+   * (`aria-haspopup="listbox"`) once one does. All names are written with textContent: project names are user data.
+   */
+  private renderTitle(view: SheetView): void {
+    const menu = view.menu;
+    if (!menu) {
+      if (this.titleBtn) this.teardownMenu();
+      if (this.titleEl.textContent !== view.title) this.titleEl.textContent = view.title;
+      return;
+    }
+    if (!this.titleBtn) this.buildMenu();
+    const label = this.titleBtn!.querySelector('.ct-orch-title-label');
+    if (label && label.textContent !== view.title) label.textContent = view.title;
+    this.renderMenuRows(menu);
+  }
+
+  private buildMenu(): void {
+    this.titleEl.textContent = '';
+    const btn = this.titleEl.createEl('button', {
+      cls: 'ct-orch-title-btn',
+      attr: { type: 'button', 'aria-haspopup': 'listbox', 'aria-expanded': 'false', 'aria-controls': this.menuId, 'data-testid': 'orchestrator-title-menu' },
+    });
+    btn.createSpan('ct-orch-title-label');
+    icon(btn, 'chevron-down');
+    btn.addEventListener('click', () => { if (this.menuIsOpen) this.closeMenu(true); else this.openMenu(); });
+    this.titleBtn = btn;
+    const menu = this.headEl.createDiv({ cls: 'ct-orch-menu', attr: { role: 'listbox', id: this.menuId, 'aria-label': 'Orchestrators', 'data-testid': 'orchestrator-menu' } });
+    menu.hidden = true;
+    this.menuEl = menu;
+    this.menuSig = '';
+    this.headEl.addEventListener('keydown', this.onHeadKeydown);
+  }
+
+  private teardownMenu(): void {
+    this.closeMenu(false);
+    this.headEl.removeEventListener('keydown', this.onHeadKeydown);
+    this.menuEl?.remove();
+    this.menuEl = null;
+    this.titleBtn = null;
+    this.menuSig = '';
+    this.titleEl.textContent = '';
+  }
+
+  private optionEls(): HTMLElement[] {
+    return this.menuEl ? Array.from(this.menuEl.querySelectorAll<HTMLElement>('[role="option"]')) : [];
+  }
+
+  private renderMenuRows(menu: SheetMenu): void {
+    const menuEl = this.menuEl;
+    if (!menuEl) return;
+    const sig = JSON.stringify([menu.selectedId, menu.rows]);
+    if (sig === this.menuSig) return;
+    this.menuSig = sig;
+    const doc = menuEl.ownerDocument;
+    const focusedId = menuEl.contains(doc.activeElement) ? (doc.activeElement as HTMLElement).dataset.targetId : undefined;
+    menuEl.replaceChildren();
+    for (const row of menu.rows) {
+      const opt = menuEl.createDiv({
+        cls: 'ct-orch-menu-opt',
+        attr: {
+          role: 'option', 'data-target-id': row.id, 'data-kind': row.kind, 'aria-selected': String(row.selected),
+          'aria-label': rowAriaLabel(row), tabindex: row.id === (focusedId ?? menu.selectedId) ? '0' : '-1',
+        },
+      });
+      opt.createSpan({ cls: `ct-orch-sdot ct-orch-sdot-${row.status}`, attr: { 'aria-hidden': 'true' } });
+      const nm = opt.createSpan('ct-orch-opt-name');
+      nm.createSpan({ cls: 'ct-orch-opt-title', text: row.name });
+      nm.createSpan({ cls: 'ct-orch-opt-sub', text: row.kind === 'portfolio' ? 'All projects' : 'Project orchestrator' });
+      const badges = opt.createSpan({ cls: 'ct-orch-opt-badges', attr: { 'aria-hidden': 'true' } });
+      if (row.unread > 0) badges.createSpan({ cls: 'ct-orch-opt-unread', text: String(row.unread) });
+      if (row.needsYou > 0) badges.createSpan({ cls: 'ct-orch-opt-needs', text: `${row.needsYou} ${row.needsYou === 1 ? 'needs' : 'need'} you` });
+      if (row.hasDraft) badges.createSpan({ cls: 'ct-orch-opt-draft', text: 'Draft' });
+      opt.addEventListener('click', () => this.chooseTarget(row.id, menu.selectedId));
+    }
+    if (focusedId) this.optionEls().find((o) => o.dataset.targetId === focusedId)?.focus();
+  }
+
+  private openMenu(): void {
+    if (!this.menuEl || !this.titleBtn || this.destroyed) return;
+    this.h.menuOpened();
+    this.menuIsOpen = true;
+    this.menuEl.hidden = false;
+    this.titleBtn.setAttribute('aria-expanded', 'true');
+    const opts = this.optionEls();
+    const target = opts.find((o) => o.getAttribute('aria-selected') === 'true') ?? opts[0];
+    this.focusOption(target, opts);
+  }
+
+  private closeMenu(returnFocus: boolean): void {
+    if (!this.menuIsOpen) return;
+    this.menuIsOpen = false;
+    if (this.menuEl) this.menuEl.hidden = true;
+    this.titleBtn?.setAttribute('aria-expanded', 'false');
+    if (returnFocus) this.titleBtn?.focus();
+  }
+
+  /** Roving focus: only the focused option is in the tab order. */
+  private focusOption(target: HTMLElement | undefined, opts = this.optionEls()): void {
+    if (!target) return;
+    for (const o of opts) o.tabIndex = o === target ? 0 : -1;
+    target.focus();
+  }
+
+  private chooseTarget(id: string, currentId: string): void {
+    this.closeMenu(true);
+    if (id !== currentId) this.h.selectTarget(id);
+  }
+
+  /**
+   * Escape closes the MENU first (and stops there: the sheet's own Escape handler is an ancestor and never sees it), a second
+   * Escape closes the sheet. Arrows / Home / End move between options (wrapping), Enter / Space choose, Tab leaves and closes.
+   */
+  private readonly onHeadKeydown = (e: KeyboardEvent): void => {
+    if (e.isComposing || e.keyCode === 229) return;
+    const target = e.target as HTMLElement | null;
+    if (e.key === 'Escape' && this.menuIsOpen) { e.preventDefault(); e.stopPropagation(); this.closeMenu(true); return; }
+    if (target === this.titleBtn) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (!this.menuIsOpen) this.openMenu(); }
+      return;
+    }
+    const opt = target?.closest<HTMLElement>('[role="option"]');
+    if (!opt || !this.menuIsOpen) return;
+    const opts = this.optionEls();
+    const at = opts.indexOf(opt);
+    const go = (i: number): void => { e.preventDefault(); this.focusOption(opts[(i + opts.length) % opts.length], opts); };
+    if (e.key === 'ArrowDown') go(at + 1);
+    else if (e.key === 'ArrowUp') go(at - 1);
+    else if (e.key === 'Home') go(0);
+    else if (e.key === 'End') go(opts.length - 1);
+    else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      const current = opts.find((o) => o.getAttribute('aria-selected') === 'true')?.dataset.targetId ?? '';
+      this.chooseTarget(opt.dataset.targetId ?? '', current);
+    } else if (e.key === 'Tab') this.closeMenu(true);
+  };
+
+  /** The dock switched the sheet to another orchestrator: land on its latest message, drop the hover highlight of the old thread's link. */
+  resetForTarget(): void {
+    this.stick = true;
+    this.pinNext = true;
+    this.leaveLink();
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   render(view: SheetView): void {
@@ -499,6 +676,8 @@ export class DockSheet {
     this.composerSlot.hidden = view.mode !== 'orb';
     this.orbEl.classList.toggle('ct-orch-orb-spinning', view.running);
     if (this.summaryEl.textContent !== view.summary) this.summaryEl.textContent = view.summary;
+    this.renderTitle(view);
+    if (this.scrollEl.getAttribute('aria-label') !== view.regionLabel) this.scrollEl.setAttribute('aria-label', view.regionLabel);
     // The main panel carries `ct-tools-<style>` on its root; the tool-call CSS is scoped to it, so the log carries it too.
     applyToolCallStyleClass(this.logEl, this.h.messages.toolCallStyle());
     this.reconcileRows(view);
@@ -589,6 +768,7 @@ export class DockSheet {
     this.destroyed = true;
     this.el.ownerDocument.removeEventListener('focusin', this.onDocFocusIn, true);
     this.el.ownerDocument.removeEventListener('pointerdown', this.onDocPointerDown, true);
+    this.el.ownerDocument.removeEventListener('pointerdown', this.onDocPointerDownMenu, true);
     this.chromeObserver?.disconnect();
     this.chromeObserver = null;
     if (this.announceTimer) clearTimeout(this.announceTimer);

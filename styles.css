@@ -7375,6 +7375,54 @@ textarea.ct-settings-wide-input {
 .ct-kanban-dispatch .ct-orch-sheet button.ct-orch-sheet-btn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
 
 .ct-orch-sheet-scroll:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+/* ── Orchestrator menu: the sheet title as a button over a listbox (Portfolio first, then each Project orchestrator). ──
+   Only rendered once a Project orchestrator exists; without one the title is the plain h2 above. The menu sits under the header
+   (inside the sheet, which clips overflow), so it scrolls itself when the sheet is short. No motion: nothing to switch off. */
+.ct-orch-sheet-head { position: relative; }
+.ct-kanban-dispatch .ct-orch-sheet h2.ct-orch-sheet-title button.ct-orch-title-btn {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; min-height: 28px;
+  margin: 0 0 0 -6px; padding: 2px 6px; border: none; border-radius: 6px; box-shadow: none; background: transparent;
+  color: inherit; font: inherit; line-height: inherit; cursor: pointer; text-align: left;
+}
+.ct-kanban-dispatch .ct-orch-sheet h2.ct-orch-sheet-title button.ct-orch-title-btn:hover { background: var(--background-modifier-hover); }
+.ct-orch-title-btn .ct-orch-title-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-orch-title-btn .ct-orch-icon { flex: none; display: inline-flex; color: var(--text-muted); }
+.ct-orch-title-btn .ct-orch-icon svg { width: 14px; height: 14px; }
+.ct-orch-title-btn[aria-expanded="true"] .ct-orch-icon svg { transform: rotate(180deg); }
+.ct-orch-title-btn:focus-visible,
+.ct-kanban-dispatch .ct-orch-sheet h2.ct-orch-sheet-title button.ct-orch-title-btn:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.ct-orch-menu {
+  position: absolute; z-index: 3; top: 100%; left: 8px; right: 8px; max-height: min(320px, 60vh); overflow-y: auto;
+  padding: 4px; display: flex; flex-direction: column; gap: 2px;
+  background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+}
+.ct-orch-menu[hidden] { display: none; }
+.ct-orch-menu-opt {
+  display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 4px 8px; border-radius: 6px;
+  color: var(--text-normal); font-size: var(--font-ui-small); font-weight: 400; cursor: pointer;
+}
+.ct-orch-menu-opt:hover { background: var(--background-modifier-hover); }
+.ct-orch-menu-opt[aria-selected="true"] { background: var(--background-modifier-hover); }
+.ct-orch-menu-opt[aria-selected="true"] .ct-orch-opt-title { font-weight: 600; }
+.ct-orch-menu-opt:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+.ct-orch-menu-opt[data-kind="portfolio"] { margin-bottom: 2px; border-bottom: 1px solid var(--background-modifier-border); border-radius: 6px 6px 0 0; }
+.ct-orch-sdot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); }
+.ct-orch-sdot-running { background: var(--interactive-accent); }
+.ct-orch-sdot-error { background: var(--text-error); }
+.ct-orch-opt-name { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.ct-orch-opt-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-orch-opt-sub { font-size: var(--font-ui-smaller); line-height: 1.3; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-orch-opt-badges { flex: none; display: inline-flex; align-items: center; gap: 4px; }
+.ct-orch-opt-unread, .ct-orch-opt-needs, .ct-orch-opt-draft {
+  display: inline-flex; align-items: center; padding: 0 6px; min-height: 18px; border-radius: 9px;
+  font-size: var(--font-ui-smaller); line-height: 1.2; white-space: nowrap;
+}
+.ct-orch-opt-unread { min-width: 18px; justify-content: center; background: var(--interactive-accent); color: var(--text-on-accent); }
+.ct-orch-opt-needs { background: color-mix(in srgb, var(--text-warning, #d9822b) 22%, transparent); color: var(--text-normal); }
+.ct-orch-opt-draft { border: 1px solid var(--background-modifier-border); color: var(--text-muted); }
+/* A Needs-you card that belongs to an orchestrator other than the one on screen says whose it is. */
+.ct-orch-tray-owner { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; border-radius: 9px; background: var(--background-modifier-hover); color: var(--text-muted); font-size: var(--font-ui-smaller); line-height: 1.5; }
 .ct-orch-sheet-scroll { scroll-behavior: auto; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
 .ct-orch-sheet-log { display: flex; flex-direction: column; gap: 12px; } /* .ct-messages gap */
 .ct-orch-sheet-slot:empty { display: none; }
@@ -7516,6 +7564,12 @@ textarea.ct-settings-wide-input {
 }
 .ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-handle { display: block; flex: none; width: 36px; height: 4px; margin: 8px auto 0; border-radius: 2px; background: var(--text-faint); }
 .ct-orch-sheet[data-mode="orb"] .ct-orch-sheet-full-label { display: none; }
+/* The orchestrator menu: 44px rows (and title target) in the bottom sheet and on touch devices. */
+.ct-orch-sheet[data-mode="orb"] .ct-orch-menu-opt,
+.ct-agents-root.ct-mobile .ct-orch-sheet .ct-orch-menu-opt { min-height: 44px; }
+.ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] h2.ct-orch-sheet-title button.ct-orch-title-btn,
+.ct-agents-root.ct-mobile .ct-kanban-dispatch .ct-orch-sheet h2.ct-orch-sheet-title button.ct-orch-title-btn { min-height: 44px; }
+.ct-orch-sheet[data-mode="orb"] .ct-orch-menu { left: 12px; right: 12px; }
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-sheet-btn,
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-chip,
 .ct-kanban-dispatch .ct-orch-sheet[data-mode="orb"] button.ct-orch-chip-full,

@@ -8,6 +8,7 @@
  */
 import '../setup/obsidian-dom';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { OrchestratorDock, type OrchestratorDockDeps } from '../../src/orchestratorDock';
 import { createDraftStore } from '../../src/dockDraftStore';
 import type { Thread } from '../../src/types';
@@ -122,13 +123,15 @@ function setup(opts: {
 }
 type T = ReturnType<typeof setup>;
 const flush = () => new Promise((r) => setTimeout(r, 0));
-const texts = (t: T) => [...t.log().querySelectorAll('.ct-message-content')].map((e) => e.textContent ?? '').join('|');
+/** The transcript's text. Rows render their markdown asynchronously: await `settle()` after anything that builds rows. */
+const texts = (t: T) => t.log().textContent ?? '';
+const settle = async () => { await flush(); await flush(); };
 
 beforeEach(() => { document.body.innerHTML = ''; seq = 0; delete (window as unknown as { __pwned?: number }).__pwned; });
 afterEach(() => { vi.useRealTimers(); });
 
 describe('the title: plain heading vs menu button', () => {
-  it('with no Project orchestrator the title is the plain heading, exactly as today (no button, no listbox)', () => {
+  it('with no Project orchestrator the title is the plain heading, exactly as today (no button, no listbox)', async () => {
     const t = setup({ projects: [{ id: 'z', name: 'Nothing yet' }] });
     t.dock.openSheet();
     expect(t.title().textContent).toBe('Portfolio orchestrator');
@@ -138,7 +141,7 @@ describe('the title: plain heading vs menu button', () => {
     expect(t.q('[aria-haspopup]')).toBeNull();
   });
 
-  it('with a Project orchestrator the title is a menu button: aria-haspopup=listbox, aria-expanded, reachable by Tab', () => {
+  it('with a Project orchestrator the title is a menu button: aria-haspopup=listbox, aria-expanded, reachable by Tab', async () => {
     const t = setup();
     t.dock.openSheet();
     const btn = t.titleBtn()!;
@@ -152,7 +155,7 @@ describe('the title: plain heading vs menu button', () => {
     expect(t.q('.ct-orch-sheet')!.getAttribute('aria-labelledby')).toBe(t.title().id);
   });
 
-  it('the menu lists the Portfolio first, then each Project orchestrator, hiding projects with none or a stale one', () => {
+  it('the menu lists the Portfolio first, then each Project orchestrator, hiding projects with none or a stale one', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -165,7 +168,7 @@ describe('the title: plain heading vs menu button', () => {
     expect(t.menu()!.textContent).not.toContain('Stale one');
   });
 
-  it('with no Portfolio orchestrator the menu lists the projects and the dock opens on the first', () => {
+  it('with no Portfolio orchestrator the menu lists the projects and the dock opens on the first', async () => {
     const t = setup({ portfolio: false });
     t.dock.openSheet();
     expect(t.titleBtn()!.textContent).toContain('Agent Threads orchestrator');
@@ -176,16 +179,19 @@ describe('the title: plain heading vs menu button', () => {
 });
 
 describe('selecting a target switches the whole sheet', () => {
-  it('shows that thread\'s transcript, title, labels and placeholder; closes the menu; focus returns to the title button', () => {
+  it('shows that thread\'s transcript, title, labels and placeholder; closes the menu; focus returns to the title button', async () => {
     const t = setup();
     t.dock.openSheet();
+    await settle();
     expect(texts(t)).toContain('portfolio says hi');
     t.titleBtn()!.click();
     t.select('tx');
     expect(t.menuOpen()).toBe(false);
     expect(t.titleBtn()!.textContent).toContain('Agent Threads orchestrator');
     expect(t.titleBtn()!.getAttribute('aria-expanded')).toBe('false');
+    await settle();
     expect(texts(t)).toContain('agent-threads says hi');
+    await settle();
     expect(texts(t)).not.toContain('portfolio says hi');
     expect(t.input()!.placeholder).toBe('Reply to Agent Threads orchestrator…');
     expect(t.input()!.getAttribute('aria-label')).toBe('Ask the Agent Threads orchestrator');
@@ -193,7 +199,7 @@ describe('selecting a target switches the whole sheet', () => {
     expect(document.activeElement).toBe(t.titleBtn());
   });
 
-  it('Portfolio keeps today\'s exact strings', () => {
+  it('Portfolio keeps today\'s exact strings', async () => {
     const t = setup();
     t.dock.openSheet();
     expect(t.input()!.placeholder).toBe('Reply…');
@@ -223,7 +229,7 @@ describe('selecting a target switches the whole sheet', () => {
     expect(t.manager.sendMessage).toHaveBeenCalledWith('ty', 'hello compass');
   });
 
-  it('every open starts on the Portfolio orchestrator, whatever was selected last', () => {
+  it('every open starts on the Portfolio orchestrator, whatever was selected last', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -231,10 +237,11 @@ describe('selecting a target switches the whole sheet', () => {
     t.dock.closeSheet();
     t.dock.openSheet();
     expect(t.titleBtn()!.textContent).toContain('Portfolio orchestrator');
+    await settle();
     expect(texts(t)).toContain('portfolio says hi');
   });
 
-  it('a selected orchestrator that goes away falls back to the default', () => {
+  it('a selected orchestrator that goes away falls back to the default', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -242,12 +249,13 @@ describe('selecting a target switches the whole sheet', () => {
     t.s.projects = t.s.projects.map((p) => (p.id === 'x' ? { ...p, orchestratorThreadId: undefined } : p));
     t.emit('tx', 'projects_changed');
     expect(t.titleBtn()!.textContent).toContain('Portfolio orchestrator');
+    await settle();
     expect(texts(t)).toContain('portfolio says hi');
   });
 });
 
 describe('project names are user data: text only', () => {
-  it('a hostile name renders as text in the title, the rows and the labels (no element, no handler)', () => {
+  it('a hostile name renders as text in the title, the rows and the labels (no element, no handler)', async () => {
     const t = setup({ projects: [{ id: 'x', name: HOSTILE, orchestratorThreadId: 'tx' }] });
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -264,7 +272,7 @@ describe('project names are user data: text only', () => {
 });
 
 describe('menu rows: status, unread, needs-you, draft', () => {
-  it('shows a status dot, unread count, needs-you badge and draft mark per row', () => {
+  it('shows a status dot, unread count, needs-you badge and draft mark per row', async () => {
     const w1 = thread('w1', { title: 'Waiting work', projectId: 'x' } as never);
     const t = setup({ extraThreads: [w1], permission: ['w1'] });
     // tx has an unread assistant reply that arrived while the sheet was closed
@@ -286,7 +294,7 @@ describe('menu rows: status, unread, needs-you, draft', () => {
     expect(tx.getAttribute('aria-label')).toBe('Agent Threads, idle, 2 unread replies, 1 needs you');
   });
 
-  it('an error orchestrator shows the error dot', () => {
+  it('an error orchestrator shows the error dot', async () => {
     const t = setup();
     t.byId('ty')!.lastError = 'boom';
     t.dock.refresh();
@@ -295,7 +303,7 @@ describe('menu rows: status, unread, needs-you, draft', () => {
     expect(t.optionFor('ty')!.querySelector('.ct-orch-sdot')!.className).toContain('ct-orch-sdot-error');
   });
 
-  it('opening a target reads its replies: the unread badge clears', () => {
+  it('opening a target reads its replies: the unread badge clears', async () => {
     const t = setup();
     t.say('tx', 'new reply');
     t.dock.openSheet();
@@ -308,7 +316,7 @@ describe('menu rows: status, unread, needs-you, draft', () => {
 });
 
 describe('keyboard', () => {
-  it('Enter / Space / ArrowDown on the button open the menu with focus on the selected option', () => {
+  it('Enter / Space / ArrowDown on the button open the menu with focus on the selected option', async () => {
     for (const k of ['Enter', ' ', 'ArrowDown']) {
       document.body.innerHTML = '';
       const t = setup();
@@ -321,7 +329,7 @@ describe('keyboard', () => {
     }
   });
 
-  it('ArrowDown / ArrowUp / Home / End move between options; Enter selects; focus returns to the title button', () => {
+  it('ArrowDown / ArrowUp / Home / End move between options; Enter selects; focus returns to the title button', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -340,7 +348,7 @@ describe('keyboard', () => {
     expect(document.activeElement).toBe(t.titleBtn());
   });
 
-  it('Space selects the focused option', () => {
+  it('Space selects the focused option', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -349,7 +357,7 @@ describe('keyboard', () => {
     expect(t.titleBtn()!.textContent).toContain('Compass orchestrator');
   });
 
-  it('Escape closes the menu first (focus back on the button), and only a second Escape closes the sheet', () => {
+  it('Escape closes the menu first (focus back on the button), and only a second Escape closes the sheet', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -361,7 +369,7 @@ describe('keyboard', () => {
     expect(t.isOpen()).toBe(false);
   });
 
-  it('Escape while only the button is focused and the menu is open also closes just the menu', () => {
+  it('Escape while only the button is focused and the menu is open also closes just the menu', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -371,14 +379,14 @@ describe('keyboard', () => {
     expect(t.isOpen()).toBe(true);
   });
 
-  it('options are a roving set: only the focused one is in the tab order', () => {
+  it('options are a roving set: only the focused one is in the tab order', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
     expect(t.options().map((o) => o.tabIndex)).toEqual([0, -1, -1]);
   });
 
-  it('Tab out of the menu closes it', () => {
+  it('Tab out of the menu closes it', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -388,7 +396,7 @@ describe('keyboard', () => {
 });
 
 describe('outside click', () => {
-  it('a press outside the title and the menu closes the menu (the sheet stays open)', () => {
+  it('a press outside the title and the menu closes the menu (the sheet stays open)', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -397,7 +405,7 @@ describe('outside click', () => {
     expect(t.isOpen()).toBe(true);
   });
 
-  it('a press inside the menu does not close it; the title button toggles it', () => {
+  it('a press inside the menu does not close it; the title button toggles it', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -407,7 +415,7 @@ describe('outside click', () => {
     expect(t.menuOpen()).toBe(false);
   });
 
-  it('closing the sheet closes the menu', () => {
+  it('closing the sheet closes the menu', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
@@ -419,7 +427,7 @@ describe('outside click', () => {
 describe('per-target streaming', () => {
   const streaming = (t: T) => t.log().querySelector('[data-streaming="true"]');
 
-  it('a stream on another target never shows in this one, and appears when that target is selected', () => {
+  it('a stream on another target never shows in this one, and appears when that target is selected', async () => {
     const t = setup();
     t.dock.openSheet();
     t.emit('tx', 'streaming_start');
@@ -430,7 +438,7 @@ describe('per-target streaming', () => {
     expect(streaming(t)!.textContent).toContain('TX-STREAM');
   });
 
-  it('switching away from a streaming target leaves no stale streaming row and no foreign text', () => {
+  it('switching away from a streaming target leaves no stale streaming row and no foreign text', async () => {
     const t = setup();
     t.dock.openSheet();
     t.emit('orch', 'streaming_start');
@@ -445,7 +453,7 @@ describe('per-target streaming', () => {
     expect(streaming(t)!.textContent).toContain('PORTFOLIO-STREAM');
   });
 
-  it('two targets streaming at once keep separate buffers', () => {
+  it('two targets streaming at once keep separate buffers', async () => {
     const t = setup();
     t.dock.openSheet();
     t.emit('orch', 'token', { text: 'AAA' });
@@ -458,7 +466,7 @@ describe('per-target streaming', () => {
     expect(streaming(t)!.textContent).not.toContain('AAA');
   });
 
-  it('a Stopped row belongs to the target that was stopped', () => {
+  it('a Stopped row belongs to the target that was stopped', async () => {
     const t = setup();
     t.dock.openSheet();
     t.emit('orch', 'streaming_start');
@@ -472,7 +480,7 @@ describe('per-target streaming', () => {
 });
 
 describe('per-target drafts and input history', () => {
-  it('each target keeps its own draft across switching, and the field shows the selected one', () => {
+  it('each target keeps its own draft across switching, and the field shows the selected one', async () => {
     const t = setup();
     t.dock.openSheet();
     t.type('portfolio draft');
@@ -490,7 +498,7 @@ describe('per-target drafts and input history', () => {
     expect(t.drafts.get('tx')).toBe('agent-threads draft');
   });
 
-  it('the menu marks the targets that hold a draft (the selected one included)', () => {
+  it('the menu marks the targets that hold a draft (the selected one included)', async () => {
     const t = setup();
     t.dock.openSheet();
     t.type('half typed');
@@ -533,7 +541,7 @@ describe('per-target drafts and input history', () => {
 });
 
 describe('unread peek and the dot cover every orchestrator', () => {
-  it('a reply from a Project orchestrator peeks with its name and opens the sheet on that target', () => {
+  it('a reply from a Project orchestrator peeks with its name and opens the sheet on that target', async () => {
     const t = setup();
     t.say('ty', 'compass finished the review');
     expect(t.peek().hidden).toBe(false);
@@ -542,10 +550,11 @@ describe('unread peek and the dot cover every orchestrator', () => {
     (t.peek().querySelector('.ct-orch-peek-open') as HTMLElement).click();
     expect(t.isOpen()).toBe(true);
     expect(t.titleBtn()!.textContent).toContain('Compass orchestrator');
+    await settle();
     expect(texts(t)).toContain('compass finished the review');
   });
 
-  it('a Portfolio reply still peeks as "Orchestrator" and opens on the Portfolio', () => {
+  it('a Portfolio reply still peeks as "Orchestrator" and opens on the Portfolio', async () => {
     const t = setup();
     t.say('orch', 'portfolio finished');
     expect(t.peek().textContent).toContain('Orchestrator');
@@ -553,14 +562,14 @@ describe('unread peek and the dot cover every orchestrator', () => {
     expect(t.titleBtn()!.textContent).toContain('Portfolio orchestrator');
   });
 
-  it('opening the sheet by any other route (the field, Cmd+J) still starts on the Portfolio', () => {
+  it('opening the sheet by any other route (the field, Cmd+J) still starts on the Portfolio', async () => {
     const t = setup();
     t.say('ty', 'compass finished the review');
     t.dock.openSheet();
     expect(t.titleBtn()!.textContent).toContain('Portfolio orchestrator');
   });
 
-  it('a peek while the sheet is open on another target switches to its source when Open is pressed', () => {
+  it('a peek while the sheet is open on another target switches to its source when Open is pressed', async () => {
     const t = setup();
     t.dock.openSheet();
     t.say('ty', 'compass finished the review');
@@ -569,7 +578,7 @@ describe('unread peek and the dot cover every orchestrator', () => {
     expect(t.titleBtn()!.textContent).toContain('Compass orchestrator');
   });
 
-  it('an unread reply on a non-selected orchestrator keeps the dot in its attention state', () => {
+  it('an unread reply on a non-selected orchestrator keeps the dot in its attention state', async () => {
     const t = setup();
     t.say('tx', 'unread over there');
     expect(t.dot().classList.contains('ct-orch-dot-attention')).toBe(true);
@@ -581,13 +590,14 @@ describe('unread peek and the dot cover every orchestrator', () => {
     expect(t.dot().classList.contains('ct-orch-dot-attention')).toBe(false);
   });
 
-  it('a reply on the selected target while the sheet is open is read at once, no peek', () => {
+  it('a reply on the selected target while the sheet is open is read at once, no peek', async () => {
     const t = setup();
     t.dock.openSheet();
     t.titleBtn()!.click();
     t.select('tx');
     t.say('tx', 'live reply');
     expect(t.peek().hidden).toBe(true);
+    await settle();
     expect(texts(t)).toContain('live reply');
   });
 });
@@ -595,7 +605,7 @@ describe('unread peek and the dot cover every orchestrator', () => {
 describe('the Needs-you tray covers every orchestrator', () => {
   const owner = (t: T, threadId: string) => t.q(`.ct-orch-tray-card[data-thread-id="${threadId}"] .ct-orch-tray-owner`);
 
-  it('a card of a non-selected orchestrator says whose it is; the selected one\'s do not', () => {
+  it('a card of a non-selected orchestrator says whose it is; the selected one\'s do not', async () => {
     const wx = thread('wx', { title: 'Project X work', projectId: 'x' } as never);
     const wfree = thread('wf', { title: 'Unassigned work' });
     const t = setup({ extraThreads: [wx, wfree], permission: ['wx', 'wf'] });
@@ -608,7 +618,7 @@ describe('the Needs-you tray covers every orchestrator', () => {
     expect(owner(t, 'wf')!.textContent).toBe('Portfolio');
   });
 
-  it('the hand-off ("Review in thread") opens the thread that is waiting, not the selected orchestrator', () => {
+  it('the hand-off ("Review in thread") opens the thread that is waiting, not the selected orchestrator', async () => {
     const wx = thread('wx', { title: 'Project X work', projectId: 'x' } as never);
     const t = setup({ extraThreads: [wx], permission: ['wx'] });
     t.dock.openSheet();
@@ -616,7 +626,7 @@ describe('the Needs-you tray covers every orchestrator', () => {
     expect(t.deps.openThread).toHaveBeenCalledWith('wx');
   });
 
-  it('a hostile project name in the owner label is text', () => {
+  it('a hostile project name in the owner label is text', async () => {
     const wx = thread('wx', { title: 'Project X work', projectId: 'x' } as never);
     const t = setup({ extraThreads: [wx], permission: ['wx'], projects: [{ id: 'x', name: HOSTILE, orchestratorThreadId: 'tx' }] });
     t.dock.openSheet();
@@ -649,7 +659,7 @@ describe('narrow (orb) mode', () => {
     expect(t.titleBtn()).toBeTruthy();
     t.titleBtn()!.click();
     expect(t.options().length).toBe(3);
-    const css = (await import('node:fs')).readFileSync(new URL('../../styles.css', import.meta.url), 'utf8');
+    const css = readFileSync('styles.css', 'utf8');
     expect(css).toMatch(/\.ct-orch-sheet\[data-mode="orb"\][^{]*\.ct-orch-menu-opt[^{]*\{[^}]*min-height:\s*44px/);
     expect(css).toMatch(/\.ct-orch-title-btn:focus-visible/);
     expect(css).toMatch(/\.ct-orch-menu-opt:focus-visible/);

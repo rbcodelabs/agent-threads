@@ -31,9 +31,13 @@ import {
 import { capTranscript, peekLine, sheetBlock, sheetTranscript } from './dockSheetModel';
 import { createDockMessageEnv, type DockMessageHostDeps } from './dockMessageEnv';
 import { InputHistory } from './dockInputHistory';
+import {
+  attributeNeedsYou, buildDockTargets, defaultTargetId, hasTargetMenu, ownerOf, resolveTargetId, targetLabels, targetOnOpen, targetRows, unreadCount,
+  type DockTarget, type TargetFacts, type TargetLabels,
+} from './dockTargetModel';
 import { createDraftStore, MAX_DRAFT_CHARS, type DraftStore } from './dockDraftStore';
 import { KeyboardInsetTracker } from './dockKeyboardInset';
-import { DockSheet, type SheetView } from './orchestratorDockSheet';
+import { DockSheet, type SheetMenu, type SheetView } from './orchestratorDockSheet';
 import { DockTray, type TrayEntry } from './orchestratorDockTray';
 import { trayItems } from './dockTrayModel';
 import type { PermissionButtonDeps } from './permissionCard';
@@ -56,7 +60,13 @@ export interface OrchestratorDockDeps {
   /** Board threads (the host applies its own filter, e.g. isKanbanThread): the source of total/running/attention. */
   listThreads(): Thread[];
   hasPendingWakeup(threadId: string): boolean;
+  /** The Portfolio orchestrator (`settings.orchestratorThreadId`). */
   getOrchestratorThreadId(): string | undefined;
+  /**
+   * Every Project the host knows (manager.getProjects()); each may pin a Project orchestrator thread. The dock offers every
+   * live one next to the Portfolio orchestrator (dockTargetModel). Absent: the Portfolio orchestrator only, as before.
+   */
+  projects?(): ReadonlyArray<{ id: string; name: string; orchestratorThreadId?: string }>;
   /** plugin.ensureOrchestratorThread(false): creates the thread WITHOUT opening it. */
   ensureOrchestrator(): Promise<void>;
   /** plugin.openThreadInChatView */
@@ -100,6 +110,38 @@ export interface OrchestratorDockDeps {
 }
 
 type BodyKind = 'input' | 'none' | 'offline' | 'error';
+
+/**
+ * Everything the dock tracks PER orchestrator thread, so switching the sheet's target never shows another thread's streaming
+ * text, a stale "Stopped" row or somebody else's unread state. Events arrive for every orchestrator, so each updates its own.
+ */
+interface TargetState {
+  streamBuf: string;
+  /** Partial reply of an interrupted turn. The manager does not persist it (onInterrupted only rolls user messages back). */
+  stoppedText: string;
+  /** A13: set when our own message was echoed (user_message_added) while its send was still pending. */
+  sendEcho: boolean;
+  /** Stop was clicked and not yet accounted for; with the snapshot of what was streaming at that moment. */
+  stopRequested: boolean;
+  stopSnapshot: string;
+  sendingText: string;
+  /** A send is pending: another send to the SAME orchestrator is blocked (the manager does not dedupe). */
+  sending: boolean;
+  stopping: boolean;
+  txCache: { ref: unknown; len: number; lastId: string | undefined; lastLen: number; lastTools: number; entries: ReturnType<typeof sheetTranscript> } | null;
+  /** User message ids that landed while a turn was running (coalesced into it): "Sent, will be picked up". */
+  pickupIds: Set<string>;
+  /** Latest assistant message id the user has seen; seeded when the thread is first seen (its history counts as read). */
+  lastSeenId: string | undefined;
+  seeded: boolean;
+}
+
+function newTargetState(): TargetState {
+  return {
+    streamBuf: '', stoppedText: '', sendEcho: false, stopRequested: false, stopSnapshot: '', sendingText: '', sending: false, stopping: false,
+    txCache: null, pickupIds: new Set(), lastSeenId: undefined, seeded: false,
+  };
+}
 
 /**
  * The ONLY manager events that re-derive the dock. An allowlist (not a blocklist) so a new high-frequency
@@ -168,7 +210,6 @@ export class OrchestratorDock {
   /** Sends that failed after the orchestrator was swapped: their text, per orchestrator id, comes back if the user returns. */
   private readonly lostSends = new Map<string, string>();
   private keyboardRoot: HTMLElement | null = null;
-  private readonly history = new InputHistory();
   private readonly drafts: DraftStore;
   /** The store version after this dock's last read / write: a different version means another dock changed the draft since. */
   private syncedVersion = 0;
@@ -182,33 +223,28 @@ export class OrchestratorDock {
   /** The announcement waiting to be written is a problem report (error / offline) that can still be withdrawn. */
   private pendingProblem = false;
 
-  /** Orchestrator id the per-thread state below belongs to; a change resets it. */
+  /** Orchestrator id the input / lost-send bookkeeping last followed; a change swaps the field to that target's draft. */
   private trackedId: string | undefined;
-  /** The last defined orchestrator id seen (survives the thread being deleted, so a re-setup with a NEW id is a swap). */
-  private lastOrchestratorId: string | undefined;
-  private streamBuf = '';
-  /** Partial reply of an interrupted turn. The manager does not persist it (onInterrupted only rolls user messages back). */
-  private stoppedText = '';
-  /** A13: set when our own message was echoed (user_message_added) while its send was still pending. */
-  private sendEcho = false;
-  /** Stop was clicked and not yet accounted for; with the snapshot of what was streaming at that moment. */
-  private stopRequested = false;
-  private stopSnapshot = '';
-  private sendingText = '';
-  private txCache: { ref: unknown; len: number; lastId: string | undefined; lastLen: number; lastTools: number; entries: ReturnType<typeof sheetTranscript> } | null = null;
-  /** User message ids that landed while a turn was running (coalesced into it): "Sent, will be picked up". */
-  private readonly pickupIds = new Set<string>();
-  /** Latest assistant message id the user has seen; per dock instance, seeded when the thread is first seen. */
-  private lastSeenId: string | undefined;
-  private seeded = false;
-  private stopping = false;
+  /** Per-orchestrator state (TargetState), by thread id. */
+  private readonly states = new Map<string, TargetState>();
+  /** Recall history per orchestrator (ArrowUp walks THAT orchestrator's sent messages). */
+  private readonly histories = new Map<string, InputHistory>();
+  /**
+   * The orchestrator the open sheet talks to. Only meaningful while the sheet is open: closing clears it, so the closed dock
+   * (field, orb, dot) always talks to the default target. DECIDED DEFAULT (1): see dockTargetModel.targetOnOpen.
+   */
+  private selectedId: string | undefined;
+  /** The target an unread peek came from: its Open button opens the sheet on that target. */
+  private peekTargetId: string | undefined;
+  /** The menu rows' facts from the last refresh (the sheet is rendered from it). */
+  private targets: DockTarget[] = [];
+  private needsByTarget = new Map<string, number>();
   private attention: AttentionItem[] = [];
   private trayEntries: TrayEntry[] = [];
 
   private bodyKind: BodyKind | null = null;
   private state: DockState = 'none';
   private currentMode: DockMode = 'pill';
-  private sending = false;
   private settingUp = false;
   private destroyed = false;
   private unsubscribeManager: (() => void) | null = null;
@@ -221,11 +257,54 @@ export class OrchestratorDock {
   /** Write-through: every change reaches the (in-memory) store, so a re-mounted dock starts from it. */
   private get draft(): string { return this.drafts.get(this.draftKey); }
   private set draft(text: string) {
-    if (text) this.drafts.set(text, this.draftKey); else this.drafts.clear();
+    this.drafts.set(text, this.draftKey); // an empty text removes the key
     this.syncedVersion = this.drafts.version;
   }
-  /** The draft belongs to one orchestrator thread: a swapped / re-set-up orchestrator never reads it. */
-  private get draftKey(): string { return this.deps.getOrchestratorThreadId() ?? ''; }
+  /** The draft belongs to one orchestrator thread: a swapped / re-set-up / switched-to orchestrator never reads another's. */
+  private get draftKey(): string { return this.activeId() ?? ''; }
+
+  // ── Targets (the Portfolio orchestrator + every Project orchestrator) ─────
+
+  private stateFor(id: string | undefined): TargetState {
+    const key = id ?? '';
+    let st = this.states.get(key);
+    if (!st) { st = newTargetState(); this.states.set(key, st); }
+    return st;
+  }
+  /** The state of the orchestrator the dock currently talks to. */
+  private get st(): TargetState { return this.stateFor(this.activeId()); }
+  private get hist(): InputHistory {
+    const key = this.activeId() ?? '';
+    let h = this.histories.get(key);
+    if (!h) { h = new InputHistory(); this.histories.set(key, h); }
+    return h;
+  }
+
+  /** Computed live (cheap: a handful of projects), so a swapped / archived orchestrator is never read through a stale cache. */
+  private currentTargets(): DockTarget[] {
+    return buildDockTargets({
+      portfolioThreadId: this.deps.getOrchestratorThreadId(),
+      projects: this.deps.projects?.() ?? [],
+      threadExists: (id) => !!this.deps.manager.getThread(id),
+    });
+  }
+
+  /**
+   * The orchestrator thread the dock talks to: the selected target while the sheet is open (still a target, else the default),
+   * the default otherwise. With no orchestrator thread at all it is the Portfolio setting itself (possibly stale or unset), which
+   * keeps the "No orchestrator yet / Set up…" behaviour exactly as before.
+   */
+  private activeId(): string | undefined {
+    const targets = this.currentTargets();
+    if (targets.length === 0) return this.deps.getOrchestratorThreadId();
+    return resolveTargetId(targets, this.selectedId);
+  }
+
+  private activeTarget(): DockTarget | undefined {
+    const id = this.activeId();
+    return this.currentTargets().find((t) => t.threadId === id);
+  }
+  private get labels(): TargetLabels { return targetLabels(this.activeTarget()); }
 
   mount(): void {
     if (this.rootEl) return;
@@ -265,10 +344,11 @@ export class OrchestratorDock {
     });
 
     this.unsubscribeManager = this.deps.manager.subscribe((threadId, event) => {
-      const id = this.deps.getOrchestratorThreadId();
-      if (id && threadId === id) this.onOrchestratorEvent(event as { type: string; [k: string]: unknown });
+      // Every orchestrator keeps its own streaming / unread state, whichever one the sheet is showing.
+      const tracked = this.trackedIds().includes(threadId);
+      if (tracked) this.onOrchestratorEvent(threadId, event as { type: string; [k: string]: unknown });
       if (REFRESH_EVENTS.has(event.type)) this.refresh();
-      else if (id && threadId === id && SHEET_EVENTS.has(event.type)) this.renderSheet();
+      else if (tracked && threadId === this.activeId() && SHEET_EVENTS.has(event.type)) this.renderSheet();
     });
     this.unsubscribeDaemons = this.deps.daemons?.onState(() => this.refresh()) ?? null;
     this.refresh();
@@ -288,7 +368,9 @@ export class OrchestratorDock {
     this.cancelRecovery();
     this.stopKeyboardTracking();
     this.keyboard = null;
-    this.history.clear();
+    for (const h of this.histories.values()) h.clear();
+    this.histories.clear();
+    this.states.clear();
     this.host.parentElement?.classList.remove('ct-orch-pill-mode', 'ct-orch-kbd-up');
     this.tray?.destroy();
     this.tray = null;
@@ -305,6 +387,14 @@ export class OrchestratorDock {
     this.inputEl = null;
     this.actionEl = null;
     this.reasonEl = null;
+  }
+
+  /** Every orchestrator thread the dock follows (all targets; with none, the Portfolio setting itself). */
+  private trackedIds(): string[] {
+    const targets = this.currentTargets();
+    if (targets.length > 0) return targets.map((t) => t.threadId);
+    const id = this.activeId();
+    return id ? [id] : [];
   }
 
   /** Re-read the layout mode (the host calls this when its width changes). */
@@ -326,10 +416,12 @@ export class OrchestratorDock {
     if (this.destroyed || !this.rootEl) return;
     const { manager } = this.deps;
     const listed = this.deps.listThreads();
-    // The orchestrator needs the user too, even if the board's filter hides it (e.g. a peer plugin flagged it `background`).
-    const ownId = this.deps.getOrchestratorThreadId();
-    const own = ownId && !listed.some((t) => t.id === ownId) ? manager.getThread(ownId) : undefined;
-    const threads = own ? [...listed, own] : listed;
+    // An orchestrator needs the user too, even if the board's filter hides it (e.g. a peer plugin flagged it `background`).
+    const listedIds = new Set(listed.map((t) => t.id));
+    const hidden = this.trackedIds().filter((id) => !listedIds.has(id)).map((id) => manager.getThread(id)).filter((t): t is Thread => !!t);
+    const threads = hidden.length > 0 ? [...listed, ...hidden] : listed;
+    const targets = this.currentTargets();
+    this.targets = targets;
     const candidates: AttentionCandidate[] = threads.map((t) => ({
       threadId: t.id,
       title: t.title,
@@ -342,14 +434,17 @@ export class OrchestratorDock {
       },
     }));
     this.attention = attentionItems(candidates);
-    this.trayEntries = this.computeTrayEntries();
+    this.needsByTarget = attributeNeedsYou(this.attention, targets, (id) => manager.getThread(id)?.projectId);
     const needsYou = needsYouCount(this.attention);
     const running = threads.filter((t) => manager.isRunning(t.id)).length;
 
-    const orchestratorId = this.deps.getOrchestratorThreadId();
+    const orchestratorId = this.activeId();
     const thread = orchestratorId ? manager.getThread(orchestratorId) : undefined;
     this.trackOrchestrator(orchestratorId, thread);
-    const unread = thread ? unreadState(this.transcriptOf(thread), this.lastSeenId) : { hasUnread: false, latestAssistantId: undefined };
+    this.trackTargets(targets, orchestratorId);
+    // The dot, the tooltip and the count cover ALL orchestrators: an unread reply anywhere keeps it in its attention state.
+    const anyUnread = targets.some((t) => this.factsFor(t.threadId).unread > 0);
+    this.trayEntries = this.computeTrayEntries(); // the owner labels follow the active target
     const daemon = thread?.remote ? this.deps.daemons?.stateOf(thread.remote.daemonId) : undefined;
     const focusBefore = this.host.ownerDocument.activeElement;
     this.state = deriveDockState({
@@ -358,9 +453,9 @@ export class OrchestratorDock {
       isRunning: !!orchestratorId && manager.isRunning(orchestratorId),
       daemon,
       needsYouCount: needsYou,
-      hasUnreadReply: unread.hasUnread,
+      hasUnreadReply: anyUnread,
     });
-    this.trackHealth(thread);
+    this.trackHealth(this.healthState(orchestratorId, needsYou, anyUnread), thread);
     const previousMode = this.currentMode;
     if (this.state === 'none' && this.sheet?.isOpen) this.closeSheet(false);
     this.currentMode = this.deps.mode();
@@ -380,8 +475,8 @@ export class OrchestratorDock {
     this.orbEl.toggleClass('ct-orch-orb-spinning', !alertTint && (running > 0 || (!!orchestratorId && manager.isRunning(orchestratorId))));
 
     const tip = tooltipText({ running, total: threads.length, needsYou });
-    const dotTip = unread.hasUnread ? `${tip} · unread reply` : tip;
-    this.dotEl.toggleClass('ct-orch-dot-attention', needsYou > 0 || unread.hasUnread);
+    const dotTip = anyUnread ? `${tip} · unread reply` : tip;
+    this.dotEl.toggleClass('ct-orch-dot-attention', needsYou > 0 || anyUnread);
     this.dotEl.setAttribute('title', dotTip);
     this.dotEl.setAttribute('aria-label', dotTip);
     this.summaryText = tip;
@@ -409,9 +504,9 @@ export class OrchestratorDock {
    * way or the other. A recovery is announced only after it has held for RECOVERY_DEBOUNCE_MS, so a flap (retry that fails
    * again, a daemon bounce) is never announced as "recovered".
    */
-  private trackHealth(thread: Thread | undefined): void {
-    if (this.state === 'working') return;
-    const h: Health = this.state === 'error' ? 'error' : this.state === 'offline' ? 'offline' : this.state === 'none' ? 'none' : 'ok';
+  private trackHealth(state: DockState, thread: Thread | undefined): void {
+    if (state === 'working') return;
+    const h: Health = state === 'error' ? 'error' : state === 'offline' ? 'offline' : state === 'none' ? 'none' : 'ok';
     const prev = this.health;
     this.health = h;
     const bad = h === 'error' || h === 'offline';
@@ -479,85 +574,141 @@ export class OrchestratorDock {
 
   // ── Per-orchestrator state ────────────────────────────────────────────────
 
-  /** A new orchestrator thread (first sight, re-setup) starts with a clean buffer, and its history counts as read. */
-  private trackOrchestrator(id: string | undefined, thread: Thread | undefined): void {
+  /**
+   * Health (the error / offline announcer) follows the DEFAULT target, the one the closed dock shows, not whatever the open sheet
+   * is switched to: choosing another orchestrator must never read as a recovery or a new failure.
+   */
+  private healthState(activeId: string | undefined, needsYou: number, anyUnread: boolean): DockState {
+    const id = defaultTargetId(this.targets) ?? this.deps.getOrchestratorThreadId();
+    if (id === activeId) return this.state;
+    const thread = id ? this.deps.manager.getThread(id) : undefined;
+    return deriveDockState({
+      orchestratorId: id,
+      thread,
+      isRunning: !!id && this.deps.manager.isRunning(id),
+      daemon: thread?.remote ? this.deps.daemons?.stateOf(thread.remote.daemonId) : undefined,
+      needsYouCount: needsYou,
+      hasUnreadReply: anyUnread,
+    });
+  }
+
+  /**
+   * The input follows the active target: another orchestrator means another draft (keyed by thread id), and a send that failed
+   * while the user was elsewhere comes back when they return to that orchestrator.
+   */
+  private trackOrchestrator(id: string | undefined, _thread: Thread | undefined): void {
     if (id !== this.trackedId) {
-      // A swapped / re-set-up orchestrator thread must not inherit what was typed for the previous one.
-      // (Deleted and re-created with the SAME id keeps it: only a different, defined id clears, and only a draft that is NOT
-      // already the new orchestrator's: a second board noticing the swap late must not wipe what was typed for it meanwhile.)
-      if (id !== undefined && this.lastOrchestratorId !== undefined && id !== this.lastOrchestratorId) {
-        if (this.drafts.get(id) === '') this.drafts.clear();
-        this.syncedVersion = this.drafts.version;
-        if (this.inputEl) { this.inputEl.value = this.drafts.get(id); this.autosize(this.inputEl); }
-        this.history.reset();
-      }
-      // First sight of an orchestrator (a board re-mount): whatever the store holds for ANOTHER orchestrator is dropped, not kept hidden.
-      if (id !== undefined && this.lastOrchestratorId === undefined && this.drafts.get(id) === '') {
-        this.drafts.clear();
-        this.syncedVersion = this.drafts.version;
-      }
       this.trackedId = id;
-      if (id !== undefined) this.lastOrchestratorId = id;
-      // A send that failed while the user was on another orchestrator comes back when they return to this one.
       const lost = id ? this.lostSends.get(id) : undefined;
       if (id && lost !== undefined) {
         this.lostSends.delete(id);
         if (this.drafts.get(id) === '') {
           this.drafts.set(lost, id);
           this.syncedVersion = this.drafts.version;
-          if (this.inputEl) { this.inputEl.value = lost; this.autosize(this.inputEl); }
         }
       }
-      this.streamBuf = '';
-      this.stoppedText = '';
-      this.txCache = null;
-      this.pickupIds.clear();
-      this.seeded = false;
-      this.lastSeenId = undefined;
-      this.stopping = false;
     }
-    if (!thread) return;
-    const latest = unreadState(this.transcriptOf(thread), undefined).latestAssistantId;
-    if (!this.seeded || this.sheet?.isOpen) { this.lastSeenId = latest; this.seeded = true; }
+    this.syncInputToTarget();
   }
 
-  private onOrchestratorEvent(event: { type: string; [k: string]: unknown }): void {
-    const id = this.deps.getOrchestratorThreadId();
-    if (!id) return;
+  /** The textarea (one element, kept across switches so focus survives) shows the active target's draft. */
+  private syncInputToTarget(): void {
+    const input = this.inputEl;
+    if (!input || this.inputKey === this.draftKey) return;
+    this.inputKey = this.draftKey;
+    input.value = this.draft;
+    this.syncedVersion = this.drafts.version;
+    this.hist.reset();
+    this.recallCaret = -1;
+    this.autosize(input);
+  }
+
+  /**
+   * Per-orchestrator bookkeeping after each refresh: the first time an orchestrator is seen its history counts as read; while the
+   * sheet is open the target it shows is read as it changes; the others keep their unread count. State of orchestrators that are
+   * no longer targets is dropped (what was typed may have held a secret).
+   */
+  private trackTargets(targets: readonly DockTarget[], activeId: string | undefined): void {
+    const live = new Set<string>(targets.map((t) => t.threadId));
+    if (activeId) live.add(activeId);
+    for (const key of [...this.states.keys()]) if (!live.has(key)) this.states.delete(key);
+    for (const key of [...this.histories.keys()]) if (!live.has(key)) { this.histories.get(key)?.clear(); this.histories.delete(key); }
+    // A draft belongs to an orchestrator that still exists: a swapped / archived one's text is dropped, not kept hidden (it may hold
+    // a secret). Orchestrators the settings / projects still POINT at survive a thread that is briefly missing.
+    const pinned = new Set(live);
+    const portfolio = this.deps.getOrchestratorThreadId();
+    if (portfolio) pinned.add(portfolio);
+    for (const p of this.deps.projects?.() ?? []) if (p.orchestratorThreadId) pinned.add(p.orchestratorThreadId);
+    // Nothing pinned at all (the orchestrator is gone, e.g. deleted): keep the draft, the same orchestrator may be re-created.
+    for (const key of pinned.size === 0 ? [] : this.drafts.keys()) {
+      if (pinned.has(key) || key === '') continue;
+      this.drafts.clear(key);
+      this.syncedVersion = this.drafts.version;
+    }
+    for (const id of live) {
+      const thread = this.deps.manager.getThread(id);
+      if (!thread) continue;
+      const st = this.stateFor(id);
+      const latest = unreadState(this.transcriptOf(thread), undefined).latestAssistantId;
+      if (!st.seeded || (this.sheet?.isOpen && id === activeId)) { st.lastSeenId = latest; st.seeded = true; }
+    }
+  }
+
+  /** Live facts for one menu row (needs-you comes from the last refresh's attribution: it needs the whole board). */
+  private factsFor(id: string): TargetFacts {
+    const manager = this.deps.manager;
+    const thread = manager.getThread(id);
+    const running = manager.isRunning(id);
+    const daemon = thread?.remote ? this.deps.daemons?.stateOf(thread.remote.daemonId) : undefined;
+    const state = deriveDockState({ orchestratorId: id, thread, isRunning: running, daemon, needsYouCount: 0, hasUnreadReply: false });
+    return {
+      running,
+      error: state === 'error' || state === 'offline',
+      unread: thread ? unreadCount(this.transcriptOf(thread), this.stateFor(id).lastSeenId) : 0,
+      needsYou: this.needsByTarget.get(id) ?? 0,
+      hasDraft: this.drafts.has(id),
+    };
+  }
+
+  /** One orchestrator's event, applied to ITS state (the sheet is only touched when it is showing this orchestrator). */
+  private onOrchestratorEvent(id: string, event: { type: string; [k: string]: unknown }): void {
+    const st = this.stateFor(id);
+    const showing = id === this.activeId();
+    const voice = targetLabels(this.currentTargets().find((t) => t.threadId === id)).voice;
     switch (event.type) {
       case 'token': {
-        const first = this.streamBuf === '';
-        this.streamBuf += String(event.text ?? '');
-        if (this.sheet?.isOpen) {
-          this.sheet.setStreaming(this.streamBuf);
-          if (first) this.sheet.announce('Orchestrator is replying');
+        const first = st.streamBuf === '';
+        st.streamBuf += String(event.text ?? '');
+        if (showing && this.sheet?.isOpen) {
+          this.sheet.setStreaming(st.streamBuf);
+          if (first) this.sheet.announce(`${voice} is replying`);
         }
         break;
       }
       case 'stream_reset':
-        this.streamBuf = '';
+        st.streamBuf = '';
         break;
       case 'streaming_start':
-        this.streamBuf = '';
-        this.stoppedText = '';
-        this.stopRequested = false;
+        st.streamBuf = '';
+        st.stoppedText = '';
+        st.stopRequested = false;
         break;
       case 'user_message_added': {
         // The event precedes streaming_start, so isRunning() still reflects the PRIOR state: true means the
         // manager coalesced this message into the turn in flight (ADR-0002), and it is not yet answered.
         const msg = event.message as { id?: string; content?: string } | undefined;
-        if (msg?.id && this.deps.manager.isRunning(id)) this.pickupIds.add(msg.id);
+        if (msg?.id && this.deps.manager.isRunning(id)) st.pickupIds.add(msg.id);
         // A13: our own send was recorded: a later failure must not restore the draft (it would send a duplicate).
-        if (this.sending && msg?.content === this.sendingText) { this.sendEcho = true; this.sheet?.pinOnNextRender(); }
-        this.stoppedText = '';
-        this.stopRequested = false;
+        if (st.sending && msg?.content === st.sendingText) { st.sendEcho = true; if (showing) this.sheet?.pinOnNextRender(); }
+        st.stoppedText = '';
+        st.stopRequested = false;
         break;
       }
       case 'message':
-        this.streamBuf = '';
-        this.stoppedText = '';
-        this.stopRequested = false; // the reply completed anyway: nothing was stopped
-        this.onAssistantMessage(event.message as { role?: string; content?: string } | undefined);
+        st.streamBuf = '';
+        st.stoppedText = '';
+        st.stopRequested = false; // the reply completed anyway: nothing was stopped
+        this.onAssistantMessage(id, event.message as { role?: string; content?: string } | undefined);
         break;
       case 'interrupted':
       case 'done':
@@ -566,36 +717,40 @@ export class OrchestratorDock {
         // An interrupt drops the in-progress assistant text (never persisted): keep it visible, dimmed, until the next send.
         // Remote sessions may end a stopped turn with done / run_state_settled / error and no `interrupted`: when Stop was
         // clicked, any end-of-turn event keeps the partial (from the buffer, or the snapshot taken at the click).
-        if (!this.stoppedText && (event.type === 'interrupted' || this.stopRequested)) {
-          const partial = this.streamBuf || (this.stopRequested ? this.stopSnapshot : '');
-          if (partial) this.stoppedText = partial;
+        if (!st.stoppedText && (event.type === 'interrupted' || st.stopRequested)) {
+          const partial = st.streamBuf || (st.stopRequested ? st.stopSnapshot : '');
+          if (partial) st.stoppedText = partial;
         }
-        if (event.type !== 'done') this.stopRequested = false;
-        this.streamBuf = '';
-        this.pickupIds.clear();
-        if (event.type !== 'done') this.stopping = false;
+        if (event.type !== 'done') st.stopRequested = false;
+        st.streamBuf = '';
+        st.pickupIds.clear();
+        if (event.type !== 'done') st.stopping = false;
         break;
       case 'tool_use':
       case 'tool_progress':
       case 'status':
-        this.sheet?.setActivity(this.deps.manager.getThreadActivity(id) ?? '');
+        if (showing) this.sheet?.setActivity(this.deps.manager.getThreadActivity(id) ?? '');
         break;
     }
   }
 
-  /** Assistant text arrived: read at once when the sheet is open, otherwise unread + a one-line peek. */
-  private onAssistantMessage(message: { role?: string; content?: string } | undefined): void {
+  /**
+   * Assistant text arrived. On the orchestrator the open sheet shows it is read at once; anywhere else (any other orchestrator,
+   * or the sheet closed) it is unread and gets a one-line peek that names its source, so Open lands on the right target.
+   */
+  private onAssistantMessage(id: string, message: { role?: string; content?: string } | undefined): void {
     if (message?.role !== 'assistant') return;
-    const id = this.deps.getOrchestratorThreadId();
-    const thread = id ? this.deps.manager.getThread(id) : undefined;
+    const thread = this.deps.manager.getThread(id);
     if (!thread) return;
-    const u = unreadState(this.transcriptOf(thread), this.lastSeenId);
+    const st = this.stateFor(id);
+    const u = unreadState(this.transcriptOf(thread), st.lastSeenId);
     const line = peekLine(message.content ?? '', this.threadRefs());
-    if (this.sheet?.isOpen) {
-      this.lastSeenId = u.latestAssistantId;
-      if (line) this.sheet.announce(`Orchestrator replied: ${line}`, true);
+    const labels = targetLabels(this.currentTargets().find((t) => t.threadId === id));
+    if (this.sheet?.isOpen && id === this.activeId()) {
+      st.lastSeenId = u.latestAssistantId;
+      if (line) this.sheet.announce(`${labels.voice} replied: ${line}`, true);
     } else if (u.hasUnread && line) {
-      this.showPeek(line);
+      this.showPeek(line, id, labels.peekName);
     }
   }
 
@@ -611,10 +766,12 @@ export class OrchestratorDock {
     const parent = this.rootEl ?? this.host.parentElement ?? this.host;
     this.sheet = new DockSheet(parent, {
       close: () => this.closeSheet(),
-      openFull: () => { const id = this.deps.getOrchestratorThreadId(); if (id) void this.openQuietly(id); },
+      openFull: () => { const id = this.activeId(); if (id) void this.openQuietly(id); },
+      selectTarget: (id) => this.selectTarget(id),
+      menuOpened: () => this.renderSheet(), // the draft marks and unread counts are read fresh when the menu opens
       imageSrc: this.deps.imageSrc ? (ref, inline) => this.deps.imageSrc!(ref, inline) : undefined,
       messages: createDockMessageEnv({
-        threadId: () => this.deps.getOrchestratorThreadId(),
+        threadId: () => this.activeId(),
         getThread: (id) => this.deps.manager.getThread(id),
         openNote: (href) => { this.deps.openLink?.(href); },
         // Defence in depth: an anchor injected into the DOM after render can carry any id; only threads the board knows open.
@@ -641,7 +798,7 @@ export class OrchestratorDock {
     const text = peek.createSpan('ct-orch-peek-text');
     this.peekTextEl = text;
     peek.createEl('button', { cls: 'ct-orch-peek-open', text: 'Open', attr: { type: 'button' } })
-      .addEventListener('click', () => this.openSheet());
+      .addEventListener('click', () => this.openSheet(this.peekTargetId));
     const dismiss = peek.createEl('button', { cls: 'ct-orch-peek-dismiss', attr: { type: 'button', 'aria-label': 'Dismiss' } });
     const dx = dismiss.createSpan({ cls: 'ct-orch-icon', attr: { 'aria-hidden': 'true' } });
     setIcon(dx, 'x');
@@ -661,7 +818,7 @@ export class OrchestratorDock {
     this.chipsEl = chips;
   }
 
-  /** sheetTranscript per (messages array, length, last id): refresh() reads it several times per event. */
+  /** sheetTranscript per (thread, messages array, length, last id): refresh() reads it several times per event. */
   private transcriptOf(thread: Thread): ReturnType<typeof sheetTranscript> {
     const msgs = thread.messages;
     const lastMsg = msgs[msgs.length - 1];
@@ -669,22 +826,33 @@ export class OrchestratorDock {
     const lastLen = lastMsg?.content.length ?? 0;
     // A tool call appended to the last message changes the merged row with no new message and no new text.
     const lastTools = lastMsg?.toolCalls?.length ?? 0;
-    const c = this.txCache;
+    const st = this.stateFor(thread.id);
+    const c = st.txCache;
     if (c && c.ref === msgs && c.len === msgs.length && c.lastId === last && c.lastLen === lastLen && c.lastTools === lastTools) return c.entries;
     const entries = sheetTranscript(msgs);
-    this.txCache = { ref: msgs, len: msgs.length, lastId: last, lastLen, lastTools, entries };
+    st.txCache = { ref: msgs, len: msgs.length, lastId: last, lastLen, lastTools, entries };
     return entries;
   }
 
   private hasTranscript(): boolean {
-    const id = this.deps.getOrchestratorThreadId();
+    const id = this.activeId();
     const thread = id ? this.deps.manager.getThread(id) : undefined;
     return !!thread && this.transcriptOf(thread).length > 0;
   }
 
-  openSheet(): void {
-    if (this.destroyed || !this.sheet || !this.deps.getOrchestratorThreadId()) return;
+  /**
+   * `targetId`: open on that orchestrator (an unread peek's source). Otherwise a closed sheet opens on the default target (the
+   * Portfolio orchestrator), and an open one stays where it is. DECIDED DEFAULT (1), dockTargetModel.targetOnOpen.
+   */
+  openSheet(targetId?: string): void {
+    if (this.destroyed || !this.sheet) return;
+    const targets = this.currentTargets();
     const wasOpen = this.sheet.isOpen;
+    const want = targets.length === 0 ? this.deps.getOrchestratorThreadId() : (wasOpen && !targetId ? resolveTargetId(targets, this.selectedId) : targetOnOpen(targets, targetId));
+    if (!want) return;
+    const switched = wasOpen && want !== this.activeId();
+    this.selectedId = targets.length === 0 ? undefined : want;
+    if (switched) this.sheet.resetForTarget();
     this.sheet.open();
     this.startKeyboardTracking();
     this.hidePeek();
@@ -714,6 +882,7 @@ export class OrchestratorDock {
     // A programmatic close (orchestrator deleted, state none) must not drop focus from inside the sheet to the page.
     const hadFocus = !!doc.activeElement && this.sheet.el.contains(doc.activeElement);
     this.sheet.close(); // also clears the board-card highlight of a hovered link
+    this.selectedId = undefined; // the closed dock talks to the default target again
     if (!this.touchFieldFocused()) this.stopKeyboardTracking();
     else this.layoutChanged();
     this.tray?.reset();
@@ -820,17 +989,39 @@ export class OrchestratorDock {
     });
   }
 
+  /** The title menu: null (a plain heading) until at least one Project orchestrator exists. */
+  private menuView(activeId: string): SheetMenu | null {
+    const targets = this.currentTargets();
+    if (!hasTargetMenu(targets)) return null;
+    return { rows: targetRows(targets, (id) => this.factsFor(id), activeId), selectedId: activeId };
+  }
+
+  /**
+   * The user picked an orchestrator in the title menu: the WHOLE sheet follows (transcript, title, labels, draft, Stop, tray owner
+   * labels). Opening a target reads its replies. Everything per-target is already keyed by thread id, so nothing is copied.
+   */
+  private selectTarget(id: string): void {
+    if (this.destroyed || !this.sheet?.isOpen) return;
+    const targets = this.currentTargets();
+    if (!targets.some((t) => t.threadId === id) || id === this.activeId()) return;
+    this.selectedId = id;
+    this.sheet.resetForTarget();
+    this.hidePeekFor(id);
+    this.refresh();
+  }
+
   private renderSheet(): void {
     const sheet = this.sheet;
     if (!sheet || !sheet.isOpen) return;
-    const id = this.deps.getOrchestratorThreadId();
+    const id = this.activeId();
     const thread = id ? this.deps.manager.getThread(id) : undefined;
     if (!id || !thread) return;
     const { manager } = this;
+    const st = this.stateFor(id);
     const all = this.transcriptOf(thread);
     const live = new Set(all.map((e) => e.id));
     const { entries, older } = capTranscript(all);
-    for (const pid of [...this.pickupIds]) if (!live.has(pid)) this.pickupIds.delete(pid); // rolled back
+    for (const pid of [...st.pickupIds]) if (!live.has(pid)) st.pickupIds.delete(pid); // rolled back
     // The tray already lists the orchestrator's own plan / question (hand-off button) and gives its own permission real
     // buttons, so a notice would only repeat them (dockSheetModel.sheetBlock).
     const blocked = sheetBlock({
@@ -840,11 +1031,12 @@ export class OrchestratorDock {
       pendingPermission: manager.hasPendingPermission(id),
       tray: this.trayEntries,
     });
+    const labels = this.labels;
     const view: SheetView = {
-      entries: entries.map((e) => ({ ...e, pickup: this.pickupIds.has(e.id) })),
+      entries: entries.map((e) => ({ ...e, pickup: st.pickupIds.has(e.id) })),
       older,
-      streaming: this.streamBuf,
-      stopped: this.stoppedText,
+      streaming: st.streamBuf,
+      stopped: st.stoppedText,
       running: manager.isRunning(id),
       activity: manager.getThreadActivity(id) ?? '',
       waiting: manager.getQueuedMessages(id).map((q) => q.text),
@@ -854,6 +1046,9 @@ export class OrchestratorDock {
       chips: this.bodyKind === 'input' ? suggestionChips(this.attention) : [],
       mode: this.currentMode,
       summary: this.summaryText,
+      title: labels.title,
+      regionLabel: labels.regionLabel,
+      menu: this.menuView(id),
     };
     sheet.render(view);
   }
@@ -865,8 +1060,12 @@ export class OrchestratorDock {
    */
   private computeTrayEntries(): TrayEntry[] {
     const { manager } = this;
+    const active = this.activeId();
+    const projectIdOf = (id: string): string | undefined => manager.getThread(id)?.projectId;
     return trayItems(this.attention).map((item) => ({
       item,
+      // Whose card this is, when it belongs to an orchestrator other than the one on screen (the tray covers all of them).
+      owner: ownerLabel(ownerOf(item.threadId, this.targets, projectIdOf), active),
       // Buttons only for a live permission that the host can persist an "Always" for; otherwise the card hands off.
       permission: item.kind === 'permission' && this.deps.permissionCard ? manager.getPendingPermission(item.threadId) : undefined,
     }));
@@ -883,17 +1082,18 @@ export class OrchestratorDock {
   private get manager(): OrchestratorDockDeps['manager'] { return this.deps.manager; }
 
   private removeWaiting(index: number, text: string): void {
-    const id = this.deps.getOrchestratorThreadId();
+    const id = this.activeId();
     if (!id) return;
     // The manager emits no event on removal and indexes shift as items dequeue: verify the row is still what the user saw.
     if (this.manager.getQueuedMessages(id)[index]?.text === text) this.manager.removeQueuedMessageAt(id, index);
     this.renderSheet();
   }
 
-  private showPeek(line: string): void {
+  private showPeek(line: string, targetId: string | undefined, name: string): void {
     if (!this.peekEl || !this.peekTextEl) return;
+    this.peekTargetId = targetId;
     this.peekTextEl.empty();
-    this.peekTextEl.createEl('strong', { text: 'Orchestrator' });
+    this.peekTextEl.createEl('strong', { text: name });
     this.peekTextEl.createSpan({ text: ` · ${line}` });
     this.peekEl.hidden = false;
     if (this.peekTimer) clearTimeout(this.peekTimer);
@@ -903,7 +1103,13 @@ export class OrchestratorDock {
   private hidePeek(): void {
     if (this.peekTimer) clearTimeout(this.peekTimer);
     this.peekTimer = null;
+    this.peekTargetId = undefined;
     if (this.peekEl) this.peekEl.hidden = true;
+  }
+
+  /** The peek that announced `targetId`'s reply is moot once that orchestrator is on screen. */
+  private hidePeekFor(targetId: string): void {
+    if (this.peekTargetId === targetId) this.hidePeek();
   }
 
   /** The "Try:" strip above the pill: field focused, nothing said yet, sheet closed (narrow shows chips inside the sheet instead). */
@@ -956,7 +1162,7 @@ export class OrchestratorDock {
   }
 
   private reasonFor(kind: BodyKind, thread: Thread | undefined): { text: string; action?: { label: string; run: () => void } } {
-    const id = this.deps.getOrchestratorThreadId();
+    const id = this.activeId();
     if (kind === 'none') {
       return { text: 'No orchestrator yet', action: { label: 'Set up…', run: () => { void this.setUp(); } } };
     }
@@ -1010,7 +1216,7 @@ export class OrchestratorDock {
     if (!this.inputEl || this.drafts.version !== this.syncedVersion) return;
     // Under the key the field was built for: the orchestrator may be gone right now (state none), which must not re-key the draft.
     if (this.inputEl.value !== this.drafts.get(this.inputKey)) {
-      if (this.inputEl.value) this.drafts.set(this.inputEl.value, this.inputKey); else this.drafts.clear();
+      this.drafts.set(this.inputEl.value, this.inputKey); // an empty value removes the key
       this.syncedVersion = this.drafts.version;
     }
   }
@@ -1021,15 +1227,15 @@ export class OrchestratorDock {
     this.actionEl = null;
     const input = this.bodyEl.createEl('textarea', {
       cls: 'ct-orch-input',
-      attr: { rows: '1', maxlength: String(MAX_DRAFT_CHARS), placeholder: 'Ask the orchestrator…', 'aria-label': 'Ask the portfolio orchestrator', 'data-testid': 'orchestrator-input' },
+      attr: { rows: '1', maxlength: String(MAX_DRAFT_CHARS), placeholder: this.labels.askPlaceholder, 'aria-label': this.labels.askLabel, 'data-testid': 'orchestrator-input' },
     });
-    this.history.reset();
+    this.hist.reset();
     this.inputKey = this.draftKey;
     input.value = this.draft;
     this.syncedVersion = this.drafts.version;
     this.autosize(input);
     input.addEventListener('input', () => {
-      this.history.reset(); // typing in a recalled message makes it the draft
+      this.hist.reset(); // typing in a recalled message makes it the draft
       this.draft = input.value;
       this.autosize(input);
     });
@@ -1047,7 +1253,7 @@ export class OrchestratorDock {
     const send = this.bodyEl.createEl('button', { cls: 'ct-orch-send', text: 'Send', attr: { type: 'button' } });
     send.hidden = true;
     send.addEventListener('click', () => { void this.submitText(input.value); });
-    const stop = this.bodyEl.createEl('button', { cls: 'ct-orch-stop', text: 'Stop', attr: { type: 'button', 'aria-label': 'Stop the orchestrator' } });
+    const stop = this.bodyEl.createEl('button', { cls: 'ct-orch-stop', text: 'Stop', attr: { type: 'button', 'aria-label': this.labels.stopLabel } });
     stop.hidden = true;
     stop.addEventListener('click', () => { void this.stop(); });
     this.sendEl = send;
@@ -1080,11 +1286,11 @@ export class OrchestratorDock {
    * and ArrowDown goes forward, ending on the draft that was being typed. Never during IME composition or with a modifier.
    */
   private recall(e: KeyboardEvent, input: HTMLTextAreaElement): void {
-    if (this.sending || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing || e.keyCode === 229) return;
+    if (this.st.sending || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing || e.keyCode === 229) return;
     if (input.selectionStart !== input.selectionEnd) return;
     const caret = input.selectionStart ?? 0;
     const value = input.value;
-    const h = this.history;
+    const h = this.hist;
     let next: string | undefined;
     // A freshly recalled single line keeps walking (the caret is where the recall put it); once the caret has been moved,
     // only its very start (Up) / very end (Down) continue, so a long wrapped paragraph keeps normal caret movement.
@@ -1113,72 +1319,85 @@ export class OrchestratorDock {
    */
   private async submitText(raw: string): Promise<void> {
     const text = raw.trim();
-    const id = this.deps.getOrchestratorThreadId();
-    if (!text || !id || this.sending || this.bodyKind !== 'input') return;
-    this.sending = true;
-    this.sendEcho = false;
-    this.sendingText = text;
-    this.history.push(text);
+    const id = this.activeId();
+    if (!text || !id) return;
+    const st = this.stateFor(id); // this orchestrator's state, whichever one is on screen when the send settles
+    if (st.sending || this.bodyKind !== 'input') return;
+    st.sending = true;
+    st.sendEcho = false;
+    st.sendingText = text;
+    this.hist.push(text);
     this.draft = '';
     if (this.inputEl) { this.inputEl.value = ''; this.autosize(this.inputEl); }
     this.openSheet();
     try {
       await this.deps.manager.sendMessage(id, text);
     } catch (err) {
-      if (this.sendEcho) {
+      const why = err instanceof Error ? err.message : String(err);
+      if (st.sendEcho) {
         // The message is already in the transcript (user_message_added was seen): restoring the draft would invite a duplicate send.
-        new Notice(`The orchestrator could not start working on your message: ${err instanceof Error ? err.message : String(err)}`);
+        new Notice(`The orchestrator could not start working on your message: ${why}`);
         return;
       }
-      if (this.deps.getOrchestratorThreadId() !== id) {
-        // The orchestrator was swapped while the send was pending: this text belongs to the old one and must not land in the new one's
-        // draft. It is never dropped: kept per orchestrator (it comes back if the user returns) and quoted in the notice.
+      if (!this.trackedIds().includes(id)) {
+        // The orchestrator was swapped / archived while the send was pending: this text belongs to the old one and must not land in
+        // another one's draft. It is never dropped: kept per orchestrator (it comes back if the user returns) and quoted in the notice.
         this.lostSends.set(id, this.lostSends.has(id) ? `${this.lostSends.get(id)}\n${text}` : text);
-        new Notice(`Could not send to the previous orchestrator (${err instanceof Error ? err.message : String(err)}). Your message: "${text.length > 160 ? `${text.slice(0, 160)}…` : text}"`);
+        new Notice(`Could not send to the previous orchestrator (${why}). Your message: "${text.length > 160 ? `${text.slice(0, 160)}…` : text}"`);
         return;
       }
-      // Never silently drop a message: put it back and say why.
-      // The textarea may have been rebuilt while the send was pending: write to the CURRENT one, draft first.
-      this.draft = this.draft ? `${text}\n${this.draft}` : text;
-      if (this.inputEl) { this.inputEl.value = this.draft; this.autosize(this.inputEl); }
-      new Notice(`Could not send to the orchestrator: ${err instanceof Error ? err.message : String(err)}`);
+      // Never silently drop a message: put it back (under the orchestrator it was sent to, which may no longer be on screen) and say why.
+      const back = this.drafts.get(id) ? `${text}\n${this.drafts.get(id)}` : text;
+      this.drafts.set(back, id);
+      this.syncedVersion = this.drafts.version;
+      if (this.inputEl && this.inputKey === id) { this.inputEl.value = this.drafts.get(id); this.autosize(this.inputEl); }
+      new Notice(`Could not send to the ${id === this.activeId() ? '' : 'other '}orchestrator: ${why}`);
     } finally {
-      this.sending = false;
+      st.sending = false;
     }
   }
 
   private async stop(): Promise<void> {
-    const id = this.deps.getOrchestratorThreadId();
-    if (!id || this.stopping) return;
-    this.stopping = true;
-    this.stopRequested = true;
-    this.stopSnapshot = this.streamBuf; // before interrupt(): the end-of-turn events may arrive in any order
+    const id = this.activeId();
+    if (!id) return;
+    const st = this.stateFor(id); // the orchestrator Stop was clicked on, even if the user switches while the interrupt is pending
+    if (st.stopping) return;
+    st.stopping = true;
+    st.stopRequested = true;
+    st.stopSnapshot = st.streamBuf; // before interrupt(): the end-of-turn events may arrive in any order
     this.updateInputControls();
     try {
       await this.deps.manager.interrupt(id);
     } catch (err) {
       // The turn carries on: no stale stop state may turn a later normal end into a "Stopped" row.
-      this.stopRequested = false;
-      this.stopSnapshot = '';
+      st.stopRequested = false;
+      st.stopSnapshot = '';
       new Notice(`Could not stop the orchestrator: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      this.stopping = false;
+      st.stopping = false;
       this.refresh(); // the interrupt events already re-derived the transcript; this settles the controls
     }
   }
 
   /** Stop replaces Send while the orchestrator runs (visible with the sheet open); Send exists only in the narrow sheet. */
   private updateInputControls(): void {
-    const id = this.deps.getOrchestratorThreadId();
+    const id = this.activeId();
     const running = !!id && this.deps.manager.isRunning(id);
     const open = !!this.sheet?.isOpen;
-    if (this.stopEl) { this.stopEl.hidden = !(running && open); this.stopEl.disabled = this.stopping; }
+    if (this.stopEl) { this.stopEl.hidden = !(running && open); this.stopEl.disabled = this.st.stopping; }
     if (this.sendEl) this.sendEl.hidden = !(this.currentMode === 'orb' && open && !running);
-    if (this.inputEl) this.inputEl.placeholder = open ? 'Reply…' : 'Ask the orchestrator…';
+    // Portfolio keeps today's exact strings; a Project orchestrator names itself (dockTargetModel.targetLabels).
+    const labels = this.labels;
+    if (this.inputEl) {
+      this.inputEl.placeholder = open ? labels.replyPlaceholder : labels.askPlaceholder;
+      this.inputEl.setAttribute('aria-label', labels.askLabel);
+    }
+    this.stopEl?.setAttribute('aria-label', labels.stopLabel);
+    this.orbEl.setAttribute('aria-label', labels.askLabel);
   }
 
   private async openThreadFull(): Promise<void> {
-    const id = this.deps.getOrchestratorThreadId();
+    const id = this.activeId();
     if (id) await this.openQuietly(id);
   }
 
@@ -1200,7 +1419,7 @@ export class OrchestratorDock {
 
   /** Narrow mode / Cmd+J: open the bottom sheet, setting the orchestrator up first if there is none. */
   private async openOrSetUp(): Promise<void> {
-    if (!this.deps.getOrchestratorThreadId()) {
+    if (!this.activeId()) {
       try { await this.deps.ensureOrchestrator(); } catch (err) {
         new Notice(`Could not set up the orchestrator: ${err instanceof Error ? err.message : String(err)}`);
         this.refresh();
@@ -1230,4 +1449,9 @@ export class OrchestratorDock {
     }
     this.focusField();
   }
+}
+
+/** The owner label of a Needs-you card: only for an orchestrator other than the one the sheet is showing. */
+function ownerLabel(owner: DockTarget | undefined, activeId: string | undefined): string | undefined {
+  return owner && owner.threadId !== activeId ? targetLabels(owner).ownerName : undefined;
 }

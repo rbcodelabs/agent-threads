@@ -23,6 +23,11 @@ export interface TrayEntry {
   item: TrayItem;
   /** Present only for a permission item that can render buttons; absent = hand off to the thread instead. */
   permission?: PendingPermissionInfo;
+  /**
+   * Whose card this is, when it belongs to an orchestrator other than the one the sheet is showing (the tray covers every
+   * orchestrator). Absent: it belongs to the one on screen. User data (a project name): textContent only.
+   */
+  owner?: string;
 }
 
 export interface TrayDeps {
@@ -191,6 +196,7 @@ export class DockTray {
     const icon = head.createSpan({ cls: 'ct-orch-tray-icon', attr: { 'aria-hidden': 'true' } });
     setIcon(icon, ICONS[item.kind]);
     head.createSpan({ cls: 'ct-orch-tray-name', text: item.title, attr: { title: item.title } });
+    if (entry.owner) head.createSpan({ cls: 'ct-orch-tray-owner', text: entry.owner, attr: { title: `Belongs to ${entry.owner}` } });
 
     const card = this.deps.permissionCard;
     if (item.kind === 'permission' && permission && card) {
@@ -252,7 +258,7 @@ export class DockTray {
 
 /** A new prompt (even with identical tool + detail) rebuilds the card, so a queued request never inherits the previous one's disabled / clicked buttons. */
 function cardKey(e: TrayEntry): string {
-  return `${e.item.kind}|${e.item.title}|${e.permission ? `${e.permission.toolName}|${e.permission.detail}|${e.permission.promptId ?? ''}` : '-'}`;
+  return `${e.item.kind}|${e.item.title}|${e.owner ?? ''}|${e.permission ? `${e.permission.toolName}|${e.permission.detail}|${e.permission.promptId ?? ''}` : '-'}`;
 }
 
 /** Several arrivals at once: two named, the rest counted (one screen-reader utterance, not a wall of text). */

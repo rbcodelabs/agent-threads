@@ -72,6 +72,14 @@ describe('DraftStore', () => {
     expect(s.get('b')).toBe('');
   });
 
+  it('keys() lists the keys that hold a non-empty draft', () => {
+    const s = createDraftStore();
+    s.set('x', 'a');
+    s.set('y', 'b');
+    s.set('', 'a');
+    expect(s.keys()).toEqual(['b']);
+  });
+
   it('has(key) reports whether a non-empty draft is held, and setting an empty text removes the key', () => {
     const s = createDraftStore();
     expect(s.has('a')).toBe(false);
