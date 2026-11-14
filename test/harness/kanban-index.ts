@@ -186,6 +186,27 @@ if (orchFixture && orchFixture !== 'first-run') {
   } as (typeof kanbanFixtureThreads)[number]);
   settings.orchestratorThreadId = orchestratorFixtureId;
 }
+// ?orchprojects=1 (orchestrator-dock-targets.spec.ts) gives the HipTrip and Agent Threads projects their own Project orchestrator
+// threads, so the dock's title becomes a menu. Without the param no project has an orchestrator and the dock is unchanged.
+const orchProjectsFixture = new URLSearchParams(window.location.search).has('orchprojects');
+const projectOrchestrators = [
+  { projectId: 'proj-hiptrip', id: 'k-orch-hiptrip', title: 'HipTrip Orchestrator', reply: 'HipTrip: 1 deploy approval is waiting.' },
+  { projectId: 'proj-threads', id: 'k-orch-threads', title: 'Agent Threads Orchestrator', reply: 'Agent Threads: the dock menu PR is in review.' },
+];
+if (orchProjectsFixture) {
+  for (const o of projectOrchestrators) {
+    kanbanFixtureThreads.push({
+      id: o.id, title: o.title, cwd: '/Users/mock/projects', projectId: o.projectId,
+      messages: [
+        { id: `${o.id}-u1`, role: 'user', content: 'Where are we?', timestamp: KT_ORCH - 60_000 },
+        { id: `${o.id}-a1`, role: 'assistant', content: o.reply, timestamp: KT_ORCH - 30_000 },
+      ],
+      createdAt: KT_ORCH - 3_600_000, updatedAt: KT_ORCH, reviewed: true,
+    } as (typeof kanbanFixtureThreads)[number]);
+    const project = kanbanFixtureProjects.find((p) => p.id === o.projectId);
+    if (project) { project.orchestratorThreadId = o.id; project.orchestratorEnabled = true; }
+  }
+}
 manager.loadThreads(kanbanFixtureThreads);
 // Restore intentionally marks persisted non-terminal runs unavailable. Turn this
 // deterministic fixture back into a live run after hydration.
@@ -471,6 +492,18 @@ let orchSeq = 0;
   const message = { id: `k-say-${++orchSeq}`, role: 'assistant', content: text, timestamp: KT_ORCH };
   (thread.messages as unknown[]).push(message);
   emitEvent(orchestratorFixtureId, { type: 'message', message });
+};
+// Same as __orchSay, for any orchestrator thread (a Project orchestrator replying while another is on screen).
+(window as any).__orchSayTo = (threadId: string, text: string) => {
+  const thread = manager.getThread(threadId)!;
+  const message = { id: `k-say-${++orchSeq}`, role: 'assistant', content: text, timestamp: KT_ORCH };
+  (thread.messages as unknown[]).push(message);
+  emitEvent(threadId, { type: 'message', message });
+};
+(window as any).__orchStreamTo = (threadId: string, text: string) => {
+  m.sessions.set(threadId, { turnInFlight: true });
+  emitEvent(threadId, { type: 'streaming_start' });
+  emitEvent(threadId, { type: 'token', text });
 };
 (window as any).__orchStream = (text: string, activity?: string) => {
   m.sessions.set(orchestratorFixtureId, { turnInFlight: true });

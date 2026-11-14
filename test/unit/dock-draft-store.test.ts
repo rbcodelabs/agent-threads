@@ -51,6 +51,36 @@ describe('DraftStore', () => {
     expect(s.version).toBeGreaterThan(v1);
   });
 
+  it('holds one draft per key (the dock keeps a draft for every orchestrator thread)', () => {
+    const s = createDraftStore();
+    s.set('for a', 'a');
+    s.set('for b', 'b');
+    expect(s.get('a')).toBe('for a');
+    expect(s.get('b')).toBe('for b');
+  });
+
+  it('clear(key) drops only that key; clear() drops everything', () => {
+    const s = createDraftStore();
+    s.set('for a', 'a');
+    s.set('for b', 'b');
+    const v = s.version;
+    s.clear('a');
+    expect(s.get('a')).toBe('');
+    expect(s.get('b')).toBe('for b');
+    expect(s.version).toBeGreaterThan(v);
+    s.clear();
+    expect(s.get('b')).toBe('');
+  });
+
+  it('has(key) reports whether a non-empty draft is held, and setting an empty text removes the key', () => {
+    const s = createDraftStore();
+    expect(s.has('a')).toBe(false);
+    s.set('x', 'a');
+    expect(s.has('a')).toBe(true);
+    s.set('', 'a');
+    expect(s.has('a')).toBe(false);
+  });
+
   it('is memory only: the module touches no storage, file system, settings or network', () => {
     const src = readFileSync('src/dockDraftStore.ts', 'utf8');
     for (const banned of [/localStorage/, /sessionStorage/, /indexedDB/, /require\(['"]fs/, /from ['"](?:node:)?fs/, /saveData|saveSettings|writeFile|fetch\(/]) {
