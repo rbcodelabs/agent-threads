@@ -2626,6 +2626,10 @@ export class ThreadManager {
         mcpServers: codexMcpServers,
         skillRoots,
       },
+      antigravity: {
+        dynamicTools: codexDynamicTools,
+        mcpServers: codexMcpServers,
+      },
     };
   }
 
@@ -2702,10 +2706,12 @@ export class ThreadManager {
         },
       };
     }
-    // Codex and OpenCode: Claude's model aliases mean nothing to them (as for a local thread), the denylist is the
-    // top-level one (Claude's tool names are ignored by the daemon's adapters except Bash), and the vetted MCP servers
-    // go in the harness's own block, which `projectSessionOptions` reads back.
+    // Codex, OpenCode and Antigravity: Claude's model aliases mean nothing to them (as for a local thread), the
+    // denylist is the top-level one (Claude's tool names are ignored by the daemon's adapters except Bash/edits), and
+    // the vetted MCP servers go in the harness's own block, which `projectSessionOptions` reads back. An explicit
+    // three-way choice: a new harness must be added here, not silently become OpenCode.
     const disallowed = mergeDisallowedTools(this.settings.disallowedTools, thread.disallowedTools);
+    const mcpBlock = passthrough ? { mcpServers: passthrough } : {};
     return {
       ...common,
       ...(disallowed.length ? { disallowedTools: disallowed } : {}),
@@ -2715,10 +2721,12 @@ export class ThreadManager {
             codex: {
               ...resolveCodexPermissions(thread.permissionMode ?? this.settings.permissionMode),
               ...(this.settings.codexEffort && this.settings.codexEffort !== 'default' ? { effort: this.settings.codexEffort } : {}),
-              ...(passthrough ? { mcpServers: passthrough } : {}),
+              ...mcpBlock,
             },
           }
-        : { opencode: { ...(passthrough ? { mcpServers: passthrough } : {}) } }),
+        : harness === 'antigravity'
+          ? { antigravity: { ...mcpBlock } }
+          : { opencode: { ...mcpBlock } }),
       // The session environment (Extra env, keychain secrets) reaches every harness through the daemon's credential
       // kind; skill plugin paths are Claude plugins and are not sent to Codex or OpenCode.
       ...(extras?.envKind ? { claude: { remoteEnvKind: extras.envKind } } : {}),

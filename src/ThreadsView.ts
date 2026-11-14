@@ -1441,6 +1441,7 @@ export class ThreadsView extends ItemView {
         getModelOptions: (harness) => this.modelOptionsFor(harness),
         getRemoteDaemons: () => this.plugin.settings.remoteDaemons ?? [],
         getDaemonCapabilities: (id) => this.plugin.daemonRegistry?.capabilitiesOf(id),
+        getLocalUnavailable: (h) => this.plugin.localHarnessUnavailableReason(h),
         warmDaemon: (id) => this.plugin.daemonRegistry?.warm(id) ?? Promise.resolve(),
         localDaemonOffer: { available: () => this.plugin.isLocalDaemonSetupOffered(), onSetUp: () => this.plugin.openLocalDaemonSettings() },
         getFolderSource: () => this.plugin.remoteFolders ?? undefined,
@@ -2851,11 +2852,13 @@ export class ThreadsView extends ItemView {
     const policy = this.plugin.managedPolicy?.peek();
     const managedHarness = (value: AgentHarness): string | undefined =>
       harnessDenyReason(policy, this.manager.policyTargetFor(thread.remote?.daemonId), value) ? MANAGED_SUFFIX : undefined;
+    // A harness whose CLI is not installed here cannot take a local thread (a remote thread's daemon has its own).
+    const localGate = (value: AgentHarness): string | undefined => (thread.remote ? undefined : this.plugin.localHarnessUnavailableReason(value));
     const harnessGroups: PopoverOptionGroup[] = [{
       options: AGENT_HARNESSES.map((value) => ({
-        label: value !== harness && (blocked ?? remoteGate(value) ?? managedHarness(value)) ? `${agentHarnessLabel(value)} \u2014 ${blocked ?? remoteGate(value) ?? managedHarness(value)}` : agentHarnessLabel(value),
+        label: value !== harness && (blocked ?? remoteGate(value) ?? localGate(value) ?? managedHarness(value)) ? `${agentHarnessLabel(value)} \u2014 ${blocked ?? remoteGate(value) ?? localGate(value) ?? managedHarness(value)}` : agentHarnessLabel(value),
         checked: value === harness,
-        disabled: value !== harness && !!(blocked ?? remoteGate(value) ?? managedHarness(value)),
+        disabled: value !== harness && !!(blocked ?? remoteGate(value) ?? localGate(value) ?? managedHarness(value)),
         closeOnSelect: true,
         icon: HARNESS_BRAND_ICONS[value],
         onSelect: () => { if (value !== harness) void this.requestHarnessSwitch(threadId, value); },

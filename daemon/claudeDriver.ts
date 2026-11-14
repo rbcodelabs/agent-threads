@@ -105,6 +105,7 @@ export interface SessionOptionParts {
  *   codex     approval policy + sandbox from the permission mode (a read-only workspace pins the sandbox to
  *             read-only for the life of the session), `sessionOptions.effort`, dynamic tools, external MCP servers
  *   opencode  dynamic tools (served through its loopback bridge), external MCP servers
+ *   antigravity  the same as opencode (its `agy acp` session takes them as `mcpServers` in `session/new`)
  * Claude-specific `sessionOptions` (thinking, betas, agents, ...) have no equivalent elsewhere and are dropped.
  */
 export function specToSessionOptions(spec: RemoteSessionSpec, parts: SessionOptionParts): HarnessSessionOptions {
@@ -156,6 +157,16 @@ export function specToSessionOptions(spec: RemoteSessionSpec, parts: SessionOpti
     return { ...base, opencode };
   }
 
+  if (spec.harness === 'antigravity') {
+    const antigravity: NonNullable<HarnessSessionOptions['antigravity']> = {};
+    if (parts.dynamicTools?.length) antigravity.dynamicTools = parts.dynamicTools;
+    const mcp = external();
+    if (Object.keys(mcp).length) antigravity.mcpServers = mcp;
+    return { ...base, antigravity };
+  }
+
+  // Anything else is Claude, but only by name: an unknown harness must not silently start Claude.
+  if (spec.harness !== 'claude') throw new Error(`harness "${String(spec.harness)}" cannot be started by this daemon`);
   const claude: ClaudeHarnessOptions = {};
   if (parts.preApprove) claude.preApprove = parts.preApprove;
   if (parts.credentialsBlank) claude.credentialsBlank = parts.credentialsBlank;
@@ -242,7 +253,7 @@ function hostServerNames(ctx: DriverContext, hasLocalOrProxied: boolean): string
   const names = new Set(Object.keys(ctx.hostTools?.manifest() ?? {}));
   if (hasLocalOrProxied && ctx.localTools?.enabled !== false) names.add(CLAUDE_THREADS_SERVER);
   // OpenCode's loopback bridge for these tools is registered under this name; a client server must not take it.
-  if (ctx.spec.harness === 'opencode') names.add(OPENCODE_HOST_TOOLS_SERVER);
+  if (ctx.spec.harness === 'opencode' || ctx.spec.harness === 'antigravity') names.add(OPENCODE_HOST_TOOLS_SERVER);
   return [...names];
 }
 
@@ -621,6 +632,7 @@ export interface ClaudeDriverFactoryOptions {
   claudeBinaryPath?: string;
   codexBinaryPath?: string;
   opencodeBinaryPath?: string;
+  antigravityBinaryPath?: string;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   /** See `ClaudeDriverDeps.requestTimeoutMs`. */
@@ -651,14 +663,14 @@ export function createRealHarness(
   const binary = findHarnessBinary(kind, binaries[kind], env);
   if (!binary) throw new Error(missingBinaryMessage(kind));
   // Same construction point ThreadManager uses; only the fields it reads are populated.
-  const settings = { claudeBinaryPath: '', codexBinaryPath: '', opencodeBinaryPath: '', [`${kind}BinaryPath`]: binary } as unknown as PluginSettings;
+  const settings = { claudeBinaryPath: '', codexBinaryPath: '', opencodeBinaryPath: '', antigravityBinaryPath: '', [`${kind}BinaryPath`]: binary } as unknown as PluginSettings;
   return createHarnessSession({ agentHarness: kind } as Thread, settings);
 }
 
 export function createClaudeDriverFactory(opts: ClaudeDriverFactoryOptions = {}): DriverFactory {
   const env = opts.env ?? process.env;
   const secretEnv = resolveCredentialEnv(env);
-  const binaries = { claude: opts.claudeBinaryPath, codex: opts.codexBinaryPath, opencode: opts.opencodeBinaryPath };
+  const binaries = { claude: opts.claudeBinaryPath, codex: opts.codexBinaryPath, opencode: opts.opencodeBinaryPath, antigravity: opts.antigravityBinaryPath };
   const createHarness = opts.createHarness ?? ((spec: RemoteSessionSpec) => createRealHarness(spec, binaries, env));
   const configured = opts.mcpServers ?? {};
   // Precedence, low to high: spec passthrough, synced, config.json (applied in `specToSessionOptions`: it drops a

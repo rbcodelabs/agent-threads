@@ -1643,7 +1643,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       }
       return;
     }
-    // Codex and OpenCode intentionally have no guessed fallback: wait for their
+    // Codex, OpenCode and Antigravity intentionally have no guessed fallback: wait for their
     // native model catalogs so we never offer a model the account cannot use.
     for (const m of discovered) {
       dropdown.addOption(m.value, m.displayName);
@@ -1958,6 +1958,7 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .addOption('claude', 'Claude Code')
           .addOption('codex', 'OpenAI Codex')
           .addOption('opencode', 'OpenCode')
+          .addOption('antigravity', 'Antigravity')
           .setValue(this.plugin.settings.agentHarness ?? 'claude')
           .onChange(async (value) => {
             this.plugin.settings.agentHarness = isAgentHarness(value) ? value : 'claude';
@@ -2004,6 +2005,20 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.opencodeBinaryPath ?? 'opencode')
           .onChange(async (value) => {
             this.plugin.settings.opencodeBinaryPath = value || 'opencode';
+            this.plugin.manager.updateSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Antigravity binary path')
+      .setDesc('Path to the agy executable (desktop only). Antigravity threads run a local "agy acp" per session and use the Google sign-in and model catalog of your Antigravity CLI: run agy once and sign in first. The model menu is filled from the CLI when a thread starts.')
+      .addText((text) =>
+        text
+          .setPlaceholder('agy')
+          .setValue(this.plugin.settings.antigravityBinaryPath ?? 'agy')
+          .onChange(async (value) => {
+            this.plugin.settings.antigravityBinaryPath = value || 'agy';
             this.plugin.manager.updateSettings(this.plugin.settings);
             await this.plugin.saveSettings();
           }),

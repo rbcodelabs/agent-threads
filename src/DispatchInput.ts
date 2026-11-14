@@ -115,6 +115,8 @@ export interface DispatchInputOptions {
      * to disable a harness a selected daemon does not offer (no `harness.*` capability at all = an older daemon = Claude only).
      */
     getDaemonCapabilities?: (daemonId: string) => string[] | undefined;
+    /** Why `harness` cannot run on THIS computer (its CLI is not installed), or undefined. Only consulted when running locally. */
+    getLocalUnavailable?: (harness: AgentHarness) => string | undefined;
     /** Connect to a daemon so its capabilities become known; resolves when they are, or when it gives up. */
     warmDaemon?: (daemonId: string) => Promise<void>;
     /**
@@ -701,7 +703,7 @@ export class DispatchInput {
     const managed = this.managedReason(this.selectedRunOn.daemonId, harness);
     if (managed) return managed;
     const selected = this.activeDaemon();
-    if (!selected) return undefined;
+    if (!selected) return this.options.harnessPicker?.getLocalUnavailable?.(harness);
     const gate = this.gateHarnessOn(harness, selected);
     return gate.ok ? undefined : gate.reason;
   }

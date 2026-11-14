@@ -62,8 +62,9 @@ export function chooseChiefOfStaffHarness(
   selected: AgentHarness,
   canResolve: (harness: AgentHarness) => boolean,
 ): AgentHarness | undefined {
+  // Antigravity is not offered: its adapter does not load skill sources yet, so `cos-setup` would not exist there.
   const fallbackOrder: AgentHarness[] = ['claude', 'codex', 'opencode'];
-  const order = [selected, ...fallbackOrder.filter(h => h !== selected)];
+  const order = [...(fallbackOrder.includes(selected) ? [selected] : []), ...fallbackOrder.filter(h => h !== selected)];
   return order.find(h => canResolve(h));
 }
 

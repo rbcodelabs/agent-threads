@@ -2,9 +2,9 @@
  * Projection of `HarnessSessionOptions` onto the `RemoteSessionSpec` that
  * crosses the wire in `session.open` (design 3.5).
  *
- * The wire harness is the thread's (`claude`, `codex` or `opencode`); the per-harness option blocks are projected as
+ * The wire harness is the thread's (`claude`, `codex`, `opencode` or `antigravity`); the per-harness option blocks are projected as
  * the daemon's `specToSessionOptions` reads them back: Claude's `sessionOptions` in full, Codex's `effort` only,
- * vetted http/sse MCP servers for all three. Everything the daemon derives itself (Codex approval policy and sandbox
+ * vetted http/sse MCP servers for all four. Everything the daemon derives itself (Codex approval policy and sandbox
  * from `permissionMode`, OpenCode permissions) is NOT sent.
  *
  * Deliberately conservative for stage 1 ("daemon-local tools only"): anything
@@ -29,13 +29,22 @@ import { describeHostToolsForPrompt, type HostToolsSummary } from './hostTools';
 import type { AgentHarness, RemoteVaultMapping, Thread } from '../types';
 import { isUnderRemoteRoot, normalizePosixPath, relativeWithin } from './vaultMapping';
 
+/** The vetted MCP servers a non-Claude harness block carries. Exhaustive: a new harness must be placed here. */
+function harnessMcpServers(harness: Exclude<AgentHarness, 'claude'>, options: HarnessSessionOptions): Record<string, { type?: string; url?: string; headers?: Record<string, string> }> {
+  switch (harness) {
+    case 'codex': return options.codex?.mcpServers ?? {};
+    case 'opencode': return options.opencode?.mcpServers ?? {};
+    case 'antigravity': return options.antigravity?.mcpServers ?? {};
+  }
+}
+
 export function projectSessionOptions(options: HarnessSessionOptions, thread: Thread): RemoteSessionSpec {
   const remote = thread.remote;
   if (!remote) throw new Error('projectSessionOptions: thread is not a remote thread');
 
   const harness: AgentHarness = thread.agentHarness ?? 'claude';
   // Claude carries the full session options; Codex only its reasoning effort (what the daemon's `specToSessionOptions`
-  // reads for it); OpenCode has none. Claude-only options (thinking, betas, agents) never ride a non-Claude spec.
+  // reads for it); OpenCode and Antigravity have none. Claude-only options (thinking, betas, agents) never ride a non-Claude spec.
   const so = harness === 'claude'
     ? options.claude?.sessionOptions
     : harness === 'codex' && options.codex?.effort ? { effort: options.codex.effort as never } : undefined;
@@ -56,7 +65,7 @@ export function projectSessionOptions(options: HarnessSessionOptions, thread: Th
   const mcpServers: Record<string, RemoteMcpServerConfig> = {};
   const vetted: Record<string, { type?: string; url?: string; headers?: Record<string, string> }> = harness === 'claude'
     ? options.claude?.remoteMcpServers ?? {}
-    : (harness === 'codex' ? options.codex?.mcpServers : options.opencode?.mcpServers) ?? {};
+    : harnessMcpServers(harness, options);
   for (const [name, s] of Object.entries(vetted)) {
     if ((s.type === 'http' || s.type === 'sse') && typeof s.url === 'string') {
       mcpServers[name] = { type: s.type, url: s.url, ...(s.headers ? { headers: s.headers } : {}) };

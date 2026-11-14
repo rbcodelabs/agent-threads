@@ -132,6 +132,7 @@ export const SESSION_OPTION_DISPOSITION: Record<keyof HarnessSessionOptions, Spe
   claude: 'transformed',
   codex: 'transformed',
   opencode: 'transformed',
+  antigravity: 'transformed',
 };
 
 // ── shape validation (daemon side, before any policy) ─────────────────────

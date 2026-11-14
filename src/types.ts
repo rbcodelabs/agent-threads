@@ -3,8 +3,8 @@ import { DEFAULT_VAULT_FOLDER } from './productIdentity';
 export type MessageRole = 'user' | 'assistant' | 'compact' | 'notice';
 
 /** Local coding-agent harnesses that can own a thread's native session. */
-export type AgentHarness = 'claude' | 'codex' | 'opencode';
-export const AGENT_HARNESSES: readonly AgentHarness[] = ['claude', 'codex', 'opencode'];
+export type AgentHarness = 'claude' | 'codex' | 'opencode' | 'antigravity';
+export const AGENT_HARNESSES: readonly AgentHarness[] = ['claude', 'codex', 'opencode', 'antigravity'];
 
 export function isAgentHarness(value: unknown): value is AgentHarness {
   return typeof value === 'string' && (AGENT_HARNESSES as readonly string[]).includes(value);
@@ -15,6 +15,7 @@ export function agentHarnessLabel(harness: AgentHarness | undefined): string {
   switch (harness) {
     case 'codex': return 'Codex';
     case 'opencode': return 'OpenCode';
+    case 'antigravity': return 'Antigravity';
     default: return 'Claude';
   }
 }
@@ -340,7 +341,8 @@ export interface LocalDaemonSettings {
   /**
    * Which agent CLIs the daemon image carries and the daemon accepts sessions for. Absent = Claude only. Changing it
    * changes the container's spec signature, so Update / Apply rebuilds the image layer. Contains no secrets: logins
-   * for Codex and OpenCode live inside the daemon's data volume, never here.
+   * for Codex and OpenCode live inside the daemon's data volume, never here. Deliberately NOT `AgentHarness`: the
+   * managed container does not carry the Antigravity CLI yet (see LOCAL_HARNESSES), and a test pins that.
    */
   harnesses?: Array<'claude' | 'codex' | 'opencode'>;
   /**
@@ -1181,6 +1183,8 @@ export interface PluginSettings {
   codexBinaryPath: string;
   /** Path to the OpenCode CLI executable (`opencode serve` is launched from it). Desktop only. */
   opencodeBinaryPath: string;
+  /** Path to the Antigravity CLI executable (`agy acp` is launched from it). Desktop only. */
+  antigravityBinaryPath: string;
   /** Allow inherited Codex computer-use capabilities in newly initialized sessions. */
   codexComputerUseEnabled: boolean;
   /**
@@ -1508,6 +1512,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   agentHarness: 'claude',
   codexBinaryPath: 'codex',
   opencodeBinaryPath: 'opencode',
+  antigravityBinaryPath: 'agy',
   codexComputerUseEnabled: false,
   worktreeRoot: '',
   containerAwsProfiles: '',

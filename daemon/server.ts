@@ -163,8 +163,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DaemonHandle>
     const credentialEnv = resolveCredentialEnv(env);
     setKnownSecretsProvider(() => [env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_API_KEY, credentialEnv.CLAUDE_CODE_OAUTH_TOKEN, ...HARNESS_SECRET_ENV.map((k) => env[k]), ...creds.secretValues(), ...repos.envSecretValues()].filter((v): v is string => !!v));
     if (!driverFactory) {
-      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, codexBinaryPath: config.codexBinaryPath, opencodeBinaryPath: config.opencodeBinaryPath, env, mcpServers: config.mcpServers, syncedMcp, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: (spec) => ({ ...repos.sessionEnv(), ...sessionEnvFromCreds(creds, spec) }), onSessionStart: (cwd) => repos.refreshForCwd(cwd), authPreflight: createGhAuthPreflight({ hasToken: () => repos.hasToken() }) });
-      const explicit: Record<RealHarness, string | undefined> = { claude: config.claudeBinaryPath, codex: config.codexBinaryPath, opencode: config.opencodeBinaryPath };
+      driverFactory = createClaudeDriverFactory({ claudeBinaryPath: config.claudeBinaryPath, codexBinaryPath: config.codexBinaryPath, opencodeBinaryPath: config.opencodeBinaryPath, antigravityBinaryPath: config.antigravityBinaryPath, env, mcpServers: config.mcpServers, syncedMcp, creds, requestTimeoutMs: config.requestTimeoutMinutes * 60_000, sessionEnv: (spec) => ({ ...repos.sessionEnv(), ...sessionEnvFromCreds(creds, spec) }), onSessionStart: (cwd) => repos.refreshForCwd(cwd), authPreflight: createGhAuthPreflight({ hasToken: () => repos.hasToken() }) });
+      const explicit: Record<RealHarness, string | undefined> = { claude: config.claudeBinaryPath, codex: config.codexBinaryPath, opencode: config.opencodeBinaryPath, antigravity: config.antigravityBinaryPath };
       for (const kind of config.harnesses) {
         const b = HARNESS_BINARY[kind];
         const binary = findHarnessBinary(kind, explicit[kind], env);

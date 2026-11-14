@@ -34,6 +34,11 @@ const GLYPHS: Record<ModelGlyph | ProviderGlyph | LocationGlyph, Shape[]> = {
     ['polyline', { points: '6,4.5 2.5,8 6,11.5' }],
     ['polyline', { points: '10,4.5 13.5,8 10,11.5' }],
   ],
+  // Open arch with a mote floating above it.
+  antigravity: [
+    ['polyline', { points: '3,13 8,5.5 13,13' }],
+    ['circle', { cx: '8', cy: '2.6', r: '0.95' }, true],
+  ],
   laptop: [
     ['rect', { x: '3', y: '3.5', width: '10', height: '7', rx: '1' }],
     ['line', { x1: '1.5', y1: '12.5', x2: '14.5', y2: '12.5' }],

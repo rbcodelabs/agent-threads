@@ -7,7 +7,7 @@ import { agentHarnessLabel, type AgentHarness, type PluginSettings } from './typ
 
 export type ModelTier = 'haiku' | 'sonnet' | 'opus' | 'fable' | 'unknown';
 export type ModelGlyph = 'chip' | 'chip-1' | 'chip-2' | 'chip-3' | 'sparkle';
-export type ProviderGlyph = 'claude' | 'codex' | 'opencode';
+export type ProviderGlyph = 'claude' | 'codex' | 'opencode' | 'antigravity';
 export type LocationGlyph = 'laptop' | 'cube' | 'cloud';
 export type RemoteConnection = 'connected' | 'pending' | 'unreachable';
 

@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { CodexSession } from './CodexSession';
 import { OpenCodeSession } from './OpenCodeSession';
+import { AntigravitySession } from './AntigravitySession';
 import { ReplaySession, parseReplayScript, type ReplayScript } from './ReplaySession';
 import { ThreadSession } from './ThreadSession';
 import type { HarnessSession } from './HarnessSession';
@@ -65,6 +66,9 @@ export function createHarnessSession(
       return new CodexSession(settings.codexBinaryPath);
     case 'opencode':
       return new OpenCodeSession(settings.opencodeBinaryPath || 'opencode');
+    case 'antigravity':
+      return new AntigravitySession(settings.antigravityBinaryPath || 'agy');
+    case 'claude':
     default:
       return new ThreadSession(settings.claudeBinaryPath);
   }

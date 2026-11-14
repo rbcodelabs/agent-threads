@@ -14,6 +14,7 @@
  * capability header stay in the `HostMcpSource`.
  */
 import type { HarnessDynamicTool } from '../HarnessSession';
+import type { AgentHarness } from '../types';
 import {
   HOST_RESOURCE_TOOLS, HOST_TOOL_LIMITS, checkResourceUri, encodeResourceContents, encodeResourceList, encodeResourceTemplates,
   isHostResourceTool, asStructuredContent, validateHostToolSpec, type RemoteHostToolSpec,
@@ -276,7 +277,7 @@ export class RemoteHostTools {
  * The paragraph(s) of the remote environment prompt that say what runs where (design 3.5: the env prompt names
  * the host-tool server). `null` summary = host tools are off for this thread.
  */
-export function describeHostToolsForPrompt(summary: HostToolsSummary | null, hostName: string, harness: 'claude' | 'codex' | 'opencode' = 'claude'): string[] {
+export function describeHostToolsForPrompt(summary: HostToolsSummary | null, hostName: string, harness: AgentHarness = 'claude'): string[] {
   const lines: string[] = [
     '- Worktree tools (enter_worktree, exit_worktree, set_working_directory) run on this remote machine, beside the repo.',
   ];
@@ -287,7 +288,7 @@ export function describeHostToolsForPrompt(summary: HostToolsSummary | null, hos
   lines.push(
     `- These tools run on the USER'S computer in ${hostName}, not on this machine, and work only while ${hostName} is connected. If it is not, the call fails with a clear message after a wait; carry on without them rather than retrying in a loop:`,
   );
-  // Claude sees MCP names (`mcp__server__tool`). Codex and OpenCode get the same tools as plain tools: bare names for
+  // Claude sees MCP names (`mcp__server__tool`). Codex, OpenCode and Antigravity get the same tools as plain tools: bare names for
   // claude_threads, `<server>__<tool>` for any other server (the daemon's `hostDynamicTools.ts` naming).
   const named = (server: string, tools: string[]): string =>
     harness === 'claude' ? `mcp__${server}__*: ${tools.join(', ')}` : tools.map((t) => (server === 'claude_threads' ? t : `${server}__${t}`)).join(', ');

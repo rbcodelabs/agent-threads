@@ -51,6 +51,8 @@ export interface DaemonConfig {
   codexBinaryPath?: string;
   /** Explicit path to the `opencode` CLI; otherwise discovered like `claudeBinaryPath`. */
   opencodeBinaryPath?: string;
+  /** Explicit path to the `agy` (Antigravity) CLI; otherwise discovered like `claudeBinaryPath`. */
+  antigravityBinaryPath?: string;
   /** A journal entry older than this is dropped (a client that was away longer gets a `resync`). 0 = keep forever. */
   journalTtlDays: number;
   /** Cap on one thread's retained journal (approximate JSON bytes); oldest entries go first. 0 = no cap. */
@@ -131,7 +133,7 @@ export interface ConfigInputs {
   flags?: Partial<{
     dataDir: string; listen: string; port: number; allowedOrigins: string[]; acknowledgeOpen: boolean;
     harness: HarnessKind; harnesses: RealHarness[]; workspaces: string[]; readOnlyWorkspaces: string[]; allowBypass: boolean; maxConcurrentTurns: number;
-    idleReapMinutes: number; claudeBinaryPath: string; codexBinaryPath: string; opencodeBinaryPath: string; journalTtlDays: number; journalMaxMb: number;
+    idleReapMinutes: number; claudeBinaryPath: string; codexBinaryPath: string; opencodeBinaryPath: string; antigravityBinaryPath: string; journalTtlDays: number; journalMaxMb: number;
     maxConnections: number; maxLiveSessions: number; requestTimeoutMinutes: number; allowedClientEnv: string[];
     hostToolGraceSec: number; hostToolTimeoutSec: number; worktreeRoot: string;
     allowSyncedStdio: boolean; syncedCommandAllowlist: string[];
@@ -164,6 +166,7 @@ export interface ConfigFile {
   claudeBinaryPath?: string;
   codexBinaryPath?: string;
   opencodeBinaryPath?: string;
+  antigravityBinaryPath?: string;
   harness?: string;
   harnesses?: string[];
   journalTtlDays?: number;
@@ -306,6 +309,7 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
   const claudeBinaryPath = flags.claudeBinaryPath ?? (env.AGENT_THREADS_CLAUDE_BINARY || undefined) ?? file.claudeBinaryPath;
   const codexBinaryPath = flags.codexBinaryPath ?? (env.AGENT_THREADS_CODEX_BINARY || undefined) ?? file.codexBinaryPath;
   const opencodeBinaryPath = flags.opencodeBinaryPath ?? (env.AGENT_THREADS_OPENCODE_BINARY || undefined) ?? file.opencodeBinaryPath;
+  const antigravityBinaryPath = flags.antigravityBinaryPath ?? (env.AGENT_THREADS_ANTIGRAVITY_BINARY || undefined) ?? file.antigravityBinaryPath;
   const repoRoot = resolve(expandHome(file.repoRoot ?? join(dataDir, 'workspace')));
   if (!isAbsolute(repoRoot)) throw new Error(`repoRoot "${repoRoot}" must be an absolute path`);
   return {
@@ -343,5 +347,6 @@ export function resolveConfig(input: ConfigInputs = {}): DaemonConfig {
     ...(claudeBinaryPath ? { claudeBinaryPath } : {}),
     ...(codexBinaryPath ? { codexBinaryPath } : {}),
     ...(opencodeBinaryPath ? { opencodeBinaryPath } : {}),
+    ...(antigravityBinaryPath ? { antigravityBinaryPath } : {}),
   };
 }
