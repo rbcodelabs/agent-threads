@@ -569,13 +569,23 @@ describe('unread peek and the dot cover every orchestrator', () => {
     expect(t.titleBtn()!.textContent).toContain('Portfolio orchestrator');
   });
 
-  it('a peek while the sheet is open on another target switches to its source when Open is pressed', async () => {
+  it('while the sheet is open another orchestrator\'s reply shows NO peek (it would sit under the sheet): the menu row\'s unread badge tells', async () => {
     const t = setup();
     t.dock.openSheet();
     t.say('ty', 'compass finished the review');
+    expect(t.peek().hidden).toBe(true);
+    t.titleBtn()!.click();
+    expect(t.optionFor('ty')!.querySelector('.ct-orch-opt-unread')!.textContent).toBe('1');
+  });
+
+  it('a peek that was showing when the sheet opens is dismissed, and closing the sheet does not resurrect it', async () => {
+    const t = setup();
+    t.say('ty', 'compass finished the review');
     expect(t.peek().hidden).toBe(false);
-    (t.peek().querySelector('.ct-orch-peek-open') as HTMLElement).click();
-    expect(t.titleBtn()!.textContent).toContain('Compass orchestrator');
+    t.dock.openSheet();
+    expect(t.peek().hidden).toBe(true);
+    t.dock.closeSheet();
+    expect(t.peek().hidden).toBe(true);
   });
 
   it('an unread reply on a non-selected orchestrator keeps the dot in its attention state', async () => {
@@ -663,5 +673,55 @@ describe('narrow (orb) mode', () => {
     expect(css).toMatch(/\.ct-orch-sheet\[data-mode="orb"\][^{]*\.ct-orch-menu-opt[^{]*\{[^}]*min-height:\s*44px/);
     expect(css).toMatch(/\.ct-orch-title-btn:focus-visible/);
     expect(css).toMatch(/\.ct-orch-menu-opt:focus-visible/);
+  });
+});
+
+describe('a long menu fits a short sheet', () => {
+  const many = () => Array.from({ length: 16 }, (_, i) => ({ id: `p${i}`, name: `Project ${i}`, orchestratorThreadId: `t${i}` }));
+  function setupMany() {
+    const extra = many().map((p) => thread(p.orchestratorThreadId!, { title: p.name, messages: [m('assistant', 'hi')] as never }));
+    const t = setup({ projects: many(), extraThreads: extra });
+    // jsdom has no layout: give the sheet a 300px max-height and a 60px header, as the dock's setMaxHeight would.
+    const sheet = t.q('.ct-orch-sheet')!;
+    sheet.style.maxHeight = '300px';
+    Object.defineProperty(t.q('.ct-orch-sheet-head')!, 'offsetHeight', { configurable: true, get: () => 60 });
+    Object.defineProperty(t.q('.ct-orch-sheet-head')!, 'offsetTop', { configurable: true, get: () => 12 });
+    return t;
+  }
+
+  it('caps the menu to the sheet\'s max height minus what is above it, and lifts the sheet\'s min-height so it is not clipped', async () => {
+    const t = setupMany();
+    t.dock.openSheet();
+    t.titleBtn()!.click();
+    const menu = t.menu()!;
+    expect(menu.style.maxHeight).toBe('220px'); // 300 - (12 + 60) - 8
+    expect(t.q('.ct-orch-sheet')!.style.minHeight).not.toBe('');
+    t.titleBtn()!.click();
+    expect(t.q('.ct-orch-sheet')!.style.minHeight).toBe('');
+  });
+
+  it('keyboard navigation scrolls the active option into view', async () => {
+    const t = setupMany();
+    const spy = vi.fn();
+    (HTMLElement.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = spy;
+    try {
+      t.dock.openSheet();
+      t.titleBtn()!.click();
+      t.key(document.activeElement!, 'End');
+      expect(document.activeElement).toBe(t.optionFor('t15'));
+      expect(spy).toHaveBeenCalled();
+      expect(spy.mock.instances.at(-1)).toBe(t.optionFor('t15'));
+    } finally { delete (HTMLElement.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView; }
+  });
+});
+
+describe('menu CSS: every colour variable Geode may not define carries a fallback', () => {
+  it('no new rule uses var(--text-error) / var(--text-warning) / var(--color-*) without a fallback', () => {
+    const css = readFileSync('styles.css', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((r) => /ct-orch-(menu|sdot|opt-|title-btn|tray-owner)/.test(r[1]));
+    expect(rules.length).toBeGreaterThan(10);
+    const bare = rules.flatMap((r) => [...r[2].matchAll(/var\(--(?:text-error|text-warning|color-[a-z]+)\)/g)].map((x) => `${r[1].trim()} -> ${x[0]}`));
+    expect(bare).toEqual([]);
+    expect(css).toMatch(/\.ct-orch-sdot-error\s*\{[^}]*var\(--text-error,\s*var\(--color-red\)\)/);
   });
 });
