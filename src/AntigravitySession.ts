@@ -120,6 +120,8 @@ export interface AcpToolCall {
 export function antigravityToolSummary(tool: AcpToolCall): string {
   const input = tool.rawInput ?? tool.args ?? {};
   const command = input.CommandLine ?? input.command;
+  // An MCP tool's title is "Run mcp_<server>_<tool>"; agy's own one-line description of the call reads better.
+  if (tool.name?.startsWith('mcp_') && typeof input.toolSummary === 'string' && input.toolSummary.trim()) return input.toolSummary.trim();
   if (tool.kind === 'execute' && typeof command === 'string' && command.trim()) return command.trim().split('\n')[0].slice(0, 200);
   const file = tool.locations?.find((location) => typeof location.path === 'string' && location.path)?.path;
   if (EDIT_KINDS.has(tool.kind ?? '') && file) return file;

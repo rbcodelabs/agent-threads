@@ -87,6 +87,7 @@ describe('tool mapping against recorded frames', () => {
     expect(antigravityToolSummary(shell)).toBe(shell.rawInput.CommandLine);
     expect(antigravityToolSummary(write)).toBe('/work/project/hello.txt');
     expect(antigravityToolSummary({ title: 'Browse', kind: 'other' })).toBe('Browse');
+    expect(antigravityToolSummary({ name: 'mcp_agent-threads_host_echo', kind: 'other', title: 'Run mcp_agent-threads_host_echo', rawInput: { text: 'x', toolSummary: 'Echo text via MCP tool' } })).toBe('Echo text via MCP tool');
   });
 
   it('renders a new file and a replacement as diffs for the approval card', () => {
