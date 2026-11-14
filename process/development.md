@@ -55,7 +55,8 @@ Run these checks before pushing. The PostToolUse hook will remind you if you for
 cd <worktree-path>
 npx tsc --noEmit                 # type-check (esbuild strips types silently — TSC catches the real errors)
 npm test                         # unit tests via vitest
-npm run test:screenshots:remote  # screenshots on dev-builder (2 intentional skips are normal)
+npm run test:browser             # parallel Playwright behavioral/layout browser tests (Mac + Linux)
+npm run test:screenshots:remote  # pixel-baseline screenshots on dev-builder (2 intentional skips are normal)
 ```
 
 **Run the typecheck + unit gate through the `tq` test-worker queue first** (operating guide: vault note `Agent How-Tos/Test Worker Pool`). Use the `agent-threads-unit` profile (npm ci, tsc, npm test on Node 22; defined in the testq repo). The commit must be pushed, and `--sha` must be the exact 40-hex SHA:
@@ -156,6 +157,16 @@ npm test
 Located in `test/unit/`. Use vitest. Mock Obsidian APIs are in `test/mocks/`.
 
 When adding a new MCP tool or modifying serialization logic, add a corresponding test file in `test/unit/`.
+
+---
+
+## Browser Tests (Behavioral & Layout)
+
+```bash
+npm run test:browser
+```
+
+Located in `test/browser/` (`playwright.browser.config.ts`). Runs against the headless harness in `test/harness/` with parallel workers (`workers: 4` in CI, Playwright default locally) and **no pixel snapshot baselines**, so it runs cleanly on both macOS and Linux. Put DOM/state interaction, keyboard navigation, accessibility, and computed-style/bounding-box geometry assertions in `test/browser/` — reserve `test/screenshots/` strictly for tests that call `shot()` / `toHaveScreenshot()`.
 
 ---
 

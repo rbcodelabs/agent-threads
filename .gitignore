@@ -3,9 +3,12 @@ screenshots/node_modules/
 dist/
 *.js.map
 test-results/
+test-results-browser/
 playwright-report/
+playwright-browser-report/
 .env.local
 .claude/worktrees/
+.worktrees/
 deploy/.env
 
 .geode-harness/

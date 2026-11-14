@@ -82,7 +82,7 @@ if (run('ssh', ['-o', 'ConnectTimeout=8', '-o', 'BatchMode=yes', host, 'command 
 //    left alone on the remote, so its Linux node_modules survives between runs.
 const excludes = [
   '.git', 'node_modules', '.pnpm-store', '.worktrees', '.claude/worktrees', '.serena',
-  'test/harness/dist', 'playwright-report', 'test-results', 'dist',
+  'test/harness/dist', 'playwright-report', 'playwright-browser-report', 'test-results', 'test-results-browser', 'dist',
 ];
 console.log(`screenshots-remote: syncing to ${host}:~/${remoteDir}`);
 if (run('ssh', [host, `mkdir -p ${shellQuote(remoteDir)}`]) !== 0) fail('could not create remote directory.');
