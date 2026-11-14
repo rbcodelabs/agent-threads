@@ -63,11 +63,13 @@ describe('doctor checks', () => {
 
   it('resolveDoctorTarget reads the harness set and binary paths like serve does', () => {
     const t = (env: NodeJS.ProcessEnv, files: Record<string, string> = {}) => resolveDoctorTarget({ dataDir: '/d' }, probes({ env, files }));
-    expect(t({}).harnesses).toEqual(['claude', 'codex', 'opencode']);
+    expect(t({}).harnesses).toEqual(['claude', 'codex', 'opencode', 'antigravity']);
     expect(t({ AGENT_THREADS_HARNESS: 'codex' }).harnesses).toEqual(['codex']);
     expect(t({ AGENT_THREADS_HARNESSES: 'opencode,claude' }).harnesses).toEqual(['opencode', 'claude']);
     expect(t({}, { '/d/config.json': JSON.stringify({ harnesses: ['codex'], codexBinaryPath: '/opt/codex' }) })).toMatchObject({ harnesses: ['codex'], codexBinaryPath: '/opt/codex' });
     expect(t({ AGENT_THREADS_OPENCODE_BINARY: '/o/oc' }).opencodeBinaryPath).toBe('/o/oc');
+    expect(t({ AGENT_THREADS_ANTIGRAVITY_BINARY: '/a/agy' }).antigravityBinaryPath).toBe('/a/agy');
+    expect(t({ AGENT_THREADS_HARNESS: 'antigravity' }).harnesses).toEqual(['antigravity']);
   });
 
   it('disk: warns under 5 GiB and fails under 500 MiB', () => {

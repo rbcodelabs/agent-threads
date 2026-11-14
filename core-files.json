@@ -14,7 +14,9 @@
     "src/tools/cwdTracker.ts"
   ],
   "files": [
+    "src/AcpClient.ts",
     "src/AgentProfiles.ts",
+    "src/AntigravitySession.ts",
     "src/ClaudeSession.ts",
     "src/CodexRawLog.ts",
     "src/CodexSession.ts",

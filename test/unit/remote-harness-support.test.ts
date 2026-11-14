@@ -20,13 +20,13 @@ describe('daemonHarnesses', () => {
     expect(daemonHarnesses(undefined)).toBeUndefined();
   });
   it('the scripted fake daemon accepts any harness; unknown kinds are ignored', () => {
-    expect(daemonHarnesses(['harness.fake'])).toEqual(['claude', 'codex', 'opencode']);
+    expect(daemonHarnesses(['harness.fake'])).toEqual(['claude', 'codex', 'opencode', 'antigravity']);
     expect(daemonHarnesses(['harness.gemini', 'harness.codex'])).toEqual(['codex']);
   });
   it('agrees with what the daemon advertises', () => {
     expect(daemonHarnesses(capabilitiesFor('claude', ['claude', 'opencode']))).toEqual(['claude', 'opencode']);
     expect(daemonHarnesses(capabilitiesFor('claude', ['claude']))).toEqual(['claude']);
-    expect(daemonHarnesses(capabilitiesFor('fake'))).toEqual(['claude', 'codex', 'opencode']);
+    expect(daemonHarnesses(capabilitiesFor('fake'))).toEqual(['claude', 'codex', 'opencode', 'antigravity']);
   });
 });
 

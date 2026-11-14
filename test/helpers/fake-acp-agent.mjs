@@ -80,7 +80,7 @@ async function runPrompt(sessionId, text) {
     const start = toolFrame('tool_call', 'write_file');
     update(sessionId, start);
     update(sessionId, { ...start, sessionUpdate: 'tool_call_update', status: 'pending' });
-    const permissionTool = withSession(denyFixture.permissionRequest.params.toolCall, sessionId);
+    const permissionTool = withSession(stream.find((m) => m.method === 'session/request_permission' && m.params.toolCall.name === 'write_file').params.toolCall, sessionId);
     const reply = await requestPermission(permissionTool);
     if (reply?.outcome?.outcome === 'selected' && reply.outcome.optionId === 'allow') {
       update(sessionId, { ...start, sessionUpdate: 'tool_call_update', status: 'in_progress' });

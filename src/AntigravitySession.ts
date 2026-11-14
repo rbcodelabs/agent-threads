@@ -506,6 +506,8 @@ export class AntigravitySession {
   private handleClientClosed(client: AcpClient, error?: Error): void {
     if (this.client !== client || this.closed || this.starting) return;
     const failure = error ?? new Error('Antigravity exited unexpectedly.');
+    // The process is gone: further sends fail fast so the manager starts a fresh session instead of writing to a dead pipe.
+    this.closed = true;
     this.resetTurnState();
     this.pendingPermissions.clear();
     this.options?.callbacks.onError(failure);
