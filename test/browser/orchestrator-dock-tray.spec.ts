@@ -294,7 +294,7 @@ test.describe('orchestrator tray — hovered card is scrolled OUT from under the
         for (let i = 0; i < n; i++) {
           await links.nth(i).scrollIntoViewIfNeeded();
           await links.nth(i).hover();
-          await page.waitForTimeout(140); // hover intent (120ms); reducedMotion scrolls synchronously
+          await page.waitForTimeout(220); // clear CARD_HOVER_INTENT_MS (120ms) with headroom under parallel CI workers
           await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null)))));
           const m = await page.evaluate(() => {
             const card = document.querySelector('.ct-kanban-card-linked') as HTMLElement | null;
@@ -333,7 +333,7 @@ test.describe('orchestrator tray — hovered card is scrolled OUT from under the
     await page.evaluate(() => (window as any).__orchSay('[[thread:Kanban folder swimlanes]]'));
     await openSheet(page, DESKTOP);
     await page.locator('.ct-orch-sheet a.internal-link[data-href^="thread:"]').first().hover();
-    await page.waitForTimeout(160);
+    await page.waitForTimeout(220);
     const covered = await page.evaluate(() => {
       const c = document.querySelector('.ct-kanban-card-linked')!.getBoundingClientRect();
       const s = document.querySelector('.ct-orch-sheet')!.getBoundingClientRect();
@@ -428,7 +428,7 @@ test.describe('orchestrator tray — hovered card is VISIBLE (clip + overlays) i
         for (let i = 0; i < n; i++) {
           await links.nth(i).scrollIntoViewIfNeeded();
           await links.nth(i).hover();
-          await page.waitForTimeout(140); // hover intent (120ms)
+          await page.waitForTimeout(220); // clear CARD_HOVER_INTENT_MS (120ms) before polling smooth scroll settlement
           const m = await settledVisibility(page);
           if (!m) continue;
           const attainable = Math.min(m.cardH, Math.max(m.bandH, 60));
@@ -437,6 +437,7 @@ test.describe('orchestrator tray — hovered card is VISIBLE (clip + overlays) i
           expect(ok, `link ${i} ${m.title}: ${(m.fraction * 100).toFixed(0)}% visible, ${Math.round(m.visibleH)}px of ${Math.round(m.cardH)}px (band ${Math.round(m.bandH)}px)\n${report.join('\n')}`).toBe(true);
           await page.mouse.move(2, 2);
         }
+        expect(report.length, 'at least 5 linked cards were measured').toBeGreaterThanOrEqual(5);
       });
     }
   }

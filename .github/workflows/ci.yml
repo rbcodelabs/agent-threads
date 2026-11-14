@@ -50,6 +50,7 @@ jobs:
   browser:
     name: Browser Tests
     runs-on: ubuntu-latest
+    # Keep tag synced with screenshots.container.image and the exact @playwright/test pin in package.json.
     container:
       image: mcr.microsoft.com/playwright:v1.61.1-noble
       options: --ipc=host

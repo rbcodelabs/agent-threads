@@ -73,7 +73,7 @@ if (run('ssh', ['-o', 'ConnectTimeout=8', '-o', 'BatchMode=yes', host, 'command 
   fail(
     `cannot reach "${host}" over ssh, or podman is not installed there.\n` +
       '  Fallback: `npm run test:screenshots` on this machine. On a Mac that result is ADVISORY ONLY —\n' +
-      '  Mac renders do not match the Linux baselines. Trust the PR\'s "Screenshot Tests" CI job instead,\n' +
+      '  Mac renders do not match the Linux baselines. Trust the PR\'s sharded "Screenshot Tests" CI jobs instead,\n' +
       '  and never commit baselines rendered on a Mac.',
   );
 }
