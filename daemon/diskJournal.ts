@@ -67,7 +67,12 @@ export interface DiskJournalOptions<E> extends InMemoryJournalOptions {
    * Applied to every event before it is journaled, so the ndjson file, the
    * in-memory replay buffer and therefore every client frame served from it all
    * carry the masked form (a secret never reaches this machine's disk). Must be
-   * pure and never throw; the daemon passes `redactForStorage`.
+   * pure and never throw; the daemon passes `redactWireEvent`.
+   *
+   * One exception to "everyone sees the masked form": a request that is still OPEN (a `tool.call` the
+   * client must execute, a permission prompt) keeps its real event in memory, never on disk, and
+   * only until it closes. `rawFor` / `withRawOpenRequests` hand it to the code that serves the
+   * seat holder, the one client that acts on it. Replays, checkpoints and observers stay masked.
    */
   redact?: (event: E) => E;
 }
@@ -88,6 +93,8 @@ export class DiskJournal<E> implements Journal<E> {
   private listeners = new Set<JournalListener<E>>();
   private closed = false;
   private epochChain: Array<{ epoch: string; startSeq: number }> = [];
+  /** Real (unmasked) events of requests still open, by journal seq. In memory only; gone when the request closes. */
+  private readonly rawOpen = new Map<number, { requestId: string; raw: E }>();
 
   private constructor(
     dir: string,
@@ -139,6 +146,7 @@ export class DiskJournal<E> implements Journal<E> {
     if (this.closed) throw new Error(`journal ${this.id} is closed`);
     const event = this.opts.redact ? this.opts.redact(rawEvent) : rawEvent;
     const entry = this.inner.append(event, ts);
+    if (this.opts.redact) this.trackRawRequest(entry.seq, rawEvent);
     this.buffer.push(`${JSON.stringify(entry)}\n`);
     // Append may have evicted from the front; the file must shed those lines too.
     if (this.inner.lowWater > this.fileLowWater) this.needsRewrite = true;
@@ -148,6 +156,24 @@ export class DiskJournal<E> implements Journal<E> {
       try { l(entry); } catch { /* a bad subscriber must not break the journal */ }
     }
     return entry;
+  }
+
+  /** The real event journaled at `seq` while its request is still open (else undefined). Never persisted. */
+  rawFor(seq: number): E | undefined { return this.rawOpen.get(seq)?.raw; }
+
+  /** `cp` with each still-open request's real event swapped in. For the seat holder's resync only; `cp` is not modified. */
+  withRawOpenRequests(cp: Checkpoint<E>): Checkpoint<E> {
+    if (this.rawOpen.size === 0) return cp;
+    return { ...cp, openRequests: cp.openRequests.map((r) => { const raw = this.rawOpen.get(r.seq)?.raw; return raw === undefined ? r : { ...r, event: raw }; }) };
+  }
+
+  private trackRawRequest(seq: number, raw: E): void {
+    const role = this.policy.classify(raw);
+    if (role.role === 'request_open') {
+      this.rawOpen.set(seq, { requestId: role.requestId, raw });
+    } else if (role.role === 'request_close' && this.rawOpen.size > 0) {
+      for (const [s, r] of this.rawOpen) if (r.requestId === role.requestId) this.rawOpen.delete(s);
+    }
   }
 
   replay(afterSeq: number): ReplayResult<E> { return this.inner.replay(afterSeq); }
@@ -204,6 +230,7 @@ export class DiskJournal<E> implements Journal<E> {
     this.flush(true);
     this.closed = true;
     this.listeners.clear();
+    this.rawOpen.clear();
     if (this.fd !== null) { closeSync(this.fd); this.fd = null; }
   }
 

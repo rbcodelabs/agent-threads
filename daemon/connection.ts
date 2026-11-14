@@ -670,15 +670,23 @@ export class Connection {
     const afterSeq = rewind ?? requestedAfterSeq;
     this.subs.get(ch)?.unsubscribe?.();
     const sub = new ChannelSub(ch);
+    // A control-scope client takes (or, with the same token, takes back) the read-write seat;
+    // anyone else observes. Mutating commands re-check, so this is advisory for the client UI.
+    // An `observe` attach never claims it (a terminal watching a thread must not lock Geode out).
+    // Decided BEFORE the replay is queued: the seat holder is the one client that is handed the real
+    // input of an open request (see `rawEventFor`), everyone else gets the masked journal form.
+    const controller = !observe && scopeSatisfies(auth.scope, 'control')
+      && this.ctx.controllers.claim(ch.slice(2), this.seat(auth));
     // Everything from here to the end of this block runs in one synchronous
     // turn: no append can interleave, so replay + subscribe has no gap.
     // A cursor AHEAD of the journal means the client saw history we no longer
     // have (data directory restored or wiped); it must rebuild, not wait.
     const replay = afterSeq > journal.lastSeq
-      ? { kind: 'resync' as const, checkpoint: journal.checkpoint(), lastSeq: journal.lastSeq }
+      ? { kind: 'resync' as const, checkpoint: controller ? journal.withRawOpenRequests(journal.checkpoint()) : journal.checkpoint(), lastSeq: journal.lastSeq }
       : journal.replay(afterSeq);
     if (replay.kind === 'resync') {
-      const cp = replay.checkpoint;
+      // The journal's own compaction can also answer with a checkpoint; same rule for it.
+      const cp = controller ? journal.withRawOpenRequests(replay.checkpoint) : replay.checkpoint;
       sub.resyncText = encodeFrame({ v: PROTOCOL_VERSION, ch, seq: cp.seq, ts: cp.ts, type: 'resync', checkpoint: cp });
     } else {
       // A request opened at or below the cursor that is still unanswered was seen
@@ -691,11 +699,6 @@ export class Connection {
     }
     sub.unsubscribe = journal.subscribe((entry) => this.onLive(sub, entry));
     this.subs.set(ch, sub);
-    // A control-scope client takes (or, with the same token, takes back) the read-write seat;
-    // anyone else observes. Mutating commands re-check, so this is advisory for the client UI.
-    // An `observe` attach never claims it (a terminal watching a thread must not lock Geode out).
-    const controller = !observe && scopeSatisfies(auth.scope, 'control')
-      && this.ctx.controllers.claim(ch.slice(2), this.seat(auth));
     const result = { lastSeq: replay.lastSeq, lowWater: journal.lowWater, epoch: this.ctx.epoch, resync: replay.kind === 'resync', controller, ...(rewind !== null ? { rewind } : {}) };
     // The ack is queued first (control drains before channels) so the client
     // learns the cursor before the first replayed event.
@@ -716,7 +719,22 @@ export class Connection {
   }
 
   private eventText(ch: Channel, entry: JournalEntry<WireEvent>, reopen?: true, replay?: true): string {
-    return encodeFrame({ v: PROTOCOL_VERSION, ch, seq: entry.seq, ts: entry.ts, type: 'event', ...(reopen ? { reopen } : {}), ...(replay ? { replay } : {}), ...entry.event });
+    const event = this.rawEventFor(ch, entry) ?? entry.event;
+    return encodeFrame({ v: PROTOCOL_VERSION, ch, seq: entry.seq, ts: entry.ts, type: 'event', ...(reopen ? { reopen } : {}), ...(replay ? { replay } : {}), ...event });
+  }
+
+  /**
+   * The journal stores every event masked (secrets never reach disk), but the client holding the thread's
+   * read-write seat ACTS on an open request: it runs a `tool.call` with the input in the frame, so a masked
+   * input would execute (and write) `[REDACTED:...]`. That client alone is handed the real event, from memory,
+   * for as long as the request is open. Observers, read-scope clients, other seats, replays of closed requests
+   * and everything on disk carry the masked form.
+   */
+  private rawEventFor(ch: Channel, entry: JournalEntry<WireEvent>): WireEvent | undefined {
+    if (ch === 'ctl') return undefined;
+    const threadId = ch.slice(2);
+    if (!this.ctx.controllers.isController(threadId, this.id)) return undefined;
+    return this.ctx.host.journalFor(threadId)?.rawFor(entry.seq);
   }
 
   // ── outbound ─────────────────────────────────────────────────────────────

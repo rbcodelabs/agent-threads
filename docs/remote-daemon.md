@@ -611,7 +611,13 @@ Read this before exposing the daemon beyond `127.0.0.1`.
   the agent reads, an environment dump) is still stored. A token the model streams in several fragments is only caught once
   it appears whole, so an individual streamed fragment may not be masked even though the finished message is. Journal files
   written by an older daemon are not rewritten. The live session keeps the real value; only what is stored and served later
-  is masked, so a resumed thread can show `[REDACTED:...]` where a value used to be. Files are `0600` in a `0700` directory; the retention settings below bound how long they
+  is masked, so a resumed thread can show `[REDACTED:...]` where a value used to be. One carve-out: a request that is still
+  open (a `tool.call` the client must run, a permission prompt) keeps its real event in the daemon's memory, never on disk,
+  and only the client holding the thread's read-write seat is sent that real form, live or when it re-attaches, because it
+  acts on the input (a masked `mcp_register_server` or `vault_write` call would register or write `[REDACTED:...]`). Observers,
+  other tokens, replays of finished calls and the journal file carry the masked form. Not covered yet: a secret split across
+  streamed chunks, ANSI-prefixed tokens, `password: x` / JSON / YAML colon forms, `--token` / `--password` flags and camelCase
+  keys. Files are `0600` in a `0700` directory; the retention settings below bound how long they
   live. Deleting a thread in Geode does not delete its daemon-side files.
 - **`tailscale serve` exposes the daemon to your whole tailnet.** Anyone on the tailnet can reach the port and try
   tokens (256-bit tokens make guessing infeasible, but reachability should still be deliberate). Restrict who can reach
