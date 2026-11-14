@@ -98,6 +98,7 @@ export interface HarnessSessionOptions {
   claude?: ClaudeHarnessOptions;
   codex?: CodexHarnessOptions;
   opencode?: OpenCodeHarnessOptions;
+  antigravity?: AntigravityHarnessOptions;
 }
 
 /** Claude-only capabilities intentionally kept out of the shared contract. */
@@ -171,6 +172,14 @@ export interface OpenCodeHarnessOptions {
    * gets. Written to OpenCode's native `skills.paths` config key.
    */
   skillRoots?: string[];
+}
+
+/** Antigravity-specific inputs; permission and model use the shared fields. */
+export interface AntigravityHarnessOptions {
+  /** Host tools, served to `agy` through the same loopback MCP bridge OpenCode uses. */
+  dynamicTools?: HarnessDynamicTool[];
+  /** Serializable external MCP servers passed to `session/new` / `session/load`. */
+  mcpServers?: Record<string, HarnessMcpServerConfig>;
 }
 
 /** A host-owned capability exposed through a harness's native tool protocol. */
