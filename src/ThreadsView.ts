@@ -19,7 +19,7 @@ import { canAlwaysAllow, parsePermissionDetail } from './permissionDetail';
 import { isPermissionPreApprovedForThread, recordAlwaysAllow } from './remoteAlwaysAllow';
 import { contributionApprovalPredicate } from './contributedToolApproval';
 import type { ViewStateResult } from 'obsidian';
-import { renderMarkdown as renderSharedMarkdown, renderMessage, renderToolResultImages, linkifyUrls, type MessageRenderHost } from './messageRenderer';
+import { renderMarkdown as renderSharedMarkdown, renderMessage, renderToolResultImages, linkifyUrls, ToolCallRenderer, type MessageRenderHost } from './messageRenderer';
 import { isHttpUrl, urlChipLabel } from './urlLinks';
 import { effectiveExtraEnv } from './types';
 import { parseLoopArgs, formatLoopInterval } from './loopUtils';
@@ -41,11 +41,11 @@ import os from 'os';
 import * as fsp from 'fs/promises';
 import type ClaudeThreadsPlugin from './main';
 import { isDefaultThreadTitle } from './thread-title-utils';
-import { formatToolName, getToolIcon } from './ClaudeSession';
+import { formatToolName } from './ClaudeSession';
 import { isHostExecPermission, normalizeToolCallStyle, type ToolPathContext } from './toolNameUtils';
 import { addHostExecPrefix, hostExecAlwaysAllowOffer } from './hostExecPrefix';
-import { applyToolCallStyleClass, refreshToolRowByUseId, renderToolGroupShell, renderToolRow } from './toolCallDom';
-import { groupToolRuns, liveToolGroupKey, mergeAdjacentToolOnlyMessages, pickCurrentTool, shouldWrapOuter, isBrowserTool, type ToolCallGroup } from './toolNameUtils';
+import { applyToolCallStyleClass, refreshToolRowByUseId } from './toolCallDom';
+import { groupToolRuns, liveToolGroupKey, mergeAdjacentToolOnlyMessages, isBrowserTool } from './toolNameUtils';
 import { BrowserSessionPresenter, PLACEHOLDER_WHILE_SIGNING_IN } from './BrowserSessionPresenter';
 import { HARNESS_BRAND_ICONS } from './harnessBrandIcons';
 import { DispatchInput, MANAGED_SUFFIX, type DispatchPayload, type ExtraSkillDir } from './DispatchInput';
@@ -4138,21 +4138,6 @@ export class ThreadsView extends ItemView {
     }
   }
 
-  /**
-   * Render a single tool call as a `.ct-tool-pill` into `wrapper`. Shared by
-   * the finalized flat (ungrouped) path, renderToolGroup's expanded body, and
-   * the live-streaming path (renderLiveToolCalls) so isolated calls, grouped
-   * calls, and in-progress calls all look identical. Returns the created pill
-   * so live-rendering can register it in toolPillsByUseId for tool_progress
-   * heartbeat updates.
-   */
-  private renderToolPill(wrapper: HTMLElement, tool: ToolCallRecord): HTMLElement {
-    return renderToolRow(wrapper, tool, {
-      pathCtx: this.toolPathContext(),
-      time: tool.timestamp ? this.formatShortTime(tool.timestamp) : undefined,
-    });
-  }
-
   /** Vault root + home dir, so tool-call paths render vault-relative / ~-relative. */
   private toolPathContext(): ToolPathContext {
     const adapter = this.app.vault.adapter as { basePath?: string };
@@ -4165,171 +4150,41 @@ export class ThreadsView extends ItemView {
     applyToolCallStyleClass(this.rootEl, normalizeToolCallStyle(this.plugin.settings.toolCallStyle));
   }
 
-  /** Deterministic key for a FINALIZED tool-call group's expand/collapse state. */
-  private toolGroupKey(tools: ToolCallRecord[]): string {
-    return tools.map(t => t.toolUseId ?? t.timestamp ?? '').join(':');
+  /**
+   * The tool-call renderer shared with the dock sheet (src/messageRenderer/toolCalls.ts). Built on first use, not in a
+   * field initialiser, because the expand/collapse sets below are the view's own (cleared on a thread switch) and the
+   * golden tests drive the view through Object.create(prototype). Everything it needs from this view is read lazily.
+   */
+  private toolCallRendererCache: ToolCallRenderer | null = null;
+  private get toolCallRenderer(): ToolCallRenderer {
+    return this.toolCallRendererCache ??= new ToolCallRenderer({
+      state: {
+        expandedToolGroups: this.expandedToolGroups,
+        userCollapsedToolGroups: this.userCollapsedToolGroups,
+        liveExpandedToolGroups: this.liveExpandedToolGroups,
+        expandedOuterToolWrap: this.expandedOuterToolWrap,
+        liveExpandedOuterToolWrap: this.liveExpandedOuterToolWrap,
+      },
+      pathContext: () => this.toolPathContext(),
+      formatTime: (timestamp) => this.formatShortTime(timestamp),
+      browser: () => this.browser,
+    });
   }
 
-  /**
-   * Deterministic key for a FINALIZED outer-wrap's expand/collapse state.
-   * Thin wrapper over toolGroupKey — hashes the FULL flat tool list (not the
-   * post-smoothing grouped entries), matching toolGroupKey's own convention.
-   */
-  private outerToolWrapKey(tools: ToolCallRecord[]): string {
-    return this.toolGroupKey(tools);
-  }
-
-  /**
-   * LIVE counterpart to outerToolWrapKey — thin wrapper over liveToolGroupKey
-   * for the same "member list keeps growing mid-turn" reason liveToolGroupKey
-   * exists at the group level (see that function's doc comment).
-   */
-  private outerLiveToolWrapKey(tools: ToolCallRecord[]): string {
-    return liveToolGroupKey(tools); // already imported from toolNameUtils
-  }
-
-  /**
-   * @param opts.live When true, groups are keyed/expand-tracked the same way
-   *   the live-streaming path (renderLiveToolCalls) does — via liveToolGroupKey
-   *   + liveExpandedToolGroups instead of the stable id-hash keying used by
-   *   default. Needed by the R3 in-place tail-row rebuild: that row's member
-   *   list keeps growing as the still-open run receives more tool-only steps,
-   *   so a stable-hash key would change on every extension and silently
-   *   re-collapse a group the user had expanded. Only that call site should
-   *   pass `live: true` — first-time append of a settled row and the full
-   *   renderMessages() rebuild both keep the default (stable) keying.
-   */
   private renderToolCalls(
     parent: HTMLElement,
     tools: ToolCallRecord[],
     opts?: { live?: boolean; onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void },
   ): HTMLElement {
-    const wrapper = parent.createDiv('ct-tools');
-    this.populateToolCallsWrapper(wrapper, tools, { live: opts?.live ?? false, onPillRendered: opts?.onPillRendered });
-    return wrapper;
+    return this.toolCallRenderer.renderToolCalls(parent, tools, opts);
   }
 
-  /**
-   * Renders one layer of tool-call entries (singles and groups) into
-   * `container` — the exact per-entry loop shared by the flat (non-wrapped)
-   * render path AND the expanded body of the outer wrap (renderOuterToolWrap),
-   * so the two structurally match. `opts.onPillRendered` is threaded through
-   * to renderToolGroup so live-mode pill registration (toolPillsByUseId, for
-   * per-pill tool_progress heartbeat updates) keeps working even when a group
-   * ends up nested inside the outer wrap.
-   */
-  private renderGroupedEntries(
-    container: HTMLElement,
-    grouped: ToolCallGroup[],
-    opts: { live: boolean; onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void },
-  ): void {
-    for (const entry of grouped) {
-      if (entry.kind === 'single') {
-        const pill = this.renderToolPill(container, entry.tool);
-        opts.onPillRendered?.(entry.tool, pill);
-      } else if (entry.kind === 'browser') {
-        // One card per browser session, in place of tool pills. Live and
-        // finalized rendering share this call, so they cannot drift.
-        if (this.browser) this.browser.renderEntry(container, entry);
-        else for (const tool of entry.tools) this.renderToolPill(container, tool);
-      } else if (opts.live) {
-        this.renderToolGroup(container, entry, {
-          keyOverride: liveToolGroupKey(entry.tools),
-          expandedSet: this.liveExpandedToolGroups,
-          onPillRendered: opts.onPillRendered,
-        });
-      } else {
-        this.renderToolGroup(container, entry);
-      }
-    }
-  }
-
-  /**
-   * Second collapsible tier, wrapping the ENTIRE post-smoothing entry list
-   * when it's still too long to render flat (see shouldWrapOuter). Mirrors
-   * renderToolGroup's collapse/expand pattern one level up: collapsed by
-   * default, auto-expands through BOTH tiers if any descendant tool errored,
-   * and — while live — shows a live-updating "currently executing tool"
-   * header instead of a static count so a long collapsed run doesn't read as
-   * frozen.
-   */
-  private renderOuterToolWrap(
-    wrapper: HTMLElement,
-    tools: ToolCallRecord[],
-    grouped: ToolCallGroup[],
-    opts: { live: boolean; onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void },
-  ): void {
-    const hasError = tools.some(t => t.status === 'error');
-    const hasPending = tools.some(t => t.status === 'pending');
-
-    const groupEl = wrapper.createDiv('ct-tool-outer-wrap');
-    const headerRow = groupEl.createDiv('ct-tool-outer-wrap-header ct-compressed-row');
-    if (hasError) headerRow.addClass('ct-tool-error');
-
-    if (opts.live && hasPending) {
-      headerRow.addClass('ct-tool-active');
-      const current = pickCurrentTool(tools);
-      const summaryEl = headerRow.createSpan({ cls: 'ct-tool-outer-wrap-live-summary' });
-      if (current) {
-        const iconEl = summaryEl.createSpan({ cls: 'ct-tool-pill-icon' });
-        setIcon(iconEl, getToolIcon(current.name));
-        summaryEl.createSpan({ cls: 'ct-tool-pill-name', text: formatToolName(current.name) });
-        if (current.summary) summaryEl.createSpan({ cls: 'ct-tool-pill-text', text: current.summary });
-      }
-    } else {
-      // 'list-tree' reads as "a nested list of steps," matching what the
-      // outer wrap actually contains (a list of groups, each a list of pills).
-      const iconEl = headerRow.createSpan({ cls: 'ct-tool-pill-icon' });
-      setIcon(iconEl, 'list-tree');
-      headerRow.createSpan({
-        cls: 'ct-compressed-summary',
-        text: `${tools.length} tool calls, ${grouped.length} steps`,
-      });
-    }
-
-    const expandBtn = headerRow.createEl('button', { cls: 'ct-expand-btn', attr: { title: 'Expand' } });
-
-    const fullContent = groupEl.createDiv('ct-full-content');
-    this.renderGroupedEntries(fullContent, grouped, opts);
-
-    const expandedSet = opts.live ? this.liveExpandedOuterToolWrap : this.expandedOuterToolWrap;
-    const key = opts.live ? this.outerLiveToolWrapKey(tools) : this.outerToolWrapKey(tools);
-    // A browser card waiting on the human (sign-in) must not hide behind a collapsed wrap.
-    let expanded = hasError || expandedSet.has(key) || (this.browser?.needsAttention(tools) ?? false);
-    if (!expanded) fullContent.addClass('ct-hidden');
-    setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
-
-    expandBtn.addEventListener('click', () => {
-      expanded = !expanded;
-      if (expanded) {
-        fullContent.removeClass('ct-hidden');
-        expandedSet.add(key);
-      } else {
-        fullContent.addClass('ct-hidden');
-        expandedSet.delete(key);
-      }
-      setIcon(expandBtn, expanded ? 'chevron-up' : 'chevron-down');
-    });
-  }
-
-  /**
-   * The one place "smooth + decide + render" policy for a tool-call list
-   * lives. Groups the raw tools, smooths short off-kind interruptions back
-   * into their surrounding groups, then either renders flat (the common
-   * case) or wraps the whole list in a second collapsible tier once it's
-   * still too long after smoothing (see shouldWrapOuter/OUTER_WRAP_ENTRY_THRESHOLD).
-   */
   private populateToolCallsWrapper(
     wrapper: HTMLElement,
     tools: ToolCallRecord[],
     opts: { live: boolean; onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void },
   ): void {
-    const grouped = groupToolRuns(tools);
-    if (shouldWrapOuter(grouped)) {
-      this.renderOuterToolWrap(wrapper, tools, grouped, opts);
-    } else {
-      this.renderGroupedEntries(wrapper, grouped, opts);
-    }
+    this.toolCallRenderer.populateToolCallsWrapper(wrapper, tools, opts);
   }
 
   /**
@@ -4386,55 +4241,6 @@ export class ThreadsView extends ItemView {
    */
   private renderRowToolImages(rowEl: HTMLElement, msg: ChatMessage): HTMLElement | null {
     return renderToolResultImages(rowEl, msg, (ref, inline) => this.imageSrc(ref, inline), this.browser?.claimedImageIndexes(msg.id));
-  }
-
-  /**
-   * Render a run of 2+ consecutive same-activity tool calls as a collapsible
-   * section, mirroring appendAssistantGroup's collapse/expand pattern and CSS
-   * classes. Auto-expands (and visually flags) if any tool in the group errored,
-   * so failures are never hidden behind a collapsed group.
-   *
-   * Shared by the finalized view (default opts) and the live-streaming view
-   * (renderLiveToolCalls passes a stable liveToolGroupKey + a dedicated
-   * expand-state set + a callback to register pending pills for tool_progress
-   * heartbeat lookups).
-   */
-  private renderToolGroup(
-    wrapper: HTMLElement,
-    entry: Extract<ToolCallGroup, { kind: 'group' }>,
-    opts?: {
-      keyOverride?: string;
-      expandedSet?: Set<string>;
-      onPillRendered?: (tool: ToolCallRecord, pill: HTMLElement) => void;
-    },
-  ): void {
-    const { activityKind, tools } = entry;
-    const hasError = tools.some(t => t.status === 'error');
-    const hasPending = tools.some(t => t.status === 'pending');
-    const expandedSet = opts?.expandedSet ?? this.expandedToolGroups;
-    const groupKey = opts?.keyOverride ?? this.toolGroupKey(tools);
-
-    // Collapsed by default, running, failed or finished; the red header icon
-    // flags a failure. Only a group the user opened stays open.
-    const expanded = expandedSet.has(groupKey);
-    const { body } = renderToolGroupShell(wrapper, activityKind, tools, {
-      hasError,
-      hasPending,
-      expanded,
-      onToggle: (open) => {
-        if (open) {
-          expandedSet.add(groupKey);
-          this.userCollapsedToolGroups.delete(groupKey);
-        } else {
-          expandedSet.delete(groupKey);
-          this.userCollapsedToolGroups.add(groupKey);
-        }
-      },
-    });
-    for (const tool of tools) {
-      const pill = this.renderToolPill(body, tool);
-      opts?.onPillRendered?.(tool, pill);
-    }
   }
 
   /**

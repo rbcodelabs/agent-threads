@@ -66,7 +66,7 @@ describe('reduced-motion audit of the dock stylesheet rules', () => {
     const names = animated.map((a) => a.selector).join('\n');
     expect(names).toContain('.ct-orch-orb-spinning .ct-orch-orb-ring');
     expect(names).toContain('.ct-orch-activity-spin');
-    expect(names).toContain('.ct-orch-bubble-streaming::after');
+    // The streaming cursor is the main panel's `.ct-cursor`, already animated only under `no-preference` (so reduce = static).
     expect(names).toContain('.ct-kanban-dispatch .ct-orch-peek');
     expect(names).toContain('.ct-kanban-dispatch');
   });

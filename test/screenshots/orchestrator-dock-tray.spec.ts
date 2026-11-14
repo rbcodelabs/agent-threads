@@ -38,7 +38,7 @@ async function openSheet(page: Page, size: { width: number }) {
   await expect(sheet(page)).toBeVisible();
 }
 const card = (page: Page, title: string) => page.locator('.ct-kanban-card', { hasText: title }).first();
-const linkTo = (page: Page, title: string) => page.locator('.ct-orch-sheet a.ct-thread-link', { hasText: title }).first();
+const linkTo = (page: Page, title: string) => page.locator('.ct-orch-sheet a.internal-link[data-href^="thread:"]', { hasText: title }).first();
 
 test.describe('orchestrator tray — screenshots', () => {
   for (const { label, size } of SIZES) {
@@ -327,7 +327,7 @@ test.describe('orchestrator tray — hovered card is scrolled OUT from under the
         if (mode !== 'status') await page.evaluate((m) => (window as any).__setGroupBy(m), mode);
         await page.evaluate((titles) => (window as any).__orchSay(titles.map((t: string) => `[[thread:${t}]]`).join(' · ')), TITLES);
         await openSheet(page, size);
-        const links = page.locator('.ct-orch-sheet a.ct-thread-link');
+        const links = page.locator('.ct-orch-sheet a.internal-link[data-href^="thread:"]');
         const n = await links.count();
         expect(n).toBeGreaterThanOrEqual(6);
         let checked = 0;
@@ -372,7 +372,7 @@ test.describe('orchestrator tray — hovered card is scrolled OUT from under the
     await page.waitForSelector('.ct-kanban-dispatch .ct-orch-dock');
     await page.evaluate(() => (window as any).__orchSay('[[thread:Kanban folder swimlanes]]'));
     await openSheet(page, DESKTOP);
-    await page.locator('.ct-orch-sheet a.ct-thread-link').first().hover();
+    await page.locator('.ct-orch-sheet a.internal-link[data-href^="thread:"]').first().hover();
     await page.waitForTimeout(300);
     const covered = await page.evaluate(() => {
       const c = document.querySelector('.ct-kanban-card-linked')!.getBoundingClientRect();
@@ -464,7 +464,7 @@ test.describe('orchestrator tray — hovered card is VISIBLE (clip + overlays) i
         if (mode !== 'status') await page.evaluate((m) => (window as any).__setGroupBy(m), mode);
         await page.evaluate((titles) => (window as any).__orchSay(titles.map((t: string) => `[[thread:${t}]]`).join(' · ')), TITLES);
         await openSheet(page, size);
-        const links = page.locator('.ct-orch-sheet a.ct-thread-link');
+        const links = page.locator('.ct-orch-sheet a.internal-link[data-href^="thread:"]');
         const n = await links.count();
         expect(n).toBeGreaterThanOrEqual(6);
         const report: string[] = [];

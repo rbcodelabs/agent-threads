@@ -239,7 +239,7 @@ function markerLabel(label: string): string {
  * title, characters that would break the marker replaced by spaces); unresolvable
  * ones become their plain label. Everything else, including surrounding
  * `**bold**` and table syntax, is untouched. The renderer then turns the
- * normalised markers into anchors before running markdown (dockMarkdown).
+ * normalised markers into the shared renderer's wikilink anchors before running markdown (see threadIdOfHref).
  * Labels are model-controlled: set them via textContent / escape them.
  */
 export function rewriteThreadLinks(markdown: string, threads: readonly ThreadRef[]): string {
@@ -250,6 +250,17 @@ export function rewriteThreadLinks(markdown: string, threads: readonly ThreadRef
     if (!hit) return alias || ref;
     return `[[thread:${hit.threadId}|${markerLabel(alias || hit.title)}]]`;
   });
+}
+
+/**
+ * The thread id in the `data-href` of a rewritten thread link (`thread:<id>`), or null for anything else. The shared
+ * renderer turns `[[thread:<id>|label]]` into an ordinary `a.internal-link`; the dock recognises its own thread links by
+ * this prefix (see rewriteThreadLinks, dockMessageEnv).
+ */
+export function threadIdOfHref(href: string | null | undefined): string | null {
+  if (!href || !href.startsWith('thread:')) return null;
+  const id = href.slice('thread:'.length).trim();
+  return id === '' ? null : id;
 }
 
 // ── Count text ──────────────────────────────────────────────────────────────

@@ -4,13 +4,12 @@ import { extractMessageContent } from '../MessageContent';
 import { extractVisualizeMarkers, VISUALIZE_SLOT_CLASS } from '../visualizeMarker';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, resolveAbsoluteVaultHref } from '../linkUtils';
 import { hydrateRemoteImages } from '../remote/remoteImages';
-import { renderStrictMarkdown } from './strict';
 import { linkifyBridgePaths, linkifyUrls } from './links';
 import type { MessageRenderHost, MessageRenderOptions } from './types';
 
 /**
  * Render assistant markdown into `el`. This is the single pipeline shared by
- * the main panel and the mobile view; anything surface-specific goes through
+ * the main panel, the mobile view and the dock sheet; anything surface-specific goes through
  * `host`. Order of operations matters (extraction before marked, hydration
  * after sanitizing, link wiring last) and is preserved from the original
  * ThreadsView implementation.
@@ -18,13 +17,9 @@ import type { MessageRenderHost, MessageRenderOptions } from './types';
 export async function renderMarkdown(
   markdown: string,
   el: HTMLElement,
-  host: MessageRenderHost | undefined,
+  host: MessageRenderHost,
   options: MessageRenderOptions = {},
 ): Promise<void> {
-  if (options.linkPolicy === 'strict') {
-    return renderStrictMarkdown(markdown, el, { threads: options.threadRefs ?? [], resolveLink: options.resolveLink, streaming: options.streaming });
-  }
-  if (!host) throw new Error('renderMarkdown: the trusted link policy needs a MessageRenderHost');
   const threadId = host.threadId();
   const signal = host.signal;
   const transcriptMessage = options.messageId && threadId

@@ -11,7 +11,8 @@ export interface DockLinkDeps {
   /** metadataCache.getFirstLinkpathDest(linkpath, sourcePath) */
   getFirstLinkpathDest(linkpath: string, sourcePath: string): unknown;
   isConversationFirst(): boolean;
-  openInContextPanel(href: string, sourcePath: string): void;
+  /** May be async; a throw or rejection (e.g. no chat leaf is open for the context panel) falls back to a new tab. */
+  openInContextPanel(href: string, sourcePath: string): void | Promise<void>;
   /** workspace.openLinkText(href, sourcePath, newLeaf) */
   openLinkText(href: string, sourcePath: string, newLeaf: 'tab'): void;
 }
@@ -28,6 +29,12 @@ export function canOpenDockLink(deps: Pick<DockLinkDeps, 'getFirstLinkpathDest'>
 
 export function openDockLink(deps: DockLinkDeps, href: string): void {
   if (!canOpenDockLink(deps, href)) return;
-  if (deps.isConversationFirst()) deps.openInContextPanel(href, '');
-  else deps.openLinkText(href, '', 'tab');
+  const inTab = (): void => deps.openLinkText(href, '', 'tab');
+  if (!deps.isConversationFirst()) { inTab(); return; }
+  try {
+    const pending = deps.openInContextPanel(href, '');
+    if (pending && typeof pending.then === 'function') pending.then(undefined, inTab);
+  } catch {
+    inTab();
+  }
 }

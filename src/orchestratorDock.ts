@@ -29,6 +29,7 @@ import {
   type SuggestionChip,
 } from './orchestratorDockModel';
 import { capTranscript, peekLine, sheetBlock, sheetTranscript } from './dockSheetModel';
+import { createDockMessageEnv, type DockMessageHostDeps } from './dockMessageEnv';
 import { InputHistory } from './dockInputHistory';
 import { createDraftStore, MAX_DRAFT_CHARS, type DraftStore } from './dockDraftStore';
 import { KeyboardInsetTracker } from './dockKeyboardInset';
@@ -60,10 +61,16 @@ export interface OrchestratorDockDeps {
   ensureOrchestrator(): Promise<void>;
   /** plugin.openThreadInChatView */
   openThread(threadId: string): void | Promise<void>;
-  /** Opens a `[[note]]` wikilink from an orchestrator reply (workspace.openLinkText). Absent: wikilinks are inert. */
+  /**
+   * Opens a `[[note]]` / vault link from an orchestrator reply (never the board's own leaf, an unresolved link opens
+   * nothing: dockLinkOpener). Absent: those links do nothing when clicked.
+   */
   openLink?(href: string): void;
-  /** Whether a `[[note]]` can be opened (resolves to a file). Absent with `openLink` present: assume yes. */
-  resolveLink?(href: string): boolean;
+  /**
+   * What the shared message renderer needs from the app so the sheet renders a conversation like the main panel (opening
+   * URLs, bridges, vault probe, clock, tool-call style). Absent: inert defaults (no URL opener, no bridges, no vault files).
+   */
+  messageHost?: DockMessageHostDeps;
   /** Source for an attached / tool-result image: a vault resource URL when it has a path, else a data URL. Absent: data URLs. */
   imageSrc?(ref: { path?: string; mediaType: string }, inlineData: string | undefined): string;
   /**
@@ -188,7 +195,7 @@ export class OrchestratorDock {
   private stopRequested = false;
   private stopSnapshot = '';
   private sendingText = '';
-  private txCache: { ref: unknown; len: number; lastId: string | undefined; lastLen: number; entries: ReturnType<typeof sheetTranscript> } | null = null;
+  private txCache: { ref: unknown; len: number; lastId: string | undefined; lastLen: number; lastTools: number; entries: ReturnType<typeof sheetTranscript> } | null = null;
   /** User message ids that landed while a turn was running (coalesced into it): "Sent, will be picked up". */
   private readonly pickupIds = new Set<string>();
   /** Latest assistant message id the user has seen; per dock instance, seeded when the thread is first seen. */
@@ -605,12 +612,15 @@ export class OrchestratorDock {
     this.sheet = new DockSheet(parent, {
       close: () => this.closeSheet(),
       openFull: () => { const id = this.deps.getOrchestratorThreadId(); if (id) void this.openQuietly(id); },
-      // Defence in depth: an anchor injected into the DOM after render can carry any id; only threads the board knows open.
-      openThread: (threadId) => { if (this.deps.manager.getThread(threadId)) void this.openQuietly(threadId); },
-      openLink: this.deps.openLink ? (href) => this.deps.openLink?.(href) : undefined,
       imageSrc: this.deps.imageSrc ? (ref, inline) => this.deps.imageSrc!(ref, inline) : undefined,
-      // Without an opener, wikilinks are inert text; with one, the host decides what resolves.
-      resolveLink: (href) => !!this.deps.openLink && (this.deps.resolveLink ? this.deps.resolveLink(href) : true),
+      messages: createDockMessageEnv({
+        threadId: () => this.deps.getOrchestratorThreadId(),
+        getThread: (id) => this.deps.manager.getThread(id),
+        openNote: (href) => { this.deps.openLink?.(href); },
+        // Defence in depth: an anchor injected into the DOM after render can carry any id; only threads the board knows open.
+        openThread: (threadId) => { if (this.deps.manager.getThread(threadId)) void this.openQuietly(threadId); },
+        deps: this.deps.messageHost,
+      }),
       removeWaiting: (index, text) => this.removeWaiting(index, text),
       pickChip: (chip) => { void this.submitText(chip.prompt); },
       linkEnter: (threadId) => { this.deps.focusCard?.(threadId, { scroll: true, flash: true }); },
@@ -657,10 +667,12 @@ export class OrchestratorDock {
     const lastMsg = msgs[msgs.length - 1];
     const last = lastMsg?.id;
     const lastLen = lastMsg?.content.length ?? 0;
+    // A tool call appended to the last message changes the merged row with no new message and no new text.
+    const lastTools = lastMsg?.toolCalls?.length ?? 0;
     const c = this.txCache;
-    if (c && c.ref === msgs && c.len === msgs.length && c.lastId === last && c.lastLen === lastLen) return c.entries;
+    if (c && c.ref === msgs && c.len === msgs.length && c.lastId === last && c.lastLen === lastLen && c.lastTools === lastTools) return c.entries;
     const entries = sheetTranscript(msgs);
-    this.txCache = { ref: msgs, len: msgs.length, lastId: last, lastLen, entries };
+    this.txCache = { ref: msgs, len: msgs.length, lastId: last, lastLen, lastTools, entries };
     return entries;
   }
 

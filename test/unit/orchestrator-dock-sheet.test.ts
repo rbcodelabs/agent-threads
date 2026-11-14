@@ -177,7 +177,7 @@ describe('opening and closing', () => {
     await vi.waitFor(() => expect(t.manager.sendMessage).toHaveBeenCalledWith('orch', 'What needs me?'));
     expect(t.deps.openThread).not.toHaveBeenCalled();
     expect(t.input()!.value).toBe('');
-    await vi.waitFor(() => expect(t.q('.ct-orch-msg[data-role="user"]')?.textContent).toContain('What needs me?'));
+    await vi.waitFor(() => expect(t.q('.ct-orch-sheet-log > [data-role][data-role="user"]')?.textContent).toContain('What needs me?'));
   });
 
   it('clicking the field opens the sheet when a transcript exists, not when it is empty', () => {
@@ -246,7 +246,7 @@ describe('transcript is a projection of thread.messages', () => {
   it('renders user and assistant bubbles in order; assistant text as markdown', async () => {
     const t = setup({ messages: [m('user', 'what now?'), m('assistant', 'Two **things** wait')] });
     t.dock.openSheet();
-    const rows = t.qa('.ct-orch-msg');
+    const rows = t.qa('.ct-orch-sheet-log > [data-role]');
     expect(rows.map((r) => r.dataset.role)).toEqual(['user', 'assistant']);
     await vi.waitFor(() => expect(rows[1].querySelector('strong')?.textContent).toBe('things'));
     expect(rows[0].textContent).toContain('what now?');
@@ -257,7 +257,7 @@ describe('transcript is a projection of thread.messages', () => {
     t.dock.openSheet();
     const u = m('user', 'fresh'); (t.orch.messages as unknown as Msg[]).push(u);
     t.emit('user_message_added', { message: u });
-    expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(1);
+    expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="user"]')).toHaveLength(1);
   });
 
   it('interrupt rolls the unresolved user message back: the bubble disappears (never append-only)', async () => {
@@ -267,19 +267,19 @@ describe('transcript is a projection of thread.messages', () => {
     const el = t.type('first'); t.enter(el);
     await flush();
     t.type('second'); t.enter(t.input()!);
-    await vi.waitFor(() => expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(2));
+    await vi.waitFor(() => expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="user"]')).toHaveLength(2));
     await t.manager.interrupt();
-    expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(0);
-    expect(t.qa('.ct-orch-msg')).toHaveLength(1);
+    expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="user"]')).toHaveLength(0);
+    expect(t.qa('.ct-orch-sheet-log > [data-role]')).toHaveLength(1);
   });
 
   it('keeps the DOM node of an unchanged message across re-derivations', async () => {
     const t = setup({ messages: [m('user', 'one'), m('assistant', 'two')] });
     t.dock.openSheet();
-    const before = t.qa('.ct-orch-msg')[0];
+    const before = t.qa('.ct-orch-sheet-log > [data-role]')[0];
     t.say('three');
-    expect(t.qa('.ct-orch-msg')[0]).toBe(before);
-    await vi.waitFor(() => expect(t.qa('.ct-orch-msg')).toHaveLength(3));
+    expect(t.qa('.ct-orch-sheet-log > [data-role]')[0]).toBe(before);
+    await vi.waitFor(() => expect(t.qa('.ct-orch-sheet-log > [data-role]')).toHaveLength(3));
   });
 
   it('ignores events from other threads', () => {
@@ -292,10 +292,10 @@ describe('transcript is a projection of thread.messages', () => {
   it('thread-link anchors open that thread; [[note]] anchors go through openLink', async () => {
     const t = setup({ messages: [m('assistant', 'See [[thread:a|Deploy fix]] and [[Plan note]]')] });
     t.dock.openSheet();
-    const a = await vi.waitFor(() => { const x = t.q('a.ct-thread-link'); expect(x).toBeTruthy(); return x!; });
+    const a = await vi.waitFor(() => { const x = t.q('a.internal-link[data-href^="thread:"]'); expect(x).toBeTruthy(); return x!; });
     a.click();
     expect(t.deps.openThread).toHaveBeenCalledWith('a');
-    t.q('a.internal-link')!.click();
+    t.q('a.internal-link[data-href="Plan note"]')!.click();
     expect(t.deps.openLink).toHaveBeenCalledWith('Plan note');
   });
 });
@@ -311,17 +311,19 @@ describe('streaming', () => {
     expect(live.textContent).toContain('Two things');
     t.say('Two things are waiting');
     expect(t.q('[data-streaming]')).toBeNull();
-    await vi.waitFor(() => expect(t.qa('.ct-orch-msg[data-role="assistant"]')[0]?.textContent).toContain('Two things are waiting'));
-    expect(t.qa('.ct-orch-msg[data-role="assistant"]')).toHaveLength(1);
+    await vi.waitFor(() => expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="assistant"]')[0]?.textContent).toContain('Two things are waiting'));
+    expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="assistant"]')).toHaveLength(1);
   });
 
-  it('streamed text is text, never markup', async () => {
+  it('streamed text goes through the main panel markdown pipeline (markdown, the shared cursor); the sanitizer-level checks live in dock-identical-render.test.ts', async () => {
     const t = setup({ running: true, messages: [m('user', 'go')] });
     t.dock.openSheet();
-    t.emit('token', { text: '<img src=x onerror=alert(1)>' });
-    await frame();
-    expect(t.q('[data-streaming] img')).toBeNull();
-    expect(t.q('[data-streaming]')!.textContent).toContain('<img');
+    t.emit('token', { text: 'Hello **bold**' });
+    await frame(); await flush();
+    const live = t.q('[data-streaming]')!;
+    expect(live.className).toBe('ct-message ct-message-assistant ct-streaming');
+    expect(live.querySelector('.ct-message-content strong')?.textContent).toBe('bold');
+    expect(live.querySelector('.ct-message-content > .ct-cursor')).not.toBeNull();
   });
 
   it('stream_reset and interrupted clear the live bubble', () => {
@@ -420,7 +422,7 @@ describe('send while the orchestrator is working', () => {
     t.enter(t.type('also check CI'));
     await vi.waitFor(() => expect(t.q('.ct-orch-pickup')).toBeTruthy());
     expect(t.q('.ct-orch-pickup')!.textContent).toBe('Sent, will be picked up');
-    expect(t.q('.ct-orch-pickup')!.closest('.ct-orch-msg')!.textContent).toContain('also check CI');
+    expect(t.q('.ct-orch-pickup')!.closest('.ct-orch-sheet-log > [data-role]')!.textContent).toContain('also check CI');
     expect(t.sheet()!.textContent!.toLowerCase()).not.toContain('queued');
     expect(t.stage.innerHTML.toLowerCase()).not.toMatch(/queued/);
     t.s.running.delete('orch'); t.emit('run_state_settled');
@@ -430,7 +432,7 @@ describe('send while the orchestrator is working', () => {
   it('an idle orchestrator gets no status line', async () => {
     const t = setup({ messages: [m('assistant', 'hi')] });
     t.enter(t.type('hello'));
-    await vi.waitFor(() => expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(1));
+    await vi.waitFor(() => expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="user"]')).toHaveLength(1));
     expect(t.q('.ct-orch-pickup')).toBeNull();
   });
 
@@ -441,7 +443,7 @@ describe('send while the orchestrator is working', () => {
     await vi.waitFor(() => expect(t.q('.ct-orch-pickup')).toBeTruthy());
     await t.manager.interrupt();
     expect(t.q('.ct-orch-pickup')).toBeNull();
-    expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(0);
+    expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="user"]')).toHaveLength(0);
   });
 });
 
@@ -699,29 +701,29 @@ describe('content the sheet cannot draw', () => {
       m('assistant', 'plain'),
     ] });
     t.dock.openSheet();
-    const rows = t.qa('.ct-orch-msg');
+    const rows = t.qa('.ct-orch-sheet-log > [data-role]');
     expect(rows.map((r) => !!r.querySelector('.ct-orch-chip-full'))).toEqual([false, true, false, false]);
     rows[1].querySelector<HTMLElement>('.ct-orch-chip-full')!.click();
     expect(t.deps.openThread).toHaveBeenCalledWith('orch');
     expect(rows[1].textContent).not.toContain('visualize{');
     expect(rows[0].querySelector('.ct-tool-result-images img')).not.toBeNull();
-    expect(rows[2].querySelector('.ct-orch-tools-toggle')).not.toBeNull();
+    expect(rows[2].querySelector('.ct-tool-group-header')).not.toBeNull();
   });
 
   it('a text-less message with an image is a row with its thumbnail, not a blank bubble and not hidden', () => {
     const t = setup({ messages: [m('assistant', '', { toolResultImages: [{ mediaType: 'image/png', data: 'AAAA' }] })] });
     t.dock.openSheet();
-    const row = t.q('.ct-orch-msg')!;
+    const row = t.q('.ct-orch-sheet-log > [data-role]')!;
     expect(row.querySelector('.ct-tool-result-images img')).toBeTruthy();
     expect(row.querySelector('.ct-orch-chip-full')).toBeNull();
-    expect(row.querySelector('.ct-orch-bubble')).toBeNull();
+    expect(row.querySelector('.ct-message-content')?.textContent ?? '').toBe('');
   });
 
   it('a text-less message that is only a visualization says so and keeps the chip', () => {
     const t = setup({ messages: [m('assistant', 'visualize{"path":"/x.html"}')] });
     t.dock.openSheet();
-    const row = t.q('.ct-orch-msg')!;
-    expect(row.querySelector('.ct-orch-bubble')?.textContent).toBe('This message has a visualization.');
+    const row = t.q('.ct-orch-sheet-log > [data-role]')!;
+    expect(row.querySelector('.ct-message-content')?.textContent).toBe('This message has a visualization.');
     expect(row.querySelector('.ct-orch-chip-full')).toBeTruthy();
   });
 
@@ -789,37 +791,39 @@ describe('lifecycle', () => {
 
 // ── Review round (#903 at 854b52c) ─────────────────────────────────────────────────────────────────────────────────
 describe('review: wikilinks never navigate the board (B1)', () => {
-  it('an unresolvable [[note]] renders as inert text: no anchor, no click target', async () => {
-    const t = setup({ messages: [m('assistant', 'see [[Ghost note]] and [[Real note]]')] });
-    t.deps.resolveLink = vi.fn((href: string) => href === 'Real note');
-    t.dock.destroy(); document.body.innerHTML = '';
+  // Notes render as the main panel's ordinary wikilink anchors; the click goes to the dock's opener (deps.openLink), which is
+  // dockLinkOpener.openDockLink: never the active leaf (the board), and an unresolved link opens nothing (dock-link-opener tests).
+  it('a [[note]] is an ordinary internal link whose click goes ONLY to the dock opener', async () => {
     const u = setup({ messages: [m('assistant', 'see [[Ghost note]] and [[Real note]]')] });
-    u.deps.resolveLink = vi.fn((href: string) => href === 'Real note');
     u.dock.openSheet();
-    await vi.waitFor(() => expect(u.qa('a.internal-link').length + u.qa('.ct-orch-wikilink-unresolved').length).toBe(2));
-    expect(u.qa('a.internal-link').map((a) => a.textContent)).toEqual(['Real note']);
-    expect(u.qa('.ct-orch-wikilink-unresolved').map((a) => a.textContent)).toEqual(['Ghost note']);
-    u.q('a.internal-link')!.click();
+    await vi.waitFor(() => expect(u.qa('a.internal-link').length).toBe(2));
+    expect(u.qa('a.internal-link').map((a) => a.textContent)).toEqual(['Ghost note', 'Real note']);
+    u.qa('a.internal-link')[1].click();
     expect(u.deps.openLink).toHaveBeenCalledWith('Real note');
+    expect(u.deps.openThread).not.toHaveBeenCalled();
   });
 
-  it('without an openLink dependency wikilinks are inert text (nothing to click)', async () => {
+  it('without an openLink dependency a wikilink click does nothing (and never throws)', async () => {
     const t = setup({ messages: [m('assistant', 'see [[Note]]')] });
     (t.deps as { openLink?: unknown }).openLink = undefined;
     t.dock.openSheet();
-    await vi.waitFor(() => expect(t.sheet()!.textContent).toContain('Note'));
-    expect(t.q('a.internal-link')).toBeNull();
+    await vi.waitFor(() => expect(t.q('a.internal-link')).toBeTruthy());
+    expect(() => t.q('a.internal-link')!.click()).not.toThrow();
+    expect(t.deps.openThread).not.toHaveBeenCalled();
   });
 });
 
 describe('review: assistant row hand-off (A1, A2)', () => {
-  it('the new assistant row is seeded with its text immediately (never empty while markdown renders)', () => {
+  it('the assistant row is the main panel row and holds its markdown once the (microtask) render lands, in the same task as the swap from the streaming bubble', async () => {
     const t = setup({ running: true, messages: [m('user', 'go')] });
     t.dock.openSheet();
     t.emit('token', { text: 'Done' });
     t.say('**Done** and dusted');
-    const row = t.qa('.ct-orch-msg[data-role="assistant"]').find((r) => !r.dataset.streaming)!;
-    expect(row.querySelector('.ct-orch-bubble')!.textContent).toBe('**Done** and dusted');
+    expect(t.q('[data-streaming]')).toBeNull();
+    await flush();
+    const row = t.qa('.ct-orch-sheet-log > [data-role][data-role="assistant"]').find((r) => !r.dataset.streaming)!;
+    expect(row.className).toBe('ct-message ct-message-assistant');
+    expect(row.querySelector('.ct-message-content strong')!.textContent).toBe('Done');
   });
 
   it('re-pins to the bottom after the async markdown lands, if the user was pinned', async () => {
@@ -850,19 +854,20 @@ describe('review: assistant row hand-off (A1, A2)', () => {
 });
 
 describe('review: streaming writes are coalesced (A4)', () => {
-  it('a burst of tokens in one frame produces at most one text write', async () => {
+  it('a burst of tokens in one frame produces ONE render pass (a constant number of writes, not 200)', async () => {
     const t = setup({ running: true, messages: [m('user', 'go')] });
     t.dock.openSheet();
     t.emit('token', { text: 'a' });
     await frame();
-    const bubble = t.q('[data-streaming] .ct-orch-bubble')!;
+    const bubble = t.q('[data-streaming] .ct-message-content')!;
     let writes = 0;
     new MutationObserver((rs) => { writes += rs.length; }).observe(bubble, { childList: true, characterData: true, subtree: true });
     for (let i = 0; i < 200; i++) t.emit('token', { text: 'x' });
     expect(bubble.textContent).toBe('a');
     await frame(); await flush();
-    expect(bubble.textContent!.length).toBe(201);
-    expect(writes).toBeLessThanOrEqual(2);
+    expect(bubble.textContent!.trim().length).toBe(201);
+    // One render pass = a constant handful of mutations (plain-text seed, cursor, markdown swap, cursor), not one per token.
+    expect(writes).toBeLessThanOrEqual(6);
   });
 });
 
@@ -987,7 +992,7 @@ describe('review: a failure AFTER the user message was recorded does not duplica
   it('sendMessage that throws after user_message_added keeps the draft empty (the message is in the transcript)', async () => {
     const t = setup({ sendThrowsAfterEcho: true, messages: [m('assistant', 'x')] });
     t.enter(t.type('already recorded'));
-    await vi.waitFor(() => expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(1));
+    await vi.waitFor(() => expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="user"]')).toHaveLength(1));
     await flush();
     expect(t.input()!.value).toBe('');
   });
@@ -998,8 +1003,8 @@ describe('review: link clicks (A14)', () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
     const t = setup({ messages: [m('assistant', '[ext](https://example.com/x) [bad](javascript:alert(1))')] });
     t.dock.openSheet();
-    await vi.waitFor(() => expect(t.qa('.ct-orch-bubble a').length).toBeGreaterThan(0));
-    const links = t.qa('.ct-orch-bubble a') as HTMLAnchorElement[];
+    await vi.waitFor(() => expect(t.qa('.ct-message-content a').length).toBeGreaterThan(0));
+    const links = t.qa('.ct-message-content a') as HTMLAnchorElement[];
     const ext = links.find((a) => a.getAttribute('href')?.startsWith('https'))!;
     const ev = new MouseEvent('click', { bubbles: true, cancelable: true });
     ext.dispatchEvent(ev);
@@ -1144,7 +1149,7 @@ describe('delta B1: a queued streaming frame never resurrects a ghost bubble', (
     t.say('Hello there');
     await frame(); await frame();
     expect(t.q('[data-streaming]')).toBeNull();
-    await vi.waitFor(() => expect(t.qa('.ct-orch-msg[data-role="assistant"]')).toHaveLength(1));
+    await vi.waitFor(() => expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="assistant"]')).toHaveLength(1));
   });
 
   it('tokens followed by interrupted leave one Stopped partial, not a duplicate live bubble', async () => {
@@ -1209,11 +1214,11 @@ describe('delta (c): rollback then resend', () => {
     const t = setup({ running: true, messages: [m('assistant', 'hi')] });
     t.dock.openSheet();
     t.enter(t.type('first try')); await flush();
-    expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(1);
+    expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="user"]')).toHaveLength(1);
     await t.manager.interrupt();
-    expect(t.qa('.ct-orch-msg[data-role="user"]')).toHaveLength(0);
+    expect(t.qa('.ct-orch-sheet-log > [data-role][data-role="user"]')).toHaveLength(0);
     t.enter(t.type('second try')); await flush();
-    const users = t.qa('.ct-orch-msg[data-role="user"]');
+    const users = t.qa('.ct-orch-sheet-log > [data-role][data-role="user"]');
     expect(users).toHaveLength(1);
     expect(users[0].textContent).toContain('second try');
   });
@@ -1286,25 +1291,15 @@ describe('delta (e): the narrow modal sheet inerts what it covers', () => {
   });
 });
 
-describe('delta (f): links follow the world, not just the text', () => {
-  it('a note created later turns an inert wikilink into a link on the next refresh', async () => {
-    let exists = false;
-    const t = setup({ messages: [m('assistant', 'see [[Later note]]')] });
-    t.deps.resolveLink = vi.fn(() => exists);
-    t.dock.openSheet();
-    await vi.waitFor(() => expect(t.q('.ct-orch-wikilink-unresolved')).toBeTruthy());
-    exists = true; t.emit('done');
-    await vi.waitFor(() => expect(t.q('a.internal-link')).toBeTruthy());
-  });
-
+describe('delta (f): thread links follow the board (note links resolve at click time now)', () => {
   it('a renamed thread updates a title-only thread link', async () => {
     const t = setup({ messages: [m('assistant', 'open [[thread:a]]')] });
     t.dock.openSheet();
-    await vi.waitFor(() => expect(t.q('a.ct-thread-link')?.textContent).toBe('Deploy curation'));
+    await vi.waitFor(() => expect(t.q('a.internal-link[data-href^="thread:"]')?.textContent).toBe('Deploy curation'));
     t.deps.listThreads().find((x) => x.id === 'a')!.title = 'Deploy curation v2';
     t.emit('thread_renamed');
     t.emit('done');
-    await vi.waitFor(() => expect(t.q('a.ct-thread-link')?.textContent).toBe('Deploy curation v2'));
+    await vi.waitFor(() => expect(t.q('a.internal-link[data-href^="thread:"]')?.textContent).toBe('Deploy curation v2'));
   });
 });
 
@@ -1371,15 +1366,24 @@ describe('N2: opening the narrow sheet from the orb moves focus into it', () => 
 });
 
 describe('observation: openThread never opens an id the board does not know', () => {
-  it('a thread anchor injected after render with an unknown id opens nothing; a known id still opens', async () => {
-    const t = setup({ messages: [m('assistant', 'hello')] });
+  it('a thread link whose thread left the board before the click opens nothing; an anchor injected into the DOM has no handler at all', async () => {
+    const t = setup({ messages: [m('assistant', 'see [[thread:a|Deploy]]')] });
     t.dock.openSheet();
-    await vi.waitFor(() => expect(t.qa('.ct-orch-bubble').length).toBe(1));
-    const mk = (id: string) => { const a = document.createElement('a'); a.setAttribute('data-thread-id', id); a.href = '#'; a.textContent = id; t.q('.ct-orch-sheet-log')!.appendChild(a); return a; };
-    mk('ghost-id').click();
+    const link = await vi.waitFor(() => { const x = t.q('a.internal-link[data-href="thread:a"]'); expect(x).toBeTruthy(); return x!; });
+    const known = t.manager.getThread;
+    t.manager.getThread = vi.fn(() => undefined) as never; // archived / deleted since the render
+    link.click();
     expect(t.deps.openThread).not.toHaveBeenCalled();
-    mk('a').click();
+    t.manager.getThread = known;
+    link.click();
     expect(t.deps.openThread).toHaveBeenCalledWith('a');
+    // Defence in depth: the sheet only ever acts on anchors the shared renderer wired.
+    const injected = document.createElement('a');
+    injected.className = 'internal-link'; injected.setAttribute('data-href', 'thread:b'); injected.href = '#';
+    t.q('.ct-orch-sheet-log')!.appendChild(injected);
+    vi.mocked(t.deps.openThread).mockClear();
+    injected.click();
+    expect(t.deps.openThread).not.toHaveBeenCalled();
   });
 });
 
@@ -1389,9 +1393,9 @@ describe('delta: middle-click / auxclick on a plain link is handled like click',
   it('is prevented and never navigates', async () => {
     const t = setup({ messages: [m('assistant', '[ext](https://example.com/x)')] });
     t.dock.openSheet();
-    await vi.waitFor(() => expect(t.q('.ct-orch-bubble a')).toBeTruthy());
+    await vi.waitFor(() => expect(t.q('.ct-message-content a')).toBeTruthy());
     const ev = new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 });
-    t.q('.ct-orch-bubble a')!.dispatchEvent(ev);
+    t.q('.ct-message-content a')!.dispatchEvent(ev);
     expect(ev.defaultPrevented).toBe(true);
   });
 });
@@ -1766,7 +1770,7 @@ describe('QA N9: End / Home work from any focus inside the log, not only the scr
   it('a focused thread link: End snaps to the live bottom, re-pins, and keeps following', async () => {
     const t = setup({ running: true, messages: [m('assistant', 'see [[thread:a|Deploy]]')] });
     t.dock.openSheet();
-    const link = await vi.waitFor(() => { const a = t.q('a.ct-thread-link'); expect(a).toBeTruthy(); return a!; });
+    const link = await vi.waitFor(() => { const a = t.q('a.internal-link[data-href^="thread:"]'); expect(a).toBeTruthy(); return a!; });
     const { scroll, grow } = await rig(t);
     (link as HTMLElement).focus();
     const ev = key(link, 'End');
@@ -1779,7 +1783,7 @@ describe('QA N9: End / Home work from any focus inside the log, not only the scr
   it('a focused button inside a bubble behaves the same; Home unpins and goes to the top', async () => {
     const t = setup({ running: true, messages: [m('assistant', 'did work', { toolCalls: [{ name: 'Read' }] })] });
     const { scroll } = await rig(t);
-    const btn = t.q<HTMLButtonElement>('.ct-orch-msg .ct-orch-tools-toggle')!;
+    const btn = t.q<HTMLButtonElement>('.ct-orch-sheet-log > [data-role] .ct-tool-group-header')!;
     btn.focus();
     expect(key(btn, 'End').defaultPrevented).toBe(true);
     expect(scroll.scrollTop).toBe(3000);
@@ -1799,18 +1803,32 @@ describe('QA N9: End / Home work from any focus inside the log, not only the scr
   });
 });
 
-describe('step 3: the sheet draws real messages through the shared item renderer (compact density)', () => {
+describe('step 3: the sheet draws real messages through the shared item renderer (same rows as the main panel)', () => {
   const settle = async () => { await flush(); await flush(); };
 
-  it('tool calls are ONE collapsed summary row per message, expandable; no "N tool calls" chip', async () => {
+  it('tool calls are the main panel `.ct-tools` list: one collapsed group per run with its pills, expandable; no "Open full thread" chip', async () => {
     const t = setup({ messages: [m('assistant', 'did work', { toolCalls: [{ name: 'Read', summary: 'Read: a' }, { name: 'Read', summary: 'Read: b' }, { name: 'Bash', summary: 'ls' }] })] });
     t.dock.openSheet(); await settle();
-    const row = t.q('.ct-orch-msg')!;
-    expect(row.querySelectorAll('.ct-orch-tools')).toHaveLength(1);
-    expect(row.querySelector('.ct-orch-tools-toggle')!.textContent).toContain('3 tool calls');
-    expect(row.querySelector<HTMLElement>('.ct-orch-tools-list')!.hidden).toBe(true);
+    const row = t.q('.ct-orch-sheet-log > [data-role]')!;
+    expect(row.querySelectorAll(':scope > .ct-tools > .ct-tool-group')).toHaveLength(1);
+    const header = row.querySelector<HTMLElement>('.ct-tool-group-header')!;
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+    expect(row.querySelectorAll('.ct-tool-pill')).toHaveLength(3);
+    header.click();
+    expect(header.getAttribute('aria-expanded')).toBe('true');
     expect(row.querySelector('.ct-orch-chip-full')).toBeNull();
     expect(row.textContent).not.toContain('This message has');
+  });
+
+  it('a group the user opened stays open when the row is rebuilt (the expand state lives in the sheet)', async () => {
+    const tools = [{ name: 'Read', summary: 'Read: a', toolUseId: 'u1' }, { name: 'Read', summary: 'Read: b', toolUseId: 'u2' }];
+    const t = setup({ messages: [m('assistant', 'did work', { toolCalls: tools })] });
+    t.dock.openSheet(); await settle();
+    t.q<HTMLElement>('.ct-tool-group-header')!.click();
+    t.say('and more'); await settle(); // a new message re-derives the transcript
+    t.orch.messages[0] = { ...(t.orch.messages[0] as object), content: 'did work (edited)' } as never;
+    t.emit('done'); await settle();
+    expect(t.q('.ct-tool-group-header')!.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('notices and compact dividers are shown (they used to be dropped)', async () => {
@@ -1821,15 +1839,15 @@ describe('step 3: the sheet draws real messages through the shared item renderer
       m('assistant', 'done'),
     ] });
     t.dock.openSheet(); await settle();
-    expect(t.q('.ct-orch-msg[data-role="notice"] .ct-notice-text')!.textContent).toBe('Background task "build" failed');
-    expect(t.q('.ct-orch-msg[data-role="compact"] .ct-compact-divider')!.textContent).toContain('Context auto-compacted');
-    expect(t.qa('.ct-orch-msg').map((r) => r.dataset.role)).toEqual(['user', 'notice', 'compact', 'assistant']);
+    expect(t.q('.ct-orch-sheet-log > .ct-notice-row[data-role="notice"] .ct-notice-text')!.textContent).toBe('Background task "build" failed');
+    expect(t.q('.ct-orch-sheet-log > .ct-compact-divider[data-role="compact"]')!.textContent).toContain('Context auto-compacted');
+    expect(t.qa('.ct-orch-sheet-log > [data-role]').map((r) => r.dataset.role)).toEqual(['user', 'notice', 'compact', 'assistant']);
   });
 
   it('a user message with a URL gets a link, handled by the log (no new tab from the anchor itself)', async () => {
     const t = setup({ messages: [m('user', 'look at https://example.com/page now')] });
     t.dock.openSheet(); await settle();
-    const a = t.q<HTMLAnchorElement>('.ct-orch-msg[data-role="user"] a.ct-auto-link')!;
+    const a = t.q<HTMLAnchorElement>('.ct-orch-sheet-log > [data-role][data-role="user"] a.ct-auto-link')!;
     expect(a.getAttribute('href')).toBe('https://example.com/page');
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
     a.click();
@@ -1837,21 +1855,22 @@ describe('step 3: the sheet draws real messages through the shared item renderer
     open.mockRestore();
   });
 
-  it('attached and tool-result images render as local thumbnails; a remote markdown image never does', async () => {
+  it('attached and tool-result images render as thumbnails; a remote markdown image renders exactly as in the main panel (trusted policy, Rick decision after #912)', async () => {
     const t = setup({ messages: [
       m('user', 'see', { images: [{ name: 's.png', mediaType: 'image/png', base64: 'AAAA' }] }),
       m('assistant', 'pic ![r](https://evil.example/p.png)', { toolResultImages: [{ mediaType: 'image/png', data: 'BBBB' }] }),
     ] });
     t.dock.openSheet(); await settle();
-    expect(t.qa('.ct-orch-msg img').map((i) => i.getAttribute('src'))).toEqual(['data:image/png;base64,AAAA', 'data:image/png;base64,BBBB']);
-    expect(t.q('.ct-orch-bubble img[src*="evil"]')).toBeNull();
+    expect(t.qa('.ct-orch-sheet-log > [data-role] img').map((i) => i.getAttribute('src'))).toEqual([
+      'data:image/png;base64,AAAA', 'data:image/png;base64,BBBB', 'https://evil.example/p.png',
+    ]);
     expect(t.q('.ct-orch-chip-full')).toBeNull();
   });
 
   it('only a visualize marker keeps the "Open full thread" chip, and the marker line is not shown', async () => {
     const t = setup({ messages: [m('assistant', 'chart\nvisualize{"path":"/x.html"}'), m('assistant', 'plain', { toolCalls: [{ name: 'Read' }] })] });
     t.dock.openSheet(); await settle();
-    const rows = t.qa('.ct-orch-msg');
+    const rows = t.qa('.ct-orch-sheet-log > [data-role]');
     expect(rows.map((r) => !!r.querySelector('.ct-orch-chip-full'))).toEqual([true, false]);
     expect(rows[0].textContent).not.toContain('visualize{');
   });
@@ -1860,7 +1879,7 @@ describe('step 3: the sheet draws real messages through the shared item renderer
     const msgs = Array.from({ length: 60 }, (_, i) => m(i % 2 ? 'assistant' : 'user', `message ${i}`));
     const t = setup({ messages: msgs });
     t.dock.openSheet(); await settle();
-    const rows = t.qa('.ct-orch-msg');
+    const rows = t.qa('.ct-orch-sheet-log > [data-role]');
     expect(rows).toHaveLength(50);
     expect(rows[0].textContent).toContain('message 10');
     expect(rows[49].textContent).toContain('message 59');
@@ -1875,9 +1894,9 @@ describe('step 3: the sheet draws real messages through the shared item renderer
     const t = setup({ messages: [m('user', 'a'), m('assistant', 'b')] });
     t.dock.openSheet(); await settle();
     expect(t.q('.ct-orch-older')).toBeNull();
-    const before = t.qa('.ct-orch-msg');
+    const before = t.qa('.ct-orch-sheet-log > [data-role]');
     t.say('c'); await settle();
-    const after = t.qa('.ct-orch-msg');
+    const after = t.qa('.ct-orch-sheet-log > [data-role]');
     expect(after).toHaveLength(3);
     expect(after[0]).toBe(before[0]);
     expect(after[1]).toBe(before[1]);

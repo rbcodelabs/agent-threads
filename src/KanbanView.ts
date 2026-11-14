@@ -9,7 +9,8 @@ import { approveProposedReply, discardProposedReply, takeProposedReplyForEdit } 
 import { answerPendingQuestions } from './questionActions';
 import { proposedReplyDeps, questionAnswerDeps } from './managerActionDeps';
 import { threadNeedsInput, splitNeedsInput } from './needsInput';
-import { canOpenDockLink, openDockLink, type DockLinkDeps } from './dockLinkOpener';
+import { openDockLink, type DockLinkDeps } from './dockLinkOpener';
+import { createDockMessageHostDeps } from './dockMessageHost';
 import { OrchestratorDock, dockModeForWidth, type DockMode } from './orchestratorDock';
 import { windowDraftStore } from './dockDraftStore';
 import { decisionToQuestion } from './decisions';
@@ -415,8 +416,9 @@ export class KanbanView extends ItemView {
       },
       // Never the active leaf (the board): see dockLinkOpener.ts.
       openLink: (href) => openDockLink(this.dockLinkDeps(), href),
-      resolveLink: (href) => canOpenDockLink(this.dockLinkDeps(), href),
       imageSrc: (ref, inline) => resolveImageSrc(this.app, ref, inline),
+      // The shared message renderer's app-side pieces (URL opening, bridges, clock, tool-call style): dockMessageHost.ts.
+      messageHost: createDockMessageHostDeps(this.app, plugin, this.manager),
       mode: () => this.dockMode,
       // In memory only (drafts can hold secrets): survives this view being rebuilt, not an app restart.
       drafts: windowDraftStore,
@@ -460,7 +462,7 @@ export class KanbanView extends ItemView {
     return {
       getFirstLinkpathDest: (path, source) => this.app.metadataCache.getFirstLinkpathDest(path, source),
       isConversationFirst: () => plugin.isConversationFirst(),
-      openInContextPanel: (href, source) => { void plugin.contextPanel.openLinkText(href, source); },
+      openInContextPanel: (href, source) => plugin.contextPanel.openLinkText(href, source),
       openLinkText: (href, source, newLeaf) => { void this.app.workspace.openLinkText(href, source, newLeaf); },
     };
   }

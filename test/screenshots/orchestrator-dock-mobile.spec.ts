@@ -207,7 +207,7 @@ async function fillTranscript(page: Page, n: number) {
 }
 const lastMessageVisible = (page: Page) => page.evaluate(() => {
   const sc = document.querySelector('.ct-orch-sheet-scroll')!.getBoundingClientRect();
-  const msgs = document.querySelectorAll('.ct-orch-msg');
+  const msgs = document.querySelectorAll('.ct-orch-sheet-log > [data-role]');
   const last = msgs[msgs.length - 1].getBoundingClientRect();
   return { lastBottom: last.bottom, scrollBottom: sc.bottom, lastTop: last.top, scrollTop: sc.top };
 });
@@ -762,10 +762,10 @@ test.describe('prefers-reduced-motion: computed styles across dock, sheet, peek 
     await arrange(page, false);
     const names = await page.evaluate(() => ({
       ring: getComputedStyle(document.querySelector('.ct-orch-orb-spinning .ct-orch-orb-ring')!).animationName,
-      caret: getComputedStyle(document.querySelector('.ct-orch-bubble-streaming')!, '::after').animationName,
+      caret: getComputedStyle(document.querySelector('[data-streaming] .ct-cursor')!).animationName,
       activity: getComputedStyle(document.querySelector('.ct-orch-activity-spin')!).animationName,
     }));
-    expect(names).toEqual({ ring: 'ct-orch-spin', caret: 'ct-orch-blink', activity: 'ct-orch-spin' });
+    expect(names).toEqual({ ring: 'ct-orch-spin', caret: 'ct-cursor-pulse', activity: 'ct-orch-spin' });
     expect((await page.evaluate(MOTION)).length).toBeGreaterThan(0);
   });
 
@@ -790,7 +790,7 @@ test.describe('prefers-reduced-motion: computed styles across dock, sheet, peek 
       await page.emulateMedia({ reducedMotion: reduced ? 'reduce' : 'no-preference' });
       await open(page, 'orch=idle&tx=conversation&tray=1', { width: 1280, height: 800 });
       await page.evaluate(() => (window as any).__openSheet());
-      const link = page.locator('.ct-orch-sheet a.ct-thread-link').first();
+      const link = page.locator('.ct-orch-sheet a.internal-link[data-href^="thread:"]').first();
       await expect(link).toBeVisible();
       await link.hover();
       await expect(page.locator('.ct-kanban-card-linked')).toHaveCount(1);
