@@ -9,14 +9,16 @@
 import { isWireEvent, type WireEvent } from '../src/protocol';
 import { redactForStorage } from '../src/secretRedaction';
 
-/** Shown in place of an event whose redaction failed. A known callback with a plain-text payload: clients render it, nothing else reads it. */
-const REDACTION_FAILED: WireEvent = {
-  name: 'onNotification',
-  args: ['An event was withheld because it could not be checked for secrets (redaction failed).', 'low'],
-};
+/** Shown in place of an event whose redaction failed. A known callback with a plain-text payload: clients render it, nothing else reads it. Built fresh per call so no caller can mutate a shared instance. */
+function redactionFailedEvent(): WireEvent {
+  return {
+    name: 'onNotification',
+    args: ['An event was withheld because it could not be checked for secrets (redaction failed).', 'low'],
+  };
+}
 
 export function redactWireEvent(event: WireEvent): WireEvent {
   const out = redactForStorage(event);
-  if (!isWireEvent(out)) return { ...REDACTION_FAILED, args: [...REDACTION_FAILED.args] } as WireEvent;
+  if (!isWireEvent(out)) return redactionFailedEvent();
   return out;
 }
