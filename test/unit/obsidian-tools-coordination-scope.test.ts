@@ -114,3 +114,48 @@ describe('coordination tool scoping', () => {
     expect(authorizeThread).toHaveBeenCalledTimes(cases.length);
   });
 });
+
+describe('threads_set_proposed_reply with an open decision', () => {
+  type Handler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
+  const setReply = (opts: Record<string, unknown>) =>
+    (createClaudeThreadsMcpServers(app, opts as never).claude_threads as unknown as { tools: Array<{ name: string; handler: Handler }> }).tools
+      .find(tool => tool.name === 'threads_set_proposed_reply')!.handler;
+  const decision = { id: 'dec-1', question: 'Ship?', header: 'Ship', options: [], multiSelect: false, allowOther: true, createdAt: 1, sourceThreadId: 'orch' };
+
+  it('rejects staging while a decision is open and does not stage', async () => {
+    const setThreadProposedReply = vi.fn();
+    const res = await setReply({ threadId: 'orch', setThreadProposedReply, getThreadDetail: () => ({ id: 'w', pendingDecisions: [decision] }) })({ threadId: 'w', text: 'yes' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0]!.text).toContain('open decision awaiting Rick');
+    expect(res.content[0]!.text).toContain('dec-1');
+    expect(res.content[0]!.text).toContain('threads_clear_decision');
+    expect(setThreadProposedReply).not.toHaveBeenCalled();
+  });
+
+  it('allows staging once the decision is answered or cleared (no pendingDecisions) so the answer can be relayed', async () => {
+    for (const detail of [{ id: 'w' }, { id: 'w', pendingDecisions: [] }]) {
+      const setThreadProposedReply = vi.fn();
+      const res = await setReply({ threadId: 'orch', setThreadProposedReply, getThreadDetail: () => detail })({ threadId: 'w', text: 'Ship it, per your answer' });
+      expect(res.isError).toBeUndefined();
+      expect(setThreadProposedReply).toHaveBeenCalledWith('w', 'Ship it, per your answer');
+    }
+  });
+
+  it('transitions from blocked to allowed when the decision is removed', async () => {
+    let pending: unknown[] | undefined = [decision];
+    const setThreadProposedReply = vi.fn();
+    const call = setReply({ threadId: 'orch', setThreadProposedReply, getThreadDetail: () => ({ id: 'w', pendingDecisions: pending }) });
+    expect((await call({ threadId: 'w', text: 'x' })).isError).toBe(true);
+    pending = undefined;
+    expect((await call({ threadId: 'w', text: 'x' })).isError).toBeUndefined();
+    expect(setThreadProposedReply).toHaveBeenCalledTimes(1);
+  });
+
+  it('still stages when the host gives no thread detail (guard needs state to act)', async () => {
+    const setThreadProposedReply = vi.fn();
+    const res = await setReply({ threadId: 'orch', setThreadProposedReply })({ threadId: 'w', text: 'x' });
+    expect(res.isError).toBeUndefined();
+    expect(setThreadProposedReply).toHaveBeenCalled();
+  });
+});
+
