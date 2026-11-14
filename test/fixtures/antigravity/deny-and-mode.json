@@ -1,0 +1,223 @@
+{
+  "permissionRequest": {
+    "jsonrpc": "2.0",
+    "method": "session/request_permission",
+    "params": {
+      "sessionId": "SESSION-ID",
+      "toolCall": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call_9208724520220912590",
+        "name": "write_file",
+        "args": {
+          "Content": "x",
+          "Path": "/work/project/denied.txt"
+        },
+        "status": "pending",
+        "kind": "edit",
+        "title": "File denied.txt",
+        "locations": [
+          {
+            "path": "/work/project/denied.txt"
+          }
+        ],
+        "rawInput": {
+          "Content": "x",
+          "Path": "/work/project/denied.txt"
+        },
+        "content": [
+          {
+            "type": "diff",
+            "path": "/work/project/denied.txt",
+            "newText": "x"
+          }
+        ]
+      },
+      "options": [
+        {
+          "optionId": "allow",
+          "name": "Allow",
+          "kind": "allow_once"
+        },
+        {
+          "optionId": "deny",
+          "name": "Deny",
+          "kind": "reject_once"
+        }
+      ]
+    },
+    "id": "1"
+  },
+  "stream": [
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "current_mode_update",
+          "currentModeId": "plan"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "current_mode_update",
+          "currentModeId": "default"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "current_mode_update",
+          "currentModeId": "accept-edits"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "current_mode_update",
+          "currentModeId": "default"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_9208724520220912590",
+          "name": "write_file",
+          "args": {
+            "Content": "x",
+            "Path": "/work/project/denied.txt"
+          },
+          "status": "in_progress",
+          "kind": "edit",
+          "title": "File denied.txt",
+          "locations": [
+            {
+              "path": "/work/project/denied.txt"
+            }
+          ],
+          "rawInput": {
+            "Content": "x",
+            "Path": "/work/project/denied.txt"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_9208724520220912590",
+          "name": "write_file",
+          "args": {
+            "Content": "x",
+            "Path": "/work/project/denied.txt"
+          },
+          "status": "pending",
+          "kind": "edit",
+          "title": "File denied.txt",
+          "locations": [
+            {
+              "path": "/work/project/denied.txt"
+            }
+          ],
+          "rawInput": {
+            "Content": "x",
+            "Path": "/work/project/denied.txt"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_9208724520220912590",
+          "name": "write_file",
+          "args": {
+            "Content": "x",
+            "Path": "/work/project/denied.txt"
+          },
+          "status": "in_progress",
+          "kind": "edit",
+          "title": "File denied.txt",
+          "locations": [
+            {
+              "path": "/work/project/denied.txt"
+            }
+          ],
+          "rawInput": {
+            "Content": "x",
+            "Path": "/work/project/denied.txt"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "SESSION-ID",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_9208724520220912590",
+          "name": "write_file",
+          "args": {
+            "Content": "x",
+            "Path": "/work/project/denied.txt"
+          },
+          "status": "failed",
+          "kind": "edit",
+          "title": "File denied.txt",
+          "locations": [
+            {
+              "path": "/work/project/denied.txt"
+            }
+          ],
+          "rawInput": {
+            "Content": "x",
+            "Path": "/work/project/denied.txt"
+          }
+        }
+      }
+    }
+  ],
+  "response": {
+    "jsonrpc": "2.0",
+    "result": {
+      "stopReason": "end_turn",
+      "usage": {
+        "inputTokens": 9186,
+        "outputTokens": 36,
+        "cachedReadTokens": 0,
+        "cachedWriteTokens": 0,
+        "thoughtTokens": 0,
+        "totalTokens": 9222
+      }
+    },
+    "id": 9
+  }
+}
