@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DiskJournal } from '../../daemon/diskJournal';
-import { InMemoryJournal, wireJournalPolicy, type WireEvent } from '../../src/protocol';
+import { redactWireEvent } from '../../daemon/redactEvent';
+import { InMemoryJournal, isWireEvent, wireJournalPolicy, type WireEvent } from '../../src/protocol';
+import { redactForStorage } from '../../src/secretRedaction';
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'dj-')); dirs.push(d); return d; };
@@ -31,6 +33,57 @@ describe('InMemoryJournal.restore', () => {
     expect(j.size).toBe(1);
     expect(j.replay(0).kind).toBe('resync');
     expect(() => j.restore([], { lastSeq: 0, lowWater: 0 })).toThrow();
+  });
+});
+
+describe('DiskJournal redact option', () => {
+  const GH = 'ghp_' + 'd'.repeat(36);
+
+  it('masks the ndjson file, the replay buffer and a reopened journal, keeping every line parseable', () => {
+    const dir = tmp();
+    const a = open(dir, { redact: redactForStorage });
+    a.append(tok(`first\n${GH}\nnext`));
+    a.append(msg(`here is ${GH} and API_TOKEN="a b c"`));
+    a.append({ name: 'onToolUse', args: [{ name: 'Bash', input: { command: `export X_SECRET=hunter2hunter2 && echo ${GH}`, password: 'p4ssw0rd!!' } }] } as WireEvent);
+    a.append(done);
+    a.close();
+
+    const raw = readFileSync(join(dir, 'th.ndjson'), 'utf8');
+    expect(raw).not.toMatch(/ghp_d|a b c|hunter2|p4ssw0rd/);
+    expect(raw).toContain('[REDACTED:github]');
+    const lines = raw.trim().split('\n');
+    expect(lines).toHaveLength(4);
+    for (const l of lines) expect(() => JSON.parse(l)).not.toThrow();
+
+    const b = open(dir, { redact: redactForStorage });
+    const replay = b.replay(0);
+    expect(JSON.stringify(replay)).not.toContain(GH);
+    expect(replay).toMatchObject({ kind: 'entries', lastSeq: 4 });
+    b.close();
+  });
+
+  it('leaves an unmasked journal alone when no redactor is given, and subscribers see the masked entry', () => {
+    const dir = tmp();
+    const seen: string[] = [];
+    const j = open(dir, { redact: redactForStorage });
+    j.subscribe((e) => seen.push(JSON.stringify(e)));
+    j.append(tok(GH));
+    expect(seen.join('')).not.toContain(GH);
+    j.close();
+    const plain = open(tmp());
+    plain.append(tok('hello'));
+    expect(JSON.stringify(plain.replay(0))).toContain('hello');
+    plain.close();
+  });
+
+  it('adds negligible cost per event (10k typical events well under a second)', () => {
+    const dir = tmp();
+    const j = open(dir, { redact: redactForStorage, flushMs: 1000 });
+    const t = Date.now();
+    for (let i = 0; i < 10_000; i++) j.append(tok(`word${i} `));
+    const ms = Date.now() - t;
+    j.close();
+    expect(ms).toBeLessThan(2000);
   });
 });
 
@@ -236,5 +289,155 @@ describe('DiskJournal.rewindFor (a crash reused seqs the client had applied)', (
     const idx = JSON.parse(readFileSync(join(dir, 'th.idx'), 'utf8')) as { epochs: Array<{ epoch: string; startSeq: number }> };
     expect(idx.epochs.map((e) => e.epoch)).toEqual(['A', 'B']);
     b.abandon();
+  });
+});
+
+describe('DiskJournal: masked at rest, raw only for the open request that must be acted on', () => {
+  const FAKE = 'ghp_' + 'f'.repeat(36);
+  const toolCall = (callId: string, input: Record<string, unknown>): WireEvent =>
+    ({ name: 'tool.call', args: { callId, threadId: 'th', server: 'claude_threads', tool: 'mcp_register_server', input } });
+  const mcpInput = {
+    name: 'vercel', type: 'oauth', clientSecret: '${S}',
+    env: { API_KEY: '${MY_KEY}' }, headers: { Authorization: 'Bearer ${TOKEN}' },
+  };
+
+  it('keeps the real input of an open tool.call in memory only: file, replay and checkpoint stay masked', () => {
+    const dir = tmp();
+    const j = open(dir, { redact: redactForStorage });
+    const seen: unknown[] = [];
+    j.subscribe((e) => seen.push(e.event));
+    const entry = j.append(toolCall('c1', mcpInput));
+
+    // the entry every subscriber and every replay sees is masked ...
+    expect(JSON.stringify(entry.event)).not.toContain('${MY_KEY}');
+    expect(JSON.stringify(entry.event)).not.toContain('${S}');
+    expect(JSON.stringify(j.replay(0))).not.toContain('${MY_KEY}');
+    expect(JSON.stringify(j.checkpoint())).not.toContain('${S}');
+    // ... while the raw form is available, by seq, to the code that delivers it to the executing client.
+    expect(j.rawFor(entry.seq)).toEqual(toolCall('c1', mcpInput));
+    const cp = j.withRawOpenRequests(j.checkpoint());
+    expect(cp.openRequests[0].event).toEqual(toolCall('c1', mcpInput));
+    expect(cp.openRequests[0].seq).toBe(entry.seq);
+    // withRawOpenRequests never mutates the journal's own checkpoint
+    expect(JSON.stringify(j.checkpoint())).not.toContain('${S}');
+
+    j.close();
+    const file = readFileSync(join(dir, 'th.ndjson'), 'utf8');
+    expect(file).not.toContain('${MY_KEY}');
+    expect(file).not.toContain('${S}');
+    expect(file).not.toContain('${TOKEN}');
+    expect(file).toContain('[REDACTED:secret]');
+  });
+
+  it('drops the raw copy once the request closes, and after a reopen the raw copy is gone', () => {
+    const dir = tmp();
+    const j = open(dir, { redact: redactForStorage });
+    const e = j.append(toolCall('c1', mcpInput));
+    expect(j.rawFor(e.seq)).toBeDefined();
+    j.append({ name: 'request_resolved', args: { requestId: 'c1', outcome: 'resolved' } });
+    expect(j.rawFor(e.seq)).toBeUndefined();
+    const e2 = j.append(toolCall('c2', mcpInput));
+    j.append({ name: 'tool.cancel', args: { callId: 'c2' } });
+    expect(j.rawFor(e2.seq)).toBeUndefined();
+    const e3 = j.append(toolCall('c3', mcpInput));
+    j.close();
+    const re = open(dir, { redact: redactForStorage });
+    expect(re.rawFor(e3.seq)).toBeUndefined(); // raw never touched disk
+    re.close();
+  });
+
+  it('also keeps a permission_request raw for the seat holder and masked on disk', () => {
+    const dir = tmp();
+    const j = open(dir, { redact: redactForStorage });
+    const ev: WireEvent = { name: 'permission_request', args: { requestId: 'r1', toolName: 'Bash', detail: `run with ${FAKE}` } };
+    const e = j.append(ev);
+    expect(JSON.stringify(e.event)).not.toContain(FAKE);
+    expect(j.rawFor(e.seq)).toEqual(ev);
+    j.close();
+    expect(readFileSync(join(dir, 'th.ndjson'), 'utf8')).not.toContain(FAKE);
+  });
+
+  it('ordinary events have no raw copy', () => {
+    const j = open(tmp(), { redact: redactForStorage });
+    const e = j.append(msg(`here ${FAKE}`));
+    expect(j.rawFor(e.seq)).toBeUndefined();
+    j.close();
+  });
+});
+
+describe('DiskJournal: bounded, private raw copies of open requests', () => {
+  const call = (callId: string, pad = ''): WireEvent =>
+    ({ name: 'tool.call', args: { callId, threadId: 'th', server: 's', tool: 't', input: { v: `${callId}${pad}` } } });
+
+  it('keeps a snapshot, not the driver object (a later mutation does not reach the stored copy)', () => {
+    const j = open(tmp(), { redact: redactForStorage });
+    const ev = call('c1') as { args: { input: { v: string } } };
+    const e = j.append(ev as unknown as WireEvent);
+    ev.args.input.v = 'mutated';
+    expect(JSON.stringify(j.rawFor(e.seq))).toContain('c1');
+    expect(JSON.stringify(j.rawFor(e.seq))).not.toContain('mutated');
+    j.close();
+  });
+
+  it('evicts the oldest copy past the entry cap; the evicted request is served masked, the rest stay raw', () => {
+    const j = open(tmp(), { redact: redactForStorage, maxRawOpenEntries: 3 });
+    const seqs = ['a', 'b', 'c', 'd', 'e'].map((id) => j.append(call(id)).seq);
+    expect(seqs.map((s) => j.rawFor(s) !== undefined)).toEqual([false, false, true, true, true]);
+    j.close();
+  });
+
+  it('evicts oldest-first past the byte cap and never retains a single event over it', () => {
+    const j = open(tmp(), { redact: redactForStorage, maxRawOpenBytes: 1000 });
+    const a = j.append(call('a', 'x'.repeat(400))).seq;
+    const b = j.append(call('b', 'x'.repeat(400))).seq;
+    const c = j.append(call('c', 'x'.repeat(400))).seq; // 3 x ~480 > 1000: a goes
+    expect([j.rawFor(a) !== undefined, j.rawFor(b) !== undefined, j.rawFor(c) !== undefined]).toEqual([false, true, true]);
+    const huge = j.append(call('huge', 'x'.repeat(5000))).seq;
+    expect(j.rawFor(huge)).toBeUndefined();
+    expect(j.rawFor(b)).toBeDefined(); // an oversized event does not evict the others
+    j.close();
+  });
+
+  it('frees the byte budget when requests close', () => {
+    const j = open(tmp(), { redact: redactForStorage, maxRawOpenBytes: 1000 });
+    for (let i = 0; i < 20; i++) {
+      const e = j.append(call(`r${i}`, 'x'.repeat(400)));
+      expect(j.rawFor(e.seq)).toBeDefined();
+      j.append({ name: 'request_resolved', args: { requestId: `r${i}`, outcome: 'resolved' } });
+    }
+    j.close();
+  });
+
+  it('abandon() releases the raw copies', () => {
+    const j = open(tmp(), { redact: redactForStorage });
+    const e = j.append(call('c1'));
+    expect(j.rawFor(e.seq)).toBeDefined();
+    j.abandon();
+    expect(j.rawFor(e.seq)).toBeUndefined();
+  });
+});
+
+describe('redactWireEvent (journal redaction wrapper)', () => {
+  it('masks ordinary events', () => {
+    const out = redactWireEvent({ name: 'onToken', args: ['x ghp_' + 'g'.repeat(36)] });
+    expect(JSON.stringify(out)).toContain('[REDACTED:github]');
+  });
+
+  it('falls back to a well-formed event when redaction fails, never a bare string', () => {
+    const poison = { name: 'onToolUse', args: [{ get boom(): string { throw new Error('nope'); } }] } as unknown as WireEvent;
+    const out = redactWireEvent(poison);
+    expect(typeof out).toBe('object');
+    expect(isWireEvent(out)).toBe(true);
+    expect(JSON.stringify(out)).toContain('redaction');
+    // and the journal appends it as a normal, parseable entry
+    const dir = tmp();
+    const j = open(dir, { redact: redactWireEvent });
+    j.append(poison);
+    j.close();
+    const lines = readFileSync(join(dir, 'th.ndjson'), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const parsed = JSON.parse(lines[0]) as { seq: number; event: WireEvent };
+    expect(isWireEvent(parsed.event)).toBe(true);
+    expect(JSON.stringify(parsed.event)).not.toContain('boom');
   });
 });

@@ -247,11 +247,10 @@ describe('GitHub token fallback when the pushed credential expires', () => {
     expect(filesContaining(FROM_ENV)).toEqual([]);
   });
 
-  // BUG (pre-existing, not introduced by #803, but #803 registers the env token with the redactor in good faith):
-  // the daemon registers secrets with setKnownSecretsProvider, yet nothing on the event path (onError -> journal ->
-  // wire) calls redactSecrets, so an agent process that echoes GH_TOKEN on stderr leaks it verbatim into the
-  // journal and to every attached client. Remove `.fails` when error events are redacted.
-  it.fails('KNOWN GAP: redacts a token the agent process echoes on stderr before it is journaled or sent', async () => {
+  // Formerly a KNOWN GAP (`it.fails`): nothing on the event path (onError -> journal -> wire) redacted, so an agent
+  // process echoing GH_TOKEN on stderr leaked into the journal and every attached client. Fixed by the journal's
+  // write-time redaction (OPP-17 phase 1).
+  it('redacts a token the agent process echoes on stderr before it is journaled or sent', async () => {
     vi.stubEnv('GH_TOKEN', FROM_ENV);
     vi.stubEnv('FAKE_CLAUDE_ECHO_TOKEN', '1'); // fake claude prints "boom: token was $GH_TOKEN" on stderr
     const { c } = await startDaemon();

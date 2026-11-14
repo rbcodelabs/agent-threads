@@ -1,5 +1,5 @@
 import { debugLog } from './logger';
-import { redactDeep } from './secretRedaction';
+import { redactForStorage } from './secretRedaction';
 
 /**
  * One line in a raw JSONL conversation log. Wraps the verbatim SDK event with a
@@ -107,7 +107,7 @@ export class RawLogWriter {
       type,
       // Mask credentials before they reach disk: the log lives in the vault,
       // which is synced and often shared.
-      event: redactDeep(event),
+      event: redactForStorage(event),
     };
     let line: string;
     try {

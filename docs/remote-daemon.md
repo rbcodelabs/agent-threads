@@ -104,9 +104,9 @@ mount. When the selected Project's folder is not shared, the folder chooser says
 it, Agent Threads pushes that project's **Extra environment variables** (`AWS_PROFILE`, `CLAUDE_CODE_USE_BEDROCK`, ...) and
 keychain secrets as a credential kind `sessenv-<project>` (`agent-threads creds push`, over stdin, 24 hour expiry,
 refreshed on every send). The session spec carries only the kind's name; the daemon reads the values when the session
-starts, so they are never in a spec or `config.json`. Known values are masked in the raw log and the daemon's logger, but NOT in the
-journal, in what is sent to clients, or in the error text the daemon prints when the agent process fails: a command that prints a value, or an
-error message that contains it, can land in the journal.
+starts, so they are never in a spec or `config.json`. Known values are masked in the raw log, the journal and the frames sent to clients (see "Redaction at rest" in the
+Security section), but NOT in the error text the daemon prints to its own console when the agent process fails: that text can still
+contain a value the agent printed.
 Variables that describe this Mac's shell (`PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `DYLD_*`/`LD_*`, ...) are not
 sent. A spec cannot name any other credential kind as its environment.
 
@@ -603,9 +603,25 @@ Read this before exposing the daemon beyond `127.0.0.1`.
   command. `--readonly-workspace` only removes the harness's edit tools; shell commands are not blocked.
 - **A `read` token sees everything.** It can attach to any thread and receive its transcript and tool output (file
   contents, command output, anything the agent printed). It cannot send or resolve anything.
-- **The journal and raw logs are not redacted for content.** `<data-dir>/journal` and `<data-dir>/logs` hold prompts, replies
-  and tool output. Known credentials are masked in the raw log, but a secret the agent prints (a `.env` it reads, an
-  environment dump) is stored. Files are `0600` in a `0700` directory; the retention settings below bound how long they
+- **Redaction at rest is best effort, not a guarantee.** `<data-dir>/journal` and `<data-dir>/logs` hold prompts, replies
+  and tool output. Before an event is written (and so before any client is sent it, since frames are served from the journal)
+  the daemon masks known credentials and well-known token shapes (GitHub, Anthropic and OpenAI keys, AWS, Slack, Google,
+  Atlassian, Terraform Cloud, JWTs, PEM keys, `Bearer` headers, URL credentials, `KEY=value` assignments) as
+  `[REDACTED:type]`. A secret with no recognizable shape that the daemon was not told about (a random password in a `.env`
+  the agent reads, an environment dump) is still stored. A token the model streams in several fragments is only caught once
+  it appears whole, so an individual streamed fragment may not be masked even though the finished message is. Journal files
+  written by an older daemon are not rewritten. The live session keeps the real value; only what is stored and served later
+  is masked, so a resumed thread can show `[REDACTED:...]` where a value used to be. One carve-out: a request that is still
+  open (a `tool.call` the client must run, a permission prompt) keeps its real event in the daemon's memory, never on disk,
+  and only the client holding the thread's read-write seat is sent that real form, live or when it re-attaches, because it
+  acts on the input (a masked `mcp_register_server` or `vault_write` call would register or write `[REDACTED:...]`). Observers,
+  other tokens, replays of finished calls and the journal file carry the masked form. Not covered yet: a secret split across
+  streamed chunks, ANSI-prefixed tokens, `password: x` / JSON / YAML colon forms and `--token` / `--password` flags (the
+  `=` form, `--token=x`, is covered). `KEY=value` masking also covers nested pairs (`?a=1&token=x`, `env="A=1 API_KEY=x"`)
+  and camelCase / fused names (`accessToken=`, `GITHUBTOKEN=`); bare values end at the next `&name=`. Further
+  limits: the real form of an open request is retained in memory for at most 64 requests / 1 MiB (older ones are then
+  delivered masked), and a request that closes while a client is re-attaching can be re-sent to it in its masked form,
+  and a URL password longer than 512 characters is not masked by the URL rule. Files are `0600` in a `0700` directory; the retention settings below bound how long they
   live. Deleting a thread in Geode does not delete its daemon-side files.
 - **`tailscale serve` exposes the daemon to your whole tailnet.** Anyone on the tailnet can reach the port and try
   tokens (256-bit tokens make guessing infeasible, but reachability should still be deliberate). Restrict who can reach
@@ -730,7 +746,7 @@ exactly which tools run on your computer (or says none do).
   the agent is told only `saved` or `cancelled`, plus the name it chose. A secret that is already in the keychain is sent
   without a second prompt unless the agent sets `force`. If the push fails you see a notice, the secret stays in the keychain,
   and the next session start sends it. Once a command on the daemon prints the variable (`echo $NAME`), that output is
-  tool output like any other: the model has seen it, and it is masked only in the raw log, not in the journal or in what clients receive
+  tool output like any other: the model has seen it, and it is masked in the raw log, the journal and what clients receive, but the model and the live turn have seen it
   (the same goes for an error message that contains the value). Ask only for secrets you would let the agent use. Nothing in this path applies to a daemon you added yourself.
 - **Limits.** A new proxied server that first appears after a session started needs a new session (tools of servers already
   present update live). `request_secret` is not offered to a daemon you add yourself; there it stores the value in your keychain and
@@ -826,7 +842,7 @@ A daemon-listed server replaces a same-named server sent by the app (and a same-
 
 Secret values are sent with the `creds.push` protocol command (`{ kind, ttlSec, fields }`), which needs an **admin** token.
 They are stored on the daemon as `<data-dir>/creds/<kind>.json` (directory 0700, files 0600), never in `config.json` or in a
-thread's saved spec, and masked in the daemon's raw log and logger (not in the journal). Push them with `agent-threads creds push` (below) or from any admin
+thread's saved spec, and masked in the daemon's raw log, journal and logger. Push them with `agent-threads creds push` (below) or from any admin
 client on the wire protocol; there is no settings screen for it yet.
 
 A push replaces the whole kind; pushing no fields removes it; `ttlSec` (0 = no expiry) makes it lapse on its own. Placeholders
@@ -862,7 +878,7 @@ By default no secret leaves your computer for a remote daemon. To send some, ope
 - Values go over the existing `creds.push` command as a `sessenv-<project>` kind and are read when a session starts. Pushes to plain `ws://` addresses are refused unless the address is loopback; use `wss://`.
 - The kind lasts one hour. It is re-sent before each message once it is half that old, and every 10 minutes while Geode is open, so a session the daemon restarts on its own still finds it. If Geode is closed for more than an hour the kind is deleted by the daemon (or by Geode on quit) and is sent again with your next message.
 - Removing a name re-sends the kind without it. Emptying the list, removing the daemon or quitting Geode deletes the kind from the daemon.
-- Values are redacted from logs and errors and are never put in command arguments.
+- Values are masked by exact match in the raw log, journal and logger, and in error text produced by the push itself, and are never put in command arguments. Anything the agent later prints is covered only as far as "Redaction at rest" above describes.
 
 ## Signing in to Claude on a remote daemon
 
