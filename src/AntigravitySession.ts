@@ -42,6 +42,7 @@ import type {
 import { mergeUsageSnapshot, type UsageSnapshot, type UsageTokenTotals } from './Usage';
 import { AcpClient, type AcpClientOptions, type AcpLauncher } from './AcpClient';
 import { OPENCODE_HOST_TOOLS_SERVER, OpenCodeHostToolsBridge } from './OpenCodeHostTools';
+import { ANTIGRAVITY_MCP_FALLBACK_NOTE, CALL_MCP_TOOL_NAME } from './antigravityMcpFallback';
 import {
   BrainTranscriptReader,
   describeSubagentSpawn,
@@ -153,7 +154,20 @@ const NAME_TOOL_NAMES: Record<string, string> = {
   read_resource: 'ReadMcpResource',
 };
 
-export function antigravityToolName(name: string | undefined, kind: string | undefined): string {
+const CALL_MCP_TOOL_ACP_NAME = `mcp_${OPENCODE_HOST_TOOLS_SERVER}_${CALL_MCP_TOOL_NAME}`;
+
+export function antigravityToolName(
+  name: string | undefined,
+  kind: string | undefined,
+  rawInput?: Record<string, unknown>,
+): string {
+  if (name === CALL_MCP_TOOL_ACP_NAME && typeof rawInput?.tool === 'string' && rawInput.tool.trim()) {
+    const targetTool = rawInput.tool.trim();
+    const server = typeof rawInput.server === 'string' && rawInput.server.trim()
+      ? rawInput.server.trim()
+      : OPENCODE_HOST_TOOLS_SERVER;
+    return server === OPENCODE_HOST_TOOLS_SERVER ? targetTool : `mcp_${server}_${targetTool}`;
+  }
   if (name && NAME_TOOL_NAMES[name]) return NAME_TOOL_NAMES[name];
   if (kind && KIND_TOOL_NAMES[kind]) return KIND_TOOL_NAMES[kind];
   if (kind === 'edit') return 'Edit';
@@ -190,6 +204,12 @@ export function antigravityToolSummary(tool: AcpToolCall): string {
   const command = input.CommandLine ?? input.command;
   // An MCP tool's title is "Run mcp_<server>_<tool>"; agy's own one-line description of the call reads better.
   if (tool.name?.startsWith('mcp_') && typeof input.toolSummary === 'string' && input.toolSummary.trim()) return input.toolSummary.trim();
+  if (tool.name === CALL_MCP_TOOL_ACP_NAME) {
+    const server = typeof input.server === 'string' && input.server.trim() ? input.server.trim() : OPENCODE_HOST_TOOLS_SERVER;
+    return typeof input.tool === 'string' && input.tool.trim()
+      ? `${server}/${input.tool.trim()}`
+      : `list tools (${server})`;
+  }
   if ((tool.kind === 'execute' || tool.name === 'run_command') && typeof command === 'string' && command.trim()) {
     return command.trim().split('\n')[0].slice(0, 200);
   }
@@ -427,7 +447,7 @@ export class AntigravitySession {
     this.turns = 0;
     this.activeModel = options.model ?? '';
     this.resumeFallbackPending = false;
-    this.systemPromptPending = Boolean(options.appendSystemPrompt);
+    this.systemPromptPending = false;
     this.currentMode = undefined;
     this.sessionId = undefined;
     this.loading = false;
@@ -443,14 +463,25 @@ export class AntigravitySession {
     const brainDir = this.brainOptions?.brainDir ?? resolveDefaultAntigravityBrainDir(this.resolvedEnv);
     this.brainReader = new BrainTranscriptReader(brainDir, this.brainOptions?.pollIntervalMs ?? DEFAULT_BRAIN_POLL_MS);
 
-    const mcpServers = antigravityMcpServers(options.antigravity?.mcpServers);
+    const externalServers = options.antigravity?.mcpServers ?? {};
+    const mcpServers = antigravityMcpServers(externalServers);
     const hostTools = options.antigravity?.dynamicTools ?? [];
     this.hostToolNames = new Set(hostTools.map((tool) => tool.name));
-    if (hostTools.length > 0) {
-      const bridge = new OpenCodeHostToolsBridge(hostTools, {
-        permissionMode: () => this.options?.permissionMode ?? 'default',
-        requestPermission: (toolName, detail) => this.options?.callbacks.onPermissionRequest(toolName, detail) ?? Promise.resolve(false),
-      });
+    if (hostTools.length > 0 || Object.keys(externalServers).length > 0) {
+      this.hostToolNames.add(CALL_MCP_TOOL_NAME);
+      const bridge = new OpenCodeHostToolsBridge(
+        hostTools,
+        {
+          permissionMode: () => this.options?.permissionMode ?? 'default',
+          requestPermission: (toolName, detail) => this.options?.callbacks.onPermissionRequest(toolName, detail) ?? Promise.resolve(false),
+        },
+        {
+          enableMcpDispatcher: true,
+          externalMcpServers: externalServers,
+          cwd: options.cwd,
+          env: this.resolvedEnv,
+        },
+      );
       await bridge.start();
       this.bridge = bridge;
       mcpServers.push({
@@ -461,6 +492,7 @@ export class AntigravitySession {
       });
     }
     this.mcpServers = mcpServers;
+    this.systemPromptPending = Boolean(this.effectiveSystemPrompt());
 
     try {
       await this.connectClient(options.resume, 'initial');
@@ -510,7 +542,7 @@ export class AntigravitySession {
     }
     if (!setup) {
       if (phase === 'initial' && resumeSessionId) this.resumeFallbackPending = true;
-      if (phase === 'respawn') this.systemPromptPending = Boolean(options.appendSystemPrompt);
+      if (phase === 'respawn') this.systemPromptPending = Boolean(this.effectiveSystemPrompt());
       setup = await client.request('session/new', { cwd: options.cwd, mcpServers: this.mcpServers }, client.startTimeoutMs);
     }
     const sessionId = typeof setup?.sessionId === 'string' ? setup.sessionId : undefined;
@@ -546,7 +578,7 @@ export class AntigravitySession {
           console.warn('[ClaudeThreads] Antigravity replayed no history for the saved session; the transcript will be sent with the next prompt.');
         } else {
           // A mid-session respawn whose session vanished on disk starts clean under the same id; re-arm system prompt.
-          this.systemPromptPending = Boolean(this.options?.appendSystemPrompt);
+          this.systemPromptPending = Boolean(this.effectiveSystemPrompt());
         }
       }
       return { ...response, sessionId: typeof response?.sessionId === 'string' ? response.sessionId : resume };
@@ -695,8 +727,9 @@ export class AntigravitySession {
     this.resumeFallbackPending = false;
     // `_meta.antigravity.systemPrompt.append` is advertised but its request shape is unobserved, so the system prompt
     // rides the first prompt of each fresh conversation instead (a resumed conversation already has it in history).
-    if (this.systemPromptPending && options.appendSystemPrompt) {
-      effectiveText = `<system-instructions>\n${options.appendSystemPrompt}\n</system-instructions>\n\n${effectiveText}`;
+    const systemPrompt = this.effectiveSystemPrompt();
+    if (this.systemPromptPending && systemPrompt) {
+      effectiveText = `<system-instructions>\n${systemPrompt}\n</system-instructions>\n\n${effectiveText}`;
       this.systemPromptPending = false;
     }
     const prompt: Array<Record<string, unknown>> = [{ type: 'text', text: effectiveText }];
@@ -769,6 +802,13 @@ export class AntigravitySession {
     this.parentWakeupInFlight = false;
     this.wakeupPendingTools = [];
     this.brainReader?.stopWatching();
+  }
+
+  private effectiveSystemPrompt(): string | undefined {
+    const base = this.options?.appendSystemPrompt ? this.options.appendSystemPrompt : undefined;
+    const mcpNote = this.bridge ? ANTIGRAVITY_MCP_FALLBACK_NOTE : undefined;
+    if (base && mcpNote) return `${base}\n\n${mcpNote}`;
+    return base ?? mcpNote;
   }
 
   private compatibilityHint(): string {
@@ -847,13 +887,19 @@ export class AntigravitySession {
     const callId = String(tool.toolCallId ?? '');
     if (!callId) return;
     const known = this.announcedTools.get(callId);
-    const merged: AcpToolCall = { ...known, ...tool, content: tool.content ?? known?.content };
+    const merged: AcpToolCall = {
+      ...known,
+      ...tool,
+      content: tool.content ?? known?.content,
+      rawInput: tool.rawInput ?? known?.rawInput,
+      args: tool.args ?? known?.args,
+    };
     if (!known) {
       this.announcedTools.set(callId, merged);
       this.toolStartedAt.set(callId, Date.now());
       const record: ToolCallRecord = {
         toolUseId: callId,
-        name: antigravityToolName(merged.name, merged.kind),
+        name: antigravityToolName(merged.name, merged.kind, merged.rawInput ?? merged.args),
         summary: antigravityToolSummary(merged),
         status: 'pending',
         timestamp: Date.now(),
@@ -1057,7 +1103,7 @@ export class AntigravitySession {
             const tool: AcpToolCall = { toolCallId: callId, name: tc.name, args: tc.args };
             const record: ToolCallRecord = {
               toolUseId: callId,
-              name: antigravityToolName(tool.name, tool.kind),
+              name: antigravityToolName(tool.name, tool.kind, tool.rawInput ?? tool.args),
               summary: antigravityToolSummary(tool),
               status: 'pending',
               timestamp: Date.now(),
@@ -1233,7 +1279,7 @@ export class AntigravitySession {
                 }
               }
               const lastTool = calls[calls.length - 1];
-              callbacks.onTaskProgress?.(subagent.id, subagent.description, antigravityToolName(lastTool?.name, undefined));
+              callbacks.onTaskProgress?.(subagent.id, subagent.description, antigravityToolName(lastTool?.name, undefined, lastTool?.args));
             } else if (step.status === 'DONE' && subagent.running) {
               subagent.running = false;
               const summary = firstSummaryLine(step.content, 240)
@@ -1335,7 +1381,7 @@ export class AntigravitySession {
         resolve(outcome);
       };
       this.pendingPermissions.set(key, (outcome) => settle(outcome.outcome === 'cancelled' ? cancelled : outcome));
-      callbacks.onPermissionRequest(`Antigravity: ${antigravityToolName(tool.name, kind)}`, antigravityPermissionDetail(tool))
+      callbacks.onPermissionRequest(`Antigravity: ${antigravityToolName(tool.name, kind, tool.rawInput ?? tool.args)}`, antigravityPermissionDetail(tool))
         .then((allow) => settle(allow ? select('allow_once', 'allow') : select('reject_once', 'deny')))
         .catch(() => settle(select('reject_once', 'deny')));
     });
