@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CredStore } from '../../daemon/credStore';
-import { redactDeep, redactForStorage, redactSecrets, setKnownSecretsProvider } from '../../src/secretRedaction';
+import { invalidateKnownSecrets, redactDeep, redactForStorage, redactSecrets, setKnownSecretsProvider } from '../../src/secretRedaction';
 
 const GH = 'ghp_' + 'a'.repeat(36);
 const BYTES = 200_000;
@@ -146,6 +146,34 @@ describe('known-secret lookup cost', () => {
   });
 });
 
+describe('a failing known-secrets provider', () => {
+  const SECRET = 'plain-value-no-shape-9f3a';
+  it('is not cached as "no secrets": the last good list keeps masking and the next call retries', () => {
+    let calls = 0;
+    let fail = false;
+    setKnownSecretsProvider(() => { calls++; if (fail) throw new Error('keychain locked'); return [SECRET]; });
+    expect(redactSecrets(`x ${SECRET}`)).not.toContain(SECRET);
+    fail = true;
+    invalidateKnownSecrets();
+    expect(redactSecrets(`x ${SECRET}`)).not.toContain(SECRET); // served from the last good list
+    const afterFailure = calls;
+    expect(redactSecrets(`y ${SECRET}`)).not.toContain(SECRET);
+    expect(calls).toBeGreaterThan(afterFailure); // the failure was not cached: it retried
+    fail = false;
+    expect(redactSecrets(`z ${SECRET}`)).not.toContain(SECRET);
+  });
+
+  it('with no good list yet, returns nothing extra and retries rather than caching an empty list', () => {
+    let calls = 0;
+    let fail = true;
+    setKnownSecretsProvider(() => { calls++; if (fail) throw new Error('boom'); return [SECRET]; });
+    expect(redactSecrets(`x ${SECRET}`)).toContain(SECRET);
+    fail = false;
+    expect(redactSecrets(`x ${SECRET}`)).not.toContain(SECRET); // recovered on the very next call, no TTL wait
+    expect(calls).toBe(2);
+  });
+});
+
 describe('redactDeep shared references', () => {
   it('keeps a value referenced twice (a DAG) and only flags a true cycle', () => {
     const shared = { note: `see ${GH}`, n: 1 };
@@ -199,6 +227,103 @@ describe('KEY=value rule', () => {
   it('keeps the key name and surrounding text, and leaves == comparisons alone', () => {
     expect(redactSecrets('run API_KEY=abc123def456 now')).toBe('run API_KEY=[REDACTED:secret] now');
     expect(redactSecrets('API_KEY == other')).toBe('API_KEY == other');
+  });
+});
+
+describe('KEY=value rule: nested pairs and name shapes (review blockers)', () => {
+  // A non-secret name=value must not swallow a secret pair inside its value.
+  it.each([
+    ['https://x/cb?user=bob&password=hunter2xx', 'hunter2xx'],
+    ['https://x/cb?a=1&token=abcdef123', 'abcdef123'],
+    ['curl -d "a=1&key=abc123def" https://x', 'abc123def'],
+    ['a=b&c=d&secret=abc12345', 'abc12345'],
+    ['a=b,SECRET=abc123', 'abc123'],
+    ['env="FOO=1 API_KEY=abc123"', 'abc123'],
+    ["cmd='export TOKEN=abc123xyz'", 'abc123xyz'],
+    ['opts=--token=abc123xyz', 'abc123xyz'],
+    ['cfg={token=abc123xyz}', 'abc123xyz'],
+    ['f(a=1,token=abc123xyz)', 'abc123xyz'],
+    ['x=1;TOKEN=abc123xyz', 'abc123xyz'],
+    ['a=b=c=d=TOKEN=abc123xyz', 'abc123xyz'],
+  ])('masks the nested secret in %j', (text, secret) => {
+    const out = redactSecrets(text);
+    expect(out).not.toContain(secret);
+    expect(out).toContain('[REDACTED:secret]');
+  });
+
+  // Names the pre-PR code masked: camelCase, fused, leading underscore, other auth words, INI-style spacing.
+  it.each([
+    ['//registry.npmjs.org/:_authToken=npm_abcdef123456', 'npm_abcdef123456'],
+    ['accessToken=abcdef123456', 'abcdef123456'],
+    ['sessionKey=abcdef123456', 'abcdef123456'],
+    ['secretKey=abcdef123456', 'abcdef123456'],
+    ['GITHUBTOKEN=abcdef123456', 'abcdef123456'],
+    ['ACCESSKEY=abcdef123456', 'abcdef123456'],
+    ['PASSPHRASE=abcdef123456', 'abcdef123456'],
+    ['Authorization=abcdef123456', 'abcdef123456'],
+    ['password = "hunter2hunter2"', 'hunter2hunter2'],
+    ['password = hunter2hunter2', 'hunter2hunter2'],
+    ['client-secret=abcdef123456', 'abcdef123456'],
+    [`${'N'.repeat(100)}_TOKEN=abcdef123456`, 'abcdef123456'],
+    ['{"cmd":"x=1\\nTOKEN=abcdef123456"}', 'abcdef123456'],
+    ['{"cmd":"x=1\\nprivateKey=abcdef123456"}', 'abcdef123456'],
+  ])('masks %j', (text, secret) => {
+    const out = redactSecrets(text);
+    expect(out).not.toContain(secret);
+    expect(out).toContain('[REDACTED:secret]');
+  });
+
+  it('keeps a serialized JSON line valid and the neighbouring text intact', () => {
+    const line = JSON.stringify({ cmd: 'x=1\nTOKEN=abcdef123456 && ls' });
+    const out = redactSecrets(line);
+    expect(out).not.toContain('abcdef123456');
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect(out).toContain('&& ls');
+  });
+
+  it('keeps non-secret names intact around a masked nested pair', () => {
+    expect(redactSecrets('https://x/cb?user=bob&password=hunter2xx&next=/home')).toBe(
+      'https://x/cb?user=bob&password=[REDACTED:secret]&next=/home',
+    );
+  });
+
+  it.each([
+    'const key = foo(); if (key == other) { run(); }',
+    'const author = "bob"',
+    'author = "bob"',
+    'let tokens = []',
+    'PASSENGER=3',
+    'MONKEY=banana',
+    'KEYBOARD=us',
+    'keyboard=us',
+    'monkey = "banana"',
+    'https://x/cb?user=bob&next=/home',
+    'a=1&b=2&c=3',
+  ])('leaves %j alone', (text) => {
+    expect(redactSecrets(text)).toBe(text);
+  });
+});
+
+describe('KEY=value rule stays linear (200 KB)', () => {
+  const hostile: Array<[string, string]> = [
+    ['a= repeats', rep('a=')],
+    ['&a= repeats', rep('&a=')],
+    ['a=b& repeats', rep('a=b&')],
+    ['_token repeats', rep('_token')],
+    ['_token= repeats', rep('_token=')],
+    ['a=a=a= nested', rep('a=a=a=')],
+    ['quoted nested a=" repeats', rep('a="')],
+    ['{token= repeats', rep('{token=')],
+    ['camelCase repeats', rep('accessToken')],
+    ['Token repeats', rep('aToken')],
+    ['name then pairs', 'x=' + rep('a=1&')],
+    ['\\nTOKEN repeats', rep('\\nTOKEN')],
+    ['KEY=\\n repeats', rep('KEY=\\n')],
+  ];
+  it.each(hostile)('%s', (_name, input) => {
+    const t0 = performance.now();
+    redactSecrets(input);
+    expect(performance.now() - t0).toBeLessThan(250);
   });
 });
 

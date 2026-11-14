@@ -75,7 +75,17 @@ export interface DiskJournalOptions<E> extends InMemoryJournalOptions {
    * seat holder, the one client that acts on it. Replays, checkpoints and observers stay masked.
    */
   redact?: (event: E) => E;
+  /**
+   * Bounds on the in-memory raw copies of open requests (default 64 requests / 1 MiB in total). Past either
+   * bound the OLDEST copy is dropped and that request is delivered in its masked form, so a flood of unanswered
+   * requests cannot grow the daemon's memory without limit. A single event over the byte bound is never retained.
+   */
+  maxRawOpenEntries?: number;
+  maxRawOpenBytes?: number;
 }
+
+const DEFAULT_MAX_RAW_OPEN_ENTRIES = 64;
+const DEFAULT_MAX_RAW_OPEN_BYTES = 1024 * 1024;
 
 export type JournalListener<E> = (entry: JournalEntry<E>) => void;
 
@@ -94,7 +104,8 @@ export class DiskJournal<E> implements Journal<E> {
   private closed = false;
   private epochChain: Array<{ epoch: string; startSeq: number }> = [];
   /** Real (unmasked) events of requests still open, by journal seq. In memory only; gone when the request closes. */
-  private readonly rawOpen = new Map<number, { requestId: string; raw: E }>();
+  private readonly rawOpen = new Map<number, { requestId: string; raw: E; bytes: number }>();
+  private rawOpenBytes = 0;
 
   private constructor(
     dir: string,
@@ -167,12 +178,44 @@ export class DiskJournal<E> implements Journal<E> {
     return { ...cp, openRequests: cp.openRequests.map((r) => { const raw = this.rawOpen.get(r.seq)?.raw; return raw === undefined ? r : { ...r, event: raw }; }) };
   }
 
+  private dropRaw(seq: number): void {
+    const r = this.rawOpen.get(seq);
+    if (!r) return;
+    this.rawOpen.delete(seq);
+    this.rawOpenBytes -= r.bytes;
+  }
+
+  private clearRaw(): void {
+    this.rawOpen.clear();
+    this.rawOpenBytes = 0;
+  }
+
   private trackRawRequest(seq: number, raw: E): void {
     const role = this.policy.classify(raw);
     if (role.role === 'request_open') {
-      this.rawOpen.set(seq, { requestId: role.requestId, raw });
+      // Keep a private snapshot, not the driver's object: the driver may keep mutating what it emitted.
+      let copy: E;
+      let bytes: number;
+      try {
+        const json = JSON.stringify(raw);
+        copy = JSON.parse(json) as E;
+        bytes = json.length;
+      } catch {
+        return; // not serializable: it could not have been journaled either, so there is nothing to keep
+      }
+      const maxBytes = this.opts.maxRawOpenBytes ?? DEFAULT_MAX_RAW_OPEN_BYTES;
+      const maxEntries = this.opts.maxRawOpenEntries ?? DEFAULT_MAX_RAW_OPEN_ENTRIES;
+      if (bytes > maxBytes) return;
+      this.rawOpen.set(seq, { requestId: role.requestId, raw: copy, bytes });
+      this.rawOpenBytes += bytes;
+      // Map iteration is insertion order: the first key is the oldest.
+      while (this.rawOpen.size > maxEntries || this.rawOpenBytes > maxBytes) {
+        const oldest = this.rawOpen.keys().next();
+        if (oldest.done) break;
+        this.dropRaw(oldest.value);
+      }
     } else if (role.role === 'request_close' && this.rawOpen.size > 0) {
-      for (const [s, r] of this.rawOpen) if (r.requestId === role.requestId) this.rawOpen.delete(s);
+      for (const [s, r] of [...this.rawOpen]) if (r.requestId === role.requestId) this.dropRaw(s);
     }
   }
 
@@ -230,7 +273,7 @@ export class DiskJournal<E> implements Journal<E> {
     this.flush(true);
     this.closed = true;
     this.listeners.clear();
-    this.rawOpen.clear();
+    this.clearRaw();
     if (this.fd !== null) { closeSync(this.fd); this.fd = null; }
   }
 
@@ -241,6 +284,7 @@ export class DiskJournal<E> implements Journal<E> {
     this.buffer = [];
     this.closed = true;
     this.listeners.clear();
+    this.clearRaw();
     if (this.fd !== null) { closeSync(this.fd); this.fd = null; }
   }
 

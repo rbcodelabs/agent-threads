@@ -668,41 +668,55 @@ export class Connection {
     // start from where history really resumed, and tell it (it must lower its own cursor to match).
     const rewind = journal.rewindFor(clientEpoch, requestedAfterSeq);
     const afterSeq = rewind ?? requestedAfterSeq;
-    this.subs.get(ch)?.unsubscribe?.();
     const sub = new ChannelSub(ch);
     // A control-scope client takes (or, with the same token, takes back) the read-write seat;
     // anyone else observes. Mutating commands re-check, so this is advisory for the client UI.
     // An `observe` attach never claims it (a terminal watching a thread must not lock Geode out).
     // Decided BEFORE the replay is queued: the seat holder is the one client that is handed the real
     // input of an open request (see `rawEventFor`), everyone else gets the masked journal form.
+    const threadId = ch.slice(2);
+    const prevOwner = this.ctx.controllers.ownerOf(threadId);
+    const heldBefore = this.ctx.controllers.isController(threadId, this.id);
     const controller = !observe && scopeSatisfies(auth.scope, 'control')
-      && this.ctx.controllers.claim(ch.slice(2), this.seat(auth));
-    // Everything from here to the end of this block runs in one synchronous
-    // turn: no append can interleave, so replay + subscribe has no gap.
-    // A cursor AHEAD of the journal means the client saw history we no longer
-    // have (data directory restored or wiped); it must rebuild, not wait.
-    const replay = afterSeq > journal.lastSeq
-      ? { kind: 'resync' as const, checkpoint: controller ? journal.withRawOpenRequests(journal.checkpoint()) : journal.checkpoint(), lastSeq: journal.lastSeq }
-      : journal.replay(afterSeq);
-    if (replay.kind === 'resync') {
-      // The journal's own compaction can also answer with a checkpoint; same rule for it.
-      const cp = controller ? journal.withRawOpenRequests(replay.checkpoint) : replay.checkpoint;
-      sub.resyncText = encodeFrame({ v: PROTOCOL_VERSION, ch, seq: cp.seq, ts: cp.ts, type: 'resync', checkpoint: cp });
-    } else {
-      // A request opened at or below the cursor that is still unanswered was seen
-      // by the client, but a client that lost its socket (or its UI) needs the
-      // prompt again. Re-deliver it first, flagged so it is not dropped as a duplicate.
-      for (const entry of journal.checkpoint().openRequests) {
-        if (entry.seq <= afterSeq) sub.items.push({ entry, live: false, reopen: true });
+      && this.ctx.controllers.claim(threadId, this.seat(auth));
+    // The seat is claimed before code that can still throw (encoding the resync, reading the journal). If it
+    // does, put the seat back as it was so a failed attach cannot leave this connection holding a thread it never attached.
+    try {
+      // Everything from here to the end of this block runs in one synchronous
+      // turn: no append can interleave, so replay + subscribe has no gap.
+      // A cursor AHEAD of the journal means the client saw history we no longer
+      // have (data directory restored or wiped); it must rebuild, not wait.
+      const replay = afterSeq > journal.lastSeq
+        ? { kind: 'resync' as const, checkpoint: controller ? journal.withRawOpenRequests(journal.checkpoint()) : journal.checkpoint(), lastSeq: journal.lastSeq }
+        : journal.replay(afterSeq);
+      if (replay.kind === 'resync') {
+        // The journal's own compaction can also answer with a checkpoint; same rule for it.
+        const cp = controller ? journal.withRawOpenRequests(replay.checkpoint) : replay.checkpoint;
+        sub.resyncText = encodeFrame({ v: PROTOCOL_VERSION, ch, seq: cp.seq, ts: cp.ts, type: 'resync', checkpoint: cp });
+      } else {
+        // A request opened at or below the cursor that is still unanswered was seen
+        // by the client, but a client that lost its socket (or its UI) needs the
+        // prompt again. Re-deliver it first, flagged so it is not dropped as a duplicate.
+        for (const entry of journal.checkpoint().openRequests) {
+          if (entry.seq <= afterSeq) sub.items.push({ entry, live: false, reopen: true });
+        }
+        for (const entry of replay.entries) sub.items.push({ entry, live: false });
       }
-      for (const entry of replay.entries) sub.items.push({ entry, live: false });
+      // The previous subscription is dropped only now that nothing below can throw: a failed attach leaves it in place.
+      this.subs.get(ch)?.unsubscribe?.();
+      sub.unsubscribe = journal.subscribe((entry) => this.onLive(sub, entry));
+      this.subs.set(ch, sub);
+      const result = { lastSeq: replay.lastSeq, lowWater: journal.lowWater, epoch: this.ctx.epoch, resync: replay.kind === 'resync', controller, ...(rewind !== null ? { rewind } : {}) };
+      // The ack is queued first (control drains before channels) so the client
+      // learns the cursor before the first replayed event.
+      return result;
+    } catch (err) {
+      if (controller && !heldBefore) {
+        if (prevOwner) this.ctx.controllers.claim(threadId, prevOwner);
+        else this.ctx.controllers.release(threadId, this.id);
+      }
+      throw err;
     }
-    sub.unsubscribe = journal.subscribe((entry) => this.onLive(sub, entry));
-    this.subs.set(ch, sub);
-    const result = { lastSeq: replay.lastSeq, lowWater: journal.lowWater, epoch: this.ctx.epoch, resync: replay.kind === 'resync', controller, ...(rewind !== null ? { rewind } : {}) };
-    // The ack is queued first (control drains before channels) so the client
-    // learns the cursor before the first replayed event.
-    return result;
   }
 
   private onLive(sub: ChannelSub, entry: JournalEntry<WireEvent>): void {

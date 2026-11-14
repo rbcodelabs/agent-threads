@@ -365,6 +365,58 @@ describe('DiskJournal: masked at rest, raw only for the open request that must b
   });
 });
 
+describe('DiskJournal: bounded, private raw copies of open requests', () => {
+  const call = (callId: string, pad = ''): WireEvent =>
+    ({ name: 'tool.call', args: { callId, threadId: 'th', server: 's', tool: 't', input: { v: `${callId}${pad}` } } });
+
+  it('keeps a snapshot, not the driver object (a later mutation does not reach the stored copy)', () => {
+    const j = open(tmp(), { redact: redactForStorage });
+    const ev = call('c1') as { args: { input: { v: string } } };
+    const e = j.append(ev as unknown as WireEvent);
+    ev.args.input.v = 'mutated';
+    expect(JSON.stringify(j.rawFor(e.seq))).toContain('c1');
+    expect(JSON.stringify(j.rawFor(e.seq))).not.toContain('mutated');
+    j.close();
+  });
+
+  it('evicts the oldest copy past the entry cap; the evicted request is served masked, the rest stay raw', () => {
+    const j = open(tmp(), { redact: redactForStorage, maxRawOpenEntries: 3 });
+    const seqs = ['a', 'b', 'c', 'd', 'e'].map((id) => j.append(call(id)).seq);
+    expect(seqs.map((s) => j.rawFor(s) !== undefined)).toEqual([false, false, true, true, true]);
+    j.close();
+  });
+
+  it('evicts oldest-first past the byte cap and never retains a single event over it', () => {
+    const j = open(tmp(), { redact: redactForStorage, maxRawOpenBytes: 1000 });
+    const a = j.append(call('a', 'x'.repeat(400))).seq;
+    const b = j.append(call('b', 'x'.repeat(400))).seq;
+    const c = j.append(call('c', 'x'.repeat(400))).seq; // 3 x ~480 > 1000: a goes
+    expect([j.rawFor(a) !== undefined, j.rawFor(b) !== undefined, j.rawFor(c) !== undefined]).toEqual([false, true, true]);
+    const huge = j.append(call('huge', 'x'.repeat(5000))).seq;
+    expect(j.rawFor(huge)).toBeUndefined();
+    expect(j.rawFor(b)).toBeDefined(); // an oversized event does not evict the others
+    j.close();
+  });
+
+  it('frees the byte budget when requests close', () => {
+    const j = open(tmp(), { redact: redactForStorage, maxRawOpenBytes: 1000 });
+    for (let i = 0; i < 20; i++) {
+      const e = j.append(call(`r${i}`, 'x'.repeat(400)));
+      expect(j.rawFor(e.seq)).toBeDefined();
+      j.append({ name: 'request_resolved', args: { requestId: `r${i}`, outcome: 'resolved' } });
+    }
+    j.close();
+  });
+
+  it('abandon() releases the raw copies', () => {
+    const j = open(tmp(), { redact: redactForStorage });
+    const e = j.append(call('c1'));
+    expect(j.rawFor(e.seq)).toBeDefined();
+    j.abandon();
+    expect(j.rawFor(e.seq)).toBeUndefined();
+  });
+});
+
 describe('redactWireEvent (journal redaction wrapper)', () => {
   it('masks ordinary events', () => {
     const out = redactWireEvent({ name: 'onToken', args: ['x ghp_' + 'g'.repeat(36)] });

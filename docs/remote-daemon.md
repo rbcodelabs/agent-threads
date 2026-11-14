@@ -616,8 +616,12 @@ Read this before exposing the daemon beyond `127.0.0.1`.
   and only the client holding the thread's read-write seat is sent that real form, live or when it re-attaches, because it
   acts on the input (a masked `mcp_register_server` or `vault_write` call would register or write `[REDACTED:...]`). Observers,
   other tokens, replays of finished calls and the journal file carry the masked form. Not covered yet: a secret split across
-  streamed chunks, ANSI-prefixed tokens, `password: x` / JSON / YAML colon forms, `--token` / `--password` flags and camelCase
-  keys. Files are `0600` in a `0700` directory; the retention settings below bound how long they
+  streamed chunks, ANSI-prefixed tokens, `password: x` / JSON / YAML colon forms and `--token` / `--password` flags (the
+  `=` form, `--token=x`, is covered). `KEY=value` masking also covers nested pairs (`?a=1&token=x`, `env="A=1 API_KEY=x"`)
+  and camelCase / fused names (`accessToken=`, `GITHUBTOKEN=`); bare values end at the next `&name=`. Further
+  limits: the real form of an open request is retained in memory for at most 64 requests / 1 MiB (older ones are then
+  delivered masked), and a request that closes while a client is re-attaching can be re-sent to it in its masked form,
+  and a URL password longer than 512 characters is not masked by the URL rule. Files are `0600` in a `0700` directory; the retention settings below bound how long they
   live. Deleting a thread in Geode does not delete its daemon-side files.
 - **`tailscale serve` exposes the daemon to your whole tailnet.** Anyone on the tailnet can reach the port and try
   tokens (256-bit tokens make guessing infeasible, but reachability should still be deliberate). Restrict who can reach

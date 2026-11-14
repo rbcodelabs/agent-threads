@@ -98,22 +98,121 @@ const PEM_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[^-"]*(?:-----END [A-Z ]*PRIVA
 // `Authorization: Bearer xyz`, `Bearer xyz`, `Authorization: Basic xyz`
 const BEARER_RE = new RegExp(`${LEFT}(Bearer|Basic)(\\s+)[A-Za-z0-9._~+/=-]{8,}`, 'gi');
 
-// NAME=value where NAME has a secret-ish segment. Keeps the name, drops the value. The value is a
-// quoted string (plain or JSON-escaped `\"...\"`) or a bare run that never swallows the backslash of
-// a JSON escape, so serialized lines stay valid. The name is a bounded word and the "is it secret-ish"
-// decision is made in the replacer (see `isSecretAssignment`): a pattern that tried to find the keyword
-// inside an unbounded `[A-Z0-9_]*` was quadratic on long names. `(?![=>])` keeps `==` and `=>` out.
-const SECRET_ASSIGN_RE =
-  /\b([A-Za-z0-9_]{1,80})(\s*=(?![=>])\s*)(?!\[REDACTED)("[^"]*"|'[^']*'|\\"(?:[^"\\]|\\[^"])*\\"|(?:[^\s"'\\]|\\\\|\\(?!["'nrt]))+)/g;
+// NAME=value where NAME looks like a credential name. Keeps the name, drops the value.
+//
+// This is a scan, not one big replace: `NAME_EQ_RE` finds `name=` and the loop in `maskAssignments`
+// decides what to do with the value. A pair whose name is not secret-ish does NOT swallow its value;
+// scanning resumes right after its `=`, so `?user=bob&password=x`, `env="A=1 TOKEN=x"` and
+// `opts=--token=x` still expose the nested `password=`/`TOKEN=`/`--token=`.
+//
+// The name must start at a boundary (so a long run is examined once, never from every offset inside
+// it) and is unbounded: a bounded name silently dropped `...<80 chars>_TOKEN=`. A name may follow a
+// literal backslash-n/r/t from serialized JSON (`x=1\nTOKEN=abc`), which is stripped from the name.
+// `(?![=>])` keeps `==` and `=>` out.
+const NAME_EQ_RE = /(\\[nrt]|^|[^A-Za-z0-9_-])([A-Za-z0-9_-]+)(\s*=(?![=>])\s*)/g;
 
-/** A name is secret-ish when KEY/TOKEN/SECRET/... is a whole `_`-delimited segment: API_KEY yes, PASSENGER and MONKEY no. */
-const SECRET_NAME_SEGMENTS = new Set(['TOKEN', 'KEY', 'APIKEY', 'SECRET', 'PASSWORD', 'PASSWD', 'PASS', 'AUTH', 'CREDENTIAL', 'CREDENTIALS']);
+// The value, matched sticky at its start: a quoted string (plain or JSON-escaped `\"...\"`) or a bare
+// run that never swallows the backslash of a JSON escape, so serialized lines stay valid.
+const VALUE_RE = /"[^"]*"|'[^']*'|\\"(?:[^"\\]|\\[^"])*\\"|(?:[^\s"'\\]|\\\\|\\(?!["'nrt]))+/y;
 
-function isSecretAssignment(name: string, eq: string): boolean {
-  if (!name.split('_').some((seg) => SECRET_NAME_SEGMENTS.has(seg.toUpperCase()))) return false;
-  // Env-var style (all caps) tolerates spaces around `=`; anything else must be the tight `key=value` of a
-  // query string or shell word, so `const key = foo()` and `x.token = compute()` in code are left alone.
-  return name === name.toUpperCase() || eq === '=';
+// A bare value ends where the next query-string pair starts (`&name=`), so the neighbours survive.
+const NEXT_PAIR_RE = /[A-Za-z0-9_.%[\]-]+=/y;
+
+const STRONG_WHOLE = new Set(['token', 'secret', 'password', 'passwd', 'passphrase', 'apikey', 'credential', 'credentials', 'authorization']);
+const WEAK_WHOLE = new Set(['key', 'auth', 'pass']);
+const PASSWORD_WORDS = ['password', 'passwd', 'passphrase'];
+// Fused words (GITHUBTOKEN, ACCESSKEY). Bare `key` is deliberately not a suffix: MONKEY, KEYBOARD, TURKEY.
+const FUSED_SUFFIXES = ['token', 'secret', 'apikey', 'accesskey', 'secretkey', 'privatekey', ...PASSWORD_WORDS];
+
+/** Split a name on `_`, `-` and camelCase boundaries in one linear pass: `_authToken` -> auth, Token. */
+function nameSegments(name: string): string[] {
+  const segs: string[] = [];
+  let cur = '';
+  const isUpper = (c: string | undefined): boolean => c !== undefined && c >= 'A' && c <= 'Z';
+  const isLower = (c: string | undefined): boolean => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'));
+  for (let i = 0; i < name.length; i++) {
+    const c = name[i];
+    if (c === '_' || c === '-') {
+      if (cur) segs.push(cur);
+      cur = '';
+      continue;
+    }
+    if (cur && isUpper(c) && (isLower(name[i - 1]) || (isUpper(name[i - 1]) && name[i + 1] !== undefined && name[i + 1] >= 'a' && name[i + 1] <= 'z'))) {
+      segs.push(cur);
+      cur = '';
+    }
+    cur += c;
+  }
+  if (cur) segs.push(cur);
+  return segs;
+}
+
+const enum NameKind { None, Weak, Strong, Password }
+
+/**
+ * How credential-like a name is. A keyword counts as a whole segment (`API_KEY`, `sessionKey`, `_authToken`)
+ * or, for the long unambiguous ones, as the prefix/suffix of a fused segment (`GITHUBTOKEN`, `ACCESSKEY`,
+ * `PASSWORDHASH`). PASSENGER, MONKEY, KEYBOARD, `author` and `tokens` are not.
+ */
+function classifyName(name: string): NameKind {
+  let kind = NameKind.None;
+  for (const seg of nameSegments(name)) {
+    const w = seg.toLowerCase();
+    let k = NameKind.None;
+    if (PASSWORD_WORDS.some((pw) => w === pw || w.startsWith(pw) || w.endsWith(pw))) k = NameKind.Password;
+    else if (STRONG_WHOLE.has(w) || FUSED_SUFFIXES.some((suf) => w.endsWith(suf))) k = NameKind.Strong;
+    else if (WEAK_WHOLE.has(w)) k = NameKind.Weak;
+    if (k > kind) kind = k;
+  }
+  return kind;
+}
+
+function isSecretAssignment(kind: NameKind, name: string, eq: string, value: string): boolean {
+  // Env-var style (all caps) and the tight `key=value` of a query string or shell word are always masked.
+  if (eq === '=' || name === name.toUpperCase()) return true;
+  // Anything else is ordinary code or config with spaces around `=`: `const key = foo()`, `x.token = compute()`.
+  // Mask only what is clearly a literal credential: a strong name with a quoted value (`password = "hunter2"`),
+  // or a password name with a plain word (INI/TOML `password = hunter2`).
+  if (kind === NameKind.Weak) return false;
+  if (/^["'\\]/.test(value)) return true;
+  return kind === NameKind.Password && !/[()[\]{}]/.test(value);
+}
+
+/** Where a value that starts at `start` ends: the match end, cut at the next `&name=` for a bare value. */
+function valueEnd(text: string, start: number): number {
+  VALUE_RE.lastIndex = start;
+  const m = VALUE_RE.exec(text);
+  if (!m) return start;
+  const first = m[0][0];
+  const end = start + m[0].length;
+  if (first === '"' || first === "'" || first === '\\') return end;
+  for (let amp = text.indexOf('&', start); amp !== -1 && amp < end; amp = text.indexOf('&', amp + 1)) {
+    NEXT_PAIR_RE.lastIndex = amp + 1;
+    if (NEXT_PAIR_RE.test(text)) return amp;
+  }
+  return end;
+}
+
+function maskAssignments(text: string): string {
+  let out = '';
+  let copied = 0;
+  const re = new RegExp(NAME_EQ_RE.source, 'g');
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    const valueStart = m.index + m[0].length;
+    // Resume one char back so the boundary char the next name needs (`=`, ` `, `&`) is still there.
+    re.lastIndex = valueStart - 1;
+    if (text.startsWith('[REDACTED', valueStart)) continue;
+    // Decide on the name alone first: scanning a value that is then thrown away would be quadratic on `a=a=a=...`.
+    const kind = classifyName(m[2]);
+    if (kind === NameKind.None) continue;
+    const end = valueEnd(text, valueStart);
+    if (end === valueStart) continue;
+    if (!isSecretAssignment(kind, m[2], m[3], text.slice(valueStart, end))) continue;
+    out += text.slice(copied, valueStart) + redactedMarker('secret');
+    copied = end;
+    re.lastIndex = end - 1;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
 }
 
 // Credentials embedded in a URL: https://user:pass@host. Scheme, user and password are bounded: an
@@ -134,6 +233,8 @@ interface PreparedSecret {
   escaped: string | null;
 }
 let providerCache: { at: number; list: PreparedSecret[] } | null = null;
+/** The last list the provider returned successfully; still served if a later read fails (and not cached as if it were fresh). */
+let lastGoodList: PreparedSecret[] = [];
 
 /**
  * Register the source of exact secret values to mask (e.g. keychain-backed env
@@ -144,6 +245,7 @@ let providerCache: { at: number; list: PreparedSecret[] } | null = null;
 export function setKnownSecretsProvider(provider: (() => readonly string[]) | null): void {
   knownSecretsProvider = provider;
   providerCache = null;
+  lastGoodList = [];
 }
 
 /** Forget the cached provider list (a secret was just pushed or rotated). */
@@ -165,14 +267,17 @@ function providedSecrets(): PreparedSecret[] {
   if (!knownSecretsProvider) return [];
   const now = Date.now();
   if (providerCache && now - providerCache.at < KNOWN_SECRETS_TTL_MS && now >= providerCache.at) return providerCache.list;
-  let list: PreparedSecret[] = [];
   try {
-    list = prepare(knownSecretsProvider() ?? []);
+    const list = prepare(knownSecretsProvider() ?? []);
+    lastGoodList = list;
+    providerCache = { at: now, list };
+    return list;
   } catch {
-    // A failing provider must never break logging.
+    // A failing provider must never break logging, and a failed read must not be cached as "no secrets":
+    // keep masking with the last good list and retry on the next call.
+    providerCache = null;
+    return lastGoodList;
   }
-  providerCache = { at: now, list };
-  return list;
 }
 
 /** The known secrets to mask, resolved ONCE for a whole redaction call. */
@@ -198,8 +303,7 @@ function maskText(text: string, known: readonly PreparedSecret[]): string {
   out = out.replace(OAUTH_PARAM_RE, (_m, left: string, name: string, eq: string) => `${left}${name}${eq}${redactedMarker('auth0')}`);
   out = out.replace(BEARER_RE, (_m, left: string, scheme: string, ws: string) => `${left}${scheme}${ws}${redactedMarker('bearer')}`);
   out = out.replace(URL_CREDENTIALS_RE, (_m, scheme: string) => `${scheme}${redactedMarker('url-credentials')}@`);
-  out = out.replace(SECRET_ASSIGN_RE, (m: string, name: string, eq: string) => (isSecretAssignment(name, eq) ? `${name}${eq}${redactedMarker('secret')}` : m));
-  return out;
+  return maskAssignments(out);
 }
 
 /** Mask secrets in free text. Never throws. */
