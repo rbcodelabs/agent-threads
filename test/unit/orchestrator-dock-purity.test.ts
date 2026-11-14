@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const FILES = ['src/orchestratorDockModel.ts', 'src/permissionCard.ts', 'src/dockSheetModel.ts'];
+const FILES = ['src/orchestratorDockModel.ts', 'src/permissionCard.ts', 'src/dockSheetModel.ts', 'src/dockTargetModel.ts'];
 const IMPORT_OBSIDIAN = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"]obsidian['"]/;
 
 describe.each(FILES)('%s', (file) => {

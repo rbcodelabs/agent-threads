@@ -1049,7 +1049,8 @@ describe('batch 3 advisories', () => {
   it('8: the recall history is cleared when the dock is destroyed', async () => {
     const t = setup();
     await sendText(t, 'secret token');
-    const history = (t.dock as unknown as { history: { entries: readonly string[] } }).history;
+    // The history is per orchestrator now (`hist` is the active one's); destroy() clears every one of them.
+    const history = (t.dock as unknown as { hist: { entries: readonly string[] } }).hist;
     expect(history.entries).toEqual(['secret token']);
     t.dock.destroy();
     expect(history.entries).toEqual([]);

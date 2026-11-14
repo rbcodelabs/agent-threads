@@ -403,6 +403,8 @@ export class KanbanView extends ItemView {
       listThreads: () => this.manager.getThreads().filter(isKanbanThread),
       hasPendingWakeup: (id) => plugin.hasPendingWakeup(id),
       getOrchestratorThreadId: () => plugin.settings.orchestratorThreadId,
+      // Every Project; the dock offers the ones that own a live orchestrator thread next to the Portfolio orchestrator.
+      projects: () => this.manager.getProjects(),
       // open=false: set up without stealing focus into the chat view; the dock then focuses its own field.
       ensureOrchestrator: () => plugin.ensureOrchestratorThread(false),
       openThread: (id) => plugin.openThreadInChatView(id),
