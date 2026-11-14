@@ -110,6 +110,20 @@ interface AgentScrollState {
   atBottom: boolean;
 }
 
+/**
+ * Picks the placeholder label for a thread's active background/sub-agent tasks,
+ * keeping an active workflow label (`Workflow: ...`) ahead of child agent rows.
+ */
+function deriveActiveTaskLabel(activeTasks?: Map<string, string>): string | undefined {
+  if (!activeTasks || activeTasks.size === 0) return undefined;
+  let latest: string | undefined;
+  for (const label of activeTasks.values()) {
+    if (label.startsWith('Workflow:')) return label;
+    latest = label;
+  }
+  return latest;
+}
+
 export class ThreadsView extends ItemView {
   private plugin: ClaudeThreadsPlugin;
   private manager: ThreadManager;
@@ -382,11 +396,18 @@ export class ThreadsView extends ItemView {
    */
   private summarizeInFlight: Set<string> = new Set();
 
-  // Per-thread streaming buffers. Accumulates tokens and tool calls for every
-  // running thread (active or background) so the streaming UI can be fully
-  // restored when the user switches back to a thread that is still in progress.
-  // Cleared on 'message' or 'done' for the corresponding thread.
-  private streamingBuffers: Map<string, { content: string; tools: ToolCallRecord[]; subagentLabel?: string }> = new Map();
+  // Per-thread streaming buffers. Accumulates tokens, tool calls, and active
+  // sub-agent/background tasks for every running thread (active or background)
+  // so the streaming UI can be fully restored when the user switches back to a
+  // thread that is still in progress.
+  private streamingBuffers: Map<string, {
+    content: string;
+    tools: ToolCallRecord[];
+    subagentLabel?: string;
+    activeTasks?: Map<string, string>;
+    workflowTaskId?: string;
+    workflowChildTaskIds?: Set<string>;
+  }> = new Map();
 
   // Per-thread escalated-turn model. Set when a turn starts with the escalation
   // keyword and cleared when the turn ends, so the model button can show a
@@ -485,8 +506,11 @@ export class ThreadsView extends ItemView {
     if (!activeThreadId) return;
     // A late layout restore must not pull the panel out of a conversation being composed.
     if (this.newConv) return;
-    this.activeThreadId = activeThreadId;
-    if (this.rootEl) await this.setActiveThread(activeThreadId);
+    if (this.rootEl) {
+      await this.setActiveThread(activeThreadId);
+    } else {
+      this.activeThreadId = activeThreadId;
+    }
   }
 
   async onOpen(): Promise<void> {
@@ -615,11 +639,21 @@ export class ThreadsView extends ItemView {
         for (const key of [...this.agentScroll.keys()]) {
           if (key.startsWith(`${threadId}:`)) this.agentScroll.delete(key);
         }
+        this.streamingBuffers.delete(threadId);
       }
       // Maintain a per-thread streaming buffer for ALL threads so we can restore
       // the live streaming UI when switching back to a thread still in progress.
       if (event.type === 'streaming_start') {
-        this.streamingBuffers.set(threadId, { content: '', tools: [] });
+        const prev = this.streamingBuffers.get(threadId);
+        const activeTasks = prev?.activeTasks && prev.activeTasks.size > 0 ? prev.activeTasks : undefined;
+        this.streamingBuffers.set(threadId, {
+          content: '',
+          tools: [],
+          subagentLabel: deriveActiveTaskLabel(activeTasks),
+          activeTasks,
+          workflowTaskId: activeTasks ? prev?.workflowTaskId : undefined,
+          workflowChildTaskIds: activeTasks ? prev?.workflowChildTaskIds : undefined,
+        });
       } else if (event.type === 'token') {
         let buf = this.streamingBuffers.get(threadId);
         if (!buf) { buf = { content: '', tools: [] }; this.streamingBuffers.set(threadId, buf); }
@@ -636,28 +670,58 @@ export class ThreadsView extends ItemView {
         if (!buf) { buf = { content: '', tools: [] }; this.streamingBuffers.set(threadId, buf); }
         buf.tools.push(event.record);
       } else if (event.type === 'message') {
-        // If the message invoked the Agent tool, keep the buffer alive for the
-        // sub-agent phase (don't delete it). Reset content/tools and mark it as
-        // a sub-agent waiting state so restoring the view shows the right label.
+        // Keep the buffer alive across intermediate messages whenever this message
+        // invoked the Agent tool OR sub-agent / background tasks from task_started
+        // are still running (have not yet emitted task_notification).
         const hasAgentCall = event.message.toolCalls?.some(t => t.name === 'Agent');
-        if (hasAgentCall) {
-          const buf: { content: string; tools: ToolCallRecord[]; subagentLabel?: string } =
-            { content: '', tools: [], subagentLabel: 'Sub-agent working' };
-          this.streamingBuffers.set(threadId, buf);
+        const prev = this.streamingBuffers.get(threadId);
+        const activeTasks = prev?.activeTasks && prev.activeTasks.size > 0 ? prev.activeTasks : undefined;
+        if (hasAgentCall || activeTasks) {
+          this.streamingBuffers.set(threadId, {
+            content: '',
+            tools: [],
+            subagentLabel: deriveActiveTaskLabel(activeTasks) ?? prev?.subagentLabel ?? 'Sub-agent working',
+            activeTasks,
+            workflowTaskId: activeTasks ? prev?.workflowTaskId : undefined,
+            workflowChildTaskIds: activeTasks ? prev?.workflowChildTaskIds : undefined,
+          });
         } else {
           this.streamingBuffers.delete(threadId);
         }
       } else if (event.type === 'task_started') {
         let buf = this.streamingBuffers.get(threadId);
         if (!buf) { buf = { content: '', tools: [] }; this.streamingBuffers.set(threadId, buf); }
+        const label = event.taskType === 'local_workflow'
+          ? `Workflow: ${event.workflowName ?? event.description}`
+          : `${event.skipTranscript ? 'Background' : 'Sub-agent'}: ${event.description}`;
+        if (!buf.activeTasks) buf.activeTasks = new Map();
         if (event.taskType === 'local_workflow') {
-          buf.subagentLabel = `Workflow: ${event.workflowName ?? event.description}`;
-        } else if (!buf.subagentLabel?.startsWith('Workflow:')) {
-          // Don't overwrite a workflow label with individual agent labels
-          const kind = event.skipTranscript ? 'Background' : 'Sub-agent';
-          buf.subagentLabel = `${kind}: ${event.description}`;
+          if (buf.workflowChildTaskIds) {
+            for (const childId of buf.workflowChildTaskIds) buf.activeTasks.delete(childId);
+          }
+          if (buf.workflowTaskId) buf.activeTasks.delete(buf.workflowTaskId);
+          buf.workflowTaskId = event.taskId;
+          buf.workflowChildTaskIds = new Set();
+        } else if (buf.workflowTaskId) {
+          buf.workflowChildTaskIds?.add(event.taskId);
         }
-      } else if (event.type === 'done') {
+        buf.activeTasks.set(event.taskId, label);
+        buf.subagentLabel = deriveActiveTaskLabel(buf.activeTasks);
+      } else if (event.type === 'task_notification') {
+        const buf = this.streamingBuffers.get(threadId);
+        if (buf?.activeTasks) {
+          buf.activeTasks.delete(event.taskId);
+          buf.workflowChildTaskIds?.delete(event.taskId);
+          if (event.taskId === buf.workflowTaskId) {
+            if (buf.workflowChildTaskIds) {
+              for (const childId of buf.workflowChildTaskIds) buf.activeTasks.delete(childId);
+            }
+            buf.workflowTaskId = undefined;
+            buf.workflowChildTaskIds = undefined;
+          }
+          buf.subagentLabel = buf.content ? undefined : deriveActiveTaskLabel(buf.activeTasks);
+        }
+      } else if (event.type === 'done' || event.type === 'error' || event.type === 'interrupted') {
         this.streamingBuffers.delete(threadId);
       }
       // Track escalated turns for ALL threads (active or background) so the
@@ -825,6 +889,9 @@ export class ThreadsView extends ItemView {
       return;
     }
     this.activeThreadId = null;
+    this.resetActiveTaskDomState();
+    this.lastAppendedRowId = null;
+    this.lastAppendedRowEl = null;
     this.renderTitleBar();
     void this.renderMessages();
   }
@@ -1347,6 +1414,9 @@ export class ThreadsView extends ItemView {
       this.saveDraftToThread(this.activeThreadId);
       this.newConv = { returnTo: this.activeThreadId };
       this.activeThreadId = null;
+      this.resetActiveTaskDomState();
+      this.lastAppendedRowId = null;
+      this.lastAppendedRowEl = null;
       this.floatingPanelEl?.addClass('ct-new-conversation');
       this.manager.notifyActiveThreadCleared();
       this.setRunningState(false);
@@ -1547,6 +1617,9 @@ export class ThreadsView extends ItemView {
     }
 
     this.activeThreadId = null;
+    this.resetActiveTaskDomState();
+    this.lastAppendedRowId = null;
+    this.lastAppendedRowEl = null;
     this.plugin.settings.activeThreadId = undefined;
     this.app.workspace.requestSaveLayout?.();
     await this.plugin.saveSettings();
@@ -1640,7 +1713,13 @@ export class ThreadsView extends ItemView {
 
     // Persist the draft for the thread we're leaving before switching
     this.saveDraftToThread(this.activeThreadId);
+    const switchingThread = this.activeThreadId !== id;
     this.activeThreadId = id;
+    if (switchingThread) {
+      this.resetActiveTaskDomState();
+      this.lastAppendedRowId = null;
+      this.lastAppendedRowEl = null;
+    }
     const { persistActiveThreadSelection } = require('./conversationFirstPlacement') as typeof import('./conversationFirstPlacement');
     void persistActiveThreadSelection(
       this.app.workspace,
@@ -3528,6 +3607,49 @@ export class ThreadsView extends ItemView {
     this.streamingToolsEl = null;
   }
 
+  private resetActiveTaskDomState(): void {
+    this.taskPills?.clear();
+    this.taskStartTimes?.clear();
+    this.toolPillsByUseId?.clear();
+    this.subagentWaiting = false;
+    this.activeWorkflowTaskId = null;
+    this.workflowBlockEl = null;
+    this.workflowPhaseEl = null;
+    this.workflowAgentRows?.clear();
+  }
+
+  /**
+   * Ensures `this.streamingEl` exists in the main conversation pane and mounts
+   * any still-active task pills / workflow block from `this.taskPills` inside it.
+   */
+  private reattachActiveTaskPills(): void {
+    if (!this.taskPills || this.taskPills.size === 0) return;
+    if (!this.messagesEl || this.messagesEl.classList.contains('ct-messages-agent-view')) return;
+    if (!this.streamingEl || !this.messagesEl.contains(this.streamingEl)) {
+      const label = (this.activeThreadId ? this.streamingBuffers.get(this.activeThreadId)?.subagentLabel : undefined)
+        ?? 'Sub-agent working';
+      this.createStreamingEl(label);
+    }
+    if (
+      this.workflowBlockEl &&
+      this.activeWorkflowTaskId !== null &&
+      this.taskPills.has(this.activeWorkflowTaskId) &&
+      !this.streamingEl!.contains(this.workflowBlockEl)
+    ) {
+      this.streamingEl!.appendChild(this.workflowBlockEl);
+    }
+    for (const [taskId, pillEl] of this.taskPills) {
+      if (taskId === this.activeWorkflowTaskId || this.workflowAgentRows?.has(taskId)) continue;
+      if (!this.streamingEl!.contains(pillEl)) {
+        if (this.streamingContentEl && this.streamingContentEl.parentElement === this.streamingEl) {
+          this.streamingEl!.insertBefore(pillEl, this.streamingContentEl);
+        } else {
+          this.streamingEl!.prepend(pillEl);
+        }
+      }
+    }
+  }
+
   /**
    * Lazily creates (or returns the existing) `.ct-tools` wrapper inside the
    * current streamingEl, inserted as the FIRST child so live tool calls sit
@@ -3729,6 +3851,7 @@ export class ThreadsView extends ItemView {
       // Use the sub-agent label if the thread is waiting on a sub-agent, otherwise
       // the default "Claude is thinking" placeholder.
       this.createStreamingEl(buf?.subagentLabel ?? 'Claude is thinking');
+      this.reattachActiveTaskPills();
       // Restore streaming content and tool calls accumulated while this thread
       // was running in the background (user was viewing a different thread).
       if (buf) {
@@ -5231,14 +5354,22 @@ export class ThreadsView extends ItemView {
           });
         }
         this.scrollToBottom();
-        // If this message invoked the Agent tool, create a "Sub-agent working…"
-        // placeholder immediately so there's a visible indicator while the
-        // sub-agent runs. task_started will prepend its pill to this element
-        // if/when it fires; if it never fires the placeholder stays until done.
+        // Keep active sub-agent / background-task / workflow elements mounted below
+        // the newly committed message row so intermediate parent messages do not
+        // detach running task indicators. Otherwise, if this message invoked the
+        // Agent tool before task_started has arrived — or tasks are still active
+        // in streamingBuffers after a thread switch — show the waiting placeholder.
         const hasAgentCall = event.message.toolCalls?.some(t => t.name === 'Agent');
-        if (hasAgentCall) {
+        const activeBuf = this.activeThreadId ? this.streamingBuffers.get(this.activeThreadId) : undefined;
+        const hasBufferedActiveTasks = (activeBuf?.activeTasks?.size ?? 0) > 0;
+        const waitingLabel = activeBuf?.subagentLabel ?? 'Sub-agent working';
+        if ((this.taskPills?.size ?? 0) > 0) {
+          this.subagentWaiting = false;
+          this.reattachActiveTaskPills();
+          this.scrollToBottom();
+        } else if ((hasAgentCall || hasBufferedActiveTasks) && !this.messagesEl?.classList?.contains('ct-messages-agent-view')) {
           this.subagentWaiting = true;
-          this.createStreamingEl('Sub-agent working');
+          this.createStreamingEl(waitingLabel);
           this.scrollToBottom();
         } else {
           this.subagentWaiting = false;
@@ -5307,14 +5438,7 @@ export class ThreadsView extends ItemView {
           this.streamingContentEl = null;
           this.clearStreamingState();
         }
-        this.taskPills.clear();
-        this.taskStartTimes.clear();
-        this.toolPillsByUseId.clear();
-        this.subagentWaiting = false;
-        this.activeWorkflowTaskId = null;
-        this.workflowBlockEl = null;
-        this.workflowPhaseEl = null;
-        this.workflowAgentRows.clear();
+        this.resetActiveTaskDomState();
         // Message completed normally — discard the saved sent text so it can't
         // bleed into another thread if the user later stops a different thread.
         if (this.activeThreadId) this.lastSentTexts.delete(this.activeThreadId);
@@ -5334,14 +5458,7 @@ export class ThreadsView extends ItemView {
           this.streamingContentEl = null;
           this.clearStreamingState();
         }
-        this.taskPills.clear();
-        this.taskStartTimes.clear();
-        this.toolPillsByUseId.clear();
-        this.subagentWaiting = false;
-        this.activeWorkflowTaskId = null;
-        this.workflowBlockEl = null;
-        this.workflowPhaseEl = null;
-        this.workflowAgentRows.clear();
+        this.resetActiveTaskDomState();
         // Restore the sent message so the user can edit and re-send
         const lastSent = this.activeThreadId ? this.lastSentTexts.get(this.activeThreadId) : undefined;
         if (lastSent) {
@@ -5420,6 +5537,14 @@ export class ThreadsView extends ItemView {
 
         if (event.taskType === 'local_workflow') {
           // Workflow orchestrator — render a structured block
+          for (const childId of this.workflowAgentRows.keys()) {
+            this.taskPills.delete(childId);
+            this.taskStartTimes.delete(childId);
+          }
+          if (this.activeWorkflowTaskId !== null) {
+            this.taskPills.delete(this.activeWorkflowTaskId);
+            this.taskStartTimes.delete(this.activeWorkflowTaskId);
+          }
           this.activeWorkflowTaskId = event.taskId;
           this.workflowAgentRows.clear();
 
@@ -5489,6 +5614,7 @@ export class ThreadsView extends ItemView {
 
       case 'task_progress': {
         if (event.taskId === this.activeWorkflowTaskId) {
+          if (this.taskPills.has(event.taskId)) this.reattachActiveTaskPills();
           // Progress on the workflow itself — update phase label
           if (this.workflowPhaseEl) {
             this.workflowPhaseEl.textContent = event.description ? ` · ${event.description}` : '';
@@ -5496,6 +5622,7 @@ export class ThreadsView extends ItemView {
         } else {
           const progressEl = this.taskPills.get(event.taskId);
           if (progressEl) {
+            this.reattachActiveTaskPills();
             const startedAt = this.taskStartTimes.get(event.taskId);
             const elapsedSec = startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0;
             const elapsedStr = elapsedSec >= 60
@@ -5521,6 +5648,7 @@ export class ThreadsView extends ItemView {
 
       case 'task_notification': {
         if (event.taskId === this.activeWorkflowTaskId) {
+          if (this.taskPills.has(event.taskId)) this.reattachActiveTaskPills();
           // Workflow orchestrator finished
           if (this.workflowBlockEl) {
             if (event.status === 'completed') {
@@ -5531,6 +5659,11 @@ export class ThreadsView extends ItemView {
               if (this.workflowPhaseEl) this.workflowPhaseEl.textContent = ' · Failed';
             }
           }
+          for (const childId of this.workflowAgentRows.keys()) {
+            this.taskPills.delete(childId);
+            this.taskStartTimes.delete(childId);
+          }
+          this.workflowAgentRows.clear();
           this.taskPills.delete(event.taskId);
           this.taskStartTimes.delete(event.taskId);
           this.activeWorkflowTaskId = null;
@@ -5539,6 +5672,7 @@ export class ThreadsView extends ItemView {
         } else {
           const notifEl = this.taskPills.get(event.taskId);
           if (notifEl) {
+            this.reattachActiveTaskPills();
             if (this.workflowAgentRows.has(event.taskId)) {
               // Workflow sub-agent row
               notifEl.classList.remove('ct-workflow-agent-running');
@@ -5585,6 +5719,7 @@ export class ThreadsView extends ItemView {
         // first for workflow sub-agents or when backgrounded tasks resume.
         const updatedPill = this.taskPills.get(event.taskId);
         if (updatedPill) {
+          this.reattachActiveTaskPills();
           if (event.description) {
             const label = updatedPill.querySelector('.ct-tool-pill-text');
             if (label) label.textContent = event.description;
@@ -5726,6 +5861,7 @@ export class ThreadsView extends ItemView {
         // Update the task pill label with the AI-generated summary.
         const progressEl = this.taskPills.get(event.taskId);
         if (progressEl) {
+          this.reattachActiveTaskPills();
           const label = progressEl.querySelector<HTMLElement>('.ct-tool-pill-text');
           if (label) label.textContent = event.summary;
         }
@@ -5884,14 +6020,7 @@ export class ThreadsView extends ItemView {
 
       case 'error': {
         this.clearStreamingState();
-        this.taskPills.clear();
-        this.taskStartTimes.clear();
-        this.toolPillsByUseId.clear();
-        this.subagentWaiting = false;
-        this.activeWorkflowTaskId = null;
-        this.workflowBlockEl = null;
-        this.workflowPhaseEl = null;
-        this.workflowAgentRows.clear();
+        this.resetActiveTaskDomState();
         if (this.streamingEl) {
           this.streamingEl.remove();
           this.streamingEl = null;
