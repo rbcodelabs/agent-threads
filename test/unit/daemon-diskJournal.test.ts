@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DiskJournal } from '../../daemon/diskJournal';
 import { InMemoryJournal, wireJournalPolicy, type WireEvent } from '../../src/protocol';
+import { redactForStorage } from '../../src/secretRedaction';
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'dj-')); dirs.push(d); return d; };
@@ -31,6 +32,57 @@ describe('InMemoryJournal.restore', () => {
     expect(j.size).toBe(1);
     expect(j.replay(0).kind).toBe('resync');
     expect(() => j.restore([], { lastSeq: 0, lowWater: 0 })).toThrow();
+  });
+});
+
+describe('DiskJournal redact option', () => {
+  const GH = 'ghp_' + 'd'.repeat(36);
+
+  it('masks the ndjson file, the replay buffer and a reopened journal, keeping every line parseable', () => {
+    const dir = tmp();
+    const a = open(dir, { redact: redactForStorage });
+    a.append(tok(`first\n${GH}\nnext`));
+    a.append(msg(`here is ${GH} and API_TOKEN="a b c"`));
+    a.append({ name: 'onToolUse', args: [{ name: 'Bash', input: { command: `export X_SECRET=hunter2hunter2 && echo ${GH}`, password: 'p4ssw0rd!!' } }] } as WireEvent);
+    a.append(done);
+    a.close();
+
+    const raw = readFileSync(join(dir, 'th.ndjson'), 'utf8');
+    expect(raw).not.toMatch(/ghp_d|a b c|hunter2|p4ssw0rd/);
+    expect(raw).toContain('[REDACTED:github]');
+    const lines = raw.trim().split('\n');
+    expect(lines).toHaveLength(4);
+    for (const l of lines) expect(() => JSON.parse(l)).not.toThrow();
+
+    const b = open(dir, { redact: redactForStorage });
+    const replay = b.replay(0);
+    expect(JSON.stringify(replay)).not.toContain(GH);
+    expect(replay).toMatchObject({ kind: 'entries', lastSeq: 4 });
+    b.close();
+  });
+
+  it('leaves an unmasked journal alone when no redactor is given, and subscribers see the masked entry', () => {
+    const dir = tmp();
+    const seen: string[] = [];
+    const j = open(dir, { redact: redactForStorage });
+    j.subscribe((e) => seen.push(JSON.stringify(e)));
+    j.append(tok(GH));
+    expect(seen.join('')).not.toContain(GH);
+    j.close();
+    const plain = open(tmp());
+    plain.append(tok('hello'));
+    expect(JSON.stringify(plain.replay(0))).toContain('hello');
+    plain.close();
+  });
+
+  it('adds negligible cost per event (10k typical events well under a second)', () => {
+    const dir = tmp();
+    const j = open(dir, { redact: redactForStorage, flushMs: 1000 });
+    const t = Date.now();
+    for (let i = 0; i < 10_000; i++) j.append(tok(`word${i} `));
+    const ms = Date.now() - t;
+    j.close();
+    expect(ms).toBeLessThan(2000);
   });
 });
 

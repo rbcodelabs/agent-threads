@@ -2,6 +2,7 @@ import { agentHarnessLabel } from './types';
 import { App, TFile, normalizePath } from 'obsidian';
 import type { Thread, ChatMessage } from './types';
 import { imageEmbedMarkdown } from './imageExternalization';
+import { redactForStorage } from './secretRedaction';
 import {
   decodeThreadRecoverySnapshot,
   encodeThreadRecoverySnapshot,
@@ -74,7 +75,9 @@ export class VaultPersistence {
       .substring(0, 40);
     const date = new Date(thread.createdAt).toISOString().split('T')[0];
     const fileName = normalizePath(`${this.folder}/${date}-${slug}.md`);
-    const content = this.threadToMarkdown(thread);
+    // The vault is synced and often shared, and an archived note is read back by humans and other
+    // agents: mask credentials at the write sink rather than trusting every upstream producer.
+    const content = redactForStorage(this.threadToMarkdown(thread));
 
     const existing = this.app.vault.getAbstractFileByPath(fileName);
     if (existing instanceof TFile) {

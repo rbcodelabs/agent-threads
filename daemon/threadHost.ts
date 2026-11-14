@@ -20,6 +20,7 @@ import {
   type WireEvent,
   type WireImage,
 } from '../src/protocol';
+import { redactForStorage } from '../src/secretRedaction';
 import { DiskJournal, type DiskJournalOptions } from './diskJournal';
 import { HostToolBroker } from './hostTools';
 import { ensureDir, isSafeThreadId } from './fsutil';
@@ -591,6 +592,9 @@ export class ThreadHost {
     if (!rt) {
       const journal = DiskJournal.open<WireEvent>(this.journalDir, threadId, wireJournalPolicy, {
         ...this.opts.journalOptions,
+        // Every append point above (driver emit, host-tool emit, daemon-authored events) funnels
+        // through this journal, so masking here covers the ndjson file AND the frames served from it.
+        redact: redactForStorage,
         epoch: this.opts.epoch,
         flushMs: this.opts.flushMs,
         isBoundary,

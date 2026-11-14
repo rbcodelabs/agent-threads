@@ -20,7 +20,7 @@
  * to enable verbose output.
  */
 
-import { redactDeep } from './secretRedaction';
+import { redactForStorage } from './secretRedaction';
 
 export type LogLevel ='debug' | 'info' | 'warn' | 'error';
 
@@ -73,7 +73,7 @@ export function log(level: LogLevel, category: string | undefined, ...args: unkn
 
   // Mask secrets once, up front, so neither the console nor the ring (which
   // feeds the diagnostics export) can ever see a raw credential.
-  const safeArgs = args.map((a) => redactDeep(a));
+  const safeArgs = args.map((a) => redactForStorage(a));
 
   pushRing({ ts: Date.now(), level, category, msg: formatArgs(safeArgs) });
 

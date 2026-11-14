@@ -63,6 +63,13 @@ export interface DiskJournalOptions<E> extends InMemoryJournalOptions {
   isBoundary?: (event: E) => boolean;
   /** Reported in the sidecar. */
   isTurnInFlight?: (checkpoint: Checkpoint<E>) => boolean;
+  /**
+   * Applied to every event before it is journaled, so the ndjson file, the
+   * in-memory replay buffer and therefore every client frame served from it all
+   * carry the masked form (a secret never reaches this machine's disk). Must be
+   * pure and never throw; the daemon passes `redactForStorage`.
+   */
+  redact?: (event: E) => E;
 }
 
 export type JournalListener<E> = (entry: JournalEntry<E>) => void;
@@ -128,8 +135,9 @@ export class DiskJournal<E> implements Journal<E> {
   get size(): number { return this.inner.size; }
   get path(): string { return this.ndjsonPath; }
 
-  append(event: E, ts?: number): JournalEntry<E> {
+  append(rawEvent: E, ts?: number): JournalEntry<E> {
     if (this.closed) throw new Error(`journal ${this.id} is closed`);
+    const event = this.opts.redact ? this.opts.redact(rawEvent) : rawEvent;
     const entry = this.inner.append(event, ts);
     this.buffer.push(`${JSON.stringify(entry)}\n`);
     // Append may have evicted from the front; the file must shed those lines too.

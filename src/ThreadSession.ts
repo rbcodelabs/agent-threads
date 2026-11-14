@@ -9,7 +9,7 @@ import {
 import { formatCurrentTimeContext, shouldAddCurrentTimeContext } from './currentTimeContext';
 import type { ToolCallRecord, ImageAttachment } from './types';
 import { parseExtraEnv } from './types';
-import { debugLog } from './logger';
+import { debugLog, logger } from './logger';
 import { formatToolName, getToolIcon, isBrowserTool, buildPermissionDetail } from './toolNameUtils';
 import { browserToolSummary, parseBrowserToolResult } from './browserSession';
 // SessionCallbacks/TaskTrackerEvent are ClaudeSession.ts's contract, kept as the
@@ -1236,12 +1236,14 @@ export class ThreadSession {
             await this.restart('transport-error');
             this.sendInternal(TRANSPORT_ERROR_CONTINUATION_PROMPT);
           } catch (restartErr) {
-            console.error('[ClaudeThreads] ThreadSession transport-error auto-retry failed:', restartErr);
+            logger.error('[ClaudeThreads] ThreadSession transport-error auto-retry failed:', restartErr);
             callbacks.onError(restartErr instanceof Error ? restartErr : new Error(String(restartErr)));
           }
         } else if (!terminalErrorReported) {
           const zodIssues = (err as Record<string, unknown>).issues;
-          console.error('[ClaudeThreads] ThreadSession pump error:', e, zodIssues ? JSON.stringify(zodIssues, null, 2) : '');
+          // Through the logger so the error text (stack, SDK message, zod issues) is masked before
+          // it reaches the console or the diagnostics ring; bare console.error bypassed redaction.
+          logger.error('[ClaudeThreads] ThreadSession pump error:', e, zodIssues ? JSON.stringify(zodIssues, null, 2) : '');
           callbacks.onError(new Error(`${withStderr(e.message, this.stderrTail)}${zodIssues ? '\n\nZod issues: ' + JSON.stringify(zodIssues) : ''}\n\nStack: ${e.stack ?? 'none'}`));
         }
       }
