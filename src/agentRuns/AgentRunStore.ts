@@ -69,6 +69,7 @@ export class AgentRunStore {
     if (!run) return undefined;
     run.status = status; run.updatedAt = now; run.resultSummary = summary ?? run.resultSummary; run.error = error ?? run.error;
     if (terminal.has(status)) run.completedAt = now;
+    else delete run.completedAt;
     const eventId = `status:${status}:${summary ?? error ?? ''}`;
     if (!run.events.some(e => e.nativeEventId === eventId)) run.events.push({ kind: status === 'failed' ? 'error' : 'lifecycle', text: summary ?? error ?? status, timestamp: now, nativeEventId: eventId });
     return run;

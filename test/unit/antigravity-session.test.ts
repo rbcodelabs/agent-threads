@@ -20,6 +20,8 @@ import {
   type AntigravityBrainOptions,
 } from '../../src/AntigravitySession';
 import {
+  cleanBrainArgString,
+  cleanBrainArgStringArray,
   parseAntigravityBackgroundTask,
   parseAntigravityCreatedSubagent,
   parseAntigravityWakeupMessage,
@@ -945,5 +947,218 @@ describe('AntigravitySession subagents and post-turn brain wakeups', () => {
     expect(h.tasksUpdated).toContainEqual({ taskId: 'child-sub-1', patch: { status: 'in_progress', description: 'Auth Researcher' } });
     expect(h.tasksUpdated).toContainEqual({ taskId: 'child-sub-1', patch: { status: 'killed' } });
     expect(h.tasksUpdated).toContainEqual({ taskId: 'grandchild-1', patch: { status: 'killed' } });
+  });
+
+  it('anchors brain generic-step parsers, rejects placeholder IDs, and unwraps compact-transcript quoted arguments', () => {
+    const subHeader = 'Created the ' + 'following subagent:';
+    const bgHeader = 'Tool is running as a ' + 'background task with task id: ';
+
+    expect(parseAntigravityCreatedSubagent(`${subHeader}\n{\n  "conversationId": "ecf60001-30fd-4c5b-824a-8c6f7d9324e6"\n}`))
+      .toEqual({ conversationId: 'ecf60001-30fd-4c5b-824a-8c6f7d9324e6' });
+    expect(parseAntigravityCreatedSubagent(`Created At: 2026-11-14T10:00:00-05:00\nCompleted At: 2026-11-14T10:00:01-05:00\n${subHeader}\n{\n  "conversationId": "child-sub-1"\n}`))
+      .toEqual({ conversationId: 'child-sub-1' });
+    expect(parseAntigravityCreatedSubagent(`${subHeader}\n{\n  "conversationId": "..."\n}`)).toBeNull();
+    expect(parseAntigravityCreatedSubagent(`Showing lines 90-100\n91: * ${subHeader}\n{\n  "conversationId": "child-sub-1"\n}`)).toBeNull();
+    expect(parseAntigravityCreatedSubagent(`+ ${subHeader}\n+ {\n+   "conversationId": "child-sub-1"\n+ }`)).toBeNull();
+
+    expect(parseAntigravityBackgroundTask(`Created At: 2026-11-14T10:00:00Z\nCompleted At: 2026-11-14T10:00:01Z\n${bgHeader}ecf60001/task-42\nOutput:`))
+      .toEqual({ taskId: 'ecf60001/task-42' });
+    expect(parseAntigravityBackgroundTask(`${bgHeader}...`)).toBeNull();
+    expect(parseAntigravityBackgroundTask(`104: // ${bgHeader}abc-123`)).toBeNull();
+
+    expect(cleanBrainArgString('child-1')).toBe('child-1');
+    expect(cleanBrainArgString('"child-1"')).toBe('child-1');
+    expect(cleanBrainArgStringArray(['a', '"b"'])).toEqual(['a', 'b']);
+    expect(cleanBrainArgStringArray('["child-1", "child-2"]')).toEqual(['child-1', 'child-2']);
+  });
+
+  it('never hangs on read_file or diff outputs containing subagent/background headers when no spawn tool was called', async () => {
+    let releasePermission: (allow: boolean) => void = () => undefined;
+    const h = makeHarness({
+      brainOptions: { wakeupGraceMs: 5_000 },
+      permission: () => new Promise<boolean>((resolve) => { releasePermission = resolve; }),
+    });
+    await h.session.start(h.options);
+    h.session.send('EDIT inspect-brain');
+    await vi.waitFor(() => expect(h.session.hasPendingPermission).toBe(true), { timeout: 10_000 });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const subHeader = 'Created the ' + 'following subagent:';
+    const bgHeader = 'Tool is running as a ' + 'background task with task id: ';
+
+    h.appendBrain(sessionId, [
+      {
+        step_index: 0,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [{ id: 'r1', name: 'read_file', args: { Path: '/repo/src/antigravityBrain.ts' } }],
+      },
+      {
+        step_index: 1,
+        source: 'MODEL',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: `${subHeader}\n{\n  "conversationId": "phantom-sub"\n}`,
+      },
+      {
+        step_index: 2,
+        source: 'MODEL',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: `${bgHeader}phantom-bg-1\n`,
+      },
+      { step_index: 3, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Created the file.' },
+    ]);
+
+    releasePermission(true);
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(1), { timeout: 2_000 });
+    expect(h.tasksStarted).toEqual([]);
+    expect(h.session.turnInFlight).toBe(false);
+  });
+
+  it('keeps parent turn open while a child subagent waits on its own background run_command and unwraps compact-quoted args', async () => {
+    const h = makeHarness({ brainOptions: { wakeupGraceMs: 60 } });
+    await h.session.start(h.options);
+    h.session.send('SUBAGENT_BRAIN child-bg-cmd');
+
+    await vi.waitFor(() => expect(h.tasksStarted).toHaveLength(1), { timeout: 10_000 });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const bgHeader = 'Tool is running as a ' + 'background task with task id: ';
+
+    h.appendBrain('child-sub-1', [
+      {
+        step_index: 0,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [{ id: 'bg1', name: 'run_command', args: { CommandLine: 'npm test', WaitMsBeforeAsync: 500 } }],
+      },
+      {
+        step_index: 1,
+        source: 'MODEL',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: `Created At: 2026-11-14T08:00:00Z\nCompleted At: 2026-11-14T08:00:01Z\n${bgHeader}child-sub-1/task-9\n`,
+      },
+      { step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Waiting for full test run to finish...' },
+    ]);
+
+    // Wait well past wakeupGraceMs (60ms): child is waiting on task-9, so neither child completion nor parent onDone may fire.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(h.tasksNotified.filter((n) => n.taskId === 'child-sub-1' && n.status === 'completed')).toEqual([]);
+    expect(h.done).not.toHaveBeenCalled();
+    expect(h.session.turnInFlight).toBe(true);
+
+    // Background command finishes inside child; child sends compact-quoted message to parent and completes.
+    h.appendBrain('child-sub-1', [
+      {
+        step_index: 3,
+        source: 'SYSTEM',
+        type: 'SYSTEM_MESSAGE',
+        status: 'DONE',
+        content: '<SYSTEM_MESSAGE>\n[Message] sender=child-sub-1/task-9\n72 passed\n</SYSTEM_MESSAGE>',
+      },
+      {
+        step_index: 4,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [{ id: 'sm1', name: 'send_message', args: { Recipient: JSON.stringify(sessionId), Message: '"All 72 tests passed."' } }],
+      },
+      { step_index: 5, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'Sent.' },
+      { step_index: 6, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Reported test results.' },
+    ]);
+
+    await vi.waitFor(() => expect(h.tasksNotified).toContainEqual({
+      taskId: 'child-sub-1',
+      status: 'completed',
+      summary: 'Reported test results.',
+    }), { timeout: 10_000 });
+    expect(h.done).not.toHaveBeenCalled();
+
+    // Parent receives wakeup and kills any lingering child via compact-quoted manage_subagents array.
+    h.appendBrain(sessionId, [
+      { step_index: 4, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=child-sub-1\nAll 72 tests passed.' },
+      { step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Everything green.' },
+    ]);
+
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    expect(h.messages).toContain('Everything green.');
+  });
+
+  it('preserves fast post-ACP wakeup steps written before session/prompt resolves and catches up late wakeups on Turn 2', async () => {
+    let releasePermission: (allow: boolean) => void = () => undefined;
+    const h = makeHarness({
+      brainOptions: { wakeupGraceMs: 60 },
+      permission: () => new Promise<boolean>((resolve) => { releasePermission = resolve; }),
+    });
+    await h.session.start(h.options);
+    h.session.send('EDIT fast-wakeup');
+    await vi.waitFor(() => expect(h.session.hasPendingPermission).toBe(true), { timeout: 10_000 });
+    const sessionId = (h.received().find((m: any) => m.method === 'session/prompt') as any).params.sessionId;
+    const subHeader = 'Created the ' + 'following subagent:';
+
+    // Both the ACP turn AND its fast post-turn wakeup land on disk before `session/prompt` resolves over stdio.
+    h.appendBrain('fast-sub-1', [
+      { step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Fast audit complete.' },
+    ]);
+    h.appendBrain(sessionId, [
+      {
+        step_index: 0,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: '',
+        tool_calls: [{ id: 's1', name: 'invoke_subagent', args: { Role: '"Fast Worker"', TypeName: '"research"' } }],
+      },
+      { step_index: 1, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: `${subHeader}\n{\n  "conversationId": "fast-sub-1"\n}` },
+      { step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Created the file.' },
+      { step_index: 3, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=fast-sub-1\nFast audit complete.' },
+      { step_index: 4, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Fast Worker finished: all good.' },
+    ]);
+
+    // Let onBrainTick run while acpPromptInFlight is still true.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    releasePermission(true);
+
+    await vi.waitFor(() => expect(h.done).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    expect(h.tasksStarted).toContainEqual(expect.objectContaining({
+      taskId: 'fast-sub-1',
+      description: 'Fast Worker',
+      subagentType: 'research',
+    }));
+    expect(h.messages).toContain('Fast Worker finished: all good.');
+
+    // Now simulate a late between-turn wakeup landing while idle (after Turn 1 closed) before Turn 2 starts.
+    h.appendBrain('reviewer-sub-2', [
+      { step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'LGTM.' },
+    ]);
+    h.appendBrain(sessionId, [
+      { step_index: 5, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=fast-sub-1\nFollow-up note' },
+      {
+        step_index: 6,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        content: 'Spawning reviewer.',
+        tool_calls: [{ id: 's2', name: 'invoke_subagent', args: { Role: 'Code Reviewer', TypeName: 'research' } }],
+      },
+      { step_index: 7, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: `${subHeader}\n{\n  "conversationId": "reviewer-sub-2"\n}` },
+      { step_index: 8, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Waiting on reviewer.' },
+      { step_index: 9, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', content: '[Message] sender=reviewer-sub-2\nLGTM.' },
+      { step_index: 10, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Late review complete.' },
+    ]);
+
+    await h.turn('TEXT second turn');
+    expect(h.done).toHaveBeenCalledTimes(2);
+    expect(h.tasksStarted).toContainEqual(expect.objectContaining({
+      taskId: 'reviewer-sub-2',
+      description: 'Code Reviewer',
+    }));
+    expect(h.messages).toContain('Late review complete.');
+    expect(h.messages[h.messages.length - 1]).toBe('Hello from Antigravity.');
   });
 });
